@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+work/
+*.egg-info/
+
+# results/ is intentionally NOT ignored: SPEC.md M3 wants the benchmark
+# table artifact committed to the repo once a real run has been done.

@@ -1,0 +1,93 @@
+# ccbench matrix config.
+#
+# Copy this to bench.toml (or any name -- pass it via --config) and fill in
+# the endpoint section(s) for whichever engines you're actually going to run.
+# Relative paths below are resolved relative to *this file's* directory.
+#
+# Secrets: never put a plaintext SMB password in this file. Set it in an
+# environment variable and reference the variable's *name* via password_env.
+
+[general]
+results_file = "results/results.jsonl"   # append-only, resumable
+work_dir = "work"                        # scratch space for downloads/syncthing temp dirs
+repeats = 2                              # report picks the best of N repeats per combo
+verify = true                            # spot-check 3 random files (size + sha256) after each transfer
+keep_remote_data = false                 # true = don't clean up the NAS-side test data after each run
+
+# ---------------------------------------------------------------------------
+# Datasets: generate these first with
+#   ccbench dataset --out data/large --profile large
+#   ccbench dataset --out data/small --profile small
+# ---------------------------------------------------------------------------
+[datasets]
+large = "data/large"
+small = "data/small"
+
+# ---------------------------------------------------------------------------
+# Lanes, matching SPEC.md's three sync lanes. "direction" is up, down, or
+# both (both = run the dataset in each direction separately).
+# ---------------------------------------------------------------------------
+[lanes.A]
+dataset = "large"
+direction = "up"
+
+[lanes.B]
+dataset = "large"
+direction = "down"
+
+[lanes.C]
+dataset = "small"
+direction = "both"
+
+# ---------------------------------------------------------------------------
+# Which engines to include in `ccbench run` (still overridable with --engines)
+# ---------------------------------------------------------------------------
+[engines]
+include = ["rclone_sftp", "rclone_smb", "robocopy_smb", "syncthing", "iperf3"]
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+[endpoints.sftp]
+host = "100.x.x.x"                 # NAS's Tailscale IP or MagicDNS name
+user = "editor1"
+key_file = "~/.ssh/id_ed25519"
+port = 22
+remote_path = "Creators_Club/_bench"   # scratch subtree on the NAS, cleaned up per run
+
+[endpoints.smb]
+# Used by both rclone_smb (host/share/user/...) and robocopy_smb (unc_path).
+host = "100.x.x.x"
+share = "TheCreatorsPool"
+user = "editor1"
+password_env = "CCBENCH_SMB_PASSWORD"    # set this env var, don't hardcode a password here
+remote_subpath = "Creators_Club/_bench"
+unc_path = "\\\\100.x.x.x\\TheCreatorsPool\\Creators_Club\\_bench"
+
+[endpoints.syncthing]
+binary = "syncthing"    # or an absolute path if it's not on PATH
+
+[endpoints.iperf3]
+host = "100.x.x.x"
+port = 5201
+
+# ---------------------------------------------------------------------------
+# Per-engine param sweeps
+# ---------------------------------------------------------------------------
+[params.rclone]
+transfers = [1, 4, 8, 16]
+multi_thread_streams = [0, 4, 8]   # only applied on "down" (local destination); ignored on "up"
+sftp_chunk_size_mb = [4, 32]        # sftp backend only, ignored by rclone_smb
+
+[params.robocopy]
+mt = [1, 8, 16, 32]
+
+[params.iperf3]
+parallel = [1, 4, 8]
+duration_s = 10
+
+# ---------------------------------------------------------------------------
+# Not part of the matrix itself -- used by `ccbench tailscale-check --peer ...`
+# ---------------------------------------------------------------------------
+[tailscale]
+peer_hint = "nas-tailnet-hostname-or-ip"

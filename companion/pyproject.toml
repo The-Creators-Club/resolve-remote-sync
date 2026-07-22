@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccsync-companion"
+version = "0.1.0"
+description = "Editor-side companion app for the Creators Club Resolve remote-sync system: timeline watcher, move-and-relink popup, and rclone/Syncthing sync lanes."
+requires-python = ">=3.12"
+dependencies = [
+    "watchdog>=4",
+]
+
+[project.optional-dependencies]
+tray = ["pystray>=0.19", "Pillow>=10"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+ccsync-companion = "ccsync_companion.app:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

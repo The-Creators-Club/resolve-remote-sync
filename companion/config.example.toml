@@ -1,0 +1,68 @@
+# ccsync-companion config — example
+#
+# Copy this file to ~/.ccsync/config.toml and fill in the blanks (the app
+# also writes this same content there automatically on first run — see
+# ccsync_companion/config.py: DEFAULT_TOML_TEXT). Restart the companion
+# after editing.
+
+# Your name/handle — used to build the "B-roll/Editor Added/<editor_name>"
+# destination suggested by the popup fixer.
+editor_name = "alex"
+
+# Absolute path to this machine's local copy of the project tree.
+#   Windows: "C:\\Creators_Club"
+#   macOS:   "/Users/alex/Creators_Club"
+local_root = "C:\\Creators_Club"
+
+# The canonical shared-drive prefix used in Resolve's stored clip paths
+# (Windows: the "P:" virtual drive letter from SPEC.md's Path canon). Used
+# to detect BAD_PREFIX (mapping-health) situations — a clip path that starts
+# with this prefix but doesn't resolve under local_root.
+canonical_prefix = "P:\\"
+
+# Name of a pre-configured rclone remote (via `rclone config`) pointing at
+# the NAS, e.g. an SFTP remote. ccsync-companion does not configure rclone
+# remotes for you — set this up once with `rclone config`.
+remote = "nas"
+
+# Root path on the remote under which project trees live.
+remote_root = "Creators_Club"
+
+# Project relative paths to sync (informational for now — v1 syncs
+# local_root as a whole; kept here for the benchmark harness / future
+# per-project lane scoping).
+projects = ["Projects/2025/FF4/Nuclear"]
+
+# Resolve timeline poll interval, in seconds.
+poll_interval = 3
+
+# Lane A (video originals, up) periodic full-pass interval, in seconds.
+scan_interval_up = 300
+
+# Lane B (proxies, down) periodic full-pass interval, in seconds.
+scan_interval_down = 120
+
+# Lane A watchdog file-stability debounce, in seconds.
+watch_debounce_seconds = 10
+
+# rclone --transfers (parallel stream count).
+transfers = 4
+
+# Local Syncthing REST API base URL and API key. Leave syncthing_api_key
+# empty to read it from Syncthing's own config.xml at the standard per-OS
+# path (see ccsync_companion/sync/syncthing_lane.py: default_config_xml_path).
+syncthing_url = "http://127.0.0.1:8384"
+syncthing_api_key = ""
+
+# Expected Syncthing folder ID per project (same order/length as `projects`
+# above). Leave as [] to skip the folder-id verification.
+syncthing_folder_ids = []
+
+# Path to the rclone binary. Defaults to "rclone" (must be on PATH) — the
+# bootstrap installer is responsible for getting rclone onto PATH, not this
+# app; if missing, the sync lanes report a clear error status.
+rclone_path = "rclone"
+
+# Log file (rotating) — console logging is always on in addition to this.
+log_path = "~/.ccsync/companion.log"
+log_level = "INFO"

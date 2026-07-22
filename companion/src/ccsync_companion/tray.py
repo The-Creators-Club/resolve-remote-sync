@@ -28,9 +28,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("ccsync.tray")
 
-COLOR_GREEN = (46, 160, 67)
-COLOR_ORANGE = (219, 141, 41)
-COLOR_RED = (214, 39, 40)
+from . import theme
+
+COLOR_GREEN = theme.RGB_GREEN
+COLOR_ORANGE = theme.RGB_AMBER
+COLOR_RED = theme.RGB_RED
 
 
 def compute_overall_color(statuses: list[LaneStatus]) -> str:
@@ -47,9 +49,24 @@ def _color_rgb(color_name: str) -> tuple[int, int, int]:
 
 
 def _make_icon_image(color_name: str):
+    """Terminal-style tile: near-black rounded square, neon-red border, and a
+    status-colored sync glyph (two chevrons) with a soft glow."""
+    c = _color_rgb(color_name)
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.ellipse((8, 8, 56, 56), fill=_color_rgb(color_name))
+
+    # tile + neon border
+    draw.rounded_rectangle((3, 3, 61, 61), radius=12, fill=(*theme.RGB_BG, 255),
+                           outline=(*theme.RGB_RED, 255), width=3)
+
+    up = [(20, 27), (32, 13), (44, 27)]     # ▲ upload chevron
+    down = [(20, 37), (32, 51), (44, 37)]   # ▼ download chevron
+
+    # glow pass: fat translucent strokes under the crisp ones
+    for pts in (up, down):
+        draw.line(pts, fill=(*c, 70), width=11, joint="curve")
+    for pts in (up, down):
+        draw.line(pts, fill=(*c, 255), width=5, joint="curve")
     return img
 
 

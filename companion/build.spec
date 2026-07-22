@@ -33,7 +33,7 @@ try:
 except ImportError:
     pass
 
-entry_point = str(Path("src") / "ccsync_companion" / "__main__.py")
+entry_point = "launcher.py"  # absolute-import shim; running the package __main__.py directly breaks relative imports
 
 a = Analysis(
     [entry_point],

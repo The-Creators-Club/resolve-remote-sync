@@ -174,7 +174,10 @@ def parse_json_log(text: str) -> RcloneRunResult:
         msg = record.get("msg", "")
         if level == "error":
             errors.append(msg)
-        elif "Copied" in msg or "Transferred" in msg:
+        elif "Copied" in msg or "Moved" in msg or "Deleted" in msg:
+            # Per-file records ("clip.mov: Copied (new)") only — the run-
+            # summary stats line ("Transferred: 0 B / ...") must not count
+            # as a file, which is why "Transferred" is NOT matched here.
             transferred += 1
     return RcloneRunResult(ok=not errors, transferred=transferred, errors=errors, raw_returncode=0)
 
@@ -302,11 +305,17 @@ class RcloneLane(LaneAdapter):
         with self._lock:
             self._status.transferring = 0
             self._status.queued = 0
-            if proc.returncode != 0 or result.errors:
+            # Exit code is authoritative: rclone logs transient per-attempt
+            # failures at error level ("Attempt 1/3 failed ...") even when a
+            # retry succeeds and the run as a whole is fine.
+            if proc.returncode != 0:
                 self._status.state = STATE_ERROR
                 tail = result.errors[-1] if result.errors else (proc.stderr or "").strip()[-300:]
                 self._status.last_error = tail or f"rclone exited {proc.returncode}"
             else:
+                if result.errors:
+                    log.info("%s: %d transient error line(s), run succeeded (last: %s)",
+                             self.name, len(result.errors), result.errors[-1])
                 self._status.state = STATE_IDLE
                 self._status.last_error = None
                 self._status.last_sync = datetime.now(timezone.utc)

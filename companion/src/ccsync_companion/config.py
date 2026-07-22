@@ -38,6 +38,9 @@ DEFAULTS: dict[str, Any] = {
     "remote": "nas",
     "remote_root": "",
     "projects": [],
+    # The project new editor media gets filed into (popup destinations are
+    # prefixed with this) — rel path under local_root, e.g. "Projects/2025/FF4/Nuclear".
+    "active_project": "",
     "poll_interval": 3,
     # SPEC.md lists a single `scan_interval` but gives Lane A and Lane B
     # different defaults (300s / 120s) — split into two keys (addition).
@@ -87,6 +90,7 @@ remote_root = ""
 
 # Project relative paths to sync, e.g. ["Projects/2025/FF4/Nuclear"].
 projects = []
+active_project = ""
 
 # Resolve timeline poll interval, in seconds.
 poll_interval = 3

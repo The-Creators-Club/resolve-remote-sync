@@ -57,25 +57,37 @@ def classify_ext(path: str) -> str:
     return "other"  # video + anything else share the same default per SPEC.md
 
 
-def suggest_destination(path: str, editor_name: str) -> str:
+def suggest_destination(path: str, editor_name: str, project_prefix: str = "") -> str:
     """Return a local_root-relative destination dir, '/'-separated.
 
     audio -> "Audio/Music"
     still image -> "B-roll/Stills"
     video / other -> "B-roll/Editor Added/<editor_name>"
+
+    `project_prefix` (e.g. "Projects/2025/FF4/Nuclear") is prepended when
+    set — destinations must land INSIDE the active project, not at the
+    Creators_Club root, or editor media uploads to an orphan path on the
+    NAS that no Resolve project references.
     """
     kind = classify_ext(path)
     if kind == "audio":
-        return "Audio/Music"
-    if kind == "image":
-        return "B-roll/Stills"
-    editor = editor_name or "Unknown"
-    return f"B-roll/Editor Added/{editor}"
+        dest = "Audio/Music"
+    elif kind == "image":
+        dest = "B-roll/Stills"
+    else:
+        editor = editor_name or "Unknown"
+        dest = f"B-roll/Editor Added/{editor}"
+    prefix = (project_prefix or "").strip("/").replace("\\", "/")
+    return f"{prefix}/{dest}" if prefix else dest
 
 
-def default_destination_dirs(editor_name: str) -> set[str]:
+def default_destination_dirs(editor_name: str, project_prefix: str = "") -> set[str]:
     editor = editor_name or "Unknown"
-    return {"Audio/Music", "B-roll/Stills", f"B-roll/Editor Added/{editor}"}
+    dests = {"Audio/Music", "B-roll/Stills", f"B-roll/Editor Added/{editor}"}
+    prefix = (project_prefix or "").strip("/").replace("\\", "/")
+    if prefix:
+        dests = {f"{prefix}/{d}" for d in dests}
+    return dests
 
 
 def list_destination_dirs(local_root: str, editor_name: str) -> list[str]:

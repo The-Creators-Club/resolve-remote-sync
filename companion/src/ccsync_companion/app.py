@@ -120,7 +120,8 @@ class CompanionApp:
         for item in fresh:
             self._popup_snooze[_norm_key(item.get("file_path", ""))] = now
         popup.show_popup(
-            fresh, self.config["local_root"], self.config.get("editor_name", ""), self.ignore_tracker
+            fresh, self.config["local_root"], self.config.get("editor_name", ""), self.ignore_tracker,
+            project_prefix=self.config.get("active_project", ""),
         )
 
     def _handle_mapping_warning(self, item: dict[str, Any]) -> None:

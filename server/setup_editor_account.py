@@ -47,22 +47,29 @@ def find_group(name: str, dry_run: bool):
 
 
 def ensure_group(name: str, dry_run: bool) -> int:
-    """Return the gid (real mode) or -1 (dry-run, unknown)."""
+    """Return the group's DB id (real mode) or -1 (dry-run, unknown).
+
+    NOTE: the /user endpoints' `group`/`groups` fields take the group's
+    database id, NOT its unix gid — passing the gid fails validation with
+    "This group does not exist" (learned against the live 25.10 API).
+    """
     existing = find_group(name, dry_run)
     if dry_run:
         print(f"[dry-run] would ensure group {name!r} exists")
         return -1
     if existing:
-        print(f"group already exists, skipping: {name} (gid {existing['gid']})")
-        return existing["gid"]
+        print(f"group already exists, skipping: {name} (gid {existing['gid']}, id {existing['id']})")
+        return existing["id"]
 
     resp = truenas_api("POST", "/group", json_body={"name": name, "smb": True}, dry_run=dry_run)
     if not ok(resp):
         print(f"FAILED to create group {name!r}: HTTP {resp.status_code} {resp.text}", file=sys.stderr)
         sys.exit(1)
     created = resp.json()
-    print(f"created group: {name} (gid {created['gid']})")
-    return created["gid"]
+    # POST /group returns the new row id (an int), not a dict, on 25.10.
+    group_id = created if isinstance(created, int) else created.get("id")
+    print(f"created group: {name} (id {group_id})")
+    return group_id
 
 
 def find_user(name: str, dry_run: bool):
@@ -128,7 +135,9 @@ def main():
             "group_create": False,
             "group": gid,
             "groups": [gid],
-            "home": f"/mnt/tank/TheCreatorsPool/homes/{args.name}",
+            # With home_create=True, `home` is the PARENT dir — TrueNAS
+            # appends the username itself (25.10 API semantics).
+            "home": "/mnt/tank/TheCreatorsPool/homes",
             "home_create": True,
             "shell": "/usr/bin/bash",
             "password_disabled": False,  # flipped to True below once we can verify smb survives it

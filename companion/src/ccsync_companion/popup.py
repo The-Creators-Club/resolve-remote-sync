@@ -22,7 +22,8 @@ log = logging.getLogger("ccsync.popup")
 
 
 def build_popup_rows(
-    out_of_tree_items: list[dict[str, Any]], local_root: str, editor_name: str
+    out_of_tree_items: list[dict[str, Any]], local_root: str, editor_name: str,
+    project_prefix: str = "",
 ) -> list[dict[str, Any]]:
     """Turn watcher OUT_OF_TREE items into popup row dicts.
 
@@ -36,7 +37,7 @@ def build_popup_rows(
                 "file_path": path,
                 "media_pool_item": item.get("media_pool_item"),
                 "clip_name": item.get("clip_name") or os.path.basename(path),
-                "suggested_dest": fixer.suggest_destination(path, editor_name),
+                "suggested_dest": fixer.suggest_destination(path, editor_name, project_prefix),
             }
         )
     return rows
@@ -154,12 +155,13 @@ def show_popup(
     local_root: str,
     editor_name: str,
     ignore_tracker: "fixer.IgnoreTracker",
+    project_prefix: str = "",
 ) -> None:
     """Build and show the popup, falling back to a console listing (with the
     items auto-ignored so we don't spin forever re-popping the same clips)
     if tkinter can't create a window in this environment.
     """
-    rows = build_popup_rows(out_of_tree_items, local_root, editor_name)
+    rows = build_popup_rows(out_of_tree_items, local_root, editor_name, project_prefix)
     try:
         dialog = PopupDialog(rows, local_root, ignore_tracker)
         dialog.show()

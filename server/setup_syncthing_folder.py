@@ -99,6 +99,11 @@ def main():
             "path": path,
             "type": "sendreceive",
             "fsWatcherEnabled": True,
+            # aclmode=restricted on the dataset forbids chmod, which
+            # Syncthing otherwise uses to mirror permissions — without this
+            # every dir touch fails with "operation not permitted" and
+            # transfers stall at the .syncthing.*.tmp stage (seen live).
+            "ignorePerms": True,
             "rescanIntervalS": 3600,
             "versioning": {
                 "type": "staggered",

@@ -32,6 +32,9 @@ remote_root = "Creators_Club"
 # local_root as a whole; kept here for the benchmark harness / future
 # per-project lane scoping).
 projects = ["Projects/2025/FF4/Nuclear"]
+# Popup destinations are prefixed with this project (editor-added media
+# must land inside a project, not at the Creators_Club root):
+active_project = "Projects/2025/FF4/Nuclear"
 
 # Resolve timeline poll interval, in seconds.
 poll_interval = 3

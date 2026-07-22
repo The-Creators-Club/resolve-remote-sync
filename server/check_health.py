@@ -116,7 +116,10 @@ def check_syncthing_app(gui_url, api_key, dry_run: bool):
 
 
 def check_tree(projects_root: str, dry_run: bool):
-    cmd = f"test -d {shell_quote(projects_root)} && echo PRESENT || echo MISSING"
+    # sudo: TRUENAS_USER itself has no traverse rights on the 770 dataset,
+    # so an unprivileged test -d false-negatives even when the tree exists.
+    cmd = (f'echo "$SUDO_PW" | sudo -S -p "" test -d {shell_quote(projects_root)} '
+           f"&& echo PRESENT || echo MISSING")
     rc, out, err = run_ssh(cmd, dry_run=dry_run)
     if dry_run:
         return

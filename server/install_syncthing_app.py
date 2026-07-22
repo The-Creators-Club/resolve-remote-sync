@@ -155,30 +155,41 @@ def main():
     version = entry.get("latest_version", "<unknown>")
     print(f"found catalog entry: {APP_NAME} version {version} (catalog={CATALOG}, train={TRAIN})")
 
+    # Schema confirmed against the live TrueNAS 25.10.4 chart (stable/
+    # syncthing 1.3.11 questions.yaml) on 2026-07-22 — see the chart's
+    # run_as/network/storage variable tree. run_as 3000:3001 = broll:editors
+    # so files Syncthing writes land group-editors like everything else.
     values = {
-        "syncthing": {
-            "puid": 0,
-            "pgid": 0,
-        },
+        "run_as": {"user": 3000, "group": 3001},
         "network": {
-            "webUIPort": args.gui_port,
+            "web_port": {"bind_mode": "published", "port_number": args.gui_port},
+            "tcp_port": {"bind_mode": "published", "port_number": 22000},
+            "udp_port": {"bind_mode": "published", "port_number": 22000},
+            "host_network": False,
         },
         "storage": {
-            "data": {
-                "type": "hostPath",
-                "hostPath": args.host_path,
+            "config": {
+                "type": "ix_volume",
+                "ix_volume_config": {"dataset_name": "config", "acl_enable": False},
             },
+            "additional_storage": [
+                {
+                    "type": "host_path",
+                    "mount_path": args.container_mount,
+                    "host_path_config": {"path": args.host_path, "acl_enable": False},
+                }
+            ],
         },
     }
     body = {
         "app_name": APP_NAME,
-        "catalog": CATALOG,
+        "catalog_app": APP_NAME,
         "train": TRAIN,
         "version": version,
         "values": values,
     }
 
-    resp = truenas_api("POST", "/app/create", json_body=body, dry_run=args.dry_run)
+    resp = truenas_api("POST", "/app", json_body=body, dry_run=args.dry_run)
     if args.dry_run:
         print(f"[dry-run] container mount for --host-path would be assumed at: {args.container_mount}")
         print("[dry-run] (CONFIRM this against the real chart before running setup_syncthing_folder.py)")

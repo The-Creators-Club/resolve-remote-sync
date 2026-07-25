@@ -23,7 +23,7 @@ else:  # pragma: no cover - project targets 3.12
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

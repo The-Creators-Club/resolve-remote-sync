@@ -226,6 +226,7 @@ def _show_update_dialog(app: "CompanionApp") -> None:
         app.apply_upgrade()
         return
 
+    log.info("update dialog: opening for v%s", info.get("version"))
     syncing = False
     try:
         syncing = any(getattr(s, "state", "") == "syncing" for s in app.lane_statuses())
@@ -233,35 +234,45 @@ def _show_update_dialog(app: "CompanionApp") -> None:
         pass
 
     confirmed = {"value": False}
-    root = tk.Tk()
-    root.title("CCSYNC.EXE — update")
-    root.attributes("-topmost", True)
-    root.configure(bg=theme.BG, padx=18, pady=14)
+    # The WHOLE dialog is best-effort: tk.Tk() can raise (or wedge Tcl) when
+    # other Tk roots have run on sibling threads in this process -- seen
+    # live 2026-07-25 as a silent no-op on "Update now" (the daemon thread
+    # died to invisible stderr). The menu click is already explicit consent,
+    # so any dialog failure falls through to applying the update directly.
+    try:
+        root = tk.Tk()
+        root.title("CCSYNC.EXE — update")
+        root.attributes("-topmost", True)
+        root.configure(bg=theme.BG, padx=18, pady=14)
 
-    tk.Label(root, text="► UPDATE COMPANION", bg=theme.BG, fg=theme.RED,
-             font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
-    tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
-    body = f"Update to v{info['version']}? The companion will restart itself."
-    if syncing:
-        body += "\n\nA sync is currently running — it will resume automatically after the restart."
-    tk.Label(root, text=body, bg=theme.BG, fg=theme.MUTED, font=theme.mono(9),
-             justify="left", anchor="w", wraplength=360).pack(anchor="w", pady=(6, 10))
+        tk.Label(root, text="► UPDATE COMPANION", bg=theme.BG, fg=theme.RED,
+                 font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+        tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        body = f"Update to v{info['version']}? The companion will restart itself."
+        if syncing:
+            body += "\n\nA sync is currently running — it will resume automatically after the restart."
+        tk.Label(root, text=body, bg=theme.BG, fg=theme.MUTED, font=theme.mono(9),
+                 justify="left", anchor="w", wraplength=360).pack(anchor="w", pady=(6, 10))
 
-    btn_bar = tk.Frame(root, bg=theme.BG)
-    btn_bar.pack(anchor="e", pady=(12, 0))
+        btn_bar = tk.Frame(root, bg=theme.BG)
+        btn_bar.pack(anchor="e", pady=(12, 0))
 
-    def _cancel():
-        root.destroy()
+        def _cancel():
+            root.destroy()
 
-    def _go():
-        confirmed["value"] = True
-        root.destroy()
+        def _go():
+            confirmed["value"] = True
+            root.destroy()
 
-    theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
-    theme.neon_button(tk, btn_bar, "UPDATE", _go, primary=True).pack(side="left")
-    root.bind("<Return>", lambda _e: _go())
-    root.protocol("WM_DELETE_WINDOW", _cancel)
-    root.mainloop()
+        theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
+        theme.neon_button(tk, btn_bar, "UPDATE", _go, primary=True).pack(side="left")
+        root.bind("<Return>", lambda _e: _go())
+        root.protocol("WM_DELETE_WINDOW", _cancel)
+        root.mainloop()
+    except Exception as exc:
+        log.warning("update dialog failed (%s) -- applying update directly", exc)
+        app.apply_upgrade()
+        return
 
     if confirmed["value"]:
         app.apply_upgrade()

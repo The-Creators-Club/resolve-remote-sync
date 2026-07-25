@@ -396,31 +396,40 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
         return False
 
     result = {"ok": False}
-    root = tk.Tk()
-    root.title(title)
-    root.attributes("-topmost", True)
-    root.configure(bg=theme.BG, padx=18, pady=14)
+    # tk.Tk() itself can raise/wedge when other Tk roots have run on sibling
+    # threads in this process (Tcl is thread-touchy) -- treat ANY dialog
+    # failure like "no display": log + safe-default False, never a silent
+    # dead thread (that failure mode was seen live on the update dialog,
+    # 2026-07-25).
+    try:
+        root = tk.Tk()
+        root.title(title)
+        root.attributes("-topmost", True)
+        root.configure(bg=theme.BG, padx=18, pady=14)
 
-    tk.Label(root, text=f"► {title}", bg=theme.BG, fg=theme.RED,
-             font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
-    tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
-    tk.Label(root, text=body, bg=theme.BG, fg=theme.TEXT, font=theme.mono(10),
-             justify="left", anchor="w").pack(anchor="w", pady=(6, 12))
+        tk.Label(root, text=f"► {title}", bg=theme.BG, fg=theme.RED,
+                 font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+        tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        tk.Label(root, text=body, bg=theme.BG, fg=theme.TEXT, font=theme.mono(10),
+                 justify="left", anchor="w").pack(anchor="w", pady=(6, 12))
 
-    btn_bar = tk.Frame(root, bg=theme.BG)
-    btn_bar.pack(anchor="e")
+        btn_bar = tk.Frame(root, bg=theme.BG)
+        btn_bar.pack(anchor="e")
 
-    def _ok():
-        result["ok"] = True
-        root.destroy()
+        def _ok():
+            result["ok"] = True
+            root.destroy()
 
-    def _cancel():
-        root.destroy()
+        def _cancel():
+            root.destroy()
 
-    theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
-    theme.neon_button(tk, btn_bar, ok_label, _ok, primary=True).pack(side="left")
-    root.protocol("WM_DELETE_WINDOW", _cancel)
-    root.mainloop()
+        theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
+        theme.neon_button(tk, btn_bar, ok_label, _ok, primary=True).pack(side="left")
+        root.protocol("WM_DELETE_WINDOW", _cancel)
+        root.mainloop()
+    except Exception as exc:
+        log.warning("confirm dialog failed (%s) — defaulting to cancel", exc)
+        return False
     return result["ok"]
 
 

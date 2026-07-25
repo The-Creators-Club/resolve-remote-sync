@@ -153,3 +153,10 @@ popup_enabled = true
 # explicitly above; the out-of-tree popup stays on so stray media still gets
 # fixed into the tree).
 mode = "editor"
+
+# Resolve project names (case-insensitive) the companion pretends not to
+# see: never reported, never prompt "set this up on the server", and their
+# clips never raise the out-of-tree popup. For scratch/utility projects --
+# Resolve's default "Untitled Project" and the Blackmagic Proxy Generator's
+# helper project.
+ignored_resolve_projects = ["Untitled Project", "New Doc"]

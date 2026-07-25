@@ -53,6 +53,7 @@ class TimelineWatcher:
         ignore_tracker: Optional[IgnoreTracker] = None,
         get_timeline_items: Optional[Callable[[], dict[str, Any]]] = None,
         on_project_changed: Optional[Callable[[str], None]] = None,
+        ignored_projects: Optional[list[str]] = None,
     ) -> None:
         self.local_root = local_root
         self.canonical_prefix = canonical_prefix
@@ -64,6 +65,13 @@ class TimelineWatcher:
         # the bridge flaps to None (Resolve restarting, transient failure),
         # so name -> None -> same name never refires on_project_changed.
         self._last_seen_project: Optional[str] = None
+        # Scratch/utility project names (config `ignored_resolve_projects`,
+        # lowercased): the whole poll pretends these aren't open -- nothing
+        # is reported, prompted, or popped for them. Kills the Blackmagic
+        # Proxy Generator's helper project nagging the base rig.
+        self._ignored_projects = {
+            str(n).strip().lower() for n in (ignored_projects or []) if str(n).strip()
+        }
         self.ignore_tracker = ignore_tracker if ignore_tracker is not None else IgnoreTracker()
         self._get_timeline_items = get_timeline_items or resolve_bridge.get_timeline_items
         self._warned_mapping: set[str] = set()
@@ -83,7 +91,13 @@ class TimelineWatcher:
             self.last_resolve_project = None
             return {"ok": False, "message": str(exc), "out_of_tree": 0, "mapping_warnings": 0}
 
-        self.last_resolve_project = result.get("project_name") or None
+        project_name = result.get("project_name") or None
+        if project_name is not None and project_name.strip().lower() in self._ignored_projects:
+            log.debug("ignoring Resolve project %r (ignored_resolve_projects)", project_name)
+            self.last_resolve_project = None
+            return {"ok": True, "message": "ignored project", "out_of_tree": 0,
+                    "mapping_warnings": 0}
+        self.last_resolve_project = project_name
         if (
             self.last_resolve_project is not None
             and self.last_resolve_project != self._last_seen_project

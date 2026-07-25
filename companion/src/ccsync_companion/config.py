@@ -23,7 +23,7 @@ else:  # pragma: no cover - project targets 3.12
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -127,6 +127,14 @@ DEFAULTS: dict[str, Any] = {
     # unless the file sets it explicitly; the out-of-tree popup stays ON so
     # stray media still gets fixed into the tree).
     "mode": "editor",
+    # Resolve project names (case-insensitive) the companion pretends not to
+    # see: not reported to the dashboard, never trigger the new-project
+    # prompt, and their clips never raise the out-of-tree popup. For scratch
+    # and utility projects -- Resolve's default "Untitled Project", and
+    # whatever project the Blackmagic Proxy Generator's Resolve process has
+    # open (a BPG rig otherwise nags about its own helper project; seen live
+    # 2026-07-25 as recurring "New Doc" popups on the base rig).
+    "ignored_resolve_projects": ["Untitled Project", "New Doc"],
 }
 
 # Profile defaults applied by load_config when mode is set and the file does
@@ -260,6 +268,11 @@ popup_enabled = true
 # explicitly above; the out-of-tree popup stays on so stray media still gets
 # fixed into the tree).
 mode = "editor"
+
+# Resolve project names (case-insensitive) the companion pretends not to
+# see: never reported, never prompt "set this up on the server", and their
+# clips never raise the out-of-tree popup. Scratch/utility projects only.
+ignored_resolve_projects = ["Untitled Project", "New Doc"]
 """
 
 
@@ -300,6 +313,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
         merged["projects"] = []
     if not isinstance(merged.get("syncthing_folder_ids"), list):
         merged["syncthing_folder_ids"] = []
+    if not isinstance(merged.get("ignored_resolve_projects"), list):
+        merged["ignored_resolve_projects"] = list(DEFAULTS["ignored_resolve_projects"])
 
     return merged
 

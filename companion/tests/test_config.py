@@ -300,3 +300,15 @@ def test_version_matches_pyproject():
     with pyproject.open("rb") as fh:
         data = tomllib.load(fh)
     assert data["project"]["version"] == config_mod.VERSION
+
+
+def test_ignored_resolve_projects_default_and_coercion(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('editor_name = "x"\n', encoding="utf-8")
+    cfg = config_mod.load_config(path)
+    assert "Untitled Project" in cfg["ignored_resolve_projects"]
+    assert "New Doc" in cfg["ignored_resolve_projects"]
+
+    path.write_text('ignored_resolve_projects = "oops-not-a-list"\n', encoding="utf-8")
+    cfg = config_mod.load_config(path)
+    assert isinstance(cfg["ignored_resolve_projects"], list)

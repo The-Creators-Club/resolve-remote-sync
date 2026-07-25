@@ -322,3 +322,44 @@ def test_project_changed_callback_exception_swallowed(tmp_path):
     )
     result = w.poll_once()  # must not raise
     assert result["ok"] is True
+
+
+def test_ignored_projects_are_invisible(tmp_path):
+    """A scratch/BPG project in ignored_resolve_projects: not tracked as
+    last_resolve_project (so never reported/prompted), items never popped,
+    on_project_changed never fired."""
+    from ccsync_companion.watcher import TimelineWatcher
+
+    changed = []
+    popped = []
+    w = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: {
+            "ok": True,
+            "project_name": "New Doc",
+            "items": [{"file_path": str(tmp_path.parent / "outside.mov"),
+                       "media_pool_item": object(), "clip_name": "outside"}],
+        },
+        on_out_of_tree=popped.append,
+        on_project_changed=changed.append,
+        ignored_projects=["Untitled Project", "new doc"],
+    )
+    result = w.poll_once()
+    assert result["ok"] is True
+    assert result["out_of_tree"] == 0
+    assert w.last_resolve_project is None
+    assert changed == []
+    assert popped == []
+
+
+def test_non_ignored_project_still_tracked(tmp_path):
+    from ccsync_companion.watcher import TimelineWatcher
+
+    w = TimelineWatcher(
+        local_root=str(tmp_path), canonical_prefix="P:\\",
+        get_timeline_items=lambda: {"ok": True, "project_name": "Real Doc", "items": []},
+        ignored_projects=["Untitled Project", "New Doc"],
+    )
+    w.poll_once()
+    assert w.last_resolve_project == "Real Doc"

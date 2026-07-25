@@ -207,6 +207,7 @@ class CompanionApp:
             on_mapping_warning=self._handle_mapping_warning,
             ignore_tracker=self.ignore_tracker,
             on_project_changed=self._on_resolve_project_changed,
+            ignored_projects=cfg.get("ignored_resolve_projects"),
         )
 
     def _on_report_response(self, resp: Any) -> None:

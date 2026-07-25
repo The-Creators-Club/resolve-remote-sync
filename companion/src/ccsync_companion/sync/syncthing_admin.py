@@ -100,6 +100,14 @@ class SyncthingAdmin:
     def set_folder_paused(self, folder_id: str, paused: bool) -> Any:
         return self._request("PATCH", f"/rest/config/folders/{folder_id}", {"paused": paused})
 
+    def set_folder_path(self, folder_id: str, path: str, label: Optional[str] = None) -> Any:
+        """Re-point a folder at a new local path (server-side project moves
+        -- see sync/repath.py). Same PATCH shape as set_folder_paused."""
+        body: dict = {"path": path}
+        if label is not None:
+            body["label"] = label
+        return self._request("PATCH", f"/rest/config/folders/{folder_id}", body)
+
     # -- pending/accept -----------------------------------------------------
     def pending_folders(self) -> Any:
         return self._request("GET", "/rest/cluster/pending/folders")

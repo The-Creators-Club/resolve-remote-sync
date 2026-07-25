@@ -4,6 +4,8 @@ manually per README.md's "known limitations")."""
 
 from __future__ import annotations
 
+from conftest import write_project_marker
+
 from ccsync_companion import fixer
 from ccsync_companion.popup import (
     build_popup_rows,
@@ -127,7 +129,9 @@ def test_build_popup_rows_always_dedupes_before_building():
 
 def test_build_popup_rows_prefers_matched_resolve_project(tmp_path):
     (tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1").mkdir(parents=True)
+    write_project_marker(tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1")
     (tmp_path / "Projects" / "2025" / "FF4" / "Nuclear").mkdir(parents=True)
+    write_project_marker(tmp_path / "Projects" / "2025" / "FF4" / "Nuclear")
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="CCT Creator Profiles")]
 
     rows = build_popup_rows(
@@ -141,6 +145,7 @@ def test_build_popup_rows_prefers_matched_resolve_project(tmp_path):
 
 def test_build_popup_rows_falls_back_to_configured_project_prefix_when_unmatched(tmp_path):
     (tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1").mkdir(parents=True)
+    write_project_marker(tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1")
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="Some Unrelated Show")]
 
     rows = build_popup_rows(
@@ -165,6 +170,7 @@ def test_build_popup_rows_server_roots_wins_over_local_matching(tmp_path):
     # A tree dir exists that WOULD locally match by token overlap, but the
     # server mapping must take priority over fixer.pick_project_prefix.
     (tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1").mkdir(parents=True)
+    write_project_marker(tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1")
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="CCT Creator Profiles")]
 
     server_roots = {"cct creator profiles": "Projects/2099/Server/Override"}
@@ -189,6 +195,7 @@ def test_build_popup_rows_server_roots_lookup_is_case_insensitive(tmp_path):
 
 def test_build_popup_rows_server_roots_absent_entry_falls_through_to_existing_chain(tmp_path):
     (tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1").mkdir(parents=True)
+    write_project_marker(tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1")
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="CCT Creator Profiles")]
 
     # server_roots is provided but has no entry for this project -- must
@@ -206,6 +213,7 @@ def test_build_popup_rows_server_roots_absent_entry_falls_through_to_existing_ch
 
 def test_build_popup_rows_server_roots_none_falls_through_to_existing_chain(tmp_path):
     (tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1").mkdir(parents=True)
+    write_project_marker(tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1")
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="CCT Creator Profiles")]
 
     rows = build_popup_rows(items, str(tmp_path), "alex", server_roots=None)

@@ -358,3 +358,35 @@ class TestCloneDirectoryTree:
         assert (base / "good").is_dir()
         assert not (tmp_path / "escape").exists()
         assert not (base.parent / "escape").exists()
+
+
+# -- _project_rel_for_path (any-depth attribution) ---------------------------
+
+
+class TestProjectRelForPath:
+    def _f(self, tmp_path, sub, knowns=None):
+        from ccsync_companion.sync.rclone_lane import _project_rel_for_path
+
+        return _project_rel_for_path(str(tmp_path), str(tmp_path / sub), knowns)
+
+    def test_longest_known_prefix_wins(self, tmp_path):
+        knowns = ["2026/CCT", "2026/CCT/Creator Profiles/Season 1"]
+        rel = self._f(tmp_path, Path("Projects/2026/CCT/Creator Profiles/Season 1/B-roll/a.mov"),
+                      knowns)
+        assert rel == "Projects/2026/CCT/Creator Profiles/Season 1"
+
+    def test_no_known_match_returns_none(self, tmp_path):
+        rel = self._f(tmp_path, Path("Projects/2026/Other/Show/a.mov"), ["2025/FF4/Nuclear"])
+        assert rel is None
+
+    def test_legacy_fallback_without_knowns(self, tmp_path):
+        rel = self._f(tmp_path, Path("Projects/2026/Series/Show/a.mov"), None)
+        assert rel == "Projects/2026/Series/Show"
+        assert self._f(tmp_path, Path("Projects/2026/a.mov"), None) is None
+
+    def test_file_directly_in_project_dir(self, tmp_path):
+        rel = self._f(tmp_path, Path("Projects/2026/CCT/Show/a.mov"), ["2026/CCT/Show"])
+        assert rel == "Projects/2026/CCT/Show"
+
+    def test_outside_projects_tree(self, tmp_path):
+        assert self._f(tmp_path, Path("Elsewhere/a.mov"), ["2026/CCT/Show"]) is None

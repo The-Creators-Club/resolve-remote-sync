@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from ..selection import SelectionClient
 from .rclone_lane import clone_directory_tree
+from .repath import ProjectRepather
 from .syncthing_admin import SyncthingAdmin
 
 log = logging.getLogger("ccsync.sync.sequencer")
@@ -73,6 +74,7 @@ class Sequencer:
         folder_status_poll_seconds: float = DEFAULT_FOLDER_STATUS_POLL_SECONDS,
         now: Any = time.monotonic,
         clone_tree_fn: Any = clone_directory_tree,
+        repather: Optional[ProjectRepather] = None,
     ) -> None:
         self.lane_a = lane_a
         self.lane_b = lane_b
@@ -89,6 +91,10 @@ class Sequencer:
         self.folder_status_poll_seconds = folder_status_poll_seconds
         self._now = now
         self._clone_tree_fn = clone_tree_fn
+        # Editor-side half of server-side project moves (sync/repath.py).
+        self.repather = repather if repather is not None else ProjectRepather(
+            admin, self.local_root
+        )
 
         self._stop_event = threading.Event()
         self._resume_event = threading.Event()
@@ -183,6 +189,12 @@ class Sequencer:
             return "paused"
         return "stopped"
 
+    def known_rels(self) -> list[str]:
+        """Selected-project rel paths (any depth) -- feeds lane A's watchdog
+        project attribution (rclone_lane.known_rels_fn)."""
+        with self._lock:
+            return list(self._rel_to_slug)
+
     # -- watcher hand-off -----------------------------------------------------
     def notify_change(self, rel: str) -> None:
         """rel is "Projects/<year>/<series>/<project>" (from RcloneLane's
@@ -225,6 +237,7 @@ class Sequencer:
                 continue
 
             self._update_known_selection(selection)
+            self._reconcile_paths(selection)
             self._run_pass(selection)
 
             if self._stop_event.is_set() or not self._resume_event.is_set():
@@ -361,9 +374,22 @@ class Sequencer:
             selection = restart_selection
             self._update_known_selection(selection)
 
+    def _reconcile_paths(self, selection: list[dict]) -> None:
+        """Repath any project moved server-side BEFORE lanes touch it --
+        otherwise lane A re-uploads the old local tree to the NAS's dead
+        old path. Fault-isolated like every other step."""
+        try:
+            self.repather.reconcile(selection)
+        except Exception:
+            log.exception("sequencer: repath reconcile failed")
+
     def _process_project(self, item: dict, ordered_selected: list[dict]) -> None:
         rel_path = str(item.get("rel_path", ""))
         subpath = f"{PROJECTS_PREFIX}{rel_path}"
+
+        # A mid-pass selection refresh may have re-ordered/changed rels --
+        # re-check this project's local path right before its lanes run.
+        self._reconcile_paths([item])
 
         # First, mirror the project's full directory skeleton -- including
         # empty folders, which neither lane would otherwise create (lane B

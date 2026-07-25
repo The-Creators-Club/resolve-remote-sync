@@ -148,3 +148,31 @@ def test_shell_quote_wraps_simple_value():
 
 def test_shell_quote_escapes_single_quote():
     assert shell_quote("it's") == "'it'\\''s'"
+
+
+def test_project_path_rel_any_depth():
+    from common import project_path_rel
+
+    assert project_path_rel("/root", "2026/CCT/Creator Profiles/Season 1") == \
+        "/root/2026/CCT/Creator Profiles/Season 1"
+    assert project_path_rel("/root/", "OneOffs") == "/root/OneOffs"
+
+
+def test_project_path_rel_rejects_bad_segments():
+    import pytest
+    from common import project_path_rel
+
+    for bad in ("", "a/../b", "a/.hidden", "a\\b", "a//b"):
+        with pytest.raises(ValueError):
+            project_path_rel("/root", bad)
+
+
+def test_build_marker_write_cmd_quoting():
+    from common import MARKER_FILENAME, build_marker_write_cmd
+
+    cmd = build_marker_write_cmd("/root/2026/CCT/Event 1.exe Videos", "the-slug")
+    assert MARKER_FILENAME in cmd
+    assert '"slug": "the-slug"' in cmd
+    assert "sudo -S" in cmd
+    # path with spaces stays inside single quotes
+    assert "Event 1.exe Videos/.ccsync-project" in cmd

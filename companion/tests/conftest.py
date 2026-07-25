@@ -39,6 +39,18 @@ def _find_rclone() -> str | None:
     return None
 
 
+def write_project_marker(project_dir, slug: str = "test-slug") -> None:
+    """Stamp a directory as a project (.ccsync-project marker) -- since
+    2026-07-25 discovery is marker-based, so tests that build project trees
+    call this instead of relying on depth."""
+    import json
+
+    Path(project_dir).mkdir(parents=True, exist_ok=True)
+    (Path(project_dir) / ".ccsync-project").write_text(
+        json.dumps({"slug": slug}), encoding="utf-8"
+    )
+
+
 @pytest.fixture(scope="session")
 def rclone_binary() -> str:
     path = _find_rclone()

@@ -54,7 +54,9 @@ def scan_local_manifest(
     proxies=None. `selected_rels=None` means every project is rollup-only.
     """
     result: dict[str, dict[str, Any]] = {}
-    project_rels = fixer.list_project_dirs(local_root)
+    # Selection rels union in so a just-selected project whose marker file
+    # hasn't synced down yet still gets a rollup (see fixer.list_project_dirs).
+    project_rels = fixer.list_project_dirs(local_root, extra_rels=selected_rels or ())
     for project_rel in project_rels:
         project_dir = Path(local_root) / "Projects" / project_rel.replace("/", os.sep)
         include_files = selected_rels is not None and project_rel in selected_rels

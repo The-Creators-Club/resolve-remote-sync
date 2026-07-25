@@ -122,6 +122,40 @@ def project_path(projects_root: str, year: str, series: str, project: str) -> st
     return f"{projects_root.rstrip('/')}/{year}/{series}/{project}"
 
 
+def project_path_rel(projects_root: str, rel: str) -> str:
+    """Like project_path but for an arbitrary-depth rel path
+    ("2026/CCT/Creator Profiles/Season 1"). Validates every segment."""
+    rel = str(rel or "").strip().strip("/")
+    if not rel:
+        raise ValueError("empty --project-rel-path")
+    for part in rel.split("/"):
+        if not part or "\\" in part or part.startswith(".") or ".." in part:
+            raise ValueError(f"invalid path segment: {part!r}")
+    return f"{projects_root.rstrip('/')}/{rel}"
+
+
+# Intentional copy of the dashboard's provision.MARKER_FILENAME (see that
+# module's marker docs) -- keep in sync. A directory IS a project because it
+# carries this file; the slug inside is its immutable identity.
+MARKER_FILENAME = ".ccsync-project"
+
+
+def build_marker_write_cmd(base: str, slug: str, created_by: str = "setup_tree") -> str:
+    """Shell line writing the project marker into `base` (root via sudo,
+    then chowned by the caller's chown -R). JSON kept minimal + quoted for
+    embedding in the SSH script."""
+    import json as _json
+
+    payload = _json.dumps({"slug": slug, "created_by": created_by})
+    marker_q = shell_quote(f"{base}/{MARKER_FILENAME}")
+    payload_q = shell_quote(payload)
+    return (
+        f'echo "$SUDO_PW" | sudo -S -p "" sh -c '
+        + shell_quote(f"printf '%s' {payload_q} > {marker_q}")
+        + f' && echo "marker written: {MARKER_FILENAME}"'
+    )
+
+
 def shell_quote(value: str) -> str:
     """Single-quote a value for embedding in a POSIX shell command."""
     return "'" + value.replace("'", "'\\''") + "'"

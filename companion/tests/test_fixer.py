@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import write_project_marker
+
 from ccsync_companion import fixer
 
 
@@ -300,7 +302,9 @@ def test_match_project_dir_picks_higher_overlap_over_lower():
 
 def test_list_project_dirs_scans_year_series_project_layout(tmp_path):
     (tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1").mkdir(parents=True)
+    write_project_marker(tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1")
     (tmp_path / "Projects" / "2025" / "FF4" / "Nuclear").mkdir(parents=True)
+    write_project_marker(tmp_path / "Projects" / "2025" / "FF4" / "Nuclear")
     dirs = fixer.list_project_dirs(str(tmp_path))
     assert "2026/Creator Profiles/Season 1" in dirs
     assert "2025/FF4/Nuclear" in dirs
@@ -346,3 +350,34 @@ def test_match_project_dir_ignores_trivial_numeric_tokens():
     assert fixer.match_project_dir("Event 1.EXE Videos for Event", candidates) is None
     assert fixer.match_project_dir("Part 2 Cut 1", candidates) is None
     assert fixer.match_project_dir("Season 1 Recap", candidates) == "2026/Creator Profiles/Season 1"
+
+
+def test_list_project_dirs_marker_at_any_depth(tmp_path):
+    deep = tmp_path / "Projects" / "2026" / "CCT" / "Creator Profiles" / "Season 1"
+    deep.mkdir(parents=True)
+    write_project_marker(deep)
+    shallow = tmp_path / "Projects" / "OneOffs"
+    shallow.mkdir(parents=True)
+    write_project_marker(shallow)
+    # bare dir (no marker) is invisible
+    (tmp_path / "Projects" / "2026" / "CCT" / "Bare").mkdir(parents=True)
+
+    dirs = fixer.list_project_dirs(str(tmp_path))
+    assert dirs == ["2026/CCT/Creator Profiles/Season 1", "OneOffs"]
+
+
+def test_list_project_dirs_prunes_nested_markers(tmp_path):
+    outer = tmp_path / "Projects" / "2026" / "Show"
+    inner = outer / "Nested"
+    inner.mkdir(parents=True)
+    write_project_marker(outer)
+    write_project_marker(inner)
+    assert fixer.list_project_dirs(str(tmp_path)) == ["2026/Show"]
+
+
+def test_list_project_dirs_extra_rels_union(tmp_path):
+    # selected project whose marker hasn't synced down yet
+    d = tmp_path / "Projects" / "2026" / "CCT" / "New Thing"
+    d.mkdir(parents=True)
+    dirs = fixer.list_project_dirs(str(tmp_path), extra_rels=["2026/CCT/New Thing", "2026/Absent"])
+    assert dirs == ["2026/CCT/New Thing"]  # absent extra dropped, existing bare dir adopted

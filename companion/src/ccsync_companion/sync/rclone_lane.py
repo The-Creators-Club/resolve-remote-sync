@@ -286,16 +286,36 @@ def parse_json_log(text: str) -> RcloneRunResult:
     return RcloneRunResult(ok=not errors, transferred=transferred, errors=errors, raw_returncode=0)
 
 
-def _project_rel_for_path(local_root: str, path: str) -> Optional[str]:
+def _project_rel_for_path(
+    local_root: str, path: str, known_rels: Optional[list[str]] = None
+) -> Optional[str]:
     """Given an absolute file path under local_root, return the
-    "Projects/<year>/<series>/<project>" subtree it belongs to, or None if
-    the path isn't under a Projects/ tree at least 3 components deep."""
+    "Projects/<rel>" subtree it belongs to.
+
+    With `known_rels` (posix rels like "2026/CCT/Creator Profiles/Season 1",
+    from the sequencer's selection), the LONGEST rel whose segments prefix
+    the path wins -- projects live at any depth since 2026-07-25, so fixed
+    slicing can't work. Without knowns (legacy whole-tree mode) the original
+    year/series/project heuristic (first 3 components) is kept."""
     try:
         rel = Path(path).relative_to(Path(local_root))
     except ValueError:
         return None
     parts = rel.parts
-    if len(parts) < 4 or parts[0] != "Projects":
+    if len(parts) < 2 or parts[0] != "Projects":
+        return None
+    inner = [p.lower() for p in parts[1:]]
+
+    if known_rels:
+        best: Optional[str] = None
+        best_len = 0
+        for known in known_rels:
+            segs = [s.lower() for s in known.strip("/").split("/") if s]
+            if len(segs) < len(inner) and inner[: len(segs)] == segs and len(segs) > best_len:
+                best, best_len = known, len(segs)
+        return f"Projects/{best}" if best else None
+
+    if len(parts) < 4:
         return None
     return "/".join(parts[:4])
 
@@ -317,6 +337,7 @@ class RcloneLane(LaneAdapter):
         subprocess_run=subprocess.run,
         popen_factory=None,
         on_change: Optional[Callable[[str], None]] = None,
+        known_rels_fn: Optional[Callable[[], list[str]]] = None,
     ) -> None:
         assert direction in (DIRECTION_UP, DIRECTION_DOWN)
         self.direction = direction
@@ -331,6 +352,9 @@ class RcloneLane(LaneAdapter):
         self.subprocess_run = subprocess_run
         self.popen_factory = popen_factory
         self.on_change = on_change
+        # Selected-project rels (any depth) for the watchdog's project
+        # attribution -- see _project_rel_for_path. None = legacy heuristic.
+        self.known_rels_fn = known_rels_fn
 
         # Backward-compat seam: a caller that injects a custom subprocess_run
         # (and no popen_factory) keeps the old subprocess.run() code path —
@@ -610,10 +634,17 @@ class RcloneLane(LaneAdapter):
                 if lane.on_change is not None:
                     # Per-project mode: hand off to the (separately built)
                     # sequencer instead of running a debounced whole-tree
-                    # pass. If the changed file isn't under a recognizable
-                    # Projects/<year>/<series>/<project> subtree, ignore it
-                    # rather than falling back to the old whole-tree trigger.
-                    rel = _project_rel_for_path(lane.local_root, path)
+                    # pass. Known project rels (any depth) come from the
+                    # sequencer's selection via known_rels_fn; a file not
+                    # under any known project is ignored rather than falling
+                    # back to the old whole-tree trigger.
+                    knowns = None
+                    if lane.known_rels_fn is not None:
+                        try:
+                            knowns = list(lane.known_rels_fn())
+                        except Exception:
+                            knowns = None
+                    rel = _project_rel_for_path(lane.local_root, path, knowns)
                     if rel is not None:
                         lane.on_change(rel)
                     return

@@ -114,7 +114,7 @@ def test_editor_cannot_change_or_delete_existing(env):
 
 
 def create_body(**overrides):
-    body = {"year": "2026", "series": "Creator Profiles", "project": "Season 2",
+    body = {"parent_rel": "2026/Creator Profiles", "name": "Season 2",
             "resolve_project": "CP S2 Edit"}
     body.update(overrides)
     return body
@@ -122,6 +122,7 @@ def create_body(**overrides):
 
 def test_create_project_makes_template_and_maps(env):
     client, conn, projects_dir = env
+    (projects_dir / "2026" / "Creator Profiles").mkdir(parents=True)  # parent must exist
     as_user(client, "jsmith")
     resp = client.post("/api/v1/projects", json=create_body())
     assert resp.status_code == 200
@@ -132,6 +133,8 @@ def test_create_project_makes_template_and_maps(env):
     target = projects_dir / "2026" / "Creator Profiles" / "Season 2"
     for sub in TEMPLATE_FOLDERS:
         assert (target / sub).is_dir(), f"missing template folder {sub}"
+    from ccsync_dashboard import provision
+    assert provision.read_marker(target) == body["slug"]  # marker = identity
 
     row = conn.execute("SELECT * FROM projects WHERE slug=?", (body["slug"],)).fetchone()
     assert row["active"] == 1
@@ -148,22 +151,53 @@ def test_create_project_makes_template_and_maps(env):
 
 
 def test_create_rejects_bad_input(env):
-    client, _conn, _pd = env
+    client, _conn, projects_dir = env
+    (projects_dir / "2026" / "Creator Profiles").mkdir(parents=True)
     as_user(client, "jsmith")
-    assert client.post("/api/v1/projects", json=create_body(year="26")).status_code == 422
-    assert client.post("/api/v1/projects", json=create_body(series="a/b")).status_code == 422
-    assert client.post("/api/v1/projects", json=create_body(project="..evil")).status_code == 422
-    assert client.post("/api/v1/projects", json=create_body(project=".hidden")).status_code == 422
+    assert client.post("/api/v1/projects", json=create_body(name="a/b")).status_code == 422
+    assert client.post("/api/v1/projects", json=create_body(name="..evil")).status_code == 422
+    assert client.post("/api/v1/projects", json=create_body(name=".hidden")).status_code == 422
+    assert client.post("/api/v1/projects",
+                       json=create_body(parent_rel="../escape")).status_code == 422
+    assert client.post("/api/v1/projects",
+                       json=create_body(parent_rel="2026/Nope")).status_code == 422  # parent absent
+
+
+def test_create_at_any_depth_and_at_root(env):
+    client, _conn, projects_dir = env
+    (projects_dir / "2026" / "CCT" / "Creator Profiles").mkdir(parents=True)
+    as_user(client, "jsmith")
+    resp = client.post("/api/v1/projects", json=create_body(
+        parent_rel="2026/CCT/Creator Profiles", name="Season 2"))
+    assert resp.status_code == 200
+    assert resp.json()["slug"] == "2026-cct-creator-profiles-season-2"
+    resp = client.post("/api/v1/projects", json=create_body(
+        parent_rel="", name="OneOff", resolve_project=""))
+    assert resp.status_code == 200
+    assert resp.json()["slug"] == "oneoff"
+
+
+def test_create_inside_project_rejected(env):
+    client, _conn, projects_dir = env
+    from ccsync_dashboard import provision
+    outer = projects_dir / "2026" / "Show"
+    outer.mkdir(parents=True)
+    provision.write_marker(outer, "2026-show")
+    as_user(client, "jsmith")
+    resp = client.post("/api/v1/projects", json=create_body(
+        parent_rel="2026/Show", name="Nested"))
+    assert resp.status_code == 422
+    assert "inside another project" in resp.json()["detail"]
 
 
 def test_create_slug_collision(env):
-    client, _conn, _pd = env
+    client, _conn, projects_dir = env
+    (projects_dir / "2025" / "FF4").mkdir(parents=True)
     as_user(client, "jsmith")
     # existing project 2025-ff4-nuclear has label 2025/FF4/Nuclear; a create
     # producing the same slug from a DIFFERENT rel must be rejected.
     resp = client.post("/api/v1/projects", json=create_body(
-        year="2025", series="FF4", project="nuclear"))
-    # same slug, same normalized rel? "2025/FF4/nuclear" != "2025/FF4/Nuclear" label
+        parent_rel="2025/FF4", name="nuclear"))
     assert resp.status_code == 422
     assert "different project" in resp.json()["detail"]
 
@@ -191,14 +225,39 @@ def test_page_redirects_anon_with_next(env):
     assert "project-setup" in resp.headers["location"]
 
 
-def test_page_shows_link_and_create_boxes(env):
-    client, _conn, _pd = env
+def test_page_shows_folder_browser(env):
+    client, _conn, projects_dir = env
+    from ccsync_dashboard import provision
+    nuclear = projects_dir / "2025" / "FF4" / "Nuclear"
+    nuclear.mkdir(parents=True)
+    provision.write_marker(nuclear, "2025-ff4-nuclear")
     as_user(client, "jsmith")
     page = client.get("/project-setup?resolve_project=Mystery Doc")
     assert page.status_code == 200
-    assert "[ LINK TO AN EXISTING PROJECT ]" in page.text
-    assert "[ OR CREATE A NEW PROJECT ]" in page.text
-    assert "2025/FF4/Nuclear" in page.text
+    assert "[ PICK THE FOLDER FOR THIS PROJECT ]" in page.text
+    assert "[ OR CREATE A NEW PROJECT FOLDER HERE ]" in page.text
+    assert "2025" in page.text  # top-level dir listed
+
+
+def test_browse_drills_down_and_flags_projects(env):
+    client, _conn, projects_dir = env
+    from ccsync_dashboard import provision
+    nuclear = projects_dir / "2025" / "FF4" / "Nuclear"
+    nuclear.mkdir(parents=True)
+    provision.write_marker(nuclear, "2025-ff4-nuclear")
+    as_user(client, "jsmith")
+    page = client.get("/partials/project-setup/browse?rel=2025/FF4&resolve_project=Doc")
+    assert page.status_code == 200
+    assert "[ PROJECT ]" in page.text     # Nuclear flagged as a project
+    assert "Nuclear" in page.text
+
+
+def test_browse_traversal_guard(env):
+    client, _conn, _pd = env
+    as_user(client, "jsmith")
+    page = client.get("/partials/project-setup/browse?rel=../escape&resolve_project=Doc")
+    assert page.status_code == 200        # banner-not-crash convention
+    assert "must not start with" in page.text or "escape" in page.text
 
 
 def test_page_shows_mapping_when_already_set(env):
@@ -212,28 +271,65 @@ def test_page_shows_mapping_when_already_set(env):
     assert "2025/FF4/Nuclear" in page.text
 
 
-def test_partial_link_first_set(env):
-    client, conn, _pd = env
+def test_partial_link_marked_folder_first_set(env):
+    client, conn, projects_dir = env
+    from ccsync_dashboard import provision
+    nuclear = projects_dir / "2025" / "FF4" / "Nuclear"
+    nuclear.mkdir(parents=True)
+    provision.write_marker(nuclear, "2025-ff4-nuclear")
     as_user(client, "jsmith")
     resp = client.post("/partials/project-setup/link",
-                       data={"resolve_project": "Mystery Doc", "root": "2025-ff4-nuclear"})
+                       data={"resolve_project": "Mystery Doc", "rel": "2025/FF4/Nuclear"})
     assert resp.status_code == 200
-    assert "[ ALREADY SET UP ]" in resp.text
     root = conn.execute("SELECT * FROM project_roots WHERE resolve_project=?",
                         ("Mystery Doc",)).fetchone()
+    assert root["project_slug"] == "2025-ff4-nuclear"
     assert root["source"] == "editor" and root["updated_by"] == "jsmith"
+
+
+def test_link_bare_folder_adopts_it(env):
+    client, conn, projects_dir = env
+    from ccsync_dashboard import provision
+    bare = projects_dir / "2026" / "CCT" / "Event 1.exe Videos for Event"
+    bare.mkdir(parents=True)
+    as_user(client, "jsmith")
+    resp = client.post("/api/v1/projects/link", json={
+        "rel": "2026/CCT/Event 1.exe Videos for Event",
+        "resolve_project": "Event 1.EXE Videos for Event",
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["slug"] == "2026-cct-event-1-exe-videos-for-event"
+    # marker written = folder claimed
+    assert provision.read_marker(bare) == body["slug"]
+    row = conn.execute("SELECT active FROM projects WHERE slug=?", (body["slug"],)).fetchone()
+    assert row["active"] == 1
+
+
+def test_link_folder_with_existing_marker_keeps_identity(env):
+    client, _conn, projects_dir = env
+    from ccsync_dashboard import provision
+    moved = projects_dir / "2026" / "CCT" / "Moved Show"
+    moved.mkdir(parents=True)
+    provision.write_marker(moved, "original-identity")
+    as_user(client, "jsmith")
+    resp = client.post("/api/v1/projects/link",
+                       json={"rel": "2026/CCT/Moved Show", "resolve_project": ""})
+    assert resp.status_code == 200
+    assert resp.json()["slug"] == "original-identity"
 
 
 def test_partial_create_flow(env):
     client, _conn, projects_dir = env
+    (projects_dir / "2026" / "CCT").mkdir(parents=True)
     as_user(client, "jsmith")
     resp = client.post("/partials/project-setup/create", data={
-        "resolve_project": "CP S2 Edit", "year": "2026",
-        "series": "Creator Profiles", "project": "Season 2",
+        "resolve_project": "CP S2 Edit", "parent_rel": "2026/CCT",
+        "name": "Season 2",
     })
     assert resp.status_code == 200
-    assert "[ CREATED ]" in resp.text
-    assert (projects_dir / "2026" / "Creator Profiles" / "Season 2" / "B-roll").is_dir()
+    assert "[ DONE ]" in resp.text
+    assert (projects_dir / "2026" / "CCT" / "Season 2" / "B-roll").is_dir()
 
 
 # -- deactivation grace ---------------------------------------------------

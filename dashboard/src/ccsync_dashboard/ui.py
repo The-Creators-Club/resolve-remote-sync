@@ -230,9 +230,60 @@ async def partial_set_project_root(
 
 # -------------------------------------------------- project setup (new-project)
 
+def _browse_context(request: Request, resolve_project: str, rel: str) -> dict:
+    """The folder-browser box: children of `rel` under the Projects tree,
+    each flagged is_project (marker present). Tolerant: an invalid rel or
+    unmounted tree degrades to an error entry, never a crash."""
+    from .api import ProjectSetupError, _marked_ancestor, _safe_rel
+
+    settings = request.app.state.settings
+    error = None
+    entries: list[dict] = []
+    crumbs: list[dict] = []
+    inside_project = False
+    norm_rel = ""
+    try:
+        target, norm_rel = _safe_rel(settings, rel)
+        projects_dir = Path(settings.projects_dir)
+        if norm_rel:
+            acc = []
+            for part in norm_rel.split("/"):
+                acc.append(part)
+                crumbs.append({"name": part, "rel": "/".join(acc)})
+            inside_project = _marked_ancestor(projects_dir, norm_rel) is not None
+        for child in sorted(target.iterdir(), key=lambda p: p.name.lower()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            child_rel = f"{norm_rel}/{child.name}" if norm_rel else child.name
+            slug = provision.read_marker(child)
+            has_children = any(
+                g.is_dir() and not g.name.startswith(".") for g in child.iterdir()
+            ) if slug is None else False
+            entries.append({
+                "name": child.name,
+                "rel": child_rel,
+                "is_project": slug is not None,
+                "slug": slug,
+                "has_children": has_children,
+            })
+    except ProjectSetupError as exc:
+        error = str(exc)
+    except OSError as exc:
+        error = f"could not list the folder: {exc}"
+
+    return {"browse": {
+        "resolve_project": resolve_project.strip(),
+        "rel": norm_rel,
+        "crumbs": crumbs,
+        "inside_project": inside_project,
+        "entries": entries,
+        "error": error,
+    }}
+
+
 def _setup_context(
     request: Request, conn: sqlite3.Connection, resolve_project: str,
-    error: str | None = None, created: dict | None = None,
+    error: str | None = None, created: dict | None = None, browse_rel: str = "",
 ) -> dict:
     from .api import _project_roots_view
 
@@ -244,22 +295,22 @@ def _setup_context(
         if row["resolve_project"].strip().lower() == name.lower():
             mapping = row
             break
-    projects = [
-        {"slug": r["slug"], "label": r["label"]}
-        for r in conn.execute("SELECT slug, label FROM projects WHERE active=1 ORDER BY label")
-    ]
     projects_dir = str(getattr(settings, "projects_dir", "") or "")
-    return {"setup": {
+    projects_dir_ok = bool(projects_dir) and Path(projects_dir).is_dir()
+    context = {"setup": {
         "resolve_project": name,
         "mapping": mapping,
-        "projects": projects,
         "is_admin": auth.is_admin(settings, user),
-        "projects_dir_ok": bool(projects_dir) and Path(projects_dir).is_dir(),
-        "default_year": dt.datetime.now().year,
+        "projects_dir_ok": projects_dir_ok,
         "template_folders": provision.TEMPLATE_FOLDERS,
         "error": error,
         "created": created,
     }}
+    if projects_dir_ok:
+        context.update(_browse_context(request, name, browse_rel))
+    else:
+        context["browse"] = None
+    return context
 
 
 @router.get("/project-setup")
@@ -274,45 +325,61 @@ def page_project_setup(
     })
 
 
+@router.get("/partials/project-setup/browse")
+def partial_project_setup_browse(
+    request: Request, rel: str = "", resolve_project: str = "",
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    if auth.get_session_user(request) is None:
+        raise HTTPException(status_code=401, detail="not signed in")
+    return _render(request, "partials/project_setup_panel.html",
+                   _setup_context(request, conn, resolve_project, browse_rel=rel))
+
+
 @router.post("/partials/project-setup/link")
 async def partial_project_setup_link(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ):
+    """Link the browsed folder to the Resolve project: adopt_folder claims
+    the directory (marker + projects row) and does the tiered sticky map.
+    Already-mapped Resolve projects: sticky insert returns False -> banner
+    (adopt_folder itself only touches project_roots via sticky, so a
+    non-admin can never overwrite an existing mapping)."""
+    from .api import ProjectSetupError, adopt_folder
+
     settings = request.app.state.settings
     user = auth.get_session_user(request)
     form = await _form(request)
     name = form.get("resolve_project", "").strip()
-    slug = form.get("root", "").strip()
+    rel = form.get("rel", "").strip()
 
     error = None
+    created = None
     if user is None:
         error = "not signed in"
-    elif not name or not slug:
-        error = "pick a project to link"
+    elif not rel:
+        error = "pick a folder to link"
     else:
         existing = conn.execute(
             "SELECT 1 FROM project_roots WHERE resolve_project=?", (name,)
-        ).fetchone()
-        active = conn.execute(
-            "SELECT 1 FROM projects WHERE slug=? AND active=1", (slug,)
-        ).fetchone()
-        if active is None:
-            error = f"unknown or inactive project {slug!r}"
-        elif existing is not None and not auth.is_admin(settings, user):
+        ).fetchone() if name else None
+        if existing is not None and not auth.is_admin(settings, user):
             error = "this Resolve project is already mapped -- ask an admin to change it"
-        elif existing is not None:
-            db.admin_set_project_root(conn, name, slug, admin=user, now=db.utcnow_iso())
-            conn.commit()
         else:
-            inserted = db.sticky_project_root(
-                conn, name, slug, db.utcnow_iso(), source="editor", updated_by=user
-            )
-            conn.commit()
-            if not inserted:
-                error = "someone just mapped this project -- see the mapping below"
+            try:
+                created = adopt_folder(settings, conn, rel, name if existing is None else "", user)
+                if existing is not None:
+                    # admin re-pointing an existing mapping
+                    db.admin_set_project_root(conn, name, created["slug"],
+                                              admin=user, now=db.utcnow_iso())
+                    created["mapped"] = True
+                conn.commit()
+            except ProjectSetupError as exc:
+                error = str(exc)
 
     return _render(request, "partials/project_setup_panel.html",
-                   _setup_context(request, conn, name, error=error))
+                   _setup_context(request, conn, name, error=error, created=created,
+                                  browse_rel=rel.rsplit("/", 1)[0] if "/" in rel else ""))
 
 
 @router.post("/partials/project-setup/create")
@@ -324,6 +391,7 @@ async def partial_project_setup_create(
     user = auth.get_session_user(request)
     form = await _form(request)
     name = form.get("resolve_project", "").strip()
+    parent_rel = form.get("parent_rel", "").strip()
 
     error = None
     created = None
@@ -333,15 +401,15 @@ async def partial_project_setup_create(
         try:
             created = create_tree_project(
                 request.app.state.settings, conn,
-                form.get("year", ""), form.get("series", ""), form.get("project", ""),
-                name, user,
+                parent_rel, form.get("name", ""), name, user,
             )
             conn.commit()
         except ProjectSetupError as exc:
             error = str(exc)
 
     return _render(request, "partials/project_setup_panel.html",
-                   _setup_context(request, conn, name, error=error, created=created))
+                   _setup_context(request, conn, name, error=error, created=created,
+                                  browse_rel=parent_rel))
 
 
 @router.post("/partials/selection/{editor}/{slug}/toggle")

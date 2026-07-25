@@ -51,9 +51,17 @@ as the expected answer.
 
 ## Onboarding a new project
 
-Projects live at `Creators_Club/Projects/<year>/<series>/<project>` — any
-year, any series, any project name, including names with spaces. Nothing is
-hardcoded to a particular show; the examples below just use two real ones.
+Projects live anywhere under `Creators_Club/Projects/` at **any depth**
+(e.g. `2026/CCT/Creator Profiles/Season 1`) — since 2026-07-25 a directory
+is a project because it carries a hidden `.ccsync-project` **marker file**
+(its `slug` field is the project's permanent identity), not because of its
+depth. Containers/sub-categories nest freely; projects never nest. Moving
+or renaming a project directory on the NAS is now safe: the marker travels
+with it, the dashboard retargets the Syncthing folder automatically within
+one provision cycle (~5 min), and editors' companions (v0.4.0+) move their
+local copies to match. Bare folders without markers are invisible to sync
+until claimed via the dashboard's `/project-setup` picker (LINK THIS
+FOLDER) or `server/write_marker.py`.
 
 **Self-serve path (added 2026-07-25):** when someone opens a Resolve project
 the server doesn't recognize, their companion prompts them and deep-links to

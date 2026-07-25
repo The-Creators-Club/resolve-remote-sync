@@ -677,61 +677,56 @@ def _validate_tree_part(value: str, what: str) -> str:
     return value
 
 
-def create_tree_project(
-    settings,
-    conn: sqlite3.Connection,
-    year: str,
-    series: str,
-    project: str,
-    resolve_project: str,
-    user: str,
-) -> dict[str, Any]:
-    """Create Projects/<year>/<series>/<project> on the NAS (the /projects
-    mount, now rw) with the standard template subfolders, eagerly register
-    it in the projects table (active immediately -- the collector's
-    provision cycle adds the Syncthing folder within ~5 min; the
-    deactivation grace window in db.deactivate_missing_projects covers the
-    gap), and sticky-map the Resolve project to it. Idempotent: re-running
-    for the same rel path converges. Caller commits."""
+def _projects_dir_or_error(settings) -> Path:
     projects_dir = str(getattr(settings, "projects_dir", "") or "")
     if not projects_dir or not Path(projects_dir).is_dir():
         raise ProjectSetupError(
             "the NAS Projects tree is not mounted on the dashboard "
             "(DASH_PROJECTS_DIR) -- create the folder with server/setup_tree.py instead"
         )
-    year = _validate_tree_part(year, "year")
-    if not _YEAR_RE.match(year):
-        raise ProjectSetupError("year must be a 4-digit year (e.g. 2026)")
-    series = _validate_tree_part(series, "series")
-    project = _validate_tree_part(project, "project")
-    rel = f"{year}/{series}/{project}"
+    return Path(projects_dir)
 
+
+def _safe_rel(settings, rel: str) -> tuple[Path, str]:
+    """Validate a user-supplied posix rel path and resolve it under
+    projects_dir. Returns (absolute_path, normalized_rel). '' means the
+    Projects root itself. Raises ProjectSetupError on traversal attempts."""
+    projects_dir = _projects_dir_or_error(settings)
+    rel = str(rel or "").strip().strip("/")
+    if not rel:
+        return projects_dir, ""
+    parts = [_validate_tree_part(p, "path segment") for p in rel.split("/")]
+    normalized = "/".join(parts)
+    target = (projects_dir / Path(*parts)).resolve()
+    if not str(target).startswith(str(projects_dir.resolve())):
+        raise ProjectSetupError("path escapes the Projects tree")
+    return target, normalized
+
+
+def _marked_ancestor(projects_dir: Path, rel: str) -> str | None:
+    """The rel of the closest ancestor (or rel itself) carrying a project
+    marker, or None. Projects cannot nest -- both create and link refuse
+    inside an existing project."""
     from . import provision
-    try:
-        slug = provision.slugify(rel)
-    except ValueError:
-        raise ProjectSetupError("that name produces an empty identifier -- use letters/numbers")
 
-    row = conn.execute("SELECT label FROM projects WHERE slug=?", (slug,)).fetchone()
-    if row is not None and row["label"] != rel:
-        raise ProjectSetupError(
-            f"a different project already uses this identifier: {row['label']} -- pick another name"
-        )
+    parts = [p for p in rel.split("/") if p]
+    for i in range(len(parts), 0, -1):
+        candidate = "/".join(parts[:i])
+        if provision.read_marker(projects_dir / Path(*parts[:i])) is not None:
+            return candidate
+    return None
 
-    target = Path(projects_dir) / year / series / project
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-        for sub in provision.TEMPLATE_FOLDERS:
-            (target / sub).mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ProjectSetupError(f"could not create folders on the NAS: {exc}")
 
+def _register_project(
+    settings, conn: sqlite3.Connection, rel: str, slug: str,
+    resolve_project: str, user: str,
+) -> dict[str, Any]:
+    """Shared tail of create/adopt: eager projects row (active immediately;
+    the provision cycle adds the Syncthing folder within ~5 min and the
+    deactivation grace covers the gap) + sticky Resolve mapping."""
     now = db.utcnow_iso()
-    # Same `path` the collector's config cycle will write once the Syncthing
-    # folder exists, so the eager row and the collector's row agree.
     st_path = f"{settings.syncthing_data_prefix.rstrip('/')}/{rel}"
     db.upsert_project(conn, slug, rel, st_path, now)
-
     mapped = False
     resolve_project = (resolve_project or "").strip()
     if resolve_project:
@@ -741,10 +736,128 @@ def create_tree_project(
     return {"slug": slug, "rel": rel, "mapped": mapped}
 
 
+def create_tree_project(
+    settings,
+    conn: sqlite3.Connection,
+    parent_rel: str,
+    name: str,
+    resolve_project: str,
+    user: str,
+) -> dict[str, Any]:
+    """Create Projects/<parent_rel>/<name> (any depth) with the standard
+    template subfolders and a project marker, register + map it. Idempotent
+    for the same rel. Caller commits."""
+    from . import provision
+
+    parent_path, parent_norm = _safe_rel(settings, parent_rel)
+    if not parent_path.is_dir():
+        raise ProjectSetupError(f"parent folder does not exist: {parent_norm or '(root)'}")
+    name = _validate_tree_part(name, "project name")
+    rel = f"{parent_norm}/{name}" if parent_norm else name
+
+    inside = _marked_ancestor(_projects_dir_or_error(settings), rel.rsplit("/", 1)[0]) \
+        if "/" in rel else None
+    if inside:
+        raise ProjectSetupError(
+            f"cannot create a project inside another project ({inside})"
+        )
+
+    try:
+        slug = provision.slugify(rel)
+    except ValueError:
+        raise ProjectSetupError("that name produces an empty identifier -- use letters/numbers")
+
+    target = parent_path / name
+    existing_marker = provision.read_marker(target) if target.is_dir() else None
+    if existing_marker is not None and existing_marker != slug:
+        raise ProjectSetupError(
+            f"that folder is already a project with a different identity ({existing_marker})"
+        )
+    row = conn.execute("SELECT label FROM projects WHERE slug=?", (slug,)).fetchone()
+    if row is not None and row["label"] != rel:
+        raise ProjectSetupError(
+            f"a different project already uses this identifier: {row['label']} -- pick another name"
+        )
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for sub in provision.TEMPLATE_FOLDERS:
+            (target / sub).mkdir(parents=True, exist_ok=True)
+        provision.write_marker(target, slug, created_by=user)
+    except OSError as exc:
+        raise ProjectSetupError(f"could not create folders on the NAS: {exc}")
+
+    return _register_project(settings, conn, rel, slug, resolve_project, user)
+
+
+def adopt_folder(
+    settings,
+    conn: sqlite3.Connection,
+    rel: str,
+    resolve_project: str,
+    user: str,
+) -> dict[str, Any]:
+    """Claim an EXISTING folder (any depth) as a project: write its marker
+    (or adopt the one it already carries), register + map it. This is the
+    picker's [ LINK THIS FOLDER ] flow. Caller commits."""
+    from . import provision
+
+    projects_dir = _projects_dir_or_error(settings)
+    target, rel = _safe_rel(settings, rel)
+    if not rel:
+        raise ProjectSetupError("pick a folder -- the Projects root itself cannot be a project")
+    if not target.is_dir():
+        raise ProjectSetupError(f"folder does not exist: {rel}")
+
+    marked = _marked_ancestor(projects_dir, rel)
+    if marked is not None and marked != rel:
+        raise ProjectSetupError(f"this folder is inside an existing project ({marked})")
+    # No marked descendants either -- a container of projects isn't a project.
+    for child_rel, child_slug in provision.scan_project_dirs(projects_dir):
+        if child_rel != rel and child_rel.startswith(rel + "/"):
+            raise ProjectSetupError(
+                f"this folder contains an existing project ({child_rel}) -- pick that instead"
+            )
+
+    slug = provision.read_marker(target)
+    if slug is None:
+        try:
+            slug = provision.slugify(rel)
+        except ValueError:
+            raise ProjectSetupError("that folder name produces an empty identifier")
+        row = conn.execute("SELECT label FROM projects WHERE slug=?", (slug,)).fetchone()
+        if row is not None and row["label"] != rel:
+            raise ProjectSetupError(
+                f"a different project already uses this identifier: {row['label']}"
+            )
+        try:
+            provision.write_marker(target, slug, created_by=user)
+        except OSError as exc:
+            raise ProjectSetupError(f"could not write the project marker: {exc}")
+    else:
+        # Folder already carries an identity (e.g. a moved project) -- adopt
+        # it, but refuse if that identity's registered dir ALSO still exists
+        # elsewhere (a copy, not a move).
+        row = conn.execute("SELECT label FROM projects WHERE slug=?", (slug,)).fetchone()
+        if row is not None and row["label"] != rel:
+            other = projects_dir / Path(*row["label"].split("/"))
+            if other.is_dir():
+                raise ProjectSetupError(
+                    f"this folder claims the identity of {row['label']}, which still exists -- "
+                    "resolve the duplicate on the NAS first"
+                )
+
+    return _register_project(settings, conn, rel, slug, resolve_project, user)
+
+
 class CreateProjectIn(BaseModel):
-    year: str = Field(min_length=1, max_length=16)
-    series: str = Field(min_length=1, max_length=128)
-    project: str = Field(min_length=1, max_length=128)
+    parent_rel: str = Field(default="", max_length=512)
+    name: str = Field(min_length=1, max_length=128)
+    resolve_project: str = Field(default="", max_length=256)
+
+
+class LinkFolderIn(BaseModel):
+    rel: str = Field(min_length=1, max_length=512)
     resolve_project: str = Field(default="", max_length=256)
 
 
@@ -758,8 +871,24 @@ def api_create_project(
     try:
         result = create_tree_project(
             request.app.state.settings, conn,
-            payload.year, payload.series, payload.project,
-            payload.resolve_project, user,
+            payload.parent_rel, payload.name, payload.resolve_project, user,
+        )
+    except ProjectSetupError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    conn.commit()
+    return {"ok": True, **result, "project_roots": _project_roots_view(conn)}
+
+
+@router.post("/projects/link")
+def api_link_folder(
+    payload: LinkFolderIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    user = auth.get_session_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="log in first")
+    try:
+        result = adopt_folder(
+            request.app.state.settings, conn, payload.rel, payload.resolve_project, user,
         )
     except ProjectSetupError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

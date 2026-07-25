@@ -154,27 +154,97 @@ class Collector:
         return True
 
     def _run_provision(self, conn) -> None:
-        """Create (and share to every known editor device) a Syncthing folder
-        for any project dir on disk that doesn't have one yet. Never touches
-        existing folders."""
+        """Marker-driven discovery + reconcile (see provision.py's marker
+        docs). Three jobs per cycle:
+
+        1. self-heal: any existing Syncthing folder whose directory exists
+           but lacks a marker gets one written (this was also the one-time
+           migration when markers were introduced).
+        2. retarget: a marker whose slug already has a Syncthing folder at a
+           DIFFERENT path means the directory was moved/renamed on the NAS
+           -- update the folder's path+label in place. Slug-keyed DB rows
+           (selections, project_roots, completion, media) all survive; the
+           data moved with the dir so Syncthing rescan finds identical
+           hashes, no resync storm.
+        3. create: a marker whose slug has no folder yet is provisioned,
+           using THE MARKER'S slug (not slugify(rel) -- an adopted/moved
+           project's slug may not match its current path).
+
+        Never deletes folders: a folder whose dir vanished is left for the
+        deactivation grace / a human."""
         projects_dir = Path(self.settings.projects_dir)
         if not projects_dir.is_dir():
             raise RuntimeError(f"DASH_PROJECTS_DIR does not exist: {projects_dir}")
         cfg = self.client.config()
-        existing_ids = {f["id"] for f in cfg.get("folders", [])}
-        for rel in provision.scan_project_dirs(projects_dir):
-            slug = provision.slugify(rel)
-            if slug in existing_ids:
+        folders_by_id = {f["id"]: f for f in cfg.get("folders", [])}
+        prefix = self.settings.syncthing_data_prefix.rstrip("/")
+
+        # -- 1. marker self-heal for known folders --------------------------
+        for folder in folders_by_id.values():
+            path = str(folder.get("path", ""))
+            if not path.startswith(prefix + "/"):
                 continue
-            # Created unshared: the selections table + enforce cycle decide
-            # which editor devices get each folder.
-            folder = provision.build_folder_config(
-                slug, rel, self.settings.syncthing_data_prefix, []
-            )
-            self.client.add_folder(folder)
-            self.client.set_ignores(slug, provision.build_stignore_lines())
-            log.info("auto-provisioned syncthing folder %s (%s), unshared until ticked",
-                     slug, rel)
+            rel = path[len(prefix) + 1:].strip("/")
+            local = projects_dir / rel
+            if local.is_dir() and provision.read_marker(local) is None:
+                try:
+                    provision.write_marker(local, folder["id"])
+                    log.info("wrote missing project marker for %s (%s)", folder["id"], rel)
+                except OSError as exc:
+                    log.warning("could not write marker for %s: %s", folder["id"], exc)
+
+        # -- 2+3. scan markers, reconcile against folders -------------------
+        scanned = provision.scan_project_dirs(projects_dir)
+        by_slug: dict[str, list[str]] = {}
+        for rel, slug in scanned:
+            if slug is None:
+                log.warning("unreadable project marker in %s -- skipping", rel)
+                continue
+            by_slug.setdefault(slug, []).append(rel)
+
+        for slug, rels in by_slug.items():
+            existing = folders_by_id.get(slug)
+            if len(rels) > 1:
+                # Copied project dir: NEVER guess. If one rel matches the
+                # current folder path, keep working with that one; else skip.
+                current_rel = None
+                if existing is not None:
+                    path = str(existing.get("path", ""))
+                    if path.startswith(prefix + "/"):
+                        current_rel = path[len(prefix) + 1:].strip("/")
+                matching = [r for r in rels if r == current_rel]
+                log.warning("slug %s claimed by %d dirs (%s) -- %s",
+                            slug, len(rels), ", ".join(rels),
+                            "keeping current" if matching else "skipping all")
+                if not matching:
+                    continue
+                rels = matching
+            rel = rels[0]
+            expected_path = f"{prefix}/{rel}"
+
+            if existing is None:
+                # Created unshared: the selections table + enforce cycle
+                # decide which editor devices get each folder.
+                folder = provision.build_folder_config(slug, rel, prefix, [])
+                self.client.add_folder(folder)
+                self.client.set_ignores(slug, provision.build_stignore_lines())
+                log.info("auto-provisioned syncthing folder %s (%s), unshared until ticked",
+                         slug, rel)
+            elif str(existing.get("path", "")).rstrip("/") != expected_path:
+                old_path = existing.get("path", "")
+                existing = dict(existing)
+                existing["path"] = expected_path
+                existing["label"] = rel
+                self.client.put_folder(slug, existing)
+                db.upsert_project(conn, slug, rel, expected_path, self.now_fn())
+                conn.commit()
+                log.warning("RETARGETED syncthing folder %s: %s -> %s (dir moved on the NAS)",
+                            slug, old_path, expected_path)
+            elif str(existing.get("label", "")) != rel:
+                existing = dict(existing)
+                existing["label"] = rel
+                self.client.put_folder(slug, existing)
+                log.info("fixed label drift on folder %s -> %s", slug, rel)
 
     def _run_config(self, conn) -> None:
         cfg = self.client.config()

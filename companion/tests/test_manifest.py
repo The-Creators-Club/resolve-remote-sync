@@ -10,8 +10,11 @@ from ccsync_companion import manifest as manifest_mod
 
 
 def _make_project(tmp_path, year, series, project):
+    from conftest import write_project_marker
+
     project_dir = tmp_path / "Projects" / year / series / project
     project_dir.mkdir(parents=True)
+    write_project_marker(project_dir, slug=f"{year}-{series}-{project}".lower().replace(" ", "-"))
     return project_dir
 
 

@@ -40,14 +40,17 @@ from common import (
     DEFAULT_DATASET_OWNER,
     EDITORS_GROUP,
     TEMPLATE_FOLDERS,
+    build_marker_write_cmd,
     project_path,
+    project_path_rel,
     project_relative_dirs,
     run_ssh,
     shell_quote,
+    slugify,
 )
 
 
-def build_remote_script(base: str, owner: str, group: str) -> str:
+def build_remote_script(base: str, owner: str, group: str, slug: str = "") -> str:
     """Bash snippet run on the NAS. Prints one line per folder: created or
     already-existed, then (re-)applies ownership/permissions and reports
     that too. Runs as root via sudo -S so it works regardless of what
@@ -65,6 +68,12 @@ def build_remote_script(base: str, owner: str, group: str) -> str:
             f'else echo "$SUDO_PW" | sudo -S -p "" mkdir -p {full_q} && echo "created: {rel}"; fi'
         )
 
+    # Project marker: the directory's explicit, slug-carrying identity (see
+    # common.MARKER_FILENAME) -- the dashboard's provisioning discovers and
+    # tracks projects by this file, at any tree depth.
+    if slug:
+        lines.append(build_marker_write_cmd(base, slug))
+
     owner_group = shell_quote(f"{owner}:{group}")
     lines.append(f'echo "$SUDO_PW" | sudo -S -p "" chown -R {owner_group} {base_q} && echo "ownership set: {owner}:{group} on {base}"')
     # Non-fatal: some datasets have ZFS aclmode=restricted, which blocks
@@ -81,9 +90,12 @@ def build_remote_script(base: str, owner: str, group: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--year", required=True, help="e.g. 2025")
-    ap.add_argument("--series", required=True, help="e.g. FF4, or \"Creator Profiles\" (quote names with spaces)")
-    ap.add_argument("--project", required=True, help="e.g. Nuclear")
+    ap.add_argument("--year", help="e.g. 2025")
+    ap.add_argument("--series", help="e.g. FF4, or \"Creator Profiles\" (quote names with spaces)")
+    ap.add_argument("--project", help="e.g. Nuclear")
+    ap.add_argument("--project-rel-path",
+                     help="arbitrary-depth alternative to --year/--series/--project, "
+                          "e.g. \"2026/CCT/Creator Profiles/Season 1\"")
     ap.add_argument("--projects-root", default=DEFAULT_PROJECTS_ROOT,
                      help=f"default: {DEFAULT_PROJECTS_ROOT}")
     ap.add_argument("--owner", default=DEFAULT_DATASET_OWNER, help=f"default: {DEFAULT_DATASET_OWNER}")
@@ -91,11 +103,22 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    base = project_path(args.projects_root, args.year, args.series, args.project)
+    if args.project_rel_path:
+        if args.year or args.series or args.project:
+            ap.error("--project-rel-path is mutually exclusive with --year/--series/--project")
+        rel = args.project_rel_path.strip().strip("/")
+        base = project_path_rel(args.projects_root, rel)
+    elif args.year and args.series and args.project:
+        base = project_path(args.projects_root, args.year, args.series, args.project)
+        rel = f"{args.year}/{args.series}/{args.project}"
+    else:
+        ap.error("provide either --project-rel-path or all of --year/--series/--project")
+    slug = slugify(rel)
     print(f"Target project root: {base}")
+    print(f"Project slug (marker identity): {slug}")
     print(f"Template folders ({len(TEMPLATE_FOLDERS)}): {', '.join(TEMPLATE_FOLDERS)}")
 
-    script = build_remote_script(base, args.owner, args.group)
+    script = build_remote_script(base, args.owner, args.group, slug=slug)
     rc, out, err = run_ssh(script, dry_run=args.dry_run)
 
     if args.dry_run:

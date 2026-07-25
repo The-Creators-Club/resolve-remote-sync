@@ -251,6 +251,12 @@ class CompanionApp:
             watch_debounce_seconds=float(cfg.get("watch_debounce_seconds", 10)),
             state_dir=state_dir,
             on_change=on_change,
+            # Any-depth project attribution for watchdog events (deferred:
+            # the sequencer is constructed after the lanes).
+            known_rels_fn=(
+                (lambda: self.sequencer.known_rels() if self.sequencer else [])
+                if self._managed else None
+            ),
         )
         lane_b = RcloneLane(
             direction=DIRECTION_DOWN,

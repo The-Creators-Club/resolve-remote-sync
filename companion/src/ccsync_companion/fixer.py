@@ -18,7 +18,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from . import resolve_bridge
 
@@ -140,28 +140,44 @@ def match_project_dir(resolve_project_name: str, project_rel_paths: list[str]) -
     return best_matches[0]
 
 
-def list_project_dirs(local_root: str) -> list[str]:
-    """Scan local_root/Projects/<year>/<series>/<project> for existing
-    project directories. Returns "<year>/<series>/<project>" rel-paths,
-    '/'-separated, sorted. Tolerant of a missing/partial tree — never
-    raises, just returns fewer (or no) entries.
+# Intentional copy of the dashboard's provision.MARKER_FILENAME convention
+# (see that module's marker docs) -- markers sync to editors via lane C, so
+# a local project dir self-identifies at any depth. Keep in sync.
+MARKER_FILENAME = ".ccsync-project"
+
+
+def list_project_dirs(local_root: str, extra_rels: Iterable[str] = ()) -> list[str]:
+    """Project rel-paths ('/'-separated, sorted) under local_root/Projects.
+
+    Since 2026-07-25 a project is any directory carrying the
+    .ccsync-project marker, at ANY depth (descent prunes at markers -- no
+    nested projects; hidden dirs skipped). `extra_rels` (e.g. the
+    dashboard-selected rels, which are authoritative) are unioned in for
+    dirs whose marker hasn't synced down yet. Tolerant of a missing/partial
+    tree — never raises, just returns fewer (or no) entries.
     """
     if not local_root:
         return []
     projects_dir = Path(local_root) / "Projects"
+    rels: set[str] = set()
 
-    def _subdirs(parent: Path) -> list[Path]:
-        try:
-            return sorted(p for p in parent.iterdir() if p.is_dir())
-        except OSError:
-            return []
+    try:
+        for dirpath, dirnames, filenames in os.walk(projects_dir):
+            rel = Path(dirpath).relative_to(projects_dir)
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            if rel == Path("."):
+                continue
+            if MARKER_FILENAME in filenames:
+                rels.add(rel.as_posix())
+                dirnames[:] = []
+    except OSError:
+        pass
 
-    rels: list[str] = []
-    for year_dir in _subdirs(projects_dir):
-        for series_dir in _subdirs(year_dir):
-            for project_dir in _subdirs(series_dir):
-                rels.append(f"{year_dir.name}/{series_dir.name}/{project_dir.name}")
-    return rels
+    for extra in extra_rels or ():
+        extra = str(extra).strip().strip("/")
+        if extra and (projects_dir / Path(*extra.split("/"))).is_dir():
+            rels.add(extra)
+    return sorted(rels)
 
 
 def pick_project_prefix(

@@ -1,18 +1,19 @@
 <div class="roots-box project-setup-box">
   <div class="side-head">[ PROJECT SETUP ]
-    <span class="muted">Resolve project: <span class="who">{{ setup.resolve_project }}</span></span></div>
+    {% if setup.resolve_project %}
+    <span class="muted">Resolve project: <span class="who">{{ setup.resolve_project }}</span></span>
+    {% endif %}</div>
 
   {% if setup.error %}
     <div class="banner">▲ {{ setup.error }}</div>
   {% endif %}
 
   {% if setup.created %}
-    <div class="side-head" style="margin-top:0.8rem">[ CREATED ]</div>
+    <div class="side-head" style="margin-top:0.8rem">[ DONE ]</div>
     <div>
       <span class="chip green">[ OK ]</span>
-      <span class="mono-sm">Projects/{{ setup.created.rel }}</span> created on the server
-      with the standard folder template{% if setup.created.mapped %},
-      and “{{ setup.resolve_project }}” now files into it{% endif %}.
+      <span class="mono-sm">Projects/{{ setup.created.rel }}</span> is set up on the server
+      {% if setup.created.mapped %} and “{{ setup.resolve_project }}” now files into it{% endif %}.
     </div>
     <div class="muted" style="margin-top:0.4rem">
       Sync (Syncthing folder) is provisioned automatically within ~5 minutes.
@@ -30,45 +31,78 @@
       in the [ PROJECT ROOTS ] box on the <a href="/">fleet page</a>{% else %} — ask Alex
       if this looks wrong{% endif %}.
     </div>
+  {% elif not setup.projects_dir_ok %}
+    <div class="muted" style="margin-top:0.8rem">The NAS Projects tree isn't mounted on the
+      dashboard (DASH_PROJECTS_DIR) — ask Alex to create/link the folder with
+      <span class="mono-sm">server/setup_tree.py</span>.</div>
   {% else %}
 
-  <div class="side-head" style="margin-top:0.8rem">[ LINK TO AN EXISTING PROJECT ]</div>
-  <div class="muted">Pick the server folder this Resolve project belongs to.</div>
-  <form class="inline-form" style="margin-top:0.4rem"
-        hx-post="/partials/project-setup/link"
-        hx-target="closest .project-setup-box" hx-swap="outerHTML">
-    <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
-    <select name="root" required>
-      <option value="" disabled selected>choose a project…</option>
-      {% for p in setup.projects %}
-        <option value="{{ p.slug }}">{{ p.label }}</option>
-      {% endfor %}
-    </select>
-    <button class="btn" type="submit">[ LINK ]</button>
-  </form>
+  <div class="side-head" style="margin-top:0.8rem">[ PICK THE FOLDER FOR THIS PROJECT ]</div>
+  <div class="muted">Browse the server's Projects tree. Select the project's folder to link it,
+    or create a new folder — new projects get the standard subfolders
+    (<span class="mono-sm">{{ setup.template_folders | join(", ") }}</span>).</div>
 
-  <div class="side-head" style="margin-top:1.4rem">[ OR CREATE A NEW PROJECT ]</div>
-  {% if setup.projects_dir_ok %}
-    <div class="muted">Creates <span class="mono-sm">Projects/&lt;year&gt;/&lt;series&gt;/&lt;project&gt;</span>
-      on the server with the standard folders:
-      <span class="mono-sm">{{ setup.template_folders | join(", ") }}</span></div>
-    <form style="margin-top:0.5rem"
+  {% if browse %}
+  <div class="mono-sm" style="margin:0.6rem 0 0.2rem">
+    <a class="btn" hx-get="/partials/project-setup/browse?rel=&resolve_project={{ setup.resolve_project | urlencode }}"
+       hx-target="closest .project-setup-box" hx-swap="outerHTML" style="cursor:pointer">[ Projects ]</a>
+    {% for c in browse.crumbs %}
+      / <a class="btn" hx-get="/partials/project-setup/browse?rel={{ c.rel | urlencode }}&resolve_project={{ setup.resolve_project | urlencode }}"
+           hx-target="closest .project-setup-box" hx-swap="outerHTML" style="cursor:pointer">{{ c.name }}</a>
+    {% endfor %}
+  </div>
+
+  {% if browse.error %}
+    <div class="banner">▲ {{ browse.error }}</div>
+  {% endif %}
+
+  <table class="editors" style="margin-top:0.4rem">
+    <tbody>
+    {% for e in browse.entries %}
+      <tr class="editor-row">
+        <td style="width:60%">
+          {% if e.is_project %}
+            <span class="chip green">[ PROJECT ]</span> <span class="mono-sm">{{ e.name }}</span>
+          {% elif e.has_children %}
+            <a class="mono-sm" style="cursor:pointer"
+               hx-get="/partials/project-setup/browse?rel={{ e.rel | urlencode }}&resolve_project={{ setup.resolve_project | urlencode }}"
+               hx-target="closest .project-setup-box" hx-swap="outerHTML">📁 {{ e.name }} /</a>
+          {% else %}
+            <a class="mono-sm" style="cursor:pointer"
+               hx-get="/partials/project-setup/browse?rel={{ e.rel | urlencode }}&resolve_project={{ setup.resolve_project | urlencode }}"
+               hx-target="closest .project-setup-box" hx-swap="outerHTML">📁 {{ e.name }}</a>
+          {% endif %}
+        </td>
+        <td>
+          <form class="inline-form" hx-post="/partials/project-setup/link"
+                hx-target="closest .project-setup-box" hx-swap="outerHTML">
+            <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
+            <input type="hidden" name="rel" value="{{ e.rel }}">
+            <button class="btn" type="submit">[ {{ "LINK" if e.is_project else "LINK THIS FOLDER" }} ]</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td class="muted">empty folder</td><td></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if browse.inside_project %}
+    <div class="muted" style="margin-top:0.6rem">You're inside an existing project — projects
+      can't nest. Go up to link or create.</div>
+  {% else %}
+    <div class="side-head" style="margin-top:1.0rem">[ OR CREATE A NEW PROJECT FOLDER HERE ]</div>
+    <div class="muted mono-sm">in Projects/{{ browse.rel or "" }}</div>
+    <form class="inline-form" style="margin-top:0.3rem"
           hx-post="/partials/project-setup/create"
           hx-target="closest .project-setup-box" hx-swap="outerHTML">
       <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
-      <input type="text" name="year" value="{{ setup.default_year }}" size="6" required
-             style="margin:0.2rem 0">
-      <input type="text" name="series" placeholder="series (e.g. Creator Profiles)" size="24" required
-             style="margin:0.2rem 0">
-      <input type="text" name="project" placeholder="project (e.g. Season 2)" size="20" required
-             style="margin:0.2rem 0">
+      <input type="hidden" name="parent_rel" value="{{ browse.rel }}">
+      <input type="text" name="name" placeholder="new folder name" size="28" required>
       <button class="btn" type="submit">[ CREATE &amp; LINK ]</button>
     </form>
-  {% else %}
-    <div class="muted">Creating projects from the dashboard is unavailable
-      (the NAS Projects tree isn't mounted writable — DASH_PROJECTS_DIR).
-      Ask Alex to create the folder with <span class="mono-sm">server/setup_tree.py</span>,
-      then link it above.</div>
+  {% endif %}
   {% endif %}
 
   {% endif %}

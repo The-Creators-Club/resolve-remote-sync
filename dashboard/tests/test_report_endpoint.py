@@ -63,6 +63,38 @@ def test_malformed_payload_422(app_env):
     assert resp.status_code == 422
 
 
+def test_report_rejects_unknown_lane_name(app_env):
+    """SEC-4: an unknown lane name must never create a permanent
+    lane_report_current row -- current companions send exactly the three
+    names in LANE_LABELS, so rejecting anything else is safe."""
+    client, conn = app_env
+    bad = payload()
+    bad["lanes"].append({"name": "lane_z_made_up", "state": "idle"})
+    resp = client.post("/api/v1/report", json=bad, headers={"X-CCSync-Token": "sekrit"})
+    assert resp.status_code == 422
+    assert conn.execute("SELECT COUNT(*) FROM lane_report_current").fetchone()[0] == 0
+
+
+def test_report_lanes_list_is_capped(app_env):
+    """SEC-4: an unbounded lanes list could otherwise insert one permanent
+    lane_report_current row per distinct (bogus) lane name."""
+    client, _ = app_env
+    bad = payload()
+    bad["lanes"] = [{"name": "lane_a_video_up", "state": "idle"}] * 33
+    resp = client.post("/api/v1/report", json=bad, headers={"X-CCSync-Token": "sekrit"})
+    assert resp.status_code == 422
+
+
+def test_report_transfers_list_is_capped(app_env):
+    client, _ = app_env
+    bad = payload()
+    bad["lanes"][0]["transfers"] = [
+        {"name": f"f{i}.braw", "direction": "up"} for i in range(257)
+    ]
+    resp = client.post("/api/v1/report", json=bad, headers={"X-CCSync-Token": "sekrit"})
+    assert resp.status_code == 422
+
+
 def test_report_upserts_and_transition_history(app_env):
     client, conn = app_env
     headers = {"X-CCSync-Token": "sekrit"}

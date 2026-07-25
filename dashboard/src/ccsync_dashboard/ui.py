@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -134,10 +135,34 @@ def page_login(request: Request):
     return _render(request, "login.html", {"error": None, "next_path": next_path})
 
 
+MAX_LOGIN_BODY_BYTES = 8 * 1024   # generous for a username/password/next form
+MAX_FORM_FIELDS = 16
+
+
 @router.post("/login")
 async def page_login_submit(request: Request):
+    # /login is unauthenticated (app.py's _OPEN_EXACT), so an unbounded body
+    # read here is a single-worker OOM open to anyone on the tailnet -- check
+    # Content-Length BEFORE reading, and re-check the actual body length as a
+    # fallback for chunked/absent-header requests (see the unbounded /login
+    # body finding).
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_too_big = int(content_length) > MAX_LOGIN_BODY_BYTES
+        except ValueError:
+            declared_too_big = True
+        if declared_too_big:
+            raise HTTPException(status_code=413, detail="request body too large")
+    body = await request.body()
+    if len(body) > MAX_LOGIN_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="request body too large")
+    try:
+        parsed = parse_qs(body.decode(), max_num_fields=MAX_FORM_FIELDS)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="malformed form body")
+    form = {k: v[0] for k, v in parsed.items()}
     settings = request.app.state.settings
-    form = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
     username = form.get("username", "").strip().lower()
     password = form.get("password", "")
     next_path = _safe_next(form.get("next", ""))
@@ -148,7 +173,12 @@ async def page_login_submit(request: Request):
         error = "too many failed attempts -- wait a minute"
     else:
         verifier = getattr(request.app.state, "credential_verifier", auth.verify_credentials)
-        if verifier(settings, username, password):
+        # verifier is a blocking SMB session setup (up to a 10s timeout) --
+        # push it off the event loop so a slow/unreachable SMB server can't
+        # freeze every other request, including companions' /api/v1/report
+        # (see SEC-13 / the ui.py blocking-handlers finding).
+        verified = await run_in_threadpool(verifier, settings, username, password)
+        if verified:
             auth.clear_login_failures(username)
             response = RedirectResponse(next_path, status_code=303)
             response.set_cookie(
@@ -580,6 +610,18 @@ def partial_admin_users(request: Request):
     })
 
 
+def _create_or_update_editor_sync(
+    truenas: TrueNASClient, username: str, ssh_pubkey: str,
+    full_name: str | None, password: str | None,
+) -> dict:
+    """Runs on a threadpool worker -- see partial_admin_create_user. TrueNAS
+    job polling (_wait_for_job) blocks on time.sleep() for up to ~2 minutes."""
+    result = truenas.create_or_update_editor(username, ssh_pubkey, full_name)
+    if password:
+        truenas.set_known_password(username, password)
+    return result
+
+
 @router.post("/partials/admin/users/create")
 async def partial_admin_create_user(request: Request):
     _require_admin_page(request)
@@ -602,9 +644,13 @@ async def partial_admin_create_user(request: Request):
         truenas = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
                                  base_url=settings.truenas_base_url or None)
         try:
-            result = truenas.create_or_update_editor(username, ssh_pubkey, full_name)
-            if password:
-                truenas.set_known_password(username, password)
+            # Blocking TrueNAS REST calls + job polling -- push off the event
+            # loop so a slow TrueNAS response can't stall every other
+            # request for up to ~2 minutes (see the ui.py blocking-handlers
+            # finding).
+            result = await run_in_threadpool(
+                _create_or_update_editor_sync, truenas, username, ssh_pubkey, full_name, password
+            )
             if result["warnings"]:
                 error = f"{username}: created with warnings — {'; '.join(result['warnings'])}"
         except TrueNASError as exc:
@@ -633,7 +679,9 @@ async def partial_admin_set_password(request: Request):
         truenas = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
                                  base_url=settings.truenas_base_url or None)
         try:
-            truenas.set_known_password(username, password)
+            # See the ui.py blocking-handlers finding: blocking TrueNAS call
+            # off the event loop.
+            await run_in_threadpool(truenas.set_known_password, username, password)
         except TrueNASError as exc:
             error = str(exc)
 
@@ -659,7 +707,9 @@ async def partial_admin_approve_device(request: Request):
     else:
         syncthing = SyncthingClient(settings.syncthing_url, settings.syncthing_api_key)
         try:
-            syncthing.approve_device(device_id, username)
+            # See the ui.py blocking-handlers finding: blocking Syncthing
+            # REST call off the event loop.
+            await run_in_threadpool(syncthing.approve_device, device_id, username)
         except SyncthingError as exc:
             error = str(exc)
 

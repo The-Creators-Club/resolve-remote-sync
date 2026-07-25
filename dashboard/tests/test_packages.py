@@ -46,9 +46,13 @@ def env(tmp_path):
 
 
 def publish(client, version, body=b"exe-bytes", sha=None, make_current=0):
+    return publish_platform(client, "windows", version, body=body, sha=sha, make_current=make_current)
+
+
+def publish_platform(client, platform, version, body=b"exe-bytes", sha=None, make_current=0):
     sha = sha or hashlib.sha256(body).hexdigest()
     return client.put(
-        f"/api/v1/admin/packages/windows/{version}?sha256={sha}&make_current={make_current}",
+        f"/api/v1/admin/packages/{platform}/{version}?sha256={sha}&make_current={make_current}",
         content=body,
         headers={"Content-Type": "application/octet-stream"},
     )
@@ -251,7 +255,53 @@ def test_editors_view_outdated_flag(env):
 
 
 def test_migration_reaches_v7(conn):
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
+
+
+def test_editors_view_outdated_flag_is_per_platform(env):
+    """X-5: a machine's out-of-date flag must compare its companion_version
+    against the CURRENT PACKAGE FOR ITS OWN REPORTED PLATFORM -- a macOS
+    companion must never be compared against the Windows release (and an
+    unreported platform falls back to windows, preserving old behaviour for
+    pre-platform-field companions)."""
+    client, conn, _settings = env
+    headers = {"X-CCSync-Token": "sekrit"}
+
+    mac_payload = report_payload("1.0.0")
+    mac_payload["editor_name"] = "mchan"
+    mac_payload["machine"] = "MAC-1"
+    mac_payload["platform"] = "macos"
+    client.post("/api/v1/report", json=mac_payload, headers=headers)
+
+    win_payload = report_payload("0.1.0")  # jsmith / EDIT-PC / windows
+    client.post("/api/v1/report", json=win_payload, headers=headers)
+
+    # Publish a new WINDOWS current version only -- the mac machine is on a
+    # perfectly current macOS build that simply has no published counterpart.
+    publish(as_user(client, "alex"), "0.2.0", body=b"winv2", make_current=1)
+    clear_user(client)
+
+    view = build_editors_view(conn)
+    by_machine = {e["machine"]: e for e in view["editors"]}
+    assert by_machine["EDIT-PC"]["companion_outdated"] is True     # windows, 0.1.0 != 0.2.0
+    assert by_machine["MAC-1"]["companion_outdated"] is False      # macos: no macos package published
+
+    # Now publish a MATCHING macOS current version -- the mac machine is
+    # up to date; publishing a macos package must not affect the windows
+    # comparison either.
+    publish_platform(as_user(client, "alex"), "macos", "1.0.0", body=b"macv1", make_current=1)
+    clear_user(client)
+    view = build_editors_view(conn)
+    by_machine = {e["machine"]: e for e in view["editors"]}
+    assert by_machine["MAC-1"]["companion_outdated"] is False
+    assert by_machine["EDIT-PC"]["companion_outdated"] is True
+
+    # A newer macos release flips it.
+    publish_platform(as_user(client, "alex"), "macos", "1.1.0", body=b"macv1b", make_current=1)
+    clear_user(client)
+    view = build_editors_view(conn)
+    by_machine = {e["machine"]: e for e in view["editors"]}
+    assert by_machine["MAC-1"]["companion_outdated"] is True
     assert conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='companion_packages'"
     ).fetchone() is not None

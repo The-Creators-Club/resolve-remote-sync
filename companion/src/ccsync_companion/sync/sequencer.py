@@ -58,6 +58,20 @@ def _sort_by_position(selection: list[dict]) -> list[dict]:
     return sorted(selection, key=lambda item: item.get("position", 0))
 
 
+def _item_is_valid(item: dict) -> bool:
+    """A selection item usable for sync: rel_path must be a non-blank str
+    and active (when present) must not be explicitly False. A dashboard row
+    whose project record is gone (LEFT JOIN -> rel_path NULL) must never
+    reach a path join -- str(None) == "None" would move the project
+    directory to "...\\Projects\\None" (AUDIT D-4)."""
+    rel = item.get("rel_path")
+    if not isinstance(rel, str) or not rel.strip():
+        return False
+    if item.get("active") is False:
+        return False
+    return True
+
+
 class Sequencer:
     """Fault-isolated daemon thread: syncs the dashboard's selected projects
     one at a time, in order, re-checking the selection between projects and
@@ -113,6 +127,11 @@ class Sequencer:
         self._queue: Optional[deque] = None  # live remaining-items during a pass; None otherwise
         self._last_selection: list[dict] = []
         self._no_selection_reason = ""
+        # True only while _lane_c_turn is actively pausing/unpausing folders
+        # -- stop()/pause() wait for this to clear before their own
+        # unpause-everything sweep, so an in-flight sweep can't re-pause a
+        # folder AFTER that sweep already ran (AUDIT §4).
+        self._in_lane_c_turn = False
 
     # -- lifecycle -----------------------------------------------------
     def start(self) -> None:
@@ -126,9 +145,14 @@ class Sequencer:
     def stop(self) -> None:
         self._stop_event.set()
         self._wake_event.set()
-        self._unpause_all(self._last_selection)
+        # JOIN first, THEN unpause: unpausing before the worker has actually
+        # stopped let an in-flight _lane_c_turn re-pause every non-current
+        # project right after this sweep ran, leaving them stuck paused
+        # until the next launch's _startup_unpause (AUDIT §4).
+        self._wait_for_lane_c_turn_idle(timeout=5.0)
         if self._thread is not None:
             self._thread.join(timeout=10)
+        self._unpause_all(self._last_selection)
         with self._lock:
             self._state = STATE_STOPPED
             self._current_slug = None
@@ -136,11 +160,33 @@ class Sequencer:
 
     def pause(self) -> None:
         self._resume_event.clear()
+        # Same ordering concern as stop(): give an in-flight lane-C pause
+        # sweep a bounded window to notice and bail (or finish) before the
+        # unpause-everything sweep below runs.
+        self._wait_for_lane_c_turn_idle(timeout=5.0)
         self._unpause_all(self._last_selection)
 
     def resume(self) -> None:
         self._resume_event.set()
         self._wake_event.set()
+
+    def _wait_for_lane_c_turn_idle(self, timeout: float) -> None:
+        """Bounded, non-blocking-past-timeout wait for _lane_c_turn's
+        folder-pause sweep to finish. Never waits for the whole pass (e.g.
+        _wait_for_folder_sync) -- only for the part that actually mutates
+        other folders' paused state, which is what could otherwise race
+        _unpause_all() below."""
+        if self._thread is None or not self._thread.is_alive():
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                busy = self._in_lane_c_turn
+            if not busy:
+                return
+            if not self._thread.is_alive():
+                return
+            time.sleep(_POLL_CHUNK_SECONDS)
 
     def trigger_pass_now(self) -> None:
         self._wake_event.set()
@@ -296,6 +342,8 @@ class Sequencer:
         rel_to_slug: dict[str, str] = {}
         slug_to_item: dict[str, dict] = {}
         for item in selection:
+            if not _item_is_valid(item):
+                continue
             rel = item.get("rel_path")
             slug = item.get("slug")
             if rel and slug:
@@ -384,7 +432,14 @@ class Sequencer:
             log.exception("sequencer: repath reconcile failed")
 
     def _process_project(self, item: dict, ordered_selected: list[dict]) -> None:
-        rel_path = str(item.get("rel_path", ""))
+        if not _item_is_valid(item):
+            log.warning(
+                "sequencer: skipping selection item with invalid/inactive rel_path "
+                "(slug=%s) -- refusing to build a path from it",
+                item.get("slug"),
+            )
+            return
+        rel_path = item.get("rel_path")
         subpath = f"{PROJECTS_PREFIX}{rel_path}"
 
         # A mid-pass selection refresh may have re-ordered/changed rels --
@@ -437,26 +492,41 @@ class Sequencer:
 
     # -- Lane C (Syncthing) turn -----------------------------------------------------
     def _lane_c_turn(self, item: dict, ordered_selected: list[dict]) -> None:
+        # A stopping/pausing sequencer must not start a fresh pause sweep --
+        # re-checked below inside the sweep loop too (AUDIT §4).
+        if self._stop_event.is_set() or not self._resume_event.is_set():
+            return
         slug = item.get("slug")
         rel_path = str(item.get("rel_path", ""))
         if not slug:
             return
 
-        self._maybe_auto_accept(slug, rel_path)
-
-        for other in ordered_selected:
-            other_slug = other.get("slug")
-            if not other_slug or other_slug == slug:
-                continue
-            try:
-                self.admin.set_folder_paused(other_slug, True)
-            except Exception:
-                log.exception("sequencer: failed to pause folder %s", other_slug)
-
+        with self._lock:
+            self._in_lane_c_turn = True
         try:
-            self.admin.set_folder_paused(slug, False)
-        except Exception:
-            log.exception("sequencer: failed to unpause folder %s", slug)
+            self._maybe_auto_accept(slug, rel_path)
+
+            for other in ordered_selected:
+                if self._stop_event.is_set() or not self._resume_event.is_set():
+                    return
+                other_slug = other.get("slug")
+                if not other_slug or other_slug == slug:
+                    continue
+                try:
+                    self.admin.set_folder_paused(other_slug, True)
+                except Exception:
+                    log.exception("sequencer: failed to pause folder %s", other_slug)
+
+            if self._stop_event.is_set() or not self._resume_event.is_set():
+                return
+
+            try:
+                self.admin.set_folder_paused(slug, False)
+            except Exception:
+                log.exception("sequencer: failed to unpause folder %s", slug)
+        finally:
+            with self._lock:
+                self._in_lane_c_turn = False
 
         base_slugs = [i.get("slug") for i in ordered_selected]
         self._wait_for_folder_sync(slug, base_slugs)

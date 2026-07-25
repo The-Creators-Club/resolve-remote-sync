@@ -110,8 +110,27 @@ if ($task) {
 else { Write-Skip "no scheduled task: CCSync-SubstP" }
 
 # --- 3. P: drive mapping --------------------------------------------------
+# D-8: on the BASE rig, P:/T: are real SMB mappings of the NAS itself that
+# this installer never created (onboarding/steps.py's build_cleanup_plan
+# deliberately guards the same thing with unmount_p=(role=="editor")). This
+# script has no -Role switch, so detect instead: a subst mapping has no
+# DisplayRoot and is always ours (the bootstrap's fallback style); a net-use
+# mapping is only ours if it points at our own loopback share. Anything
+# else -- a net-use mapping to a real host -- must be left alone.
 if (Test-Path "P:\") {
-    if ($DryRun) { Write-Step "[dry-run] would unmap P:" }
+    $pDrive = $null
+    try { $pDrive = Get-PSDrive -Name P -ErrorAction Stop } catch {}
+    $displayRoot = $null
+    if ($pDrive) { $displayRoot = $pDrive.DisplayRoot }
+    $looksLikeOurs = [string]::IsNullOrWhiteSpace($displayRoot) -or
+                     ($displayRoot -match '^\\\\localhost\\CCSync_P$')
+
+    if (-not $looksLikeOurs) {
+        Write-Skip "P: is mapped to '$displayRoot' -- not this installer's mapping (looks like a real NAS mapping, e.g. on the base rig). Leaving it alone; remove the share/label leftovers below only."
+    }
+    elseif ($DryRun) {
+        Write-Step "[dry-run] would unmap P: ($(if ($displayRoot) { $displayRoot } else { 'subst mapping' }))"
+    }
     else {
         # subst and net use are separate mechanisms; try both, ignore errors.
         # Redirect inside cmd -- a PowerShell-level 2>$null turns native

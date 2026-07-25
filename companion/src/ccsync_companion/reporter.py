@@ -132,8 +132,13 @@ class DashboardReporter:
         # mirrors the "warn once" pattern in watcher.py without spamming the
         # log every interval while the dashboard is unreachable.
         self._error_logged = False
-        # monotonic timestamp of the last HEAVY (light=False) post -- 0.0
-        # forces the very first tick to be heavy regardless of cadence.
+        # monotonic timestamp of the last HEAVY (light=False) post ATTEMPT
+        # -- 0.0 forces the very first tick to be heavy regardless of
+        # cadence. Set on attempt, not only on success (see _run_cycle):
+        # a heavy payload that times out must still degrade to the normal
+        # report_interval cadence instead of retrying the full
+        # local_manifest/media_tree payload on every fast active tick
+        # forever.
         self._last_heavy_at = 0.0
 
     @property
@@ -303,6 +308,15 @@ class DashboardReporter:
                 break
 
     def _run_cycle(self, light: bool = False) -> None:
+        if not light:
+            # Mark the heavy ATTEMPT now, before the post -- not only on
+            # success. Otherwise a heavy payload that fails/times out (e.g.
+            # a large multi-project local_manifest exceeding `timeout`)
+            # never updates this timestamp, so every subsequent active tick
+            # keeps computing `light=False` and resends the same oversized
+            # payload every report_interval_active seconds forever instead
+            # of degrading to the normal cadence.
+            self._last_heavy_at = time.monotonic()
         try:
             self.post_once(light=light)
         except Exception as exc:
@@ -313,5 +327,3 @@ class DashboardReporter:
                 log.debug("dashboard report failed: %s", exc)
         else:
             self._error_logged = False
-            if not light:
-                self._last_heavy_at = time.monotonic()

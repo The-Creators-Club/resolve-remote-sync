@@ -37,12 +37,43 @@ def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(str(path)))
 
 
+def _default_move(src: str, dst: str) -> None:
+    """Same-volume rename with the destination's parent tree created first.
+
+    Deliberately NOT os.renames: os.renames additionally prunes every
+    now-empty parent directory of the SOURCE (via os.removedirs), walking
+    up as far as it can. For a one-project editor whose project was the
+    last thing left under its parent, that walk continues past Projects/
+    and can remove local_root itself (e.g. the `subst P:` target),
+    leaving every `P:\\...` path in the Resolve database dead
+    (AUDIT D-3). No pruning at all is the simplest correct behavior here --
+    an emptied source directory is harmless and left in place.
+    """
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    os.rename(src, dst)
+
+
+def _item_is_valid(item: dict) -> bool:
+    """A selection item usable for repathing: rel_path must be a non-blank
+    str and active (when present) must not be explicitly False. A null/
+    non-str rel_path (e.g. a dashboard row whose project record is gone --
+    LEFT JOIN yields NULL) must never reach a path join, where
+    str(None) == "None" would become a literal path segment and move the
+    project directory to "...\\Projects\\None" (AUDIT D-4)."""
+    rel = item.get("rel_path")
+    if not isinstance(rel, str) or not rel.strip():
+        return False
+    if item.get("active") is False:
+        return False
+    return True
+
+
 class ProjectRepather:
     def __init__(
         self,
         admin: SyncthingAdmin,
         local_root: str,
-        move_fn: Callable[[str, str], Any] = os.renames,
+        move_fn: Callable[[str, str], Any] = _default_move,
     ) -> None:
         self.admin = admin
         self.local_root = local_root
@@ -62,8 +93,10 @@ class ProjectRepather:
             return repathed
 
         for item in selection or []:
+            if not _item_is_valid(item):
+                continue
             slug = item.get("slug")
-            rel = str(item.get("rel_path", "")).strip().strip("/")
+            rel = item.get("rel_path", "").strip().strip("/")
             if not slug or not rel:
                 continue
             folder = folders.get(slug)

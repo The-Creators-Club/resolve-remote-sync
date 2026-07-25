@@ -105,6 +105,59 @@ def test_unpause_always_happens_even_when_repoint_fails(tmp_path):
     assert ("paused", "s1", False) in admin.calls  # unpaused in finally
 
 
+def test_move_out_of_nested_tree_leaves_local_root_and_projects_dir_intact(tmp_path):
+    """Regression (AUDIT D-3): the default move_fn used to be os.renames,
+    which prunes every now-empty parent of the SOURCE all the way up. Moving
+    the only project out of "2026" (leaving it empty) must NOT cascade into
+    deleting Projects/ or local_root itself (the `subst P:` target)."""
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+    (old / "file.txt").write_text("x")
+    admin = FakeAdmin({"s1": str(old)})
+    r = ProjectRepather(admin, str(tmp_path))
+
+    repathed = r.reconcile([_sel("s1", "2027/CCT/Season 1")])
+    assert repathed == ["s1"]
+
+    new = tmp_path / "Projects" / "2027" / "CCT" / "Season 1"
+    assert (new / "file.txt").is_file()
+    assert not old.exists()
+    # "2026" is now empty -- os.renames would have pruned it, then
+    # Projects/, then local_root itself. None of that may happen.
+    assert (tmp_path / "Projects" / "2026").is_dir()
+    assert (tmp_path / "Projects").is_dir()
+    assert tmp_path.is_dir()
+
+
+def test_null_rel_path_is_skipped_not_literal_none(tmp_path):
+    """AUDIT D-4: a dashboard row whose rel_path is None (e.g. an orphaned
+    selection) must never reach the path join, where str(None) == "None"
+    would become a literal "...\\Projects\\None" move target."""
+    admin = FakeAdmin({"s1": str(tmp_path / "Projects" / "Somewhere")})
+    r = ProjectRepather(admin, str(tmp_path))
+    item = {"slug": "s1", "rel_path": None, "active": True}
+    assert r.reconcile([item]) == []
+    assert admin.calls == []
+
+
+def test_non_str_rel_path_is_skipped(tmp_path):
+    admin = FakeAdmin({"s1": str(tmp_path / "Projects" / "Somewhere")})
+    r = ProjectRepather(admin, str(tmp_path))
+    item = {"slug": "s1", "rel_path": 123, "active": True}
+    assert r.reconcile([item]) == []
+    assert admin.calls == []
+
+
+def test_inactive_item_is_skipped(tmp_path):
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+    admin = FakeAdmin({"s1": str(old)})
+    r = ProjectRepather(admin, str(tmp_path))
+    item = {"slug": "s1", "rel_path": "2026/CCT/Season 1", "active": False}
+    assert r.reconcile([item]) == []
+    assert admin.calls == []
+
+
 def test_unaccepted_or_unknown_folders_skipped(tmp_path):
     admin = FakeAdmin({})
     r = ProjectRepather(admin, str(tmp_path))

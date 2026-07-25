@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from ccsync_dashboard import db as dbmod
@@ -165,6 +167,47 @@ def test_v1_to_v2_migration_preserves_data(tmp_path):
     conn.close()
 
 
+def test_migration_commits_user_version_after_each_step(tmp_path):
+    """An interrupted upgrade (e.g. a container restart mid-migration) must
+    resume from where it left off, not re-run an already-applied step and
+    crash on 'duplicate column name'. Uses a small synthetic step list so
+    this is independent of the real schema (see the db.py migration
+    finding)."""
+    path = tmp_path / "steps.db"
+    conn = dbmod.connect(path)
+    steps = [
+        (1, "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT);"),
+        (2, "ALTER TABLE t ADD COLUMN b TEXT;"),
+        (3, "ALTER TABLE t ADD COLUMN c TEXT;"),
+    ]
+    dbmod.migrate(conn, steps=steps)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(t)")}
+    assert cols == {"id", "a", "b", "c"}
+
+    # Simulate a crash partway through a later upgrade: step 4 applies (and
+    # commits its own user_version bump) but step 5 fails outright.
+    steps_v2 = steps + [
+        (4, "ALTER TABLE t ADD COLUMN d TEXT;"),
+        (5, "ALTER TABLE t ADD COLUMN nope THIS IS NOT VALID SQL;"),
+    ]
+    with pytest.raises(sqlite3.OperationalError):
+        dbmod.migrate(conn, steps=steps_v2)
+    # Step 4's user_version bump survived the step-5 failure -- NOT rolled
+    # back to 3, and NOT silently left un-bumped either.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+
+    # Re-running from here must NOT re-apply step 4's ALTER TABLE (that would
+    # raise "duplicate column name" and crash-loop) -- only step 5 (still
+    # broken) is attempted, and it fails the same way, not a duplicate-column
+    # error.
+    with pytest.raises(sqlite3.OperationalError) as exc:
+        dbmod.migrate(conn, steps=steps_v2)
+    assert "duplicate column" not in str(exc.value)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    conn.close()
+
+
 def test_selection_helpers(conn):
     assert dbmod.add_selection(conn, "jsmith", "a", "jsmith", T0) is True
     assert dbmod.add_selection(conn, "jsmith", "b", "alex", T1) is True
@@ -256,6 +299,27 @@ def test_active_transfers_freshness(conn):
         {"lane": "lane_a_video_up", "name": "x.braw", "direction": "up"}], old)
     assert dbmod.fetch_active_transfers(conn, old) != []      # fresh at report time
     assert dbmod.fetch_active_transfers(conn, now) == []      # stale later
+
+
+def test_prune_drops_stale_lane_report_current(conn):
+    """SEC-4: lane_report_current previously had NO retention at all -- a
+    machine that stops reporting must eventually drop out of the fleet
+    grid's underlying table, not accumulate forever."""
+    now = "2026-07-25T12:00:00+00:00"
+    old = "2026-06-01T12:00:00+00:00"   # > LANE_HISTORY_MAX_AGE_DAYS (30) ago
+    dbmod.upsert_lane_report(
+        conn, editor_username="ghost", machine="OLD-PC", lane="lane_a_video_up",
+        state="idle", queued=0, transferring=0, last_error=None, last_sync=None,
+        detail=None, companion_version="0.1.0", reported_at=old, received_at=old,
+    )
+    dbmod.upsert_lane_report(
+        conn, editor_username="jsmith", machine="PC", lane="lane_a_video_up",
+        state="idle", queued=0, transferring=0, last_error=None, last_sync=None,
+        detail=None, companion_version="0.1.0", reported_at=now, received_at=now,
+    )
+    dbmod.prune(conn, now)
+    rows = conn.execute("SELECT editor_username FROM lane_report_current").fetchall()
+    assert [r[0] for r in rows] == ["jsmith"]
 
 
 def test_prune_media_tables(conn):

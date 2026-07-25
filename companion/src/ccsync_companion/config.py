@@ -13,6 +13,7 @@ asserts the two agree on keys).
 
 from __future__ import annotations
 
+import logging
 import sys
 
 if sys.version_info >= (3, 11):
@@ -21,9 +22,11 @@ else:  # pragma: no cover - project targets 3.12
     import tomli as tomllib  # type: ignore[no-redef]
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-VERSION = "0.4.3"
+log = logging.getLogger("ccsync.config")
+
+VERSION = "0.4.4"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -122,6 +125,13 @@ DEFAULTS: dict[str, Any] = {
     # media legitimately lives outside/next to the tree, so the popup is
     # noise there). Out-of-tree clips are still logged.
     "popup_enabled": True,
+    # How long (seconds) a dismissed-without-acting out-of-tree clip is
+    # snoozed before the passive watcher will pop it again (addition; see
+    # app.py's _popup_snooze). Was previously read via cfg.get(..., 300)
+    # with no entry here/in the template/validate_config, so it was
+    # undiscoverable and a bad hand-edited value raised inside __init__
+    # before logging existed (see S-10).
+    "popup_snooze_seconds": 300,
     # Machine role: "editor" (default -- full sync lanes) or "base" (the
     # central machine with direct NAS access: implies sync_enabled false
     # unless the file sets it explicitly; the out-of-tree popup stays ON so
@@ -196,7 +206,7 @@ transfers = 4
 
 # Local Syncthing REST API base URL and API key. Leave syncthing_api_key
 # empty to read it from Syncthing's own config.xml (the installer-managed
-# ccsync\syncthing-config home first, else the stock per-OS path).
+# ccsync\\syncthing-config home first, else the stock per-OS path).
 syncthing_url = "http://127.0.0.1:8384"
 syncthing_api_key = ""
 
@@ -257,12 +267,19 @@ lane_b_enabled = true
 
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
-# dashboard reporting keep working; all sync lanes stay off.
-sync_enabled = true
+# dashboard reporting keep working; all sync lanes stay off. Left commented
+# out here on purpose: mode="base" below already sets this to false via its
+# profile (MODE_PROFILES in config.py) -- pinning an explicit value in every
+# first-run file would make that profile dead. Uncomment to override it.
+# sync_enabled = true
 
 # Set false to never show the media-outside-tree popup (base rig: raw media
 # legitimately lives outside the tree there). Still logged either way.
 popup_enabled = true
+
+# How long (seconds) a dismissed-without-acting out-of-tree clip is snoozed
+# before the passive watcher will pop it again.
+popup_snooze_seconds = 300
 
 # Machine role: "editor" (default -- full sync lanes) or "base" (the central
 # machine working directly off the NAS: implies sync_enabled false unless set
@@ -288,18 +305,46 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     """Load config, creating it with defaults on first run.
 
     Malformed TOML falls back to defaults rather than crashing the app —
-    matches the never-raise ethos used throughout this package.
+    matches the never-raise ethos used throughout this package. Unlike a
+    silent fallback, though, a parse failure is LOUD: logged here (the root
+    logger buffers records emitted before setup_logging() configures
+    handlers, so this is never lost even this early in startup) and
+    recorded on the returned dict under "_config_load_error" so
+    validate_config()/app.py's config_problems make an otherwise
+    indistinguishable-from-blank-first-run failure visible.
+
+    Reads with encoding="utf-8-sig" + tomllib.loads() rather than a binary
+    "rb" + tomllib.load(): PowerShell's Set-Content (windows_bootstrap.ps1,
+    windows_upgrade.ps1) prepends a UTF-8 BOM even when overwriting a
+    BOM-less file, and a binary tomllib.load() raises TOMLDecodeError on
+    that BOM -- see identity.py's load_identity(), which already reads
+    identity.json the same way for the same reason.
     """
     ensure_config_exists(path)
+    data: Any = {}
+    load_error: Optional[str] = None
     try:
-        with path.open("rb") as fh:
-            data = tomllib.load(fh)
-    except (tomllib.TOMLDecodeError, OSError):
+        text = path.read_text(encoding="utf-8-sig")
+        data = tomllib.loads(text)
+    except OSError as exc:
+        load_error = f"could not read {path}: {exc}"
+        log.error("config: %s -- falling back to defaults", load_error)
+        data = {}
+    except tomllib.TOMLDecodeError as exc:
+        load_error = f"{path} is not valid TOML: {exc}"
+        log.error(
+            "config: %s -- falling back to ALL DEFAULTS; the file on disk "
+            "looks fine to a human but every setting below is now a "
+            "default, not what's actually in the file",
+            load_error,
+        )
         data = {}
 
     merged = dict(DEFAULTS)
     if isinstance(data, dict):
         merged.update(data)
+    # None when the file parsed cleanly -- see validate_config().
+    merged["_config_load_error"] = load_error
 
     # Role profile: mode="base" flips the sync/popup defaults, but an
     # explicit key in the file always wins.
@@ -342,6 +387,13 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
 
+    load_error = cfg.get("_config_load_error")
+    if load_error:
+        errors.append(
+            f"config.toml failed to load and every setting below is a DEFAULT, "
+            f"not what's in the file -- {load_error}"
+        )
+
     local_root = str(cfg.get("local_root", "")).strip()
     if not local_root:
         errors.append(
@@ -372,8 +424,10 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
     if not str(cfg.get("editor_name", "")).strip():
         warnings.append(
             "editor_name is blank -- popup 'Fix' destinations will land in "
-            "'B-roll/Editor Added/' with an empty name component. Syncing is "
-            "unaffected."
+            "'B-roll/Editor Added/' with an empty name component, and (with "
+            "require_login=false) dashboard reporting silently stops entirely: "
+            "the server rejects a blank editor_name on every report. Local "
+            "rclone/Syncthing sync lanes are unaffected either way."
         )
     if not str(cfg.get("active_project", "")).strip():
         warnings.append(
@@ -426,6 +480,7 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
     for key in (
         "selection_poll_interval", "project_rotation_seconds", "sequencer_idle_seconds",
         "dashboard_report_interval_active", "manifest_refresh_interval", "media_tree_refresh_interval",
+        "popup_snooze_seconds",
     ):
         try:
             value = float(cfg.get(key, DEFAULTS[key]))

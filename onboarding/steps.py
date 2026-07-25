@@ -43,7 +43,7 @@ from ccsync_companion import identity as identity_mod
 
 # -- constants ---------------------------------------------------------------
 
-INSTALLER_VERSION = "1.0.2"
+INSTALLER_VERSION = "1.0.3"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.
@@ -55,6 +55,17 @@ DEFAULT_LOCAL_ROOT = r"C:\Creators_Club"
 # canonical_prefix both point at the tree root there (see the base-rig
 # comments in companion config.example.toml).
 DEFAULT_BASE_LOCAL_ROOT = r"T:\Creators_Club"
+# Same default windows_bootstrap.ps1's -RemoteRoot parameter ships (see
+# BOOTSTRAP_SCRIPT_NAME). ensure_config must force this too: the bootstrap's
+# own config-seeding step is skipped whenever config.toml already exists
+# (which it always does by the time run_bootstrap() runs -- ensure_config
+# runs first), so a blank remote_root here means an editor's originals get
+# uploaded to their bare SFTP home directory instead of the project tree.
+DEFAULT_REMOTE_ROOT = "/mnt/tank/TheCreatorsPool/Creators_Club"
+# subprocess timeout for the bootstrap script (winget prompts, a stalled
+# Invoke-WebRequest, or a hung `subst` would otherwise block the worker
+# thread forever -- see run_bootstrap).
+BOOTSTRAP_TIMEOUT_SECONDS = 1800
 BOOTSTRAP_SCRIPT_NAME = "windows_bootstrap.ps1"
 COMPANION_EXE_NAME = "ccsync-companion.exe"
 # THE canonical companion location, both roles (matches
@@ -335,7 +346,15 @@ def run_bootstrap(
     companion exe into place (P:\\ once mapped), registers its autostart,
     launches it, and confirms it's still running a few seconds later --
     see windows_bootstrap.ps1's "Companion" step. Find it with
-    find_companion_exe() before calling this."""
+    find_companion_exe() before calling this.
+
+    Bounded by BOOTSTRAP_TIMEOUT_SECONDS: `powershell -File` inherits a
+    non-interactive captured stdin, so a winget prompt, a hung `subst`, or a
+    stalled Invoke-WebRequest would otherwise block forever with no way out.
+    A timeout is reported like any other bootstrap failure -- a non-zero
+    exit code plus an explanatory message -- rather than raised, since
+    _clean_slate has already run by the time callers get here and the
+    wizard needs a normal failed-install result, not an exception."""
     script = find_bootstrap_script(script_path)
 
     cmd = [
@@ -352,7 +371,19 @@ def run_bootstrap(
     if companion_exe_source:
         cmd += ["-CompanionExeSource", str(companion_exe_source)]
 
-    result = run(cmd, capture_output=True, text=True)
+    try:
+        result = run(cmd, capture_output=True, text=True, timeout=BOOTSTRAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        partial = ((exc.stdout or "") if isinstance(exc.stdout, str) else "") + (
+            (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        )
+        message = (
+            f"{partial}\nbootstrap timed out after {BOOTSTRAP_TIMEOUT_SECONDS}s "
+            "-- it may be stuck on a prompt (e.g. winget) or a stalled download; "
+            "re-run the installer, or run windows_bootstrap.ps1 by hand to see "
+            "where it hangs."
+        )
+        return 1, message
     output = (getattr(result, "stdout", "") or "") + (getattr(result, "stderr", "") or "")
     return getattr(result, "returncode", 1), output
 
@@ -512,11 +543,16 @@ def build_cleanup_plan(
     role = str(role or "").strip().lower()
 
     candidate_dirs: list[Path] = [COMPANION_BIN_DIR]
-    if local_root:
-        candidate_dirs.append(Path(local_root))
-    config_root = read_local_root()
-    if config_root:
-        candidate_dirs.append(Path(config_root))
+    # On the BASE rig, local_root (and the local_root read back out of an
+    # existing config.toml) IS the NAS pool mapping (T:\Creators_Club) --
+    # never a cleanup candidate. Only an editor's local_root is a real local
+    # directory the installer might have dropped exe copies into.
+    if role != "base":
+        if local_root:
+            candidate_dirs.append(Path(local_root))
+        config_root = read_local_root()
+        if config_root:
+            candidate_dirs.append(Path(config_root))
     candidate_dirs.append(Path(DEFAULT_LOCAL_ROOT))
     if role == "editor":
         # Editors' P: is a subst of their local root -- the bootstrap
@@ -754,6 +790,7 @@ def ensure_config(
         forced["local_root"] = _toml_string(local_root or DEFAULT_LOCAL_ROOT)
         forced["canonical_prefix"] = _toml_string("P:\\")
         forced["remote"] = _toml_string("creators_club_sftp")
+        forced["remote_root"] = _toml_string(DEFAULT_REMOTE_ROOT)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(merge_config_text(text, forced), encoding="utf-8")

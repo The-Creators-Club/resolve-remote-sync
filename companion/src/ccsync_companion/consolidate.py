@@ -75,16 +75,34 @@ def plan_local_consolidation(
 
 # ------------------------------------------------------------ rclone diff
 
+# Cap on how many "would transfer"/"would delete" object names we hold in
+# memory -- a whole-tree dry run (D-2) can log hundreds of thousands of
+# per-file lines; the totals below still come from rclone's own summary
+# stats record, so capping the sample lists loses nothing but the (already
+# unusable) full listing. See AUDIT §6 "dry run buffers the entire verbose
+# rclone log in memory".
+_OBJECTS_CAP = 200
+
+
 def parse_dry_run_stats(stderr_text: str) -> dict[str, Any]:
     """Parse rclone --use-json-log --dry-run stderr. Returns
-    {"count": int, "bytes": int, "objects": [names]}. Verified against
-    rclone 1.71 (2026-07-24): the final `stats` record carries
-    totalTransfers/totalBytes for what WOULD transfer under --dry-run, and
-    each skipped object logs 'Skipped copy as --dry-run is set' with an
-    "object" field."""
+    {"count": int, "bytes": int, "objects": [names], "objects_total": int,
+    "deletes": int, "deleted_dirs": int, "delete_objects": [names],
+    "delete_objects_total": int}. Verified against rclone 1.71
+    (2026-07-24): the final `stats` record carries totalTransfers/
+    totalBytes/deletes/deletedDirs for what WOULD happen under --dry-run;
+    each skipped transfer logs 'Skipped copy as --dry-run is set' and each
+    skipped removal logs 'Skipped delete as --dry-run is set', both with an
+    "object" field -- kept in SEPARATE lists so a deletion is never
+    mistaken for (or hidden among) a harmless upload/download (AUDIT D-1)."""
     count = 0
     total_bytes = 0
+    deletes = 0
+    deleted_dirs = 0
     objects: list[str] = []
+    objects_total = 0
+    delete_objects: list[str] = []
+    delete_objects_total = 0
     for line in stderr_text.splitlines():
         try:
             rec = json.loads(line)
@@ -94,11 +112,31 @@ def parse_dry_run_stats(stderr_text: str) -> dict[str, Any]:
         if isinstance(stats, dict):
             count = int(stats.get("totalTransfers", count) or 0)
             total_bytes = int(stats.get("totalBytes", total_bytes) or 0)
+            deletes = int(stats.get("deletes", deletes) or 0)
+            deleted_dirs = int(stats.get("deletedDirs", deleted_dirs) or 0)
         obj = rec.get("object")
         msg = rec.get("msg", "")
-        if obj and "dry-run" in msg.lower():
-            objects.append(obj)
-    return {"count": count, "bytes": total_bytes, "objects": objects}
+        low = msg.lower()
+        if not obj or "dry-run" not in low:
+            continue
+        if "delete" in low:
+            delete_objects_total += 1
+            if len(delete_objects) < _OBJECTS_CAP:
+                delete_objects.append(obj)
+        else:
+            objects_total += 1
+            if len(objects) < _OBJECTS_CAP:
+                objects.append(obj)
+    return {
+        "count": count,
+        "bytes": total_bytes,
+        "objects": objects,
+        "objects_total": objects_total,
+        "deletes": deletes,
+        "deleted_dirs": deleted_dirs,
+        "delete_objects": delete_objects,
+        "delete_objects_total": delete_objects_total,
+    }
 
 
 def _default_run(cmd: list[str], timeout: float) -> str:
@@ -125,6 +163,14 @@ def _dry_run_command(
         cmd = rclone_lane.build_up_command(**common)
     else:
         cmd = rclone_lane.build_down_command(**common)
+    # build_up/down_command always add --verbose so the REAL runs get
+    # per-file INFO log lines for parse_json_log() -- but a dry run only
+    # needs the NOTICE-level "Skipped ... as --dry-run is set" lines and the
+    # --stats summary record (added above via stats_interval), both of which
+    # rclone emits at the default log level. --verbose on a whole-tree dry
+    # run instead floods capture_output with one JSON line per file, which
+    # parse_dry_run_stats then has to hold entirely in memory (AUDIT §6).
+    cmd = [arg for arg in cmd if arg != "--verbose"]
     return cmd + ["--dry-run"]
 
 
@@ -135,10 +181,34 @@ def reconcile_with_nas(
     run_fn: Callable[[list[str], float], str] = _default_run,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    """Dry-run both lanes for `subpath` (a project subtree, or None = whole
-    tree). Returns {"uploads": {count,bytes,objects}, "downloads": {...},
-    "ok": bool, "error": str|None}. Never raises."""
-    result: dict[str, Any] = {"uploads": None, "downloads": None, "ok": True, "error": None}
+    """Dry-run both lanes for `subpath` (a project subtree). Returns
+    {"uploads": {...}, "downloads": {...}, "ok": bool, "error": str|None,
+    "skip_lane_b": bool}. Never raises.
+
+    A blank/None `subpath` is a HARD ABORT, not a whole-tree fallback: it
+    means the caller couldn't pin down which project is being consolidated
+    (e.g. a blank active_project with no server-root mapping for the open
+    Resolve project), and running either lane against the whole tree would
+    upload every local file and -- worse -- let lane B's `rclone sync`
+    delete every local Proxy/ file the NAS doesn't have, across every
+    project, not just the one being onboarded (AUDIT D-2).
+
+    `skip_lane_b` is True whenever the down-direction dry run reports it
+    would delete anything: lane B is a destructive `rclone sync`, and a
+    dry-run delete count here means the consent dialog's promised "proxies
+    download" is really "local proxy files get deleted" (AUDIT D-1). The
+    caller is responsible for actually honouring skip_lane_b before running
+    lane B; this function only computes and surfaces it.
+    """
+    result: dict[str, Any] = {
+        "uploads": None, "downloads": None, "ok": True, "error": None,
+        "skip_lane_b": False,
+    }
+    if subpath is None or not str(subpath).strip():
+        result["ok"] = False
+        result["error"] = "no active project resolved — refusing whole-tree consolidate"
+        log.error("reconcile_with_nas: %s", result["error"])
+        return result
     try:
         up_filter = rclone_lane.write_filter_file(
             rclone_lane.build_filter_rules_up(), state_dir / "consolidate_filter_up.txt"
@@ -154,7 +224,31 @@ def reconcile_with_nas(
         log.exception("reconcile dry-run failed")
         result["ok"] = False
         result["error"] = str(exc)
+        return result
+
+    downloads = result["downloads"] or {}
+    deletes = int(downloads.get("deletes", 0) or 0)
+    deleted_dirs = int(downloads.get("deleted_dirs", 0) or 0)
+    if deletes or deleted_dirs:
+        result["skip_lane_b"] = True
+        log.warning(
+            "reconcile_with_nas: dry-run reports the proxy sync would DELETE "
+            "%d local file(s) and %d local dir(s) under %s -- lane B (proxy "
+            "download) must be SKIPPED to avoid data loss",
+            deletes, deleted_dirs, subpath,
+        )
     return result
+
+
+def lane_b_allowed(reconcile: dict[str, Any]) -> bool:
+    """Whether the actual lane-B (proxy download) run is safe to execute
+    after this reconcile: the dry run must have succeeded AND reported zero
+    deletions. Callers (e.g. app.py's consolidate flow) must check this
+    before invoking the real `rclone sync` -- see reconcile_with_nas's
+    docstring (AUDIT D-1)."""
+    if not reconcile.get("ok", False):
+        return False
+    return not reconcile.get("skip_lane_b", False)
 
 
 # ------------------------------------------------------------ report text
@@ -182,10 +276,23 @@ def build_report(plan: dict[str, Any], reconcile: dict[str, Any]) -> str:
             f"  {up['count']} original(s) will upload to the NAS "
             f"({human_bytes(up['bytes'])}) — plus the consolidated clips above once copied in"
         )
-        lines.append(
-            f"  {down['count']} proxy file(s) will download from the NAS "
-            f"({human_bytes(down['bytes'])})"
-        )
+        deletes = int(down.get("deletes", 0) or 0)
+        deleted_dirs = int(down.get("deleted_dirs", 0) or 0)
+        if deletes or deleted_dirs:
+            dirs_part = f" and {deleted_dirs} folder(s)" if deleted_dirs else ""
+            lines.append(
+                f"  !!! WARNING: the NAS proxy sync would DELETE {deletes} local file(s)"
+                f"{dirs_part} !!!"
+            )
+            lines.append(
+                "  Proxy download will be SKIPPED for this consolidate -- fix the mismatch "
+                "on the NAS first, then re-run."
+            )
+        else:
+            lines.append(
+                f"  {down['count']} proxy file(s) will download from the NAS "
+                f"({human_bytes(down['bytes'])})"
+            )
     else:
         lines.append(f"  (could not check the NAS: {reconcile.get('error')})")
     lines.append("")

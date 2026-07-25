@@ -20,6 +20,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import quote
 
 log = logging.getLogger("ccsync.selection")
 
@@ -47,6 +48,7 @@ class SelectionClient:
         state_dir: Path,
         http_get: Optional[HttpGetFn] = None,
         timeout: float = 5.0,
+        editor_name_fn: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self.cfg = cfg
         self.state_dir = state_dir
@@ -55,7 +57,15 @@ class SelectionClient:
 
         self.dashboard_url = str(cfg.get("dashboard_url", "")).strip()
         self.dashboard_token = str(cfg.get("dashboard_token", "")).strip()
-        self.editor_name = str(cfg.get("editor_name", "")).strip().lower()
+        # Evaluated per fetch, not just once here -- so a tray sign-in as a
+        # verified identity (app.py's editor_identity()) redirects which
+        # editor's tick list gets fetched, instead of this staying pinned to
+        # whatever editor_name was in config.toml at construction time (see
+        # identity.py's docstring: the verified username "becomes this
+        # companion's identity for reporting/selection"). Defaults to the
+        # raw config value for back-compat / require_login=false callers
+        # that never pass one.
+        self._editor_name_fn = editor_name_fn or (lambda: cfg.get("editor_name", ""))
 
         self._cache_path = self.state_dir / CACHE_FILENAME
         # Fault-isolation logging state: WARNING on the first failure of a
@@ -77,7 +87,16 @@ class SelectionClient:
         failure (network error, bad JSON, unexpected shape)."""
         if not self.enabled:
             return None
-        url = f"{self.dashboard_url.rstrip('/')}/api/v1/selection/{self.editor_name}"
+        editor_name = str(self._editor_name_fn() or "").strip().lower()
+        if not editor_name:
+            # No verified/configured identity yet (e.g. require_login=true
+            # and not signed in). Requesting /api/v1/selection/ with no
+            # username 404s every single poll forever -- skip the request
+            # entirely and let get() fall back to the cache/none, same as
+            # any other fetch failure, but without the network round trip
+            # or log spam (see the selection-identity finding).
+            return None
+        url = f"{self.dashboard_url.rstrip('/')}/api/v1/selection/{quote(editor_name, safe='')}"
         headers = {}
         if self.dashboard_token:
             headers["X-CCSync-Token"] = self.dashboard_token

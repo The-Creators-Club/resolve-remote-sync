@@ -639,6 +639,35 @@ def test_run_cycle_swallows_exceptions():
     reporter._run_cycle()  # must not raise
 
 
+def test_run_cycle_marks_heavy_attempt_even_on_failure():
+    # A failing heavy post must still update _last_heavy_at -- otherwise
+    # _report_loop's `light = active_tick and (now - self._last_heavy_at) <
+    # report_interval` is always False, and every subsequent active tick
+    # resends the full (possibly oversized) heavy payload forever instead
+    # of degrading to the normal report_interval cadence.
+    def failing_post(url, data, headers, timeout):
+        raise RuntimeError("timed out")
+
+    reporter = DashboardReporter(lambda: [], _cfg(), http_post=failing_post)
+    assert reporter._last_heavy_at == 0.0
+    reporter._run_cycle(light=False)
+    assert reporter._last_heavy_at > 0.0
+
+
+def test_run_cycle_light_tick_does_not_touch_last_heavy_at():
+    reporter = DashboardReporter(lambda: [], _cfg(), http_post=lambda *a: {})
+    reporter._last_heavy_at = 123.0
+    reporter._run_cycle(light=True)
+    assert reporter._last_heavy_at == 123.0
+
+
+def test_run_cycle_heavy_success_still_updates_last_heavy_at():
+    reporter = DashboardReporter(lambda: [], _cfg(), http_post=lambda *a: {})
+    before = time.monotonic()
+    reporter._run_cycle(light=False)
+    assert reporter._last_heavy_at >= before
+
+
 def test_report_loop_survives_post_failures_and_keeps_running(monkeypatch):
     monkeypatch.setattr(reporter_mod, "INITIAL_DELAY_SECONDS", 0.01)
     call_count = {"n": 0}

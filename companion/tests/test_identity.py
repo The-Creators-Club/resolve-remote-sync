@@ -5,6 +5,7 @@ sign_out."""
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 import urllib.error
@@ -22,10 +23,14 @@ from ccsync_companion.identity import (
 )
 
 
-def _token(username="alex", expires_epoch=None):
+def _b64u(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+def _token(username="alex", expires_epoch=None, purpose="identity"):
     if expires_epoch is None:
         expires_epoch = int(time.time()) + 3600
-    return f"v1.{username}.{expires_epoch}.deadbeef"
+    return f"v2.{purpose}.{_b64u(username)}.{expires_epoch}.deadbeef"
 
 
 # -- identity_path -----------------------------------------------
@@ -41,21 +46,40 @@ def test_identity_path_lives_under_config_dir(monkeypatch, tmp_path):
 
 
 def test_parse_token_valid():
-    username, expires = parse_token("v1.alex.1999999999.deadbeef")
+    username, expires = parse_token(f"v2.identity.{_b64u('alex')}.1999999999.deadbeef")
     assert username == "alex"
     assert expires == 1999999999
 
 
+def test_parse_token_valid_dotted_username_round_trips():
+    # base64url-encoding the username means a dot in it (a valid TrueNAS-style
+    # username character, e.g. "john.doe") can never be mistaken for a field
+    # separator (see S-9).
+    username, expires = parse_token(f"v2.identity.{_b64u('john.doe')}.1999999999.deadbeef")
+    assert username == "john.doe"
+    assert expires == 1999999999
+
+
 def test_parse_token_malformed_too_few_parts():
-    assert parse_token("v1.alex") == (None, None)
+    assert parse_token(f"v2.identity.{_b64u('alex')}") == (None, None)
 
 
 def test_parse_token_malformed_non_integer_expiry():
-    assert parse_token("v1.alex.notanumber.deadbeef") == (None, None)
+    assert parse_token(f"v2.identity.{_b64u('alex')}.notanumber.deadbeef") == (None, None)
 
 
 def test_parse_token_blank_username():
-    assert parse_token("v1..1999999999.deadbeef") == (None, None)
+    assert parse_token("v2.identity..1999999999.deadbeef") == (None, None)
+
+
+def test_parse_token_rejects_v1_format():
+    assert parse_token("v1.alex.1999999999.deadbeef") == (None, None)
+
+
+def test_parse_token_rejects_session_purpose():
+    # A dashboard SESSION cookie must never be usable as a machine-identity
+    # token (see SEC-1) -- parse_token only accepts purpose="identity".
+    assert parse_token(f"v2.session.{_b64u('alex')}.1999999999.deadbeef") == (None, None)
 
 
 def test_parse_token_none():

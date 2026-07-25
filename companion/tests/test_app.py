@@ -4,7 +4,10 @@ real Tk window (headless CI-safe, same ethos as test_watcher.py)."""
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+import pytest
 
 from ccsync_companion import popup, resolve_bridge
 from ccsync_companion.app import CompanionApp
@@ -244,6 +247,28 @@ def test_scan_whole_project_server_roots_failure_falls_back_to_none(tmp_path, mo
     assert captured["server_roots"] is None
 
 
+def test_selection_client_editor_name_fn_wired_to_editor_identity(tmp_path):
+    # Selection identity finding: SelectionClient must re-evaluate the
+    # editor name per fetch via app.editor_identity(), so a tray sign-in
+    # redirects which editor's tick list gets fetched instead of staying
+    # pinned to the raw config editor_name forever.
+    app = _make_app(
+        tmp_path, dashboard_url="http://dash.example.com", editor_name="config-name",
+        require_login=False,
+    )
+    assert app.selection_client is not None
+    assert app.selection_client._editor_name_fn() == "config-name"
+
+    app.identity._identity = {
+        "username": "verified-user",
+        # v2.identity.<base64url(username), no padding>.<expires_epoch>.<sig>
+        # -- see identity.py's parse_token().
+        "token": "v2.identity.dmVyaWZpZWQtdXNlcg.99999999999.deadbeef",
+        "role": None,
+    }
+    assert app.selection_client._editor_name_fn() == "verified-user"
+
+
 # -- concurrent-popup guard ------------------------------------------
 
 
@@ -405,7 +430,9 @@ def test_reporter_reports_effective_mode_not_raw_config(tmp_path):
     app = _make_app(tmp_path, mode="editor")
     app.identity._identity = {
         "username": "alex",
-        "token": "v1.alex.99999999999.deadbeef",
+        # v2.identity.<base64url(username), no padding>.<expires_epoch>.<sig>
+        # -- see identity.py's parse_token().
+        "token": "v2.identity.YWxleA.99999999999.deadbeef",
         "role": "base",
     }
     assert app.effective_mode() == "base"
@@ -444,8 +471,197 @@ def test_report_response_fanout_isolates_failures(tmp_path):
     app._on_report_response({"ok": True})  # must not raise
 
 
+# -- editor_identity(): blank editor_name must not report (S-15) -----------
+
+
+def test_editor_identity_returns_none_for_blank_editor_name_when_require_login_false(tmp_path):
+    app = _make_app(tmp_path, editor_name="", require_login=False)
+    assert app.editor_identity() is None
+
+
+def test_editor_identity_returns_none_for_whitespace_editor_name_when_require_login_false(tmp_path):
+    app = _make_app(tmp_path, editor_name="   ", require_login=False)
+    assert app.editor_identity() is None
+
+
+def test_editor_identity_returns_configured_name_when_require_login_false(tmp_path):
+    app = _make_app(tmp_path, editor_name="alex", require_login=False)
+    assert app.editor_identity() == "alex"
+
+
 def test_project_setup_absent_in_legacy_mode(tmp_path):
     app = _make_app(tmp_path, dashboard_url="")
     assert app.project_setup is None
     assert app.setup_project_available() is None
     app.setup_current_project()  # no-op, no raise
+
+
+# -- module-level run(): logging/validation before construction (S-10) ------
+
+
+def test_run_sets_up_logging_and_validates_before_constructing_app(monkeypatch, tmp_path):
+    from ccsync_companion import app as app_mod
+
+    order: list[str] = []
+    cfg = _cfg(tmp_path)
+
+    monkeypatch.setattr(app_mod.config_mod, "load_config", lambda: cfg)
+    monkeypatch.setattr(app_mod, "setup_logging", lambda c: order.append("setup_logging"))
+
+    real_validate = app_mod.config_mod.validate_config
+
+    def spy_validate(c):
+        order.append("validate_config")
+        return real_validate(c)
+
+    monkeypatch.setattr(app_mod.config_mod, "validate_config", spy_validate)
+
+    class FakeApp:
+        def __init__(self, c):
+            order.append("construct")
+
+        def run(self):
+            order.append("run")
+
+    monkeypatch.setattr(app_mod, "CompanionApp", FakeApp)
+
+    app_mod.run()
+
+    assert order.index("setup_logging") < order.index("construct")
+    assert order.index("validate_config") < order.index("construct")
+    assert order[-1] == "run"
+
+
+def test_run_logs_and_reraises_when_construction_raises(monkeypatch, tmp_path, caplog):
+    from ccsync_companion import app as app_mod
+
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(app_mod.config_mod, "load_config", lambda: cfg)
+    monkeypatch.setattr(app_mod, "setup_logging", lambda c: None)
+
+    class BoomApp:
+        def __init__(self, c):
+            raise RuntimeError("bad config value, e.g. poll_interval='fast'")
+
+    monkeypatch.setattr(app_mod, "CompanionApp", BoomApp)
+
+    with caplog.at_level(logging.ERROR, logger="ccsync.app"):
+        with pytest.raises(RuntimeError):
+            app_mod.run()
+
+    assert any("crashed" in r.message for r in caplog.records)
+
+
+# -- CompanionApp.run(): tray-start failure must not skip shutdown (S-11) ---
+
+
+def test_run_tray_start_non_import_error_still_runs_shutdown(tmp_path, monkeypatch):
+    from ccsync_companion import tray as tray_mod
+
+    app = _make_app(tmp_path)  # sync_enabled=False -> _start_lanes() is inert
+    app.start = lambda: None  # skip real watcher/reporter/manifest threads
+
+    shutdown_calls = []
+    real_shutdown = app.shutdown
+
+    def spy_shutdown():
+        shutdown_calls.append(True)
+        real_shutdown()
+
+    app.shutdown = spy_shutdown
+
+    def boom(_app):
+        # Let run()'s wait loop exit immediately once we're past the tray
+        # try/except -- this stands in for whatever eventually sets it in
+        # a real run (KeyboardInterrupt / shutdown()).
+        app._stop_event.set()
+        raise OSError("tray backend unavailable (no display)")
+
+    monkeypatch.setattr(tray_mod, "start_tray", boom)
+
+    app.run()  # must not raise
+
+    assert app._tray_icon is None
+    assert shutdown_calls, "shutdown() must still run after a non-ImportError tray failure"
+
+
+# -- toggle_pause: legacy mode must respect lane_b_enabled (finding) --------
+
+
+def test_toggle_pause_legacy_mode_skips_lane_b_on_resume_when_disabled(tmp_path):
+    app = _make_app(tmp_path, dashboard_url="", sync_enabled=True, lane_b_enabled=False)
+    assert app._managed is False
+
+    started: list[str] = []
+    stopped: list[str] = []
+    for lane in app.lanes:
+        def _start(name=lane.name):
+            started.append(name)
+
+        def _stop(name=lane.name):
+            stopped.append(name)
+
+        lane.start = _start
+        lane.stop = _stop
+
+    app.toggle_pause()  # pause -> _stop_lanes()
+    assert app.is_paused() is True
+    assert set(stopped) == {lane.name for lane in app.lanes}
+
+    started.clear()
+    app.toggle_pause()  # resume -> _start_lanes()
+    assert app.is_paused() is False
+    assert "lane_a_video_up" in started
+    assert "lane_b_proxy_down" not in started  # lane_b_enabled=False
+
+
+# -- managed _stop_lanes must also stop lane A (finding) --------------------
+
+
+def test_stop_lanes_managed_mode_stops_lane_a_too(tmp_path):
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    assert app._managed is True
+
+    stopped: list[str] = []
+    app._lane_a.stop = lambda: stopped.append("lane_a")
+    app._lane_c.stop = lambda: stopped.append("lane_c")
+    if app.sequencer is not None:
+        app.sequencer.stop = lambda: stopped.append("sequencer")
+
+    app._stop_lanes()
+
+    assert "lane_a" in stopped
+    assert "lane_c" in stopped
+
+
+# -- _refresh_media_tree_once must skip ignored_resolve_projects (X-7) ------
+
+
+def test_refresh_media_tree_once_skips_ignored_project(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, ignored_resolve_projects=["Untitled Project", "New Doc"])
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("clip.mov"), project_name="Untitled Project"),
+    )
+    app._refresh_media_tree_once()
+    assert app.get_media_tree() == {}
+
+
+def test_refresh_media_tree_once_is_case_insensitive_for_ignored_project(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, ignored_resolve_projects=["New Doc"])
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("clip.mov"), project_name="  NEW DOC  "),
+    )
+    app._refresh_media_tree_once()
+    assert app.get_media_tree() == {}
+
+
+def test_refresh_media_tree_once_keeps_non_ignored_project(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, ignored_resolve_projects=["Untitled Project"])
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("clip.mov"), project_name="Real Project"),
+    )
+    app._refresh_media_tree_once()
+    assert "Real Project" in app.get_media_tree()

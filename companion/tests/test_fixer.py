@@ -4,6 +4,7 @@ resolve_bridge / copy_fn — never touches a real Resolve instance)."""
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -233,6 +234,114 @@ def test_fix_clip_accepts_single_media_pool_item_back_compat(tmp_path):
 
     assert result["ok"] is True
     assert media_pool_item["relinked_to"] is not None
+
+
+def test_fix_clip_relinks_duplicate_media_pool_items_only_once(tmp_path):
+    """AUDIT §6: popup.dedupe_out_of_tree_items collapses timeline
+    occurrences by path, so the same underlying MediaPoolItem object can
+    appear many times in the list -- ReplaceClip must fire once per
+    DISTINCT item, not once per occurrence."""
+    calls = []
+
+    def fake_replace(mpi, new_path):
+        calls.append(mpi)
+        return {"ok": True, "message": "ok"}
+
+    shared = {"id": "shared"}
+    other = {"id": "other"}
+
+    src = tmp_path / "src.mov"
+    src.write_text("bytes")
+    local_root = tmp_path / "root"
+
+    result = fixer.fix_clip(
+        str(src), "Audio/Music", str(local_root),
+        [shared, shared, shared, other],
+        copy_fn=shutil.copy2, replace_clip_fn=fake_replace,
+    )
+
+    assert result["ok"] is True
+    assert "2 item(s)" in result["message"]
+    assert len(calls) == 2
+    assert calls[0] is shared and calls[1] is other
+
+
+def test_fix_clip_copy_failure_mid_copy_leaves_no_dest_file(tmp_path):
+    """AUDIT D-5: a copy that dies partway through (disk full, SMB drop)
+    must not leave a truncated file under the final name -- or any stray
+    temp file -- in the destination dir."""
+    src = tmp_path / "src" / "big.braw"
+    src.parent.mkdir(parents=True)
+    src.write_text("original bytes")
+    local_root = tmp_path / "root"
+
+    def flaky_copy(_src, dst):
+        # Simulate a partial write before the failure -- exactly the
+        # truncated-file scenario the fix must prevent under the final name.
+        Path(dst).write_text("PARTIAL")
+        raise OSError("disk full")
+
+    result = fixer.fix_clip(
+        str(src), "B-roll/Editor Added/alex", str(local_root), {},
+        copy_fn=flaky_copy,
+    )
+
+    assert result["ok"] is False
+    assert result["copied_to"] is None
+    dest_dir = local_root / "B-roll" / "Editor Added" / "alex"
+    assert not dest_dir.exists() or list(dest_dir.iterdir()) == []
+    assert src.is_file(), "original must never be touched"
+
+
+def test_fix_clip_rejects_absolute_destination(tmp_path):
+    local_root = tmp_path / "root"
+    local_root.mkdir()
+    src = tmp_path / "clip.mov"
+    src.write_text("bytes")
+
+    other_drive = "C:\\Windows\\Temp" if os.name == "nt" else "/etc/elsewhere"
+    result = fixer.fix_clip(str(src), other_drive, str(local_root), {})
+
+    assert result["ok"] is False
+    assert "outside local_root" in result["message"]
+    assert result["copied_to"] is None
+
+
+def test_fix_clip_rejects_drive_relative_leading_slash_destination(tmp_path):
+    local_root = tmp_path / "root"
+    local_root.mkdir()
+    src = tmp_path / "clip.mov"
+    src.write_text("bytes")
+
+    result = fixer.fix_clip(str(src), "/Escaped/Dir", str(local_root), {})
+
+    assert result["ok"] is False
+    assert "outside local_root" in result["message"]
+
+
+def test_fix_clip_rejects_parent_traversal_destination(tmp_path):
+    local_root = tmp_path / "root"
+    local_root.mkdir()
+    src = tmp_path / "clip.mov"
+    src.write_text("bytes")
+
+    result = fixer.fix_clip(str(src), "../../Elsewhere", str(local_root), {})
+
+    assert result["ok"] is False
+    assert "outside local_root" in result["message"]
+
+
+def test_fix_clip_accepts_normal_relative_destination(tmp_path):
+    local_root = tmp_path / "root"
+    src = tmp_path / "clip.mov"
+    src.write_text("bytes")
+
+    result = fixer.fix_clip(
+        str(src), "Audio/Music", str(local_root), {}, replace_clip_fn=_fake_replace_clip_ok,
+    )
+
+    assert result["ok"] is True
+    assert (local_root / "Audio" / "Music" / "clip.mov").is_file()
 
 
 def test_fix_clip_reports_partial_relink_failure(tmp_path):

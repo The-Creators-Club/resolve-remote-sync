@@ -196,6 +196,73 @@ def test_admin_users_page_renders_for_admin(env):
     assert "[ DEVICES AWAITING APPROVAL ]" in page.text
 
 
+# -- htmx partials (ui.py) -- these wrap blocking TrueNAS/Syncthing calls in
+# run_in_threadpool (see the ui.py blocking-handlers finding); these tests
+# confirm that change didn't break the request/response contract.
+
+
+def test_partial_create_user_end_to_end(env):
+    client, truenas, _syncthing = env
+    as_user(client, "alex")
+    resp = client.post("/partials/admin/users/create", data={
+        "username": "newbie",
+        "ssh_pubkey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA newbie@laptop",
+        "full_name": "New Editor",
+        "password": "hunter2horse",
+    })
+    assert resp.status_code == 200
+    assert "newbie" in resp.text
+    [user] = [u for u in truenas.state["users"] if u["username"] == "newbie"]
+    assert user["sshpubkey"].startswith("ssh-ed25519")
+
+
+def test_partial_create_user_requires_admin(env):
+    client, _truenas, _syncthing = env
+    as_user(client, "jsmith")
+    resp = client.post("/partials/admin/users/create", data={
+        "username": "newbie", "ssh_pubkey": "ssh-ed25519 AAAA newbie@laptop",
+    })
+    assert resp.status_code == 403
+
+
+def test_partial_create_user_bad_key_shows_error(env):
+    client, _truenas, _syncthing = env
+    as_user(client, "alex")
+    resp = client.post("/partials/admin/users/create", data={
+        "username": "newbie", "ssh_pubkey": "not a key at all",
+    })
+    assert resp.status_code == 200
+    assert "does not look like an OpenSSH public key" in resp.text
+
+
+def test_partial_set_password_end_to_end(env):
+    client, truenas, _syncthing = env
+    truenas.state["groups"].append({"id": 111, "group": "editors", "gid": 3001})
+    truenas.state["users"].append({
+        "id": 5, "uid": 3010, "username": "jsmith", "full_name": "jsmith",
+        "home": "/mnt/tank/TheCreatorsPool/homes/jsmith", "group": {"id": 111}, "groups": [111],
+        "sshpubkey": "ssh-ed25519 AAAA", "smb": True, "locked": False, "password_disabled": False,
+    })
+    as_user(client, "alex")
+    resp = client.post("/partials/admin/users/password",
+                       data={"username": "jsmith", "password": "knownpw123"})
+    assert resp.status_code == 200
+    [user] = [u for u in truenas.state["users"] if u["username"] == "jsmith"]
+    assert user["password"] == "knownpw123"
+
+
+def test_partial_approve_device_end_to_end(env):
+    client, _truenas, syncthing = env
+    new_id = "NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1"
+    syncthing.state["pending_devices"] = {new_id: {"name": "", "address": "100.9.9.9:22000"}}
+    as_user(client, "alex")
+    resp = client.post("/partials/admin/users/approve",
+                       data={"device_id": new_id, "username": "newbie"})
+    assert resp.status_code == 200
+    added = next(d for d in syncthing.state["devices"] if d["deviceID"] == new_id)
+    assert added["name"] == "newbie"
+
+
 def test_truenas_not_configured_is_read_only(tmp_path, syncthing):
     settings = Settings(
         db_path=str(tmp_path / "noadmin.db"),

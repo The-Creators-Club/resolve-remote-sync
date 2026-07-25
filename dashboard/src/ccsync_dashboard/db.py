@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-SCHEMA_VERSION = 7
 
 # Caps + retention for the media-presence tables.
 EDITOR_MEDIA_CAP = 2000          # per-file disk-manifest rows per (editor, machine, project)
@@ -152,6 +151,15 @@ CREATE TABLE IF NOT EXISTS companion_packages (
 );
 """
 
+# v8: per-machine reported platform, so the fleet grid's "out of date" flag
+# (build_editors_view) can compare a machine's companion_version against the
+# CURRENT PACKAGE FOR THAT MACHINE'S PLATFORM instead of always "windows"
+# (see X-5) -- a macOS companion must never be compared against the Windows
+# release.
+SCHEMA_V8 = """
+ALTER TABLE machine_state ADD COLUMN platform TEXT;
+"""
+
 # v3: fix-destination project-root visibility/override. The companion
 # auto-detects which project the editor is working in (Resolve project name
 # matched against the tree) and reports it; an editor/admin can override it
@@ -227,25 +235,45 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def migrate(conn: sqlite3.Connection) -> None:
+# Ordered migration steps: (target user_version, script). `script=None` means
+# "apply the base schema.sql" (the v0 -> v1 bootstrap). Each entry's
+# user_version is committed IMMEDIATELY after that entry's script runs -- not
+# once at the end -- so an upgrade interrupted between two steps (a
+# `docker restart` mid-migration is routine) resumes on the next start
+# instead of re-running an already-applied `ALTER TABLE ... ADD COLUMN` and
+# crash-looping on `duplicate column name`. See the db.py migration finding.
+_MIGRATION_STEPS: list[tuple[int, str | None]] = [
+    (1, None),
+    (2, SCHEMA_V2),
+    (3, SCHEMA_V3),
+    (4, SCHEMA_V4),
+    (5, SCHEMA_V5),
+    (6, SCHEMA_V6),
+    (7, SCHEMA_V7),
+    (8, SCHEMA_V8),
+]
+
+SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
+
+
+def migrate(
+    conn: sqlite3.Connection, steps: list[tuple[int, str | None]] | None = None
+) -> None:
+    """Apply schema migrations in order, one step at a time. `steps` is
+    overridable (tests only) so the per-step-commit behaviour can be
+    exercised without depending on the real schema."""
+    steps = _MIGRATION_STEPS if steps is None else steps
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version < 1:
-        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-    if version < 2:
-        conn.executescript(SCHEMA_V2)
-    if version < 3:
-        conn.executescript(SCHEMA_V3)
-    if version < 4:
-        conn.executescript(SCHEMA_V4)
-    if version < 5:
-        conn.executescript(SCHEMA_V5)
-    if version < 6:
-        conn.executescript(SCHEMA_V6)
-    if version < 7:
-        conn.executescript(SCHEMA_V7)
-    if version < SCHEMA_VERSION:
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    for target_version, script in steps:
+        if version >= target_version:
+            continue
+        if script is None:
+            conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        else:
+            conn.executescript(script)
+        conn.execute(f"PRAGMA user_version = {target_version}")
         conn.commit()
+        version = target_version
 
 
 def resolve_editor_username(device_name: str) -> str | None:
@@ -676,19 +704,30 @@ def upsert_machine_state(
     conn: sqlite3.Connection, editor: str, machine: str,
     detected_project_root: str | None, now: str,
     resolve_project: str | None = None, verified: bool = False,
+    platform: str | None = None,
 ) -> None:
     conn.execute(
         """INSERT INTO machine_state
              (editor_username, machine, detected_project_root, reported_at,
-              resolve_project, verified)
-           VALUES (?, ?, ?, ?, ?, ?)
+              resolve_project, verified, platform)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(editor_username, machine) DO UPDATE SET
              detected_project_root=excluded.detected_project_root,
              reported_at=excluded.reported_at,
              resolve_project=excluded.resolve_project,
-             verified=excluded.verified""",
-        (editor, machine, detected_project_root, now, resolve_project, int(verified)),
+             verified=excluded.verified,
+             platform=COALESCE(excluded.platform, machine_state.platform)""",
+        (editor, machine, detected_project_root, now, resolve_project, int(verified), platform),
     )
+
+
+def fetch_platform_map(conn: sqlite3.Connection) -> dict[tuple[str, str], str | None]:
+    """(editor, machine) -> last-reported platform, or None if never reported
+    (build_editors_view falls back to 'windows' for those -- see X-5)."""
+    return {
+        (r["editor_username"], r["machine"]): r["platform"]
+        for r in conn.execute("SELECT editor_username, machine, platform FROM machine_state")
+    }
 
 
 def fetch_verified_map(conn: sqlite3.Connection) -> dict[tuple[str, str], bool]:
@@ -845,6 +884,14 @@ def prune(conn: sqlite3.Connection, now: str) -> None:
     )
     conn.execute(
         "DELETE FROM lane_report_history WHERE ts < ?", (cutoff(days=LANE_HISTORY_MAX_AGE_DAYS),)
+    )
+    # A machine that stopped reporting entirely (uninstalled, retired, or a
+    # single bad report with a runaway lane count -- see SEC-4) must not keep
+    # its lane_report_current rows forever; there was previously no retention
+    # on this table at all.
+    conn.execute(
+        "DELETE FROM lane_report_current WHERE received_at < ?",
+        (cutoff(days=LANE_HISTORY_MAX_AGE_DAYS),),
     )
     conn.execute(
         "DELETE FROM missing_files WHERE refreshed_at < ?",

@@ -8,6 +8,7 @@ own token-crafting helper for a valid, non-expired identity."""
 
 from __future__ import annotations
 
+import base64
 import time
 from typing import Any
 
@@ -15,9 +16,11 @@ from ccsync_companion.app import CompanionApp
 
 
 def _token(username: str = "alex", ttl: int = 3600) -> str:
-    # Same opaque shape identity.py's IdentityManager expects: it never
-    # verifies the signature locally, only reads field[1]/field[2].
-    return f"v1.{username}.{int(time.time()) + ttl}.deadbeef"
+    # Same v2 identity shape identity.py's parse_token expects (it never
+    # verifies the signature locally, only the format + expiry field) --
+    # mirrors test_identity.py's helper.
+    user_b64 = base64.urlsafe_b64encode(username.encode("utf-8")).rstrip(b"=").decode("ascii")
+    return f"v2.identity.{user_b64}.{int(time.time()) + ttl}.deadbeef"
 
 
 def _cfg(tmp_path, **overrides) -> dict[str, Any]:

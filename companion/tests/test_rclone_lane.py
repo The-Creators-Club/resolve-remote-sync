@@ -10,6 +10,8 @@ this module's fake is modeled on).
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -273,6 +275,162 @@ def test_popen_factory_alone_is_not_legacy_even_with_default_subprocess_run(tmp_
     lane = _make_lane(tmp_path, popen_factory=factory)
     assert lane._legacy_run is False
     assert lane.subprocess_run is subprocess.run
+
+
+# -- S-6: UTF-8 decoding + CREATE_NO_WINDOW + reader-thread crash safety -----
+
+
+def test_run_popen_passes_utf8_replace_decoding(tmp_path):
+    """rclone logs UTF-8; the default cp1252 text=True decoding raises
+    UnicodeDecodeError on a non-ASCII filename, which (pre-fix) killed the
+    reader thread with no try/except and deadlocked proc.wait() forever."""
+    captured: dict = {}
+
+    def factory(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeProc([], 0)
+
+    lane = _make_lane(tmp_path, popen_factory=factory)
+    lane._run_popen(["rclone"])
+
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+    assert "text" not in captured
+
+
+def test_run_popen_sets_create_no_window_flag_matching_platform(tmp_path):
+    import sys
+
+    captured: dict = {}
+
+    def factory(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeProc([], 0)
+
+    lane = _make_lane(tmp_path, popen_factory=factory)
+    lane._run_popen(["rclone"])
+
+    if sys.platform == "win32":
+        assert captured["creationflags"] == subprocess.CREATE_NO_WINDOW
+    else:
+        assert captured["creationflags"] == 0
+
+
+class _FakeProcRaisesMidStream:
+    """Simulates a decode/IO error surfacing partway through iterating
+    proc.stderr -- the exact shape a UnicodeDecodeError from a rogue byte
+    sequence would take even with errors="replace" (e.g. a genuine pipe
+    read failure)."""
+
+    def __init__(self, returncode: int = 0) -> None:
+        self._returncode = returncode
+        self.killed = False
+
+    @property
+    def stderr(self):
+        def _gen():
+            yield '{"level":"info","msg":"rclone starting"}\n'
+            raise OSError("simulated pipe read failure")
+
+        return _gen()
+
+    def wait(self) -> int:
+        return self._returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def test_run_popen_reader_crash_kills_proc_instead_of_deadlocking(tmp_path):
+    fake_proc = _FakeProcRaisesMidStream()
+
+    def factory(cmd, **kwargs):
+        return fake_proc
+
+    lane = _make_lane(tmp_path, popen_factory=factory)
+    # Must return promptly (not hang) and must have killed the process so
+    # proc.wait() -- which already returned via the fixed returncode here,
+    # but in the real deadlock scenario would otherwise never return --
+    # cannot stall forever with nobody draining the pipe.
+    returncode, _text = lane._run_popen(["rclone"])
+
+    assert fake_proc.killed is True
+    assert returncode == 0
+
+
+# -- thread-leak fix: sign-out/sign-in must not leak the periodic thread ----
+
+
+def test_start_is_noop_when_periodic_thread_still_alive(tmp_path):
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+
+    class _StubAliveThread:
+        def is_alive(self) -> bool:
+            return True
+
+    stub = _StubAliveThread()
+    lane._periodic_thread = stub
+    lane._stop_event.set()  # simulate a pending stop() the old thread hasn't observed yet
+
+    lane.start()
+
+    # No new thread was spawned, and _stop_event was left alone -- clearing
+    # it here would un-stick the still-alive thread's own wait() and leak
+    # it forever once a real second thread started looping too.
+    assert lane._periodic_thread is stub
+    assert lane._stop_event.is_set()
+
+
+def test_start_spawns_fresh_thread_when_no_thread_alive(tmp_path):
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    lane.scan_interval = 60  # avoid a second real rclone run firing mid-test
+
+    lane.start()
+    try:
+        assert lane._periodic_thread is not None
+        assert lane._periodic_thread.is_alive()
+        assert not lane._stop_event.is_set()
+    finally:
+        lane.stop()
+
+
+def test_stop_joins_periodic_thread_with_timeout(tmp_path):
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    finished = threading.Event()
+
+    def worker():
+        time.sleep(0.05)
+        finished.set()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    lane._periodic_thread = thread
+    thread.start()
+
+    lane.stop()
+
+    assert finished.is_set()
+    assert not thread.is_alive()
+
+
+def test_stop_then_start_does_not_leak_the_old_thread(tmp_path):
+    """The exact sequence from the audit: sign_out() (stop) followed
+    quickly by sign_in() (start) must not end up with two live periodic
+    threads, one of them orphaned forever."""
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    lane.scan_interval = 0.01
+
+    lane.start()
+    first_thread = lane._periodic_thread
+    lane.stop()
+    assert not first_thread.is_alive()
+
+    lane.start()
+    try:
+        second_thread = lane._periodic_thread
+        assert second_thread is not first_thread
+        assert second_thread.is_alive()
+    finally:
+        lane.stop()
 
 
 # -- clone_directory_tree (empty-dir structure cloning) ----------------------

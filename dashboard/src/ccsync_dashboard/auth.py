@@ -8,12 +8,24 @@ does verify an editor's TrueNAS password is SMB session setup on :445 (every
 editor is an SMB user by construction -- setup_editor_account.py), so that is
 the primary method. `DASH_AUTH_METHOD` keeps the seam pluggable.
 
-Sessions: `v1.<user>.<expires_epoch>.<hmac_sha256 hex>` in an HttpOnly cookie,
-stdlib only. Secret comes from DASH_SESSION_SECRET and must be stable across
-redeploys (the install script requires it) or everyone gets logged out.
+Tokens: `v2.<purpose>.<user_b64url>.<expires_epoch>.<hmac_sha256 hex>` in an
+HttpOnly cookie (session) or the X-CCSync-Identity header (identity),
+stdlib only. `purpose` is "session" or "identity" -- read_session_cookie
+only ever accepts "session" and read_identity_token only ever accepts
+"identity", so one can never be replayed as the other (see SEC-1). The
+username is base64url-encoded (no padding) so a dot in a username (a valid
+character per db.py's `_USERNAME_RE`) can never be confused with a field
+separator (see S-9). Secret comes from DASH_SESSION_SECRET and must be
+stable across redeploys (the install script requires it) or everyone gets
+logged out.
+
+v1 tokens (pre-2026-07-25) are rejected outright -- this is a hard cutover,
+not a compatibility shim. Every editor and every companion re-authenticates
+once after a deploy of this change.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import logging
@@ -31,6 +43,10 @@ SESSION_TTL_SECONDS = 7 * 24 * 3600
 IDENTITY_TTL_SECONDS = 30 * 24 * 3600   # companion machine-identity token
 LOGIN_FAILURE_LIMIT = 5          # per username
 LOGIN_FAILURE_WINDOW = 60.0      # seconds
+
+_TOKEN_VERSION = "v2"
+PURPOSE_SESSION = "session"
+PURPOSE_IDENTITY = "identity"
 
 # In-process failure tracking -- valid because the app runs a single worker.
 _failures: dict[str, list[float]] = {}
@@ -73,10 +89,23 @@ def verify_credentials(settings: Settings, username: str, password: str) -> bool
     return False
 
 
+def _evict_expired_failures(now: float) -> None:
+    """Sweep every username's failure list, dropping expired timestamps and
+    the whole entry once it's empty. Called on every login attempt (cheap at
+    fleet scale) so failed logins against throwaway/random usernames don't
+    grow the dict forever (see SEC-12)."""
+    for username in list(_failures.keys()):
+        recent = [t for t in _failures[username] if now - t < LOGIN_FAILURE_WINDOW]
+        if recent:
+            _failures[username] = recent
+        else:
+            _failures.pop(username, None)
+
+
 def login_throttled(username: str, now: float | None = None) -> bool:
     now = time.monotonic() if now is None else now
-    recent = [t for t in _failures.get(username, []) if now - t < LOGIN_FAILURE_WINDOW]
-    _failures[username] = recent
+    _evict_expired_failures(now)
+    recent = _failures.get(username, [])
     return len(recent) >= LOGIN_FAILURE_LIMIT
 
 
@@ -94,29 +123,53 @@ def _sign(secret: str, payload: str) -> str:
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 
+def _b64u_encode(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+def _b64u_decode(value: str) -> str | None:
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except Exception:
+        return None
+
+
+def _make_token(secret: str, purpose: str, username: str, now: float | None = None,
+                ttl: int = SESSION_TTL_SECONDS) -> str:
+    expires = int((time.time() if now is None else now) + ttl)
+    user_b64 = _b64u_encode(username)
+    payload = f"{_TOKEN_VERSION}.{purpose}.{user_b64}.{expires}"
+    return f"{payload}.{_sign(secret, payload)}"
+
+
 def make_session_cookie(secret: str, username: str, now: float | None = None,
                         ttl: int = SESSION_TTL_SECONDS) -> str:
-    expires = int((time.time() if now is None else now) + ttl)
-    payload = f"v1.{username}.{expires}"
-    return f"{payload}.{_sign(secret, payload)}"
+    return _make_token(secret, PURPOSE_SESSION, username, now=now, ttl=ttl)
 
 
 def make_identity_token(secret: str, username: str, now: float | None = None) -> str:
     """Long-lived signed token the companion stores to prove which editor's
-    machine it is. Same verifiable format as the session cookie, so
-    read_session_cookie validates it too."""
-    return make_session_cookie(secret, username, now=now, ttl=IDENTITY_TTL_SECONDS)
+    machine it is. Same HMAC scheme as the session cookie but signed with
+    purpose="identity" -- read_session_cookie only accepts purpose="session"
+    and read_identity_token only accepts purpose="identity", so this token
+    can never be replayed as a browser session (see SEC-1)."""
+    return _make_token(secret, PURPOSE_IDENTITY, username, now=now, ttl=IDENTITY_TTL_SECONDS)
 
 
-def read_session_cookie(secret: str, cookie: str | None, now: float | None = None) -> str | None:
-    """Returns the username, or None for missing/expired/tampered cookies."""
-    if not cookie or not secret:
+def _read_token(secret: str, token: str | None, purpose: str, now: float | None = None) -> str | None:
+    """Returns the username, or None for missing/expired/tampered/wrong-purpose
+    tokens. v1 tokens (no purpose claim, raw username) are rejected outright --
+    hard cutover, see module docstring."""
+    if not token or not secret:
         return None
-    parts = cookie.split(".")
-    if len(parts) != 4 or parts[0] != "v1":
+    parts = token.split(".")
+    if len(parts) != 5:
         return None
-    version, username, expires_s, signature = parts
-    payload = f"{version}.{username}.{expires_s}"
+    version, tok_purpose, user_b64, expires_s, signature = parts
+    if version != _TOKEN_VERSION or tok_purpose != purpose:
+        return None
+    payload = f"{version}.{tok_purpose}.{user_b64}.{expires_s}"
     if not hmac.compare_digest(signature, _sign(secret, payload)):
         return None
     try:
@@ -124,7 +177,22 @@ def read_session_cookie(secret: str, cookie: str | None, now: float | None = Non
             return None
     except ValueError:
         return None
+    username = _b64u_decode(user_b64)
+    if not username:
+        return None
     return username
+
+
+def read_session_cookie(secret: str, cookie: str | None, now: float | None = None) -> str | None:
+    """Returns the username, or None for missing/expired/tampered cookies --
+    or a cookie that is actually a valid IDENTITY token (see SEC-1)."""
+    return _read_token(secret, cookie, PURPOSE_SESSION, now=now)
+
+
+def read_identity_token(secret: str, token: str | None, now: float | None = None) -> str | None:
+    """Returns the username for a valid X-CCSync-Identity token, or None --
+    including for a token that is actually a valid SESSION cookie."""
+    return _read_token(secret, token, PURPOSE_IDENTITY, now=now)
 
 
 # ------------------------------------------------------------ fastapi glue

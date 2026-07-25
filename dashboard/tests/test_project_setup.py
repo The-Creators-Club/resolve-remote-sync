@@ -181,6 +181,29 @@ def test_create_rejects_bad_input(env):
                        json=create_body(parent_rel="2026/Nope")).status_code == 422  # parent absent
 
 
+def test_create_rejects_control_characters(env):
+    """A NUL/control character used to reach Path.resolve(), which raises
+    ValueError (not OSError) -- escaping the ProjectSetupError -> 422
+    handling and surfacing a 500 traceback instead."""
+    client, _conn, projects_dir = env
+    (projects_dir / "2026" / "Creator Profiles").mkdir(parents=True)
+    as_user(client, "jsmith")
+    resp = client.post("/api/v1/projects", json=create_body(name="a\x00b"))
+    assert resp.status_code == 422
+    resp = client.post("/api/v1/projects", json=create_body(parent_rel="a\x01b"))
+    assert resp.status_code == 422
+
+
+def test_validate_tree_part_rejects_control_characters_directly():
+    from ccsync_dashboard.api import ProjectSetupError, _validate_tree_part
+
+    with pytest.raises(ProjectSetupError):
+        _validate_tree_part("a\x00b", "name")
+    with pytest.raises(ProjectSetupError):
+        _validate_tree_part("a\x1fb", "name")
+    assert _validate_tree_part("normal name", "name") == "normal name"
+
+
 def test_create_at_any_depth_and_at_root(env):
     client, _conn, projects_dir = env
     (projects_dir / "2026" / "CCT" / "Creator Profiles").mkdir(parents=True)

@@ -114,11 +114,42 @@ def test_verify_endpoint_returns_identity_token(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True and body["username"] == "jsmith"
-    # the token validates as a session/identity token for that user
-    assert auth.read_session_cookie(SECRET, body["token"]) == "jsmith"
+    # the token validates as an IDENTITY token for that user...
+    assert auth.read_identity_token(SECRET, body["token"]) == "jsmith"
+    # ...but NOT as a session cookie (see SEC-1: purpose claims are distinct).
+    assert auth.read_session_cookie(SECRET, body["token"]) is None
     # onboarding smoothness: the report token comes back so the installer
     # needs no extra secret from the editor
     assert "report_token" in body
+
+
+def test_session_cookie_not_accepted_as_identity_token():
+    cookie = auth.make_session_cookie(SECRET, "jsmith")
+    assert auth.read_session_cookie(SECRET, cookie) == "jsmith"
+    assert auth.read_identity_token(SECRET, cookie) is None
+
+
+def test_identity_token_not_accepted_as_session_cookie():
+    token = auth.make_identity_token(SECRET, "jsmith")
+    assert auth.read_identity_token(SECRET, token) == "jsmith"
+    assert auth.read_session_cookie(SECRET, token) is None
+
+
+def test_dotted_username_round_trips_through_both_token_kinds():
+    # A dot is a valid TrueNAS-style username character (db.py's
+    # _USERNAME_RE) -- it must never break the token's field parsing (S-9).
+    cookie = auth.make_session_cookie(SECRET, "john.doe")
+    assert auth.read_session_cookie(SECRET, cookie) == "john.doe"
+    token = auth.make_identity_token(SECRET, "john.doe")
+    assert auth.read_identity_token(SECRET, token) == "john.doe"
+
+
+def test_v1_token_format_rejected_everywhere():
+    # Hard cutover (see SEC-1/S-9 module docstring): a pre-2026-07-25 v1
+    # token is never valid, either as a session cookie or an identity token.
+    v1 = "v1.jsmith.9999999999.deadbeef"
+    assert auth.read_session_cookie(SECRET, v1) is None
+    assert auth.read_identity_token(SECRET, v1) is None
 
 
 def test_identity_token_longer_ttl_than_session():
@@ -126,8 +157,21 @@ def test_identity_token_longer_ttl_than_session():
     now = _t.time()
     sess = auth.make_session_cookie(SECRET, "jsmith", now=now)
     ident = auth.make_identity_token(SECRET, "jsmith", now=now)
-    # identity expiry field is further out
-    assert int(ident.split(".")[2]) > int(sess.split(".")[2])
+    # identity expiry field (index 3: v2.<purpose>.<user_b64>.<exp>.<sig>) is
+    # further out than the session's.
+    assert int(ident.split(".")[3]) > int(sess.split(".")[3])
+
+
+def test_login_throttle_evicts_expired_entries():
+    # SEC-12: a spray of failed logins against throwaway/random usernames
+    # must not grow the in-process dict forever -- the next call to
+    # login_throttled sweeps every expired/empty entry, not just the queried
+    # username's.
+    for i in range(50):
+        auth.record_login_failure(f"spray{i}", now=0.0)
+    assert len(auth._failures) == 50
+    assert auth.login_throttled("jsmith", now=1000.0) is False
+    assert len(auth._failures) == 0  # all 50 stale entries evicted by the sweep
 
 
 def test_report_marks_machine_verified_with_identity(tmp_path):
@@ -146,10 +190,22 @@ def test_report_marks_machine_verified_with_identity(tmp_path):
         c.post("/api/v1/report", json=payload,
                headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": token})
         assert dbmod.fetch_verified_map(conn) == {("jsmith", "PC"): True}
-        # a token for a DIFFERENT user does not verify jsmith's report
+        # a token for a DIFFERENT user does not silently pass through as
+        # unverified -- SEC-5: it's an outright spoofing attempt, rejected
+        # before any write, so jsmith's prior verified state is unchanged.
         other = auth.make_identity_token(SECRET, "someoneelse")
-        c.post("/api/v1/report", json=payload,
-               headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": other})
+        resp = c.post("/api/v1/report", json=payload,
+                      headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": other})
+        assert resp.status_code == 401
+        assert dbmod.fetch_verified_map(conn) == {("jsmith", "PC"): True}
+        # a session cookie in the identity header (not an identity token) is
+        # simply invalid -- treated the same as absent (id_user is None, so
+        # it's not a spoofing rejection), which means it does NOT verify
+        # jsmith's report either.
+        session_cookie = auth.make_session_cookie(SECRET, "someoneelse")
+        resp = c.post("/api/v1/report", json=payload,
+                      headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": session_cookie})
+        assert resp.status_code == 200
         assert dbmod.fetch_verified_map(conn) == {("jsmith", "PC"): False}
         conn.close()
 
@@ -172,3 +228,37 @@ def test_login_page_renders(client):
     assert resp.status_code == 303 and auth.COOKIE_NAME in resp.cookies
     bad = client.post("/login", data={"username": "jsmith", "password": "nope"})
     assert "bad username or password" in bad.text
+
+
+def test_login_rejects_oversized_body(client):
+    # /login is unauthenticated -- an unbounded body read here would be a
+    # single-worker OOM open to anyone on the tailnet (see the unbounded
+    # /login body finding). Declared-too-big (Content-Length) is rejected
+    # before the body is even read.
+    from ccsync_dashboard.ui import MAX_LOGIN_BODY_BYTES
+
+    huge = "username=" + ("a" * (MAX_LOGIN_BODY_BYTES + 1))
+    resp = client.post(
+        "/login", content=huge.encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.status_code == 413
+
+
+def test_login_rejects_too_many_form_fields(client):
+    # max_num_fields caps a field-count DoS via parse_qs.
+    from ccsync_dashboard.ui import MAX_FORM_FIELDS
+
+    body = "&".join(f"f{i}=x" for i in range(MAX_FORM_FIELDS + 5))
+    resp = client.post(
+        "/login", content=body.encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.status_code == 400
+
+
+def test_login_accepts_normal_sized_body(client):
+    # Sanity: the size/field guards must not break a normal login.
+    resp = client.post("/login", data={"username": "jsmith", "password": "pw1", "next": "/"},
+                       follow_redirects=False)
+    assert resp.status_code == 303

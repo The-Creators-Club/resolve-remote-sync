@@ -7,13 +7,14 @@
 Steps (each idempotent, one line printed per action):
 
   1. Create the host dirs over SSH (sudo):
-       <host-root>/app    -- the repo's dashboard/ tree (replaced on re-run)
-       <host-root>/data   -- SQLite DB + venv (NEVER touched on re-run)
-     both chowned 3000:3001 (broll:editors), mode 770.
-  2. Upload the local dashboard/ tree via SFTP to a /tmp staging dir, then
-     sudo-move it into <host-root>/app (SFTP runs as TRUENAS_USER, which
-     cannot write into the 770 broll:editors dir directly). Excludes .venv,
-     __pycache__, *.pyc.
+       <host-root>/app    -- the repo's dashboard/ tree (replaced on re-run);
+                             root:root, world-readable, never group-writable
+                             (mounted :ro in the container -- AUDIT C-1)
+       <host-root>/data   -- SQLite DB + venv (NEVER touched on re-run);
+                             3000:3001 (broll:editors), mode 770.
+  2. Upload the local dashboard/ tree via SFTP to a fresh mktemp staging dir,
+     verify the staged file count, then sudo-copy it into <host-root>/app.
+     Excludes .venv, __pycache__, *.pyc.
   3. If the app is not yet installed: POST /api/v2.0/app with
        {"custom_app": true, "app_name": "ccsync-dashboard",
         "custom_compose_config": {...}}   (compose dict mirrors
@@ -54,9 +55,13 @@ from common import (
 APP_NAME = "ccsync-dashboard"
 DEFAULT_HOST_ROOT = "/mnt/tank/apps/ccsync-dashboard"
 DEFAULT_SYNCTHING_GUI_URL = "http://192.168.0.102:8384"
-STAGING_DIR = "/tmp/ccsync-dashboard-upload"
 EXCLUDE_DIRS = {".venv", "__pycache__", ".pytest_cache"}
 LOCAL_DASHBOARD_DIR = Path(__file__).resolve().parents[1] / "dashboard"
+# Host interfaces the dashboard binds to (mirrors dashboard/deploy/compose.yaml
+# -- keep in sync): LAN for the base rig, tailnet for remote editors. Never
+# 0.0.0.0 -- a new NAS interface must not silently expose the dashboard.
+LAN_BIND_IP = "192.168.0.102"
+TAILNET_BIND_IP = "100.71.216.3"
 
 
 def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token: str,
@@ -85,9 +90,15 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     "TRUENAS_USER": truenas_user,
                     "TRUENAS_PW": truenas_pw,
                 },
-                "ports": [f"{port}:{port}"],
+                "ports": [
+                    f"{LAN_BIND_IP}:{port}:{port}",
+                    f"{TAILNET_BIND_IP}:{port}:{port}",
+                ],
                 "volumes": [
-                    f"{host_root}/app:/app",
+                    # ro: the command: line executes /app/deploy/run.sh, so a
+                    # writable /app is code execution in a container holding
+                    # TRUENAS_PW (AUDIT C-1).
+                    f"{host_root}/app:/app:ro",
                     f"{host_root}/data:/data",
                     # rw for the /project-setup create flow; container runs
                     # as broll:editors, matching setup_tree.py's ownership.
@@ -108,11 +119,26 @@ def iter_local_files():
             yield path, rel.as_posix()
 
 
-def upload_tree(dry_run: bool) -> int:
+def make_staging_dir(dry_run: bool) -> str:
+    """Fresh unpredictable staging dir on the NAS (mode 700, owned by the SSH
+    user). A fixed /tmp path could be pre-created world-writable or symlinked
+    by any local account and later cp -a'd into /app as root (AUDIT SEC-11).
+    """
+    if dry_run:
+        return "/tmp/ccsync-dashboard-upload.dryrun"
+    rc, out, err = run_ssh("mktemp -d /tmp/ccsync-dashboard-upload.XXXXXX")
+    staging = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    if rc != 0 or not staging.startswith("/tmp/ccsync-dashboard-upload."):
+        print(f"FAILED to create staging dir: {err or out}", file=sys.stderr)
+        sys.exit(1)
+    return staging
+
+
+def upload_tree(staging_dir: str, dry_run: bool) -> int:
     files = list(iter_local_files())
     if dry_run:
         print(f"[dry-run] would SFTP {len(files)} files from {LOCAL_DASHBOARD_DIR} "
-              f"to {STAGING_DIR} on the NAS")
+              f"to {staging_dir} on the NAS")
         return len(files)
 
     import paramiko
@@ -126,7 +152,7 @@ def upload_tree(dry_run: bool) -> int:
         sftp = client.open_sftp()
         made: set[str] = set()
         for local, rel in files:
-            remote = posixpath.join(STAGING_DIR, rel)
+            remote = posixpath.join(staging_dir, rel)
             parent = posixpath.dirname(remote)
             parts = parent.split("/")
             for i in range(2, len(parts) + 1):
@@ -141,7 +167,7 @@ def upload_tree(dry_run: bool) -> int:
         sftp.close()
     finally:
         client.close()
-    print(f"uploaded {len(files)} files to staging {STAGING_DIR}")
+    print(f"uploaded {len(files)} files to staging {staging_dir}")
     return len(files)
 
 
@@ -193,13 +219,19 @@ def main():
 
     root = args.host_root.rstrip("/")
 
-    # Step 1: host dirs. data/ is create-only; app/ contents get replaced later.
+    # Step 1: host dirs. data/ is create-only and stays 3000:3001 770; app/
+    # is root-owned and world-readable but NOT group-writable -- editors have
+    # shell accounts in group 3001, and a group-writable code dir behind the
+    # container's `command: run.sh` was an editor->NAS-admin escalation
+    # (AUDIT C-1). The container only ever READS /app (mounted :ro).
     rc, _, err = run_ssh(
         'echo "$SUDO_PW" | sudo -S sh -c '
         + shell_quote(
             f"mkdir -p {shell_quote(root + '/app')} {shell_quote(root + '/data')} && "
-            f"chown -R 3000:3001 {shell_quote(root)} && chmod 770 "
-            f"{shell_quote(root)} {shell_quote(root + '/app')} {shell_quote(root + '/data')}"
+            f"chown root:root {shell_quote(root)} {shell_quote(root + '/app')} && "
+            f"chmod 755 {shell_quote(root)} {shell_quote(root + '/app')} && "
+            f"chown -R 3000:3001 {shell_quote(root + '/data')} && "
+            f"chmod 770 {shell_quote(root + '/data')}"
         ),
         dry_run=args.dry_run,
     )
@@ -208,22 +240,40 @@ def main():
         return 1
     print(f"host dirs ready: {root}/app, {root}/data")
 
-    # Step 2: upload code to staging, sudo-copy into place (data/ untouched).
-    # The app dir is bind-mounted into the running container, so its INODE
-    # must be preserved: empty it and copy contents in, never rm -rf + mv the
-    # directory itself (that orphans the container's mount -- seen live
-    # 2026-07-24 as an empty /app inside the container).
-    upload_tree(args.dry_run)
+    # Step 2: upload code to a fresh staging dir, verify the staged copy is
+    # COMPLETE, then sudo-copy into place (data/ untouched).
+    # Two constraints shape this:
+    #   - The app dir is bind-mounted into the running container, so its
+    #     INODE must be preserved: empty it and copy contents in, never
+    #     rm -rf + mv the directory itself (that orphans the container's
+    #     mount -- seen live 2026-07-24 as an empty /app in the container).
+    #     That rules out a build-aside-and-swap, so instead the staged tree's
+    #     file count is checked against what we uploaded BEFORE the
+    #     destructive empty step (AUDIT D-7: a partial SFTP upload must not
+    #     leave /app gutted).
+    #   - Staging comes from mktemp (see make_staging_dir) so no other local
+    #     account can pre-plant content that ends up root-copied into /app.
+    staging = make_staging_dir(args.dry_run)
+    expected = upload_tree(staging, args.dry_run)
     app_dir = shell_quote(root + "/app")
+    staged_q = shell_quote(staging)
+    rc, out, err = run_ssh(f"find {staged_q} -type f | wc -l", dry_run=args.dry_run)
+    if not args.dry_run:
+        staged_count = int(out.strip().splitlines()[-1]) if rc == 0 and out.strip() else -1
+        if staged_count != expected:
+            print(f"FAILED: staging has {staged_count} files, expected {expected} -- "
+                  f"not touching {root}/app (staging left at {staging} for inspection)",
+                  file=sys.stderr)
+            return 1
     rc, _, err = run_ssh(
         'echo "$SUDO_PW" | sudo -S sh -c '
         + shell_quote(
             f"mkdir -p {app_dir} && "
             f"find {app_dir} -mindepth 1 -delete && "
-            f"cp -a {shell_quote(STAGING_DIR)}/. {app_dir}/ && "
-            f"rm -rf {shell_quote(STAGING_DIR)} && "
-            f"chown -R 3000:3001 {app_dir} && "
-            f"chmod -R u+rwX,g+rwX,o-rwx {app_dir}"
+            f"cp -a {staged_q}/. {app_dir}/ && "
+            f"rm -rf {staged_q} && "
+            f"chown -R root:root {app_dir} && "
+            f"chmod -R u+rwX,go+rX,go-w {app_dir}"
         ),
         dry_run=args.dry_run,
     )

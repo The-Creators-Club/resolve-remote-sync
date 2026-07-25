@@ -403,6 +403,95 @@ def test_stop_unpauses_selected_folders():
     assert ("s-a", False) in admin.pause_calls
 
 
+def test_stop_during_lane_c_pause_sweep_never_leaves_a_folder_stuck_paused():
+    """Regression (AUDIT §4): stop()/pause() used to run _unpause_all()
+    BEFORE the worker had actually stopped, so an in-flight _lane_c_turn
+    sweep (pausing every OTHER selected project) could re-pause a folder
+    right after the unpause-everything sweep already ran -- leaving it
+    stuck paused until the next launch. Fires stop() from inside the
+    sweep loop itself (mid-iteration) and asserts every folder ends up
+    unpaused, with the sweep never reaching a later folder."""
+    items = [
+        _item("s-a", "2026/FF5/Alpha", 0),
+        _item("s-b", "2026/FF5/Bravo", 1),
+        _item("s-c", "2026/FF5/Charlie", 2),
+    ]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    stopped_thread: dict[str, threading.Thread] = {}
+    orig_pause = admin.set_folder_paused
+
+    def hooked(folder_id, paused):
+        orig_pause(folder_id, paused)
+        # Fire exactly while Alpha's lane-C sweep is mid-loop pausing
+        # Bravo -- setting the stop event here is synchronous on the
+        # WORKER's own thread, so the sweep's next iteration (Charlie) is
+        # guaranteed to observe it rather than racing a separate thread.
+        if folder_id == "s-b" and paused and "t" not in stopped_thread:
+            seq._stop_event.set()
+            t = threading.Thread(target=seq.stop, daemon=True)
+            t.start()
+            stopped_thread["t"] = t
+
+    admin.set_folder_paused = hooked
+
+    seq.start()
+    assert _wait_until(lambda: "t" in stopped_thread, timeout=3.0)
+    stopped_thread["t"].join(timeout=5.0)
+
+    # The sweep must have bailed before ever touching Charlie.
+    assert ("s-c", True) not in admin.pause_calls
+
+    # Nothing selected may be left stuck paused -- the LAST recorded call
+    # for every slug that was touched must be an unpause.
+    for slug in ("s-a", "s-b", "s-c"):
+        calls_for = [p for s, p in admin.pause_calls if s == slug]
+        if calls_for:
+            assert calls_for[-1] is False, f"{slug} left paused: {calls_for}"
+
+
+# -- invalid selection items (AUDIT D-4) -----------------------------------------------------
+
+
+def test_process_project_skips_item_with_null_rel_path():
+    """A dashboard row whose rel_path is None (e.g. an orphaned selection --
+    LEFT JOIN yields NULL) must never reach the path join, where
+    str(None) == "None" would build "Projects/None" and move a real
+    directory there."""
+    items = [{"slug": "s-a", "rel_path": None, "position": 0, "active": True}]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    time.sleep(0.2)
+    seq.stop()
+
+    assert lane_a.calls == []
+    assert lane_b.calls == []
+
+
+def test_known_rels_excludes_invalid_or_inactive_items():
+    items = [
+        _item("s-a", "2026/FF5/Alpha", 0),
+        {"slug": "s-b", "rel_path": None, "position": 1, "active": True},
+        {"slug": "s-c", "rel_path": "2026/FF5/Charlie", "position": 2, "active": False},
+        {"slug": "s-d", "rel_path": 123, "position": 3, "active": True},
+    ]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    assert _wait_until(lambda: seq.known_rels() != [])
+    seq.stop()
+
+    assert seq.known_rels() == ["2026/FF5/Alpha"]
+    assert "Projects/2026/FF5/Charlie" not in [c for c in lane_a.calls]
+
+
 # -- fault isolation -----------------------------------------------------
 
 

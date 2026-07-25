@@ -14,11 +14,16 @@ Dashboard contract (already built server-side; this module only calls it):
       200 -> {"ok": true, "username": "<lowercased>", "token": "<opaque>",
               "role": "base" | "editor"}
       401 -> bad credentials / 429 -> throttled / 503 -> login not configured
-    The token is "v1.<username>.<expires_epoch>.<hexsig>" -- OPAQUE to this
-    module except for reading field[1] (username) and field[2] (expiry) back
-    out of it (parse_token). The signature can only be verified server-side
-    (no secret here) -- the dashboard does that when a report comes in with
-    the token in the X-CCSync-Identity header.
+    The token is "v2.identity.<user_b64url>.<expires_epoch>.<hexsig>" --
+    OPAQUE to this module except for reading the username (base64url field 2,
+    padding-less) and the expiry (field 3) back out of it (parse_token). The
+    purpose claim ("identity") and the signature can only be verified
+    server-side (no secret here) -- the dashboard does that when a report
+    comes in with the token in the X-CCSync-Identity header, and rejects a
+    token that isn't signed with purpose="identity" (e.g. a plain session
+    cookie) -- see the dashboard's auth.py. v1 tokens (pre-2026-07-25, plain
+    "v1.<username>.<expires_epoch>.<hexsig>") are no longer issued; parse_token
+    treats one as malformed like any other unparseable token.
 
     `role` is trusted the same way `username` already is: read straight off
     the response with no local signature to check (the dashboard is the
@@ -35,6 +40,7 @@ or filesystem failure -- see reporter.py's docstring for the same pattern.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
@@ -97,20 +103,27 @@ def save_identity(path: Path, username: str, token: str, role: Optional[str] = N
 
 
 def parse_token(token: Optional[str]) -> tuple[Optional[str], Optional[int]]:
-    """Split the opaque "v1.<username>.<expires_epoch>.<hexsig>" token into
-    (username, expires_epoch). Returns (None, None) for anything malformed
-    -- this module cannot and does not verify the signature, only reads the
-    two fields it needs (display + expiry)."""
+    """Split the opaque "v2.identity.<user_b64url>.<expires_epoch>.<hexsig>"
+    token into (username, expires_epoch). Returns (None, None) for anything
+    malformed -- including a v1 token, a session-cookie-shaped token (wrong
+    purpose), or an unparseable base64url username -- this module cannot and
+    does not verify the signature, only reads the two fields it needs
+    (display + expiry)."""
     if not token or not isinstance(token, str):
         return None, None
     parts = token.split(".")
-    if len(parts) < 3:
+    if len(parts) != 5 or parts[0] != "v2" or parts[1] != "identity":
         return None, None
-    username = parts[1].strip()
+    user_b64, expires_s = parts[2], parts[3]
+    try:
+        padded = user_b64 + "=" * (-len(user_b64) % 4)
+        username = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8").strip()
+    except Exception:
+        return None, None
     if not username:
         return None, None
     try:
-        expires_epoch = int(parts[2])
+        expires_epoch = int(expires_s)
     except (TypeError, ValueError):
         return None, None
     return username, expires_epoch

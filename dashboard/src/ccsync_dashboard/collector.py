@@ -84,18 +84,27 @@ class Collector:
         backoff = {k: 0.0 for k in KINDS}
         try:
             while not self._stop.is_set():
-                due = [k for k in KINDS if time.monotonic() >= next_due[k]]
-                if due:
-                    results = self.run_cycle(conn, due)
-                    for kind in due:
-                        if results.get(kind, False):
-                            backoff[kind] = 0.0
-                            next_due[kind] = time.monotonic() + self._interval(kind)
-                        else:
-                            backoff[kind] = min(
-                                max(backoff[kind] * 2, BACKOFF_BASE), self.settings.backoff_max
-                            )
-                            next_due[kind] = time.monotonic() + backoff[kind]
+                try:
+                    due = [k for k in KINDS if time.monotonic() >= next_due[k]]
+                    if due:
+                        results = self.run_cycle(conn, due)
+                        for kind in due:
+                            if results.get(kind, False):
+                                backoff[kind] = 0.0
+                                next_due[kind] = time.monotonic() + self._interval(kind)
+                            else:
+                                backoff[kind] = min(
+                                    max(backoff[kind] * 2, BACKOFF_BASE), self.settings.backoff_max
+                                )
+                                next_due[kind] = time.monotonic() + backoff[kind]
+                except Exception:
+                    # Fault isolation of last resort: _timed already catches a
+                    # runner's own exceptions, but its own db.record_poll_run
+                    # call is unprotected -- e.g. a transient
+                    # "database is locked" there must not kill this thread
+                    # for good (nothing else restarts it, and prune/retention
+                    # stops with it). Log-and-continue; the next tick retries.
+                    log.exception("collector loop iteration failed; continuing")
                 remaining = min(nd - time.monotonic() for nd in next_due.values())
                 self._stop.wait(max(0.5, min(remaining, 5.0)))
         finally:
@@ -406,6 +415,13 @@ class Collector:
         db.set_connections(conn, connected, self.now_fn())
 
     def _run_completion(self, conn) -> None:
+        # Rebuilt from scratch every cycle (not popped-in-place) so a (slug,
+        # device) pair that drops out of _folder_devices -- an untick, a
+        # deleted editor device, a removed folder -- is pruned here rather
+        # than lingering forever and making _run_remoteneed hit Syncthing
+        # with an unknown folder/device pair on every future cycle (see the
+        # collector _incomplete finding).
+        fresh: dict[tuple[str, str], int] = {}
         for slug, shared in self._folder_devices.items():
             project_id = self._project_ids[slug]
             status = self.client.db_status(slug)
@@ -430,9 +446,9 @@ class Collector:
                 )
                 if completion >= 100 and need_items == 0:
                     db.clear_missing_files(conn, project_id, device_row)
-                    self._incomplete.pop((slug, device_id), None)
                 else:
-                    self._incomplete[(slug, device_id)] = need_items
+                    fresh[(slug, device_id)] = need_items
+        self._incomplete = fresh
 
     def _run_remoteneed(self, conn) -> None:
         for (slug, device_id), need_items in list(self._incomplete.items()):
@@ -440,19 +456,27 @@ class Collector:
             device_row = self._device_ids.get(device_id)
             if project_id is None or device_row is None:
                 continue
-            files: list[tuple[str, int | None]] = []
-            for page in range(1, REMOTENEED_MAX_PAGES + 1):
-                payload = self.client.remoteneed(slug, device_id, page, REMOTENEED_PERPAGE)
-                page_files = payload.get("files") or []
-                for entry in page_files:
-                    if isinstance(entry, str):
-                        files.append((entry, None))
-                    else:
-                        files.append((entry.get("name", "?"), entry.get("size")))
-                if len(page_files) < REMOTENEED_PERPAGE:
-                    break
-            truncated = need_items > len(files)
-            db.replace_missing_files(conn, project_id, device_row, files, truncated, self.now_fn())
+            try:
+                files: list[tuple[str, int | None]] = []
+                for page in range(1, REMOTENEED_MAX_PAGES + 1):
+                    payload = self.client.remoteneed(slug, device_id, page, REMOTENEED_PERPAGE)
+                    page_files = payload.get("files") or []
+                    for entry in page_files:
+                        if isinstance(entry, str):
+                            files.append((entry, None))
+                        else:
+                            files.append((entry.get("name", "?"), entry.get("size")))
+                    if len(page_files) < REMOTENEED_PERPAGE:
+                        break
+                truncated = need_items > len(files)
+                db.replace_missing_files(conn, project_id, device_row, files, truncated, self.now_fn())
+            except Exception as exc:
+                # One bad (slug, device) pair -- e.g. Syncthing errors on an
+                # unknown folder/device combination that briefly outran the
+                # config cache -- must not abort the whole cycle and stop
+                # missing-file refresh fleet-wide (see the collector
+                # _incomplete finding).
+                log.warning("remoteneed failed for %s/%s: %s", slug, device_id, exc)
 
     def _run_prune(self, conn) -> None:
         db.prune(conn, self.now_fn())

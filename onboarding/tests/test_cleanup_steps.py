@@ -4,6 +4,7 @@ injected-fake style as test_steps.py: nothing here touches the registry,
 scheduled tasks, real processes, or any path outside tmp_path."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import steps
@@ -55,6 +56,19 @@ class TestBuildCleanupPlan:
         p_exe = Path("P:/") / "ccsync-companion.exe"
         plan = self._plan(role="base", existing=[p_exe])
         assert p_exe not in plan.exe_paths
+
+    def test_base_role_never_treats_local_root_as_cleanup_candidate(self):
+        # D-9: on the base rig, local_root (and an existing config's
+        # local_root) IS the shared NAS tree -- must never be a cleanup dir.
+        nas_exe = Path(r"T:\Creators_Club") / "ccsync-companion.exe"
+        plan = self._plan(role="base", local_root=r"T:\Creators_Club",
+                          config_root=r"T:\Creators_Club", existing=[nas_exe])
+        assert nas_exe not in plan.exe_paths
+
+    def test_editor_role_still_scans_local_root(self):
+        exe = Path(r"D:\CC") / "ccsync-companion.exe"
+        plan = self._plan(role="editor", local_root=r"D:\CC", existing=[exe])
+        assert exe in plan.exe_paths
 
     def test_run_value_dir_is_scanned(self):
         stray = Path(r"F:\Creators_Club") / "ccsync-companion.exe"
@@ -255,6 +269,20 @@ class TestEnsureConfig:
         assert 'local_root = "D:\\\\CC"' in text
         assert 'canonical_prefix = "P:\\\\"' in text
         assert 'remote = "creators_club_sftp"' in text
+
+    def test_editor_role_forces_nonblank_remote_root(self, tmp_path):
+        # S-1: a fresh editor config must never ship a blank remote_root --
+        # rclone would otherwise target the bare SFTP home directory.
+        path = tmp_path / "config.toml"
+        steps.ensure_config(
+            "editor", editor_name="ruskin", dashboard_url="http://tail:8480",
+            dashboard_token="tok", local_root="D:\\CC", config_path=path,
+        )
+        text = path.read_text(encoding="utf-8")
+        match = re.search(r'(?m)^remote_root\s*=\s*"(.*)"\s*$', text)
+        assert match is not None
+        assert match.group(1).strip() != ""
+        assert match.group(1) == steps.DEFAULT_REMOTE_ROOT
 
     def test_existing_file_merged_not_replaced(self, tmp_path):
         path = tmp_path / "config.toml"

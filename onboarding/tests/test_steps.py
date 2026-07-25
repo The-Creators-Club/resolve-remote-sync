@@ -398,6 +398,39 @@ def test_run_bootstrap_propagates_nonzero_exit_code(tmp_path):
     assert "something broke" in output
 
 
+def test_run_bootstrap_passes_timeout_to_run(tmp_path):
+    script = tmp_path / "windows_bootstrap.ps1"
+    script.write_text("# fake")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeResult(returncode=0, stdout="")
+
+    steps.run_bootstrap(
+        editor_name="jsmith", dashboard_token="x", tailnet_host="100.71.216.3",
+        run=fake_run, script_path=script,
+    )
+    assert captured["kwargs"]["timeout"] == steps.BOOTSTRAP_TIMEOUT_SECONDS
+
+
+def test_run_bootstrap_timeout_becomes_failed_install_result(tmp_path):
+    script = tmp_path / "windows_bootstrap.ps1"
+    script.write_text("# fake")
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"),
+                                         output="partial output so far", stderr="")
+
+    exit_code, output = steps.run_bootstrap(
+        editor_name="jsmith", dashboard_token="x", tailnet_host="100.71.216.3",
+        run=fake_run, script_path=script,
+    )
+    assert exit_code != 0
+    assert "partial output so far" in output
+    assert "timed out" in output
+
+
 # -- write_identity / finalize_config_identity ------------------------------------------------------
 
 

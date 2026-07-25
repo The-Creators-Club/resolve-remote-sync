@@ -83,6 +83,11 @@ def test_build_up_command_shape(tmp_path):
     assert cmd[2] == "C:\\root"
     assert cmd[3] == "nas:Creators_Club"
     assert "--ignore-existing" in cmd
+    # rclone filters are case-sensitive by default: without this, uppercase
+    # camera extensions (CLIP.MOV) and a lowercase-cased "proxy/" dir slip
+    # past build_filter_rules_up() entirely (verified live against a real
+    # rclone binary -- see the integration tests below).
+    assert "--ignore-case" in cmd
     assert "--min-age" in cmd and "30s" in cmd
     assert "--transfers" in cmd and "8" in cmd
     assert "--use-json-log" in cmd
@@ -97,6 +102,7 @@ def test_build_down_command_shape(tmp_path):
     assert cmd[2] == "nas:Creators_Club"
     assert cmd[3] == "C:\\root"
     assert "--ignore-existing" not in cmd  # lane B is server-authoritative, no skip-if-exists
+    assert "--ignore-case" in cmd  # same case-sensitivity gap as lane A
 
 
 # -- subpath (per-project) + --stats command building, pure -----------------
@@ -133,6 +139,25 @@ def test_build_up_command_subpath_no_double_slash_with_trailing_slash_root(tmp_p
     )
     assert cmd[3] == "nas:Creators_Club/Projects/2026/FF5/Energy Transition"
     assert "//" not in cmd[3].split(":", 1)[1]
+    # A leading "/" on subpath must NOT discard local_root: pathlib treats a
+    # rooted component as absolute, so an unstripped join would silently
+    # collapse to just the subpath (reachable via consolidate.py, not the
+    # sequencer's own PROJECTS_PREFIX-guaranteed inputs).
+    assert cmd[2] == str(Path("C:\\root") / "Projects/2026/FF5/Energy Transition")
+    assert cmd[2] != "/Projects/2026/FF5/Energy Transition/"
+
+
+def test_build_down_command_subpath_no_double_slash_with_trailing_slash_root(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    cmd = build_down_command(
+        "rclone", "C:\\root", "nas", "Creators_Club/", filter_file,
+        subpath="/Projects/2026/FF5/Energy Transition/",
+    )
+    assert cmd[2] == "nas:Creators_Club/Projects/2026/FF5/Energy Transition"
+    assert "//" not in cmd[2].split(":", 1)[1]
+    assert cmd[3] == str(Path("C:\\root") / "Projects/2026/FF5/Energy Transition")
+    assert cmd[3] != "/Projects/2026/FF5/Energy Transition/"
 
 
 def test_build_up_command_stats_interval_appends_flags(tmp_path):
@@ -198,6 +223,62 @@ def test_rclone_available_missing_binary():
     available, msg = rclone_available("definitely-not-a-real-rclone-binary-xyz")
     assert available is False
     assert "not found" in msg
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode: int = 0) -> None:
+        self.returncode = returncode
+        self.stdout = ""
+        self.stderr = ""
+
+
+def test_rclone_available_uses_utf8_replace_decoding_and_no_console_window(monkeypatch, tmp_path):
+    """rclone logs UTF-8; the default cp1252 `text=True` decoding raises on
+    non-ASCII bytes (S-6). Also asserts CREATE_NO_WINDOW is passed on
+    Windows so a windowed build doesn't flash a console per probe."""
+    from ccsync_companion.sync import rclone_lane as rl
+
+    fake_exe = tmp_path / "rclone.exe"
+    fake_exe.write_text("stub")
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompletedProcess(0)
+
+    monkeypatch.setattr(rl.subprocess, "run", fake_run)
+
+    available, _msg = rl.rclone_available(str(fake_exe))
+
+    assert available is True
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+    if rl.sys.platform == "win32":
+        assert captured["creationflags"] == rl.subprocess.CREATE_NO_WINDOW
+    else:
+        assert captured["creationflags"] == 0
+
+
+def test_run_lsf_uses_utf8_replace_decoding_and_no_console_window(monkeypatch):
+    from ccsync_companion.sync import rclone_lane as rl
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeCompletedProcess(0)
+
+    monkeypatch.setattr(rl.subprocess, "run", fake_run)
+
+    rl._run_lsf(["rclone", "lsf"], timeout=5.0)
+
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+    if rl.sys.platform == "win32":
+        assert captured["creationflags"] == rl.subprocess.CREATE_NO_WINDOW
+    else:
+        assert captured["creationflags"] == 0
 
 
 # -- integration: real rclone against local fixture dirs -------------------

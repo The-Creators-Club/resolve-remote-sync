@@ -242,6 +242,28 @@ def unique_destination_path(dest_dir: Path, filename: str) -> Path:
     return candidate
 
 
+def _dest_dir_is_contained(dest_dir: Path, local_root_resolved: Path) -> bool:
+    """True iff `dest_dir`, once resolved, is local_root itself or somewhere
+    under it. dest_rel is free text from an editable combobox (popup.py) --
+    an absolute path, a drive-relative "\\Escaped\\Dir" (pathlib re-roots on
+    the current drive when the right-hand side starts with a separator), or
+    a "..\\..\\" traversal must all be rejected rather than silently copied
+    (and Resolve relinked) outside the tree (AUDIT D-6)."""
+    try:
+        resolved = dest_dir.resolve()
+    except OSError:
+        return False
+    try:
+        common = os.path.commonpath(
+            [os.path.normcase(str(resolved)), os.path.normcase(str(local_root_resolved))]
+        )
+    except ValueError:
+        # Different drives (e.g. dest resolves onto C: while local_root is
+        # on T:) -- os.path.commonpath raises rather than returning "".
+        return False
+    return common == os.path.normcase(str(local_root_resolved))
+
+
 def fix_clip(
     file_path: str,
     dest_rel: str,
@@ -251,33 +273,70 @@ def fix_clip(
     replace_clip_fn=resolve_bridge.replace_clip,
 ) -> dict[str, Any]:
     """Copy `file_path` into local_root/dest_rel (collision-safe) once, then
-    relink EVERY media pool item in `media_pool_items` to that one copy via
-    ReplaceClip.
+    relink EVERY DISTINCT media pool item in `media_pool_items` to that one
+    copy via ReplaceClip.
 
     `media_pool_items` may be a single item (back-compat with callers/tests
     that only ever deal with one) or a list — the same source file can be
     referenced by several timeline items (e.g. the same clip cut onto
     multiple places in the sequence), and popup.py collapses those into one
-    row per unique path (see popup.dedupe_out_of_tree_items), so fixing the
-    row has to relink all of them, not just the first.
+    row per unique path (see popup.dedupe_out_of_tree_items) by TIMELINE
+    OCCURRENCE, not by underlying MediaPoolItem -- a clip cut in 50 times
+    would otherwise trigger 50 identical ReplaceClip calls, each forcing a
+    re-conform (AUDIT §6). De-duplicate here by object identity (id()) so
+    each distinct item is relinked exactly once.
 
     Returns {"ok": bool, "message": str, "copied_to": Optional[str]}. Never
     raises — every failure path (missing source, copy error, ReplaceClip
     failure) is reported in the returned dict. The original file at
     `file_path` is NEVER deleted or moved, regardless of outcome.
     """
-    items = media_pool_items if isinstance(media_pool_items, list) else [media_pool_items]
+    items_raw = media_pool_items if isinstance(media_pool_items, list) else [media_pool_items]
+    items: list[Any] = []
+    seen_ids: set[int] = set()
+    for mpi in items_raw:
+        if id(mpi) in seen_ids:
+            continue
+        seen_ids.add(id(mpi))
+        items.append(mpi)
 
     src = Path(file_path)
     if not src.is_file():
         return {"ok": False, "message": f"source file not found: {file_path}", "copied_to": None}
 
+    try:
+        local_root_resolved = Path(local_root).resolve()
+    except OSError as exc:
+        return {"ok": False, "message": f"bad local_root: {exc}", "copied_to": None}
+
     dest_dir = Path(local_root) / dest_rel.replace("/", os.sep)
+    if not _dest_dir_is_contained(dest_dir, local_root_resolved):
+        return {
+            "ok": False,
+            "message": f"refusing destination outside local_root: {dest_rel}",
+            "copied_to": None,
+        }
+
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = unique_destination_path(dest_dir, src.name)
-        copy_fn(src, dest_path)
     except OSError as exc:
+        return {"ok": False, "message": f"copy failed: {exc}", "copied_to": None}
+
+    dest_path = unique_destination_path(dest_dir, src.name)
+    # Copy to a temp name in the same dir, then atomically replace into the
+    # final name -- a copy that dies mid-way (disk full, SMB drop) must
+    # never leave a truncated file under the final name, which lane A would
+    # otherwise upload once its --min-age guard expires and could then never
+    # replace (lane A uses --ignore-existing) (AUDIT D-5).
+    tmp_path = dest_path.with_name(dest_path.name + ".ccsync-tmp")
+    try:
+        copy_fn(src, tmp_path)
+        os.replace(tmp_path, dest_path)
+    except Exception as exc:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         return {"ok": False, "message": f"copy failed: {exc}", "copied_to": None}
 
     failures: list[str] = []

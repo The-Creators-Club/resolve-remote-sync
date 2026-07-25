@@ -14,7 +14,7 @@ from typing import Any, Iterator, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import VERSION, auth, db, health
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -252,8 +252,20 @@ def build_presence_view(
 
 def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict[str, Any]:
     now = now or db.utcnow_iso()
-    current_pkg = db.get_current_package(conn, "windows")
-    current_version = current_pkg["version"] if current_pkg is not None else None
+    # Per-platform current version (see X-5): a machine's "out of date" flag
+    # must compare against the CURRENT PACKAGE FOR ITS OWN REPORTED PLATFORM,
+    # never hardcoded to "windows" -- a macOS companion must never be
+    # compared against the Windows release. Unreported platform (old
+    # companions predating the platform field) falls back to "windows".
+    current_pkg_cache: dict[str, sqlite3.Row | None] = {}
+
+    def current_version_for(platform: str) -> str | None:
+        if platform not in current_pkg_cache:
+            current_pkg_cache[platform] = db.get_current_package(conn, platform)
+        pkg = current_pkg_cache[platform]
+        return pkg["version"] if pkg is not None else None
+
+    platforms = db.fetch_platform_map(conn)
     machines: dict[tuple[str, str], dict[str, Any]] = {}
     for row in db.fetch_lane_reports(conn):
         key = (row["editor_username"], row["machine"])
@@ -271,6 +283,8 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     for entry in machines.values():
         entry["status"] = health.worst(l["chip"] for l in entry["lanes"])
         entry["verified"] = verified.get((entry["editor_username"], entry["machine"]), False)
+        platform = (platforms.get((entry["editor_username"], entry["machine"])) or "windows").strip().lower()
+        current_version = current_version_for(platform)
         # "Out of date" = running version differs from the published current
         # (not "older than": an admin rollback must flag machines too).
         entry["companion_outdated"] = bool(
@@ -281,7 +295,7 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         result.append(entry)
     result.sort(key=lambda e: (e["editor_username"], e["machine"]))
     return {"generated_at": now, "editors": result,
-            "current_companion_version": current_version}
+            "current_companion_version": current_version_for("windows")}
 
 
 # ------------------------------------------------------------------ routes
@@ -681,6 +695,11 @@ def _validate_tree_part(value: str, what: str) -> str:
         raise ProjectSetupError(f"{what} must not contain slashes")
     if value.startswith(".") or ".." in value:
         raise ProjectSetupError(f"{what} must not start with '.' or contain '..'")
+    if any(ord(ch) < 32 for ch in value):
+        # NUL/control characters make Path.resolve() raise ValueError (not
+        # OSError), which would otherwise escape the ProjectSetupError -> 422
+        # handling and surface as a 500 traceback.
+        raise ProjectSetupError(f"{what} must not contain control characters")
     return value
 
 
@@ -1295,7 +1314,19 @@ class LaneReportIn(BaseModel):
     bytes_total: int | None = None
     speed_bps: float | None = None
     eta_seconds: float | None = None
-    transfers: list[TransferIn] = []   # per-file live transfers (companions >= 0.3)
+    # Generous but bounded (see SEC-4): current companions send a handful of
+    # live transfers per lane, never anywhere near this many.
+    transfers: list[TransferIn] = Field(default_factory=list, max_length=256)
+
+    @field_validator("name")
+    @classmethod
+    def _known_lane(cls, v: str) -> str:
+        # Current companions send exactly the three lanes in LANE_LABELS;
+        # anything else is rejected rather than silently creating a
+        # permanent lane_report_current row for a bogus lane name (SEC-4).
+        if v not in LANE_LABELS:
+            raise ValueError(f"unknown lane name: {v!r}")
+        return v
 
 
 class ManifestProjectIn(BaseModel):
@@ -1322,7 +1353,9 @@ class ReportIn(BaseModel):
     companion_version: str | None = None
     platform: str | None = None         # 'windows' | 'macos' (companions >= 0.2)
     reported_at: str
-    lanes: list[LaneReportIn]
+    # Generous but bounded (see SEC-4): current companions send exactly the
+    # three lanes in LANE_LABELS.
+    lanes: list[LaneReportIn] = Field(max_length=32)
     queue: list[str] | None = None      # informational; selections table is the truth
     current_project: str | None = None
     resolve_project: str | None = None  # currently open Resolve project name
@@ -1349,6 +1382,24 @@ def api_report(
         )
     received_at = db.utcnow_iso()
     editor = payload.editor_name.strip().lower()
+
+    # Machine-identity verification: a valid X-CCSync-Identity token whose
+    # username matches the reported editor_name proves this companion actually
+    # authenticated as that editor (not just a config-set editor_name). Check
+    # this BEFORE any write: an identity token that is present and valid but
+    # names a DIFFERENT editor means someone is spoofing editor_name in the
+    # body (see SEC-5) -- reject the whole report rather than silently
+    # writing under verified=0, which would let any editor overwrite/corrupt
+    # another editor's presence rows and machine_state.
+    identity = request.headers.get("x-ccsync-identity", "")
+    id_user = auth.read_identity_token(settings.session_secret, identity) if identity else None
+    if identity and id_user is not None and id_user != editor:
+        raise HTTPException(
+            status_code=401,
+            detail="X-CCSync-Identity does not match editor_name",
+        )
+    verified = id_user is not None and id_user == editor
+
     for lane in payload.lanes:
         db.upsert_lane_report(
             conn,
@@ -1401,15 +1452,10 @@ def api_report(
             if match is not None:
                 detected_slug = labels[match]
                 db.sticky_project_root(conn, resolve_project, detected_slug, received_at)
-    # Machine-identity verification: a valid X-CCSync-Identity token whose
-    # username matches the reported editor_name proves this companion actually
-    # authenticated as that editor (not just a config-set editor_name).
-    identity = request.headers.get("x-ccsync-identity", "")
-    id_user = auth.read_session_cookie(settings.session_secret, identity) if identity else None
-    verified = id_user is not None and id_user == editor
     db.upsert_machine_state(
         conn, editor, payload.machine, detected_slug, received_at,
         resolve_project=resolve_project or None, verified=verified,
+        platform=(payload.platform or "").strip().lower() or None,
     )
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
@@ -1431,7 +1477,7 @@ def api_report(
 
     if payload.local_manifest is not None:
         for rel, m in payload.local_manifest.items():
-            slug = _slug_for_rel(rel)
+            slug = _slug_for_rel(conn, rel)
             db.upsert_editor_media_project(
                 conn, editor=editor, machine=machine, slug=slug, mode=mode,
                 n_originals=m.n_originals, bytes_originals=m.bytes_originals,
@@ -1472,7 +1518,16 @@ def api_report(
     return result
 
 
-def _slug_for_rel(rel: str) -> str:
+def _slug_for_rel(conn: sqlite3.Connection, rel: str) -> str:
+    """rel -> project slug. The project's LABEL (kept in lockstep with its
+    current rel by the collector's provision/retarget cycle) is the
+    authoritative lookup key, because a moved/adopted project's real slug --
+    the marker's immutable slug -- need not equal slugify(its current rel)
+    (see X-3). Only falls back to slugify() when no project is registered at
+    that label at all (e.g. a report about a brand-new/unregistered dir)."""
+    row = conn.execute("SELECT slug FROM projects WHERE label = ?", (rel,)).fetchone()
+    if row is not None:
+        return row["slug"]
     from . import provision
     try:
         return provision.slugify(rel)

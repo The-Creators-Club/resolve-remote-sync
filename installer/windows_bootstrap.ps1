@@ -165,6 +165,27 @@ function Test-IsElevated {
     }
 }
 
+# Writes a shim file (.cmd or .vbs) using the codepage the interpreter that
+# reads it actually uses -- NOT ASCII, which silently replaces every
+# non-ASCII character (e.g. in $CCRoot or $SyncthingHome, which contains
+# %LOCALAPPDATA% and therefore the Windows username) with '?', pointing the
+# logon shim at a nonexistent path with no error ever shown. cmd.exe parses
+# .cmd/.bat files in the console's OEM codepage; wscript.exe parses .vbs
+# files in the system's ANSI codepage -- they are frequently different
+# codepages on the same machine, so each file needs its own encoding.
+# Belt-and-braces: even the right codepage can't represent every character
+# (e.g. CJK on an English-locale Windows), so round-trip the content and
+# warn loudly rather than let a silently mangled path through.
+function Write-ShimFile {
+    param([string]$Path, [string]$Content, [int]$CodePage)
+    $encoding = [System.Text.Encoding]::GetEncoding($CodePage)
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+    $roundTripped = $encoding.GetString($encoding.GetBytes($Content))
+    if ($roundTripped -ne $Content) {
+        Write-Warn2 "$Path contains characters outside codepage $CodePage -- the path it launches may be silently mangled. If autostart doesn't work, start it by hand or use an ASCII-only Windows user profile path."
+    }
+}
+
 # Register a hidden, no-elevation-required logon autostart via HKCU\...\Run.
 # Goes through a .cmd (holds the real command line, normal quoting) launched
 # by a one-line .vbs under wscript, which is what keeps the console window
@@ -185,11 +206,13 @@ function Register-HiddenRunEntry {
     }
 
     $cmdBody = "@echo off" + "`r`n" + $CommandLine + "`r`n"
-    Set-Content -LiteralPath $cmdPath -Value $cmdBody -Encoding ASCII
+    Write-ShimFile -Path $cmdPath -Content $cmdBody `
+        -CodePage ([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
 
     # VBS quoting: "" is a literal quote inside a VBS string literal.
     $vbsBody = "CreateObject(""WScript.Shell"").Run ""cmd /c """"$cmdPath"""""", 0, False"
-    Set-Content -LiteralPath $vbsPath -Value $vbsBody -Encoding ASCII
+    Write-ShimFile -Path $vbsPath -Content $vbsBody `
+        -CodePage ([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage)
 
     try {
         Set-ItemProperty -Path $runKey -Name $Name -Value "wscript.exe ""$vbsPath"""
@@ -361,6 +384,14 @@ else {
 # (syncthing-windows-amd64-v2.1.2.zip), so the unversioned alias 404s. Two
 # ways to learn the real name, API first, redirect-sniffing as a backstop
 # (the unauthenticated API is rate-limited to 60 requests/hour per IP).
+function Get-SyncthingExePath {
+    if (Test-CommandExists "syncthing") { return (Get-Command syncthing).Source }
+    if (Test-Path "$BinDir\syncthing.exe") { return "$BinDir\syncthing.exe" }
+    if (Test-Path "$env:ProgramFiles\Syncthing\syncthing.exe") { return "$env:ProgramFiles\Syncthing\syncthing.exe" }
+    if (Test-Path "${env:ProgramFiles(x86)}\Syncthing\syncthing.exe") { return "${env:ProgramFiles(x86)}\Syncthing\syncthing.exe" }
+    return $null
+}
+
 function Get-SyncthingZipUrl {
     $pattern = "syncthing-windows-amd64-*.zip"
 
@@ -397,16 +428,7 @@ function Get-SyncthingZipUrl {
 }
 
 Write-Step "checking Syncthing..."
-$syncthingPath = $null
-if (Test-CommandExists "syncthing") {
-    $syncthingPath = (Get-Command syncthing).Source
-}
-elseif (Test-Path "$BinDir\syncthing.exe") {
-    $syncthingPath = "$BinDir\syncthing.exe"
-}
-elseif (Test-Path "$env:ProgramFiles\Syncthing\syncthing.exe") {
-    $syncthingPath = "$env:ProgramFiles\Syncthing\syncthing.exe"
-}
+$syncthingPath = Get-SyncthingExePath
 
 if ($syncthingPath) {
     Write-Skip "Syncthing already installed: $syncthingPath"
@@ -421,7 +443,16 @@ else {
         else {
             Write-Step "installing Syncthing via winget..."
             winget install --id Syncthing.Syncthing -e --accept-source-agreements --accept-package-agreements
-            if ($LASTEXITCODE -eq 0) { $installed = $true }
+            if ($LASTEXITCODE -eq 0) {
+                $installed = $true
+                # winget doesn't tell us where it put the exe (and doesn't
+                # refresh this process's PATH) -- re-probe the usual
+                # locations rather than assuming a well-known path.
+                $syncthingPath = Get-SyncthingExePath
+                if (-not $syncthingPath) {
+                    Write-Warn2 "winget reported success but Syncthing's exe could not be located afterwards -- open a new terminal (PATH may need a refresh) and re-run this script"
+                }
+            }
             else { Write-Warn2 "winget install of Syncthing exited with code $LASTEXITCODE, falling back to direct download" }
         }
     }
@@ -667,7 +698,13 @@ else {
                 Write-Skip "P: already labelled '$DriveLabel' in Explorer"
             }
             else {
-                New-Item -Path $mpKey -Force | Out-Null
+                # New-Item -Force on a registry key that ALREADY EXISTS
+                # deletes every other value under it (verified live) --
+                # MountPoints2 entries carry more than just _LabelFromReg.
+                # Only create the key when it's actually missing.
+                if (-not (Test-Path -LiteralPath $mpKey)) {
+                    New-Item -Path $mpKey -Force | Out-Null
+                }
                 Set-ItemProperty -LiteralPath $mpKey -Name "_LabelFromReg" -Value $DriveLabel
                 Write-Step "labelled P: as '$DriveLabel' ($mpName)"
                 # Explorer reads _LabelFromReg when it (re)enumerates the
@@ -703,6 +740,13 @@ if ($DryRun) {
     Write-Step "[dry-run] would run: `"$syncthingPath`" generate --home=`"$SyncthingHome`" (if not already generated)"
     Write-Step "[dry-run] would register a hidden autostart running: `"$syncthingPath`" serve --no-browser --home=`"$SyncthingHome`""
     Write-Step "[dry-run] would start the Syncthing daemon now if it isn't already running"
+}
+elseif (-not $syncthingPath) {
+    # A null path here would run `& $null generate ...`, a terminating error
+    # under $ErrorActionPreference = "Stop" that aborts the whole script
+    # AFTER _clean_slate has already removed the previous install (S-3).
+    # Skip loudly instead -- steps 7-10 still run.
+    Write-Warn2 "Syncthing executable path is unknown -- skipping config generation, daemon autostart, and launch. Install Syncthing manually (https://syncthing.net/downloads/) and re-run this script."
 }
 else {
     if (-not (Test-Path -LiteralPath $SyncthingHome)) {
@@ -786,7 +830,13 @@ else {
         Write-Host $Stanza
     }
     else {
-        Add-Content -LiteralPath $RcloneConfPath -Value "`r`n$Stanza`r`n"
+        # Add-Content with no -Encoding writes the system ANSI codepage: a
+        # non-ASCII -TailnetHost/-EditorName lands mangled, and appending
+        # ANSI bytes onto an existing UTF-8 rclone.conf mixes encodings in
+        # one file. [IO.File]::AppendAllText with an explicit no-BOM UTF8
+        # encoding avoids both.
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::AppendAllText($RcloneConfPath, "`r`n$Stanza`r`n", $utf8NoBom)
         Write-Step "appended [$RemoteName] stanza to $RcloneConfPath"
     }
 }
@@ -870,7 +920,13 @@ dashboard_token = "$DashboardToken"
     }
     else {
         Ensure-Dir $CCSyncConfigDir
-        Set-Content -LiteralPath $CCSyncConfigPath -Value $CompanionToml -Encoding UTF8
+        # PS 5.1's Set-Content -Encoding UTF8 emits a BOM even for a new
+        # file. tomllib.load rejects a BOM outright, and load_config swallows
+        # that exception with no log line -- the companion silently runs on
+        # DEFAULTS (blank local_root/remote_root/editor_name/token) while
+        # config.toml looks perfectly correct to a human (S-2).
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($CCSyncConfigPath, "$CompanionToml`r`n", $utf8NoBom)
         Write-Step "wrote seeded companion config: $CCSyncConfigPath"
         Write-Step "  the whole project tree syncs as-is; set active_project in that file only if you want popup-fixed media filed into a specific project."
     }
@@ -1005,7 +1061,15 @@ if ($DryRun) {
     Write-Host "=================================================================="
 }
 else {
-    $deviceId = Get-SyncthingDeviceId -ExePath $syncthingPath -Home2 $SyncthingHome
+    if (-not $syncthingPath) {
+        # No `& $null generate ...` here (S-3's terminating RuntimeException)
+        # -- the banner and remaining-steps list below still print.
+        Write-Warn2 "Syncthing executable path is unknown -- cannot determine the device ID automatically."
+        $deviceId = $null
+    }
+    else {
+        $deviceId = Get-SyncthingDeviceId -ExePath $syncthingPath -Home2 $SyncthingHome
+    }
 
     Write-Host ""
     Write-Host "=================================================================="

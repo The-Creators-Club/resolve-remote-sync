@@ -63,6 +63,92 @@ def test_fetch_url_uses_lowercased_editor_name(tmp_path):
     assert calls[0] == "http://dash.example.com/api/v1/selection/alex"
 
 
+def test_fetch_url_quotes_editor_name_with_space(tmp_path):
+    # S-8: an unquoted space/non-ASCII editor_name breaks the URL entirely
+    # (InvalidURL / UnicodeEncodeError from http.client) -- see
+    # project_setup.py's quote(name, safe="") for the pattern this mirrors.
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(url)
+        return {"selection": []}
+
+    client = SelectionClient(_cfg(editor_name="alex chen"), tmp_path, http_get=fake_get)
+    client.fetch()
+    assert calls[0] == "http://dash.example.com/api/v1/selection/alex%20chen"
+
+
+def test_fetch_uses_editor_name_fn_when_provided(tmp_path):
+    # Selection identity finding: the editor name must be re-evaluated per
+    # fetch via editor_name_fn (e.g. app.py's editor_identity(), which
+    # reflects a tray sign-in), not pinned to cfg["editor_name"] at
+    # construction time.
+    calls = []
+    names = iter(["alex", "jamie"])
+
+    def fake_get(url, headers, timeout):
+        calls.append(url)
+        return {"selection": []}
+
+    client = SelectionClient(
+        _cfg(editor_name="ignored-config-name"), tmp_path, http_get=fake_get,
+        editor_name_fn=lambda: next(names),
+    )
+    client.fetch()
+    client.fetch()
+    assert calls[0].endswith("/selection/alex")
+    assert calls[1].endswith("/selection/jamie")
+
+
+def test_fetch_skips_request_when_editor_name_fn_returns_blank(tmp_path):
+    # A blank/None editor identity (not signed in yet, require_login=true)
+    # must not hit /api/v1/selection/ at all -- that 404s every poll
+    # forever instead of just falling back to the cache/none like any
+    # other fetch failure.
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(url)
+        return {"selection": []}
+
+    client = SelectionClient(
+        _cfg(editor_name="ignored-config-name"), tmp_path, http_get=fake_get,
+        editor_name_fn=lambda: None,
+    )
+    assert client.fetch() is None
+    assert calls == []
+
+
+def test_fetch_skips_request_when_editor_name_fn_returns_whitespace(tmp_path):
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(url)
+        return {"selection": []}
+
+    client = SelectionClient(
+        _cfg(), tmp_path, http_get=fake_get, editor_name_fn=lambda: "   ",
+    )
+    assert client.fetch() is None
+    assert calls == []
+
+
+def test_get_falls_back_to_cache_when_editor_name_fn_blank(tmp_path):
+    def fake_get_ok(url, headers, timeout):
+        return {"selection": _SAMPLE}
+
+    seeding_client = SelectionClient(_cfg(), tmp_path, http_get=fake_get_ok)
+    seeding_client.fetch()  # populate cache under a real fetch
+
+    client = SelectionClient(
+        _cfg(), tmp_path, http_get=lambda *a: (_ for _ in ()).throw(RuntimeError()),
+        editor_name_fn=lambda: None,
+    )
+    selection, source = client.get()
+    assert selection == _SAMPLE
+    assert source == "cache"
+
+
 def test_fetch_sends_token_header(tmp_path):
     calls = []
 

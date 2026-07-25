@@ -74,7 +74,13 @@ def test_poll_once_debounces_ignored_out_of_tree_paths(tmp_path):
     assert captured == []
 
 
-def test_poll_once_mapping_warning_fires_once_per_path(tmp_path):
+def test_poll_once_canonical_prefix_missing_locally_does_not_warn(tmp_path):
+    # THE designed steady state on a remote editor rig (lane A is
+    # upload-only, so a video original legitimately lives only on the NAS
+    # and was never downloaded here) must NOT fire a mapping-health
+    # notification -- see AUDIT.md §5's BAD_PREFIX-storm finding. This used
+    # to assert the opposite (a bug the audit flagged this exact test for
+    # enshrining).
     item = make_timeline_item(r"P:\Projects\clip.mov")
 
     warnings = []
@@ -87,7 +93,30 @@ def test_poll_once_mapping_warning_fires_once_per_path(tmp_path):
     watcher.poll_once()
     watcher.poll_once()
     watcher.poll_once()
-    assert warnings == [r"P:\Projects\clip.mov"]
+    assert warnings == []
+
+
+def test_poll_once_mapping_warning_fires_once_per_genuinely_broken_mapping(tmp_path):
+    # A canonical-prefix path that DOES exist on disk but resolves outside
+    # local_root is a genuine mapping break (subst/mount pointing at the
+    # wrong target) and must still warn, debounced to once per path.
+    canon_dir = tmp_path / "canon"
+    canon_dir.mkdir()
+    clip_path = canon_dir / "clip.mov"
+    clip_path.touch()
+    item = make_timeline_item(str(clip_path))
+
+    warnings = []
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path / "root"),
+        canonical_prefix=str(canon_dir),
+        on_mapping_warning=lambda item: warnings.append(item["file_path"]),
+        get_timeline_items=lambda: _ok_result(item),
+    )
+    watcher.poll_once()
+    watcher.poll_once()
+    watcher.poll_once()
+    assert warnings == [str(clip_path)]
 
 
 def test_poll_once_handles_resolve_error_gracefully():

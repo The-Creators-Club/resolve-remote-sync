@@ -141,6 +141,40 @@ def test_pages_render(env):
     assert r.status_code == 200 and "PROJECTS" in r.text
 
 
+def test_local_manifest_uses_marker_slug_not_slugify_of_rel(env):
+    """X-3: a project whose real slug (the marker's immutable identity) no
+    longer matches slugify(its current rel) -- e.g. after an adopt where the
+    original folder name produced a different slug -- must still get its
+    local_manifest rows filed under the REAL slug, found via projects.label,
+    not a freshly recomputed slugify(rel)."""
+    client, conn, now = env
+    # A project registered under a slug that does NOT equal slugify(label) --
+    # simulates an adopted/retargeted project (collector.py's _run_provision
+    # keeps label in lockstep with the current rel, but the slug is the
+    # marker's, independent of it).
+    dbmod.upsert_project(conn, "legacy-slug-from-marker", "2026/Weird Case/Odd Name", "/z", now)
+    conn.commit()
+
+    payload = report(
+        "ruskin", "RUSKIN-PC",
+        local_manifest={"2026/Weird Case/Odd Name": {
+            "n_originals": 1, "bytes_originals": 100, "n_proxies": 0, "bytes_proxies": 0,
+            "truncated": False,
+        }},
+    )
+    assert client.post("/api/v1/report", json=payload,
+                       headers={"X-CCSync-Token": TOKEN}).status_code == 200
+
+    # Filed under the marker's real slug (found via label)...
+    roll = dbmod.fetch_editor_media_for_project(conn, "legacy-slug-from-marker")
+    assert roll and roll[0]["n_originals"] == 1
+    # ...NOT under whatever slugify() would have freshly produced for that rel.
+    from ccsync_dashboard import provision
+    guessed = provision.slugify("2026/Weird Case/Odd Name")
+    assert guessed != "legacy-slug-from-marker"   # sanity: the two really differ
+    assert dbmod.fetch_editor_media_for_project(conn, guessed) == []
+
+
 def test_report_without_media_leaves_tables_untouched(env):
     client, conn, now = env
     # first report WITH media

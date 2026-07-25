@@ -3,6 +3,7 @@ and DEFAULTS/DEFAULT_TOML_TEXT key parity."""
 
 from __future__ import annotations
 
+import logging
 import re
 
 import pytest
@@ -54,7 +55,45 @@ def test_load_config_malformed_toml_falls_back_to_defaults(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text("this is not valid TOML [[[", encoding="utf-8")
     cfg = config_mod.load_config(path)
-    assert cfg == config_mod.DEFAULTS
+    for key, value in config_mod.DEFAULTS.items():
+        assert cfg[key] == value
+
+
+def test_load_config_malformed_toml_logs_loudly_and_marks_load_error(tmp_path, caplog):
+    # S-2: a malformed config used to be silently indistinguishable from a
+    # never-configured install -- no log line at all. Now it must log an
+    # ERROR and leave a trail validate_config() can surface.
+    path = tmp_path / "config.toml"
+    path.write_text("this is not valid TOML [[[", encoding="utf-8")
+    with caplog.at_level(logging.ERROR, logger="ccsync.config"):
+        cfg = config_mod.load_config(path)
+    assert cfg["_config_load_error"]
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+    errors, _warnings = config_mod.validate_config(cfg)
+    assert any("config.toml failed to load" in e for e in errors)
+
+
+def test_load_config_tolerates_utf8_bom(tmp_path):
+    # S-2: PowerShell's Set-Content prepends a UTF-8 BOM even when
+    # overwriting a BOM-less file (windows_bootstrap.ps1 / windows_upgrade
+    # .ps1) -- a config written that way must still parse cleanly, the same
+    # way identity.py's load_identity() already tolerates a BOM.
+    path = tmp_path / "config.toml"
+    text = 'editor_name = "alex"\nlocal_root = "C:\\\\Creators_Club"\n'
+    path.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+    cfg = config_mod.load_config(path)
+    assert cfg["editor_name"] == "alex"
+    assert cfg["local_root"] == "C:\\Creators_Club"
+    assert cfg["_config_load_error"] is None
+
+
+def test_load_config_clean_file_has_no_load_error(tmp_path):
+    path = tmp_path / "config.toml"
+    cfg = config_mod.load_config(path)
+    assert cfg["_config_load_error"] is None
+    errors, _warnings = config_mod.validate_config(cfg)
+    assert not any("config.toml failed to load" in e for e in errors)
 
 
 def test_load_config_coerces_bad_list_fields(tmp_path):
@@ -78,9 +117,16 @@ def test_resolved_local_root(tmp_path):
 def test_default_toml_text_documents_every_default_key():
     # Every key in DEFAULTS should appear as a `key =` assignment somewhere
     # in DEFAULT_TOML_TEXT, so the shipped template never drifts from the
-    # code's actual fallback values.
+    # code's actual fallback values -- EXCEPT keys a MODE_PROFILES entry
+    # controls (currently just sync_enabled): those are deliberately left
+    # commented out in the template (see S-7) so a first-run file doesn't
+    # pin an explicit value that would make mode="base"'s profile dead.
+    profile_controlled = {key for profile in config_mod.MODE_PROFILES.values() for key in profile}
     for key in config_mod.DEFAULTS:
-        pattern = rf"^{re.escape(key)} = "
+        if key in profile_controlled:
+            pattern = rf"^#\s*{re.escape(key)} = "
+        else:
+            pattern = rf"^{re.escape(key)} = "
         assert re.search(pattern, config_mod.DEFAULT_TOML_TEXT, re.MULTILINE), (
             f"DEFAULT_TOML_TEXT is missing an assignment for '{key}'"
         )
@@ -254,6 +300,22 @@ def test_unknown_mode_warns_and_acts_as_editor(tmp_path):
     assert any("unknown mode" in w for w in warnings)
 
 
+def test_mode_base_profile_is_not_dead_from_a_real_first_run_template(tmp_path):
+    # S-7 regression: DEFAULT_TOML_TEXT used to contain a literal
+    # `sync_enabled = true`, which -- because load_config only applies a
+    # MODE_PROFILES entry when the key is ABSENT from the file -- made
+    # mode="base" a no-op for any config seeded from the companion's own
+    # template (as opposed to the bare one-line files the older tests here
+    # use). Write a config that mirrors the real first-run template, only
+    # with mode flipped to "base", and confirm the profile still applies.
+    p = tmp_path / "config.toml"
+    text = config_mod.DEFAULT_TOML_TEXT.replace('mode = "editor"', 'mode = "base"')
+    assert 'mode = "base"' in text  # sanity: the replace actually matched
+    p.write_text(text, encoding="utf-8")
+    cfg = config_mod.load_config(p)
+    assert cfg["sync_enabled"] is False
+
+
 # -- dashboard_report_interval_active / manifest_refresh_interval /
 # media_tree_refresh_interval -----------------------------------------------
 
@@ -287,6 +349,28 @@ def test_validate_config_flags_non_numeric_new_interval_keys(tmp_path, key):
     errors, _ = config_mod.validate_config(_good_cfg(tmp_path, **{key: "soon"}))
     assert any(f"{key} must be a positive number" in e for e in errors)
 
+
+# -- popup_snooze_seconds -----------------------------------------------
+
+
+def test_popup_snooze_seconds_has_expected_default():
+    assert config_mod.DEFAULTS["popup_snooze_seconds"] == 300
+
+
+def test_load_config_creates_defaults_includes_popup_snooze_seconds(tmp_path):
+    path = tmp_path / "config.toml"
+    cfg = config_mod.load_config(path)
+    assert cfg["popup_snooze_seconds"] == 300
+
+
+def test_validate_config_flags_non_positive_popup_snooze_seconds(tmp_path):
+    errors, _ = config_mod.validate_config(_good_cfg(tmp_path, popup_snooze_seconds=0))
+    assert any("popup_snooze_seconds must be a positive number" in e for e in errors)
+
+
+def test_validate_config_flags_non_numeric_popup_snooze_seconds(tmp_path):
+    errors, _ = config_mod.validate_config(_good_cfg(tmp_path, popup_snooze_seconds="soon"))
+    assert any("popup_snooze_seconds must be a positive number" in e for e in errors)
 
 
 def test_version_matches_pyproject():

@@ -210,12 +210,23 @@ class SyncthingLane(LaneAdapter):
 
     # -- LaneAdapter ---------------------------------------------------
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            # Idempotent per LaneAdapter's contract. Same shape as
+            # RcloneLane.start(): spawning thread #2 while #1 is still
+            # alive and then clearing _stop_event would un-stick #1's own
+            # wait() and leak it forever (sign-out -> sign-in in quick
+            # succession).
+            return
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._poll_loop, name="ccsync-syncthing-poll", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
+        if self._thread is not None:
+            # Bounded join -- see RcloneLane.stop() for why this can't wait
+            # indefinitely (an in-flight REST call could stall).
+            self._thread.join(timeout=5)
 
     def status(self) -> LaneStatus:
         with self._lock:

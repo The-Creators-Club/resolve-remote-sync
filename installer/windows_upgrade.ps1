@@ -84,14 +84,45 @@ if (-not $stopped -and -not $DryRun) { Write-Skip "companion was not running" }
 if (-not $DryRun) { Start-Sleep -Milliseconds 800 }  # let the file handle release
 
 # --- 2. copy the new exe into place ---------------------------------------
-if ($DryRun) { Write-Step "[dry-run] would copy new exe -> $CompanionExePath" }
+# The companion was just force-killed above; if the 800ms wait wasn't enough
+# (AV scanning the exe, a lingering handle -- seen live, see
+# build_editor_package.ps1's notes), Copy-Item throws under
+# $ErrorActionPreference = "Stop". Retry rather than let that abort the
+# script here -- it would leave the editor with the companion already
+# killed and steps 3-5 (autostart, config migration, relaunch) never run,
+# i.e. strictly worse than not upgrading at all.
+$copySucceeded = $false
+if ($DryRun) {
+    Write-Step "[dry-run] would copy new exe -> $CompanionExePath"
+    $copySucceeded = $true
+}
 else {
     if (-not (Test-Path -LiteralPath $BinDir)) { New-Item -ItemType Directory -Path $BinDir -Force | Out-Null }
-    Copy-Item -LiteralPath $CompanionExe -Destination $CompanionExePath -Force
-    Write-Step "installed new companion: $CompanionExePath"
+    $maxAttempts = 5
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            Copy-Item -LiteralPath $CompanionExe -Destination $CompanionExePath -Force -ErrorAction Stop
+            Write-Step "installed new companion: $CompanionExePath"
+            $copySucceeded = $true
+            break
+        }
+        catch {
+            if ($attempt -lt $maxAttempts) {
+                Write-Warn2 "copy attempt $attempt/$maxAttempts failed ($($_.Exception.Message)) -- retrying in 2s"
+                Start-Sleep -Seconds 2
+            }
+            else {
+                Write-Warn2 "could not replace $CompanionExePath after $maxAttempts attempts ($($_.Exception.Message)) -- the OLD companion build is still in place. Close anything that might have it open (Explorer preview, AV scan) and re-run this script."
+            }
+        }
+    }
 }
 
-# --- 3. (re)register autostart --------------------------------------------
+# --- 3. (re)register autostart ---------------------------------------------
+# Always run this (and steps 4-5), even if the copy above ultimately failed:
+# the companion was already killed, so re-registering autostart and
+# relaunching whatever exe is actually at CompanionExePath (new or, if the
+# copy failed, the surviving old one) leaves the machine no worse off.
 if ($DryRun) { Write-Step "[dry-run] would set autostart $RunKeyPath\CCSyncCompanion = $CompanionExePath" }
 else {
     Set-ItemProperty -Path $RunKeyPath -Name "CCSyncCompanion" -Value $CompanionExePath
@@ -141,12 +172,19 @@ else {
         Write-Step "[dry-run] would add/update in ${ConfigPath}: $($added -join ', ')"
     }
     else {
-        Set-Content -LiteralPath $ConfigPath -Value ($lines -join "`r`n") -Encoding UTF8
+        # PS 5.1's Set-Content -Encoding UTF8 emits a BOM even for a file
+        # that started BOM-less. tomllib rejects it outright, and
+        # load_config swallows that exception with no log line -- the
+        # companion silently runs on blank DEFAULTS while config.toml looks
+        # correct to a human (S-2).
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($ConfigPath, (($lines -join "`r`n") + "`r`n"), $utf8NoBom)
         Write-Step "config updated ($ConfigPath): $($added -join ', ')"
     }
 }
 
-# --- 5. relaunch ----------------------------------------------------------
+# --- 5. relaunch ------------------------------------------------------------
+# Always runs, even after a failed copy above -- see the note on step 3.
 if ($DryRun) { Write-Step "[dry-run] would relaunch $CompanionExePath" }
 else {
     Start-Process -FilePath $CompanionExePath -WorkingDirectory $BinDir
@@ -155,7 +193,12 @@ else {
 
 Write-Host ""
 Write-Host "=================================================================="
-Write-Step "Upgrade complete$(if ($DryRun) { ' (dry run -- nothing changed)' })."
+if (-not $copySucceeded) {
+    Write-Step "Upgrade INCOMPLETE: the new companion build could not be installed (see the WARNING above); the previous build was relaunched instead."
+}
+else {
+    Write-Step "Upgrade complete$(if ($DryRun) { ' (dry run -- nothing changed)' })."
+}
 Write-Step "Syncthing identity, rclone key, drive mapping, and settings were preserved."
 if (-not $DashboardToken -and (Test-Path -LiteralPath $ConfigPath)) {
     $hasToken = (Get-Content -LiteralPath $ConfigPath | Where-Object { $_ -match '^\s*dashboard_token\s*=\s*"\S' }).Count -gt 0

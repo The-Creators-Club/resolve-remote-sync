@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -47,6 +48,17 @@ VIDEO_EXTS = [
 
 DIRECTION_UP = "up"
 DIRECTION_DOWN = "down"
+
+
+def _win_creationflags() -> int:
+    """CREATE_NO_WINDOW: rclone is spawned from a windowed (console=False,
+    build.spec) build, so without this every lane run and every
+    rclone_available() probe flashes a fresh black console window on the
+    editor's desktop. upgrade.py's _default_spawn applies the same flag for
+    the self-upgrade spawn -- mirrored here. A no-op (0) off Windows."""
+    if sys.platform == "win32":
+        return subprocess.CREATE_NO_WINDOW
+    return 0
 
 
 def build_filter_rules_up() -> list[str]:
@@ -95,7 +107,12 @@ def rclone_available(rclone_path: str) -> tuple[bool, str]:
 
     try:
         proc = subprocess.run(
-            [resolved, "version"], capture_output=True, timeout=10, text=True
+            [resolved, "version"],
+            capture_output=True,
+            timeout=10,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_win_creationflags(),
         )
     except Exception as exc:
         return False, f"rclone at '{resolved}' failed to run: {exc}"
@@ -117,7 +134,14 @@ def _join_remote_path(remote_root: str, subpath: str) -> str:
 
 
 def _run_lsf(cmd: list[str], timeout: float) -> Optional[str]:
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        timeout=timeout,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_win_creationflags(),
+    )
     if proc.returncode != 0:
         log.warning(
             "rclone lsf exited %d: %s", proc.returncode, (proc.stderr or "").strip()[:300]
@@ -163,7 +187,8 @@ def clone_directory_tree(
     if output is None:
         return None
 
-    base = Path(local_root) / subpath
+    local_sub = _local_subpath(subpath)
+    base = Path(local_root) / local_sub if local_sub else Path(local_root)
     created = 0
     try:
         if not base.is_dir():
@@ -194,6 +219,19 @@ def _append_stats_flags(cmd: list[str], stats_interval: Optional[str]) -> list[s
     return cmd
 
 
+def _local_subpath(subpath: str | None) -> str | None:
+    """Strip leading/trailing path separators from `subpath` before it is
+    joined onto local_root: pathlib treats a rooted component (leading "/"
+    or "\\") as absolute, so `Path(local_root) / "/Projects/x"` silently
+    discards local_root entirely and joins onto the filesystem root
+    instead. The remote side doesn't need this -- _join_remote_path already
+    strips slashes on both sides of its own join."""
+    if not subpath:
+        return subpath
+    stripped = subpath.strip("/\\")
+    return stripped or None
+
+
 def build_up_command(
     rclone_path: str,
     local_root: str,
@@ -204,7 +242,8 @@ def build_up_command(
     subpath: str | None = None,
     stats_interval: str | None = None,
 ) -> list[str]:
-    local_side = str(Path(local_root) / subpath) if subpath else str(local_root)
+    local_sub = _local_subpath(subpath)
+    local_side = str(Path(local_root) / local_sub) if local_sub else str(local_root)
     remote_side = (
         f"{remote}:{_join_remote_path(remote_root, subpath)}" if subpath else f"{remote}:{remote_root}"
     )
@@ -215,6 +254,9 @@ def build_up_command(
         remote_side,
         "--filter-from", str(filter_file),
         "--ignore-existing",
+        "--ignore-case",  # rclone filters are case-sensitive by default;
+        # without this, uppercase camera extensions (CLIP.MOV) and a
+        # lowercase-cased "proxy/" dir slip past the filter rules entirely.
         "--min-age", "30s",
         "--transfers", str(transfers),
         "--use-json-log",
@@ -233,7 +275,8 @@ def build_down_command(
     subpath: str | None = None,
     stats_interval: str | None = None,
 ) -> list[str]:
-    local_side = str(Path(local_root) / subpath) if subpath else str(local_root)
+    local_sub = _local_subpath(subpath)
+    local_side = str(Path(local_root) / local_sub) if local_sub else str(local_root)
     remote_side = (
         f"{remote}:{_join_remote_path(remote_root, subpath)}" if subpath else f"{remote}:{remote_root}"
     )
@@ -243,6 +286,7 @@ def build_down_command(
         remote_side,
         local_side,
         "--filter-from", str(filter_file),
+        "--ignore-case",  # see build_up_command -- same case-sensitivity gap
         "--transfers", str(transfers),
         "--use-json-log",
         "--verbose",  # INFO-level per-file log lines — parse_json_log() needs these
@@ -397,6 +441,15 @@ class RcloneLane(LaneAdapter):
 
     # -- LaneAdapter ---------------------------------------------------
     def start(self) -> None:
+        if self._periodic_thread is not None and self._periodic_thread.is_alive():
+            # Idempotent per LaneAdapter's contract. A still-running
+            # periodic thread (e.g. mid rclone run when sign-out -> sign-in
+            # happens quickly) must not get a second thread spawned
+            # alongside it: clearing _stop_event below would un-stick
+            # thread #1's own stop_event.wait() and leak it forever, since
+            # it would then loop against an event thread #2 also controls.
+            return
+
         available, msg = rclone_available(self.rclone_path)
         if not available:
             with self._lock:
@@ -405,6 +458,9 @@ class RcloneLane(LaneAdapter):
             log.error("%s: %s", self.name, msg)
             return
 
+        # Only clear the stop event once we're actually about to start a
+        # fresh thread -- clearing it unconditionally is what let a stale
+        # thread's wait() re-arm above.
         self._stop_event.clear()
         self._periodic_thread = threading.Thread(
             target=self._periodic_loop, name=f"ccsync-{self.name}-periodic", daemon=True
@@ -425,6 +481,12 @@ class RcloneLane(LaneAdapter):
 
     def stop(self) -> None:
         self._stop_event.set()
+        if self._periodic_thread is not None:
+            # Bounded join: an in-flight rclone run can take minutes, and
+            # stop() must never block that long -- but without joining at
+            # all, start() right after (sign-out -> sign-in) can leak this
+            # thread (see start()'s liveness guard above).
+            self._periodic_thread.join(timeout=5)
         if self._debounce_timer is not None:
             self._debounce_timer.cancel()
         if self._observer is not None:
@@ -476,7 +538,14 @@ class RcloneLane(LaneAdapter):
         if self._legacy_run:
             cmd = self._build_command(subpath=subpath, stats_interval=None)
             try:
-                proc = self.subprocess_run(cmd, capture_output=True, text=True, timeout=None)
+                proc = self.subprocess_run(
+                    cmd,
+                    capture_output=True,
+                    timeout=None,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=_win_creationflags(),
+                )
             except Exception as exc:
                 with self._lock:
                     self._status.state = STATE_ERROR
@@ -529,13 +598,35 @@ class RcloneLane(LaneAdapter):
     # -- Popen-based runner with live --stats JSON parsing ---------------
     def _run_popen(self, cmd: list[str]) -> tuple[int, str]:
         factory = self.popen_factory or subprocess.Popen
-        proc = factory(cmd, stderr=subprocess.PIPE, text=True)
+        proc = factory(
+            cmd,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_win_creationflags(),
+        )
         lines: list[str] = []
 
         def _reader() -> None:
-            for line in proc.stderr:
-                lines.append(line)
-                self._handle_stderr_line(line)
+            # Never let a decode/IO error escape this thread: with no
+            # try/except here, one non-ASCII filename raising inside the
+            # loop would kill the reader silently, nobody would drain
+            # proc.stderr, rclone would block on a full pipe once its 64 KB
+            # buffer fills, and proc.wait() below would never return --
+            # deadlocking _run_lock (and the whole sequencer) forever.
+            try:
+                for line in proc.stderr:
+                    lines.append(line)
+                    self._handle_stderr_line(line)
+            except Exception:
+                log.exception(
+                    "%s: stderr reader failed -- killing rclone so proc.wait() "
+                    "cannot deadlock", self.name,
+                )
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
         reader_thread = threading.Thread(
             target=_reader, name=f"ccsync-{self.name}-stderr-reader", daemon=True

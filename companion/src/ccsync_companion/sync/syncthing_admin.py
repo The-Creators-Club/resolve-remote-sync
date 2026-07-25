@@ -115,18 +115,30 @@ class SyncthingAdmin:
     def accept_folder(
         self, folder_id: str, label: str, local_path: str, offered_by_device_id: str
     ) -> Any:
+        """Accept a pending Syncthing folder offer with the video/Proxy
+        ignores already in place before it can pull anything.
+
+        Created paused so there is no window between the folder existing
+        and set_ignores() landing during which Syncthing could start
+        pulling the video/Proxy content lanes A/B already own (a
+        hand-provisioned or older server folder would otherwise duplicate
+        that transfer). Only unpaused after set_ignores() succeeds; if it
+        raises, the folder is left paused rather than silently syncing
+        unfiltered, and the exception propagates per this class's
+        never-swallow-errors-itself contract."""
         folder_config = {
             "id": folder_id,
             "label": label,
             "path": local_path,
             "type": "sendreceive",
-            "paused": False,
+            "paused": True,
             "fsWatcherEnabled": True,
             "ignorePerms": False,
             "devices": [{"deviceID": offered_by_device_id, "introducedBy": ""}],
         }
         result = self._request("POST", "/rest/config/folders", folder_config)
         self.set_ignores(folder_id, STIGNORE_LINES)
+        self.set_folder_paused(folder_id, False)
         return result
 
     def set_ignores(self, folder_id: str, lines: list[str]) -> Any:

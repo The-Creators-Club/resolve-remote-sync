@@ -5,15 +5,26 @@ classified as one of:
 
   OK           — under local_root (case-insensitive on Windows).
   OUT_OF_TREE  — exists on disk but outside local_root -> popup candidate.
-  BAD_PREFIX   — starts with the canonical shared prefix (e.g. "P:\\") but
-                 does not resolve to somewhere under local_root -> mapping-
-                 health warning (tray notification, not popup).
-  MISSING      — doesn't exist on disk and isn't under local_root or the
-                 canonical prefix either (e.g. a truly offline/deleted
-                 source). Not in SPEC.md's three-way list explicitly, but
-                 the watcher needs *some* answer for this case rather than
-                 silently mis-filing it as OUT_OF_TREE (which would trigger
-                 an unfixable popup for a file that's simply gone).
+  BAD_PREFIX   — starts with the canonical shared prefix (e.g. "P:\\") AND
+                 exists on disk (the mapping resolves to *something*) but
+                 that something is not under local_root -> a genuinely
+                 broken mapping (subst/mount pointing at the wrong target)
+                 -> mapping-health warning (tray notification, not popup).
+  MISSING      — doesn't exist on disk, whether or not it's under the
+                 canonical prefix. This is the DESIGNED steady state on a
+                 remote editor rig: lane A is upload-only, so a video
+                 original legitimately lives only on the NAS and was never
+                 downloaded here -- every clip Resolve has ever cut in
+                 renders this way, on a perfectly healthy install. A
+                 canonical-prefix path that simply isn't present locally is
+                 therefore NOT treated as a mapping problem (that used to
+                 fire a tray notification per distinct clip -- see
+                 AUDIT.md §5's BAD_PREFIX-storm finding); only a path that
+                 resolves to somewhere real but wrong (above) does. Not in
+                 SPEC.md's three-way list explicitly, but the watcher needs
+                 *some* answer for this case rather than silently mis-filing
+                 it as OUT_OF_TREE (which would trigger an unfixable popup
+                 for a file that's simply gone/not yet synced).
 
 Windows case-insensitivity and separator differences ('/' vs '\\') are
 handled the same way resolve_bridge.py does it: os.path.normcase(os.path.
@@ -84,10 +95,19 @@ def classify_path(
     if norm_prefix and norm_path.startswith(norm_prefix):
         # On a correctly-mapped machine (subst P: -> local_root) canonical-
         # prefix paths are the HEALTHY state: realpath resolves the subst
-        # drive, landing under local_root -> OK. A canonical path that
-        # doesn't exist, or that resolves somewhere OTHER than local_root
-        # (P: mapped to the wrong target), is a broken mapping -> warning.
-        if exists and norm_root:
+        # drive, landing under local_root -> OK.
+        if not exists:
+            # DESIGNED steady state on a remote editor rig (see the module
+            # docstring): the prefix itself is fine -- there's simply
+            # nothing local to check yet (lane A never downloads
+            # originals). This is deliberately indistinguishable from a
+            # genuinely unmapped P: drive (both fail exists()) -- that
+            # ambiguity is the tradeoff for not raising a mapping-health
+            # notification per not-yet-synced clip. A mapping that resolves
+            # to the WRONG target (below) is still caught, because that
+            # case is only detectable once something actually exists there.
+            return MISSING
+        if norm_root:
             resolve = realpath_fn if realpath_fn is not None else os.path.realpath
             try:
                 real = _norm(resolve(path), plat)
@@ -95,6 +115,9 @@ def classify_path(
                 real = norm_path
             if _is_under(real, norm_root, sep):
                 return OK
+        # Exists (the mapping resolves to something real) but not under
+        # local_root -- a genuinely broken mapping (wrong subst/mount
+        # target, or local_root isn't configured at all) -> warn.
         return BAD_PREFIX
 
     if exists:

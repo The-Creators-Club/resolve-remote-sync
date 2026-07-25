@@ -59,9 +59,13 @@ def test_windows_out_of_tree_when_exists():
     assert result == OUT_OF_TREE
 
 
-def test_windows_bad_prefix_when_on_canonical_prefix_but_not_local_root():
-    # e.g. Resolve stored "P:\Projects\..." but this machine's local_root is
-    # "C:\Creators_Club" and P: isn't mapped/subst'd right now.
+def test_windows_canonical_prefix_missing_locally_is_missing_not_bad_prefix():
+    # THE designed steady state on a remote editor rig: lane A is
+    # upload-only, so Resolve's "P:\Projects\..." video original
+    # legitimately lives only on the NAS and was never downloaded here.
+    # This must NOT warn -- see AUDIT.md §5's BAD_PREFIX-storm finding
+    # (a 400-clip project would otherwise fire 400 tray notifications on a
+    # perfectly healthy install).
     result = classify_path(
         r"P:\Projects\2025\FF4\Nuclear\B-roll\clip.mov",
         local_root=r"C:\Creators_Club",
@@ -69,7 +73,7 @@ def test_windows_bad_prefix_when_on_canonical_prefix_but_not_local_root():
         exists_fn=_always_false,
         is_windows=True,
     )
-    assert result == BAD_PREFIX
+    assert result == MISSING
 
 
 def test_windows_bad_prefix_takes_priority_even_if_file_exists():
@@ -160,15 +164,30 @@ def test_posix_out_of_tree_when_exists():
     assert result == OUT_OF_TREE
 
 
-def test_posix_bad_prefix_mapped_mount_broken():
-    # SPEC.md flaw #7: Mapped Mount on Mac is a manual Resolve preference;
-    # if it's misconfigured, a stored "P:"-equivalent path won't resolve.
+def test_posix_canonical_prefix_missing_locally_is_missing_not_bad_prefix():
+    # Same steady-state case as the Windows equivalent above: a Mapped
+    # Mount path that simply isn't downloaded yet must not warn.
     result = classify_path(
         "/Volumes/CreatorsClub/Projects/clip.mov",
         local_root="/Users/jane/Creators_Club",
         canonical_prefix="/Volumes/CreatorsClub",
         exists_fn=_always_false,
         is_windows=False,
+    )
+    assert result == MISSING
+
+
+def test_posix_bad_prefix_mapped_mount_resolves_elsewhere():
+    # SPEC.md flaw #7: Mapped Mount on Mac is a manual Resolve preference.
+    # Here the mount DOES exist but resolves to somewhere other than
+    # local_root -- that is still a genuine, detectable mapping break.
+    result = classify_path(
+        "/Volumes/CreatorsClub/Projects/clip.mov",
+        local_root="/Users/jane/Creators_Club",
+        canonical_prefix="/Volumes/CreatorsClub",
+        exists_fn=_always_true,
+        is_windows=False,
+        realpath_fn=lambda p: p,  # no subst-equivalent resolution on this mount
     )
     assert result == BAD_PREFIX
 

@@ -88,6 +88,17 @@ class CompanionApp:
         # popup and the user-initiated "Scan whole project" tray action
         # both trying to open a Tk root at once.
         self._popup_active_lock = threading.Lock()
+        # Scratch/utility Resolve project names (config `ignored_resolve_
+        # projects`), normalized the same way watcher.TimelineWatcher does
+        # -- used by _refresh_media_tree_once() so the media-tree reporter
+        # honors the same "pretend this project doesn't exist" contract the
+        # watcher already enforces (see X-7: this cache used to have no
+        # ignore check at all, so an ignored scratch project's clips could
+        # get reported under "media_tree" and, server-side, fuzzy-match
+        # onto and overwrite a real project's bin tree).
+        self._ignored_resolve_projects = {
+            str(n).strip().lower() for n in (cfg.get("ignored_resolve_projects") or []) if str(n).strip()
+        }
         self._paused = False
         self._stop_event = threading.Event()
         self._watcher_thread: Optional[threading.Thread] = None
@@ -132,7 +143,9 @@ class CompanionApp:
         self.syncthing_admin: Optional[SyncthingAdmin] = None
         self.sequencer: Optional[Sequencer] = None
         if self._managed:
-            self.selection_client = SelectionClient(cfg, self._state_dir)
+            self.selection_client = SelectionClient(
+                cfg, self._state_dir, editor_name_fn=self.editor_identity
+            )
             self.syncthing_admin = SyncthingAdmin(
                 syncthing_url=cfg.get("syncthing_url", "http://127.0.0.1:8384"),
                 api_key=cfg.get("syncthing_api_key", ""),
@@ -476,7 +489,12 @@ class CompanionApp:
             self._lane_a.run_once(subpath)
         except Exception:
             log.exception("consolidate: lane A upload failed")
-        if self._lane_b_enabled:
+        if self._lane_b_enabled and not consolidate.lane_b_allowed(reconcile):
+            # The dry run saw deletions: `rclone sync` down would delete local
+            # proxy files the NAS doesn't have (D-1) -- the report already
+            # told the user lane B is being skipped.
+            log.warning("consolidate: skipping lane B pull -- dry run reported deletions")
+        elif self._lane_b_enabled:
             try:
                 self._lane_b.run_once(subpath)
             except Exception:
@@ -550,6 +568,15 @@ class CompanionApp:
             return
 
         project_name = str(result.get("project_name") or "").strip()
+        if project_name and project_name.lower() in self._ignored_resolve_projects:
+            # Same "pretend this project doesn't exist" contract the
+            # watcher enforces for ignored_resolve_projects (config.py) --
+            # never cache/report a scratch project's clips as "media_tree"
+            # (see X-7).
+            with self._media_tree_lock:
+                self._media_tree_cache = {}
+            return
+
         clips: list[dict[str, Any]] = []
         for item in result.get("items", []):
             file_path = item.get("file_path", "") or ""
@@ -627,7 +654,13 @@ class CompanionApp:
             return self.identity.username
         if self._require_login:
             return None
-        return self.config.get("editor_name", "")
+        # A blank/whitespace editor_name is not a usable identity either --
+        # returning "" here used to let post_once() proceed and POST every
+        # report under editor_name="", which the dashboard's ReportIn
+        # (min_length=1) 422s forever, invisibly (see S-15). None makes
+        # post_once() SKIP the cycle instead, same as the require_login gate.
+        name = str(self.config.get("editor_name", "")).strip()
+        return name or None
 
     def _lane_pending_login_detail(self) -> str:
         return 'sign in required -- use the tray\'s "Sign in..." to authenticate before syncing'
@@ -703,6 +736,16 @@ class CompanionApp:
                 self._lane_c.stop()
             except Exception:
                 log.exception("failed to stop lane %s", getattr(self._lane_c, "name", self._lane_c))
+            # Mirror _start_lanes()'s start_watchdog_only() call: lane A's
+            # watchdog observer keeps running otherwise -- feeding
+            # sequencer.notify_change() on a now-stopped sequencer after
+            # sign-out, or staying live in the outgoing process alongside a
+            # freshly self-upgraded instance's own observer on the same
+            # tree (see the managed-_stop_lanes finding).
+            try:
+                self._lane_a.stop()
+            except Exception:
+                log.exception("failed to stop lane %s", getattr(self._lane_a, "name", self._lane_a))
         else:
             for lane in self.lanes:
                 try:
@@ -852,11 +895,21 @@ class CompanionApp:
             # Lane C's poll loop is read-only status reporting -- it keeps
             # running regardless of pause state.
         else:
-            for lane in self.lanes:
-                try:
-                    lane.stop() if self._paused else lane.start()
-                except Exception:
-                    log.exception("toggle_pause: lane %s failed", getattr(lane, "name", lane))
+            # Delegate to _start_lanes()/_stop_lanes() rather than looping
+            # over self.lanes directly: the old loop called lane.start()
+            # unconditionally on EVERY lane regardless of lane_b_enabled,
+            # so a base rig with lane_b_enabled=false would start
+            # mirroring proxies -- something config says must never
+            # happen -- on the very first Pause->Resume. _start_lanes()
+            # already skips lane B correctly (see the toggle_pause
+            # finding).
+            try:
+                self._stop_lanes() if self._paused else self._start_lanes()
+            except Exception:
+                log.exception(
+                    "toggle_pause: failed to %s lanes",
+                    "stop" if self._paused else "start",
+                )
         log.info("sync %s", "paused" if self._paused else "resumed")
 
     # -- lifecycle ---------------------------------------------------
@@ -949,6 +1002,16 @@ class CompanionApp:
         except ImportError:
             self._tray_icon = None
             log.warning("pystray/Pillow not installed — running headless (Ctrl+C to stop)")
+        except Exception:
+            # pystray.Icon(...) / _make_icon_image / _build_menu can raise
+            # OSError/TclError/PIL errors too (no interactive session,
+            # Explorer's tray not up yet at login, shell restart) -- only
+            # catching ImportError here let any of those escape past the
+            # try/finally below, skipping shutdown() entirely (lanes,
+            # sequencer, reporter, watchdog observer all left running --
+            # see S-11). Fall back to headless instead.
+            self._tray_icon = None
+            log.exception("tray icon failed to start -- running headless (Ctrl+C to stop)")
 
         if just_upgraded:
             log.info("self-upgrade to v%s completed", config_mod.VERSION)
@@ -977,8 +1040,29 @@ class CompanionApp:
 
 def run() -> None:
     cfg = config_mod.load_config()
-    app = CompanionApp(cfg)
-    app.run()
+    # Logging (and a first validate_config pass) must exist BEFORE
+    # CompanionApp() is constructed -- a hand-edited bad value (e.g.
+    # poll_interval = "fast") raises inside __init__, and in the windowed
+    # (console=False) PyInstaller build sys.stderr is None, so without
+    # logging already active the exe would just vanish with no log line,
+    # no tray, no toast (see S-10). CompanionApp.run() also calls
+    # setup_logging()/validate_config() itself -- harmless repeats
+    # (setup_logging() just re-clears/re-adds handlers; idempotent).
+    setup_logging(cfg)
+    errors, _warnings = config_mod.validate_config(cfg)
+    if errors:
+        log.error(
+            "config has %d problem(s) that STOP syncing -- fix these in %s:",
+            len(errors), config_mod.CONFIG_PATH,
+        )
+        for problem in errors:
+            log.error("  - %s", problem)
+    try:
+        app = CompanionApp(cfg)
+        app.run()
+    except Exception:
+        log.exception("ccsync-companion crashed during startup/run")
+        raise
 
 
 if __name__ == "__main__":

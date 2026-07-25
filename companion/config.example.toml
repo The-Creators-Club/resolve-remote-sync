@@ -151,6 +151,10 @@ sync_enabled = true
 # legitimately lives outside the tree there). Still logged either way.
 popup_enabled = true
 
+# How long (seconds) a dismissed-without-acting out-of-tree clip is snoozed
+# before the passive watcher will pop it again.
+popup_snooze_seconds = 300
+
 # Machine role: "editor" (default -- full sync lanes) or "base" (the central
 # machine working directly off the NAS: implies sync_enabled false unless set
 # explicitly above; the out-of-tree popup stays on so stray media still gets

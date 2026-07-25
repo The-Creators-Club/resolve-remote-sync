@@ -46,7 +46,7 @@ COLOR_RED = theme.RGB_RED
 LANE_LABELS = {
     "lane_a_video_up": "Uploads (your footage → server)",
     "lane_b_proxy_down": "Proxies (server → you)",
-    "lane_c_syncthing": "Everything else (audio, graphics, subs — both ways)",
+    "lane_c_syncthing": "Everything else, both ways (audio, graphics, subs)",
 }
 
 
@@ -153,19 +153,19 @@ def classify_lane_error(last_error: Optional[str]) -> str:
     Copy diagnostics."""
     text = str(last_error or "").lower()
     if not text:
-        return "Something went wrong. Tray → Copy diagnostics for Alex."
+        return "Something went wrong. Tray → Copy diagnostics for your admin."
     if any(k in text for k in ("no space", "enospc", "disk full", "not enough space")):
-        return "Your disk is full — free up space and it will resume."
+        return "Your disk is full. Free up space and it will resume."
     if any(k in text for k in (
         "permission denied", "auth", "handshake", "publickey", "unable to authenticate",
     )):
-        return "The server rejected this machine's login. Tray → Copy diagnostics for Alex."
+        return "The server rejected this machine's login. Tray → Copy diagnostics for your admin."
     if any(k in text for k in (
         "timeout", "timed out", "no route", "connection refused", "connection reset",
         "network", "unreachable", "dial tcp", "lookup", "eof",
     )):
         return "Can't reach the server. Check the Tailscale tray icon is connected."
-    return "Something went wrong. Tray → Copy diagnostics for Alex."
+    return "Something went wrong. Tray → Copy diagnostics for your admin."
 
 
 def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> str:
@@ -184,20 +184,20 @@ def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> 
     if app is not None:
         try:
             if getattr(app, "config_problems", None):
-                return f"{label}: NOT SYNCING — this machine isn't set up yet"
+                return f"{label}: NOT SYNCING (this machine isn't set up yet)"
             if app.is_paused():
                 return f"{label}: PAUSED"
         except Exception:
             pass
     if status.state == STATE_ERROR:
-        return f"{label}: PROBLEM — {classify_lane_error(status.last_error)}"
+        return f"{label}: PROBLEM. {classify_lane_error(status.last_error)}"
     detail = str(status.detail or "")
     if "sign in required" in detail.lower():
-        return f"{label}: NOT SYNCING — sign in first"
+        return f"{label}: NOT SYNCING (sign in first)"
     if "sync disabled" in detail.lower() or "direct NAS access" in detail:
         return f"{label}: not used on this machine (it works straight off the NAS)"
     if detail.startswith("NOT SYNCING"):
-        return f"{label}: NOT SYNCING — this machine isn't set up yet"
+        return f"{label}: NOT SYNCING (this machine isn't set up yet)"
     if status.state == STATE_SYNCING:
         # `queued` is set to 0 at the end of every run and incremented by
         # nothing, so the old "syncing (0 queued)" was a counter reading zero
@@ -212,7 +212,7 @@ def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> 
             parts.append(f"{human_bytes(int(status.speed_bps))}/s")
         if status.eta_seconds:
             parts.append(f"{human_duration(status.eta_seconds)} left")
-        return f"{label}: syncing" + (f" — {' · '.join(parts)}" if parts else "…")
+        return f"{label}: syncing" + (f" ({' · '.join(parts)})" if parts else "…")
     if status.state == STATE_PAUSED:
         return f"{label}: PAUSED"
     if status.queued:
@@ -279,7 +279,7 @@ def _show_sign_in_dialog(app: "CompanionApp") -> None:
     """
     lock = getattr(app, "_popup_active_lock", None)
     if lock is not None and not lock.acquire(blocking=False):
-        _notify(app, "Another CCSync window is already open — close it first.")
+        _notify(app, "Another CCSync window is already open. Close it first.")
         return
     try:
         _show_sign_in_dialog_locked(app)
@@ -304,7 +304,7 @@ def _show_sign_in_dialog_locked(app: "CompanionApp") -> None:
         log.warning("sign-in dialog failed to open (%s)", exc)
         _notify(app, "Couldn't open the sign-in window. Restart CCSync and try again.")
         return
-    root.title("CCSYNC.EXE — sign in")
+    root.title("CCSYNC.EXE: sign in")
     root.attributes("-topmost", True)
     root.configure(bg=theme.BG, padx=18, pady=14)
 
@@ -403,7 +403,7 @@ def _show_update_dialog(app: "CompanionApp") -> None:
 
     lock = getattr(app, "_popup_active_lock", None)
     if lock is not None and not lock.acquire(blocking=False):
-        _notify(app, "Can't update while a CCSync window is open — close it and try again.")
+        _notify(app, "Can't update while a CCSync window is open. Close it and try again.")
         return
     try:
         confirmed = _show_update_dialog_locked(app, info)
@@ -421,8 +421,8 @@ def _show_update_dialog(app: "CompanionApp") -> None:
         app.apply_upgrade()
     except Exception:
         log.exception("apply_upgrade() raised")
-        _notify(app, f"Update failed — you're still on v{config_mod.VERSION}, nothing is "
-                     "broken. Tray → Copy diagnostics for Alex.")
+        _notify(app, f"Update failed. You're still on v{config_mod.VERSION}, nothing is "
+                     "broken. Tray → Copy diagnostics for your admin.")
 
 
 def _show_update_dialog_locked(app: "CompanionApp", info: dict) -> bool:
@@ -459,7 +459,7 @@ def _show_update_dialog_locked(app: "CompanionApp", info: dict) -> bool:
                  font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
         tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
         if syncing:
-            body += "\n\nA sync is currently running — it will resume automatically after the restart."
+            body += "\n\nA sync is currently running. It will resume automatically after the restart."
         tk.Label(root, text=body, bg=theme.BG, fg=theme.MUTED, font=theme.mono(9),
                  justify="left", anchor="w", wraplength=360).pack(anchor="w", pady=(6, 10))
 
@@ -498,7 +498,7 @@ def _guarded(app: "CompanionApp", label: str, fn) -> None:
         fn()
     except Exception:
         log.exception("tray action %r failed", label)
-        _notify(app, f"'{label}' didn't work. Tray → Copy diagnostics for Alex.")
+        _notify(app, f"'{label}' didn't work. Tray → Copy diagnostics for your admin.")
 
 
 def _spawn(app: "CompanionApp", label: str, fn) -> None:
@@ -566,7 +566,7 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
         _open_log(app.log_path)
 
     def on_copy_diagnostics(icon, item):
-        _spawn(app, "Copy diagnostics for Alex", app.copy_diagnostics)
+        _spawn(app, "Copy diagnostics for your admin", app.copy_diagnostics)
 
     def on_open_project_folder(icon, item):
         _spawn(app, "Open my project folder",
@@ -638,7 +638,7 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
     try:
         if app.config_problems:
             problem_items = [pystray.MenuItem(
-                "⚠ NOT SET UP — nothing will sync (Copy diagnostics for Alex)",
+                "⚠ NOT SET UP: nothing will sync (Copy diagnostics for your admin)",
                 None, enabled=False,
             )]
     except Exception:
@@ -672,7 +672,7 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
         *setup_items,
         pystray.Menu.SEPARATOR,
         *upgrade_items,
-        pystray.MenuItem("Copy diagnostics for Alex", on_copy_diagnostics),
+        pystray.MenuItem("Copy diagnostics for your admin", on_copy_diagnostics),
         pystray.MenuItem("Open log", on_open_log),
         pystray.MenuItem("Advanced", pystray.Menu(
             pystray.MenuItem("Scan whole project", on_scan_whole_project),

@@ -254,7 +254,7 @@ def test_menu_calls_an_older_offered_build_a_rollback_not_an_update():
     labels = _menu_labels(_build_menu(_FakeAppWithUpgrade({"dashboard_url": ""},
                                                           {"version": older})))
     offer = next(la for la in labels if older in la)
-    assert offer == "Roll back to v0.0.1 (older — install)"
+    assert offer == "Roll back to v0.0.1 (older build, install)"
     assert "update" not in offer.lower(), "a downgrade must never read as an update"
 
 
@@ -341,7 +341,8 @@ def test_menu_offers_copy_diagnostics():
     every unknown failure into a single paste."""
     from ccsync_companion.tray import _build_menu
 
-    assert "Copy diagnostics for Alex" in _menu_labels(_build_menu(_FakeApp({"dashboard_url": ""})))
+    assert "Copy diagnostics for your admin" in _menu_labels(
+        _build_menu(_FakeApp({"dashboard_url": ""})))
 
 
 # -- UX-1 / UX-2 / UX-11 / UX-12: the tray must tell the truth ------------
@@ -359,7 +360,7 @@ def test_lane_line_never_says_ok_when_not_signed_in():
     )
     line = _format_lane_line(status, _FakeApp({"dashboard_url": ""}))
     assert "OK" not in line
-    assert "NOT SYNCING — sign in first" in line
+    assert "NOT SYNCING (sign in first)" in line
 
 
 def test_lane_line_says_sync_disabled_rather_than_ok():
@@ -410,7 +411,7 @@ def test_lane_labels_are_editor_facing():
     ]
     assert lines[0].startswith("Uploads (your footage → server)")
     assert lines[1].startswith("Proxies (server → you)")
-    assert lines[2].startswith("Everything else (audio, graphics, subs — both ways)")
+    assert lines[2].startswith("Everything else, both ways (audio, graphics, subs)")
     assert not any("lane a" in la or "lane_a" in la for la in lines)
 
 

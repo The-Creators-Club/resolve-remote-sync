@@ -16,9 +16,9 @@
       {% if scope_admin %}<td class="who">{{ t.editor }}</td>{% endif %}
       <td class="mono">{{ "⇡" if t.direction == "up" else "⇣" }}</td>
       <td class="mono-sm">{{ t.name }}{% if t.granularity == "project" %} <span class="chip">lane C</span>{% endif %}</td>
-      <td class="mono">{% if t.percentage is not none %}[{{ t.percentage | bar }}] {{ "%.0f" | format(t.percentage) }}%{% else %}—{% endif %}</td>
-      <td class="mono-sm">{% if t.speed_bps %}{{ t.speed_bps | human_bytes }}/s{% else %}—{% endif %}</td>
-      <td class="muted">{{ t.eta_seconds | eta if t.eta_seconds else "—" }}</td>
+      <td class="mono">{% if t.percentage is not none %}[{{ t.percentage | bar }}] {{ "%.0f" | format(t.percentage) }}%{% else %}-{% endif %}</td>
+      <td class="mono-sm">{% if t.speed_bps %}{{ t.speed_bps | human_bytes }}/s{% else %}-{% endif %}</td>
+      <td class="muted">{{ t.eta_seconds | eta if t.eta_seconds else "-" }}</td>
     </tr>
   {% endfor %}
   </tbody>

@@ -351,7 +351,7 @@ class IdentityManager:
                 self._identity = None
             return False, (
                 "The server's sign-in reply couldn't be used. If this keeps happening, "
-                "check this machine's clock is correct, then tray -> Copy diagnostics for Alex."
+                "check this machine's clock is correct, then tray -> Copy diagnostics for your admin."
             )
         return True, None
 

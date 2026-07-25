@@ -224,7 +224,7 @@ In the Resolve menu bar: **Playback > Proxy Handling > Prefer Proxies**.
 This makes Resolve play the locally-synced H.264 proxy for any clip whose
 camera original isn't on your machine (it won't be, for anything you
 didn't shoot/add yourself -- proxies travel down to you, originals travel
-up from whoever added them). The host machine (Alex's) is configured the
+up from whoever added them). The studio base rig is configured the
 opposite way (prefers camera originals) since it holds everything locally.
 
 ## 6. Mac only: Mapped Mount preference (manual, one-time)
@@ -268,7 +268,7 @@ warning pointing you back to this section.
 - Video you add (in `B-roll/`, `Interviewees/`, etc., outside any `Proxy/`
   folder) uploads to the NAS automatically but does **not** download to
   other editors as originals -- only its generated proxy comes back down,
-  once Alex's PC has generated one (this can take minutes to hours; the
+  once the base rig has generated one (this can take minutes to hours; the
   tray app shows the upload/proxy-wait queue).
 - If you add a clip to a timeline from somewhere *outside* your synced
   project folder (e.g. straight off your Desktop), the companion app pops

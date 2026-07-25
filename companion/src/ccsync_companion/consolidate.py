@@ -251,7 +251,7 @@ def reconcile_with_nas(
     }
     if subpath is None or not str(subpath).strip():
         result["ok"] = False
-        result["error"] = "no active project resolved — refusing whole-tree consolidate"
+        result["error"] = "no active project resolved -- refusing whole-tree consolidate"
         log.error("reconcile_with_nas: %s", result["error"])
         return result
     try:
@@ -325,7 +325,7 @@ def build_report(plan: dict[str, Any], reconcile: dict[str, Any]) -> str:
     # anyone who knows Resolve's Media Management (AUDIT_2 UX-13).
     lines = [
         "COPY THIS PROJECT'S MEDIA IN",
-        "Your original files are COPIED, never moved — everything stays exactly where it is.",
+        "Your original files are COPIED, never moved. Everything stays exactly where it is.",
         "",
     ]
     lines.append(
@@ -337,7 +337,7 @@ def build_report(plan: dict[str, Any], reconcile: dict[str, Any]) -> str:
         down = reconcile.get("downloads") or {"count": 0, "bytes": 0}
         lines.append(
             f"  {up['count']} original(s) will upload to the NAS "
-            f"({human_bytes(up['bytes'])}) — plus the consolidated clips above once copied in"
+            f"({human_bytes(up['bytes'])}), plus the consolidated clips above once copied in"
         )
         deletes = int(down.get("deletes", 0) or 0)
         deleted_dirs = int(down.get("deleted_dirs", 0) or 0)

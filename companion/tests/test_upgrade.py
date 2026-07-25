@@ -555,7 +555,7 @@ def test_offer_label_never_calls_a_downgrade_an_update():
         "Update available → v0.5.0 (install)")
 
     rollback = upgrade_mod.offer_label("0.4.3", running="0.4.5")
-    assert rollback == "Roll back to v0.4.3 (older — install)"
+    assert rollback == "Roll back to v0.4.3 (older build, install)"
     assert "update" not in rollback.lower()
 
     assert upgrade_mod.offer_label("weird", running="0.4.5") == (

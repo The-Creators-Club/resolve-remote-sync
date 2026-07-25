@@ -405,7 +405,7 @@ def test_fleet_view_flags_a_stale_per_machine_version(env):
     as_user(client, "alex")
     page = client.get("/partials/fleet")
     assert page.status_code == 200
-    assert "[ OUT OF DATE — 0.2.0 ]" in page.text
+    assert "[ OUT OF DATE: 0.2.0 ]" in page.text
     assert "EDIT-PC" in page.text
 
 

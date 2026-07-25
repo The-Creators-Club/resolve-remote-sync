@@ -725,7 +725,7 @@ async def partial_admin_create_user(request: Request):
                 _create_or_update_editor_sync, truenas, username, ssh_pubkey, full_name, password
             )
             if result["warnings"]:
-                error = f"{username}: created with warnings — {'; '.join(result['warnings'])}"
+                error = f"{username}: created with warnings ({'; '.join(result['warnings'])})"
         except TrueNASError as exc:
             error = str(exc)
 
@@ -846,7 +846,7 @@ async def partial_admin_package_delete(
     if row is None:
         error = f"no published {platform} package {version}"
     elif row["is_current"]:
-        error = "cannot delete the current version — make another version current first"
+        error = "cannot delete the current version; make another version current first"
     else:
         db.delete_companion_package(conn, platform, version)
         conn.commit()

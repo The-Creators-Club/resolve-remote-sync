@@ -942,7 +942,7 @@ def test_summarize_fix_results_says_what_was_left_alone_when_stopped():
 
     results = [{"ok": True}, {"ok": False, "aborted": True}]
     assert popup.summarize_fix_results(results, 6, stopped_early=True) == (
-        "Stopped — 1 of 6 copied in, 1 skipped by you, 4 left alone")
+        "Stopped: 1 of 6 copied in, 1 skipped by you, 4 left alone")
 
 
 def test_batch_control_flags_are_independent():

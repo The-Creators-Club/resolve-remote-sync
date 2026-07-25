@@ -33,9 +33,9 @@ Three sync lanes with different directions, one policy:
 
 Why split: no single tool expresses "video up-only, proxy down-only, rest both ways" in one folder. Syncthing `.stignore` can't upload a file type it ignores; rclone bisync is weak on conflicts. Splitting gives multi-stream bulk lanes (where speed matters) and battle-tested bidirectional sync for the small-file lane. Lanes are behind an adapter interface so the benchmark can swap engines per lane.
 
-**Path canon:** one virtual drive letter on Windows — `P:`. Host/Alex: `P:` → `\\192.168.0.102\TheCreatorsPool\Creators_Club` (SMB). Editors (Win): `subst P: C:\Creators_Club` at login. Editors (Mac): local root `~/Creators_Club` + Resolve **Mapped Mount** preference translating to `P:` paths (one-time documented setup; companion verifies it by checking timeline clip paths resolve). All DB-stored paths are `P:\Projects\...` → identical everywhere.
+**Path canon:** one virtual drive letter on Windows — `P:`. Host/base rig: `P:` → `\\192.168.0.102\TheCreatorsPool\Creators_Club` (SMB). Editors (Win): `subst P: C:\Creators_Club` at login. Editors (Mac): local root `~/Creators_Club` + Resolve **Mapped Mount** preference translating to `P:` paths (one-time documented setup; companion verifies it by checking timeline clip paths resolve). All DB-stored paths are `P:\Projects\...` → identical everywhere.
 
-**Proxy generation:** **Blackmagic Proxy Generator on Alex's PC** watching `P:` (per-project watch folders). It natively handles BRAW (ffmpeg cannot decode .braw), is GPU-accelerated, preserves timecode, and writes to the in-place `Proxy/` subfolder convention — exactly what Resolve auto-links, and what the template tree already uses. Output: H.264 1080p (cross-platform safe; revisit H.265 later). NAS-side ffmpeg fallback container is a later nice-to-have for non-BRAW formats when the PC is off (PC has wake-on-LAN anyway).
+**Proxy generation:** **Blackmagic Proxy Generator on the base rig** watching `P:` (per-project watch folders). It natively handles BRAW (ffmpeg cannot decode .braw), is GPU-accelerated, preserves timecode, and writes to the in-place `Proxy/` subfolder convention — exactly what Resolve auto-links, and what the template tree already uses. Output: H.264 1080p (cross-platform safe; revisit H.265 later). NAS-side ffmpeg fallback container is a later nice-to-have for non-BRAW formats when the PC is off (PC has wake-on-LAN anyway).
 
 **Resolve behavior:** editors run Playback → Proxy Handling → *Prefer Proxies* (original offline locally → proxy plays); host prefers camera originals. Auto-link requires same filename + timecode in the adjacent `Proxy/` folder — BPG guarantees this.
 
@@ -102,7 +102,7 @@ New repo: `E:\Projects\resolve-remote-sync`
 4. **Companion v1**: lanes + tray + timeline watcher + move-and-relink popup; test on this PC with a simulated editor root.
 5. **Pilot**: one real remote editor through the bootstrap; fix what breaks; write docs.
 
-## Execution model (per Alex)
+## Execution model (as directed by the admin)
 
 Orchestrated build: I act as orchestrator — `builder` subagents implement the components (server setup scripts, companion, benchmark harness, installer) from detailed briefs; I review every diff they produce, run the tests myself, and do the integration/verification passes inline. Parallel tracks only where genuinely independent (e.g. companion vs benchmark harness); infra work on the NAS stays inline since it touches live systems.
 

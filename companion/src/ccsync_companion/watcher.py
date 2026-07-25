@@ -176,7 +176,7 @@ class TimelineWatcher:
             # (AUDIT_2 L-17). Clearing on recovery re-arms the warning and
             # bounds the set at the same time.
             log.info(
-                "mapping to %s is healthy again — re-arming mapping-health warnings",
+                "mapping to %s is healthy again -- re-arming mapping-health warnings",
                 self.canonical_prefix,
             )
             self._warned_mapping.clear()

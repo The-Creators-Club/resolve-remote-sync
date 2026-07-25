@@ -990,7 +990,7 @@ def test_fix_clip_abort_reports_a_partial_it_could_not_delete(tmp_path, monkeypa
     assert result["aborted"] is True
     assert len(result["leftover_paths"]) == 1
     assert result["leftover_paths"][0].endswith(fixer.TMP_SUFFIX)
-    assert "delete it by hand" in result["message"]
+    assert "Delete it by hand" in result["message"]
     assert any("COULD NOT REMOVE" in r.message for r in caplog.records)
 
 

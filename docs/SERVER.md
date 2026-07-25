@@ -172,7 +172,7 @@ it'll propagate correctly.
 
 ## Where proxies come from
 
-The **Blackmagic Proxy Generator (BPG)** runs on Alex's PC (the host),
+The **Blackmagic Proxy Generator (BPG)** runs on the base rig (the host),
 watching per-project folders under `P:` (the host's own SMB mount of the
 same tree). It natively decodes BRAW (ffmpeg can't), is GPU-accelerated,
 preserves timecode, and writes proxies into the existing in-place `Proxy/`

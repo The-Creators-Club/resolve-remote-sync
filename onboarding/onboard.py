@@ -44,7 +44,7 @@ from ccsync_companion import theme
 logging.basicConfig(level=logging.INFO, format="[onboard] %(message)s")
 log = logging.getLogger("onboard")
 
-WINDOW_TITLE = "CCSYNC.EXE — onboarding"
+WINDOW_TITLE = "CCSYNC.EXE: onboarding"
 WINDOW_SIZE = "660x560"
 
 
@@ -157,8 +157,8 @@ class OnboardWizard:
                        "remounts the project drive, installs the current companion app\n"
                        "(which updates itself from the dashboard from now on), and\n"
                        "signs it in.\n\n"
-                       "You'll need the TrueNAS username and password Alex set up\n"
-                       "for you -- nothing else. Safe to re-run any time.",
+                       "You'll need the TrueNAS username and password your admin set\n"
+                       "up for you -- nothing else. Safe to re-run any time.",
                wraplength=560).pack(anchor="w", pady=(0, 14))
 
         try:
@@ -166,7 +166,7 @@ class OnboardWizard:
             bundled = _cfg_mod.VERSION
         except Exception:
             bundled = "?"
-        _label(frame, f"installer v{steps.INSTALLER_VERSION} — bundles companion v{bundled}",
+        _label(frame, f"installer v{steps.INSTALLER_VERSION}, bundles companion v{bundled}",
                fg=theme.MUTED, font=theme.mono(9)).pack(anchor="w", pady=(0, 8))
 
         self._nav_bar(frame, back=None, next_=self.show_role, next_label="NEXT")
@@ -175,9 +175,9 @@ class OnboardWizard:
 
     def show_role(self) -> None:
         frame = self._new_page()
-        _heading(frame, "STEP 1 — WHAT IS THIS MACHINE?")
-        _label(frame, "Pick the role for this computer. If you're not Alex, it's\n"
-                       "almost certainly a remote editor.",
+        _heading(frame, "STEP 1: WHAT IS THIS MACHINE?")
+        _label(frame, "Pick the role for this computer. If this is not the studio\n"
+                       "base rig, it is almost certainly a remote editor.",
                wraplength=560).pack(anchor="w", pady=(0, 12))
 
         def _radio(parent, text, value, subtitle):
@@ -197,7 +197,7 @@ class OnboardWizard:
         _radio(frame, "REMOTE EDITOR", "editor",
                "You edit from elsewhere. Installs Tailscale, the sync tools,\n"
                "and maps the P: project drive (re-created fresh).")
-        _radio(frame, "BASE RIG (Alex's machine)", "base",
+        _radio(frame, "BASE RIG (the studio machine)", "base",
                "This machine sits on the studio LAN and works directly off the\n"
                "NAS. Installs only the companion app -- no sync tools, and your\n"
                "P:/T: drive mappings are NOT touched.")
@@ -235,10 +235,10 @@ class OnboardWizard:
 
     def show_tailscale(self) -> None:
         frame = self._new_page()
-        _heading(frame, "STEP 2 — JOIN THE NETWORK")
+        _heading(frame, "STEP 2: JOIN THE NETWORK")
         _label(frame, "The project server lives on a private Tailscale network.\n"
-                       "Install Tailscale and sign in with the invite link Alex sent\n"
-                       "you, then come back here and check the connection.",
+                       "Install Tailscale and sign in with the invite link your admin\n"
+                       "sent you, then come back here and check the connection.",
                wraplength=560).pack(anchor="w", pady=(0, 14))
 
         installed = steps.tailscale_installed()
@@ -310,10 +310,10 @@ class OnboardWizard:
 
     def show_signin(self) -> None:
         frame = self._new_page()
-        _heading(frame, "STEP 3 — SIGN IN")
-        _label(frame, "Enter the TrueNAS username and password Alex set up for you.\n"
-                       "This is checked against the dashboard right now -- if it\n"
-                       "doesn't match, the install will not proceed.",
+        _heading(frame, "STEP 3: SIGN IN")
+        _label(frame, "Enter the TrueNAS username and password your admin set up\n"
+                       "for you. This is checked against the dashboard right now -- if\n"
+                       "it doesn't match, the install will not proceed.",
                wraplength=560).pack(anchor="w", pady=(0, 14))
 
         form = tk.Frame(frame, bg=theme.BG)
@@ -361,7 +361,7 @@ class OnboardWizard:
     def show_install(self) -> None:
         frame = self._new_page()
         role = self.role_var.get()
-        _heading(frame, f"STEP 4 — INSTALL  (signed in as {self.verified_username})")
+        _heading(frame, f"STEP 4: INSTALL  (signed in as {self.verified_username})")
         if role == "base":
             _label(frame, "This removes every trace of older CCSync versions, installs\n"
                            "the current companion app, and signs it in. Your P:/T: drive\n"
@@ -614,10 +614,10 @@ class OnboardWizard:
             # this machine NEEDS is missing. Saying DONE here is how an
             # editor ends up waiting weeks for a sync that can never start
             # (INST-5) -- so say the opposite, first and loudest.
-            _heading(frame, f"COMPLETED WITH {len(warnings)} WARNING(S) — NOT READY YET")
-            _label(frame, "This machine is NOT ready to sync. Do not tell Alex you're\n"
-                           "set up until the problems below are fixed -- send him this\n"
-                           "list instead. Everything else installed fine, so re-running\n"
+            _heading(frame, f"COMPLETED WITH {len(warnings)} WARNING(S): NOT READY YET")
+            _label(frame, "This machine is NOT ready to sync. Do not tell your admin\n"
+                           "you are set up until the problems below are fixed. Send them\n"
+                           "this list instead. Everything else installed fine, so re-running\n"
                            "the installer once the cause is sorted will finish the job.",
                    fg=theme.AMBER, wraplength=560).pack(anchor="w", pady=(0, 10))
             for warning in warnings[:6]:
@@ -625,10 +625,10 @@ class OnboardWizard:
                        wraplength=560).pack(anchor="w", pady=(0, 2))
             _label(frame, "", font=theme.mono(4)).pack(anchor="w")
         else:
-            _heading(frame, "DONE — SEND THESE TWO VALUES TO YOUR ADMIN")
-            _label(frame, "Nothing syncs and no project will be shared with you until Alex\n"
-                           "approves both of these. The companion is installed, signed in as\n"
-                           f"{self.verified_username}, and will start automatically next login.",
+            _heading(frame, "DONE: SEND THESE TWO VALUES TO YOUR ADMIN")
+            _label(frame, "Nothing syncs and no project will be shared with you until your\n"
+                           "admin approves both of these. The companion is installed, signed\n"
+                           f"in as {self.verified_username}, and will start automatically next login.",
                    wraplength=560).pack(anchor="w", pady=(0, 16))
 
         device_id_display = self.device_id or "(not found automatically -- open http://127.0.0.1:8384, "
@@ -640,8 +640,8 @@ class OnboardWizard:
         self._labeled_copy_field(frame, "SSH public key:", pub_display)
 
         _label(frame, "One more step: right-click the tray icon → \"Sign in…\" is already\n"
-                       "done for you, but nothing downloads until Alex approves the two\n"
-                       "values above.", fg=theme.MUTED, font=theme.mono(9),
+                       "done for you, but nothing downloads until your admin approves the\n"
+                       "two values above.", fg=theme.MUTED, font=theme.mono(9),
                wraplength=560).pack(anchor="w", pady=(6, 0))
         _label(frame, "Send these to your admin to finish signup.", fg=theme.AMBER,
                font=theme.mono(10, bold=True)).pack(anchor="w", pady=(10, 0))
@@ -650,7 +650,7 @@ class OnboardWizard:
 
     def show_finish_base(self) -> None:
         frame = self._new_page()
-        _heading(frame, "DONE — BASE RIG READY")
+        _heading(frame, "DONE: BASE RIG READY")
         _label(frame, "The companion app is installed, signed in as\n"
                        f"{self.verified_username}, and will start automatically at login.\n\n"
                        "No sync lanes run on this machine (it works directly off the\n"

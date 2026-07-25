@@ -177,7 +177,7 @@ class SyncthingAdmin:
         existing = (folder or {}).get("versioning") or {}
         if isinstance(existing, dict) and (existing.get("type") or ""):
             return False
-        log.info("syncthing: folder %s had no versioning — adding staggered", folder_id)
+        log.info("syncthing: folder %s had no versioning -- adding staggered", folder_id)
         self._write_request(
             "PATCH", self._folder_path(folder_id), {"versioning": FOLDER_VERSIONING}
         )

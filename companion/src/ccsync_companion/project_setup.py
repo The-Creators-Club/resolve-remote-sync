@@ -181,8 +181,8 @@ class ProjectSetupPrompter:
                 log.info("new-project prompt: showing for %r", name)
                 accepted = self._confirm(
                     "NEW PROJECT",
-                    f"Project '{name}' isn't set up on the server —\n"
-                    "no media will sync for it until it has a home.\n\n"
+                    f"Project '{name}' isn't set up on the server.\n"
+                    "No media will sync for it until it has a home.\n\n"
                     "Set it up now? (Opens the dashboard in your browser.)",
                     ok_label="SET UP NOW",
                 )

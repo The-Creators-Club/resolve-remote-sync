@@ -584,7 +584,7 @@ class CompanionApp:
         self._notify_tray(
             f"Resolve is looking for media on {self.config.get('canonical_prefix')} but that "
             "path doesn't land in your sync folder. Your P: drive (Windows) or Mapped Mount "
-            "(Mac) is wrong — see EDITOR_SETUP step 6. Nothing will sync until this is fixed.",
+            "(Mac) is wrong. See EDITOR_SETUP step 6. Nothing will sync until this is fixed.",
             "ccsync-companion: mapping warning",
         )
 
@@ -611,7 +611,7 @@ class CompanionApp:
         CORE-M2)."""
         if not self._popup_active_lock.acquire(blocking=False):
             log.info("popup already open -- skipping (%d clip(s) not shown)", len(items))
-            self._notify_tray("A popup is already open — close it first.", "ccsync-companion")
+            self._notify_tray("A popup is already open. Close it first.", "ccsync-companion")
             return
         try:
             if snooze:
@@ -629,7 +629,7 @@ class CompanionApp:
                 log.error("popup suppressed: cannot reach the dashboard for project roots")
                 self._notify_tray(
                     "Can't reach the server right now, so CCSync doesn't know where this "
-                    "media belongs. It'll ask again once the connection is back — nothing "
+                    "media belongs. It'll ask again once the connection is back. Nothing "
                     "was changed.", "ccsync-companion")
                 return
 
@@ -660,7 +660,7 @@ class CompanionApp:
             log.error("scan whole project refused: local_root is misconfigured")
             self._notify_tray(
                 "CCSync's sync folder isn't set up correctly, so it can't tell which media "
-                "is in the wrong place. Tray → Copy diagnostics for Alex.", "ccsync-companion")
+                "is in the wrong place. Tray → Copy diagnostics for your admin.", "ccsync-companion")
             return
         result = resolve_bridge.get_media_pool_items()
         if not result.get("ok"):
@@ -745,21 +745,21 @@ class CompanionApp:
         if not self._sync_enabled:
             log.info("consolidate ignored: sync_enabled=false on this machine")
             self._notify_tray(
-                "This machine works directly off the NAS — there's nothing to copy in.",
+                "This machine works directly off the NAS, so there's nothing to copy in.",
                 "ccsync-companion",
             )
             return
         if self._paused:
             self._notify_tray(
-                "Syncing is paused — resume it from the tray first.", "ccsync-companion")
+                "Syncing is paused. Resume it from the tray first.", "ccsync-companion")
             return
         if self.config_problems:
             self._notify_tray(
                 "CCSync isn't fully set up on this machine yet, so nothing can be copied in. "
-                "Tray → Copy diagnostics for Alex.", "ccsync-companion")
+                "Tray → Copy diagnostics for your admin.", "ccsync-companion")
             return
         if not self._consolidate_lock.acquire(blocking=False):
-            self._notify_tray("Already copying a project's media in — let it finish.",
+            self._notify_tray("Already copying a project's media in. Let it finish.",
                               "ccsync-companion")
             return
         try:
@@ -785,7 +785,7 @@ class CompanionApp:
             log.error("consolidate: cannot reach the dashboard for project roots -- refusing")
             self._notify_tray(
                 "Can't reach the server, so CCSync doesn't know where this project lives. "
-                "Nothing was copied or uploaded — try again once you're back online.",
+                "Nothing was copied or uploaded. Try again once you're back online.",
                 "ccsync-companion")
             return
 
@@ -832,13 +832,13 @@ class CompanionApp:
             )
             self._notify_tray(
                 "CCSync got a project location that points outside your sync folder, so "
-                "nothing was copied or uploaded. Tray → Copy diagnostics for Alex.",
+                "nothing was copied or uploaded. Tray → Copy diagnostics for your admin.",
                 "ccsync-companion",
             )
             return
 
         if not self._popup_active_lock.acquire(blocking=False):
-            self._notify_tray("A popup is already open — close it first.", "ccsync-companion")
+            self._notify_tray("A popup is already open. Close it first.", "ccsync-companion")
             return
         try:
             plan = consolidate.plan_local_consolidation(
@@ -856,10 +856,10 @@ class CompanionApp:
                             reconcile.get("error"))
                 self._notify_tray(
                     "Couldn't check the server, so nothing was copied or uploaded. "
-                    "Tray → Copy diagnostics for Alex.", "ccsync-companion")
+                    "Tray → Copy diagnostics for your admin.", "ccsync-companion")
                 return
             if plan["count"] == 0 and (reconcile["uploads"] or {}).get("count", 0) == 0:
-                self._notify_tray("Nothing to copy in — this project is already tidy.",
+                self._notify_tray("Nothing to copy in: this project is already tidy.",
                                   "ccsync-companion")
                 return
             if not popup.confirm_dialog(
@@ -881,7 +881,7 @@ class CompanionApp:
         # phases: the local copy, then the lane A upload.
         window = popup.ProgressWindow(
             "COPYING THIS PROJECT'S MEDIA IN",
-            "Your original files are COPIED, never moved — everything stays where it is.",
+            "Your original files are COPIED, never moved. Everything stays where it is.",
         )
         results: list[dict[str, Any]] = []
 
@@ -913,7 +913,7 @@ class CompanionApp:
             self._notify_tray(
                 f"{len(results) - len(failures) - len(skipped)}/{len(results)} copied in"
                 f"{skipped_part}, {len(failures)} failed. "
-                f"Tray → Copy diagnostics for Alex.",
+                f"Tray → Copy diagnostics for your admin.",
                 "ccsync-companion")
         elif window.should_stop():
             done = len(results) - len(skipped)
@@ -921,7 +921,7 @@ class CompanionApp:
             # no cancelled() and must read as the graceful stop.
             verb = "Cancelled" if getattr(window, "cancelled", lambda: False)() else "Stopped"
             self._notify_tray(
-                f"{verb} — {done} of {plan['count']} copied in{skipped_part}, the rest "
+                f"{verb}: {done} of {plan['count']} copied in{skipped_part}, the rest "
                 f"were left alone. Nothing was moved or deleted.", "ccsync-companion")
             return
         self._notify_tray(
@@ -960,7 +960,7 @@ class CompanionApp:
                     continue
                 publish({
                     "headline": (
-                        f"Uploading to the server — {status.current_project or 'this project'}"
+                        f"Uploading to the server: {status.current_project or 'this project'}"
                     ),
                     "name": "",
                     "file_bytes_done": status.bytes_done or 0,
@@ -1378,12 +1378,12 @@ class CompanionApp:
         # are not (AUDIT_2 CORE-H8/H5).
         if self._popup_active_lock.locked():
             self._notify_tray(
-                "Can't update while a CCSync window is open — close it and try again.",
+                "Can't update while a CCSync window is open. Close it and try again.",
                 "ccsync-companion")
             return
         if self._consolidate_active:
             self._notify_tray(
-                "Can't update while media is being copied in — let it finish, then try again.",
+                "Can't update while media is being copied in. Let it finish, then try again.",
                 "ccsync-companion")
             return
         # "Installing", not "Updating": the offered build may be OLDER than
@@ -1397,8 +1397,8 @@ class CompanionApp:
             applied = False
         if not applied:
             self._notify_tray(
-                f"Update failed — you're still on v{config_mod.VERSION}, nothing is broken. "
-                "Tray → Copy diagnostics for Alex.",
+                f"Update failed. You're still on v{config_mod.VERSION}, nothing is broken. "
+                "Tray → Copy diagnostics for your admin.",
                 "ccsync-companion",
             )
 
@@ -1470,8 +1470,9 @@ class CompanionApp:
         """Everything an admin needs to diagnose this machine, as one block of
         text for the clipboard (AUDIT_2 UX-19).
 
-        The support instruction everywhere is "send Alex a screenshot of the
-        tray menu" -- which said `OK` on all three lanes whatever was wrong.
+        The support instruction everywhere is "send your admin a screenshot
+        of the tray menu" -- which said `OK` on all three lanes whatever was
+        wrong.
         Never raises: every section is independently fault-isolated, because
         a diagnostics gather that crashes on the one broken subsystem is
         worse than useless."""
@@ -1588,13 +1589,13 @@ class CompanionApp:
                 root.destroy()
             log.info("diagnostics copied to clipboard (%d chars)", len(text))
             self._notify_tray(
-                "Diagnostics copied — paste them to Alex in a message.", "ccsync-companion")
+                "Diagnostics copied. Paste them to your admin in a message.", "ccsync-companion")
             return True
         except Exception:
             log.exception("could not copy diagnostics to the clipboard")
             log.info("DIAGNOSTICS:\n%s", text)
             self._notify_tray(
-                "Couldn't reach the clipboard — the diagnostics were written to the log "
+                "Couldn't reach the clipboard. The diagnostics were written to the log "
                 "instead (tray → Open log).", "ccsync-companion")
             return False
 
@@ -1772,7 +1773,7 @@ class CompanionApp:
         if leftovers:
             self._notify_tray(
                 f"Found {len(leftovers)} half-copied file(s) from an interrupted copy. "
-                "Nothing was deleted — tray → Copy diagnostics for Alex.",
+                "Nothing was deleted. Tray → Copy diagnostics for your admin.",
                 "ccsync-companion")
 
     def _identity_watch_loop(self) -> None:
@@ -1802,7 +1803,7 @@ class CompanionApp:
                         self._mark_lanes_pending_login()
                         self._lanes_started = False
                     self._notify_tray(
-                        "Your CCSync sign-in has expired — syncing has stopped. "
+                        "Your CCSync sign-in has expired, so syncing has stopped. "
                         "Right-click the tray icon → Sign in…", "ccsync-companion")
                 else:
                     self.on_signed_in()
@@ -1886,7 +1887,7 @@ class CompanionApp:
                 log.info("tray icon started")
             except ImportError:
                 self._tray_icon = None
-                log.warning("pystray/Pillow not installed — running headless (Ctrl+C to stop)")
+                log.warning("pystray/Pillow not installed -- running headless (Ctrl+C to stop)")
             except Exception:
                 # pystray.Icon(...) / _make_icon_image / _build_menu can raise
                 # OSError/TclError/PIL errors too (no interactive session,
@@ -1900,15 +1901,15 @@ class CompanionApp:
 
             if errors:
                 self._notify_tray(
-                    "NOT SYNCING — CCSync isn't fully set up on this machine. "
-                    "Tray → Copy diagnostics for Alex.", "ccsync-companion")
+                    "NOT SYNCING: CCSync isn't fully set up on this machine. "
+                    "Tray → Copy diagnostics for your admin.", "ccsync-companion")
 
             if just_upgraded:
                 log.info("self-upgrade to v%s completed", config_mod.VERSION)
                 # Slight delay: the tray icon thread has only just started and
                 # Windows drops notify() calls for icons not yet registered.
                 timer = threading.Timer(3.0, lambda: self._notify_tray(
-                    f"Update complete — now running v{config_mod.VERSION}.",
+                    f"Update complete. Now running v{config_mod.VERSION}.",
                     "ccsync-companion",
                 ))
                 timer.daemon = True

@@ -231,7 +231,7 @@ DEFAULT_TOML_TEXT = """\
 # See companion/README.md for the full reference. Restart the companion
 # after editing this file.
 
-# Your name/handle — used to build the "B-roll/Editor Added/<editor_name>"
+# Your name/handle, used to build the "B-roll/Editor Added/<editor_name>"
 # destination suggested by the popup fixer.
 editor_name = ""
 
@@ -334,7 +334,7 @@ syncthing_folder_ids = []
 # Path to the rclone binary. Defaults to "rclone" (must be on PATH).
 rclone_path = "rclone"
 
-# Log file (rotating) — console logging is always on in addition to this.
+# Log file (rotating). Console logging is always on in addition to this.
 log_path = "~/.ccsync/companion.log"
 log_level = "INFO"
 

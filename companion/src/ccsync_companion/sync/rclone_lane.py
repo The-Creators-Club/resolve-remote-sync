@@ -174,7 +174,7 @@ def _cfg_int(cfg: Optional[dict], key: str, default: int) -> int:
     try:
         return int(cfg.get(key, default))
     except (TypeError, ValueError):
-        log.warning("rclone tuning: %s=%r is not an integer — using %d", key, cfg.get(key), default)
+        log.warning("rclone tuning: %s=%r is not an integer -- using %d", key, cfg.get(key), default)
         return default
 
 
@@ -290,10 +290,10 @@ def validate_filter_file(path: Path) -> None:
         raise FilterFileError(f"filter file unreadable ({path}): {exc}") from exc
     rules = [line.strip() for line in text.splitlines() if line.strip()]
     if not rules:
-        raise FilterFileError(f"filter file is empty ({path}) — refusing to run unfiltered")
+        raise FilterFileError(f"filter file is empty ({path}) -- refusing to run unfiltered")
     if rules[-1] != "- **":
         raise FilterFileError(
-            f"filter file's last rule is {rules[-1]!r}, not '- **' ({path}) — "
+            f"filter file's last rule is {rules[-1]!r}, not '- **' ({path}) -- "
             "refusing to run with an incomplete filter"
         )
 
@@ -751,7 +751,7 @@ def write_files_from_list(rels: list[str], path: Path) -> Path:
     for raw in rels:
         rel = str(raw).replace("\\", "/").strip().strip("/")
         if not rel:
-            raise ExpressListError("express list entry is empty — rclone reads a blank line as the root dir")
+            raise ExpressListError("express list entry is empty -- rclone reads a blank line as the root dir")
         if "\n" in rel or "\r" in rel:
             raise ExpressListError(f"express list entry contains a newline: {raw!r}")
         segments = [seg for seg in rel.split("/") if seg]
@@ -762,7 +762,7 @@ def write_files_from_list(rels: list[str], path: Path) -> Path:
         seen.add(rel)
         cleaned.append(rel)
     if not cleaned:
-        raise ExpressListError("express list is empty — refusing to run rclone with a blank list")
+        raise ExpressListError("express list is empty -- refusing to run rclone with a blank list")
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1132,7 +1132,7 @@ class RcloneLane(LaneAdapter):
             self._express_debounce = max(0.1, float(debounce))
         except (TypeError, ValueError):
             log.warning(
-                "express: express_debounce_seconds=%r is not a number — using %ss",
+                "express: express_debounce_seconds=%r is not a number -- using %ss",
                 debounce, watch_debounce_seconds,
             )
             self._express_debounce = max(0.1, float(watch_debounce_seconds))
@@ -1265,7 +1265,7 @@ class RcloneLane(LaneAdapter):
         # knob, watch_debounce_seconds, is no longer dead -- it now drives
         # the express window below.)
         log.warning(
-            "%s: managed mode — scan_interval_up/scan_interval_down are IGNORED "
+            "%s: managed mode -- scan_interval_up/scan_interval_down are IGNORED "
             "(the sequencer drives every pass; scan_interval=%ss unused). "
             "watch_debounce_seconds=%.1fs now sets the express-upload window.",
             self.name, self.scan_interval, self._express_debounce,
@@ -1372,7 +1372,7 @@ class RcloneLane(LaneAdapter):
         }
         if partials and partials.get("count"):
             log.warning(
-                "%s: %d orphan .partial file(s) (%.1f GB) under %s on the NAS — "
+                "%s: %d orphan .partial file(s) (%.1f GB) under %s on the NAS -- "
                 "left in place deliberately (never deleted); remove them by hand "
                 "if you want the space back",
                 self.name, partials["count"], partials["bytes"] / 1e9, subpath or "the remote root",
@@ -1442,7 +1442,7 @@ class RcloneLane(LaneAdapter):
             # Fail the run, loudly, rather than let rclone run unfiltered:
             # for lane B that is `sync` with no filter, which deletes every
             # local file the NAS lacks (AUDIT_2 DEL-2).
-            log.error("%s: refusing to run — %s", self.name, exc)
+            log.error("%s: refusing to run -- %s", self.name, exc)
             with self._lock:
                 self._status.state = STATE_ERROR
                 self._status.last_error = str(exc)
@@ -1506,7 +1506,7 @@ class RcloneLane(LaneAdapter):
                 # up next pass. A bounded stop, not a failure -- painting the
                 # lane red here would make normal rotation look broken.
                 log.info(
-                    "%s: hit the %ss per-project budget for %s — remaining files "
+                    "%s: hit the %ss per-project budget for %s -- remaining files "
                     "resume next pass", self.name, int(max_duration_seconds), subpath,
                 )
                 self._status.state = STATE_IDLE
@@ -1700,7 +1700,7 @@ class RcloneLane(LaneAdapter):
             from watchdog.observers import Observer
         except ImportError:
             log.warning(
-                "%s: 'watchdog' not installed — falling back to periodic-only "
+                "%s: 'watchdog' not installed -- falling back to periodic-only "
                 "uploads every %ss", self.name, self.scan_interval,
             )
             return
@@ -1888,7 +1888,7 @@ class RcloneLane(LaneAdapter):
                 # fires thousands of times a minute during a card ingest.
                 if self._express_status.get("dropped_over_cap", 0) % 1000 == 0:
                     log.info(
-                        "%s: express batch is at its %d-path cap — extra paths "
+                        "%s: express batch is at its %d-path cap -- extra paths "
                         "are left to the periodic pass",
                         self.name, self._express_max_batch,
                     )
@@ -2002,7 +2002,7 @@ class RcloneLane(LaneAdapter):
                 continue  # deleted/moved since the event: nothing to upload
             if now - first_seen > EXPRESS_PENDING_MAX_SECONDS:
                 log.debug(
-                    "%s: express gave up on %s after %.0fs — the periodic pass owns it",
+                    "%s: express gave up on %s after %.0fs -- the periodic pass owns it",
                     self.name, rel, now - first_seen,
                 )
                 continue
@@ -2021,11 +2021,11 @@ class RcloneLane(LaneAdapter):
         if not self.remote or not self.remote_root:
             # Unconfigured remote: `rclone copy src ":"` is not a shape we
             # want to hand a real binary. Same posture as the lsf helpers.
-            log.debug("%s: express upload skipped — no remote configured", self.name)
+            log.debug("%s: express upload skipped -- no remote configured", self.name)
             return
         available, msg = rclone_available(self.rclone_path)
         if not available:
-            log.warning("%s: express upload skipped — %s", self.name, msg)
+            log.warning("%s: express upload skipped -- %s", self.name, msg)
             return
 
         self._express_seq += 1
@@ -2035,7 +2035,7 @@ class RcloneLane(LaneAdapter):
         try:
             write_files_from_list(rels, list_file)
         except (ExpressListError, OSError) as exc:
-            log.warning("%s: express list not written (%s) — periodic pass will cover it",
+            log.warning("%s: express list not written (%s) -- periodic pass will cover it",
                         self.name, exc)
             return
 
@@ -2110,7 +2110,7 @@ class RcloneLane(LaneAdapter):
             try:
                 stderr_text = proc.stderr.read() if proc.stderr is not None else ""
             except Exception:
-                log.exception("%s: express stderr read failed — killing rclone", self.name)
+                log.exception("%s: express stderr read failed -- killing rclone", self.name)
                 try:
                     proc.kill()
                 except Exception:

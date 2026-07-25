@@ -50,7 +50,7 @@ HttpGetFn = Callable[[str, str, float], Any]
 # beat. Everything else (tcp-client/tcp-server/quic-client/quic-server) is
 # a direct connection.
 RELAY_CONNECTION_PREFIX = "relay"
-RELAYED_DETAIL = "relayed — slow path"
+RELAYED_DETAIL = "relayed, slow path"
 
 
 def summarize_connections(payload: Any) -> dict[str, Any]:
@@ -244,7 +244,7 @@ class SyncthingLane(LaneAdapter):
     def _with_path_detail(detail: str, path_detail: str) -> str:
         if not path_detail:
             return detail
-        return f"{detail} — {path_detail}" if detail else path_detail
+        return f"{detail}; {path_detail}" if detail else path_detail
 
     def check_once(self) -> LaneStatus:
         """Single synchronous status check. Never raises."""
@@ -266,7 +266,7 @@ class SyncthingLane(LaneAdapter):
             return status
 
         # Path diagnostics BEFORE the folder verdict, so every branch below
-        # can carry "relayed — slow path" (AUDIT_2 C-6). A relayed lane C and
+        # can carry "relayed, slow path" (AUDIT_2 C-6). A relayed lane C and
         # a slow lane C look identical without this.
         path_detail = self._path_detail(self._refresh_connection_summary())
 

@@ -18,7 +18,7 @@
                 {% for p in roots.projects %}
                   <option value="{{ p.slug }}" {{ "selected" if p.slug == m.slug }}>{{ p.label }}</option>
                 {% endfor %}
-                <option value="">— remove (re-detect) —</option>
+                <option value="">remove (re-detect)</option>
               </select>
               <button class="btn" type="submit">[ SET ]</button>
             </form>
@@ -36,7 +36,7 @@
             <form class="inline-form" hx-post="/partials/project-roots" hx-target="closest .roots-box" hx-swap="outerHTML">
               <input type="hidden" name="resolve_project" value="{{ name }}">
               <select name="root" class="root-select">
-                <option value="">— pick a project —</option>
+                <option value="">pick a project</option>
                 {% for p in roots.projects %}
                   <option value="{{ p.slug }}">{{ p.label }}</option>
                 {% endfor %}
@@ -50,6 +50,6 @@
       </tbody>
     </table>
   {% else %}
-    <div class="muted">nothing yet — mappings appear when companions report an open Resolve project</div>
+    <div class="muted">nothing yet. Mappings appear when companions report an open Resolve project</div>
   {% endif %}
 </div>

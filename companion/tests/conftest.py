@@ -31,8 +31,8 @@ def _isolate_ccsync_home(tmp_path, monkeypatch):
        the real ~/.ccsync/companion.log and interleaved test output
        (tracebacks, G:\\raw\\A001.braw fixtures, "no display name and no
        $DISPLAY") into the live companion's log. That file is the one
-       artifact the docs tell editors to send to Alex, so corrupting it
-       actively costs support time. (2026-07-25.)
+       artifact the docs tell editors to send to their admin, so corrupting
+       it actively costs support time. (2026-07-25.)
 
     HOME/USERPROFILE are redirected too, so even a literal "~/..." string
     that slips past the patched DEFAULTS cannot expanduser() its way back to
@@ -228,7 +228,7 @@ def _writes_under(path: Path, root: Path) -> bool:
 def test_no_test_can_resolve_to_the_real_ccsync_home(tmp_path):
     """GUARD. The suite must never touch ~/.ccsync -- not config.toml, not
     identity.json, and above all not companion.log, which is the artifact
-    every doc tells editors to send to Alex when something breaks.
+    every doc tells editors to send to their admin when something breaks.
 
     Lives in conftest.py deliberately: it asserts the property that the
     autouse fixture above is responsible for, so it fails right next to the

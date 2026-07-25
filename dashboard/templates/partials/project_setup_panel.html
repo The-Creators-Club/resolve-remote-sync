@@ -37,19 +37,19 @@
       <span class="muted">({{ setup.mapping.source }}-set by {{ setup.mapping.updated_by }})</span>
     </div>
     <div class="muted" style="margin-top:0.4rem">
-      Mappings are fixed once set{% if setup.is_admin %} — as an admin you can change it
-      in the [ PROJECT ROOTS ] box on the <a href="/">fleet page</a>{% else %} — ask Alex
+      Mappings are fixed once set{% if setup.is_admin %}. As an admin you can change it
+      in the [ PROJECT ROOTS ] box on the <a href="/">fleet page</a>{% else %}. Ask your admin
       if this looks wrong{% endif %}.
     </div>
   {% elif not setup.projects_dir_ok %}
     <div class="muted" style="margin-top:0.8rem">The NAS Projects tree isn't mounted on the
-      dashboard (DASH_PROJECTS_DIR) — ask Alex to create/link the folder with
+      dashboard (DASH_PROJECTS_DIR). Ask your admin to create/link the folder with
       <span class="mono-sm">server/setup_tree.py</span>.</div>
   {% else %}
 
   <div class="side-head" style="margin-top:0.8rem">[ PICK THE FOLDER FOR THIS PROJECT ]</div>
   <div class="muted">Browse the server's Projects tree. If the project's folder is already
-    there, pick it with [ USE THIS FOLDER ] — nothing inside it is changed. Only create a
+    there, pick it with [ USE THIS FOLDER ]. Nothing inside it is changed. Only create a
     new folder when there isn't one yet; new folders get the standard subfolders
     (<span class="mono-sm">{{ setup.template_folders | join(", ") }}</span>).</div>
 
@@ -77,7 +77,7 @@
         <input type="hidden" name="rel" value="{{ browse.rel }}">
         <button class="btn" type="submit">[ USE THIS FOLDER ]</button>
       </form>
-      <span class="muted"> — point “{{ setup.resolve_project }}” at this folder as it is</span>
+      <span class="muted"> (points “{{ setup.resolve_project }}” at this folder as it is)</span>
     </div>
   {% endif %}
 
@@ -116,14 +116,14 @@
 
   {% if browse.inside_project %}
     <div class="muted" style="margin-top:0.6rem">
-      {% if browse.current_is_project %}This folder is already a project — use
+      {% if browse.current_is_project %}This folder is already a project. Use
         [ USE THIS FOLDER ] above to point “{{ setup.resolve_project }}” at it.
-      {% else %}You're inside an existing project — projects can't nest. Go up to pick or
+      {% else %}You're inside an existing project, and projects can't nest. Go up to pick or
         create.{% endif %}</div>
   {% else %}
     <div class="side-head" style="margin-top:1.0rem">[ OR CREATE A NEW PROJECT FOLDER HERE ]</div>
     <div class="muted mono-sm">in Projects/{{ browse.rel or "" }}</div>
-    <div class="muted">Only for a folder that doesn't exist yet — a name that's already listed
+    <div class="muted">Only for a folder that doesn't exist yet. A name that's already listed
       above would nest a second folder inside it, so pick it with [ USE THIS FOLDER ] instead.</div>
     <form class="inline-form" style="margin-top:0.3rem"
           hx-post="/partials/project-setup/create"

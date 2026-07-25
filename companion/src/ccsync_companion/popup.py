@@ -85,7 +85,7 @@ class RateEstimator:
 
 def format_file_progress(name: str, done: int, total: int, speed_bps: Optional[float],
                          eta_seconds: Optional[float], placeholder: bool = False) -> str:
-    """e.g. Copying "A001_C012.braw" — 4.1 GB of 12.7 GB · 33 MB/s · ~4 min left
+    """e.g. Copying "A001_C012.braw": 4.1 GB of 12.7 GB · 33 MB/s · ~4 min left
 
     While a cloud placeholder is still hydrating (`placeholder` set and no
     bytes moved yet) it says so INSTEAD, because the byte bar is honestly at
@@ -95,8 +95,8 @@ def format_file_progress(name: str, done: int, total: int, speed_bps: Optional[f
         return ""
     if placeholder and done <= 0:
         size = f" ({human_bytes(total)})" if total else ""
-        return (f'Waiting for your cloud drive to download "{name}"{size} — '
-                f'this can take a while')
+        return (f'Waiting for your cloud drive to download "{name}"{size}. '
+                f'This can take a while')
     parts = [f'Copying "{name}"']
     detail = [f"{human_bytes(done)} of {human_bytes(total)}"] if total else []
     if speed_bps:
@@ -106,15 +106,15 @@ def format_file_progress(name: str, done: int, total: int, speed_bps: Optional[f
         detail.append(eta)
     if detail:
         parts.append(" · ".join(detail))
-    return " — ".join(parts)
+    return ": ".join(parts)
 
 
 def format_batch_progress(index: int, total: int, done: int, total_bytes: int) -> str:
-    """e.g. File 35 of 69 — 128 GB of 402 GB done"""
+    """e.g. File 35 of 69: 128 GB of 402 GB done"""
     head = f"File {max(index, 1)} of {total}"
     if not total_bytes:
         return head
-    return f"{head} — {human_bytes(done)} of {human_bytes(total_bytes)} done"
+    return f"{head}: {human_bytes(done)} of {human_bytes(total_bytes)} done"
 
 
 class BatchControl:
@@ -195,7 +195,7 @@ def summarize_fix_results(
         parts.append(f"{failed} failed")
     head = ", ".join(parts)
     if stopped_early:
-        head = f"Stopped — {head}"
+        head = f"Stopped: {head}"
         if len(results) < batch_size:
             head += f", {batch_size - len(results)} left alone"
     return head
@@ -323,7 +323,7 @@ def preflight_summary(rows: list[dict[str, Any]]) -> str:
     return (
         f"{len(online_only)} of {len(rows)} files are online-only in your cloud drive "
         f"and have to download before they can be copied. That happens automatically, "
-        f"but it can be slow — the bar will sit at 0% for those while they download."
+        f"but it can be slow, so the bar will sit at 0% for those while they download."
     )
 
 
@@ -625,8 +625,8 @@ class PopupDialog:
         _label(
             self.root,
             f"{len(rows)} timeline clip(s) live outside {local_root} and will NOT sync.\n"
-            "Pick a destination — FIX ALL copies them in and relinks Resolve.\n"
-            "Your original file is left exactly where it is — nothing is moved or deleted.",
+            "Pick a destination. FIX ALL copies them in and relinks Resolve.\n"
+            "Your original file is left exactly where it is. Nothing is moved or deleted.",
             fg=theme.MUTED, wraplength=620,
         ).grid(row=r, column=0, columnspan=2, sticky="w", pady=(4, 10))
         r += 1
@@ -847,7 +847,7 @@ class PopupDialog:
         preflight = preflight_summary(rows)
         self.status_label.config(
             text=(f"Copying {len(rows)} file(s) in. Your originals stay exactly where "
-                  f"they are — nothing is moved or deleted."
+                  f"they are. Nothing is moved or deleted."
                   + ("\n" + preflight if preflight else "")))
 
         def _publish(info):
@@ -875,7 +875,7 @@ class PopupDialog:
         try:
             self._stop_btn.config(state="disabled")
             self.status_label.config(
-                text="Stopping after the current file finishes — please wait.")
+                text="Stopping after the current file finishes. Please wait.")
         except Exception:
             pass
 
@@ -889,7 +889,7 @@ class PopupDialog:
         self._control.request_skip_current()
         try:
             self.status_label.config(
-                text="Skipping the file being copied now — the half-copied file is "
+                text="Skipping the file being copied now. The half-copied file is "
                      "deleted and the rest of the list carries on.")
         except Exception:
             pass
@@ -906,7 +906,7 @@ class PopupDialog:
             for btn in (self._stop_btn, self._skip_btn, self._cancel_btn):
                 btn.config(state="disabled")
             self.status_label.config(
-                text="Cancelling — the file being copied now is abandoned and its "
+                text="Cancelling. The file being copied now is abandoned and its "
                      "half-copied file deleted. Everything already copied in stays.")
         except Exception:
             pass
@@ -989,7 +989,7 @@ class PopupDialog:
             if aborted:
                 names = ", ".join(os.path.basename(r["file_path"]) for r in aborted[:6])
                 blocks.append(
-                    f"You skipped: {names} — nothing was copied in or relinked for "
+                    f"You skipped: {names}. Nothing was copied in or relinked for "
                     f"them, and the half-copied files were deleted. "
                     f"Press RETRY FAILED to try them again.")
                 leftovers = [p for r in aborted for p in (r.get("leftover_paths") or [])]
@@ -999,13 +999,13 @@ class PopupDialog:
                     # (CORE-H5) and only this process ever knew about it.
                     blocks.append(
                         "⚠ CCSync could NOT delete the half-copied file(s): "
-                        + "; ".join(leftovers[:6]) + " — please delete them by hand.")
+                        + "; ".join(leftovers[:6]) + ". Please delete them by hand.")
             if failures:
                 # Name every failure (up to a readable cap) with its REASON,
                 # not a bare "FAILED" -- the destination lives on an SMB share
                 # whose metadata isn't refreshed until the handle closes, so
                 # nothing outside this process can tell the user which failed.
-                shown = "\n".join(f"✗ {os.path.basename(r['file_path'])} — {r['message']}"
+                shown = "\n".join(f"✗ {os.path.basename(r['file_path'])}: {r['message']}"
                                   for r in failures[:12])
                 if len(failures) > 12:
                     shown += f"\n… and {len(failures) - 12} more (see tray → Open log)"
@@ -1207,7 +1207,7 @@ class ProgressWindow:
         self.control.request_skip_current()
         try:
             self._batch_label.config(
-                text="Skipping the file being copied now — carrying on with the rest…")
+                text="Skipping the file being copied now. Carrying on with the rest…")
         except Exception:
             pass
 
@@ -1219,7 +1219,7 @@ class ProgressWindow:
             for btn in (self._stop_btn, self._skip_btn, self._cancel_btn):
                 btn.config(state="disabled")
             self._batch_label.config(
-                text="Cancelling — the half-copied file is deleted; everything already "
+                text="Cancelling. The half-copied file is deleted; everything already "
                      "copied in stays…")
         except Exception:
             pass
@@ -1276,7 +1276,7 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
 
         from . import theme
     except Exception as exc:
-        log.warning("confirm dialog unavailable (%s) — defaulting to cancel", exc)
+        log.warning("confirm dialog unavailable (%s) -- defaulting to cancel", exc)
         return False
 
     result = {"ok": False}
@@ -1312,7 +1312,7 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
         root.protocol("WM_DELETE_WINDOW", _cancel)
         root.mainloop()
     except Exception as exc:
-        log.warning("confirm dialog failed (%s) — defaulting to cancel", exc)
+        log.warning("confirm dialog failed (%s) -- defaulting to cancel", exc)
         return False
     return result["ok"]
 
@@ -1334,7 +1334,7 @@ def show_popup(
         dialog = PopupDialog(rows, local_root, ignore_tracker, editor_name=editor_name)
         dialog.show()
     except Exception as exc:
-        log.warning("popup unavailable (%s) — falling back to console listing", exc)
+        log.warning("popup unavailable (%s) -- falling back to console listing", exc)
         # The docstring above promised the items are auto-ignored; the
         # fallback only print()ed them -- a no-op in the windowed build where
         # sys.stdout is None -- and never touched ignore_tracker, so the same

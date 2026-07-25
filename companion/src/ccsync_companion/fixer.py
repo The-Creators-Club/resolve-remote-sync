@@ -321,12 +321,12 @@ def classify_copy_failure(exc: BaseException, placeholder: bool) -> str:
     text = str(exc)
     low = text.lower()
     if isinstance(exc, PermissionError) or "permission" in low:
-        return ("Windows wouldn't let CCSync read or write this file — it may be open in "
+        return ("Windows wouldn't let CCSync read or write this file. It may be open in "
                 "another program. Close it and try again.")
     if "no space" in low or "not enough space" in low or getattr(exc, "errno", None) == 28:
-        return "Your disk is full — free up space and try again."
+        return "Your disk is full. Free up space and try again."
     if isinstance(exc, FileNotFoundError):
-        return "The file isn't there any more — it may have been moved or renamed."
+        return "The file isn't there any more. It may have been moved or renamed."
     if "network" in low or "semaphore" in low or "device is not ready" in low:
         return ("Lost the connection to the drive this file lives on. Reconnect it and "
                 "try again.")
@@ -657,7 +657,7 @@ def fix_clip(
             "ok": False,
             "message": (
                 "CCSync doesn't know where your sync folder is (local_root is not set), "
-                "so it won't copy anything. Tray → Copy diagnostics for Alex."
+                "so it won't copy anything. Tray → Copy diagnostics for your admin."
             ),
             "copied_to": None,
         }
@@ -719,12 +719,12 @@ def fix_clip(
         log.info("fix_clip: %s abandoned by the user mid-copy%s", file_path,
                  f" (LEFTOVERS: {', '.join(leftovers)})" if leftovers else
                  " -- the half-copied file was removed")
-        message = "Skipped by you — the half-copied file was removed. Nothing was relinked."
+        message = "Skipped by you. The half-copied file was removed. Nothing was relinked."
         if leftovers:
             message = (
                 "Skipped by you, but CCSync couldn't delete the half-copied file at "
                 + "; ".join(leftovers)
-                + " — delete it by hand."
+                + ". Delete it by hand."
             )
         return {
             "ok": False,

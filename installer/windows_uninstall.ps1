@@ -11,12 +11,12 @@
 
       (default) -- remove the CCSync app and its autostart entries, and keep
         your saved sign-in and Syncthing identity, so reinstalling is
-        painless and Alex does not have to re-approve you. Removes: running
+        painless and the admin does not have to re-approve you. Removes: running
         processes, the three autostart entries, the P: drive mapping, and the
         program binaries under %LOCALAPPDATA%\ccsync\bin.
 
       -Full -- also remove your saved sign-in and Syncthing identity (a
-        reinstall then needs Alex to re-approve you). Neither mode ever
+        reinstall then needs the admin to re-approve you). Neither mode ever
         deletes your synced media in C:\Creators_Club, and neither mode
         deletes ~/.ccsync\state (the once-ever prompt answers and local
         caches -- see section 5).
@@ -31,7 +31,7 @@
 
 .PARAMETER Full
     Also remove your saved sign-in and Syncthing identity (a reinstall then
-    needs Alex to re-approve you). Your synced media is never touched, and
+    needs the admin to re-approve you). Your synced media is never touched, and
     ~/.ccsync\state is kept either way.
 
 .PARAMETER DryRun
@@ -268,7 +268,7 @@ if ($Full) {
         }
     }
     else { Write-Skip "already absent: $CcsyncProfile" }
-    Write-Warn2 "FULL uninstall: your saved sign-in and Syncthing device identity are gone. A reinstall generates a NEW device ID -- send it to Alex so he can re-approve this machine on the dashboard before anything syncs again. Your media was not touched."
+    Write-Warn2 "FULL uninstall: your saved sign-in and Syncthing device identity are gone. A reinstall generates a NEW device ID -- send it to the admin so they can re-approve this machine on the dashboard before anything syncs again. Your media was not touched."
     $sshKey = "$env:USERPROFILE\.ssh\ccsync_ed25519"
     if (Test-Path -LiteralPath $sshKey) {
         Write-Step "NOTE: the rclone SSH key remains at $sshKey (left in place -- delete it manually if you want it gone; the admin would then re-run setup_editor_account.py)."

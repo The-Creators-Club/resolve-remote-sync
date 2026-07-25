@@ -1,11 +1,11 @@
-# ccsync-companion config — example, with every value filled in.
+# ccsync-companion config: an example with every value filled in.
 #
 # This file is a REFERENCE, not what you get on first run. Three things can
 # produce ~/.ccsync/config.toml, and they differ:
-#   1. installer/windows_bootstrap.ps1 or macos_bootstrap.sh — seeds it with
-#      the values it already knows (editor_name, local_root, remote,
+#   1. installer/windows_bootstrap.ps1 or macos_bootstrap.sh, which seeds it
+#      with the values it already knows (editor_name, local_root, remote,
 #      remote_root). This is the normal path and the one to prefer.
-#   2. the companion itself, if no config exists when it starts — writes
+#   2. the companion itself, if no config exists when it starts. It writes
 #      ccsync_companion/config.py: DEFAULT_TOML_TEXT, which leaves the
 #      install-specific values BLANK on purpose.
 #   3. copying this file by hand and editing it.
@@ -14,7 +14,7 @@
 # at startup (config.py: validate_config) rather than silently doing nothing.
 # Restart the companion after editing.
 
-# Your name/handle — used to build the "B-roll/Editor Added/<editor_name>"
+# Your name/handle, used to build the "B-roll/Editor Added/<editor_name>"
 # destination suggested by the popup fixer.
 editor_name = "alex"
 
@@ -25,12 +25,12 @@ local_root = "C:\\Creators_Club"
 
 # The canonical shared-drive prefix used in Resolve's stored clip paths
 # (Windows: the "P:" virtual drive letter from SPEC.md's Path canon). Used
-# to detect BAD_PREFIX (mapping-health) situations — a clip path that starts
+# to detect BAD_PREFIX (mapping-health) situations: a clip path that starts
 # with this prefix but doesn't resolve under local_root.
 canonical_prefix = "P:\\"
 
 # Name of the rclone remote pointing at the NAS. Must match a stanza in
-# rclone.conf — the bootstrap installers create one called
+# rclone.conf. The bootstrap installers create one called
 # "creators_club_sftp". ccsync-companion does not configure rclone remotes
 # for you.
 remote = "creators_club_sftp"
@@ -39,12 +39,12 @@ remote = "creators_club_sftp"
 #
 # This MUST be absolute. An SFTP session starts in your home directory on the
 # NAS (/mnt/tank/TheCreatorsPool/homes/<you>), so a relative value like
-# "Creators_Club" resolves to ~/Creators_Club — a path that doesn't exist —
+# "Creators_Club" resolves to ~/Creators_Club (a path that doesn't exist),
 # and lane A would upload into your home directory instead of the shared
 # tree, with no error to show for it.
 remote_root = "/mnt/tank/TheCreatorsPool/Creators_Club"
 
-# NEITHER OF THESE SCOPES WHAT SYNCS — and neither does the whole tree.
+# NEITHER OF THESE SCOPES WHAT SYNCS, and neither does the whole tree.
 # With dashboard_url set (the default), the DASHBOARD decides: only the
 # projects you have TICKED there sync to this machine, and the sequencer
 # works through them ONE AT A TIME. Lanes A and B are not whole-tree
@@ -136,12 +136,12 @@ syncthing_api_key = ""
 # above). Leave as [] to skip the folder-id verification.
 syncthing_folder_ids = []
 
-# Path to the rclone binary. Defaults to "rclone" (must be on PATH) — the
+# Path to the rclone binary. Defaults to "rclone" (must be on PATH). The
 # bootstrap installer is responsible for getting rclone onto PATH, not this
 # app; if missing, the sync lanes report a clear error status.
 rclone_path = "rclone"
 
-# Log file (rotating) — console logging is always on in addition to this.
+# Log file (rotating). Console logging is always on in addition to this.
 log_path = "~/.ccsync/companion.log"
 log_level = "INFO"
 

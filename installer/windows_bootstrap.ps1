@@ -878,7 +878,7 @@ if (-not $existing) {
         if (-not $taskRegistered) {
             $okFallback = Register-HiddenRunEntry -Name $substFallbackName -CommandLine $SubstCommand
             if (-not $okFallback) {
-                Write-Warn2 "P: will NOT be remapped automatically at logon. Run '$SubstCommand' by hand after each reboot, or tell Alex -- do NOT re-run this script as administrator to try to fix it, that makes P: invisible to Resolve."
+                Write-Warn2 "P: will NOT be remapped automatically at logon. Run '$SubstCommand' by hand after each reboot, or tell the admin -- do NOT re-run this script as administrator to try to fix it, that makes P: invisible to Resolve."
             }
         }
 
@@ -1442,8 +1442,8 @@ else {
         Write-Host ""
         Write-Host "     $deviceId" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host " Send this device ID to Alex so he can approve this machine on"
-        Write-Host " the dashboard. There is no per-project sharing step for you to"
+        Write-Host " Send this device ID to the admin so they can approve this machine"
+        Write-Host " on the dashboard. There is no per-project sharing step for you to"
         Write-Host " do -- once you're approved, ticking a project on the dashboard"
         Write-Host " is what shares it."
     }
@@ -1455,7 +1455,7 @@ else {
     Write-Host "      and send the .pub file to the admin"
     Write-Host "   3. SIGN IN: right-click the CCSync tray icon (bottom-right of"
     Write-Host "      your taskbar) and choose `"Sign in...`", then enter the SAME"
-    Write-Host "      TrueNAS username and password Alex gave you."
+    Write-Host "      TrueNAS username and password the admin gave you."
     Write-Host "      NOTHING SYNCS UNTIL YOU DO THIS -- the companion deliberately"
     Write-Host "      refuses to touch your files until it knows who you are, and"
     Write-Host "      signing in on the dashboard WEBSITE is not the same thing."

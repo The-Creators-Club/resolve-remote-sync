@@ -83,7 +83,7 @@ def test_queue_ui_and_toggle(env):
     client, conn = env
     as_user(client, "jsmith")
     page = client.get("/")
-    assert "[ SYNC QUEUE — JSMITH ]" in page.text and "[ TICK ]" in page.text
+    assert "[ SYNC QUEUE: JSMITH ]" in page.text and "[ TICK ]" in page.text
 
     resp = client.post("/partials/selection/jsmith/2025-ff4-nuclear/toggle")
     assert resp.status_code == 200 and "[ UNTICK ]" in resp.text

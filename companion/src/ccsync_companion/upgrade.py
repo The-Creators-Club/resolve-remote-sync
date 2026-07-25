@@ -72,7 +72,7 @@ def note_version_start(state_dir: Path) -> bool:
     from whether cleanup_old_exe() managed to unlink an `.old`. That is wrong
     twice over: it forced the rollback copy to be destroyed before the new
     build had proven anything, and when an AV hold deferred the unlink it
-    fired the "Update complete — now running vX" toast on an unrelated later
+    fired the "Update complete. Now running vX" toast on an unrelated later
     restart (AUDIT_2 CORE-H6). Never raises; a marker that can't be read or
     written just means no toast."""
     try:
@@ -308,7 +308,7 @@ def offer_label(version: Any, running: Optional[str] = None) -> str:
     if order == VERSION_NEWER:
         return f"Update available → v{version} (install)"
     if order == VERSION_OLDER:
-        return f"Roll back to v{version} (older — install)"
+        return f"Roll back to v{version} (older build, install)"
     return f"Switch to v{version} (install)"
 
 
@@ -318,11 +318,11 @@ def offer_toast(version: Any, running: Optional[str] = None) -> str:
     order = compare_to_running(version, running)
     current = config_mod.VERSION if running is None else running
     if order == VERSION_NEWER:
-        return f"Update available → v{version} — use the tray menu to install"
+        return f"Update available → v{version}. Use the tray menu to install"
     if order == VERSION_OLDER:
-        return (f"Roll back to v{version} offered — that is OLDER than the v{current} "
-                f"you are running. Only install it if Alex asked you to.")
-    return f"Switch to v{version} — use the tray menu to install"
+        return (f"Roll back to v{version} offered. That is OLDER than the v{current} "
+                f"you are running. Only install it if your admin asked you to.")
+    return f"Switch to v{version}. Use the tray menu to install"
 
 
 def offer_dialog_text(version: Any, running: Optional[str] = None) -> tuple[str, str, str]:
@@ -333,20 +333,20 @@ def offer_dialog_text(version: Any, running: Optional[str] = None) -> tuple[str,
     current = config_mod.VERSION if running is None else running
     if order == VERSION_OLDER:
         return (
-            "CCSYNC.EXE — roll back",
+            "CCSYNC.EXE: roll back",
             f"Roll back to v{version}? That is OLDER than the v{current} on this "
-            f"machine — you would LOSE whatever v{current} fixed. The companion "
+            f"machine. You would LOSE whatever v{current} fixed. The companion "
             f"will restart itself.",
             "ROLL BACK",
         )
     if order == VERSION_NEWER:
         return (
-            "CCSYNC.EXE — update",
+            "CCSYNC.EXE: update",
             f"Update to v{version}? The companion will restart itself.",
             "UPDATE",
         )
     return (
-        "CCSYNC.EXE — switch build",
+        "CCSYNC.EXE: switch build",
         f"Switch to v{version}? You are running v{current}. The companion will "
         f"restart itself.",
         "SWITCH",

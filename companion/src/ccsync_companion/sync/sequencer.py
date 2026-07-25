@@ -183,7 +183,7 @@ class Sequencer:
         scheme = str(cfg.get("lane_c_pause_scheme", PAUSE_SCHEME_NONE) or "").strip().lower()
         if scheme not in (PAUSE_SCHEME_NONE, PAUSE_SCHEME_ROTATE):
             log.warning(
-                "sequencer: unknown lane_c_pause_scheme %r — using %r",
+                "sequencer: unknown lane_c_pause_scheme %r -- using %r",
                 scheme, PAUSE_SCHEME_NONE,
             )
             scheme = PAUSE_SCHEME_NONE
@@ -276,7 +276,7 @@ class Sequencer:
             # entirely. Every subsequent sign-out/sign-in added another
             # permanent thread (AUDIT_2 L-1, reproduced live).
             log.warning(
-                "sequencer: start() while a sequencer thread is still alive — "
+                "sequencer: start() while a sequencer thread is still alive -- "
                 "ignoring rather than spawning a second one"
             )
             return
@@ -522,7 +522,7 @@ class Sequencer:
             self.admin.ensure_max_folder_concurrency(self.lane_c_max_folder_concurrency)
         except Exception:
             log.debug(
-                "sequencer: could not set maxFolderConcurrency — leaving Syncthing's default",
+                "sequencer: could not set maxFolderConcurrency -- leaving Syncthing's default",
                 exc_info=True,
             )
 
@@ -595,7 +595,7 @@ class Sequencer:
                 # Proxy/ file. The next turn re-asserts the ignores and
                 # releases it (AUDIT_2 L-3).
                 log.debug(
-                    "sequencer: folder %s stays paused — its ignores never landed", slug
+                    "sequencer: folder %s stays paused -- its ignores never landed", slug
                 )
                 continue
             self._set_paused(slug, False)
@@ -925,7 +925,7 @@ class Sequencer:
                 # for the life of the install -- a straight lane-direction
                 # violation (AUDIT_2 L-3).
                 log.warning(
-                    "sequencer: folder %s could not be accepted cleanly — leaving it "
+                    "sequencer: folder %s could not be accepted cleanly -- leaving it "
                     "paused rather than syncing without ignores", slug,
                 )
                 return
@@ -1011,7 +1011,7 @@ class Sequencer:
                 continue
             if folder.get("paused"):
                 log.warning(
-                    "sequencer: folder %s is still paused after its lane C turn — "
+                    "sequencer: folder %s is still paused after its lane C turn -- "
                     "retrying the unpause", slug,
                 )
                 self._set_paused(slug, False)

@@ -15,7 +15,7 @@
       <a class="btn nav-link" href="/admin/users">[ USERS ]</a>
     {% endif %}
     {% if view and not view.syncthing_reachable %}
-      <span class="banner">▲ SYNCTHING UNREACHABLE — data may be stale</span>
+      <span class="banner">▲ SYNCTHING UNREACHABLE: data may be stale</span>
     {% endif %}
     <span class="stamp">updated {{ view.generated_at | ago if view else "" }}</span>
     <span class="session">

@@ -5,6 +5,15 @@ and tray — the entry point started by `ccsync-companion` (see pyproject.toml
 
 from __future__ import annotations
 
+# Eagerly load the idna codec ON THE MAIN THREAD, before any worker thread
+# exists. socket.getaddrinfo() lazily imports it on first use; when that
+# first use is the reporter thread racing the main thread's own imports
+# (tray/PIL, ~2s after start), the lazy import can fail under import-lock
+# contention in the frozen exe -- and Python's codec registry CACHES the
+# failure, so every network call in the process then fails with "unknown
+# encoding: idna" until restart. Seen live 2026-07-25 on the v0.3.0 build.
+import encodings.idna  # noqa: F401
+
 import logging
 import logging.handlers
 import os

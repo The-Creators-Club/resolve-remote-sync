@@ -509,8 +509,11 @@ else {
     }
     # Both unmap styles: subst for our own mapping, net use for a hand-made
     # SMB mapping subst can't see. Errors (not mapped) are expected noise.
-    cmd /c "subst P: /D" 2>$null | Out-Null
-    cmd /c "net use P: /delete /y" 2>$null | Out-Null
+    # Redirection must happen INSIDE cmd: a PowerShell-level 2>$null wraps
+    # native stderr in a NativeCommandError, which is fatal under
+    # $ErrorActionPreference = 'Stop' when the drive isn't mapped.
+    cmd /c "subst P: /D >nul 2>&1"
+    cmd /c "net use P: /delete /y >nul 2>&1"
 
     # -- recreate: task (elevated) or Run-entry fallback, then map now --
     $taskRegistered = $false

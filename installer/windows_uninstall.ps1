@@ -114,8 +114,10 @@ if (Test-Path "P:\") {
     if ($DryRun) { Write-Step "[dry-run] would unmap P:" }
     else {
         # subst and net use are separate mechanisms; try both, ignore errors.
-        & cmd /c "subst P: /D" 2>$null
-        & cmd /c "net use P: /delete /y" 2>$null
+        # Redirect inside cmd -- a PowerShell-level 2>$null turns native
+        # stderr into a NativeCommandError (fatal under EAP Stop).
+        & cmd /c "subst P: /D >nul 2>&1"
+        & cmd /c "net use P: /delete /y >nul 2>&1"
         Write-Step "unmapped P: (if it was mapped)"
     }
 }

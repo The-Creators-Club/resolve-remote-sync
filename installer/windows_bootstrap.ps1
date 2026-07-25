@@ -482,9 +482,10 @@ $TaskName = "CCSync-SubstP"
 $SubstCommand = "subst P: $CCRoot"
 $RunKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $substFallbackName = "CCSyncSubstP"
+$ShareName = "CCSync_P"
 
 if ($DryRun) {
-    Write-Step "[dry-run] would remove any existing '$TaskName' task / '$substFallbackName' Run entry, unmount P: (subst /D + net use /delete), then re-register the logon task and run '$SubstCommand'"
+    Write-Step "[dry-run] would remove any existing '$TaskName' task / '$substFallbackName' Run entry, unmount P: (subst /D + net use /delete), then remap P: (elevated: loopback share '\\localhost\$ShareName' -> $CCRoot via net use /persistent:yes; unelevated: logon task + '$SubstCommand')"
 }
 else {
     # -- tear down: task, Run-entry fallback (+ its shim files), P: mapping --
@@ -515,77 +516,174 @@ else {
     cmd /c "subst P: /D >nul 2>&1"
     cmd /c "net use P: /delete /y >nul 2>&1"
 
-    # -- recreate: task (elevated) or Run-entry fallback, then map now --
-    $taskRegistered = $false
-    try {
-        $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c $SubstCommand"
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
-        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-        Write-Step "registered scheduled task '$TaskName'"
-        $taskRegistered = $true
+    # -- recreate. Preferred style: a private loopback SMB share of the
+    # local root, mapped with `net use /persistent:yes`. Explorer honors
+    # _LabelFromReg display names for net-use drives (section 5b) but
+    # ignores every known labelling mechanism for subst drives (DriveIcons
+    # DefaultLabel under HKCU and HKLM, autorun.inf -- all tested dead on
+    # Win11 26200), and a persistent mapping self-restores at logon with no
+    # scheduled task at all.
+    #
+    # Split responsibilities carefully: creating the SHARE needs admin (one
+    # UAC prompt when unelevated), but the `net use` MAPPING must run in
+    # THIS process at the user's normal integrity level -- a drive mapped
+    # by an elevated token is invisible to the user's unelevated session
+    # (UAC linked-token isolation), which would leave Resolve staring at a
+    # missing P: until the next logon. If the share can't be created (UAC
+    # declined, SMB server off), fall back to the old subst + logon-task
+    # style: everything works, the drive just shows the host volume's name.
+    $script:PMappedViaShare = $false
+    $shareReady = $false
+    $existingShare = $null
+    try { $existingShare = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue } catch {}
+    if ($existingShare -and $existingShare.Path -eq $CCRoot) {
+        Write-Skip "loopback share '$ShareName' already -> $CCRoot"
+        $shareReady = $true
     }
-    catch {
-        Write-Warn2 "could not register scheduled task '$TaskName': $($_.Exception.Message)"
-        Write-Warn2 "falling back to an HKCU Run entry (equivalent effect, no admin rights needed)"
+    elseif ($IsElevated) {
+        try {
+            if ($existingShare) {
+                Remove-SmbShare -Name $ShareName -Force -Confirm:$false -ErrorAction Stop
+                Write-Step "removed stale share '$ShareName' (pointed at $($existingShare.Path))"
+            }
+            New-SmbShare -Name $ShareName -Path $CCRoot -FullAccess "$env:USERDOMAIN\$env:USERNAME" -ErrorAction Stop | Out-Null
+            Write-Step "created loopback share '$ShareName' -> $CCRoot"
+            $shareReady = $true
+        }
+        catch {
+            Write-Warn2 "could not create share '$ShareName': $($_.Exception.Message) -- falling back to subst"
+        }
     }
-    if (-not $taskRegistered) {
-        $okFallback = Register-HiddenRunEntry -Name $substFallbackName -CommandLine $SubstCommand
-        if (-not $okFallback) {
-            Write-Warn2 "P: will NOT be remapped automatically at logon. Re-run this script from an elevated PowerShell, or run '$SubstCommand' by hand after each reboot."
+    else {
+        # One-off elevated helper for just the share. -File + argument array
+        # keeps paths with spaces intact (no nested-quote surgery).
+        try {
+            $helperPath = Join-Path $env:TEMP "ccsync_make_share.ps1"
+            @'
+param([string]$Name, [string]$Path, [string]$Grantee)
+$ErrorActionPreference = "Stop"
+$existing = Get-SmbShare -Name $Name -ErrorAction SilentlyContinue
+if ($existing -and $existing.Path -ne $Path) {
+    Remove-SmbShare -Name $Name -Force -Confirm:$false
+    $existing = $null
+}
+if (-not $existing) {
+    New-SmbShare -Name $Name -Path $Path -FullAccess $Grantee | Out-Null
+}
+'@ | Set-Content -LiteralPath $helperPath -Encoding UTF8
+            Write-Step "creating the '$ShareName' share needs administrator rights -- approve the UAC prompt..."
+            $proc = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList @(
+                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $helperPath,
+                "-Name", $ShareName, "-Path", $CCRoot, "-Grantee", "$env:USERDOMAIN\$env:USERNAME"
+            )
+            $madeShare = $null
+            try { $madeShare = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue } catch {}
+            if ($proc.ExitCode -eq 0 -and $madeShare -and $madeShare.Path -eq $CCRoot) {
+                Write-Step "created loopback share '$ShareName' -> $CCRoot"
+                $shareReady = $true
+            }
+            else {
+                Write-Warn2 "share helper exited with code $($proc.ExitCode) -- falling back to subst"
+            }
+        }
+        catch {
+            Write-Warn2 "UAC declined or share creation failed: $($_.Exception.Message) -- falling back to subst (P: will show the host volume's name in Explorer)"
         }
     }
 
-    subst P: $CCRoot
-    if ($LASTEXITCODE -eq 0) {
-        Write-Step "mapped P: -> $CCRoot"
+    if ($shareReady) {
+        cmd /c "net use P: \\localhost\$ShareName /persistent:yes >nul 2>&1"
+        if ($LASTEXITCODE -eq 0) {
+            Write-Step "mapped P: -> \\localhost\$ShareName (persistent -- no logon task needed)"
+            $script:PMappedViaShare = $true
+        }
+        else {
+            Write-Warn2 "net use P: \\localhost\$ShareName exited with code $LASTEXITCODE -- falling back to subst"
+        }
     }
-    else {
-        Write-Warn2 "subst P: $CCRoot exited with code $LASTEXITCODE -- something may still have files open on the old P:"
+
+    if (-not $script:PMappedViaShare) {
+        # -- subst fallback: logon task (elevated) or Run-entry, then map now --
+        $taskRegistered = $false
+        try {
+            $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c $SubstCommand"
+            $trigger = New-ScheduledTaskTrigger -AtLogOn
+            $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+            Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+            Write-Step "registered scheduled task '$TaskName'"
+            $taskRegistered = $true
+        }
+        catch {
+            Write-Warn2 "could not register scheduled task '$TaskName': $($_.Exception.Message)"
+            Write-Warn2 "falling back to an HKCU Run entry (equivalent effect, no admin rights needed)"
+        }
+        if (-not $taskRegistered) {
+            $okFallback = Register-HiddenRunEntry -Name $substFallbackName -CommandLine $SubstCommand
+            if (-not $okFallback) {
+                Write-Warn2 "P: will NOT be remapped automatically at logon. Re-run this script from an elevated PowerShell, or run '$SubstCommand' by hand after each reboot."
+            }
+        }
+
+        subst P: $CCRoot
+        if ($LASTEXITCODE -eq 0) {
+            Write-Step "mapped P: -> $CCRoot"
+        }
+        else {
+            Write-Warn2 "subst P: $CCRoot exited with code $LASTEXITCODE -- something may still have files open on the old P:"
+        }
     }
 }
 
 # --------------------------------------------------------------------
 # 5b. Name the P: drive in Explorer
 # --------------------------------------------------------------------
-# `subst` drives inherit the underlying volume's label and have none of
-# their own, so `label P: ...` would rename the whole host volume -- if
-# LocalRoot is on F:, that renames all of F:. This per-user DriveIcons key
-# changes only how Explorer *displays* P:, touches no volume, and needs no
-# admin rights.
-$DriveIconsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\P\DefaultLabel"
+# Only net-use (network-style) drives can be display-named: Explorer reads
+# the per-user MountPoints2 _LabelFromReg value for them -- the same value
+# it writes when a user F2-renames a network drive. For subst drives every
+# known mechanism is ignored on current Windows 11 (DriveIcons DefaultLabel
+# under both HKCU and HKLM, autorun.inf label= -- all verified dead on
+# build 26200): they always show the host volume's label. That asymmetry is
+# WHY section 5 prefers the loopback-share mapping.
 Write-Step "labelling the P: drive as '$DriveLabel' in Explorer..."
 if ($DryRun) {
-    Write-Step "[dry-run] would set $DriveIconsKey (default) = $DriveLabel"
+    Write-Step "[dry-run] would set MountPoints2 _LabelFromReg = $DriveLabel for P:'s UNC path (net-use mappings only)"
 }
 else {
     try {
-        $currentLabel = $null
-        if (Test-Path -LiteralPath $DriveIconsKey) {
-            $currentLabel = (Get-ItemProperty -LiteralPath $DriveIconsKey -ErrorAction SilentlyContinue).'(default)'
-        }
-        if ($currentLabel -eq $DriveLabel) {
-            Write-Skip "P: already labelled '$DriveLabel' in Explorer"
+        $displayRoot = $null
+        try { $displayRoot = (Get-PSDrive -Name P -ErrorAction Stop).DisplayRoot } catch {}
+        if ([string]::IsNullOrWhiteSpace($displayRoot)) {
+            Write-Warn2 "P: is a subst mapping -- Explorer cannot display a custom name for it (it will show the host volume's label). Re-run the installer as administrator to get the labelled '\\localhost\$ShareName' mapping."
         }
         else {
-            New-Item -Path $DriveIconsKey -Force | Out-Null
-            Set-ItemProperty -LiteralPath $DriveIconsKey -Name "(default)" -Value $DriveLabel
-            Write-Step "labelled P: as '$DriveLabel'"
-            # Explorer caches DriveIcons labels aggressively -- a live
-            # SHChangeNotify broadcast is unreliable for this specific key in
-            # practice (reported live: the label silently "did not take"
-            # despite the registry write succeeding). Restarting explorer.exe
-            # is the one method that reliably shows it immediately. Open
-            # Explorer windows survive; the taskbar/desktop blinks out and
-            # back for roughly a second.
-            try {
-                Get-Process -Name explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
-                Start-Sleep -Milliseconds 500
-                Start-Process explorer.exe
-                Write-Step "restarted Explorer so the new P: label shows immediately"
+            # \\localhost\CCSync_P -> ##localhost#CCSync_P
+            $mpName = "##" + $displayRoot.TrimStart("\").Replace("\", "#")
+            $mpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\$mpName"
+            $currentLabel = $null
+            if (Test-Path -LiteralPath $mpKey) {
+                $currentLabel = (Get-ItemProperty -LiteralPath $mpKey -ErrorAction SilentlyContinue)._LabelFromReg
             }
-            catch {
-                Write-Warn2 "could not restart Explorer automatically: $($_.Exception.Message) -- log off and back on (or restart Explorer via Task Manager) to see the new P: label"
+            if ($currentLabel -eq $DriveLabel) {
+                Write-Skip "P: already labelled '$DriveLabel' in Explorer"
+            }
+            else {
+                New-Item -Path $mpKey -Force | Out-Null
+                Set-ItemProperty -LiteralPath $mpKey -Name "_LabelFromReg" -Value $DriveLabel
+                Write-Step "labelled P: as '$DriveLabel' ($mpName)"
+                # Explorer reads _LabelFromReg when it (re)enumerates the
+                # drive; restarting explorer.exe is the reliable way to make
+                # the new name show immediately. Open Explorer windows are
+                # closed; the taskbar/desktop blinks out and back for
+                # roughly a second.
+                try {
+                    Get-Process -Name explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
+                    Start-Sleep -Milliseconds 500
+                    Start-Process explorer.exe
+                    Write-Step "restarted Explorer so the new P: label shows immediately"
+                }
+                catch {
+                    Write-Warn2 "could not restart Explorer automatically: $($_.Exception.Message) -- log off and back on (or restart Explorer via Task Manager) to see the new P: label"
+                }
             }
         }
     }

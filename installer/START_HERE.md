@@ -19,6 +19,11 @@ key** — to send to Alex so he can approve you. Re-running it any time is
 safe. Once installed, the companion updates itself: when Alex publishes a
 new version, the tray shows a one-click "Update now".
 
+During the install a **UAC (administrator) prompt appears once** — approve
+it. It's what lets the installer set up the P: drive so it shows up in
+Explorer named properly instead of echoing your local disk's name. If you
+decline it, everything still works; the drive just keeps the wrong name.
+
 If you'd rather do it by hand, or you're on a Mac, follow the manual steps
 below instead.
 

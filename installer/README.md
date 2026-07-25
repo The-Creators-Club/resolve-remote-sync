@@ -104,14 +104,26 @@ Steps (each idempotent, each prints what it did/skipped):
    GitHub releases API** (the asset name is version-stamped, so a fixed URL
    goes stale -- see below).
 4. The local sync root (`-LocalRoot`).
-5. A logon scheduled task (`CCSync-SubstP`) running `subst P: <LocalRoot>`,
-   plus running `subst` once immediately (skipped if `P:` is already
-   correctly mapped; warns instead of clobbering if `P:` points elsewhere).
-   Falls back to an `HKCU\...\Run` entry if not elevated.
-6. Labels `P:` as `-DriveLabel` in Explorer, via
-   `HKCU\...\Explorer\DriveIcons\P\DefaultLabel`. **Not** `label P:`: `P:` is
-   a `subst` drive with no volume label of its own, so `label` would rename
-   the whole underlying volume (all of `F:`, say) instead of just `P:`.
+5. Maps `P:` to `<LocalRoot>`. Preferred: creates a private loopback SMB
+   share `CCSync_P` of the local root (admin-only -- done directly when
+   elevated, else via a one-off UAC prompt) and maps
+   `net use P: \\localhost\CCSync_P /persistent:yes` -- self-restores at
+   logon with no scheduled task, and (crucially) net-use drives are the
+   only kind Explorer can display-name. The `net use` itself deliberately
+   runs UNelevated: a drive mapped by an elevated token is invisible to
+   the user's normal session (UAC linked-token isolation). If the share
+   can't be created (UAC declined, SMB server off): falls back to the old
+   `subst P: <LocalRoot>` with a logon scheduled task (`CCSync-SubstP`),
+   falling back further to an `HKCU\...\Run` entry -- works identically,
+   but the drive shows the host volume's label in Explorer.
+6. Labels `P:` as `-DriveLabel` in Explorer via the per-user
+   `MountPoints2\##localhost#CCSync_P\_LabelFromReg` value (what Explorer
+   itself writes when you F2-rename a network drive), then restarts
+   Explorer so it shows immediately. `subst`-mapped drives cannot be
+   labelled at all on current Windows 11 -- `DriveIcons\DefaultLabel`
+   (HKCU and HKLM) and `autorun.inf label=` were all verified ignored on
+   build 26200. **Not** `label P:` either: that renames the whole
+   underlying volume.
 7. Generates the Syncthing config, registers `syncthing serve` for autostart,
    and **starts the daemon now**.
 8. Writes a `[creators_club_sftp]` stanza into

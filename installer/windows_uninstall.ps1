@@ -123,6 +123,36 @@ if (Test-Path "P:\") {
 }
 else { Write-Skip "P: not mapped" }
 
+# the loopback share behind the labelled net-use mapping (needs admin)
+$share = $null
+try { $share = Get-SmbShare -Name "CCSync_P" -ErrorAction SilentlyContinue } catch {}
+if ($share) {
+    if ($DryRun) { Write-Step "[dry-run] would remove SMB share CCSync_P" }
+    else {
+        try {
+            Remove-SmbShare -Name "CCSync_P" -Force -Confirm:$false -ErrorAction Stop
+            Write-Step "removed SMB share CCSync_P"
+        }
+        catch { Write-Warn2 "could not remove share CCSync_P: $($_.Exception.Message) (re-run elevated)" }
+    }
+}
+else { Write-Skip "no SMB share: CCSync_P" }
+
+# Explorer label leftovers: MountPoints2 _LabelFromReg for the loopback UNC,
+# plus the legacy (never-working) DriveIcons key from older installs.
+foreach ($k in @(
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\##localhost#CCSync_P",
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\P"
+)) {
+    if (Test-Path -LiteralPath $k) {
+        if ($DryRun) { Write-Step "[dry-run] would delete $k" }
+        else {
+            try { Remove-Item -LiteralPath $k -Recurse -Force -ErrorAction Stop; Write-Step "removed $k" }
+            catch { Write-Warn2 "could not remove ${k}: $($_.Exception.Message)" }
+        }
+    }
+}
+
 # --- 4. program binaries --------------------------------------------------
 if (Test-Path -LiteralPath $BinDir) {
     if ($DryRun) { Write-Step "[dry-run] would delete $BinDir (rclone, syncthing, companion exe)" }

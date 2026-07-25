@@ -66,18 +66,26 @@ def default_http_open(url: str, headers: dict, timeout: float):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def cleanup_old_exe(exe_path: Optional[Path] = None) -> None:
+def cleanup_old_exe(exe_path: Optional[Path] = None) -> bool:
     """Delete the `<exe>.old` a previous apply() left behind. Swallows
     OSError entirely -- an AV scanner may still hold the file; we simply try
-    again on the next start. At most one `.old` ever exists."""
+    again on the next start. At most one `.old` ever exists.
+
+    Returns True when an `.old` was actually removed -- i.e. THIS start is
+    the first after a successful self-upgrade; app.run() uses that as the
+    trigger for the "updated to vX.Y.Z" tray toast."""
     try:
         if exe_path is None:
             if not is_frozen():
-                return
+                return False
             exe_path = Path(sys.executable)
-        exe_path.with_name(exe_path.name + _OLD_SUFFIX).unlink(missing_ok=True)
+        old = exe_path.with_name(exe_path.name + _OLD_SUFFIX)
+        existed = old.exists()
+        old.unlink(missing_ok=True)
+        return existed
     except OSError:
         log.debug("cleanup_old_exe: .old still locked; will retry next start")
+        return False
 
 
 def parse_upgrade(resp: Any) -> Optional[dict[str, Any]]:

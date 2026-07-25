@@ -155,6 +155,7 @@ class ProjectSetupPrompter:
                 # the no-display False fallback all count as "asked" -- the
                 # tray item is the escape hatch, never a repeat auto-prompt.
                 self._record_asked(name)
+                log.info("new-project prompt: showing for %r", name)
                 accepted = self._confirm(
                     "NEW PROJECT",
                     f"Project '{name}' isn't set up on the server —\n"
@@ -164,6 +165,7 @@ class ProjectSetupPrompter:
                 )
             finally:
                 self._popup_lock.release()
+            log.info("new-project prompt: %r -> %s", name, "accepted" if accepted else "declined")
             if accepted:
                 self._open_url(self.setup_url(name))
             elif self._notify is not None:

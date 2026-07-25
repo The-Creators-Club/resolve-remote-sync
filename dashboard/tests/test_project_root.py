@@ -49,6 +49,19 @@ def test_match_project_label():
     assert f("Creator Nuclear", labels) is None or f("Creator Nuclear", labels) in labels
 
 
+def test_match_project_label_ignores_trivial_numeric_tokens():
+    """Regression (2026-07-25): 'Event 1.EXE Videos for Event' auto-matched
+    '.../Season 1' on the shared bare token '1' alone, and the sticky
+    mapping wedged a brand-new project under Creator Profiles. Short
+    all-digit tokens must never count as match evidence."""
+    f = dbmod.match_project_label
+    labels = ["2025/FF4/Nuclear", "2026/Creator Profiles/Season 1"]
+    assert f("Event 1.EXE Videos for Event", labels) is None
+    assert f("Part 2 Cut 1", labels) is None
+    # but a real word still matches even alongside numbers
+    assert f("Season 1 Recap", labels) == "2026/Creator Profiles/Season 1"
+
+
 def test_first_match_is_sticky(env):
     client, conn = env
     headers = {"X-CCSync-Token": TOKEN}

@@ -336,3 +336,13 @@ def test_pick_project_prefix_falls_back_to_configured_project_prefix():
 def test_pick_project_prefix_falls_back_to_tree_root_when_nothing_matches():
     result = fixer.pick_project_prefix("Unrelated Show", [], project_prefix="")
     assert result == ""
+
+
+def test_match_project_dir_ignores_trivial_numeric_tokens():
+    """Regression (2026-07-25, dashboard twin): 'Event 1 Videos' must not
+    match '.../Season 1' on the shared bare '1' -- short all-digit tokens
+    carry no identity."""
+    candidates = ["2025/FF4/Nuclear", "2026/Creator Profiles/Season 1"]
+    assert fixer.match_project_dir("Event 1.EXE Videos for Event", candidates) is None
+    assert fixer.match_project_dir("Part 2 Cut 1", candidates) is None
+    assert fixer.match_project_dir("Season 1 Recap", candidates) == "2026/Creator Profiles/Season 1"

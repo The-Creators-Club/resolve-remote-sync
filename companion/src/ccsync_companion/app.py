@@ -910,7 +910,9 @@ class CompanionApp:
         log.info("ccsync-companion v%s starting", config_mod.VERSION)
         log.info("config: %s", config_mod.CONFIG_PATH)
         # Remove the .old a previous self-upgrade left behind (see upgrade.py).
-        upgrade_mod.cleanup_old_exe()
+        # Its presence means THIS start is the first on a freshly-upgraded
+        # build -- surface that as a toast once the tray exists below.
+        just_upgraded = upgrade_mod.cleanup_old_exe()
 
         # A half-configured install is the single most common failure mode and
         # is otherwise completely silent — nothing syncs and no lane says why.
@@ -940,6 +942,17 @@ class CompanionApp:
         except ImportError:
             self._tray_icon = None
             log.warning("pystray/Pillow not installed — running headless (Ctrl+C to stop)")
+
+        if just_upgraded:
+            log.info("self-upgrade to v%s completed", config_mod.VERSION)
+            # Slight delay: the tray icon thread has only just started and
+            # Windows drops notify() calls for icons not yet registered.
+            timer = threading.Timer(3.0, lambda: self._notify_tray(
+                f"Update complete — now running v{config_mod.VERSION}.",
+                "ccsync-companion",
+            ))
+            timer.daemon = True
+            timer.start()
 
         try:
             while not self._stop_event.is_set():

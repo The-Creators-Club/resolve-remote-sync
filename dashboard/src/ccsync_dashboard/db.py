@@ -709,13 +709,23 @@ def latest_machine_state(conn: sqlite3.Connection, editor: str):
 def match_project_label(resolve_project: str, labels: Iterable[str]) -> str | None:
     """Match a Resolve project name to a tree project label
     ("year/series/project"). Mirrors the companion's fixer.match_project_dir:
-    lowercase alnum token overlap, year-only overlap disqualifies, best score
-    wins, tie -> None."""
-    def tokens(text: str) -> set[str]:
-        return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if t}
+    lowercase alnum token overlap, best score wins, tie -> None.
 
-    def is_year(token: str) -> bool:
-        return token.isdigit() and len(token) == 4
+    Tokens that carry no identity NEVER count: 4-digit years (a name
+    containing "2026" is not evidence it belongs to every 2026 project) and
+    short bare numbers ("1", "2" -- season/part counters). Without the
+    latter rule, "Event 1 Videos" auto-matched "2026/Creator Profiles/
+    Season 1" on the shared "1" alone and the sticky mapping wedged it
+    there (seen live 2026-07-25)."""
+    def is_trivial(token: str) -> bool:
+        # all-digit tokens up to year length; any token with a letter is kept
+        return token.isdigit() and len(token) <= 4
+
+    def tokens(text: str) -> set[str]:
+        return {
+            t for t in re.split(r"[^a-z0-9]+", text.lower())
+            if t and not is_trivial(t)
+        }
 
     name_tokens = tokens(resolve_project)
     if not name_tokens:
@@ -724,9 +734,9 @@ def match_project_label(resolve_project: str, labels: Iterable[str]) -> str | No
     best_score = 0
     for label in labels:
         overlap = name_tokens & tokens(label)
-        if not any(not is_year(t) for t in overlap):
-            continue
         score = len(overlap)
+        if score == 0:
+            continue
         if score > best_score:
             best, best_score = [label], score
         elif score == best_score:

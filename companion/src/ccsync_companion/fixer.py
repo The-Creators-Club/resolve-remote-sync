@@ -118,10 +118,17 @@ def match_project_dir(resolve_project_name: str, project_rel_paths: list[str]) -
     for rel in project_rel_paths:
         path_tokens = _tokenize(rel)
         overlap = name_tokens & path_tokens
-        non_year_overlap = {t for t in overlap if not _YEAR_RE.match(t)}
-        if not non_year_overlap:
+        # Trivial tokens never count toward a match: 4-digit years AND short
+        # bare numbers ("1", "2" -- season/part counters). Without the
+        # latter, "Event 1 Videos" matched ".../Season 1" on the shared "1"
+        # alone (seen live 2026-07-25 on the dashboard's twin of this
+        # matcher, db.match_project_label -- keep the two in sync).
+        meaningful = {
+            t for t in overlap if not (t.isdigit() and len(t) <= 4)
+        }
+        if not meaningful:
             continue
-        score = len(overlap)
+        score = len(meaningful)
         if score > best_score:
             best_score = score
             best_matches = [rel]

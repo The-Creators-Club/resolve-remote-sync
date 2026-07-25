@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import pystray  # noqa: F401  (raises ImportError here if missing — by design)
 from PIL import Image, ImageDraw
 
+from . import config as config_mod
 from .sync.base import STATE_ERROR, STATE_SYNCING, LaneStatus
 
 if TYPE_CHECKING:
@@ -364,6 +365,8 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
     ]
 
     return pystray.Menu(
+        pystray.MenuItem(f"ccsync-companion v{config_mod.VERSION}", None, enabled=False),
+        pystray.Menu.SEPARATOR,
         *identity_items,
         pystray.Menu.SEPARATOR,
         *lane_items,

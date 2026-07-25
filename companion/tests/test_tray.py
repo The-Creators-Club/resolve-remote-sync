@@ -187,3 +187,11 @@ def test_menu_shows_setup_item_only_when_unmapped():
     # app double without the method must not crash
     menu = _build_menu(_FakeApp({"dashboard_url": ""}))
     assert not any("Set up" in label for label in _menu_labels(menu))
+
+
+def test_menu_first_item_is_running_version():
+    from ccsync_companion import config as config_mod
+    from ccsync_companion.tray import _build_menu
+
+    labels = _menu_labels(_build_menu(_FakeApp({"dashboard_url": ""})))
+    assert labels[0] == f"ccsync-companion v{config_mod.VERSION}"

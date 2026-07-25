@@ -270,12 +270,18 @@ class UpgradeManager:
 
     @staticmethod
     def _default_spawn(exe: Path) -> None:
-        # DETACHED_PROCESS: the child gets no console (build.spec builds a
-        # console exe; inheriting this process's soon-dead console would be
-        # worse than none). All std handles to DEVNULL for the same reason.
+        # DETACHED_PROCESS decouples from this soon-dead process;
+        # CREATE_NO_WINDOW stops Windows allocating a fresh (empty, killable)
+        # console if the exe is ever a console build again -- closing that
+        # mystery window kills the companion (seen live 2026-07-25). All std
+        # handles to DEVNULL; build.spec is console=False since 0.3.2.
         creationflags = 0
         if sys.platform == "win32":
-            creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            creationflags = (
+                subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.CREATE_NO_WINDOW
+            )
         subprocess.Popen(
             [str(exe)],
             cwd=str(exe.parent),

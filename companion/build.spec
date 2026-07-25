@@ -82,7 +82,13 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,  # keep a console window for status/log lines (see README)
+    # Windowed, NOT console: the tray icon + ~/.ccsync/companion.log are the
+    # real interfaces. console=True (the original choice) meant every direct
+    # launch -- the installer's, the self-upgrade respawn, the Run-key
+    # autostart -- popped an EMPTY console window (output is redirected to
+    # null), and closing that mystery window KILLS the companion. Seen live
+    # 2026-07-25: the base-rig install "failed" because the user closed it.
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

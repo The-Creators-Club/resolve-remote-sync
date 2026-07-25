@@ -783,7 +783,14 @@ def launch_companion(
     try:
         creationflags = 0
         if sys.platform == "win32":
-            creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            # CREATE_NO_WINDOW: without it a console-build companion gets a
+            # fresh EMPTY console allocated, and closing that window kills
+            # the app (seen live 2026-07-25 right after a base install).
+            creationflags = (
+                subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.CREATE_NO_WINDOW
+            )
         proc = popen(
             [str(exe_path)],
             cwd=str(Path(exe_path).parent),

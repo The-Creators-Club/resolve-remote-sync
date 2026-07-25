@@ -17,6 +17,7 @@ import encodings.idna  # noqa: F401
 import logging
 import logging.handlers
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -55,9 +56,14 @@ def setup_logging(cfg: dict[str, Any]) -> None:
     file_handler = logging.handlers.RotatingFileHandler(
         log_path, maxBytes=5_000_000, backupCount=3, encoding="utf-8"
     )
-    console_handler = logging.StreamHandler()
+    handlers: list[logging.Handler] = [file_handler]
+    # In the windowed (console=False) build sys.stderr is None -- a
+    # StreamHandler would just swallow every record via handleError. Only
+    # attach it when there's a real stream (source runs, console builds).
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    for handler in (file_handler, console_handler):
+    for handler in handlers:
         handler.setFormatter(fmt)
         root.addHandler(handler)
 

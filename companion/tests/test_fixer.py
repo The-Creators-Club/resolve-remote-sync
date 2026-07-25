@@ -822,3 +822,241 @@ def test_fix_clip_reports_the_placeholder_reason_on_a_copy_failure(tmp_path, mon
     assert "cloud file provider" not in result["message"], "raw OS text is for the log"
     # ...and nothing was left behind at the destination.
     assert list((root / "B-roll").iterdir()) == []
+
+
+# ===========================================================================
+# [ SKIP THIS FILE ] / [ CANCEL ALL ]: mid-file abort, and the cleanup that
+# is the only reason it is allowed to exist (CORE-H5)
+# ===========================================================================
+
+
+def test_copy_with_progress_aborts_promptly_mid_file(tmp_path):
+    """The flag flips while a multi-GB file is copying: the copy must stop at
+    the next 8 MB chunk boundary, not at the end of the file."""
+    src = tmp_path / "big.braw"
+    src.write_bytes(b"A" * 10_000)
+    dst = tmp_path / "partial.braw"
+
+    seen = []
+
+    def should_abort():
+        return len(seen) >= 3
+
+    with pytest.raises(fixer.CopyAborted):
+        fixer.copy_with_progress(src, dst, on_bytes=lambda d, t: seen.append(d),
+                                 chunk_size=1000, should_abort=should_abort)
+
+    assert dst.exists(), "the partial is left for the CALLER to delete"
+    assert dst.stat().st_size < src.stat().st_size, "it must not have finished the file"
+    assert len(seen) < 12, "it must not have read the whole file before noticing"
+
+
+def test_copy_with_progress_closes_its_handles_before_raising(tmp_path):
+    """CopyAborted is raised AFTER the `with` block. Raising inside it leaves
+    a Windows handle open on the destination, so the caller's unlink fails
+    with "in use by another process" -- stranding exactly the partial the
+    abort exists to remove."""
+    src = tmp_path / "a.mov"
+    src.write_bytes(b"x" * 4096)
+    dst = tmp_path / "b.mov"
+
+    with pytest.raises(fixer.CopyAborted):
+        fixer.copy_with_progress(src, dst, chunk_size=512, should_abort=lambda: True)
+
+    # If a handle were still open this unlink would raise on Windows.
+    dst.unlink()
+    assert not dst.exists()
+
+
+def test_copy_with_progress_ignores_an_abort_callback_that_raises(tmp_path):
+    """A misbehaving UI predicate must never abandon a copy that is fine."""
+    src = tmp_path / "a.mov"
+    src.write_bytes(b"x" * 4096)
+    dst = tmp_path / "b.mov"
+
+    def boom():
+        raise RuntimeError("the window went away")
+
+    fixer.copy_with_progress(src, dst, chunk_size=512, should_abort=boom)
+    assert dst.read_bytes() == src.read_bytes()
+
+
+def test_copy_with_progress_with_the_flag_never_set_is_unchanged(tmp_path):
+    src = tmp_path / "a.mov"
+    src.write_bytes(b"x" * 4096)
+    dst = tmp_path / "b.mov"
+    fixer.copy_with_progress(src, dst, chunk_size=512, should_abort=lambda: False)
+    assert dst.read_bytes() == src.read_bytes()
+
+
+def test_fix_clip_abort_deletes_the_partial_destination(tmp_path):
+    """THE CORE-H5 GUARANTEE, and the only reason mid-file abort is allowed
+    at all: after a skip/cancel nothing of the attempt survives under
+    local_root. A stranded multi-GB partial is what lane A would upload and
+    lane C would fan out to the whole fleet."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "huge.braw"
+    src.write_bytes(b"A" * 100_000)
+
+    relinked = []
+
+    def _relink(mpi, path):
+        relinked.append(path)
+        return {"ok": True, "message": ""}
+
+    result = fixer.fix_clip(
+        str(src), "B-roll/Stills", str(root), [object()],
+        replace_clip_fn=_relink,
+        on_bytes=lambda d, t: None,
+        should_abort=lambda: True,
+    )
+
+    assert result["ok"] is False
+    assert result["aborted"] is True
+    assert result["copied_to"] is None
+    assert result["leftover_paths"] == []
+    assert relinked == [], "an abandoned file must NEVER be relinked in Resolve"
+    dest_dir = root / "B-roll" / "Stills"
+    assert list(dest_dir.iterdir()) == [], (
+        f"the abort left files behind: {[p.name for p in dest_dir.iterdir()]}"
+    )
+    assert src.read_bytes() == b"A" * 100_000, "the original is never touched"
+
+
+def test_fix_clip_abort_removes_both_the_tmp_and_the_reserved_final_name(tmp_path):
+    """Two artifacts exist by the time a copy is running: the partial
+    <dest>.<pid>-<uuid>.ccsync-tmp, and the 0-byte final name
+    _claim_destination_path reserved up front (O_CREAT|O_EXCL). The tmp is
+    filtered out of every lane; the reservation is NOT -- a 0-byte .braw
+    under the final name would upload on lane A and could then never be
+    replaced (lane A uses --ignore-existing)."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "take.wav"
+    src.write_bytes(b"z" * 50_000)
+
+    seen_during_copy = {}
+
+    def copy_then_abort(s, d):
+        # Write a partial (as the real copier would), snapshot what is on
+        # disk at the moment of the abort, then raise like it does.
+        Path(d).write_bytes(b"z" * 10_000)
+        seen_during_copy["paths"] = sorted(p.name for p in Path(d).parent.iterdir())
+        raise fixer.CopyAborted("user skipped")
+
+    result = fixer.fix_clip(str(src), "Audio/Music", str(root), [],
+                            copy_fn=copy_then_abort,
+                            replace_clip_fn=lambda m, p: {"ok": True, "message": ""})
+
+    names = seen_during_copy["paths"]
+    assert "take.wav" in names, "the final name is reserved before the copy starts"
+    assert any(n.endswith(fixer.TMP_SUFFIX) for n in names)
+    assert result["aborted"] is True
+    assert list((root / "Audio" / "Music").iterdir()) == [], (
+        "BOTH the partial and the reserved name must be gone"
+    )
+
+
+def test_fix_clip_abort_reports_a_partial_it_could_not_delete(tmp_path, monkeypatch, caplog):
+    """Best-effort-but-LOUD: a delete that fails must never raise, must log a
+    warning naming the path, and must surface in the result so the dialog can
+    tell the user there is an orphan on their disk."""
+    import logging
+
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "clip.mov"
+    src.write_bytes(b"q" * 1000)
+
+    def copy_then_abort(s, d):
+        Path(d).write_bytes(b"q" * 100)
+        raise fixer.CopyAborted("user cancelled")
+
+    real_unlink = Path.unlink
+
+    def stubborn_unlink(self, *a, **k):
+        if self.name.endswith(fixer.TMP_SUFFIX):
+            raise PermissionError("used by another process")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", stubborn_unlink)
+
+    with caplog.at_level(logging.WARNING, logger="ccsync.fixer"):
+        result = fixer.fix_clip(str(src), "B-roll", str(root), [],
+                                copy_fn=copy_then_abort,
+                                replace_clip_fn=lambda m, p: {"ok": True, "message": ""})
+
+    assert result["aborted"] is True
+    assert len(result["leftover_paths"]) == 1
+    assert result["leftover_paths"][0].endswith(fixer.TMP_SUFFIX)
+    assert "delete it by hand" in result["message"]
+    assert any("COULD NOT REMOVE" in r.message for r in caplog.records)
+
+
+def test_remove_partial_never_raises_and_is_a_no_op_on_a_missing_file(tmp_path):
+    assert fixer.remove_partial(tmp_path / "not-there.braw") is None
+    doomed = tmp_path / "there.braw"
+    doomed.write_bytes(b"x")
+    assert fixer.remove_partial(doomed) is None
+    assert not doomed.exists()
+    # a directory can't be unlinked -- reported, never raised
+    a_dir = tmp_path / "a-dir"
+    a_dir.mkdir()
+    assert fixer.remove_partial(a_dir) == str(a_dir)
+
+
+def test_abort_cleanup_never_deletes_a_file_another_writer_put_there(tmp_path):
+    """DEL-7 still holds during an abort. Lane C can sync down a same-named
+    file from another editor onto the name we reserved while our copy runs --
+    deleting THAT would destroy data this module did not write, which is the
+    one thing it may never do."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "track.wav"
+    src.write_bytes(b"m" * 5000)
+
+    def copy_then_abort(s, d):
+        Path(d).write_bytes(b"m" * 500)
+        # somebody else's content lands on our reserved final name
+        dest = Path(d).parent / "track.wav"
+        dest.write_bytes(b"SOMEONE ELSE'S TRACK")
+        raise fixer.CopyAborted("user skipped")
+
+    result = fixer.fix_clip(str(src), "Audio/Music", str(root), [],
+                            copy_fn=copy_then_abort,
+                            replace_clip_fn=lambda m, p: {"ok": True, "message": ""})
+
+    assert result["aborted"] is True
+    survivor = root / "Audio" / "Music" / "track.wav"
+    assert survivor.read_bytes() == b"SOMEONE ELSE'S TRACK"
+    # ...but OUR partial is still gone
+    assert not any(p.name.endswith(fixer.TMP_SUFFIX)
+                   for p in (root / "Audio" / "Music").iterdir())
+
+
+def test_remove_reserved_name_only_removes_an_empty_reservation(tmp_path):
+    empty = tmp_path / "claimed.braw"
+    empty.touch()
+    assert fixer.remove_reserved_name(empty) is None
+    assert not empty.exists()
+
+    theirs = tmp_path / "theirs.braw"
+    theirs.write_bytes(b"data")
+    assert fixer.remove_reserved_name(theirs) is None
+    assert theirs.read_bytes() == b"data", "a non-empty file is never deleted here"
+
+    assert fixer.remove_reserved_name(tmp_path / "gone.braw") is None
+
+
+def test_fix_clip_without_should_abort_behaves_exactly_as_before(tmp_path):
+    """The new parameter is optional; every existing caller is unaffected."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "a.wav"
+    src.write_bytes(b"payload")
+    result = fixer.fix_clip(str(src), "Audio/Music", str(root), [],
+                            replace_clip_fn=lambda m, p: {"ok": True, "message": ""})
+    assert result["ok"] is True
+    assert "aborted" not in result
+    assert (root / "Audio" / "Music" / "a.wav").read_bytes() == b"payload"

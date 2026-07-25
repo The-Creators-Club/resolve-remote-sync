@@ -359,3 +359,88 @@ def test_run_consolidation_tolerates_a_fix_clip_double_without_on_bytes():
         ops, "L", fix_clip_fn=lambda p, d, r, m: {"ok": True, "message": "ok", "copied_to": d},
     )
     assert results[0]["ok"] is True
+
+
+# ===========================================================================
+# Consolidate gets the same mid-file controls as FIX ALL
+# ===========================================================================
+
+
+def _ops(count=4, size=1000):
+    return [
+        {"file_path": f"G:\\x\\f{i}.mov", "media_pool_items": [], "dest_rel": "D",
+         "size": size}
+        for i in range(count)
+    ]
+
+
+def test_run_consolidation_skip_abandons_one_op_and_continues():
+    from ccsync_companion import popup
+
+    control = popup.BatchControl()
+    attempted = []
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        attempted.append(path)
+        if path.endswith("f1.mov"):
+            control.request_skip_current()
+            if should_abort():
+                return {"ok": False, "aborted": True, "copied_to": None,
+                        "leftover_paths": [], "message": "Skipped by you"}
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    results = consolidate.run_consolidation(_ops(4), "L", fix_clip_fn=fake_fix,
+                                            control=control)
+    assert len(attempted) == 4
+    assert [r.get("aborted", False) for r in results] == [False, True, False, False]
+
+
+def test_run_consolidation_cancel_all_stops_the_batch():
+    from ccsync_companion import popup
+
+    control = popup.BatchControl()
+    attempted = []
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        attempted.append(path)
+        control.request_cancel_all()
+        if should_abort():
+            return {"ok": False, "aborted": True, "copied_to": None,
+                    "leftover_paths": [], "message": "Skipped by you"}
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    results = consolidate.run_consolidation(_ops(5), "L", fix_clip_fn=fake_fix,
+                                            control=control)
+    assert len(attempted) == 1
+    assert results[0]["aborted"] is True
+
+
+def test_run_consolidation_publishes_the_new_counts():
+    from ccsync_companion import popup
+
+    control = popup.BatchControl()
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        if path.endswith("f0.mov"):
+            control.request_skip_current()
+            return {"ok": False, "aborted": True, "copied_to": None,
+                    "leftover_paths": [], "message": "Skipped by you"}
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    seen = []
+    consolidate.run_consolidation(_ops(3), "L", fix_clip_fn=fake_fix,
+                                  state_fn=seen.append, control=control)
+    final = seen[-1]
+    assert final["skipped"] == 1 and final["fixed"] == 2 and final["failed"] == 0
+    assert final["cancelled"] is False
+    assert final["batch_bytes_total"] == 3000  # existing keys untouched
+
+
+def test_run_consolidation_without_a_control_is_unchanged():
+    """The existing app.py/test callers pass no control and must be
+    byte-for-byte unaffected -- including doubles that predate on_bytes."""
+    results = consolidate.run_consolidation(
+        _ops(2), "L",
+        fix_clip_fn=lambda p, d, r, m: {"ok": True, "message": "ok", "copied_to": d},
+    )
+    assert [r["ok"] for r in results] == [True, True]

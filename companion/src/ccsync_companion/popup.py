@@ -117,6 +117,90 @@ def format_batch_progress(index: int, total: int, done: int, total_bytes: int) -
     return f"{head} — {human_bytes(done)} of {human_bytes(total_bytes)} done"
 
 
+class BatchControl:
+    """The three user controls over a running copy batch, shared between the
+    Tk thread (which SETS them from a button) and the copy worker (which only
+    POLLS them).
+
+    Plain threading.Events, same pattern as the older `_stop_requested` flag:
+    the worker must never touch Tk and the Tk thread must never block on the
+    worker, so a set/is_set pair is the entire handshake.
+
+      STOP AFTER THIS FILE -> finish the file in flight, then stop (graceful;
+                              the only control that existed before).
+      SKIP THIS FILE       -> abandon the file in flight, CONTINUE the batch.
+      CANCEL ALL           -> abandon the file in flight, stop the batch.
+
+    The skip flag is per-file and is re-armed (cleared) by the batch loop
+    before each file starts: a click that lands in the gap BETWEEN files
+    would otherwise abandon the next file the user never saw copying.
+    """
+
+    def __init__(self) -> None:
+        self._skip = threading.Event()
+        self._cancel = threading.Event()
+        self._stop_after_file = threading.Event()
+
+    # -- Tk thread ------------------------------------------------------
+    def request_skip_current(self) -> None:
+        self._skip.set()
+
+    def request_cancel_all(self) -> None:
+        self._cancel.set()
+
+    def request_stop_after_file(self) -> None:
+        self._stop_after_file.set()
+
+    def reset(self) -> None:
+        """Re-arm for a fresh run (RETRY FAILED reuses the same control)."""
+        self._skip.clear()
+        self._cancel.clear()
+        self._stop_after_file.clear()
+
+    # -- worker thread --------------------------------------------------
+    def should_abort_current(self) -> bool:
+        """Poll handed to fixer.copy_with_progress -- true for either of the
+        two mid-file controls."""
+        return self._skip.is_set() or self._cancel.is_set()
+
+    def cancel_all_requested(self) -> bool:
+        return self._cancel.is_set()
+
+    def should_stop(self) -> bool:
+        """The between-files predicate: an explicit stop, or a cancel-all
+        (which also has to end the batch, not just the current file)."""
+        return self._stop_after_file.is_set() or self._cancel.is_set()
+
+    def begin_file(self) -> None:
+        self._skip.clear()
+
+
+def summarize_fix_results(
+    results: list[dict[str, Any]], batch_size: int, stopped_early: bool = False
+) -> str:
+    """The one-line headline over a finished batch.
+
+    Skipped-by-the-user is a THIRD outcome, distinct from fixed and failed:
+    reporting "3 fixed, 1 failed" for a file the user deliberately abandoned
+    reads as a malfunction, and reporting it as fixed is a lie about a file
+    that was never copied or relinked. Pure so the wording is testable
+    without Tk."""
+    fixed = sum(1 for r in results if r.get("ok"))
+    skipped = sum(1 for r in results if r.get("aborted"))
+    failed = len(results) - fixed - skipped
+    parts = [f"{fixed} of {batch_size} copied in"]
+    if skipped:
+        parts.append(f"{skipped} skipped by you")
+    if failed:
+        parts.append(f"{failed} failed")
+    head = ", ".join(parts)
+    if stopped_early:
+        head = f"Stopped — {head}"
+        if len(results) < batch_size:
+            head += f", {batch_size - len(results)} left alone"
+    return head
+
+
 def dedupe_out_of_tree_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse timeline items that share the same source file (normalized
     case-insensitive path — same rule as fixer.IgnoreTracker/resolve_bridge)
@@ -243,6 +327,33 @@ def preflight_summary(rows: list[dict[str, Any]]) -> str:
     )
 
 
+def call_fix_clip(
+    fix_clip_fn: Callable[..., dict[str, Any]],
+    args: tuple,
+    on_bytes: Optional[Callable[[int, int], None]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
+) -> dict[str, Any]:
+    """Call `fix_clip_fn` with as many of the optional keyword arguments as it
+    actually accepts, newest first.
+
+    fix_clip has grown two optional callbacks (on_bytes for UX-9, should_abort
+    for [ SKIP THIS FILE ]), and both the tests and any injected copier are
+    full of doubles written against the older signatures. Dropping one kwarg
+    at a time on TypeError keeps every existing caller working; the final
+    call is made OUTSIDE the loop so a genuine TypeError from inside fix_clip
+    still surfaces instead of being retried into silence."""
+    attempts: list[dict[str, Any]] = []
+    if should_abort is not None:
+        attempts.append({"on_bytes": on_bytes, "should_abort": should_abort})
+    attempts.append({"on_bytes": on_bytes})
+    for kwargs in attempts:
+        try:
+            return fix_clip_fn(*args, **kwargs)
+        except TypeError:
+            continue
+    return fix_clip_fn(*args)
+
+
 def perform_fix_all(
     rows: list[dict[str, Any]],
     selections: dict[str, str],
@@ -251,6 +362,7 @@ def perform_fix_all(
     progress_fn: Optional[Callable[[int, int, dict[str, Any]], None]] = None,
     state_fn: Optional[Callable[[dict[str, Any]], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    control: Optional[BatchControl] = None,
 ) -> list[dict[str, Any]]:
     """Run fixer.fix_clip for every row, using `selections[file_path]` as the
     chosen destination (falling back to the row's suggested_dest if a path
@@ -270,9 +382,20 @@ def perform_fix_all(
     is that a 40 GB BRAW no longer parks the UI on one number for twenty
     minutes.
 
-    `should_stop()` is checked BETWEEN files only ([ STOP AFTER THIS FILE ]).
-    Never mid-file: aborting a copy in flight is exactly what leaves an
-    orphaned multi-GB .ccsync-tmp for lane C to fan out (CORE-H5).
+    `should_stop()` is checked BETWEEN files ([ STOP AFTER THIS FILE ]): the
+    file in flight is finished, then the batch ends.
+
+    `control` (a BatchControl) adds the two MID-FILE controls,
+    [ SKIP THIS FILE ] and [ CANCEL ALL ]. Mid-file abort used to be
+    forbidden outright because an abandoned copy strands a multi-GB partial
+    for lane C to fan out (CORE-H5); it is allowed now only because
+    fixer.fix_clip deletes both artifacts of the attempt before returning
+    {"ok": False, "aborted": True}. An aborted file is NOT relinked and is
+    counted separately from both fixed and failed (see summarize_fix_results).
+
+    The final state_fn publish carries the counts the summary needs --
+    `fixed`, `skipped`, `failed`, `cancelled` -- ADDED alongside the existing
+    keys, never in place of them (existing readers keep working).
 
     NEITHER CALLBACK MAY TOUCH TK. This runs on a worker thread; Tk is not
     thread-safe and this process has already shown Tk instability
@@ -284,6 +407,7 @@ def perform_fix_all(
     batch_total = batch_total_bytes(rows)
     batch_done = 0
     stopped = False
+    cancelled = False
 
     def publish(**kw: Any) -> None:
         if state_fn is None:
@@ -294,6 +418,11 @@ def perform_fix_all(
             log.exception("fix-all state callback failed")
 
     for index, row in enumerate(rows, start=1):
+        if control is not None and control.cancel_all_requested():
+            stopped = True
+            cancelled = True
+            log.info("fix all: cancelled by the user after %d/%d", len(results), total)
+            break
         if should_stop is not None:
             try:
                 if should_stop():
@@ -302,6 +431,11 @@ def perform_fix_all(
                     break
             except Exception:
                 log.exception("fix-all should_stop callback failed")
+        if control is not None:
+            # Re-arm the per-file skip: a click that landed in the gap
+            # between two files must not abandon a file the user never saw
+            # start (see BatchControl).
+            control.begin_file()
 
         path = row["file_path"]
         dest_rel = selections.get(path) or row["suggested_dest"]
@@ -332,13 +466,11 @@ def perform_fix_all(
                 file_bytes_total=file_total, batch_bytes_done=batch_done,
                 batch_bytes_total=batch_total, placeholder=placeholder, stopped=False)
 
-        try:
-            outcome = fix_clip_fn(path, dest_rel, local_root, media_pool_items,
-                                  on_bytes=_on_bytes)
-        except TypeError:
-            # A fix_clip double that predates on_bytes (tests, and any
-            # caller injecting its own). Progress just stays coarse.
-            outcome = fix_clip_fn(path, dest_rel, local_root, media_pool_items)
+        outcome = call_fix_clip(
+            fix_clip_fn, (path, dest_rel, local_root, media_pool_items),
+            on_bytes=_on_bytes,
+            should_abort=control.should_abort_current if control is not None else None,
+        )
 
         outcome = dict(outcome)
         outcome["file_path"] = path
@@ -351,9 +483,27 @@ def perform_fix_all(
             except Exception:
                 log.exception("fix-all progress callback failed")
 
+        if outcome.get("aborted"):
+            # The user abandoned this ONE copy. fix_clip has already deleted
+            # the partial and relinked nothing; nothing is added to any
+            # ignore list either -- skipping a copy attempt is not the same
+            # as telling CCSync to stop offering the clip.
+            log.info("fix all: %s skipped by the user (%s)", path, outcome.get("message"))
+            if control is not None and control.cancel_all_requested():
+                stopped = True
+                cancelled = True
+                log.info("fix all: cancelled by the user during %s (%d/%d attempted)",
+                         path, len(results), total)
+                break
+
+    fixed = sum(1 for r in results if r.get("ok"))
+    skipped = sum(1 for r in results if r.get("aborted"))
     publish(index=len(results), total=total, name="", file_bytes_done=0,
             file_bytes_total=0, batch_bytes_done=batch_done,
-            batch_bytes_total=batch_total, stopped=stopped)
+            batch_bytes_total=batch_total, stopped=stopped,
+            # ADDED keys, never replacing the ones above (existing readers).
+            fixed=fixed, skipped=skipped, failed=len(results) - fixed - skipped,
+            cancelled=cancelled)
     return results
 
 
@@ -395,6 +545,10 @@ class PopupDialog:
         self._progress_lock = threading.Lock()
         self._progress: dict[str, Any] = {}
         self._stop_requested = False
+        # SKIP THIS FILE / CANCEL ALL / STOP AFTER THIS FILE. Set on the Tk
+        # thread by the buttons below, polled by the worker (and, per chunk,
+        # by fixer.copy_with_progress) -- see BatchControl.
+        self._control = BatchControl()
         self._rate = RateEstimator()
         self._tick_job = None
         # Rows of the run in flight, and the ones that failed (kept as ROWS,
@@ -532,11 +686,25 @@ class PopupDialog:
         self._batch_bar = ttk.Progressbar(self._progress_frame, style=bar_style,
                                           mode="determinate", maximum=1000)
         self._batch_bar.grid(row=3, column=0, sticky="we", pady=(2, 8))
+        # Three controls, weakest to strongest. SKIP and CANCEL ALL abandon
+        # the file being copied right now, which is only safe because
+        # fixer.fix_clip deletes the partial before returning (CORE-H5) --
+        # without that cleanup neither button may exist.
+        controls_bar = tk.Frame(self._progress_frame, bg=theme.BG)
+        controls_bar.grid(row=4, column=0, sticky="w", pady=(0, 6))
         self._stop_btn = theme.neon_button(
-            tk, self._progress_frame, "STOP AFTER THIS FILE", self._on_stop_after_file,
+            tk, controls_bar, "STOP AFTER THIS FILE", self._on_stop_after_file,
             primary=False,
         )
-        self._stop_btn.grid(row=4, column=0, sticky="w", pady=(0, 6))
+        self._stop_btn.pack(side="left", padx=(0, 18))
+        self._skip_btn = theme.neon_button(
+            tk, controls_bar, "SKIP THIS FILE", self._on_skip_current_file, primary=False,
+        )
+        self._skip_btn.pack(side="left", padx=(0, 18))
+        self._cancel_btn = theme.neon_button(
+            tk, controls_bar, "CANCEL ALL", self._on_cancel_all, primary=True,
+        )
+        self._cancel_btn.pack(side="left")
 
         _label(self.root, theme.RULE, fg=theme.RED_DIM).grid(row=r, column=0, columnspan=2, sticky="we")
         r += 1
@@ -622,22 +790,21 @@ class PopupDialog:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
 
     def _on_close_request(self) -> None:
-        """Refuse the X while a FIX ALL is in flight.
+        """The X during a FIX ALL means CANCEL ALL -- it does NOT close the
+        window.
 
-        Destroying the root ends mainloop(), so show_popup() returns and
-        app._show_out_of_tree_popup()'s `finally` RELEASES _popup_active_lock
-        -- while the daemon worker is still copying multi-GB files and
-        calling ReplaceClip. A second popup, Scan whole project, or a
-        consolidate could then start its own copy/relink pass over the same
-        clips (AUDIT_2 CORE-M1)."""
+        Clicking X is "stop this", so it now abandons the file in flight and
+        the rest of the batch, with the same cleanup as the button (the
+        partial is deleted by fixer.fix_clip; leaving it orphaned is CORE-H5).
+        What it must never do is destroy the root: that ends mainloop(), so
+        show_popup() returns and app._show_out_of_tree_popup()'s `finally`
+        RELEASES _popup_active_lock -- while the daemon worker is still
+        copying multi-GB files and calling ReplaceClip. A second popup, Scan
+        whole project, or a consolidate could then start its own copy/relink
+        pass over the same clips (AUDIT_2 CORE-M1). The window closes itself
+        once the worker has actually stopped."""
         if self._fixing:
-            try:
-                self.status_label.config(
-                    text="Still copying — closing now would leave half-copied files. "
-                         "This window closes itself when it's done.")
-                self.root.bell()
-            except Exception:
-                pass
+            self._on_cancel_all()
             return
         self.root.destroy()
 
@@ -664,6 +831,7 @@ class PopupDialog:
             return
         self._fixing = True
         self._stop_requested = False
+        self._control.reset()
         self._batch_rows = rows
         self._rate = RateEstimator()
         selections = {path: var.get() for path, var in self._vars}
@@ -672,7 +840,8 @@ class PopupDialog:
             self._ignore_btn.config(state="disabled")
             self._retry_btn.pack_forget()
             self._progress_frame.grid()
-            self._stop_btn.config(state="normal")
+            for btn in (self._stop_btn, self._skip_btn, self._cancel_btn):
+                btn.config(state="normal")
         except Exception:
             pass
         preflight = preflight_summary(rows)
@@ -689,6 +858,7 @@ class PopupDialog:
             results = perform_fix_all(
                 rows, selections, self.local_root,
                 state_fn=_publish, should_stop=lambda: self._stop_requested,
+                control=self._control,
             )
             self._safe_after(lambda: self._fix_done(results))
 
@@ -697,14 +867,47 @@ class PopupDialog:
 
     # -- progress rendering (Tk thread only) -------------------------------
     def _on_stop_after_file(self) -> None:
-        """UX-9's cancel. Deliberately "after this file", never mid-file:
-        aborting a copy in flight is exactly what leaves an orphaned multi-GB
-        .ccsync-tmp for lane C to fan out to the fleet (CORE-H5)."""
+        """The graceful stop: the file in flight is COMPLETED, then the batch
+        ends. Unchanged behaviour -- the two abandon-mid-file controls below
+        are separate buttons precisely so this one stays lossless."""
         self._stop_requested = True
+        self._control.request_stop_after_file()
         try:
             self._stop_btn.config(state="disabled")
             self.status_label.config(
                 text="Stopping after the current file finishes — please wait.")
+        except Exception:
+            pass
+
+    def _on_skip_current_file(self) -> None:
+        """Abandon the file copying right now and CARRY ON with the rest.
+
+        Safe only because fixer.fix_clip deletes the partial copy and the
+        reserved name before it returns, and relinks nothing (CORE-H5). The
+        clip is not added to any ignore list: the user skipped one copy
+        attempt, not the clip forever."""
+        self._control.request_skip_current()
+        try:
+            self.status_label.config(
+                text="Skipping the file being copied now — the half-copied file is "
+                     "deleted and the rest of the list carries on.")
+        except Exception:
+            pass
+
+    def _on_cancel_all(self) -> None:
+        """Abandon the file copying right now AND the rest of the batch.
+
+        The window stays open until the worker actually stops (see
+        _on_close_request) -- files already copied in stay copied and
+        relinked; nothing is moved or deleted except the half-copied file."""
+        self._stop_requested = True
+        self._control.request_cancel_all()
+        try:
+            for btn in (self._stop_btn, self._skip_btn, self._cancel_btn):
+                btn.config(state="disabled")
+            self.status_label.config(
+                text="Cancelling — the file being copied now is abandoned and its "
+                     "half-copied file deleted. Everything already copied in stays.")
         except Exception:
             pass
 
@@ -753,17 +956,27 @@ class PopupDialog:
         except Exception:
             pass
         batch = self._batch_rows or self.rows
-        failures = [r for r in results if not r["ok"]]
+        # THREE outcomes since [ SKIP THIS FILE ]: fixed, failed, and
+        # skipped-by-the-user. A skipped file is not a failure -- nothing
+        # malfunctioned, the partial has already been deleted by fix_clip and
+        # nothing was relinked -- so it must not be counted as one, or the
+        # summary accuses CCSync of breaking what the user chose to abandon.
+        aborted = [r for r in results if r.get("aborted")]
+        failures = [r for r in results if not r.get("ok") and not r.get("aborted")]
         stopped_early = self._stop_requested and len(results) < len(batch)
 
         # Keep the actual ROWS, so RETRY FAILED can re-run exactly these with
         # the same destinations. The user could previously see only a count.
+        # Skipped rows are retryable TOO: skipping a copy is not "never offer
+        # this clip again" (nothing goes into the IgnoreTracker either), and
+        # a file abandoned by mistake must be one click from being redone.
         by_path = {row["file_path"]: row for row in batch}
-        self._failed_rows = [by_path[r["file_path"]] for r in failures if r["file_path"] in by_path]
+        self._failed_rows = [by_path[r["file_path"]] for r in failures + aborted
+                             if r["file_path"] in by_path]
         for r in failures:
             log.warning("fix all: FAILED %s -- %s", r["file_path"], r["message"])
 
-        if failures or stopped_early:
+        if failures or aborted or stopped_early:
             try:
                 self._fix_btn.config(state="normal")
                 self._ignore_btn.config(state="normal")
@@ -771,30 +984,42 @@ class PopupDialog:
                     self._retry_btn.pack(side="left", padx=(18, 0))
             except Exception:
                 pass
-            ok_count = len(results) - len(failures)
-            if stopped_early and not failures:
-                self.status_label.config(
-                    text=f"Stopped — {ok_count} of {len(batch)} copied in, the rest "
-                         f"were left alone. Nothing was moved or deleted.")
-                log.info("fix all: stopped early at %d/%d", ok_count, len(batch))
-                return
-            # Name every failure (up to a readable cap) with its REASON, not
-            # a bare "FAILED" -- the destination lives on an SMB share whose
-            # metadata isn't refreshed until the handle closes, so nothing
-            # outside this process can tell the user which files failed.
-            shown = "\n".join(f"✗ {os.path.basename(r['file_path'])} — {r['message']}"
-                              for r in failures[:12])
-            more = f"\n… and {len(failures) - 12} more (see tray → Open log)" \
-                if len(failures) > 12 else ""
-            head = (f"Stopped — {ok_count} of {len(batch)} copied in"
-                    if stopped_early else f"{ok_count} of {len(results)} copied in")
-            hint = ""
-            if any(r.get("placeholder") for r in failures):
-                hint = ("\nThese are online-only cloud files. Make them available offline "
-                        "in your cloud drive, then press RETRY FAILED.")
-            self.status_label.config(
-                text=f"{head}, {len(failures)} failed:\n{shown}{more}{hint}")
-            log.warning("fix all: %d/%d failed", len(failures), len(results))
+            head = summarize_fix_results(results, len(batch), stopped_early)
+            blocks: list[str] = []
+            if aborted:
+                names = ", ".join(os.path.basename(r["file_path"]) for r in aborted[:6])
+                blocks.append(
+                    f"You skipped: {names} — nothing was copied in or relinked for "
+                    f"them, and the half-copied files were deleted. "
+                    f"Press RETRY FAILED to try them again.")
+                leftovers = [p for r in aborted for p in (r.get("leftover_paths") or [])]
+                if leftovers:
+                    # The one case where a skip is NOT clean: say so, because
+                    # the orphan is on the user's disk inside the sync folder
+                    # (CORE-H5) and only this process ever knew about it.
+                    blocks.append(
+                        "⚠ CCSync could NOT delete the half-copied file(s): "
+                        + "; ".join(leftovers[:6]) + " — please delete them by hand.")
+            if failures:
+                # Name every failure (up to a readable cap) with its REASON,
+                # not a bare "FAILED" -- the destination lives on an SMB share
+                # whose metadata isn't refreshed until the handle closes, so
+                # nothing outside this process can tell the user which failed.
+                shown = "\n".join(f"✗ {os.path.basename(r['file_path'])} — {r['message']}"
+                                  for r in failures[:12])
+                if len(failures) > 12:
+                    shown += f"\n… and {len(failures) - 12} more (see tray → Open log)"
+                if any(r.get("placeholder") for r in failures):
+                    shown += ("\nThese are online-only cloud files. Make them available "
+                              "offline in your cloud drive, then press RETRY FAILED.")
+                blocks.append(shown)
+            if not failures and not aborted:
+                blocks.append("Nothing was moved or deleted.")
+            self.status_label.config(text="\n".join([head + ":"] + blocks))
+            if failures:
+                log.warning("fix all: %d/%d failed", len(failures), len(results))
+            else:
+                log.info("fix all: %s", head)
         else:
             self.status_label.config(text="")
             if self.on_done is not None:
@@ -835,6 +1060,12 @@ class ProgressWindow:
     optional "headline" string for phases with no file list (e.g. the lane A
     upload). Falls back to headless (worker still runs, progress logged) when
     no display is available -- the copy must never depend on the window.
+
+    `.control` is the same BatchControl the fixer dialog uses; a worker that
+    drives a per-file copy loop (consolidate.run_consolidation) passes it
+    down so [ SKIP THIS FILE ] and [ CANCEL ALL ] work mid-file here too. The
+    worker signature stays `(publish, should_stop)` -- existing callers and
+    their tests are untouched.
     """
 
     def __init__(self, title: str, subtitle: str = "") -> None:
@@ -843,6 +1074,7 @@ class ProgressWindow:
         self._lock = threading.Lock()
         self._state: dict[str, Any] = {}
         self._stop_requested = False
+        self.control = BatchControl()
         self._rate = RateEstimator()
         self._done = threading.Event()
         self.root = None
@@ -853,7 +1085,12 @@ class ProgressWindow:
             self._state = dict(info)
 
     def should_stop(self) -> bool:
-        return self._stop_requested
+        return self._stop_requested or self.control.should_stop()
+
+    def cancelled(self) -> bool:
+        """True when the user hit [ CANCEL ALL ] (or the X) rather than the
+        graceful stop -- the caller words its summary differently."""
+        return self.control.cancel_all_requested()
 
     def run(self, worker: Callable[[Callable[[dict], None], Callable[[], bool]], None]) -> None:
         """Start `worker` on a daemon thread and show the window until it
@@ -924,13 +1161,27 @@ class ProgressWindow:
                                               maximum=1000, length=560)
             self._batch_bar.pack(anchor="w", fill="x", pady=(2, 8))
 
-            self._stop_btn = theme.neon_button(tk, root, "STOP AFTER THIS FILE",
+            # Same three controls as the fixer dialog, same order and same
+            # safety rule: SKIP/CANCEL ALL abandon the file in flight, which
+            # is only allowed because fixer.fix_clip deletes the partial
+            # before returning (CORE-H5).
+            controls_bar = tk.Frame(root, bg=theme.BG)
+            controls_bar.pack(anchor="w", pady=(4, 0))
+            self._stop_btn = theme.neon_button(tk, controls_bar, "STOP AFTER THIS FILE",
                                                self._on_stop, primary=False)
-            self._stop_btn.pack(anchor="w", pady=(4, 0))
+            self._stop_btn.pack(side="left", padx=(0, 18))
+            self._skip_btn = theme.neon_button(tk, controls_bar, "SKIP THIS FILE",
+                                               self._on_skip_current_file, primary=False)
+            self._skip_btn.pack(side="left", padx=(0, 18))
+            self._cancel_btn = theme.neon_button(tk, controls_bar, "CANCEL ALL",
+                                                 self._on_cancel_all, primary=True)
+            self._cancel_btn.pack(side="left")
 
-            # Closing the window must not abandon the copy -- it keeps
-            # running either way, so refuse and point at the stop button.
-            root.protocol("WM_DELETE_WINDOW", self._on_stop)
+            # The X means "stop this" -- it cancels the batch (with the
+            # partial cleaned up) instead of silently leaving the copy
+            # running behind a closed window. The window itself closes when
+            # the worker has actually stopped.
+            root.protocol("WM_DELETE_WINDOW", self._on_cancel_all)
             root.after(250, self._tick)
             root.mainloop()
         finally:
@@ -941,10 +1192,35 @@ class ProgressWindow:
             self.root = None
 
     def _on_stop(self) -> None:
+        """Graceful: the file in flight is finished first."""
         self._stop_requested = True
+        self.control.request_stop_after_file()
         try:
             self._stop_btn.config(state="disabled")
             self._batch_label.config(text="Stopping after the current file finishes…")
+        except Exception:
+            pass
+
+    def _on_skip_current_file(self) -> None:
+        """Abandon the file being copied now, carry on with the rest. The
+        half-copied file is deleted by fixer.fix_clip (CORE-H5)."""
+        self.control.request_skip_current()
+        try:
+            self._batch_label.config(
+                text="Skipping the file being copied now — carrying on with the rest…")
+        except Exception:
+            pass
+
+    def _on_cancel_all(self) -> None:
+        """Abandon the file being copied now AND the rest of the batch."""
+        self._stop_requested = True
+        self.control.request_cancel_all()
+        try:
+            for btn in (self._stop_btn, self._skip_btn, self._cancel_btn):
+                btn.config(state="disabled")
+            self._batch_label.config(
+                text="Cancelling — the half-copied file is deleted; everything already "
+                     "copied in stays…")
         except Exception:
             pass
 

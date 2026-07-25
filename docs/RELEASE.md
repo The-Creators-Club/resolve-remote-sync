@@ -132,8 +132,13 @@ Nothing is pushed. Each companion reports its `companion_version` on every
 version differs, the response carries an `upgrade` block (version, URL,
 sha256, size). The companion then:
 
-- pops a tray notification, and grows a menu entry
-  **“Update available → vX.Y.Z (install)”**;
+- pops a tray notification, and grows a menu entry whose wording depends on
+  how the offered version ranks against the running one — the channel
+  advertises "different", not "newer", so a rollback is a normal thing to
+  see here:
+  **“Update available → vX.Y.Z (install)”** when it is newer,
+  **“Roll back to vX.Y.Z (older — install)”** when it is older, and
+  **“Switch to vX.Y.Z (install)”** when the two can't be ranked;
 - on click, confirms in a dialog, downloads (same-origin URL only, sha256
   verified, size-capped, free-space checked), renames the running exe to
   `.old`, moves the new one into place, and respawns;

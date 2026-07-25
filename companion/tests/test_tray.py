@@ -217,10 +217,13 @@ class _FakeAppWithUpgrade(_FakeApp):
 
 
 def test_menu_shows_update_item_only_when_available():
+    """The offered version here is deliberately NEWER than the running build:
+    "Update available" is only correct for an upgrade (see the downgrade
+    tests below)."""
     from ccsync_companion.tray import _build_menu
 
-    menu = _build_menu(_FakeAppWithUpgrade({"dashboard_url": ""}, {"version": "0.2.0"}))
-    assert "Update available → v0.2.0 (install)" in _menu_labels(menu)
+    menu = _build_menu(_FakeAppWithUpgrade({"dashboard_url": ""}, {"version": "99.0.0"}))
+    assert "Update available → v99.0.0 (install)" in _menu_labels(menu)
 
     menu = _build_menu(_FakeAppWithUpgrade({"dashboard_url": ""}, None))
     assert not any("Update available" in label for label in _menu_labels(menu))
@@ -228,6 +231,42 @@ def test_menu_shows_update_item_only_when_available():
     # an app double without the method at all (older fakes) must not crash
     menu = _build_menu(_FakeApp({"dashboard_url": ""}))
     assert not any("Update available" in label for label in _menu_labels(menu))
+
+
+# ===========================================================================
+# An offered build that is OLDER than the running one is a DOWNGRADE
+# ===========================================================================
+
+
+def test_menu_calls_an_older_offered_build_a_rollback_not_an_update():
+    """THE BUG, seen live 2026-07-25: this rig ran v0.4.5 (installed straight
+    from a build), the dashboard still published v0.4.3 as `current`, and the
+    tray offered "Update available → v0.4.3 (install)". One click would have
+    silently DOWNGRADED the machine and reintroduced a whole round of
+    security fixes. upgrade.py advertises "different, not newer" on purpose
+    (an admin can roll the fleet back) -- so the WORDING has to carry the
+    direction the mechanism doesn't."""
+    from ccsync_companion import config as config_mod
+    from ccsync_companion.tray import _build_menu
+
+    older = "0.0.1"
+    assert older < config_mod.VERSION
+    labels = _menu_labels(_build_menu(_FakeAppWithUpgrade({"dashboard_url": ""},
+                                                          {"version": older})))
+    offer = next(la for la in labels if older in la)
+    assert offer == "Roll back to v0.0.1 (older — install)"
+    assert "update" not in offer.lower(), "a downgrade must never read as an update"
+
+
+def test_menu_uses_neutral_wording_for_an_unparseable_version():
+    """A weird version string must degrade to neutral wording, never crash
+    the tray and never guess a direction."""
+    from ccsync_companion.tray import _build_menu
+
+    labels = _menu_labels(
+        _build_menu(_FakeAppWithUpgrade({"dashboard_url": ""}, {"version": "nightly"}))
+    )
+    assert "Switch to vnightly (install)" in labels
 
 
 class _FakeAppWithSetup(_FakeApp):

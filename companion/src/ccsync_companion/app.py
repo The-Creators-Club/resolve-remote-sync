@@ -334,8 +334,14 @@ class CompanionApp:
         self.upgrade = upgrade_mod.UpgradeManager(
             cfg,
             request_shutdown=self.shutdown,
+            # offer_toast, not a hardcoded "Update available": the dashboard
+            # advertises whatever it publishes as `current`, which may be
+            # OLDER than what this machine runs (upgrade.py's "different, not
+            # newer"). Calling a downgrade an update is how a rollback offer
+            # becomes a one-click loss of everything the running build fixed
+            # (seen live 2026-07-25: v0.4.5 offered "Update ... → v0.4.3").
             on_available=lambda info: self._notify_tray(
-                f"Update available → v{info['version']} — use the tray menu to install",
+                upgrade_mod.offer_toast(info["version"]),
                 "ccsync-companion",
             ),
         )
@@ -880,8 +886,15 @@ class CompanionApp:
         results: list[dict[str, Any]] = []
 
         def _work(publish, should_stop):
+            # window.control carries [ SKIP THIS FILE ] / [ CANCEL ALL ] down
+            # to the per-chunk abort check inside the copy; should_stop is
+            # still the between-files [ STOP AFTER THIS FILE ].
             results.extend(consolidate.run_consolidation(
                 plan["ops"], local_root, state_fn=publish, should_stop=should_stop,
+                # getattr: a progress-window double without the newer
+                # attribute (tests, and anything injected) must degrade to
+                # "no mid-file controls", not crash the copy.
+                control=getattr(window, "control", None),
             ))
             if should_stop():
                 return
@@ -889,19 +902,32 @@ class CompanionApp:
 
         window.run(_work)
 
-        failures = [r for r in results if not r.get("ok")]
+        # Skipped-by-the-user is its own outcome: fix_clip has already deleted
+        # the half-copied file and relinked nothing, so it is neither a
+        # success nor a malfunction and must not be reported as either.
+        skipped = [r for r in results if r.get("aborted")]
+        failures = [r for r in results if not r.get("ok") and not r.get("aborted")]
+        skipped_part = f", {len(skipped)} skipped by you" if skipped else ""
         if failures:
             log.warning("consolidate: %d/%d copies failed", len(failures), len(results))
             self._notify_tray(
-                f"{len(results) - len(failures)}/{len(results)} copied in, "
-                f"{len(failures)} failed. Tray → Copy diagnostics for Alex.",
+                f"{len(results) - len(failures) - len(skipped)}/{len(results)} copied in"
+                f"{skipped_part}, {len(failures)} failed. "
+                f"Tray → Copy diagnostics for Alex.",
                 "ccsync-companion")
         elif window.should_stop():
+            done = len(results) - len(skipped)
+            # Same tolerance as `control` above: an older window double has
+            # no cancelled() and must read as the graceful stop.
+            verb = "Cancelled" if getattr(window, "cancelled", lambda: False)() else "Stopped"
             self._notify_tray(
-                f"Stopped — {len(results)} of {plan['count']} copied in, the rest were "
-                f"left alone. Nothing was moved or deleted.", "ccsync-companion")
+                f"{verb} — {done} of {plan['count']} copied in{skipped_part}, the rest "
+                f"were left alone. Nothing was moved or deleted.", "ccsync-companion")
             return
-        self._notify_tray("Copy & upload finished.", "ccsync-companion: consolidate")
+        self._notify_tray(
+            f"Copy & upload finished ({len(results) - len(failures) - len(skipped)} "
+            f"copied in{skipped_part})." if skipped else "Copy & upload finished.",
+            "ccsync-companion: consolidate")
 
     def _subpath_is_contained(self, subpath: str) -> bool:
         """True when `local_root/<subpath>` really lands under local_root.
@@ -1360,7 +1386,10 @@ class CompanionApp:
                 "Can't update while media is being copied in — let it finish, then try again.",
                 "ccsync-companion")
             return
-        self._notify_tray(f"Updating to v{info['version']}…", "ccsync-companion")
+        # "Installing", not "Updating": the offered build may be OLDER than
+        # the running one (upgrade.py's "different, not newer"), and every
+        # other string on this path now refuses to call that an update.
+        self._notify_tray(f"Installing v{info['version']}…", "ccsync-companion")
         try:
             applied = self.upgrade.apply()
         except Exception:

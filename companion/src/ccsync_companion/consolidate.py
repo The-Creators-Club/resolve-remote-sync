@@ -370,6 +370,7 @@ def run_consolidation(
     progress_fn: Optional[Callable[[int, int, dict[str, Any]], None]] = None,
     state_fn: Optional[Callable[[dict[str, Any]], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    control: Optional["popup.BatchControl"] = None,
 ) -> list[dict[str, Any]]:
     """Copy+relink every op (fixer.fix_clip never raises). Returns per-op
     results with file_path attached. Same shape/semantics as
@@ -377,8 +378,13 @@ def run_consolidation(
 
     `state_fn`/`should_stop` mirror perform_fix_all's (AUDIT_2 UX-9/UX-10):
     per-chunk byte progress so a multi-GB original doesn't park the display
-    on one number for twenty minutes, and a between-files stop. Never
-    mid-file -- an aborted copy strands a partial .ccsync-tmp (CORE-H5).
+    on one number for twenty minutes, and a between-files stop.
+
+    `control` (popup.BatchControl) mirrors it too: [ SKIP THIS FILE ] and
+    [ CANCEL ALL ] abandon the copy in flight. Allowed only because
+    fixer.fix_clip deletes the partial and the reserved name before it
+    returns {"ok": False, "aborted": True} -- an abandoned copy that left its
+    partial behind is CORE-H5.
 
     NEITHER CALLBACK MAY TOUCH TK: this runs on a worker thread.
     """
@@ -387,6 +393,7 @@ def run_consolidation(
     batch_total = sum(int(op.get("size") or 0) for op in ops)
     batch_done = 0
     stopped = False
+    cancelled = False
 
     def publish(**kw: Any) -> None:
         if state_fn is None:
@@ -397,6 +404,11 @@ def run_consolidation(
             log.exception("consolidation state callback failed")
 
     for index, op in enumerate(ops, start=1):
+        if control is not None and control.cancel_all_requested():
+            stopped = True
+            cancelled = True
+            log.info("consolidate: cancelled by the user after %d/%d", len(results), total)
+            break
         if should_stop is not None:
             try:
                 if should_stop():
@@ -405,6 +417,10 @@ def run_consolidation(
                     break
             except Exception:
                 log.exception("consolidation should_stop callback failed")
+        if control is not None:
+            # Re-arm the per-file skip -- a click in the gap between two
+            # files must not abandon the next one (see popup.BatchControl).
+            control.begin_file()
 
         path = op["file_path"]
         name = os.path.basename(path)
@@ -427,13 +443,12 @@ def run_consolidation(
                 file_bytes_total=size, batch_bytes_done=batch_done,
                 batch_bytes_total=batch_total, placeholder=placeholder, stopped=False)
 
-        try:
-            outcome = fix_clip_fn(path, op["dest_rel"], local_root,
-                                  op.get("media_pool_items", []), on_bytes=_on_bytes)
-        except TypeError:
-            # A fix_clip double that predates on_bytes (tests / injected).
-            outcome = fix_clip_fn(path, op["dest_rel"], local_root,
-                                  op.get("media_pool_items", []))
+        outcome = popup.call_fix_clip(
+            fix_clip_fn,
+            (path, op["dest_rel"], local_root, op.get("media_pool_items", [])),
+            on_bytes=_on_bytes,
+            should_abort=control.should_abort_current if control is not None else None,
+        )
         outcome = dict(outcome)
         outcome["file_path"] = path
         results.append(outcome)
@@ -444,7 +459,24 @@ def run_consolidation(
             except Exception:
                 log.exception("consolidation progress callback failed")
 
+        if outcome.get("aborted"):
+            # Skipped ONE copy attempt: the partial is already deleted,
+            # nothing was relinked, and nothing is ignored -- the clip is
+            # still offered next time (same choice as popup.perform_fix_all).
+            log.info("consolidate: %s skipped by the user (%s)", path, outcome.get("message"))
+            if control is not None and control.cancel_all_requested():
+                stopped = True
+                cancelled = True
+                log.info("consolidate: cancelled by the user during %s (%d/%d attempted)",
+                         path, len(results), total)
+                break
+
+    copied = sum(1 for r in results if r.get("ok"))
+    skipped = sum(1 for r in results if r.get("aborted"))
     publish(index=len(results), total=total, name="", file_bytes_done=0,
             file_bytes_total=0, batch_bytes_done=batch_done,
-            batch_bytes_total=batch_total, stopped=stopped)
+            batch_bytes_total=batch_total, stopped=stopped,
+            # ADDED alongside the existing keys, never replacing them.
+            fixed=copied, skipped=skipped, failed=len(results) - copied - skipped,
+            cancelled=cancelled)
     return results

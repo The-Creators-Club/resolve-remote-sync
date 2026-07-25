@@ -440,7 +440,9 @@ updates silently). Publish flow, from the base rig:
 3. Without `-MakeCurrent`, the build is staged: flip `[ MAKE CURRENT ]` in
    the `[ COMPANION PACKAGES ]` box on `/admin/users` when ready.
 4. Watch the fleet grid: each machine's VERSION cell goes amber until its
-   editor clicks the tray's "Update available → vX.Y — Update now". The
+   editor takes the tray's offer ("Update available → vX.Y" when the
+   published build is newer; "Roll back to vX.Y" when you have deliberately
+   pointed CURRENT at an older build). The
    companion downloads via the dashboard (sha256-verified), swaps its own
    exe, and restarts itself; a failed swap rolls back and keeps the old
    build running.

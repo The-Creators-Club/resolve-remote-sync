@@ -333,11 +333,24 @@ def classify_copy_failure(exc: BaseException, placeholder: bool) -> str:
     return f"Couldn't copy this file: {text}"
 
 
+class CopyAborted(Exception):
+    """The user abandoned THIS file mid-copy ([ SKIP THIS FILE ] /
+    [ CANCEL ALL ]).
+
+    A distinct exception type, not a generic failure, because the caller owes
+    the abort something a failure doesn't: the partial destination MUST be
+    removed. Mid-file abort was forbidden outright until now precisely
+    because an orphaned multi-GB partial is what lane C would fan out to the
+    whole fleet (CORE-H5); it is allowed only in exchange for that cleanup
+    (see fix_clip's abort branch)."""
+
+
 def copy_with_progress(
     src,
     dst,
     on_bytes: Optional[Callable[[int, int], None]] = None,
     chunk_size: int = COPY_CHUNK_BYTES,
+    should_abort: Optional[Callable[[], bool]] = None,
 ) -> None:
     """shutil.copy2 semantics, but reporting bytes as it goes.
 
@@ -352,6 +365,17 @@ def copy_with_progress(
     rather than showing an empty bar until the first chunk lands. It must be
     cheap and must not raise; exceptions from it are swallowed rather than
     failing a copy that is otherwise fine.
+
+    `should_abort()` is polled ONCE PER CHUNK (and once before the first
+    read). A chunk is 8 MB, so the button the user just clicked responds
+    inside a second on any real link. When it returns True the copy stops and
+    CopyAborted is raised AFTER both file handles are closed -- raising from
+    inside the `with` would leave the caller trying to unlink `dst` while a
+    Windows handle to it is still open, which fails with "in use by another
+    process" and strands exactly the partial the abort exists to remove. Like
+    `on_bytes` it must be cheap and must not raise; an exception from it is
+    swallowed and read as "don't abort" (never abandon a copy because a UI
+    predicate misbehaved).
 
     Metadata is copied with copystat afterwards, matching copy2. The source
     is opened read-only and never modified.
@@ -369,16 +393,32 @@ def copy_with_progress(
         except Exception:
             log.debug("copy progress callback failed", exc_info=True)
 
+    def aborting() -> bool:
+        if should_abort is None:
+            return False
+        try:
+            return bool(should_abort())
+        except Exception:
+            log.debug("copy abort callback failed", exc_info=True)
+            return False
+
     copied = 0
+    aborted = False
     report(0)
     with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
         while True:
+            if aborting():
+                aborted = True
+                break
             chunk = fsrc.read(chunk_size)
             if not chunk:
                 break
             fdst.write(chunk)
             copied += len(chunk)
             report(copied)
+    if aborted:
+        # Handles are closed by now (see above) -- the caller can unlink.
+        raise CopyAborted(f"copy of {src} abandoned by the user after {copied} bytes")
     # copy2 == copyfile + copystat (mtime/atime/mode/flags).
     shutil.copystat(src, dst)
 # Stale-tmp sweep age: anything younger might be an in-flight copy from a
@@ -467,6 +507,63 @@ def sweep_stale_tmp_files(
     return [path for _mtime, path in found]
 
 
+def remove_partial(path: Path) -> Optional[str]:
+    """Delete one artifact of an aborted copy. Returns None when the file is
+    gone (including "was never there"), or the path as a string when it could
+    NOT be removed.
+
+    Best-effort-but-LOUD, and never raises: this is the whole price of
+    allowing a mid-file abort at all. A partial that survives is a multi-GB
+    file sitting under a final name inside local_root, which lane A would
+    upload and lane C would fan out to the fleet (CORE-H5) -- so if it can't
+    be removed the caller must say so to the user rather than reporting a
+    tidy "skipped"."""
+    try:
+        path = Path(path)
+        if not path.exists():
+            return None
+        path.unlink()
+        log.info("removed the partial copy left by an abandoned file: %s", path)
+        return None
+    except Exception as exc:
+        log.warning(
+            "COULD NOT REMOVE the half-copied file at %s (%s) -- delete it by hand; "
+            "until you do it wastes the space and may upload to the server", path, exc,
+        )
+        return str(path)
+
+
+def remove_reserved_name(path: Path) -> Optional[str]:
+    """Remove the 0-byte final name _claim_destination_path reserved, after
+    an aborted copy. Same return contract as remove_partial().
+
+    ONLY when it is still empty. DEL-7's whole point is that another writer
+    can land on that exact path -- lane C syncing down a same-named file from
+    another editor is the concrete case -- and this module's hardest rule is
+    that it never deletes data it did not write. A non-empty file under our
+    reserved name is therefore left alone and logged: it is not our partial.
+    Never raises."""
+    try:
+        path = Path(path)
+        if not path.exists():
+            return None
+        if path.stat().st_size:
+            log.warning(
+                "aborted copy: %s is not empty, so it is NOT ours to delete "
+                "(something else wrote there during the copy) -- left in place", path,
+            )
+            return None
+        path.unlink()
+        log.info("removed the reserved name left by an abandoned copy: %s", path)
+        return None
+    except Exception as exc:
+        log.warning(
+            "COULD NOT REMOVE the empty placeholder file at %s (%s) -- delete it by "
+            "hand; a 0-byte file under that name would upload to the server", path, exc,
+        )
+        return str(path)
+
+
 def _dest_dir_is_contained(dest_dir: Path, local_root_resolved: Path) -> bool:
     """True iff `dest_dir`, once resolved, is local_root itself or somewhere
     under it. dest_rel is free text from an editable combobox (popup.py) --
@@ -497,6 +594,7 @@ def fix_clip(
     copy_fn=None,
     replace_clip_fn=resolve_bridge.replace_clip,
     on_bytes: Optional[Callable[[int, int], None]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Copy `file_path` into local_root/dest_rel (collision-safe) once, then
     relink EVERY DISTINCT media pool item in `media_pool_items` to that one
@@ -520,10 +618,19 @@ def fix_clip(
     `on_bytes(copied, total)` reports progress DURING the copy (UX-9); it is
     only consulted by the default copier. `copy_fn` (a 2-arg src/dst
     callable) overrides the copier entirely, for tests.
+
+    `should_abort()` is the [ SKIP THIS FILE ] / [ CANCEL ALL ] predicate,
+    polled per chunk by the default copier. On abort NOTHING is relinked (no
+    ReplaceClip), BOTH artifacts of the attempt are deleted -- the partial
+    `.ccsync-tmp` and the 0-byte O_EXCL name reservation -- and the result
+    comes back as {"ok": False, "aborted": True}, i.e. a third outcome that
+    is neither fixed nor failed. `leftover_paths` names anything the delete
+    could not remove, so the dialog can tell the user rather than leaving a
+    multi-GB orphan for lane A to upload (CORE-H5).
     """
     if copy_fn is None:
         def copy_fn(s, d):
-            copy_with_progress(s, d, on_bytes=on_bytes)
+            copy_with_progress(s, d, on_bytes=on_bytes, should_abort=should_abort)
     items_raw = media_pool_items if isinstance(media_pool_items, list) else [media_pool_items]
     items: list[Any] = []
     seen_ids: set[int] = set()
@@ -595,6 +702,37 @@ def fix_clip(
     try:
         copy_fn(src, tmp_path)
         os.replace(tmp_path, dest_path)
+    except CopyAborted:
+        # THE CORE-H5 BARGAIN. Mid-file abort is only acceptable because
+        # every artifact of the attempt goes away here: the partial
+        # `<dest>.<pid>-<uuid>.ccsync-tmp` the copy was writing, and the
+        # 0-byte final name _claim_destination_path reserved up front (which
+        # os.replace never reached, so it is empty and unambiguously ours).
+        # Leave either behind and the editor is back to an orphan under
+        # local_root -- the tmp is filtered out of every lane, but the
+        # reservation is not: a 0-byte .braw under the final name would
+        # upload on lane A and could then never be replaced (--ignore-existing).
+        # The reservation goes through remove_reserved_name, which refuses to
+        # delete it if something else wrote there meanwhile (DEL-7).
+        leftovers = [p for p in (remove_partial(tmp_path),
+                                 remove_reserved_name(dest_path)) if p]
+        log.info("fix_clip: %s abandoned by the user mid-copy%s", file_path,
+                 f" (LEFTOVERS: {', '.join(leftovers)})" if leftovers else
+                 " -- the half-copied file was removed")
+        message = "Skipped by you — the half-copied file was removed. Nothing was relinked."
+        if leftovers:
+            message = (
+                "Skipped by you, but CCSync couldn't delete the half-copied file at "
+                + "; ".join(leftovers)
+                + " — delete it by hand."
+            )
+        return {
+            "ok": False,
+            "aborted": True,
+            "message": message,
+            "copied_to": None,
+            "leftover_paths": leftovers,
+        }
     except Exception as exc:
         try:
             tmp_path.unlink(missing_ok=True)

@@ -500,3 +500,102 @@ def test_redirect_status_reads_either_attribute():
     assert upgrade_mod.redirect_status(_WithCode()) == 301
     assert upgrade_mod.redirect_status(_WithStatus()) is None
     assert upgrade_mod.redirect_status(object()) is None
+
+
+# ===========================================================================
+# Wording: "different, not newer" must not read as "update" for a downgrade
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("0.4.5", (0, 4, 5)),
+        ("v1.2", (1, 2)),
+        (" 10.0.3 ", (10, 0, 3)),
+        # NOT ranked as (0, 5): truncating a suffixed build would make
+        # "0.4.5-hotfix" compare OLDER than the 0.4.5 it patches.
+        ("0.5.0-rc1", None),
+        ("2", (2,)),
+        ("", None),
+        ("nightly", None),
+        (None, None),
+        ("v", None),
+    ],
+)
+def test_parse_version_is_tolerant_and_never_raises(text, expected):
+    assert upgrade_mod.parse_version(text) == expected
+
+
+def test_compare_to_running_orders_newer_older_and_same():
+    assert upgrade_mod.compare_to_running("0.5.0", running="0.4.5") == "newer"
+    assert upgrade_mod.compare_to_running("0.4.3", running="0.4.5") == "older"
+    assert upgrade_mod.compare_to_running("0.4.5", running="0.4.5") == "same"
+    # more components wins a shared prefix, both directions
+    assert upgrade_mod.compare_to_running("0.4.5.1", running="0.4.5") == "newer"
+    assert upgrade_mod.compare_to_running("0.4", running="0.4.5") == "older"
+
+
+def test_compare_to_running_is_unknown_when_either_side_is_unparseable():
+    assert upgrade_mod.compare_to_running("nightly", running="0.4.5") == "unknown"
+    assert upgrade_mod.compare_to_running("0.4.5", running="dev") == "unknown"
+    assert upgrade_mod.compare_to_running(None, running=None) == "unknown"
+
+
+def test_compare_to_running_defaults_to_the_build_we_are_running():
+    assert upgrade_mod.compare_to_running(config_mod.VERSION) == "same"
+
+
+def test_offer_label_never_calls_a_downgrade_an_update():
+    """THE LIVE BUG (2026-07-25): running v0.4.5, dashboard still publishing
+    v0.4.3 as `current`, tray offering "Update available → v0.4.3 (install)"
+    -- one click from a silent downgrade that reintroduced a round of
+    security fixes."""
+    assert upgrade_mod.offer_label("0.5.0", running="0.4.5") == (
+        "Update available → v0.5.0 (install)")
+
+    rollback = upgrade_mod.offer_label("0.4.3", running="0.4.5")
+    assert rollback == "Roll back to v0.4.3 (older — install)"
+    assert "update" not in rollback.lower()
+
+    assert upgrade_mod.offer_label("weird", running="0.4.5") == (
+        "Switch to vweird (install)")
+    # equal numbers but a different string (the server only advertises a
+    # DIFFERENT version, so this is reachable) -> neutral, not "update"
+    assert upgrade_mod.offer_label("0.4.5-hotfix", running="0.4.5") == (
+        "Switch to v0.4.5-hotfix (install)")
+
+
+def test_offer_toast_matches_the_label_direction():
+    assert "Update available" in upgrade_mod.offer_toast("9.9.9", running="0.4.5")
+    toast = upgrade_mod.offer_toast("0.4.3", running="0.4.5")
+    assert "Roll back" in toast and "OLDER" in toast
+    assert "update" not in toast.lower()
+    assert "0.4.5" in toast, "the toast must say what this machine is running"
+    assert upgrade_mod.offer_toast("nightly", running="0.4.5").startswith("Switch to")
+
+
+def test_offer_dialog_text_agrees_with_the_menu_item_that_opened_it():
+    title, body, ok = upgrade_mod.offer_dialog_text("0.4.3", running="0.4.5")
+    assert ok == "ROLL BACK"
+    assert "OLDER" in body and "roll back" in title.lower()
+
+    title, body, ok = upgrade_mod.offer_dialog_text("9.9.9", running="0.4.5")
+    assert ok == "UPDATE"
+
+    title, body, ok = upgrade_mod.offer_dialog_text("nightly", running="0.4.5")
+    assert ok == "SWITCH"
+
+
+def test_the_wording_helpers_never_raise_on_hostile_input():
+    """A version string is server-supplied. Nothing here may kill the tray
+    thread that renders the menu."""
+    class _Hostile:
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    for value in (object(), 5, ["0.4.5"], {"v": 1}):
+        assert upgrade_mod.compare_to_running(value) in (
+            "newer", "older", "same", "unknown")
+    assert upgrade_mod.parse_version(_Hostile()) is None
+    assert upgrade_mod.compare_to_running(_Hostile()) == "unknown"

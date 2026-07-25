@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw
 
 from . import config as config_mod
 from . import resolve_bridge
+from . import upgrade as upgrade_mod
 from .sync.base import STATE_ERROR, STATE_PAUSED, STATE_SYNCING, LaneStatus
 
 if TYPE_CHECKING:
@@ -443,16 +444,20 @@ def _show_update_dialog_locked(app: "CompanionApp", info: dict) -> bool:
         pass
 
     confirmed = {"value": False}
+    # The dialog is the LAST thing shown before the exe is swapped, so it has
+    # to agree with the menu item that opened it -- an offer of an OLDER
+    # build must say so here too (see upgrade.offer_dialog_text).
+    title, body, ok_label = upgrade_mod.offer_dialog_text(info["version"])
+    heading = "► ROLL BACK COMPANION" if ok_label == "ROLL BACK" else "► UPDATE COMPANION"
     try:
         root = tk.Tk()
-        root.title("CCSYNC.EXE — update")
+        root.title(title)
         root.attributes("-topmost", True)
         root.configure(bg=theme.BG, padx=18, pady=14)
 
-        tk.Label(root, text="► UPDATE COMPANION", bg=theme.BG, fg=theme.RED,
+        tk.Label(root, text=heading, bg=theme.BG, fg=theme.RED,
                  font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
         tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
-        body = f"Update to v{info['version']}? The companion will restart itself."
         if syncing:
             body += "\n\nA sync is currently running — it will resume automatically after the restart."
         tk.Label(root, text=body, bg=theme.BG, fg=theme.MUTED, font=theme.mono(9),
@@ -469,7 +474,7 @@ def _show_update_dialog_locked(app: "CompanionApp", info: dict) -> bool:
             root.destroy()
 
         theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
-        theme.neon_button(tk, btn_bar, "UPDATE", _go, primary=True).pack(side="left")
+        theme.neon_button(tk, btn_bar, ok_label, _go, primary=True).pack(side="left")
         root.bind("<Return>", lambda _e: _go())
         root.protocol("WM_DELETE_WINDOW", _cancel)
         root.mainloop()
@@ -611,9 +616,15 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
             upgrade_info = _get_upgrade()
     except Exception:
         log.exception("upgrade_available() failed")
+    # The label is NOT "Update available" unconditionally: the dashboard
+    # advertises whatever it publishes as `current`, newer or older (see
+    # upgrade.py's "different, not newer"). This rig ran v0.4.5 while the
+    # dashboard still published v0.4.3, and the tray offered "Update
+    # available → v0.4.3 (install)" -- one click from a silent DOWNGRADE
+    # that reintroduced a round of security fixes (seen live 2026-07-25).
     upgrade_items = (
         [pystray.MenuItem(
-            f"Update available → v{upgrade_info['version']} (install)", on_update_now,
+            upgrade_mod.offer_label(upgrade_info["version"]), on_update_now,
         ), pystray.Menu.SEPARATOR]
         if upgrade_info else []
     )

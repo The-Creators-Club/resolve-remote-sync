@@ -4,6 +4,8 @@ manually per README.md's "known limitations")."""
 
 from __future__ import annotations
 
+import pytest
+
 from conftest import write_project_marker
 
 from ccsync_companion import fixer
@@ -668,3 +670,653 @@ def test_a_failure_does_not_stop_the_batch(tmp_path):
     results = popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=flaky)
     assert len(results) == 4
     assert [r["ok"] for r in results] == [True, False, True, True]
+
+
+# ===========================================================================
+# [ SKIP THIS FILE ] and [ CANCEL ALL ] (mid-file), alongside the older
+# [ STOP AFTER THIS FILE ] (between files)
+# ===========================================================================
+
+
+def _rows(tmp_path, count=4, size=10):
+    rows = []
+    for i in range(count):
+        p = tmp_path / f"f{i}.mov"
+        p.write_bytes(b"x" * size)
+        rows.append({"file_path": str(p), "suggested_dest": "D",
+                     "clip_name": p.name, "media_pool_items": []})
+    return rows
+
+
+def test_skip_this_file_abandons_one_file_and_continues_the_batch(tmp_path):
+    """The whole point of SKIP: the rest of the list still gets copied."""
+    from ccsync_companion import popup
+
+    rows = _rows(tmp_path, 4)
+    control = popup.BatchControl()
+    attempted, relinked = [], []
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        attempted.append(path)
+        if path.endswith("f1.mov"):
+            control.request_skip_current()          # the user clicks, mid-copy
+            if should_abort():
+                return {"ok": False, "aborted": True, "copied_to": None,
+                        "leftover_paths": [], "message": "Skipped by you"}
+        relinked.append(path)
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    results = popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=fake_fix,
+                                    control=control)
+
+    assert len(attempted) == 4, "every file is still attempted after a skip"
+    assert len(results) == 4
+    assert [r.get("aborted", False) for r in results] == [False, True, False, False]
+    assert not any(p.endswith("f1.mov") for p in relinked), (
+        "the skipped file must not be relinked in Resolve"
+    )
+
+
+def test_cancel_all_stops_the_batch_immediately(tmp_path):
+    """CANCEL ALL abandons the file in flight AND everything after it."""
+    from ccsync_companion import popup
+
+    rows = _rows(tmp_path, 5)
+    control = popup.BatchControl()
+    attempted = []
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        attempted.append(path)
+        if path.endswith("f1.mov"):
+            control.request_cancel_all()
+            if should_abort():
+                return {"ok": False, "aborted": True, "copied_to": None,
+                        "leftover_paths": [], "message": "Skipped by you"}
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    results = popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=fake_fix,
+                                    control=control)
+
+    assert len(attempted) == 2, f"the batch kept going after CANCEL ALL: {attempted}"
+    assert len(results) == 2
+    assert results[-1]["aborted"] is True
+    assert all(not r.get("aborted") for r in results[:-1])
+
+
+def test_cancel_all_between_files_never_starts_the_next_one(tmp_path):
+    from ccsync_companion import popup
+
+    rows = _rows(tmp_path, 5)
+    control = popup.BatchControl()
+    attempted = []
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        attempted.append(path)
+        if len(attempted) == 2:
+            control.request_cancel_all()            # lands after the copy ends
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    results = popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=fake_fix,
+                                    control=control)
+    assert len(attempted) == 2
+    assert len(results) == 2 and all(r["ok"] for r in results)
+
+
+def test_stop_after_this_file_still_finishes_the_file_it_is_on(tmp_path):
+    """The graceful control must stay lossless -- that is why SKIP is a
+    separate button and not a change of meaning."""
+    from ccsync_companion import popup
+
+    rows = _rows(tmp_path, 4)
+    control = popup.BatchControl()
+    finished = []
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        if path.endswith("f0.mov"):
+            control.request_stop_after_file()       # clicked mid-copy
+        assert should_abort is None or not should_abort(), (
+            "STOP AFTER THIS FILE must never abort the copy in flight"
+        )
+        finished.append(path)
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    results = popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=fake_fix,
+                                    control=control, should_stop=control.should_stop)
+
+    assert len(finished) == 1, "the file in flight is COMPLETED, then the batch stops"
+    assert results[0]["ok"] is True
+
+
+def test_a_skip_click_between_files_does_not_abandon_the_next_file(tmp_path):
+    """The skip flag is per-file and re-armed by the loop: a click that lands
+    in the gap between two files must not abandon a file the user never saw
+    start copying."""
+    from ccsync_companion import popup
+
+    rows = _rows(tmp_path, 3)
+    control = popup.BatchControl()
+    control.request_skip_current()                  # set BEFORE the run starts
+    aborts = []
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        aborts.append(bool(should_abort()))
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=fake_fix, control=control)
+    assert aborts == [False, False, False]
+
+
+def test_perform_fix_all_publishes_the_new_counts_without_touching_the_old_keys(tmp_path):
+    from ccsync_companion import popup
+
+    rows = _rows(tmp_path, 3)
+    control = popup.BatchControl()
+    control.request_skip_current()
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        if path.endswith("f1.mov"):
+            control.request_skip_current()
+            return {"ok": False, "aborted": True, "copied_to": None,
+                    "leftover_paths": [], "message": "Skipped by you"}
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    seen = []
+    popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=fake_fix,
+                          state_fn=seen.append, control=control)
+
+    final = seen[-1]
+    assert final["fixed"] == 2 and final["skipped"] == 1 and final["failed"] == 0
+    assert final["cancelled"] is False
+    # the pre-existing keys are still all there, unchanged in meaning
+    for key in ("index", "total", "name", "file_bytes_done", "file_bytes_total",
+                "batch_bytes_done", "batch_bytes_total", "stopped"):
+        assert key in final
+
+
+def test_perform_fix_all_marks_cancelled_in_the_final_state(tmp_path):
+    from ccsync_companion import popup
+
+    rows = _rows(tmp_path, 3)
+    control = popup.BatchControl()
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        control.request_cancel_all()
+        return {"ok": False, "aborted": True, "copied_to": None,
+                "leftover_paths": [], "message": "Skipped by you"}
+
+    seen = []
+    popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=fake_fix,
+                          state_fn=seen.append, control=control)
+    assert seen[-1]["cancelled"] is True
+    assert seen[-1]["stopped"] is True
+    assert seen[-1]["skipped"] == 1
+
+
+def test_perform_fix_all_passes_the_abort_poll_into_fix_clip(tmp_path):
+    """End to end: the Tk button sets a BatchControl flag, and the copy sees
+    it through fix_clip's should_abort -- that poll is what
+    fixer.copy_with_progress checks once per 8 MB chunk."""
+    from ccsync_companion import popup
+
+    rows = _rows(tmp_path, 1)
+    control = popup.BatchControl()
+    polls = []
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        polls.append(should_abort())
+        control.request_skip_current()              # "the user clicks"
+        polls.append(should_abort())
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=fake_fix, control=control)
+    assert polls == [False, True]
+
+
+def test_perform_fix_all_without_a_control_is_exactly_the_old_behaviour(tmp_path):
+    """Every existing caller passes no control and must keep working, right
+    down to the fix_clip doubles written against the older signatures."""
+    from ccsync_companion import popup
+
+    rows = _rows(tmp_path, 2)
+    results = popup.perform_fix_all(
+        rows, {}, str(tmp_path),
+        fix_clip_fn=lambda a, b, c, d: {"ok": True, "message": "", "copied_to": b},
+    )
+    assert [r["ok"] for r in results] == [True, True]
+
+
+def test_call_fix_clip_drops_kwargs_the_double_does_not_accept(tmp_path):
+    from ccsync_companion import popup
+
+    def oldest(path, dest, root, mpis):
+        return {"ok": True, "message": "oldest", "copied_to": dest}
+
+    def with_on_bytes(path, dest, root, mpis, on_bytes=None):
+        return {"ok": True, "message": "on_bytes", "copied_to": dest}
+
+    def newest(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        return {"ok": True, "message": "newest", "copied_to": dest}
+
+    args = ("p", "d", "r", [])
+    poll = (lambda: False)
+    assert popup.call_fix_clip(oldest, args, on_bytes=None,
+                               should_abort=poll)["message"] == "oldest"
+    assert popup.call_fix_clip(with_on_bytes, args, on_bytes=None,
+                               should_abort=poll)["message"] == "on_bytes"
+    assert popup.call_fix_clip(newest, args, on_bytes=None,
+                               should_abort=poll)["message"] == "newest"
+
+
+def test_call_fix_clip_lets_a_genuine_type_error_surface():
+    """The retry loop must not swallow a real bug inside fix_clip -- the
+    final call is made outside it."""
+    from ccsync_companion import popup
+
+    def broken(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        raise TypeError("unsupported operand type(s) for +: 'int' and 'str'")
+
+    with pytest.raises(TypeError):
+        popup.call_fix_clip(broken, ("p", "d", "r", []), on_bytes=None, should_abort=None)
+
+
+def test_summarize_fix_results_counts_skipped_separately_from_failed():
+    """"3 fixed, 1 skipped by you" -- a file the user abandoned is neither a
+    success nor a malfunction, and calling it either lies to them."""
+    from ccsync_companion import popup
+
+    results = [
+        {"ok": True}, {"ok": True}, {"ok": True},
+        {"ok": False, "aborted": True},
+    ]
+    assert popup.summarize_fix_results(results, 4) == "3 of 4 copied in, 1 skipped by you"
+
+    mixed = results + [{"ok": False, "message": "disk full"}]
+    assert popup.summarize_fix_results(mixed, 5) == (
+        "3 of 5 copied in, 1 skipped by you, 1 failed")
+
+    assert popup.summarize_fix_results([{"ok": True}], 1) == "1 of 1 copied in"
+
+
+def test_summarize_fix_results_says_what_was_left_alone_when_stopped():
+    from ccsync_companion import popup
+
+    results = [{"ok": True}, {"ok": False, "aborted": True}]
+    assert popup.summarize_fix_results(results, 6, stopped_early=True) == (
+        "Stopped — 1 of 6 copied in, 1 skipped by you, 4 left alone")
+
+
+def test_batch_control_flags_are_independent():
+    from ccsync_companion import popup
+
+    control = popup.BatchControl()
+    assert not control.should_abort_current() and not control.should_stop()
+
+    control.request_stop_after_file()
+    assert control.should_stop()
+    assert not control.should_abort_current(), (
+        "STOP AFTER THIS FILE must never abort the copy in flight")
+
+    control.reset()
+    control.request_skip_current()
+    assert control.should_abort_current()
+    assert not control.should_stop(), "a skip must not end the batch"
+
+    control.reset()
+    control.request_cancel_all()
+    assert control.should_abort_current() and control.should_stop()
+    assert control.cancel_all_requested()
+
+    control.begin_file()
+    assert control.should_abort_current(), "begin_file only re-arms the SKIP flag"
+
+
+def _real_rows(tmp_path, count=3, size=60_000):
+    rows = []
+    for i in range(count):
+        p = tmp_path / "src" / f"clip{i}.braw"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"A" * size)
+        rows.append({"file_path": str(p), "suggested_dest": "B-roll",
+                     "clip_name": p.name, "media_pool_items": []})
+    return rows
+
+
+def test_end_to_end_skip_leaves_no_partial_in_the_tree_and_copies_the_rest(tmp_path):
+    """THE CORE-H5 GUARANTEE through the whole stack -- real perform_fix_all,
+    real fixer.fix_clip, real chunked copy. After a mid-file skip the sync
+    folder holds the files that finished and NOTHING of the one abandoned:
+    no partial under the final name, no `.ccsync-tmp`. That orphan is what
+    lane A would upload and lane C would fan out to the fleet."""
+    from ccsync_companion import popup
+
+    root = tmp_path / "root"
+    root.mkdir()
+    rows = _real_rows(tmp_path, 3)
+    control = popup.BatchControl()
+
+    def on_state(info):
+        # "the user clicks SKIP" as soon as the middle file starts moving.
+        if info.get("name") == "clip1.braw" and info.get("file_bytes_done"):
+            control.request_skip_current()
+
+    results = popup.perform_fix_all(
+        rows, {}, str(root), state_fn=on_state, control=control,
+        fix_clip_fn=lambda *a, **kw: fixer.fix_clip(
+            *a, replace_clip_fn=lambda m, p: {"ok": True, "message": ""}, **kw),
+    )
+
+    assert [r.get("aborted", False) for r in results] == [False, True, False]
+    dest = root / "B-roll"
+    assert sorted(p.name for p in dest.iterdir()) == ["clip0.braw", "clip2.braw"], (
+        f"the abandoned copy left something behind: {sorted(p.name for p in dest.iterdir())}"
+    )
+    assert not any(p.name.endswith(fixer.TMP_SUFFIX) for p in dest.iterdir())
+    # every original is untouched, as always
+    assert all((tmp_path / "src" / f"clip{i}.braw").stat().st_size == 60_000
+               for i in range(3))
+
+
+def test_end_to_end_cancel_all_deletes_the_partial_and_stops(tmp_path):
+    from ccsync_companion import popup
+
+    root = tmp_path / "root"
+    root.mkdir()
+    rows = _real_rows(tmp_path, 4)
+    control = popup.BatchControl()
+
+    def on_state(info):
+        if info.get("name") == "clip1.braw" and info.get("file_bytes_done"):
+            control.request_cancel_all()
+
+    results = popup.perform_fix_all(
+        rows, {}, str(root), state_fn=on_state, control=control,
+        fix_clip_fn=lambda *a, **kw: fixer.fix_clip(
+            *a, replace_clip_fn=lambda m, p: {"ok": True, "message": ""}, **kw),
+    )
+
+    assert len(results) == 2, "CANCEL ALL must not start clip2/clip3"
+    assert results[-1]["aborted"] is True
+    assert sorted(p.name for p in (root / "B-roll").iterdir()) == ["clip0.braw"]
+
+
+def test_end_to_end_skipped_file_is_never_relinked_in_resolve(tmp_path):
+    """ReplaceClip must not be called for a file that was abandoned -- the
+    copy it would point at does not exist."""
+    from ccsync_companion import popup
+
+    root = tmp_path / "root"
+    root.mkdir()
+    rows = _real_rows(tmp_path, 2)
+    rows[0]["media_pool_items"] = [object()]
+    rows[1]["media_pool_items"] = [object()]
+    control = popup.BatchControl()
+    replaced = []
+
+    def on_state(info):
+        if info.get("name") == "clip0.braw" and info.get("file_bytes_done"):
+            control.request_skip_current()
+
+    popup.perform_fix_all(
+        rows, {}, str(root), state_fn=on_state, control=control,
+        fix_clip_fn=lambda *a, **kw: fixer.fix_clip(
+            *a,
+            replace_clip_fn=lambda m, p: (replaced.append(p), {"ok": True, "message": ""})[1],
+            **kw),
+    )
+
+    assert len(replaced) == 1, "only the file that actually copied is relinked"
+    assert replaced[0].endswith("clip1.braw")
+
+
+def test_a_skipped_file_is_not_added_to_the_ignore_tracker(tmp_path):
+    """CHOSEN SEMANTICS: skipping ONE copy attempt is not "never offer me
+    this clip again". Only the popup's [ SKIP FOR NOW (this session) ] button
+    (perform_ignore_all) touches the IgnoreTracker; an abandoned copy leaves
+    it alone, so the clip is offered again on the next scan."""
+    from ccsync_companion import popup
+
+    root = tmp_path / "root"
+    root.mkdir()
+    rows = _real_rows(tmp_path, 1)
+    tracker = fixer.IgnoreTracker()
+    control = popup.BatchControl()
+
+    def on_state(info):
+        if info.get("file_bytes_done"):
+            control.request_skip_current()
+
+    results = popup.perform_fix_all(
+        rows, {}, str(root), state_fn=on_state, control=control,
+        fix_clip_fn=lambda *a, **kw: fixer.fix_clip(
+            *a, replace_clip_fn=lambda m, p: {"ok": True, "message": ""}, **kw),
+    )
+
+    assert results[0]["aborted"] is True
+    assert not tracker.is_ignored(rows[0]["file_path"]), (
+        "an abandoned copy must not silently hide the clip forever"
+    )
+
+
+def test_progress_window_skip_and_cancel_reach_the_worker(monkeypatch):
+    """The consolidate window gets the same three controls. The worker sees
+    them through `window.control` (mid-file) and `should_stop` (between
+    files) -- its 2-arg signature is unchanged, so existing callers and
+    their doubles keep working."""
+    from ccsync_companion import popup
+
+    window = popup.ProgressWindow("COPYING")
+    monkeypatch.setattr(window, "_show", lambda: None)
+
+    window._on_skip_current_file()
+    assert window.control.should_abort_current(), "SKIP must abort the file in flight"
+    assert not window.should_stop(), "SKIP must NOT end the batch"
+    assert not window.cancelled()
+
+    window.control.reset()
+    window._on_cancel_all()
+    assert window.control.should_abort_current()
+    assert window.cancelled()
+
+    seen = []
+    window.run(lambda publish, should_stop: seen.append(should_stop()))
+    assert seen == [True], "CANCEL ALL must also stop the batch between files"
+
+
+def test_progress_window_stop_after_this_file_never_aborts_the_copy(monkeypatch):
+    from ccsync_companion import popup
+
+    window = popup.ProgressWindow("COPYING")
+    monkeypatch.setattr(window, "_show", lambda: None)
+    window._on_stop()
+    assert window.should_stop()
+    assert not window.control.should_abort_current(), (
+        "the graceful stop must let the file in flight finish")
+    assert not window.cancelled()
+
+
+def test_progress_window_controls_never_raise_without_a_window(monkeypatch):
+    """The buttons only exist once _show() has built them; a headless run (or
+    a click racing the window teardown) must not raise out of the Tk
+    callback."""
+    from ccsync_companion import popup
+
+    window = popup.ProgressWindow("COPYING")
+    window._on_stop()
+    window._on_skip_current_file()
+    window._on_cancel_all()
+    assert window.should_stop() and window.cancelled()
+
+
+# ===========================================================================
+# PopupDialog's Tk-side wiring, with fake widgets (conftest forbids a real
+# Tk window, and this logic is exactly what a live-only test never covers)
+# ===========================================================================
+
+
+class _FakeWidget:
+    """Records config()/pack()/grid() calls instead of drawing anything."""
+
+    def __init__(self):
+        self.text = ""
+        self.state = "normal"
+        self.packed = False
+        self.gridded = True
+
+    def config(self, **kw):
+        if "text" in kw:
+            self.text = kw["text"]
+        if "state" in kw:
+            self.state = kw["state"]
+
+    def pack(self, **kw):
+        self.packed = True
+
+    def pack_forget(self):
+        self.packed = False
+
+    def grid(self, **kw):
+        self.gridded = True
+
+    def grid_remove(self):
+        self.gridded = False
+
+
+class _FakeRoot(_FakeWidget):
+    def __init__(self):
+        super().__init__()
+        self.destroyed = False
+
+    def destroy(self):
+        self.destroyed = True
+
+    def bell(self):
+        pass
+
+
+def _bare_dialog(rows):
+    """A PopupDialog with every widget faked -- no tkinter involved."""
+    from ccsync_companion import popup
+
+    dialog = object.__new__(popup.PopupDialog)
+    dialog.rows = rows
+    dialog.local_root = "L"
+    dialog.ignore_tracker = fixer.IgnoreTracker()
+    dialog.on_done = None
+    dialog.editor_name = "alex"
+    dialog._fixing = False
+    dialog._progress_lock = __import__("threading").Lock()
+    dialog._progress = {}
+    dialog._stop_requested = False
+    dialog._control = popup.BatchControl()
+    dialog._rate = popup.RateEstimator()
+    dialog._tick_job = None
+    dialog._batch_rows = rows
+    dialog._failed_rows = []
+    dialog.root = _FakeRoot()
+    for name in ("status_label", "_progress_frame", "_fix_btn", "_ignore_btn",
+                 "_retry_btn", "_stop_btn", "_skip_btn", "_cancel_btn"):
+        setattr(dialog, name, _FakeWidget())
+    return dialog
+
+
+def _row(path):
+    return {"file_path": path, "suggested_dest": "D", "clip_name": path,
+            "media_pool_items": []}
+
+
+def test_the_x_button_during_a_copy_means_cancel_all_and_does_not_close():
+    """The X must not orphan a partial, and must not destroy the root either:
+    destroying it ends mainloop(), so show_popup() returns and
+    app._show_out_of_tree_popup() RELEASES the popup lock while the worker is
+    still copying multi-GB files and calling ReplaceClip (CORE-M1). It
+    cancels (partial cleaned up by fix_clip) and the window closes itself."""
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._fixing = True
+
+    dialog._on_close_request()
+
+    assert dialog._control.cancel_all_requested()
+    assert dialog._control.should_abort_current()
+    assert dialog.root.destroyed is False
+    assert "Cancelling" in dialog.status_label.text
+
+
+def test_the_x_button_still_closes_a_dialog_that_is_not_copying():
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._on_close_request()
+    assert dialog.root.destroyed is True
+    assert not dialog._control.cancel_all_requested()
+
+
+def test_the_three_buttons_set_exactly_one_meaning_each():
+    dialog = _bare_dialog([_row("a.mov")])
+
+    dialog._on_stop_after_file()
+    assert dialog._stop_requested is True
+    assert not dialog._control.should_abort_current(), (
+        "STOP AFTER THIS FILE must never abandon the file in flight")
+
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._on_skip_current_file()
+    assert dialog._control.should_abort_current()
+    assert dialog._stop_requested is False, "SKIP must not end the batch"
+    assert not dialog._control.should_stop()
+
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._on_cancel_all()
+    assert dialog._control.should_abort_current()
+    assert dialog._control.cancel_all_requested()
+    assert dialog._stop_requested is True
+    assert dialog._cancel_btn.state == "disabled"
+
+
+def test_fix_done_reports_skipped_separately_and_keeps_the_window_open():
+    """"3 fixed, 1 skipped by you" -- and the dialog stays open so the user
+    can retry the file they abandoned."""
+    rows = [_row("a.mov"), _row("b.mov")]
+    dialog = _bare_dialog(rows)
+    dialog._fixing = True
+
+    dialog._fix_done([
+        {"ok": True, "message": "", "file_path": "a.mov"},
+        {"ok": False, "aborted": True, "leftover_paths": [], "file_path": "b.mov",
+         "message": "Skipped by you"},
+    ])
+
+    text = dialog.status_label.text
+    assert "1 of 2 copied in" in text and "1 skipped by you" in text
+    assert "failed" not in text, "a deliberate skip is not a failure"
+    assert dialog.root.destroyed is False
+    # the skipped row is retryable -- skipping ONE copy attempt is not
+    # "never offer me this clip again"
+    assert dialog._failed_rows == [rows[1]]
+    assert dialog._retry_btn.packed is True
+    assert not dialog.ignore_tracker.is_ignored("b.mov")
+
+
+def test_fix_done_surfaces_a_partial_it_could_not_delete():
+    """The one case where a skip is not clean: the orphan is inside the sync
+    folder and only this process ever knew about it (CORE-H5)."""
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._fixing = True
+
+    dialog._fix_done([
+        {"ok": False, "aborted": True, "file_path": "a.mov",
+         "leftover_paths": [r"T:\Creators_Club\B-roll\a.mov.1234-ab.ccsync-tmp"],
+         "message": "Skipped by you, but CCSync couldn't delete..."},
+    ])
+
+    assert "could NOT delete" in dialog.status_label.text
+    assert "a.mov.1234-ab.ccsync-tmp" in dialog.status_label.text
+
+
+def test_fix_done_closes_the_window_when_everything_worked():
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._fixing = True
+    done = []
+    dialog.on_done = done.append
+
+    dialog._fix_done([{"ok": True, "message": "", "file_path": "a.mov"}])
+
+    assert dialog.root.destroyed is True
+    assert len(done) == 1

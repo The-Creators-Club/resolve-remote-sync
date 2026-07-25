@@ -20,7 +20,9 @@ new process may start while the old one still holds its own image briefly.
 
 "Different, not newer": the server only advertises when the current published
 version differs from what we reported, so an admin rollback is offered to the
-fleet exactly like an upgrade. Nothing here compares version numbers.
+fleet exactly like an upgrade. The DOWNLOAD/SWAP machinery still compares
+nothing -- but the WORDING must (see compare_to_running / offer_label): a
+rollback offer that reads "Update available" is a one-click downgrade.
 
 Never-raise ethos throughout, injectable I/O for tests (same conventions as
 reporter.py).
@@ -30,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -232,6 +235,122 @@ def parse_upgrade(resp: Any) -> Optional[dict[str, Any]]:
         return None
     return {"version": version, "url": url, "sha256": sha256,
             "size_bytes": info.get("size_bytes")}
+
+
+# --------------------------------------------------------------- wording
+#
+# The offer is "different, not newer" by design (see the module docstring),
+# so the SAME machinery advertises an admin rollback and a genuine upgrade.
+# Calling both of them "Update available" is what made the tray on this rig
+# offer "Update available -> v0.4.3 (install)" while it was running v0.4.5
+# (seen live 2026-07-25): one click would have DOWNGRADED the machine and
+# reintroduced a whole round of security fixes. The install path is
+# unchanged -- only the words, which are the only thing the human has.
+
+_NUMERIC_PART = re.compile(r"^\d+$")
+
+VERSION_NEWER = "newer"
+VERSION_OLDER = "older"
+VERSION_SAME = "same"
+VERSION_UNKNOWN = "unknown"
+
+
+def parse_version(text: Any) -> Optional[tuple[int, ...]]:
+    """A plain dotted-numeric version string as a tuple of ints.
+
+    "0.4.5" -> (0, 4, 5); "v1.2" -> (1, 2). None for ANYTHING else ("",
+    "nightly", "0.4.5-hotfix", None), which callers must treat as "ordering
+    unknown" and word neutrally.
+
+    Deliberately strict rather than "compare the numeric prefix and ignore
+    the rest": truncating "0.4.5-hotfix" to (0, 4) makes it compare OLDER
+    than the 0.4.5 it is a hotfix for, and this function's only consumer is
+    the sentence that tells an editor whether they are about to upgrade or
+    downgrade. Refusing to rank a string we don't fully understand costs a
+    neutral label; ranking it wrong costs the wrong click. Never raises."""
+    try:
+        raw = str(text or "").strip()
+        if raw[:1] in ("v", "V"):
+            raw = raw[1:]
+        parts = raw.split(".")
+        if not parts or not all(_NUMERIC_PART.match(part) for part in parts):
+            return None
+        return tuple(int(part) for part in parts)
+    except Exception:
+        log.debug("parse_version(%r) failed", text, exc_info=True)
+        return None
+
+
+def compare_to_running(version: Any, running: Optional[str] = None) -> str:
+    """"newer" / "older" / "same" / "unknown" for `version` vs the build we
+    are running. Never raises -- anything unparseable on either side is
+    "unknown", which the labels below render in neutral wording rather than
+    guessing a direction."""
+    try:
+        offered = parse_version(version)
+        current = parse_version(config_mod.VERSION if running is None else running)
+        if offered is None or current is None:
+            return VERSION_UNKNOWN
+        if offered > current:
+            return VERSION_NEWER
+        if offered < current:
+            return VERSION_OLDER
+        return VERSION_SAME
+    except Exception:
+        log.debug("compare_to_running(%r) failed", version, exc_info=True)
+        return VERSION_UNKNOWN
+
+
+def offer_label(version: Any, running: Optional[str] = None) -> str:
+    """The tray menu item for an available build. The word "update" appears
+    ONLY when the offered build really is newer."""
+    order = compare_to_running(version, running)
+    if order == VERSION_NEWER:
+        return f"Update available → v{version} (install)"
+    if order == VERSION_OLDER:
+        return f"Roll back to v{version} (older — install)"
+    return f"Switch to v{version} (install)"
+
+
+def offer_toast(version: Any, running: Optional[str] = None) -> str:
+    """The tray balloon raised once when a new offer appears (app.py's
+    on_available). Same three cases as offer_label."""
+    order = compare_to_running(version, running)
+    current = config_mod.VERSION if running is None else running
+    if order == VERSION_NEWER:
+        return f"Update available → v{version} — use the tray menu to install"
+    if order == VERSION_OLDER:
+        return (f"Roll back to v{version} offered — that is OLDER than the v{current} "
+                f"you are running. Only install it if Alex asked you to.")
+    return f"Switch to v{version} — use the tray menu to install"
+
+
+def offer_dialog_text(version: Any, running: Optional[str] = None) -> tuple[str, str, str]:
+    """(title, body, ok-button label) for the confirmation dialog, so the
+    LAST thing shown before the swap agrees with the menu item that opened
+    it."""
+    order = compare_to_running(version, running)
+    current = config_mod.VERSION if running is None else running
+    if order == VERSION_OLDER:
+        return (
+            "CCSYNC.EXE — roll back",
+            f"Roll back to v{version}? That is OLDER than the v{current} on this "
+            f"machine — you would LOSE whatever v{current} fixed. The companion "
+            f"will restart itself.",
+            "ROLL BACK",
+        )
+    if order == VERSION_NEWER:
+        return (
+            "CCSYNC.EXE — update",
+            f"Update to v{version}? The companion will restart itself.",
+            "UPDATE",
+        )
+    return (
+        "CCSYNC.EXE — switch build",
+        f"Switch to v{version}? You are running v{current}. The companion will "
+        f"restart itself.",
+        "SWITCH",
+    )
 
 
 class UpgradeManager:

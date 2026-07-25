@@ -30,9 +30,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -50,6 +54,63 @@ SpawnFn = Callable[[Path], Any]
 DOWNLOAD_TIMEOUT = 600.0
 _NEW_NAME = "ccsync-companion.new.exe"
 _OLD_SUFFIX = ".old"
+# The published exe is ~20 MB. A ceiling stops a hostile or broken response
+# filling the editor's disk (there was none at all), and the free-space check
+# stops a download that cannot possibly complete (AUDIT_2 §2-low).
+MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
+MIN_FREE_BYTES_MARGIN = 200 * 1024 * 1024
+_VERSION_MARKER = "last_version.txt"
+
+
+def note_version_start(state_dir: Path) -> bool:
+    """Record the running version and report whether it CHANGED.
+
+    "Is this the first start on a freshly-upgraded build?" used to be derived
+    from whether cleanup_old_exe() managed to unlink an `.old`. That is wrong
+    twice over: it forced the rollback copy to be destroyed before the new
+    build had proven anything, and when an AV hold deferred the unlink it
+    fired the "Update complete — now running vX" toast on an unrelated later
+    restart (AUDIT_2 CORE-H6). Never raises; a marker that can't be read or
+    written just means no toast."""
+    try:
+        state_dir = Path(state_dir)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        marker = state_dir / _VERSION_MARKER
+        try:
+            previous = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            previous = ""
+        if previous != config_mod.VERSION:
+            tmp = marker.with_name(marker.name + ".tmp")
+            tmp.write_text(config_mod.VERSION, encoding="utf-8")
+            os.replace(tmp, marker)
+        # A first-ever run (no marker) is not an upgrade.
+        return bool(previous) and previous != config_mod.VERSION
+    except Exception:
+        log.debug("note_version_start failed", exc_info=True)
+        return False
+
+
+def same_origin(url: str, base_url: str) -> bool:
+    """True when `url` is relative, or shares scheme+host+port with `base_url`.
+
+    `upgrade.url` arrives inside a plain-HTTP /api/v1/report response, and
+    the sha256 that "verifies" the download comes from that SAME response --
+    so anyone able to answer or alter one report response could hand the
+    companion an arbitrary exe plus its matching hash, which is then renamed
+    over the running companion and launched detached. Tailnet-only limits
+    exposure; there was no origin check at all (AUDIT_2 CORE-M10)."""
+    if not url:
+        return False
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.scheme and not parsed.netloc:
+        return True  # relative -- resolved against dashboard_url below
+    base = urllib.parse.urlparse(str(base_url or "").strip())
+    if not base.netloc:
+        return False
+    return (parsed.scheme.lower(), parsed.netloc.lower()) == (
+        base.scheme.lower(), base.netloc.lower()
+    )
 
 
 def platform_key() -> str:
@@ -61,9 +122,61 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+class _RedirectRefused(Exception):
+    """An injected http_open handed us an already-followed/3xx response."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(f"update URL answered HTTP {code} (redirect) -- refused")
+        self.code = code
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that refuses every redirect.
+
+    Returning None from redirect_request() makes urllib fall through to the
+    default error handler, i.e. the 3xx surfaces as an HTTPError instead of
+    being followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+def build_no_redirect_opener(*handlers) -> urllib.request.OpenerDirector:
+    """An opener that will NOT follow redirects.
+
+    same_origin() is checked once, BEFORE the request -- but
+    urllib.request.urlopen follows 3xx automatically, so a dashboard answer
+    of `302 Location: http://attacker/build.exe` bounced the download
+    off-origin AND re-sent the X-CCSync-Token header to whatever host the
+    redirect chose (urllib only strips credentials, not custom headers). The
+    sha256 is no defence: it comes from the same response that supplied the
+    URL, so it proves the integrity of exactly the file the redirect chose.
+    The result is renamed over the running companion and launched detached
+    (AUDIT_3 H-1, tightening AUDIT_2 CORE-M10).
+
+    Extra `handlers` exist so a test can drive the real chain."""
+    return urllib.request.build_opener(NoRedirectHandler, *handlers)
+
+
 def default_http_open(url: str, headers: dict, timeout: float):
     req = urllib.request.Request(url, headers=headers, method="GET")
-    return urllib.request.urlopen(req, timeout=timeout)
+    return build_no_redirect_opener().open(req, timeout=timeout)
+
+
+def redirect_status(resp: Any) -> Optional[int]:
+    """The 3xx status of an already-open response, or None.
+
+    Belt to build_no_redirect_opener's braces: `http_open` is injectable
+    (tests, and any future transport), so download_and_verify checks what it
+    was actually handed rather than trusting the opener alone."""
+    for attr in ("status", "code"):
+        value = getattr(resp, attr, None)
+        try:
+            if value is not None and 300 <= int(value) < 400:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def cleanup_old_exe(exe_path: Optional[Path] = None) -> bool:
@@ -71,20 +184,31 @@ def cleanup_old_exe(exe_path: Optional[Path] = None) -> bool:
     OSError entirely -- an AV scanner may still hold the file; we simply try
     again on the next start. At most one `.old` ever exists.
 
-    Returns True when an `.old` was actually removed -- i.e. THIS start is
-    the first after a successful self-upgrade; app.run() uses that as the
-    trigger for the "updated to vX.Y.Z" tray toast."""
+    Returns True when an `.old` was actually removed. NOTE: callers must not
+    use that as "we just upgraded" -- see note_version_start(), which is what
+    app.run() uses now (AUDIT_2 CORE-H6). Retries a few times because the
+    usual cause of failure is a transient AV/indexer hold seconds after the
+    rename."""
     try:
         if exe_path is None:
             if not is_frozen():
                 return False
             exe_path = Path(sys.executable)
         old = exe_path.with_name(exe_path.name + _OLD_SUFFIX)
-        existed = old.exists()
-        old.unlink(missing_ok=True)
-        return existed
-    except OSError:
-        log.debug("cleanup_old_exe: .old still locked; will retry next start")
+        if not old.exists():
+            return False
+        for attempt in range(3):
+            try:
+                old.unlink()
+                log.info("upgrade: removed the previous build at %s", old)
+                return True
+            except OSError as exc:
+                log.debug("cleanup_old_exe: attempt %d failed (%s)", attempt + 1, exc)
+                time.sleep(1.0)
+        log.info("cleanup_old_exe: %s is still locked; will retry next start", old)
+        return False
+    except Exception:
+        log.debug("cleanup_old_exe failed", exc_info=True)
         return False
 
 
@@ -171,8 +295,16 @@ class UpgradeManager:
         and verify its sha256. Returns the path, or None on any failure
         (temp file removed). Never raises."""
         url = str(info.get("url") or "")
+        base = str(self.cfg.get("dashboard_url", "")).strip().rstrip("/")
+        # ORIGIN PINNING (CORE-M10): an absolute URL is only followed when it
+        # points at the same dashboard we already trust for config/tokens.
+        if not same_origin(url, base):
+            log.error(
+                "upgrade: REFUSING an update URL that isn't on the dashboard's own host "
+                "(%r vs dashboard_url %r)", url, base,
+            )
+            return None
         if url.startswith("/"):
-            base = str(self.cfg.get("dashboard_url", "")).strip().rstrip("/")
             if not base:
                 log.warning("upgrade: dashboard_url is not configured -- cannot download")
                 return None
@@ -182,18 +314,61 @@ class UpgradeManager:
         if token:
             headers["X-CCSync-Token"] = token
 
+        try:
+            free = shutil.disk_usage(str(dest_dir)).free
+            if free < MIN_FREE_BYTES_MARGIN:
+                log.warning(
+                    "upgrade: only %.0f MB free at %s -- refusing to download the update",
+                    free / 1_000_000, dest_dir,
+                )
+                return None
+        except Exception:
+            log.debug("upgrade: free-space check failed; continuing", exc_info=True)
+
         tmp = dest_dir / _NEW_NAME
         digest = hashlib.sha256()
+        written = 0
         try:
-            with self._http_open(url, headers, DOWNLOAD_TIMEOUT) as resp, tmp.open("wb") as fh:
-                while True:
-                    chunk = resp.read(256 * 1024)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    digest.update(chunk)
+            with self._http_open(url, headers, DOWNLOAD_TIMEOUT) as resp:
+                status = redirect_status(resp)
+                if status is not None:
+                    raise _RedirectRefused(status)
+                with tmp.open("wb") as fh:
+                    while True:
+                        chunk = resp.read(256 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > MAX_DOWNLOAD_BYTES:
+                            raise ValueError(
+                                f"update exceeded the "
+                                f"{MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB ceiling"
+                            )
+                        fh.write(chunk)
+                        digest.update(chunk)
         except Exception as exc:
-            log.warning("upgrade: download failed: %s", exc)
+            code = getattr(exc, "code", None)
+            try:
+                is_redirect = isinstance(exc, _RedirectRefused) or (
+                    isinstance(exc, urllib.error.HTTPError) and 300 <= int(code) < 400
+                )
+            except (TypeError, ValueError):
+                # Nothing in this handler may raise: it runs on the path where
+                # the running exe is about to be renamed.
+                is_redirect = False
+            if is_redirect:
+                # NOT followed, deliberately -- see build_no_redirect_opener.
+                # The origin check above is worthless if a redirect can move
+                # the download (and the X-CCSync-Token header) elsewhere
+                # afterwards (AUDIT_3 H-1).
+                log.error(
+                    "upgrade: REFUSING the update download -- %s answered with a "
+                    "redirect (HTTP %s). The update must be served by the dashboard "
+                    "itself; nothing was downloaded and no token was re-sent.",
+                    url, code or "3xx",
+                )
+            else:
+                log.warning("upgrade: download failed: %s", exc)
             self._unlink_quietly(tmp)
             return None
         if digest.hexdigest() != info.get("sha256"):
@@ -229,17 +404,23 @@ class UpgradeManager:
             return False
 
         old = exe.with_name(exe.name + _OLD_SUFFIX)
+        # `except Exception` throughout: _replace is injectable and os.replace
+        # is not limited to OSError (CORE-H7). Anything escaping here kills
+        # the tray daemon thread while the exe may not exist.
         try:
             self._replace(exe, old)
-        except OSError as exc:
+        except Exception as exc:
             log.warning("upgrade: could not move the running exe aside: %s", exc)
             self._unlink_quietly(new)
             return False
         try:
             self._replace(new, exe)
-        except OSError as exc:
+        except Exception as exc:
             log.warning("upgrade: could not move the new exe into place: %s -- rolling back", exc)
             self._rollback(old, exe, aside=None)
+            # The new build is still parked at .new.exe and we are not going
+            # to run it -- don't leave 20 MB behind.
+            self._unlink_quietly(new)
             return False
         try:
             self._spawn(exe)
@@ -258,16 +439,35 @@ class UpgradeManager:
 
     def _rollback(self, old: Path, exe: Path, aside: Optional[Path]) -> None:
         """Restore `old` to `exe`; if the failed new build currently sits at
-        `exe`, park it back at `aside` first so the restore can land."""
+        `exe`, park it back at `aside` first so the restore can land.
+
+        `except Exception`, not `except OSError`: `_replace` is an injectable
+        callable and os.replace can raise TypeError/ValueError (surrogate
+        path) or anything a wrapper raises. A raise here escaped
+        _apply_inner -> apply() -> app.apply_upgrade() -> the tray's dialog
+        handler, killing the tray daemon thread to invisible stderr WHILE
+        `exe` did not exist -- renamed to `.old`, with the new build parked
+        at `.new.exe` (AUDIT_2 CORE-H7). Rollback is the last line of
+        defence; it may not have a failure mode of its own."""
+        restored = False
         try:
             if aside is not None:
                 self._replace(exe, aside)
             self._replace(old, exe)
-        except OSError:
-            log.error(
+            restored = True
+        except Exception:
+            log.exception(
                 "upgrade: ROLLBACK FAILED -- the previous build is at %s; "
                 "rename it back to %s by hand", old, exe.name,
             )
+        if not restored:
+            return
+        log.info("upgrade: rolled back to the previous build at %s", exe)
+        # The rollback SUCCEEDED, so `aside` now holds ~20 MB of a build we
+        # just refused to run. It was never unlinked (AUDIT_2 CORE-H7) and
+        # would be silently truncated by the next apply()'s "wb" open.
+        if aside is not None:
+            self._unlink_quietly(aside)
 
     @staticmethod
     def _unlink_quietly(path: Path) -> None:
@@ -301,6 +501,14 @@ class UpgradeManager:
             k: v for k, v in os.environ.items()
             if not k.startswith("_PYI") and not k.startswith("_MEI")
         }
+        # Same reasoning one level up: resolve_bridge pins PYTHONHOME/
+        # PYTHON3HOME at THIS process's _MEI... dir so fusionscript.dll loads
+        # our python3.dll. The bootloader deletes that dir seconds from now,
+        # so inheriting them points the new instance's Python at a vanished
+        # directory (AUDIT_2 CORE-M6).
+        from . import resolve_bridge
+
+        env = resolve_bridge.sanitized_child_env(env)
         env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         subprocess.Popen(
             [str(exe)],

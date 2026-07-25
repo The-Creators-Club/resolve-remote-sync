@@ -9,9 +9,12 @@ folders are indistinguishable.
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Iterable
+
+log = logging.getLogger("ccsync.dashboard.provision")
 
 VIDEO_EXTENSIONS = [
     ".braw", ".mov", ".mp4", ".mxf", ".avi", ".mts", ".m2ts", ".mkv",
@@ -73,18 +76,72 @@ def build_stignore_lines() -> list[str]:
 # helpers -- intentional copy, keep in sync.
 MARKER_FILENAME = ".ccsync-project"
 
+# Intentional copy of server/common.py's SLUG_RE (same reason as slugify:
+# the container cannot import server/). A marker is a plain JSON file on a
+# share every editor can write, and its slug becomes a Syncthing FOLDER ID,
+# a filesystem-ish path component in log lines, and a dashboard URL segment
+# -- a hand-dropped {"slug": "../../etc"} or {"slug": "a/b"} must never get
+# that far. read_marker enforces it at the only place markers are read.
+SLUG_RE = re.compile(r"^[a-z0-9-]+$")
+
 
 def read_marker(directory: Path) -> str | None:
-    """The marker's slug, or None (missing/unreadable/malformed -- never
-    raises; callers treat None as 'not a project' or log-and-skip)."""
+    """The marker's slug, or None (missing/unreadable/malformed/invalid slug
+    -- never raises; callers treat None as 'not a project' or log-and-skip)."""
     import json
 
     try:
         data = json.loads((Path(directory) / MARKER_FILENAME).read_text(encoding="utf-8-sig"))
         slug = str(data.get("slug", "")).strip()
-        return slug or None
     except (OSError, ValueError):
         return None
+    if not slug:
+        return None
+    if not SLUG_RE.match(slug):
+        log.warning(
+            "IGNORING project marker in %s: slug %r is not a valid identity "
+            "(only lowercase a-z, 0-9 and '-'; it becomes a Syncthing folder id "
+            "and a dashboard URL segment)", directory, slug)
+        return None
+    return slug
+
+
+def marked_ancestor(projects_dir: Path, rel: str, include_self: bool = True) -> str | None:
+    """The rel of the closest ancestor of `rel` (optionally `rel` itself)
+    carrying a valid project marker, or None. Projects cannot nest."""
+    projects_dir = Path(projects_dir)
+    parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p]
+    start = len(parts) if include_self else len(parts) - 1
+    for i in range(start, 0, -1):
+        if read_marker(projects_dir / Path(*parts[:i])) is not None:
+            return "/".join(parts[:i])
+    return None
+
+
+def marked_descendants(directory: Path, max_depth: int = 8) -> list[str]:
+    """Rel paths (relative to `directory`) BELOW it that carry a marker.
+
+    scan_project_dirs prunes its descent at every marker, so a marker
+    hand-dropped on a CONTAINER (e.g. Projects/2026/CCT/) makes every real
+    project underneath vanish from discovery -- and provisioning a Syncthing
+    folder for the container then either nests folders or 400s and aborts the
+    whole cycle. This is the direct look-below that catches that case."""
+    import os as _os
+
+    directory = Path(directory)
+    found: list[str] = []
+    for dirpath, dirnames, filenames in _os.walk(directory):
+        current = Path(dirpath)
+        rel = current.relative_to(directory)
+        parts = () if rel == Path(".") else rel.parts
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if len(parts) >= max_depth:
+            dirnames[:] = []
+        if parts and MARKER_FILENAME in filenames:
+            found.append(rel.as_posix())
+            dirnames[:] = []   # no nested projects below a project
+    found.sort()
+    return found
 
 
 def write_marker(directory: Path, slug: str, created_by: str = "dashboard") -> None:
@@ -151,6 +208,14 @@ def build_folder_config(
         # dataset is aclmode=restricted; chmod fails without this
         "ignorePerms": True,
         "rescanIntervalS": 3600,
+        # WAN pull tuning (AUDIT_2 P6/§4.2). Both are per-folder puller
+        # knobs: maxConcurrentWrites raises in-flight block writes from
+        # Syncthing's default 2, and pullerMaxPendingKiB (64 MiB) lets the
+        # puller keep more blocks in flight on a high-latency link.
+        # copiers/hashers are deliberately left unset (0 == auto): pinning
+        # them is how you starve a box with many folders.
+        "maxConcurrentWrites": 32,
+        "pullerMaxPendingKiB": 65536,
         "versioning": {
             "type": "staggered",
             "params": {"cleanInterval": "3600", "maxAge": "31536000"},

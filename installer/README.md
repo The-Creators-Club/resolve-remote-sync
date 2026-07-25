@@ -10,10 +10,26 @@ built separately in `companion/` and may not exist on disk yet).
 
 **Status:** the Windows script has now been run end-to-end on a real editor
 machine (`DESKTOP-LQQ41TC`, 2026-07-24); the bugs that run exposed are fixed
-here and listed under "Fixed after the first live run" below. The macOS
-script is syntax-checked with `bash -n` and exercised with `--dry-run` under
-Git Bash only -- it has **not** been run on an actual Mac, though it carries
-the same fixes.
+here and listed under "Fixed after the first live run" below. `onboard.exe`
+(built from `onboarding/`) wraps it and is the path a new Windows editor
+should actually take.
+
+**macOS is not a supported editor platform yet.** `macos_bootstrap.sh` is
+syntax-checked with `bash -n` and exercised with `--dry-run` under Git Bash
+only -- it has never been run on an actual Mac. More importantly **there is
+no macOS companion app**: nothing in this repo builds or ships one, so the
+script sets up rclone and Syncthing and stops. A Mac editor ends up with no
+tray app, no lane A/B sync, no out-of-tree popup and no dashboard reporting.
+The script now says so loudly at the top. Don't hand this package to a Mac
+editor without talking to them first.
+
+**Building and shipping a companion release is documented in
+[`../docs/RELEASE.md`](../docs/RELEASE.md)** — `tools\release.ps1` (parity
+check + tests + PyInstaller + provenance manifest), then
+`build_editor_package.ps1 -Publish -MakeCurrent`, then verify with
+`tools\check_deploy_drift.ps1`. Read it before concluding that a fix "didn't
+work": on 2026-07-25 a rig ran v0.4.3 for an afternoon while every fix was
+being verified against v0.4.5.
 
 ## The editor package
 
@@ -51,11 +67,26 @@ Publishing needs the version bumped first — in BOTH
 `companion/pyproject.toml` — and prompts for the dashboard admin password
 (`-AdminUser`, default `alex`; `-DashboardUrl` defaults to the tailnet
 address). Without `-MakeCurrent` the build is staged until you flip
-`[ MAKE CURRENT ]` on the dashboard's admin page. Full runbook:
-`docs/SERVER.md` → "Publishing a companion update".
+`[ MAKE CURRENT ]` on the dashboard's admin page. Publishing **keeps every
+previous build** (nothing is auto-pruned any more, so rollback stays
+available); add `?prune=1` to the publish URL if you deliberately want the
+old current-plus-2 trimming. Full runbook: `docs/SERVER.md` → "Publishing a
+companion update".
 
-Contents: `START_HERE.md`, `windows_bootstrap.ps1`, `macos_bootstrap.sh`,
-`EDITOR_SETUP.md`, `config.example.toml`, `ccsync-companion.exe`.
+Contents (10 files, all copied by `build_editor_package.ps1`):
+
+| File | Why it's there |
+|---|---|
+| `onboard.exe` | **The primary path.** One-click wizard: clean slate, bootstrap, account verification, sign-in. What a new Windows editor runs. |
+| `START_HERE.md` | The editor-facing quick start (wizard first, manual steps after). |
+| `FIRST_UPGRADE.md` | One-time hand-upgrade instructions for editors on a pre-self-update build. |
+| `windows_bootstrap.ps1` | Manual/repair install path (what `onboard.exe` drives internally). |
+| `windows_upgrade.ps1` | Manual upgrade: swaps the exe, keeps identity/config. |
+| `windows_uninstall.ps1` | Removal; `-Full` also drops sign-in + Syncthing identity. |
+| `macos_bootstrap.sh` | rclone + Syncthing only -- see the macOS status note above. |
+| `EDITOR_SETUP.md` | The long-form setup reference. Copied **flat**, so its commands must not reference an `installer\` prefix or `../` links. |
+| `config.example.toml` | Reference copy of every companion config key. |
+| `ccsync-companion.exe` | The tray app itself, for the manual path and repairs. |
 
 Note this path does **not** reach editors automatically. Lane B's filter only
 pulls down `Proxy/` contents and the Syncthing folders are scoped to
@@ -77,13 +108,16 @@ every branch is a plain `if`/`else`. Requires an execution-policy bypass to
 run at all on a default Windows install, e.g.:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\windows_bootstrap.ps1 -TailnetHost <host> -EditorName <name>
+powershell -ExecutionPolicy Bypass -File .\windows_bootstrap.ps1 -TailnetHost <host> -EditorName <name> -DashboardToken <token>
 ```
 
-An elevated shell is **preferred but not required**: registering the logon
-scheduled task needs admin rights, and without them the script falls back to
-an equivalent `HKCU\...\Run` entry, warns, and carries on. No step aborts the
-run.
+**Run it from a normal, unelevated shell.** Do not tell an editor to "Run as
+Administrator": the whole script runs in one process, and a drive mapped by
+an elevated token is invisible to the user's normal session (UAC linked-token
+isolation), so Resolve sees no `P:` until the next logon. The script raises
+UAC by itself, once, for the only step that needs it (creating the loopback
+share), and falls back to an `HKCU\...\Run` entry where it can't register a
+scheduled task. No step aborts the run.
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -92,7 +126,10 @@ run.
 | `-LocalRoot` | `C:\Creators_Club` | Point at a volume with room for originals + proxies. |
 | `-RemoteRoot` | `/mnt/tank/TheCreatorsPool/Creators_Club` | Must be absolute -- see below. |
 | `-DriveLabel` | `TheCreatorsClub` | Explorer display name for `P:`. |
-| `-CompanionExePath` | under `%LOCALAPPDATA%\ccsync\bin` | Skipped with a note if absent. |
+| `-CompanionExePath` | `%LOCALAPPDATA%\ccsync\bin\ccsync-companion.exe` | Where the companion is expected to live and what gets autostarted. Skipped with a note if absent. |
+| `-CompanionExeSource` | *(none)* | Path to the exe in the package; copies it to `-CompanionExePath` if missing/older, then registers autostart. Without it the editor has to place the exe there by hand. |
+| `-DashboardUrl` | `http://100.71.216.3:8480` | Written to the seeded `config.toml` as `dashboard_url`. |
+| `-DashboardToken` | *(empty)* | Written as `dashboard_token`. **Required for a reporting (managed) install** -- with it blank the companion never reports and never receives the editor's project ticks, i.e. a silently unmanaged machine. |
 | `-DryRun` | off | Prints every action, touches nothing. |
 
 Steps (each idempotent, each prints what it did/skipped):
@@ -105,8 +142,8 @@ Steps (each idempotent, each prints what it did/skipped):
    goes stale -- see below).
 4. The local sync root (`-LocalRoot`).
 5. Maps `P:` to `<LocalRoot>`. Preferred: creates a private loopback SMB
-   share `CCSync_P` of the local root (admin-only -- done directly when
-   elevated, else via a one-off UAC prompt) and maps
+   share `CCSync_P` of the local root (admin-only -- via a one-off UAC
+   prompt, which is why the script itself must not be run elevated) and maps
    `net use P: \\localhost\CCSync_P /persistent:yes` -- self-restores at
    logon with no scheduled task, and (crucially) net-use drives are the
    only kind Explorer can display-name. The `net use` itself deliberately
@@ -132,11 +169,13 @@ Steps (each idempotent, each prints what it did/skipped):
    (`%USERPROFILE%\.ssh\ccsync_ed25519`) doesn't exist yet -- generating it
    and sending the `.pub` to the admin is a separate manual step.
 9. Seeds `~/.ccsync/config.toml` with the values it already knows
-   (`editor_name`, `local_root`, `remote`, `remote_root`). If the file
-   already exists it is left alone and the expected values are printed for
-   comparison.
-10. Registers `ccsync-companion.exe` to autostart via `HKCU\...\Run` --
-    guarded: skipped with a note if the exe doesn't exist yet.
+   (`editor_name`, `local_root`, `remote`, `remote_root`, plus
+   `dashboard_url` / `dashboard_token` from the matching parameters). If the
+   file already exists it is left alone and the expected values are printed
+   for comparison.
+10. Installs the companion from `-CompanionExeSource` (if given) to
+    `-CompanionExePath`, then registers it to autostart via `HKCU\...\Run` --
+    guarded: skipped with a note if no exe is there.
 11. Prints the Syncthing device ID and the remaining manual steps.
 
 ## macos_bootstrap.sh
@@ -150,10 +189,12 @@ downloads of official release archives otherwise. Accepts `--local-root`
 (default `~/Creators_Club`) and `--remote-root`. Uses a path instead of a
 drive letter (Resolve's Mapped Mount preference bridges the two -- manual,
 one-time, documented in `../docs/EDITOR_SETUP.md`, since it isn't exposed by
-the scripting API). Syncthing and (if present) the companion app are wired to
-autostart via `LaunchAgent` plists in `~/Library/LaunchAgents/`, and the
-script now **loads them** (`launchctl bootstrap`, falling back to `launchctl
-load`) rather than just printing the command.
+the scripting API). Syncthing is wired to autostart via a `LaunchAgent` plist
+in `~/Library/LaunchAgents/`, and the script now **loads it** (`launchctl
+bootstrap`, falling back to `launchctl load`) rather than just printing the
+command. The companion step is dead code today -- there is no macOS companion
+build for it to find, so it always warns and skips; see the macOS status note
+at the top of this file.
 
 `--dry-run` prints every action it would take without touching the filesystem
 or writing any LaunchAgent.
@@ -214,11 +255,13 @@ on a new editor's machine. Recorded here because most of these fail
   verified against a live winget source -- if any 404, the script falls back
   to the next method (scoop/direct download for rclone and Syncthing; a
   printed manual URL for Tailscale).
-- **Companion app packaging** (a single `ccsync-companion.exe` on Windows, a
-  `.app` bundle on Mac) is a placeholder assumption -- adjust
-  `-CompanionExePath` / `--companion-app-path` (and the LaunchAgent's
-  `ProgramArguments` on Mac) once the actual `companion/` build output is
-  known.
+- **Companion app packaging.** Windows is settled: a single
+  `ccsync-companion.exe`, installed to `%LOCALAPPDATA%\ccsync\bin` and
+  autostarted from there. The Mac side is **not** -- `macos_bootstrap.sh`
+  looks for a `.app` bundle that nothing in this repo builds or ships, so
+  its companion step always skips. Until a `.app` exists (and is notarized,
+  or shipped with documented `xattr -dr com.apple.quarantine` instructions),
+  macOS editors have no companion at all.
 - Both scripts assume the editor will run `ssh-keygen` themselves (or the
   admin will send them a keypair) for the rclone SFTP remote -- neither
   script generates one, since a fresh keypair with no matching account yet is

@@ -43,8 +43,10 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import threading
 import time
 import urllib.error
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -162,6 +164,43 @@ def _http_error_message(exc: urllib.error.HTTPError) -> str:
     }.get(exc.code, f"sign-in failed (HTTP {exc.code})")
 
 
+# Set once per process by _warn_if_plaintext(): sign-in is a tray action an
+# editor may repeat all day, and one warning is a note, twenty are noise.
+_PLAINTEXT_WARNED = False
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "[::1]", "localhost"}
+
+
+def _warn_if_plaintext(dashboard_url: str) -> None:
+    """Warn ONCE when sign-in will POST the editor's TrueNAS password over
+    plain HTTP to a non-loopback host.
+
+    DELIBERATELY NOT A REFUSAL. The current deployment is http over
+    LAN/Tailscale by design, and refusing here would lock every editor out of
+    a working system to fix a risk the tailnet already bounds -- but a
+    password crossing the wire in clear should not be invisible either
+    (AUDIT_3 L-13). The fix when it comes is TLS on the dashboard (a reverse
+    proxy in front of the container, or Tailscale HTTPS certs); see the
+    dashboard's deploy notes. Never raises."""
+    global _PLAINTEXT_WARNED
+    if _PLAINTEXT_WARNED:
+        return
+    try:
+        parsed = urllib.parse.urlparse(str(dashboard_url or "").strip())
+        host = (parsed.hostname or "").strip().lower()
+        if parsed.scheme.lower() != "http" or not host or host in _LOOPBACK_HOSTS:
+            return
+        _PLAINTEXT_WARNED = True
+        log.warning(
+            "sign-in posts your TrueNAS username and password to %s over plain HTTP "
+            "(no TLS) -- anyone able to read traffic between this machine and the "
+            "dashboard can read them. It is sent over the tailnet, not the open "
+            "internet; enable TLS on the dashboard to close this properly.",
+            dashboard_url,
+        )
+    except Exception:
+        log.debug("plaintext sign-in check failed", exc_info=True)
+
+
 def verify_credentials(
     dashboard_url: str,
     username: str,
@@ -173,6 +212,7 @@ def verify_credentials(
     {"ok": True, "username": ..., "token": ...} on success, or
     {"ok": False, "error": "..."} on any failure -- bad credentials,
     throttling, a misconfigured server, or a network error. Never raises."""
+    _warn_if_plaintext(dashboard_url)
     url = f"{str(dashboard_url).rstrip('/')}/api/v1/verify"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -221,6 +261,13 @@ class IdentityManager:
         self.cfg = cfg
         self._http_post = http_post
         self.path = identity_path(cfg)
+        # _identity is READ from the reporter thread and the tray refresh
+        # loop, and REASSIGNED from tray callback threads (sign_in/sign_out)
+        # and the app's expiry watcher. Without this, a sign_out() landing
+        # between a getter's valid() guard and its .get() raises
+        # AttributeError -- contained today only by the reporter's per-getter
+        # try/except (AUDIT_2 §2-low). Every access below goes through it.
+        self._lock = threading.RLock()
         self._identity: Optional[dict[str, Any]] = load_identity(self.path)
         # The `upgrade` advertisement from the most recent sign_in()'s verify
         # response, if any -- app.sign_in() forwards it to the
@@ -229,29 +276,41 @@ class IdentityManager:
         self.last_upgrade_info: Optional[dict[str, Any]] = None
 
     def valid(self) -> bool:
-        return is_valid(self._identity)
+        with self._lock:
+            return is_valid(self._identity)
+
+    def snapshot(self) -> Optional[dict[str, Any]]:
+        """A consistent copy of the identity, or None when it isn't valid.
+        Callers that need two fields must use this, not two properties."""
+        with self._lock:
+            if not is_valid(self._identity) or self._identity is None:
+                return None
+            return dict(self._identity)
 
     @property
     def username(self) -> Optional[str]:
-        if not self.valid() or self._identity is None:
+        identity = self.snapshot()
+        if identity is None:
             return None
-        username = str(self._identity.get("username", "")).strip()
+        username = str(identity.get("username", "")).strip()
         return username or None
 
     @property
     def token(self) -> Optional[str]:
-        if not self.valid() or self._identity is None:
+        identity = self.snapshot()
+        if identity is None:
             return None
-        return self._identity.get("token")
+        return identity.get("token")
 
     @property
     def role(self) -> Optional[str]:
         """"base" or "editor" as returned by the dashboard at sign-in, or
         None if not signed in / the dashboard didn't send one (older
         server). See app.py's _apply_identity_role()."""
-        if not self.valid() or self._identity is None:
+        identity = self.snapshot()
+        if identity is None:
             return None
-        role = self._identity.get("role")
+        role = identity.get("role")
         if not role:
             return None
         return str(role).strip().lower() or None
@@ -277,22 +336,28 @@ class IdentityManager:
         except OSError as exc:
             log.warning("sign_in: failed to persist identity to %s: %s", self.path, exc)
 
-        self._identity = {
-            "username": verified_username,
-            "token": token,
-            "role": role,
-            "verified_at": datetime.now(timezone.utc).isoformat(),
-        }
+        with self._lock:
+            self._identity = {
+                "username": verified_username,
+                "token": token,
+                "role": role,
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+            }
         if not self.valid():
             # The dashboard's response didn't yield a usable (parseable,
             # non-expired) token -- treat this as a failed sign-in rather
             # than silently adopting a broken identity.
-            self._identity = None
-            return False, "dashboard returned a malformed or already-expired token"
+            with self._lock:
+                self._identity = None
+            return False, (
+                "The server's sign-in reply couldn't be used. If this keeps happening, "
+                "check this machine's clock is correct, then tray -> Copy diagnostics for Alex."
+            )
         return True, None
 
     def sign_out(self) -> None:
-        self._identity = None
+        with self._lock:
+            self._identity = None
         try:
             self.path.unlink(missing_ok=True)
         except OSError:

@@ -24,7 +24,9 @@ version you're running doesn't know how to update itself yet. ~2 minutes.
 
 3. Check the tray icon is back (green/orange dot). Right-click it — if it
    says **NOT SIGNED IN**, click **Sign in…** and use your usual username
-   and password.
+   and password. Do this even if everything else looks fine: until the tray
+   reads `Signed in as <you>`, nothing syncs and your machine doesn't show
+   up on Alex's side at all.
 
 ## What you get
 

@@ -255,6 +255,242 @@ def test_ensure_ssh_key_skips_generation_when_present(tmp_path):
     assert pub_path.read_text() == "ssh-ed25519 AAAA... existing"
 
 
+# -- ensure_ssh_key: INST-22 (returncode + missing .pub + missing ssh-keygen) --
+
+
+def test_ensure_ssh_key_raises_when_ssh_keygen_missing(tmp_path):
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("ssh-keygen")
+
+    with pytest.raises(steps.SshKeyError) as exc:
+        steps.ensure_ssh_key(tmp_path, run=fake_run)
+    assert "OpenSSH" in str(exc.value)
+
+
+def test_ensure_ssh_key_raises_on_nonzero_returncode(tmp_path):
+    def fake_run(cmd, **kwargs):
+        return _FakeResult(returncode=1, stderr="Saving key failed: Permission denied\n")
+
+    with pytest.raises(steps.SshKeyError) as exc:
+        steps.ensure_ssh_key(tmp_path, run=fake_run)
+    assert "Permission denied" in str(exc.value)
+
+
+def test_ensure_ssh_key_raises_when_keygen_lies_about_success(tmp_path):
+    # Exit 0 but no .pub on disk -- the old code returned that path anyway and
+    # the Finish page said DONE next to a file that does not exist.
+    def fake_run(cmd, **kwargs):
+        return _FakeResult(returncode=0)
+
+    with pytest.raises(steps.SshKeyError):
+        steps.ensure_ssh_key(tmp_path, run=fake_run)
+
+
+def test_ensure_ssh_key_derives_pub_from_existing_private_key(tmp_path):
+    # INST-22: existing private key + missing .pub must NOT re-run
+    # `ssh-keygen -f <key>` (which prompts "Overwrite (y/n)?" against closed
+    # stdin, and would destroy a key the admin already installed on the NAS).
+    (tmp_path / "ccsync_ed25519").write_text("existing-private-key")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _FakeResult(returncode=0, stdout="ssh-ed25519 AAAAC3Nz derived\n")
+
+    pub_path = steps.ensure_ssh_key(tmp_path, run=fake_run)
+    assert len(calls) == 1
+    assert calls[0][:2] == ["ssh-keygen", "-y"]
+    assert "-N" not in calls[0]  # not a generate call
+    assert pub_path.read_text().strip() == "ssh-ed25519 AAAAC3Nz derived"
+
+
+def test_ensure_ssh_key_raises_when_derivation_produces_garbage(tmp_path):
+    (tmp_path / "ccsync_ed25519").write_text("not-really-a-key")
+
+    def fake_run(cmd, **kwargs):
+        return _FakeResult(returncode=0, stdout="")
+
+    with pytest.raises(steps.SshKeyError):
+        steps.ensure_ssh_key(tmp_path, run=fake_run)
+
+
+# -- S-6: every subprocess capture must decode explicitly ---------------------
+
+
+def _captured_kwargs(fn, *args, **kwargs):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        seen["cmd"] = cmd
+        return _FakeResult(returncode=0, stdout="")
+
+    fn(*args, run=fake_run, **kwargs)
+    return seen
+
+
+def test_tailscale_up_decodes_explicitly():
+    kwargs = _captured_kwargs(steps.tailscale_up)
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
+
+
+def test_ensure_ssh_key_decodes_explicitly(tmp_path):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        key_path = Path(cmd[cmd.index("-f") + 1])
+        key_path.write_text("private")
+        key_path.with_suffix(key_path.suffix + ".pub").write_text("ssh-ed25519 AAAA x")
+        return _FakeResult(returncode=0)
+
+    steps.ensure_ssh_key(tmp_path, run=fake_run)
+    assert seen["encoding"] == "utf-8" and seen["errors"] == "replace"
+
+
+def test_run_bootstrap_decodes_explicitly(tmp_path):
+    script = tmp_path / "windows_bootstrap.ps1"
+    script.write_text("# fake")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeResult(returncode=0, stdout="")
+
+    steps.run_bootstrap(editor_name="j", dashboard_token="t", tailnet_host="h",
+                        run=fake_run, script_path=script)
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+
+
+def test_run_bootstrap_survives_non_ascii_output(tmp_path):
+    # S-6: a `C:\Users\José` profile echoed back by the bootstrap used to
+    # raise UnicodeDecodeError out of the wizard's worker thread -- AFTER
+    # _clean_slate() had removed the working install.
+    script = tmp_path / "windows_bootstrap.ps1"
+    script.write_text("# fake")
+    noisy = "[ccsync] configuring for editor 'josé', local root 'C:\\Users\\José\\台北'\n"
+
+    def fake_run(cmd, **kwargs):
+        return _FakeResult(returncode=0, stdout=noisy)
+
+    exit_code, output = steps.run_bootstrap(
+        editor_name="josé", dashboard_token="t", tailnet_host="h",
+        run=fake_run, script_path=script,
+    )
+    assert exit_code == 0
+    assert "José" in output and "台北" in output
+
+
+def test_run_bootstrap_uses_noprofile_noninteractive(tmp_path):
+    # INST-23: a profile script that prompts hangs the install against this
+    # process's closed stdin, and surfaces as an unrelated bootstrap error.
+    script = tmp_path / "windows_bootstrap.ps1"
+    script.write_text("# fake")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeResult(returncode=0, stdout="")
+
+    steps.run_bootstrap(editor_name="j", dashboard_token="t", tailnet_host="h",
+                        run=fake_run, script_path=script)
+    assert "-NoProfile" in captured["cmd"]
+    assert "-NonInteractive" in captured["cmd"]
+    # ...and before -File, so PowerShell parses them as its own switches.
+    assert captured["cmd"].index("-NoProfile") < captured["cmd"].index("-File")
+
+
+# -- bootstrap_capability_warnings (INST-5) -----------------------------------
+
+
+class TestBootstrapCapabilityWarnings:
+    def test_empty_output_is_clean(self):
+        assert steps.bootstrap_capability_warnings("") == []
+        assert steps.bootstrap_capability_warnings("[ccsync] Bootstrap complete.\n") == []
+
+    def test_marker_lines_are_extracted_without_the_prefix(self):
+        output = (
+            "[ccsync] checking rclone...\n"
+            "[ccsync] WARNING: CAPABILITY MISSING: rclone is NOT installed.\n"
+            "[ccsync] WARNING: CAPABILITY MISSING: Syncthing is NOT installed.\n"
+            "[ccsync] Bootstrap complete.\n"
+        )
+        found = steps.bootstrap_capability_warnings(output)
+        assert found == ["rclone is NOT installed.", "Syncthing is NOT installed."]
+
+    def test_ordinary_warnings_are_not_capability_misses(self):
+        output = "[ccsync] WARNING: normalized -EditorName 'JSmith' -> 'jsmith'\n"
+        assert steps.bootstrap_capability_warnings(output) == []
+
+    def test_duplicates_collapse(self):
+        line = "[ccsync] WARNING: CAPABILITY MISSING: rclone is NOT installed.\n"
+        assert len(steps.bootstrap_capability_warnings(line * 3)) == 1
+
+    def test_legacy_phrasing_still_flagged(self):
+        # An onboard.exe paired with an older windows_bootstrap.ps1 must not
+        # silently report DONE.
+        output = "[ccsync] WARNING: could not determine a Syncthing download URL -- install manually\n"
+        assert steps.bootstrap_capability_warnings(output)
+
+
+# -- validate_local_root (INST-21) --------------------------------------------
+
+
+class TestValidateLocalRoot:
+    def _ok(self, value, role="editor", drives=("C", "D")):
+        return steps.validate_local_root(
+            value, role, drive_exists=lambda letter: letter in drives)
+
+    def test_accepts_a_normal_path(self):
+        assert self._ok(r"C:\Creators_Club") is None
+        assert self._ok(r"D:\Video\Creators_Club") is None
+
+    def test_rejects_blank(self):
+        assert self._ok("") is not None
+        assert self._ok("   ") is not None
+
+    def test_rejects_trailing_whitespace(self):
+        problem = self._ok("C:\\Creators_Club ")
+        assert problem is not None and "space" in problem
+
+    def test_rejects_relative_and_bare_names(self):
+        assert self._ok("Creators_Club") is not None
+        assert self._ok(r"\Creators_Club") is not None
+
+    def test_rejects_unc_path_with_a_specific_reason(self):
+        problem = self._ok(r"\\nas\share\Creators_Club")
+        assert problem is not None and "network path" in problem
+
+    def test_rejects_a_double_quote(self):
+        # Breaks `cmd /c subst P: "<root>"` irrecoverably (INST-2).
+        problem = self._ok('C:\\Creat"ors')
+        assert problem is not None and "double-quote" in problem
+
+    def test_rejects_a_drive_that_does_not_exist(self):
+        problem = self._ok(r"Z:\Creators_Club")
+        assert problem is not None and "Z:" in problem
+
+    def test_rejects_p_drive_for_an_editor(self):
+        # The install unmounts P: and remaps it AT this folder; Ensure-Dir
+        # then runs against a drive that no longer exists, mid-install.
+        problem = self._ok(r"P:\Creators_Club", drives=("C", "P"))
+        assert problem is not None and "P:" in problem
+        assert self._ok(r"p:\Creators_Club", drives=("C", "P")) is not None
+
+    def test_allows_p_drive_for_the_base_rig(self):
+        # The base flow never touches drive mappings.
+        assert self._ok(r"P:\Creators_Club", role="base", drives=("C", "P")) is None
+
+    def test_a_broken_drive_probe_never_blocks_the_install(self):
+        def exploding(letter):
+            raise OSError("probe blew up")
+
+        assert steps.validate_local_root(r"C:\Creators_Club", "editor",
+                                          drive_exists=exploding) is None
+
+
 # -- read_pubkey ------------------------------------------------------
 
 

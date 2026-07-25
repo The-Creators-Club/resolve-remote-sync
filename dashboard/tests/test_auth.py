@@ -98,13 +98,46 @@ def test_login_gate_allows_authenticated(client):
 def test_selection_open_with_token_but_gated_without(tmp_path):
     settings = Settings(db_path=str(tmp_path / "t.db"), session_secret=SECRET, report_token="tok")
     app = create_app(settings)
+    identity = auth.make_identity_token(SECRET, "jsmith")
     with TestClient(app) as c:
-        # companion token path bypasses the gate
-        assert c.get("/api/v1/selection/jsmith", headers={"X-CCSync-Token": "tok"}).status_code == 200
+        # companion token + matching identity bypasses the gate
+        assert c.get("/api/v1/selection/jsmith",
+                     headers={"X-CCSync-Token": "tok",
+                              "X-CCSync-Identity": identity}).status_code == 200
         # without token and without session -> gated
         assert c.get("/api/v1/selection/jsmith").status_code == 401
         # wrong token -> gated
         assert c.get("/api/v1/selection/jsmith", headers={"X-CCSync-Token": "no"}).status_code == 401
+
+
+def test_selection_read_with_the_shared_token_needs_a_matching_identity(tmp_path):
+    """The report token is a SHARED secret /api/v1/verify hands to every
+    editor, so on its own it said nothing about WHOSE selection was being
+    read: any editor could enumerate the whole fleet's queues and sticky
+    project-root mappings. Same identity rule as /api/v1/report."""
+    settings = Settings(db_path=str(tmp_path / "si.db"), session_secret=SECRET,
+                        report_token="tok")
+    with TestClient(create_app(settings)) as c:
+        token_only = {"X-CCSync-Token": "tok"}
+        assert c.get("/api/v1/selection/jsmith", headers=token_only).status_code == 401
+        # a valid identity for SOMEONE ELSE is not enough either
+        wrong = dict(token_only, **{"X-CCSync-Identity": auth.make_identity_token(SECRET, "ruskin")})
+        assert c.get("/api/v1/selection/jsmith", headers=wrong).status_code == 401
+        # a session cookie is not an identity token
+        stale = dict(token_only, **{"X-CCSync-Identity": auth.make_session_cookie(SECRET, "jsmith")})
+        assert c.get("/api/v1/selection/jsmith", headers=stale).status_code == 401
+        right = dict(token_only, **{"X-CCSync-Identity": auth.make_identity_token(SECRET, "jsmith")})
+        assert c.get("/api/v1/selection/jsmith", headers=right).status_code == 200
+
+
+def test_selection_read_falls_back_to_token_only_without_a_session_secret(tmp_path):
+    """A server with no DASH_SESSION_SECRET can neither mint nor verify
+    identity tokens (dashboard login is off too), so demanding one there
+    would simply break lab deployments -- same carve-out /api/v1/report has."""
+    settings = Settings(db_path=str(tmp_path / "nosec.db"), report_token="tok")
+    with TestClient(create_app(settings)) as c:
+        assert c.get("/api/v1/selection/jsmith",
+                     headers={"X-CCSync-Token": "tok"}).status_code == 200
 
 
 def test_verify_endpoint_returns_identity_token(client):
@@ -121,6 +154,120 @@ def test_verify_endpoint_returns_identity_token(client):
     # onboarding smoothness: the report token comes back so the installer
     # needs no extra secret from the editor
     assert "report_token" in body
+
+
+def test_verify_only_mints_identities_for_fleet_members(tmp_path):
+    """The credential check is an SMB session setup, so ANY account the NAS's
+    SMB service accepts -- a bookkeeper, a share user -- came back with a
+    valid identity token AND the shared report_token, i.e. the ability to
+    write reports and read selections. Membership of `editors` (or
+    DASH_ADMIN_USERS) is the fleet definition create_or_update_editor already
+    enforces."""
+    from fake_truenas import FakeTrueNAS
+
+    truenas = FakeTrueNAS().start()
+    try:
+        truenas.state["groups"].append({"id": 111, "group": "editors", "gid": 3001})
+        truenas.state["users"].extend([
+            {"id": 5, "uid": 3010, "username": "jsmith", "full_name": "jsmith",
+             "home": "/h/jsmith", "group": {"id": 111}, "groups": [111],
+             "sshpubkey": None, "smb": True, "locked": False, "password_disabled": False},
+            {"id": 6, "uid": 4000, "username": "bookkeeper", "full_name": "bookkeeper",
+             "home": "/h/book", "group": {"id": 60}, "groups": [60], "sshpubkey": None,
+             "smb": True, "locked": False, "password_disabled": False},
+            {"id": 7, "uid": 0, "username": "root", "full_name": "root", "home": "/root",
+             "group": {"id": 5}, "groups": [5], "sshpubkey": None, "smb": True,
+             "locked": False, "password_disabled": False},
+        ])
+        settings = Settings(db_path=str(tmp_path / "v.db"), session_secret=SECRET,
+                            report_token="tok", admin_users=frozenset({"alex"}),
+                            truenas_pw="fake-pw", truenas_base_url=truenas.base_url)
+        app = create_app(settings)
+        app.state.credential_verifier = lambda s, u, p: p == "pw"   # SMB says yes to all
+        with TestClient(app) as c:
+            def verify(username):
+                return c.post("/api/v1/verify", json={"username": username, "password": "pw"})
+
+            assert verify("jsmith").status_code == 200                    # editor
+            assert verify("alex").status_code == 200                      # DASH_ADMIN_USERS
+            for outsider in ("bookkeeper", "root", "ghost"):
+                resp = verify(outsider)
+                assert resp.status_code == 403, outsider
+                assert "editors" in resp.json()["detail"]
+                assert "report_token" not in resp.text
+    finally:
+        truenas.stop()
+
+
+def test_verify_is_retryable_not_open_when_truenas_is_unreachable(tmp_path):
+    """Fail closed but retryable: a NAS blip must never quietly hand out
+    identities, nor permanently brick sign-in."""
+    settings = Settings(db_path=str(tmp_path / "vu.db"), session_secret=SECRET,
+                        truenas_pw="fake-pw",
+                        truenas_base_url="http://127.0.0.1:9/api/v2.0")   # discard port
+    app = create_app(settings)
+    app.state.credential_verifier = lambda s, u, p: True
+    with TestClient(app) as c:
+        resp = c.post("/api/v1/verify", json={"username": "jsmith", "password": "pw"})
+        assert resp.status_code == 503
+        assert "try again" in resp.json()["detail"]
+
+
+def test_verify_skips_the_group_check_without_truenas_credentials(tmp_path):
+    """Same degrade-don't-crash convention as the admin Users section: with
+    no TRUENAS_PW there is nothing to check against, and locking every
+    companion out of a TrueNAS-less deployment is not the answer."""
+    settings = Settings(db_path=str(tmp_path / "vn.db"), session_secret=SECRET)
+    app = create_app(settings)
+    app.state.credential_verifier = lambda s, u, p: True
+    with TestClient(app) as c:
+        assert c.post("/api/v1/verify",
+                      json={"username": "jsmith", "password": "pw"}).status_code == 200
+
+
+def test_session_cookie_secure_flag_follows_the_scheme(tmp_path):
+    """secure=True on today's plain-http LAN deployment makes the browser
+    silently drop the cookie -- an unloggable total outage. auto = on for
+    https only; DASH_COOKIE_SECURE forces either way."""
+    from ccsync_dashboard import auth as authmod
+
+    def cookie_header(settings, headers=None):
+        app = create_app(settings)
+        app.state.credential_verifier = lambda s, u, p: True
+        with TestClient(app) as c:
+            resp = c.post("/api/v1/login", json={"username": "jsmith", "password": "pw"},
+                          headers=headers or {})
+            assert resp.status_code == 200
+            return resp.headers["set-cookie"].lower()
+
+    auto = Settings(db_path=str(tmp_path / "c1.db"), session_secret=SECRET)
+    assert "secure" not in cookie_header(auto)                       # http today
+    assert "httponly" in cookie_header(auto) and "samesite=lax" in cookie_header(auto)
+    # a TLS terminator in front is the only way this deployment sees https
+    assert "secure" in cookie_header(auto, {"X-Forwarded-Proto": "https"})
+
+    forced = Settings(db_path=str(tmp_path / "c2.db"), session_secret=SECRET,
+                      cookie_secure="1")
+    assert "secure" in cookie_header(forced)
+    off = Settings(db_path=str(tmp_path / "c3.db"), session_secret=SECRET,
+                   cookie_secure="0")
+    assert "secure" not in cookie_header(off, {"X-Forwarded-Proto": "https"})
+
+    assert Settings.from_env({}).cookie_secure == "auto"
+    assert Settings.from_env({"DASH_COOKIE_SECURE": "1"}).cookie_secure == "1"
+    assert authmod.cookie_secure is not None
+
+
+def test_session_cookie_secure_flag_on_the_html_login_form(tmp_path):
+    settings = Settings(db_path=str(tmp_path / "c4.db"), session_secret=SECRET,
+                        cookie_secure="1")
+    app = create_app(settings)
+    app.state.credential_verifier = lambda s, u, p: True
+    with TestClient(app) as c:
+        resp = c.post("/login", data={"username": "jsmith", "password": "pw"},
+                      follow_redirects=False)
+        assert resp.status_code == 303
+        assert "secure" in resp.headers["set-cookie"].lower()
 
 
 def test_session_cookie_not_accepted_as_identity_token():
@@ -174,7 +321,15 @@ def test_login_throttle_evicts_expired_entries():
     assert len(auth._failures) == 0  # all 50 stale entries evicted by the sweep
 
 
-def test_report_marks_machine_verified_with_identity(tmp_path):
+def test_report_requires_a_matching_identity_header(tmp_path):
+    """The report token is a SHARED secret handed to every editor by
+    /api/v1/verify, so it cannot prove WHO is reporting. A valid
+    X-CCSync-Identity naming the same editor is therefore required: without
+    it, bob could post as alice and overwrite her lane state, machine_state,
+    live transfers and presence rows (proved live in the round-2 audit).
+
+    BEHAVIOUR CHANGE: pre-upgrade companions that send no identity header are
+    rejected with 401 rather than written as unverified."""
     from ccsync_dashboard import db as dbmod
     settings = Settings(db_path=str(tmp_path / "v.db"), session_secret=SECRET, report_token="tok")
     app = create_app(settings)
@@ -182,32 +337,78 @@ def test_report_marks_machine_verified_with_identity(tmp_path):
         conn = dbmod.connect(tmp_path / "v.db")
         payload = {"editor_name": "jsmith", "machine": "PC", "reported_at": "2026-07-25T10:00:00+00:00",
                    "lanes": [{"name": "lane_a_video_up", "state": "idle"}]}
-        # no identity header -> unverified
-        c.post("/api/v1/report", json=payload, headers={"X-CCSync-Token": "tok"})
-        assert dbmod.fetch_verified_map(conn) == {("jsmith", "PC"): False}
-        # valid identity token matching editor -> verified
+        # no identity header -> REJECTED, and nothing written
+        resp = c.post("/api/v1/report", json=payload, headers={"X-CCSync-Token": "tok"})
+        assert resp.status_code == 401
+        assert "X-CCSync-Identity" in resp.json()["detail"]
+        assert dbmod.fetch_verified_map(conn) == {}
+        assert conn.execute("SELECT COUNT(*) FROM lane_report_current").fetchone()[0] == 0
+
+        # valid identity token matching editor -> accepted and verified
         token = auth.make_identity_token(SECRET, "jsmith")
-        c.post("/api/v1/report", json=payload,
-               headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": token})
+        resp = c.post("/api/v1/report", json=payload,
+                      headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": token})
+        assert resp.status_code == 200
         assert dbmod.fetch_verified_map(conn) == {("jsmith", "PC"): True}
-        # a token for a DIFFERENT user does not silently pass through as
-        # unverified -- SEC-5: it's an outright spoofing attempt, rejected
-        # before any write, so jsmith's prior verified state is unchanged.
+
+        # a token for a DIFFERENT user is an outright spoofing attempt,
+        # rejected before any write, so jsmith's rows are unchanged.
         other = auth.make_identity_token(SECRET, "someoneelse")
         resp = c.post("/api/v1/report", json=payload,
                       headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": other})
         assert resp.status_code == 401
         assert dbmod.fetch_verified_map(conn) == {("jsmith", "PC"): True}
-        # a session cookie in the identity header (not an identity token) is
-        # simply invalid -- treated the same as absent (id_user is None, so
-        # it's not a spoofing rejection), which means it does NOT verify
-        # jsmith's report either.
+
+        # a session cookie is not an identity token: invalid, so rejected too
+        # (it can no longer sneak through as an unverified write).
         session_cookie = auth.make_session_cookie(SECRET, "someoneelse")
         resp = c.post("/api/v1/report", json=payload,
                       headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": session_cookie})
-        assert resp.status_code == 200
+        assert resp.status_code == 401
+        assert dbmod.fetch_verified_map(conn) == {("jsmith", "PC"): True}
+
+        # An expired identity token is rejected with a "sign in again" message
+        # rather than silently downgrading to an unverified write.
+        expired = auth.make_identity_token(SECRET, "jsmith", now=1000.0)
+        resp = c.post("/api/v1/report", json=payload,
+                      headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": expired})
+        assert resp.status_code == 401 and "expired" in resp.json()["detail"]
+        conn.close()
+
+
+def test_report_without_session_secret_cannot_require_identity(tmp_path):
+    """A server with no DASH_SESSION_SECRET cannot mint OR verify identity
+    tokens at all (dashboard login is disabled too), so requiring the header
+    there would make reports impossible. Lab/token-optional deployments keep
+    working -- unverified."""
+    from ccsync_dashboard import db as dbmod
+    settings = Settings(db_path=str(tmp_path / "n.db"), report_token_optional=True)
+    app = create_app(settings)
+    with TestClient(app) as c:
+        payload = {"editor_name": "jsmith", "machine": "PC",
+                   "reported_at": "2026-07-25T10:00:00+00:00",
+                   "lanes": [{"name": "lane_a_video_up", "state": "idle"}]}
+        assert c.post("/api/v1/report", json=payload).status_code == 200
+        conn = dbmod.connect(tmp_path / "n.db")
         assert dbmod.fetch_verified_map(conn) == {("jsmith", "PC"): False}
         conn.close()
+
+
+def test_report_body_size_is_capped(tmp_path):
+    """Any holder of the shared report token could otherwise POST a
+    multi-GB body at the single-worker container. Rejected from
+    Content-Length, before anything is parsed."""
+    from ccsync_dashboard.app import MAX_REPORT_BODY_BYTES
+    settings = Settings(db_path=str(tmp_path / "big.db"), session_secret=SECRET, report_token="tok")
+    app = create_app(settings)
+    with TestClient(app) as c:
+        resp = c.post(
+            "/api/v1/report",
+            content=b"x" * 16,
+            headers={"X-CCSync-Token": "tok", "Content-Type": "application/json",
+                     "Content-Length": str(MAX_REPORT_BODY_BYTES + 1)},
+        )
+        assert resp.status_code == 413
 
 
 def test_scope_helper():

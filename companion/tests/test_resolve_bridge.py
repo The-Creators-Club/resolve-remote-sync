@@ -354,11 +354,16 @@ def test_replace_clip_ok():
 
 
 def test_replace_clip_returns_false():
+    # UX-16: the message is editor-facing (it reaches the fixer dialog and a
+    # tray toast verbatim), so it must name an action, not an API return
+    # value. "ReplaceClip returned False for C:\..." was the old text.
     mpi = FakeMediaPoolItem(r"C:\old.mov")
     mpi.replace_result = False
     result = resolve_bridge.replace_clip(mpi, r"C:\new.mov")
     assert result["ok"] is False
-    assert "ReplaceClip returned False" in result["message"]
+    assert "wouldn't relink" in result["message"]
+    assert "Scan whole project" in result["message"]
+    assert "ReplaceClip" not in result["message"]
 
 
 def test_replace_clip_raises_never_propagates():
@@ -366,7 +371,10 @@ def test_replace_clip_raises_never_propagates():
     mpi.raise_on_replace = True
     result = resolve_bridge.replace_clip(mpi, r"C:\new.mov")
     assert result["ok"] is False
-    assert "Resolve scripting error" in result["message"]
+    # UX-16: was f"Resolve scripting error: {exc}" -- the exception text is
+    # now logged instead of shown.
+    assert "Resolve didn't answer" in result["message"]
+    assert "boom" not in result["message"]
 
 
 def test_replace_clip_none_media_pool_item():

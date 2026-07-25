@@ -27,7 +27,7 @@ from . import config as config_mod
 from . import popup
 from . import resolve_bridge
 from . import upgrade as upgrade_mod
-from .fixer import IgnoreTracker
+from .fixer import IgnoreTracker, _dest_dir_is_contained
 from .identity import IdentityManager
 from .manifest import ManifestCache
 from .paths import OUT_OF_TREE, classify_path
@@ -68,6 +68,133 @@ def setup_logging(cfg: dict[str, Any]) -> None:
         root.addHandler(handler)
 
 
+# -- single-instance guard (AUDIT_2 CORE-M7) ------------------------------
+# Two companions = two watchers hammering the Resolve C extension from four
+# more threads, two rclone lane sets writing the same tree and the same
+# state/ files, two reporters POSTing under one identity, and two self-
+# upgrades renaming the same exe. The trigger is the single most likely user
+# action after "it looks like it's not running": double-clicking the desktop
+# exe while the Run-key instance is already live.
+_SINGLE_INSTANCE_MUTEX = "Local\\ccsync-companion-single-instance"
+_SINGLE_INSTANCE_LOCKFILE = "companion.pid"
+_ERROR_ALREADY_EXISTS = 183
+# Module-global purely to keep the handle/file object alive for the process
+# lifetime -- Windows releases a mutex when its last handle closes.
+_single_instance_token: Any = None
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    except OSError:
+        return True  # can't tell -- assume alive, i.e. fail safe
+    return True
+
+
+def _acquire_lock_file() -> bool:
+    """Portable fallback: a pid file with a liveness check. A stale file from
+    a crashed/killed companion must never lock the editor out permanently."""
+    global _single_instance_token
+    path = config_mod.CONFIG_DIR / _SINGLE_INSTANCE_LOCKFILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = int(path.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            existing = 0
+        if existing and existing != os.getpid() and _pid_is_alive(existing):
+            return False
+        path.write_text(str(os.getpid()), encoding="utf-8")
+        _single_instance_token = path
+        return True
+    except Exception:
+        log.debug("single-instance lock file unavailable", exc_info=True)
+        return True  # never block startup on the guard itself failing
+
+
+def acquire_single_instance() -> bool:
+    """True when this process may run. False means another companion already
+    holds the slot. Never raises; any failure of the guard itself returns
+    True rather than blocking a legitimate start."""
+    global _single_instance_token
+    if sys.platform != "win32":
+        return _acquire_lock_file()
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        handle = kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX)
+        last_error = ctypes.get_last_error()
+        if not handle:
+            return True
+        if last_error == _ERROR_ALREADY_EXISTS:
+            return False
+        _single_instance_token = handle
+        return True
+    except Exception:
+        log.debug("single-instance mutex unavailable", exc_info=True)
+        return _acquire_lock_file()
+
+
+def _warn_already_running() -> None:
+    log.warning("another ccsync-companion is already running -- this instance is exiting")
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "CCSync is already running.\n\nLook for the CCSync icon in your system tray "
+            "(you may need to click the ^ arrow next to the clock).",
+            "CCSync",
+            0x00000040 | 0x00010000,
+        )
+    except Exception:
+        log.debug("could not show the already-running message box", exc_info=True)
+
+
+def _fallback_logging(cfg: dict[str, Any]) -> None:
+    """Last-resort logging setup after setup_logging(cfg) raised.
+
+    `log_path` is used unvalidated by resolved_log_path()/setup_logging():
+    a non-str (TypeError), a path on a drive not mounted at logon
+    (FileNotFoundError) or a blank string (PermissionError) all raise. That
+    happened OUTSIDE any try, so the windowed exe vanished with no log, no
+    tray and no toast -- the exact S-10 symptom the original fix was written
+    to eliminate (AUDIT_2 CORE-H2). Fall back to the packaged default, and
+    if even that fails, to a bare stderr/NullHandler setup so the process
+    still starts."""
+    broken = cfg.get("log_path")
+    try:
+        setup_logging({**cfg, "log_path": config_mod.DEFAULTS["log_path"]})
+        log.error(
+            "log_path %r is unusable -- logging to the default %s instead; "
+            "fix log_path in %s",
+            broken, config_mod.DEFAULTS["log_path"], config_mod.CONFIG_PATH,
+        )
+        return
+    except Exception:
+        pass
+    root = logging.getLogger("ccsync")
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+    root.addHandler(
+        logging.StreamHandler() if sys.stderr is not None else logging.NullHandler()
+    )
+    log.error("log_path %r is unusable and the default failed too -- no log file", broken)
+
+
 class CompanionApp:
     """Owns the timeline watcher, all three sync lanes, and (optionally) the
     tray icon. Every public method is safe to call from any thread (the
@@ -81,13 +208,25 @@ class CompanionApp:
         self.ignore_tracker = IgnoreTracker()
         # Paths recently shown in a popup the user closed without acting:
         # snoozed so the dialog doesn't re-pop every poll cycle forever.
+        # GUARDED BY _popup_snooze_lock: the WATCHER thread prunes/reads this
+        # dict while a ccsync-popup thread inserts into it, and mutating a
+        # dict mid-iteration raises RuntimeError -- inside the watcher's poll
+        # loop, whose out-of-tree handler would then be skipped for that
+        # cycle (AUDIT_3 L-9).
         self._popup_snooze: dict[str, float] = {}
-        self.popup_snooze_seconds = float(cfg.get("popup_snooze_seconds", 300))
+        self._popup_snooze_lock = threading.Lock()
+        self.popup_snooze_seconds = config_mod.coerce_numeric(cfg, "popup_snooze_seconds", 300)
         # popup.show_popup blocks (it runs a Tk mainloop) and Tk is not
         # thread-safe -- this guards against the passive watcher-driven
         # popup and the user-initiated "Scan whole project" tray action
         # both trying to open a Tk root at once.
         self._popup_active_lock = threading.Lock()
+        # Serializes consolidate_project() with itself, and lets the
+        # self-upgrade refuse to swap the exe mid-copy (AUDIT_2 CORE-H8/M13).
+        # Separate from _popup_active_lock on purpose: consolidate holds THIS
+        # for hours but the popup lock only for its dialogs.
+        self._consolidate_lock = threading.Lock()
+        self._consolidate_active = False
         # Scratch/utility Resolve project names (config `ignored_resolve_
         # projects`), normalized the same way watcher.TimelineWatcher does
         # -- used by _refresh_media_tree_once() so the media-tree reporter
@@ -96,16 +235,28 @@ class CompanionApp:
         # ignore check at all, so an ignored scratch project's clips could
         # get reported under "media_tree" and, server-side, fuzzy-match
         # onto and overwrite a real project's bin tree).
-        self._ignored_resolve_projects = {
-            str(n).strip().lower() for n in (cfg.get("ignored_resolve_projects") or []) if str(n).strip()
-        }
+        self._ignored_resolve_projects = config_mod.normalize_ignored_projects(
+            cfg.get("ignored_resolve_projects")
+        )
         self._paused = False
         self._stop_event = threading.Event()
         self._watcher_thread: Optional[threading.Thread] = None
+        # Token-expiry watcher (CORE-M11) -- see _identity_watch_loop().
+        self.identity_check_interval = config_mod.coerce_numeric(cfg, "identity_check_interval", 60)
+        self._identity_stop_event = threading.Event()
+        self._identity_thread: Optional[threading.Thread] = None
         self._tray_icon = None
-        # Populated by run(); surfaced in the tray tooltip so a misconfigured
-        # install is visible without opening the log.
-        self.config_problems: list[str] = []
+        # Config errors that STOP syncing. Computed HERE, not just in run(),
+        # because the gates that consume it (the out-of-tree popup, FIX ALL,
+        # Consolidate) can all fire before/without run() -- and it was
+        # previously written and never read at all, despite the comment
+        # claiming it reached the tray (AUDIT_2 DEL-3 + §2-low). run() logs
+        # it, _start_lanes() refuses to start on it, and the tray renders it.
+        try:
+            self.config_problems, self.config_warnings = config_mod.validate_config(cfg)
+        except Exception:
+            log.exception("validate_config() failed")
+            self.config_problems, self.config_warnings = [], []
 
         # Managed mode: the dashboard decides which projects this editor
         # has and in what order (see selection.py / sync/sequencer.py).
@@ -144,7 +295,13 @@ class CompanionApp:
         self.sequencer: Optional[Sequencer] = None
         if self._managed:
             self.selection_client = SelectionClient(
-                cfg, self._state_dir, editor_name_fn=self.editor_identity
+                cfg, self._state_dir, editor_name_fn=self.editor_identity,
+                # The dashboard's selection endpoint now requires the signed
+                # identity token alongside the shared dashboard token (the
+                # rule /api/v1/report already followed) -- without this every
+                # managed editor's fetch 401s and falls back to the cached
+                # selection forever. Same getter the reporter uses.
+                identity_token_fn=lambda: self.identity.token,
             )
             self.syncthing_admin = SyncthingAdmin(
                 syncthing_url=cfg.get("syncthing_url", "http://127.0.0.1:8384"),
@@ -164,7 +321,7 @@ class CompanionApp:
 
         # Resolve media-pool BIN tree cache (get_media_tree()) -- refreshed
         # on its own slow background thread; see _refresh_media_tree_once().
-        self.media_tree_refresh_interval = float(cfg.get("media_tree_refresh_interval", 120))
+        self.media_tree_refresh_interval = config_mod.coerce_numeric(cfg, "media_tree_refresh_interval", 120)
         self._media_tree_cache: dict[str, list[dict[str, Any]]] = {}
         self._media_tree_lock = threading.Lock()
         self._media_tree_stop_event = threading.Event()
@@ -211,11 +368,12 @@ class CompanionApp:
             get_editor_name=self.editor_identity,
             get_identity_token=lambda: self.identity.token,
             on_report_response=self._on_report_response,
+            get_transport_health=self.transport_health,
         )
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
             canonical_prefix=cfg["canonical_prefix"],
-            poll_interval=float(cfg.get("poll_interval", 3)),
+            poll_interval=config_mod.coerce_numeric(cfg, "poll_interval", 3),
             on_out_of_tree=self._handle_out_of_tree,
             on_mapping_warning=self._handle_mapping_warning,
             ignore_tracker=self.ignore_tracker,
@@ -246,7 +404,15 @@ class CompanionApp:
 
     def _build_lanes(self) -> list[LaneAdapter]:
         cfg = self.config
-        state_dir = Path(cfg.get("log_path", "~/.ccsync/companion.log")).expanduser().parent / "state"
+        # config.resolved_log_path(), NOT a raw Path(cfg["log_path"]): its own
+        # docstring names _build_lanes as one of its three callers, but this
+        # line never used it. `log_path = 5` raised TypeError right here --
+        # inside CompanionApp.__init__, i.e. the windowed exe vanishing with
+        # no tray and no log line -- and `log_path = ""` put every lane's
+        # state dir (filter files, express lists) in Path("")/"state", which
+        # is the process CWD: C:\Windows\system32 for a Run-key autostart
+        # (AUDIT_3 M-7, the CORE-H2 twin).
+        state_dir = config_mod.resolved_log_path(cfg).parent / "state"
         self._state_dir = state_dir
         # on_change hands per-project file events straight to the sequencer
         # (managed mode only) instead of triggering a debounced whole-tree
@@ -260,9 +426,9 @@ class CompanionApp:
             remote=cfg["remote"],
             remote_root=cfg["remote_root"],
             rclone_path=cfg.get("rclone_path", "rclone"),
-            transfers=int(cfg.get("transfers", 4)),
-            scan_interval=float(cfg.get("scan_interval_up", 300)),
-            watch_debounce_seconds=float(cfg.get("watch_debounce_seconds", 10)),
+            transfers=int(config_mod.coerce_numeric(cfg, "transfers", 4)),
+            scan_interval=config_mod.coerce_numeric(cfg, "scan_interval_up", 300),
+            watch_debounce_seconds=config_mod.coerce_numeric(cfg, "watch_debounce_seconds", 10),
             state_dir=state_dir,
             on_change=on_change,
             # Any-depth project attribution for watchdog events (deferred:
@@ -271,6 +437,11 @@ class CompanionApp:
                 (lambda: self.sequencer.known_rels() if self.sequencer else [])
                 if self._managed else None
             ),
+            # Transport tuning (sftp_chunk_size/concurrency/connections,
+            # checkers, rclone_ignore_checksum, order_by_*) is read off cfg
+            # by RcloneTuning.from_cfg -- without this the lane silently
+            # keeps its own defaults and none of those keys do anything.
+            cfg=cfg,
         )
         lane_b = RcloneLane(
             direction=DIRECTION_DOWN,
@@ -278,14 +449,32 @@ class CompanionApp:
             remote=cfg["remote"],
             remote_root=cfg["remote_root"],
             rclone_path=cfg.get("rclone_path", "rclone"),
-            transfers=int(cfg.get("transfers", 4)),
-            scan_interval=float(cfg.get("scan_interval_down", 120)),
+            transfers=int(config_mod.coerce_numeric(cfg, "transfers", 4)),
+            scan_interval=config_mod.coerce_numeric(cfg, "scan_interval_down", 120),
             state_dir=state_dir,
+            cfg=cfg,
+            # Lane B is `sync` with --backup-dir: a proxy the editor made
+            # locally and hasn't uploaded yet is moved out of the project
+            # folder into .ccsync-trash. That used to happen in total
+            # silence (AUDIT_3 L-12).
+            on_trash=self._notify_trash_recovery,
         )
         lane_c = SyncthingLane(
             base_url=cfg.get("syncthing_url", "http://127.0.0.1:8384"),
             api_key=cfg.get("syncthing_api_key", ""),
             expected_folder_ids=cfg.get("syncthing_folder_ids", []),
+            # Late-bound on purpose: the lanes are built before the sequencer
+            # exists, and the folder set changes with every selection fetch,
+            # so this is evaluated fresh on every poll. Without it lane C
+            # iterated the config's `syncthing_folder_ids` -- written as a
+            # literal [] by every installer and populated by nothing -- so it
+            # reported idle/queued=0/last_sync=now unconditionally for every
+            # managed editor while carrying all the audio, GFX and subtitles
+            # (AUDIT_2 L-6/UX-3).
+            expected_folder_ids_fn=(
+                (lambda: self.sequencer.expected_folder_slugs() if self.sequencer else [])
+                if self._managed else None
+            ),
         )
         self._lane_a = lane_a
         self._lane_b = lane_b
@@ -293,14 +482,49 @@ class CompanionApp:
         return [lane_a, lane_b, lane_c]
 
     # -- watcher callbacks -----------------------------------------------
+    def _local_root_is_broken(self) -> bool:
+        """True when config validation flagged local_root itself. With a
+        blank local_root, classify_path() returns OUT_OF_TREE for EVERY clip
+        and Path("").resolve() == the process CWD, so one FIX ALL scatters
+        the whole project's media into the autostart working directory
+        (C:\\Windows\\system32 for a Run-key launch) and relinks Resolve
+        there. The popup must not be offered at all in that state (AUDIT_2
+        CORE-H1)."""
+        return any("local_root" in str(problem) for problem in self.config_problems)
+
+    def _prune_popup_snooze(self, now: float) -> None:
+        """Drop entries past their snooze window. Unbounded growth here was
+        one interned path string per distinct out-of-tree clip ever seen,
+        never evicted (AUDIT_2 §2-low).
+
+        The snapshot + lock is not decoration: the popup thread writes this
+        dict from _show_out_of_tree_popup while the watcher thread iterates
+        it here (AUDIT_3 L-9)."""
+        window = self.popup_snooze_seconds
+        with self._popup_snooze_lock:
+            stale = [k for k, at in list(self._popup_snooze.items()) if (now - at) >= window]
+            for key in stale:
+                self._popup_snooze.pop(key, None)
+
+    def _popup_snooze_snapshot(self) -> dict[str, float]:
+        with self._popup_snooze_lock:
+            return dict(self._popup_snooze)
+
+    def _popup_snooze_stamp(self, keys: list[str], now: float) -> None:
+        with self._popup_snooze_lock:
+            for key in keys:
+                self._popup_snooze[key] = now
+
     def _handle_out_of_tree(self, items: list[dict[str, Any]]) -> None:
         from .watcher import _norm_key
 
         now = time.monotonic()
+        self._prune_popup_snooze(now)
+        snoozed = self._popup_snooze_snapshot()
         fresh = []
         for item in items:
             key = _norm_key(item.get("file_path", ""))
-            shown_at = self._popup_snooze.get(key)
+            shown_at = snoozed.get(key)
             if shown_at is not None and (now - shown_at) < self.popup_snooze_seconds:
                 continue
             fresh.append(item)
@@ -311,21 +535,52 @@ class CompanionApp:
             log.debug("popup suppressed (popup_enabled=false): %d clip(s) outside %s",
                       len(fresh), self.config.get("local_root"))
             return
+        if self._local_root_is_broken():
+            log.error(
+                "popup suppressed: local_root is misconfigured, so every clip looks "
+                "out-of-tree and FIX ALL would copy media outside the sync folder"
+            )
+            return
 
         log.info("popup: %d clip(s) outside %s", len(fresh), self.config.get("local_root"))
-        for item in fresh:
-            self._popup_snooze[_norm_key(item.get("file_path", ""))] = now
+        # The popup runs a blocking Tk mainloop. Calling it inline froze the
+        # WATCHER thread for as long as the dialog stayed on screen:
+        # last_resolve_project stopped updating (the dashboard reported a
+        # project already closed), no further out-of-tree detection happened,
+        # and _stop_event went unobserved so shutdown/self-upgrade couldn't
+        # stop the watcher cleanly (AUDIT_2 CORE-M2).
+        threading.Thread(
+            target=self._show_out_of_tree_popup, args=(fresh,), kwargs={"snooze": True},
+            name="ccsync-popup", daemon=True,
+        ).start()
 
-        self._show_out_of_tree_popup(fresh)
+    def _notify_trash_recovery(self, trash_dir: str) -> None:
+        """Toast naming the recovery directory after a lane B run moved local
+        files out of a project folder (see RcloneLane._notify_trash). The
+        message must name the DIRECTORY, since that is the only action the
+        editor can take."""
+        self._notify_tray(
+            f"Some files in your project folder weren't on the server, so CCSync moved "
+            f"them (never deleted) to:\n{trash_dir}\nCopy anything you still need back "
+            f"out of there.",
+            "ccsync-companion: files moved to .ccsync-trash",
+        )
 
     def _handle_mapping_warning(self, item: dict[str, Any]) -> None:
         path = item.get("file_path", "")
-        msg = (
-            f"clip on canonical prefix ({self.config.get('canonical_prefix')}) doesn't "
-            f"resolve under local_root ({self.config.get('local_root')}): {path}"
+        # The log line keeps the internals (that's what diagnostics are for);
+        # the toast an editor actually reads must name the thing they can fix
+        # (AUDIT_2 UX-16).
+        log.warning(
+            "clip on canonical prefix (%s) doesn't resolve under local_root (%s): %s",
+            self.config.get("canonical_prefix"), self.config.get("local_root"), path,
         )
-        log.warning(msg)
-        self._notify_tray(msg, "ccsync-companion: mapping warning")
+        self._notify_tray(
+            f"Resolve is looking for media on {self.config.get('canonical_prefix')} but that "
+            "path doesn't land in your sync folder. Your P: drive (Windows) or Mapped Mount "
+            "(Mac) is wrong — see EDITOR_SETUP step 6. Nothing will sync until this is fixed.",
+            "ccsync-companion: mapping warning",
+        )
 
     # -- popup plumbing (shared by the passive watcher and the manual
     # "Scan whole project" tray action) -------------------------------
@@ -336,25 +591,41 @@ class CompanionApp:
             except Exception:
                 log.debug("tray notify failed (backend may not support it)")
 
-    def _show_out_of_tree_popup(self, items: list[dict[str, Any]]) -> None:
+    def _show_out_of_tree_popup(self, items: list[dict[str, Any]], snooze: bool = False) -> None:
         """Build server_roots and show the popup for `items`. Blocks until
         the dialog closes (popup.show_popup runs a Tk mainloop), so this is
         guarded by `_popup_active_lock`: only one popup -- whether raised by
         the passive watcher or a user-initiated "Scan whole project" -- may
         be open at a time, since Tk is not safe to touch from two threads
-        at once. Safe to call from any thread."""
+        at once. Safe to call from any thread.
+
+        `snooze` stamps the batch's paths AFTER the lock is won. Stamping
+        before the attempt meant a batch that merely LOST the lock race was
+        snoozed the full 300 s despite never having been shown (AUDIT_2
+        CORE-M2)."""
         if not self._popup_active_lock.acquire(blocking=False):
             log.info("popup already open -- skipping (%d clip(s) not shown)", len(items))
             self._notify_tray("A popup is already open — close it first.", "ccsync-companion")
             return
         try:
-            server_roots: Optional[dict[str, str]] = None
-            if self.selection_client is not None and hasattr(self.selection_client, "get_project_roots"):
-                try:
-                    server_roots = self.selection_client.get_project_roots()
-                except Exception:
-                    log.exception("get_project_roots() failed")
-                    server_roots = None
+            if snooze:
+                from .watcher import _norm_key
+
+                self._popup_snooze_stamp(
+                    [_norm_key(item.get("file_path", "")) for item in items],
+                    time.monotonic(),
+                )
+            server_roots, source = self._server_roots_result()
+            if source == "unreachable":
+                # Falling through to fixer.match_project_dir's token-overlap
+                # guess means the SAME clip gets a different destination than
+                # it had five minutes ago, silently (AUDIT_2 CORE-H9).
+                log.error("popup suppressed: cannot reach the dashboard for project roots")
+                self._notify_tray(
+                    "Can't reach the server right now, so CCSync doesn't know where this "
+                    "media belongs. It'll ask again once the connection is back — nothing "
+                    "was changed.", "ccsync-companion")
+                return
 
             popup.show_popup(
                 items, self.config["local_root"], self.editor_identity() or "", self.ignore_tracker,
@@ -379,6 +650,12 @@ class CompanionApp:
         recently dismissed). Still respects ignore_tracker. Safe to call
         from the tray thread; blocks until any resulting popup is closed.
         """
+        if self._local_root_is_broken():
+            log.error("scan whole project refused: local_root is misconfigured")
+            self._notify_tray(
+                "CCSync's sync folder isn't set up correctly, so it can't tell which media "
+                "is in the wrong place. Tray → Copy diagnostics for Alex.", "ccsync-companion")
+            return
         result = resolve_bridge.get_media_pool_items()
         if not result.get("ok"):
             message = result.get("message", "unknown error")
@@ -406,13 +683,37 @@ class CompanionApp:
         log.info("whole-project scan: %d clip(s) outside %s", len(out_of_tree), local_root)
         self._show_out_of_tree_popup(out_of_tree)
 
-    def _server_roots(self) -> Optional[dict[str, str]]:
-        if self.selection_client is not None and hasattr(self.selection_client, "get_project_roots"):
+    def _server_roots_result(self) -> tuple[Optional[dict[str, str]], str]:
+        """(mapping, source) -- source "unreachable" means DO NOT resolve a
+        destination from a local guess (AUDIT_2 CORE-H9)."""
+        client = self.selection_client
+        if client is None:
+            return None, "none"
+        getter = getattr(client, "project_roots_result", None)
+        if getter is not None:
             try:
-                return self.selection_client.get_project_roots()
+                return getter()
+            except Exception:
+                log.exception("project_roots_result() failed")
+                return None, "unreachable"
+        if hasattr(client, "get_project_roots"):
+            try:
+                return client.get_project_roots(), "live"
             except Exception:
                 log.exception("get_project_roots() failed")
-        return None
+                return None, "unreachable"
+        return None, "none"
+
+    def _server_roots(self) -> Optional[dict[str, str]]:
+        mapping, _source = self._server_roots_result()
+        return mapping
+
+    def consolidate_in_flight(self) -> bool:
+        """True while consolidate_project() is between the user's confirm and
+        the end of its lane runs -- read by the self-upgrade path, which must
+        not swap the exe and exit out from under a multi-hour copy (AUDIT_2
+        CORE-H8)."""
+        return self._consolidate_active
 
     def consolidate_project(self) -> None:
         """User-initiated (tray): onboard a pre-existing project. Scans the
@@ -420,10 +721,49 @@ class CompanionApp:
         canonical project folder, dry-runs both rclone lanes against the NAS
         for a reconciliation report, and -- on confirm -- consolidates
         (copy+relink) then uploads originals and downloads proxies for the
-        open project. Runs on the tray thread; guarded by the popup lock so
-        it can't collide with an open fixer dialog."""
+        open project. Runs on the tray thread.
+
+        The popup lock is held ONLY for the dialogs, never across the copy or
+        the rclone runs: it used to be held for the whole (potentially
+        multi-hour) operation, during which every watcher popup was dropped
+        with "A popup is already open" and the new-project prompt starved
+        (AUDIT_2 CORE-M13). `_consolidate_lock` is what actually keeps two
+        consolidates from overlapping.
+        """
         from . import consolidate
 
+        # This runs real rclone lanes against the tree, so it must respect
+        # the same three gates every other sync path does -- it used to run
+        # lane A even on a base rig with a blank remote_root, and even while
+        # the user had Pause ticked (AUDIT_2 CORE-M13).
+        if not self._sync_enabled:
+            log.info("consolidate ignored: sync_enabled=false on this machine")
+            self._notify_tray(
+                "This machine works directly off the NAS — there's nothing to copy in.",
+                "ccsync-companion",
+            )
+            return
+        if self._paused:
+            self._notify_tray(
+                "Syncing is paused — resume it from the tray first.", "ccsync-companion")
+            return
+        if self.config_problems:
+            self._notify_tray(
+                "CCSync isn't fully set up on this machine yet, so nothing can be copied in. "
+                "Tray → Copy diagnostics for Alex.", "ccsync-companion")
+            return
+        if not self._consolidate_lock.acquire(blocking=False):
+            self._notify_tray("Already copying a project's media in — let it finish.",
+                              "ccsync-companion")
+            return
+        try:
+            self._consolidate_active = True
+            self._consolidate_project_inner(consolidate)
+        finally:
+            self._consolidate_active = False
+            self._consolidate_lock.release()
+
+    def _consolidate_project_inner(self, consolidate) -> None:
         result = resolve_bridge.get_media_pool_items()
         if not result.get("ok"):
             message = result.get("message", "unknown error")
@@ -434,7 +774,14 @@ class CompanionApp:
         local_root = self.config.get("local_root", "")
         canonical_prefix = self.config.get("canonical_prefix", "")
         resolve_project = result.get("project_name", "") or ""
-        server_roots = self._server_roots()
+        server_roots, roots_source = self._server_roots_result()
+        if roots_source == "unreachable":
+            log.error("consolidate: cannot reach the dashboard for project roots -- refusing")
+            self._notify_tray(
+                "Can't reach the server, so CCSync doesn't know where this project lives. "
+                "Nothing was copied or uploaded — try again once you're back online.",
+                "ccsync-companion")
+            return
 
         out_of_tree = [
             item for item in result.get("items", [])
@@ -450,6 +797,40 @@ class CompanionApp:
         # or the whole tree if we can't pin one down.
         subpath = project_prefix.strip("/").replace("\\", "/") or None
 
+        # HARD ABORT before the dialog, not after it. reconcile_with_nas()
+        # already refuses a None subpath (D-2), but line 489 used to call
+        # self._lane_a.run_once(None) regardless, which builds
+        # `rclone copy <the whole local_root>` to the NAS -- unquantified and
+        # unmentioned by the dialog the user consented to (AUDIT_2 CORE-C2).
+        if subpath is None:
+            log.error("consolidate: no active project resolved -- refusing whole-tree consolidate")
+            self._notify_tray(
+                "CCSync can't tell which project this is, so it won't copy anything in. "
+                "Open the project in Resolve and set it up on the dashboard first.",
+                "ccsync-companion",
+            )
+            return
+
+        # SECOND LAYER on the dashboard's rel_path (selection.py drops unsafe
+        # project_roots entries; this is the assertion right before the lanes
+        # run). `subpath` is "Projects/<rel>" built from a dashboard-supplied
+        # rel_path, or from config's active_project -- both hand-editable,
+        # neither validated here before. It becomes lane A's SOURCE, so a
+        # traversal turns this into `rclone copy <somewhere outside the tree>
+        # nas:...`, uploading whatever lives there (AUDIT_3 H-2). Same
+        # containment check the popup fixer applies to its destination.
+        if not self._subpath_is_contained(subpath):
+            log.error(
+                "consolidate: refusing -- %r does not resolve under local_root %r",
+                subpath, local_root,
+            )
+            self._notify_tray(
+                "CCSync got a project location that points outside your sync folder, so "
+                "nothing was copied or uploaded. Tray → Copy diagnostics for Alex.",
+                "ccsync-companion",
+            )
+            return
+
         if not self._popup_active_lock.acquire(blocking=False):
             self._notify_tray("A popup is already open — close it first.", "ccsync-companion")
             return
@@ -461,45 +842,135 @@ class CompanionApp:
             self._notify_tray("Checking the NAS…", "ccsync-companion: consolidate")
             reconcile = consolidate.reconcile_with_nas(self.config, subpath, self._state_dir)
             report = consolidate.build_report(plan, reconcile)
-            if plan["count"] == 0 and reconcile.get("ok") and \
-                    (reconcile["uploads"] or {}).get("count", 0) == 0:
-                self._notify_tray("Nothing to consolidate — this project is already tidy.",
+            if not reconcile.get("ok"):
+                # Every number in the report is unknown, and both lane runs
+                # below are gated on this anyway -- do not offer a button
+                # that can only do something we couldn't describe.
+                log.warning("consolidate: NAS check failed (%s) -- not offering the copy",
+                            reconcile.get("error"))
+                self._notify_tray(
+                    "Couldn't check the server, so nothing was copied or uploaded. "
+                    "Tray → Copy diagnostics for Alex.", "ccsync-companion")
+                return
+            if plan["count"] == 0 and (reconcile["uploads"] or {}).get("count", 0) == 0:
+                self._notify_tray("Nothing to copy in — this project is already tidy.",
                                   "ccsync-companion")
                 return
-            if not popup.confirm_dialog("CONSOLIDATE PROJECT", report, ok_label="CONSOLIDATE & UPLOAD"):
+            if not popup.confirm_dialog(
+                "COPY THIS PROJECT'S MEDIA IN", report, ok_label="COPY & UPLOAD"
+            ):
                 log.info("consolidate: cancelled by user")
                 return
-
-            log.info("consolidate: copying %d clip(s) into %s", plan["count"], project_prefix or "tree")
-            results = consolidate.run_consolidation(plan["ops"], local_root)
-            failures = [r for r in results if not r.get("ok")]
-            if failures:
-                log.warning("consolidate: %d/%d copies failed", len(failures), len(results))
-                self._notify_tray(
-                    f"{len(results) - len(failures)}/{len(results)} consolidated, "
-                    f"{len(failures)} failed — see log.", "ccsync-companion")
         finally:
+            # Released BEFORE the copy: run_consolidation can take hours on a
+            # real project, and holding this starves every watcher popup and
+            # the new-project prompt for the duration (AUDIT_2 CORE-M13).
             self._popup_active_lock.release()
 
-        # Upload originals + pull proxies for this project (outside the popup
-        # lock -- these are long rclone runs, not UI). One-shot, regardless of
-        # managed/sequencer state.
-        self._notify_tray("Uploading originals to the NAS…", "ccsync-companion: consolidate")
+        log.info("consolidate: copying %d clip(s) into %s", plan["count"], project_prefix or "tree")
+        # UX-10: this used to be a MULTI-HOUR silence between two toasts,
+        # with no progress and no cancel -- even though run_consolidation
+        # already accepted a progress_fn and rclone_lane already populates
+        # bytes_done/speed_bps/eta_seconds every 10 s. One window covers both
+        # phases: the local copy, then the lane A upload.
+        window = popup.ProgressWindow(
+            "COPYING THIS PROJECT'S MEDIA IN",
+            "Your original files are COPIED, never moved — everything stays where it is.",
+        )
+        results: list[dict[str, Any]] = []
+
+        def _work(publish, should_stop):
+            results.extend(consolidate.run_consolidation(
+                plan["ops"], local_root, state_fn=publish, should_stop=should_stop,
+            ))
+            if should_stop():
+                return
+            self._consolidate_upload_phase(subpath, reconcile, consolidate, publish, should_stop)
+
+        window.run(_work)
+
+        failures = [r for r in results if not r.get("ok")]
+        if failures:
+            log.warning("consolidate: %d/%d copies failed", len(failures), len(results))
+            self._notify_tray(
+                f"{len(results) - len(failures)}/{len(results)} copied in, "
+                f"{len(failures)} failed. Tray → Copy diagnostics for Alex.",
+                "ccsync-companion")
+        elif window.should_stop():
+            self._notify_tray(
+                f"Stopped — {len(results)} of {plan['count']} copied in, the rest were "
+                f"left alone. Nothing was moved or deleted.", "ccsync-companion")
+            return
+        self._notify_tray("Copy & upload finished.", "ccsync-companion: consolidate")
+
+    def _subpath_is_contained(self, subpath: str) -> bool:
+        """True when `local_root/<subpath>` really lands under local_root.
+
+        Mirrors fixer._dest_dir_is_contained (which guards the popup's
+        editable destination) for the OTHER path a rel_path reaches: the
+        subpath handed to lane A/B run_once. Never raises -- a blank
+        local_root, an unresolvable path or a different drive is False, i.e.
+        "refuse"."""
+        root = str(self.config.get("local_root", "") or "").strip()
+        if not root or not str(subpath or "").strip():
+            return False
+        try:
+            return _dest_dir_is_contained(Path(root) / subpath, Path(root).resolve())
+        except Exception:
+            log.debug("containment check failed for %r", subpath, exc_info=True)
+            return False
+
+    def _consolidate_upload_phase(self, subpath, reconcile, consolidate, publish, should_stop):
+        """Lane A upload + optional lane B pull, rendering the same progress
+        line from LaneStatus (UX-10). Runs on the ProgressWindow's worker
+        thread, so it may only call `publish`."""
+        stop_poll = threading.Event()
+
+        def _poll_lane_a():
+            while not stop_poll.wait(2.0):
+                try:
+                    status = self._lane_a.status()
+                except Exception:
+                    continue
+                publish({
+                    "headline": (
+                        f"Uploading to the server — {status.current_project or 'this project'}"
+                    ),
+                    "name": "",
+                    "file_bytes_done": status.bytes_done or 0,
+                    "file_bytes_total": status.bytes_total or 0,
+                    "batch_bytes_done": status.bytes_done or 0,
+                    "batch_bytes_total": status.bytes_total or 0,
+                    "speed_bps": status.speed_bps,
+                    "eta_seconds": status.eta_seconds,
+                    "index": 0,
+                    "total": 0,
+                })
+
+        publish({"headline": "Uploading originals to the server…", "name": "",
+                 "index": 0, "total": 0})
+        poller = threading.Thread(target=_poll_lane_a, name="ccsync-consolidate-poll",
+                                  daemon=True)
+        poller.start()
         try:
             self._lane_a.run_once(subpath)
         except Exception:
             log.exception("consolidate: lane A upload failed")
+        finally:
+            stop_poll.set()
+            poller.join(timeout=3.0)
         if self._lane_b_enabled and not consolidate.lane_b_allowed(reconcile):
             # The dry run saw deletions: `rclone sync` down would delete local
             # proxy files the NAS doesn't have (D-1) -- the report already
             # told the user lane B is being skipped.
             log.warning("consolidate: skipping lane B pull -- dry run reported deletions")
         elif self._lane_b_enabled:
+            publish({"headline": "Downloading proxies from the server…", "name": "",
+                     "index": 0, "total": 0})
             try:
                 self._lane_b.run_once(subpath)
             except Exception:
                 log.exception("consolidate: lane B proxy pull failed")
-        self._notify_tray("Consolidate & upload finished.", "ccsync-companion: consolidate")
 
     # -- sequencer hand-off (managed mode) -----------------------------------------------
     def _on_tree_change(self, rel: str) -> None:
@@ -568,7 +1039,9 @@ class CompanionApp:
             return
 
         project_name = str(result.get("project_name") or "").strip()
-        if project_name and project_name.lower() in self._ignored_resolve_projects:
+        if project_name and config_mod.is_ignored_project(
+            project_name, self._ignored_resolve_projects
+        ):
             # Same "pretend this project doesn't exist" contract the
             # watcher enforces for ignored_resolve_projects (config.py) --
             # never cache/report a scratch project's clips as "media_tree"
@@ -621,6 +1094,17 @@ class CompanionApp:
         comment: a careless base-rig editor can still cut in media from
         outside the tree, so the popup should still catch it).
 
+        MONOTONIC: the role may only ever DISABLE sync, never enable it.
+        This used to be a flat `self._sync_enabled = (role != "base")`, which
+        let a dashboard-supplied role="editor" override the machine's own
+        `mode="base"` / `sync_enabled=false` -- so any sign-in by an account
+        outside DASH_ADMIN_USERS started full sync lanes on the base rig,
+        where local_root IS the live NAS share (T:\\Creators_Club). Lane B is
+        a deleting `rclone sync` DOWNWARD from that user's empty SFTP home,
+        i.e. it would delete the NAS's real Proxy/ files under every selected
+        project (AUDIT_2 CORE-C1). A machine that says it does not sync must
+        stay that way whatever the server says.
+
         Idempotent and cheap to call whenever identity state changes
         (constructor, sign_in(), sign_out()) rather than threading role
         through every call site that currently reads self._sync_enabled.
@@ -629,7 +1113,7 @@ class CompanionApp:
         if role is None:
             self._sync_enabled = self._configured_sync_enabled
         else:
-            self._sync_enabled = (role != "base")
+            self._sync_enabled = self._configured_sync_enabled and (role != "base")
 
     def effective_mode(self) -> str:
         """"base" or "editor" -- the identity-derived role when signed in
@@ -665,6 +1149,12 @@ class CompanionApp:
     def _lane_pending_login_detail(self) -> str:
         return 'sign in required -- use the tray\'s "Sign in..." to authenticate before syncing'
 
+    def _lane_config_problem_detail(self) -> str:
+        return (
+            "NOT SYNCING: this machine isn't fully set up -- "
+            f"{self.config_problems[0] if self.config_problems else 'see companion.log'}"
+        )
+
     def _mark_lanes_pending_login(self) -> None:
         for lane in self.lanes:
             try:
@@ -673,11 +1163,35 @@ class CompanionApp:
             except Exception:
                 pass
 
+    def _mark_lanes_misconfigured(self) -> None:
+        detail = self._lane_config_problem_detail()
+        for lane in self.lanes:
+            try:
+                with lane._lock:
+                    lane._status.detail = detail
+            except Exception:
+                pass
+
     def _start_lanes(self) -> None:
         """Actually start the sync lanes/sequencer, per sync_enabled/managed
         mode. Extracted from start() so on_signed_in() can (re)run it once a
         require_login gate clears, without repeating the reporter/manifest/
         watcher startup that only ever needs to happen once."""
+        if self.config_problems:
+            # validate_config()'s "errors that STOP syncing" used to stop
+            # nothing: they were logged and then start() ran anyway. A typo'd
+            # remote_root makes lane B's `rclone sync` delete every local
+            # proxy tree-wide; a blank local_root makes every destination
+            # CWD-relative (AUDIT_2 DEL-3). Same shape as the pending-login
+            # gate: lanes stay down with a reason, everything else runs so
+            # the machine is still visible and fixable.
+            self._mark_lanes_misconfigured()
+            log.error(
+                "sync lanes/sequencer NOT started: %d config problem(s) that stop syncing "
+                "-- fix them in %s and restart",
+                len(self.config_problems), config_mod.CONFIG_PATH,
+            )
+            return
         if not self._sync_enabled:
             # Base rig: works directly off the NAS share; no lanes, no
             # sequencer, no watchdog. Watcher/fixer/reporter still run.
@@ -832,12 +1346,228 @@ class CompanionApp:
         info = self.upgrade.available
         if info is None:
             return
-        self._notify_tray(f"Updating to v{info['version']}…", "ccsync-companion")
-        if not self.upgrade.apply():
+        # Never swap the exe and exit out from under work in progress: the
+        # spawned copy would be killed mid-shutil.copy2, leaving a partial
+        # .ccsync-tmp and a project where some clips are relinked and some
+        # are not (AUDIT_2 CORE-H8/H5).
+        if self._popup_active_lock.locked():
             self._notify_tray(
-                "Update failed — still running the current version. See companion.log.",
+                "Can't update while a CCSync window is open — close it and try again.",
+                "ccsync-companion")
+            return
+        if self._consolidate_active:
+            self._notify_tray(
+                "Can't update while media is being copied in — let it finish, then try again.",
+                "ccsync-companion")
+            return
+        self._notify_tray(f"Updating to v{info['version']}…", "ccsync-companion")
+        try:
+            applied = self.upgrade.apply()
+        except Exception:
+            log.exception("apply_upgrade: upgrade.apply() raised")
+            applied = False
+        if not applied:
+            self._notify_tray(
+                f"Update failed — you're still on v{config_mod.VERSION}, nothing is broken. "
+                "Tray → Copy diagnostics for Alex.",
                 "ccsync-companion",
             )
+
+    def transport_health(self) -> dict[str, Any]:
+        """Connection-path + orphan diagnostics for the report payload
+        (AUDIT_2 C-6).
+
+        This signal does not exist anywhere in production today, which is why
+        a RELAYED editor and a merely slow one are indistinguishable on the
+        fleet grid. Syncthing devices are added with addresses:["dynamic"]
+        and relaysEnabled/globalAnnounceEnabled left at their `true`
+        defaults, so lane C can silently ride the public relay pool at
+        1-5 MB/s -- and the NAS peer is measurably DERP-relayed right now.
+        `syncthing.relayed` being non-empty is the whole answer.
+
+        Never raises: each half is isolated, because a diagnostic that can
+        fail the report cycle is worse than no diagnostic.
+        """
+        health: dict[str, Any] = {}
+        try:
+            summary = getattr(self._lane_c, "connection_path_summary", None)
+            if summary is not None:
+                health["syncthing"] = summary()
+        except Exception:
+            log.exception("connection_path_summary() failed")
+        for lane, key in ((self._lane_a, "lane_a"), (self._lane_b, "lane_b")):
+            try:
+                getter = getattr(lane, "orphan_report", None)
+                if getter is None:
+                    continue
+                report = getter()
+                if report:
+                    health.setdefault("orphans", {})[key] = report
+            except Exception:
+                log.exception("orphan_report() failed for %s", getattr(lane, "name", lane))
+        # Express-lane counters (AUDIT_2 P9/C-2). An express failure is
+        # deliberately a warning + counter rather than STATE_ERROR, so
+        # without this the server has no way to see one at all.
+        try:
+            getter = getattr(self._lane_a, "express_report", None)
+            if getter is not None:
+                report = getter()
+                if report:
+                    health["express"] = report
+        except Exception:
+            log.exception("express_report() failed")
+        return health
+
+    def sequencer_state(self) -> tuple[str, str]:
+        """(state, human detail) for the sequencer, or ("", "") in legacy
+        mode. The sequencer computes exactly the strings an editor needs and
+        they appeared in no tray line, no log line and no report (UX-4)."""
+        if self.sequencer is None:
+            return "", ""
+        try:
+            return str(self.sequencer.state), str(self.sequencer.status_detail())
+        except Exception:
+            log.exception("sequencer state read failed")
+            return "", ""
+
+    def _diagnostic_log_tail(self, lines: int = 40) -> list[str]:
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as fh:
+                return [line.rstrip("\n") for line in fh.readlines()[-lines:]]
+        except Exception as exc:
+            return [f"(could not read {self.log_path}: {exc})"]
+
+    def build_diagnostics(self) -> str:
+        """Everything an admin needs to diagnose this machine, as one block of
+        text for the clipboard (AUDIT_2 UX-19).
+
+        The support instruction everywhere is "send Alex a screenshot of the
+        tray menu" -- which said `OK` on all three lanes whatever was wrong.
+        Never raises: every section is independently fault-isolated, because
+        a diagnostics gather that crashes on the one broken subsystem is
+        worse than useless."""
+        from .sync import rclone_lane as _rclone_lane
+
+        out: list[str] = []
+
+        def section(label: str, fn: Callable[[], Any]) -> None:
+            try:
+                out.append(f"{label}: {fn()}")
+            except Exception as exc:
+                out.append(f"{label}: <failed: {exc}>")
+
+        out.append("=== CCSYNC DIAGNOSTICS ===")
+        section("time", lambda: time.strftime("%Y-%m-%d %H:%M:%S %z"))
+        section("companion version", lambda: config_mod.VERSION)
+        section("platform", lambda: f"{sys.platform} / {os.name}")
+        section("frozen exe", upgrade_mod.is_frozen)
+        section("config file", lambda: config_mod.CONFIG_PATH)
+        section("log file", lambda: self.log_path)
+        section("effective mode", self.effective_mode)
+        section("signed in as", lambda: self.editor_identity() or "NOT SIGNED IN")
+        section("token expires", self._token_expiry_text)
+        section("sync enabled", lambda: self._sync_enabled)
+        section("paused", lambda: self._paused)
+        section("managed mode", lambda: self._managed)
+        section("lanes started", lambda: self._lanes_started)
+        section("local_root", lambda: self.config.get("local_root"))
+        section("remote", lambda: f"{self.config.get('remote')}:{self.config.get('remote_root')}")
+        section("dashboard_url", lambda: self.config.get("dashboard_url"))
+        section("rclone available", lambda: _rclone_lane.rclone_available(
+            str(self.config.get("rclone_path", "rclone"))))
+        section("resolve project", lambda: getattr(self.watcher, "last_resolve_project", None))
+
+        out.append("")
+        out.append("-- config problems (these STOP syncing) --")
+        if self.config_problems:
+            out.extend(f"  ERROR: {p}" for p in self.config_problems)
+        else:
+            out.append("  none")
+        for warning in self.config_warnings:
+            out.append(f"  warning: {warning}")
+
+        out.append("")
+        out.append("-- sequencer --")
+        state, detail = self.sequencer_state()
+        out.append(f"  state: {state or '(legacy mode: no sequencer)'}")
+        out.append(f"  detail: {detail}")
+        try:
+            out.append(f"  selected project rels: {sorted(self._selected_project_rels() or [])}")
+        except Exception as exc:
+            out.append(f"  selected project rels: <failed: {exc}>")
+
+        out.append("")
+        out.append("-- lanes --")
+        try:
+            for status in self.lane_statuses():
+                out.append(f"  {vars(status)}")
+        except Exception as exc:
+            out.append(f"  <failed: {exc}>")
+
+        out.append("")
+        out.append("-- syncthing --")
+        try:
+            reachable = self._lane_c.check_once()
+            out.append(f"  reachable: {reachable.state != 'error'} ({reachable.state})")
+            out.append(f"  detail: {reachable.detail or reachable.last_error or ''}")
+        except Exception as exc:
+            out.append(f"  <failed: {exc}>")
+
+        out.append("")
+        out.append("-- transport health (relay path / orphaned uploads) --")
+        try:
+            health = self.transport_health()
+            relayed = ((health.get("syncthing") or {}).get("relayed")) or []
+            if relayed:
+                out.append(f"  RELAYED: {len(relayed)} Syncthing device(s) are NOT on a "
+                           f"direct path -- {relayed}")
+            out.append(f"  {health}")
+        except Exception as exc:
+            out.append(f"  <failed: {exc}>")
+
+        out.append("")
+        out.append(f"-- last 40 log lines ({self.log_path}) --")
+        out.extend(f"  {line}" for line in self._diagnostic_log_tail(40))
+        return "\n".join(out)
+
+    def _token_expiry_text(self) -> str:
+        from .identity import parse_token
+
+        # Deliberately NOT identity.token (which returns None once expired --
+        # and "when did it expire" is exactly what diagnostics need).
+        raw = getattr(self.identity, "_identity", None) or {}
+        _user, expires = parse_token(raw.get("token"))
+        if expires is None:
+            return "(no token)"
+        remaining = expires - time.time()
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires))
+        return f"{stamp} ({remaining / 3600:.1f}h from now)"
+
+    def copy_diagnostics(self) -> bool:
+        """Put build_diagnostics() on the clipboard. Returns success."""
+        text = self.build_diagnostics()
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+            try:
+                root.withdraw()
+                root.clipboard_clear()
+                root.clipboard_append(text)
+                root.update()
+            finally:
+                root.destroy()
+            log.info("diagnostics copied to clipboard (%d chars)", len(text))
+            self._notify_tray(
+                "Diagnostics copied — paste them to Alex in a message.", "ccsync-companion")
+            return True
+        except Exception:
+            log.exception("could not copy diagnostics to the clipboard")
+            log.info("DIAGNOSTICS:\n%s", text)
+            self._notify_tray(
+                "Couldn't reach the clipboard — the diagnostics were written to the log "
+                "instead (tray → Open log).", "ccsync-companion")
+            return False
 
     def lane_statuses(self) -> list[LaneStatus]:
         statuses = [lane.status() for lane in self.lanes]
@@ -882,6 +1612,25 @@ class CompanionApp:
     def is_paused(self) -> bool:
         return self._paused
 
+    def _toggle_express_pause(self) -> None:
+        """Pause/resume lane A's express upload alongside the sequencer.
+
+        Public lane API (pause_express/resume_express), never the lane's
+        privates. getattr-guarded because tests and future lane adapters may
+        not implement it; fault-isolated because pause must never raise out
+        of a tray callback."""
+        for lane in (getattr(self, "_lane_a", None), getattr(self, "_lane_b", None)):
+            fn = getattr(lane, "pause_express" if self._paused else "resume_express", None)
+            if fn is None:
+                continue
+            try:
+                fn()
+            except Exception:
+                log.exception(
+                    "toggle_pause: failed to %s express on %s",
+                    "pause" if self._paused else "resume", getattr(lane, "name", lane),
+                )
+
     def toggle_pause(self) -> None:
         self._paused = not self._paused
         if not self._sync_enabled:
@@ -892,6 +1641,11 @@ class CompanionApp:
                 self.sequencer.pause() if self._paused else self.sequencer.resume()
             except Exception:
                 log.exception("toggle_pause: sequencer failed")
+            # The sequencer only owns the ROTATION. Lane A's express upload
+            # runs off the watchdog on its own timer, so "Pause syncing" left
+            # the editor still pushing every new clip to the NAS -- the one
+            # thing the button is for (AUDIT_3 M-3).
+            self._toggle_express_pause()
             # Lane C's poll loop is read-only status reporting -- it keeps
             # running regardless of pause state.
         else:
@@ -914,7 +1668,16 @@ class CompanionApp:
 
     # -- lifecycle ---------------------------------------------------
     def start(self) -> None:
-        if self._require_login and not self.identity.valid():
+        if self.config_problems:
+            # DEL-3: takes precedence over the sign-in gate -- signing in
+            # would not fix it, and the lane detail must name the real
+            # blocker rather than telling the editor to sign in again.
+            self._mark_lanes_misconfigured()
+            log.error(
+                "sync lanes/sequencer NOT started: %d config problem(s) that stop syncing",
+                len(self.config_problems),
+            )
+        elif self._require_login and not self.identity.valid():
             # Not signed in yet: do NOT start sync lanes/the sequencer (same
             # spirit as the sync_enabled=False path above -- lanes stay
             # idle with a clear reason). The watcher, popup fixer, and tray
@@ -946,11 +1709,76 @@ class CompanionApp:
             self._media_tree_thread.start()
         except Exception:
             log.exception("failed to start media tree cache thread")
+        # Report (never delete) partial copies an interrupted FIX ALL left
+        # behind -- see fixer.sweep_stale_tmp_files (AUDIT_2 CORE-H5). Off
+        # the main thread: it walks local_root.
+        try:
+            threading.Thread(
+                target=self._sweep_stale_tmp_files, name="ccsync-tmp-sweep", daemon=True
+            ).start()
+        except Exception:
+            log.exception("failed to start stale-tmp sweep")
+        try:
+            self._identity_stop_event.clear()
+            self._identity_thread = threading.Thread(
+                target=self._identity_watch_loop, name="ccsync-identity", daemon=True
+            )
+            self._identity_thread.start()
+        except Exception:
+            log.exception("failed to start identity expiry watcher")
         self._stop_event.clear()
         self._watcher_thread = threading.Thread(
             target=self.watcher.run, args=(self._stop_event,), name="ccsync-watcher", daemon=True
         )
         self._watcher_thread.start()
+
+    def _sweep_stale_tmp_files(self) -> None:
+        from . import fixer as fixer_mod
+
+        try:
+            leftovers = fixer_mod.sweep_stale_tmp_files(str(self.config.get("local_root", "")))
+        except Exception:
+            log.exception("stale-tmp sweep failed")
+            return
+        if leftovers:
+            self._notify_tray(
+                f"Found {len(leftovers)} half-copied file(s) from an interrupted copy. "
+                "Nothing was deleted — tray → Copy diagnostics for Alex.",
+                "ccsync-companion")
+
+    def _identity_watch_loop(self) -> None:
+        """Notice a token EXPIRING, not just a sign-out.
+
+        At the instant the token expires, editor_identity() starts returning
+        None so the reporter silently skips every cycle and the machine
+        vanishes from the fleet grid -- but _apply_identity_role() was never
+        re-run, so the lanes kept running under the now-stale role and
+        effective_mode() silently reverted to config `mode` (AUDIT_2
+        CORE-M11). Clock skew produces the same state instantly."""
+        was_valid = self.identity.valid()
+        while not self._identity_stop_event.wait(self.identity_check_interval):
+            try:
+                now_valid = self.identity.valid()
+                if now_valid == was_valid:
+                    continue
+                was_valid = now_valid
+                self._apply_identity_role()
+                if not now_valid:
+                    log.warning("identity token is no longer valid -- sign in again")
+                    if self._require_login and self._lanes_started:
+                        try:
+                            self._stop_lanes()
+                        except Exception:
+                            log.exception("identity expiry: failed to stop sync lanes")
+                        self._mark_lanes_pending_login()
+                        self._lanes_started = False
+                    self._notify_tray(
+                        "Your CCSync sign-in has expired — syncing has stopped. "
+                        "Right-click the tray icon → Sign in…", "ccsync-companion")
+                else:
+                    self.on_signed_in()
+            except Exception:
+                log.exception("identity expiry watcher failed")
 
     def shutdown(self) -> None:
         self._stop_event.set()
@@ -964,19 +1792,41 @@ class CompanionApp:
         except Exception:
             log.exception("failed to stop manifest cache")
         self._media_tree_stop_event.set()
+        self._identity_stop_event.set()
+        # Join both Resolve-touching threads (bounded). A self-upgrade used
+        # to exit the process while get_media_pool_items() was inside the
+        # fusionscript C extension (AUDIT_2 §2-low). Bounded so a wedged
+        # extension can still never block shutdown indefinitely.
+        for thread in (self._watcher_thread, self._media_tree_thread):
+            if thread is None or not thread.is_alive():
+                continue
+            try:
+                thread.join(timeout=5.0)
+                if thread.is_alive():
+                    log.warning("shutdown: %s did not stop within 5s", thread.name)
+            except Exception:
+                log.exception("shutdown: failed to join %s", getattr(thread, "name", thread))
 
     def run(self) -> None:
-        setup_logging(self.config)
+        try:
+            setup_logging(self.config)
+        except Exception:
+            _fallback_logging(self.config)
         log.info("ccsync-companion v%s starting", config_mod.VERSION)
         log.info("config: %s", config_mod.CONFIG_PATH)
-        # Remove the .old a previous self-upgrade left behind (see upgrade.py).
-        # Its presence means THIS start is the first on a freshly-upgraded
-        # build -- surface that as a toast once the tray exists below.
-        just_upgraded = upgrade_mod.cleanup_old_exe()
+
+        # "Is this the first start on a new build?" now comes from a version
+        # marker file, NOT from whether an `.old` happened to be unlinkable.
+        # The old derivation fired the "Update complete" toast on an unrelated
+        # later restart whenever an AV hold had deferred the unlink (AUDIT_2
+        # CORE-H6).
+        just_upgraded = upgrade_mod.note_version_start(self._state_dir)
 
         # A half-configured install is the single most common failure mode and
         # is otherwise completely silent — nothing syncs and no lane says why.
-        errors, warnings = config_mod.validate_config(self.config)
+        # (Computed in __init__ so the popup/FIX ALL/Consolidate gates see it
+        # too; re-logged here where the log file actually exists.)
+        errors, warnings = self.config_problems, self.config_warnings
         if errors:
             log.error(
                 "config has %d problem(s) that STOP syncing -- fix these in %s:",
@@ -990,41 +1840,62 @@ class CompanionApp:
             log.info("config OK: remote=%s remote_root=%s local_root=%s",
                      self.config.get("remote"), self.config.get("remote_root"),
                      self.config.get("local_root"))
-        self.config_problems = errors
 
-        self.start()
-
+        # start() and the toast timer below are INSIDE the try/finally that
+        # runs shutdown(): an exception from the watcher thread start or the
+        # timer used to propagate past run() with shutdown() never called,
+        # and rclone children are Popen'd, not daemon threads -- they keep
+        # transferring against the tree after the companion is gone (AUDIT_2
+        # CORE-M8).
         try:
-            from . import tray as tray_mod
+            self.start()
 
-            self._tray_icon = tray_mod.start_tray(self)
-            log.info("tray icon started")
-        except ImportError:
-            self._tray_icon = None
-            log.warning("pystray/Pillow not installed — running headless (Ctrl+C to stop)")
-        except Exception:
-            # pystray.Icon(...) / _make_icon_image / _build_menu can raise
-            # OSError/TclError/PIL errors too (no interactive session,
-            # Explorer's tray not up yet at login, shell restart) -- only
-            # catching ImportError here let any of those escape past the
-            # try/finally below, skipping shutdown() entirely (lanes,
-            # sequencer, reporter, watchdog observer all left running --
-            # see S-11). Fall back to headless instead.
-            self._tray_icon = None
-            log.exception("tray icon failed to start -- running headless (Ctrl+C to stop)")
+            try:
+                from . import tray as tray_mod
 
-        if just_upgraded:
-            log.info("self-upgrade to v%s completed", config_mod.VERSION)
-            # Slight delay: the tray icon thread has only just started and
-            # Windows drops notify() calls for icons not yet registered.
-            timer = threading.Timer(3.0, lambda: self._notify_tray(
-                f"Update complete — now running v{config_mod.VERSION}.",
-                "ccsync-companion",
-            ))
-            timer.daemon = True
-            timer.start()
+                self._tray_icon = tray_mod.start_tray(self)
+                log.info("tray icon started")
+            except ImportError:
+                self._tray_icon = None
+                log.warning("pystray/Pillow not installed — running headless (Ctrl+C to stop)")
+            except Exception:
+                # pystray.Icon(...) / _make_icon_image / _build_menu can raise
+                # OSError/TclError/PIL errors too (no interactive session,
+                # Explorer's tray not up yet at login, shell restart) -- only
+                # catching ImportError here let any of those escape past the
+                # try/finally below, skipping shutdown() entirely (lanes,
+                # sequencer, reporter, watchdog observer all left running --
+                # see S-11). Fall back to headless instead.
+                self._tray_icon = None
+                log.exception("tray icon failed to start -- running headless (Ctrl+C to stop)")
 
-        try:
+            if errors:
+                self._notify_tray(
+                    "NOT SYNCING — CCSync isn't fully set up on this machine. "
+                    "Tray → Copy diagnostics for Alex.", "ccsync-companion")
+
+            if just_upgraded:
+                log.info("self-upgrade to v%s completed", config_mod.VERSION)
+                # Slight delay: the tray icon thread has only just started and
+                # Windows drops notify() calls for icons not yet registered.
+                timer = threading.Timer(3.0, lambda: self._notify_tray(
+                    f"Update complete — now running v{config_mod.VERSION}.",
+                    "ccsync-companion",
+                ))
+                timer.daemon = True
+                timer.start()
+
+            # Only NOW is the rollback copy expendable: the new build has
+            # constructed itself, validated config, started its lanes and put
+            # a tray icon on screen. Deleting it as run()'s third statement
+            # meant a build that crashed one line later left the machine with
+            # a broken exe and no way back (AUDIT_2 CORE-H6). Deferred again
+            # by 60 s so an AV hold on the freshly-renamed file has time to
+            # clear, and retried on every subsequent start regardless.
+            cleanup_timer = threading.Timer(60.0, upgrade_mod.cleanup_old_exe)
+            cleanup_timer.daemon = True
+            cleanup_timer.start()
+
             while not self._stop_event.is_set():
                 self._stop_event.wait(1.0)
         except KeyboardInterrupt:
@@ -1048,7 +1919,13 @@ def run() -> None:
     # no tray, no toast (see S-10). CompanionApp.run() also calls
     # setup_logging()/validate_config() itself -- harmless repeats
     # (setup_logging() just re-clears/re-adds handlers; idempotent).
-    setup_logging(cfg)
+    try:
+        setup_logging(cfg)
+    except Exception:
+        # setup_logging() itself was the one unguarded statement here, so a
+        # bad log_path took the windowed exe down before anything could say
+        # why (AUDIT_2 CORE-H2).
+        _fallback_logging(cfg)
     errors, _warnings = config_mod.validate_config(cfg)
     if errors:
         log.error(
@@ -1057,6 +1934,9 @@ def run() -> None:
         )
         for problem in errors:
             log.error("  - %s", problem)
+    if not acquire_single_instance():
+        _warn_already_running()
+        return
     try:
         app = CompanionApp(cfg)
         app.run()

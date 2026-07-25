@@ -417,3 +417,48 @@ def test_identity_manager_role_none_when_not_signed_in_or_dashboard_omits_it(tmp
     mgr2.sign_in("jsmith", "hunter2")
     assert mgr2.valid() is True
     assert mgr2.role is None  # signed in, but no role info from the dashboard
+
+
+# -- plaintext sign-in warning (AUDIT_3 L-13) -------------------------------
+
+
+@pytest.fixture
+def _reset_plaintext_warning(monkeypatch):
+    monkeypatch.setattr(identity_mod, "_PLAINTEXT_WARNED", False)
+    yield
+
+
+def _ok_post(url, data, headers, timeout):
+    return {"ok": True, "username": "alex", "token": _token()}
+
+
+def test_http_signin_to_a_remote_host_warns_once(caplog, _reset_plaintext_warning):
+    """NOT a refusal: the deployment is http over the tailnet by design, and
+    refusing would lock every editor out to fix a risk the tailnet already
+    bounds. But a TrueNAS password crossing the wire in clear must not be
+    invisible either -- the fix is TLS on the dashboard."""
+    with caplog.at_level("WARNING", logger="ccsync.identity"):
+        verify_credentials("http://100.71.216.3:8480", "alex", "hunter2", http_post=_ok_post)
+        verify_credentials("http://100.71.216.3:8480", "alex", "hunter2", http_post=_ok_post)
+
+    warnings = [r for r in caplog.records if "plain HTTP" in r.message]
+    assert len(warnings) == 1, "one note, not one per sign-in attempt"
+    # ...and it still signs in.
+    assert verify_credentials(
+        "http://100.71.216.3:8480", "alex", "hunter2", http_post=_ok_post
+    )["ok"] is True
+
+
+def test_no_plaintext_warning_for_https_or_loopback(caplog, _reset_plaintext_warning):
+    with caplog.at_level("WARNING", logger="ccsync.identity"):
+        verify_credentials("https://dash.example.com", "alex", "x", http_post=_ok_post)
+        verify_credentials("http://127.0.0.1:8480", "alex", "x", http_post=_ok_post)
+        verify_credentials("http://localhost:8480", "alex", "x", http_post=_ok_post)
+
+    assert not [r for r in caplog.records if "plain HTTP" in r.message]
+
+
+def test_plaintext_check_never_raises(_reset_plaintext_warning):
+    identity_mod._warn_if_plaintext(None)
+    identity_mod._warn_if_plaintext(5)
+    identity_mod._warn_if_plaintext("")

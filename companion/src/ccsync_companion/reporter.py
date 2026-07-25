@@ -102,11 +102,18 @@ class DashboardReporter:
         get_editor_name: Optional[GetEditorNameFn] = None,
         get_identity_token: Optional[GetIdentityTokenFn] = None,
         on_report_response: Optional[OnReportResponseFn] = None,
+        get_transport_health: Optional[Callable[[], dict[str, Any]]] = None,
     ) -> None:
         self._get_statuses = get_statuses
         self.cfg = cfg
         self._http_post = http_post or default_http_post
         self.timeout = timeout
+        # Scaled ceiling for the heavy manifest/media-tree sections -- see
+        # post_once(). Config-overridable so a very large fleet can tune it.
+        try:
+            self.full_report_timeout = max(timeout, float(cfg.get("report_timeout_full", 30.0)))
+        except (TypeError, ValueError):
+            self.full_report_timeout = max(timeout, 30.0)
         self._get_queue_info = get_queue_info
         self._get_resolve_project = get_resolve_project
         self._get_local_manifest = get_local_manifest
@@ -115,15 +122,29 @@ class DashboardReporter:
         self._get_editor_name = get_editor_name
         self._get_identity_token = get_identity_token
         self._on_report_response = on_report_response
+        # Connection-path + orphan diagnostics (AUDIT_2 C-6). Nothing in
+        # production could tell a RELAYED editor from a merely slow one:
+        # Syncthing devices are added with addresses:["dynamic"] and relays
+        # left at their `true` default, so lane C can silently ride the
+        # public relay pool at 1-5 MB/s. Same for orphaned .partial uploads,
+        # which lane A never deletes and nothing ever reported.
+        self._get_transport_health = get_transport_health
 
         self.dashboard_url = str(cfg.get("dashboard_url", "")).strip()
         self.dashboard_token = str(cfg.get("dashboard_token", "")).strip()
-        self.report_interval = float(cfg.get("dashboard_report_interval", 60))
+        # coerce_numeric, not float(): the reporter is constructed inside
+        # CompanionApp.__init__, so a hand-edited
+        # `dashboard_report_interval = "1m"` raised there -- the windowed exe
+        # exiting with no tray and no log line (AUDIT_2 CORE-M4's family).
+        # validate_config() reports the bad value.
+        self.report_interval = config_mod.coerce_numeric(cfg, "dashboard_report_interval", 60)
         # Adaptive cadence: while any lane is actively syncing, report more
         # often (dashboard_report_interval_active) -- but the heavier
         # local_manifest/media_tree payload sections still only go out at
         # most every report_interval seconds (see _run_cycle).
-        self.report_interval_active = float(cfg.get("dashboard_report_interval_active", 5))
+        self.report_interval_active = config_mod.coerce_numeric(
+            cfg, "dashboard_report_interval_active", 5
+        )
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -204,6 +225,11 @@ class DashboardReporter:
                 payload["mode"] = self._get_mode()
             except Exception:
                 log.exception("get_mode() failed")
+        if self._get_transport_health is not None:
+            try:
+                payload["transport_health"] = self._get_transport_health()
+            except Exception:
+                log.exception("get_transport_health() failed")
         if not light:
             if self._get_local_manifest is not None:
                 try:
@@ -254,7 +280,14 @@ class DashboardReporter:
                 headers["X-CCSync-Identity"] = identity_token
 
         payload = self._build_payload(light=light, editor_name=editor_name)
-        resp = self._http_post(url, payload, headers, self.timeout)
+        # A FULL report carries local_manifest + media_tree: a 2000-clip
+        # project's media tree plus the per-file manifest cannot cross any
+        # real WAN link in 5 s, so those two sections never reached the
+        # dashboard at all -- one WARNING for the whole streak, then DEBUG
+        # forever (AUDIT_2 CORE-M12). Light ticks keep the short timeout,
+        # which is what makes live transfer progress feel responsive.
+        timeout = self.timeout if light else self.full_report_timeout
+        resp = self._http_post(url, payload, headers, timeout)
         if self._on_report_response is not None:
             try:
                 self._on_report_response(resp)

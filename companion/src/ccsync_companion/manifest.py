@@ -23,6 +23,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import config as config_mod
 from . import fixer
 from .sync import rclone_lane
 
@@ -128,7 +129,10 @@ class ManifestCache:
     ) -> None:
         self.cfg = cfg
         self.local_root = cfg.get("local_root", "")
-        self.refresh_interval = float(cfg.get("manifest_refresh_interval", 300))
+        # coerce_numeric, not float(): ManifestCache is constructed inside
+        # CompanionApp.__init__, so a hand-edited "5m" here took the windowed
+        # exe down with no tray and no log line (AUDIT_2 CORE-M4's family).
+        self.refresh_interval = config_mod.coerce_numeric(cfg, "manifest_refresh_interval", 300)
         self._get_selected_rels = get_selected_rels
         self._size_fn = size_fn
 

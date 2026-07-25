@@ -5,11 +5,12 @@
 #
 #     pyinstaller build_onboard.spec
 #
-# Output: dist/onboard/onboard.exe (one-folder build; windows_bootstrap.ps1
-# and the ccsync_companion package are bundled alongside it as data/binaries
-# so steps.find_bootstrap_script() and `from ccsync_companion import ...`
-# both resolve at runtime -- see steps.py's find_bootstrap_script docstring
-# for the exact lookup order under sys._MEIPASS).
+# Output: dist/onboard.exe -- a ONE-FILE build (there is no COLLECT step
+# below). windows_bootstrap.ps1, ccsync-companion.exe and the
+# ccsync_companion package are packed into that exe and extracted to
+# sys._MEIPASS at launch, which steps.find_bootstrap_script() /
+# find_companion_exe() already look in -- see steps.py's
+# find_bootstrap_script docstring for the exact lookup order.
 
 import sys
 from pathlib import Path
@@ -96,7 +97,11 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # upx=False deliberately. A UPX-packed, unsigned, onefile exe is the
+    # classic SmartScreen / AV false-positive shape -- and this is a binary a
+    # remote editor has to download and run as their FIRST contact with the
+    # system. A few MB of size is worth not having the installer quarantined.
+    upx=False,
     runtime_tmpdir=None,
     console=False,  # GUI app -- no console window
     icon=None,

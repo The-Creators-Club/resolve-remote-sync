@@ -16,15 +16,28 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote
 
+from . import config as config_mod
+from .sync.repath import normalized_safe_rel
+
 log = logging.getLogger("ccsync.selection")
 
 HttpGetFn = Callable[[str, dict, float], Any]
+# The signed identity token (identity.py's IdentityManager.token), sent as
+# the "X-CCSync-Identity" header exactly as reporter.py sends it on
+# /api/v1/report. The dashboard's selection-read endpoint now requires it
+# ALONGSIDE the shared X-CCSync-Token -- the fleet-wide token alone no
+# longer authorizes reading a given editor's selection. None when not signed
+# in: the header is omitted (never sent empty) and the fetch is still
+# ATTEMPTED, so an unauthenticated 401 degrades exactly like any other fetch
+# failure (cached selection, once-per-streak logging).
+GetIdentityTokenFn = Callable[[], Optional[str]]
 
 CACHE_FILENAME = "selection.json"
 
@@ -49,11 +62,17 @@ class SelectionClient:
         http_get: Optional[HttpGetFn] = None,
         timeout: float = 5.0,
         editor_name_fn: Optional[Callable[[], Optional[str]]] = None,
+        identity_token_fn: Optional[GetIdentityTokenFn] = None,
     ) -> None:
         self.cfg = cfg
         self.state_dir = state_dir
         self._http_get = http_get or default_http_get
         self.timeout = timeout
+        # See GetIdentityTokenFn. Optional so callers that predate the
+        # dashboard's identity requirement (and tests) still work; when it is
+        # absent the request goes out with the shared token only, which is
+        # what the dashboard used to accept.
+        self._identity_token_fn = identity_token_fn
 
         self.dashboard_url = str(cfg.get("dashboard_url", "")).strip()
         self.dashboard_token = str(cfg.get("dashboard_token", "")).strip()
@@ -76,18 +95,55 @@ class SelectionClient:
         # mapping -- see get_project_roots()). None until a live fetch
         # succeeds at least once this run.
         self._last_response: Optional[dict[str, Any]] = None
+        # Monotonic stamp for the TTLs below.
+        self._last_response_at = 0.0
+        # How long get()/fetch() may serve the in-memory response without
+        # going back to the network. get() used to do a LIVE HTTP fetch (and
+        # a disk write) on every call, and the sequencer calls it from a
+        # 5-second poll loop: ~120 requests + 120 writes per project per
+        # pass per editor, against the dashboard running ON THE NAS, exactly
+        # while transfers are in flight (AUDIT_2 P11 / L-5).
+        #
+        # coerce_numeric, not float(): a hand-edited `selection_fetch_ttl =
+        # "30s"` raised here, and SelectionClient is built inside
+        # CompanionApp.__init__ -- the windowed exe then dies with no tray and
+        # no log line (AUDIT_2 CORE-M4's family). Both keys are in DEFAULTS,
+        # the template and validate_config() now.
+        self.fetch_ttl = config_mod.coerce_numeric(cfg, "selection_fetch_ttl", 30)
+        # Separate, longer TTL for the sticky destination mapping -- see
+        # project_roots_result().
+        self.project_roots_ttl = config_mod.coerce_numeric(cfg, "project_roots_ttl", 300)
+        # Whose selection _last_response holds -- the TTL is keyed on it.
+        self._last_response_editor: Optional[str] = None
+        # Last payload actually written to disk, for write-only-on-change.
+        self._last_written: Optional[dict[str, Any]] = None
 
     @property
     def enabled(self) -> bool:
         return bool(self.dashboard_url)
 
     # -- fetch -----------------------------------------------------
-    def fetch(self) -> Optional[list[dict]]:
+    def fetch(self, force: bool = False) -> Optional[list[dict]]:
         """Single synchronous fetch. Never raises -- returns None on any
-        failure (network error, bad JSON, unexpected shape)."""
+        failure (network error, bad JSON, unexpected shape).
+
+        Throttled by `fetch_ttl`: a response younger than that is served from
+        memory with no request and no disk write (AUDIT_2 P11). `force=True`
+        bypasses it for the paths that genuinely want a round trip."""
         if not self.enabled:
             return None
         editor_name = str(self._editor_name_fn() or "").strip().lower()
+        # The TTL is keyed on the editor too: a tray sign-in must redirect
+        # WHOSE tick list is fetched immediately, not up to fetch_ttl later.
+        if (
+            not force
+            and self._last_response is not None
+            and editor_name == self._last_response_editor
+            and (time.monotonic() - self._last_response_at) < self.fetch_ttl
+        ):
+            cached = self._last_response.get("selection")
+            if isinstance(cached, list):
+                return cached
         if not editor_name:
             # No verified/configured identity yet (e.g. require_login=true
             # and not signed in). Requesting /api/v1/selection/ with no
@@ -97,9 +153,7 @@ class SelectionClient:
             # or log spam (see the selection-identity finding).
             return None
         url = f"{self.dashboard_url.rstrip('/')}/api/v1/selection/{quote(editor_name, safe='')}"
-        headers = {}
-        if self.dashboard_token:
-            headers["X-CCSync-Token"] = self.dashboard_token
+        headers = self._headers()
         try:
             response = self._http_get(url, headers, self.timeout)
             selection = response.get("selection") if isinstance(response, dict) else None
@@ -115,17 +169,60 @@ class SelectionClient:
 
         self._error_logged = False
         self._last_response = response if isinstance(response, dict) else {"selection": selection}
+        self._last_response_at = time.monotonic()
+        self._last_response_editor = editor_name
         self._write_cache(self._last_response)
         return selection
 
+    def _headers(self) -> dict[str, str]:
+        """Auth headers for a selection read.
+
+        BOTH the shared dashboard token and the signed identity token, the
+        same pair /api/v1/report sends: the dashboard's selection endpoint
+        now requires X-CCSync-Identity as well, so a fetch carrying only
+        X-CCSync-Token 401s and every editor silently falls back to the
+        cached selection.
+
+        Never raises and never sends an empty identity header -- the
+        not-signed-in case must still ATTEMPT the fetch (an old dashboard
+        answers it) and degrade through the existing failure path if it
+        doesn't."""
+        headers: dict[str, str] = {}
+        if self.dashboard_token:
+            headers["X-CCSync-Token"] = self.dashboard_token
+        if self._identity_token_fn is not None:
+            try:
+                identity_token = self._identity_token_fn()
+            except Exception:
+                log.debug("selection: identity_token_fn failed", exc_info=True)
+                identity_token = None
+            if identity_token:
+                headers["X-CCSync-Identity"] = str(identity_token)
+        return headers
+
     def _write_cache(self, response: dict[str, Any]) -> None:
+        # WRITE ONLY ON CHANGE. This was rewritten on every successful
+        # fetch, and fetch() is reached from the sequencer's poll loop --
+        # 120 disk writes per project per pass per editor while waiting out a
+        # lane C turn, all of them byte-identical (AUDIT_2 P11).
+        if response == self._last_written:
+            return
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             payload = {
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
                 "response": response,
             }
-            self._cache_path.write_text(json.dumps(payload), encoding="utf-8")
+            # tmp + replace, like identity.save_identity. A bare write_text
+            # truncates first, and this path is rewritten from inside the
+            # sequencer's 5-second poll loop -- a companion killed at that
+            # instant left a ZERO-BYTE selection.json, so load_cached()
+            # returned None and the next start with the dashboard down meant
+            # STATE_NO_SELECTION and lanes A/B never ran (AUDIT_2 §2-low).
+            tmp = self._cache_path.with_name(self._cache_path.name + ".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(self._cache_path)
+            self._last_written = response
         except Exception:
             log.debug("failed to write selection cache to %s", self._cache_path, exc_info=True)
 
@@ -176,34 +273,71 @@ class SelectionClient:
         return None, "none"
 
     # -- project roots (sticky per-Resolve-project destination mapping) --
-    def get_project_roots(self) -> dict[str, str]:
-        """Case-insensitive mapping of Resolve project name -> tree
-        destination prefix ("Projects/<year>/<series>/<project>"), built
-        from the server's "project_roots" list (see popup.py's server_roots
-        lookup). Prefers the most recently fetched live response this run,
-        falling back to the on-disk cache; returns {} when neither is
-        available or the field is absent (older server / never fetched).
-        Never raises."""
+    def project_roots_result(self) -> tuple[dict[str, str], str]:
+        """(mapping, source) where source is "live", "cache" or
+        "unreachable".
+
+        "No mapping exists" and "we could not ask" are completely different
+        answers and this used to return {} for both. Callers then fell
+        through to fixer.match_project_dir's token-overlap GUESS, so during a
+        dashboard outage the same clip got a different destination than it
+        had five minutes earlier -- gigabytes filed under a guessed root and
+        lane-A-uploaded there (AUDIT_2 CORE-H9). Callers must refuse to
+        resolve a destination on "unreachable".
+
+        The cached response is also TTL'd. `_last_response` was set once by
+        the base-rig one-shot fetch below and, because the sequencer never
+        runs there, never refreshed -- so after an admin re-mapped a project
+        root the base rig kept filing media under the old one until restart,
+        with no indication.
+        """
         response = self._last_response
-        if response is None:
-            response = self._load_cached_response()
-        if response is None and self.enabled:
-            # Base rig: the sequencer never runs, so nothing populates the
-            # cache in the background. A one-shot fetch here keeps popup
-            # destinations honoring admin-set project roots. fetch() stores
-            # the response and never raises.
+        fresh = response is not None and (
+            time.monotonic() - self._last_response_at
+        ) < self.project_roots_ttl
+        if not fresh and self.enabled:
+            # Refresh (base rigs never do it in the background; on editors
+            # the sequencer's own polling normally keeps this warm).
             try:
                 self.fetch()
             except Exception:
                 pass
-            response = self._last_response
+            if self._last_response is not None:
+                return self._parse_project_roots(self._last_response), "live"
+            cached = self._load_cached_response()
+            if cached is not None:
+                return self._parse_project_roots(cached), "cache"
+            return {}, "unreachable"
+        if response is not None:
+            return self._parse_project_roots(response), "live"
+        cached = self._load_cached_response()
+        if cached is not None:
+            return self._parse_project_roots(cached), "cache"
+        return {}, "unreachable" if self.enabled else "live"
+
+    def get_project_roots(self) -> dict[str, str]:
+        """Back-compat wrapper: the mapping only. Prefer
+        project_roots_result() where "unreachable" matters."""
+        mapping, _source = self.project_roots_result()
+        return mapping
+
+    @staticmethod
+    def _parse_project_roots(response: Any) -> dict[str, str]:
+        """Build {resolve project name (lower) -> "Projects/<rel>"}.
+
+        UNSAFE ENTRIES ARE DROPPED. This mapping is the destination the popup
+        fixer copies media into and the subpath app.consolidate_project hands
+        to lane A -- but unlike every other consumer of a dashboard rel_path
+        (sequencer._item_is_valid, repath._item_is_valid) it validated
+        nothing at all, so a `../../..` rel_path from the dashboard became
+        `Projects/../../..` and reached both a local copy destination and
+        `rclone copy <that>` to the NAS. Same shared helper as everyone else
+        (AUDIT_3 H-2)."""
         if not isinstance(response, dict):
             return {}
-
         roots = response.get("project_roots")
         if not isinstance(roots, list):
             return {}
-
         mapping: dict[str, str] = {}
         for entry in roots:
             if not isinstance(entry, dict):
@@ -212,5 +346,12 @@ class SelectionClient:
             rel_path = entry.get("rel_path")
             if not name or not rel_path:
                 continue
-            mapping[str(name).strip().lower()] = f"Projects/{rel_path}"
+            safe_rel = normalized_safe_rel(rel_path)
+            if safe_rel is None:
+                log.warning(
+                    "selection: dropping project_roots entry for %r -- rel_path %r "
+                    "is not a contained relative path", name, rel_path,
+                )
+                continue
+            mapping[str(name).strip().lower()] = f"Projects/{safe_rel}"
         return mapping

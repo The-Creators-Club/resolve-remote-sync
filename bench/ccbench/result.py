@@ -18,16 +18,30 @@ class RunResult:
     params: dict[str, Any]  # engine-specific params for this run (e.g. transfers=8)
     seconds: float
     num_bytes: int
-    MB_s: float
+    MB_s: float  # decimal megabytes/second (bytes / 1e6 / seconds) -- see base.mb_per_s
     verified: bool
     ok: bool = True
     skipped: bool = False
     reason: str = ""
-    lane: str = ""  # "A" | "B" | "C" | "" (assigned by matrix.py from bench.toml)
+    lane: str = ""  # "A" | "B" | "C" | "net" -- assigned by matrix.py from bench.toml
     endpoint: str = ""  # short label for which endpoint config was used
     timestamp: float = field(default_factory=time.time)
     repeat_index: int = 0
     stderr_tail: str = ""
+    # How `num_bytes` was obtained. "rclone-stats"/"robocopy-summary" = the
+    # tool's own accounting of what it actually moved; "manifest-fallback" =
+    # the tool's stats couldn't be parsed and the dataset manifest total was
+    # substituted (treat the throughput as an upper bound, not a measurement).
+    bytes_source: str = "manifest"
+    # How `verified` was established: "spot-check-sha256" (re-hashed files at
+    # the destination), "remote-size-listing" (remote byte/file count matches
+    # the manifest), "exit-code-only" (the tool said it worked and nothing
+    # independent was checked -- do NOT read this as verified data), "none".
+    verify_method: str = ""
+    # True when both ends of this transfer were on this machine (loopback
+    # syncthing pair, local_test_dir selftest runs). Such rows are NOT
+    # comparable with rows measured over the real network.
+    loopback: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -78,6 +92,7 @@ def make_skipped(
     lane: str = "",
     endpoint: str = "",
     repeat_index: int = 0,
+    loopback: bool = False,
 ) -> RunResult:
     return RunResult(
         engine=engine,
@@ -94,6 +109,9 @@ def make_skipped(
         lane=lane,
         endpoint=endpoint,
         repeat_index=repeat_index,
+        bytes_source="none",
+        verify_method="none",
+        loopback=loopback,
     )
 
 

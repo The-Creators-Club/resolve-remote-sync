@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import pathlib
 from pathlib import Path
 
@@ -237,3 +238,265 @@ def test_cleanup_old_exe_swallows_oserror(tmp_path, monkeypatch):
         raise OSError("held by AV scan")
     monkeypatch.setattr(pathlib.Path, "unlink", locked)
     cleanup_old_exe(tmp_path / "ccsync-companion.exe")  # must not raise
+
+
+# ===========================================================================
+# AUDIT_2 round-2 regressions
+# ===========================================================================
+
+
+def test_upgrade_url_must_share_the_dashboards_origin():
+    """AUDIT_2 CORE-M10. `upgrade.url` arrives inside a plain-HTTP
+    /api/v1/report response, and the sha256 that "verifies" the download
+    comes from that SAME response -- so anyone able to answer or alter one
+    report response could hand the companion an arbitrary exe PLUS its
+    matching hash, which is then renamed over the running companion and
+    launched detached. There was no origin check at all."""
+    from ccsync_companion.upgrade import same_origin
+
+    base = "http://100.71.216.3:8480"
+    assert same_origin("/api/v1/packages/ccsync-companion-0.4.5.exe", base) is True
+    assert same_origin("http://100.71.216.3:8480/x.exe", base) is True
+    assert same_origin("http://evil.example.com/payload.exe", base) is False
+    assert same_origin("https://100.71.216.3:8480/x.exe", base) is False  # scheme differs
+    assert same_origin("http://100.71.216.3:9999/x.exe", base) is False   # port differs
+    assert same_origin("", base) is False
+
+
+def test_download_refuses_a_foreign_host(tmp_path):
+    opened = []
+
+    def spy_open(url, headers, timeout):
+        opened.append(url)
+        raise AssertionError("must never be fetched")
+
+    mgr = UpgradeManager({"dashboard_url": "http://100.71.216.3:8480"}, http_open=spy_open)
+    result = mgr.download_and_verify(
+        {"url": "http://evil.example.com/x.exe", "sha256": "0" * 64}, tmp_path,
+    )
+    assert result is None
+    assert opened == []
+
+
+def test_download_enforces_a_size_ceiling(tmp_path, monkeypatch):
+    """AUDIT_2 §2-low: the download had no size ceiling and no free-space
+    check."""
+    import ccsync_companion.upgrade as upgrade_mod
+
+    monkeypatch.setattr(upgrade_mod, "MAX_DOWNLOAD_BYTES", 1024)
+
+    class _Endless:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return b"x" * n
+
+    mgr = UpgradeManager({"dashboard_url": "http://d"},
+                         http_open=lambda u, h, t: _Endless())
+    assert mgr.download_and_verify({"url": "/x.exe", "sha256": "0" * 64}, tmp_path) is None
+    assert not (tmp_path / "ccsync-companion.new.exe").exists()
+
+
+def test_rollback_survives_a_non_oserror_and_cleans_up(tmp_path):
+    """AUDIT_2 CORE-H7. _rollback caught only OSError, but `_replace` is an
+    INJECTABLE callable and os.replace can raise TypeError/ValueError. A raise
+    escaped _apply_inner -> apply() -> app.apply_upgrade() -> the tray's
+    dialog handler, killing the tray daemon thread to invisible stderr WHILE
+    `exe` did not exist -- renamed to .old, new build parked at .new.exe."""
+    exe = tmp_path / "ccsync-companion.exe"
+    old = tmp_path / "ccsync-companion.exe.old"
+    aside = tmp_path / "ccsync-companion.new.exe"
+    old.write_bytes(b"previous")
+    exe.write_bytes(b"new build")
+    aside.write_bytes(b"leftover")
+
+    def hostile(a, b):
+        raise TypeError("surrogates not allowed")
+
+    mgr = UpgradeManager({}, replace_fn=hostile)
+    mgr._rollback(old, exe, aside=aside)  # must not raise
+
+
+def test_rollback_unlinks_the_rejected_build(tmp_path):
+    exe = tmp_path / "ccsync-companion.exe"
+    old = tmp_path / "ccsync-companion.exe.old"
+    aside = tmp_path / "ccsync-companion.new.exe"
+    old.write_bytes(b"previous")
+    exe.write_bytes(b"new build")
+
+    mgr = UpgradeManager({}, replace_fn=os.replace)
+    mgr._rollback(old, exe, aside=aside)
+
+    assert exe.read_bytes() == b"previous", "the previous build must be restored"
+    assert not aside.exists(), "~20MB of a refused build must not be left behind"
+
+
+def test_note_version_start_only_fires_on_an_actual_version_change(tmp_path):
+    """AUDIT_2 CORE-H6. "Did we just upgrade?" used to be derived from whether
+    cleanup_old_exe() managed to unlink an `.old` -- which forced the rollback
+    copy to be destroyed before the new build had proven anything, AND fired
+    the "Update complete" toast on an unrelated later restart whenever an AV
+    hold had deferred the unlink."""
+    import ccsync_companion.upgrade as upgrade_mod
+    from ccsync_companion import config as config_mod
+
+    state = tmp_path / "state"
+    # First ever run: no marker -> not an upgrade.
+    assert upgrade_mod.note_version_start(state) is False
+    # Same version again -> still not an upgrade.
+    assert upgrade_mod.note_version_start(state) is False
+    # A different version was recorded -> this start IS the first on a new build.
+    (state / "last_version.txt").write_text("0.0.1", encoding="utf-8")
+    assert upgrade_mod.note_version_start(state) is True
+    assert (state / "last_version.txt").read_text(encoding="utf-8") == config_mod.VERSION
+    assert upgrade_mod.note_version_start(state) is False
+
+
+def test_note_version_start_never_raises(tmp_path):
+    import ccsync_companion.upgrade as upgrade_mod
+
+    blocker = tmp_path / "blocked"
+    blocker.write_text("i am a file, not a directory", encoding="utf-8")
+    assert upgrade_mod.note_version_start(blocker) is False
+
+
+# ===========================================================================
+# AUDIT_3 H-1: the update download must not follow redirects
+# ===========================================================================
+
+
+class _RedirectResponse:
+    """A 3xx handed back by an injected http_open (a transport that follows
+    redirects itself, or a dashboard answering the download with one)."""
+
+    status = 302
+
+    def __init__(self):
+        self.reads = 0
+
+    def read(self, n=-1):
+        self.reads += 1
+        return b"attacker-payload"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_download_refuses_a_redirect_response(tmp_path, caplog):
+    """same_origin() is checked ONCE, before the request. urlopen follows 3xx
+    automatically, so `302 Location: http://attacker/x.exe` moved the
+    download off-origin afterwards -- and the sha256 proves nothing, since it
+    came from the same response that supplied the URL."""
+    resp = _RedirectResponse()
+    calls = []
+
+    def redirecting_open(url, headers, timeout):
+        calls.append(url)
+        return resp
+
+    mgr = UpgradeManager(_cfg(), http_open=redirecting_open)
+    with caplog.at_level("ERROR", logger="ccsync.upgrade"):
+        result = mgr.download_and_verify(_info(), tmp_path)
+
+    assert result is None
+    assert resp.reads == 0, "not a single byte of a redirected download may be read"
+    assert not (tmp_path / "ccsync-companion.new.exe").exists()
+    assert len(calls) == 1, "the redirect target must never be requested"
+    assert any("redirect" in r.message.lower() for r in caplog.records)
+
+
+class _FakeHTTPResponse(io.BytesIO):
+    """Minimal stand-in for http.client.HTTPResponse, enough for urllib's
+    handler chain (HTTPErrorProcessor -> HTTPRedirectHandler)."""
+
+    def __init__(self, code: int, headers: dict, body: bytes = b"", url: str = ""):
+        super().__init__(body)
+        import email.message
+
+        self.code = code
+        self.status = code
+        self.msg = "Found" if code // 100 == 3 else "OK"
+        self.url = url
+        self._info = email.message.Message()
+        for key, value in headers.items():
+            self._info[key] = value
+
+    def info(self):
+        return self._info
+
+    def geturl(self):
+        return self.url
+
+
+def test_the_upgrade_opener_never_follows_a_redirect_and_never_resends_the_token():
+    """Drives the REAL handler chain build_no_redirect_opener() builds: a 302
+    must surface as an error, the redirect target must never be requested,
+    and X-CCSync-Token must therefore never reach it."""
+    import urllib.error
+    import urllib.request
+
+    seen = []
+
+    class _RecordingHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            seen.append((req.full_url, dict(req.header_items())))
+            if len(seen) == 1:
+                return _FakeHTTPResponse(
+                    302, {"Location": "http://evil.example.com/payload.exe"},
+                    url=req.full_url,
+                )
+            return _FakeHTTPResponse(200, {}, b"payload", url=req.full_url)
+
+    opener = upgrade_mod.build_no_redirect_opener(_RecordingHandler())
+    req = urllib.request.Request(
+        "http://dash.example.com/api/v1/companion/package/windows/9.9.9",
+        headers={"X-CCSync-Token": "tok123"}, method="GET",
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        opener.open(req, timeout=5)
+
+    assert excinfo.value.code == 302
+    assert len(seen) == 1, f"the redirect was followed: {seen}"
+    assert "evil.example.com" not in seen[0][0]
+    assert any("ccsync-token" in key.lower() for key in seen[0][1]), (
+        "sanity: the token IS sent to the dashboard itself"
+    )
+
+
+def test_default_http_open_uses_the_no_redirect_opener(monkeypatch):
+    """The production fetch path must be the hardened opener, not
+    urllib.request.urlopen (which follows redirects)."""
+    used = []
+
+    class _StubOpener:
+        def open(self, req, timeout=None):
+            used.append((req.full_url, dict(req.header_items()), timeout))
+            return _FakeHTTPResponse(200, {}, b"ok", url=req.full_url)
+
+    monkeypatch.setattr(upgrade_mod, "build_no_redirect_opener", lambda *a: _StubOpener())
+    upgrade_mod.default_http_open(
+        "http://dash.example.com/x.exe", {"X-CCSync-Token": "tok123"}, 12.0
+    )
+
+    assert used and used[0][0] == "http://dash.example.com/x.exe"
+    assert used[0][2] == 12.0
+
+
+def test_redirect_status_reads_either_attribute():
+    class _WithCode:
+        code = 301
+
+    class _WithStatus:
+        status = 200
+
+    assert upgrade_mod.redirect_status(_WithCode()) == 301
+    assert upgrade_mod.redirect_status(_WithStatus()) is None
+    assert upgrade_mod.redirect_status(object()) is None

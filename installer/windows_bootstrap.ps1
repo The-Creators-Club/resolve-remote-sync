@@ -26,10 +26,19 @@
     generate SSH keys -- those are one-time interactive/manual steps, see
     docs/EDITOR_SETUP.md.
 
-    ELEVATION: an elevated shell is preferred but NOT required. Registering
-    the logon scheduled task needs admin rights; without them the script
-    falls back to an HKCU Run entry that achieves the same thing, warns, and
-    carries on. No step aborts the run.
+    ELEVATION: run this from a NORMAL, NON-ADMINISTRATOR PowerShell window.
+    Windows keeps elevated and unelevated drive letters in separate device
+    maps, so a P: created by an elevated process is INVISIBLE to the session
+    DaVinci Resolve, Explorer and the companion actually run in -- while this
+    script's own checks succeed, so the install looks perfect and Resolve
+    shows every clip offline (INST-1). Exactly one step genuinely needs admin
+    rights (creating the loopback SMB share); the script raises a single UAC
+    prompt for that step alone and does the mapping itself at your normal
+    integrity level. Registering the logon scheduled task also wants admin;
+    without it the script falls back to an HKCU Run entry that achieves the
+    same thing, warns, and carries on. No step aborts the run. If you DO run
+    this elevated, it routes the mapping through a one-shot task at your own
+    integrity level, and warns loudly if even that fails.
 
 .PARAMETER TailnetHost
     Tailnet hostname or IP of the NAS, e.g. "truenas.tailXXXX.ts.net" or a
@@ -113,8 +122,39 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$InstallerVersion = "1.0.4"
+
+# When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
+# the console OEM codepage -- so the wizard, which decodes UTF-8, would see
+# mojibake for a `C:\Users\Jose` profile and, on some codepages, raise
+# UnicodeDecodeError out of its worker thread AFTER clean-slate ran (S-6).
+# Force UTF-8 only in that case; changing it for an interactive console would
+# alter what the editor sees for no benefit.
+try {
+    if ([Console]::IsOutputRedirected) {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    }
+}
+catch {}
+
 # PS 5.1 has no ternary/null-coalescing operators and no `&&`/`||` chaining --
 # every branch below is written as a plain if/else.
+
+# Hard-capability misses (rclone absent, Syncthing absent, no device ID).
+# Each one means this machine can never sync something it is supposed to
+# sync, so unlike every other warning here they must NOT end in exit 0 with
+# the wizard showing a green DONE page (INST-5).
+$script:CapabilityMisses = @()
+
+# Set when a P: mount had to be made from an elevated token after all -- the
+# editor then needs to log off and back on before Resolve can see it.
+$script:MappedWhileElevated = $false
+
+function Add-CapabilityMiss {
+    param([string]$Message)
+    $script:CapabilityMisses += $Message
+    Write-Host "[ccsync] WARNING: CAPABILITY MISSING: $Message" -ForegroundColor Red
+}
 
 function Write-Step {
     param([string]$Message)
@@ -152,6 +192,79 @@ function Ensure-Dir {
             Write-Step "created directory: $Path"
         }
     }
+}
+
+# Runs one command line through cmd.exe at the user's NORMAL (unelevated,
+# medium-integrity) level, even when this process is elevated. A one-shot
+# scheduled task with -RunLevel Limited + -LogonType Interactive is the only
+# mechanism in PS 5.1 that reliably does this without a shell round-trip.
+#
+# WHY it matters: drive letters live in a per-logon-session DOS device map
+# that is ALSO split by UAC's linked tokens. A P: mapped by an elevated
+# process does not exist for the unelevated session Resolve, Explorer and the
+# companion run in -- and the elevated session's own Get-PSDrive happily
+# reports success, which is what made this invisible (INST-1).
+#
+# Returns $true only when the task actually ran and exited 0.
+function Invoke-AtUserIntegrity {
+    param([string]$CommandLine)
+
+    $taskName = "CCSync-OneShot-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+    try {
+        $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c $CommandLine"
+        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+            -LogonType Interactive -RunLevel Limited
+        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
+        Start-ScheduledTask -TaskName $taskName
+
+        # 267009 = 0x41301 "task is currently running"; 267011 = 0x41303
+        # "task has not yet run" (what a brand-new task reports until the
+        # scheduler actually picks it up).
+        $result = $null
+        $deadline = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+            if ($info -and ($info.LastTaskResult -ne 267009) -and ($info.LastTaskResult -ne 267011)) {
+                $result = $info.LastTaskResult
+                break
+            }
+        }
+        try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        if ($null -eq $result) { return $false }
+        return ($result -eq 0)
+    }
+    catch {
+        try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        return $false
+    }
+}
+
+# Every P: mount/unmount goes through here. Unelevated (the normal, and the
+# documented, case) it just runs; elevated it is routed to the user's own
+# integrity level so the mapping is visible where it needs to be.
+function Invoke-MappingCommand {
+    param([string]$CommandLine, [string]$What = "")
+
+    if (-not $IsElevated) {
+        # Redirection must happen INSIDE cmd: a PowerShell-level 2>$null
+        # wraps native stderr in a NativeCommandError, fatal under
+        # $ErrorActionPreference = 'Stop' when the drive isn't mapped.
+        cmd /c "$CommandLine >nul 2>&1"
+        return ($LASTEXITCODE -eq 0)
+    }
+
+    if (Invoke-AtUserIntegrity "$CommandLine >nul 2>&1") {
+        if ($What) {
+            Write-Step "$What (run at your normal integrity level via a one-shot task -- this elevated window deliberately cannot see the result)"
+        }
+        return $true
+    }
+
+    Write-Warn2 "could not run '$CommandLine' at your normal integrity level; running it in this elevated session instead."
+    $script:MappedWhileElevated = $true
+    cmd /c "$CommandLine >nul 2>&1"
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Test-IsElevated {
@@ -236,6 +349,17 @@ catch {
 # --------------------------------------------------------------------
 # 0. Normalize / echo inputs
 # --------------------------------------------------------------------
+# A double quote in -LocalRoot cannot survive the `cmd /c subst P: "<root>"`
+# command line the logon remap runs through, and there is no escaping that
+# fixes it -- so refuse up front rather than install a machine whose P: never
+# comes back after a reboot (INST-2).
+if ($LocalRoot -match '"') {
+    Write-Host "[ccsync] ERROR: -LocalRoot contains a double-quote character: $LocalRoot" -ForegroundColor Red
+    Write-Host "[ccsync] The logon remap runs 'subst P: `"<LocalRoot>`"' through cmd, which a quote breaks irrecoverably."
+    Write-Host "[ccsync] Rename the folder (or pick a different one) and re-run."
+    exit 2
+}
+
 $EditorNameRaw = $EditorName
 $EditorName = $EditorName.Trim().ToLowerInvariant()
 if ($EditorName -cne $EditorNameRaw) {
@@ -247,9 +371,21 @@ if (-not $RemoteRoot.StartsWith("/")) {
 }
 
 $IsElevated = Test-IsElevated
-Write-Step "configuring for editor '$EditorName', local root '$LocalRoot', NAS '$TailnetHost'"
+Write-Step "installer v$InstallerVersion -- configuring for editor '$EditorName', local root '$LocalRoot', NAS '$TailnetHost'"
 if (-not $IsElevated) {
     Write-Step "running unelevated -- will fall back to an HKCU Run entry if scheduled-task registration is denied"
+}
+else {
+    # UAC linked-token isolation: drive letters are per-logon-session AND
+    # per-token, so a P: mapped by this elevated process does not exist in
+    # the unelevated session Resolve and Explorer run in. Both mapping styles
+    # (net use, subst) behave identically here. Section 5 works around it by
+    # doing the mapping through an unelevated helper; this is the warning for
+    # when that can't be done (INST-1).
+    Write-Warn2 "this PowerShell window is ELEVATED (running as administrator)."
+    Write-Warn2 "Drive letters mapped by an elevated process are INVISIBLE to your normal, unelevated session -- which is the one DaVinci Resolve runs in."
+    Write-Warn2 "This script will try to create the P: mapping at your normal integrity level anyway (see section 5). If that fails, P: will not appear until you log off and back on."
+    Write-Warn2 "Next time, run this from a NORMAL (non-administrator) PowerShell window -- it asks for elevation only for the one step that genuinely needs it."
 }
 
 $BinDir = "$env:LOCALAPPDATA\ccsync\bin"
@@ -342,16 +478,29 @@ else {
         }
         else {
             Write-Step "downloading rclone from $zipUrl ..."
-            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+            # -UseBasicParsing skips the IE DOM parser; SilentlyContinue on
+            # $ProgressPreference removes PS 5.1's per-chunk progress render,
+            # which costs an order of magnitude on a multi-MB download; and
+            # -TimeoutSec stops a half-open TCP connection hanging until the
+            # wizard's 1800s timeout kills the whole install (INST-19).
+            $prevProgress = $ProgressPreference
+            $ProgressPreference = 'SilentlyContinue'
+            try {
+                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
+            }
+            finally {
+                $ProgressPreference = $prevProgress
+            }
             if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
             Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
             $exe = Get-ChildItem -Path $extractDir -Filter "rclone.exe" -Recurse | Select-Object -First 1
             if ($null -eq $exe) {
-                Write-Warn2 "could not find rclone.exe inside the downloaded zip -- install rclone manually"
+                Write-Warn2 "could not find rclone.exe inside the downloaded zip"
             }
             else {
                 Copy-Item -Path $exe.FullName -Destination "$BinDir\rclone.exe" -Force
                 Write-Step "installed rclone to $BinDir\rclone.exe"
+                $rclonePath = "$BinDir\rclone.exe"
             }
         }
     }
@@ -372,6 +521,27 @@ else {
         if ($userPath.Length -gt 0) { $newPath = $userPath + ";" + $BinDir }
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         Write-Step "added $BinDir to user PATH (restart your terminal to pick it up)"
+    }
+}
+
+# The REGISTRY PATH above only takes effect for processes started after the
+# next logon. Section 9 launches the companion as a child of THIS process,
+# with a config saying rclone_path = "rclone" -- without this line lanes A/B
+# report "rclone not found on PATH" and the tray sits red until the editor
+# next logs in, on a machine that is actually fine (INST-14).
+if (-not (($env:Path -split ";") -contains $BinDir)) {
+    $env:Path = "$env:Path;$BinDir"
+    Write-Step "added $BinDir to this session's PATH (so the companion we launch below finds rclone now)"
+}
+
+# Authoritative check, after every install route: winget/scoop don't refresh
+# this process's PATH, so re-probe rather than trust which branch ran.
+if (-not $DryRun) {
+    $rcloneFinal = $null
+    if (Test-CommandExists "rclone") { $rcloneFinal = (Get-Command rclone).Source }
+    elseif (Test-Path "$BinDir\rclone.exe") { $rcloneFinal = "$BinDir\rclone.exe" }
+    if (-not $rcloneFinal) {
+        Add-CapabilityMiss "rclone is NOT installed. Lanes A and B -- every video upload and every proxy download -- cannot run at all on this machine. Install rclone from https://rclone.org/downloads/ (or 'winget install Rclone.Rclone') and re-run this script."
     }
 }
 
@@ -469,7 +639,16 @@ else {
                 $zipPath = "$env:TEMP\syncthing-windows-amd64.zip"
                 $extractDir = "$env:TEMP\syncthing-extract"
                 Write-Step "downloading Syncthing from $zipUrl ..."
-                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+                # See the rclone download above for why all three of these
+                # matter (INST-19).
+                $prevProgress = $ProgressPreference
+                $ProgressPreference = 'SilentlyContinue'
+                try {
+                    Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
+                }
+                finally {
+                    $ProgressPreference = $prevProgress
+                }
                 if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
                 Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
                 $exe = Get-ChildItem -Path $extractDir -Filter "syncthing.exe" -Recurse | Select-Object -First 1
@@ -487,6 +666,9 @@ else {
 }
 if ($DryRun -and (-not $syncthingPath)) {
     $syncthingPath = "$BinDir\syncthing.exe"
+}
+if ((-not $DryRun) -and (-not $syncthingPath)) {
+    Add-CapabilityMiss "Syncthing is NOT installed. Lane C -- audio, After Effects projects, graphics, subtitles, .drp project files and docs -- will never sync on this machine. Install Syncthing from https://syncthing.net/downloads/ (or 'winget install Syncthing.Syncthing') and re-run this script."
 }
 
 # --------------------------------------------------------------------
@@ -509,13 +691,53 @@ Ensure-Dir $CCRoot
 # The documented launch path ("Run with PowerShell") is unelevated, so this
 # is the common case, not the exception -- it must warn and continue rather
 # than take the rest of the script down with $ErrorActionPreference=Stop.
+# Set when P: turns out to be somebody else's mapping (a real NAS share).
+# Section 5 AND section 5b both bail out on it: relabelling a drive this
+# installer did not create is the same class of mistake as remapping it.
+$script:PIsForeign = $false
 $TaskName = "CCSync-SubstP"
-$SubstCommand = "subst P: $CCRoot"
+# QUOTED, always. This exact string is handed to `cmd /c` twice -- as the
+# scheduled task's -Argument and inside the .cmd shim Register-HiddenRunEntry
+# writes -- and cmd splits on spaces. Unquoted, a -LocalRoot of
+# "D:\Video Projects\Creators_Club" becomes `subst P: D:\Video` at EVERY
+# logon: "Path not found", no window, no log, no P:, Resolve fully offline,
+# while the companion (which has the real path) reports green. The direct
+# call at the bottom of this section is fine either way -- PowerShell
+# auto-quotes an argument containing spaces -- which is exactly why the
+# install looked successful and only reboots broke (INST-2, measured).
+$SubstCommand = "subst P: `"$CCRoot`""
 $RunKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $substFallbackName = "CCSyncSubstP"
 $ShareName = "CCSync_P"
 
-if ($DryRun) {
+# -- "is P: ours?" guard, BEFORE any teardown and before the dry-run split --
+# Same test windows_uninstall.ps1 and steps.build_cleanup_plan already apply
+# (D-8), which the bootstrap never got (INST-15). A subst mapping has no
+# DisplayRoot and is always ours; a net-use mapping is ours only when it
+# points at our own loopback share. Anything else is a real NAS mapping --
+# replacing it with a loopback share of a local folder makes every
+# P:\Projects\... path in the Resolve database resolve to a nearly-empty
+# local tree. Detected outside the -DryRun branch on purpose, so a dry run
+# reports the refusal instead of describing a remap that would never happen.
+$existingDisplayRoot = $null
+if (Test-Path "P:\") {
+    $existingP = $null
+    try { $existingP = Get-PSDrive -Name P -ErrorAction Stop } catch {}
+    if ($existingP) { $existingDisplayRoot = $existingP.DisplayRoot }
+    if ((-not [string]::IsNullOrWhiteSpace($existingDisplayRoot)) -and
+        (-not ($existingDisplayRoot -match '^\\\\localhost\\CCSync_P$'))) {
+        $script:PIsForeign = $true
+    }
+}
+
+if ($script:PIsForeign) {
+    Write-Host "[ccsync] ERROR: P: is already mapped to '$existingDisplayRoot' -- that is not a mapping this installer created." -ForegroundColor Red
+    Write-Warn2 "Leaving it exactly as it is. Replacing a real NAS mapping with a loopback share of a local folder would make every P:\Projects\... path in your Resolve database point at a nearly-empty local tree."
+    Write-Warn2 "If this IS the machine that should get a local P:, disconnect that mapping yourself first (Explorer > This PC > right-click P: > Disconnect) and re-run."
+    Write-Warn2 "If this is the base rig, you want the BASE role in onboard.exe -- it never touches drive mappings."
+    Write-Warn2 "Skipping the whole P: mapping section; everything else below still runs."
+}
+elseif ($DryRun) {
     Write-Step "[dry-run] would remove any existing '$TaskName' task / '$substFallbackName' Run entry, unmount P: (subst /D + net use /delete), then remap P: (elevated: loopback share '\\localhost\$ShareName' -> $CCRoot via net use /persistent:yes; unelevated: logon task + '$SubstCommand')"
 }
 else {
@@ -527,7 +749,9 @@ else {
         }
     }
     catch {
-        Write-Warn2 "could not remove existing task '$TaskName': $($_.Exception.Message) (re-run elevated to replace it)"
+        # Not "re-run elevated" -- see INST-1. An admin Command Prompt is the
+        # right tool for this one command; an admin install is not.
+        Write-Warn2 "could not remove the old scheduled task '$TaskName': $($_.Exception.Message). Harmless -- the install continues. To clear it, open an administrator Command Prompt and run:  schtasks /Delete /TN $TaskName /F"
     }
     try {
         if ((Get-ItemProperty -Path $RunKeyPath -Name $substFallbackName -ErrorAction SilentlyContinue)) {
@@ -541,11 +765,11 @@ else {
     }
     # Both unmap styles: subst for our own mapping, net use for a hand-made
     # SMB mapping subst can't see. Errors (not mapped) are expected noise.
-    # Redirection must happen INSIDE cmd: a PowerShell-level 2>$null wraps
-    # native stderr in a NativeCommandError, which is fatal under
-    # $ErrorActionPreference = 'Stop' when the drive isn't mapped.
-    cmd /c "subst P: /D >nul 2>&1"
-    cmd /c "net use P: /delete /y >nul 2>&1"
+    # Routed through Invoke-MappingCommand so an elevated run tears down the
+    # mapping in the session that actually holds it (the user's), not this
+    # process's private view of it.
+    Invoke-MappingCommand "subst P: /D" | Out-Null
+    Invoke-MappingCommand "net use P: /delete /y" | Out-Null
 
     # -- recreate. Preferred style: a private loopback SMB share of the
     # local root, mapped with `net use /persistent:yes`. Explorer honors
@@ -623,13 +847,16 @@ if (-not $existing) {
     }
 
     if ($shareReady) {
-        cmd /c "net use P: \\localhost\$ShareName /persistent:yes >nul 2>&1"
-        if ($LASTEXITCODE -eq 0) {
-            Write-Step "mapped P: -> \\localhost\$ShareName (persistent -- no logon task needed)"
+        $mappedOk = Invoke-MappingCommand "net use P: \\localhost\$ShareName /persistent:yes" `
+            "mapped P: -> \\localhost\$ShareName (persistent -- no logon task needed)"
+        if ($mappedOk) {
+            if (-not $IsElevated) {
+                Write-Step "mapped P: -> \\localhost\$ShareName (persistent -- no logon task needed)"
+            }
             $script:PMappedViaShare = $true
         }
         else {
-            Write-Warn2 "net use P: \\localhost\$ShareName exited with code $LASTEXITCODE -- falling back to subst"
+            Write-Warn2 "net use P: \\localhost\$ShareName failed -- falling back to subst"
         }
     }
 
@@ -651,18 +878,31 @@ if (-not $existing) {
         if (-not $taskRegistered) {
             $okFallback = Register-HiddenRunEntry -Name $substFallbackName -CommandLine $SubstCommand
             if (-not $okFallback) {
-                Write-Warn2 "P: will NOT be remapped automatically at logon. Re-run this script from an elevated PowerShell, or run '$SubstCommand' by hand after each reboot."
+                Write-Warn2 "P: will NOT be remapped automatically at logon. Run '$SubstCommand' by hand after each reboot, or tell Alex -- do NOT re-run this script as administrator to try to fix it, that makes P: invisible to Resolve."
             }
         }
 
-        subst P: $CCRoot
-        if ($LASTEXITCODE -eq 0) {
-            Write-Step "mapped P: -> $CCRoot"
+        $substOk = Invoke-MappingCommand $SubstCommand "mapped P: -> $CCRoot"
+        if ($substOk) {
+            if (-not $IsElevated) {
+                Write-Step "mapped P: -> $CCRoot"
+            }
         }
         else {
-            Write-Warn2 "subst P: $CCRoot exited with code $LASTEXITCODE -- something may still have files open on the old P:"
+            Write-Warn2 "'$SubstCommand' failed -- something may still have files open on the old P:"
         }
     }
+}  # end: P: is ours, safe to remap
+
+if ($script:MappedWhileElevated) {
+    Write-Host ""
+    Write-Host "[ccsync] ******************************************************************" -ForegroundColor Red
+    Write-Warn2 "P: HAD TO BE MAPPED FROM THIS ELEVATED WINDOW."
+    Write-Warn2 "Windows keeps elevated and normal drive letters apart, so P: does NOT exist yet for DaVinci Resolve, Explorer, or the companion app."
+    Write-Warn2 "LOG OFF AND BACK ON (or restart) BEFORE OPENING RESOLVE. After that P: is there for good."
+    Write-Warn2 "Do not re-run this installer to 'fix' it -- it will report success from this window every time."
+    Write-Host "[ccsync] ******************************************************************" -ForegroundColor Red
+    Write-Host ""
 }
 
 # --------------------------------------------------------------------
@@ -676,15 +916,33 @@ if (-not $existing) {
 # build 26200): they always show the host volume's label. That asymmetry is
 # WHY section 5 prefers the loopback-share mapping.
 Write-Step "labelling the P: drive as '$DriveLabel' in Explorer..."
-if ($DryRun) {
+if ($script:PIsForeign) {
+    # Section 5 refused to touch this mapping; renaming it in Explorer is the
+    # same mistake in cosmetic form -- and _LabelFromReg would then persist on
+    # someone else's mount point long after this script is forgotten (INST-15).
+    Write-Skip "P: is not this installer's mapping -- leaving its Explorer name alone too"
+}
+elseif ($DryRun) {
     Write-Step "[dry-run] would set MountPoints2 _LabelFromReg = $DriveLabel for P:'s UNC path (net-use mappings only)"
 }
 else {
     try {
         $displayRoot = $null
         try { $displayRoot = (Get-PSDrive -Name P -ErrorAction Stop).DisplayRoot } catch {}
+        if ([string]::IsNullOrWhiteSpace($displayRoot) -and $script:PMappedViaShare) {
+            # Elevated run: the mapping was deliberately made in the user's
+            # own session, so it is invisible from here. We still know what
+            # it points at, and the label key is per-user, not per-token.
+            $displayRoot = "\\localhost\$ShareName"
+        }
         if ([string]::IsNullOrWhiteSpace($displayRoot)) {
-            Write-Warn2 "P: is a subst mapping -- Explorer cannot display a custom name for it (it will show the host volume's label). Re-run the installer as administrator to get the labelled '\\localhost\$ShareName' mapping."
+            # Deliberately does NOT say "re-run as administrator": an elevated
+            # run maps P: into a token the editor's own session cannot see,
+            # which is a far worse outcome than a drive showing the wrong
+            # name (INST-1). The labelled mapping comes from approving the
+            # one UAC prompt this script raises for the share, from a NORMAL
+            # PowerShell window.
+            Write-Warn2 "P: is a subst mapping, so Explorer will show the host volume's name instead of '$DriveLabel'. Cosmetic only -- everything syncs exactly the same. To get the nicer name, re-run this script from a NORMAL (non-administrator) PowerShell window and approve the single UAC prompt it raises for the '$ShareName' share."
         }
         else {
             # \\localhost\CCSync_P -> ##localhost#CCSync_P
@@ -707,19 +965,36 @@ else {
                 }
                 Set-ItemProperty -LiteralPath $mpKey -Name "_LabelFromReg" -Value $DriveLabel
                 Write-Step "labelled P: as '$DriveLabel' ($mpName)"
-                # Explorer reads _LabelFromReg when it (re)enumerates the
-                # drive; restarting explorer.exe is the reliable way to make
-                # the new name show immediately. Open Explorer windows are
-                # closed; the taskbar/desktop blinks out and back for
-                # roughly a second.
+                # This used to force-kill explorer.exe to make the new name
+                # show immediately. Never again: Stop-Process -Force kills
+                # EVERY Explorer in reach (all sessions when elevated -- other
+                # logged-in users lose their shell, and nothing restarts it),
+                # and it aborts any Explorer file copy in flight mid-file,
+                # leaving a truncated destination that lane A then uploads and,
+                # thanks to --ignore-existing, never replaces (INST-18).
+                # SHChangeNotify asks the shell to re-read the drive instead;
+                # if that doesn't take, the name is correct at next sign-in.
+                $refreshed = $false
                 try {
-                    Get-Process -Name explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
-                    Start-Sleep -Milliseconds 500
-                    Start-Process explorer.exe
-                    Write-Step "restarted Explorer so the new P: label shows immediately"
+                    if (-not ("CCSync.Shell32" -as [type])) {
+                        Add-Type -Namespace CCSync -Name Shell32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shell32.dll")]
+public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr item1, System.IntPtr item2);
+'@ -ErrorAction Stop
+                    }
+                    # SHCNE_UPDATEDIR (0x1000) with SHCNF_PATHW (0x0005) on
+                    # the drive root, then SHCNE_ASSOCCHANGED (0x08000000).
+                    [CCSync.Shell32]::SHChangeNotify(0x08000000, 0x0000, [System.IntPtr]::Zero, [System.IntPtr]::Zero)
+                    $refreshed = $true
                 }
                 catch {
-                    Write-Warn2 "could not restart Explorer automatically: $($_.Exception.Message) -- log off and back on (or restart Explorer via Task Manager) to see the new P: label"
+                    $refreshed = $false
+                }
+                if ($refreshed) {
+                    Write-Step "asked Explorer to refresh (SHChangeNotify) -- if P: still shows its old name, it will be correct at your next sign-in"
+                }
+                else {
+                    Write-Step "the '$DriveLabel' name on P: will appear the next time you sign in (Explorer caches drive names; nothing else is affected)"
                 }
             }
         }
@@ -814,15 +1089,65 @@ shell_type = unix
 "@
 
 $hasSection = $false
+$stanzaMatches = $false
+$existingHost = ""
+$existingUser = ""
 if (Test-Path -LiteralPath $RcloneConfPath) {
-    $existingConf = Get-Content -LiteralPath $RcloneConfPath -Raw
+    # -Encoding UTF8 explicitly: this script APPENDS to rclone.conf as
+    # no-BOM UTF-8 (below), and Get-Content with no -Encoding falls back to
+    # the system ANSI codepage for a BOM-less file. A non-ASCII value then
+    # reads back mangled, the -match duplicate detection misses, and a
+    # SECOND [creators_club_sftp] block gets appended (INST-3).
+    $existingConf = Get-Content -LiteralPath $RcloneConfPath -Raw -Encoding UTF8
+    if ($null -eq $existingConf) { $existingConf = "" }
     if ($existingConf -match [Regex]::Escape("[$RemoteName]")) {
         $hasSection = $true
+        # Pull host/user out of THIS stanza only: from its header up to the
+        # next [section] header or end of file.
+        # SINGLE-quoted fragments: in a double-quoted PowerShell string
+        # "$(.*?)" is a subexpression, not a regex capture group.
+        $sectionPattern = '(?ms)^\[' + [Regex]::Escape($RemoteName) + '\]\s*$(.*?)(?=^\[|\z)'
+        $sectionMatch = [regex]::Match($existingConf, $sectionPattern)
+        if ($sectionMatch.Success) {
+            $body = $sectionMatch.Groups[1].Value
+            $hostMatch = [regex]::Match($body, '(?m)^\s*host\s*=\s*(.*?)\s*$')
+            if ($hostMatch.Success) { $existingHost = $hostMatch.Groups[1].Value }
+            $userMatch = [regex]::Match($body, '(?m)^\s*user\s*=\s*(.*?)\s*$')
+            if ($userMatch.Success) { $existingUser = $userMatch.Groups[1].Value }
+        }
+        $stanzaMatches = ($existingHost -ceq $TailnetHost) -and ($existingUser -ceq $EditorName)
     }
 }
 
-if ($hasSection) {
-    Write-Skip "rclone.conf already has a [$RemoteName] section: $RcloneConfPath"
+if ($hasSection -and $stanzaMatches) {
+    Write-Skip "rclone.conf already has a correct [$RemoteName] section: $RcloneConfPath"
+}
+elseif ($hasSection) {
+    # The single most likely reason to re-run this script is a typo'd
+    # -EditorName -- and skipping the whole stanza whenever the section
+    # exists made that re-run a silent no-op for the one file that carries
+    # the username (INST-17). Rewrite this stanza in place; every other
+    # remote in the file is preserved byte-for-byte.
+    Write-Warn2 "rclone.conf's [$RemoteName] disagrees with the values you passed:"
+    Write-Warn2 "  host: '$existingHost' -> '$TailnetHost'"
+    Write-Warn2 "  user: '$existingUser' -> '$EditorName'"
+    if ($DryRun) {
+        Write-Step "[dry-run] would rewrite the [$RemoteName] stanza in $RcloneConfPath (other remotes untouched):"
+        Write-Host $Stanza
+    }
+    else {
+        $sectionPattern = '(?ms)^\[' + [Regex]::Escape($RemoteName) + '\]\s*$.*?(?=^\[|\z)'
+        $replacement = $Stanza + "`r`n`r`n"
+        # Instance Regex + a MatchEvaluator: the static Replace has no
+        # count overload, and a literal replacement string would treat any
+        # '$' in the editor name / host as a capture-group reference.
+        $rx = New-Object System.Text.RegularExpressions.Regex($sectionPattern)
+        $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $replacement }
+        $newConf = $rx.Replace($existingConf, $evaluator, 1)
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($RcloneConfPath, $newConf, $utf8NoBom)
+        Write-Step "rewrote the [$RemoteName] stanza in $RcloneConfPath (host=$TailnetHost, user=$EditorName)"
+    }
 }
 else {
     if ($DryRun) {
@@ -961,6 +1286,33 @@ if ($CompanionExeSource) {
             Copy-Item -LiteralPath $CompanionExeSource -Destination $CompanionExePath -Force
             Write-Step "installed companion app: $CompanionExePath"
         }
+
+        # Carry the release manifest (written by tools\release.ps1, shipped in
+        # the package by build_editor_package.ps1) next to the installed exe.
+        # Without it nothing on the machine can say WHICH build is installed --
+        # the exe has no --version flag -- which is how a rig ran v0.4.3 for an
+        # afternoon while every fix was being verified against v0.4.5
+        # (2026-07-25; see docs\RELEASE.md). Copied only when it matches the
+        # exe actually installed; a mismatched or absent manifest leaves no
+        # claim rather than a false one.
+        $srcManifest = Join-Path (Split-Path -Parent $CompanionExeSource) "ccsync-release.json"
+        $destManifest = Join-Path (Split-Path -Parent $CompanionExePath) "ccsync-release.json"
+        if ((Test-Path -LiteralPath $srcManifest) -and -not $DryRun) {
+            try {
+                $srcSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $CompanionExeSource).Hash.ToLower()
+                $rel = Get-Content -LiteralPath $srcManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ("$($rel.sha256)" -eq $srcSha) {
+                    Copy-Item -LiteralPath $srcManifest -Destination $destManifest -Force
+                    Write-Step "companion build: v$($rel.version_stamp) (built $($rel.built_at))"
+                }
+                else {
+                    Write-Warn2 "ccsync-release.json in the package describes a different exe -- not recording a version"
+                }
+            }
+            catch {
+                Write-Warn2 "could not record the companion build version: $($_.Exception.Message)"
+            }
+        }
     }
 }
 
@@ -1031,8 +1383,15 @@ else {
 function Get-SyncthingDeviceId {
     param([string]$ExePath, [string]$Home2)
 
+    # NO PowerShell-level `2>&1` here. Under $ErrorActionPreference = "Stop"
+    # it wraps the FIRST stderr line a native command writes in a fatal
+    # NativeCommandError, so one ordinary progress line from `syncthing
+    # generate` aborted the whole assignment and the editor was told the
+    # device ID could not be determined (INST-16, measured). Un-redirected
+    # stderr is harmless -- it just goes to the console. Syncthing prints the
+    # ID on stdout, which is all we parse.
     try {
-        $genOutput = & $ExePath generate --home="$Home2" 2>&1 | Out-String
+        $genOutput = & $ExePath generate --home="$Home2" | Out-String
         $m = [regex]::Match($genOutput, "device=([A-Z0-9]{7}(?:-[A-Z0-9]{7}){7})")
         if ($m.Success) { return $m.Groups[1].Value }
     }
@@ -1041,7 +1400,7 @@ function Get-SyncthingDeviceId {
     }
 
     try {
-        $legacy = & $ExePath --device-id --home="$Home2" 2>&1 | Out-String
+        $legacy = & $ExePath --device-id --home="$Home2" | Out-String
         $m2 = [regex]::Match($legacy, "([A-Z0-9]{7}(?:-[A-Z0-9]{7}){7})")
         if ($m2.Success) { return $m2.Groups[1].Value }
     }
@@ -1076,17 +1435,17 @@ else {
     Write-Host " Bootstrap complete."
     Write-Host ""
     if ($null -eq $deviceId) {
-        Write-Warn2 "could not determine the Syncthing device ID automatically."
-        Write-Host " Get it from the Syncthing web UI (http://127.0.0.1:8384)"
-        Write-Host " under Actions > Show ID, and send that to the admin."
+        Add-CapabilityMiss "the Syncthing device ID could NOT be determined. The admin cannot approve this machine without it, so lane C (audio, AE, graphics, subtitles, .drp project files, docs) will never sync. Get it from the Syncthing web UI at http://127.0.0.1:8384 under Actions > Show ID and send it to the admin."
     }
     else {
         Write-Host " Your Syncthing device ID is:"
         Write-Host ""
         Write-Host "     $deviceId" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host " Send this device ID to the admin so they can approve it with"
-        Write-Host " server/accept_device.py for each project you're working on."
+        Write-Host " Send this device ID to Alex so he can approve this machine on"
+        Write-Host " the dashboard. There is no per-project sharing step for you to"
+        Write-Host " do -- once you're approved, ticking a project on the dashboard"
+        Write-Host " is what shares it."
     }
     Write-Host ""
     Write-Host " Remaining manual steps (see docs/EDITOR_SETUP.md):"
@@ -1094,9 +1453,40 @@ else {
     Write-Host "   2. generate an SSH keypair for rclone if you haven't already:"
     Write-Host "        ssh-keygen -t ed25519 -f `"$KeyFilePath`""
     Write-Host "      and send the .pub file to the admin"
-    Write-Host "   3. connect DaVinci Resolve to the Project Server"
-    Write-Host "   4. Playback > Proxy Handling > Prefer Proxies"
-    Write-Host "   5. do NOT map any NAS share to another drive letter -- see the"
+    Write-Host "   3. SIGN IN: right-click the CCSync tray icon (bottom-right of"
+    Write-Host "      your taskbar) and choose `"Sign in...`", then enter the SAME"
+    Write-Host "      TrueNAS username and password Alex gave you."
+    Write-Host "      NOTHING SYNCS UNTIL YOU DO THIS -- the companion deliberately"
+    Write-Host "      refuses to touch your files until it knows who you are, and"
+    Write-Host "      signing in on the dashboard WEBSITE is not the same thing."
+    Write-Host "      (If you installed via onboard.exe this is already done.)"
+    Write-Host "   4. connect DaVinci Resolve to the Project Server"
+    Write-Host "   5. Playback > Proxy Handling > Prefer Proxies"
+    Write-Host "   6. do NOT map any NAS share to another drive letter -- see the"
     Write-Host "      drive-letter warning in docs/EDITOR_SETUP.md"
     Write-Host "=================================================================="
 }
+
+# --------------------------------------------------------------------
+# 11. Exit code
+# --------------------------------------------------------------------
+# Everything above warns and carries on -- correct, because a half-installed
+# machine beats an aborted one. But the script used to exit 0 regardless, so
+# onboard.exe (which branches only on the exit code) showed a green DONE page
+# for a machine with no rclone, no Syncthing and no device ID -- after
+# clean-slate had already removed the previous working install (INST-5).
+if ($script:CapabilityMisses.Count -gt 0) {
+    Write-Host ""
+    Write-Host "[ccsync] ==================================================================" -ForegroundColor Red
+    Write-Host "[ccsync] THIS MACHINE IS NOT READY TO SYNC -- $($script:CapabilityMisses.Count) required piece(s) are missing:" -ForegroundColor Red
+    $missIndex = 1
+    foreach ($miss in $script:CapabilityMisses) {
+        Write-Host "[ccsync]   $missIndex. $miss" -ForegroundColor Red
+        $missIndex = $missIndex + 1
+    }
+    Write-Host "[ccsync] Everything else installed fine. Fix the above and re-run this script -- it is safe to re-run." -ForegroundColor Red
+    Write-Host "[ccsync] Do NOT tell the admin you are set up yet." -ForegroundColor Red
+    Write-Host "[ccsync] ==================================================================" -ForegroundColor Red
+    exit 3
+}
+exit 0

@@ -91,6 +91,7 @@ $ErrorActionPreference = "Stop"
 
 function Write-Step { param([string]$m) Write-Host "[pkg] $m" }
 function Write-Warn2 { param([string]$m) Write-Host "[pkg] WARNING: $m" -ForegroundColor Yellow }
+function Write-Skip2 { param([string]$m) Write-Host "[pkg] (skip) $m" -ForegroundColor DarkGray }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $CompanionDir = Join-Path $RepoRoot "companion"
@@ -187,6 +188,15 @@ $Files = @(
     @{ Src = "onboarding\dist\onboard.exe"; Dst = "onboard.exe" }
 )
 
+# Present only when the exe came out of tools\release.ps1 (which is the point
+# -- see docs\RELEASE.md). It is what lets windows_upgrade.ps1 say WHICH
+# version it just installed and lets tools\check_deploy_drift.ps1 name the
+# installed build on a machine with no logs. Absence is not a broken package,
+# so it is not in $Files: a missing entry there marks the package INCOMPLETE.
+$OptionalFiles = @(
+    @{ Src = "companion\dist\ccsync-release.json"; Dst = "ccsync-release.json" }
+)
+
 if (-not $DryRun) {
     if (-not (Test-Path -LiteralPath $Destination)) {
         New-Item -ItemType Directory -Path $Destination -Force | Out-Null
@@ -222,6 +232,26 @@ foreach ($f in $Files) {
             $copyFailed += $f.Dst
             Write-Warn2 "could NOT copy $($f.Dst): $($_.Exception.Message)"
         }
+    }
+}
+
+foreach ($f in $OptionalFiles) {
+    $src = Join-Path $RepoRoot $f.Src
+    $dst = Join-Path $Destination $f.Dst
+    if (-not (Test-Path -LiteralPath $src)) {
+        Write-Skip2 "no $($f.Src) -- build with tools\release.ps1 so the package carries its provenance"
+        continue
+    }
+    if ($DryRun) {
+        Write-Step "[dry-run] would copy $($f.Src) -> $($f.Dst)"
+        continue
+    }
+    try {
+        Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+        Write-Step "copied $($f.Dst)"
+    }
+    catch {
+        Write-Warn2 "could NOT copy $($f.Dst): $($_.Exception.Message)"
     }
 }
 
@@ -289,8 +319,13 @@ else {
 }
 
 try {
-    $gitDescribe = (& git -C $RepoRoot rev-parse --short HEAD 2>$null)
-    $gitDirty = (& git -C $RepoRoot status --porcelain 2>$null)
+    # Redirect INSIDE cmd, not at the PowerShell level: `& git ... 2>$null`
+    # is native-command redirection, which under $ErrorActionPreference =
+    # "Stop" turns git's first stderr line into a fatal NativeCommandError
+    # (measured). Being inside this try, the only symptom was a silently
+    # missing provenance line on every build run outside a git checkout.
+    $gitDescribe = (cmd /c "git -C ""$RepoRoot"" rev-parse --short HEAD 2>nul")
+    $gitDirty = (cmd /c "git -C ""$RepoRoot"" status --porcelain 2>nul")
     if ($gitDescribe) {
         Write-Host ""
         Write-Step "built from commit $gitDescribe$(if ($gitDirty) { ' (working tree has uncommitted changes)' })"
@@ -338,6 +373,32 @@ if ($Publish) {
     }
 
     $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $ExePath).Hash.ToLower()
+
+    # Provenance cross-check against the manifest tools\release.ps1 writes.
+    # Advisory only -- publishing must stay possible when the exe was built by
+    # hand -- but "which commit is the fleet running?" should have an answer.
+    $relManifest = Join-Path $CompanionDir "dist\ccsync-release.json"
+    if (Test-Path -LiteralPath $relManifest) {
+        try {
+            $rel = Get-Content -LiteralPath $relManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ("$($rel.sha256)" -ne $sha) {
+                Write-Warn2 "ccsync-release.json describes a different exe than the one being published -- rebuild with tools\release.ps1"
+            }
+            elseif ($rel.git_dirty) {
+                Write-Warn2 "publishing $($rel.version_stamp) -- built from an UNCOMMITTED tree ($($rel.git_describe)); nobody will be able to reproduce what the fleet runs"
+            }
+            else {
+                Write-Step "provenance: v$($rel.version_stamp) built $($rel.built_at) from $($rel.git_describe)"
+            }
+        }
+        catch {
+            Write-Warn2 "could not read $relManifest -- continuing without provenance"
+        }
+    }
+    else {
+        Write-Warn2 "no ccsync-release.json in companion\dist -- this exe's provenance is unrecorded (build with tools\release.ps1)"
+    }
+
     $mc = if ($MakeCurrent) { 1 } else { 0 }
     $uri = "$DashboardUrl/api/v1/admin/packages/windows/${version}?sha256=$sha&make_current=$mc"
 

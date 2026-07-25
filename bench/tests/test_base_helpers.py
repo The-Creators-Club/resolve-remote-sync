@@ -13,10 +13,24 @@ def test_expand_sweep_normalizes():
     assert base.expand_sweep([5, 6], [1, 2]) == [5, 6]
 
 
-def test_mb_per_s():
+def test_mb_per_s_is_decimal_megabytes():
     assert base.mb_per_s(0, 10) == 0.0
-    assert base.mb_per_s(1024 * 1024, 0) == 0.0
-    assert round(base.mb_per_s(10 * 1024 * 1024, 2), 2) == 5.0
+    assert base.mb_per_s(1_000_000, 0) == 0.0
+    assert round(base.mb_per_s(10_000_000, 2), 3) == 5.0
+    # 60 Mbps must convert exactly, which is the whole point of the unit choice
+    assert round(base.mb_per_s(7_500_000, 1), 3) == 7.5
+
+
+def test_mib_per_s_is_binary_and_labelled_separately():
+    assert round(base.mib_per_s(10 * 1024 * 1024, 2), 3) == 5.0
+    assert base.mib_per_s(1_000_000, 1) != base.mb_per_s(1_000_000, 1)
+
+
+def test_parse_size_handles_rclone_and_robocopy_suffixes():
+    assert base.parse_size("1.5", "GiB") == int(1.5 * 1024**3)
+    assert base.parse_size("262.1", "k") == int(262.1 * 1024)
+    assert base.parse_size("268435456", "b") == 268435456
+    assert base.parse_size("1", "parsecs") is None
 
 
 def test_spot_check_ok_and_detects_corruption(tmp_path: Path):

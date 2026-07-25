@@ -21,6 +21,12 @@ def report(resolve_project=None, machine="EDIT-PC"):
     }
 
 
+def report_headers(editor="jsmith"):
+    """Both companion headers -- X-CCSync-Identity is required on reports."""
+    return {"X-CCSync-Token": TOKEN,
+            "X-CCSync-Identity": auth.make_identity_token(SECRET, editor)}
+
+
 @pytest.fixture
 def env(tmp_path):
     settings = Settings(db_path=str(tmp_path / "r.db"), session_secret=SECRET,
@@ -62,9 +68,73 @@ def test_match_project_label_ignores_trivial_numeric_tokens():
     assert f("Season 1 Recap", labels) == "2026/Creator Profiles/Season 1"
 
 
+def test_confident_match_needs_two_tokens_or_an_exact_name():
+    """The live 2026-07-25 miss: 'Nuclear Family Reunion' auto-mapped itself
+    permanently into '2025/FF4/Nuclear' on the single shared word 'nuclear',
+    and every frame that editor shot then had a destination inside an
+    unrelated project. One word is a coincidence, not a match."""
+    f = dbmod.match_project_label_confident
+    labels = ["2025/FF4/Nuclear", "2026/Creator Profiles/Season 1"]
+
+    # the incident itself, and its shape in general
+    assert dbmod.match_project_label("Nuclear Family Reunion", labels) == "2025/FF4/Nuclear"
+    assert f("Nuclear Family Reunion", labels) is None
+    assert f("Season 1 Recap", labels) is None          # one token: 'season'
+    assert f("Profiles of Nobody", labels) is None
+
+    # (a) two or more shared non-trivial tokens
+    assert f("CCT Creator Profiles", labels) == "2026/Creator Profiles/Season 1"
+    assert f("FF4 Nuclear Cut", labels) == "2025/FF4/Nuclear"
+
+    # (b) the name IS the project: final path segment, or the whole label
+    assert f("Nuclear", labels) == "2025/FF4/Nuclear"
+    assert f("  nuclear  ", labels) == "2025/FF4/Nuclear"
+    assert f("Season 1", labels) == "2026/Creator Profiles/Season 1"
+    assert f("2025/FF4/Nuclear", labels) == "2025/FF4/Nuclear"
+
+    # ...and everything match_project_label already refused stays refused
+    assert f("Totally Unrelated", labels) is None
+    assert f("2026", labels) is None
+    assert f("", labels) is None
+
+
+def test_report_does_not_sticky_map_a_single_token_match(env):
+    client, conn = env
+    headers = report_headers()
+    resp = client.post("/api/v1/report", headers=headers,
+                       json=report("Nuclear Family Reunion"))
+    assert resp.status_code == 200
+    # nothing written, and the editor is asked to pick instead
+    assert resp.json()["resolve_project_unmapped"] == "Nuclear Family Reunion"
+    assert conn.execute("SELECT COUNT(*) c FROM project_roots").fetchone()["c"] == 0
+
+
+def test_media_tree_requires_an_explicit_mapping(env):
+    """_slug_for_resolve_name used to fall back to the same loose matcher --
+    and replace_media_tree WIPES the target project's whole bin tree for the
+    reporting machine, so a coincidental word blew away another project's
+    presence data. No mapping, no write."""
+    client, conn = env
+    headers = report_headers()
+    payload = report("Nuclear Family Reunion")
+    payload["media_tree"] = {"Nuclear Family Reunion": [
+        {"bin_path": "", "clip_name": "a.braw", "file_path": "C:/a.braw", "present": True},
+    ]}
+    assert client.post("/api/v1/report", headers=headers, json=payload).status_code == 200
+    assert conn.execute("SELECT COUNT(*) c FROM media_tree_clips").fetchone()["c"] == 0
+
+    # with an explicit mapping the very same report lands
+    dbmod.admin_set_project_root(conn, "Nuclear Family Reunion", "2025-ff4-nuclear",
+                                 admin="alex", now=dbmod.utcnow_iso())
+    conn.commit()
+    assert client.post("/api/v1/report", headers=headers, json=payload).status_code == 200
+    rows = conn.execute("SELECT project_slug FROM media_tree_clips").fetchall()
+    assert [r[0] for r in rows] == ["2025-ff4-nuclear"]
+
+
 def test_first_match_is_sticky(env):
     client, conn = env
-    headers = {"X-CCSync-Token": TOKEN}
+    headers = report_headers()
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))  # login gate
     assert client.post("/api/v1/report", headers=headers,
                        json=report("CCT Creator Profiles")).status_code == 200
@@ -93,7 +163,7 @@ def test_first_match_is_sticky(env):
 
 def test_admin_only_changes(env):
     client, _ = env
-    headers = {"X-CCSync-Token": TOKEN}
+    headers = report_headers()
     client.post("/api/v1/report", headers=headers, json=report("CCT Creator Profiles"))
 
     body = {"resolve_project": "CCT Creator Profiles", "slug": "2025-ff4-nuclear"}
@@ -119,7 +189,7 @@ def test_admin_only_changes(env):
 
 def test_unmatched_projects_surface_for_admin(env):
     client, conn = env
-    headers = {"X-CCSync-Token": TOKEN}
+    headers = report_headers()
     client.post("/api/v1/report", headers=headers, json=report("Mystery Doc"))
     assert dbmod.fetch_unmapped_resolve_projects(conn) == ["Mystery Doc"]
 
@@ -140,7 +210,7 @@ def test_unmatched_projects_surface_for_admin(env):
 
 def test_queue_shows_fixed_root_read_only(env):
     client, _ = env
-    headers = {"X-CCSync-Token": TOKEN}
+    headers = report_headers()
     client.post("/api/v1/report", headers=headers, json=report("CCT Creator Profiles"))
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
     page = client.get("/")

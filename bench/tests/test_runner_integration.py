@@ -62,11 +62,56 @@ def test_rclone_sftp_availability():
 def test_rclone_sftp_local_test_dir_roundtrip(tmp_path):
     ds_dir = _tiny_dataset(tmp_path)
     remote_base = tmp_path / "rclone_remote"
+    endpoint = {"local_test_dir": str(remote_base)}
+    params = {"transfers": 1, "multi_thread_streams": 0, "sftp_chunk_size_kib": 255}
+
     result = rclone_sftp.run(
-        ds_dir, "up", {"local_test_dir": str(remote_base)}, {"transfers": 1, "multi_thread_streams": 0},
+        ds_dir, "up", endpoint, params,
         dataset_name="large", verify=True, keep_remote_data=True,
     )
     assert result.ok, result.reason
+    # bytes come from rclone's own stats, and the upload is read back
+    assert result.bytes_source == "rclone-stats", result.bytes_source
+    assert result.num_bytes > 0
+    assert result.verify_method == "remote-size-listing"
+    assert result.verified, result.reason
+    assert result.loopback is True
+
+    # a "down" run into a pre-populated destination still measures a transfer,
+    # because the destination is emptied before the timed copy
+    dest_dir = tmp_path / "_bench_down" / "0"
+    dest_dir.mkdir(parents=True)
+    (dest_dir / "stale.bin").write_bytes(b"warm cache")
+    down = rclone_sftp.run(
+        ds_dir, "down", endpoint, params,
+        dataset_name="large", verify=True, dest_dir=dest_dir, keep_remote_data=True,
+    )
+    assert down.ok, down.reason
+    assert down.num_bytes > 0
+    assert down.verify_method == "spot-check-sha256"
+    assert not (dest_dir / "stale.bin").exists()
+
+
+@pytest.mark.skipif(shutil.which("rclone") is None, reason="rclone not found on PATH")
+def test_rclone_refuses_a_non_bench_remote_before_transferring(tmp_path):
+    """The endpoint path guard, end to end against the real binary."""
+    ds_dir = _tiny_dataset(tmp_path)
+    live_tree = tmp_path / "Creators_Club" / "Projects"
+    live_tree.mkdir(parents=True)
+    (live_tree / "original.braw").write_bytes(b"irreplaceable")
+
+    result = rclone_sftp.run(
+        ds_dir, "up", {"local_test_dir": str(live_tree)}, {"transfers": 1},
+        dataset_name="large", verify=True, keep_remote_data=True,
+    )
+    # local_test_dir gets a "_bench_sftp" component, so this one is allowed --
+    # but the raw endpoint path is not, and cleanup of it must be refused.
+    assert result.ok, result.reason
+    from ccbench import guard
+
+    with pytest.raises(guard.DestructiveEndpointRefused):
+        guard.assert_scratch_path(str(live_tree), action="rclone purge")
+    assert (live_tree / "original.braw").exists()
 
 
 def test_syncthing_availability_reports_reason_when_absent():

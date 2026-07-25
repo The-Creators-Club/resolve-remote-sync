@@ -10,9 +10,16 @@
 [general]
 results_file = "results/results.jsonl"   # append-only, resumable
 work_dir = "work"                        # scratch space for downloads/syncthing temp dirs
-repeats = 2                              # report picks the best of N repeats per combo
-verify = true                            # spot-check 3 random files (size + sha256) after each transfer
-keep_remote_data = false                 # true = don't clean up the NAS-side test data after each run
+repeats = 3                              # report shows the MEDIAN of N repeats (min/max as columns)
+verify = true                            # downloads: 3 random files re-hashed; uploads: remote size listing
+keep_remote_data = false                 # true = don't clean up the NAS-side test data (cleanup runs once, after the matrix)
+
+# Safety: every purge/rmtree this harness performs is refused unless the target
+# path contains a "_bench" component (see ccbench/guard.py), so a mistyped
+# remote_path/unc_path can never wipe a real project subtree. Only set this
+# true (or pass --allow-destructive-endpoint) if you deliberately want to
+# delete a non-"_bench" endpoint path.
+allow_destructive_endpoint = false
 
 # ---------------------------------------------------------------------------
 # Datasets: generate these first with
@@ -53,7 +60,11 @@ host = "100.x.x.x"                 # NAS's Tailscale IP or MagicDNS name
 user = "editor1"
 key_file = "~/.ssh/id_ed25519"
 port = 22
-remote_path = "Creators_Club/_bench"   # scratch subtree on the NAS, cleaned up per run
+# Scratch subtree on the NAS, purged before each timed upload and once after
+# the matrix. MUST contain a "_bench" path component or the harness refuses to
+# delete anything under it -- that guard is the only thing between a typo here
+# and `rclone purge` on live project media.
+remote_path = "Creators_Club/_bench"
 
 [endpoints.smb]
 # Used by both rclone_smb (host/share/user/...) and robocopy_smb (unc_path).
@@ -61,6 +72,8 @@ host = "100.x.x.x"
 share = "TheCreatorsPool"
 user = "editor1"
 password_env = "CCBENCH_SMB_PASSWORD"    # set this env var, don't hardcode a password here
+# Both of these are delete targets -- same "_bench" component requirement as
+# [endpoints.sftp].remote_path above.
 remote_subpath = "Creators_Club/_bench"
 unc_path = "\\\\100.x.x.x\\TheCreatorsPool\\Creators_Club\\_bench"
 
@@ -75,9 +88,22 @@ port = 5201
 # Per-engine param sweeps
 # ---------------------------------------------------------------------------
 [params.rclone]
-transfers = [1, 4, 8, 16]
-multi_thread_streams = [0, 4, 8]   # only applied on "down" (local destination); ignored on "up"
-sftp_chunk_size_mb = [4, 32]        # sftp backend only, ignored by rclone_smb
+transfers = [1, 4, 8, 16, 32]
+
+# Swept in BOTH directions for rclone_smb (the SMB backend can multi-thread
+# uploads -- that's the advantage the SFTP-vs-SMB A/B for lane A is meant to
+# measure). For rclone_sftp it is swept on "down" only and pinned to an
+# explicit 0 on "up", because SFTP cannot multi-thread uploads at all.
+multi_thread_streams = [0, 4, 8]
+
+# --sftp-chunk-size, in KiB (sftp backend only; ignored by rclone_smb).
+# The SFTP protocol's maximum total packet is 256 KiB, so 255 is the largest
+# usable value and rclone's own recommendation (`--sftp-chunk-size 255k`).
+# Anything expressed in megabytes is a protocol error, not a tuning choice --
+# the old `sftp_chunk_size_mb` key is rejected with an error for that reason.
+# 32 KiB is rclone's default and is the value a high-RTT link punishes hardest,
+# so sweeping 32 -> 255 is the single highest-value A/B in this file.
+sftp_chunk_size_kib = [32, 128, 255]
 
 [params.robocopy]
 mt = [1, 8, 16, 32]

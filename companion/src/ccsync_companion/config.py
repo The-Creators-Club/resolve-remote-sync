@@ -14,6 +14,7 @@ asserts the two agree on keys).
 from __future__ import annotations
 
 import logging
+import re
 import sys
 
 if sys.version_info >= (3, 11):
@@ -26,7 +27,7 @@ from typing import Any, Optional
 
 log = logging.getLogger("ccsync.config")
 
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -61,6 +62,63 @@ DEFAULTS: dict[str, Any] = {
     # says "10s debounce" for lane A but doesn't name a config key for it).
     "watch_debounce_seconds": 10,
     "transfers": 4,
+    # -- transport tuning (see sync/rclone_lane.py: RcloneTuning) ----------
+    # Every one of these disables its flag when set to "" (strings) or 0
+    # (ints), so any single knob can be reverted from config.toml without a
+    # code change. Defaults are the measured-good values from the round-2
+    # performance work, not rclone's own defaults.
+    #
+    # rclone's SFTP backend has NO multi-thread upload, so one 40 GB BRAW
+    # rides a single SSH stream whose in-flight window is
+    # sftp_chunk_size x sftp_concurrency. At rclone's 32Ki x 64 that window
+    # is 2 MiB, i.e. a hard per-file ceiling of window/RTT -- ~14 MB/s at
+    # 150 ms, which is the ~60 mb/s class ceiling this project exists to
+    # beat. 255Ki x 64 is a 16.3 MiB window (AUDIT_2 P1).
+    "sftp_chunk_size": "255Ki",
+    "sftp_concurrency": 64,
+    "sftp_connections": 16,
+    "checkers": 16,
+    # rclone verifies size AND hash after every transfer when a common hash
+    # exists; with shell_type=unix it gets MD5 by running `md5sum <path>` on
+    # the NAS, so the NAS RE-READS every file it just received or sent
+    # (AUDIT_2 P2). Set false to restore post-transfer hash verification.
+    "rclone_ignore_checksum": True,
+    # Upload newest first (an editor wants today's card ingest to land);
+    # download smallest first (many small proxies beat one huge one for
+    # perceived progress). "" disables ordering.
+    "order_by_up": "modtime,descending",
+    "order_by_down": "size,ascending",
+    # Lanes A and B are opposite directions and the link is full duplex, so
+    # serializing them left one direction idle for the whole of the other's
+    # run (AUDIT_2 P7). Set false to go back to strictly-serial passes.
+    "concurrent_lanes": True,
+    # clone_directory_tree is fully redundant once the structure exists;
+    # running it every pass was three full destination traversals per
+    # project per pass (AUDIT_2 P10). 0 disables the periodic re-clone.
+    "structure_clone_every_n_passes": 10,
+    # "none" = leave every selected Syncthing folder unpaused (lane C then
+    # runs continuously alongside A/B); "rotate" = the original
+    # pause-all-but-current scheme, which cost N(N-1) config commits and a
+    # full rescan per unpause, and could leave a project's small files
+    # unsent for ~50 minutes (AUDIT_2 P4).
+    "lane_c_pause_scheme": "none",
+    "lane_c_max_folder_concurrency": 2,
+    # Killed uploads leave <name>.partial on the NAS and lane A never
+    # deletes, so they accumulate forever (AUDIT_2 P8). This only REPORTS
+    # them. 0 disables the scan.
+    "orphan_scan_every_n_passes": 20,
+    # Express lane A: a watchdog event uploads just that file immediately
+    # instead of waiting for the sequencer to rotate round to its project,
+    # which took minutes at best and a whole pass at worst (AUDIT_2 P9/C-2).
+    # Upload-only (copy --ignore-existing with an explicit file list), so it
+    # runs alongside the periodic pass without a delete verb between them.
+    "express_upload_enabled": True,
+    # Window over which watchdog events are batched. Falls back to
+    # watch_debounce_seconds, which managed mode otherwise ignored entirely.
+    "express_debounce_seconds": 10.0,
+    # Paths per window; a bigger burst (a card ingest) is left to the
+    # periodic pass rather than shipped as one enormous express run.
+    "express_max_batch": 200,
     "syncthing_url": "http://127.0.0.1:8384",
     "syncthing_api_key": "",
     # Expected Syncthing folder ID per entry in `projects` (addition; needed
@@ -113,6 +171,16 @@ DEFAULTS: dict[str, Any] = {
     "selection_poll_interval": 60,
     "project_rotation_seconds": 600,
     "sequencer_idle_seconds": 60,
+    # How long selection.SelectionClient may serve the last dashboard
+    # response from memory before going back to the network, and the longer
+    # TTL for the sticky project_roots destination mapping. Both were read
+    # via cfg.get(..., 30/300) with no entry here, in the template, or in
+    # validate_config -- undiscoverable, and a hand-edited string raised
+    # inside SelectionClient.__init__ i.e. inside CompanionApp construction,
+    # which on the windowed exe means no tray and no log line (the same
+    # class as S-10/CORE-M4).
+    "selection_fetch_ttl": 30,
+    "project_roots_ttl": 300,
     # False on the base rig (direct LAN access to the NAS): it reads proxies
     # straight off the share, so mirroring them locally is pure waste.
     "lane_b_enabled": True,
@@ -144,6 +212,8 @@ DEFAULTS: dict[str, Any] = {
     # whatever project the Blackmagic Proxy Generator's Resolve process has
     # open (a BPG rig otherwise nags about its own helper project; seen live
     # 2026-07-25 as recurring "New Doc" popups on the base rig).
+    # Each entry matches its own numbered duplicates too ("New Doc 1",
+    # "New Doc 2", "Untitled Project (3)") -- see is_ignored_project().
     "ignored_resolve_projects": ["Untitled Project", "New Doc"],
 }
 
@@ -185,7 +255,12 @@ remote = "creators_club_sftp"
 # resolves under ~/ and will not find the project tree.
 remote_root = ""
 
-# Project relative paths to sync, e.g. ["Projects/2025/FF4/Nuclear"].
+# WHICH PROJECTS SYNC is decided on the dashboard, by your ticks -- not
+# here. The sequencer works through the ticked projects ONE AT A TIME; the
+# tree is not replicated as a whole. These two keys are leftovers from the
+# pre-dashboard mode: `projects` only pairs positionally with
+# syncthing_folder_ids below, and `active_project` only supplies the folder
+# the popup fixer suggests for media you add yourself.
 projects = []
 active_project = ""
 
@@ -203,6 +278,48 @@ watch_debounce_seconds = 10
 
 # rclone --transfers (parallel stream count).
 transfers = 4
+
+# --- transport tuning ------------------------------------------------------
+# All commented out: the values below ARE the defaults. Uncomment to
+# override. Set a string to "" or an int to 0 to drop that rclone flag
+# entirely.
+#
+# In-flight SFTP window = chunk_size x concurrency. rclone's SFTP backend
+# has no multi-thread upload, so this is the hard per-file speed ceiling
+# (window / round-trip time) for a single large original.
+# sftp_chunk_size = "255Ki"
+# sftp_concurrency = 64
+# Parallel SSH connections rclone may open to the NAS.
+# sftp_connections = 16
+# Parallel same-or-different checks while comparing the two sides.
+# checkers = 16
+# true skips rclone's post-transfer hash check, which otherwise makes the
+# NAS re-read (md5sum) every file it just received or sent.
+# rclone_ignore_checksum = true
+# Transfer order. Uploads newest-first, downloads smallest-first. "" = none.
+# order_by_up = "modtime,descending"
+# order_by_down = "size,ascending"
+# Run lane A (up) and lane B (down) at the same time -- they are opposite
+# directions on a full-duplex link, so serializing them leaves one idle.
+# concurrent_lanes = true
+# Re-clone the server's empty directory structure only every Nth pass; it
+# is redundant once the structure exists. 0 = never re-clone.
+# structure_clone_every_n_passes = 10
+# "none" leaves every selected Syncthing folder unpaused; "rotate" pauses
+# all but the current project (many more config commits + a rescan per
+# unpause, and small files can wait a full rotation).
+# lane_c_pause_scheme = "none"
+# lane_c_max_folder_concurrency = 2
+# Report (never delete) orphaned <name>.partial files left on the NAS by
+# killed uploads, every Nth pass. 0 = never scan.
+# orphan_scan_every_n_passes = 20
+# Upload a newly-added clip as soon as it settles, instead of waiting for
+# the sequencer to reach its project. Upload-only, runs alongside the
+# periodic pass. express_debounce_seconds defaults to watch_debounce_seconds;
+# a burst larger than express_max_batch is left to the periodic pass.
+# express_upload_enabled = true
+# express_debounce_seconds = 10.0
+# express_max_batch = 200
 
 # Local Syncthing REST API base URL and API key. Leave syncthing_api_key
 # empty to read it from Syncthing's own config.xml (the installer-managed
@@ -248,10 +365,11 @@ manifest_refresh_interval = 300
 # reporting, on its own background thread.
 media_tree_refresh_interval = 120
 
-# Managed mode (active only when dashboard_url above is set): the dashboard
-# decides WHICH projects this editor has and in what order, and a
-# sequencer syncs them one at a time instead of the whole tree
-# continuously. How often the sequencer re-fetches the ordered selection:
+# Managed mode (active only when dashboard_url above is set, which is the
+# default): the dashboard decides WHICH projects this editor has and in what
+# order, and a sequencer syncs them ONE AT A TIME. Only ticked projects sync
+# -- lanes A and B are not whole-tree mirrors. How often the sequencer
+# re-fetches the ordered selection:
 selection_poll_interval = 60
 # How long (seconds) the sequencer waits for a project's Lane C
 # (Syncthing) sync to settle before moving on to the next project anyway:
@@ -260,6 +378,11 @@ project_rotation_seconds = 600
 # selected project is caught up (small edits still trickle during this
 # window -- every selected folder is unpaused while idle):
 sequencer_idle_seconds = 60
+# How long (seconds) the last selection response is served from memory
+# before the companion asks the dashboard again, and the longer TTL for the
+# sticky per-project destination mapping (project_roots) inside it:
+selection_fetch_ttl = 30
+project_roots_ttl = 300
 
 # Set false on the base rig (direct LAN access to the NAS): it reads proxies
 # straight off the share, so lane B's local proxy mirror is pure waste.
@@ -290,6 +413,9 @@ mode = "editor"
 # Resolve project names (case-insensitive) the companion pretends not to
 # see: never reported, never prompt "set this up on the server", and their
 # clips never raise the out-of-tree popup. Scratch/utility projects only.
+# Each name also covers Resolve's numbered duplicates of it -- "New Doc"
+# here silences "New Doc 1", "New Doc 2", "New Doc (3)" as well. A longer
+# real name that merely starts the same ("New Doc Final") is NOT ignored.
 ignored_resolve_projects = ["Untitled Project", "New Doc"]
 """
 
@@ -374,15 +500,21 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
     why. Callers log these at startup rather than raising; the never-raise
     ethos used throughout this package still applies.
 
-    The split matters. **errors** stop syncing outright. **warnings** degrade
-    one specific feature and are genuinely optional otherwise -- notably
-    `projects` / `active_project`, which do NOT scope the rclone lanes:
-    lanes A and B sync `local_root` <-> `remote_root` as whole trees, so the
-    entire Projects/<year>/<series>/<project> structure replicates verbatim
-    no matter what those keys say. `active_project` only supplies the
-    destination the popup fixer suggests for editor-added media, and
-    `projects` only pairs with `syncthing_folder_ids` for lane C's
-    folder-ID check.
+    The split matters. **errors** stop syncing outright -- since 0.4.5 they
+    genuinely do: app._start_lanes() refuses to start the lanes or the
+    sequencer while any is present (AUDIT_2 DEL-3). **warnings** degrade one
+    specific feature and are genuinely optional otherwise -- notably
+    `projects` / `active_project`, which do NOT scope the rclone lanes.
+
+    What DOES scope them, in managed mode (i.e. whenever `dashboard_url` is
+    set -- the default): the dashboard's per-editor selection. Only the
+    projects an editor has TICKED sync, and the sequencer syncs them ONE AT
+    A TIME. The old claim that "lanes A and B sync local_root <-> remote_root
+    as whole trees, so the entire structure replicates verbatim" is legacy
+    non-managed behaviour and was materially misleading (AUDIT_2 UX-21).
+    `active_project` only supplies the destination the popup fixer suggests
+    for editor-added media, and `projects` only pairs with
+    `syncthing_folder_ids` for lane C's folder-ID check.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -433,8 +565,21 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
         warnings.append(
             "active_project is blank -- the popup fixer has no project to file "
             "editor-added media into, so it will suggest a destination at the "
-            "root of the tree. Syncing is unaffected: lanes A and B replicate "
-            "the whole tree regardless."
+            "root of the tree. Which projects sync is decided by your ticks on "
+            "the dashboard, not by this key."
+        )
+
+    # Absent is fine (load_config merges DEFAULTS in); PRESENT AND WRONG is
+    # the failure being caught here.
+    log_path = cfg.get("log_path", DEFAULTS["log_path"])
+    if not isinstance(log_path, str) or not log_path.strip():
+        # setup_logging() does log_path.parent.mkdir() on Path(cfg["log_path"])
+        # with no coercion: a non-str raises TypeError and a blank string
+        # raises PermissionError, both of which used to kill the windowed exe
+        # before it could say why (AUDIT_2 CORE-H2).
+        errors.append(
+            f"log_path must be a non-blank path string, got {log_path!r} -- "
+            f"the default is {DEFAULTS['log_path']!r}"
         )
 
     folder_ids = cfg.get("syncthing_folder_ids") or []
@@ -477,10 +622,25 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
             f"(valid: {', '.join(sorted(MODE_PROFILES))})"
         )
 
+    # Every numeric key whose bad value raises inside CompanionApp.__init__ /
+    # _build_lanes rather than being caught here. The loop used to omit
+    # exactly the ones that crash: poll_interval="fast" (which run()'s own
+    # comment names as the case it protects against), transfers="four",
+    # scan_interval_up="soon" and watch_debounce_seconds=None all produced
+    # errors == [] and then raised at construction, taking the windowed exe
+    # down with no log line (AUDIT_2 CORE-M4).
     for key in (
         "selection_poll_interval", "project_rotation_seconds", "sequencer_idle_seconds",
+        "selection_fetch_ttl", "project_roots_ttl",
         "dashboard_report_interval_active", "manifest_refresh_interval", "media_tree_refresh_interval",
         "popup_snooze_seconds",
+        "poll_interval", "transfers", "scan_interval_up", "scan_interval_down",
+        "watch_debounce_seconds",
+        # Transport tuning: a string in sftp_concurrency is the same class of
+        # bug -- it crashes lane construction.
+        "sftp_concurrency", "sftp_connections", "checkers",
+        "lane_c_max_folder_concurrency",
+        "express_debounce_seconds", "express_max_batch",
     ):
         try:
             value = float(cfg.get(key, DEFAULTS[key]))
@@ -489,11 +649,143 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
         except (TypeError, ValueError):
             errors.append(f"{key} must be a positive number, got {cfg.get(key)!r}")
 
+    # Same, but 0 is legal here: it means "disable this behaviour entirely".
+    for key in ("structure_clone_every_n_passes", "orphan_scan_every_n_passes"):
+        try:
+            if float(cfg.get(key, DEFAULTS[key])) < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            errors.append(
+                f"{key} must be a number >= 0 (0 disables it), got {cfg.get(key)!r}"
+            )
+
+    scheme = str(cfg.get("lane_c_pause_scheme", DEFAULTS["lane_c_pause_scheme"])).strip().lower()
+    if scheme not in ("none", "rotate"):
+        warnings.append(
+            f"unknown lane_c_pause_scheme {cfg.get('lane_c_pause_scheme')!r} -- "
+            f"treated as 'none' (valid: none, rotate)"
+        )
+
     return errors, warnings
 
 
+# What may follow an ignored project name and still be the SAME scratch
+# project: Resolve's duplicate suffix -- "New Doc 1", "New Doc 2",
+# "Untitled Project (3)". Nothing else ("New Doc Final" is a real project).
+_NUMBERED_DUPLICATE_RE = re.compile(r"^[\s_\-]*[\(\[]?\d+[\)\]]?$")
+
+
+def normalize_ignored_projects(values: Any) -> set[str]:
+    """The `ignored_resolve_projects` config list as a normalized match set.
+
+    Normalization is strip + lower + internal-whitespace collapse, so a
+    hand-edited "  New  Doc " entry still matches Resolve's "New Doc".
+    Blank/garbage entries are dropped; a non-list (already coerced by
+    load_config, but this is also called with raw values) yields an empty
+    set, i.e. "ignore nothing" -- never an exception.
+    """
+    try:
+        items = list(values or [])
+    except TypeError:
+        return set()
+    normalized: set[str] = set()
+    for value in items:
+        if value is None:
+            continue
+        try:
+            text = " ".join(str(value).split()).lower()
+        except Exception:
+            continue
+        if text:
+            normalized.add(text)
+    return normalized
+
+
+def is_ignored_project(name: Any, ignored: Any) -> bool:
+    """True if `name` is one of the ignored scratch/utility Resolve projects.
+
+    Matching is a PREFIX match, not equality: Resolve names duplicates of its
+    scratch projects "New Doc 1", "New Doc 2", "Untitled Project (3)", and
+    the Blackmagic Proxy Generator's helper project counts up like that all
+    day. Only a trailing number (with optional spaces/dashes/underscores and
+    optional brackets) is allowed after the ignored name -- "New Documentary"
+    and "New Doc Final" are real projects and never match.
+
+    `ignored` may be the raw config list or an already-normalized set; both
+    are accepted so callers can normalize once at construction. Never raises.
+    """
+    try:
+        candidate = " ".join(str(name or "").split()).lower()
+    except Exception:
+        return False
+    if not candidate:
+        return False
+
+    if isinstance(ignored, (set, frozenset)):
+        entries = ignored
+    else:
+        entries = normalize_ignored_projects(ignored)
+
+    for entry in entries:
+        if candidate == entry:
+            return True
+        if candidate.startswith(entry):
+            if _NUMBERED_DUPLICATE_RE.match(candidate[len(entry):]):
+                return True
+    return False
+
+
+def coerce_numeric(cfg: dict[str, Any], key: str, default: Any) -> float:
+    """float(cfg[key]) with the packaged default as a never-raise fallback.
+
+    validate_config() now flags these, and _start_lanes() refuses to run on
+    an error -- but CompanionApp is still CONSTRUCTED first, and construction
+    must not raise on a hand-edited value (that is the failure mode with no
+    log line and no tray)."""
+    try:
+        value = float(cfg.get(key, default))
+        if value <= 0:
+            raise ValueError
+        return value
+    except (TypeError, ValueError):
+        log.error("config: %s=%r is not a positive number -- using %r", key, cfg.get(key), default)
+        return float(default)
+
+
+def coerce_count(cfg: dict[str, Any], key: str, default: Any) -> int:
+    """coerce_numeric's sibling for the "every N passes, 0 disables" knobs.
+
+    Same never-raise contract and the same reason for existing (construction
+    must survive a hand-edited value -- see coerce_numeric), but 0 is a legal
+    value here rather than an error, so these cannot go through
+    coerce_numeric's positive-only gate. A negative number is garbage and
+    falls back to the packaged default."""
+    try:
+        value = int(float(cfg.get(key, default)))
+        if value < 0:
+            raise ValueError
+        return value
+    except (TypeError, ValueError):
+        log.error(
+            "config: %s=%r is not a number >= 0 (0 disables it) -- using %r",
+            key, cfg.get(key), default,
+        )
+        return int(default)
+
+
 def resolved_log_path(cfg: dict[str, Any]) -> Path:
-    return Path(cfg.get("log_path", DEFAULTS["log_path"])).expanduser()
+    """Never raises. A non-str or blank `log_path` falls back to the packaged
+    default -- Path(5) raises TypeError, and this is called from
+    CompanionApp.__init__, _build_lanes AND setup_logging, i.e. three places
+    where an exception means the windowed exe vanishes silently (AUDIT_2
+    CORE-H2). validate_config() reports the bad value."""
+    raw = cfg.get("log_path", DEFAULTS["log_path"])
+    if not isinstance(raw, str) or not raw.strip():
+        raw = DEFAULTS["log_path"]
+    try:
+        return Path(raw).expanduser()
+    except Exception:
+        return Path(DEFAULTS["log_path"]).expanduser()
 
 
 def resolved_local_root(cfg: dict[str, Any]) -> Path:

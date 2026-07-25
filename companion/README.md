@@ -129,6 +129,8 @@ of what either of those produces. Restart the app after editing.
 | `selection_poll_interval` | `60` | How often the sequencer refreshes the editor's project selection from the dashboard. |
 | `project_rotation_seconds` | `600` | Max time the sequencer spends on one project's lane-C turn before rotating to the next (starvation guard). |
 | `sequencer_idle_seconds` | `60` | Idle sleep between full passes over the queue. |
+| `selection_fetch_ttl` | `30` | How long the last selection response is served from memory before the dashboard is asked again (the sequencer consults it from a 5-second poll loop). |
+| `project_roots_ttl` | `300` | Longer TTL for the sticky per-Resolve-project destination mapping (`project_roots`) carried in the same response. |
 | `lane_b_enabled` | `true` | Set `false` on the base rig (direct LAN access to the NAS): proxies are read straight off the share, so the local proxy mirror is skipped in both managed and legacy modes. |
 | `sync_enabled` | `true` | Set `false` when the machine works entirely off the NAS share (base rig): no sync lanes run at all; timeline watcher, popup fixer and dashboard reporting still work, lanes report idle with a "disabled" detail. |
 | `popup_enabled` | `true` | Set `false` to suppress the media-outside-tree popup entirely (still logged). |
@@ -156,6 +158,15 @@ and editor-side ignore patterns. No selection data (fresh install, dashboard
 down, nothing ticked) means **nothing syncs** -- that's the design: editors
 choose their projects on the dashboard. With `dashboard_url` blank the
 legacy whole-tree behavior is unchanged.
+
+The selection fetch (`GET {dashboard_url}/api/v1/selection/{editor_name}`)
+sends **both** auth headers, the same pair `/api/v1/report` sends:
+`X-CCSync-Token` (the fleet-wide `dashboard_token`) and `X-CCSync-Identity`
+(the signed identity token from sign-in). The dashboard requires both to
+read an editor's selection -- the shared token alone does not authorize it.
+Not signed in means no identity header and, on an up-to-date dashboard, a
+401 that degrades exactly like any other fetch failure: the cached
+selection keeps the sequencer working.
 
 ### What actually syncs: the whole tree
 

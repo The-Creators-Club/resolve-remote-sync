@@ -43,12 +43,28 @@ class FakeAdmin:
         self.pause_calls = []
         self.pending = {}
         self.accept_calls = []
+        self.accept_raises = set()
         self.status_by_slug = {}
         self.status_calls = []
+        self.ignore_calls = []
+        self.versioning_calls = []
+        self.completion_calls = []
+        # slug -> needBytes the SERVER still needs from us (AUDIT_2 P5)
+        self.completion_need_bytes = {}
+        self.paused_state = {}
+        self.my_id = "SELF-DEVICE"
+        self.folder_devices = {}
+        self.max_folder_concurrency_calls = []
 
     def set_folder_paused(self, folder_id, paused):
         self.pause_calls.append((folder_id, paused))
+        self.paused_state[folder_id] = paused
         self.events.append(("pause", folder_id, paused))
+
+    def ensure_max_folder_concurrency(self, value):
+        """What replaces the pause scheme's pacing (AUDIT_2 P4/C-1)."""
+        self.max_folder_concurrency_calls.append(value)
+        return True
 
     def pending_folders(self):
         return dict(self.pending)
@@ -62,8 +78,39 @@ class FakeAdmin:
                 "offered_by_device_id": offered_by_device_id,
             }
         )
+        if folder_id in self.accept_raises:
+            raise RuntimeError("set_ignores timed out; folder left paused")
         self.pending.pop(folder_id, None)
         return {}
+
+    def set_ignores(self, folder_id, lines):
+        self.ignore_calls.append((folder_id, list(lines)))
+        return {}
+
+    def ensure_versioning(self, folder_id, folder=None):
+        self.versioning_calls.append(folder_id)
+        return True
+
+    def get_config(self):
+        return {
+            "folders": [
+                {
+                    "id": fid,
+                    "paused": paused,
+                    "devices": [{"deviceID": d} for d in self.folder_devices.get(fid, [])],
+                }
+                for fid, paused in self.paused_state.items()
+            ]
+        }
+
+    def system_status(self):
+        return {"myID": self.my_id}
+
+    def completion(self, folder_id, device_id):
+        self.completion_calls.append((folder_id, device_id))
+        value = self.completion_need_bytes.get(folder_id, 0)
+        need = value() if callable(value) else value
+        return {"needBytes": need}
 
     def folder_status(self, folder_id):
         self.status_calls.append(folder_id)
@@ -410,7 +457,11 @@ def test_stop_during_lane_c_pause_sweep_never_leaves_a_folder_stuck_paused():
     right after the unpause-everything sweep already ran -- leaving it
     stuck paused until the next launch. Fires stop() from inside the
     sweep loop itself (mid-iteration) and asserts every folder ends up
-    unpaused, with the sweep never reaching a later folder."""
+    unpaused, with the sweep never reaching a later folder.
+
+    Pinned to lane_c_pause_scheme="rotate": there IS no pause sweep under
+    the new default (AUDIT_2 P4), but the scheme is still selectable, so the
+    ordering guarantee it depends on still has to hold."""
     items = [
         _item("s-a", "2026/FF5/Alpha", 0),
         _item("s-b", "2026/FF5/Bravo", 1),
@@ -418,7 +469,7 @@ def test_stop_during_lane_c_pause_sweep_never_leaves_a_folder_stuck_paused():
     ]
     selection = FakeSelectionClient(selection=items)
     admin = FakeAdmin()
-    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq, lane_a, lane_b, events = _build(selection, admin, lane_c_pause_scheme="rotate")
 
     stopped_thread: dict[str, threading.Thread] = {}
     orig_pause = admin.set_folder_paused
@@ -541,6 +592,243 @@ def test_lane_b_disabled_skips_proxy_runs():
     assert lane_a.calls and not lane_b.calls
 
 
+# -- thread lifecycle (AUDIT_2 L-1) -----------------------------------------
+
+
+def test_start_never_spawns_a_second_sequencer_thread():
+    """AUDIT_2 L-1 [reproduced live]: stop() joins with timeout=10, which an
+    in-flight 40 GB lane A run always outlasts. start() then cleared
+    _stop_event and spawned thread #2 alongside the still-looping #1. Both
+    drove _lane_c_turn, so Syncthing folders flipped paused/unpaused several
+    times a second, _in_lane_c_turn was corrupted by whichever thread wrote
+    last, and rotation collapsed. Every subsequent sign-out/sign-in added
+    another permanent thread."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    admin.status_by_slug["s-a"] = 5  # keep the turn open so the thread stays busy
+    seq, lane_a, lane_b, events = _build(selection, admin, project_rotation_seconds=5.0)
+
+    seq.start()
+    assert _wait_until(lambda: seq.current_slug == "s-a", timeout=3.0)
+    first = seq._thread
+
+    # Simulate the sign-out -> sign-in whose stop() join timed out: the
+    # thread is still alive when start() is called again.
+    seq.start()
+    assert seq._thread is first
+
+    live = [t for t in threading.enumerate() if t.name == "ccsync-sequencer" and t.is_alive()]
+    assert len(live) == 1
+    seq.stop()
+
+
+# -- accept failures must not be unpaused (AUDIT_2 L-3) ---------------------
+
+
+def test_failed_accept_leaves_the_folder_paused():
+    """test_syncthing_admin.py asserts accept_folder leaves a folder paused
+    when set_ignores fails. Its own caller broke that guarantee 1 ms later by
+    unpausing unconditionally -- and since the folder then leaves
+    pending_folders(), NOTHING ever retried the ignores, so lane C indexed
+    and offered every .braw/.mov original for the life of the install."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    admin.pending = {"s-a": {"offeredBy": {"DEVICE-1": {}}}}
+    admin.accept_raises.add("s-a")
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    # Let several passes go by: the turn must never unpause it, and neither
+    # may the leak-recovery sweeps that run between passes.
+    assert _wait_until(lambda: len(admin.accept_calls) >= 3, timeout=5.0)
+    # Snapshot BEFORE stop(), whose own sweep is a separate concern.
+    during_the_passes = list(admin.pause_calls)
+    seq.stop()
+
+    unpauses = [c for c in during_the_passes if c == ("s-a", False)]
+    # At most the single pre-lane unpause of the FIRST pass, i.e. before the
+    # first accept attempt could reveal the problem. Never once the folder is
+    # known to have landed without its ignores.
+    assert len(unpauses) <= 1, during_the_passes
+    # No ignores/versioning reassertion either -- the folder isn't usable.
+    assert admin.ignore_calls == []
+    # And the pass moved on rather than dying.
+    assert lane_a.calls
+
+
+def test_successful_turn_reasserts_ignores_and_versioning_every_turn():
+    """AUDIT_2 L-3/P6/DEL-6: nothing in the codebase ever set ignores or
+    versioning on a folder it did not itself accept, so a folder accepted by
+    an older companion or by hand in the Syncthing GUI stayed un-ignored (and
+    unversioned) forever."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()  # nothing pending: the folder was accepted long ago
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    assert _wait_until(lambda: admin.ignore_calls, timeout=3.0)
+    seq.stop()
+
+    assert admin.ignore_calls[0][0] == "s-a"
+    assert any("*.braw" in line for line in admin.ignore_calls[0][1])
+    assert "s-a" in admin.versioning_calls
+
+
+# -- lane C turn must not end mid-upload (AUDIT_2 P5) -----------------------
+
+
+def test_turn_waits_for_outgoing_uploads_to_drain():
+    items = [_item("s-a", "2026/FF5/Alpha", 0), _item("s-b", "2026/FF5/Bravo", 1)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    admin.status_by_slug["s-a"] = 0          # nothing left to DOWNLOAD...
+    admin.folder_devices["s-a"] = ["SELF-DEVICE", "NAS-DEVICE"]
+    remaining = iter([9000, 4000, 0])        # ...but plenty still to UPLOAD
+    admin.completion_need_bytes["s-a"] = lambda: next(remaining, 0)
+    seq, lane_a, lane_b, events = _build(selection, admin, project_rotation_seconds=5.0)
+
+    seq.start()
+    assert _wait_until(lambda: "Projects/2026/FF5/Bravo" in lane_a.calls, timeout=3.0)
+    seq.stop()
+
+    # The turn polled completion against the NAS device, not just db/status.
+    assert ("s-a", "NAS-DEVICE") in admin.completion_calls
+    assert ("s-a", "SELF-DEVICE") not in admin.completion_calls
+    assert len(admin.completion_calls) >= 2
+
+
+# -- notify_change starvation (AUDIT_2 L-10) --------------------------------
+
+
+def test_notify_change_ignores_projects_already_done_this_pass():
+    """Lane A's watchdog fires per write chunk, so a card ingest into
+    project 1 of N re-prepended project 1 thousands of times a minute and
+    the tail of the queue never got a turn."""
+    items = [
+        _item("s-a", "2026/FF5/Alpha", 0),
+        _item("s-b", "2026/FF5/Bravo", 1),
+        _item("s-c", "2026/FF5/Charlie", 2),
+    ]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    admin.status_by_slug["s-b"] = 5  # park the pass on Bravo
+    seq, lane_a, lane_b, events = _build(selection, admin, project_rotation_seconds=5.0)
+
+    seq.start()
+    assert _wait_until(lambda: seq.current_slug == "s-b", timeout=3.0)
+
+    # Alpha is already done this pass -- an ingest into it must NOT jump it
+    # back ahead of Charlie, which has not run yet.
+    for _ in range(20):
+        seq.notify_change("Projects/2026/FF5/Alpha")
+    time.sleep(0.1)
+    assert seq.queue_slugs == ["s-c"]
+
+    # A project that has NOT run yet is still promotable.
+    seq.notify_change("Projects/2026/FF5/Charlie")
+    time.sleep(0.05)
+    assert seq.queue_slugs == ["s-c"]
+    seq.stop()
+
+
+# -- long lane A/B runs must not hold other folders paused (AUDIT_2 L-4) ----
+
+
+def test_folders_paused_by_the_previous_turn_are_released_before_the_next_lanes():
+    """project_rotation_seconds bounds only the lane C wait, so a 200 GB
+    ingest can block inside lane A for hours. The only unpause sweep was the
+    one between passes -- so projects 3..N stayed paused, i.e. lane C silently
+    did not sync audio/GFX/AE/subs for them, for that entire time.
+
+    Pinned to lane_c_pause_scheme="rotate" for the same reason as the stop-
+    sweep test above: under the default scheme nothing is ever paused, so
+    there is nothing to release -- but the release must still work for
+    anyone who selects the old scheme."""
+    order = []
+    items = [
+        _item("s-a", "2026/FF5/Alpha", 0),
+        _item("s-b", "2026/FF5/Bravo", 1),
+        _item("s-c", "2026/FF5/Charlie", 2),
+    ]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin(events=order)
+    seq, lane_a, lane_b, events = _build(selection, admin, lane_c_pause_scheme="rotate")
+
+    seq.start()
+    assert _wait_until(lambda: "Projects/2026/FF5/Bravo" in lane_a.calls, timeout=3.0)
+    seq.stop()
+
+    # Alpha's turn paused Bravo and Charlie; both must be unpaused again
+    # before Bravo's lane A starts, not merely at the end of the pass.
+    bravo_lane_a = events.index(("lane_a", "Projects/2026/FF5/Bravo"))
+    before = events[:bravo_lane_a]
+    assert ("pause", "s-b", True) in before
+    assert ("pause", "s-c", True) in before
+    assert before.index(("pause", "s-c", False)) > before.index(("pause", "s-c", True))
+
+
+def test_release_before_lanes_costs_nothing_when_no_folder_is_paused():
+    """Each pause/unpause makes Syncthing commit its config and restart the
+    folder, so the release must be scoped to what we actually paused."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq._release_paused_folders()
+    assert admin.pause_calls == []
+
+
+# -- expected_folder_slugs (AUDIT_2 L-6/UX-3 wiring) ------------------------
+
+
+def test_expected_folder_slugs_exposes_the_live_selection():
+    items = [
+        _item("s-a", "2026/FF5/Alpha", 0),
+        {"slug": "s-bad", "rel_path": None, "position": 1, "active": True},
+        _item("s-b", "2026/FF5/Bravo", 2),
+    ]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    assert seq.expected_folder_slugs() == []  # nothing known before the first pass
+    seq.start()
+    assert _wait_until(lambda: seq.expected_folder_slugs(), timeout=3.0)
+    slugs = seq.expected_folder_slugs()
+    seq.stop()
+
+    assert slugs == ["s-a", "s-b"]  # the invalid item never becomes a folder id
+
+
+# -- rel_path containment (AUDIT_2 L-7) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["../../../Windows/Temp/x", "2026/../../../evil", "\\evil", "/evil", "C:/evil", ".."],
+)
+def test_escaping_rel_paths_never_reach_a_lane(rel):
+    """The same string becomes lane A's SOURCE path: `rclone copy C:\\
+    nas:...` under the video filter would upload every video on the editor's
+    C: drive to the NAS -- which lane A never deletes."""
+    items = [{"slug": "s-a", "rel_path": rel, "position": 0, "active": True}]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    time.sleep(0.2)
+    seq.stop()
+
+    assert lane_a.calls == []
+    assert lane_b.calls == []
+    assert seq.expected_folder_slugs() == []
+
+
 # -- structure clone (empty-dir replication on tick) -------------------------
 
 
@@ -590,3 +878,24 @@ def test_structure_clone_failure_does_not_stop_the_pass():
     assert _wait_until(lambda: len(lane_a.calls) >= 1)
     seq.stop()
     assert "Projects/2026/FF5/Alpha" in lane_a.calls
+
+
+# -- one normalized rel_path everywhere (AUDIT_3 L-11) ----------------------
+
+
+def test_a_trailing_slash_rel_path_still_builds_a_clean_subpath():
+    """Every path the sequencer builds now comes from the same normalized,
+    validated rel that repath.py agreed was safe -- so a dashboard rel with a
+    trailing separator can't produce "Projects/2026/FF5/Alpha/" (which
+    reaches lane A's source, the lane C accept path and _rel_to_slug)."""
+    items = [{"slug": "s-a", "rel_path": "2026/FF5/Alpha/", "position": 0, "active": True}]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    assert _wait_until(lambda: lane_a.calls, timeout=3.0)
+    seq.stop()
+
+    assert lane_a.calls[0] == "Projects/2026/FF5/Alpha"
+    assert seq.known_rels() == ["2026/FF5/Alpha"]

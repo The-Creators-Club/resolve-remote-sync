@@ -3,10 +3,20 @@ get_timeline_items callable, never touching a real Resolve instance."""
 
 from __future__ import annotations
 
+import pytest
+
+from ccsync_companion import paths
 from ccsync_companion.fixer import IgnoreTracker
 from ccsync_companion.watcher import TimelineWatcher
 
 from conftest import make_timeline_item
+
+
+@pytest.fixture(autouse=True)
+def _fresh_prefix_cache():
+    paths.clear_prefix_cache()
+    yield
+    paths.clear_prefix_cache()
 
 
 def _ok_result(*items, project_name=""):
@@ -74,13 +84,26 @@ def test_poll_once_debounces_ignored_out_of_tree_paths(tmp_path):
     assert captured == []
 
 
-def test_poll_once_canonical_prefix_missing_locally_does_not_warn(tmp_path):
+def _subst(monkeypatch, prefix, target):
+    """Pretend `subst <prefix> <target>` is (or isn't) in place, by way of the
+    realpath() call paths.classify_path makes on the PREFIX."""
+    def fake_realpath(p):
+        p = str(p)
+        if p.upper().startswith(prefix.upper()):
+            return target + p[len(prefix):] if target else p
+        return p
+    monkeypatch.setattr(paths.os.path, "realpath", fake_realpath)
+    paths.clear_prefix_cache()
+
+
+def test_poll_once_canonical_prefix_missing_locally_does_not_warn(tmp_path, monkeypatch):
     # THE designed steady state on a remote editor rig (lane A is
     # upload-only, so a video original legitimately lives only on the NAS
     # and was never downloaded here) must NOT fire a mapping-health
     # notification -- see AUDIT.md §5's BAD_PREFIX-storm finding. This used
     # to assert the opposite (a bug the audit flagged this exact test for
-    # enshrining).
+    # enshrining). The mapping is in place here; only the file is absent.
+    _subst(monkeypatch, "P:\\", str(tmp_path) + "\\")
     item = make_timeline_item(r"P:\Projects\clip.mov")
 
     warnings = []
@@ -94,6 +117,51 @@ def test_poll_once_canonical_prefix_missing_locally_does_not_warn(tmp_path):
     watcher.poll_once()
     watcher.poll_once()
     assert warnings == []
+
+
+def test_poll_once_warns_when_the_subst_never_ran(tmp_path, monkeypatch):
+    """AUDIT_2 L-15: the PRIMARY mapping failure -- `subst P:` didn't run at
+    login, so P:\\ resolves to itself -- produced zero warnings, because the
+    classifier keyed on the missing FILE rather than the prefix."""
+    _subst(monkeypatch, "P:\\", "")  # P:\ resolves to P:\, i.e. nowhere useful
+    item = make_timeline_item(r"P:\Projects\clip.mov")
+
+    warnings = []
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        on_mapping_warning=lambda i: warnings.append(i["file_path"]),
+        get_timeline_items=lambda: _ok_result(item),
+    )
+    watcher.poll_once()
+    watcher.poll_once()
+    assert warnings == [r"P:\Projects\clip.mov"]  # warned, and debounced
+
+
+def test_mapping_warning_re_arms_after_the_mapping_is_fixed(tmp_path, monkeypatch):
+    """AUDIT_2 L-17: _warned_mapping warned once per PROCESS lifetime, so a
+    break -> fix -> break cycle (reboot without the login subst, fix it, it
+    breaks again next week) was silent the second time."""
+    item = make_timeline_item(r"P:\Projects\clip.mov")
+    warnings = []
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        on_mapping_warning=lambda i: warnings.append(i["file_path"]),
+        get_timeline_items=lambda: _ok_result(item),
+    )
+
+    _subst(monkeypatch, "P:\\", "")            # broken
+    watcher.poll_once()
+    assert len(warnings) == 1
+
+    _subst(monkeypatch, "P:\\", str(tmp_path) + "\\")  # editor fixes it
+    watcher.poll_once()
+    assert watcher._warned_mapping == set()
+
+    _subst(monkeypatch, "P:\\", "")            # and it breaks again
+    watcher.poll_once()
+    assert len(warnings) == 2
 
 
 def test_poll_once_mapping_warning_fires_once_per_genuinely_broken_mapping(tmp_path):
@@ -392,3 +460,40 @@ def test_non_ignored_project_still_tracked(tmp_path):
     )
     w.poll_once()
     assert w.last_resolve_project == "Real Doc"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["New Doc 1", "New Doc 2", "new doc 17", "New Doc (3)", "  New   Doc 4 ",
+     "Untitled Project 2"],
+)
+def test_ignored_projects_cover_resolve_numbered_duplicates(tmp_path, name):
+    """The Blackmagic Proxy Generator's helper project comes back as "New
+    Doc 1", "New Doc 2", ... The exact-match list let every new number
+    through and the "set this project up on the server" prompt returned
+    (seen live 2026-07-25)."""
+    from ccsync_companion.watcher import TimelineWatcher
+
+    changed = []
+    w = TimelineWatcher(
+        local_root=str(tmp_path), canonical_prefix="P:\\",
+        get_timeline_items=lambda: {"ok": True, "project_name": name, "items": []},
+        on_project_changed=changed.append,
+        ignored_projects=["Untitled Project", "New Doc"],
+    )
+    assert w.poll_once()["ok"] is True
+    assert w.last_resolve_project is None
+    assert changed == []
+
+
+@pytest.mark.parametrize("name", ["New Doc Final", "New Documentary", "New Docs 2026"])
+def test_a_real_project_that_merely_starts_the_same_is_not_ignored(tmp_path, name):
+    from ccsync_companion.watcher import TimelineWatcher
+
+    w = TimelineWatcher(
+        local_root=str(tmp_path), canonical_prefix="P:\\",
+        get_timeline_items=lambda: {"ok": True, "project_name": name, "items": []},
+        ignored_projects=["Untitled Project", "New Doc"],
+    )
+    w.poll_once()
+    assert w.last_resolve_project == name

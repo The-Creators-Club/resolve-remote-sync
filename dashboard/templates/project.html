@@ -5,7 +5,8 @@
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
-    <div hx-get="/partials/project/{{ project.slug }}" hx-trigger="every 10s" hx-swap="innerHTML">
+    <div id="project-detail"
+         hx-get="/partials/project/{{ project.slug }}" hx-trigger="every 10s" hx-swap="innerHTML">
       {% include "partials/project_detail.html" %}
     </div>
     <div style="margin-top:1.4rem"

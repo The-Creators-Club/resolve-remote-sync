@@ -112,6 +112,66 @@ def test_prompt_skipped_when_project_no_longer_open(tmp_path):
     assert not (tmp_path / STATE_FILENAME).exists()
 
 
+def test_prompt_skipped_when_no_project_is_open(tmp_path):
+    """THE Blackmagic Proxy Generator hole. When an ignored scratch project
+    ("New Doc") is open, the watcher reports None -- "nothing promptable is
+    open". A stale resolve_project_unmapped from an earlier report would
+    then sail past the guard (which only compared non-None names) and pop
+    the NEW PROJECT dialog over whatever the rig was doing. Skip, and do NOT
+    burn the once-ever "asked" record on it."""
+    prompter = ProjectSetupPrompter(
+        _cfg(), state_dir=tmp_path, popup_lock=threading.Lock(),
+        confirm=lambda *a, **k: True,
+        open_url=lambda u: None,
+        get_current_project=lambda: None,
+    )
+    prompter.note_report_response({"resolve_project_unmapped": "Old Doc"})
+    time.sleep(0.15)
+    assert not (tmp_path / STATE_FILENAME).exists()
+    # the tray item still offers it manually
+    assert prompter.unmapped_project == "Old Doc"
+
+
+def test_prompt_retries_once_a_real_project_is_confirmed_open(tmp_path):
+    """The skip above must not be permanent: the next report prompts as soon
+    as the watcher can name the project again."""
+    current = {"name": None}
+    confirmed = []
+    prompter = ProjectSetupPrompter(
+        _cfg(), state_dir=tmp_path, popup_lock=threading.Lock(),
+        confirm=lambda *a, **k: confirmed.append(a) or True,
+        open_url=lambda u: None,
+        get_current_project=lambda: current["name"],
+    )
+    prompter.note_report_response({"resolve_project_unmapped": "Old Doc"})
+    time.sleep(0.15)
+    assert confirmed == []
+
+    current["name"] = "Old Doc"
+    prompter.note_report_response({"resolve_project_unmapped": "Old Doc"})
+    assert wait_for(lambda: confirmed)
+    assert (tmp_path / STATE_FILENAME).exists()
+
+
+def test_prompt_skipped_when_the_project_getter_is_broken(tmp_path):
+    """A raising bridge is "we don't know what's open" -- same answer as
+    None: don't show a dialog about a project we cannot confirm."""
+    def boom():
+        raise RuntimeError("bridge down")
+
+    confirmed = []
+    prompter = ProjectSetupPrompter(
+        _cfg(), state_dir=tmp_path, popup_lock=threading.Lock(),
+        confirm=lambda *a, **k: confirmed.append(a) or True,
+        open_url=lambda u: None,
+        get_current_project=boom,
+    )
+    prompter.note_report_response({"resolve_project_unmapped": "Old Doc"})
+    time.sleep(0.15)
+    assert confirmed == []
+    assert not (tmp_path / STATE_FILENAME).exists()
+
+
 def test_prompt_skipped_while_popup_lock_held(tmp_path):
     lock = threading.Lock()
     confirmed = []

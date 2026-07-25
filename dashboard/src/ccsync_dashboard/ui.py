@@ -120,9 +120,10 @@ def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
 
 def _safe_next(raw: str) -> str:
     """Only same-site absolute paths survive; anything else (external URLs,
-    protocol-relative //host tricks) falls back to '/'."""
+    protocol-relative //host tricks, and the backslash variant '/\\host')
+    falls back to '/'."""
     raw = str(raw or "").strip()
-    if raw.startswith("/") and not raw.startswith("//"):
+    if raw.startswith("/") and not (len(raw) > 1 and raw[1] in "/\\"):
         return raw
     return "/"
 
@@ -177,18 +178,30 @@ async def page_login_submit(request: Request):
         # push it off the event loop so a slow/unreachable SMB server can't
         # freeze every other request, including companions' /api/v1/report
         # (see SEC-13 / the ui.py blocking-handlers finding).
-        verified = await run_in_threadpool(verifier, settings, username, password)
-        if verified:
-            auth.clear_login_failures(username)
-            response = RedirectResponse(next_path, status_code=303)
-            response.set_cookie(
-                auth.COOKIE_NAME,
-                auth.make_session_cookie(settings.session_secret, username),
-                max_age=auth.SESSION_TTL_SECONDS, httponly=True, samesite="lax", path="/",
-            )
-            return response
-        auth.record_login_failure(username)
-        error = "bad username or password"
+        try:
+            verified = await run_in_threadpool(verifier, settings, username, password)
+        except auth.CredentialProbeBusy:
+            # Saturated probe pool (see auth.MAX_CONCURRENT_SMB_PROBES): this
+            # is NOT a failed password, so it must not count toward the
+            # throttle either.
+            error = "the server is busy checking sign-ins -- try again in a moment"
+        else:
+            if verified:
+                auth.clear_login_failures(username)
+                response = RedirectResponse(next_path, status_code=303)
+                response.set_cookie(
+                    auth.COOKIE_NAME,
+                    auth.make_session_cookie(settings.session_secret, username),
+                    max_age=auth.SESSION_TTL_SECONDS, httponly=True, samesite="lax",
+                    # see auth.cookie_secure: on for https, off for the
+                    # current plain-http LAN/tailnet deployment (where a
+                    # hardcoded True makes the browser drop the cookie and
+                    # login silently loops)
+                    secure=auth.cookie_secure(settings, request), path="/",
+                )
+                return response
+            auth.record_login_failure(username)
+            error = "bad username or password"
     return _render(request, "login.html", {"error": error, "next_path": next_path})
 
 
@@ -262,8 +275,15 @@ async def partial_set_project_root(
 
 def _browse_context(request: Request, resolve_project: str, rel: str) -> dict:
     """The folder-browser box: children of `rel` under the Projects tree,
-    each flagged is_project (marker present). Tolerant: an invalid rel or
-    unmounted tree degrades to an error entry, never a crash."""
+    each flagged is_project (marker present) and name_match (same name as the
+    Resolve project -- almost always the folder the editor means). Tolerant:
+    an invalid rel or unmounted tree degrades to an error entry, never a
+    crash.
+
+    can_link_current says whether the folder you are STANDING IN may itself be
+    picked: without that button, drilling into an already-existing project
+    folder left "create a new subfolder here" as the only action, which is how
+    <project>/<project> double-nesting happened."""
     from .api import ProjectSetupError, _marked_ancestor, _safe_rel
 
     settings = request.app.state.settings
@@ -271,7 +291,9 @@ def _browse_context(request: Request, resolve_project: str, rel: str) -> dict:
     entries: list[dict] = []
     crumbs: list[dict] = []
     inside_project = False
+    current_is_project = False
     norm_rel = ""
+    wanted = resolve_project.strip().casefold()
     try:
         target, norm_rel = _safe_rel(settings, rel)
         projects_dir = Path(settings.projects_dir)
@@ -280,7 +302,9 @@ def _browse_context(request: Request, resolve_project: str, rel: str) -> dict:
             for part in norm_rel.split("/"):
                 acc.append(part)
                 crumbs.append({"name": part, "rel": "/".join(acc)})
-            inside_project = _marked_ancestor(projects_dir, norm_rel) is not None
+            marked = _marked_ancestor(projects_dir, norm_rel)
+            inside_project = marked is not None
+            current_is_project = marked == norm_rel
         for child in sorted(target.iterdir(), key=lambda p: p.name.lower()):
             if not child.is_dir() or child.name.startswith("."):
                 continue
@@ -295,6 +319,7 @@ def _browse_context(request: Request, resolve_project: str, rel: str) -> dict:
                 "is_project": slug is not None,
                 "slug": slug,
                 "has_children": has_children,
+                "name_match": bool(wanted) and child.name.casefold() == wanted,
             })
     except ProjectSetupError as exc:
         error = str(exc)
@@ -306,6 +331,11 @@ def _browse_context(request: Request, resolve_project: str, rel: str) -> dict:
         "rel": norm_rel,
         "crumbs": crumbs,
         "inside_project": inside_project,
+        "current_is_project": current_is_project,
+        # the current folder is pickable unless it sits inside a DIFFERENT
+        # project (projects cannot nest) -- adopt_folder re-checks all of this
+        "can_link_current": bool(norm_rel) and error is None
+                            and (not inside_project or current_is_project),
         "entries": entries,
         "error": error,
     }}
@@ -314,6 +344,7 @@ def _browse_context(request: Request, resolve_project: str, rel: str) -> dict:
 def _setup_context(
     request: Request, conn: sqlite3.Connection, resolve_project: str,
     error: str | None = None, created: dict | None = None, browse_rel: str = "",
+    suggest_rel: str = "",
 ) -> dict:
     from .api import _project_roots_view
 
@@ -334,6 +365,9 @@ def _setup_context(
         "projects_dir_ok": projects_dir_ok,
         "template_folders": provision.TEMPLATE_FOLDERS,
         "error": error,
+        # rel of an existing folder the failed action should have used --
+        # rendered next to the banner as a one-click [ USE THIS FOLDER ]
+        "suggest_rel": suggest_rel,
         "created": created,
     }}
     if projects_dir_ok:
@@ -366,6 +400,20 @@ def partial_project_setup_browse(
                    _setup_context(request, conn, resolve_project, browse_rel=rel))
 
 
+def _link_folder_sync(settings, conn, rel: str, name: str, user: str, existing) -> dict:
+    """Runs on a threadpool worker -- see partial_project_setup_link. Does a
+    depth-8 os.walk of the whole Projects tree plus marker writes."""
+    from .api import adopt_folder
+
+    created = adopt_folder(settings, conn, rel, name if existing is None else "", user)
+    if existing is not None:
+        # admin re-pointing an existing mapping
+        db.admin_set_project_root(conn, name, created["slug"], admin=user, now=db.utcnow_iso())
+        created["mapped"] = True
+    conn.commit()
+    return created
+
+
 @router.post("/partials/project-setup/link")
 async def partial_project_setup_link(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
@@ -375,7 +423,7 @@ async def partial_project_setup_link(
     Already-mapped Resolve projects: sticky insert returns False -> banner
     (adopt_folder itself only touches project_roots via sticky, so a
     non-admin can never overwrite an existing mapping)."""
-    from .api import ProjectSetupError, adopt_folder
+    from .api import ProjectSetupError
 
     settings = request.app.state.settings
     user = auth.get_session_user(request)
@@ -397,26 +445,37 @@ async def partial_project_setup_link(
             error = "this Resolve project is already mapped -- ask an admin to change it"
         else:
             try:
-                created = adopt_folder(settings, conn, rel, name if existing is None else "", user)
-                if existing is not None:
-                    # admin re-pointing an existing mapping
-                    db.admin_set_project_root(conn, name, created["slug"],
-                                              admin=user, now=db.utcnow_iso())
-                    created["mapped"] = True
-                conn.commit()
+                # Full-tree NAS I/O off the event loop: this walk takes tens of
+                # seconds on a loaded NAS, and blocking here freezes every
+                # companion report and every htmx poll (see the blocking
+                # project-setup handlers finding).
+                created = await run_in_threadpool(
+                    _link_folder_sync, settings, conn, rel, name, user, existing
+                )
             except ProjectSetupError as exc:
                 error = str(exc)
 
-    return _render(request, "partials/project_setup_panel.html",
-                   _setup_context(request, conn, name, error=error, created=created,
-                                  browse_rel=rel.rsplit("/", 1)[0] if "/" in rel else ""))
+    return await run_in_threadpool(
+        _render_setup_panel, request, conn, name, error, created,
+        rel.rsplit("/", 1)[0] if "/" in rel else "",
+    )
+
+
+def _create_project_sync(settings, conn, parent_rel: str, name: str,
+                          resolve_project: str, user: str) -> dict:
+    """Runs on a threadpool worker -- see partial_project_setup_create."""
+    from .api import create_tree_project
+
+    created = create_tree_project(settings, conn, parent_rel, name, resolve_project, user)
+    conn.commit()
+    return created
 
 
 @router.post("/partials/project-setup/create")
 async def partial_project_setup_create(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ):
-    from .api import ProjectSetupError, create_tree_project
+    from .api import FolderExistsError, ProjectSetupError
 
     user = auth.get_session_user(request)
     form = await _form(request)
@@ -425,21 +484,34 @@ async def partial_project_setup_create(
 
     error = None
     created = None
+    suggest_rel = ""
     if user is None:
         error = "not signed in"
     else:
         try:
-            created = create_tree_project(
-                request.app.state.settings, conn,
+            created = await run_in_threadpool(
+                _create_project_sync, request.app.state.settings, conn,
                 parent_rel, form.get("name", ""), name, user,
             )
-            conn.commit()
+        except FolderExistsError as exc:
+            # the typed name is already a folder here -- offer it instead of
+            # making the admin invent a second, nested name
+            error, suggest_rel = str(exc), exc.rel
         except ProjectSetupError as exc:
             error = str(exc)
 
+    return await run_in_threadpool(
+        _render_setup_panel, request, conn, name, error, created, parent_rel, suggest_rel
+    )
+
+
+def _render_setup_panel(request: Request, conn, name: str, error, created, browse_rel: str,
+                        suggest_rel: str = ""):
+    """_setup_context does per-row iterdir() over the NAS mount, so rendering
+    the panel is itself blocking work -- always call this in a threadpool."""
     return _render(request, "partials/project_setup_panel.html",
                    _setup_context(request, conn, name, error=error, created=created,
-                                  browse_rel=parent_rel))
+                                  browse_rel=browse_rel, suggest_rel=suggest_rel))
 
 
 @router.post("/partials/selection/{editor}/{slug}/toggle")
@@ -642,7 +714,8 @@ async def partial_admin_create_user(request: Request):
         error = "does not look like an OpenSSH public key"
     else:
         truenas = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
-                                 base_url=settings.truenas_base_url or None)
+                                 base_url=settings.truenas_base_url or None,
+                                 verify_ssl=settings.truenas_verify_ssl)
         try:
             # Blocking TrueNAS REST calls + job polling -- push off the event
             # loop so a slow TrueNAS response can't stall every other
@@ -673,11 +746,18 @@ async def partial_admin_set_password(request: Request):
     error = None
     if not settings.truenas_pw:
         error = "TRUENAS_PW is not configured on the dashboard"
+    elif not is_valid_username(username):
+        # Same charset gate as the create form: a typo (or a hand-posted
+        # "root") must never reach TrueNAS. set_known_password refuses system
+        # and non-editor accounts too -- this is the cheap first pass.
+        error = ("username must start with a letter and contain only lowercase letters, "
+                 "digits, '.', '_', '-'")
     elif not password:
         error = "password required"
     else:
         truenas = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
-                                 base_url=settings.truenas_base_url or None)
+                                 base_url=settings.truenas_base_url or None,
+                                 verify_ssl=settings.truenas_verify_ssl)
         try:
             # See the ui.py blocking-handlers finding: blocking TrueNAS call
             # off the event loop.
@@ -705,7 +785,7 @@ async def partial_admin_approve_device(request: Request):
     elif not is_valid_username(username):
         error = "username must be a valid TrueNAS-style username"
     else:
-        syncthing = SyncthingClient(settings.syncthing_url, settings.syncthing_api_key)
+        syncthing = SyncthingClient.from_settings(settings)
         try:
             # See the ui.py blocking-handlers finding: blocking Syncthing
             # REST call off the event loop.

@@ -160,6 +160,26 @@ SCHEMA_V8 = """
 ALTER TABLE machine_state ADD COLUMN platform TEXT;
 """
 
+# v9: Syncthing's own folder health, per project. db_status already returned
+# `state`/`error` on every completion cycle and the collector threw them away,
+# so a folder that had STOPPED syncing ("folder marker missing" after a move)
+# showed a stale-but-plausible completion % forever.
+SCHEMA_V9 = """
+ALTER TABLE projects ADD COLUMN folder_state TEXT;
+ALTER TABLE projects ADD COLUMN folder_error TEXT;
+ALTER TABLE projects ADD COLUMN folder_state_at TEXT;
+"""
+
+# v10: per-machine companion version in machine_state. lane_report_current
+# already carried companion_version, but it is pruned after 30 silent days
+# and is keyed per LANE -- machine_state is the one row per (editor, machine)
+# that the fleet view wants for "which build is this box running", and it
+# survives a lane-row prune. Optional: reports from companions that predate
+# the field leave it NULL and the view shows "?" rather than lying.
+SCHEMA_V10 = """
+ALTER TABLE machine_state ADD COLUMN companion_version TEXT;
+"""
+
 # v3: fix-destination project-root visibility/override. The companion
 # auto-detects which project the editor is working in (Resolve project name
 # matched against the tree) and reports it; an editor/admin can override it
@@ -200,12 +220,32 @@ ALTER TABLE lane_report_current ADD COLUMN speed_bps REAL;
 ALTER TABLE lane_report_current ADD COLUMN eta_seconds REAL;
 """
 
+# A collector poll finished longer ago than this means the collector thread is
+# dead or wedged -- "the last poll succeeded" then says nothing about NOW.
+# 3x the slowest frequently-run cadence (remoteneed/enforce, 60s); connections
+# runs every 15s, so a healthy collector is never anywhere near this.
+COLLECTOR_STALE_SECONDS = 180.0
+
 MISSING_FILES_CAP = 500
 MISSING_FILES_MAX_AGE_DAYS = 7
 HISTORY_MAX_AGE_DAYS = 30
 HISTORY_THIN_AFTER_HOURS = 48
 LANE_HISTORY_MAX_AGE_DAYS = 30
 POLL_RUNS_KEEP = 2000
+# machine_state had NO retention and NO cap, while `machine` is an
+# attacker-chosen string of up to 128 chars on an endpoint (/api/v1/report)
+# with no rate limit: one identity-token holder could mint unbounded rows
+# that then show up forever in the fleet grid. Same 30-day cutoff as the lane
+# tables, plus a hard per-editor ceiling applied at write time.
+MACHINE_STATE_MAX_AGE_DAYS = 30
+# Evict-oldest rather than refuse: a real editor swapping rigs must never be
+# locked out of reporting by rows they can no longer delete, and a companion
+# reporting every 30s can never be the row that gets evicted. 20 is far above
+# any real editor's machine count (the fleet's busiest editor has 2).
+MAX_MACHINES_PER_EDITOR = 20
+# Shared non-trivial tokens required before an auto-match may be written as a
+# permanent sticky mapping -- see match_project_label_confident.
+MIN_CONFIDENT_TOKENS = 2
 
 _DEVICE_ID_RE = re.compile(r"^[A-Z0-9]{7}(-[A-Z0-9]{7}){7}$")
 _USERNAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
@@ -251,27 +291,108 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (6, SCHEMA_V6),
     (7, SCHEMA_V7),
     (8, SCHEMA_V8),
+    (9, SCHEMA_V9),
+    (10, SCHEMA_V10),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
+
+_ADD_COLUMN_RE = re.compile(
+    r"^\s*ALTER\s+TABLE\s+(?P<table>[\w\"'`\[\]]+)\s+ADD\s+(?:COLUMN\s+)?(?P<column>[\w\"'`\[\]]+)",
+    re.IGNORECASE,
+)
+
+
+def _split_statements(script: str) -> list[str]:
+    """Split a migration script into individual statements.
+
+    Uses sqlite's own completeness check rather than splitting on ';' -- the
+    base schema has comments containing semicolons ("one row per (project,
+    device); upserted every cycle"), and sqlite3_complete correctly ignores
+    those (and string literals)."""
+    statements: list[str] = []
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statements.append(buffer.strip())
+            buffer = ""
+    tail = buffer.strip()
+    if tail:
+        statements.append(tail)
+    # Drop chunks that are only comments/whitespace (nothing to execute).
+    return [
+        s for s in statements
+        if any(
+            line.strip() and not line.strip().startswith("--")
+            for line in s.splitlines()
+        )
+    ]
+
+
+def _already_applied(conn: sqlite3.Connection, statement: str) -> bool:
+    """True when an `ALTER TABLE x ADD COLUMN y` statement is already in
+    effect. This is what makes a step REPLAYABLE: sqlite's executescript ran
+    in autocommit, so an interrupt between two ADD COLUMNs left the column
+    present while user_version stayed put -- and the replay then died on
+    'duplicate column name', crash-looping the container forever (measured)."""
+    stripped = "\n".join(
+        line for line in statement.splitlines() if not line.strip().startswith("--")
+    )
+    match = _ADD_COLUMN_RE.match(stripped)
+    if match is None:
+        return False
+    table = match.group("table").strip('"\'`[]')
+    column = match.group("column").strip('"\'`[]')
+    try:
+        existing = {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')}
+    except sqlite3.Error:
+        return False
+    return column in existing
 
 
 def migrate(
     conn: sqlite3.Connection, steps: list[tuple[int, str | None]] | None = None
 ) -> None:
-    """Apply schema migrations in order, one step at a time. `steps` is
-    overridable (tests only) so the per-step-commit behaviour can be
-    exercised without depending on the real schema."""
+    """Apply schema migrations in order, one statement at a time.
+
+    Each step runs as individual statements with the `user_version` bump in
+    the SAME explicit transaction, and every `ADD COLUMN` is skipped when the
+    column already exists -- so an interrupt anywhere (including *within* a
+    step, which executescript's autocommit made unrecoverable) leaves a DB
+    that the next start can simply replay. `steps` is overridable (tests
+    only) so this behaviour can be exercised without depending on the real
+    schema."""
     steps = _MIGRATION_STEPS if steps is None else steps
     version = conn.execute("PRAGMA user_version").fetchone()[0]
+    target_max = max((v for v, _ in steps), default=0)
+    if version > target_max:
+        # A rollback to an older image against a newer schema: fail with a
+        # clear message instead of 500ing later on the first query that
+        # touches a column this build doesn't know about.
+        raise RuntimeError(
+            f"database schema is newer than this build: user_version={version}, "
+            f"this build knows {target_max}. Deploy the matching (or a newer) image."
+        )
     for target_version, script in steps:
         if version >= target_version:
             continue
-        if script is None:
-            conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-        else:
-            conn.executescript(script)
-        conn.execute(f"PRAGMA user_version = {target_version}")
+        body = SCHEMA_PATH.read_text(encoding="utf-8") if script is None else script
+        # BEGIN/COMMIT explicitly: the sqlite3 module would otherwise leave
+        # DDL in autocommit, which is exactly the hole this closes. migrate()
+        # runs at startup and owns its transaction outright -- never nest.
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN")
+        try:
+            for statement in _split_statements(body):
+                if _already_applied(conn, statement):
+                    continue
+                conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {target_version}")
+        except Exception:
+            conn.rollback()
+            raise
         conn.commit()
         version = target_version
 
@@ -342,6 +463,23 @@ def deactivate_missing_projects(
         f"UPDATE projects SET active=0 WHERE active=1 AND last_seen < ? "
         f"AND slug NOT IN ({placeholders})",
         [cutoff, *slugs],
+    )
+
+
+def set_folder_status(
+    conn: sqlite3.Connection, project_id: int, state: str | None,
+    error: str | None, now: str,
+) -> None:
+    """Record Syncthing's own health for this project's folder.
+
+    `state` is Syncthing's folder state ('idle', 'scanning', 'error',
+    'stopped'...) and `error` its folder-level error string ("folder marker
+    missing" after a botched move). Surfaced by build_project_view and
+    fetch_collector_status so a folder that has stopped syncing entirely
+    can't keep showing a stale-but-plausible completion %."""
+    conn.execute(
+        "UPDATE projects SET folder_state=?, folder_error=?, folder_state_at=? WHERE id=?",
+        (state, (error or None), now, project_id),
     )
 
 
@@ -704,21 +842,73 @@ def upsert_machine_state(
     conn: sqlite3.Connection, editor: str, machine: str,
     detected_project_root: str | None, now: str,
     resolve_project: str | None = None, verified: bool = False,
-    platform: str | None = None,
+    platform: str | None = None, companion_version: str | None = None,
 ) -> None:
     conn.execute(
         """INSERT INTO machine_state
              (editor_username, machine, detected_project_root, reported_at,
-              resolve_project, verified, platform)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+              resolve_project, verified, platform, companion_version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(editor_username, machine) DO UPDATE SET
              detected_project_root=excluded.detected_project_root,
              reported_at=excluded.reported_at,
              resolve_project=excluded.resolve_project,
              verified=excluded.verified,
-             platform=COALESCE(excluded.platform, machine_state.platform)""",
-        (editor, machine, detected_project_root, now, resolve_project, int(verified), platform),
+             platform=COALESCE(excluded.platform, machine_state.platform),
+             companion_version=COALESCE(excluded.companion_version,
+                                        machine_state.companion_version)""",
+        (editor, machine, detected_project_root, now, resolve_project, int(verified),
+         platform, companion_version),
     )
+    evict_extra_machines(conn, editor)
+
+
+def evict_extra_machines(
+    conn: sqlite3.Connection, editor: str, keep: int = MAX_MACHINES_PER_EDITOR
+) -> int:
+    """Keep only this editor's `keep` most recently-reporting machines.
+
+    `machine` is attacker-chosen (<=128 chars) and /api/v1/report is
+    unthrottled, so without this one identity-token holder could grow
+    machine_state without bound -- and every row shows up in the fleet grid.
+    Evicting the OLDEST (rather than refusing the new row) means a live
+    companion, which reports every 30s, can never be the row that goes."""
+    victims = [
+        r["machine"] for r in conn.execute(
+            """SELECT machine FROM machine_state WHERE editor_username=?
+               ORDER BY reported_at DESC, machine ASC LIMIT -1 OFFSET ?""",
+            (editor, keep),
+        )
+    ]
+    for machine in victims:
+        conn.execute(
+            "DELETE FROM machine_state WHERE editor_username=? AND machine=?",
+            (editor, machine),
+        )
+    return len(victims)
+
+
+def editor_reported_resolve_project(
+    conn: sqlite3.Connection, editor: str, resolve_project: str
+) -> bool:
+    """True when one of THIS editor's machines has actually reported having
+    this Resolve project open.
+
+    Gate on the first-claim paths (PUT /project-roots, the /project-setup
+    create+link flows): without it any signed-in editor could first-claim any
+    unmapped Resolve project name -- including one only another editor's
+    companion has ever reported -- and permanently fix where that editor's
+    media gets written. Admins are exempt (they own the mapping table)."""
+    name = (resolve_project or "").strip()
+    if not name or not editor:
+        return False
+    row = conn.execute(
+        """SELECT 1 FROM machine_state
+           WHERE editor_username=? AND resolve_project IS NOT NULL
+             AND TRIM(resolve_project) = ? COLLATE NOCASE LIMIT 1""",
+        (editor, name),
+    ).fetchone()
+    return row is not None
 
 
 def fetch_platform_map(conn: sqlite3.Connection) -> dict[tuple[str, str], str | None]:
@@ -727,6 +917,27 @@ def fetch_platform_map(conn: sqlite3.Connection) -> dict[tuple[str, str], str | 
     return {
         (r["editor_username"], r["machine"]): r["platform"]
         for r in conn.execute("SELECT editor_username, machine, platform FROM machine_state")
+    }
+
+
+def fetch_companion_version_map(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> {"companion_version", "platform", "reported_at"}.
+
+    Survives a lane_report_current prune, so a machine that has gone quiet
+    still shows the build it was last running (see the release-hygiene fleet
+    view). companion_version is None for pre-v10 reports."""
+    return {
+        (r["editor_username"], r["machine"]): {
+            "companion_version": r["companion_version"],
+            "platform": r["platform"],
+            "reported_at": r["reported_at"],
+        }
+        for r in conn.execute(
+            "SELECT editor_username, machine, companion_version, platform, reported_at "
+            "FROM machine_state"
+        )
     }
 
 
@@ -745,10 +956,8 @@ def latest_machine_state(conn: sqlite3.Connection, editor: str):
     ).fetchone()
 
 
-def match_project_label(resolve_project: str, labels: Iterable[str]) -> str | None:
-    """Match a Resolve project name to a tree project label
-    ("year/series/project"). Mirrors the companion's fixer.match_project_dir:
-    lowercase alnum token overlap, best score wins, tie -> None.
+def _label_tokens(text: str) -> set[str]:
+    """Lowercase alnum tokens that carry identity.
 
     Tokens that carry no identity NEVER count: 4-digit years (a name
     containing "2026" is not evidence it belongs to every 2026 project) and
@@ -756,23 +965,28 @@ def match_project_label(resolve_project: str, labels: Iterable[str]) -> str | No
     latter rule, "Event 1 Videos" auto-matched "2026/Creator Profiles/
     Season 1" on the shared "1" alone and the sticky mapping wedged it
     there (seen live 2026-07-25)."""
-    def is_trivial(token: str) -> bool:
+    return {
+        t for t in re.split(r"[^a-z0-9]+", text.lower())
         # all-digit tokens up to year length; any token with a letter is kept
-        return token.isdigit() and len(token) <= 4
+        if t and not (t.isdigit() and len(t) <= 4)
+    }
 
-    def tokens(text: str) -> set[str]:
-        return {
-            t for t in re.split(r"[^a-z0-9]+", text.lower())
-            if t and not is_trivial(t)
-        }
 
-    name_tokens = tokens(resolve_project)
+def match_project_label(resolve_project: str, labels: Iterable[str]) -> str | None:
+    """Match a Resolve project name to a tree project label
+    ("year/series/project"). Mirrors the companion's fixer.match_project_dir:
+    lowercase alnum token overlap, best score wins, tie -> None.
+
+    This is the LOOSE matcher and is only safe where a wrong answer is
+    cheap. Anything that writes a permanent sticky mapping must go through
+    match_project_label_confident instead."""
+    name_tokens = _label_tokens(resolve_project)
     if not name_tokens:
         return None
     best: list[str] = []
     best_score = 0
     for label in labels:
-        overlap = name_tokens & tokens(label)
+        overlap = name_tokens & _label_tokens(label)
         score = len(overlap)
         if score == 0:
             continue
@@ -781,6 +995,40 @@ def match_project_label(resolve_project: str, labels: Iterable[str]) -> str | No
         elif score == best_score:
             best.append(label)
     return best[0] if len(best) == 1 else None
+
+
+def match_project_label_confident(
+    resolve_project: str, labels: Iterable[str]
+) -> str | None:
+    """match_project_label, but only when the evidence is strong enough to
+    write a PERMANENT, GLOBAL, sticky mapping nobody but an admin can change.
+
+    match_project_label alone returns a winner on ONE shared non-trivial
+    token, which is how "Nuclear Family Reunion" auto-mapped to
+    "2025/FF4/Nuclear" on the token "nuclear" (verified 2026-07-25): every
+    frame that editor shot then had a permanent destination inside an
+    unrelated project. A single word is a coincidence, not a match, so the
+    auto-map now requires one of:
+
+      (a) at least MIN_CONFIDENT_TOKENS shared non-trivial tokens, or
+      (b) the normalized Resolve name IS the project -- equal to the label's
+          final path segment, or to the whole label.
+
+    Below the threshold nothing is written: the report reply carries
+    resolve_project_unmapped and a human picks the folder in /project-setup.
+    """
+    match = match_project_label(resolve_project, labels)
+    if match is None:
+        return None
+    if len(_label_tokens(resolve_project) & _label_tokens(match)) >= MIN_CONFIDENT_TOKENS:
+        return match
+    # (b) exact-identity: "Season 2" for ".../CCT/Season 2", or the whole rel.
+    name_key = " ".join(str(resolve_project or "").split()).casefold()
+    segments = [s for s in str(match).replace("\\", "/").split("/") if s]
+    candidates = {str(match).casefold()}
+    if segments:
+        candidates.add(segments[-1].casefold())
+    return match if name_key in candidates else None
 
 
 def sticky_project_root(
@@ -892,6 +1140,15 @@ def prune(conn: sqlite3.Connection, now: str) -> None:
     conn.execute(
         "DELETE FROM lane_report_current WHERE received_at < ?",
         (cutoff(days=LANE_HISTORY_MAX_AGE_DAYS),),
+    )
+    # machine_state had no retention at all, and `machine` is an
+    # attacker-chosen string on an unthrottled endpoint: a retired (or bogus)
+    # machine must age out of the fleet grid exactly like its lane rows do.
+    # The write-time cap (evict_extra_machines) bounds the burst; this bounds
+    # the long tail.
+    conn.execute(
+        "DELETE FROM machine_state WHERE reported_at < ?",
+        (cutoff(days=MACHINE_STATE_MAX_AGE_DAYS),),
     )
     conn.execute(
         "DELETE FROM missing_files WHERE refreshed_at < ?",
@@ -1203,17 +1460,51 @@ def fetch_lane_reports(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     )]
 
 
-def fetch_collector_status(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Last poll_runs row per kind, plus overall syncthing reachability
-    (True when the most recent run of any kind succeeded)."""
+def fetch_collector_status(
+    conn: sqlite3.Connection, now: str | None = None,
+    stale_after_seconds: float = COLLECTOR_STALE_SECONDS,
+) -> dict[str, Any]:
+    """Last poll_runs row per kind, plus overall syncthing reachability and
+    any Syncthing folder-level errors.
+
+    `syncthing_reachable` is True only when the most recent Syncthing-backed
+    run succeeded AND it finished recently. Without the staleness check, a
+    collector thread that died before entering its guarded loop (nothing
+    restarts it) left /api/v1/health reporting ok forever off a poll run from
+    hours ago -- see the syncthing_reachable staleness finding."""
+    now = now or utcnow_iso()
     kinds: dict[str, dict[str, Any]] = {}
     for row in conn.execute(
         """SELECT p.* FROM poll_runs p
            JOIN (SELECT kind, MAX(id) AS id FROM poll_runs GROUP BY kind) m ON m.id = p.id"""
     ):
         kinds[row["kind"]] = dict(row)
-    latest = conn.execute("SELECT ok FROM poll_runs ORDER BY id DESC LIMIT 1").fetchone()
+    # 'prune' is the one kind that also runs in a Syncthing-less deployment,
+    # so it can never be evidence that Syncthing is reachable.
+    latest = conn.execute(
+        "SELECT ok, finished_at FROM poll_runs WHERE kind <> 'prune' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    reachable = bool(latest["ok"]) if latest is not None else False
+    stale = False
+    if reachable and latest["finished_at"]:
+        try:
+            stale = age_seconds(latest["finished_at"], now) >= stale_after_seconds
+        except ValueError:
+            stale = False
+        if stale:
+            reachable = False
+    folder_errors = [
+        dict(r) for r in conn.execute(
+            """SELECT slug, label, folder_state, folder_error, folder_state_at
+               FROM projects
+               WHERE active=1 AND (folder_error IS NOT NULL
+                                   OR folder_state IN ('error', 'stopped'))
+               ORDER BY label"""
+        )
+    ]
     return {
         "kinds": kinds,
-        "syncthing_reachable": bool(latest["ok"]) if latest is not None else False,
+        "syncthing_reachable": reachable,
+        "collector_stale": stale,
+        "folder_errors": folder_errors,
     }

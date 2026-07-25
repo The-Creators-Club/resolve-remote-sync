@@ -9,7 +9,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from ccsync_companion.sync.base import STATE_ERROR, STATE_IDLE, STATE_SYNCING
+from ccsync_companion.sync.base import (
+    STATE_ERROR,
+    STATE_IDLE,
+    STATE_PAUSED,
+    STATE_SYNCING,
+)
 from ccsync_companion.sync import syncthing_lane
 from ccsync_companion.sync.syncthing_lane import (
     SyncthingLane,
@@ -95,6 +100,14 @@ class _FakeSyncthingHandler(BaseHTTPRequestHandler):
         elif self.path.startswith("/rest/db/status"):
             folder_id = self.path.split("folder=")[-1]
             self._json(200, state["db_status"].get(folder_id, {"needTotalItems": 0}))
+        elif self.path == "/rest/system/connections":
+            # Absent from fake_state -> 404, i.e. exactly what an older
+            # Syncthing (or one mid-restart) does. The lane must treat that
+            # as "no path information", never as a lane error.
+            if "connections" not in state:
+                self._json(404, {"error": "not found"})
+            else:
+                self._json(200, state["connections"])
         else:
             self._json(404, {"error": "not found"})
 
@@ -164,10 +177,97 @@ def test_check_once_error_when_folder_not_shared(fake_syncthing_server):
     assert "not shared" in status.last_error
 
 
-def test_check_once_no_expected_folders_is_idle(fake_syncthing_server):
+def test_check_once_no_expected_folders_never_claims_a_sync(fake_syncthing_server):
+    """AUDIT_2 L-6/UX-3: `syncthing_folder_ids` defaults to [] and nothing in
+    managed mode ever populates it, so this branch was EVERY editor's steady
+    state -- and it reported `last_sync=now` on every 15 s poll, which is
+    what kept the tray's lane C dot green while lane C did nothing. Checking
+    nothing must not look like a successful sync."""
     lane = _lane_for(fake_syncthing_server, expected_folder_ids=[])
     status = lane.check_once()
     assert status.state == STATE_IDLE
+    assert status.last_sync is None
+    assert status.detail == "no project folders to check yet"
+
+
+def test_expected_folder_ids_fn_is_evaluated_per_poll(fake_syncthing_server):
+    """The sequencer owns the live folder set; the lane must read it fresh
+    each poll rather than from a config key nothing writes."""
+    live: list[str] = []
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids_fn=lambda: list(live))
+
+    assert lane.check_once().last_sync is None  # nothing selected yet
+
+    live.append("proj-1")
+    fake_syncthing_server.fake_state["db_status"]["proj-1"] = {"needTotalItems": 7}
+    status = lane.check_once()
+    assert status.state == STATE_SYNCING
+    assert status.queued == 7
+
+
+def test_expected_folder_ids_fn_failure_falls_back_to_the_static_list(fake_syncthing_server):
+    def boom():
+        raise RuntimeError("sequencer not started")
+
+    lane = _lane_for(
+        fake_syncthing_server, expected_folder_ids=["proj-1"], expected_folder_ids_fn=boom
+    )
+    assert lane.check_once().state == STATE_IDLE
+
+
+def test_check_once_reports_paused_when_every_folder_is_paused(fake_syncthing_server):
+    fake_syncthing_server.fake_state["folders"] = [
+        {"id": "proj-1", "paused": True,
+         "devices": [{"deviceID": "AAAA"}, {"deviceID": "BBBB"}]},
+    ]
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    status = lane.check_once()
+    assert status.state == STATE_PAUSED
+    assert status.last_sync is None
+
+
+def test_check_once_reports_error_on_folder_error_state(fake_syncthing_server):
+    """"folder marker missing" (the aftermath of a failed repath) syncs
+    nothing at all, and needTotalItems reports that as a serene 0."""
+    fake_syncthing_server.fake_state["db_status"]["proj-1"] = {
+        "needTotalItems": 0, "state": "error", "stateChanged": "folder marker missing",
+    }
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    status = lane.check_once()
+    assert status.state == STATE_ERROR
+    assert "folder marker missing" in status.last_error
+
+
+def test_check_once_reports_error_on_nonzero_error_count(fake_syncthing_server):
+    fake_syncthing_server.fake_state["db_status"]["proj-1"] = {
+        "needTotalItems": 0, "state": "idle", "errors": 3,
+    }
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    assert lane.check_once().state == STATE_ERROR
+
+
+def test_start_after_a_timed_out_stop_starts_a_fresh_generation(fake_syncthing_server):
+    """AUDIT_2 L-2, lane C half."""
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    lane.poll_interval = 60
+
+    class _StubAliveThread:
+        def is_alive(self) -> bool:
+            return True
+
+    stale = _StubAliveThread()
+    stale_event = lane._stop_event
+    lane._thread = stale
+    stale_event.set()
+
+    lane.start()
+    try:
+        assert lane._thread is not stale
+        assert lane._thread.is_alive()
+        assert not lane._stop_event.is_set()
+        assert stale_event.is_set()
+    finally:
+        lane.stop()
 
 
 def test_check_once_unreachable_server_reports_not_running():
@@ -188,3 +288,114 @@ def test_check_once_no_api_key_anywhere(tmp_path):
     status = lane.check_once()
     assert status.state == STATE_ERROR
     assert "API key" in status.last_error
+
+
+# -- relay detection (AUDIT_2 P3/C-6) ---------------------------------------
+
+
+def _connections(**by_device):
+    return {"connections": dict(by_device)}
+
+
+def test_summarize_connections_splits_relayed_from_direct():
+    """Devices are added with addresses ["dynamic"] and relaysEnabled
+    defaults to true, so Syncthing silently falls back to the PUBLIC relay
+    pool -- typically 1-5 MB/s, shared and rate-limited. The `type` field is
+    the only thing that says so."""
+    summary = syncthing_lane.summarize_connections(_connections(
+        NASDEV={"connected": True, "type": "relay-client"},
+        EDITOR={"connected": True, "type": "tcp-client"},
+        QUICDEV={"connected": True, "type": "quic-client"},
+    ))
+    assert summary["relayed"] == ["NASDEV"]
+    assert sorted(summary["direct"]) == ["EDITOR", "QUICDEV"]
+    assert summary["devices"]["NASDEV"] == "relay-client"
+
+
+def test_summarize_connections_ignores_disconnected_devices():
+    """"Offline" and "relayed" are different problems with different fixes;
+    a disconnected entry keeps a stale type and must not be counted."""
+    summary = syncthing_lane.summarize_connections(_connections(
+        GONE={"connected": False, "type": "relay-client"},
+    ))
+    assert summary["relayed"] == []
+    assert summary["devices"] == {}
+
+
+def test_summarize_connections_tolerates_junk():
+    for payload in (None, {}, {"connections": None}, {"connections": {"X": "nope"}}):
+        summary = syncthing_lane.summarize_connections(payload)
+        assert summary["relayed"] == []
+
+
+def test_relayed_device_shows_up_in_the_lane_detail(fake_syncthing_server):
+    """Without this, a slow editor and a relayed editor are indistinguishable
+    -- which is precisely the state the fleet is in today."""
+    fake_syncthing_server.fake_state["connections"] = _connections(
+        NASDEV={"connected": True, "type": "relay-client"},
+    )
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    status = lane.check_once()
+
+    assert status.state == STATE_IDLE
+    assert "relayed" in status.detail
+    assert lane.connection_path_summary()["relayed"] == ["NASDEV"]
+
+
+def test_direct_connection_adds_no_relay_warning(fake_syncthing_server):
+    fake_syncthing_server.fake_state["connections"] = _connections(
+        NASDEV={"connected": True, "type": "tcp-client"},
+    )
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    status = lane.check_once()
+
+    assert "relayed" not in status.detail
+    assert lane.connection_path_summary()["direct"] == ["NASDEV"]
+
+
+def test_relay_detail_is_appended_not_substituted(fake_syncthing_server):
+    """The existing detail still has to answer "what is lane C doing"; the
+    path warning is extra information, not a replacement for it."""
+    fake_syncthing_server.fake_state["connections"] = _connections(
+        NASDEV={"connected": True, "type": "relay-client"},
+    )
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=[])
+    status = lane.check_once()
+
+    assert "no project folders to check yet" in status.detail
+    assert "relayed" in status.detail
+
+
+def test_missing_connections_endpoint_is_not_a_lane_error(fake_syncthing_server):
+    """An older Syncthing 404s here; lane C must keep working and simply
+    report no path information."""
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    status = lane.check_once()
+
+    assert status.state == STATE_IDLE
+    assert status.last_error is None
+    assert lane.connection_path_summary() == {}
+
+
+# -- URL encoding of folder ids (AUDIT_3 L-10) ------------------------------
+
+
+def test_db_status_query_encodes_the_folder_id(fake_syncthing_server, monkeypatch):
+    """Folder IDs are dashboard project slugs: an "&" or "?" in one used to
+    be interpolated raw into the query string, so the request asked about
+    something else entirely."""
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["a b&folder=other"])
+    seen: list[str] = []
+    real_get = lane._get
+
+    def _spy(path):
+        seen.append(path)
+        return real_get(path)
+
+    monkeypatch.setattr(lane, "_get", _spy)
+    fake_syncthing_server.fake_state["folders"] = [
+        {"id": "a b&folder=other", "devices": [{"deviceID": "AAAA"}, {"deviceID": "BBBB"}]}
+    ]
+    lane.check_once()
+
+    assert "/rest/db/status?folder=a+b%26folder%3Dother" in seen

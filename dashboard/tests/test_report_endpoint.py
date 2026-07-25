@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from ccsync_dashboard import auth
 from ccsync_dashboard import db as dbmod
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
@@ -23,6 +24,15 @@ def payload(state="idle", error=None):
              "last_error": None, "last_sync": None, "detail": None},
         ],
     }
+
+
+SECRET = "s"
+
+
+def report_headers(editor="jsmith", token="sekrit"):
+    """Both companion headers -- X-CCSync-Identity is required on reports."""
+    return {"X-CCSync-Token": token,
+            "X-CCSync-Identity": auth.make_identity_token(SECRET, editor)}
 
 
 @pytest.fixture
@@ -56,23 +66,35 @@ def test_malformed_payload_422(app_env):
     client, _ = app_env
     bad = payload()
     bad["lanes"][0]["state"] = "exploded"
-    resp = client.post("/api/v1/report", json=bad, headers={"X-CCSync-Token": "sekrit"})
+    resp = client.post("/api/v1/report", json=bad, headers=report_headers())
     assert resp.status_code == 422
     resp = client.post("/api/v1/report", json={"editor_name": "x"},
-                       headers={"X-CCSync-Token": "sekrit"})
+                       headers=report_headers())
     assert resp.status_code == 422
 
 
-def test_report_rejects_unknown_lane_name(app_env):
-    """SEC-4: an unknown lane name must never create a permanent
-    lane_report_current row -- current companions send exactly the three
-    names in LANE_LABELS, so rejecting anything else is safe."""
+def test_report_drops_unknown_lane_names_without_rejecting_the_report(app_env):
+    """SEC-4 says an unknown lane name must never create a permanent
+    lane_report_current row -- but rejecting the MODEL threw away the three
+    valid lanes with it, so any future 4th lane would make every companion
+    shipping it go completely dark against an un-upgraded dashboard. Filter,
+    don't reject (see new-defect 3)."""
     client, conn = app_env
-    bad = payload()
-    bad["lanes"].append({"name": "lane_z_made_up", "state": "idle"})
-    resp = client.post("/api/v1/report", json=bad, headers={"X-CCSync-Token": "sekrit"})
-    assert resp.status_code == 422
-    assert conn.execute("SELECT COUNT(*) FROM lane_report_current").fetchone()[0] == 0
+    forward_compatible = payload()
+    forward_compatible["lanes"].append({"name": "lane_z_made_up", "state": "idle"})
+    resp = client.post("/api/v1/report", json=forward_compatible, headers=report_headers())
+    assert resp.status_code == 200
+    assert resp.json()["lanes"] == 3          # the unknown one was dropped
+    lanes = {r[0] for r in conn.execute("SELECT DISTINCT lane FROM lane_report_current")}
+    assert lanes == {"lane_a_video_up", "lane_b_proxy_down", "lane_c_syncthing"}
+
+    # A report of ONLY unknown lanes still writes nothing.
+    only_unknown = payload()
+    only_unknown["lanes"] = [{"name": "lane_z_made_up", "state": "idle"}]
+    resp = client.post("/api/v1/report", json=only_unknown, headers=report_headers())
+    assert resp.status_code == 200 and resp.json()["lanes"] == 0
+    assert "lane_z_made_up" not in {
+        r[0] for r in conn.execute("SELECT DISTINCT lane FROM lane_report_current")}
 
 
 def test_report_lanes_list_is_capped(app_env):
@@ -81,7 +103,7 @@ def test_report_lanes_list_is_capped(app_env):
     client, _ = app_env
     bad = payload()
     bad["lanes"] = [{"name": "lane_a_video_up", "state": "idle"}] * 33
-    resp = client.post("/api/v1/report", json=bad, headers={"X-CCSync-Token": "sekrit"})
+    resp = client.post("/api/v1/report", json=bad, headers=report_headers())
     assert resp.status_code == 422
 
 
@@ -91,13 +113,13 @@ def test_report_transfers_list_is_capped(app_env):
     bad["lanes"][0]["transfers"] = [
         {"name": f"f{i}.braw", "direction": "up"} for i in range(257)
     ]
-    resp = client.post("/api/v1/report", json=bad, headers={"X-CCSync-Token": "sekrit"})
+    resp = client.post("/api/v1/report", json=bad, headers=report_headers())
     assert resp.status_code == 422
 
 
 def test_report_upserts_and_transition_history(app_env):
     client, conn = app_env
-    headers = {"X-CCSync-Token": "sekrit"}
+    headers = report_headers()
     assert client.post("/api/v1/report", json=payload(), headers=headers).json()["lanes"] == 3
     # editor name is normalized to the username convention (lowercase)
     rows = conn.execute("SELECT DISTINCT editor_username FROM lane_report_current").fetchall()

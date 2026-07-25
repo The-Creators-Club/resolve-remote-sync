@@ -52,6 +52,33 @@ def test_health_endpoint(app_env):
     assert body["last_polls"]["completion"]["ok"] is True
 
 
+def test_health_detail_requires_authentication(app_env):
+    """/api/v1/health is in app.py's _OPEN_EXACT so the Docker healthcheck
+    can reach it with no credentials -- which made the whole client roster
+    (project slugs, labels, Syncthing folder error strings) readable by
+    anyone who could reach the port. Anonymous now gets liveness only."""
+    client, conn = app_env
+    seed(conn)
+    client.cookies.delete(auth.COOKIE_NAME)
+
+    anon = client.get("/api/v1/health")
+    # the healthcheck only reads the status code, and that must not change
+    assert anon.status_code == 200
+    assert set(anon.json()) == {"ok", "version"}
+    assert anon.json()["ok"] is True
+
+    # the companion's shared token unlocks it (it already reads /report)...
+    full = client.get("/api/v1/health", headers={"X-CCSync-Token": "sekrit"})
+    assert full.status_code == 200
+    assert "folder_errors" in full.json() and "last_polls" in full.json()
+    assert client.get("/api/v1/health", headers={"X-CCSync-Token": "wrong"}).json().keys() == {
+        "ok", "version"}
+
+    # ...and so does any session
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
+    assert "folder_errors" in client.get("/api/v1/health").json()
+
+
 def test_projects_and_detail(app_env):
     client, conn = app_env
     seed(conn)

@@ -43,7 +43,7 @@ from ccsync_companion import identity as identity_mod
 
 # -- constants ---------------------------------------------------------------
 
-INSTALLER_VERSION = "1.0.3"
+INSTALLER_VERSION = "1.0.4"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.
@@ -94,6 +94,36 @@ _DEVICE_ID_RE = re.compile(r"([A-Z0-9]{7}(?:-[A-Z0-9]{7}){7})")
 HttpPostFn = Callable[[str, dict, dict, float], Any]
 HttpGetFn = Callable[[str, float], Any]
 RunFn = Callable[..., "subprocess.CompletedProcess"]
+
+# EVERY subprocess capture in this module must pass these (S-6). `text=True`
+# alone decodes with the console codepage under errors="strict", so one
+# non-ASCII byte -- a `C:\Users\José` profile echoed back by the bootstrap, a
+# CJK path in `tailscale status` -- raises UnicodeDecodeError out of the
+# wizard's worker thread, AFTER _clean_slate() has already removed the
+# working install. windows_bootstrap.ps1 forces UTF-8 on its own stdout when
+# redirected (see its [Console]::OutputEncoding line) so this decodes exactly
+# what it printed; errors="replace" makes anything else a mangled string
+# rather than an exception.
+CAPTURE_TEXT_KWARGS: dict[str, Any] = {
+    "capture_output": True,
+    "encoding": "utf-8",
+    "errors": "replace",
+}
+
+# Hard-capability misses windows_bootstrap.ps1 prints with this exact prefix
+# (and counts towards its own non-zero exit). onboard.py turns any of these
+# into a "completed with N warnings -- this machine is NOT ready" finish page
+# instead of DONE (INST-5).
+CAPABILITY_MARKER = "CAPABILITY MISSING:"
+# Phrasings older bootstraps used for the same three misses, kept so an
+# onboard.exe paired with a stale windows_bootstrap.ps1 still flags them.
+_LEGACY_CAPABILITY_PHRASES = (
+    "could not find rclone.exe inside the downloaded zip",
+    "could not determine a Syncthing download URL",
+    "could not find syncthing.exe inside the downloaded zip",
+    "Syncthing executable path is unknown",
+    "could not determine the Syncthing device ID",
+)
 
 
 # -- http helpers --------------------------------------------------------------
@@ -186,7 +216,7 @@ def tailscale_up(run: RunFn = subprocess.run) -> bool:
     """True if `tailscale status` reports this machine as joined to a
     tailnet (exit 0 and no "logged out"/"stopped"/"needs login" markers)."""
     try:
-        result = run(["tailscale", "status"], capture_output=True, text=True, timeout=15)
+        result = run(["tailscale", "status"], timeout=15, **CAPTURE_TEXT_KWARGS)
     except Exception:
         return False
     if getattr(result, "returncode", 1) != 0:
@@ -229,10 +259,30 @@ def dashboard_host(dashboard_url: str) -> str:
 
 # -- SSH key -------------------------------------------------------------------
 
+class SshKeyError(RuntimeError):
+    """ssh-keygen is missing, failed, or produced no public key. Raised (not
+    swallowed) so the wizard can tell the editor lanes A/B will never
+    authenticate, instead of showing DONE next to a path that doesn't exist
+    (INST-22)."""
+
+
 def ensure_ssh_key(ssh_dir: Path = DEFAULT_SSH_DIR, run: RunFn = subprocess.run) -> Path:
     """Generate ~/.ssh/ccsync_ed25519 (no passphrase) if it doesn't already
     exist. Returns the path to the PUBLIC half either way -- that's the
-    value the admin needs (see read_pubkey)."""
+    value the admin needs (see read_pubkey).
+
+    Raises SshKeyError when ssh-keygen is absent, exits non-zero, or leaves
+    no .pub behind. Three distinct cases, because they need three different
+    commands:
+
+      both halves present  -> nothing to do.
+      private key present, .pub missing -> DERIVE the public half with
+        `ssh-keygen -y -f <key>`. Never re-run plain `ssh-keygen -f <key>`
+        here: it prompts "Overwrite (y/n)?" against the wizard's closed
+        stdin, aborts, and would destroy a key the admin has already
+        installed on the NAS if it did succeed.
+      neither present -> generate a fresh keypair.
+    """
     ssh_dir = Path(ssh_dir)
     key_path = ssh_dir / SSH_KEY_NAME
     pub_path = ssh_dir / f"{SSH_KEY_NAME}.pub"
@@ -241,12 +291,55 @@ def ensure_ssh_key(ssh_dir: Path = DEFAULT_SSH_DIR, run: RunFn = subprocess.run)
         return pub_path
 
     ssh_dir.mkdir(parents=True, exist_ok=True)
-    run(
-        ["ssh-keygen", "-t", "ed25519", "-f", str(key_path), "-N", ""],
-        capture_output=True,
-        text=True,
-    )
+
+    if key_path.exists():
+        # Derive the public half from the private one -- writing it ourselves
+        # rather than with a shell redirect (no shell=True here).
+        result = _run_ssh_keygen(run, ["ssh-keygen", "-y", "-f", str(key_path)])
+        public = (getattr(result, "stdout", "") or "").strip()
+        if not public.startswith("ssh-"):
+            raise SshKeyError(
+                f"could not derive the public key from the existing {key_path} "
+                f"(ssh-keygen -y said: {_first_line(result) or 'nothing'}). Delete "
+                f"that file if you want a brand-new keypair, then re-run."
+            )
+        try:
+            pub_path.write_text(public + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise SshKeyError(f"could not write {pub_path}: {exc}") from exc
+        return pub_path
+
+    _run_ssh_keygen(run, ["ssh-keygen", "-t", "ed25519", "-f", str(key_path), "-N", ""])
+    if not pub_path.exists():
+        raise SshKeyError(
+            f"ssh-keygen reported success but {pub_path} does not exist -- "
+            "generate the keypair by hand and re-run the installer."
+        )
     return pub_path
+
+
+def _run_ssh_keygen(run: RunFn, cmd: list[str]) -> Any:
+    try:
+        result = run(cmd, timeout=60, **CAPTURE_TEXT_KWARGS)
+    except FileNotFoundError as exc:
+        raise SshKeyError(
+            "ssh-keygen was not found. Install the Windows OpenSSH Client "
+            "(Settings > System > Optional features > Add > OpenSSH Client) "
+            "and re-run the installer."
+        ) from exc
+    except Exception as exc:
+        raise SshKeyError(f"ssh-keygen failed to run: {exc}") from exc
+    if getattr(result, "returncode", 0) != 0:
+        raise SshKeyError(
+            f"ssh-keygen exited with code {getattr(result, 'returncode', '?')}: "
+            f"{_first_line(result) or '(no output)'}"
+        )
+    return result
+
+
+def _first_line(result: Any) -> str:
+    blob = ((getattr(result, "stderr", "") or "") + (getattr(result, "stdout", "") or "")).strip()
+    return blob.splitlines()[0][:200] if blob else ""
 
 
 def read_pubkey(path: Path) -> str:
@@ -359,6 +452,11 @@ def run_bootstrap(
 
     cmd = [
         "powershell",
+        # -NoProfile: a user profile script that prompts, errors, or sets
+        # Set-StrictMode would otherwise alter or hang the install and surface
+        # as an unrelated bootstrap error. -NonInteractive: this process has a
+        # captured, closed stdin, so any prompt is an immediate hang (INST-23).
+        "-NoProfile", "-NonInteractive",
         "-ExecutionPolicy", "Bypass",
         "-File", str(script),
         "-TailnetHost", tailnet_host,
@@ -372,7 +470,7 @@ def run_bootstrap(
         cmd += ["-CompanionExeSource", str(companion_exe_source)]
 
     try:
-        result = run(cmd, capture_output=True, text=True, timeout=BOOTSTRAP_TIMEOUT_SECONDS)
+        result = run(cmd, timeout=BOOTSTRAP_TIMEOUT_SECONDS, **CAPTURE_TEXT_KWARGS)
     except subprocess.TimeoutExpired as exc:
         partial = ((exc.stdout or "") if isinstance(exc.stdout, str) else "") + (
             (exc.stderr or "") if isinstance(exc.stderr, str) else ""
@@ -395,6 +493,37 @@ def parse_device_id(bootstrap_output: str) -> Optional[str]:
         return None
     match = _DEVICE_ID_RE.search(bootstrap_output)
     return match.group(1) if match else None
+
+
+def bootstrap_capability_warnings(bootstrap_output: str) -> list[str]:
+    """Every hard-capability miss windows_bootstrap.ps1 reported: no rclone
+    installed, no Syncthing installed/found, no device ID determined.
+
+    The bootstrap warns-and-continues on each of these and used to exit 0, so
+    the wizard showed a green DONE page for a machine that will never sync
+    anything -- after clean-slate had already removed the previous working
+    install (INST-5). It now exits non-zero and tags each miss with
+    CAPABILITY_MARKER; this scans for that (plus the older phrasings, so a
+    mismatched script pairing still gets flagged). De-duplicated, order
+    preserved."""
+    if not bootstrap_output:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    for line in str(bootstrap_output).splitlines():
+        stripped = line.strip()
+        message = ""
+        if CAPABILITY_MARKER in stripped:
+            message = stripped.split(CAPABILITY_MARKER, 1)[1].strip()
+        else:
+            for phrase in _LEGACY_CAPABILITY_PHRASES:
+                if phrase in stripped:
+                    message = stripped
+                    break
+        if message and message not in seen:
+            seen.add(message)
+            found.append(message)
+    return found
 
 
 # -- identity + config finalization --------------------------------------------
@@ -448,6 +577,69 @@ def finalize_config_identity(username: str, config_path: Optional[Path] = None) 
         pass
 
 
+# -- local_root validation (gates BEGIN INSTALL) -------------------------------
+
+# Anything not of the shape "<letter>:\..." is rejected before the install
+# starts: the value is forced into config.toml AND handed to
+# windows_bootstrap.ps1 as -LocalRoot, where Ensure-Dir runs under
+# $ErrorActionPreference = "Stop" -- a nonexistent drive is a hard abort
+# AFTER _clean_slate() has removed the previous install (INST-21).
+_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def validate_local_root(
+    value: str,
+    role: str = "editor",
+    drive_exists: Optional[Callable[[str], bool]] = None,
+) -> Optional[str]:
+    """None when `value` is usable as local_root, else a one-line, plain
+    English reason to show inline next to the field.
+
+    `drive_exists` takes a drive letter ("D") and is injectable for tests.
+    """
+    role = str(role or "").strip().lower()
+    raw = str(value or "")
+    if not raw.strip():
+        return "enter a folder for the project tree, e.g. C:\\Creators_Club"
+    if raw != raw.strip():
+        return (
+            "remove the leading/trailing space -- it silently becomes part of "
+            "the folder name and nothing will ever find the tree"
+        )
+    if '"' in raw:
+        # The logon remap runs through `cmd /c subst P: "<root>"`; a quote in
+        # the path breaks that command line irrecoverably (INST-2).
+        return 'a double-quote (") is not allowed in the folder path'
+    if not _DRIVE_PATH_RE.match(raw):
+        if raw.startswith("\\\\"):
+            return "a network path (\\\\server\\share) will not work -- use a local drive, e.g. D:\\Creators_Club"
+        return "use a full path starting with a drive letter, e.g. C:\\Creators_Club"
+
+    drive = raw[0].upper()
+    if role != "base" and drive == "P":
+        # The install unmounts P: and remaps it AT this folder; pointing the
+        # folder at P: means Ensure-Dir runs against a drive that no longer
+        # exists, mid-install.
+        return (
+            "P: is the drive this installer creates for you -- pick the real "
+            "folder it should point at (e.g. C:\\Creators_Club)"
+        )
+
+    if drive_exists is None:
+        drive_exists = _default_drive_exists
+    try:
+        present = drive_exists(drive)
+    except Exception:
+        present = True  # never block the install on a probe that itself broke
+    if not present:
+        return f"drive {drive}: does not exist on this machine"
+    return None
+
+
+def _default_drive_exists(letter: str) -> bool:
+    return Path(f"{letter}:\\").exists()
+
+
 # -- clean slate (remove every trace of previous installs) ---------------------
 
 @dataclass
@@ -462,6 +654,11 @@ class CleanupPlan:
     exe_paths: list[Path] = field(default_factory=list)
     shim_paths: list[Path] = field(default_factory=list)
     unmount_p: bool = False
+    # Directories a syncthing.exe must be running from for us to kill it.
+    # NEVER a blanket `taskkill /IM syncthing.exe`: editors in this
+    # population commonly run their own Syncthing, and killing it (we never
+    # restart it) silently breaks whatever they were using it for (INST-20).
+    syncthing_managed_dirs: list[Path] = field(default_factory=list)
 
 
 def default_read_run_value(name: str) -> Optional[str]:
@@ -588,14 +785,61 @@ def build_cleanup_plan(
     shim_paths = [p for p in shim_candidates if exists(p)]
 
     return CleanupPlan(
-        kill_process_names=["ccsync-companion", "ccsync-companion.new", "syncthing"],
+        kill_process_names=["ccsync-companion", "ccsync-companion.new"],
         kill_pythonw_launcher=True,
         run_values=list(ALL_RUN_VALUES),
         scheduled_tasks=[SUBST_TASK_NAME],
         exe_paths=exe_paths,
         shim_paths=shim_paths,
         unmount_p=(role == "editor"),
+        syncthing_managed_dirs=managed_syncthing_dirs(),
     )
+
+
+def managed_syncthing_dirs() -> list[Path]:
+    """The only places a syncthing.exe is ours: the installer's bin dir and
+    anything else under %LOCALAPPDATA%\\ccsync (which contains it), plus the
+    historical ~/.ccsync/bin. A syncthing.exe anywhere else -- Program Files,
+    scoop, the editor's own portable copy -- belongs to the editor."""
+    ccsync_local = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ccsync"
+    return [ccsync_local, COMPANION_BIN_DIR, Path.home() / ".ccsync"]
+
+
+def default_list_processes(name: str, run: RunFn = subprocess.run) -> list[tuple[str, str]]:
+    """[(pid, executable_path)] for every running process called `name`.exe.
+    Empty on any failure -- callers degrade to "leave it alone"."""
+    query = (
+        f"Get-CimInstance Win32_Process -Filter \"Name='{name}.exe'\" | "
+        "ForEach-Object { \"$($_.ProcessId)|$($_.ExecutablePath)\" }"
+    )
+    try:
+        result = run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", query],
+            timeout=30,
+            **CAPTURE_TEXT_KWARGS,
+        )
+    except Exception:
+        return []
+    found: list[tuple[str, str]] = []
+    for line in (getattr(result, "stdout", "") or "").splitlines():
+        pid, sep, exe = line.strip().partition("|")
+        if sep and pid.isdigit():
+            found.append((pid, exe.strip()))
+    return found
+
+
+def _path_under_any(path: str, directories: list[Path]) -> bool:
+    if not path:
+        return False
+    try:
+        resolved = os.path.normcase(os.path.abspath(str(path)))
+    except (ValueError, OSError):
+        return False
+    for directory in directories:
+        prefix = os.path.normcase(os.path.abspath(str(directory)))
+        if resolved == prefix or resolved.startswith(prefix + os.sep):
+            return True
+    return False
 
 
 def execute_cleanup(
@@ -607,6 +851,7 @@ def execute_cleanup(
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.time,
     p_drive_exists: Callable[[], bool] = lambda: Path("P:/").exists(),
+    list_processes: Optional[Callable[[str], list[tuple[str, str]]]] = None,
 ) -> list[str]:
     """Execute a CleanupPlan. Returns accumulated warnings; NEVER raises --
     a half-cleaned machine plus warnings beats an aborted install.
@@ -625,7 +870,7 @@ def execute_cleanup(
 
     def _quiet_run(cmd: list[str]) -> Any:
         try:
-            return run(cmd, capture_output=True, text=True, timeout=30)
+            return run(cmd, timeout=30, **CAPTURE_TEXT_KWARGS)
         except Exception as exc:
             warnings.append(f"{' '.join(cmd[:3])}...: {exc}")
             return None
@@ -633,6 +878,29 @@ def execute_cleanup(
     # 1. processes
     for name in plan.kill_process_names:
         _quiet_run(["taskkill", "/F", "/IM", f"{name}.exe"])
+
+    # 1b. Syncthing, but ONLY the instance we manage. A blanket
+    # `taskkill /IM syncthing.exe` also kills the editor's own Syncthing --
+    # which nothing here ever restarts (INST-20).
+    if plan.syncthing_managed_dirs:
+        lister = list_processes
+        if lister is None:
+            lister = lambda name: default_list_processes(name, run=run)  # noqa: E731
+        try:
+            processes = lister("syncthing")
+        except Exception as exc:
+            processes = []
+            warnings.append(f"could not enumerate Syncthing processes: {exc}")
+        for pid, exe_path in processes:
+            if _path_under_any(exe_path, plan.syncthing_managed_dirs):
+                _quiet_run(["taskkill", "/F", "/PID", str(pid)])
+                log(f"stopped our Syncthing (pid {pid}, {exe_path})")
+            else:
+                warnings.append(
+                    f"another Syncthing is running from {exe_path or '(unknown path)'} "
+                    f"(pid {pid}) -- left alone; it is not ours to stop or restart"
+                )
+
     if plan.kill_pythonw_launcher:
         _quiet_run([
             "powershell", "-NoProfile", "-Command",
@@ -656,9 +924,16 @@ def execute_cleanup(
             if "cannot find" in stderr or "does not exist" in stderr:
                 pass  # nothing to remove
             elif "access" in stderr or "denied" in stderr:
+                # Deliberately NOT "re-run this installer as administrator":
+                # an elevated install maps P: into a token the editor's own
+                # session cannot see, which is a far worse outcome than a
+                # leftover task (INST-1). Give the one targeted command
+                # instead.
                 warnings.append(
-                    f"could not delete scheduled task {task} (access denied) -- "
-                    "re-run this installer as administrator to remove it"
+                    f"could not delete the old scheduled task {task} (access denied). "
+                    "It is harmless -- the install continues. To clear it, open "
+                    "Start > type 'cmd' > right-click 'Command Prompt' > Run as "
+                    f"administrator, and run:  schtasks /Delete /TN {task} /F"
                 )
             else:
                 warnings.append(f"schtasks /Delete {task} failed: {stderr.strip()[:120]}")
@@ -731,13 +1006,39 @@ def _toml_string(value: str) -> str:
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def merge_config_text(text: str, forced: dict[str, str]) -> str:
+def _existing_literal(text: str, key: str) -> Optional[str]:
+    """The raw literal currently assigned to `key`, or None when the key is
+    not assigned at all. Deliberately the same line-oriented view
+    merge_config_text takes, not a TOML parse."""
+    match = re.search(rf"(?m)^\s*{re.escape(key)}\s*=\s*(.*?)\s*(?:#.*)?$", text)
+    return match.group(1) if match else None
+
+
+def _literal_is_blank(literal: Optional[str]) -> bool:
+    return literal is None or literal.strip() in ("", '""', "''")
+
+
+def merge_config_text(text: str, forced: dict[str, str],
+                      defaults: Optional[dict[str, str]] = None) -> str:
     """Force `key = <value-literal>` lines into TOML text: replace the first
-    existing assignment of each key (whatever its value), else append.
-    Everything else -- comments, unknown keys, ordering -- is preserved.
-    Pure; `forced` values must already be TOML literals (use _toml_string)."""
+    existing assignment of each `forced` key (whatever its value), else
+    append. Everything else -- comments, unknown keys, ordering -- is
+    preserved. Pure; values must already be TOML literals (use _toml_string).
+
+    `defaults` are applied the same way but ONLY when the key is absent or
+    its current value is blank -- the installer seeds them, it does not own
+    them. That distinction is what stops a re-run silently resetting an
+    admin's customised remote_root (§7 new-defect 7) or blanking a working
+    dashboard_token when the verify response carried no report_token
+    (INST-11).
+    """
     lines = text.splitlines()
     remaining = dict(forced)
+    for key, value in (defaults or {}).items():
+        if key in remaining:
+            continue
+        if _literal_is_blank(_existing_literal(text, key)):
+            remaining[key] = value
     for i, line in enumerate(lines):
         for key in list(remaining):
             if re.match(rf"^\s*{re.escape(key)}\s*=", line):
@@ -777,9 +1078,18 @@ def ensure_config(
     forced: dict[str, str] = {
         "editor_name": _toml_string(editor_name),
         "dashboard_url": _toml_string(dashboard_url),
-        "dashboard_token": _toml_string(dashboard_token),
         "mode": _toml_string(role if role in ("base", "editor") else "editor"),
     }
+    defaults: dict[str, str] = {}
+    if str(dashboard_token or "").strip():
+        forced["dashboard_token"] = _toml_string(dashboard_token)
+    else:
+        # A verify response with no report_token (older dashboard, a field
+        # rename) must never overwrite a token that already works -- the
+        # companion would then post unauthenticated forever and the fleet
+        # grid would show this editor offline, with the wizard saying DONE
+        # (INST-11).
+        defaults["dashboard_token"] = _toml_string("")
     if role == "base":
         root = local_root or DEFAULT_BASE_LOCAL_ROOT
         forced["local_root"] = _toml_string(root)
@@ -790,10 +1100,14 @@ def ensure_config(
         forced["local_root"] = _toml_string(local_root or DEFAULT_LOCAL_ROOT)
         forced["canonical_prefix"] = _toml_string("P:\\")
         forced["remote"] = _toml_string("creators_club_sftp")
-        forced["remote_root"] = _toml_string(DEFAULT_REMOTE_ROOT)
+        # SEEDED, not owned: a blank remote_root uploads an editor's
+        # originals into their bare SFTP home instead of the project tree
+        # (S-1), so it must never stay blank -- but an admin who pointed this
+        # editor at a different pool path keeps it across re-runs.
+        defaults["remote_root"] = _toml_string(DEFAULT_REMOTE_ROOT)
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(merge_config_text(text, forced), encoding="utf-8")
+    path.write_text(merge_config_text(text, forced, defaults), encoding="utf-8")
     return path
 
 

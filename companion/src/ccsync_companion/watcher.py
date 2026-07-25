@@ -20,6 +20,7 @@ import logging
 import threading
 from typing import Any, Callable, Optional
 
+from . import config as config_mod
 from . import resolve_bridge
 from .fixer import IgnoreTracker
 from .paths import BAD_PREFIX, MISSING, OK, OUT_OF_TREE, classify_path
@@ -66,12 +67,14 @@ class TimelineWatcher:
         # so name -> None -> same name never refires on_project_changed.
         self._last_seen_project: Optional[str] = None
         # Scratch/utility project names (config `ignored_resolve_projects`,
-        # lowercased): the whole poll pretends these aren't open -- nothing
+        # normalized): the whole poll pretends these aren't open -- nothing
         # is reported, prompted, or popped for them. Kills the Blackmagic
-        # Proxy Generator's helper project nagging the base rig.
-        self._ignored_projects = {
-            str(n).strip().lower() for n in (ignored_projects or []) if str(n).strip()
-        }
+        # Proxy Generator's helper project nagging the base rig. Matching is
+        # config_mod.is_ignored_project(), i.e. numbered duplicates ("New
+        # Doc 1", "New Doc 2") count as the same scratch project -- the BPG
+        # counts them up, and an exact-match list let every new number
+        # through (seen live 2026-07-25).
+        self._ignored_projects = config_mod.normalize_ignored_projects(ignored_projects)
         self.ignore_tracker = ignore_tracker if ignore_tracker is not None else IgnoreTracker()
         self._get_timeline_items = get_timeline_items or resolve_bridge.get_timeline_items
         self._warned_mapping: set[str] = set()
@@ -92,7 +95,9 @@ class TimelineWatcher:
             return {"ok": False, "message": str(exc), "out_of_tree": 0, "mapping_warnings": 0}
 
         project_name = result.get("project_name") or None
-        if project_name is not None and project_name.strip().lower() in self._ignored_projects:
+        if project_name is not None and config_mod.is_ignored_project(
+            project_name, self._ignored_projects
+        ):
             log.debug("ignoring Resolve project %r (ignored_resolve_projects)", project_name)
             self.last_resolve_project = None
             return {"ok": True, "message": "ignored project", "out_of_tree": 0,
@@ -116,6 +121,11 @@ class TimelineWatcher:
         new_out_of_tree: list[dict[str, Any]] = []
         new_mapping_warnings = 0
         resolve_project_name = result.get("project_name", "")
+        # Did anything under the canonical prefix classify as healthy this
+        # poll? See the _warned_mapping reset below.
+        prefix_healthy = False
+        prefix_broken = False
+        norm_prefix = _norm_key(self.canonical_prefix) if self.canonical_prefix else ""
 
         for item in result.get("items", []):
             path = item.get("file_path", "")
@@ -123,6 +133,15 @@ class TimelineWatcher:
                 continue
             cls = classify_path(path, self.local_root, self.canonical_prefix)
             key = _norm_key(path)
+            under_prefix = bool(norm_prefix) and key.startswith(norm_prefix)
+            if under_prefix:
+                # OK and MISSING both mean the prefix RESOLVES (paths.py
+                # probes the prefix, not the file) -- i.e. the mapping is
+                # healthy and the clip is simply not downloaded.
+                if cls in (OK, MISSING):
+                    prefix_healthy = True
+                elif cls == BAD_PREFIX:
+                    prefix_broken = True
 
             if cls == OUT_OF_TREE:
                 if self.ignore_tracker.is_ignored(path):
@@ -148,6 +167,19 @@ class TimelineWatcher:
             elif cls == MISSING:
                 log.debug("clip path missing on disk, not under local_root/prefix: %s", path)
             # OK -> nothing to do
+
+        if prefix_healthy and not prefix_broken and self._warned_mapping:
+            # The mapping is working again. Warning once per PROCESS lifetime
+            # meant a break -> fix -> break cycle (the editor reboots without
+            # the login subst, fixes it, then it fails again next week) was
+            # never reported a second time -- and the set grew without bound
+            # (AUDIT_2 L-17). Clearing on recovery re-arms the warning and
+            # bounds the set at the same time.
+            log.info(
+                "mapping to %s is healthy again — re-arming mapping-health warnings",
+                self.canonical_prefix,
+            )
+            self._warned_mapping.clear()
 
         if new_out_of_tree and self._on_out_of_tree is not None:
             try:

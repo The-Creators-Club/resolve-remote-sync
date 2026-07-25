@@ -70,7 +70,10 @@ dir.
    ```
    This only queries the local `tailscaled` daemon's cached peer state (no
    packets sent to the peer) and prints a loud warning if the path is
-   relayed instead of direct.
+   relayed instead of direct. **Direct is decided by `CurAddr` being
+   non-empty**, not by `Relay` being empty: tailscaled reports a peer's home
+   DERP region in `Relay` even when the connection is a direct UDP path, so
+   the region name is shown as supplementary detail only.
 
 4. **Run the matrix**:
    ```powershell
@@ -87,21 +90,74 @@ dir.
    ```powershell
    .venv\Scripts\ccbench report --results results\results.jsonl --out results\report.md
    ```
-   Produces a markdown table per lane (best-of-repeats MB/s + verified
-   flag), a "recommended per-lane config" section with the exact
+   Produces a markdown table per lane (**median** MB/s across repeats, with
+   min/max/n, how the bytes were counted, how verification was done, and a
+   loopback flag), a "recommended per-lane config" section with the exact
    `rclone`/`robocopy` flags (or "use Syncthing as-is" for lane C), and a
    "did we beat Resolve Cloud" section comparing the winning MB/s against
    the ~60 mb/s baseline read both as Mbps and as MB/s (the unit Blackmagic
    quotes is ambiguous, so both are shown).
 
+## Nothing here deletes anything outside a `_bench` path
+
+Every `rclone purge` / `rmtree` this harness performs goes through
+`ccbench/guard.py`, which refuses any target whose path has no `_bench`
+component. A `remote_path`/`unc_path`/`work_dir` edited down to
+`Creators_Club` therefore fails the run loudly instead of purging real project
+media. The single override is explicit:
+`ccbench run --allow-destructive-endpoint` (or
+`[general] allow_destructive_endpoint = true`), and the run prints a warning
+when it is on.
+
+## How the numbers are kept honest
+
+- **Bytes are what the tool says it moved**, not the dataset manifest total:
+  rclone's own `stats.bytes` (via `--use-json-log`), robocopy's `Bytes :`
+  summary, the size of what actually landed for syncthing. If that can't be
+  parsed the manifest total is substituted and the row's `bytes_source` says
+  `manifest-fallback`. A run that moved 0 bytes is recorded as a **failure**,
+  because timing it measures nothing.
+- **The download destination is emptied before every timed "down" run**
+  (guarded), so a warm destination can't make rclone/robocopy skip everything.
+- **The untimed "seed" copy that populates the remote for a "down" run fails
+  the run** on a non-zero exit or a timeout, instead of being swallowed.
+- **Remote cleanup happens once, after the whole matrix**, never between two
+  timed runs -- purging several GB on the NAS warms its ARC for whatever runs
+  next.
+- **MB/s is decimal** (bytes / 1e6 / s) everywhere, so 60 Mbps is exactly
+  7.5 MB/s.
+- **The report shows the median of the repeats**, with min/max as columns;
+  best-of-N rewards whichever repeat got the luckiest cache.
+- **The lane comes from `bench.toml`** and is carried on every result row; it
+  is never re-derived from a dataset name.
+- **A runner crash fails one cell**, recorded as an `ok=false` row with the
+  traceback tail; the rest of the matrix still runs.
+
 ## How verification works
 
-After a successful transfer, 3 randomly chosen files (seeded, so the same
-3 files are checked across an A/B comparison) are re-hashed at the
-destination and compared to the manifest's size + sha256. The `verified`
-column in the report reflects this; a run that "succeeds" per the tool's own
-exit code but fails the spot check is marked `verified=no` so it doesn't
-quietly win a recommendation.
+- **Downloads**: 3 randomly chosen files (seeded, so the same 3 files are
+  checked across an A/B comparison) are re-hashed at the destination and
+  compared to the manifest's size + sha256 (`verify_method =
+  spot-check-sha256`).
+- **Uploads**: the destination is listed back (`rclone lsjson -R`, or a
+  directory walk for robocopy) and every manifest file must be present with
+  the right size (`remote-size-listing`). If the listing itself is
+  unavailable the row is marked `verified=no` with
+  `verify_method=exit-code-only` -- an exit code alone is never reported as
+  verification.
+
+A run that "succeeds" per the tool's own exit code but fails verification is
+marked `verified=no`, and the report only picks a verified winner when one
+exists.
+
+## Loopback rows are not comparable
+
+The syncthing runner benchmarks two ephemeral instances on 127.0.0.1, and the
+`local_test_dir` selftest escape hatch makes rclone/robocopy copy disk-to-disk
+on this machine. Every such row carries `loopback=true`, is shown as
+`YES -- not comparable` in the report's Loopback column, and can only become a
+lane winner if no real-network row exists for that lane (in which case the
+recommendation says so in bold).
 
 ## Runner notes / known limitations
 
@@ -109,27 +165,34 @@ quietly win a recommendation.
   (`:sftp,host=...,user=...,key_file=...:path` /
   `:smb,host=...,user=...,pass=...:share/path`) so editors don't need a
   pre-provisioned `rclone.conf`.
-- `--multi-thread-streams` is dropped to `0` for "up" transfers -- it only
-  helps rclone when it's the one writing the local destination file (a
-  "down" transfer), and some backends don't support the parallel
-  seek-writes at all; this is handled by direction, not by probing the
-  backend at runtime.
+- `--sftp-chunk-size` is configured in **KiB** (`sftp_chunk_size_kib`). SFTP's
+  maximum total packet is 256 KiB, so 255 is the largest usable value and the
+  one that matters on a high-RTT link; rclone's default is 32 KiB. The old
+  megabyte key (`sftp_chunk_size_mb`) is rejected with an error rather than
+  silently reinterpreted.
+- `--multi-thread-streams` is swept in **both** directions for `rclone_smb`
+  (the SMB backend can multi-thread uploads) and for "down" on `rclone_sftp`.
+  It is pinned to an explicit `0` only for SFTP "up", where the backend cannot
+  use it at all -- and that appears in the recorded params, so it is never a
+  silent zero.
 - For "down" runs, the runner first does an untimed "seed" copy to make sure
   the remote side actually has the dataset (idempotent -- rclone/robocopy
-  skip files that are already present and unchanged), then times only the
-  download. For "up" runs, the remote destination is pre-cleaned (untimed)
-  before each timed run so a repeat can't look artificially fast because the
-  data was already there from the previous repeat.
+  skip files that are already present and unchanged) and **fails the run if
+  that seed errors or times out**, then empties the local destination and
+  times only the download. For "up" runs, the remote destination is
+  pre-cleaned (untimed) before each timed run so a repeat can't look
+  artificially fast because the data was already there.
 - `keep_remote_data = false` (default) cleans up the NAS-side (or ephemeral
-  syncthing) test data after each run; set `true` in `bench.toml` to leave
-  it for manual inspection.
+  syncthing) test data **once, after the whole matrix**; set `true` in
+  `bench.toml` to leave it for manual inspection.
 - **syncthing** runner spins up two ephemeral instances on loopback
   (temp config dirs, random high ports, relays/discovery/NAT disabled, one
   shared folder) and polls `/rest/db/status` for completion. This is fully
   self-contained by design (matches the selftest requirement) -- to actually
   benchmark a real editor<->NAS Syncthing pair over Tailscale later, the
   same device-pairing/REST logic would just need the loopback addresses
-  swapped for real reachable ones.
+  swapped for real reachable ones. Until then **every syncthing row is
+  `loopback=true` and is not comparable** with the rclone/robocopy rows.
 - **iperf3** direction "down" uses `-R` (server sends). The `sum_received`
   field of iperf3's own JSON output is used for goodput (bytes/seconds), so
   the reported MB/s is what the receiver actually got, not the sender's
@@ -147,6 +210,7 @@ bench/
     cli.py            argparse entry point (ccbench dataset|run|report|selftest|tailscale-check)
     dataset.py         synthetic dataset generator (large/small/both profiles) + manifest.json
     config.py          bench.toml loader (stdlib tomllib, path resolution)
+    guard.py           scratch-path guard: no purge/rmtree outside a "_bench" path
     matrix.py           orchestrates the engine x lane x param x repeat matrix, resumable JSONL
     report.py           results.jsonl -> markdown report + per-lane recommendation
     result.py           RunResult dataclass + JSONL append/read/resume helpers

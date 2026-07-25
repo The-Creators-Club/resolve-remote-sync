@@ -490,3 +490,335 @@ def test_list_project_dirs_extra_rels_union(tmp_path):
     d.mkdir(parents=True)
     dirs = fixer.list_project_dirs(str(tmp_path), extra_rels=["2026/CCT/New Thing", "2026/Absent"])
     assert dirs == ["2026/CCT/New Thing"]  # absent extra dropped, existing bare dir adopted
+
+
+# ===========================================================================
+# AUDIT_2 round-2 regressions
+# ===========================================================================
+
+
+def test_fix_clip_refuses_a_blank_local_root(tmp_path, monkeypatch):
+    """AUDIT_2 CORE-H1 [measured]. D-6's containment check is a NO-OP when
+    local_root is blank: Path("").resolve() is the process CWD, so
+    _dest_dir_is_contained happily approved "<CWD>/Audio/Music". Measured in
+    the audit as:
+
+        fix_clip(src, "Audio/Music", "", [mpi]) -> copied_to 'Audio\\Music\\take1.mp4'
+
+    With local_root="" every clip also classifies OUT_OF_TREE, so one FIX ALL
+    scattered the whole project's media into the autostart exe's working
+    directory -- C:\\Windows\\system32 for a Run-key launch -- and relinked
+    Resolve to paths nothing will ever sync.
+    """
+    src = tmp_path / "take1.mp4"
+    src.write_bytes(b"x" * 16)
+    monkeypatch.chdir(tmp_path)
+
+    for blank in ("", "   "):
+        result = fixer.fix_clip(str(src), "Audio/Music", blank, [],
+                               replace_clip_fn=lambda mpi, p: {"ok": True, "message": ""})
+        assert result["ok"] is False
+        assert result["copied_to"] is None
+        assert "sync folder" in result["message"]
+
+    assert not (tmp_path / "Audio").exists(), "nothing may be created under the CWD"
+
+
+def test_fix_clip_claims_the_destination_name_before_copying(tmp_path):
+    """AUDIT_2 DEL-7. unique_destination_path() chose a free name, then a
+    multi-GB copy ran for minutes, and only THEN did os.replace() land --
+    silently clobbering whatever had arrived at that path meanwhile. The
+    concrete case is lane C syncing down a DIFFERENT track.wav from another
+    editor into Audio/Music during the copy; Syncthing then propagates the
+    overwrite fleet-wide.
+
+    The destination name is now created O_CREAT|O_EXCL up front, so a
+    concurrent writer picking a name cannot collide with ours.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "track.wav"
+    src.write_bytes(b"original" * 8)
+
+    seen_during_copy = {}
+
+    def slow_copy(s, d):
+        # Whatever the final name is, it must ALREADY exist by now.
+        seen_during_copy["dest_exists"] = (root / "Audio" / "Music" / "track.wav").exists()
+        import shutil as _sh
+        _sh.copy2(s, d)
+
+    result = fixer.fix_clip(str(src), "Audio/Music", str(root), [],
+                           copy_fn=slow_copy,
+                           replace_clip_fn=lambda mpi, p: {"ok": True, "message": ""})
+    assert result["ok"] is True
+    assert seen_during_copy["dest_exists"] is True
+
+
+def test_fix_clip_never_overwrites_a_file_that_appeared_during_the_copy(tmp_path):
+    """The DEL-7 outcome that matters: an arriving file is not clobbered."""
+    root = tmp_path / "root"
+    root.mkdir()
+    dest_dir = root / "Audio" / "Music"
+    dest_dir.mkdir(parents=True)
+    src = tmp_path / "track.wav"
+    src.write_bytes(b"mine")
+
+    def racing_copy(s, d):
+        # Another writer lands its own track.wav while we copy.
+        import shutil as _sh
+        _sh.copy2(s, d)
+
+    (dest_dir / "track.wav").write_bytes(b"someone-elses")
+    result = fixer.fix_clip(str(src), "Audio/Music", str(root), [],
+                           copy_fn=racing_copy,
+                           replace_clip_fn=lambda mpi, p: {"ok": True, "message": ""})
+    assert result["ok"] is True
+    assert (dest_dir / "track.wav").read_bytes() == b"someone-elses"
+    assert result["copied_to"].endswith("track (2).wav")
+
+
+def test_fix_clip_tmp_name_is_unique_per_process_and_call(tmp_path):
+    """AUDIT_2 CORE-M1: two overlapping FIX ALLs for the same source name both
+    wrote "<name>.ccsync-tmp", interleaved their writes, and both replaced
+    into the same final name -- a corrupted mixed file under a name Resolve
+    was then relinked to."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "a.mov"
+    src.write_bytes(b"x")
+
+    tmp_names = []
+
+    def record(s, d):
+        tmp_names.append(str(d))
+        import shutil as _sh
+        _sh.copy2(s, d)
+
+    for _ in range(2):
+        fixer.fix_clip(str(src), "B-roll", str(root), [], copy_fn=record,
+                       replace_clip_fn=lambda mpi, p: {"ok": True, "message": ""})
+    assert len(set(tmp_names)) == 2
+    assert all(n.endswith(fixer.TMP_SUFFIX) for n in tmp_names)
+
+
+def test_sweep_stale_tmp_files_reports_and_does_not_delete(tmp_path):
+    """AUDIT_2 CORE-H5. A FIX ALL killed mid-copy leaves a partial multi-GB
+    file and nothing ever cleaned it up.
+
+    DELIBERATE CHOICE: this REPORTS, it does not unlink. The .stignore and
+    rclone-filter half of the fix (in sync/) already stops these syncing
+    anywhere, which leaves only wasted disk -- not worth weighing against the
+    hard "never delete user data" rule, since a partial BRAW is still the
+    editor's data and the filesystem alone cannot prove no process is
+    writing it.
+    """
+    import os
+    import time
+
+    root = tmp_path / "root"
+    (root / "Projects" / "X").mkdir(parents=True)
+    stale = root / "Projects" / "X" / ("A001.braw" + fixer.TMP_SUFFIX)
+    stale.write_bytes(b"partial")
+    fresh = root / "Projects" / "X" / ("B002.braw" + fixer.TMP_SUFFIX)
+    fresh.write_bytes(b"in flight")
+    old = time.time() - 7200
+    os.utime(stale, (old, old))
+
+    found = fixer.sweep_stale_tmp_files(str(root))
+    assert found == [str(stale)], "only files older than the age floor are reported"
+    assert stale.exists(), "the sweep must NEVER delete -- hard requirement"
+    assert fresh.exists()
+
+
+def test_sweep_stale_tmp_files_tolerates_a_blank_or_missing_root(tmp_path):
+    assert fixer.sweep_stale_tmp_files("") == []
+    assert fixer.sweep_stale_tmp_files(str(tmp_path / "nope")) == []
+
+
+def test_list_destination_dirs_scopes_to_the_project_prefix(tmp_path):
+    """AUDIT_2 CORE-H3. popup.py called this with no project_prefix and a
+    hardcoded EMPTY editor_name, so the dropdown offered bare "Audio/Music",
+    "B-roll/Stills" and "B-roll/Editor Added/Unknown" beside the correctly
+    prefixed suggestion. Picking one filed the media OUTSIDE Projects/, where
+    _project_rel_for_path yields None and no run_once(subpath) ever covers
+    it -- and the dialog still said "Fixed"."""
+    prefix = "Projects/2026/CCT/Season 1"
+    (tmp_path / "Projects" / "2026" / "CCT" / "Season 1" / "Audio" / "Music").mkdir(parents=True)
+    (tmp_path / "Audio" / "Music").mkdir(parents=True)  # a stray root-level dir
+
+    dirs = fixer.list_destination_dirs(str(tmp_path), "ruskin", prefix)
+    assert f"{prefix}/Audio/Music" in dirs
+    assert f"{prefix}/B-roll/Editor Added/ruskin" in dirs
+    assert "Audio/Music" not in dirs, "an un-prefixed destination never syncs"
+    assert "B-roll/Editor Added/Unknown" not in dirs
+    assert all(d.startswith(prefix) for d in dirs)
+
+
+# ===========================================================================
+# AUDIT_2 UX-9: per-file copy progress
+# ===========================================================================
+
+
+def test_copy_with_progress_reports_bytes_as_it_goes(tmp_path):
+    """shutil.copy2 reports NOTHING, so a 40 GB BRAW over SMB parked the
+    fixer dialog's counter for twenty-plus minutes and looked exactly like a
+    hang. Hit live 2026-07-25 at "35/69" while the process was demonstrably
+    copying at ~33 MB/s."""
+    src = tmp_path / "big.braw"
+    src.write_bytes(b"A" * (5 * 1024 * 1024))
+    dst = tmp_path / "copy.braw"
+
+    seen = []
+    fixer.copy_with_progress(src, dst, on_bytes=lambda d, t: seen.append((d, t)),
+                             chunk_size=1024 * 1024)
+
+    assert dst.read_bytes() == src.read_bytes()
+    assert seen[0] == (0, 5 * 1024 * 1024), "must report 0 BEFORE the first read"
+    assert seen[-1] == (5 * 1024 * 1024, 5 * 1024 * 1024)
+    assert len(seen) >= 5, "one report per chunk, not just start and end"
+    assert [d for d, _t in seen] == sorted(d for d, _t in seen)
+
+
+def test_copy_with_progress_preserves_copy2_semantics(tmp_path):
+    """It replaces shutil.copy2, so it must still copy metadata and must
+    still never touch the source."""
+    import os
+    import time
+
+    src = tmp_path / "a.mov"
+    src.write_bytes(b"payload")
+    old = time.time() - 100_000
+    os.utime(src, (old, old))
+    dst = tmp_path / "b.mov"
+
+    fixer.copy_with_progress(src, dst)
+    assert dst.read_bytes() == b"payload"
+    assert abs(os.stat(dst).st_mtime - os.stat(src).st_mtime) < 2
+    assert src.exists() and src.read_bytes() == b"payload"
+
+
+def test_copy_with_progress_survives_a_broken_callback(tmp_path):
+    """A progress callback that raises must not fail a copy that is fine."""
+    src = tmp_path / "a.mov"
+    src.write_bytes(b"x" * 4096)
+    dst = tmp_path / "b.mov"
+
+    def boom(done, total):
+        raise RuntimeError("UI is gone")
+
+    fixer.copy_with_progress(src, dst, on_bytes=boom, chunk_size=1024)
+    assert dst.read_bytes() == src.read_bytes()
+
+
+def test_fix_clip_streams_progress_and_still_uses_tmp_plus_replace(tmp_path):
+    """The chunked copy must COMPOSE with DEL-7/CORE-H5: still copy to a
+    unique <dest>.ccsync-tmp, still os.replace into an O_EXCL-claimed final
+    name, still never touch the source."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "take.wav"
+    src.write_bytes(b"z" * (3 * 1024 * 1024))
+
+    seen = []
+    result = fixer.fix_clip(
+        str(src), "Audio/Music", str(root), [],
+        replace_clip_fn=lambda mpi, p: {"ok": True, "message": ""},
+        on_bytes=lambda d, t: seen.append(d),
+    )
+    assert result["ok"] is True
+    assert seen and seen[-1] == 3 * 1024 * 1024
+    dest = root / "Audio" / "Music" / "take.wav"
+    assert dest.read_bytes() == src.read_bytes()
+    assert src.exists()
+    assert not any(p.name.endswith(fixer.TMP_SUFFIX)
+                   for p in (root / "Audio" / "Music").iterdir())
+
+
+# ===========================================================================
+# Cloud placeholders -- the measured root cause of the 2026-07-25 incident
+# ===========================================================================
+
+
+def test_is_placeholder_reads_the_windows_cloud_attributes(tmp_path, monkeypatch):
+    """MEASURED on the user's machine: ccsync-companion read 222.0 MB/10 s
+    while GoogleDriveFS read 222.1 MB/10 s -- byte for byte. FIX ALL was
+    blocked inside open()/read() waiting for Google Drive to hydrate an
+    online-only source clip. Nothing anywhere said so, so a working copy was
+    indistinguishable from a hang."""
+    import os
+
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"x")
+    real_stat = os.stat
+
+    class _Stat:
+        def __init__(self, attrs):
+            self.st_file_attributes = attrs
+
+    for attr in (fixer.FILE_ATTRIBUTE_OFFLINE,
+                 fixer.FILE_ATTRIBUTE_RECALL_ON_OPEN,
+                 fixer.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS):
+        monkeypatch.setattr(os, "stat", lambda p, _a=attr: _Stat(_a))
+        assert fixer.is_placeholder(str(path)) is True, hex(attr)
+
+    monkeypatch.setattr(os, "stat", lambda p: _Stat(0x20))  # FILE_ATTRIBUTE_ARCHIVE
+    assert fixer.is_placeholder(str(path)) is False
+
+    monkeypatch.setattr(os, "stat", real_stat)
+
+
+def test_is_placeholder_is_never_a_gate(tmp_path, monkeypatch):
+    """A false positive must never block a copy and a missing attribute must
+    never raise -- this is a diagnostic, not a permission check."""
+    import os
+
+    assert fixer.is_placeholder(str(tmp_path / "nope.mov")) is False
+
+    class _NoAttrStat:
+        pass  # no st_file_attributes at all (Linux/macOS)
+
+    monkeypatch.setattr(os, "stat", lambda p: _NoAttrStat())
+    assert fixer.is_placeholder("anything") is False
+
+
+def test_classify_copy_failure_names_the_cloud_case_and_the_action():
+    """`(last: FAILED)` told the user nothing. The most common real cause is
+    a placeholder that never hydrated, and the fix is a specific right-click
+    in Google Drive."""
+    msg = fixer.classify_copy_failure(OSError("The cloud operation was unsuccessful"),
+                                      placeholder=True)
+    assert "Available offline" in msg
+    assert "Scan whole project" in msg
+
+
+def test_classify_copy_failure_gives_the_os_reason_for_genuine_errors():
+    assert "disk is full" in fixer.classify_copy_failure(
+        OSError(28, "No space left on device"), placeholder=False)
+    assert "open in another program" in fixer.classify_copy_failure(
+        PermissionError("Access is denied"), placeholder=False)
+    assert "moved or renamed" in fixer.classify_copy_failure(
+        FileNotFoundError("nope"), placeholder=False)
+    generic = fixer.classify_copy_failure(OSError("weird thing happened"), placeholder=False)
+    assert "weird thing happened" in generic
+
+
+def test_fix_clip_reports_the_placeholder_reason_on_a_copy_failure(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "The Billion Dollar Buddhists.mp4"
+    src.write_bytes(b"x" * 16)
+
+    monkeypatch.setattr(fixer, "is_placeholder", lambda p: True)
+
+    def hydration_fails(s, d):
+        raise OSError("The cloud file provider is not running")
+
+    result = fixer.fix_clip(str(src), "B-roll", str(root), [], copy_fn=hydration_fails,
+                            replace_clip_fn=lambda m, p: {"ok": True, "message": ""})
+    assert result["ok"] is False
+    assert result["placeholder"] is True
+    assert "Available offline" in result["message"]
+    assert "cloud file provider" not in result["message"], "raw OS text is for the log"
+    # ...and nothing was left behind at the destination.
+    assert list((root / "B-roll").iterdir()) == []

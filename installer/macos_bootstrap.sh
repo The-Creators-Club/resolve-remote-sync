@@ -200,6 +200,23 @@ else
     fi
 fi
 
+# Authoritative re-probe after every install route. Neither the brew branch
+# nor the direct-download branch above set RCLONE_BIN, so without this it
+# stays empty on a FRESH install and config.toml gets the unresolvable
+# rclone_path = "rclone" that INST-7 is about.
+if [ -z "$RCLONE_BIN" ]; then
+    if have_cmd rclone; then
+        RCLONE_BIN="$(command -v rclone)"
+    elif [ -x "$BIN_DIR/rclone" ]; then
+        RCLONE_BIN="$BIN_DIR/rclone"
+    fi
+    if [ -n "$RCLONE_BIN" ]; then
+        step "rclone resolved to: $RCLONE_BIN"
+    elif [ "$DRY_RUN" != 1 ]; then
+        warn "rclone is NOT installed. Lanes A and B -- every video upload and every proxy download -- cannot run on this Mac. Install rclone (brew install rclone, or https://rclone.org/downloads/) and re-run this script."
+    fi
+fi
+
 # ----------------------------------------------------------------------
 # 3. Syncthing (+ LaunchAgent autostart)
 # ----------------------------------------------------------------------
@@ -301,6 +318,11 @@ fi
 # is stable and the LaunchAgent doesn't race a first-run key generation.
 if [ "$DRY_RUN" = 1 ]; then
     dry "would run: $SYNCTHING_BIN generate --home=$SYNCTHING_HOME (if not already generated)"
+elif [ -z "$SYNCTHING_BIN" ]; then
+    # With set -u but no set -e, `"" generate ...` is a silently-ignored
+    # "command not found" -- and everything downstream then assumed a config
+    # existed. Say so instead.
+    warn "Syncthing is not installed, so no Syncthing config was generated."
 else
     if [ ! -d "$SYNCTHING_HOME" ]; then
         step "generating Syncthing config at $SYNCTHING_HOME ..."
@@ -312,9 +334,53 @@ fi
 
 SYNCTHING_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.syncthing.plist"
 ensure_dir "$LAUNCH_AGENTS_DIR"
-if [ -f "$SYNCTHING_PLIST" ]; then
-    skip "Syncthing LaunchAgent already present: $SYNCTHING_PLIST"
+
+# Returns the first <string> inside a plist's ProgramArguments array, i.e.
+# the program the agent actually runs. Empty when it can't be determined.
+plist_program() {
+    [ -f "$1" ] || return 0
+    sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$1" \
+      | grep -o '<string>[^<]*</string>' \
+      | head -n 1 \
+      | sed -E 's#</?string>##g'
+}
+
+# Reload a LaunchAgent we just rewrote. bootout+bootstrap is the modern form;
+# unload+load is the fallback on older macOS.
+reload_agent() {
+    local plist="$1"
+    launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+    launchctl unload "$plist" >/dev/null 2>&1 || true
+    if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then
+        return 0
+    fi
+    launchctl load "$plist" 2>/dev/null
+}
+
+# INST-8: a failed brew/curl leaves SYNCTHING_BIN empty (set -u, no set -e),
+# and the old code happily wrote a plist whose ProgramArguments[0] was
+# <string></string>. Because the guard was "does the file exist", EVERY later
+# run -- including one after the editor installed Syncthing by hand -- printed
+# "already present" and never repaired it. So: never write a plist with an
+# empty program, and make the guard compare the embedded path against the
+# binary we found, rewriting and reloading on a mismatch.
+SYNCTHING_PLIST_PROGRAM="$(plist_program "$SYNCTHING_PLIST")"
+if [ -z "$SYNCTHING_BIN" ]; then
+    warn "Syncthing was not installed, so no LaunchAgent was written (an agent with no program to run can never be repaired by a later run of this script)."
+    warn "Install Syncthing (brew install syncthing, or https://syncthing.net/downloads/) and re-run this script."
+    if [ -f "$SYNCTHING_PLIST" ] && [ -z "$SYNCTHING_PLIST_PROGRAM" ]; then
+        warn "Removing the broken agent left by an earlier run: $SYNCTHING_PLIST"
+        if [ "$DRY_RUN" != 1 ]; then
+            launchctl bootout "gui/$(id -u)" "$SYNCTHING_PLIST" >/dev/null 2>&1 || true
+            rm -f "$SYNCTHING_PLIST"
+        fi
+    fi
+elif [ -f "$SYNCTHING_PLIST" ] && [ "$SYNCTHING_PLIST_PROGRAM" = "$SYNCTHING_BIN" ]; then
+    skip "Syncthing LaunchAgent already present and correct: $SYNCTHING_PLIST"
 else
+    if [ -f "$SYNCTHING_PLIST" ]; then
+        step "Syncthing LaunchAgent points at '$SYNCTHING_PLIST_PROGRAM' but Syncthing is at '$SYNCTHING_BIN' -- rewriting it"
+    fi
     if [ "$DRY_RUN" = 1 ]; then
         dry "would write LaunchAgent plist: $SYNCTHING_PLIST (runs $SYNCTHING_BIN serve --home=$SYNCTHING_HOME)"
     else
@@ -340,6 +406,15 @@ else
 </plist>
 PLIST
         step "wrote Syncthing LaunchAgent: $SYNCTHING_PLIST"
+        # A rewritten plist means launchd is still running the OLD program
+        # until the agent is reloaded -- which is the whole point of repairing
+        # it (INST-8).
+        if reload_agent "$SYNCTHING_PLIST"; then
+            step "reloaded the Syncthing LaunchAgent"
+        else
+            warn "could not reload $SYNCTHING_PLIST -- it will take effect at your next logon, or reload it now with:"
+            warn "    launchctl bootout gui/\$(id -u) \"$SYNCTHING_PLIST\"; launchctl bootstrap gui/\$(id -u) \"$SYNCTHING_PLIST\""
+        fi
     fi
 fi
 
@@ -347,6 +422,8 @@ fi
 # daemon, no REST API on 127.0.0.1:8384, and lane C never syncs at all.
 if [ "$DRY_RUN" = 1 ]; then
     dry "would load the Syncthing LaunchAgent and confirm the daemon is running"
+elif [ -z "$SYNCTHING_BIN" ]; then
+    warn "no Syncthing binary -- skipping the daemon start. Lane C (audio, After Effects projects, graphics, subtitles, .drp project files, docs) will not sync on this Mac until Syncthing is installed and this script re-run."
 else
     if pgrep -qx syncthing 2>/dev/null || pgrep -f "syncthing.*serve" >/dev/null 2>&1; then
         skip "Syncthing daemon already running"
@@ -391,12 +468,53 @@ shell_type = unix
 "
 
 has_section=0
+existing_host=""
+existing_user=""
 if [ -f "$RCLONE_CONF_PATH" ] && grep -qF "[$REMOTE_NAME]" "$RCLONE_CONF_PATH"; then
     has_section=1
+    # Read host/user from THIS stanza only: awk from its header to the next
+    # bracketed header (or EOF).
+    existing_host="$(awk -v sect="[$REMOTE_NAME]" '
+        $0 == sect { inside=1; next }
+        /^\[/      { inside=0 }
+        inside && /^[[:space:]]*host[[:space:]]*=/ {
+            sub(/^[[:space:]]*host[[:space:]]*=[[:space:]]*/, ""); print; exit
+        }' "$RCLONE_CONF_PATH")"
+    existing_user="$(awk -v sect="[$REMOTE_NAME]" '
+        $0 == sect { inside=1; next }
+        /^\[/      { inside=0 }
+        inside && /^[[:space:]]*user[[:space:]]*=/ {
+            sub(/^[[:space:]]*user[[:space:]]*=[[:space:]]*/, ""); print; exit
+        }' "$RCLONE_CONF_PATH")"
 fi
 
-if [ "$has_section" = 1 ]; then
-    skip "rclone.conf already has a [$REMOTE_NAME] section: $RCLONE_CONF_PATH"
+if [ "$has_section" = 1 ] && [ "$existing_host" = "$TAILNET_HOST" ] && [ "$existing_user" = "$EDITOR_NAME" ]; then
+    skip "rclone.conf already has a correct [$REMOTE_NAME] section: $RCLONE_CONF_PATH"
+elif [ "$has_section" = 1 ]; then
+    # INST-17: the single most likely reason to re-run this script is a
+    # typo'd --editor-name, and skipping the whole stanza whenever the
+    # section exists made that re-run a silent no-op for the one file that
+    # carries the username. Rewrite this stanza in place; every other remote
+    # in the file is preserved.
+    warn "rclone.conf's [$REMOTE_NAME] disagrees with the values you passed:"
+    warn "  host: '$existing_host' -> '$TAILNET_HOST'"
+    warn "  user: '$existing_user' -> '$EDITOR_NAME'"
+    if [ "$DRY_RUN" = 1 ]; then
+        dry "would rewrite the [$REMOTE_NAME] stanza in $RCLONE_CONF_PATH (other remotes untouched):"
+        echo "$STANZA"
+    else
+        RCLONE_TMP="$(mktemp "${RCLONE_CONF_PATH}.ccsync.XXXXXX")"
+        awk -v sect="[$REMOTE_NAME]" -v stanza="$STANZA" '
+            $0 == sect { inside=1; printf "%s\n", stanza; next }
+            inside && /^\[/ { inside=0 }
+            !inside { print }
+        ' "$RCLONE_CONF_PATH" > "$RCLONE_TMP"
+        # Same permissions as the file we are replacing; rclone.conf can hold
+        # credentials for other remotes.
+        chmod 600 "$RCLONE_TMP"
+        mv "$RCLONE_TMP" "$RCLONE_CONF_PATH"
+        step "rewrote the [$REMOTE_NAME] stanza in $RCLONE_CONF_PATH (host=$TAILNET_HOST, user=$EDITOR_NAME)"
+    fi
 else
     if [ "$DRY_RUN" = 1 ]; then
         dry "would append this stanza to $RCLONE_CONF_PATH :"
@@ -416,14 +534,51 @@ fi
 # ----------------------------------------------------------------------
 step "checking companion app at $COMPANION_APP_PATH..."
 COMPANION_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.companion.plist"
+COMPANION_MISSING=0
 if [ ! -e "$COMPANION_APP_PATH" ]; then
-    warn "companion app not found at $COMPANION_APP_PATH -- skipping autostart registration. Install the companion app later and re-run this script to register autostart."
+    # INST-6: this used to be one skippable WARNING line in the middle of an
+    # otherwise successful-looking run that ended with "Bootstrap complete"
+    # and a device ID -- so a Mac editor reasonably concluded they were set
+    # up. They are not: without the companion there are NO sync lanes, no
+    # popup fixer, no dashboard reporting and no project selection on this
+    # machine. Say that unmissably.
+    COMPANION_MISSING=1
+    echo ""
+    warn "**********************************************************************"
+    warn "THE SYNC APP IS NOT INSTALLED ON THIS MAC."
+    warn ""
+    warn "No companion app was found at:"
+    warn "    $COMPANION_APP_PATH"
+    warn ""
+    warn "That app is what actually syncs. Without it, NOTHING on this Mac will:"
+    warn "  - upload your camera originals to the NAS      (lane A)"
+    warn "  - download proxies from the NAS                (lane B)"
+    warn "  - sync audio / AE / graphics / subtitles / .drp (lane C)"
+    warn "  - report status to the dashboard, or let you pick projects"
+    warn ""
+    warn "A macOS build of the companion is NOT SHIPPED YET. Everything this"
+    warn "script configured (Tailscale, rclone, Syncthing, the rclone remote)"
+    warn "is real and correct, but this Mac cannot sync on its own until the"
+    warn "app exists. Tell Alex you ran this on a Mac before you rely on it."
+    warn "**********************************************************************"
+    echo ""
 else
+    COMPANION_PLIST_PROGRAM="$(plist_program "$COMPANION_PLIST")"
+    # The companion agent runs `open -a <app>`, so ProgramArguments[0] is
+    # "open" and the app path is the third element. Compare that instead.
+    COMPANION_PLIST_APP=""
     if [ -f "$COMPANION_PLIST" ]; then
-        skip "companion LaunchAgent already present: $COMPANION_PLIST"
+        COMPANION_PLIST_APP="$(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$COMPANION_PLIST" \
+            | grep -o '<string>[^<]*</string>' | sed -E 's#</?string>##g' | sed -n '3p')"
+    fi
+    if [ -f "$COMPANION_PLIST" ] && [ -n "$COMPANION_PLIST_PROGRAM" ] && [ "$COMPANION_PLIST_APP" = "$COMPANION_APP_PATH" ]; then
+        skip "companion LaunchAgent already present and correct: $COMPANION_PLIST"
     else
+        if [ -f "$COMPANION_PLIST" ]; then
+            step "companion LaunchAgent points at '$COMPANION_PLIST_APP' but the app is at '$COMPANION_APP_PATH' -- rewriting it"
+        fi
         if [ "$DRY_RUN" = 1 ]; then
-            dry "would write LaunchAgent plist: $COMPANION_PLIST (runs $COMPANION_APP_PATH/Contents/MacOS/ccsync-companion)"
+            dry "would write LaunchAgent plist: $COMPANION_PLIST (runs open -a $COMPANION_APP_PATH)"
         else
             cat > "$COMPANION_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -445,11 +600,10 @@ else
 PLIST
             step "wrote companion LaunchAgent: $COMPANION_PLIST"
             # Same trap as the Syncthing agent: a written-but-unloaded plist
-            # does nothing until the next logon.
-            if launchctl bootstrap "gui/$(id -u)" "$COMPANION_PLIST" 2>/dev/null; then
-                step "loaded companion LaunchAgent (launchctl bootstrap)"
-            elif launchctl load "$COMPANION_PLIST" 2>/dev/null; then
-                step "loaded companion LaunchAgent (launchctl load)"
+            # does nothing until the next logon, and a REWRITTEN one leaves
+            # launchd running the old program until it is booted out first.
+            if reload_agent "$COMPANION_PLIST"; then
+                step "loaded companion LaunchAgent"
             else
                 warn "could not load $COMPANION_PLIST automatically -- it will start at your next logon, or load it now with:"
                 warn "    launchctl bootstrap gui/\$(id -u) \"$COMPANION_PLIST\""
@@ -467,8 +621,23 @@ fi
 CCSYNC_CONFIG_DIR="$HOME/.ccsync"
 CCSYNC_CONFIG_PATH="$CCSYNC_CONFIG_DIR/config.toml"
 
+# rclone_path must be absolute (see the config below). Fall back to the bare
+# name only when rclone genuinely isn't installed -- there is nothing better
+# to write, and the companion's own error message is then accurate.
+RCLONE_PATH_VALUE="$RCLONE_BIN"
+if [ -z "$RCLONE_PATH_VALUE" ]; then
+    RCLONE_PATH_VALUE="rclone"
+    warn "rclone was not found, so config.toml gets rclone_path = \"rclone\" -- lanes A and B will not work until rclone is installed and this script re-run."
+fi
+
 if [ -f "$CCSYNC_CONFIG_PATH" ]; then
     skip "companion config already exists: $CCSYNC_CONFIG_PATH"
+    if [ "$DRY_RUN" != 1 ]; then
+        # Repair permissions on a config an older run wrote under the default
+        # umask -- it holds the fleet dashboard_token (SEC-14).
+        chmod 700 "$CCSYNC_CONFIG_DIR" 2>/dev/null || true
+        chmod 600 "$CCSYNC_CONFIG_PATH" 2>/dev/null || true
+    fi
     step "  confirm these values match, the companion will not fix them for you:"
     echo "      editor_name = \"$EDITOR_NAME\""
     echo "      local_root  = \"$CC_ROOT\""
@@ -520,7 +689,12 @@ syncthing_url = "http://127.0.0.1:8384"
 syncthing_api_key = ""
 syncthing_folder_ids = []
 
-rclone_path = "rclone"
+# ABSOLUTE path, not the bare name "rclone". The companion is started by a
+# LaunchAgent, and launchd gives it PATH=/usr/bin:/bin:/usr/sbin:/sbin --
+# neither /opt/homebrew/bin nor ~/.local/ccsync/bin is on it, so
+# rclone_available()'s shutil.which("rclone") fails and lanes A/B report
+# "rclone not found on PATH" forever (INST-7).
+rclone_path = "$RCLONE_PATH_VALUE"
 
 log_path = "~/.ccsync/companion.log"
 log_level = "INFO"
@@ -531,7 +705,12 @@ log_level = "INFO"
 dashboard_url = "${DASHBOARD_URL:-http://100.71.216.3:8480}"
 dashboard_token = "${DASHBOARD_TOKEN:-}"
 TOML
-    step "wrote seeded companion config: $CCSYNC_CONFIG_PATH"
+    # SEC-14: this file carries the fleet dashboard_token, and `cat >` uses
+    # the default umask (world-readable on a stock Mac). Lock down both the
+    # file and the directory -- ~/.ccsync also holds identity.json.
+    chmod 700 "$CCSYNC_CONFIG_DIR" 2>/dev/null || warn "could not chmod 700 $CCSYNC_CONFIG_DIR"
+    chmod 600 "$CCSYNC_CONFIG_PATH" 2>/dev/null || warn "could not chmod 600 $CCSYNC_CONFIG_PATH"
+    step "wrote seeded companion config: $CCSYNC_CONFIG_PATH (mode 600, dir 700 -- it holds the dashboard token)"
     step "  the whole project tree syncs as-is; set active_project in that file only if you want popup-fixed media filed into a specific project."
 fi
 
@@ -562,9 +741,12 @@ if [ "$DRY_RUN" = 1 ]; then
     echo " Bootstrap complete (dry run). No changes were made."
     echo "=================================================================="
 else
-    DEVICE_ID="$(device_id_from_generate)"
-    if [ -z "$DEVICE_ID" ]; then
-        DEVICE_ID="$(device_id_legacy)"
+    DEVICE_ID=""
+    if [ -n "$SYNCTHING_BIN" ]; then
+        DEVICE_ID="$(device_id_from_generate)"
+        if [ -z "$DEVICE_ID" ]; then
+            DEVICE_ID="$(device_id_legacy)"
+        fi
     fi
 
     echo ""
@@ -580,8 +762,10 @@ else
         echo ""
         echo "     $DEVICE_ID"
         echo ""
-        echo " Send this device ID to the admin so they can approve it with"
-        echo " server/accept_device.py for each project you're working on."
+        echo " Send this device ID to Alex so he can approve this machine on"
+        echo " the dashboard. There is no per-project sharing step for you to"
+        echo " do -- once you're approved, ticking a project on the dashboard"
+        echo " is what shares it."
     fi
     echo ""
     echo " Remaining manual steps (see docs/EDITOR_SETUP.md):"
@@ -589,11 +773,26 @@ else
     echo "   2. generate an SSH keypair for rclone if you haven't already:"
     echo "        ssh-keygen -t ed25519 -f \"$KEY_FILE_PATH\""
     echo "      and send the .pub file to the admin"
-    echo "   3. connect DaVinci Resolve to the Project Server"
-    echo "   4. Playback > Proxy Handling > Prefer Proxies"
-    echo "   5. Preferences > Media Storage > add $CC_ROOT as a Mapped"
+    echo "   3. SIGN IN: right-click the CCSync menu-bar icon and choose"
+    echo "      \"Sign in...\", using the SAME TrueNAS username and password"
+    echo "      Alex gave you. NOTHING SYNCS UNTIL YOU DO THIS -- signing in"
+    echo "      on the dashboard WEBSITE is not the same thing."
+    echo "   4. connect DaVinci Resolve to the Project Server"
+    echo "   5. Playback > Proxy Handling > Prefer Proxies"
+    echo "   6. Preferences > Media Storage > add $CC_ROOT as a Mapped"
     echo "      Mount for P:\\  (manual, one-time -- see docs/EDITOR_SETUP.md)"
-    echo "   6. do NOT mount any NAS share over SMB alongside this -- see the"
+    echo "   7. do NOT mount any NAS share over SMB alongside this -- see the"
     echo "      drive-letter/mount warning in docs/EDITOR_SETUP.md"
     echo "=================================================================="
+
+    # Last line seen, so the one thing that invalidates everything above
+    # cannot scroll away (INST-6).
+    if [ "$COMPANION_MISSING" = 1 ]; then
+        echo ""
+        warn "REMINDER: the sync app is NOT installed on this Mac (see the block"
+        warn "above). Tailscale, rclone, Syncthing and the rclone remote are all"
+        warn "configured -- but nothing will sync by itself, and step 3 above has"
+        warn "no menu-bar icon to right-click yet. Do not report yourself ready."
+        echo ""
+    fi
 fi

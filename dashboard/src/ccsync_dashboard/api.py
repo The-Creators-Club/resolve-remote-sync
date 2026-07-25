@@ -6,6 +6,8 @@ X-CCSync-Token shared secret unless DASH_REPORT_TOKEN_OPTIONAL=1.
 from __future__ import annotations
 
 import hashlib
+import hmac
+import logging
 import os
 import re
 import sqlite3
@@ -13,14 +15,19 @@ from pathlib import Path
 from typing import Any, Iterator, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 from . import VERSION, auth, db, health
 from .syncthing_client import SyncthingClient, SyncthingError
-from .truenas_client import TrueNASClient, TrueNASError, is_valid_username, looks_like_ssh_pubkey
+from .truenas_client import (
+    EDITORS_GROUP, TrueNASClient, TrueNASError, is_valid_username, looks_like_ssh_pubkey,
+)
 
 router = APIRouter(prefix="/api/v1")
+
+log = logging.getLogger("ccsync.dashboard.api")
 
 LANE_LABELS = {
     "lane_a_video_up": "A",
@@ -34,6 +41,41 @@ LANE_LABELS = {
 # ignored_resolve_projects config default -- kept server-side too so reports
 # from OLD companion versions (or any unfiltered code path) stay harmless.
 IGNORED_RESOLVE_PROJECTS = {"untitled project", "new doc"}
+
+# Resolve numbers duplicates of its scratch projects -- "New Doc 1",
+# "Untitled Project (3)" -- and the Blackmagic Proxy Generator's helper
+# project counts up like that all day. Only a trailing number (optionally
+# spaced/dashed/bracketed) may follow the ignored name: "New Documentary"
+# and "New Doc Final" are real projects and never match. Mirrors the
+# companion's config.is_ignored_project rule -- keep the two in lockstep.
+_NUMBERED_DUPLICATE_RE = re.compile(r"^[\s_\-]*[\(\[]?\d+[\)\]]?$")
+
+
+def is_ignored_resolve_project(name: str) -> bool:
+    """Prefix match over IGNORED_RESOLVE_PROJECTS, whitespace-collapsed."""
+    candidate = " ".join(str(name or "").split()).lower()
+    if not candidate:
+        return False
+    for entry in IGNORED_RESOLVE_PROJECTS:
+        if candidate == entry:
+            return True
+        if candidate.startswith(entry) and _NUMBERED_DUPLICATE_RE.match(
+            candidate[len(entry):]
+        ):
+            return True
+    return False
+
+
+def token_ok(configured: str, presented: str) -> bool:
+    """Constant-time shared-secret comparison.
+
+    `==` on a secret leaks its length and its matching prefix through timing.
+    The dashboard is LAN/tailnet-only, so this was never the day's biggest
+    problem -- but every token check in this codebase goes through here now so
+    the next one can't be written the naive way."""
+    if not configured or not presented:
+        return False
+    return hmac.compare_digest(str(configured), str(presented))
 
 
 def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
@@ -138,6 +180,11 @@ def build_projects_view(conn: sqlite3.Connection, now: str | None = None) -> dic
             "slug": p["slug"],
             "label": p["label"],
             "path": p["path"],
+            # Syncthing's own folder health -- 'stopped' with "folder marker
+            # missing" is the tell that a project dir was moved out from under
+            # a folder, which the completion % alone hides.
+            "folder_state": p.get("folder_state"),
+            "folder_error": p.get("folder_error"),
             "status": health.project_status(e["status"] for e in editors),
             "editors": editors,
             "need_bytes_total": sum(e["need_bytes"] or 0 for e in editors),
@@ -167,6 +214,9 @@ def build_project_view(conn: sqlite3.Connection, slug: str, now: str | None = No
         "label": project["label"],
         "path": project["path"],
         "active": bool(project["active"]),
+        "folder_state": project.get("folder_state"),
+        "folder_error": project.get("folder_error"),
+        "folder_state_at": project.get("folder_state_at"),
         "status": health.project_status(e["status"] for e in editors),
         "editors": editors,
         "project_row_id": project["id"],
@@ -266,6 +316,11 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         return pkg["version"] if pkg is not None else None
 
     platforms = db.fetch_platform_map(conn)
+    # Per-machine reported build (schema v10). machine_state is one row per
+    # (editor, machine) and outlives a lane_report_current prune, so it is the
+    # authority for "which companion build is this box running"; the lane rows
+    # are only a fallback for machines that reported before v10.
+    machine_versions = db.fetch_companion_version_map(conn)
     machines: dict[tuple[str, str], dict[str, Any]] = {}
     for row in db.fetch_lane_reports(conn):
         key = (row["editor_username"], row["machine"])
@@ -278,20 +333,45 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         })
         entry["lanes"].extend(_lanes_view([row], now))
         entry["received_at"] = max(entry["received_at"], row["received_at"])
+    # A machine that has reported at all belongs in the fleet view even with
+    # no live lane rows (pruned after 30 silent days, or a report whose lanes
+    # were all filtered out) -- otherwise a stale build goes invisible exactly
+    # when you most want to see it.
+    for key, state in machine_versions.items():
+        entry = machines.setdefault(key, {
+            "editor_username": key[0],
+            "machine": key[1],
+            "companion_version": state["companion_version"],
+            "received_at": state["reported_at"],
+            "lanes": [],
+        })
     verified = db.fetch_verified_map(conn)
     result = []
     for entry in machines.values():
+        key = (entry["editor_username"], entry["machine"])
         entry["status"] = health.worst(l["chip"] for l in entry["lanes"])
-        entry["verified"] = verified.get((entry["editor_username"], entry["machine"]), False)
-        platform = (platforms.get((entry["editor_username"], entry["machine"])) or "windows").strip().lower()
+        entry["verified"] = verified.get(key, False)
+        entry["companion_version"] = (
+            (machine_versions.get(key) or {}).get("companion_version")
+            or entry["companion_version"]
+        )
+        platform = (platforms.get(key) or "windows").strip().lower()
         current_version = current_version_for(platform)
+        entry["platform"] = platform
+        entry["current_companion_version"] = current_version
         # "Out of date" = running version differs from the published current
-        # (not "older than": an admin rollback must flag machines too).
+        # (not "older than": an admin rollback must flag machines too), and
+        # ALWAYS compared against the current package for THIS machine's own
+        # platform -- see X-5.
         entry["companion_outdated"] = bool(
             current_version
             and entry["companion_version"]
             and entry["companion_version"] != current_version
         )
+        # No version reported at all (pre-0.2 companion): flag it separately
+        # so the fleet view can say "unknown build" instead of silently
+        # showing "?" next to a green row.
+        entry["companion_version_unknown"] = not entry["companion_version"]
         result.append(entry)
     result.sort(key=lambda e: (e["editor_username"], e["machine"]))
     return {"generated_at": now, "editors": result,
@@ -301,11 +381,37 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
 # ------------------------------------------------------------------ routes
 
 @router.get("/health")
-def api_health(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """Liveness for anyone; detail only for authenticated callers.
+
+    The full body carries project slugs, project labels and Syncthing's
+    folder error strings, and this route is in app.py's _OPEN_EXACT so the
+    Docker healthcheck (which only reads the status code, from 127.0.0.1) can
+    reach it without credentials -- which made the client roster readable by
+    anyone who could reach the port. Unauthenticated callers now get
+    {"ok", "version"} and the same 200/exception behaviour; a session or the
+    companion's X-CCSync-Token unlocks the rest."""
+    settings = request.app.state.settings
     collector = db.fetch_collector_status(conn)
+    if not (
+        auth.get_session_user(request) is not None
+        or token_ok(settings.report_token, request.headers.get("x-ccsync-token", ""))
+    ):
+        # Enough for a probe to distinguish "process up" from "process up but
+        # blind", and nothing an outsider can inventory the fleet from.
+        return {
+            "ok": bool(collector["syncthing_reachable"]) or not settings.syncthing_url,
+            "version": VERSION,
+        }
     return {
+        "ok": bool(collector["syncthing_reachable"]) or not settings.syncthing_url,
         "version": VERSION,
         "syncthing_reachable": collector["syncthing_reachable"],
+        # True = the last poll succeeded but finished too long ago, i.e. the
+        # collector thread is dead/wedged. Docker's healthcheck (see
+        # deploy/compose.yaml) uses syncthing_reachable, which this clears.
+        "collector_stale": collector["collector_stale"],
+        "folder_errors": collector["folder_errors"],
         "last_polls": {
             kind: {"finished_at": run["finished_at"], "ok": bool(run["ok"]), "error": run["error"]}
             for kind, run in collector["kinds"].items()
@@ -439,7 +545,11 @@ def api_login(payload: LoginIn, request: Request, response: Response) -> dict[st
     if auth.login_throttled(username):
         raise HTTPException(status_code=429, detail="too many failed attempts; wait a minute")
     verifier = getattr(request.app.state, "credential_verifier", auth.verify_credentials)
-    if not verifier(settings, username, payload.password):
+    try:
+        verified = verifier(settings, username, payload.password)
+    except auth.CredentialProbeBusy as exc:
+        raise HTTPException(status_code=503, detail=f"login busy: {exc} -- try again") from exc
+    if not verified:
         auth.record_login_failure(username)
         raise HTTPException(status_code=401, detail="bad username or password")
     auth.clear_login_failures(username)
@@ -449,6 +559,8 @@ def api_login(payload: LoginIn, request: Request, response: Response) -> dict[st
         max_age=auth.SESSION_TTL_SECONDS,
         httponly=True,
         samesite="lax",
+        # see auth.cookie_secure: on for https, off for today's http LAN
+        secure=auth.cookie_secure(settings, request),
         path="/",
     )
     return {"ok": True, "user": username, "is_admin": auth.is_admin(settings, username)}
@@ -468,13 +580,56 @@ class VerifyIn(LoginIn):
     platform: str | None = None
 
 
+def _require_fleet_member(settings, username: str) -> None:
+    """Refuse to mint a companion identity (and hand out the shared report
+    token) for an SMB account that isn't part of this fleet.
+
+    The credential check is an SMB session setup, so ANY account the NAS's
+    SMB service accepts -- a bookkeeper, a guest share user, truenas_admin --
+    used to come back with a valid identity token AND report_token, i.e. the
+    ability to write reports as themselves and read every editor's selection.
+    Membership of the `editors` group (or DASH_ADMIN_USERS) is the same
+    fleet definition create_or_update_editor already enforces.
+
+    Degrades the way build_admin_users_view does: with no TRUENAS_PW there is
+    nothing to check against, so the check is skipped (and logged) rather than
+    locking every companion out of a TrueNAS-less deployment. A TrueNAS that
+    is configured but unreachable answers 503 -- retryable, never open.
+    """
+    if auth.is_admin(settings, username):
+        return
+    if not settings.truenas_pw:
+        log.warning(
+            "minting an identity for %r without an editors-group check: TRUENAS_PW is not "
+            "configured on the dashboard", username)
+        return
+    client = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
+                           base_url=settings.truenas_base_url or None,
+                           verify_ssl=settings.truenas_verify_ssl)
+    try:
+        allowed = client.is_editor(username)
+    except TrueNASError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"cannot confirm fleet membership right now ({exc}) -- try again",
+        ) from exc
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{username!r} is not in the '{EDITORS_GROUP}' group on the NAS -- "
+                   "ask an admin to add the account in Admin > Users",
+        )
+
+
 @router.post("/verify")
 def api_verify(
     payload: VerifyIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
     """Companion machine-identity verification: same credential check as the
     browser login, but returns a long-lived signed identity token the
-    companion stores to prove whose machine it is. Open (no session needed)."""
+    companion stores to prove whose machine it is. Open (no session needed),
+    but only for accounts that are actually in the fleet (see
+    _require_fleet_member)."""
     settings = request.app.state.settings
     if not settings.session_secret:
         raise HTTPException(status_code=503, detail="identity not configured (DASH_SESSION_SECRET unset)")
@@ -482,10 +637,15 @@ def api_verify(
     if auth.login_throttled(username):
         raise HTTPException(status_code=429, detail="too many failed attempts; wait a minute")
     verifier = getattr(request.app.state, "credential_verifier", auth.verify_credentials)
-    if not verifier(settings, username, payload.password):
+    try:
+        verified = verifier(settings, username, payload.password)
+    except auth.CredentialProbeBusy as exc:
+        raise HTTPException(status_code=503, detail=f"verify busy: {exc} -- try again") from exc
+    if not verified:
         auth.record_login_failure(username)
         raise HTTPException(status_code=401, detail="bad username or password")
     auth.clear_login_failures(username)
+    _require_fleet_member(settings, username)
     result = {
         "ok": True,
         "username": username,
@@ -554,10 +714,30 @@ def _selection_view(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
 
 
 def _require_selection_read(request: Request, editor: str) -> None:
+    """Session (self or admin), or the companion's token PLUS a matching
+    identity header.
+
+    The report token is a SHARED secret every editor's companion holds (it is
+    handed out by /api/v1/verify), so on its own it proved nothing about WHOSE
+    selection was being read -- any editor could enumerate the whole fleet's
+    queues and sticky project-root mappings. This is the same identity rule
+    /api/v1/report already applies, and the same carve-out: a server with no
+    DASH_SESSION_SECRET cannot mint or verify identity tokens at all, so
+    requiring one there would just break lab deployments."""
     settings = request.app.state.settings
     token = request.headers.get("x-ccsync-token", "")
-    if settings.report_token and token == settings.report_token:
-        return  # companion access
+    if token_ok(settings.report_token, token):
+        if not settings.session_secret:
+            return  # cannot mint or check identities at all -- token is all there is
+        identity = request.headers.get("x-ccsync-identity", "")
+        id_user = auth.read_identity_token(settings.session_secret, identity)
+        if id_user is not None and id_user == editor:
+            return  # companion access, proven to be this editor's machine
+        raise HTTPException(
+            status_code=401,
+            detail="X-CCSync-Identity required (and must match the editor) alongside "
+                   "X-CCSync-Token -- sign in from the companion tray",
+        )
     if auth.can_manage(settings, auth.get_session_user(request), editor):
         return
     raise HTTPException(status_code=401, detail="log in, or present X-CCSync-Token")
@@ -638,9 +818,12 @@ def api_project_roots(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str,
 def api_set_project_root(
     payload: ProjectRootIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
-    """Tiered: any signed-in editor may FIRST-SET an unmapped Resolve
-    project (first-write-wins, so races resolve at the DB); deleting or
-    CHANGING an existing mapping stays admin-only ("fixed once set")."""
+    """Tiered: an editor may FIRST-SET an unmapped Resolve project that ONE OF
+    THEIR OWN MACHINES HAS REPORTED (first-write-wins, so races resolve at the
+    DB); deleting or CHANGING an existing mapping stays admin-only ("fixed
+    once set"). Admins may first-set anything. See may_first_claim: the
+    un-scoped version let any editor claim any name, including one only
+    another editor's companion had ever opened."""
     settings = request.app.state.settings
     user = auth.get_session_user(request)
     if user is None:
@@ -664,6 +847,12 @@ def api_set_project_root(
             admin = _require_admin(request)
             db.admin_set_project_root(conn, name, slug, admin=admin, now=db.utcnow_iso())
         else:
+            if not may_first_claim(settings, conn, user, name):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"{name!r} is not a Resolve project any of your machines has "
+                           "reported -- open it in Resolve first, or ask an admin",
+                )
             inserted = db.sticky_project_root(
                 conn, name, slug, db.utcnow_iso(), source="editor", updated_by=user
             )
@@ -682,6 +871,18 @@ def api_set_project_root(
 class ProjectSetupError(Exception):
     """User-fixable problem with a create-project request; the message is
     shown verbatim in the UI banner / API 422 detail."""
+
+
+class FolderExistsError(ProjectSetupError):
+    """create_tree_project's target directory already exists on the NAS and
+    the caller did not ask to reuse it. Carries `rel` so the picker can offer
+    a one-click "use that folder instead" -- without it the only remaining
+    action was "type another name", which is how
+    2026/CCT/Website Highlights/Website Highlights happened."""
+
+    def __init__(self, message: str, rel: str):
+        super().__init__(message)
+        self.rel = rel
 
 
 _YEAR_RE = re.compile(r"^\d{4}$")
@@ -724,7 +925,10 @@ def _safe_rel(settings, rel: str) -> tuple[Path, str]:
     parts = [_validate_tree_part(p, "path segment") for p in rel.split("/")]
     normalized = "/".join(parts)
     target = (projects_dir / Path(*parts)).resolve()
-    if not str(target).startswith(str(projects_dir.resolve())):
+    # is_relative_to, not a string prefix: the old check would have accepted a
+    # sibling '<projects_dir>-old' (not currently reachable, but one segment
+    # validator change away from being so).
+    if not target.is_relative_to(projects_dir.resolve()):
         raise ProjectSetupError("path escapes the Projects tree")
     return target, normalized
 
@@ -732,15 +936,28 @@ def _safe_rel(settings, rel: str) -> tuple[Path, str]:
 def _marked_ancestor(projects_dir: Path, rel: str) -> str | None:
     """The rel of the closest ancestor (or rel itself) carrying a project
     marker, or None. Projects cannot nest -- both create and link refuse
-    inside an existing project."""
+    inside an existing project. Shared with the collector's provision cycle,
+    which enforces the same rule before creating a Syncthing folder."""
     from . import provision
 
-    parts = [p for p in rel.split("/") if p]
-    for i in range(len(parts), 0, -1):
-        candidate = "/".join(parts[:i])
-        if provision.read_marker(projects_dir / Path(*parts[:i])) is not None:
-            return candidate
-    return None
+    return provision.marked_ancestor(projects_dir, rel, include_self=True)
+
+
+def may_first_claim(
+    settings, conn: sqlite3.Connection, user: str | None, resolve_project: str
+) -> bool:
+    """May `user` create the FIRST sticky mapping for this Resolve project?
+
+    Admins: always. Everyone else: only for a name one of their OWN machines
+    has actually reported (machine_state). Without this scoping any signed-in
+    editor could first-claim any unmapped Resolve project name -- including
+    one only somebody else's companion has ever opened -- and permanently fix
+    where that editor's media lands, with no way back but an admin edit."""
+    if user is None:
+        return False
+    if auth.is_admin(settings, user):
+        return True
+    return db.editor_reported_resolve_project(conn, user, resolve_project)
 
 
 def _register_project(
@@ -751,10 +968,18 @@ def _register_project(
     the provision cycle adds the Syncthing folder within ~5 min and the
     deactivation grace covers the gap) + sticky Resolve mapping."""
     now = db.utcnow_iso()
+    resolve_project = (resolve_project or "").strip()
+    if resolve_project and not may_first_claim(settings, conn, user, resolve_project):
+        # Refuse BEFORE the projects row is written: half-claiming (folder
+        # made, mapping silently skipped) is how an editor ends up believing
+        # a project is set up when their companion still prompts for it.
+        raise ProjectSetupError(
+            f"{resolve_project!r} is not a Resolve project any of your machines has "
+            "reported -- open it in Resolve first, or ask an admin to set the mapping"
+        )
     st_path = f"{settings.syncthing_data_prefix.rstrip('/')}/{rel}"
     db.upsert_project(conn, slug, rel, st_path, now)
     mapped = False
-    resolve_project = (resolve_project or "").strip()
     if resolve_project:
         mapped = db.sticky_project_root(
             conn, resolve_project, slug, now, source="editor", updated_by=user
@@ -769,10 +994,19 @@ def create_tree_project(
     name: str,
     resolve_project: str,
     user: str,
+    use_existing: bool = False,
 ) -> dict[str, Any]:
     """Create Projects/<parent_rel>/<name> (any depth) with the standard
     template subfolders and a project marker, register + map it. Idempotent
-    for the same rel. Caller commits."""
+    for the same rel. Caller commits.
+
+    An already-existing target raises FolderExistsError unless it already
+    carries this project's marker (partial-create convergence) or the caller
+    passes use_existing=True -- the picker's [ USE THIS FOLDER ] (adopt_folder)
+    is the normal way to point a project at a folder that is already there,
+    and it does not touch the folder's contents. use_existing=True means
+    "adopt it AND add the standard template subfolders"; every mkdir is
+    exist_ok so a pre-populated folder is left alone."""
     from . import provision
 
     parent_path, parent_norm = _safe_rel(settings, parent_rel)
@@ -781,12 +1015,23 @@ def create_tree_project(
     name = _validate_tree_part(name, "project name")
     rel = f"{parent_norm}/{name}" if parent_norm else name
 
-    inside = _marked_ancestor(_projects_dir_or_error(settings), rel.rsplit("/", 1)[0]) \
-        if "/" in rel else None
+    projects_dir = _projects_dir_or_error(settings)
+    inside = _marked_ancestor(projects_dir, rel.rsplit("/", 1)[0]) if "/" in rel else None
     if inside:
         raise ProjectSetupError(
             f"cannot create a project inside another project ({inside})"
         )
+    # ...and no marked DESCENDANTS either (adopt_folder already checks this).
+    # mkdir(exist_ok=True) happily reuses an existing directory, so "create
+    # 2026/CCT" over a container that already holds three real projects would
+    # otherwise drop a marker on the container: scan_project_dirs prunes at
+    # it, all three vanish from discovery, and a Syncthing folder is
+    # provisioned whose path CONTAINS three other folders' paths.
+    for child_rel, _child_slug in provision.scan_project_dirs(projects_dir):
+        if child_rel.startswith(rel + "/"):
+            raise ProjectSetupError(
+                f"that folder already contains a project ({child_rel}) -- pick that instead"
+            )
 
     try:
         slug = provision.slugify(rel)
@@ -794,10 +1039,21 @@ def create_tree_project(
         raise ProjectSetupError("that name produces an empty identifier -- use letters/numbers")
 
     target = parent_path / name
-    existing_marker = provision.read_marker(target) if target.is_dir() else None
+    exists = target.is_dir()
+    existing_marker = provision.read_marker(target) if exists else None
     if existing_marker is not None and existing_marker != slug:
         raise ProjectSetupError(
             f"that folder is already a project with a different identity ({existing_marker})"
+        )
+    if exists and existing_marker is None and not use_existing:
+        # Don't silently absorb (and template-ify) a folder someone already
+        # made on the NAS -- offer it instead, so the answer to "my folder is
+        # already there" stops being "type another name" (the double-nesting
+        # bug).
+        raise FolderExistsError(
+            f"Projects/{rel} already exists -- use [ USE THIS FOLDER ] to point the project "
+            "at it instead of creating another folder inside it",
+            rel,
         )
     row = conn.execute("SELECT label FROM projects WHERE slug=?", (slug,)).fetchone()
     if row is not None and row["label"] != rel:
@@ -825,7 +1081,10 @@ def adopt_folder(
 ) -> dict[str, Any]:
     """Claim an EXISTING folder (any depth) as a project: write its marker
     (or adopt the one it already carries), register + map it. This is the
-    picker's [ LINK THIS FOLDER ] flow. Caller commits."""
+    picker's [ USE THIS FOLDER ] flow -- for a browsed child row AND for the
+    folder the browser is currently standing in. Contents are never touched
+    (no template subfolders), so a folder already full of media adopts
+    cleanly. Caller commits."""
     from . import provision
 
     projects_dir = _projects_dir_or_error(settings)
@@ -880,6 +1139,8 @@ class CreateProjectIn(BaseModel):
     parent_rel: str = Field(default="", max_length=512)
     name: str = Field(min_length=1, max_length=128)
     resolve_project: str = Field(default="", max_length=256)
+    # opt-in "the folder is already there, use it" -- see create_tree_project
+    use_existing: bool = False
 
 
 class LinkFolderIn(BaseModel):
@@ -898,6 +1159,7 @@ def api_create_project(
         result = create_tree_project(
             request.app.state.settings, conn,
             payload.parent_rel, payload.name, payload.resolve_project, user,
+            use_existing=payload.use_existing,
         )
     except ProjectSetupError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -938,7 +1200,8 @@ def build_admin_users_view(settings) -> dict[str, Any]:
         return {"truenas_configured": False, "editors": [], "pending_devices": [], "error": None}
 
     truenas = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
-                              base_url=settings.truenas_base_url or None)
+                              base_url=settings.truenas_base_url or None,
+                              verify_ssl=settings.truenas_verify_ssl)
     try:
         editors = truenas.list_editors()
     except TrueNASError as exc:
@@ -957,7 +1220,7 @@ def build_admin_users_view(settings) -> dict[str, Any]:
 
     pending: list[dict[str, Any]] = []
     if settings.syncthing_url:
-        syncthing = SyncthingClient(settings.syncthing_url, settings.syncthing_api_key)
+        syncthing = SyncthingClient.from_settings(settings)
         try:
             cfg = syncthing.config()
             my_id = syncthing.system_status().get("myID", "")
@@ -991,7 +1254,8 @@ def _truenas_client_or_503(request: Request) -> TrueNASClient:
     if not settings.truenas_pw:
         raise HTTPException(status_code=503, detail="TRUENAS_PW is not configured on the dashboard")
     return TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
-                              base_url=settings.truenas_base_url or None)
+                              base_url=settings.truenas_base_url or None,
+                              verify_ssl=settings.truenas_verify_ssl)
 
 
 class CreateEditorIn(BaseModel):
@@ -1042,10 +1306,24 @@ def api_admin_create_user(payload: CreateEditorIn, request: Request) -> dict[str
 
 @router.post("/admin/users/{username}/password")
 def api_admin_set_password(username: str, payload: SetPasswordIn, request: Request) -> dict[str, Any]:
+    """Set a known password for an EDITOR account.
+
+    The charset check is here as well as inside set_known_password: an
+    admin's typo (or a URL-encoded 'root') must be a 422 from the dashboard,
+    not a TrueNAS round-trip that changes a system account's password. The
+    refusals that actually matter -- uid < 1000, not in the editors group --
+    live in truenas_client.set_known_password so every caller gets them."""
     _require_admin(request)
+    username = username.strip().lower()
+    if not is_valid_username(username):
+        raise HTTPException(
+            status_code=422,
+            detail="username must start with a letter and contain only lowercase letters, "
+                   "digits, '.', '_', '-'",
+        )
     truenas = _truenas_client_or_503(request)
     try:
-        truenas.set_known_password(username.strip().lower(), payload.password)
+        truenas.set_known_password(username, payload.password)
     except TrueNASError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"ok": True}
@@ -1060,7 +1338,7 @@ def api_admin_approve_device(payload: ApproveDeviceIn, request: Request) -> dict
     username = payload.username.strip().lower()
     if not is_valid_username(username):
         raise HTTPException(status_code=422, detail="username must be a valid TrueNAS-style username")
-    syncthing = SyncthingClient(settings.syncthing_url, settings.syncthing_api_key)
+    syncthing = SyncthingClient.from_settings(settings)
     try:
         syncthing.approve_device(payload.device_id.strip(), username)
     except SyncthingError as exc:
@@ -1096,8 +1374,13 @@ def _upgrade_info(
     not "newer": that makes an admin rollback get offered to the fleet like
     any other update, with zero extra machinery. Absent key = up to date
     (old companions that never send their version just never see it).
+
+    An absent or unknown `platform` offers NOTHING (see X-5): coercing it to
+    "windows" is how a macOS companion got handed a Windows .exe.
     """
-    plat = (platform or "windows").strip().lower()
+    plat = (platform or "").strip().lower()
+    if plat not in _PACKAGE_PLATFORMS:
+        return None
     current = db.get_current_package(conn, plat)
     if current is None or not running or running == current["version"]:
         return None
@@ -1158,13 +1441,29 @@ async def api_publish_package(
     request: Request,
     sha256: str = "",
     make_current: int = 0,
+    prune: int = 0,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """Publish a companion build: raw exe bytes as the request body (no
     multipart -- python-multipart isn't a dependency and doesn't need to be),
     expected sha256 as a query param, verified server-side before anything
     becomes visible. A `.part` staging file + os.replace means the served
-    file is always complete."""
+    file is always complete.
+
+    `?prune=1` opts IN to deleting all but the current build and the two
+    newest non-current ones. It is off by default: publishing must not
+    silently destroy older build artifacts (rollback material) as a side
+    effect, given the standing no-deletion rule.
+
+    Two shapes here are deliberate (see the unbounded-packages-upload
+    finding): the body is capped at MAX_PACKAGE_BODY_BYTES both by
+    Content-Length (app.py's body_size_gate) and by a running total here --
+    the header is advisory for a chunked request -- and every file write goes
+    through the threadpool, because this is an `async def` and a 60 MB
+    blocking write to a ZFS dataset otherwise stalls the whole event loop
+    (every companion report, every htmx poll) for its duration."""
+    from .app import MAX_PACKAGE_BODY_BYTES
+
     user = _require_admin(request)
     settings = request.app.state.settings
     platform = platform.strip().lower()
@@ -1188,22 +1487,32 @@ async def api_publish_package(
     part = dest_dir / (filename + ".part")
     digest = hashlib.sha256()
     size = 0
+    too_big = False
     try:
         with part.open("wb") as fh:
             async for chunk in request.stream():
-                fh.write(chunk)
-                digest.update(chunk)
                 size += len(chunk)
+                if size > MAX_PACKAGE_BODY_BYTES:
+                    too_big = True
+                    break
+                await run_in_threadpool(fh.write, chunk)
+                digest.update(chunk)
     except Exception:
         part.unlink(missing_ok=True)
         raise
+    if too_big:
+        part.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=413,
+            detail=f"package body too large (max {MAX_PACKAGE_BODY_BYTES} bytes)",
+        )
     if size == 0 or digest.hexdigest() != sha:
         part.unlink(missing_ok=True)
         raise HTTPException(
             status_code=400,
             detail="sha256 mismatch (or empty body) -- upload corrupted, nothing was published",
         )
-    os.replace(part, dest_dir / filename)
+    await run_in_threadpool(os.replace, part, dest_dir / filename)
 
     db.insert_companion_package(
         conn, version=version, platform=platform, filename=filename,
@@ -1211,9 +1520,13 @@ async def api_publish_package(
     )
     if make_current:
         db.set_current_package(conn, platform, version)
-    for row in db.prune_companion_packages(conn, platform):
-        _unlink_package_file(settings, row)
+    pruned = db.prune_companion_packages(conn, platform) if prune else []
+    # Commit BEFORE unlinking: the old order deleted the exe first, so a
+    # failed commit left the file gone while the row survived ([ FILE
+    # MISSING ] in the UI, 404 for any companion pointed at it).
     conn.commit()
+    for row in pruned:
+        _unlink_package_file(settings, row)
     return {"ok": True, "view": build_packages_view(conn, settings)}
 
 
@@ -1258,8 +1571,7 @@ def _require_package_read(request: Request) -> None:
     any signed-in user or any companion holding the shared report token may
     download a published package (it's the same exe everyone runs)."""
     settings = request.app.state.settings
-    token = request.headers.get("x-ccsync-token", "")
-    if settings.report_token and token == settings.report_token:
+    if token_ok(settings.report_token, request.headers.get("x-ccsync-token", "")):
         return
     if auth.get_session_user(request) is not None:
         return
@@ -1289,15 +1601,24 @@ def api_download_package(
 
 # ------------------------------------------------------------------ report
 
+# Field ceilings for the report body (see the unbounded-report finding). Every
+# string that reaches a DB column is capped, every list is capped, and the two
+# free-form dicts have a key-count cap -- so the whole payload has a bounded
+# worst case even before the request-size middleware in app.py.
+MAX_REPORT_PROJECTS = 64          # keys in local_manifest / media_tree
+MAX_MANIFEST_FILES = 4000         # per project, per kind (db caps rows again)
+MAX_MEDIA_CLIPS = 4000            # per Resolve project
+
+
 class TransferIn(BaseModel):
-    name: str
-    direction: str = ""
+    name: str = Field(max_length=512)
+    direction: str = Field(default="", max_length=16)
     bytes_done: int | None = None
     bytes_total: int | None = None
     percentage: float | None = None
     speed_bps: float | None = None
     eta_seconds: float | None = None
-    project_slug: str | None = None
+    project_slug: str | None = Field(default=None, max_length=128)
 
 
 class LaneReportIn(BaseModel):
@@ -1305,11 +1626,11 @@ class LaneReportIn(BaseModel):
     state: Literal["idle", "syncing", "error", "paused"]
     queued: int | None = None
     transferring: int | None = None
-    last_error: str | None = None
-    last_sync: str | None = None
-    detail: str | None = None
+    last_error: str | None = Field(default=None, max_length=2000)
+    last_sync: str | None = Field(default=None, max_length=64)
+    detail: str | None = Field(default=None, max_length=500)
     # Progress fields (companions >= 0.2); optional for rollout compatibility.
-    current_project: str | None = None
+    current_project: str | None = Field(default=None, max_length=512)
     bytes_done: int | None = None
     bytes_total: int | None = None
     speed_bps: float | None = None
@@ -1318,52 +1639,82 @@ class LaneReportIn(BaseModel):
     # live transfers per lane, never anywhere near this many.
     transfers: list[TransferIn] = Field(default_factory=list, max_length=256)
 
-    @field_validator("name")
-    @classmethod
-    def _known_lane(cls, v: str) -> str:
-        # Current companions send exactly the three lanes in LANE_LABELS;
-        # anything else is rejected rather than silently creating a
-        # permanent lane_report_current row for a bogus lane name (SEC-4).
-        if v not in LANE_LABELS:
-            raise ValueError(f"unknown lane name: {v!r}")
-        return v
-
 
 class ManifestProjectIn(BaseModel):
-    n_originals: int = 0
-    bytes_originals: int = 0
-    n_proxies: int = 0
-    bytes_proxies: int = 0
+    n_originals: int = Field(default=0, ge=0, le=10_000_000)
+    bytes_originals: int = Field(default=0, ge=0, le=2**60)
+    n_proxies: int = Field(default=0, ge=0, le=10_000_000)
+    bytes_proxies: int = Field(default=0, ge=0, le=2**60)
     truncated: bool = False
-    originals: list[tuple[str, int | None]] | None = None
-    proxies: list[tuple[str, int | None]] | None = None
+    originals: list[tuple[str, int | None]] | None = Field(
+        default=None, max_length=MAX_MANIFEST_FILES)
+    proxies: list[tuple[str, int | None]] | None = Field(
+        default=None, max_length=MAX_MANIFEST_FILES)
 
 
 class MediaClipIn(BaseModel):
-    bin_path: str = ""
-    clip_name: str
-    file_path: str | None = None
-    kind: str | None = None
+    bin_path: str = Field(default="", max_length=512)
+    clip_name: str = Field(max_length=512)
+    file_path: str | None = Field(default=None, max_length=1024)
+    kind: str | None = Field(default=None, max_length=32)
     present: bool = False
 
 
 class ReportIn(BaseModel):
     editor_name: str = Field(min_length=1, max_length=64)
     machine: str = Field(min_length=1, max_length=128)
-    companion_version: str | None = None
-    platform: str | None = None         # 'windows' | 'macos' (companions >= 0.2)
-    reported_at: str
+    companion_version: str | None = Field(default=None, max_length=64)
+    platform: str | None = Field(default=None, max_length=32)  # 'windows' | 'macos'
+    reported_at: str = Field(max_length=64)
     # Generous but bounded (see SEC-4): current companions send exactly the
     # three lanes in LANE_LABELS.
     lanes: list[LaneReportIn] = Field(max_length=32)
-    queue: list[str] | None = None      # informational; selections table is the truth
-    current_project: str | None = None
-    resolve_project: str | None = None  # currently open Resolve project name
+    queue: list[str] | None = Field(default=None, max_length=MAX_REPORT_PROJECTS)
+    current_project: str | None = Field(default=None, max_length=512)
+    resolve_project: str | None = Field(default=None, max_length=512)
     # Media-presence (companions >= 0.3); all optional -> absent leaves tables
     # untouched, so a LIGHT report never wipes manifest/tree data.
-    mode: str | None = None             # 'base' | 'editor'
+    mode: str | None = Field(default=None, max_length=32)   # 'base' | 'editor'
     local_manifest: dict[str, ManifestProjectIn] | None = None   # keyed by project rel
     media_tree: dict[str, list[MediaClipIn]] | None = None       # keyed by RESOLVE PROJECT NAME
+
+    @field_validator("machine")
+    @classmethod
+    def _clean_machine(cls, v: str) -> str:
+        # `machine` is half of the primary key in four tables: " PC" and "PC"
+        # must never become two machines.
+        v = v.strip()
+        if not v:
+            raise ValueError("machine must not be blank")
+        return v
+
+    @field_validator("lanes")
+    @classmethod
+    def _drop_unknown_lanes(cls, lanes: list[LaneReportIn]) -> list[LaneReportIn]:
+        """Unknown lane names are FILTERED OUT, not rejected.
+
+        Rejecting the model made one unknown lane 422 the whole report, so a
+        companion shipping a future 4th lane would go completely dark against
+        an un-upgraded dashboard. Dropping the unknown entries keeps the three
+        real lanes flowing while still never creating a permanent
+        lane_report_current row for a bogus name (SEC-4)."""
+        return [lane for lane in lanes if lane.name in LANE_LABELS]
+
+    @field_validator("local_manifest", "media_tree")
+    @classmethod
+    def _cap_project_keys(cls, value):
+        if value is not None and len(value) > MAX_REPORT_PROJECTS:
+            raise ValueError(f"too many projects (max {MAX_REPORT_PROJECTS})")
+        return value
+
+    @field_validator("media_tree")
+    @classmethod
+    def _cap_clips(cls, value):
+        if value is not None:
+            for name, clips in value.items():
+                if len(clips) > MAX_MEDIA_CLIPS:
+                    raise ValueError(f"too many clips for {name!r} (max {MAX_MEDIA_CLIPS})")
+        return value
 
 
 @router.post("/report")
@@ -1373,7 +1724,7 @@ def api_report(
     settings = request.app.state.settings
     token = request.headers.get("x-ccsync-token", "")
     if settings.report_token:
-        if token != settings.report_token:
+        if not token_ok(settings.report_token, token):
             raise HTTPException(status_code=401, detail="bad or missing X-CCSync-Token")
     elif not settings.report_token_optional:
         raise HTTPException(
@@ -1382,18 +1733,40 @@ def api_report(
         )
     received_at = db.utcnow_iso()
     editor = payload.editor_name.strip().lower()
+    machine = payload.machine.strip()
 
     # Machine-identity verification: a valid X-CCSync-Identity token whose
     # username matches the reported editor_name proves this companion actually
-    # authenticated as that editor (not just a config-set editor_name). Check
-    # this BEFORE any write: an identity token that is present and valid but
-    # names a DIFFERENT editor means someone is spoofing editor_name in the
-    # body (see SEC-5) -- reject the whole report rather than silently
-    # writing under verified=0, which would let any editor overwrite/corrupt
-    # another editor's presence rows and machine_state.
+    # authenticated as that editor (not just a config-set editor_name). The
+    # header is REQUIRED whenever the server can verify one (i.e. whenever
+    # DASH_SESSION_SECRET is configured): the report token is a SHARED secret
+    # handed to every editor by /api/v1/verify, so without this any token
+    # holder could write reports -- and overwrite presence rows,
+    # machine_state and live transfers -- as any other editor (see SEC-5).
+    #
+    # BEHAVIOUR CHANGE: pre-upgrade companions that don't send the header are
+    # rejected with 401. Sign in on the companion tray to mint one.
     identity = request.headers.get("x-ccsync-identity", "")
     id_user = auth.read_identity_token(settings.session_secret, identity) if identity else None
-    if identity and id_user is not None and id_user != editor:
+    if settings.session_secret:
+        if not identity:
+            raise HTTPException(
+                status_code=401,
+                detail="X-CCSync-Identity required -- sign in from the companion tray "
+                       "(Sign in…) to get a machine identity token",
+            )
+        if id_user is None:
+            raise HTTPException(
+                status_code=401,
+                detail="X-CCSync-Identity is invalid or expired -- sign in again from the "
+                       "companion tray",
+            )
+        if id_user != editor:
+            raise HTTPException(
+                status_code=401,
+                detail="X-CCSync-Identity does not match editor_name",
+            )
+    elif identity and id_user is not None and id_user != editor:
         raise HTTPException(
             status_code=401,
             detail="X-CCSync-Identity does not match editor_name",
@@ -1404,7 +1777,7 @@ def api_report(
         db.upsert_lane_report(
             conn,
             editor_username=editor,
-            machine=payload.machine,
+            machine=machine,
             lane=lane.name,
             state=lane.state,
             queued=lane.queued,
@@ -1421,9 +1794,16 @@ def api_report(
             speed_bps=lane.speed_bps,
             eta_seconds=lane.eta_seconds,
         )
-    # Sticky fix-destination mapping: the FIRST successful auto-match of a
-    # Resolve project name to a tree project is stored and never changes
+    # Sticky fix-destination mapping: the FIRST HIGH-CONFIDENCE auto-match of
+    # a Resolve project name to a tree project is stored and never changes
     # automatically -- admins edit it on the dashboard thereafter.
+    #
+    # "High confidence" (db.match_project_label_confident) means >=2 shared
+    # non-trivial tokens, or the name IS the project's final path segment.
+    # One shared word is a coincidence: "Nuclear Family Reunion" mapped
+    # itself permanently into "2025/FF4/Nuclear" on the token "nuclear"
+    # (verified 2026-07-25). Anything weaker is left unmapped so the report
+    # reply prompts a human to pick the folder.
     #
     # Scratch/utility Resolve projects are dropped HERE, server-side, as
     # well as in the companion's watcher (config ignored_resolve_projects):
@@ -1434,7 +1814,7 @@ def api_report(
     # resolve_project_unmapped and pops a bogus NEW PROJECT dialog.
     detected_slug = None
     resolve_project = (payload.resolve_project or "").strip()
-    if resolve_project.lower() in IGNORED_RESOLVE_PROJECTS:
+    if is_ignored_resolve_project(resolve_project):
         resolve_project = ""
     if resolve_project:
         existing = conn.execute(
@@ -1448,18 +1828,18 @@ def api_report(
                 r["label"]: r["slug"]
                 for r in conn.execute("SELECT slug, label FROM projects WHERE active=1")
             }
-            match = db.match_project_label(resolve_project, labels.keys())
+            match = db.match_project_label_confident(resolve_project, labels.keys())
             if match is not None:
                 detected_slug = labels[match]
                 db.sticky_project_root(conn, resolve_project, detected_slug, received_at)
     db.upsert_machine_state(
-        conn, editor, payload.machine, detected_slug, received_at,
+        conn, editor, machine, detected_slug, received_at,
         resolve_project=resolve_project or None, verified=verified,
         platform=(payload.platform or "").strip().lower() or None,
+        companion_version=(payload.companion_version or "").strip() or None,
     )
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
-    machine = payload.machine
     mode = (payload.mode or "editor").strip().lower()
 
     # Live transfers: replace the whole set for this (editor, machine) so an
@@ -1493,7 +1873,7 @@ def api_report(
         # media_tree is keyed by the RESOLVE PROJECT NAME; map it to a slug via
         # the sticky project_roots table (same source as the fix-dest mapping).
         for resolve_name, clips in payload.media_tree.items():
-            if resolve_name.strip().lower() in IGNORED_RESOLVE_PROJECTS:
+            if is_ignored_resolve_project(resolve_name):
                 continue
             slug = _slug_for_resolve_name(conn, resolve_name)
             if slug is None:
@@ -1524,10 +1904,23 @@ def _slug_for_rel(conn: sqlite3.Connection, rel: str) -> str:
     authoritative lookup key, because a moved/adopted project's real slug --
     the marker's immutable slug -- need not equal slugify(its current rel)
     (see X-3). Only falls back to slugify() when no project is registered at
-    that label at all (e.g. a report about a brand-new/unregistered dir)."""
-    row = conn.execute("SELECT slug FROM projects WHERE label = ?", (rel,)).fetchone()
-    if row is not None:
-        return row["slug"]
+    that label at all (e.g. a report about a brand-new/unregistered dir).
+
+    `label` has no uniqueness constraint, so the lookup is constrained to
+    ACTIVE projects, ordered deterministically, and prefers a row whose
+    stored path actually ends in this rel -- otherwise two projects sharing a
+    label (or a deactivated one) yielded an arbitrary slug."""
+    rows = conn.execute(
+        "SELECT slug, path FROM projects WHERE label = ? AND active = 1 ORDER BY id",
+        (rel,),
+    ).fetchall()
+    if rows:
+        want = rel.strip("/")
+        for row in rows:
+            path = str(row["path"] or "").replace("\\", "/").rstrip("/")
+            if path == want or path.endswith("/" + want):
+                return row["slug"]
+        return rows[0]["slug"]
     from . import provision
     try:
         return provision.slugify(rel)
@@ -1536,17 +1929,19 @@ def _slug_for_rel(conn: sqlite3.Connection, rel: str) -> str:
 
 
 def _slug_for_resolve_name(conn: sqlite3.Connection, resolve_name: str) -> str | None:
-    """Resolve project NAME -> tree slug, via the sticky project_roots mapping,
-    falling back to a best-effort label match."""
+    """Resolve project NAME -> tree slug, via the sticky project_roots
+    mapping ONLY.
+
+    There is deliberately no best-effort label match here. This lookup routes
+    a media_tree report, and replace_media_tree WIPES AND REPLACES that
+    project's whole bin tree for the reporting machine: a loose token match
+    ("Nuclear Family Reunion" -> "2025/FF4/Nuclear" on the word "nuclear")
+    therefore blew away an unrelated project's presence data. No explicit
+    mapping = no write; the report reply already asks the editor to set one."""
     name = (resolve_name or "").strip()
     if not name:
         return None
     row = conn.execute(
         "SELECT project_slug FROM project_roots WHERE resolve_project = ?", (name,)
     ).fetchone()
-    if row is not None:
-        return row["project_slug"]
-    labels = {r["label"]: r["slug"] for r in
-              conn.execute("SELECT slug, label FROM projects WHERE active=1")}
-    match = db.match_project_label(name, labels.keys())
-    return labels.get(match) if match else None
+    return row["project_slug"] if row is not None else None

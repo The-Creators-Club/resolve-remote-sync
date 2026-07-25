@@ -29,6 +29,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import threading
 import time
 import uuid
 
@@ -51,6 +52,20 @@ PURPOSE_IDENTITY = "identity"
 # In-process failure tracking -- valid because the app runs a single worker.
 _failures: dict[str, list[float]] = {}
 
+# Concurrency cap on the blocking SMB probe. /login and /api/v1/verify are both
+# unauthenticated and both spend up to 10s inside smbprotocol; without a cap,
+# 60 concurrent requests against a blackholing SMB host consume every anyio
+# worker and queue every other route (including companions' reports) behind
+# them. The per-username throttle bounds RATE, not concurrency, and is trivially
+# bypassed by rotating usernames.
+MAX_CONCURRENT_SMB_PROBES = 4
+SMB_PROBE_QUEUE_SECONDS = 2.0
+_probe_slots = threading.Semaphore(MAX_CONCURRENT_SMB_PROBES)
+
+
+class CredentialProbeBusy(Exception):
+    """Too many credential probes in flight; the caller should answer 503."""
+
 
 # ------------------------------------------------------------ verification
 
@@ -64,6 +79,18 @@ def _verify_smb(host: str, username: str, password: str, timeout: float = 10.0) 
         session = Session(conn, username, password, require_encryption=False)
         try:
             session.connect()
+            # smbprotocol does NOT reject a session the server mapped to guest
+            # or to anonymous/null. If the NAS's SMB service ever maps bad
+            # passwords to guest, every password would otherwise authenticate
+            # for every username -- including anyone in DASH_ADMIN_USERS.
+            # SMB2_SESSION_FLAG_IS_GUEST = 0x0001, IS_NULL = 0x0002.
+            flags = int(getattr(session, "session_flags", 0) or 0)
+            if flags != 0:
+                log.error(
+                    "REJECTING smb auth for %s: server returned session_flags=0x%04x "
+                    "(guest/null-mapped session -- not a real credential check)",
+                    username, flags)
+                return False
             return True
         finally:
             try:
@@ -84,7 +111,14 @@ def verify_credentials(settings: Settings, username: str, password: str) -> bool
     if not username or not password:
         return False
     if settings.auth_method == "smb":
-        return _verify_smb(settings.smb_host, username, password)
+        if not _probe_slots.acquire(timeout=SMB_PROBE_QUEUE_SECONDS):
+            raise CredentialProbeBusy(
+                f"more than {MAX_CONCURRENT_SMB_PROBES} credential checks already in flight"
+            )
+        try:
+            return _verify_smb(settings.smb_host, username, password)
+        finally:
+            _probe_slots.release()
     log.error("unknown DASH_AUTH_METHOD %r -- rejecting all logins", settings.auth_method)
     return False
 
@@ -200,6 +234,25 @@ def read_identity_token(secret: str, token: str | None, now: float | None = None
 def get_session_user(request: Request) -> str | None:
     settings: Settings = request.app.state.settings
     return read_session_cookie(settings.session_secret, request.cookies.get(COOKIE_NAME))
+
+
+def cookie_secure(settings: Settings, request: Request) -> bool:
+    """Whether to set Secure on the session cookie.
+
+    DASH_COOKIE_SECURE=auto (default) means "on for https, off for http": the
+    fleet is served over plain http on the LAN/tailnet today, and a hardcoded
+    secure=True there makes the browser silently drop the cookie -- an
+    unloggable, total outage. Behind a TLS terminator the request scheme is
+    https and the flag turns itself on; X-Forwarded-Proto is honoured because
+    a reverse proxy is the only way this deployment will ever see https.
+    Force it with DASH_COOKIE_SECURE=1 (or 0)."""
+    mode = str(getattr(settings, "cookie_secure", "auto") or "auto").strip().lower()
+    if mode in ("1", "true", "yes", "on"):
+        return True
+    if mode in ("0", "false", "no", "off"):
+        return False
+    forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    return (forwarded or request.url.scheme or "").lower() == "https"
 
 
 def is_admin(settings: Settings, username: str | None) -> bool:

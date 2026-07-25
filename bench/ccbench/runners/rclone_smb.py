@@ -1,6 +1,10 @@
 """rclone against an SMB share, using an on-the-fly connection string
-(https://rclone.org/smb/). Sweeps --transfers and (download-only)
---multi-thread-streams. No --sftp-chunk-size equivalent for this backend.
+(https://rclone.org/smb/). Sweeps --transfers and --multi-thread-streams in
+**both** directions: the SMB backend supports multi-thread uploads (chunked
+parallel writes into one destination file), which is exactly the advantage the
+SFTP-vs-SMB A/B for lane A exists to measure -- pinning it to 0 on "up" would
+hand the comparison to SFTP by construction. No --sftp-chunk-size equivalent
+for this backend.
 
 endpoint config (bench.toml [endpoints.smb]):
     host, share, user, password_env (name of an env var holding the plaintext
@@ -19,13 +23,13 @@ from typing import Any
 from ccbench.result import RunResult
 
 from . import base
-from ._rclone_common import available, build_param_matrix, do_transfer
+from ._rclone_common import available, build_param_matrix, cleanup_remote, do_transfer
 
 ENGINE = "rclone_smb"
 
 
 def param_matrix(cfg: dict[str, Any], direction: str) -> list[dict[str, Any]]:
-    return build_param_matrix(cfg, direction, include_chunk_size=False)
+    return build_param_matrix(cfg, direction, include_chunk_size=False, multithread_up=True)
 
 
 def _obscure(password: str) -> str:
@@ -42,7 +46,7 @@ def _obscure(password: str) -> str:
 
 def _remote_spec(endpoint: dict[str, Any], dataset_name: str, direction: str) -> str:
     if endpoint.get("local_test_dir"):
-        base_dir = Path(endpoint["local_test_dir"]) / "smb_selftest" / dataset_name / direction
+        base_dir = Path(endpoint["local_test_dir"]) / "_bench_smb" / dataset_name / direction
         base_dir.mkdir(parents=True, exist_ok=True)
         return str(base_dir)
 
@@ -91,4 +95,11 @@ def run(
         lane=lane,
         endpoint_label=str(label),
         repeat_index=repeat_index,
+        loopback=bool(endpoint.get("local_test_dir")),
     )
+
+
+def cleanup_endpoint(endpoint: dict[str, Any], dataset_name: str, direction: str) -> None:
+    """Remove the remote scratch subtree. Called once after the whole matrix,
+    never between timed runs (post-run purges warm the NAS cache)."""
+    cleanup_remote(_remote_spec(endpoint, dataset_name, direction))

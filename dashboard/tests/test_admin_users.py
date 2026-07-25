@@ -125,8 +125,9 @@ def test_create_editor_surfaces_home_directory_trap(env):
     client, truenas, _syncthing = env
     truenas.state["groups"].append({"id": 111, "group": "editors", "gid": 3001})
     truenas.state["users"].append({
+        # already an editor (group id 111) -- an in-place update we DO allow
         "id": 80, "uid": 3005, "username": "alex_laptop", "full_name": "alex_laptop",
-        "home": "/var/empty", "group": {"id": 116}, "groups": [40, 91],
+        "home": "/var/empty", "group": {"id": 116}, "groups": [40, 91, 111],
         "sshpubkey": None, "smb": True, "locked": False, "password_disabled": False,
     })
     truenas.state["block_sshpubkey_usernames"].add("alex_laptop")
@@ -137,6 +138,44 @@ def test_create_editor_surfaces_home_directory_trap(env):
     })
     assert resp.status_code == 502
     assert "not writable" in resp.json()["detail"]
+
+
+def test_create_editor_refuses_to_hijack_a_non_editor_account(env):
+    """is_valid_username() only checks the charset, so typing an existing
+    account's name here used to overwrite its sshpubkey, force-add it to
+    `editors` and try to disable its password. Refuse unless the account is
+    already an editor -- and never touch a system (uid < 1000) account."""
+    client, truenas, _syncthing = env
+    truenas.state["groups"].append({"id": 111, "group": "editors", "gid": 3001})
+    truenas.state["users"].append({
+        "id": 1, "uid": 950, "username": "truenas_admin", "full_name": "admin",
+        "home": "/root", "group": {"id": 5}, "groups": [5],
+        "sshpubkey": "ssh-ed25519 AAAA admin@nas", "smb": False, "locked": False,
+        "password_disabled": False,
+    })
+    truenas.state["users"].append({
+        "id": 2, "uid": 4000, "username": "bookkeeper", "full_name": "bookkeeper",
+        "home": "/mnt/tank/home/bookkeeper", "group": {"id": 60}, "groups": [60],
+        "sshpubkey": "ssh-ed25519 AAAA book@pc", "smb": True, "locked": False,
+        "password_disabled": False,
+    })
+    as_user(client, "alex")
+
+    resp = client.post("/api/v1/admin/users", json={
+        "username": "truenas_admin", "ssh_pubkey": "ssh-ed25519 AAAA attacker@laptop",
+    })
+    assert resp.status_code == 502 and "system account" in resp.json()["detail"]
+
+    resp = client.post("/api/v1/admin/users", json={
+        "username": "bookkeeper", "ssh_pubkey": "ssh-ed25519 AAAA attacker@laptop",
+    })
+    assert resp.status_code == 502 and "not in the 'editors' group" in resp.json()["detail"]
+
+    # Neither account was modified.
+    by_name = {u["username"]: u for u in truenas.state["users"]}
+    assert by_name["truenas_admin"]["sshpubkey"] == "ssh-ed25519 AAAA admin@nas"
+    assert by_name["bookkeeper"]["sshpubkey"] == "ssh-ed25519 AAAA book@pc"
+    assert 111 not in by_name["bookkeeper"]["groups"]
 
 
 def test_approve_pending_device(env):
@@ -185,6 +224,82 @@ def test_set_known_password(env):
     assert resp.status_code == 200
     [user] = [u for u in truenas.state["users"] if u["username"] == "jsmith"]
     assert user["password"] == "knownpw123"
+
+
+def _seed_editors_group_and_system_accounts(truenas):
+    truenas.state["groups"].append({"id": 111, "group": "editors", "gid": 3001})
+    truenas.state["users"].extend([
+        {"id": 1, "uid": 0, "username": "root", "full_name": "root", "home": "/root",
+         "group": {"id": 5}, "groups": [5], "sshpubkey": None, "smb": False,
+         "locked": False, "password_disabled": False},
+        {"id": 2, "uid": 950, "username": "truenas_admin", "full_name": "admin",
+         "home": "/root", "group": {"id": 5}, "groups": [5], "sshpubkey": None,
+         "smb": False, "locked": False, "password_disabled": False},
+        {"id": 3, "uid": 4000, "username": "bookkeeper", "full_name": "bookkeeper",
+         "home": "/mnt/tank/home/bookkeeper", "group": {"id": 60}, "groups": [60],
+         "sshpubkey": None, "smb": True, "locked": False, "password_disabled": False},
+        {"id": 5, "uid": 3010, "username": "jsmith", "full_name": "jsmith",
+         "home": "/mnt/tank/TheCreatorsPool/homes/jsmith", "group": {"id": 111},
+         "groups": [111], "sshpubkey": "ssh-ed25519 AAAA", "smb": True,
+         "locked": False, "password_disabled": False},
+    ])
+
+
+def test_set_password_refuses_root_and_system_accounts(env):
+    """POST /admin/users/<name>/password took a free-text username straight
+    to TrueNAS: an admin session could set the NAS ROOT password (and any
+    system account's), turning "admin on the dashboard" into "owns the NAS".
+    set_known_password now carries create_or_update_editor's refusals."""
+    client, truenas, _syncthing = env
+    _seed_editors_group_and_system_accounts(truenas)
+    as_user(client, "alex")
+
+    for name in ("root", "truenas_admin"):
+        resp = client.post(f"/api/v1/admin/users/{name}/password", json={"password": "pwned1234"})
+        assert resp.status_code == 502, name
+        assert "system account" in resp.json()["detail"], name
+
+    by_name = {u["username"]: u for u in truenas.state["users"]}
+    assert "password" not in by_name["root"]
+    assert "password" not in by_name["truenas_admin"]
+
+
+def test_set_password_refuses_accounts_outside_the_editors_group(env):
+    client, truenas, _syncthing = env
+    _seed_editors_group_and_system_accounts(truenas)
+    as_user(client, "alex")
+
+    resp = client.post("/api/v1/admin/users/bookkeeper/password",
+                       json={"password": "pwned1234"})
+    assert resp.status_code == 502
+    assert "not in the 'editors' group" in resp.json()["detail"]
+    by_name = {u["username"]: u for u in truenas.state["users"]}
+    assert "password" not in by_name["bookkeeper"]
+
+    # ...and a real editor still works
+    resp = client.post("/api/v1/admin/users/jsmith/password", json={"password": "knownpw123"})
+    assert resp.status_code == 200
+    by_name = {u["username"]: u for u in truenas.state["users"]}
+    assert by_name["jsmith"]["password"] == "knownpw123"
+
+
+def test_set_password_rejects_a_bad_username_charset_before_touching_truenas(env):
+    client, truenas, _syncthing = env
+    _seed_editors_group_and_system_accounts(truenas)
+    as_user(client, "alex")
+    resp = client.post("/api/v1/admin/users/Not%20A%20Name!/password",
+                       json={"password": "whatever1"})
+    assert resp.status_code == 422
+    # the htmx form path validates too (see the ui.py call site)
+    resp = client.post("/partials/admin/users/password",
+                       data={"username": "root", "password": "pwned1234"})
+    assert resp.status_code == 200
+    assert "system account" in resp.text
+    resp = client.post("/partials/admin/users/password",
+                       data={"username": "Not A Name!", "password": "pwned1234"})
+    assert resp.status_code == 200
+    assert "username must start with a letter" in resp.text
+    assert all("password" not in u for u in truenas.state["users"])
 
 
 def test_admin_users_page_renders_for_admin(env):

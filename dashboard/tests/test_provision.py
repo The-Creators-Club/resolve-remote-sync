@@ -13,9 +13,14 @@ from ccsync_dashboard.syncthing_client import SyncthingClient
 from fake_syncthing import EDITOR2_ID, EDITOR_ID, SERVER_ID, FakeSyncthing
 
 
-def mark(root, rel, slug=None):
+def mark(root, rel, slug=None, stfolder=True):
     d = root / rel
     d.mkdir(parents=True, exist_ok=True)
+    if stfolder:
+        # Real project dirs served by Syncthing carry .stfolder; the retarget
+        # and self-heal guards both require it (see the retarget sanity-check
+        # and marker self-heal findings).
+        (d / ".stfolder").mkdir(exist_ok=True)
     provision.write_marker(d, slug or provision.slugify(rel))
     return d
 
@@ -64,6 +69,43 @@ def test_scan_malformed_marker_yields_none_slug(tmp_path):
     d.mkdir(parents=True)
     (d / provision.MARKER_FILENAME).write_text("not json{", encoding="utf-8")
     assert provision.scan_project_dirs(tmp_path) == [("2026/Broken", None)]
+
+
+@pytest.mark.parametrize("slug", [
+    "../../etc", "a/b", "UPPER", "has space", "semi;colon", "quote\"", "a?b", "a#b",
+])
+def test_marker_with_an_invalid_slug_is_ignored(tmp_path, slug):
+    """A marker is a plain JSON file on a share every editor can write, and
+    its slug becomes a Syncthing FOLDER ID and a dashboard URL segment. Only
+    server/common.py's charset (^[a-z0-9-]+$) is an identity."""
+    d = tmp_path / "2026" / "Sketchy"
+    d.mkdir(parents=True)
+    (d / provision.MARKER_FILENAME).write_text(json.dumps({"slug": slug}), encoding="utf-8")
+    assert provision.read_marker(d) is None
+    # still visible to the scan (the file IS there) but with no identity, so
+    # the collector logs and skips instead of provisioning it
+    assert provision.scan_project_dirs(tmp_path) == [("2026/Sketchy", None)]
+
+
+def test_marker_with_a_valid_slug_is_kept(tmp_path):
+    d = tmp_path / "2026" / "Fine"
+    d.mkdir(parents=True)
+    provision.write_marker(d, "2026-fine")
+    assert provision.read_marker(d) == "2026-fine"
+
+
+def test_marked_descendants_and_ancestor(tmp_path):
+    mark(tmp_path, "2026/CCT/Season 1")
+    mark(tmp_path, "2026/CCT/Season 2")
+    (tmp_path / "2026" / "CCT" / "Loose").mkdir()
+    assert provision.marked_descendants(tmp_path / "2026" / "CCT") == \
+        ["Season 1", "Season 2"]
+    assert provision.marked_descendants(tmp_path / "2026" / "CCT" / "Season 1") == []
+    assert provision.marked_ancestor(tmp_path, "2026/CCT/Season 1/AE") == "2026/CCT/Season 1"
+    assert provision.marked_ancestor(tmp_path, "2026/CCT/Season 1") == "2026/CCT/Season 1"
+    assert provision.marked_ancestor(
+        tmp_path, "2026/CCT/Season 1", include_self=False) is None
+    assert provision.marked_ancestor(tmp_path, "2026/CCT/Loose") is None
 
 
 def test_slugify_matches_server_convention():
@@ -147,12 +189,46 @@ def test_provision_retargets_moved_project(conn, fake, tmp_path):
 
 def test_provision_self_heals_missing_markers(conn, fake, tmp_path):
     """A pre-marker-era folder (or a marker someone deleted) gets its marker
-    rewritten from the Syncthing folder id."""
+    rewritten from the Syncthing folder id -- but only because .stfolder
+    proves Syncthing has been serving THIS directory."""
     d = tmp_path / "2025/FF4/Nuclear"
     d.mkdir(parents=True)          # NO marker; folder exists in fake config
+    (d / ".stfolder").mkdir()
     collector = collector_for(fake, tmp_path)
     collector.run_cycle(conn, ["provision"])
     assert provision.read_marker(d) == "2025-ff4-nuclear"
+
+
+def test_self_heal_refuses_a_dir_without_stfolder(conn, fake, tmp_path):
+    """A freshly re-created empty dir at the folder's old path must NOT be
+    stamped with the project's identity: that is how the real (moved)
+    directory becomes permanently invisible to discovery while the folder
+    points at an empty dir -- which is then a mass-delete path."""
+    d = tmp_path / "2025/FF4/Nuclear"
+    d.mkdir(parents=True)          # no marker AND no .stfolder
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision"])
+    assert provision.read_marker(d) is None
+
+
+def test_self_heal_refuses_when_the_slug_lives_elsewhere(conn, fake, tmp_path):
+    """The exact live scenario: the real project was moved (its marker went
+    with it) and someone re-created a directory at the old path. Even with a
+    .stfolder there, stamping the slug would make two dirs claim it and
+    deadlock the duplicate-slug branch forever."""
+    old = tmp_path / "2025/FF4/Nuclear"          # folder's configured path
+    old.mkdir(parents=True)
+    (old / ".stfolder").mkdir()
+    real = mark(tmp_path, "2026/CCT/Nuclear", slug="2025-ff4-nuclear")
+
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision"])
+    assert provision.read_marker(old) is None    # not stamped
+    assert provision.read_marker(real) == "2025-ff4-nuclear"
+    # ...and the folder was NOT retargeted either: the old path still exists,
+    # so this could be a copy rather than a move.
+    by_id = {f["id"]: f for f in fake.state["folders"]}
+    assert by_id["2025-ff4-nuclear"]["path"] == "/data/Projects/2025/FF4/Nuclear"
 
 
 def test_provision_duplicate_slug_dirs_skipped_or_current_kept(conn, fake, tmp_path):
@@ -168,6 +244,212 @@ def test_provision_duplicate_slug_dirs_skipped_or_current_kept(conn, fake, tmp_p
     by_id = {f["id"]: f for f in fake.state["folders"]}
     # the folder still points at the ORIGINAL (current-path preferred)
     assert by_id["2025-ff4-nuclear"]["path"] == "/data/Projects/2025/FF4/Nuclear"
+
+
+def test_provision_repairs_missing_ignores_every_cycle(conn, fake, tmp_path):
+    """A set_ignores that failed once (one dropped HTTP request) used to
+    leave the folder with NO .stignore forever: it was only ever set in the
+    create branch. Lane C is sendreceive, so an ignore-less folder indexes
+    every .braw/.mov, re-downloads them to every ticked editor, and
+    propagates an editor-side delete back to the NAS."""
+    make_tree(tmp_path)
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision"])
+    slug = "2026-ff5-energy-transition"
+    assert fake.state["ignores"][slug]        # set at creation
+
+    # Simulate the transient failure's aftermath: ignores are gone.
+    fake.state["ignores"][slug] = []
+    collector.run_cycle(conn, ["provision"])
+    assert fake.state["ignores"][slug] == provision.build_stignore_lines()
+
+    # Partial/edited ignores are repaired too...
+    fake.state["ignores"][slug] = ["(?i)*.braw"]
+    collector.run_cycle(conn, ["provision"])
+    assert fake.state["ignores"][slug] == provision.build_stignore_lines()
+
+    # ...and the pre-existing folder that was never created by us (no ignores
+    # at all in the fake's default state) is repaired as well.
+    assert fake.state["ignores"]["2025-ff4-nuclear"] == provision.build_stignore_lines()
+
+
+def test_ignore_repair_failure_fails_the_cycle_for_retry(conn, fake, tmp_path, monkeypatch):
+    """A failed repair must be visible and retried, never swallowed."""
+    make_tree(tmp_path)
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision"])
+    fake.state["ignores"]["2025-ff4-nuclear"] = []
+
+    from ccsync_dashboard.syncthing_client import SyncthingError
+
+    def boom(*_a, **_kw):
+        raise SyncthingError("simulated set_ignores failure")
+
+    monkeypatch.setattr(collector.client, "set_ignores", boom)
+    assert collector.run_cycle(conn, ["provision"])["provision"] is False
+    monkeypatch.undo()
+    assert collector.run_cycle(conn, ["provision"])["provision"] is True
+    assert fake.state["ignores"]["2025-ff4-nuclear"] == provision.build_stignore_lines()
+
+
+def test_retarget_refused_when_the_old_dir_still_exists(conn, fake, tmp_path):
+    """A COPY, not a move: retargeting onto the copy makes Syncthing treat
+    every file that hasn't been copied yet as deleted, and propagate that to
+    every editor sharing the folder."""
+    make_tree(tmp_path)
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision", "config"])
+
+    import shutil
+    src = tmp_path / "2026/Creator Profiles/Season 1"
+    dst = tmp_path / "2026/CCT/Creator Profiles/Season 1"
+    dst.parent.mkdir(parents=True)
+    shutil.copytree(src, dst)      # copy: BOTH dirs now claim the slug
+
+    collector.run_cycle(conn, ["provision"])
+    by_id = {f["id"]: f for f in fake.state["folders"]}
+    assert by_id["2026-creator-profiles-season-1"]["path"] == \
+        "/data/Projects/2026/Creator Profiles/Season 1"
+
+
+def test_retarget_refused_without_stfolder(conn, fake, tmp_path):
+    """An interrupted move: .ccsync-project is tiny and copies first, so the
+    provision cycle can fire while the media is still in flight. No
+    .stfolder = don't touch it."""
+    make_tree(tmp_path)
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision", "config"])
+
+    src = tmp_path / "2026/Creator Profiles/Season 1"
+    dst = tmp_path / "2026/CCT/Creator Profiles/Season 1"
+    dst.parent.mkdir(parents=True)
+    src.rename(dst)
+    import shutil
+    shutil.rmtree(dst / ".stfolder")           # marker arrived, .stfolder didn't
+
+    collector.run_cycle(conn, ["provision"])
+    by_id = {f["id"]: f for f in fake.state["folders"]}
+    assert by_id["2026-creator-profiles-season-1"]["path"] == \
+        "/data/Projects/2026/Creator Profiles/Season 1"
+
+
+def test_retarget_refused_when_media_is_still_in_flight(conn, fake, tmp_path):
+    """Half-copied move: the new dir carries the marker and .stfolder but
+    only a fraction of the media the last NAS inventory recorded."""
+    make_tree(tmp_path)
+    src = tmp_path / "2026/Creator Profiles/Season 1"
+    for i in range(10):
+        (src / f"clip{i}.mov").write_bytes(b"x")
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision", "config", "inventory"])
+    pid = conn.execute(
+        "SELECT id FROM projects WHERE slug='2026-creator-profiles-season-1'").fetchone()[0]
+    assert dbmod.fetch_nas_media_summary(conn, pid)["n_originals"] == 10
+
+    dst = tmp_path / "2026/CCT/Creator Profiles/Season 1"
+    dst.parent.mkdir(parents=True)
+    dst.mkdir()
+    (dst / ".stfolder").mkdir()
+    provision.write_marker(dst, "2026-creator-profiles-season-1")
+    (dst / "clip0.mov").write_bytes(b"x")      # 1 of 10 -- under the 50% floor
+    import shutil
+    shutil.rmtree(src)                         # old path gone: a real move
+
+    collector.run_cycle(conn, ["provision"])
+    by_id = {f["id"]: f for f in fake.state["folders"]}
+    assert by_id["2026-creator-profiles-season-1"]["path"] == \
+        "/data/Projects/2026/Creator Profiles/Season 1"
+
+    # Once the rest of the media lands, the same cycle retargets normally.
+    for i in range(1, 10):
+        (dst / f"clip{i}.mov").write_bytes(b"x")
+    collector.run_cycle(conn, ["provision"])
+    by_id = {f["id"]: f for f in fake.state["folders"]}
+    assert by_id["2026-creator-profiles-season-1"]["path"] == \
+        "/data/Projects/2026/CCT/Creator Profiles/Season 1"
+
+
+def test_provision_skips_a_marker_with_an_invalid_slug(conn, fake, tmp_path):
+    """A hand-dropped {"slug": "../../etc"} must never reach add_folder --
+    the slug becomes a Syncthing folder id and a dashboard URL segment."""
+    make_tree(tmp_path)
+    sketchy = tmp_path / "2026" / "Sketchy"
+    sketchy.mkdir(parents=True)
+    (sketchy / provision.MARKER_FILENAME).write_text(
+        json.dumps({"slug": "../../etc"}), encoding="utf-8")
+
+    collector = collector_for(fake, tmp_path)
+    assert collector.run_cycle(conn, ["provision"])["provision"] is True
+    ids = {f["id"] for f in fake.state["folders"]}
+    assert "../../etc" not in ids
+    assert not any("Sketchy" in str(f.get("path", "")) for f in fake.state["folders"])
+
+
+def test_provision_refuses_a_marker_dropped_on_a_container(conn, fake, tmp_path):
+    """The live shape of the bug: a .ccsync-project on Projects/2026/CCT/.
+    scan_project_dirs prunes there, so the three real projects underneath
+    vanish from discovery -- and add_folder on the container either nests
+    Syncthing folders or 400s. Refuse, loudly, and leave the tree alone."""
+    make_tree(tmp_path)
+    container = tmp_path / "2026" / "CCT"
+    mark(tmp_path, "2026/CCT/Season 1")
+    mark(tmp_path, "2026/CCT/Season 2")
+    provision.write_marker(container, "2026-cct")     # dropped on the container
+
+    collector = collector_for(fake, tmp_path)
+    assert collector.run_cycle(conn, ["provision"])["provision"] is True
+    ids = {f["id"] for f in fake.state["folders"]}
+    assert "2026-cct" not in ids
+    # every other project in the tree was still provisioned in the same cycle
+    assert {"2025-ff4-nuclear", "2026-ff5-energy-transition",
+            "2026-creator-profiles-season-1"} <= ids
+
+
+def test_provision_refuses_a_marker_inside_an_existing_project(conn, fake, tmp_path):
+    """scan_project_dirs prunes at markers so this normally can't be
+    scanned -- but the collector must not depend on the scanner's pruning
+    for a rule that decides whether a Syncthing folder is created."""
+    make_tree(tmp_path)
+    nested = tmp_path / "2026" / "FF5" / "Energy Transition" / "AE"
+    provision.write_marker(nested, "2026-ff5-energy-transition-ae")
+
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision"])
+    assert collector._creatable(
+        "2026-ff5-energy-transition-ae",
+        "2026/FF5/Energy Transition/AE", tmp_path) is False
+    assert "2026-ff5-energy-transition-ae" not in {f["id"] for f in fake.state["folders"]}
+
+
+def test_one_bad_folder_does_not_abort_the_whole_provision_cycle(conn, fake, tmp_path,
+                                                                monkeypatch):
+    """add_folder throwing on ONE project used to abort the cycle before
+    every later project was even looked at -- so a single bad marker froze
+    provisioning fleet-wide, every 5 minutes, forever. Each slug is isolated;
+    the cycle is still recorded FAILED so it retries."""
+    make_tree(tmp_path)
+    collector = collector_for(fake, tmp_path)
+    real_add = collector.client.add_folder
+
+    def boom(folder):
+        # 2026-creator-profiles-season-1 sorts BEFORE 2026-ff5-energy-transition,
+        # so the later folder proves the loop kept going.
+        if folder["id"] == "2026-creator-profiles-season-1":
+            raise RuntimeError("simulated syncthing 400")
+        return real_add(folder)
+
+    monkeypatch.setattr(collector.client, "add_folder", boom)
+    assert collector.run_cycle(conn, ["provision"])["provision"] is False
+    ids = {f["id"] for f in fake.state["folders"]}
+    assert "2026-creator-profiles-season-1" not in ids
+    # ...and the other project was still created despite that failure
+    assert "2026-ff5-energy-transition" in ids
+    run = conn.execute(
+        "SELECT error FROM poll_runs WHERE kind='provision' ORDER BY id DESC LIMIT 1").fetchone()
+    assert "2026-creator-profiles-season-1" in run["error"]
+
+    monkeypatch.undo()
+    assert collector.run_cycle(conn, ["provision"])["provision"] is True
 
 
 def test_provision_never_deletes_folders(conn, fake, tmp_path):

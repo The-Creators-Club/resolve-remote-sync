@@ -67,6 +67,29 @@ def style_combobox(ttk_module) -> str:
     return "CC.TCombobox"
 
 
+def style_progressbar(ttk_module) -> str:
+    """Register and return a dark determinate ttk Progressbar style name.
+
+    Same 'clam' base as style_combobox for the same reason -- it is the only
+    built-in theme that honours the trough/bar colours everywhere. Used by
+    the fixer's per-file and overall bars (AUDIT_2 UX-9), which exist because
+    a multi-GB copy over SMB previously showed no motion at all for twenty
+    minutes and was indistinguishable from a hang.
+    """
+    style = ttk_module.Style()
+    style.theme_use("clam")
+    style.configure(
+        "CC.Horizontal.TProgressbar",
+        troughcolor=FIELD,
+        background=RED,
+        bordercolor=RED_DIM,
+        lightcolor=RED,
+        darkcolor=RED_DIM,
+        thickness=10,
+    )
+    return "CC.Horizontal.TProgressbar"
+
+
 def neon_button(tk_module, parent, text: str, command, primary: bool = True):
     """A flat terminal-style button: [ TEXT ] with a neon hover glow.
 

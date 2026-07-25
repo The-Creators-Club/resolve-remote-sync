@@ -4,6 +4,7 @@ tmp_path trees only, matching test_fixer.py's style."""
 
 from __future__ import annotations
 
+import logging
 import time
 
 from ccsync_companion import manifest as manifest_mod
@@ -189,3 +190,17 @@ def test_manifest_cache_uses_get_selected_rels_callback(tmp_path):
     cache.refresh_once()
     entry = cache.get()["2026/FF5/Nuclear"]
     assert entry["originals"] == [["a.mov", 10]]
+
+
+def test_hand_edited_refresh_interval_never_raises_in_the_constructor(tmp_path, caplog):
+    """ManifestCache is built inside CompanionApp.__init__, so a bare
+    float(cfg.get(...)) on a hand-edited value took the windowed exe down
+    with no tray and no log line (AUDIT_3 M-5)."""
+    with caplog.at_level(logging.ERROR, logger="ccsync.config"):
+        cache = manifest_mod.ManifestCache(
+            {"local_root": str(tmp_path), "manifest_refresh_interval": "5m"}
+        )
+    assert cache.refresh_interval == 300.0
+    assert manifest_mod.ManifestCache(
+        {"local_root": str(tmp_path), "manifest_refresh_interval": 45}
+    ).refresh_interval == 45.0

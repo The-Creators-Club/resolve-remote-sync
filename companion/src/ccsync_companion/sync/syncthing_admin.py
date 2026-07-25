@@ -23,6 +23,7 @@ import logging
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import quote, urlencode
 
 from .syncthing_lane import default_config_xml_path, read_api_key_from_config
 
@@ -43,8 +44,24 @@ _VIDEO_EXTS = [
 
 STIGNORE_LINES: list[str] = (
     [f"(?i)*{ext}" for ext in _VIDEO_EXTS]
+    # The fixer copies to "<dest>.ccsync-tmp" then os.replace()s it into
+    # place. The extension patterns above match by EXTENSION, so
+    # "A001.braw.ccsync-tmp" matches none of them -- lane C would upload a
+    # half-copied 12 GB BRAW to the NAS and fan it out to every other
+    # editor if the process died mid-copy (AUDIT_2 CORE-H5).
+    + ["(?i)**/*.ccsync-tmp", "(?i)*.ccsync-tmp"]
     + ["(?i)Proxy", "(?i)**/Proxy", "(?i)**/Proxy/**"]
 )
+
+# Editor-side folders had NO versioning at all: the safety net existed only
+# server-side (dashboard provision.py, server/setup_syncthing_folder.py), so
+# any propagated delete -- from a NAS-side mistake, another editor, or any
+# of the mass-delete paths in AUDIT_2 §1 -- removed the editor's only copy
+# permanently. 30 days of staggered versions, cleaned hourly (AUDIT_2 DEL-6).
+FOLDER_VERSIONING: dict = {
+    "type": "staggered",
+    "params": {"cleanInterval": "3600", "maxAge": "2592000"},
+}
 
 
 def http_request(
@@ -76,29 +93,67 @@ class SyncthingAdmin:
         http_request: Optional[HttpRequestFn] = None,
         config_xml_path: Optional[Path] = None,
         timeout: float = 5.0,
+        config_write_timeout: float = 30.0,
     ) -> None:
         self.base_url = syncthing_url.rstrip("/")
         self._configured_api_key = api_key
         self._http_request = http_request or globals()["http_request"]
         self.config_xml_path = config_xml_path or default_config_xml_path()
         self.timeout = timeout
+        # Syncthing COMMITS THE CONFIG AND RESTARTS THE FOLDER on a config
+        # write, which on a rig with many folders routinely takes longer
+        # than the 5 s read timeout. A timeout there left the sequencer's
+        # pause sweep half-applied -- worst case every selected folder
+        # paused and lane C fully stopped (AUDIT_2 L-11).
+        self.config_write_timeout = config_write_timeout
 
     def _resolve_api_key(self) -> str:
         if self._configured_api_key:
             return self._configured_api_key
         return read_api_key_from_config(self.config_xml_path) or ""
 
-    def _request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
+    def _request(
+        self, method: str, path: str, body: Optional[dict] = None, timeout: Optional[float] = None
+    ) -> Any:
         api_key = self._resolve_api_key()
         url = f"{self.base_url}{path}"
-        return self._http_request(method, url, api_key, body, self.timeout)
+        return self._http_request(
+            method, url, api_key, body, self.timeout if timeout is None else timeout
+        )
+
+    def _write_request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
+        """A config-mutating request, on the longer write timeout."""
+        return self._request(method, path, body, timeout=self.config_write_timeout)
+
+    @staticmethod
+    def _folder_path(folder_id: str) -> str:
+        """/rest/config/folders/<id> with the id percent-encoded.
+
+        Folder IDs are project slugs from the dashboard, not constants of
+        this codebase: an id containing "/", "?" or "#" was interpolated raw
+        and silently addressed a DIFFERENT REST endpoint -- e.g. a PATCH
+        meant to pause one folder landing somewhere else entirely
+        (AUDIT_3 L-10). safe="" so "/" is encoded too."""
+        return f"/rest/config/folders/{quote(str(folder_id), safe='')}"
+
+    @staticmethod
+    def _query(path: str, params: dict[str, Any]) -> str:
+        """`path?<properly encoded query>` -- same reasoning as
+        _folder_path, for the endpoints that take the folder as a query
+        parameter."""
+        return f"{path}?{urlencode({k: str(v) for k, v in params.items()})}"
 
     # -- config -----------------------------------------------------
     def get_config(self) -> Any:
         return self._request("GET", "/rest/config")
 
+    def get_folder(self, folder_id: str) -> Any:
+        return self._request("GET", self._folder_path(folder_id))
+
     def set_folder_paused(self, folder_id: str, paused: bool) -> Any:
-        return self._request("PATCH", f"/rest/config/folders/{folder_id}", {"paused": paused})
+        return self._write_request(
+            "PATCH", self._folder_path(folder_id), {"paused": paused}
+        )
 
     def set_folder_path(self, folder_id: str, path: str, label: Optional[str] = None) -> Any:
         """Re-point a folder at a new local path (server-side project moves
@@ -106,7 +161,27 @@ class SyncthingAdmin:
         body: dict = {"path": path}
         if label is not None:
             body["label"] = label
-        return self._request("PATCH", f"/rest/config/folders/{folder_id}", body)
+        return self._write_request("PATCH", self._folder_path(folder_id), body)
+
+    def ensure_versioning(self, folder_id: str, folder: Optional[dict] = None) -> bool:
+        """PATCH staggered versioning onto a folder that has none.
+
+        Folders accepted by an older companion, by hand in the Syncthing
+        GUI, or before DEL-6 was fixed carry no `versioning` key at all, and
+        Syncthing's default is "no versions kept" -- so every propagated
+        delete is permanent on the editor. Returns True when a PATCH was
+        issued. Pass `folder` to reuse a config the caller already fetched.
+        """
+        if folder is None:
+            folder = self.get_folder(folder_id) or {}
+        existing = (folder or {}).get("versioning") or {}
+        if isinstance(existing, dict) and (existing.get("type") or ""):
+            return False
+        log.info("syncthing: folder %s had no versioning — adding staggered", folder_id)
+        self._write_request(
+            "PATCH", self._folder_path(folder_id), {"versioning": FOLDER_VERSIONING}
+        )
+        return True
 
     # -- pending/accept -----------------------------------------------------
     def pending_folders(self) -> Any:
@@ -125,7 +200,11 @@ class SyncthingAdmin:
         that transfer). Only unpaused after set_ignores() succeeds; if it
         raises, the folder is left paused rather than silently syncing
         unfiltered, and the exception propagates per this class's
-        never-swallow-errors-itself contract."""
+        never-swallow-errors-itself contract.
+
+        Versioning is set at creation, not bolted on later: a folder that
+        pulls and then deletes before the first ensure_versioning() would
+        lose the file outright (AUDIT_2 DEL-6)."""
         folder_config = {
             "id": folder_id,
             "label": label,
@@ -134,16 +213,80 @@ class SyncthingAdmin:
             "paused": True,
             "fsWatcherEnabled": True,
             "ignorePerms": False,
+            "versioning": dict(FOLDER_VERSIONING),
             "devices": [{"deviceID": offered_by_device_id, "introducedBy": ""}],
         }
-        result = self._request("POST", "/rest/config/folders", folder_config)
+        result = self._write_request("POST", "/rest/config/folders", folder_config)
         self.set_ignores(folder_id, STIGNORE_LINES)
         self.set_folder_paused(folder_id, False)
         return result
 
     def set_ignores(self, folder_id: str, lines: list[str]) -> Any:
-        return self._request("POST", f"/rest/db/ignores?folder={folder_id}", {"ignore": lines})
+        return self._write_request(
+            "POST", self._query("/rest/db/ignores", {"folder": folder_id}), {"ignore": lines}
+        )
 
     # -- status -----------------------------------------------------
     def folder_status(self, folder_id: str) -> Any:
-        return self._request("GET", f"/rest/db/status?folder={folder_id}")
+        return self._request("GET", self._query("/rest/db/status", {"folder": folder_id}))
+
+    def system_status(self) -> Any:
+        return self._request("GET", "/rest/system/status")
+
+    def connections(self) -> Any:
+        """GET /rest/system/connections -- the per-device transport.
+
+        {"total": {...}, "connections": {"<DEVICE-ID>": {"connected": true,
+        "type": "tcp-client"|"quic-client"|"relay-client", "address": ...}}}
+
+        This is the ONLY signal that distinguishes a slow editor from a
+        RELAYED one, and nothing in production read it before (AUDIT_2 P3/
+        C-6). Devices are added with addresses ["dynamic"] and relays are
+        left at their `true` default, so falling back to the public relay
+        pool -- typically 1-5 MB/s, shared and rate-limited -- is silent."""
+        return self._request("GET", "/rest/system/connections")
+
+    def get_options(self) -> Any:
+        return self._request("GET", "/rest/config/options")
+
+    def set_options(self, options: dict) -> Any:
+        """PATCH /rest/config/options. Config-write timeout: Syncthing
+        commits and may restart on any options write."""
+        return self._write_request("PATCH", "/rest/config/options", options)
+
+    def ensure_max_folder_concurrency(self, value: int) -> bool:
+        """Set maxFolderConcurrency if it isn't already `value`.
+
+        This is what gives "one project at a time" I/O pacing WITHOUT the
+        pause/unpause scheme's config churn, folder restarts, full rescans
+        and 50-minute stalls (AUDIT_2 P4/C-1). Reads first so steady state
+        costs one GET and zero config commits. Returns True when a write was
+        issued."""
+        if value <= 0:
+            return False
+        options = self.get_options() or {}
+        try:
+            current = int(options.get("maxFolderConcurrency", 0) or 0)
+        except (TypeError, ValueError):
+            current = -1
+        if current == value:
+            return False
+        log.info(
+            "syncthing: maxFolderConcurrency %s -> %d (pacing lane C without pausing folders)",
+            current, value,
+        )
+        self.set_options({"maxFolderConcurrency": value})
+        return True
+
+    def completion(self, folder_id: str, device_id: str) -> Any:
+        """What the REMOTE device still needs from us for this folder.
+
+        folder_status()'s needTotalItems is the download side only, so a
+        lane C turn could end -- and the folder then be paused -- with the
+        editor's own outgoing files half-sent, stalling them until that
+        folder's next turn up to N x rotation seconds later (AUDIT_2 P5).
+        """
+        return self._request(
+            "GET",
+            self._query("/rest/db/completion", {"folder": folder_id, "device": device_id}),
+        )

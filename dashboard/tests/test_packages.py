@@ -45,17 +45,26 @@ def env(tmp_path):
         conn.close()
 
 
-def publish(client, version, body=b"exe-bytes", sha=None, make_current=0):
-    return publish_platform(client, "windows", version, body=body, sha=sha, make_current=make_current)
+def publish(client, version, body=b"exe-bytes", sha=None, make_current=0, prune=0):
+    return publish_platform(client, "windows", version, body=body, sha=sha,
+                            make_current=make_current, prune=prune)
 
 
-def publish_platform(client, platform, version, body=b"exe-bytes", sha=None, make_current=0):
+def publish_platform(client, platform, version, body=b"exe-bytes", sha=None,
+                     make_current=0, prune=0):
     sha = sha or hashlib.sha256(body).hexdigest()
     return client.put(
-        f"/api/v1/admin/packages/{platform}/{version}?sha256={sha}&make_current={make_current}",
+        f"/api/v1/admin/packages/{platform}/{version}"
+        f"?sha256={sha}&make_current={make_current}&prune={prune}",
         content=body,
         headers={"Content-Type": "application/octet-stream"},
     )
+
+
+def report_headers(editor="jsmith"):
+    """Both companion headers -- X-CCSync-Identity is required on reports."""
+    return {"X-CCSync-Token": "sekrit",
+            "X-CCSync-Identity": auth.make_identity_token(SECRET, editor)}
 
 
 def report_payload(version="0.1.0"):
@@ -146,18 +155,38 @@ def test_delete_rules(env):
     assert client.delete("/api/v1/admin/packages/windows/0.3.0").status_code == 404
 
 
-def test_prune_keeps_current_plus_two(env):
+def test_publish_does_not_prune_by_default(env):
+    """Publishing must never destroy older build artifacts as a side effect:
+    they are the rollback material, and the standing rule is that nothing is
+    deleted without being asked (see the package auto-prune finding)."""
     client, conn, settings = env
     as_user(client, "alex")
     publish(client, "0.1.0", body=b"v1", make_current=1)
     for i, v in enumerate(["0.2.0", "0.3.0", "0.4.0", "0.5.0"]):
         publish(client, v, body=f"v{i + 2}".encode())
+    versions = {r["version"] for r in dbmod.fetch_companion_packages(conn, "windows")}
+    assert versions == {"0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0"}
+    assert (settings.packages_path() / "windows" / "ccsync-companion-0.2.0.exe").exists()
+
+
+def test_prune_opt_in_keeps_current_plus_two(env):
+    client, conn, settings = env
+    as_user(client, "alex")
+    publish(client, "0.1.0", body=b"v1", make_current=1)
+    for i, v in enumerate(["0.2.0", "0.3.0", "0.4.0"]):
+        publish(client, v, body=f"v{i + 2}".encode())
+    # only the explicitly opted-in publish prunes
+    publish(client, "0.5.0", body=b"v5", prune=1)
     rows = dbmod.fetch_companion_packages(conn, "windows")
     versions = {r["version"] for r in rows}
     # current (0.1.0, oldest!) survives; the 2 newest non-current survive.
     assert versions == {"0.1.0", "0.4.0", "0.5.0"}
     assert not (settings.packages_path() / "windows" / "ccsync-companion-0.2.0.exe").exists()
     assert (settings.packages_path() / "windows" / "ccsync-companion-0.5.0.exe").exists()
+    # every surviving row still has its file: the DB commit happens BEFORE any
+    # unlink, so a failed commit can never leave a row pointing at a gone exe.
+    for row in rows:
+        assert (settings.packages_path() / "windows" / row["filename"]).exists()
 
 
 # -- download ----------------------------------------------------------
@@ -189,7 +218,7 @@ def test_download_auth_and_integrity(env):
 
 def test_report_advertises_upgrade_only_when_outdated(env):
     client, _conn, _settings = env
-    headers = {"X-CCSync-Token": "sekrit"}
+    headers = report_headers()
     # nothing published yet -> no key
     resp = client.post("/api/v1/report", json=report_payload("0.1.0"), headers=headers)
     assert "upgrade" not in resp.json()
@@ -241,7 +270,7 @@ def test_verify_advertises_upgrade(env):
 
 def test_editors_view_outdated_flag(env):
     client, conn, _settings = env
-    headers = {"X-CCSync-Token": "sekrit"}
+    headers = report_headers()
     client.post("/api/v1/report", json=report_payload("0.1.0"), headers=headers)
 
     view = build_editors_view(conn)
@@ -265,13 +294,13 @@ def test_editors_view_outdated_flag_is_per_platform(env):
     unreported platform falls back to windows, preserving old behaviour for
     pre-platform-field companions)."""
     client, conn, _settings = env
-    headers = {"X-CCSync-Token": "sekrit"}
+    headers = report_headers()
 
     mac_payload = report_payload("1.0.0")
     mac_payload["editor_name"] = "mchan"
     mac_payload["machine"] = "MAC-1"
     mac_payload["platform"] = "macos"
-    client.post("/api/v1/report", json=mac_payload, headers=headers)
+    client.post("/api/v1/report", json=mac_payload, headers=report_headers("mchan"))
 
     win_payload = report_payload("0.1.0")  # jsmith / EDIT-PC / windows
     client.post("/api/v1/report", json=win_payload, headers=headers)
@@ -305,3 +334,107 @@ def test_editors_view_outdated_flag_is_per_platform(env):
     assert conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='companion_packages'"
     ).fetchone() is not None
+
+
+# -- upload bounds (the publish route streams a raw body) -------------------
+
+
+def test_publish_body_is_capped_by_content_length(env):
+    """The publish route streamed an unbounded body straight onto the /data
+    dataset -- an admin session, but a filled dataset takes the SQLite DB
+    down with it. Rejected from Content-Length, before anything is written."""
+    from ccsync_dashboard.app import MAX_PACKAGE_BODY_BYTES
+
+    client, _conn, settings = env
+    as_user(client, "alex")
+    resp = client.put(
+        "/api/v1/admin/packages/windows/9.9.9?sha256=" + "a" * 64,
+        content=b"x" * 16,
+        headers={"Content-Type": "application/octet-stream",
+                 "Content-Length": str(MAX_PACKAGE_BODY_BYTES + 1)},
+    )
+    assert resp.status_code == 413
+    # rejected in the middleware, so the destination dir was never even made
+    assert not (settings.packages_path() / "windows").exists()
+
+
+def test_publish_counts_the_bytes_it_actually_receives(env, monkeypatch):
+    """Content-Length is advisory for a chunked request, so the running
+    total is the real ceiling. Nothing is published and no .part survives."""
+    from ccsync_dashboard import app as appmod
+
+    client, conn, settings = env
+    monkeypatch.setattr(appmod, "MAX_PACKAGE_BODY_BYTES", 8)
+    as_user(client, "alex")
+    resp = publish(client, "9.9.9", body=b"far too many bytes for this cap")
+    assert resp.status_code == 413
+    assert dbmod.get_package(conn, "windows", "9.9.9") is None
+    assert list((settings.packages_path() / "windows").glob("*.part")) == []
+
+
+def test_publish_still_works_at_the_default_cap(env):
+    client, conn, _settings = env
+    as_user(client, "alex")
+    assert publish(client, "0.3.0", body=b"a normal little exe").status_code == 200
+    assert dbmod.get_package(conn, "windows", "0.3.0") is not None
+
+
+# -- per-machine version on the fleet view (release hygiene) ---------------
+
+
+def test_fleet_view_flags_a_stale_per_machine_version(env):
+    """machine_state carries the per-machine build (schema v10) and outlives
+    a lane_report_current prune, so a stale machine cannot go invisible
+    exactly when you most want to see it."""
+    client, conn, _settings = env
+    client.post("/api/v1/report", json=report_payload("0.1.0"), headers=report_headers())
+    publish(as_user(client, "alex"), "0.2.0", body=b"v2", make_current=1)
+    clear_user(client)
+
+    versions = dbmod.fetch_companion_version_map(conn)
+    assert versions[("jsmith", "EDIT-PC")]["companion_version"] == "0.1.0"
+    assert versions[("jsmith", "EDIT-PC")]["platform"] == "windows"
+
+    entry = build_editors_view(conn)["editors"][0]
+    assert entry["companion_version"] == "0.1.0"
+    assert entry["current_companion_version"] == "0.2.0"
+    assert entry["companion_outdated"] is True
+    assert entry["companion_version_unknown"] is False
+
+    # ...and the fleet grid says so, per machine
+    as_user(client, "alex")
+    page = client.get("/partials/fleet")
+    assert page.status_code == 200
+    assert "[ OUT OF DATE — 0.2.0 ]" in page.text
+    assert "EDIT-PC" in page.text
+
+
+def test_fleet_view_keeps_a_machine_whose_lane_rows_were_pruned(env):
+    client, conn, _settings = env
+    client.post("/api/v1/report", json=report_payload("0.1.0"), headers=report_headers())
+    conn.execute("DELETE FROM lane_report_current")     # what db.prune does after 30 days
+    conn.commit()
+
+    (entry,) = build_editors_view(conn)["editors"]
+    assert entry["machine"] == "EDIT-PC"
+    assert entry["companion_version"] == "0.1.0"
+    assert entry["lanes"] == []
+
+
+def test_fleet_view_tolerates_a_report_without_a_version(env):
+    """Companions predating the upgrade channel send no companion_version:
+    flag it as unknown, never as up to date."""
+    client, conn, _settings = env
+    payload = report_payload()
+    payload.pop("companion_version")
+    client.post("/api/v1/report", json=payload, headers=report_headers())
+    publish(as_user(client, "alex"), "0.2.0", body=b"v2", make_current=1)
+    clear_user(client)
+
+    (entry,) = build_editors_view(conn)["editors"]
+    assert entry["companion_version"] is None
+    assert entry["companion_version_unknown"] is True
+    assert entry["companion_outdated"] is False        # unknown != "differs"
+
+    as_user(client, "alex")
+    assert "[ VERSION UNKNOWN ]" in client.get("/partials/fleet").text

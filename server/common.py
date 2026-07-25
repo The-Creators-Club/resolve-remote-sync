@@ -5,7 +5,9 @@ Style conventions used across every script in this package:
     and Syncthing REST API calls (http(s)://<gui>/rest/...).
   - `paramiko` for SSH, copying the pattern from ~/scripts/truenas_ssh.py:
     creds from env vars, command piped via a single exec_command call,
-    `export SUDO_PW=...; echo "$SUDO_PW" | sudo -S <cmd>` for root actions.
+    `echo "$SUDO_PW" | sudo -S <cmd>` for root actions. $SUDO_PW is read
+    from the SSH channel's STDIN by the remote shell, never placed on the
+    remote command line (AUDIT SEC-2: argv is world-readable via `ps`).
   - Every credential comes from an environment variable. Nothing is ever
     hardcoded. See each script's --help / README for the exact var names.
   - Every script accepts --dry-run. In dry-run mode no network call/SSH
@@ -140,19 +142,81 @@ def project_path_rel(projects_root: str, rel: str) -> str:
 MARKER_FILENAME = ".ccsync-project"
 
 
-def build_marker_write_cmd(base: str, slug: str, created_by: str = "setup_tree") -> str:
+# A project slug is the identity every dashboard row is keyed on. It has to
+# survive being a Syncthing folder id and a URL path segment, so the charset
+# is deliberately narrow (this is also slugify()'s own output alphabet).
+SLUG_RE = re.compile(r"^[a-z0-9-]+$")
+
+
+def validate_slug(slug: str) -> str:
+    """Return `slug` unchanged, or raise ValueError explaining why it can't be
+    a project identity. Applied to --slug AND to slugify() output so both
+    paths into a marker enforce the same charset (AUDIT INST-12)."""
+    slug = str(slug or "").strip()
+    if not slug:
+        raise ValueError("empty slug: a project marker must carry an identity")
+    if not SLUG_RE.match(slug):
+        raise ValueError(
+            f"invalid slug {slug!r}: only lowercase a-z, 0-9 and '-' are allowed "
+            f"(the slug becomes a Syncthing folder id and a dashboard URL segment)"
+        )
+    return slug
+
+
+# sed script pulling the "slug" value out of a marker's JSON, for the shell
+# side of the never-overwrite check. Single-quoted below; contains no quotes
+# of its own that would need escaping.
+_MARKER_SLUG_SED = r's/.*"slug"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+
+
+def build_marker_write_cmd(base: str, slug: str, created_by: str = "setup_tree",
+                           only_if_absent: bool = False) -> str:
     """Shell line writing the project marker into `base` (root via sudo,
     then chowned by the caller's chown -R). JSON kept minimal + quoted for
-    embedding in the SSH script."""
+    embedding in the SSH script.
+
+    With only_if_absent=True the marker is written ONLY when none is there,
+    and an existing one is reported (never clobbered) -- the slug inside is
+    the project's immutable identity, and silently reassigning it orphans
+    every slug-keyed dashboard row (AUDIT DEL-8). Deliberate identity changes
+    go through write_marker.py, where --slug is explicit and --force gates
+    the change.
+    """
     import json as _json
 
     payload = _json.dumps({"slug": slug, "created_by": created_by})
     marker_q = shell_quote(f"{base}/{MARKER_FILENAME}")
     payload_q = shell_quote(payload)
-    return (
+    write = (
         f'echo "$SUDO_PW" | sudo -S -p "" sh -c '
         + shell_quote(f"printf '%s' {payload_q} > {marker_q}")
         + f' && echo "marker written: {MARKER_FILENAME}"'
+    )
+    if not only_if_absent:
+        return write
+
+    # Every message below interpolates only shell VARIABLES (SEC-8): the slug
+    # itself is passed in via a single-quoted assignment, never pasted into a
+    # double-quoted echo.
+    return (
+        f"want_slug={shell_quote(slug)}; "
+        f'if echo "$SUDO_PW" | sudo -S -p "" test -e {marker_q}; then '
+        f'  had_slug=$(echo "$SUDO_PW" | sudo -S -p "" cat {marker_q} 2>/dev/null '
+        f"| sed -n '{_MARKER_SLUG_SED}' || true); "
+        f'  if [ "$had_slug" = "$want_slug" ]; then '
+        f'    echo "marker already present with the same identity, left as is: '
+        f'{MARKER_FILENAME} (slug $had_slug)"; '
+        f"  else "
+        f'    echo "marker already present with a DIFFERENT identity: {MARKER_FILENAME} '
+        f'keeps slug \'$had_slug\' -- NOT overwriting it with \'$want_slug\'. '
+        f"The slug is the project's immutable identity; every dashboard row "
+        f"(ticks, Resolve mappings, completion history, media inventory) is keyed "
+        f"on it. If this project really must change identity, do it deliberately "
+        f'with write_marker.py --slug ... --force"; '
+        f"  fi; "
+        f"else "
+        f"  {write}; "
+        f"fi"
     )
 
 
@@ -199,11 +263,126 @@ def truenas_conn_params(dry_run: bool = False):
 # SSH (paramiko), mirrors ~/scripts/truenas_ssh.py
 # --------------------------------------------------------------------------
 
+# Host-key pinning (AUDIT SEC-3). Unset -> AutoAddPolicy plus a one-time
+# warning, so the default stays "works on a fresh admin box"; set -> the
+# offered key must match exactly or the connection is refused.
+_HOST_KEY_PIN = ""
+_HOST_KEY_WARNED = False
+
+
+def set_host_key_pin(value: str) -> None:
+    """Pin the NAS SSH host key for this process (from --host-key)."""
+    global _HOST_KEY_PIN
+    _HOST_KEY_PIN = str(value or "").strip()
+
+
+def host_key_pin() -> str:
+    """The configured pin: --host-key (via set_host_key_pin) or
+    CCSYNC_SSH_HOSTKEY. Format is one `known_hosts`-style key, with or
+    without a leading host field, e.g.
+
+        ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...
+
+    Get it from the NAS with `ssh-keyscan -t ed25519 <host>`.
+    """
+    return _HOST_KEY_PIN or os.environ.get("CCSYNC_SSH_HOSTKEY", "").strip()
+
+
+def add_host_key_arg(ap) -> None:
+    """Add the shared --host-key flag to an argparse parser."""
+    ap.add_argument("--host-key", default="",
+                    help="pin the NAS SSH host key (a known_hosts-style line, e.g. "
+                         "\"ssh-ed25519 AAAAC3...\"; or set CCSYNC_SSH_HOSTKEY). "
+                         "Unset means the key is accepted unverified on first use.")
+
+
+def _parse_host_key(pin: str):
+    """Turn a known_hosts-style pin into (keytype, paramiko.PKey)."""
+    import base64
+    import paramiko
+
+    # Accept any of: "<type> <base64>", "<host> <type> <base64>" (ssh-keyscan
+    # / known_hosts) and "<type> <base64> <comment>" (a .pub file), by
+    # anchoring on the key-type token rather than on position.
+    parts = pin.split()
+    keytype = blob = ""
+    for i, tok in enumerate(parts[:-1]):
+        if tok.startswith(("ssh-", "ecdsa-", "sk-ssh-", "sk-ecdsa-")):
+            keytype, blob = tok, parts[i + 1]
+            break
+    if not keytype:
+        raise EnvError(
+            f"host key pin {pin!r} is not a known_hosts-style line "
+            f"(expected e.g. 'ssh-ed25519 AAAAC3...')"
+        )
+    try:
+        data = base64.b64decode(blob)
+    except Exception as e:  # noqa: BLE001 - any decode failure is the same answer
+        raise EnvError(f"host key pin base64 is not decodable: {e}") from e
+    try:
+        key = paramiko.PKey.from_type_string(keytype, data)
+    except AttributeError:
+        classes = {
+            "ssh-ed25519": getattr(paramiko, "Ed25519Key", None),
+            "ssh-rsa": getattr(paramiko, "RSAKey", None),
+            "ssh-dss": getattr(paramiko, "DSSKey", None),
+            "ecdsa-sha2-nistp256": getattr(paramiko, "ECDSAKey", None),
+            "ecdsa-sha2-nistp384": getattr(paramiko, "ECDSAKey", None),
+            "ecdsa-sha2-nistp521": getattr(paramiko, "ECDSAKey", None),
+        }
+        cls = classes.get(keytype)
+        if cls is None:
+            raise EnvError(f"unsupported host key type in pin: {keytype!r}") from None
+        key = cls(data=data)
+    except Exception as e:  # noqa: BLE001
+        raise EnvError(f"could not parse host key pin: {e}") from e
+    return keytype, key
+
+
+def ssh_client(host: str, user: str, pw: str, timeout: int = 20):
+    """Connected paramiko.SSHClient with the shared host-key policy applied.
+
+    Every SSH/SFTP entry point in this package goes through here so the
+    pinning decision is made in exactly one place.
+    """
+    global _HOST_KEY_WARNED
+
+    import paramiko
+
+    client = paramiko.SSHClient()
+    pin = host_key_pin()
+    if pin:
+        keytype, key = _parse_host_key(pin)
+        client.get_host_keys().add(host, keytype, key)
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    else:
+        if not _HOST_KEY_WARNED:
+            print(f"WARNING: accepting {host}'s SSH host key unverified (first-use trust). "
+                  f"Pin it with --host-key or CCSYNC_SSH_HOSTKEY=\"$(ssh-keyscan -t ed25519 "
+                  f"{host} | awk '{{print $2, $3}}')\" to make this strict.",
+                  file=sys.stderr)
+            _HOST_KEY_WARNED = True
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(host, username=user, password=pw,
+                   look_for_keys=False, allow_agent=False, timeout=timeout)
+    return client
+
+
+# The remote shell reads the sudo password from stdin as its first line and
+# exports it, so it never appears in the remote process's argv (SEC-2).
+SUDO_PW_PREAMBLE = "IFS= read -r SUDO_PW; export SUDO_PW\n"
+
+
 def run_ssh(cmd: str, dry_run: bool = False, timeout: int = 120):
     """Run `cmd` on the TrueNAS host over SSH as TRUENAS_USER.
 
     `cmd` should assume $SUDO_PW is exported in its environment if it needs
     `echo "$SUDO_PW" | sudo -S ...`. Returns (rc, stdout, stderr).
+
+    The password is written to the SSH channel's STDIN and read by the remote
+    shell (see SUDO_PW_PREAMBLE) rather than passed as `export SUDO_PW=...`,
+    which any local NAS account could read out of `ps` (AUDIT SEC-2). `cmd`
+    therefore must not consume stdin itself.
 
     In dry-run mode, nothing is connected; the command is printed and
     (0, "", "") is returned so callers can still exercise their own
@@ -214,15 +393,15 @@ def run_ssh(cmd: str, dry_run: bool = False, timeout: int = 120):
         print(f"[dry-run] ssh {user}@{host}: {cmd}")
         return 0, "", ""
 
-    import paramiko
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(host, username=user, password=pw,
-                   look_for_keys=False, allow_agent=False, timeout=20)
+    client = ssh_client(host, user, pw)
     try:
-        wrapped = f"export SUDO_PW={shell_quote(pw)}; " + cmd
+        wrapped = SUDO_PW_PREAMBLE + cmd
         stdin, stdout, stderr = client.exec_command(wrapped, get_pty=False, timeout=timeout)
+        stdin.write(pw + "\n")
+        stdin.flush()
+        # EOF on stdin: without this a remote `read`/`cat` in cmd would hang
+        # waiting for more input.
+        stdin.channel.shutdown_write()
         out = stdout.read().decode(errors="replace")
         err = stderr.read().decode(errors="replace")
         rc = stdout.channel.recv_exit_status()

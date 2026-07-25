@@ -109,10 +109,19 @@ class ProjectSetupPrompter:
                 if self._was_asked(name) or self._prompt_in_flight:
                     return
                 self._prompt_in_flight = True
-            threading.Thread(
-                target=self._prompt_worker, args=(name,), daemon=True,
-                name="ccsync-project-setup-prompt",
-            ).start()
+            try:
+                threading.Thread(
+                    target=self._prompt_worker, args=(name,), daemon=True,
+                    name="ccsync-project-setup-prompt",
+                ).start()
+            except Exception:
+                # The flag is cleared ONLY in the worker's finally, so a
+                # failing start() left it True for the whole process
+                # lifetime and the once-ever new-project prompt never fired
+                # again (AUDIT_2 §2-low).
+                with self._lock:
+                    self._prompt_in_flight = False
+                raise
         except Exception:
             log.exception("note_report_response failed")
 
@@ -143,13 +152,27 @@ class ProjectSetupPrompter:
             try:
                 # The editor may have switched projects while the report was
                 # in flight -- never prompt about a project no longer open.
+                #
+                # A None answer means "no project is open AS FAR AS THIS
+                # COMPANION IS CONCERNED", which includes the case that made
+                # this bug immortal: the watcher reports None for an IGNORED
+                # scratch project (the Blackmagic Proxy Generator's "New
+                # Doc"), so a stale resolve_project_unmapped from an earlier
+                # report could still pop a dialog at exactly the moment
+                # nothing promptable is open. Skip WITHOUT recording asked --
+                # the next report retries once a real project is confirmed
+                # open, so the once-ever prompt isn't burned on a no-op.
                 if self._get_current_project is not None:
                     current = None
                     try:
                         current = self._get_current_project()
                     except Exception:
                         pass
-                    if current is not None and current.strip() != name.strip():
+                    if current is None or current.strip() != name.strip():
+                        log.debug(
+                            "new-project prompt: skipping %r (current project is %r)",
+                            name, current,
+                        )
                         return
                 # Record BEFORE showing: decline, closing the window, and
                 # the no-display False fallback all count as "asked" -- the

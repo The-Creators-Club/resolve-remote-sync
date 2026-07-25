@@ -142,9 +142,53 @@ def tail(s: str, n: int = STDERR_TAIL_CHARS) -> str:
 
 
 def mb_per_s(num_bytes: int, seconds: float) -> float:
+    """Throughput in **decimal** megabytes/second: bytes / 1e6 / seconds.
+
+    One unit, used everywhere (RunResult.MB_s, the report tables, the
+    Blackmagic-baseline comparison), so `60 Mbps -> 7.5 MB/s` is an exact
+    conversion rather than a 4.9%-off MiB/s number wearing an MB/s label.
+    Use `mib_per_s` when a binary unit is explicitly wanted.
+    """
+    if seconds <= 0:
+        return 0.0
+    return (num_bytes / 1_000_000) / seconds
+
+
+def mib_per_s(num_bytes: int, seconds: float) -> float:
+    """Throughput in binary mebibytes/second: bytes / 2**20 / seconds."""
     if seconds <= 0:
         return 0.0
     return (num_bytes / (1024 * 1024)) / seconds
+
+
+_SIZE_UNITS = {
+    "b": 1,
+    "byte": 1,
+    "bytes": 1,
+    "k": 1024,
+    "kb": 1000,
+    "kib": 1024,
+    "m": 1024**2,
+    "mb": 1000**2,
+    "mib": 1024**2,
+    "g": 1024**3,
+    "gb": 1000**3,
+    "gib": 1024**3,
+    "t": 1024**4,
+    "tb": 1000**4,
+    "tib": 1024**4,
+}
+
+
+def parse_size(value: str, unit: str) -> int | None:
+    """Parse a '1.234' + 'GiB' pair (as printed by rclone/robocopy) to bytes."""
+    factor = _SIZE_UNITS.get(unit.strip().lower())
+    if factor is None:
+        return None
+    try:
+        return int(float(value) * factor)
+    except ValueError:
+        return None
 
 
 def expand_sweep(values: Any, default: list[Any]) -> list[Any]:

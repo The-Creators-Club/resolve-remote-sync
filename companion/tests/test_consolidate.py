@@ -59,11 +59,14 @@ def test_parse_dry_run_stats():
 
 
 def test_parse_dry_run_empty():
+    # A real "rclone measured zero" run: a stats record IS present, so
+    # saw_stats is True and reconcile_with_nas may trust the zeros (DEL-0).
     parsed = consolidate.parse_dry_run_stats(
         '{"level":"info","stats":{"totalTransfers":0,"totalBytes":0}}')
     assert parsed == {
         "count": 0, "bytes": 0, "objects": [], "objects_total": 0,
         "deletes": 0, "deleted_dirs": 0, "delete_objects": [], "delete_objects_total": 0,
+        "saw_stats": True,
     }
 
 
@@ -204,6 +207,103 @@ def test_build_report_nas_error():
     assert "could not check the NAS" in report
 
 
+# ------------------------------------------------- DEL-0: the delete guard
+
+def test_default_run_survives_non_ascii_rclone_output(tmp_path):
+    """AUDIT_2 DEL-0 [reproduced live], the flagship data-loss regression.
+
+    _default_run was the ONE rclone call in companion code still using bare
+    `text=True`, which decodes with the console codepage (cp1252 here) under
+    errors="strict". rclone logs UTF-8, so a single CJK filename --
+    near-guaranteed in Traditional-Taiwanese-Mandarin documentary work --
+    raised UnicodeDecodeError inside subprocess's own reader thread. That
+    does NOT propagate: communicate() returned stderr=None, exit code 0, no
+    exception. parse_dry_run_stats("") then reported deletes=0, the consent
+    dialog said "0 proxy file(s) will download / 0 deletions", and lane B
+    deleted the editor's local proxies anyway.
+
+    Uses a real subprocess, so it exercises the actual decode path.
+    """
+    import sys
+
+    script = tmp_path / "emit.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stderr.buffer.write("
+        "'{\"level\":\"notice\",\"msg\":\"Skipped delete as --dry-run is set\","
+        "\"object\":\"Proxy/\\u53f0\\u5317_\\u4ee3\\u7406.mov\"}\\n'"
+        ".encode('utf-8'))\n"
+        "sys.stderr.buffer.write("
+        "'{\"level\":\"info\",\"stats\":{\"totalTransfers\":0,\"totalBytes\":0,"
+        "\"deletes\":2,\"deletedDirs\":0}}\\n'.encode('utf-8'))\n",
+        encoding="utf-8",
+    )
+    stderr = consolidate._default_run([sys.executable, str(script)], timeout=30)
+
+    assert stderr, "stderr came back empty -- the decode swallowed it again"
+    parsed = consolidate.parse_dry_run_stats(stderr)
+    assert parsed["deletes"] == 2, "a CJK filename must not blind the delete counter"
+    assert parsed["saw_stats"] is True
+    assert consolidate.lane_b_allowed(
+        {"ok": True, "skip_lane_b": bool(parsed["deletes"])}
+    ) is False
+
+
+def test_reconcile_fails_closed_when_rclone_returned_no_stats(tmp_path):
+    """AUDIT_2 DEL-0, second hardening. "We received no data" and "rclone
+    measured zero deletions" are indistinguishable in the counters, and
+    treating the first as the second is the exact shape of defect that
+    produced DEL-0. A timeout, a killed process or an rclone crash must
+    never read as "nothing will be deleted"."""
+    out = consolidate.reconcile_with_nas(
+        {"rclone_path": "rclone", "local_root": "L", "remote": "r", "remote_root": "/nas"},
+        "Projects/2026/X", tmp_path, run_fn=lambda cmd, timeout: "",
+    )
+    assert out["ok"] is False
+    assert "no data" in out["error"]
+    assert consolidate.lane_b_allowed(out) is False
+
+
+def test_reconcile_fails_closed_when_only_the_download_side_is_blank(tmp_path):
+    def half(cmd, timeout):
+        return '{"stats":{"totalTransfers":3,"totalBytes":300}}' if "copy" in cmd else ""
+
+    out = consolidate.reconcile_with_nas(
+        {"rclone_path": "rclone", "local_root": "L", "remote": "r", "remote_root": "/nas"},
+        "Projects/2026/X", tmp_path, run_fn=half,
+    )
+    assert out["ok"] is False
+    assert consolidate.lane_b_allowed(out) is False
+
+
+def test_parse_dry_run_stats_counts_directory_removals_as_deletions():
+    """AUDIT_2 §7 new-defect 2: rclone emits "Skipped remove directory as
+    --dry-run is set" for directories, which landed in the harmless
+    "would upload/download" sample list shown to the human."""
+    text = "\n".join([
+        '{"level":"notice","msg":"Skipped remove directory as --dry-run is set",'
+        '"object":"B-roll/day03/Proxy"}',
+        '{"level":"info","stats":{"totalTransfers":0,"totalBytes":0,"deletedDirs":1}}',
+    ])
+    parsed = consolidate.parse_dry_run_stats(text)
+    assert parsed["delete_objects"] == ["B-roll/day03/Proxy"]
+    assert parsed["objects"] == []
+
+
+def test_build_report_leads_with_the_reassurance():
+    """UX-13: "Originals are COPIED, never moved" was the LAST line, below a
+    "!!! WARNING ... DELETE !!!" block, so nobody read it."""
+    report = consolidate.build_report(
+        {"count": 2, "bytes": 20},
+        {"ok": True, "uploads": {"count": 1, "bytes": 1},
+         "downloads": {"count": 0, "bytes": 0, "deletes": 3, "deleted_dirs": 0}},
+    )
+    lines = report.splitlines()
+    assert lines[0] == "COPY THIS PROJECT'S MEDIA IN"
+    assert "COPIED, never moved" in lines[1]
+    assert "Consolidate" not in report
+
+
 def test_run_consolidation_reports_progress():
     ops = [{"file_path": f"G:\\x\\f{i}.wav", "media_pool_items": [object()],
             "dest_rel": "Audio/Music", "size": 1} for i in range(3)]
@@ -216,3 +316,46 @@ def test_run_consolidation_reports_progress():
     assert [r["ok"] for r in results] == [True, True, True]
     assert seen == [1, 2, 3]
     assert all(r["file_path"] for r in results)
+
+
+def test_run_consolidation_publishes_rich_progress_and_can_stop(tmp_path):
+    """UX-10: Consolidate's whole user-visible surface was four toasts, with
+    a potentially MULTI-HOUR silence between the third and the fourth -- even
+    though run_consolidation already ACCEPTED a progress_fn and app.py passed
+    none."""
+    ops = [
+        {"file_path": f"G:\\x\\f{i}.mov", "media_pool_items": [], "dest_rel": "D",
+         "size": 1000}
+        for i in range(4)
+    ]
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None):
+        on_bytes(0, 1000)
+        on_bytes(1000, 1000)
+        return {"ok": True, "message": "ok", "copied_to": dest}
+
+    seen = []
+    results = consolidate.run_consolidation(
+        ops, "L", fix_clip_fn=fake_fix, state_fn=seen.append,
+    )
+    assert len(results) == 4
+    assert all(s["batch_bytes_total"] == 4000 for s in seen)
+    assert seen[-1]["batch_bytes_done"] == 4000
+    assert any(s["name"] == "f2.mov" for s in seen)
+
+    # ...and it stops BETWEEN files (never mid-file: CORE-H5).
+    done = []
+    results = consolidate.run_consolidation(
+        ops, "L",
+        fix_clip_fn=lambda *a, **k: done.append(1) or {"ok": True, "message": "", "copied_to": "D"},
+        should_stop=lambda: len(done) >= 1,
+    )
+    assert len(results) == 1
+
+
+def test_run_consolidation_tolerates_a_fix_clip_double_without_on_bytes():
+    ops = [{"file_path": "G:\\x\\f.wav", "media_pool_items": [], "dest_rel": "D", "size": 1}]
+    results = consolidate.run_consolidation(
+        ops, "L", fix_clip_fn=lambda p, d, r, m: {"ok": True, "message": "ok", "copied_to": d},
+    )
+    assert results[0]["ok"] is True

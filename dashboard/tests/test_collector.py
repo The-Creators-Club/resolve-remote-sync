@@ -161,6 +161,140 @@ def test_folder_removal_spares_recently_seen_project(conn, fake, collector):
     assert row["active"] == 1
 
 
+def test_completion_one_bad_device_does_not_roll_back_the_cycle(conn, fake, collector, monkeypatch):
+    """Unlike remoteneed, _run_completion had no per-pair isolation: one
+    device erroring propagated to _timed, which rolled back every row already
+    written for every OTHER project/device -- so five minutes later the whole
+    fleet went red at once, uniformly, with no explanation."""
+    real = collector.client.completion
+
+    def flaky(folder, device):
+        if device == EDITOR_ID:
+            raise RuntimeError("simulated syncthing error")
+        return real(folder, device)
+
+    monkeypatch.setattr(collector.client, "completion", flaky)
+    results = collector.run_cycle(conn, ALL)
+    assert results["completion"] is True                 # isolated, not a cycle failure
+    projects = dbmod.fetch_projects(conn)
+    by_dev = {e["device_id"]: e for e in projects[0]["editors"]}
+    assert EDITOR2_ID in by_dev and by_dev[EDITOR2_ID]["completion"] == 100.0
+    assert EDITOR_ID not in by_dev                       # no bogus row for the failed pair
+
+
+def test_completion_skips_a_response_without_a_completion_key(conn, fake, collector):
+    """A 200 with an unexpected body must not be recorded as '0% synced, 0
+    files needed': on the project page that is indistinguishable from real
+    data loss."""
+    fake.state["completion"][("2025-ff4-nuclear", EDITOR_ID)] = {"unexpected": "body"}
+    collector.run_cycle(conn, ALL)
+    projects = dbmod.fetch_projects(conn)
+    by_dev = {e["device_id"]: e for e in projects[0]["editors"]}
+    assert EDITOR_ID not in by_dev
+    assert by_dev[EDITOR2_ID]["completion"] == 100.0
+
+
+def test_completion_records_syncthing_folder_state(conn, fake, collector):
+    """db_status's state/error were read and thrown away, so a folder that
+    had STOPPED syncing showed a stale-but-plausible completion % forever."""
+    fake.state["db_status"]["2025-ff4-nuclear"] = {
+        "globalFiles": 120, "globalBytes": 5_000_000,
+        "state": "stopped", "error": "folder marker missing",
+    }
+    collector.run_cycle(conn, ALL)
+    status = dbmod.fetch_collector_status(conn)
+    assert [(e["slug"], e["folder_error"]) for e in status["folder_errors"]] == [
+        ("2025-ff4-nuclear", "folder marker missing")]
+    from ccsync_dashboard.api import build_project_view
+    view = build_project_view(conn, "2025-ff4-nuclear")
+    assert view["folder_state"] == "stopped"
+    assert view["folder_error"] == "folder marker missing"
+
+
+def test_no_write_transaction_is_held_open_across_syncthing_calls(conn, fake, collector, tmp_path):
+    """The 'database is locked' 500s: db.upsert_completion opened the write
+    transaction on the first row and the loop then kept issuing 10s-timeout
+    HTTP calls before the commit. A second connection (an editor's report)
+    must be able to write DURING the cycle's network phase."""
+    other = dbmod.connect(conn.execute("PRAGMA database_list").fetchone()[2])
+    other.execute("PRAGMA busy_timeout=200")
+    blocked: list[str] = []
+
+    real_completion = collector.client.completion
+
+    def probing_completion(folder, device):
+        # Called between DB writes in the old code; now strictly before them.
+        try:
+            other.execute("INSERT INTO poll_runs (kind, started_at, ok) VALUES ('probe', 'x', 1)")
+            other.commit()
+        except Exception as exc:      # pragma: no cover - only on regression
+            blocked.append(str(exc))
+        return real_completion(folder, device)
+
+    collector.client.completion = probing_completion
+    try:
+        assert collector.run_cycle(conn, ALL)["completion"] is True
+    finally:
+        collector.client.completion = real_completion
+        other.close()
+    assert blocked == []
+
+
+def test_inventory_uses_the_project_path_not_its_label(conn, fake, tmp_path):
+    """A folder whose label isn't the rel path (hand-created folders, and
+    X-3's adopted projects) made projects_dir/label miss every cycle:
+    record_inventory_error forever, MEDIA PRESENCE stuck on 'NAS has 0
+    original(s)', and health.presence_status GREEN for a base rig holding
+    nothing."""
+    projects = tmp_path / "projects"
+    proj = projects / "2025/FF4/Nuclear/B-roll"
+    proj.mkdir(parents=True)
+    (proj / "A001.braw").write_bytes(b"x" * 10)
+    fake.state["folders"][0]["label"] = "Nuclear (Sam's cut)"   # label != rel path
+
+    settings = Settings(syncthing_url=fake.url, syncthing_api_key="k",
+                        projects_dir=str(projects))
+    c = Collector(settings, client=SyncthingClient(fake.url, "k", timeout=5))
+    c.run_cycle(conn, ["config", "inventory"])
+    pid = conn.execute("SELECT id FROM projects WHERE slug='2025-ff4-nuclear'").fetchone()[0]
+    assert dbmod.fetch_nas_media_summary(conn, pid)["n_originals"] == 1
+    row = conn.execute("SELECT last_error FROM nas_inventory_state WHERE project_id=?",
+                       (pid,)).fetchone()
+    assert row["last_error"] is None
+
+
+def test_prune_runs_without_syncthing_configured(conn, tmp_path):
+    """db.prune is reachable ONLY from the collector, and the collector used
+    to be started only when SYNCTHING_GUI_URL was set -- so a Syncthing-less
+    deployment (which settings.py fully supports) grew eight tables forever."""
+    settings = Settings(db_path=str(tmp_path / "p.db"))       # no syncthing_url
+    c = Collector(settings, client=SyncthingClient("", "", timeout=1))
+    old = "2026-06-01T12:00:00+00:00"
+    dbmod.upsert_lane_report(
+        conn, editor_username="ghost", machine="OLD-PC", lane="lane_a_video_up",
+        state="idle", queued=0, transferring=0, last_error=None, last_sync=None,
+        detail=None, companion_version="0.1.0", reported_at=old, received_at=old,
+    )
+    conn.commit()
+    results = c.run_cycle(conn, ["config", "connections", "prune"])
+    assert results["prune"] is True
+    assert results["config"] is True and results["connections"] is True   # skipped, not failed
+    assert conn.execute("SELECT COUNT(*) FROM lane_report_current").fetchone()[0] == 0
+    # ...and nothing pretends Syncthing is reachable off a prune run
+    assert dbmod.fetch_collector_status(conn)["syncthing_reachable"] is False
+
+
+def test_app_starts_the_collector_without_syncthing(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from ccsync_dashboard.app import create_app
+
+    app = create_app(Settings(db_path=str(tmp_path / "c.db"), interval_prune=3600))
+    with TestClient(app) as client:
+        assert client.app.state.collector is not None
+        assert client.get("/api/v1/health").status_code == 200
+
+
 def test_loop_survives_a_record_poll_run_exception(tmp_path, monkeypatch):
     """A DB error out of db.record_poll_run itself (e.g. a transient
     'database is locked') must not kill the collector thread for good --

@@ -13,7 +13,14 @@ GUI URL + API key come from -- Syncthing app config, or its config.xml):
 
   1. Compute folder id = slugify(project-rel-path), e.g. "2025-ff4-nuclear".
   2. GET /rest/config/folders -- if a folder with that id already exists,
-     skip creation (idempotent) unless --force is given.
+     compare its path with the one we would use:
+       - same path  -> skip creation (idempotent) unless --force is given;
+       - DIFFERENT path -> refuse and print both. Slugs are lossy ("Season 1",
+         "Season-1" and "Season_1" all slugify to "season-1"), so a matching
+         id with a different path means two distinct projects are colliding
+         on one folder id -- silently skipping there would leave the second
+         project sharing the first one's folder (AUDIT §9). Use --force only
+         if you genuinely mean to RETARGET the existing folder.
   3. POST /rest/config/folders with:
        - path = <container-mount>/Projects/<project-rel-path>
        - type: sendreceive
@@ -41,6 +48,27 @@ import sys
 from common import build_stignore_lines, ok, slugify, syncthing_api
 
 CONTAINER_MOUNT_DEFAULT = "/data"  # must match install_syncthing_app.py's --container-mount
+
+
+def paths_differ(existing_path: str, requested_path: str) -> bool:
+    """True if an existing folder's path is not the one we were asked for.
+    Trailing slashes are noise, not a difference."""
+    return str(existing_path or "").rstrip("/") != str(requested_path or "").rstrip("/")
+
+
+def path_conflict_message(folder_id: str, existing_path: str, requested_path: str) -> str:
+    """Why we refuse to reuse a folder id that points somewhere else."""
+    return (
+        f"REFUSING: folder id {folder_id!r} already exists but points somewhere else.\n"
+        f"  existing path:  {existing_path or '<none>'}\n"
+        f"  requested path: {requested_path}\n"
+        f"  Folder ids are slugified, so different project names collapse onto one id "
+        f'("Season 1", "Season-1" and "Season_1" all become "season-1"). Reusing this '
+        f"folder would point every editor already sharing it at a different project's "
+        f"tree, and lane C would then reconcile the two.\n"
+        f"  Rename one of the projects so the ids differ, or -- if you really do mean to "
+        f"RETARGET this folder at the new path -- re-run with --force."
+    )
 
 
 def find_folder(gui_url: str, api_key: str, folder_id: str, dry_run: bool):
@@ -91,6 +119,17 @@ def main():
     print(f"folder path (inside Syncthing app): {path}")
 
     existing = find_folder(gui_url, api_key, folder_id, args.dry_run)
+    if existing:
+        existing_path = str(existing.get("path", ""))
+        if paths_differ(existing_path, path):
+            if not args.force:
+                print(path_conflict_message(folder_id, existing_path, path), file=sys.stderr)
+                return 1
+            print(f"--force given: RETARGETING folder {folder_id} "
+                  f"from {existing_path or '<none>'} to {path}")
+        else:
+            print(f"folder id {folder_id} already points at the requested path: {existing_path}")
+
     if existing and not args.force:
         print(f"folder already exists, skipping create: {folder_id} (use --force to reconfigure)")
     else:

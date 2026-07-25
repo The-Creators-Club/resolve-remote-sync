@@ -112,7 +112,10 @@ def test_run_once_persists_final_bytes_and_clears_speed_eta_after_completion(tmp
 
     assert len(calls) == 1, "popen_factory should be invoked exactly once"
     assert status.state == STATE_IDLE
-    assert status.current_project == subpath
+    # current_project is cleared at the end of a run: leaving it set is what
+    # kept the last-synced project wearing "[ SYNCING NOW ]" on the
+    # dashboard for the rest of the process's life (AUDIT_2 UX-14).
+    assert status.current_project is None
     # Final stats record's values persist after the run completes...
     assert status.bytes_done == 5000
     assert status.bytes_total == 5000
@@ -352,33 +355,119 @@ def test_run_popen_reader_crash_kills_proc_instead_of_deadlocking(tmp_path):
     # proc.wait() -- which already returned via the fixed returncode here,
     # but in the real deadlock scenario would otherwise never return --
     # cannot stall forever with nobody draining the pipe.
-    returncode, _text = lane._run_popen(["rclone"])
+    # (returncode, bounded stderr tail, incremental parse result) since the
+    # whole-stream buffer was replaced by a tail + running tally.
+    returncode, _text, result = lane._run_popen(["rclone"])
 
     assert fake_proc.killed is True
     assert returncode == 0
+    assert result.transferred == 0
 
 
 # -- thread-leak fix: sign-out/sign-in must not leak the periodic thread ----
 
 
-def test_start_is_noop_when_periodic_thread_still_alive(tmp_path):
+def test_start_is_noop_when_a_live_generation_is_still_running(tmp_path):
+    """start() on a lane that is genuinely running (no stop() pending) is
+    idempotent per LaneAdapter's contract -- no second thread."""
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    lane.scan_interval = 60
+
+    lane.start()
+    try:
+        first = lane._periodic_thread
+        first_event = lane._stop_event
+        lane.start()
+        assert lane._periodic_thread is first
+        assert lane._stop_event is first_event
+        assert not lane._stop_event.is_set()
+    finally:
+        lane.stop()
+
+
+def test_start_after_a_timed_out_stop_starts_a_fresh_generation(tmp_path):
+    """AUDIT_2 L-2: stop()'s 5 s join times out routinely (an rclone run
+    takes minutes), and the old code then hit start()'s liveness guard and
+    returned WITHOUT clearing the latched stop event -- so the winding-down
+    thread exited and nothing ever replaced it. The lane was dead for the
+    process's life while the tray still showed `idle`."""
     lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
 
     class _StubAliveThread:
         def is_alive(self) -> bool:
             return True
 
-    stub = _StubAliveThread()
-    lane._periodic_thread = stub
-    lane._stop_event.set()  # simulate a pending stop() the old thread hasn't observed yet
+    stale = _StubAliveThread()
+    stale_event = lane._stop_event
+    lane._periodic_thread = stale
+    stale_event.set()  # stop() ran; the old thread hasn't observed it yet
+    lane.scan_interval = 60
 
     lane.start()
+    try:
+        # A NEW thread, on a NEW (cleared) event...
+        assert lane._periodic_thread is not stale
+        assert lane._periodic_thread.is_alive()
+        assert lane._stop_event is not stale_event
+        assert not lane._stop_event.is_set()
+        # ...and the stale generation's own event is untouched, so that
+        # thread still exits rather than being re-armed.
+        assert stale_event.is_set()
+    finally:
+        lane.stop()
 
-    # No new thread was spawned, and _stop_event was left alone -- clearing
-    # it here would un-stick the still-alive thread's own wait() and leak
-    # it forever once a real second thread started looping too.
-    assert lane._periodic_thread is stub
-    assert lane._stop_event.is_set()
+
+def test_slow_run_then_stop_then_start_resumes_syncing(tmp_path):
+    """The real L-2 scenario end to end: a slow run makes stop()'s join time
+    out, and the immediate start() (Pause->Resume, sign-out->sign-in, self-
+    upgrade) must leave a LIVE periodic thread that actually syncs again."""
+    started = threading.Event()
+    release = threading.Event()
+    runs = []
+
+    class _SlowLane(RcloneLane):
+        def run_once(self, subpath=None, max_duration_seconds=None):
+            runs.append(subpath)
+            started.set()
+            release.wait(10)
+            return self.status()
+
+    lane = _SlowLane(
+        direction=DIRECTION_UP,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="Creators_Club",
+        state_dir=tmp_path / "state",
+        popen_factory=_make_popen_factory([], 0, []),
+    )
+    lane.scan_interval = 0.01
+    lane._start_watchdog = lambda: None  # no observer needed here
+
+    lane.start()
+    assert started.wait(5)
+    first = lane._periodic_thread
+
+    # stop() sets the event and then blocks in its bounded join, which the
+    # still-running rclone run outlasts -- exactly the state the audit
+    # reproduced. Driving stop() from another thread reproduces it without
+    # spending the full 5 s join in the test.
+    stopper = threading.Thread(target=lane.stop, daemon=True)
+    stopper.start()
+    time.sleep(0.1)
+    assert first.is_alive(), "precondition: the old thread outlives stop()'s join"
+
+    lane.start()
+    try:
+        second = lane._periodic_thread
+        assert second is not first
+        assert second.is_alive(), "a stop() whose join timed out must not kill the lane"
+        assert not lane._stop_event.is_set()
+        # And syncs genuinely resume on the new generation.
+        assert len(runs) >= 1
+    finally:
+        release.set()
+        stopper.join(timeout=10)
+        lane.stop()
 
 
 def test_start_spawns_fresh_thread_when_no_thread_alive(tmp_path):
@@ -467,8 +556,55 @@ class TestCloneDirectoryTree:
         assert (base / "Audio" / "SFX").is_dir()
         assert created == 5
         # remote side assembled with exactly one slash at the join
-        assert calls[0][-1] == "creators_club_sftp:/mnt/tank/Creators_Club/Projects/2026/FF5/Alpha"
+        assert (
+            "creators_club_sftp:/mnt/tank/Creators_Club/Projects/2026/FF5/Alpha" in calls[0]
+        )
         assert "--dirs-only" in calls[0]
+        # .stversions on the NAS is a deep mirror of every deleted file's
+        # directory structure -- pruned at the listing, not just at the
+        # mkdir loop (AUDIT_2 DEL-1 / C-3).
+        assert ".stversions/**" in calls[0]
+        assert ".stfolder/**" in calls[0]
+
+    def test_dot_directories_are_never_recreated(self, tmp_path):
+        """AUDIT_2 DEL-1, the top-severity finding in this module.
+
+        `.stfolder` is Syncthing's folder marker. Its ABSENCE is the only
+        thing that turns "the local project dir is missing or empty" into a
+        stopped folder with an error rather than "the editor deleted 5,000
+        files -- propagate that to the NAS and every other editor". If the
+        structure clone recreates it (and it did: the loop guarded only
+        `..` and absolute paths), moving or renaming a project folder --
+        an ordinary thing an editor does -- becomes a mass delete.
+        """
+        listing = (
+            ".stfolder/\n"
+            ".stversions/\n"
+            ".stversions/Audio/Music/\n"
+            ".stignore/\n"
+            "Audio/\n"
+            "Audio/.hidden_scratch/\n"
+            "B-roll/Proxy/\n"
+        )
+        created, _calls, base = self._run(tmp_path, listing)
+
+        assert not (base / ".stfolder").exists()
+        assert not (base / ".stversions").exists()
+        assert not (base / ".stignore").exists()
+        # A dot segment anywhere in the path disqualifies the whole entry,
+        # not just a dot-named leaf.
+        assert not (base / "Audio" / ".hidden_scratch").exists()
+        # ...and the real project scaffolding is still created.
+        assert (base / "Audio").is_dir()
+        assert (base / "B-roll" / "Proxy").is_dir()
+        # base + Audio + B-roll/Proxy (B-roll itself arrives via parents=True)
+        assert created == 3
+
+    def test_backslash_dot_segments_are_skipped_too(self, tmp_path):
+        created, _calls, base = self._run(tmp_path, "sub\\.stfolder/\ngood/\n")
+        assert not (base / "sub" / ".stfolder").exists()
+        assert (base / "good").is_dir()
+        assert created == 2  # base + good
 
     def test_idempotent_second_run_creates_nothing(self, tmp_path):
         listing = "Footage/\n"
@@ -548,3 +684,168 @@ class TestProjectRelForPath:
 
     def test_outside_projects_tree(self, tmp_path):
         assert self._f(tmp_path, Path("Elsewhere/a.mov"), ["2026/CCT/Show"]) is None
+
+
+# ===========================================================================
+# AUDIT_3 M-8: stderr is parsed incrementally and only a tail is retained
+# ===========================================================================
+
+
+def test_run_popen_keeps_only_a_bounded_stderr_tail(tmp_path, monkeypatch):
+    """rclone --use-json-log --verbose emits a record PER FILE. Buffering the
+    whole stream just to re-parse it at the end held hundreds of MB in the
+    companion's RSS during a card ingest -- on the editor's machine, while it
+    was uploading."""
+    from ccsync_companion.sync import rclone_lane as rclone_mod
+
+    monkeypatch.setattr(rclone_mod, "STDERR_TAIL_LINES", 5)
+    lines = [
+        '{"level":"info","msg":"clip%03d.mov: Copied (new)"}\n' % i for i in range(500)
+    ]
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory(lines, 0, []))
+
+    returncode, tail, result = lane._run_popen(["rclone"])
+
+    assert returncode == 0
+    assert tail.count("\n") == 5, "only the tail is retained"
+    assert "clip499.mov" in tail and "clip000.mov" not in tail
+    # ...and the COUNT is still complete, because it was tallied per line.
+    assert result.transferred == 500
+    assert result.ok is True
+
+
+def test_run_popen_tally_counts_errors_and_bounds_the_kept_ones(tmp_path):
+    lines = (
+        ['{"level":"error","msg":"failure %d"}\n' % i for i in range(250)]
+        + ['{"level":"info","msg":"clip.mov: Copied (new)"}\n']
+    )
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory(lines, 1, []))
+
+    _rc, _tail, result = lane._run_popen(["rclone"])
+
+    assert result.error_count == 250
+    assert len(result.errors) == 200  # RcloneRunTally.MAX_ERRORS
+    assert result.errors[-1] == "failure 249"  # the last one still reaches last_error
+    assert result.transferred == 1
+    assert result.ok is False
+
+
+def test_run_once_still_reports_the_last_error_from_the_tail(tmp_path):
+    lines = ['{"level":"error","msg":"quota exceeded"}\n']
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory(lines, 1, []))
+    subpath = "Projects/2026/FF5/Alpha"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+
+    status = lane.run_once(subpath=subpath)
+
+    assert status.state == STATE_ERROR
+    assert status.last_error == "quota exceeded"
+
+
+def test_handle_stderr_line_still_works_without_a_tally(tmp_path):
+    """The live --stats side must stay callable on its own."""
+    lane = _make_lane(tmp_path)
+    lane._handle_stderr_line(TRANSFERRING_STATS_LINES[1])
+    assert lane.status().transfers and lane.status().bytes_done == 1000
+
+
+# ===========================================================================
+# AUDIT_3 L-12: lane B says WHERE it moved local files
+# ===========================================================================
+
+
+def test_lane_b_reports_the_trash_dir_when_the_backup_dir_was_used(tmp_path):
+    """Lane B is `sync` with --backup-dir, so a proxy the editor generated
+    locally and hasn't uploaded is MOVED out of the project folder. Nothing
+    said so -- the files just vanished from the folder they were working
+    in, and .ccsync-trash is undiscoverable unless you know it exists."""
+    notices: list[str] = []
+    lines = ['{"level":"info","msg":"old.mov: Deleted"}\n']
+    calls: list[list[str]] = []
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="Creators_Club",
+        state_dir=tmp_path / "state",
+        popen_factory=_make_popen_factory(lines, 0, calls),
+        on_trash=notices.append,
+    )
+    subpath = "Projects/2026/FF5/Alpha"
+
+    # rclone creates the backup dir only when it actually moves something
+    # there; stand in for that here.
+    real_backup_dir = lane._backup_dir
+    made: list[str] = []
+
+    def _spy_backup_dir(sub=None):
+        path = real_backup_dir(sub)
+        made.append(path)
+        target = Path(path) / "Proxy" / "old.mov"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("recovered copy")
+        return path
+
+    lane._backup_dir = _spy_backup_dir
+    lane.run_once(subpath=subpath)
+
+    assert notices == [made[0]]
+    assert ".ccsync-trash" in notices[0]
+    assert subpath.replace("/", "\\") in notices[0] or subpath in notices[0]
+
+
+def test_lane_b_stays_quiet_when_nothing_was_moved(tmp_path):
+    notices: list[str] = []
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="Creators_Club",
+        state_dir=tmp_path / "state",
+        popen_factory=_make_popen_factory(STATS_LINES, 0, []),
+        on_trash=notices.append,
+    )
+    lane.run_once(subpath="Projects/2026/FF5/Alpha")
+    assert notices == []
+
+
+def test_lane_a_never_reports_a_trash_dir(tmp_path):
+    """Lane A is copy-only: it has no --backup-dir and deletes nothing."""
+    notices: list[str] = []
+    lane = RcloneLane(
+        direction=DIRECTION_UP,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="Creators_Club",
+        state_dir=tmp_path / "state",
+        popen_factory=_make_popen_factory(STATS_LINES, 0, []),
+        on_trash=notices.append,
+    )
+    subpath = "Projects/2026/FF5/Alpha"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+    lane.run_once(subpath=subpath)
+    assert notices == []
+
+
+def test_a_raising_on_trash_callback_never_fails_the_run(tmp_path):
+    def _boom(path):
+        raise RuntimeError("tray is gone")
+
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="Creators_Club",
+        state_dir=tmp_path / "state",
+        popen_factory=_make_popen_factory([], 0, []),
+        on_trash=_boom,
+    )
+    real_backup_dir = lane._backup_dir
+
+    def _spy_backup_dir(sub=None):
+        path = real_backup_dir(sub)
+        (Path(path) / "x").mkdir(parents=True, exist_ok=True)
+        return path
+
+    lane._backup_dir = _spy_backup_dir
+    assert lane.run_once(subpath="Projects/2026/FF5/Alpha").state == STATE_IDLE

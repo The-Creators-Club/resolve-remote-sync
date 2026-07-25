@@ -122,8 +122,20 @@ def test_default_toml_text_documents_every_default_key():
     # commented out in the template (see S-7) so a first-run file doesn't
     # pin an explicit value that would make mode="base"'s profile dead.
     profile_controlled = {key for profile in config_mod.MODE_PROFILES.values() for key in profile}
+    # Transport tuning (added 0.4.5) is documented COMMENTED OUT for the same
+    # class of reason: writing explicit values into every first-run file
+    # PINS them, so a later re-tune of a measured-good default would never
+    # reach any existing install. They stay discoverable in the template and
+    # are filled in for real in config.example.toml.
+    commented_out = profile_controlled | {
+        "sftp_chunk_size", "sftp_concurrency", "sftp_connections", "checkers",
+        "rclone_ignore_checksum", "order_by_up", "order_by_down", "concurrent_lanes",
+        "structure_clone_every_n_passes", "lane_c_pause_scheme",
+        "lane_c_max_folder_concurrency", "orphan_scan_every_n_passes",
+        "express_upload_enabled", "express_debounce_seconds", "express_max_batch",
+    }
     for key in config_mod.DEFAULTS:
-        if key in profile_controlled:
+        if key in commented_out:
             pattern = rf"^#\s*{re.escape(key)} = "
         else:
             pattern = rf"^{re.escape(key)} = "
@@ -262,10 +274,21 @@ def test_config_example_toml_matches_default_keys():
     companion_root = Path(__file__).resolve().parent.parent
     example_text = (companion_root / "config.example.toml").read_text(encoding="utf-8")
     for key in config_mod.DEFAULTS:
-        pattern = rf"^{re.escape(key)} = "
+        # Keys that MODE_PROFILES applies must be documented COMMENTED OUT,
+        # exactly as DEFAULT_TOML_TEXT does. An explicit key in the file
+        # always beats the profile, so a live `sync_enabled = true` in a file
+        # whose header invites hand-copying makes mode="base" dead and gives
+        # a machine whose local_root is the NAS share full sync lanes
+        # (AUDIT_2 CORE-M5). The next assertion checks they're commented.
+        pattern = rf"^#? ?{re.escape(key)} = "
         assert re.search(pattern, example_text, re.MULTILINE), (
             f"config.example.toml is missing an assignment for '{key}'"
         )
+    for key in ("sync_enabled", "lane_b_enabled"):
+        assert not re.search(rf"^{re.escape(key)} = ", example_text, re.MULTILINE), (
+            f"config.example.toml must keep '{key}' COMMENTED OUT so MODE_PROFILES applies"
+        )
+        assert re.search(rf"^# {re.escape(key)} = ", example_text, re.MULTILINE)
 
 
 def test_mode_base_profile_disables_sync_but_keeps_popup(tmp_path):
@@ -396,3 +419,81 @@ def test_ignored_resolve_projects_default_and_coercion(tmp_path):
     path.write_text('ignored_resolve_projects = "oops-not-a-list"\n', encoding="utf-8")
     cfg = config_mod.load_config(path)
     assert isinstance(cfg["ignored_resolve_projects"], list)
+
+
+# -- the ignore matcher (shared by watcher.py and app.py) -------------------
+
+
+def test_normalize_ignored_projects_drops_blanks_and_normalizes():
+    assert config_mod.normalize_ignored_projects(
+        ["Untitled Project", "  New  Doc ", "", "   ", None]
+    ) == {"untitled project", "new doc"}
+    # never raises on garbage -- "ignore nothing" is the safe answer
+    assert config_mod.normalize_ignored_projects(None) == set()
+    assert config_mod.normalize_ignored_projects(5) == set()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "New Doc", "new doc", " NEW DOC ", "New  Doc",
+        # Resolve's own duplicate suffixes -- what the Blackmagic Proxy
+        # Generator's helper project actually looks like after a while.
+        "New Doc 1", "New Doc 2", "new doc 17", "New Doc(2)", "New Doc (3)",
+        "New Doc [4]", "New Doc-5", "New Doc_6",
+        "Untitled Project", "Untitled Project 2",
+    ],
+)
+def test_is_ignored_project_matches_scratch_projects_and_their_duplicates(name):
+    assert config_mod.is_ignored_project(name, ["Untitled Project", "New Doc"])
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["New Doc Final", "New Documentary", "New Docs 2026", "A New Doc",
+     "Untitled Project Reel", "", "   ", None],
+)
+def test_is_ignored_project_leaves_real_projects_alone(name):
+    assert not config_mod.is_ignored_project(name, ["Untitled Project", "New Doc"])
+
+
+def test_is_ignored_project_accepts_a_prenormalized_set_and_never_raises():
+    normalized = config_mod.normalize_ignored_projects(["New Doc"])
+    assert config_mod.is_ignored_project("New Doc 9", normalized)
+    assert not config_mod.is_ignored_project("New Doc 9", set())
+    assert not config_mod.is_ignored_project("New Doc 9", None)
+    assert not config_mod.is_ignored_project(object(), ["new doc"])
+
+
+# -- coerce_count: the "every N passes, 0 disables" knobs (AUDIT_3 M-5/M-6) --
+
+
+def test_coerce_count_accepts_zero_and_falls_back_on_garbage(caplog):
+    """coerce_numeric's positive-only gate is wrong for these keys: 0 means
+    "disable this behaviour entirely" and is a legal, documented value."""
+    assert config_mod.coerce_count({"orphan_scan_every_n_passes": 0}, "orphan_scan_every_n_passes", 20) == 0
+    assert config_mod.coerce_count({"orphan_scan_every_n_passes": 5}, "orphan_scan_every_n_passes", 20) == 5
+    assert config_mod.coerce_count({}, "orphan_scan_every_n_passes", 20) == 20
+    with caplog.at_level(logging.ERROR, logger="ccsync.config"):
+        assert config_mod.coerce_count({"k": "never"}, "k", 10) == 10
+        assert config_mod.coerce_count({"k": -1}, "k", 10) == 10
+        assert config_mod.coerce_count({"k": None}, "k", 10) == 10
+    assert len(caplog.records) == 3
+
+
+def test_selection_ttl_keys_are_documented_and_validated(tmp_path):
+    """Both were read via cfg.get(..., 30/300) with no entry in DEFAULTS, the
+    template or validate_config -- undiscoverable, and a hand-edited value
+    raised inside CompanionApp construction."""
+    assert config_mod.DEFAULTS["selection_fetch_ttl"] == 30
+    assert config_mod.DEFAULTS["project_roots_ttl"] == 300
+
+    good = _good_cfg(tmp_path)
+    errors, _warnings = config_mod.validate_config(good)
+    assert errors == []
+
+    for key in ("selection_fetch_ttl", "project_roots_ttl"):
+        errors, _warnings = config_mod.validate_config(_good_cfg(tmp_path, **{key: "soon"}))
+        assert any(key in e for e in errors), errors
+        errors, _warnings = config_mod.validate_config(_good_cfg(tmp_path, **{key: 0}))
+        assert any(key in e for e in errors), errors

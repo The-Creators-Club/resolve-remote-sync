@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -24,14 +25,28 @@ from pathlib import Path
 import pytest
 
 from ccsync_companion.sync.rclone_lane import (
+    ExpressListError,
+    RcloneTuning,
     build_down_command,
+    build_express_command,
     build_filter_rules_down,
     build_filter_rules_up,
     build_up_command,
     parse_json_log,
     rclone_available,
+    reset_rclone_available_cache,
+    write_files_from_list,
     write_filter_file,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_probe_cache():
+    """rclone_available() caches successful probes process-wide now; no test
+    may inherit another's cached answer."""
+    reset_rclone_available_cache()
+    yield
+    reset_rclone_available_cache()
 
 # -- pure content assertions ------------------------------------------------
 
@@ -56,7 +71,13 @@ def test_filter_rules_down_allows_proxy_dir_and_contents_then_excludes_rest():
     # Root-level (/Proxy/...) and nested (**/Proxy/...) forms are both
     # required: rclone's `**/` needs at least one leading path component,
     # so the nested rules alone miss a Proxy/ dir at the tree root.
+    # The trash exclude must come FIRST (rclone is first-match-wins): the
+    # backup dir mirrors the source layout, so `.ccsync-trash/<ts>/Sub/
+    # Proxy/x.mov` matches `**/Proxy/**` and would otherwise be re-deleted
+    # every pass -- and rclone rejects a --backup-dir that overlaps the
+    # destination unless the filter excludes it (AUDIT_2 DEL-2).
     assert rules == [
+        "- /.ccsync-trash/**",
         "+ /Proxy/", "+ /Proxy/**",
         "+ **/Proxy/", "+ **/Proxy/**",
         "- **",
@@ -88,10 +109,17 @@ def test_build_up_command_shape(tmp_path):
     # past build_filter_rules_up() entirely (verified live against a real
     # rclone binary -- see the integration tests below).
     assert "--ignore-case" in cmd
-    assert "--min-age" in cmd and "30s" in cmd
+    # 120s, not 30s: mtime-preserving copies (Windows CopyFile, Explorer,
+    # every card-ingest tool) satisfy --min-age 30s the instant the file
+    # appears, so a 40 GB .braw gets read mid-write (AUDIT_2 L-14).
+    assert "--min-age" in cmd and "120s" in cmd
     assert "--transfers" in cmd and "8" in cmd
     assert "--use-json-log" in cmd
     assert "--verbose" in cmd
+    # Bounds on a peer that ACKs and then stalls (AUDIT_2 L-12).
+    assert "--timeout" in cmd and "--contimeout" in cmd and "--retries-sleep" in cmd
+    # No budget passed -> no --max-duration.
+    assert "--max-duration" not in cmd
 
 
 def test_build_down_command_shape(tmp_path):
@@ -103,6 +131,206 @@ def test_build_down_command_shape(tmp_path):
     assert cmd[3] == "C:\\root"
     assert "--ignore-existing" not in cmd  # lane B is server-authoritative, no skip-if-exists
     assert "--ignore-case" in cmd  # same case-sensitivity gap as lane A
+    # Blast-radius bound on the one verb in this system that removes local
+    # files (AUDIT_2 §4.2 safety row).
+    assert cmd[cmd.index("--max-delete") + 1] == "100"
+    assert cmd[cmd.index("--max-delete-size") + 1] == "20G"
+    # backup_dir is opt-in so consolidate.py's --dry-run keeps reporting
+    # "Skipped delete" (not "Skipped move into backup dir") per object.
+    assert "--backup-dir" not in cmd
+
+
+def test_build_down_command_backup_dir_makes_deletes_recoverable(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- /.ccsync-trash/**\n+ **/Proxy/**\n- **\n")
+    cmd = build_down_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file,
+        backup_dir="C:\\root\\.ccsync-trash\\20260725-120000",
+    )
+    assert cmd[cmd.index("--backup-dir") + 1] == "C:\\root\\.ccsync-trash\\20260725-120000"
+
+
+def test_build_commands_add_max_duration_budget_with_soft_cutoff(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    for build in (build_up_command, build_down_command):
+        cmd = build(
+            "rclone", "C:\\root", "nas", "Creators_Club", filter_file,
+            max_duration_seconds=600,
+        )
+        assert cmd[cmd.index("--max-duration") + 1] == "600s"
+        # SOFT, not the HARD default: SFTP uploads don't resume, so killing
+        # a 40 GB original at 39 GB restarts it from byte 0 next pass.
+        assert cmd[cmd.index("--cutoff-mode") + 1] == "SOFT"
+
+
+# -- transport tuning (AUDIT_2 P1/P2/§4.2) ----------------------------------
+
+
+def _flag_value(cmd: list[str], flag: str) -> str:
+    return cmd[cmd.index(flag) + 1]
+
+
+def test_lane_a_carries_the_sftp_window_flags_by_default(tmp_path):
+    """P1, the headline finding: rclone has no multi-thread UPLOAD for sftp,
+    so one file rides one stream whose in-flight window is
+    chunk_size x concurrency. The unset default is 32Ki x 64 = 2 MiB, i.e.
+    ~14 MB/s at 150 ms RTT -- the ~60 mb/s class this project exists to
+    beat. --transfers multiplies across FILES and cannot help the single
+    40 GB BRAW that is lane A's whole purpose."""
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    cmd = build_up_command("rclone", "C:\\root", "nas", "Creators_Club", filter_file)
+
+    assert _flag_value(cmd, "--sftp-chunk-size") == "255Ki"
+    # 64, not 256: memory is chunk x concurrency x streams.
+    assert _flag_value(cmd, "--sftp-concurrency") == "64"
+    # Caps rclone's SSH pool so wide checkers can't trip sshd MaxStartups.
+    assert _flag_value(cmd, "--sftp-connections") == "16"
+    assert _flag_value(cmd, "--checkers") == "16"
+
+
+def test_both_lanes_skip_the_post_copy_hash_reread(tmp_path):
+    """P2: with shell_type=unix the SFTP backend gets MD5 by shelling
+    `md5sum <path>` on the NAS, so the NAS re-reads every file it just
+    received. --ignore-checksum (NOT --sftp-disable-hashcheck) removes the
+    re-read while keeping hash-based comparison available."""
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    for build in (build_up_command, build_down_command):
+        cmd = build("rclone", "C:\\root", "nas", "Creators_Club", filter_file)
+        assert "--ignore-checksum" in cmd
+        assert "--sftp-disable-hashcheck" not in cmd
+
+
+def test_lane_order_by_puts_newest_up_and_smallest_down(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    up = build_up_command("rclone", "C:\\root", "nas", "Creators_Club", filter_file)
+    down = build_down_command("rclone", "C:\\root", "nas", "Creators_Club", filter_file)
+    # The clip the team is waiting on goes before the archive backlog...
+    assert _flag_value(up, "--order-by") == "modtime,descending"
+    # ...and a cold project yields many usable proxies sooner.
+    assert _flag_value(down, "--order-by") == "size,ascending"
+
+
+def test_measured_no_ops_and_pessimisations_are_never_added(tmp_path):
+    """§4.2 measured these against the bundled binary: --fast-list and
+    --use-server-modtime are no-ops for SFTP, and --no-traverse UNPAIRED is
+    a pessimisation on a full pass (61 dir-modtime setstats vs 2)."""
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    for build in (build_up_command, build_down_command):
+        cmd = build("rclone", "C:\\root", "nas", "Creators_Club", filter_file)
+        assert "--fast-list" not in cmd
+        assert "--use-server-modtime" not in cmd
+        assert "--no-traverse" not in cmd
+
+
+def test_every_tuning_flag_can_be_turned_off_from_config(tmp_path):
+    """C-5: bench results have to be applyable, and every knob has to be
+    revertible without a code change."""
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    tuning = RcloneTuning.from_cfg({
+        "sftp_chunk_size": "",
+        "sftp_concurrency": 0,
+        "sftp_connections": 0,
+        "checkers": 0,
+        "rclone_ignore_checksum": False,
+        "order_by_up": "",
+        "order_by_down": "",
+    })
+    for build in (build_up_command, build_down_command):
+        cmd = build(
+            "rclone", "C:\\root", "nas", "Creators_Club", filter_file, tuning=tuning
+        )
+        for flag in (
+            "--sftp-chunk-size", "--sftp-concurrency", "--sftp-connections",
+            "--checkers", "--ignore-checksum", "--order-by",
+        ):
+            assert flag not in cmd, flag
+        # ...and the safety flags are untouched by any of it.
+        assert "--ignore-existing" in cmd or build is build_down_command
+
+
+def test_tuning_from_cfg_overrides_individual_values(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    tuning = RcloneTuning.from_cfg({"sftp_chunk_size": "128Ki", "checkers": 8})
+    cmd = build_up_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file, tuning=tuning
+    )
+    # §4.2's documented fallback if a server errors on 255Ki.
+    assert _flag_value(cmd, "--sftp-chunk-size") == "128Ki"
+    assert _flag_value(cmd, "--checkers") == "8"
+    # Untouched keys keep their defaults.
+    assert _flag_value(cmd, "--sftp-concurrency") == "64"
+
+
+def test_tuning_from_cfg_survives_a_junk_value(tmp_path):
+    tuning = RcloneTuning.from_cfg({"checkers": "lots", "sftp_concurrency": None})
+    assert tuning.checkers == 16
+    assert tuning.sftp_concurrency == 64
+
+
+def test_ignore_existing_is_never_dropped_for_speed(tmp_path):
+    """Standing rule for the whole tier: no speed change may widen a
+    deletion window. --ignore-existing is what keeps lane A from ever
+    rewriting a NAS-side file, so no tuning path may remove it."""
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    for tuning in (None, RcloneTuning.from_cfg({"rclone_ignore_checksum": False})):
+        cmd = build_up_command(
+            "rclone", "C:\\root", "nas", "Creators_Club", filter_file, tuning=tuning
+        )
+        assert "--ignore-existing" in cmd
+
+
+# -- filter-file integrity (AUDIT_2 DEL-2) ----------------------------------
+
+
+def test_write_filter_file_is_atomic_and_leaves_no_temp_file(tmp_path):
+    from ccsync_companion.sync.rclone_lane import build_filter_rules_down
+
+    path = tmp_path / "state" / "filter_down.txt"
+    write_filter_file(build_filter_rules_down(), path)
+    write_filter_file(build_filter_rules_down(), path)  # rewrite, as every run does
+
+    # Path.write_text truncates first, leaving a 0-byte window another
+    # process's rclone could read as "no filter" -- os.replace has no such
+    # window, and must not leave the tmp file behind either.
+    assert path.read_text(encoding="utf-8").splitlines()[-1] == "- **"
+    assert [p.name for p in path.parent.iterdir()] == ["filter_down.txt"]
+
+
+def test_build_commands_refuse_an_empty_filter_file(tmp_path):
+    from ccsync_companion.sync.rclone_lane import FilterFileError
+
+    empty = tmp_path / "empty.txt"
+    empty.write_text("", encoding="utf-8")
+    for build in (build_up_command, build_down_command):
+        with pytest.raises(FilterFileError):
+            build("rclone", "C:\\root", "nas", "Creators_Club", empty)
+
+
+def test_build_commands_refuse_a_truncated_filter_file(tmp_path):
+    """A half-written filter (the cross-process race in DEL-2) whose final
+    `- **` never landed would let lane B sync -- and therefore delete --
+    far outside the Proxy set."""
+    from ccsync_companion.sync.rclone_lane import FilterFileError
+
+    truncated = tmp_path / "half.txt"
+    truncated.write_text("- /.ccsync-trash/**\n+ /Proxy/\n", encoding="utf-8")
+    with pytest.raises(FilterFileError):
+        build_down_command("rclone", "C:\\root", "nas", "Creators_Club", truncated)
+
+
+def test_build_commands_refuse_a_missing_filter_file(tmp_path):
+    from ccsync_companion.sync.rclone_lane import FilterFileError
+
+    with pytest.raises(FilterFileError):
+        build_down_command("rclone", "C:\\root", "nas", "Creators_Club", tmp_path / "gone.txt")
 
 
 # -- subpath (per-project) + --stats command building, pure -----------------
@@ -406,6 +634,167 @@ def test_lane_b_sync_propagates_rename(rclone_binary, fixture_tree, tmp_path):
     assert (dst / "B-roll" / "Proxy" / "clip1_renamed.mov").is_file(), "new name must appear locally"
 
 
+def test_lane_b_backup_dir_makes_every_delete_recoverable(rclone_binary, tmp_path):
+    """AUDIT_2 DEL-2, against the real binary.
+
+    Lane B is `rclone sync`: any local proxy the NAS has never seen is
+    deleted, and the directories that held it are pruned. With --backup-dir
+    every one of those becomes a MOVE into <local_root>/.ccsync-trash/<ts>.
+
+    This also proves the trash exclude in build_filter_rules_down() is
+    load-bearing rather than decorative: the backup dir sits INSIDE the sync
+    destination (it has to, to stay on the same filesystem), and rclone
+    refuses an overlapping --backup-dir unless the filter excludes it.
+    """
+    src = tmp_path / "nas"
+    dst = tmp_path / "local"
+    (src / "Sub" / "Proxy").mkdir(parents=True)
+    (src / "Sub" / "Proxy" / "shared.mov").write_text("on the nas")
+    (dst / "Sub" / "Proxy").mkdir(parents=True)
+    (dst / "Sub" / "Proxy" / "shared.mov").write_text("on the nas")
+    (dst / "Sub" / "Proxy" / "locally_rendered.mov").write_text("hours of BPG GPU time")
+    (dst / "Local" / "Proxy").mkdir(parents=True)
+    (dst / "Local" / "Proxy" / "orphan.mov").write_text("also local-only")
+    (dst / "original_master.braw").write_text("camera original, not yet uploaded")
+
+    filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
+    trash = dst / ".ccsync-trash" / "20260725-120000"
+    cmd = build_down_command(
+        rclone_binary, str(dst), None, str(src), filter_file, backup_dir=str(trash),
+    )
+    cmd[2] = str(src)
+    cmd[3] = str(dst)
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    # Neither local-only proxy is gone -- both are recoverable, at the same
+    # relative path, byte-identical.
+    assert (trash / "Sub" / "Proxy" / "locally_rendered.mov").read_text() == (
+        "hours of BPG GPU time"
+    )
+    assert (trash / "Local" / "Proxy" / "orphan.mov").read_text() == "also local-only"
+    assert not (dst / "Sub" / "Proxy" / "locally_rendered.mov").exists()
+    # Lane B's containment is unchanged: non-proxy media is never touched.
+    assert (dst / "original_master.braw").read_text() == "camera original, not yet uploaded"
+    assert (dst / "Sub" / "Proxy" / "shared.mov").is_file()
+
+
+def test_lane_b_second_pass_does_not_re_delete_the_trash(rclone_binary, tmp_path):
+    """The backup dir mirrors the source layout, so `.ccsync-trash/<ts>/Sub/
+    Proxy/x.mov` matches `**/Proxy/**`. Without the exclude rule the next
+    pass would delete the trash it just made (or rclone would refuse the run
+    outright on the overlap check)."""
+    src = tmp_path / "nas"
+    dst = tmp_path / "local"
+    src.mkdir()
+    (dst / "Sub" / "Proxy").mkdir(parents=True)
+    (dst / "Sub" / "Proxy" / "doomed.mov").write_text("local only")
+
+    filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
+    for stamp in ("20260725-120000", "20260725-121000"):
+        cmd = build_down_command(
+            rclone_binary, str(dst), None, str(src), filter_file,
+            backup_dir=str(dst / ".ccsync-trash" / stamp),
+        )
+        cmd[2] = str(src)
+        cmd[3] = str(dst)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+
+    recovered = dst / ".ccsync-trash" / "20260725-120000" / "Sub" / "Proxy" / "doomed.mov"
+    assert recovered.read_text() == "local only", "the trash must survive later passes"
+
+
+def test_rclone_lane_run_once_puts_deletes_in_the_trash_end_to_end(rclone_binary, tmp_path):
+    """The whole DEL-2 chain through RcloneLane itself, against real rclone:
+    _ensure_filter_file -> validate -> _backup_dir -> build_down_command ->
+    Popen. Proves the wiring, not just the argv builder."""
+    from ccsync_companion.sync.rclone_lane import DIRECTION_DOWN, RcloneLane
+
+    local_root = tmp_path / "local"
+    nas = tmp_path / "nas"
+    subpath = "Projects/2026/CCT/Season 1"
+    (nas / subpath / "Proxy").mkdir(parents=True)
+    (local_root / subpath / "Proxy").mkdir(parents=True)
+    (local_root / subpath / "Proxy" / "local_only.mov").write_text("hours of GPU time")
+    (local_root / subpath / "master.braw").write_text("camera original")
+
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(local_root),
+        remote="nas",
+        remote_root=str(nas),
+        rclone_path=rclone_binary,
+        state_dir=tmp_path / "state",
+    )
+    _make_source_a_plain_local_path(lane)
+    status = lane.run_once(subpath=subpath)
+    assert status.state == "idle", status.last_error
+    # UX-14: the lane must not keep wearing the project after the run.
+    assert status.current_project is None
+
+    trash_roots = sorted((local_root / ".ccsync-trash").iterdir())
+    assert len(trash_roots) == 1, "one timestamped trash dir per run"
+    recovered = trash_roots[0] / subpath / "Proxy" / "local_only.mov"
+    assert recovered.read_text() == "hours of GPU time"
+    assert not (local_root / subpath / "Proxy" / "local_only.mov").exists()
+    assert (local_root / subpath / "master.braw").read_text() == "camera original"
+
+
+def test_rclone_lane_refuses_to_run_with_a_truncated_filter_file(rclone_binary, tmp_path):
+    """The cross-process race in DEL-2: another companion truncated the
+    shared filter file. Running anyway is `rclone sync` with no filter, which
+    deletes every local file the NAS lacks -- including camera originals
+    still queued for lane A."""
+    from ccsync_companion.sync.rclone_lane import DIRECTION_DOWN, RcloneLane
+
+    local_root = tmp_path / "local"
+    nas = tmp_path / "nas"
+    nas.mkdir()
+    (local_root / "Proxy").mkdir(parents=True)
+    (local_root / "Proxy" / "keep.mov").write_text("still here")
+    (local_root / "master.braw").write_text("camera original")
+
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(local_root),
+        remote="nas",
+        remote_root=str(nas),
+        rclone_path=rclone_binary,
+        state_dir=tmp_path / "state",
+    )
+    # Truncate the filter file after _ensure_filter_file would write it, the
+    # way another process's non-atomic write_text used to.
+    lane._ensure_filter_file = lambda: _truncated(lane._filter_file)
+
+    status = lane.run_once()
+    assert status.state == "error"
+    assert "filter file is empty" in status.last_error
+    # Nothing ran, so nothing was deleted.
+    assert (local_root / "Proxy" / "keep.mov").is_file()
+    assert (local_root / "master.braw").is_file()
+
+
+def _truncated(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    return path
+
+
+def _make_source_a_plain_local_path(lane) -> None:
+    """local->local stand-in for the SFTP remote: strip the "nas:" prefix off
+    the lane's source argument, exactly as the argv-level tests above do."""
+    original = lane._build_command
+
+    def patched(*args, **kwargs):
+        cmd = original(*args, **kwargs)
+        cmd[2] = cmd[2].split(":", 1)[1]
+        return cmd
+
+    lane._build_command = patched
+
+
 # -- integration: per-project (subpath) selection + --stats JSON shape ------
 
 
@@ -482,3 +871,341 @@ def test_rclone_json_log_stats_has_bytes_and_speed(rclone_binary, tmp_path):
     assert len(stats_records) >= 1, proc.stderr
     assert "bytes" in stats_records[0]
     assert "speed" in stats_records[0]
+
+
+# -- integration: the real binary accepts (and honours) the tuning ----------
+
+
+def test_real_rclone_accepts_the_full_tuned_lane_argv(rclone_binary, fixture_tree, tmp_path):
+    """Flags are only worth adding if the shipped binary takes them. Runs
+    both lanes' complete production argv, tuning included, against local
+    fixture dirs (backend flags are registered globally, so an unknown or
+    mis-typed one fails here regardless of backend)."""
+    up_filter = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    dst = tmp_path / "dst_up"
+    cmd = build_up_command(rclone_binary, str(fixture_tree), None, str(dst), up_filter)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "Unknown flag" not in proc.stderr and "unknown flag" not in proc.stderr
+
+    down_filter = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
+    down_dst = tmp_path / "dst_down"
+    cmd = build_down_command(rclone_binary, str(down_dst), None, str(fixture_tree), down_filter)
+    cmd[2] = str(fixture_tree)
+    cmd[3] = str(down_dst)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "unknown flag" not in proc.stderr
+
+
+def test_ignore_checksum_really_removes_the_post_copy_hash_pass(rclone_binary, tmp_path):
+    """P2's mechanism, measured rather than read: rclone verifies size AND
+    hash after every transfer when a common hash exists, and logs
+    `<file>: md5 = ... OK`. Over SFTP with shell_type=unix that hash is a
+    `md5sum <path>` on the NAS -- a full re-read of the file it just
+    received. --ignore-checksum makes the line, and the re-read, disappear."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "big.mov").write_bytes(os.urandom(256 * 1024))
+
+    baseline = subprocess.run(
+        [rclone_binary, "copy", str(src), str(tmp_path / "d1"), "-vv"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert baseline.returncode == 0, baseline.stderr
+    assert "md5 = " in baseline.stderr, "fixture invalid: no hash pass to remove"
+
+    tuned = subprocess.run(
+        [rclone_binary, "copy", str(src), str(tmp_path / "d2"), "-vv", "--ignore-checksum"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert tuned.returncode == 0, tuned.stderr
+    assert "md5 = " not in tuned.stderr
+
+
+def test_rclone_available_caches_successful_probes(monkeypatch, tmp_path):
+    """§4.2's last row: run_once() spawned `rclone version` on EVERY call --
+    ~2N process spawns per pass to re-learn that the binary that was there
+    200 ms ago is still there."""
+    from ccsync_companion.sync import rclone_lane as rl
+
+    fake_exe = tmp_path / "rclone.exe"
+    fake_exe.write_text("stub")
+    spawns = []
+
+    def fake_run(cmd, **kwargs):
+        spawns.append(cmd)
+        return _FakeCompletedProcess(0)
+
+    monkeypatch.setattr(rl.subprocess, "run", fake_run)
+
+    for _ in range(5):
+        available, msg = rl.rclone_available(str(fake_exe))
+        assert available is True
+    assert len(spawns) == 1
+
+    # use_cache=False is the escape hatch, and reset re-arms the probe.
+    rl.rclone_available(str(fake_exe), use_cache=False)
+    assert len(spawns) == 2
+    rl.reset_rclone_available_cache()
+    rl.rclone_available(str(fake_exe))
+    assert len(spawns) == 3
+
+
+def test_rclone_available_never_caches_a_failure(monkeypatch, tmp_path):
+    """A missing or broken binary must be re-probed every time, so the lane
+    recovers the instant it is installed/repaired instead of staying red for
+    the cache TTL."""
+    from ccsync_companion.sync import rclone_lane as rl
+
+    missing = tmp_path / "not-there.exe"
+    for _ in range(3):
+        available, msg = rl.rclone_available(str(missing))
+        assert available is False and "not found" in msg
+
+
+# -- integration: the EXPRESS argv against the real binary (AUDIT_2 C-2) ----
+#
+# These pin down the three things measured against the bundled rclone 1.74.4
+# that shaped build_express_command: filter flags are rejected outright with
+# --files-from-raw, a blank list line is read as the root directory, and a
+# backslash-separated entry is a silent no-op.
+
+
+def _express_cmd(rclone_binary, src: Path, dst: Path, list_file: Path) -> list[str]:
+    cmd = build_express_command(rclone_binary, str(src), None, str(dst), list_file)
+    cmd[3] = str(dst)  # local->local: plain path instead of "remote:root"
+    return cmd
+
+
+def test_express_uploads_only_the_listed_paths_including_non_ascii(
+    rclone_binary, fixture_tree, tmp_path
+):
+    """1 stat + 1 upload instead of a full-tree traverse -- and a non-ASCII
+    filename has to survive, since the audit's worst finding was a
+    non-ASCII decode bug."""
+    non_ascii = "café 日本語.braw"
+    target = fixture_tree / "B-roll" / "Editor Added" / "alex" / non_ascii
+    target.write_bytes(b"c" * 2048)
+    old = time.time() - 3600
+    os.utime(target, (old, old))
+
+    list_file = write_files_from_list(
+        [
+            f"B-roll/Editor Added/alex/{non_ascii}",
+            "B-roll/Editor Added/alex/clip3.mov",
+            "B-roll/Editor Added/alex/DELETED-BEFORE-THE-RUN.mov",  # no longer exists
+        ],
+        tmp_path / "state" / "express.txt",
+    )
+    dst = tmp_path / "dst_express"
+    proc = subprocess.run(
+        _express_cmd(rclone_binary, fixture_tree, dst, list_file),
+        capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace",
+    )
+    # A path that vanished between the watchdog event and the run is NOT an
+    # error: rclone ignores it and still exits 0 (measured).
+    assert proc.returncode == 0, proc.stderr
+
+    assert (dst / "B-roll" / "Editor Added" / "alex" / non_ascii).read_bytes() == b"c" * 2048
+    assert (dst / "B-roll" / "Editor Added" / "alex" / "clip3.mov").exists()
+    # Nothing else came along for the ride -- that is the whole point.
+    assert not (dst / "Proxynotreal.mov").exists()
+    assert not (dst / "Audio").exists()
+    # ...and --no-update-dir-modtime kept it off the destination's dirs
+    # (unpaired --no-traverse touched all 61 in the audit's fixture).
+    assert "set directory modification time" not in proc.stderr
+
+
+def test_express_ignore_existing_never_clobbers_the_nas_copy(
+    rclone_binary, fixture_tree, tmp_path
+):
+    list_file = write_files_from_list(
+        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+    )
+    dst = tmp_path / "dst_express"
+    cmd = _express_cmd(rclone_binary, fixture_tree, dst, list_file)
+    assert subprocess.run(cmd, capture_output=True, text=True, timeout=60).returncode == 0
+    dest_file = dst / "B-roll" / "Editor Added" / "alex" / "clip3.mov"
+    assert dest_file.read_text() == "original"
+
+    src_file = fixture_tree / "B-roll" / "Editor Added" / "alex" / "clip3.mov"
+    src_file.write_text("modified")
+    old = time.time() - 3600
+    os.utime(src_file, (old, old))
+    assert subprocess.run(cmd, capture_output=True, text=True, timeout=60).returncode == 0
+    assert dest_file.read_text() == "original"
+
+
+def test_express_never_deletes_anything_on_either_side(
+    rclone_binary, fixture_tree, tmp_path
+):
+    """The standing rule: no speed change may widen a deletion window."""
+    dst = tmp_path / "dst_express"
+    (dst / "B-roll").mkdir(parents=True)
+    stranger = dst / "B-roll" / "only-on-the-nas.mov"
+    stranger.write_text("must survive")
+    partial = dst / "B-roll" / "big.mov.partial"
+    partial.write_text("an orphan partial rclone must not touch")
+
+    list_file = write_files_from_list(
+        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+    )
+    proc = subprocess.run(
+        _express_cmd(rclone_binary, fixture_tree, dst, list_file),
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert stranger.read_text() == "must survive"
+    assert partial.read_text() == "an orphan partial rclone must not touch"
+    assert "Deleted" not in proc.stderr
+
+
+def test_express_temp_files_cannot_collide_with_the_periodic_pass(
+    rclone_binary, fixture_tree, tmp_path
+):
+    """rclone's partial token is DERIVED FROM THE FILE, not random per run:
+    two separate runs both produced `clip1.mov.42048420.partial`. So an
+    express run and a periodic pass uploading the same new file at the same
+    moment would share one temp path and interleave. --partial-suffix gives
+    them disjoint names; this proves the flag actually takes effect."""
+    list_file = write_files_from_list(
+        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+    )
+    proc = subprocess.run(
+        _express_cmd(rclone_binary, fixture_tree, tmp_path / "dst_ps", list_file) + ["-vv"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    def _temp_names(stderr: str) -> set[str]:
+        return {
+            m.group(0)
+            for line in stderr.splitlines()
+            if "starting with parameters" not in line
+            for m in [re.search(r"clip3\.mov\.[^:\s]*partial", line)]
+            if m
+        }
+
+    express_temps = _temp_names(proc.stderr)
+    assert express_temps, proc.stderr[-500:]
+    assert all(name.endswith(".exp.partial") for name in express_temps)
+
+    # Same file through the ordinary lane A argv: the default suffix, i.e. a
+    # different temp path from the express one above -- which is the whole
+    # point, since the token in the middle is identical for a given file.
+    filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    full = build_up_command(rclone_binary, str(fixture_tree), None, str(tmp_path / "dst_ps2"), filter_file)
+    full[3] = str(tmp_path / "dst_ps2")
+    full_proc = subprocess.run(full + ["-vv"], capture_output=True, text=True, timeout=60)
+    assert full_proc.returncode == 0, full_proc.stderr
+    full_temps = _temp_names(full_proc.stderr)
+    assert full_temps, full_proc.stderr[-500:]
+    assert all(name.endswith(".partial") and not name.endswith(".exp.partial") for name in full_temps)
+    assert express_temps.isdisjoint(full_temps)
+    # The derived token really is the same for the same file -- that is the
+    # collision this flag prevents.
+    assert {n[: -len(".exp.partial")] for n in express_temps} == {
+        n[: -len(".partial")] for n in full_temps
+    }
+
+
+def test_rclone_refuses_files_from_raw_together_with_any_filter(
+    rclone_binary, fixture_tree, tmp_path
+):
+    """Why build_express_command carries no --min-age/--filter-from, and why
+    both gates are enforced in Python instead. If a future rclone allows the
+    combination this test fails loudly and the flags can come back."""
+    list_file = write_files_from_list(
+        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+    )
+    filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    base = _express_cmd(rclone_binary, fixture_tree, tmp_path / "dst_x", list_file)
+    for extra in (["--min-age", "120s"], ["--filter-from", str(filter_file)]):
+        proc = subprocess.run(base + extra, capture_output=True, text=True, timeout=60)
+        assert proc.returncode != 0
+        assert "overrides all other filters" in proc.stderr
+
+
+def test_a_blank_list_line_is_read_as_the_root_dir(rclone_binary, fixture_tree, tmp_path):
+    """Measured: rclone reads a blank raw-list line as the root directory and
+    fails the run. write_files_from_list refuses to emit one -- this proves
+    the hazard is real, by writing the bad file by hand."""
+    bad = tmp_path / "bad.txt"
+    with open(bad, "w", encoding="utf-8", newline="") as fh:
+        fh.write("B-roll/Editor Added/alex/clip3.mov\n\n")
+    proc = subprocess.run(
+        _express_cmd(rclone_binary, fixture_tree, tmp_path / "dst_blank", bad),
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "is a directory not a file" in proc.stderr
+    with pytest.raises(ExpressListError):
+        write_files_from_list(["B-roll/Editor Added/alex/clip3.mov", ""], tmp_path / "ok.txt")
+
+
+def test_a_backslash_list_entry_silently_transfers_nothing(
+    rclone_binary, fixture_tree, tmp_path
+):
+    """The worst failure mode of the three: exit 0, zero bytes moved, no
+    error line. write_files_from_list normalises separators for exactly
+    this reason."""
+    bad = tmp_path / "bad.txt"
+    with open(bad, "w", encoding="utf-8", newline="") as fh:
+        fh.write("B-roll\\Editor Added\\alex\\clip3.mov\n")
+    dst = tmp_path / "dst_bs"
+    proc = subprocess.run(
+        _express_cmd(rclone_binary, fixture_tree, dst, bad),
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0
+    assert not (dst / "B-roll").exists()
+
+    good = write_files_from_list(
+        ["B-roll\\Editor Added\\alex\\clip3.mov"], tmp_path / "good.txt"
+    )
+    assert good.read_text(encoding="utf-8") == "B-roll/Editor Added/alex/clip3.mov\n"
+    proc = subprocess.run(
+        _express_cmd(rclone_binary, fixture_tree, dst, good),
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (dst / "B-roll" / "Editor Added" / "alex" / "clip3.mov").exists()
+
+
+def test_express_lists_far_fewer_objects_than_a_full_pass(
+    rclone_binary, fixture_tree, tmp_path
+):
+    """C-2's payoff, measured rather than asserted by hand-wave: the express
+    run stats a single object where the full pass walks the tree."""
+    dst = tmp_path / "dst_cmp"
+    filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    full = build_up_command(
+        rclone_binary, str(fixture_tree), None, str(dst), filter_file, stats_interval="1000h"
+    )
+    full[3] = str(dst)
+    full_proc = subprocess.run(full, capture_output=True, text=True, timeout=60)
+    assert full_proc.returncode == 0, full_proc.stderr
+
+    list_file = write_files_from_list(
+        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+    )
+    express = build_express_command(
+        rclone_binary, str(fixture_tree), None, str(tmp_path / "dst_cmp2"), list_file,
+        stats_interval="1000h",
+    )
+    express[3] = str(tmp_path / "dst_cmp2")
+    express_proc = subprocess.run(express, capture_output=True, text=True, timeout=60)
+    assert express_proc.returncode == 0, express_proc.stderr
+
+    def _listed(stderr: str) -> int:
+        best = None
+        for line in stderr.splitlines():
+            if '"listed"' in line:
+                best = json.loads(line)["stats"]["listed"]
+        if best is None:
+            raise AssertionError(f"no stats line in {stderr[-500:]!r}")
+        return best
+
+    assert _listed(express_proc.stderr) < _listed(full_proc.stderr)

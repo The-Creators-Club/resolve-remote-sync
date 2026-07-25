@@ -100,6 +100,8 @@ def run(
     duration_s = float(params.get("duration_s", DEFAULT_DURATION_S))
     reverse = direction == "down"
 
+    loopback = host in ("127.0.0.1", "::1", "localhost")
+
     rc, parsed, err = _run_iperf3_client(host, port, parallel, reverse, duration_s, timeout)
 
     if rc != 0 or parsed is None or "error" in (parsed or {}):
@@ -109,6 +111,7 @@ def run(
             seconds=0.0, num_bytes=0, MB_s=0.0, verified=False, ok=False,
             reason=f"iperf3 exit {rc}: {err_detail or base.tail(err)}",
             lane=lane, endpoint=f"{host}:{port}", repeat_index=repeat_index,
+            bytes_source="none", verify_method="none", loopback=loopback,
         )
 
     summary = parsed["end"]["sum_received"]
@@ -129,6 +132,9 @@ def run(
         lane=lane,
         endpoint=f"{host}:{port}",
         repeat_index=repeat_index,
+        bytes_source="iperf3-sum-received",
+        verify_method="iperf3-goodput",
+        loopback=loopback,
     )
 
 
@@ -156,7 +162,17 @@ def get_tailscale_status_json(timeout: float = 15) -> str | None:
 
 def parse_tailscale_status(raw_json: str, peer_hint: str) -> dict[str, Any]:
     """Find a peer in `tailscale status --json` output by hostname, DNS name,
-    node key, or (substring of) a TailscaleIP, and report direct-vs-relay."""
+    node key, or (substring of) a TailscaleIP, and report direct-vs-relay.
+
+    **The direct/relayed signal is `CurAddr`, not `Relay`.** `Relay` carries the
+    peer's home DERP region and stays populated on a perfectly direct
+    connection, so `Relay == ""` reports a relayed path as direct (and, worse,
+    a direct path as relayed) for most real peers. `CurAddr` is the actual
+    current endpoint: non-empty means traffic is flowing over a direct
+    UDP path; empty means it is going through DERP. `Relay` is kept as
+    supplementary detail -- which region is carrying (or would carry) the
+    relayed traffic.
+    """
     data = json.loads(raw_json)
     peers = data.get("Peer", {}) or {}
     for key, info in peers.items():
@@ -166,15 +182,27 @@ def parse_tailscale_status(raw_json: str, peer_hint: str) -> dict[str, Any]:
         matches_ip = any(peer_hint == ip or peer_hint in ip for ip in ips)
         if peer_hint in (hostname, dns_name, key) or matches_ip:
             relay = info.get("Relay", "") or ""
+            cur_addr = info.get("CurAddr", "") or ""
             return {
                 "found": True,
                 "peer_key": key,
                 "hostname": hostname,
-                "direct": relay == "",
-                "relay": relay,
-                "cur_addr": info.get("CurAddr", ""),
+                "direct": cur_addr != "",
+                "relay": relay,  # home DERP region; supplementary, not the verdict
+                "cur_addr": cur_addr,
             }
     return {"found": False, "peer_key": None, "hostname": None, "direct": False, "relay": None, "cur_addr": None}
+
+
+def describe_tailscale_path(result: dict[str, Any]) -> str:
+    """One-line human description of a parse_tailscale_status() result."""
+    if not result.get("found"):
+        return "peer not found"
+    if result["direct"]:
+        via_home = f" (home DERP {result['relay']})" if result.get("relay") else ""
+        return f"DIRECT via {result['cur_addr']}{via_home}"
+    relay = result.get("relay") or "unknown region"
+    return f"RELAYED via DERP {relay} (no direct CurAddr)"
 
 
 def check_tailscale_path(peer_hint: str) -> dict[str, Any]:
@@ -185,10 +213,12 @@ def check_tailscale_path(peer_hint: str) -> dict[str, Any]:
         return {"found": False, "reason": "tailscale not available or `status --json` failed"}
     result = parse_tailscale_status(raw, peer_hint)
     if result["found"] and not result["direct"]:
+        relay = result.get("relay") or "unknown region"
         print(
             f"WARNING: Tailscale path to {peer_hint!r} is RELAYED via DERP "
-            f"({result['relay']}) -- expect throughput far below a direct "
-            f"connection. Check UDP 41641 forwarding / NAT traversal before "
-            f"trusting any transfer benchmark numbers."
+            f"({relay}) -- CurAddr is empty, so no direct UDP path is in use. "
+            f"Expect throughput far below a direct connection. Check UDP 41641 "
+            f"forwarding / NAT traversal before trusting any transfer benchmark "
+            f"numbers."
         )
     return result

@@ -103,7 +103,13 @@ class OnboardWizard:
         self.bootstrap_output: str = ""
         self.device_id: Optional[str] = None
         self.pub_key: str = ""
+        # Non-fatal problems that still mean "this machine is NOT ready":
+        # a hard-capability miss in the bootstrap (no rclone, no Syncthing,
+        # no device ID) or a missing SSH key. The Finish page reports them
+        # instead of DONE -- see show_finish (INST-5, INST-22).
+        self.install_warnings: list[str] = []
         self._installing = False
+        self._local_root_trace: Optional[str] = None
 
         self.container = tk.Frame(self.root, bg=theme.BG, padx=22, pady=18)
         self.container.pack(fill="both", expand=True)
@@ -386,8 +392,24 @@ class OnboardWizard:
                            "add land here) -- doesn't have to be C:.",
                    fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
 
+        # INST-21: the value below is forced into config.toml AND handed to
+        # windows_bootstrap.ps1 as -LocalRoot, where a nonexistent drive is a
+        # hard abort under EAP=Stop -- after clean-slate has already removed
+        # the working install. Validate before the button is even clickable.
+        self.local_root_error_lbl = _label(frame, "", fg=theme.RED, font=theme.mono(9),
+                                            wraplength=560)
+        self.local_root_error_lbl.pack(anchor="w", pady=(0, 6))
+
         self.install_btn = theme.neon_button(tk, frame, "BEGIN INSTALL", self._on_begin_install, primary=True)
         self.install_btn.pack(anchor="w", pady=(0, 10))
+
+        # One trace for the wizard's lifetime -- the callback reads whichever
+        # widgets the current page bound, so re-entering this page must not
+        # stack another copy of it.
+        if self._local_root_trace is None:
+            self._local_root_trace = self.local_root_var.trace_add(
+                "write", lambda *_a: self._revalidate_local_root())
+        self._revalidate_local_root()
 
         log_frame = tk.Frame(frame, bg=theme.FIELD, highlightthickness=1, highlightbackground=theme.RED_DIM)
         log_frame.pack(fill="both", expand=True, pady=(0, 4))
@@ -409,8 +431,32 @@ class OnboardWizard:
             self.log_text.config(state="disabled")
         self._safe_after(_ui)
 
+    def _local_root_problem(self) -> Optional[str]:
+        return steps.validate_local_root(self.local_root_var.get(), self.role_var.get())
+
+    def _revalidate_local_root(self) -> None:
+        """Enable/disable BEGIN INSTALL from the local_root field's validity,
+        with the reason shown inline. Never runs once the install has
+        started (the button is disabled for a different reason then)."""
+        if self._installing:
+            return
+        problem = self._local_root_problem()
+        try:
+            if problem:
+                self.local_root_error_lbl.config(text=f"✖ {problem}")
+                self.install_btn.config(state="disabled", fg=theme.MUTED)
+            else:
+                self.local_root_error_lbl.config(text="")
+                self.install_btn.config(state="normal", fg=theme.RED)
+        except tk.TclError:
+            pass  # page swapped out from under the trace
+
     def _on_begin_install(self) -> None:
         if self._installing:
+            return
+        problem = self._local_root_problem()
+        if problem:
+            self._revalidate_local_root()
             return
         self._installing = True
         self.install_btn.config(state="disabled", fg=theme.MUTED)
@@ -462,10 +508,19 @@ class OnboardWizard:
                 self._safe_after(lambda: self._install_failed())
                 return
 
+            self.install_warnings = []
+
             self._append_log("checking SSH key…")
-            pub_path = steps.ensure_ssh_key()
-            self.pub_key = steps.read_pubkey(pub_path)
-            self._append_log(f"SSH public key ready: {pub_path}")
+            try:
+                pub_path = steps.ensure_ssh_key()
+                self.pub_key = steps.read_pubkey(pub_path)
+                self._append_log(f"SSH public key ready: {pub_path}")
+            except steps.SshKeyError as exc:
+                # Not fatal -- everything except lanes A/B still installs --
+                # but the editor must not be told they're done (INST-22).
+                self.pub_key = ""
+                self.install_warnings.append(f"no SSH key: {exc}")
+                self._append_log(f"WARNING: {exc}")
 
             self._clean_slate("editor")
             self._write_config_and_identity("editor")
@@ -496,10 +551,22 @@ class OnboardWizard:
             self.bootstrap_output = output
             self._append_log(output)
 
-            if exit_code != 0:
+            # A non-zero exit is now ALSO how the bootstrap reports a
+            # hard-capability miss (no rclone, no Syncthing, no device ID).
+            # Those are not retryable -- re-running produces the identical
+            # result -- so they go to the Finish page in its "NOT ready"
+            # state rather than looping the editor on RETRY INSTALL (INST-5).
+            capability_problems = steps.bootstrap_capability_warnings(output)
+            self.install_warnings.extend(capability_problems)
+            if exit_code != 0 and not capability_problems:
                 self._append_log(f"bootstrap exited with code {exit_code} -- see log above.")
                 self._safe_after(lambda: self._install_failed())
                 return
+            if capability_problems:
+                self._append_log(
+                    f"bootstrap completed with {len(capability_problems)} capability "
+                    "warning(s) -- this machine is NOT ready to sync yet."
+                )
 
             self.device_id = steps.parse_device_id(output)
             self._safe_after(self.show_finish)
@@ -541,11 +608,28 @@ class OnboardWizard:
 
     def show_finish(self) -> None:
         frame = self._new_page()
-        _heading(frame, "DONE — SEND THESE TWO VALUES TO YOUR ADMIN")
-        _label(frame, "Nothing syncs and no project will be shared with you until Alex\n"
-                       "approves both of these. The companion is installed, signed in as\n"
-                       f"{self.verified_username}, and will start automatically next login.",
-               wraplength=560).pack(anchor="w", pady=(0, 16))
+        warnings = list(self.install_warnings)
+        if warnings:
+            # The install got far enough to be worth keeping, but something
+            # this machine NEEDS is missing. Saying DONE here is how an
+            # editor ends up waiting weeks for a sync that can never start
+            # (INST-5) -- so say the opposite, first and loudest.
+            _heading(frame, f"COMPLETED WITH {len(warnings)} WARNING(S) — NOT READY YET")
+            _label(frame, "This machine is NOT ready to sync. Do not tell Alex you're\n"
+                           "set up until the problems below are fixed -- send him this\n"
+                           "list instead. Everything else installed fine, so re-running\n"
+                           "the installer once the cause is sorted will finish the job.",
+                   fg=theme.AMBER, wraplength=560).pack(anchor="w", pady=(0, 10))
+            for warning in warnings[:6]:
+                _label(frame, f"  • {warning}", fg=theme.RED, font=theme.mono(9),
+                       wraplength=560).pack(anchor="w", pady=(0, 2))
+            _label(frame, "", font=theme.mono(4)).pack(anchor="w")
+        else:
+            _heading(frame, "DONE — SEND THESE TWO VALUES TO YOUR ADMIN")
+            _label(frame, "Nothing syncs and no project will be shared with you until Alex\n"
+                           "approves both of these. The companion is installed, signed in as\n"
+                           f"{self.verified_username}, and will start automatically next login.",
+                   wraplength=560).pack(anchor="w", pady=(0, 16))
 
         device_id_display = self.device_id or "(not found automatically -- open http://127.0.0.1:8384, "
         if not self.device_id:
@@ -555,6 +639,10 @@ class OnboardWizard:
         pub_display = self.pub_key or "(no SSH public key found -- check ~/.ssh/ccsync_ed25519.pub)"
         self._labeled_copy_field(frame, "SSH public key:", pub_display)
 
+        _label(frame, "One more step: right-click the tray icon → \"Sign in…\" is already\n"
+                       "done for you, but nothing downloads until Alex approves the two\n"
+                       "values above.", fg=theme.MUTED, font=theme.mono(9),
+               wraplength=560).pack(anchor="w", pady=(6, 0))
         _label(frame, "Send these to your admin to finish signup.", fg=theme.AMBER,
                font=theme.mono(10, bold=True)).pack(anchor="w", pady=(10, 0))
 

@@ -44,11 +44,11 @@ remote = "creators_club_sftp"
 # tree, with no error to show for it.
 remote_root = "/mnt/tank/TheCreatorsPool/Creators_Club"
 
-# NEITHER OF THESE SCOPES WHAT SYNCS. Lanes A and B sync local_root against
-# remote_root as whole trees, so the server's structure is replicated
-# verbatim — every Projects/<year>/<series>/<project>, any year, any series,
-# any project, appearing at any time, with no config change here. Names with
-# spaces are fine.
+# NEITHER OF THESE SCOPES WHAT SYNCS — and neither does the whole tree.
+# With dashboard_url set (the default), the DASHBOARD decides: only the
+# projects you have TICKED there sync to this machine, and the sequencer
+# works through them ONE AT A TIME. Lanes A and B are not whole-tree
+# mirrors. Names with spaces are fine.
 #
 # `projects` pairs positionally with `syncthing_folder_ids` for lane C's
 # folder-ID check, and nothing else.
@@ -74,6 +74,54 @@ watch_debounce_seconds = 10
 
 # rclone --transfers (parallel stream count).
 transfers = 4
+
+# --- transport tuning ------------------------------------------------------
+# The values shown ARE the defaults; every one is safe to leave alone. Set a
+# string to "" or an int to 0 to drop that rclone flag entirely.
+
+# In-flight SFTP window = sftp_chunk_size x sftp_concurrency. rclone's SFTP
+# backend has no multi-thread upload, so a single large original rides ONE
+# SSH stream and this window / round-trip-time is its hard speed ceiling.
+sftp_chunk_size = "255Ki"
+sftp_concurrency = 64
+# Parallel SSH connections rclone may open to the NAS.
+sftp_connections = 16
+# Parallel same-or-different checks while comparing the two sides.
+checkers = 16
+# true skips rclone's post-transfer hash check, which otherwise makes the NAS
+# re-read (md5sum) every file it just received or sent -- the single largest
+# source of NAS I/O contention between editors.
+rclone_ignore_checksum = true
+# Transfer order: uploads newest-first (today's card ingest lands first),
+# downloads smallest-first. "" for rclone's own ordering.
+order_by_up = "modtime,descending"
+order_by_down = "size,ascending"
+# Run lane A (up) and lane B (down) at the same time. They are opposite
+# directions on a full-duplex link, so serializing them leaves one idle for
+# the whole of the other's run.
+concurrent_lanes = true
+# Re-clone the server's empty directory structure only every Nth pass -- it
+# is redundant once the structure exists. 0 = never re-clone.
+structure_clone_every_n_passes = 10
+# "none" leaves every selected Syncthing folder unpaused, so lane C runs
+# continuously alongside A/B. "rotate" is the older pause-all-but-current
+# scheme: many more Syncthing config commits, a full rescan on every
+# unpause, and a project's small files can wait a whole rotation.
+lane_c_pause_scheme = "none"
+lane_c_max_folder_concurrency = 2
+# Report (never delete) orphaned "<name>.partial" files left on the NAS by
+# killed uploads, every Nth pass. 0 = never scan.
+orphan_scan_every_n_passes = 20
+# Upload a newly-added clip as soon as it settles instead of waiting for the
+# sequencer to rotate round to its project (which took minutes at best, a
+# whole pass at worst). Upload-only, so it runs alongside the periodic pass.
+express_upload_enabled = true
+# Window over which watchdog events are batched before the express run.
+# Defaults to watch_debounce_seconds, which managed mode otherwise ignores.
+express_debounce_seconds = 10.0
+# Paths per window. A bigger burst -- a card ingest -- is left to the
+# periodic pass rather than shipped as one enormous express run.
+express_max_batch = 200
 
 # Local Syncthing REST API base URL and API key. Leave syncthing_api_key
 # empty to read it from Syncthing's own config.xml -- first from the
@@ -127,8 +175,8 @@ media_tree_refresh_interval = 120
 # Managed mode (active only when dashboard_url above is set): the dashboard
 # decides WHICH projects this editor has and in what order (GET
 # {dashboard_url}/api/v1/selection/{editor_name}), and a sequencer syncs
-# them one at a time instead of the whole tree continuously. How often the
-# sequencer re-fetches the ordered selection:
+# them ONE AT A TIME. Only ticked projects sync; the tree is never
+# replicated as a whole. How often the sequencer re-fetches that selection:
 selection_poll_interval = 60
 # How long (seconds) the sequencer waits for a project's Lane C
 # (Syncthing) sync to settle before moving on to the next project anyway:
@@ -137,15 +185,33 @@ project_rotation_seconds = 600
 # selected project is caught up (small edits still trickle during this
 # window -- every selected folder is unpaused while idle):
 sequencer_idle_seconds = 60
+# How long (seconds) the last selection response is served from memory before
+# the companion asks the dashboard again. The sequencer consults the selection
+# from a 5-second poll loop, so this is what keeps that from becoming ~120
+# requests (and disk writes) per project per pass:
+selection_fetch_ttl = 30
+# Longer TTL for the sticky per-Resolve-project destination mapping
+# (project_roots) carried in the same response -- it changes only when an
+# admin re-maps a project root:
+project_roots_ttl = 300
 
 # Set false on the base rig (direct LAN access to the NAS): it reads proxies
 # straight off the share, so lane B's local proxy mirror is pure waste.
-lane_b_enabled = true
+# COMMENTED OUT, deliberately -- see sync_enabled directly below for why.
+# lane_b_enabled = true
 
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
 # dashboard reporting keep working; all sync lanes stay off.
-sync_enabled = true
+#
+# BOTH OF THESE ARE COMMENTED OUT ON PURPOSE. mode = "base" below applies a
+# profile (MODE_PROFILES in config.py) that sets sync_enabled = false -- but
+# an explicit key in the file ALWAYS wins, so writing "sync_enabled = true"
+# here makes that profile dead. Anyone who copied this file and set
+# mode = "base" got full sync lanes on a machine whose local_root IS the NAS
+# share, which is the worst blast radius in the system (AUDIT_2 CORE-M5 /
+# the S-7 twin). Uncomment only to deliberately override the profile.
+# sync_enabled = true
 
 # Set false to never show the media-outside-tree popup (base rig: raw media
 # legitimately lives outside the tree there). Still logged either way.
@@ -166,4 +232,9 @@ mode = "editor"
 # clips never raise the out-of-tree popup. For scratch/utility projects --
 # Resolve's default "Untitled Project" and the Blackmagic Proxy Generator's
 # helper project.
+#
+# Each name also covers Resolve's numbered duplicates of it: "New Doc" here
+# silences "New Doc 1", "New Doc 2" and "New Doc (3)" too (the Proxy
+# Generator counts these up all day). A longer real project name that merely
+# starts the same -- "New Doc Final" -- is NOT ignored.
 ignored_resolve_projects = ["Untitled Project", "New Doc"]

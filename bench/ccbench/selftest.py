@@ -18,14 +18,13 @@ machine it's run on. This is the harness's own acceptance test.
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-from ccbench import dataset, matrix, report
+from ccbench import dataset, guard, matrix, report
 from ccbench.runners import base as runner_base
 from ccbench.runners.iperf3 import available as iperf3_available
 
@@ -36,8 +35,10 @@ def run_selftest(
     progress: Any = print,
 ) -> dict[str, Any]:
     tmp_root = Path(base_dir) if base_dir else Path(tempfile.mkdtemp(prefix="ccbench-selftest-"))
-    data_dir = tmp_root / "data"
-    work_dir = tmp_root / "work"
+    # "_bench" in the directory names is load-bearing: ccbench.guard refuses to
+    # delete anything without it, and the selftest tears these down at the end.
+    data_dir = tmp_root / "_bench_data"
+    work_dir = tmp_root / "_bench_work"
     results_file = tmp_root / "results.jsonl"
 
     progress(f"selftest workspace: {tmp_root}")
@@ -70,7 +71,8 @@ def run_selftest(
             "iperf3": {},
         },
         "params": {
-            "rclone": {"transfers": [1, 4], "multi_thread_streams": [0, 4], "sftp_chunk_size_mb": [4]},
+            # chunk size in KiB -- 255 is SFTP's usable maximum (256 KiB packet)
+            "rclone": {"transfers": [1, 4], "multi_thread_streams": [0, 4], "sftp_chunk_size_kib": [255]},
             "robocopy": {"mt": [1, 4]},
             "iperf3": {"parallel": [1], "duration_s": 2},
         },
@@ -107,8 +109,8 @@ def run_selftest(
     progress(report_md)
 
     if not keep:
-        shutil.rmtree(data_dir, ignore_errors=True)
-        shutil.rmtree(work_dir, ignore_errors=True)
+        guard.safe_rmtree(data_dir, action="remove selftest dataset dir")
+        guard.safe_rmtree(work_dir, action="remove selftest work dir")
 
     return {
         "results": results,

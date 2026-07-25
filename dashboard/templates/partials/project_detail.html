@@ -4,12 +4,21 @@
   {% if not project.active %}<span class="chip red">[ FOLDER REMOVED ]</span>{% endif %}
 </div>
 <div class="muted mono-sm">{{ project.path }} · folder id {{ project.slug }}</div>
+{% if project.folder_error or project.folder_state in ("error", "stopped") %}
+<div class="mono-sm"><span class="chip red">[ SYNCTHING FOLDER {{ (project.folder_state or "error") | upper }} ]</span>
+  {{ project.folder_error or "this folder is not syncing on the server" }} —
+  the completion figures below are stale until this is fixed.</div>
+{% endif %}
 {% set pickers = selected_by.get(project.slug, []) if selected_by is defined else [] %}
 <div class="mono-sm">SELECTED BY:
   {% for e in pickers %}<span class="who">{{ e }}</span>{{ ", " if not loop.last }}{% else %}<span class="muted">nobody — not syncing to any editor</span>{% endfor %}
   {% if session_user %}
+    {# Target ONLY this fragment's own wrapper: swapping "closest main" used to
+       replace <main>'s children wholesale, destroying project.html's every-10s
+       polling div AND the entire MEDIA PRESENCE panel (page frozen and bins
+       gone until a manual reload). #}
     <button class="btn" hx-post="/partials/selection/{{ session_user }}/{{ project.slug }}/toggle?view=project&slug_page={{ project.slug }}"
-            hx-target="closest main" hx-swap="innerHTML">
+            hx-target="#project-detail" hx-swap="innerHTML">
       [ {{ "UNTICK" if session_user in pickers else "TICK" }} FOR ME ]</button>
   {% endif %}
 </div>

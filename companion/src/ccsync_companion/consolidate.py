@@ -88,13 +88,27 @@ def parse_dry_run_stats(stderr_text: str) -> dict[str, Any]:
     """Parse rclone --use-json-log --dry-run stderr. Returns
     {"count": int, "bytes": int, "objects": [names], "objects_total": int,
     "deletes": int, "deleted_dirs": int, "delete_objects": [names],
-    "delete_objects_total": int}. Verified against rclone 1.71
-    (2026-07-24): the final `stats` record carries totalTransfers/
+    "delete_objects_total": int, "saw_stats": bool}. Verified against rclone
+    1.71 (2026-07-24): the final `stats` record carries totalTransfers/
     totalBytes/deletes/deletedDirs for what WOULD happen under --dry-run;
     each skipped transfer logs 'Skipped copy as --dry-run is set' and each
     skipped removal logs 'Skipped delete as --dry-run is set', both with an
     "object" field -- kept in SEPARATE lists so a deletion is never
-    mistaken for (or hidden among) a harmless upload/download (AUDIT D-1)."""
+    mistaken for (or hidden among) a harmless upload/download (AUDIT D-1).
+
+    `saw_stats` is False when NO `stats` record was present at all -- i.e.
+    the counters below are not "rclone measured zero", they are "we
+    received no data". reconcile_with_nas() FAILS CLOSED on that (AUDIT_2
+    DEL-0): an empty/truncated stderr (decode failure, timeout, killed
+    process, rclone crash) previously read as "0 deletions" and let lane B's
+    destructive `rclone sync` run against a consent dialog that promised
+    nothing would be deleted.
+
+    A dry-run removal is matched on either "delete" or "remove directory":
+    rclone emits 'Skipped remove directory as --dry-run is set' for
+    directories, which used to land in the harmless-uploads sample list
+    shown to the human (AUDIT_2 §7 new-defect 2).
+    """
     count = 0
     total_bytes = 0
     deletes = 0
@@ -103,6 +117,7 @@ def parse_dry_run_stats(stderr_text: str) -> dict[str, Any]:
     objects_total = 0
     delete_objects: list[str] = []
     delete_objects_total = 0
+    saw_stats = False
     for line in stderr_text.splitlines():
         try:
             rec = json.loads(line)
@@ -110,6 +125,7 @@ def parse_dry_run_stats(stderr_text: str) -> dict[str, Any]:
             continue
         stats = rec.get("stats")
         if isinstance(stats, dict):
+            saw_stats = True
             count = int(stats.get("totalTransfers", count) or 0)
             total_bytes = int(stats.get("totalBytes", total_bytes) or 0)
             deletes = int(stats.get("deletes", deletes) or 0)
@@ -119,7 +135,7 @@ def parse_dry_run_stats(stderr_text: str) -> dict[str, Any]:
         low = msg.lower()
         if not obj or "dry-run" not in low:
             continue
-        if "delete" in low:
+        if "delete" in low or "remove directory" in low:
             delete_objects_total += 1
             if len(delete_objects) < _OBJECTS_CAP:
                 delete_objects.append(obj)
@@ -136,12 +152,34 @@ def parse_dry_run_stats(stderr_text: str) -> dict[str, Any]:
         "deleted_dirs": deleted_dirs,
         "delete_objects": delete_objects,
         "delete_objects_total": delete_objects_total,
+        "saw_stats": saw_stats,
     }
 
 
 def _default_run(cmd: list[str], timeout: float) -> str:
-    """Run rclone, return stderr text (rclone's JSON log goes to stderr)."""
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    """Run rclone, return stderr text (rclone's JSON log goes to stderr).
+
+    encoding="utf-8", errors="replace" is LOAD-BEARING, not cosmetic. This
+    was the one remaining rclone call in companion code still using bare
+    `text=True`, which decodes with the console codepage (cp1252 here) under
+    errors="strict". rclone logs UTF-8, so a single CJK filename raised
+    UnicodeDecodeError inside subprocess's own reader thread -- which does
+    not propagate: communicate() simply returned stderr=None, exit code 0,
+    no exception. parse_dry_run_stats("") then reported deletes=0, the
+    consent dialog said "0 deletions", and lane B deleted the editor's
+    proxies anyway. Reproduced live against rclone 1.74.4 (AUDIT_2 DEL-0).
+
+    creationflags closes the last CREATE_NO_WINDOW gap: Consolidate flashed
+    two console windows out of the windowed build.
+    """
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        creationflags=rclone_lane._win_creationflags(),
+    )
     return proc.stderr or ""
 
 
@@ -199,6 +237,13 @@ def reconcile_with_nas(
     download" is really "local proxy files get deleted" (AUDIT D-1). The
     caller is responsible for actually honouring skip_lane_b before running
     lane B; this function only computes and surfaces it.
+
+    FAIL CLOSED on missing data: a dry run whose output carried no `stats`
+    record at all sets ok=False. "We received nothing" and "rclone measured
+    zero deletions" are indistinguishable in the counters, and treating the
+    first as the second is exactly the shape of defect that let DEL-0 delete
+    proxies under a dialog reading "0 deletions". A timeout, a killed
+    process or an rclone crash must never read as "nothing will be deleted".
     """
     result: dict[str, Any] = {
         "uploads": None, "downloads": None, "ok": True, "error": None,
@@ -225,6 +270,16 @@ def reconcile_with_nas(
         result["ok"] = False
         result["error"] = str(exc)
         return result
+
+    for direction_name, parsed in (("upload", result["uploads"]), ("download", result["downloads"])):
+        if not (parsed or {}).get("saw_stats", False):
+            result["ok"] = False
+            result["error"] = (
+                f"the {direction_name} check returned no data from rclone -- refusing to "
+                f"report what it would do (a blank result is not 'nothing to do')"
+            )
+            log.error("reconcile_with_nas: %s", result["error"])
+            return result
 
     downloads = result["downloads"] or {}
     deletes = int(downloads.get("deletes", 0) or 0)
@@ -264,7 +319,15 @@ def human_bytes(n: int) -> str:
 
 def build_report(plan: dict[str, Any], reconcile: dict[str, Any]) -> str:
     """One human-readable summary of what consolidate-and-upload will do."""
-    lines = ["PRE-EXISTING PROJECT — CONSOLIDATE & UPLOAD", ""]
+    # The reassurance is line 2, directly under the title -- as the LAST
+    # line (below the scary "!!! WARNING ... DELETE !!!" block) nobody read
+    # it, and "Consolidate" already means "trim and delete unused media" to
+    # anyone who knows Resolve's Media Management (AUDIT_2 UX-13).
+    lines = [
+        "COPY THIS PROJECT'S MEDIA IN",
+        "Your original files are COPIED, never moved — everything stays exactly where it is.",
+        "",
+    ]
     lines.append(
         f"  {plan['count']} scattered clip(s) to copy into the project "
         f"folder ({human_bytes(plan['bytes'])})"
@@ -295,8 +358,6 @@ def build_report(plan: dict[str, Any], reconcile: dict[str, Any]) -> str:
             )
     else:
         lines.append(f"  (could not check the NAS: {reconcile.get('error')})")
-    lines.append("")
-    lines.append("Originals are COPIED, never moved — your scattered files stay put.")
     return "\n".join(lines)
 
 
@@ -307,21 +368,83 @@ def run_consolidation(
     local_root: str,
     fix_clip_fn: Callable[..., dict[str, Any]] = fixer.fix_clip,
     progress_fn: Optional[Callable[[int, int, dict[str, Any]], None]] = None,
+    state_fn: Optional[Callable[[dict[str, Any]], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> list[dict[str, Any]]:
     """Copy+relink every op (fixer.fix_clip never raises). Returns per-op
     results with file_path attached. Same shape/semantics as
-    popup.perform_fix_all, but driven from the ops list."""
-    results = []
+    popup.perform_fix_all, but driven from the ops list.
+
+    `state_fn`/`should_stop` mirror perform_fix_all's (AUDIT_2 UX-9/UX-10):
+    per-chunk byte progress so a multi-GB original doesn't park the display
+    on one number for twenty minutes, and a between-files stop. Never
+    mid-file -- an aborted copy strands a partial .ccsync-tmp (CORE-H5).
+
+    NEITHER CALLBACK MAY TOUCH TK: this runs on a worker thread.
+    """
+    results: list[dict[str, Any]] = []
     total = len(ops)
-    for op in ops:
-        outcome = dict(fix_clip_fn(
-            op["file_path"], op["dest_rel"], local_root, op.get("media_pool_items", [])
-        ))
-        outcome["file_path"] = op["file_path"]
+    batch_total = sum(int(op.get("size") or 0) for op in ops)
+    batch_done = 0
+    stopped = False
+
+    def publish(**kw: Any) -> None:
+        if state_fn is None:
+            return
+        try:
+            state_fn(kw)
+        except Exception:
+            log.exception("consolidation state callback failed")
+
+    for index, op in enumerate(ops, start=1):
+        if should_stop is not None:
+            try:
+                if should_stop():
+                    stopped = True
+                    log.info("consolidate: stopped by the user after %d/%d", len(results), total)
+                    break
+            except Exception:
+                log.exception("consolidation should_stop callback failed")
+
+        path = op["file_path"]
+        name = os.path.basename(path)
+        size = int(op.get("size") or 0)
+        before = batch_done
+
+        placeholder = fixer.is_placeholder(path)
+
+        def _on_bytes(copied: int, file_total: int, _n=name, _i=index, _b=before,
+                      _ph=placeholder) -> None:
+            publish(index=_i, total=total, name=_n, file_bytes_done=copied,
+                    file_bytes_total=file_total, batch_bytes_done=_b + copied,
+                    batch_bytes_total=batch_total, placeholder=_ph, stopped=False)
+
+        # Cloud placeholders (Google Drive online-only et al) block inside
+        # open()/read() while they download, so the per-file bar honestly
+        # sits at 0% -- say so instead of looking hung (see
+        # fixer.is_placeholder and the 2026-07-25 incident).
+        publish(index=index, total=total, name=name, file_bytes_done=0,
+                file_bytes_total=size, batch_bytes_done=batch_done,
+                batch_bytes_total=batch_total, placeholder=placeholder, stopped=False)
+
+        try:
+            outcome = fix_clip_fn(path, op["dest_rel"], local_root,
+                                  op.get("media_pool_items", []), on_bytes=_on_bytes)
+        except TypeError:
+            # A fix_clip double that predates on_bytes (tests / injected).
+            outcome = fix_clip_fn(path, op["dest_rel"], local_root,
+                                  op.get("media_pool_items", []))
+        outcome = dict(outcome)
+        outcome["file_path"] = path
         results.append(outcome)
+        batch_done += size
         if progress_fn is not None:
             try:
                 progress_fn(len(results), total, outcome)
             except Exception:
                 log.exception("consolidation progress callback failed")
+
+    publish(index=len(results), total=total, name="", file_bytes_done=0,
+            file_bytes_total=0, batch_bytes_done=batch_done,
+            batch_bytes_total=batch_total, stopped=stopped)
     return results

@@ -23,8 +23,27 @@ def test_load_example_config_lanes_and_params():
     assert cfg["lanes"]["A"]["direction"] == "up"
     assert cfg["lanes"]["B"]["direction"] == "down"
     assert cfg["lanes"]["C"]["direction"] == "both"
-    assert cfg["params"]["rclone"]["transfers"] == [1, 4, 8, 16]
+    assert cfg["params"]["rclone"]["transfers"] == [1, 4, 8, 16, 32]
     assert cfg["params"]["robocopy"]["mt"] == [1, 8, 16, 32]
+
+
+def test_example_config_sweeps_chunk_size_in_kib_not_megabytes():
+    """SFTP's max total packet is 256 KiB: a megabyte-unit sweep can never
+    express 255k, the one value that matters on a high-RTT link."""
+    cfg = load_config(EXAMPLE_CONFIG)
+    rclone_params = cfg["params"]["rclone"]
+    assert "sftp_chunk_size_mb" not in rclone_params
+    chunk_sizes = rclone_params["sftp_chunk_size_kib"]
+    assert 255 in chunk_sizes
+    assert all(1 <= v <= 255 for v in chunk_sizes)
+
+
+def test_example_config_defaults_to_the_non_destructive_endpoint_guard():
+    cfg = load_config(EXAMPLE_CONFIG)
+    assert cfg["general"]["allow_destructive_endpoint"] is False
+    assert "_bench" in cfg["endpoints"]["sftp"]["remote_path"]
+    assert "_bench" in cfg["endpoints"]["smb"]["remote_subpath"]
+    assert "_bench" in cfg["endpoints"]["smb"]["unc_path"]
 
 
 def test_dataset_dir_for_missing_key_raises():

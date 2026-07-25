@@ -140,6 +140,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(state["pending_devices"])
         elif url.path == "/rest/system/connections":
             self._json({"connections": state["connections"]})
+        elif url.path == "/rest/db/ignores":
+            lines = state.get("ignores", {}).get(q.get("folder"), [])
+            self._json({"ignore": lines, "expanded": lines})
         elif url.path == "/rest/db/status":
             self._json(state["db_status"].get(q.get("folder"), {}))
         elif url.path == "/rest/db/completion":

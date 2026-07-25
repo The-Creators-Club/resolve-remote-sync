@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import sqlite3
 
 import pytest
@@ -322,6 +323,74 @@ def test_prune_drops_stale_lane_report_current(conn):
     assert [r[0] for r in rows] == ["jsmith"]
 
 
+def test_prune_drops_stale_machine_state(conn):
+    """machine_state had NO retention, and `machine` is an attacker-chosen
+    <=128-char string on an unthrottled endpoint. Same 30-day cutoff as the
+    lane tables."""
+    now = "2026-07-25T12:00:00+00:00"
+    old = "2026-06-01T12:00:00+00:00"      # > MACHINE_STATE_MAX_AGE_DAYS (30) ago
+    dbmod.upsert_machine_state(conn, "ghost", "OLD-PC", None, old)
+    dbmod.upsert_machine_state(conn, "jsmith", "PC", None, now)
+    dbmod.prune(conn, now)
+    rows = conn.execute("SELECT editor_username FROM machine_state").fetchall()
+    assert [r[0] for r in rows] == ["jsmith"]
+
+
+def test_machine_state_is_capped_per_editor(conn):
+    """One identity-token holder could otherwise grow machine_state without
+    bound, one row per invented machine name, all of them permanently in the
+    fleet grid. Evict-oldest, so a live companion is never the row that goes."""
+    base = dbmod.parse_iso("2026-07-25T12:00:00+00:00")
+    for i in range(dbmod.MAX_MACHINES_PER_EDITOR + 15):
+        dbmod.upsert_machine_state(
+            conn, "jsmith", f"BOGUS-{i:03d}", None,
+            (base + dt.timedelta(seconds=i)).isoformat())
+    machines = [r[0] for r in conn.execute(
+        "SELECT machine FROM machine_state WHERE editor_username='jsmith' ORDER BY machine")]
+    assert len(machines) == dbmod.MAX_MACHINES_PER_EDITOR
+    assert machines[-1] == f"BOGUS-{dbmod.MAX_MACHINES_PER_EDITOR + 14:03d}"  # newest kept
+    assert "BOGUS-000" not in machines                                        # oldest evicted
+
+    # another editor's rows are untouched by the cap
+    dbmod.upsert_machine_state(conn, "ruskin", "RUSKIN-PC", None, base.isoformat())
+    assert conn.execute(
+        "SELECT COUNT(*) FROM machine_state WHERE editor_username='ruskin'"
+    ).fetchone()[0] == 1
+
+
+def test_machine_state_companion_version_round_trip(conn):
+    """schema v10: the per-machine build the fleet view flags on."""
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine_state(conn, "jsmith", "PC", None, now,
+                               platform="windows", companion_version="0.4.4")
+    versions = dbmod.fetch_companion_version_map(conn)
+    assert versions[("jsmith", "PC")]["companion_version"] == "0.4.4"
+    assert versions[("jsmith", "PC")]["platform"] == "windows"
+
+    # a report WITHOUT the field must not blank an already-known version
+    # (companions predating it, and the LIGHT report path)
+    dbmod.upsert_machine_state(conn, "jsmith", "PC", None, now)
+    assert dbmod.fetch_companion_version_map(conn)[("jsmith", "PC")][
+        "companion_version"] == "0.4.4"
+    # ...and a machine that has never reported one stays None, not ""
+    dbmod.upsert_machine_state(conn, "jsmith", "OLD-PC", None, now)
+    assert dbmod.fetch_companion_version_map(conn)[("jsmith", "OLD-PC")][
+        "companion_version"] is None
+
+
+def test_editor_reported_resolve_project(conn):
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine_state(conn, "jsmith", "PC", None, now,
+                               resolve_project="Nuclear Family Reunion")
+    f = dbmod.editor_reported_resolve_project
+    assert f(conn, "jsmith", "Nuclear Family Reunion") is True
+    assert f(conn, "jsmith", "nuclear family reunion") is True   # NOCASE, like project_roots
+    assert f(conn, "jsmith", "  Nuclear Family Reunion  ") is True
+    assert f(conn, "ruskin", "Nuclear Family Reunion") is False  # not YOUR machine
+    assert f(conn, "jsmith", "Something Else") is False
+    assert f(conn, "jsmith", "") is False
+
+
 def test_prune_media_tables(conn):
     now = "2026-07-25T12:00:00+00:00"
     old = "2026-06-01T12:00:00+00:00"                          # >14 days
@@ -344,11 +413,109 @@ def test_purge_nas_media_for_inactive(conn):
 
 
 def test_fetch_collector_status(conn):
-    assert dbmod.fetch_collector_status(conn)["syncthing_reachable"] is False
-    dbmod.record_poll_run(conn, "completion", T0, T0, True, None)
-    dbmod.record_poll_run(conn, "connections", T1, T1, False, "connection refused")
-    status = dbmod.fetch_collector_status(conn)
+    now = dbmod.utcnow_iso()
+    assert dbmod.fetch_collector_status(conn, now)["syncthing_reachable"] is False
+    dbmod.record_poll_run(conn, "completion", now, now, True, None)
+    dbmod.record_poll_run(conn, "connections", now, now, False, "connection refused")
+    status = dbmod.fetch_collector_status(conn, now)
     assert status["syncthing_reachable"] is False  # latest run failed
     assert status["kinds"]["completion"]["ok"] == 1
-    dbmod.record_poll_run(conn, "connections", T2, T2, True, None)
-    assert dbmod.fetch_collector_status(conn)["syncthing_reachable"] is True
+    dbmod.record_poll_run(conn, "connections", now, now, True, None)
+    assert dbmod.fetch_collector_status(conn, now)["syncthing_reachable"] is True
+
+
+def test_collector_status_goes_unreachable_when_polls_go_stale(conn):
+    """'The last poll succeeded' says nothing about NOW: if the collector
+    thread dies before entering its guarded loop, nothing restarts it and
+    /api/v1/health used to report ok forever off an hours-old run (which is
+    also what the compose healthcheck watches)."""
+    now = "2026-07-25T12:00:00+00:00"
+    fresh = "2026-07-25T11:59:00+00:00"
+    stale = "2026-07-25T11:00:00+00:00"
+    dbmod.record_poll_run(conn, "connections", fresh, fresh, True, None)
+    assert dbmod.fetch_collector_status(conn, now)["syncthing_reachable"] is True
+
+    conn.execute("DELETE FROM poll_runs")
+    dbmod.record_poll_run(conn, "connections", stale, stale, True, None)
+    status = dbmod.fetch_collector_status(conn, now)
+    assert status["syncthing_reachable"] is False
+    assert status["collector_stale"] is True
+
+
+def test_collector_status_ignores_prune_only_runs(conn):
+    """prune is the one cycle that also runs with no Syncthing configured, so
+    a successful prune must never read as 'Syncthing is reachable'."""
+    now = dbmod.utcnow_iso()
+    dbmod.record_poll_run(conn, "prune", now, now, True, None)
+    assert dbmod.fetch_collector_status(conn, now)["syncthing_reachable"] is False
+
+
+def test_folder_status_surfaces_in_collector_status(conn):
+    now = dbmod.utcnow_iso()
+    pid = dbmod.upsert_project(conn, "p", "P", "/p", now)
+    dbmod.set_folder_status(conn, pid, "stopped", "folder marker missing", now)
+    errors = dbmod.fetch_collector_status(conn, now)["folder_errors"]
+    assert [(e["slug"], e["folder_state"], e["folder_error"]) for e in errors] == [
+        ("p", "stopped", "folder marker missing")]
+    # cleared once the folder is healthy again
+    dbmod.set_folder_status(conn, pid, "idle", None, now)
+    assert dbmod.fetch_collector_status(conn, now)["folder_errors"] == []
+
+
+def test_migration_refuses_a_newer_schema(tmp_path):
+    """A rollback to an older image against a newer DB must fail with a clear
+    message, not 500 later on the first query touching an unknown column."""
+    path = tmp_path / "newer.db"
+    conn = dbmod.connect(path)
+    dbmod.migrate(conn)
+    conn.execute(f"PRAGMA user_version = {dbmod.SCHEMA_VERSION + 5}")
+    conn.commit()
+    with pytest.raises(RuntimeError) as exc:
+        dbmod.migrate(conn)
+    assert "newer than this build" in str(exc.value)
+    conn.close()
+
+
+def test_migration_replays_a_step_interrupted_midway(tmp_path):
+    """The measured crash-loop: executescript ran a multi-statement step in
+    AUTOCOMMIT, so an interrupt between two ADD COLUMNs left the column
+    present while user_version stayed put -- and the replay then died on
+    'duplicate column name' forever. Each statement must now be idempotent
+    and the version bump must share the step's transaction."""
+    path = tmp_path / "partial.db"
+    conn = dbmod.connect(path)
+    dbmod.migrate(conn, steps=[(1, "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT);")])
+
+    # Simulate the interrupt: the FIRST of a two-ALTER step landed on disk,
+    # user_version was never bumped (exactly the measured state).
+    conn.execute("ALTER TABLE t ADD COLUMN b TEXT")
+    conn.commit()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+
+    steps = [
+        (1, "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT);"),
+        (2, "ALTER TABLE t ADD COLUMN b TEXT;\nALTER TABLE t ADD COLUMN c TEXT;"),
+    ]
+    dbmod.migrate(conn, steps=steps)      # must NOT raise "duplicate column name"
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert {r[1] for r in conn.execute("PRAGMA table_info(t)")} == {"id", "a", "b", "c"}
+    dbmod.migrate(conn, steps=steps)      # still idempotent afterwards
+    conn.close()
+
+
+def test_migration_step_is_atomic_with_its_version_bump(tmp_path):
+    """A step that fails partway must leave NEITHER a partially-applied
+    schema NOR a bumped user_version -- the whole step rolls back and the
+    next start replays it."""
+    path = tmp_path / "atomic.db"
+    conn = dbmod.connect(path)
+    dbmod.migrate(conn, steps=[(1, "CREATE TABLE t (id INTEGER PRIMARY KEY);")])
+    broken = [
+        (1, "CREATE TABLE t (id INTEGER PRIMARY KEY);"),
+        (2, "ALTER TABLE t ADD COLUMN b TEXT;\nALTER TABLE t ADD COLUMN nope THIS IS NOT SQL;"),
+    ]
+    with pytest.raises(sqlite3.OperationalError):
+        dbmod.migrate(conn, steps=broken)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert "b" not in {r[1] for r in conn.execute("PRAGMA table_info(t)")}
+    conn.close()

@@ -36,6 +36,12 @@ def env(tmp_path):
         yield client, conn, now
 
 
+def hdr(editor="ruskin"):
+    """Both companion headers -- X-CCSync-Identity is required on reports."""
+    return {"X-CCSync-Token": TOKEN,
+            "X-CCSync-Identity": auth.make_identity_token(SECRET, editor)}
+
+
 def report(editor, machine, **extra):
     p = {"editor_name": editor, "machine": machine, "reported_at": "2026-07-25T10:00:00+00:00",
          "lanes": [{"name": "lane_b_proxy_down", "state": "syncing", "transfers": [
@@ -71,7 +77,7 @@ def test_report_ingests_media(env):
     dbmod.admin_set_project_root(conn, "FF5 Energy Transition", "2026-ff5-energy-transition",
                                  "alex", now)
     conn.commit()
-    assert client.post("/api/v1/report", json=payload, headers={"X-CCSync-Token": TOKEN}).status_code == 200
+    assert client.post("/api/v1/report", json=payload, headers=hdr("ruskin")).status_code == 200
 
     # rollup + tree + transfer landed
     roll = dbmod.fetch_editor_media_for_project(conn, "2026-ff5-energy-transition")
@@ -90,9 +96,9 @@ def test_report_ingests_media(env):
 def test_transfers_view_and_scope(env):
     client, conn, now = env
     client.post("/api/v1/report", json=report("ruskin", "RUSKIN-PC"),
-                headers={"X-CCSync-Token": TOKEN})
+                headers=hdr("ruskin"))
     client.post("/api/v1/report", json=report("jane", "JANE-PC"),
-                headers={"X-CCSync-Token": TOKEN})
+                headers=hdr("jane"))
     # unscoped (admin) sees both editors' transfers
     allv = build_transfers_view(conn)
     assert {t["editor"] for t in allv["transfers"]} == {"ruskin", "jane"}
@@ -104,10 +110,10 @@ def test_transfers_view_and_scope(env):
 def test_scope_leak_blocked_over_http(env):
     client, conn, now = env
     client.post("/api/v1/report", json=report("ruskin", "RUSKIN-PC"),
-                headers={"X-CCSync-Token": TOKEN})
+                headers=hdr("ruskin"))
     # ruskin logs in -> /api/v1/transfers shows only ruskin, even if others exist
     client.post("/api/v1/report", json=report("jane", "JANE-PC"),
-                headers={"X-CCSync-Token": TOKEN})
+                headers=hdr("jane"))
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "ruskin"))
     body = client.get("/api/v1/transfers").json()
     assert body["transfers"] and all(t["editor"] == "ruskin" for t in body["transfers"])
@@ -126,7 +132,7 @@ def test_pages_render(env):
         media_tree={"FF5 Energy Transition": [
             {"bin_path": "Interviews", "clip_name": "clipA", "file_path": "P:/a.mov",
              "kind": "proxy", "present": True}]},
-    ), headers={"X-CCSync-Token": TOKEN})
+    ), headers=hdr("ruskin"))
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
     # transfers page + partial
     assert "LIVE TRANSFERS" in client.get("/transfers").text
@@ -163,7 +169,7 @@ def test_local_manifest_uses_marker_slug_not_slugify_of_rel(env):
         }},
     )
     assert client.post("/api/v1/report", json=payload,
-                       headers={"X-CCSync-Token": TOKEN}).status_code == 200
+                       headers=hdr("ruskin")).status_code == 200
 
     # Filed under the marker's real slug (found via label)...
     roll = dbmod.fetch_editor_media_for_project(conn, "legacy-slug-from-marker")
@@ -184,9 +190,9 @@ def test_report_without_media_leaves_tables_untouched(env):
         "ruskin", "RUSKIN-PC",
         local_manifest={"2026/FF5/Energy Transition": {"n_originals": 0, "bytes_originals": 0,
                         "n_proxies": 1, "bytes_proxies": 10, "truncated": False}},
-    ), headers={"X-CCSync-Token": TOKEN})
+    ), headers=hdr("ruskin"))
     assert dbmod.fetch_editor_media_for_project(conn, "2026-ff5-energy-transition")
     # a LIGHT report (no local_manifest) must not wipe the rollup
     light = report("ruskin", "RUSKIN-PC")
-    client.post("/api/v1/report", json=light, headers={"X-CCSync-Token": TOKEN})
+    client.post("/api/v1/report", json=light, headers=hdr("ruskin"))
     assert dbmod.fetch_editor_media_for_project(conn, "2026-ff5-energy-transition")

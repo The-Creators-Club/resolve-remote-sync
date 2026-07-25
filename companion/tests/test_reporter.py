@@ -63,7 +63,11 @@ def test_post_once_payload_shape_matches_contract():
     assert url == "http://dash.example.com/api/v1/report"
     assert headers["Content-Type"] == "application/json"
     assert headers["X-CCSync-Token"] == "tok123"
-    assert timeout == reporter.timeout
+    # CORE-M12: a FULL report carries local_manifest + media_tree, which
+    # cannot cross a real WAN link in the 5 s light-tick timeout -- so those
+    # two sections never reached the dashboard at all.
+    assert timeout == reporter.full_report_timeout
+    assert reporter.full_report_timeout > reporter.timeout
 
     assert data["editor_name"] == "alex"
     assert data["machine"] == platform.node()
@@ -828,3 +832,36 @@ def test_payload_includes_platform_key():
     )
     reporter.post_once()
     assert calls[0]["platform"] in {"windows", "macos", "linux"}
+
+
+# -- per-machine version + never-raise numeric config (AUDIT_3 M-5 / #14) ----
+
+
+def test_companion_version_is_on_every_report_including_light_ticks():
+    """The dashboard displays a per-machine companion version, and most ticks
+    are LIGHT ones (the fast active cadence) -- the field must not be part of
+    the heavy payload sections."""
+    calls = []
+
+    def fake_post(url, data, headers, timeout):
+        calls.append(data)
+        return {}
+
+    reporter = DashboardReporter(lambda: [], _cfg(), http_post=fake_post)
+    reporter.post_once(light=True)
+    reporter.post_once(light=False)
+
+    assert [d["companion_version"] for d in calls] == [config_mod.VERSION] * 2
+    assert "local_manifest" not in calls[0]  # sanity: it really was light
+
+
+def test_hand_edited_report_intervals_never_raise_in_the_constructor(caplog):
+    """The reporter is constructed inside CompanionApp.__init__, so a bare
+    float() on a hand-edited value took the windowed exe down with no tray
+    and no log line."""
+    cfg = _cfg(dashboard_report_interval="1m", dashboard_report_interval_active=None)
+    with caplog.at_level("ERROR", logger="ccsync.config"):
+        reporter = DashboardReporter(lambda: [], cfg, http_post=lambda *a: {})
+
+    assert reporter.report_interval == 60.0
+    assert reporter.report_interval_active == 5.0

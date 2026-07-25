@@ -10,22 +10,31 @@ never run it straight off this shared folder (it locks the file for
 everyone, and the installer refuses to run that way).
 
 Follow the wizard: pick **REMOTE EDITOR** on the role page (BASE is only
-for Alex's studio machine). It cleans out any older CCSync install first
-(your Syncthing identity and SSH key are kept — nothing to re-approve),
+for Alex's studio machine). It cleans out any older CCSync install first,
 remounts your P: drive fresh, installs everything, signs you in with your
 TrueNAS account (you can't finish without valid credentials), and at the
 end shows you two values — your **Syncthing device ID** and **SSH public
-key** — to send to Alex so he can approve you. Re-running it any time is
-safe. Once installed, the companion updates itself: when Alex publishes a
-new version, the tray shows a one-click "Update now".
+key** — to send to Alex so he can approve you.
+
+"Cleans out" only means the old app files are replaced. Nothing you've
+synced is touched — your Creators_Club folder, proxies, sign-in, Syncthing
+identity and SSH key all stay exactly as they are, so there's nothing to
+re-approve. Re-running the wizard any time is safe. Once installed, the
+companion updates itself: when Alex publishes a new version, the tray shows
+a one-click "Update now".
 
 During the install a **UAC (administrator) prompt appears once** — approve
 it. It's what lets the installer set up the P: drive so it shows up in
 Explorer named properly instead of echoing your local disk's name. If you
 decline it, everything still works; the drive just keeps the wrong name.
 
-If you'd rather do it by hand, or you're on a Mac, follow the manual steps
-below instead.
+If you'd rather do it by hand, follow the manual steps below instead.
+
+**On a Mac?** Talk to Alex before you start. There is no wizard for macOS
+and, right now, **no companion app for macOS either** — `macos_bootstrap.sh`
+sets up rclone and Syncthing and stops there. That means no tray icon, no
+automatic upload of media you add, no out-of-tree popup, and nothing
+reporting to the dashboard. Windows is the supported machine today.
 
 ---
 
@@ -44,17 +53,24 @@ so think in hundreds of GB rather than tens. It does **not** have to be your
 
 ## 2. Run the setup script
 
-**Windows** — open PowerShell **as Administrator** (right-click PowerShell →
-*Run as Administrator*), then:
+**Windows** — open a **normal** PowerShell window. Do **not** right-click →
+*Run as Administrator*. Then:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\windows_bootstrap.ps1 -TailnetHost 100.71.216.3 -EditorName <yourname>
+.\windows_bootstrap.ps1 -TailnetHost 100.71.216.3 -EditorName <yourname> -DashboardToken <token-from-alex>
 ```
 
-Administrator isn't strictly required — the script falls back to an equivalent
-method and tells you which one it used — but with it you get a cleaner logon
-task for the `P:` drive.
+The script asks for admin rights by itself, once, for the one step that
+needs them — approve that prompt when it appears. Running the *whole* script
+elevated is the one thing that quietly breaks the install: a drive mapped
+from an elevated window is invisible to your normal session, so `P:` won't
+exist for Resolve until you log off and back on again. If you already did it
+that way, log off and on before opening Resolve.
+
+`-DashboardToken` is the value Alex gives you; without it the app installs
+fine but never reports to the dashboard and never follows your project
+ticks.
 
 To put the sync folder on a different drive, add `-LocalRoot`:
 
@@ -62,7 +78,9 @@ To put the sync folder on a different drive, add `-LocalRoot`:
 .\windows_bootstrap.ps1 -TailnetHost 100.71.216.3 -EditorName <yourname> -LocalRoot F:\Creators_Club
 ```
 
-**macOS** — in Terminal:
+**macOS** — read the "On a Mac?" note above first; this sets up rclone and
+Syncthing only, and there's no companion app to install in step 3. In
+Terminal:
 
 ```bash
 bash macos_bootstrap.sh --tailnet-host 100.71.216.3 --editor-name <yourname>
@@ -106,23 +124,47 @@ playback — ignoring your local proxies completely. There's no error and no
 warning; it just feels mysteriously slow. **`T:` is known to collide** — never
 map that one. If you think you need another mount, ask Alex first.
 
-## 3. Copy the companion app
+## 3. Install the companion app
 
-Copy `ccsync-companion.exe` somewhere permanent (e.g. into your `Creators_Club`
-folder) and run it. A tray icon appears: **green = synced, orange = syncing,
+Easiest: let the setup script do it, by pointing it at the exe in this
+folder — it copies the app into place *and* registers auto-start:
+
+```powershell
+.\windows_bootstrap.ps1 -TailnetHost 100.71.216.3 -EditorName <yourname> -CompanionExeSource .\ccsync-companion.exe
+```
+
+By hand instead: copy `ccsync-companion.exe` into
+
+```
+%LOCALAPPDATA%\ccsync\bin\
+```
+
+(paste that into Explorer's address bar; create the `bin` folder if it isn't
+there) and run it from there. **Don't** keep it in your `Creators_Club`
+folder, on the Desktop, or anywhere else — that's the one location the setup
+script starts at logon, and stray copies elsewhere cause problems later.
+Re-running the setup script will *not* find a copy you put somewhere else.
+
+Once it's running a tray icon appears: **green = synced, orange = syncing,
 red = problem**. It also watches your Resolve timeline — if you cut in a file
-from outside the project folder (Desktop, Downloads…), it pops up and offers to
-**move it into the right place for you**. Say yes — that's what makes your added
-media appear for everyone else.
+from outside the project folder (Desktop, Downloads…), it pops up and offers
+to **copy it into the right place** and relink Resolve. Say yes — that's what
+makes your added media appear for everyone else. Your original stays where it
+is; delete it yourself later if you want.
 
-Re-run the setup script after copying it and it'll add the app to auto-start.
+**Now sign in — this is the switch that turns sync on.** Right-click the
+tray icon → **Sign in…** and enter your TrueNAS username and password
+(the ones Alex set up). Until the tray says `Signed in as <you>`, nothing
+syncs — and your machine won't show up on Alex's side either, since the app
+only reports in once it knows who you are. If he says he can't see your
+machine, check this first.
 
-Right-click the tray icon → **Open dashboard** to sign in (your TrueNAS
-username + password, same one Alex set up) and **tick the projects you want
-synced to this machine**. Nothing syncs until you tick something — that's on
-purpose, so you only pull the projects you're actually working on. Alex will
-give you a **dashboard token** to paste into `~/.ccsync/config.toml` as
-`dashboard_token` so the app can report status and follow your ticks.
+Then right-click the tray icon → **Open dashboard** — sign in there with the
+same username and password — and **tick the projects you want synced to this
+machine**. Nothing syncs until you tick something either; that's on purpose,
+so you only pull the projects you're actually working on. (If you didn't pass
+`-DashboardToken` in step 2, ask Alex for the token and re-run the setup
+script with it, or the app can't report status or follow your ticks.)
 
 ## 4. Connect Resolve to the project server
 
@@ -150,7 +192,8 @@ give you a **dashboard token** to paste into `~/.ccsync/config.toml` as
   you imported but haven't cut in yet.
 - **Starting from a project you already had?** Tray → **Consolidate
   pre-existing project…** copies your scattered media into the project folder
-  and uploads it, so everything lands neatly on the server.
+  and uploads it, so everything lands neatly on the server. It **copies,
+  never moves** — your originals stay exactly where they are.
 - **Don't reorganize/rename folders** — that happens on the server side only.
   Deleting a shared file deletes it for everyone (there's a server-side trash,
   but still — ask first).
@@ -162,8 +205,10 @@ give you a **dashboard token** to paste into `~/.ccsync/config.toml` as
   everything else (your Syncthing identity, key, drive mapping, settings) —
   nothing to re-approve. Add `-DashboardToken <value>` if Alex gives you one.
 - **Remove it:** `.\windows_uninstall.ps1` removes the app but keeps your
-  identity so a reinstall is painless. `.\windows_uninstall.ps1 -Full` wipes
-  everything (you'd then need Alex to re-approve your device).
+  identity so a reinstall is painless. `.\windows_uninstall.ps1 -Full` also
+  removes your saved sign-in and Syncthing identity (a reinstall then needs
+  Alex to re-approve you). Neither mode ever deletes your synced media in
+  `C:\Creators_Club`.
 
 Problems? Tray icon red, clips offline, popup confused — message Alex with a
 screenshot of the tray menu. If sync seems dead, the log at

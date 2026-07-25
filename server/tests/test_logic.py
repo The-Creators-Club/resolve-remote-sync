@@ -111,12 +111,14 @@ def test_project_path_preserves_spaces_verbatim():
 def test_build_remote_script_quotes_paths_with_spaces():
     # A space in a series/project name must not split into two shell words.
     from setup_tree import build_remote_script  # noqa: PLC0415
+    from tests.test_safety import unquoted_occurrences  # noqa: PLC0415
 
     base = "/mnt/tank/TheCreatorsPool/Creators_Club/Projects/2026/Creator Profiles/Season 1"
     script = build_remote_script(base, "broll", "editors")
     assert "'/mnt/tank/TheCreatorsPool/Creators_Club/Projects/2026/Creator Profiles/Season 1'" in script
-    # and never the bare, word-splittable form
-    assert " /mnt/tank/TheCreatorsPool/Creators_Club/Projects/2026/Creator Profiles/Season 1 " not in script
+    # and never outside single quotes, where it would word-split (the path also
+    # appears inside the refusal messages, which are themselves single-quoted)
+    assert unquoted_occurrences(script, base) == 0
 
 
 def test_slugify_empty_raises():

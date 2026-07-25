@@ -91,3 +91,85 @@ def test_enforce_noop_makes_no_puts(conn, fake, collector):
     fake.state.pop("put_folder_calls", None)
     collector.run_cycle(conn, ["enforce"])  # steady state
     assert "put_folder_calls" not in fake.state
+
+
+def test_seed_flag_not_set_when_no_editor_devices_are_visible(conn, fake, collector):
+    """First container start racing Syncthing's own startup: /rest/config
+    answers 200 with the device list not yet loaded. Flagging THAT as
+    'seeded' made the next enforce pass read an empty selections table as
+    authoritative and unshare every editor from every folder, fleet-wide,
+    with nobody told (see the seed-flag finding)."""
+    fake.state["devices"] = [{"deviceID": SERVER_ID, "name": "server"}]
+    fake.state["folders"][0]["devices"] = [{"deviceID": SERVER_ID}]
+    collector.run_cycle(conn, ["config", "enforce"])
+    assert dbmod.meta_get(conn, "selections_seeded") is None      # retried next cycle
+
+    # Devices show up (approved an hour later): NOW the seed runs for real.
+    fake.state["devices"] = [
+        {"deviceID": SERVER_ID, "name": "server"},
+        {"deviceID": EDITOR_ID, "name": "jsmith"},
+    ]
+    fake.state["folders"][0]["devices"] = [{"deviceID": SERVER_ID}, {"deviceID": EDITOR_ID}]
+    collector.run_cycle(conn, ["config", "enforce"])
+    assert dbmod.meta_get(conn, "selections_seeded") is not None
+    assert [s["slug"] for s in dbmod.fetch_selections(conn, "jsmith")] == [SLUG]
+    assert folder_devices(fake) == {SERVER_ID, EDITOR_ID}         # nobody unshared
+
+
+def test_seed_flag_not_set_when_there_are_no_folders(conn, fake, collector):
+    fake.state["folders"] = []
+    collector.run_cycle(conn, ["config", "enforce"])
+    assert dbmod.meta_get(conn, "selections_seeded") is None
+
+
+def test_enforce_refuses_a_mass_unshare(conn, fake, collector):
+    """A pass that would unshare more devices than the configured limit is
+    the signature of a bad snapshot, never a normal outcome. Removals are
+    skipped (and logged as an ERROR); additions still apply."""
+    editors = {"jsmith": EDITOR_ID}
+    for i in range(4):
+        device_id = f"EXTRA{i:02}-EXTRA{i:02}-EXTRA{i:02}-EXTRA{i:02}-" \
+                    f"EXTRA{i:02}-EXTRA{i:02}-EXTRA{i:02}-EXTRA{i:02}"
+        name = f"extra{i}"
+        editors[name] = device_id
+        fake.state["devices"].append({"deviceID": device_id, "name": name})
+        fake.state["folders"][0]["devices"].append({"deviceID": device_id})
+    collector.run_cycle(conn, ["config", "enforce"])          # seeds all five
+    assert folder_devices(fake) >= set(editors.values())
+
+    # Everyone unticks at once (or the selections table is lost).
+    for name in editors:
+        dbmod.remove_selection(conn, name, SLUG)
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+    assert folder_devices(fake) >= set(editors.values())       # nothing removed
+
+    # Raising the limit is the deliberate override.
+    collector.settings = Settings(
+        **{**collector.settings.__dict__, "enforce_max_share_removals": 99}
+    )
+    collector.run_cycle(conn, ["enforce"])
+    assert folder_devices(fake) == {SERVER_ID, EDITOR2_ID}     # server + unmapped only
+
+
+def test_enforce_below_the_limit_still_removes(conn, fake, collector):
+    collector.run_cycle(conn, ["config", "enforce"])
+    dbmod.remove_selection(conn, "jsmith", SLUG)
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+    assert folder_devices(fake) == {SERVER_ID, EDITOR2_ID}
+
+
+def test_enforce_skipped_when_syncthing_reports_no_my_id(conn, fake, collector):
+    """An empty myID makes `desired` omit the server device from every
+    folder: a put_folder on EVERY folder every cycle (each restarting the
+    folder in Syncthing), with the NAS itself showing up as an editor."""
+    collector.run_cycle(conn, ["config", "enforce"])
+    fake.state.pop("put_folder_calls", None)
+    fake.state["my_id"] = ""
+    collector.run_cycle(conn, ["config", "enforce"])
+    assert "put_folder_calls" not in fake.state
+    assert folder_devices(fake) == {SERVER_ID, EDITOR_ID, EDITOR2_ID}
+    # ...and the NAS was not re-classified as an editor device
+    row = conn.execute("SELECT is_server FROM devices WHERE device_id=?", (SERVER_ID,)).fetchone()
+    assert row["is_server"] == 1

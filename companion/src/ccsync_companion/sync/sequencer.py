@@ -20,17 +20,20 @@ with tiny real intervals instead of mocking time.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 import time
+import urllib.error
 from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
+from .. import config as config_mod
 from ..selection import SelectionClient
 from .rclone_lane import clone_directory_tree
-from .repath import ProjectRepather
-from .syncthing_admin import SyncthingAdmin
+from .repath import ProjectRepather, normalized_safe_rel
+from .syncthing_admin import STIGNORE_LINES, SyncthingAdmin
 
 log = logging.getLogger("ccsync.sync.sequencer")
 
@@ -46,12 +49,19 @@ STATE_STOPPED = "stopped"
 # tests aren't stuck waiting on real 5-second ticks.
 DEFAULT_FOLDER_STATUS_POLL_SECONDS = 5.0
 
-# Granularity of the interruptible waits below -- small enough that stop()/
-# pause()/notify_change()/trigger_pass_now() feel immediate, large enough
-# not to busy-loop.
+# Granularity of the (rare) waits that still have to poll a predicate rather
+# than block on an event.
 _POLL_CHUNK_SECONDS = 0.05
 
 PROJECTS_PREFIX = "Projects/"
+
+# Lane C pacing schemes (AUDIT_2 P4/C-1).
+#   "none"   -- never pause a folder; Syncthing's own maxFolderConcurrency
+#               paces the I/O. THE DEFAULT.
+#   "rotate" -- the historical scheme: pause every other selected folder for
+#               the duration of the current project's turn.
+PAUSE_SCHEME_NONE = "none"
+PAUSE_SCHEME_ROTATE = "rotate"
 
 
 def _sort_by_position(selection: list[dict]) -> list[dict]:
@@ -59,17 +69,49 @@ def _sort_by_position(selection: list[dict]) -> list[dict]:
 
 
 def _item_is_valid(item: dict) -> bool:
-    """A selection item usable for sync: rel_path must be a non-blank str
-    and active (when present) must not be explicitly False. A dashboard row
-    whose project record is gone (LEFT JOIN -> rel_path NULL) must never
-    reach a path join -- str(None) == "None" would move the project
-    directory to "...\\Projects\\None" (AUDIT D-4)."""
+    """A selection item usable for sync: rel_path must be a non-blank str,
+    contained under local_root (repath.normalized_safe_rel -- a `..`, `\\` or
+    drive-letter segment reaches lane A's SOURCE path, where
+    `rclone copy C:\\ nas:...` would upload every video on the editor's C:
+    drive; AUDIT_2 L-7), and active (when present) must not be explicitly
+    False. A dashboard row whose project record is gone (LEFT JOIN ->
+    rel_path NULL) must never reach a path join -- str(None) == "None" would
+    move the project directory to "...\\Projects\\None" (AUDIT D-4).
+
+    Goes through the SHARED normalize-then-validate helper: this used to
+    validate the raw string while repath.py stripped a leading "/" first, so
+    "/2026/CCT/Show" was repathed (directory moved, Syncthing re-pointed) and
+    then never synced by lanes A/B (AUDIT_3 L-11)."""
     rel = item.get("rel_path")
     if not isinstance(rel, str) or not rel.strip():
+        return False
+    if normalized_safe_rel(rel) is None:
         return False
     if item.get("active") is False:
         return False
     return True
+
+
+def _item_rel(item: dict) -> Optional[str]:
+    """The normalized, validated rel_path of a selection item (None when
+    unusable). Every path built from a selection item goes through this so
+    the string that reaches lane A's `Projects/<rel>` is the same one
+    _rel_to_slug and repath.py agreed was safe."""
+    return normalized_safe_rel(item.get("rel_path"))
+
+
+def _accepts_max_duration(fn: Any) -> bool:
+    try:
+        return "max_duration_seconds" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_not_found(exc: BaseException) -> bool:
+    """A Syncthing 404 -- "this folder isn't configured locally", i.e. the
+    editor hasn't accepted it yet. Routine, not an error worth a traceback
+    per project per pass (AUDIT_2 L-11)."""
+    return isinstance(exc, urllib.error.HTTPError) and exc.code == 404
 
 
 class Sequencer:
@@ -96,12 +138,65 @@ class Sequencer:
         self.selection = selection
         self.cfg = cfg
         self.local_root = cfg.get("local_root", "")
-        self.selection_poll_interval = float(cfg.get("selection_poll_interval", 60))
-        self.project_rotation_seconds = float(cfg.get("project_rotation_seconds", 600))
-        self.sequencer_idle_seconds = float(cfg.get("sequencer_idle_seconds", 60))
+        # EVERY numeric here goes through config.coerce_numeric/coerce_count.
+        # A bare float(cfg.get(...)) raises on a hand-edited
+        # `selection_poll_interval = "fast"`, and the Sequencer is built
+        # inside CompanionApp.__init__ -- on the windowed exe that is a
+        # process that vanishes with no tray and no log line (AUDIT_2
+        # CORE-M4's family; validate_config() reports the bad value).
+        self.selection_poll_interval = config_mod.coerce_numeric(
+            cfg, "selection_poll_interval", 60
+        )
+        self.project_rotation_seconds = config_mod.coerce_numeric(
+            cfg, "project_rotation_seconds", 600
+        )
+        self.sequencer_idle_seconds = config_mod.coerce_numeric(
+            cfg, "sequencer_idle_seconds", 60
+        )
         # Base rig with direct NAS access reads proxies off the share; no
         # point mirroring them locally (and it fills the system drive).
         self.lane_b_enabled = bool(cfg.get("lane_b_enabled", True))
+        # AUDIT_2 C-1/P7: lanes A and B are opposite directions over disjoint
+        # file sets (**/Proxy/** vs everything else) in separate processes,
+        # and WireGuard/Tailscale is full duplex -- so running them serially
+        # left one direction idle for the whole of the other's transfer.
+        # Toggleable because upstream and downstream now compete for the
+        # editor's CPU and disk.
+        self.concurrent_lanes = bool(cfg.get("concurrent_lanes", True))
+        # AUDIT_2 C-3/P10: the directory-structure clone is a full remote
+        # listing per project per pass and is entirely redundant in steady
+        # state. Run it on the first pass, after a repath, and every N passes
+        # thereafter. 1 => every pass; 0 => NEVER (only the forced,
+        # post-repath clone still runs).
+        #
+        # `int(cfg.get(..., 10) or 1)` turned a configured 0 into 1, i.e. the
+        # exact OPPOSITE of what config.py's comment and config.example.toml
+        # both document ("0 = never re-clone") -- an operator disabling the
+        # per-project remote listing got it on every single pass instead
+        # (AUDIT_3 M-6). 0 now means disabled, the same way
+        # orphan_scan_every_n_passes has always treated it.
+        self.structure_clone_every_n_passes = config_mod.coerce_count(
+            cfg, "structure_clone_every_n_passes", 10
+        )
+        # AUDIT_2 P4: see PAUSE_SCHEME_*. Anything unrecognised falls back to
+        # the new default rather than silently reviving the rescan storm.
+        scheme = str(cfg.get("lane_c_pause_scheme", PAUSE_SCHEME_NONE) or "").strip().lower()
+        if scheme not in (PAUSE_SCHEME_NONE, PAUSE_SCHEME_ROTATE):
+            log.warning(
+                "sequencer: unknown lane_c_pause_scheme %r — using %r",
+                scheme, PAUSE_SCHEME_NONE,
+            )
+            scheme = PAUSE_SCHEME_NONE
+        self.lane_c_pause_scheme = scheme
+        # What replaces the pause scheme's pacing. 0 disables the write.
+        self.lane_c_max_folder_concurrency = config_mod.coerce_count(
+            cfg, "lane_c_max_folder_concurrency", 2
+        )
+        # AUDIT_2 P8/P15/C-7: count orphan .partial files on the NAS every N
+        # passes and REPORT them. Never deletes. 0 disables the scan.
+        self.orphan_scan_every_n_passes = config_mod.coerce_count(
+            cfg, "orphan_scan_every_n_passes", 20
+        )
         self.folder_status_poll_seconds = folder_status_poll_seconds
         self._now = now
         self._clone_tree_fn = clone_tree_fn
@@ -114,6 +209,12 @@ class Sequencer:
         self._resume_event = threading.Event()
         self._resume_event.set()  # not paused by default
         self._wake_event = threading.Event()
+        # "Something changed -- re-evaluate now." Set by stop(), pause(),
+        # resume(), notify_change() and trigger_pass_now(); every wait below
+        # blocks on THIS for its whole remaining timeout instead of waking
+        # 20x/s forever (AUDIT_2 L-18). Distinct from _wake_event, which is a
+        # latched "run a pass now" signal that only _wait_or_wake consumes.
+        self._interrupt = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
@@ -132,12 +233,55 @@ class Sequencer:
         # unpause-everything sweep, so an in-flight sweep can't re-pause a
         # folder AFTER that sweep already ran (AUDIT §4).
         self._in_lane_c_turn = False
+        # Set whenever _in_lane_c_turn is False, so the wait below can block
+        # on an event instead of polling.
+        self._lane_c_idle = threading.Event()
+        self._lane_c_idle.set()
+        # Slugs already processed in the current pass -- notify_change must
+        # not re-prepend them (AUDIT_2 L-10).
+        self._processed_slugs: set[str] = set()
+        # Slugs whose accept_folder() failed part-way: the folder exists in
+        # Syncthing but its ignores never landed, so it must stay paused --
+        # including through the leak-recovery sweeps, which would otherwise
+        # undo the protection a few seconds later (AUDIT_2 L-3).
+        self._accept_failed: set[str] = set()
+        # How many times each project has been processed since its last
+        # structure clone (AUDIT_2 C-3). Missing == never cloned.
+        self._clone_ages: dict[str, int] = {}
+        # Same, for the orphan .partial scan.
+        self._orphan_ages: dict[str, int] = {}
+        # Throttle for selection.get(): it does a live HTTP fetch AND
+        # rewrites selection.json on EVERY call, and the lane C wait loop
+        # called it every 5 s -- ~120 requests + 120 disk writes per project
+        # per pass per editor (AUDIT_2 P11/L-5).
+        self._selection_cache: Optional[tuple[float, Any, str]] = None
+        # Folders THIS sequencer paused and has not released yet -- lets the
+        # pre-lane release below issue only the PATCHes that are actually
+        # needed instead of a blind sweep over the whole selection (each one
+        # makes Syncthing commit its config and restart the folder).
+        self._paused_by_us: set[str] = set()
 
     # -- lifecycle -----------------------------------------------------
     def start(self) -> None:
         if not self.selection.enabled:
             return
+        if self._thread is not None and self._thread.is_alive():
+            # RcloneLane.start() and SyncthingLane.start() both got this
+            # guard in round 1; the sequencer did not. stop() joins with
+            # timeout=10, which an in-flight 40 GB lane A run always
+            # outlasts -- and start() then cleared _stop_event and spawned
+            # thread #2 while #1 was still looping. Two sequencers race:
+            # both drive _lane_c_turn, so Syncthing folders flip
+            # paused/unpaused several times a second and rotation collapses
+            # entirely. Every subsequent sign-out/sign-in added another
+            # permanent thread (AUDIT_2 L-1, reproduced live).
+            log.warning(
+                "sequencer: start() while a sequencer thread is still alive — "
+                "ignoring rather than spawning a second one"
+            )
+            return
         self._stop_event.clear()
+        self._interrupt.clear()
         self._resume_event.set()
         self._thread = threading.Thread(target=self._run, name="ccsync-sequencer", daemon=True)
         self._thread.start()
@@ -145,6 +289,7 @@ class Sequencer:
     def stop(self) -> None:
         self._stop_event.set()
         self._wake_event.set()
+        self._interrupt.set()
         # JOIN first, THEN unpause: unpausing before the worker has actually
         # stopped let an in-flight _lane_c_turn re-pause every non-current
         # project right after this sweep ran, leaving them stuck paused
@@ -160,6 +305,7 @@ class Sequencer:
 
     def pause(self) -> None:
         self._resume_event.clear()
+        self._interrupt.set()
         # Same ordering concern as stop(): give an in-flight lane-C pause
         # sweep a bounded window to notice and bail (or finish) before the
         # unpause-everything sweep below runs.
@@ -169,27 +315,24 @@ class Sequencer:
     def resume(self) -> None:
         self._resume_event.set()
         self._wake_event.set()
+        self._interrupt.set()
 
     def _wait_for_lane_c_turn_idle(self, timeout: float) -> None:
         """Bounded, non-blocking-past-timeout wait for _lane_c_turn's
         folder-pause sweep to finish. Never waits for the whole pass (e.g.
         _wait_for_folder_sync) -- only for the part that actually mutates
         other folders' paused state, which is what could otherwise race
-        _unpause_all() below."""
+        _unpause_all() below.
+
+        Blocks on an event rather than the bare time.sleep() poll it used to
+        run (AUDIT_2 L-18)."""
         if self._thread is None or not self._thread.is_alive():
             return
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self._lock:
-                busy = self._in_lane_c_turn
-            if not busy:
-                return
-            if not self._thread.is_alive():
-                return
-            time.sleep(_POLL_CHUNK_SECONDS)
+        self._lane_c_idle.wait(timeout)
 
     def trigger_pass_now(self) -> None:
         self._wake_event.set()
+        self._interrupt.set()
 
     # -- introspection -----------------------------------------------------
     @property
@@ -241,6 +384,17 @@ class Sequencer:
         with self._lock:
             return list(self._rel_to_slug)
 
+    def expected_folder_slugs(self) -> list[str]:
+        """The Syncthing folder IDs (== project slugs) of the current
+        selection, in selection order. Thread-safe.
+
+        Wired into SyncthingLane as `expected_folder_ids_fn`: lane C had no
+        way to learn which folders it was supposed to be syncing, so it
+        reported idle/queued=0/last_sync=now unconditionally for every
+        managed editor (AUDIT_2 L-6/UX-3)."""
+        with self._lock:
+            return list(self._slug_to_item)
+
     # -- watcher hand-off -----------------------------------------------------
     def notify_change(self, rel: str) -> None:
         """rel is "Projects/<year>/<series>/<project>" (from RcloneLane's
@@ -252,6 +406,17 @@ class Sequencer:
             slug = self._rel_to_slug.get(rel_path)
             if not slug or slug == self._current_slug:
                 return
+            if slug in self._processed_slugs:
+                # Already done this pass. Lane A's watchdog fires per write
+                # chunk, so a card ingest into project 1 of 5 produced
+                # thousands of events a minute, each re-prepending project 1
+                # -- projects 3-5 then never reached their lane C turn for
+                # the whole ingest (AUDIT_2 L-10). It will be picked up at
+                # the head of the NEXT pass; _wake_event below still shortens
+                # the wait between passes.
+                self._wake_event.set()
+                self._interrupt.set()
+                return
             item = self._slug_to_item.get(slug)
             if item is None:
                 return
@@ -260,6 +425,7 @@ class Sequencer:
                 self._queue.appendleft(item)
                 self._queue_slugs = [i.get("slug") for i in self._queue]
         self._wake_event.set()
+        self._interrupt.set()
 
     # -- main loop -----------------------------------------------------
     def _run(self) -> None:
@@ -271,7 +437,7 @@ class Sequencer:
                 self._park_paused()
                 continue
 
-            selection, source = self.selection.get()
+            selection, source = self._selection_get()
             if not selection:
                 with self._lock:
                     self._state = STATE_NO_SELECTION
@@ -310,11 +476,66 @@ class Sequencer:
             return "dashboard unreachable"
         return "zero projects selected"
 
+    # -- selection access -----------------------------------------------------
+    def _selection_get(self) -> tuple[Any, str]:
+        """selection.get(), remembering the result for later throttled reads.
+
+        The unthrottled path -- used where a fresh answer is worth a request
+        (once per pass, once per project)."""
+        result = self.selection.get()
+        self._selection_cache = (self._now(), result[0], result[1])
+        return result
+
+    def _selection_get_throttled(self) -> tuple[Any, str]:
+        """A selection read that costs nothing more than once per
+        `selection_poll_interval`.
+
+        selection.get() is not a cheap accessor: it does a live HTTP fetch to
+        the dashboard AND rewrites selection.json on every success. Called
+        from the lane C poll loop that runs every 5 s for up to a 600 s turn,
+        that was ~120 requests + 120 disk writes per project per pass per
+        editor -- roughly 1 req/s against the dashboard ON THE NAS precisely
+        while transfers are running, and a truncate-then-write window in
+        which a killed companion leaves a zero-byte selection.json
+        (AUDIT_2 P11/L-5).
+
+        The proper fix is a TTL inside selection.py (that module's owner);
+        this is the caller-side half, and it is what makes the poll loop
+        stop hammering it in the meantime."""
+        cached = self._selection_cache
+        if cached is not None and (self._now() - cached[0]) < self.selection_poll_interval:
+            return cached[1], cached[2]
+        return self._selection_get()
+
     # -- startup / pause -----------------------------------------------------
+    def _apply_lane_c_pacing(self) -> None:
+        """With the pause scheme off, Syncthing itself has to pace lane C --
+        that is what maxFolderConcurrency 1-2 does, and it buys the pacing
+        WITHOUT ~1000 config commits and ~180 folder rescans an hour
+        (AUDIT_2 P4/C-1/§4.2). Fault-isolated: an older Syncthing without
+        the endpoint must not stop the sequencer."""
+        if self.lane_c_pause_scheme != PAUSE_SCHEME_NONE:
+            return
+        if self.lane_c_max_folder_concurrency <= 0:
+            return
+        try:
+            self.admin.ensure_max_folder_concurrency(self.lane_c_max_folder_concurrency)
+        except Exception:
+            log.debug(
+                "sequencer: could not set maxFolderConcurrency — leaving Syncthing's default",
+                exc_info=True,
+            )
+
     def _startup_unpause(self) -> None:
         """Leak recovery: best-effort unpause every folder in the cached
         selection, in case a previous run crashed mid-pass with some
-        folders left paused."""
+        folders left paused.
+
+        Runs REGARDLESS of the pause scheme -- with the scheme off this is
+        the only thing that releases a folder an older companion (or a
+        crashed rotate-scheme pass) left paused, and a folder left paused
+        means lane C silently carries nothing for that project."""
+        self._apply_lane_c_pacing()
         cached: Optional[list[dict]] = None
         try:
             cached = self.selection.load_cached()
@@ -330,7 +551,12 @@ class Sequencer:
             self._current_slug = None
             self._queue_slugs = []
         while not self._stop_event.is_set() and not self._resume_event.is_set():
-            self._stop_event.wait(_POLL_CHUNK_SECONDS)
+            # Blocks on the interrupt (resume()/stop() both set it); the
+            # bounded wait is only a safety net, not a poll.
+            self._interrupt.clear()
+            if self._stop_event.is_set() or self._resume_event.is_set():
+                break
+            self._interrupt.wait(1.0)
         if self._stop_event.is_set():
             return
         with self._lock:
@@ -344,7 +570,7 @@ class Sequencer:
         for item in selection:
             if not _item_is_valid(item):
                 continue
-            rel = item.get("rel_path")
+            rel = _item_rel(item)
             slug = item.get("slug")
             if rel and slug:
                 rel_to_slug[rel] = slug
@@ -356,80 +582,150 @@ class Sequencer:
             self._last_selection = list(selection)
 
     def _unpause_all(self, selection: list[dict]) -> None:
+        with self._lock:
+            held_paused = set(self._accept_failed)
         for item in selection:
             slug = item.get("slug")
             if not slug:
                 continue
-            try:
-                self.admin.set_folder_paused(slug, False)
-            except Exception:
-                log.exception("sequencer: failed to unpause folder %s", slug)
+            if str(slug) in held_paused:
+                # Deliberately excluded from every leak-recovery sweep: this
+                # folder has no .stignore, so unpausing it means lane C
+                # indexes and offers every .braw/.mov original and every
+                # Proxy/ file. The next turn re-asserts the ignores and
+                # releases it (AUDIT_2 L-3).
+                log.debug(
+                    "sequencer: folder %s stays paused — its ignores never landed", slug
+                )
+                continue
+            self._set_paused(slug, False)
+
+    def _release_paused_folders(self) -> None:
+        """Unpause every folder this sequencer paused and hasn't released.
+
+        Called BEFORE each project's lane A/B runs. The previous project's
+        lane C turn left all the other folders paused, and the only sweep
+        that undid that ran between passes -- so a 200 GB ingest blocking in
+        lane A for 18 h left lane C stopped for every other selected project
+        that whole time (AUDIT_2 L-4). Scoped to what we actually paused, so
+        in steady state it costs zero config writes rather than one per
+        project per project."""
+        with self._lock:
+            slugs = sorted(self._paused_by_us - self._accept_failed)
+        for slug in slugs:
+            self._set_paused(slug, False)
+
+    def _set_paused(self, slug: str, paused: bool) -> bool:
+        """Pause/unpause one folder. Returns False on failure. A 404 just
+        means the editor hasn't accepted that folder yet -- routine, and it
+        used to write a full traceback per project per pass, burying real
+        errors in companion.log (AUDIT_2 L-11)."""
+        try:
+            self.admin.set_folder_paused(slug, paused)
+            with self._lock:
+                if paused:
+                    self._paused_by_us.add(slug)
+                else:
+                    self._paused_by_us.discard(slug)
+            return True
+        except Exception as exc:
+            if _is_not_found(exc):
+                log.debug("sequencer: folder %s not configured locally yet", slug)
+            else:
+                log.exception(
+                    "sequencer: failed to %s folder %s", "pause" if paused else "unpause", slug
+                )
+            return False
 
     # -- one pass over the selected projects -----------------------------------------------------
     def _run_pass(self, selection: list[dict]) -> None:
-        while True:
-            ordered = _sort_by_position(selection)
-            base_slugs = [item.get("slug") for item in ordered]
-            total = len(ordered)
-            with self._lock:
-                self._queue = deque(ordered)
-
-            restart_selection: Optional[list[dict]] = None
-            processed = 0
+        # Survives a mid-pass selection change: a project already synced this
+        # pass must not be re-run from scratch just because the tail of the
+        # list changed (AUDIT_2 L-10).
+        with self._lock:
+            self._processed_slugs = set()
+        processed_entries: dict[str, dict] = {}
+        try:
             while True:
-                if self._stop_event.is_set() or not self._resume_event.is_set():
-                    with self._lock:
-                        self._queue = None
-                    return
-
+                ordered = _sort_by_position(selection)
+                base_slugs = [item.get("slug") for item in ordered]
+                total = len(ordered)
+                # Anything already done this pass whose entry is UNCHANGED is
+                # skipped on the restart; a changed entry (new rel_path, say)
+                # genuinely needs re-running.
+                queue_items = [
+                    item for item in ordered
+                    if processed_entries.get(str(item.get("slug"))) != item
+                ]
                 with self._lock:
-                    if self._queue:
-                        item = self._queue.popleft()
-                        self._current_slug = item.get("slug")
-                        self._current_position = processed + 1
-                        self._current_total = total
-                        self._queue_slugs = [i.get("slug") for i in self._queue]
-                        self._state = STATE_RUNNING
-                    else:
-                        item = None
+                    self._queue = deque(queue_items)
 
-                if item is None:
+                restart_selection: Optional[list[dict]] = None
+                processed = total - len(queue_items)
+                while True:
+                    if self._stop_event.is_set() or not self._resume_event.is_set():
+                        with self._lock:
+                            self._queue = None
+                        return
+
                     with self._lock:
-                        self._queue = None
-                    break
+                        if self._queue:
+                            item = self._queue.popleft()
+                            self._current_slug = item.get("slug")
+                            self._current_position = processed + 1
+                            self._current_total = total
+                            self._queue_slugs = [i.get("slug") for i in self._queue]
+                            self._state = STATE_RUNNING
+                        else:
+                            item = None
 
-                processed += 1
-                self._process_project(item, ordered)
-
-                with self._lock:
-                    self._current_slug = None
-                    self._queue_slugs = [i.get("slug") for i in (self._queue or [])]
-
-                if self._stop_event.is_set() or not self._resume_event.is_set():
-                    with self._lock:
-                        self._queue = None
-                    return
-
-                new_selection, _source = self.selection.get()
-                if new_selection:
-                    new_slugs = [i.get("slug") for i in _sort_by_position(new_selection)]
-                    if new_slugs != base_slugs:
-                        restart_selection = new_selection
+                    if item is None:
+                        with self._lock:
+                            self._queue = None
                         break
 
-            if restart_selection is None:
-                return
-            selection = restart_selection
-            self._update_known_selection(selection)
+                    processed += 1
+                    self._process_project(item, ordered)
+                    slug = str(item.get("slug"))
+                    processed_entries[slug] = item
+                    with self._lock:
+                        self._processed_slugs.add(slug)
+                        self._current_slug = None
+                        self._queue_slugs = [i.get("slug") for i in (self._queue or [])]
 
-    def _reconcile_paths(self, selection: list[dict]) -> None:
+                    if self._stop_event.is_set() or not self._resume_event.is_set():
+                        with self._lock:
+                            self._queue = None
+                        return
+
+                    # Once per project, not per poll tick -- worth a live
+                    # request, unlike the lane C wait loop (AUDIT_2 P11).
+                    new_selection, _source = self._selection_get()
+                    if new_selection:
+                        new_slugs = [i.get("slug") for i in _sort_by_position(new_selection)]
+                        if new_slugs != base_slugs:
+                            restart_selection = new_selection
+                            break
+
+                if restart_selection is None:
+                    return
+                selection = restart_selection
+                self._update_known_selection(selection)
+        finally:
+            with self._lock:
+                self._processed_slugs = set()
+
+    def _reconcile_paths(self, selection: list[dict]) -> list[str]:
         """Repath any project moved server-side BEFORE lanes touch it --
         otherwise lane A re-uploads the old local tree to the NAS's dead
-        old path. Fault-isolated like every other step."""
+        old path. Fault-isolated like every other step. Returns the slugs
+        that were actually repathed (a repath invalidates the cached
+        directory structure -- see _maybe_clone_structure)."""
         try:
-            self.repather.reconcile(selection)
+            return list(self.repather.reconcile(selection) or [])
         except Exception:
             log.exception("sequencer: repath reconcile failed")
+            return []
 
     def _process_project(self, item: dict, ordered_selected: list[dict]) -> None:
         if not _item_is_valid(item):
@@ -439,39 +735,143 @@ class Sequencer:
                 item.get("slug"),
             )
             return
-        rel_path = item.get("rel_path")
+        rel_path = _item_rel(item)
+        if rel_path is None:  # unreachable via _item_is_valid; belt and braces
+            return
+        slug = str(item.get("slug"))
         subpath = f"{PROJECTS_PREFIX}{rel_path}"
 
         # A mid-pass selection refresh may have re-ordered/changed rels --
         # re-check this project's local path right before its lanes run.
-        self._reconcile_paths([item])
+        # STRICTLY BEFORE lane A, and never concurrent with it: repath moves
+        # the project directory, and a lane A that started first would
+        # re-upload the stale tree to the NAS's dead old path (AUDIT_2 C-1).
+        repathed = self._reconcile_paths([item])
 
-        # First, mirror the project's full directory skeleton -- including
+        # Then mirror the project's full directory skeleton -- including
         # empty folders, which neither lane would otherwise create (lane B
         # copies proxy files only; lane C's .stignore drops video/Proxy).
         # Editors get the same bin layout the NAS has from the moment they
-        # tick, not only once files exist. Idempotent, so it also picks up
-        # folders added server-side later. Fault-isolated like the lanes.
-        self._clone_structure(subpath)
+        # tick, not only once files exist. Now CONDITIONAL: it is a full
+        # remote listing and it is redundant in steady state (AUDIT_2 C-3).
+        self._maybe_clone_structure(subpath, slug, forced=bool(repathed))
         if self._stop_event.is_set() or not self._resume_event.is_set():
             return
 
-        try:
-            self.lane_a.run_once(subpath)
-        except Exception:
-            log.exception("sequencer: lane A run_once failed for %s", subpath)
+        # Release every folder the previous turn paused BEFORE the
+        # (potentially very long) lane A/B runs -- see _release_paused_folders.
+        self._release_paused_folders()
+
+        budget = self.project_rotation_seconds if self.project_rotation_seconds > 0 else None
+        self._run_lanes_a_and_b(subpath, budget)
         if self._stop_event.is_set() or not self._resume_event.is_set():
             return
 
-        if self.lane_b_enabled:
+        self._maybe_scan_orphans(subpath, slug)
+        self._lane_c_turn(item, ordered_selected)
+
+    def _run_lanes_a_and_b(self, subpath: str, budget: Optional[float]) -> None:
+        """Lane A (up) and lane B (down) for one project.
+
+        Concurrent by default: they are opposite directions over disjoint
+        file sets in separate rclone processes, and the link is full duplex,
+        so serializing them left one direction idle for the whole of the
+        other's transfer -- up to 50% of pass wall clock (AUDIT_2 C-1/P7).
+        Both are joined before the caller moves to the next project, so
+        "one project at a time" is unchanged, as is the ordering guarantee
+        that repath runs first. Two lane A runs on the same project are
+        still impossible: RcloneLane._run_lock covers that."""
+        run_b = self.lane_b_enabled
+
+        def _a() -> None:
             try:
-                self.lane_b.run_once(subpath)
+                self._run_lane(self.lane_a, subpath, budget)
+            except Exception:
+                log.exception("sequencer: lane A run_once failed for %s", subpath)
+
+        def _b() -> None:
+            try:
+                self._run_lane(self.lane_b, subpath, budget)
             except Exception:
                 log.exception("sequencer: lane B run_once failed for %s", subpath)
-            if self._stop_event.is_set() or not self._resume_event.is_set():
-                return
 
-        self._lane_c_turn(item, ordered_selected)
+        if not (self.concurrent_lanes and run_b):
+            _a()
+            if run_b and not (self._stop_event.is_set() or not self._resume_event.is_set()):
+                _b()
+            return
+
+        thread = threading.Thread(
+            target=_b, name="ccsync-sequencer-lane-b", daemon=True
+        )
+        thread.start()
+        try:
+            _a()
+        finally:
+            # Always join: an un-joined lane B would still be writing into
+            # the project directory while the next project's repath moves it.
+            thread.join()
+
+    @staticmethod
+    def _run_lane(lane: Any, subpath: str, budget: Optional[float]) -> Any:
+        """run_once with a per-project time budget where the lane supports
+        one. Adapters that predate the budget (and test doubles) take
+        (subpath) only -- checked by signature rather than by catching
+        TypeError, which would silently re-run a lane whose body raised."""
+        if budget is None or not _accepts_max_duration(lane.run_once):
+            return lane.run_once(subpath)
+        return lane.run_once(subpath, max_duration_seconds=budget)
+
+    def _maybe_clone_structure(self, subpath: str, slug: str, forced: bool = False) -> bool:
+        """Structure clone, but not on every pass.
+
+        `clone_directory_tree` is an `rclone lsf --dirs-only -R` over SFTP
+        plus a local mkdir loop -- ~1.5 s and one SSH handshake per project,
+        three times per project per pass alongside the lane traversals, and
+        after the first pass it creates nothing at all in steady state
+        (AUDIT_2 C-3/P10). Kept unconditional in exactly the cases where the
+        tree really can have changed under us: the first pass after startup,
+        and immediately after a repath moved the project.
+
+        Returns True when the clone ran."""
+        every = self.structure_clone_every_n_passes
+        if every <= 0 and not forced:
+            # 0 = disabled, as config.py and config.example.toml have always
+            # said (AUDIT_3 M-6). `forced` still wins: a repath moved the
+            # project, so whatever structure exists locally is at the wrong
+            # path and re-creating it is not optional.
+            return False
+        age = self._clone_ages.get(slug)
+        due = forced or age is None or every <= 1 or age >= every
+        if not due:
+            self._clone_ages[slug] = (age or 0) + 1
+            return False
+        self._clone_structure(subpath)
+        self._clone_ages[slug] = 1
+        return True
+
+    def _maybe_scan_orphans(self, subpath: str, slug: str) -> bool:
+        """Every N passes, count the `*.partial` files lane A's killed runs
+        left on the NAS and log them. REPORTS ONLY -- adding a delete path on
+        the NAS is exactly what AUDIT_2 C-7 rules out, so this never removes
+        anything. Costs one remote listing when it runs."""
+        every = self.orphan_scan_every_n_passes
+        if every <= 0:
+            return False
+        scan = getattr(self.lane_a, "refresh_orphan_report", None)
+        if scan is None:
+            return False
+        age = self._orphan_ages.get(slug)
+        if age is not None and age < every:
+            self._orphan_ages[slug] = age + 1
+            return False
+        self._orphan_ages[slug] = 1
+        try:
+            scan(subpath)
+        except Exception:
+            log.debug("sequencer: orphan .partial scan failed for %s", subpath, exc_info=True)
+            return False
+        return True
 
     def _clone_structure(self, subpath: str) -> None:
         try:
@@ -497,48 +897,136 @@ class Sequencer:
         if self._stop_event.is_set() or not self._resume_event.is_set():
             return
         slug = item.get("slug")
-        rel_path = str(item.get("rel_path", ""))
-        if not slug:
+        # _maybe_auto_accept builds `local_root/Projects/<rel_path>` from
+        # this, so it uses the same normalized+validated rel every other
+        # path-building consumer does.
+        rel_path = _item_rel(item) or ""
+        if not slug or not rel_path:
             return
 
         with self._lock:
             self._in_lane_c_turn = True
+            self._lane_c_idle.clear()
         try:
-            self._maybe_auto_accept(slug, rel_path)
+            accepted = self._maybe_auto_accept(slug, rel_path)
+            with self._lock:
+                if accepted:
+                    self._accept_failed.discard(slug)
+                else:
+                    self._accept_failed.add(slug)
+            if not accepted:
+                # accept_folder creates the folder PAUSED, sets ignores, then
+                # unpauses -- so that a failed set_ignores leaves it paused
+                # rather than syncing unfiltered. Unpausing it here anyway
+                # (which the old code did unconditionally, ~1 ms later) threw
+                # that guarantee away: the folder leaves pending_folders(), so
+                # NOTHING ever retries the ignores, and lane C then indexes
+                # and offers every .braw/.mov original and every Proxy/ file
+                # for the life of the install -- a straight lane-direction
+                # violation (AUDIT_2 L-3).
+                log.warning(
+                    "sequencer: folder %s could not be accepted cleanly — leaving it "
+                    "paused rather than syncing without ignores", slug,
+                )
+                return
 
-            for other in ordered_selected:
-                if self._stop_event.is_set() or not self._resume_event.is_set():
-                    return
-                other_slug = other.get("slug")
-                if not other_slug or other_slug == slug:
-                    continue
-                try:
-                    self.admin.set_folder_paused(other_slug, True)
-                except Exception:
-                    log.exception("sequencer: failed to pause folder %s", other_slug)
+            # Re-assert ignores + versioning for THIS folder once per turn.
+            # Nothing else in the codebase ever sets ignores on a folder it
+            # did not itself accept, so a folder accepted by an older
+            # companion, by hand in the Syncthing GUI, or before DEL-6 was
+            # fixed stayed un-ignored and unversioned forever (AUDIT_2 L-3/
+            # P6/DEL-6).
+            self._reassert_folder_policy(slug)
+
+            # AUDIT_2 P4/C-1: pausing every OTHER selected folder for the
+            # duration of this turn costs N(N-1) config commits per pass
+            # (~1000/hour at N=6), restarts and fully rescans a folder on
+            # every unpause (~180 tree walks/hour, competing for the same
+            # IOPS as lanes A and B), silently rewrites unrelated folder
+            # fields on each PATCH, and leaves every non-current project
+            # unable to send its small latency-sensitive files for up to
+            # N x rotation seconds (~50 min at N=6). maxFolderConcurrency
+            # (set in _apply_lane_c_pacing) buys the same "one project at a
+            # time" pacing for zero config writes. "rotate" restores the old
+            # scheme if this ever turns out to be wrong in the field.
+            if self.lane_c_pause_scheme == PAUSE_SCHEME_ROTATE:
+                for other in ordered_selected:
+                    if self._stop_event.is_set() or not self._resume_event.is_set():
+                        return
+                    other_slug = other.get("slug")
+                    if not other_slug or other_slug == slug:
+                        continue
+                    self._set_paused(other_slug, True)
 
             if self._stop_event.is_set() or not self._resume_event.is_set():
                 return
 
-            try:
-                self.admin.set_folder_paused(slug, False)
-            except Exception:
-                log.exception("sequencer: failed to unpause folder %s", slug)
+            # Unpause unconditionally, in BOTH schemes: with the scheme off
+            # this is what releases a folder that an older companion, a
+            # crashed rotate-scheme pass, or a hand-pause left stuck -- and a
+            # stuck-paused folder means lane C carries nothing at all for
+            # that project. _set_paused is a no-op write only when the folder
+            # is already running, which Syncthing handles cheaply.
+            if not self._set_paused(slug, False):
+                return
         finally:
             with self._lock:
                 self._in_lane_c_turn = False
+                self._lane_c_idle.set()
 
         base_slugs = [i.get("slug") for i in ordered_selected]
         self._wait_for_folder_sync(slug, base_slugs)
+        self._verify_current_folder_unpaused(slug)
 
-    def _maybe_auto_accept(self, slug: str, rel_path: str) -> None:
+    def _reassert_folder_policy(self, slug: str) -> None:
+        """Ignores + versioning, per turn, for the current folder only."""
+        try:
+            self.admin.set_ignores(slug, STIGNORE_LINES)
+        except Exception as exc:
+            if _is_not_found(exc):
+                log.debug("sequencer: folder %s not configured locally yet", slug)
+                return
+            log.exception("sequencer: could not re-assert ignores for %s", slug)
+        try:
+            self.admin.ensure_versioning(slug)
+        except Exception as exc:
+            if _is_not_found(exc):
+                return
+            log.exception("sequencer: could not ensure versioning for %s", slug)
+
+    def _verify_current_folder_unpaused(self, slug: str) -> None:
+        """Confirm the turn actually left this folder running.
+
+        A config PATCH that times out (Syncthing commits and restarts the
+        folder on one) could otherwise leave EVERY selected folder paused
+        and lane C fully stopped until the between-passes sweep -- hours
+        away, or never, if the pass is long (AUDIT_2 L-11)."""
+        try:
+            config = self.admin.get_config() or {}
+        except Exception:
+            log.debug("sequencer: could not verify paused state for %s", slug, exc_info=True)
+            return
+        for folder in (config.get("folders") or []):
+            if folder.get("id") != slug:
+                continue
+            if folder.get("paused"):
+                log.warning(
+                    "sequencer: folder %s is still paused after its lane C turn — "
+                    "retrying the unpause", slug,
+                )
+                self._set_paused(slug, False)
+            return
+
+    def _maybe_auto_accept(self, slug: str, rel_path: str) -> bool:
+        """Returns True when the folder is (or already was) usable, False
+        when an accept was needed and failed."""
         try:
             pending = self.admin.pending_folders() or {}
         except Exception:
             log.exception("sequencer: pending_folders() failed")
-            return
+            return True  # can't tell it needs accepting -- treat as already fine
         if not isinstance(pending, dict) or slug not in pending:
-            return
+            return True
         try:
             offered_by = (pending.get(slug) or {}).get("offeredBy") or {}
             device_id = next(iter(offered_by.keys())) if offered_by else ""
@@ -548,9 +1036,52 @@ class Sequencer:
             )
         except Exception:
             log.exception("sequencer: accept_folder(%s) failed", slug)
+            return False
+        return True
+
+    def _remote_device_ids(self, slug: str) -> list[str]:
+        """Every device this folder is shared with except ourselves."""
+        try:
+            config = self.admin.get_config() or {}
+            my_id = str((self.admin.system_status() or {}).get("myID", "") or "")
+        except Exception:
+            log.debug("sequencer: could not resolve devices for %s", slug, exc_info=True)
+            return []
+        for folder in (config.get("folders") or []):
+            if folder.get("id") != slug:
+                continue
+            return [
+                str(d.get("deviceID"))
+                for d in (folder.get("devices") or [])
+                if d.get("deviceID") and str(d.get("deviceID")) != my_id
+            ]
+        return []
+
+    def _uploads_drained(self, slug: str, device_ids: list[str]) -> bool:
+        """Whether every remote device has everything we hold for this
+        folder. needTotalItems (below) is the DOWNLOAD side only, so a turn
+        could end -- and the folder then be paused by the next project's
+        turn -- with the editor's own outgoing files half-sent, stalling
+        them for up to N x rotation seconds (AUDIT_2 P5). Degrades to
+        "drained" whenever the endpoint can't answer."""
+        for device_id in device_ids:
+            try:
+                completion = self.admin.completion(slug, device_id) or {}
+            except Exception:
+                log.debug(
+                    "sequencer: completion(%s, %s) failed", slug, device_id, exc_info=True
+                )
+                continue
+            try:
+                if float(completion.get("needBytes", 0) or 0) > 0:
+                    return False
+            except (TypeError, ValueError):
+                continue
+        return True
 
     def _wait_for_folder_sync(self, slug: str, base_slugs: list[str]) -> None:
         start = self._now()
+        device_ids = self._remote_device_ids(slug)
         while True:
             if self._stop_event.is_set() or not self._resume_event.is_set():
                 return
@@ -560,12 +1091,16 @@ class Sequencer:
             except Exception:
                 log.exception("sequencer: folder_status(%s) failed", slug)
                 return  # can't tell -- don't block the whole rotation on it
-            if need == 0:
+            if need == 0 and self._uploads_drained(slug, device_ids):
                 return
             if self._now() - start >= self.project_rotation_seconds:
                 return
 
-            new_selection, _source = self.selection.get()
+            # Throttled, NOT per 5-second tick: see _selection_get_throttled
+            # (AUDIT_2 P11). Cost of the throttle: a selection change made
+            # mid-turn is noticed up to selection_poll_interval later, which
+            # is the cadence the knob already promises.
+            new_selection, _source = self._selection_get_throttled()
             if new_selection:
                 new_slugs = [i.get("slug") for i in _sort_by_position(new_selection)]
                 if new_slugs != base_slugs:
@@ -575,19 +1110,28 @@ class Sequencer:
                 return
 
     # -- interruptible waits -----------------------------------------------------
+    #
+    # Both wait on the single _interrupt event for the WHOLE remaining
+    # timeout. They used to wake every 50 ms forever, and the sequencer is
+    # always in one of them, so the process woke 20x/s indefinitely on a
+    # laptop for no reason (AUDIT_2 L-18). _interrupt is cleared BEFORE the
+    # predicates are re-checked, so a setter racing the clear can only ever
+    # cost one extra wakeup, never a missed signal.
     def _interruptible_wait(self, seconds: float) -> bool:
         """Sleep up to `seconds`, breaking early on stop() or pause().
-        Returns True if the caller should stop what it's doing."""
+        Returns True if the caller should stop what it's doing. Deliberately
+        does NOT consume _wake_event -- a notify_change() during a lane C
+        wait must still shorten the between-passes wait later."""
         deadline = self._now() + seconds
         while True:
+            self._interrupt.clear()
             if self._stop_event.is_set() or not self._resume_event.is_set():
                 return True
             remaining = deadline - self._now()
             if remaining <= 0:
                 return False
-            chunk = min(remaining, _POLL_CHUNK_SECONDS)
-            if self._stop_event.wait(chunk):
-                return True
+            if not self._interrupt.wait(remaining):
+                return False
 
     def _wait_or_wake(self, seconds: float) -> bool:
         """Sleep up to `seconds`, breaking early on stop(), pause(), or a
@@ -595,6 +1139,7 @@ class Sequencer:
         True only if the caller should stop the whole loop (stop() called)."""
         deadline = self._now() + seconds
         while True:
+            self._interrupt.clear()
             if self._stop_event.is_set():
                 return True
             if not self._resume_event.is_set():
@@ -605,6 +1150,5 @@ class Sequencer:
             remaining = deadline - self._now()
             if remaining <= 0:
                 return False
-            chunk = min(remaining, _POLL_CHUNK_SECONDS)
-            if self._stop_event.wait(chunk):
-                return True
+            if not self._interrupt.wait(remaining):
+                return False

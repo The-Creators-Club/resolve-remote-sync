@@ -5,7 +5,17 @@
     {% endif %}</div>
 
   {% if setup.error %}
-    <div class="banner">▲ {{ setup.error }}</div>
+    <div class="banner">▲ {{ setup.error }}
+      {% if setup.suggest_rel %}
+      <form class="inline-form" style="margin-left:0.5rem"
+            hx-post="/partials/project-setup/link"
+            hx-target="closest .project-setup-box" hx-swap="outerHTML">
+        <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
+        <input type="hidden" name="rel" value="{{ setup.suggest_rel }}">
+        <button class="btn" type="submit">[ USE Projects/{{ setup.suggest_rel }} ]</button>
+      </form>
+      {% endif %}
+    </div>
   {% endif %}
 
   {% if setup.created %}
@@ -38,8 +48,9 @@
   {% else %}
 
   <div class="side-head" style="margin-top:0.8rem">[ PICK THE FOLDER FOR THIS PROJECT ]</div>
-  <div class="muted">Browse the server's Projects tree. Select the project's folder to link it,
-    or create a new folder — new projects get the standard subfolders
+  <div class="muted">Browse the server's Projects tree. If the project's folder is already
+    there, pick it with [ USE THIS FOLDER ] — nothing inside it is changed. Only create a
+    new folder when there isn't one yet; new folders get the standard subfolders
     (<span class="mono-sm">{{ setup.template_folders | join(", ") }}</span>).</div>
 
   {% if browse %}
@@ -56,11 +67,26 @@
     <div class="banner">▲ {{ browse.error }}</div>
   {% endif %}
 
+  {% if browse.can_link_current %}
+    <div style="margin-top:0.4rem">
+      <span class="mono-sm">You are in Projects/{{ browse.rel }}</span>
+      <form class="inline-form" style="margin-left:0.5rem"
+            hx-post="/partials/project-setup/link"
+            hx-target="closest .project-setup-box" hx-swap="outerHTML">
+        <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
+        <input type="hidden" name="rel" value="{{ browse.rel }}">
+        <button class="btn" type="submit">[ USE THIS FOLDER ]</button>
+      </form>
+      <span class="muted"> — point “{{ setup.resolve_project }}” at this folder as it is</span>
+    </div>
+  {% endif %}
+
   <table class="editors" style="margin-top:0.4rem">
     <tbody>
     {% for e in browse.entries %}
       <tr class="editor-row">
         <td style="width:60%">
+          {% if e.name_match %}<span class="chip green">[ SAME NAME ]</span> {% endif %}
           {% if e.is_project %}
             <span class="chip green">[ PROJECT ]</span> <span class="mono-sm">{{ e.name }}</span>
           {% elif e.has_children %}
@@ -78,7 +104,7 @@
                 hx-target="closest .project-setup-box" hx-swap="outerHTML">
             <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
             <input type="hidden" name="rel" value="{{ e.rel }}">
-            <button class="btn" type="submit">[ {{ "LINK" if e.is_project else "LINK THIS FOLDER" }} ]</button>
+            <button class="btn" type="submit">[ {{ "LINK THIS PROJECT" if e.is_project else "USE THIS FOLDER" }} ]</button>
           </form>
         </td>
       </tr>
@@ -89,11 +115,16 @@
   </table>
 
   {% if browse.inside_project %}
-    <div class="muted" style="margin-top:0.6rem">You're inside an existing project — projects
-      can't nest. Go up to link or create.</div>
+    <div class="muted" style="margin-top:0.6rem">
+      {% if browse.current_is_project %}This folder is already a project — use
+        [ USE THIS FOLDER ] above to point “{{ setup.resolve_project }}” at it.
+      {% else %}You're inside an existing project — projects can't nest. Go up to pick or
+        create.{% endif %}</div>
   {% else %}
     <div class="side-head" style="margin-top:1.0rem">[ OR CREATE A NEW PROJECT FOLDER HERE ]</div>
     <div class="muted mono-sm">in Projects/{{ browse.rel or "" }}</div>
+    <div class="muted">Only for a folder that doesn't exist yet — a name that's already listed
+      above would nest a second folder inside it, so pick it with [ USE THIS FOLDER ] instead.</div>
     <form class="inline-form" style="margin-top:0.3rem"
           hx-post="/partials/project-setup/create"
           hx-target="closest .project-setup-box" hx-swap="outerHTML">

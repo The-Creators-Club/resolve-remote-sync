@@ -65,6 +65,45 @@ if (-not (Test-Path -LiteralPath $CompanionExe)) {
 }
 $srcInfo = Get-Item -LiteralPath $CompanionExe
 Write-Step "new build: $CompanionExe ($([int]($srcInfo.Length/1KB)) KB, $($srcInfo.LastWriteTime))"
+
+# --- which version IS this? -----------------------------------------------
+# The exe has no --version flag (it is a windowed PyInstaller build), so an
+# upgrade used to be entirely version-blind: it reported a path and a
+# timestamp and nothing about what it was actually installing. That is how a
+# machine spent an afternoon on v0.4.3 while everyone believed it had v0.4.5
+# (2026-07-25 -- see docs\RELEASE.md). tools\release.ps1 writes
+# ccsync-release.json next to the exe and build_editor_package.ps1 ships it
+# inside the package, so when it is there we can name the build, and we copy
+# it alongside the installed exe so tools\check_deploy_drift.ps1 can name it
+# later too. A package built before this existed simply says "unknown".
+$SrcManifest = Join-Path (Split-Path -Parent $srcInfo.FullName) "ccsync-release.json"
+$DestManifest = Join-Path $BinDir "ccsync-release.json"
+$srcSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $CompanionExe).Hash.ToLower()
+$NewVersion = ""
+if (Test-Path -LiteralPath $SrcManifest) {
+    try {
+        $rel = Get-Content -LiteralPath $SrcManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ("$($rel.sha256)" -eq $srcSha) {
+            $NewVersion = "$($rel.version_stamp)"
+            Write-Step "version: v$NewVersion (built $($rel.built_at) from $($rel.git_describe))"
+            if ($rel.git_dirty) { Write-Warn2 "this build came from an uncommitted tree -- fine for testing, not for the fleet" }
+        }
+        else {
+            Write-Warn2 "ccsync-release.json next to the new exe describes a DIFFERENT file -- ignoring it; version unknown"
+            $SrcManifest = ""
+        }
+    }
+    catch {
+        Write-Warn2 "could not read $SrcManifest -- version unknown"
+        $SrcManifest = ""
+    }
+}
+else {
+    Write-Step "version: unknown (no ccsync-release.json beside the exe; build with tools\release.ps1)"
+    $SrcManifest = ""
+}
+Write-Step "sha256: $srcSha"
+
 if ($DryRun) { Write-Step "DRY RUN -- nothing will be changed" }
 
 # --- 1. stop the running companion ----------------------------------------
@@ -118,6 +157,33 @@ else {
     }
 }
 
+# --- 2b. keep the provenance manifest with the exe it describes -----------
+# Only after a successful copy: a manifest describing a build that is not
+# actually installed is worse than none (it would make the drift check lie).
+# When the new package has no manifest, drop any stale one left by a previous
+# upgrade for the same reason.
+if ($DryRun) {
+    if ($SrcManifest) { Write-Step "[dry-run] would copy ccsync-release.json -> $DestManifest" }
+}
+elseif ($copySucceeded) {
+    if ($SrcManifest) {
+        try {
+            Copy-Item -LiteralPath $SrcManifest -Destination $DestManifest -Force -ErrorAction Stop
+            Write-Step "recorded provenance: $DestManifest"
+        }
+        catch {
+            Write-Warn2 "could not write $DestManifest ($($_.Exception.Message)) -- the install is fine, only the version record is missing"
+        }
+    }
+    elseif (Test-Path -LiteralPath $DestManifest) {
+        try {
+            Remove-Item -LiteralPath $DestManifest -Force -ErrorAction Stop
+            Write-Step "removed the stale ccsync-release.json (it described the previous build)"
+        }
+        catch { }
+    }
+}
+
 # --- 3. (re)register autostart ---------------------------------------------
 # Always run this (and steps 4-5), even if the copy above ultimately failed:
 # the companion was already killed, so re-registering autostart and
@@ -134,14 +200,42 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
     Write-Warn2 "no config at $ConfigPath -- run windows_bootstrap.ps1 to seed it, then re-run this."
 }
 else {
-    $lines = @(Get-Content -LiteralPath $ConfigPath)
+    # -Encoding UTF8 is LOAD-BEARING. config.toml is written as UTF-8 with NO
+    # BOM (see the WriteAllText below and windows_bootstrap.ps1's config
+    # seeding), and Get-Content with no -Encoding auto-detects a BOM and
+    # otherwise falls back to the system ANSI codepage. Reading UTF-8 as ANSI
+    # and writing it back as UTF-8 double-encodes every non-ASCII value --
+    # permanently, silently, and on EVERY upgrade run, because the result is
+    # still valid UTF-8 and valid TOML. Measured: editor_name = "台北-alex"
+    # became "å°åŒ—-alex", after which the editor's reports and project
+    # selections go to a username that does not exist (INST-3). On READ,
+    # PS 5.1's -Encoding UTF8 strips a BOM if present and decodes BOM-less
+    # UTF-8 correctly; only writes add one.
+    $lines = @(Get-Content -LiteralPath $ConfigPath -Encoding UTF8)
     $text = ($lines -join "`n")
     $added = @()
 
     function Test-Key { param([string]$key) return ($lines | Where-Object { $_ -match "^\s*$key\s*=" }).Count -gt 0 }
 
+    # TOML keys belong to whatever [section] header precedes them. Appending
+    # at EOF is fine for an installer-written config (which has no sections),
+    # but ONE hand-added [section] anywhere in the file swallows every key we
+    # append -- they then parse as section.mode / section.dashboard_url and
+    # are silently ignored, with the file looking perfectly correct. Insert
+    # before the first bracketed header instead, which is always top level.
+    $firstSectionIndex = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*\[') { $firstSectionIndex = $i; break }
+    }
+
+    $pending = @()
+    function Add-TopLevelKey {
+        param([string]$Line)
+        $script:pending += $Line
+    }
+
     if (-not (Test-Key "dashboard_url")) {
-        $lines += "dashboard_url = `"$DefaultDashboardUrl`""
+        Add-TopLevelKey "dashboard_url = `"$DefaultDashboardUrl`""
         $added += "dashboard_url (default $DefaultDashboardUrl)"
     }
     if ($DashboardToken) {
@@ -149,11 +243,11 @@ else {
         if (Test-Key "dashboard_token") {
             $lines = $lines | ForEach-Object { if ($_ -match "^\s*dashboard_token\s*=") { "dashboard_token = `"$DashboardToken`"" } else { $_ } }
         }
-        else { $lines += "dashboard_token = `"$DashboardToken`"" }
+        else { Add-TopLevelKey "dashboard_token = `"$DashboardToken`"" }
         $added += "dashboard_token (set from -DashboardToken)"
     }
     elseif (-not (Test-Key "dashboard_token")) {
-        $lines += 'dashboard_token = ""'
+        Add-TopLevelKey 'dashboard_token = ""'
         $added += "dashboard_token (blank -- fleet reporting stays off until you set it)"
     }
     # mode: default editor; only add if absent so a base rig's mode="base" is
@@ -161,8 +255,21 @@ else {
     # role (DASH_ADMIN_USERS) overrides this static value entirely -- see
     # companion app.py's _apply_identity_role()/effective_mode().
     if (-not (Test-Key "mode")) {
-        $lines += 'mode = "editor"'
+        Add-TopLevelKey 'mode = "editor"'
         $added += "mode (editor)"
+    }
+
+    if ($script:pending.Count -gt 0) {
+        $block = @("", "# -- added by windows_upgrade.ps1 --") + $script:pending + @("")
+        if ($firstSectionIndex -ge 0) {
+            $head = @()
+            if ($firstSectionIndex -gt 0) { $head = $lines[0..($firstSectionIndex - 1)] }
+            $tail = $lines[$firstSectionIndex..($lines.Count - 1)]
+            $lines = @($head) + @($block) + @($tail)
+        }
+        else {
+            $lines = @($lines) + @($block)
+        }
     }
 
     if ($added.Count -eq 0) {
@@ -185,10 +292,22 @@ else {
 
 # --- 5. relaunch ------------------------------------------------------------
 # Always runs, even after a failed copy above -- see the note on step 3.
+# GUARDED: where the copy failed all 5 times and no prior exe exists,
+# Start-Process under $ErrorActionPreference = "Stop" is a terminating error
+# that kills the script before the summary below -- i.e. the one place that
+# would have explained why. Test first and carry on.
 if ($DryRun) { Write-Step "[dry-run] would relaunch $CompanionExePath" }
+elseif (-not (Test-Path -LiteralPath $CompanionExePath)) {
+    Write-Warn2 "nothing to relaunch: no companion exe at $CompanionExePath (see the copy failure above)."
+}
 else {
-    Start-Process -FilePath $CompanionExePath -WorkingDirectory $BinDir
-    Write-Step "relaunched companion"
+    try {
+        Start-Process -FilePath $CompanionExePath -WorkingDirectory $BinDir
+        Write-Step "relaunched companion"
+    }
+    catch {
+        Write-Warn2 "could not relaunch the companion: $($_.Exception.Message) -- start it from $CompanionExePath, or just log off and back on (autostart is registered)."
+    }
 }
 
 Write-Host ""
@@ -197,11 +316,14 @@ if (-not $copySucceeded) {
     Write-Step "Upgrade INCOMPLETE: the new companion build could not be installed (see the WARNING above); the previous build was relaunched instead."
 }
 else {
-    Write-Step "Upgrade complete$(if ($DryRun) { ' (dry run -- nothing changed)' })."
+    $verSuffix = ""
+    if ($NewVersion) { $verSuffix = " -- now running v$NewVersion" }
+    Write-Step "Upgrade complete$(if ($DryRun) { ' (dry run -- nothing changed)' })$verSuffix."
 }
 Write-Step "Syncthing identity, rclone key, drive mapping, and settings were preserved."
 if (-not $DashboardToken -and (Test-Path -LiteralPath $ConfigPath)) {
-    $hasToken = (Get-Content -LiteralPath $ConfigPath | Where-Object { $_ -match '^\s*dashboard_token\s*=\s*"\S' }).Count -gt 0
+    # -Encoding UTF8 for the same reason as the migration read above (INST-3).
+    $hasToken = (Get-Content -LiteralPath $ConfigPath -Encoding UTF8 | Where-Object { $_ -match '^\s*dashboard_token\s*=\s*"\S' }).Count -gt 0
     if (-not $hasToken) { Write-Warn2 "dashboard_token is blank -- fleet reporting + project selection are off. Re-run with -DashboardToken <value> (ask the admin) to enable them." }
 }
 Write-Host "=================================================================="

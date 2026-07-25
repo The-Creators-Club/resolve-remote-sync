@@ -12,9 +12,11 @@ You'll need, from the admin:
   or a `100.x.y.z` address).
 - The Resolve Project Server database name + credentials for the project(s)
   you're joining.
-- Which project(s) you're on, so you can fill in `projects` and
-  `active_project` in `~/.ccsync/config.toml` (the bootstrap script can't
-  know these).
+- The dashboard address and your dashboard token (the admin runs a sync
+  dashboard; you pick your projects there).
+- Which project(s) you're on -- you tick them on the dashboard once you're
+  signed in. There is **no** project list to fill in by hand anywhere; see
+  section 3.5.
 
 You'll also want a drive with real headroom for the local sync root --
 originals you add and every proxy that comes down both live there. If your
@@ -36,23 +38,39 @@ This opens a browser window to authenticate. Once you're logged in, tell
 the admin so they can confirm your device shows up as connected on their
 tailnet and that it's getting a **direct** connection to the NAS, not a
 relayed (DERP) one -- direct matters a lot for Resolve's database
-responsiveness (see "Flaws" #5 in `../SPEC.md`).
+responsiveness.
 
 ## 2. Run the bootstrap script
 
-**Windows:**
+Run this from the folder you were sent (every file it mentions is in there,
+side by side).
+
+**Windows** -- open a **normal** PowerShell window. Do **not** use *Run as
+Administrator*:
 ```powershell
-powershell -ExecutionPolicy Bypass -File installer\windows_bootstrap.ps1 -TailnetHost <tailnet-host> -EditorName <your-username>
+powershell -ExecutionPolicy Bypass -File .\windows_bootstrap.ps1 -TailnetHost <tailnet-host> -EditorName <your-username> -DashboardToken <token-from-admin>
 ```
 
-Add `-LocalRoot F:\Creators_Club` (any drive you like) if your system drive
-is short on space. An **elevated** PowerShell is preferred -- without it the
-script can't register a scheduled task and falls back to a registry autostart
-entry instead. Either way it completes; it just tells you which path it took.
+The script asks for admin rights itself, once, for the one step that needs
+them -- approve that prompt. Running the *whole* script elevated is the one
+way to break the install silently: a drive mapped from an elevated window is
+invisible to your normal session, so Resolve sees no `P:` until you log off
+and back on. If you already ran it elevated, log off and on before opening
+Resolve.
 
-**Mac:**
+Add `-LocalRoot F:\Creators_Club` (any drive you like) if your system drive
+is short on space. Add `-CompanionExeSource .\ccsync-companion.exe` to have
+it install the companion (the tray app) for you -- otherwise you'd copy
+`ccsync-companion.exe` into `%LOCALAPPDATA%\ccsync\bin\` yourself and run it
+from there. Don't keep it anywhere else; that folder is the only one the
+script starts at logon.
+
+**Mac** -- read this first: there is currently **no companion app for
+macOS**. The script below sets up rclone and Syncthing only, which means no
+tray app, no automatic upload of media you add, no out-of-tree popup and no
+dashboard reporting. Check with the admin before going ahead:
 ```bash
-./installer/macos_bootstrap.sh --tailnet-host <tailnet-host> --editor-name <your-username>
+./macos_bootstrap.sh --tailnet-host <tailnet-host> --editor-name <your-username>
 ```
 
 This installs rclone + Syncthing, creates your local sync root, maps `P:` to
@@ -105,17 +123,28 @@ bootstrap script expects is `%USERPROFILE%\.ssh\ccsync_ed25519`.)
 
 ## 3. Send the admin your Syncthing device ID
 
-The admin runs `server/accept_device.py` once per project you need access
-to. Nothing syncs on lane C (audio/GFX/AE/subs/docs) until this happens.
+The admin approves your machine **once** (they run `server/accept_device.py`
+to accept and name the device). They do not share individual projects with
+you by hand any more -- which projects reach this machine is decided by the
+projects you tick on the dashboard, so approval plus a tick is all it takes.
+Until the admin has approved this device, nothing syncs on lane C
+(audio/GFX/AE/subs/docs).
 
 ## 3.5 About `~/.ccsync/config.toml`
 
 The bootstrap script fills in everything needed for syncing: `editor_name`,
-`local_root`, `remote`, `remote_root`. **You do not need to list projects.**
+`local_root`, `remote`, `remote_root`. **You do not list projects here** --
+you tick them on the dashboard (see below).
 
-The whole tree replicates. Lanes A and B sync `local_root` against
-`remote_root` as complete trees, so the server's structure is mirrored
-verbatim, whatever it contains:
+**Only the projects you tick sync to this machine**, and they sync **one at
+a time, top to bottom in the order you ticked them**, each getting up to
+about 10 minutes of transfer per turn before the next one takes over. So a
+project further down the list starts moving even while a huge one above it
+is still going -- it just takes longer overall. Nothing that isn't ticked is
+downloaded at all.
+
+Project folders on the server look like this, and you don't need to know or
+configure any of it:
 
 ```
 Creators_Club/Projects/<year>/<series>/<project>/...
@@ -123,7 +152,8 @@ Creators_Club/Projects/<year>/<series>/<project>/...
 
 for example `Projects/2026/Creator Profiles/Season 1` alongside
 `Projects/2025/FF4/Nuclear` — any year, any series, any project, added at any
-time, with no config change on your side. Spaces in names are fine.
+time, with no config change on your side. Spaces in names are fine. A new
+project just appears in the dashboard's list, ready to tick.
 
 Two optional keys exist and are easy to misread:
 
@@ -142,14 +172,30 @@ The companion validates its config at startup and writes anything wrong to
 `~/.ccsync/companion.log`, separating problems that stop syncing from ones
 that merely degrade the popup. If something isn't syncing, read that first.
 
-If the admin runs the sync dashboard, they will also give you two values to
-add here: `dashboard_url` (e.g. `http://<tailnet-ip>:8480`) and
-`dashboard_token`. With those set, your companion reports its lane status to
-the dashboard once a minute so the admin can see sync health without asking
-you. Leaving `dashboard_url` blank disables this entirely.
+Two more values matter here: `dashboard_url` (e.g.
+`http://<tailnet-ip>:8480`) and `dashboard_token`. The bootstrap script
+writes both if you passed `-DashboardToken` in step 2; otherwise ask the
+admin for the token and either re-run the script with it or add the line by
+hand. With them set, your companion reports its lane status to the dashboard
+once a minute (so the admin can see sync health without asking you) and,
+crucially, picks up the projects you tick. Leaving `dashboard_url` blank
+disables both.
 
-**Choosing what syncs (dashboard login).** Open the dashboard in a browser
-and sign in with your TrueNAS username and password. Tick the projects you
+**Sign in from the tray first -- this is the switch that turns sync on.**
+Right-click the tray icon → **Sign in…** and enter your TrueNAS username and
+password. Until the tray says `Signed in as <you>`, nothing syncs. It is a
+separate step from signing in to the dashboard in a browser, and it is not
+optional: the companion deliberately does nothing until it knows who you
+are.
+
+Signing in is also what makes this machine **visible to the admin**. Status
+reports are stamped with who you signed in as, and the server rejects
+anything unsigned -- so a machine that has never been signed in doesn't
+appear on the admin's fleet view at all. If they tell you they can't see
+your machine, check the tray says `Signed in as <you>` before anything else.
+
+**Choosing what syncs (dashboard login).** Then open the dashboard in a
+browser and sign in with the same username and password. Tick the projects you
 want on this machine -- they sync **one at a time, in the order you ticked
 them**, and the dashboard shows live speed, files remaining, and ETA for
 the current one. Unticking stops that project syncing to you; files already
@@ -246,7 +292,13 @@ warning pointing you back to this section.
   never deletes anything on the NAS, by design (archival safety net) -- so
   a local rename/move just creates a second copy on the server under the
   new name, and the old one sits there as an orphan. If a project needs
-  reorganizing, ask the admin to do it server-side (see
-  `../docs/SERVER.md`). This does **not** apply to the Syncthing lane
-  (audio/AE/subs/etc.) -- renames and deletes there do propagate, and
-  the server keeps a versioned trash so nothing's truly gone.
+  reorganizing, ask the admin to do it server-side. This does **not** apply
+  to the Syncthing lane (audio/AE/subs/etc.) -- renames and deletes there do
+  propagate, and the server keeps a versioned trash so nothing's truly gone.
+- **If you open the Syncthing web UI, expect to see projects marked
+  "Paused".** That's normal and it's CCSync doing it: because your projects
+  sync one at a time, the companion pauses the other project folders while
+  the current one takes its turn, then unpauses them when their turn comes.
+  **Don't pause, unpause, or remove folders by hand** -- the companion will
+  just put them back, and hand-editing there is a good way to stop a project
+  syncing without any visible reason.

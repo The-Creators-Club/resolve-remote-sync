@@ -79,7 +79,13 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX packing on a SELF-UPDATING, UNSIGNED exe maximises AV heuristic
+    # hits, and an AV quarantine of the freshly-renamed exe is the one
+    # failure mode the rollback path has no recovery from: the running
+    # image has already been renamed to .old and the new one is gone
+    # (AUDIT_2 §2-low, alongside CORE-H6). ~8 MB of download is a cheap
+    # trade for not bricking an editor's install.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     # Windowed, NOT console: the tray icon + ~/.ccsync/companion.log are the

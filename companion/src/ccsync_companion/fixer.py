@@ -17,8 +17,10 @@ import logging
 import os
 import re
 import shutil
+import time
+import uuid
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from . import resolve_bridge
 
@@ -208,22 +210,39 @@ def default_destination_dirs(editor_name: str, project_prefix: str = "") -> set[
     return dests
 
 
-def list_destination_dirs(local_root: str, editor_name: str) -> list[str]:
+def list_destination_dirs(
+    local_root: str, editor_name: str, project_prefix: str = ""
+) -> list[str]:
     """Existing directories under local_root ('/'-separated, relative),
     excluding any directory literally named "Proxy" (and its contents), plus
     the three type-default destinations (present even if they don't exist
     yet, so the dropdown always offers a sane choice).
-    """
-    dirs: set[str] = set(default_destination_dirs(editor_name))
 
+    `project_prefix` (e.g. "Projects/2026/CCT/Season 1") is REQUIRED for a
+    correct dropdown when one is known. popup.py used to call this with no
+    prefix and a hardcoded empty editor_name, so the list offered bare
+    "Audio/Music", "B-roll/Stills" and "B-roll/Editor Added/Unknown"
+    alongside the correctly-prefixed suggestion -- picking one filed the
+    media OUTSIDE Projects/, where _project_rel_for_path yields None, the
+    watchdog drops the event and no run_once(subpath) ever covers it. The
+    dialog still said "Fixed" and Resolve still played it locally, so
+    nothing surfaced that the file would never reach another editor
+    (AUDIT_2 CORE-H3). When a prefix is given, only directories inside it
+    are offered.
+    """
+    dirs: set[str] = set(default_destination_dirs(editor_name, project_prefix))
+
+    prefix = (project_prefix or "").strip("/").replace("\\", "/")
     root = Path(local_root) if local_root else None
     if root is not None and root.is_dir():
-        for dirpath, dirnames, _filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d.lower() != "proxy"]
-            rel = os.path.relpath(dirpath, root)
-            if rel == os.curdir:
-                continue
-            dirs.add(rel.replace(os.sep, "/"))
+        walk_root = root / Path(*prefix.split("/")) if prefix else root
+        if walk_root.is_dir():
+            for dirpath, dirnames, _filenames in os.walk(walk_root):
+                dirnames[:] = [d for d in dirnames if d.lower() != "proxy"]
+                rel = os.path.relpath(dirpath, root)
+                if rel == os.curdir:
+                    continue
+                dirs.add(rel.replace(os.sep, "/"))
 
     return sorted(dirs)
 
@@ -240,6 +259,212 @@ def unique_destination_path(dest_dir: Path, filename: str) -> Path:
         candidate = dest_dir / f"{stem} ({n}){ext}"
         n += 1
     return candidate
+
+
+# Suffix for in-progress copies. Matched by the rclone filters and by
+# syncthing_admin.STIGNORE_LINES so a partial never syncs anywhere.
+TMP_SUFFIX = ".ccsync-tmp"
+
+# 8 MB: big enough that the per-chunk Python overhead is noise against SMB
+# throughput, small enough that a progress bar moves ~4x/second at 33 MB/s.
+COPY_CHUNK_BYTES = 8 * 1024 * 1024
+
+# Windows file attributes meaning "this file is not really on this disk".
+# Cloud filesystems (Google Drive File Stream, OneDrive Files On-Demand,
+# Dropbox Smart Sync) leave a placeholder and HYDRATE it -- download it --
+# only when something opens it.
+#
+# This is the measured root cause of the live 2026-07-25 incident: the
+# companion's read side matched GoogleDriveFS's read side byte for byte
+# (222 MB/10 s each), i.e. FIX ALL was blocked inside open()/read() waiting
+# for Drive to materialise online-only source clips. Nothing said so, so a
+# working copy was indistinguishable from a hang, and the per-file byte bar
+# legitimately sits at 0% for the whole hydration.
+FILE_ATTRIBUTE_OFFLINE = 0x1000
+FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
+FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+PLACEHOLDER_ATTRIBUTES = (
+    FILE_ATTRIBUTE_OFFLINE
+    | FILE_ATTRIBUTE_RECALL_ON_OPEN
+    | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+)
+
+
+def is_placeholder(path: str) -> bool:
+    """True when `path` is a cloud placeholder that must be downloaded before
+    it can be read. False on any platform or filesystem that doesn't report
+    it -- this is a diagnostic, never a gate: a false negative just means the
+    old (silent) behaviour, and a false positive must never block a copy."""
+    try:
+        attrs = getattr(os.stat(path), "st_file_attributes", 0)
+    except (OSError, ValueError):
+        return False
+    return bool(attrs & PLACEHOLDER_ATTRIBUTES)
+
+
+PLACEHOLDER_FAILURE_MESSAGE = (
+    "Google Drive (or your cloud drive) couldn't download this file. Right-click it "
+    "in the Google Drive folder → \"Available offline\", wait for it to finish, then "
+    "run tray → Scan whole project again."
+)
+
+
+def classify_copy_failure(exc: BaseException, placeholder: bool) -> str:
+    """A sentence an editor can act on, instead of `FAILED`.
+
+    The popup previously rendered failures as a bare count plus raw
+    exception text (and in the no-display path, a print() that is a no-op in
+    the windowed build), so the single most common real cause -- a cloud
+    placeholder that never hydrated -- was completely invisible."""
+    if placeholder:
+        return PLACEHOLDER_FAILURE_MESSAGE
+    text = str(exc)
+    low = text.lower()
+    if isinstance(exc, PermissionError) or "permission" in low:
+        return ("Windows wouldn't let CCSync read or write this file — it may be open in "
+                "another program. Close it and try again.")
+    if "no space" in low or "not enough space" in low or getattr(exc, "errno", None) == 28:
+        return "Your disk is full — free up space and try again."
+    if isinstance(exc, FileNotFoundError):
+        return "The file isn't there any more — it may have been moved or renamed."
+    if "network" in low or "semaphore" in low or "device is not ready" in low:
+        return ("Lost the connection to the drive this file lives on. Reconnect it and "
+                "try again.")
+    return f"Couldn't copy this file: {text}"
+
+
+def copy_with_progress(
+    src,
+    dst,
+    on_bytes: Optional[Callable[[int, int], None]] = None,
+    chunk_size: int = COPY_CHUNK_BYTES,
+) -> None:
+    """shutil.copy2 semantics, but reporting bytes as it goes.
+
+    shutil.copy2 reports NOTHING, so a 40 GB BRAW over SMB parked the fixer
+    dialog's "FIXING 35/69" counter for twenty-plus minutes and looked
+    exactly like a hang -- which is precisely the state that makes a user
+    force-quit, and per CORE-H5 a force-quit mid-copy leaves a multi-GB
+    partial behind (AUDIT_2 UX-9; hit live 2026-07-25 at 35/69).
+
+    `on_bytes(copied, total)` is called after every chunk AND once at zero
+    before the first read, so a caller can render "0 of 12.7 GB" immediately
+    rather than showing an empty bar until the first chunk lands. It must be
+    cheap and must not raise; exceptions from it are swallowed rather than
+    failing a copy that is otherwise fine.
+
+    Metadata is copied with copystat afterwards, matching copy2. The source
+    is opened read-only and never modified.
+    """
+    try:
+        total = os.path.getsize(src)
+    except OSError:
+        total = 0
+
+    def report(done: int) -> None:
+        if on_bytes is None:
+            return
+        try:
+            on_bytes(done, total)
+        except Exception:
+            log.debug("copy progress callback failed", exc_info=True)
+
+    copied = 0
+    report(0)
+    with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+        while True:
+            chunk = fsrc.read(chunk_size)
+            if not chunk:
+                break
+            fdst.write(chunk)
+            copied += len(chunk)
+            report(copied)
+    # copy2 == copyfile + copystat (mtime/atime/mode/flags).
+    shutil.copystat(src, dst)
+# Stale-tmp sweep age: anything younger might be an in-flight copy from a
+# concurrent FIX ALL (or another companion mid-restart).
+STALE_TMP_AGE_SECONDS = 3600.0
+
+
+def _claim_destination_path(dest_dir: Path, filename: str) -> Path:
+    """Pick a non-colliding name AND create it atomically (O_CREAT|O_EXCL),
+    so the name is ours from this instant on.
+
+    unique_destination_path() alone is TOCTOU: the name was chosen, then a
+    multi-GB copy ran for minutes, and only then did os.replace() land --
+    silently clobbering whatever had arrived at that exact path meanwhile.
+    Lane C syncing down a DIFFERENT track.wav from another editor into
+    Audio/Music during the copy is the concrete case, and Syncthing then
+    propagates the overwrite fleet-wide (AUDIT_2 DEL-7). Creating the final
+    name up front makes the collision loop authoritative: no second writer
+    can pick the same name, because it already exists.
+
+    Raises OSError if a slot can't be claimed."""
+    stem, ext = os.path.splitext(filename)
+    n = 1
+    while True:
+        candidate = dest_dir / (filename if n == 1 else f"{stem} ({n}){ext}")
+        try:
+            fd = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            n += 1
+            if n > 10000:
+                raise OSError(f"could not find a free name for {filename} in {dest_dir}")
+            continue
+        os.close(fd)
+        return candidate
+
+
+def sweep_stale_tmp_files(
+    local_root: str,
+    max_age_seconds: float = STALE_TMP_AGE_SECONDS,
+    now_fn: Callable[[], float] = time.time,
+) -> list[str]:
+    """REPORT (do not delete) leftover `*.ccsync-tmp` files under local_root.
+
+    A FIX ALL killed mid-copy (self-upgrade shutdown, reboot, Quit) leaves a
+    partial multi-GB file behind and nothing ever cleaned it up (AUDIT_2
+    CORE-H5). The `.stignore`/rclone-filter half of that fix landed in
+    sync/, so these no longer sync anywhere -- which leaves only the wasted
+    disk space, and that is not worth weighing against the hard "never
+    delete user data" rule. DELIBERATE CHOICE: this reports and logs; it
+    does not unlink. A partial BRAW is still the editor's data, we cannot
+    prove from the filesystem alone that some other process isn't writing
+    it, and an automatic delete here would be the system's only unprompted
+    removal of a file under local_root.
+
+    Returns the paths found (oldest first). Never raises."""
+    found: list[tuple[float, str]] = []
+    if not str(local_root).strip():
+        return []
+    now = now_fn()
+    try:
+        for dirpath, dirnames, filenames in os.walk(local_root):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            for name in filenames:
+                if not name.endswith(TMP_SUFFIX):
+                    continue
+                full = os.path.join(dirpath, name)
+                try:
+                    stat = os.stat(full)
+                except OSError:
+                    continue
+                if (now - stat.st_mtime) < max_age_seconds:
+                    continue
+                found.append((stat.st_mtime, full))
+    except Exception:
+        log.debug("stale .ccsync-tmp sweep failed under %s", local_root, exc_info=True)
+        return []
+
+    found.sort()
+    for mtime, path in found:
+        log.warning(
+            "leftover partial copy from an interrupted FIX ALL: %s (%.1f MB, last written %s) "
+            "-- NOT deleted; remove it by hand once you're sure nothing is using it",
+            path, os.path.getsize(path) / 1_000_000 if os.path.exists(path) else 0,
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
+        )
+    return [path for _mtime, path in found]
 
 
 def _dest_dir_is_contained(dest_dir: Path, local_root_resolved: Path) -> bool:
@@ -269,8 +494,9 @@ def fix_clip(
     dest_rel: str,
     local_root: str,
     media_pool_items: Any,
-    copy_fn=shutil.copy2,
+    copy_fn=None,
     replace_clip_fn=resolve_bridge.replace_clip,
+    on_bytes: Optional[Callable[[int, int], None]] = None,
 ) -> dict[str, Any]:
     """Copy `file_path` into local_root/dest_rel (collision-safe) once, then
     relink EVERY DISTINCT media pool item in `media_pool_items` to that one
@@ -290,7 +516,14 @@ def fix_clip(
     raises — every failure path (missing source, copy error, ReplaceClip
     failure) is reported in the returned dict. The original file at
     `file_path` is NEVER deleted or moved, regardless of outcome.
+
+    `on_bytes(copied, total)` reports progress DURING the copy (UX-9); it is
+    only consulted by the default copier. `copy_fn` (a 2-arg src/dst
+    callable) overrides the copier entirely, for tests.
     """
+    if copy_fn is None:
+        def copy_fn(s, d):
+            copy_with_progress(s, d, on_bytes=on_bytes)
     items_raw = media_pool_items if isinstance(media_pool_items, list) else [media_pool_items]
     items: list[Any] = []
     seen_ids: set[int] = set()
@@ -303,6 +536,24 @@ def fix_clip(
     src = Path(file_path)
     if not src.is_file():
         return {"ok": False, "message": f"source file not found: {file_path}", "copied_to": None}
+
+    # A blank local_root makes the D-6 containment check a NO-OP:
+    # Path("").resolve() is the process CWD, so _dest_dir_is_contained
+    # happily approves "<CWD>/Audio/Music". With local_root="" every clip
+    # also classifies as OUT_OF_TREE, so one FIX ALL scatters the whole
+    # project's media into the autostart exe's working directory --
+    # C:\Windows\system32 for a Run-key launch -- and relinks Resolve to
+    # paths nothing will ever sync (AUDIT_2 CORE-H1). Refuse outright; there
+    # is no correct destination when we don't know where the tree is.
+    if not str(local_root).strip():
+        return {
+            "ok": False,
+            "message": (
+                "CCSync doesn't know where your sync folder is (local_root is not set), "
+                "so it won't copy anything. Tray → Copy diagnostics for Alex."
+            ),
+            "copied_to": None,
+        }
 
     try:
         local_root_resolved = Path(local_root).resolve()
@@ -322,13 +573,25 @@ def fix_clip(
     except OSError as exc:
         return {"ok": False, "message": f"copy failed: {exc}", "copied_to": None}
 
-    dest_path = unique_destination_path(dest_dir, src.name)
+    try:
+        dest_path = _claim_destination_path(dest_dir, src.name)
+    except OSError as exc:
+        return {"ok": False, "message": f"copy failed: {exc}", "copied_to": None}
+
     # Copy to a temp name in the same dir, then atomically replace into the
     # final name -- a copy that dies mid-way (disk full, SMB drop) must
     # never leave a truncated file under the final name, which lane A would
     # otherwise upload once its --min-age guard expires and could then never
     # replace (lane A uses --ignore-existing) (AUDIT D-5).
-    tmp_path = dest_path.with_name(dest_path.name + ".ccsync-tmp")
+    #
+    # The tmp name carries pid+uuid: two overlapping FIX ALLs for the same
+    # source name both wrote "<name>.ccsync-tmp", interleaved their writes,
+    # and both os.replace'd into the same final name -- a corrupted mixed
+    # file under a name Resolve was then relinked to (AUDIT_2 CORE-M1).
+    tmp_path = dest_path.with_name(
+        f"{dest_path.name}.{os.getpid()}-{uuid.uuid4().hex[:8]}{TMP_SUFFIX}"
+    )
+    placeholder = is_placeholder(str(src))
     try:
         copy_fn(src, tmp_path)
         os.replace(tmp_path, dest_path)
@@ -337,7 +600,25 @@ def fix_clip(
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
-        return {"ok": False, "message": f"copy failed: {exc}", "copied_to": None}
+        # dest_path is our O_EXCL-created reservation and nothing else's --
+        # remove it so a failed copy doesn't leave a 0-byte file behind.
+        try:
+            if dest_path.exists() and dest_path.stat().st_size == 0:
+                dest_path.unlink()
+        except OSError:
+            pass
+        # WARNING with the path: "12 failed" with no filenames left the user
+        # unable to see WHICH files failed, and the destination sits on an
+        # SMB share whose metadata isn't refreshed until the handle closes,
+        # so the filesystem cannot answer it either -- only this process can.
+        log.warning("fix_clip: copy failed for %s (cloud placeholder=%s): %s",
+                    file_path, placeholder, exc, exc_info=True)
+        return {
+            "ok": False,
+            "message": classify_copy_failure(exc, placeholder),
+            "copied_to": None,
+            "placeholder": placeholder,
+        }
 
     failures: list[str] = []
     for media_pool_item in items:

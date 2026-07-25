@@ -2,7 +2,25 @@
 
 from __future__ import annotations
 
-from ccsync_companion.paths import BAD_PREFIX, MISSING, OK, OUT_OF_TREE, classify_path
+import pytest
+
+from ccsync_companion.paths import (
+    BAD_PREFIX,
+    MISSING,
+    OK,
+    OUT_OF_TREE,
+    classify_path,
+    clear_prefix_cache,
+)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_prefix_cache():
+    """classify_path memoises the prefix probe for a couple of seconds (one
+    realpath per poll, not per clip) -- tests must not inherit each other's."""
+    clear_prefix_cache()
+    yield
+    clear_prefix_cache()
 
 
 def _always_true(_path: str) -> bool:
@@ -11,6 +29,16 @@ def _always_true(_path: str) -> bool:
 
 def _always_false(_path: str) -> bool:
     return False
+
+
+def _subst_p_to_creators_club(path: str) -> str:
+    """What realpath() returns on a machine where `subst P: C:\\Creators_Club`
+    actually ran."""
+    return path.replace("P:\\", "C:\\Creators_Club\\")
+
+
+def _mapped_mount_to_home(path: str) -> str:
+    return path.replace("/Volumes/CreatorsClub", "/Users/jane/Creators_Club")
 
 
 # -- Windows-style paths -----------------------------------------------
@@ -59,21 +87,62 @@ def test_windows_out_of_tree_when_exists():
     assert result == OUT_OF_TREE
 
 
-def test_windows_canonical_prefix_missing_locally_is_missing_not_bad_prefix():
+def test_windows_canonical_prefix_missing_locally_is_missing_when_the_prefix_resolves():
     # THE designed steady state on a remote editor rig: lane A is
     # upload-only, so Resolve's "P:\Projects\..." video original
     # legitimately lives only on the NAS and was never downloaded here.
     # This must NOT warn -- see AUDIT.md §5's BAD_PREFIX-storm finding
     # (a 400-clip project would otherwise fire 400 tray notifications on a
-    # perfectly healthy install).
+    # perfectly healthy install). What makes it healthy is that `subst P:`
+    # DID run: the prefix resolves under local_root.
     result = classify_path(
         r"P:\Projects\2025\FF4\Nuclear\B-roll\clip.mov",
         local_root=r"C:\Creators_Club",
         canonical_prefix="P:\\",
         exists_fn=_always_false,
         is_windows=True,
+        realpath_fn=_subst_p_to_creators_club,
     )
     assert result == MISSING
+
+
+def test_windows_unmapped_prefix_warns_even_though_the_file_is_absent():
+    """AUDIT_2 L-15 [REGRESSION]: round 1 made this return MISSING whenever
+    the FILE was absent, regardless of whether the PREFIX resolved -- which
+    silently deleted SPEC component 2's mapping-health warning for its
+    primary failure mode (`subst P:` never ran at login / the Mac Mapped
+    Mount is unset). Every clip then classified MISSING: zero warnings, zero
+    tray notifications, every clip offline, nothing above debug in the log."""
+    result = classify_path(
+        r"P:\Projects\2025\FF4\Nuclear\B-roll\clip.mov",
+        local_root=r"C:\Creators_Club",
+        canonical_prefix="P:\\",
+        exists_fn=_always_false,
+        is_windows=True,
+        realpath_fn=lambda p: p,  # no subst in place: P:\ resolves to itself
+    )
+    assert result == BAD_PREFIX
+
+
+def test_prefix_probe_is_cached_so_it_costs_one_realpath_per_poll():
+    """A 400-clip timeline must not mean 400 realpath() syscalls."""
+    calls = []
+
+    def counting_realpath(p):
+        calls.append(p)
+        return r"C:\Creators_Club"
+
+    for i in range(50):
+        classify_path(
+            rf"P:\Projects\clip{i}.mov",
+            local_root=r"C:\Creators_Club",
+            canonical_prefix="P:\\",
+            exists_fn=_always_false,
+            is_windows=True,
+            realpath_fn=counting_realpath,
+        )
+    assert len(calls) == 1
+    assert calls == ["P:\\"]  # the PREFIX is probed, never the per-clip path
 
 
 def test_windows_bad_prefix_takes_priority_even_if_file_exists():
@@ -164,17 +233,33 @@ def test_posix_out_of_tree_when_exists():
     assert result == OUT_OF_TREE
 
 
-def test_posix_canonical_prefix_missing_locally_is_missing_not_bad_prefix():
+def test_posix_canonical_prefix_missing_locally_is_missing_when_the_mount_resolves():
     # Same steady-state case as the Windows equivalent above: a Mapped
-    # Mount path that simply isn't downloaded yet must not warn.
+    # Mount path that simply isn't downloaded yet must not warn -- provided
+    # the mount itself resolves under local_root.
     result = classify_path(
         "/Volumes/CreatorsClub/Projects/clip.mov",
         local_root="/Users/jane/Creators_Club",
         canonical_prefix="/Volumes/CreatorsClub",
         exists_fn=_always_false,
         is_windows=False,
+        realpath_fn=_mapped_mount_to_home,
     )
     assert result == MISSING
+
+
+def test_posix_unset_mapped_mount_warns_even_though_the_file_is_absent():
+    # SPEC.md flaw #7: Mapped Mount on Mac is a manual Resolve preference,
+    # so "nobody set it" is the expected failure -- and it must warn.
+    result = classify_path(
+        "/Volumes/CreatorsClub/Projects/clip.mov",
+        local_root="/Users/jane/Creators_Club",
+        canonical_prefix="/Volumes/CreatorsClub",
+        exists_fn=_always_false,
+        is_windows=False,
+        realpath_fn=lambda p: p,
+    )
+    assert result == BAD_PREFIX
 
 
 def test_posix_bad_prefix_mapped_mount_resolves_elsewhere():

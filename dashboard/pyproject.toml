@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccsync-dashboard"
-version = "0.1.0"
+version = "0.2.0"
 description = "Creators Club Sync fleet dashboard: per-project, per-editor sync status served off the NAS"
 requires-python = ">=3.12"
 dependencies = [

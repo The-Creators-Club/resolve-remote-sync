@@ -62,8 +62,11 @@ def test_auth_matrix(env):
     # anonymous
     assert client.get("/api/v1/selection/jsmith").status_code == 401
     assert client.put("/api/v1/selection/jsmith/2025-ff4-nuclear").status_code == 401
-    # companion token: read yes, write no
-    headers = {"X-CCSync-Token": TOKEN}
+    # companion token (+ the matching identity header the read now requires,
+    # see test_auth.test_selection_read_with_the_shared_token_needs_a_matching_identity):
+    # read yes, write no
+    headers = {"X-CCSync-Token": TOKEN,
+               "X-CCSync-Identity": auth.make_identity_token(SECRET, "jsmith")}
     assert client.get("/api/v1/selection/jsmith", headers=headers).status_code == 200
     assert client.put("/api/v1/selection/jsmith/2025-ff4-nuclear", headers=headers).status_code == 401
     # another editor: no

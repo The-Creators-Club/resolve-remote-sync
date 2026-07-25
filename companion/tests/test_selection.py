@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
+
 from ccsync_companion.selection import SelectionClient
 
 
@@ -401,3 +403,142 @@ def test_get_project_roots_ignores_entries_missing_required_fields(tmp_path):
     client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
     client.fetch()
     assert client.get_project_roots() == {"good show": "Projects/2026/C/D"}
+
+
+# -- project_roots rel_path containment (AUDIT_3 H-2) -----------------------
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["../../../Windows/Temp/x", "2026/../../../evil", "\\evil", "/evil", "C:/evil", ".."],
+)
+def test_unsafe_project_root_rel_paths_are_dropped(tmp_path, rel, caplog):
+    """Every other consumer of a dashboard rel_path validates it
+    (sequencer._item_is_valid, repath._item_is_valid) -- this one built
+    f"Projects/{rel_path}" from it unchecked, and that string becomes both a
+    popup-fixer copy destination and the subpath app.consolidate_project
+    hands to lane A, i.e. `rclone copy <outside the tree> nas:...`."""
+    def fake_get(url, headers, timeout):
+        return {
+            "selection": _SAMPLE,
+            "project_roots": [
+                {"resolve_project": "Evil", "rel_path": rel},
+                {"resolve_project": "Good", "rel_path": "2026/FF5/Nuclear"},
+            ],
+        }
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    with caplog.at_level(logging.WARNING, logger="ccsync.selection"):
+        mapping, source = client.project_roots_result()
+
+    assert source == "live"
+    assert "evil" not in mapping
+    assert mapping == {"good": "Projects/2026/FF5/Nuclear"}
+    assert any("rel_path" in r.message for r in caplog.records)
+
+
+def test_project_roots_normalizes_a_trailing_slash(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {
+            "selection": _SAMPLE,
+            "project_roots": [{"resolve_project": "Nuclear", "rel_path": "2026/FF5/Nuclear/"}],
+        }
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    mapping, _source = client.project_roots_result()
+    assert mapping == {"nuclear": "Projects/2026/FF5/Nuclear"}
+
+
+# -- TTL config keys (AUDIT_3 M-5) -----------------------------------------
+
+
+def test_ttls_come_from_config_and_survive_a_hand_edited_value(tmp_path, caplog):
+    """SelectionClient is built inside CompanionApp.__init__, so a bad value
+    here used to raise before the tray/logging existed -- the windowed exe
+    simply vanishing."""
+    client = SelectionClient(
+        _cfg(selection_fetch_ttl=5, project_roots_ttl=45), tmp_path, http_get=lambda *a: {}
+    )
+    assert client.fetch_ttl == 5.0
+    assert client.project_roots_ttl == 45.0
+
+    with caplog.at_level(logging.ERROR, logger="ccsync.config"):
+        broken = SelectionClient(
+            _cfg(selection_fetch_ttl="30s", project_roots_ttl=None), tmp_path,
+            http_get=lambda *a: {},
+        )
+    assert broken.fetch_ttl == 30.0  # packaged default
+    assert broken.project_roots_ttl == 300.0
+
+
+# -- identity header on selection reads -------------------------------------
+
+
+def test_fetch_sends_both_the_dashboard_token_and_the_identity_token(tmp_path):
+    """The dashboard's selection endpoint requires X-CCSync-Identity as well
+    as the fleet-wide X-CCSync-Token (the same rule /api/v1/report follows).
+    A fetch carrying only the shared token 401s, and every managed editor
+    then runs off its cached selection with no visible cause."""
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(dict(headers))
+        return {"selection": _SAMPLE}
+
+    client = SelectionClient(
+        _cfg(), tmp_path, http_get=fake_get, identity_token_fn=lambda: "v2.identity.abc",
+    )
+    client.fetch()
+
+    assert calls[0]["X-CCSync-Token"] == "tok123"
+    assert calls[0]["X-CCSync-Identity"] == "v2.identity.abc"
+
+
+def test_fetch_is_still_attempted_when_not_signed_in(tmp_path):
+    """Graceful degrade: no identity means no header (never an empty one),
+    the request still goes out, and a 401 lands on the existing
+    fetch-failure path."""
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(dict(headers))
+        return {"selection": _SAMPLE}
+
+    client = SelectionClient(
+        _cfg(), tmp_path, http_get=fake_get, identity_token_fn=lambda: None,
+    )
+    assert client.fetch() == _SAMPLE
+    assert "X-CCSync-Identity" not in calls[0]
+    assert calls[0]["X-CCSync-Token"] == "tok123"
+
+
+def test_a_raising_identity_getter_never_breaks_the_fetch(tmp_path):
+    def _boom():
+        raise RuntimeError("identity manager is gone")
+
+    def fake_get(url, headers, timeout):
+        assert "X-CCSync-Identity" not in headers
+        return {"selection": _SAMPLE}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get, identity_token_fn=_boom)
+    assert client.fetch() == _SAMPLE
+
+
+def test_a_401_falls_back_to_the_cache_exactly_like_any_other_failure(tmp_path, caplog):
+    import urllib.error
+
+    def ok_get(url, headers, timeout):
+        return {"selection": _SAMPLE}
+
+    SelectionClient(_cfg(), tmp_path, http_get=ok_get).fetch()  # warm the cache
+
+    def unauthorized(url, headers, timeout):
+        raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+    client = SelectionClient(
+        _cfg(), tmp_path, http_get=unauthorized, identity_token_fn=lambda: None,
+    )
+    with caplog.at_level(logging.WARNING, logger="ccsync.selection"):
+        selection, source = client.get()
+
+    assert selection == _SAMPLE and source == "cache"

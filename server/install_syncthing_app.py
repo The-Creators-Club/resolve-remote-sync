@@ -14,44 +14,54 @@ Rather than guess and risk a bad POST, this script:
      /api/v2.0/catalog/apps) and looks for an entry whose name/id is
      "syncthing", validating it has the fields this script expects
      (see EXPECTED_CATALOG_FIELDS below).
-  3. Only if that shape check passes does it POST
-     /api/v2.0/app/create with the ASSUMED_VALUES payload documented
-     below. If the shape check fails, the script prints exactly what it
-     expected vs. what it found and exits non-zero -- it will NOT guess
+  3. Only if that shape check passes does it POST /api/v2.0/app with the
+     payload below. If the shape check fails, the script prints exactly what
+     it expected vs. what it found and exits non-zero -- it will NOT guess
      at a different payload shape.
+  4. POST /app returns a JOB ID, not a finished install: it only means
+     "accepted". The job is polled to completion (common.wait_for_job) and
+     the script reports success only for state SUCCESS.
 
-ASSUMED APP-CREATE PAYLOAD (documented here so a human can adapt it once
-the real schema is confirmed against the live API -- this is the single
-place to edit):
+APP-CREATE PAYLOAD -- this docstring mirrors what main() actually sends
+(schema confirmed against live TrueNAS 25.10.4, stable/syncthing 1.3.11
+questions.yaml, 2026-07-22). Edit both together:
 
+    POST /api/v2.0/app
     {
         "app_name": "syncthing",
-        "catalog": "TRUENAS",
+        "catalog_app": "syncthing",
         "train": "stable",
         "version": "<discovered from the catalog GET in step 2>",
         "values": {
-            "syncthing": {
-                "puid": 0,
-                "pgid": 0,
-            },
+            # 3000:3001 = broll:editors, so files Syncthing writes land
+            # group-editors like everything else in the tree.
+            "run_as": {"user": 3000, "group": 3001},
             "network": {
-                "webUIPort": <--gui-port, default 8384>,
+                "web_port": {"bind_mode": "published",
+                             "port_number": <--gui-port, default 8384>},
+                "tcp_port": {"bind_mode": "published", "port_number": 22000},
+                "udp_port": {"bind_mode": "published", "port_number": 22000},
+                "host_network": False,
             },
             "storage": {
-                "data": {
-                    "type": "hostPath",
-                    "hostPath": "/mnt/tank/TheCreatorsPool/Creators_Club",
-                },
+                "config": {"type": "ix_volume",
+                           "ix_volume_config": {"dataset_name": "config",
+                                                "acl_enable": False}},
+                "additional_storage": [
+                    {"type": "host_path",
+                     "mount_path": <--container-mount, default /data>,
+                     "host_path_config": {"path": <--host-path>,
+                                          "acl_enable": False}},
+                ],
             },
         },
     }
 
-`storage.data.hostPath` is the host path bind-mounted into the app; the
-in-container mount point this implies (used by setup_syncthing_folder.py
-and referenced in docs) is documented as SYNCTHING_CONTAINER_MOUNT below --
-CONFIRM THIS against the actual chart's default container mount point
-before relying on it; if the chart mounts it somewhere else, override with
---container-mount.
+`storage.additional_storage[0].host_path_config.path` is the host path
+bind-mounted into the app; `mount_path` is where it lands inside the
+container and is what setup_syncthing_folder.py builds folder paths from
+(SYNCTHING_CONTAINER_MOUNT below). Override both with --host-path /
+--container-mount if the chart's defaults ever move.
 
 GUI port default 8384 is Syncthing's own default and does not collide with
 resolve-projectserver (5432) or anything else known to be running on this
@@ -63,7 +73,7 @@ truenas_admin), TRUENAS_PW (required).
 import argparse
 import sys
 
-from common import ok, truenas_api
+from common import ok, truenas_api, wait_for_job
 
 CATALOG = "TRUENAS"
 TRAIN = "stable"
@@ -159,6 +169,7 @@ def main():
     # syncthing 1.3.11 questions.yaml) on 2026-07-22 — see the chart's
     # run_as/network/storage variable tree. run_as 3000:3001 = broll:editors
     # so files Syncthing writes land group-editors like everything else.
+    # KEEP THIS IN SYNC with the payload in the module docstring.
     values = {
         "run_as": {"user": 3000, "group": 3001},
         "network": {
@@ -197,10 +208,32 @@ def main():
 
     if not ok(resp):
         print(f"FAILED to install {APP_NAME}: HTTP {resp.status_code} {resp.text}", file=sys.stderr)
-        print("If this is a 422/400 body-shape error, the ASSUMED_VALUES payload in this script's "
-              "docstring needs updating to match the real chart schema -- check the error body above "
-              "for the specific field(s) it rejected.", file=sys.stderr)
+        print("If this is a 422/400 body-shape error, the payload in this script's docstring "
+              "(and in main(), which must match it) needs updating to match the real chart "
+              "schema -- check the error body above for the specific field(s) it rejected.",
+              file=sys.stderr)
         return 1
+
+    # A 2xx here only means the create job was ACCEPTED: /app returns a job
+    # id and pulls the image asynchronously, so it can still fail afterwards
+    # (AUDIT INST-24). Wait for the job rather than declaring success.
+    try:
+        job_id = resp.json()
+    except ValueError:
+        job_id = None
+    if isinstance(job_id, int):
+        print(f"app create job {job_id} accepted; waiting for it to finish "
+              f"(image pull can take a few minutes)...")
+        state, job_err = wait_for_job(job_id, timeout=900, poll=5)
+        if state != "SUCCESS":
+            print(f"FAILED: app create job {job_id} ended {state}: {job_err}", file=sys.stderr)
+            print(f"Check Apps > {APP_NAME} in the TrueNAS UI -- a partially created app may "
+                  f"need deleting before re-running this script.", file=sys.stderr)
+            return 1
+    else:
+        print(f"NOTE: POST /app returned {job_id!r} rather than a job id, so the install "
+              f"could not be waited on -- confirm {APP_NAME} is actually running in the "
+              f"TrueNAS UI before continuing.", file=sys.stderr)
 
     print(f"installed app: {APP_NAME} version {version}, GUI port {args.gui_port}, "
           f"host path {args.host_path} -> container mount {args.container_mount}")

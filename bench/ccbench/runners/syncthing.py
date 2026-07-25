@@ -20,6 +20,13 @@ device-pairing/REST-configuration logic is unchanged either way.
 
 If the syncthing binary isn't on PATH (and no `binary` override is
 configured), `run()` returns a skipped RunResult instead of crashing.
+
+**Every row this runner produces is marked `loopback=True`**: both peers are
+on this machine, so the number measured is local disk + localhost TCP, not the
+editor<->NAS path. The report prints those rows in a `Loopback` column and
+excludes them from lane winners whenever any real-network row exists. Point
+the endpoint at a real reachable host:port before treating a syncthing number
+as comparable with rclone/robocopy over Tailscale.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ccbench import guard
 from ccbench.result import RunResult, make_skipped
 
 from . import base
@@ -260,6 +268,18 @@ def _seed_folder_with_dataset(dataset_dir: Path, folder_dir: Path) -> None:
             shutil.copy2(item, dest)
 
 
+def _tree_bytes(root: Path) -> int:
+    """Total size of the synced payload under `root`, ignoring syncthing's own
+    dot-files (.stfolder, .stversions, .stignore, .syncthing.*.tmp)."""
+    total = 0
+    for path in root.rglob("*"):
+        if any(part.startswith(".") for part in path.relative_to(root).parts):
+            continue
+        if path.is_file():
+            total += path.stat().st_size
+    return total
+
+
 def _wait_for_sync(instance: "_Instance", folder_id: str, timeout_s: float) -> tuple[bool, float]:
     start = time.monotonic()
     deadline = start + timeout_s
@@ -292,16 +312,21 @@ def run(
     cfg = {"binary": binary or (endpoint or {}).get("binary")}
     ok, reason = available(cfg)
     if not ok:
-        return make_skipped(ENGINE, dataset_name, direction, params, reason, lane, "", repeat_index)
+        return make_skipped(
+            ENGINE, dataset_name, direction, params, reason, lane, "", repeat_index, True
+        )
     syncthing_binary = reason  # available() returns the resolved path/binary name on success
 
     if direction not in ("up", "down", "bidirectional"):
         return make_skipped(
             ENGINE, dataset_name, direction, params,
             f"unsupported direction for syncthing runner: {direction}", lane, "", repeat_index,
+            True,
         )
 
-    tmp_root = Path(tempfile.mkdtemp(prefix="ccbench-syncthing-"))
+    # The "_bench" in the prefix is load-bearing: ccbench.guard refuses to
+    # rmtree anything without it (see the teardown in `finally`).
+    tmp_root = Path(tempfile.mkdtemp(prefix="ccbench-_bench-syncthing-"))
     folder_id = "ccbench-bench"
     source_name, dest_name = ("editor", "nas") if direction == "up" else ("nas", "editor")
 
@@ -310,7 +335,6 @@ def run(
 
     try:
         _seed_folder_with_dataset(Path(dataset_dir), source.folder_dir)
-        expected_bytes = base.manifest_bytes(dataset_dir)
 
         for inst in (source, dest):
             inst.generate()
@@ -337,12 +361,20 @@ def run(
                 seconds=seconds, num_bytes=0, MB_s=0.0, verified=False, ok=False,
                 reason=f"sync did not complete within {sync_timeout_s}s", lane=lane,
                 endpoint="localhost-pair", repeat_index=repeat_index,
+                bytes_source="none", verify_method="none", loopback=True,
             )
 
         verified = False
+        verify_method = "none"
+        detail = ""
         if verify:
             manifest = base.manifest_files(dataset_dir)
-            verified, _detail = base.spot_check(manifest, dest.folder_dir)
+            verified, detail = base.spot_check(manifest, dest.folder_dir)
+            verify_method = "spot-check-sha256"
+
+        # The destination folder is freshly created per run, so "bytes moved"
+        # is the size of what landed there -- measured, not assumed.
+        moved_bytes = _tree_bytes(dest.folder_dir)
 
         return RunResult(
             engine=ENGINE,
@@ -350,20 +382,24 @@ def run(
             direction=direction,
             params=params,
             seconds=seconds,
-            num_bytes=expected_bytes,
-            MB_s=base.mb_per_s(expected_bytes, seconds),
+            num_bytes=moved_bytes,
+            MB_s=base.mb_per_s(moved_bytes, seconds),
             verified=verified,
             ok=True,
-            reason="",
+            reason="" if verified or not verify else f"verification failed: {detail}",
             lane=lane,
             endpoint="localhost-pair",
             repeat_index=repeat_index,
+            bytes_source="destination-listing",
+            verify_method=verify_method,
+            loopback=True,
         )
     except Exception as exc:  # noqa: BLE001 -- runners must never raise
         return RunResult(
             engine=ENGINE, dataset=dataset_name, direction=direction, params=params,
             seconds=0.0, num_bytes=0, MB_s=0.0, verified=False, ok=False,
             reason=f"exception: {exc}", lane=lane, endpoint="localhost-pair", repeat_index=repeat_index,
+            bytes_source="none", verify_method="none", loopback=True,
         )
     finally:
         for inst in (source, dest):
@@ -372,4 +408,7 @@ def run(
             except Exception:  # noqa: BLE001
                 pass
         if not keep_remote_data:
-            shutil.rmtree(tmp_root, ignore_errors=True)
+            try:
+                guard.safe_rmtree(tmp_root, action="remove ephemeral syncthing workspace")
+            except guard.DestructiveEndpointRefused:
+                pass  # leave the temp workspace rather than raise out of `finally`

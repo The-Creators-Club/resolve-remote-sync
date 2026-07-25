@@ -74,6 +74,34 @@ def test_inventory_signature_skip(conn, tmp_path, collector, monkeypatch):
     assert calls == []  # signature matched -> file walk skipped
 
 
+def test_inventory_walks_outside_the_write_transaction(conn, tmp_path, collector, monkeypatch):
+    """record_inventory_error/replace_nas_media used to bracket up to eight
+    full recursive walks of a ZFS/NFS tree, so every editor's POST
+    /api/v1/report during an inventory cycle 500'd with 'database is
+    locked'. All walking happens before the first write now."""
+    make_project_tree(tmp_path / "projects", "2025/FF4/Nuclear")
+    other = dbmod.connect(conn.execute("PRAGMA database_list").fetchone()[2])
+    other.execute("PRAGMA busy_timeout=200")
+    blocked = []
+
+    orig = Collector._walk_media_files
+
+    def probing_walk(proj_dir):
+        try:
+            other.execute("INSERT INTO poll_runs (kind, started_at, ok) VALUES ('probe','x',1)")
+            other.commit()
+        except Exception as exc:      # pragma: no cover - only on regression
+            blocked.append(str(exc))
+        return orig(proj_dir)
+
+    monkeypatch.setattr(Collector, "_walk_media_files", staticmethod(probing_walk))
+    try:
+        assert collector.run_cycle(conn, ["config", "inventory"])["inventory"] is True
+    finally:
+        other.close()
+    assert blocked == []
+
+
 def test_inventory_disabled_without_projects_dir(conn, fake):
     settings = Settings(syncthing_url=fake.url, syncthing_api_key="k")  # no projects_dir
     from ccsync_dashboard.syncthing_client import SyncthingClient

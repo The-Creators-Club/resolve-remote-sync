@@ -28,12 +28,54 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import urlencode
 
-from .base import STATE_ERROR, STATE_IDLE, STATE_SYNCING, LaneAdapter, LaneStatus
+from .base import (
+    STATE_ERROR,
+    STATE_IDLE,
+    STATE_PAUSED,
+    STATE_SYNCING,
+    LaneAdapter,
+    LaneStatus,
+)
 
 log = logging.getLogger("ccsync.sync.syncthing")
 
 HttpGetFn = Callable[[str, str, float], Any]
+
+# Syncthing's connection "type" values that mean "not a direct path". A
+# relay-client connection runs over the PUBLIC relay pool -- typically
+# 1-5 MB/s, shared and rate-limited -- which AUDIT_2 P3 names as the most
+# likely literal explanation of the ~60 mb/s ceiling this project exists to
+# beat. Everything else (tcp-client/tcp-server/quic-client/quic-server) is
+# a direct connection.
+RELAY_CONNECTION_PREFIX = "relay"
+RELAYED_DETAIL = "relayed — slow path"
+
+
+def summarize_connections(payload: Any) -> dict[str, Any]:
+    """Reduce /rest/system/connections to {"devices": {id: type},
+    "relayed": [ids], "direct": [ids]} over CONNECTED devices only.
+
+    Disconnected entries carry a stale/blank type and must not be counted
+    as relayed -- "offline" and "relayed" are different problems with
+    different fixes. Never raises."""
+    devices: dict[str, str] = {}
+    relayed: list[str] = []
+    direct: list[str] = []
+    conns = payload.get("connections") if isinstance(payload, dict) else None
+    if not isinstance(conns, dict):
+        return {"devices": devices, "relayed": relayed, "direct": direct}
+    for device_id, entry in conns.items():
+        if not isinstance(entry, dict) or not entry.get("connected"):
+            continue
+        conn_type = str(entry.get("type", "") or "")
+        devices[str(device_id)] = conn_type
+        if conn_type.lower().startswith(RELAY_CONNECTION_PREFIX):
+            relayed.append(str(device_id))
+        elif conn_type:
+            direct.append(str(device_id))
+    return {"devices": devices, "relayed": relayed, "direct": direct}
 
 
 def ccsync_config_xml_path() -> Path:
@@ -116,17 +158,34 @@ class SyncthingLane(LaneAdapter):
         timeout: float = 5.0,
         poll_interval: float = 15.0,
         http_get: Optional[HttpGetFn] = None,
+        expected_folder_ids_fn: Optional[Callable[[], list[str]]] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._configured_api_key = api_key
         self.expected_folder_ids = expected_folder_ids or []
+        # Managed mode learns its folders from the dashboard SELECTION, which
+        # the sequencer owns -- the static `syncthing_folder_ids` config key
+        # is written as a literal [] by every installer and populated by
+        # nothing, so check_once() used to iterate an empty list and report
+        # idle/queued=0/last_sync=now forever while lane C was paused,
+        # un-ignored or hours behind (AUDIT_2 L-6/UX-3). Supply
+        # `expected_folder_ids_fn` (e.g. Sequencer.expected_folder_slugs) and
+        # it is evaluated fresh on every poll.
+        self.expected_folder_ids_fn = expected_folder_ids_fn
         self.config_xml_path = config_xml_path or default_config_xml_path()
         self.timeout = timeout
         self.poll_interval = poll_interval
         self._http_get = http_get or default_http_get
 
         self._status = LaneStatus(name=self.name)
+        # Last /rest/system/connections summary (AUDIT_2 C-6). Public via
+        # connection_path_summary() so the reporter payload -- owned
+        # elsewhere -- can send it to the dashboard without re-polling.
+        self._connection_summary: dict[str, Any] = {}
         self._lock = threading.Lock()
+        # One event per thread generation -- see RcloneLane.__init__ for why
+        # a single re-cleared event could not be right for both start() and
+        # a stop() whose join times out (AUDIT_2 L-2).
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -142,6 +201,50 @@ class SyncthingLane(LaneAdapter):
     def _set_status(self, status: LaneStatus) -> None:
         with self._lock:
             self._status = status
+
+    def _effective_folder_ids(self) -> list[str]:
+        """The folder set this poll should judge the lane against."""
+        if self.expected_folder_ids_fn is not None:
+            try:
+                return [str(fid) for fid in (self.expected_folder_ids_fn() or [])]
+            except Exception:
+                log.debug("expected_folder_ids_fn failed; falling back to the static list")
+        return list(self.expected_folder_ids)
+
+    def connection_path_summary(self) -> dict[str, Any]:
+        """Last-seen per-device connection types, e.g.
+        {"devices": {"ABC...": "relay-client"}, "relayed": [...], "direct": [...]}.
+
+        Public on purpose: the reporter payload (another module's concern)
+        needs this to make a relayed editor distinguishable from a merely
+        slow one on the fleet strip (AUDIT_2 C-6)."""
+        with self._lock:
+            return dict(self._connection_summary)
+
+    def _refresh_connection_summary(self) -> dict[str, Any]:
+        """Poll connections; never fails the lane over it (an older
+        Syncthing, or one mid-restart, is not a lane C error)."""
+        try:
+            summary = summarize_connections(self._get("/rest/system/connections"))
+        except Exception:
+            log.debug("connections check failed", exc_info=True)
+            return {}
+        with self._lock:
+            self._connection_summary = summary
+        return summary
+
+    @staticmethod
+    def _path_detail(summary: dict[str, Any]) -> str:
+        relayed = summary.get("relayed") or []
+        if not relayed:
+            return ""
+        return f"{RELAYED_DETAIL} ({len(relayed)} device(s) via relay)"
+
+    @staticmethod
+    def _with_path_detail(detail: str, path_detail: str) -> str:
+        if not path_detail:
+            return detail
+        return f"{detail} — {path_detail}" if detail else path_detail
 
     def check_once(self) -> LaneStatus:
         """Single synchronous status check. Never raises."""
@@ -162,12 +265,34 @@ class SyncthingLane(LaneAdapter):
             self._set_status(status)
             return status
 
+        # Path diagnostics BEFORE the folder verdict, so every branch below
+        # can carry "relayed — slow path" (AUDIT_2 C-6). A relayed lane C and
+        # a slow lane C look identical without this.
+        path_detail = self._path_detail(self._refresh_connection_summary())
+
+        expected = self._effective_folder_ids()
+        if not expected:
+            # NOTHING was checked, so nothing may be claimed. Reporting
+            # "idle, last synced just now" here is what kept every editor's
+            # lane C dot green while lane C did nothing at all (AUDIT_2
+            # L-6/UX-3) -- carry the previous last_sync through untouched.
+            status = LaneStatus(
+                name=self.name,
+                state=STATE_IDLE,
+                queued=0,
+                last_sync=self.status().last_sync,
+                detail=self._with_path_detail("no project folders to check yet", path_detail),
+            )
+            self._set_status(status)
+            return status
+
         missing_folders: list[str] = []
+        paused_folders: list[str] = []
         try:
             config = self._get("/rest/config")
             folders = config.get("folders", []) if isinstance(config, dict) else []
             by_id = {f.get("id"): f for f in folders}
-            for fid in self.expected_folder_ids:
+            for fid in expected:
                 folder = by_id.get(fid)
                 if folder is None:
                     missing_folders.append(f"{fid} (not configured)")
@@ -175,6 +300,9 @@ class SyncthingLane(LaneAdapter):
                 devices = folder.get("devices", []) or []
                 if len(devices) <= 1:
                     missing_folders.append(f"{fid} (not shared with any device)")
+                    continue
+                if folder.get("paused"):
+                    paused_folders.append(fid)
         except Exception as exc:
             status = LaneStatus(
                 name=self.name, state=STATE_ERROR, last_error=f"failed to read Syncthing config: {exc}"
@@ -192,33 +320,78 @@ class SyncthingLane(LaneAdapter):
             return status
 
         queued = 0
-        for fid in self.expected_folder_ids:
+        errored: list[str] = []
+        for fid in expected:
             try:
-                db_status = self._get(f"/rest/db/status?folder={fid}")
-                queued += int((db_status or {}).get("needTotalItems", 0) or 0)
+                # urlencode, not an f-string: folder IDs are dashboard
+                # project slugs, and a "/", "?" or "#" in one silently
+                # addressed a different endpoint (AUDIT_3 L-10).
+                db_status = self._get(f"/rest/db/status?{urlencode({'folder': fid})}") or {}
+                queued += int(db_status.get("needTotalItems", 0) or 0)
+                # A folder in "error" state (the classic being "folder marker
+                # missing" after a failed repath) syncs NOTHING, and reading
+                # only needTotalItems reports that as a serene 0.
+                state = str(db_status.get("state", "") or "")
+                errors = int(db_status.get("errors", 0) or 0)
+                if state == "error" or errors > 0:
+                    detail = db_status.get("stateChanged") or state or f"{errors} error(s)"
+                    errored.append(f"{fid} ({detail})")
             except Exception:
                 log.debug("db/status check failed for folder %s", fid)
 
-        if queued > 0:
-            status = LaneStatus(name=self.name, state=STATE_SYNCING, queued=queued)
+        if errored:
+            status = LaneStatus(
+                name=self.name,
+                state=STATE_ERROR,
+                queued=queued,
+                last_error="folder(s) in error: " + ", ".join(errored),
+                detail=path_detail,
+            )
+        elif queued > 0:
+            status = LaneStatus(
+                name=self.name, state=STATE_SYNCING, queued=queued, detail=path_detail,
+            )
+        elif len(paused_folders) == len(expected):
+            # Every folder paused: the sequencer pauses all but the current
+            # project by design, so only ALL-paused is a real stop.
+            status = LaneStatus(
+                name=self.name,
+                state=STATE_PAUSED,
+                queued=0,
+                last_sync=self.status().last_sync,
+                detail=self._with_path_detail(
+                    f"{len(paused_folders)} folder(s) paused", path_detail
+                ),
+            )
         else:
             status = LaneStatus(
-                name=self.name, state=STATE_IDLE, queued=0, last_sync=datetime.now(timezone.utc)
+                name=self.name, state=STATE_IDLE, queued=0,
+                last_sync=datetime.now(timezone.utc), detail=path_detail,
             )
         self._set_status(status)
         return status
 
     # -- LaneAdapter ---------------------------------------------------
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            # Idempotent per LaneAdapter's contract. Same shape as
-            # RcloneLane.start(): spawning thread #2 while #1 is still
-            # alive and then clearing _stop_event would un-stick #1's own
-            # wait() and leak it forever (sign-out -> sign-in in quick
-            # succession).
+        if (
+            self._thread is not None
+            and self._thread.is_alive()
+            and not self._stop_event.is_set()
+        ):
+            # Genuinely running -> idempotent per LaneAdapter's contract.
             return
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._poll_loop, name="ccsync-syncthing-poll", daemon=True)
+        # Same generation-event scheme as RcloneLane.start(): retire the old
+        # event (a no-op when stop() already set it) and hand the new thread
+        # its own, so a stale thread can never be re-armed AND a stop() whose
+        # join timed out can never leave the lane permanently dead
+        # (AUDIT_2 L-2).
+        self._stop_event.set()
+        stop_event = threading.Event()
+        self._stop_event = stop_event
+        self._thread = threading.Thread(
+            target=self._poll_loop, args=(stop_event,),
+            name="ccsync-syncthing-poll", daemon=True,
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -235,11 +408,14 @@ class SyncthingLane(LaneAdapter):
     def run_once(self) -> LaneStatus:
         return self.check_once()
 
-    def _poll_loop(self) -> None:
-        while not self._stop_event.is_set():
+    def _poll_loop(self, stop_event: Optional[threading.Event] = None) -> None:
+        # This generation's own event -- never self._stop_event, which by
+        # then may belong to a newer one.
+        stop_event = stop_event if stop_event is not None else self._stop_event
+        while not stop_event.is_set():
             try:
                 self.check_once()
             except Exception:
                 log.exception("%s: poll cycle failed", self.name)
-            if self._stop_event.wait(self.poll_interval):
+            if stop_event.wait(self.poll_interval):
                 break

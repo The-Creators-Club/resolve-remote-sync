@@ -23,10 +23,20 @@ def _token(username: str = "alex", ttl: int = 3600) -> str:
     return f"v2.identity.{user_b64}.{int(time.time()) + ttl}.deadbeef"
 
 
+def _make_local_root(tmp_path) -> str:
+    """local_root must EXIST: validate_config flags a missing one as an error
+    that stops syncing, and since 0.4.5 an error genuinely does stop the
+    lanes (DEL-3) and suppress the out-of-tree popup (CORE-H1). A test config
+    pointing at a directory that was never created is a misconfigured
+    install, not a working one."""
+    root = tmp_path / "root"
+    root.mkdir(parents=True, exist_ok=True)
+    return str(root)
+
 def _cfg(tmp_path, **overrides) -> dict[str, Any]:
     cfg = {
         "editor_name": "alex",
-        "local_root": str(tmp_path / "root"),
+        "local_root": _make_local_root(tmp_path),
         "canonical_prefix": "P:\\",
         "remote": "creators_club_sftp",
         "remote_root": "/mnt/tank/Creators_Club",
@@ -66,14 +76,32 @@ def test_editor_role_keeps_sync_enabled(tmp_path):
     assert app.effective_mode() == "editor"
 
 
-def test_editor_role_overrides_a_base_flagged_config(tmp_path):
-    """A machine whose config.toml still says mode=base/sync_enabled=false
-    (stale from before this feature, or just wrong) gets overridden by a
-    real editor logging in -- role from login wins over the static file."""
+def test_editor_role_can_never_enable_sync_on_a_base_flagged_config(tmp_path):
+    """INVERTED 2026-07-25 (AUDIT_2 CORE-C1) -- this test previously asserted
+    the opposite, and the behaviour it blessed was the single most dangerous
+    thing in the companion.
+
+    `_apply_identity_role` was `self._sync_enabled = (role != "base")`, so any
+    sign-in by an account outside DASH_ADMIN_USERS force-ENABLED the sync
+    lanes on a machine whose config says mode="base"/sync_enabled=false. On
+    the base rig `local_root` IS the live NAS SMB share (T:\\Creators_Club),
+    and lane B is a deleting `rclone sync` DOWNWARD from that user's empty
+    SFTP home -- i.e. it would delete the NAS's real Proxy/ files under every
+    selected project. With require_login=false and a stale identity.json this
+    needed no user action at all.
+
+    The role is now MONOTONIC: it may only ever disable sync. A machine that
+    says it does not sync stays that way whatever the server says; the fix
+    for a genuinely mis-flagged machine is to correct its config.toml, which
+    is a deliberate local act rather than a side effect of somebody's login.
+    """
     app = _make_app(tmp_path, sync_enabled=False, mode="base")
     assert app._sync_enabled is False
     _sign_in_with_role(app, "jsmith", "editor")
-    assert app._sync_enabled is True
+    assert app._sync_enabled is False
+    # ...and the reported mode still follows the dashboard, so an admin can
+    # SEE the disagreement rather than it being silently resolved.
+    assert app.effective_mode() == "editor"
 
 
 def test_no_role_from_dashboard_falls_back_to_static_config(tmp_path):

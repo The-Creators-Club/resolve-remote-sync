@@ -35,8 +35,11 @@
           <span class="chip lane {{ lane.chip }}" title="{{ lane.lane }}: {{ lane.state }}{% if lane.last_error %} — {{ lane.last_error }}{% endif %}">{{ lane.label }}:{{ lane.state }}</span>
         {% endfor %}
       </td>
+      {# Per-machine build, compared against the current package for THAT
+         machine's own platform (see X-5) -- never the windows one by default. #}
       <td class="mono-sm muted">{{ e.companion_version or "?" }}
-        {% if e.companion_outdated %}<span class="chip amber" title="current is {{ fleet.current_companion_version }}">[ OUT OF DATE ]</span>{% endif %}
+        {% if e.companion_version_unknown %}<span class="chip amber" title="this companion has never reported its version -- it predates the upgrade channel">[ VERSION UNKNOWN ]</span>
+        {% elif e.companion_outdated %}<span class="chip amber" title="{{ e.platform }}: running {{ e.companion_version }}, current is {{ e.current_companion_version }}">[ OUT OF DATE — {{ e.current_companion_version }} ]</span>{% endif %}
       </td>
       <td class="muted">{{ e.received_at | ago }}</td>
     </tr>

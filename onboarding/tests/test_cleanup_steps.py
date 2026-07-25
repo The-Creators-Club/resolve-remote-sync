@@ -97,15 +97,140 @@ class TestBuildCleanupPlan:
         plan = self._plan(local_root=r"C:\Creators_Club", existing=[target])
         assert plan.exe_paths.count(target) == 1
 
+    def test_syncthing_is_never_blanket_killed(self):
+        # INST-20: `taskkill /IM syncthing.exe` also kills the editor's OWN
+        # Syncthing -- which nothing here ever restarts.
+        plan = self._plan()
+        assert "syncthing" not in plan.kill_process_names
+        assert plan.syncthing_managed_dirs  # scoped kill instead
+
+    def test_managed_syncthing_dirs_cover_our_install_locations(self):
+        dirs = [str(p).lower() for p in steps.managed_syncthing_dirs()]
+        assert any(str(steps.COMPANION_BIN_DIR).lower().startswith(d) for d in dirs)
+
+
+# -- managed-only Syncthing kill (INST-20) ------------------------------------
+
+
+class TestSyncthingScoping:
+    def _run(self, processes):
+        plan = steps.CleanupPlan(
+            kill_process_names=[], kill_pythonw_launcher=False,
+            syncthing_managed_dirs=[Path(r"C:\Users\x\AppData\Local\ccsync")],
+        )
+        killed = []
+        logs = []
+
+        def fake_run(cmd, **kw):
+            killed.append(cmd)
+            return _FakeCompleted()
+
+        warnings = steps.execute_cleanup(
+            plan, log=logs.append, run=fake_run,
+            delete_file=lambda p: None, delete_run_value=lambda n: False,
+            sleep=lambda s: None,
+            list_processes=lambda name: processes,
+        )
+        return warnings, killed, logs
+
+    def test_kills_our_syncthing(self):
+        warnings, killed, logs = self._run(
+            [("4242", r"C:\Users\x\AppData\Local\ccsync\bin\syncthing.exe")])
+        assert ["taskkill", "/F", "/PID", "4242"] in killed
+        assert warnings == []
+        assert any("4242" in line for line in logs)
+
+    def test_leaves_a_foreign_syncthing_alone_and_warns(self):
+        warnings, killed, _logs = self._run(
+            [("777", r"C:\Program Files\Syncthing\syncthing.exe")])
+        assert not any("taskkill" in c for c in killed)
+        assert any("not ours" in w for w in warnings)
+        assert any("Program Files" in w for w in warnings)
+
+    def test_mixed_kills_only_ours(self):
+        warnings, killed, _logs = self._run([
+            ("1", r"C:\Users\x\AppData\Local\ccsync\bin\syncthing.exe"),
+            ("2", r"D:\scoop\apps\syncthing\current\syncthing.exe"),
+        ])
+        pids = [c[3] for c in killed if c[0] == "taskkill"]
+        assert pids == ["1"]
+        assert len(warnings) == 1
+
+    def test_unknown_executable_path_is_treated_as_foreign(self):
+        # A process we cannot resolve is one we must not kill.
+        warnings, killed, _logs = self._run([("9", "")])
+        assert not any("taskkill" in c for c in killed)
+        assert warnings
+
+    def test_enumeration_failure_is_a_warning_not_a_crash(self):
+        plan = steps.CleanupPlan(
+            kill_process_names=[], kill_pythonw_launcher=False,
+            syncthing_managed_dirs=[Path(r"C:\ccsync")],
+        )
+
+        def boom(name):
+            raise OSError("wmi is having a day")
+
+        warnings = steps.execute_cleanup(
+            plan, log=lambda m: None, run=lambda c, **k: _FakeCompleted(),
+            delete_file=lambda p: None, delete_run_value=lambda n: False,
+            sleep=lambda s: None, list_processes=boom,
+        )
+        assert any("enumerate" in w for w in warnings)
+
+
+def test_execute_cleanup_decodes_subprocess_output_explicitly():
+    # S-6: `text=True` alone decodes with the console codepage under
+    # errors="strict", so one non-ASCII byte raises out of the worker thread.
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        return _FakeCompleted()
+
+    steps.execute_cleanup(
+        steps.CleanupPlan(kill_process_names=["ccsync-companion"],
+                          kill_pythonw_launcher=False),
+        log=lambda m: None, run=fake_run,
+        delete_file=lambda p: None, delete_run_value=lambda n: False,
+        sleep=lambda s: None,
+    )
+    assert seen["encoding"] == "utf-8"
+    assert seen["errors"] == "replace"
+
+
+def test_default_list_processes_parses_pid_and_path():
+    def fake_run(cmd, **kw):
+        assert "-NoProfile" in cmd and "-NonInteractive" in cmd
+        return _FakeCompleted(stdout=(
+            "4242|C:\\Users\\x\\AppData\\Local\\ccsync\\bin\\syncthing.exe\n"
+            "777|C:\\Program Files\\Syncthing\\syncthing.exe\n"
+            "\n"
+            "garbage line\n"
+        ))
+
+    found = steps.default_list_processes("syncthing", run=fake_run)
+    assert found == [
+        ("4242", "C:\\Users\\x\\AppData\\Local\\ccsync\\bin\\syncthing.exe"),
+        ("777", "C:\\Program Files\\Syncthing\\syncthing.exe"),
+    ]
+
+
+def test_default_list_processes_returns_empty_on_failure():
+    def boom(cmd, **kw):
+        raise OSError("no powershell")
+
+    assert steps.default_list_processes("syncthing", run=boom) == []
+
 
 # -- execute_cleanup ----------------------------------------------------------
 
 
 class _FakeCompleted:
-    def __init__(self, returncode=0, stderr=""):
+    def __init__(self, returncode=0, stderr="", stdout=""):
         self.returncode = returncode
         self.stderr = stderr
-        self.stdout = ""
+        self.stdout = stdout
 
 
 class TestExecuteCleanup:
@@ -243,6 +368,26 @@ class TestMergeConfigText:
     def test_toml_string_escapes_backslashes(self):
         assert steps._toml_string("T:\\Creators_Club") == '"T:\\\\Creators_Club"'
 
+    def test_defaults_fill_a_missing_key(self):
+        merged = steps.merge_config_text("a = 1\n", {}, {"b": '"seeded"'})
+        assert 'b = "seeded"' in merged
+
+    def test_defaults_fill_a_blank_key(self):
+        merged = steps.merge_config_text('remote_root = ""\n', {},
+                                          {"remote_root": '"/mnt/tank/x"'})
+        assert 'remote_root = "/mnt/tank/x"' in merged
+
+    def test_defaults_never_overwrite_a_real_value(self):
+        merged = steps.merge_config_text('remote_root = "/mnt/other/pool"\n', {},
+                                          {"remote_root": '"/mnt/tank/x"'})
+        assert 'remote_root = "/mnt/other/pool"' in merged
+        assert "/mnt/tank/x" not in merged
+
+    def test_forced_beats_defaults_for_the_same_key(self):
+        merged = steps.merge_config_text('k = "old"\n', {"k": '"forced"'},
+                                          {"k": '"default"'})
+        assert 'k = "forced"' in merged and "default" not in merged
+
 
 class TestEnsureConfig:
     def test_base_role_keys(self, tmp_path):
@@ -307,6 +452,76 @@ class TestEnsureConfig:
         # keys only the companion's DEFAULT_TOML_TEXT contributes
         assert "remote_root" in text
         assert "poll_interval" in text
+
+    def test_blank_report_token_never_wipes_a_working_dashboard_token(self, tmp_path):
+        # INST-11: a verify response with no report_token (older dashboard, a
+        # field rename) used to rewrite a good token to "" -- after which the
+        # companion posts unauthenticated forever and the fleet grid shows
+        # this editor offline, with the wizard saying DONE.
+        path = tmp_path / "config.toml"
+        path.write_text('dashboard_token = "still-works"\n', encoding="utf-8")
+        steps.ensure_config(
+            "editor", editor_name="e", dashboard_url="u", dashboard_token="",
+            config_path=path,
+        )
+        assert 'dashboard_token = "still-works"' in path.read_text(encoding="utf-8")
+
+    def test_a_real_report_token_still_replaces_the_old_one(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text('dashboard_token = "stale"\n', encoding="utf-8")
+        steps.ensure_config(
+            "editor", editor_name="e", dashboard_url="u", dashboard_token="fresh",
+            config_path=path,
+        )
+        text = path.read_text(encoding="utf-8")
+        assert 'dashboard_token = "fresh"' in text and "stale" not in text
+
+    def test_blank_token_is_still_seeded_when_the_key_is_absent(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text("transfers = 4\n", encoding="utf-8")
+        steps.ensure_config(
+            "editor", editor_name="e", dashboard_url="u", dashboard_token="",
+            config_path=path,
+        )
+        assert re.search(r'(?m)^dashboard_token\s*=', path.read_text(encoding="utf-8"))
+
+    def test_customised_remote_root_survives_a_reinstall(self, tmp_path):
+        # §7 new-defect 7: remote_root moved from forced to seeded, so an
+        # admin who pointed this editor at a different pool path keeps it.
+        path = tmp_path / "config.toml"
+        path.write_text('remote_root = "/mnt/tank/OtherPool/Creators_Club"\n',
+                        encoding="utf-8")
+        steps.ensure_config(
+            "editor", editor_name="e", dashboard_url="u", dashboard_token="t",
+            config_path=path,
+        )
+        text = path.read_text(encoding="utf-8")
+        assert 'remote_root = "/mnt/tank/OtherPool/Creators_Club"' in text
+        assert steps.DEFAULT_REMOTE_ROOT not in text
+
+    def test_blank_remote_root_is_still_repaired(self, tmp_path):
+        # ...but a blank one must never survive: S-1's whole point.
+        path = tmp_path / "config.toml"
+        path.write_text('remote_root = ""\n', encoding="utf-8")
+        steps.ensure_config(
+            "editor", editor_name="e", dashboard_url="u", dashboard_token="t",
+            config_path=path,
+        )
+        assert f'remote_root = "{steps.DEFAULT_REMOTE_ROOT}"' in path.read_text(encoding="utf-8")
+
+    def test_local_root_and_editor_name_are_still_forced(self, tmp_path):
+        # These the installer DOES own -- a stale one is what makes reports
+        # go to the wrong editor.
+        path = tmp_path / "config.toml"
+        path.write_text('editor_name = "old"\nlocal_root = "X:\\\\junk"\n',
+                        encoding="utf-8")
+        steps.ensure_config(
+            "editor", editor_name="new", dashboard_url="u", dashboard_token="t",
+            local_root="D:\\CC", config_path=path,
+        )
+        text = path.read_text(encoding="utf-8")
+        assert 'editor_name = "new"' in text
+        assert 'local_root = "D:\\\\CC"' in text
 
     def test_config_parses_as_valid_toml(self, tmp_path):
         import tomllib

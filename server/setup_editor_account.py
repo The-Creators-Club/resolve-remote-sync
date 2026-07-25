@@ -51,14 +51,40 @@ Env vars: TRUENAS_HOST (default 192.168.0.102), TRUENAS_USER (default
 truenas_admin), TRUENAS_PW (required).
 """
 import argparse
+import re
 import sys
 
-from common import EDITORS_GROUP, ok, run_ssh, truenas_api, wait_for_job
+from common import (
+    EDITORS_GROUP, add_host_key_arg, ok, run_ssh, set_host_key_pin, shell_quote,
+    truenas_api, wait_for_job,
+)
 
 # sshd StrictModes rejects a home dir that is group- or world-writable, or
 # not owned by the user logging in. 0700 satisfies both and matches what
 # TrueNAS already does for the .ssh subdirectory it creates.
 HOME_MODE = "700"
+
+# The same shape installer/windows_bootstrap.ps1 enforces on -EditorName
+# (lowercased there, because unix usernames are case-sensitive and a mismatch
+# only ever surfaces as a generic SSH auth failure on the editor's side).
+USERNAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,30}$")
+
+
+def normalize_username(name: str) -> str:
+    """Lowercase and validate an editor username, or raise ValueError.
+
+    Lowercasing mirrors the bootstrap so the account and the editor's
+    rclone.conf can never disagree by case.
+    """
+    cleaned = str(name or "").strip().lower()
+    if not USERNAME_RE.match(cleaned):
+        raise ValueError(
+            f"invalid --name {name!r}: an editor username must start with a letter and "
+            f"contain only lowercase a-z, 0-9, '.', '_' or '-' (max 31 chars). This is "
+            f"the unix/SMB username, and installer/windows_bootstrap.ps1 lowercases "
+            f"-EditorName to the same shape."
+        )
+    return cleaned
 
 
 def find_group(name: str, dry_run: bool):
@@ -149,7 +175,8 @@ def verify_home_permissions(home: str, username: str) -> bool:
     setperm job's success, because getting this wrong is silent.
     """
     rc, out, err = run_ssh(
-        f'echo "$SUDO_PW" | sudo -S -p "" stat -c "%a %U" {home!r}', dry_run=False
+        f'echo "$SUDO_PW" | sudo -S -p "" stat -c "%a %U" {shell_quote(home)}',
+        dry_run=False,
     )
     line = (out or "").strip().splitlines()
     if rc != 0 or not line:
@@ -204,8 +231,20 @@ def main():
     ap.add_argument("--full-name", default=None, help="defaults to --name")
     ap.add_argument("--tailnet-host", default="<TAILNET-HOSTNAME-OR-IP>",
                      help="tailnet address of the NAS, for the printed rclone stanza")
+    add_host_key_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    set_host_key_pin(args.host_key)
+
+    try:
+        name = normalize_username(args.name)
+    except ValueError as e:
+        print(f"FAILED: {e}", file=sys.stderr)
+        return 1
+    if name != args.name:
+        print(f"normalized --name {args.name!r} -> {name!r} (unix usernames are "
+              f"case-sensitive; the bootstrap lowercases -EditorName the same way)")
+    args.name = name
 
     if args.dry_run:
         pubkey = "<contents of %s -- not read in dry-run>" % args.ssh_pubkey_file

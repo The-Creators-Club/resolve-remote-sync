@@ -2,7 +2,11 @@
 moves. Injected fake SyncthingAdmin + move recorder; real dirs in tmp_path."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest import mock
+
+import pytest
 
 from ccsync_companion.sync.repath import ProjectRepather
 
@@ -58,13 +62,29 @@ def test_moved_project_is_moved_and_repointed(tmp_path):
     assert admin.calls[1][3] == "2026/CCT/Season 1"
 
 
-def test_missing_source_repoints_only(tmp_path):
+def test_missing_source_repoints_only_when_the_target_already_holds_the_content(tmp_path):
     old = tmp_path / "Projects" / "2026" / "Gone"
+    new = tmp_path / "Projects" / "2026" / "CCT" / "Season 1"
+    new.mkdir(parents=True)  # the structure clone (or a hand move) got there first
     admin = FakeAdmin({"s1": str(old)})
     r = ProjectRepather(admin, str(tmp_path))
     assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == ["s1"]
-    assert ("path", "s1", str(tmp_path / "Projects" / "2026" / "CCT" / "Season 1"),
-            "2026/CCT/Season 1") in admin.calls
+    assert ("path", "s1", str(new), "2026/CCT/Season 1") in admin.calls
+
+
+def test_missing_source_and_missing_target_does_not_repoint(tmp_path):
+    """AUDIT_2 DEL-5: with content at neither path, re-pointing hands
+    Syncthing an empty directory to reconcile against its index -- i.e. it
+    marks the whole project deleted and propagates that to the NAS and every
+    other editor. The next pass's structure clone creates the target, and
+    the pass after that re-points safely."""
+    old = tmp_path / "Projects" / "2026" / "Gone"
+    admin = FakeAdmin({"s1": str(old)})
+    r = ProjectRepather(admin, str(tmp_path))
+    assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == []
+    assert not any(c[0] == "path" for c in admin.calls)
+    # Left paused for a human, deliberately -- never re-pointed-and-unpaused.
+    assert ("paused", "s1", False) not in admin.calls
 
 
 def test_target_exists_conflict_skips_move_but_repoints(tmp_path):
@@ -165,6 +185,102 @@ def test_unaccepted_or_unknown_folders_skipped(tmp_path):
     assert admin.calls == []
 
 
+def test_failed_move_leaves_the_folder_paused_and_pointed_at_the_old_dir(tmp_path):
+    """AUDIT_2 DEL-5/L-8: os.rename failing is ROUTINE on Windows -- Resolve,
+    Explorer or AV holding a handle inside the project dir gives a sharing
+    violation. Re-pointing anyway aims Syncthing at a directory that doesn't
+    hold the content; the structure clone then creates it, Syncthing sees the
+    whole indexed project as deleted, and propagates that everywhere."""
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+    (old / "cut.drp").write_text("irreplaceable")
+
+    def refuse(src, dst):
+        raise PermissionError("the process cannot access the file: in use")
+
+    admin = FakeAdmin({"s1": str(old)})
+    r = ProjectRepather(admin, str(tmp_path), move_fn=refuse)
+
+    assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == []
+    # Never re-pointed...
+    assert not any(c[0] == "path" for c in admin.calls)
+    # ...and left PAUSED (paused True was issued, False never was).
+    assert ("paused", "s1", True) in admin.calls
+    assert ("paused", "s1", False) not in admin.calls
+    # The editor's files are exactly where they were.
+    assert (old / "cut.drp").read_text() == "irreplaceable"
+
+
+def test_cross_volume_move_falls_back_to_copy_and_remove(tmp_path):
+    """os.rename raises EXDEV across volumes -- a `subst P:` whose target is
+    on another drive, or a reconfigured local_root, makes that routine."""
+    import errno
+
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+    (old / "file.txt").write_text("x")
+    admin = FakeAdmin({"s1": str(old)})
+
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def exdev_once(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst)
+
+    r = ProjectRepather(admin, str(tmp_path))
+    with mock.patch("ccsync_companion.sync.repath.os.rename", side_effect=exdev_once):
+        assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == ["s1"]
+
+    new = tmp_path / "Projects" / "2026" / "CCT" / "Season 1"
+    assert (new / "file.txt").read_text() == "x"
+    assert not old.exists()
+
+
+# -- rel_path containment (AUDIT_2 L-7) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "../../../Windows/Temp/x",   # -> C:\Windows\Temp\x  [measured]
+        "2026/../../../evil",        # -> C:\evil            [measured]
+        "\\evil",                    # -> C:\evil            [measured]
+        # A leading FORWARD slash used to be absent from this list: reconcile
+        # stripped it before validating, so "/evil" normalised to a contained
+        # "evil" HERE while the sequencer refused the same item -- the
+        # project was moved and re-pointed but never synced (AUDIT_3 L-11).
+        # Both halves now go through repath.normalized_safe_rel and refuse.
+        "/evil",
+        "2026\\..\\..\\evil",
+        "C:/evil",
+        "2026/C:/evil",
+        "2026//Season 1",            # empty segment
+        "./2026/Season 1",
+        "..",
+    ],
+)
+def test_escaping_rel_paths_are_refused(tmp_path, rel):
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+    (old / "file.txt").write_text("x")
+    admin = FakeAdmin({"s1": str(old)})
+    r = ProjectRepather(admin, str(tmp_path))
+
+    assert r.reconcile([{"slug": "s1", "rel_path": rel, "active": True}]) == []
+    assert admin.calls == []            # not even paused
+    assert (old / "file.txt").is_file()  # nothing moved anywhere
+
+
+def test_ordinary_rel_paths_still_pass_the_containment_check():
+    from ccsync_companion.sync.repath import rel_path_is_safe
+
+    for rel in ("2026/CCT/Season 1", "2026", "2025/FF4/Nuclear/Sub Project"):
+        assert rel_path_is_safe(rel)
+
+
 def test_syncthing_unreachable_never_raises(tmp_path):
     class DeadAdmin:
         def get_config(self):
@@ -172,3 +288,37 @@ def test_syncthing_unreachable_never_raises(tmp_path):
 
     r = ProjectRepather(DeadAdmin(), str(tmp_path))
     assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == []
+
+
+# -- shared normalize-then-validate helper (AUDIT_3 L-11) -------------------
+
+
+def test_normalized_safe_rel_normalizes_trailing_separators_only():
+    from ccsync_companion.sync.repath import normalized_safe_rel
+
+    assert normalized_safe_rel("  2026/CCT/Season 1  ") == "2026/CCT/Season 1"
+    assert normalized_safe_rel("2026/CCT/Season 1/") == "2026/CCT/Season 1"
+    # A LEADING separator is not normalised away -- it re-roots the join.
+    assert normalized_safe_rel("/2026/CCT/Season 1") is None
+    assert normalized_safe_rel("\\2026") is None
+    assert normalized_safe_rel("") is None
+    assert normalized_safe_rel(None) is None
+    assert normalized_safe_rel(5) is None
+
+
+def test_repath_and_the_sequencer_agree_on_every_rel_path():
+    """THE finding: repath stripped a leading "/" before validating and the
+    sequencer did not, so "/2026/CCT/Show" was repathed (local directory
+    moved, Syncthing folder re-pointed) and then skipped by lanes A and B
+    forever, silently. One helper, one answer, for every shape."""
+    from ccsync_companion.sync import sequencer as sequencer_mod
+    from ccsync_companion.sync import repath as repath_mod
+
+    shapes = [
+        "2026/CCT/Season 1", "2026/CCT/Season 1/", " 2026/CCT/Season 1 ",
+        "/2026/CCT/Season 1", "\\2026", "../../evil", "2026/../../evil",
+        "C:/evil", "..", "", None, 5, "2026//Season 1",
+    ]
+    for rel in shapes:
+        item = {"slug": "s1", "rel_path": rel, "active": True}
+        assert sequencer_mod._item_is_valid(item) == repath_mod._item_is_valid(item), rel

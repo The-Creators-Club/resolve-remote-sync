@@ -10,11 +10,18 @@
 #     owned root:root, world-readable, NOT group-writable -- editors have
 #     shell accounts in group 3001, and a writable code mount here was an
 #     editor->NAS-admin escalation via run.sh, AUDIT C-1)
-#   /mnt/tank/apps/ccsync-dashboard/data  (SQLite + venv, persistent;
-#     owned 3000:3001, mode 770)
+#   /mnt/tank/apps/ccsync-dashboard/venv  (the dependency venv; owned
+#     3000:3000, mode 700 -- see AUDIT C-2 and deploy/run.sh)
+#   /mnt/tank/apps/ccsync-dashboard/data  (SQLite + companion packages,
+#     persistent; owned 3000:3000, mode 770 -- group 3000, NOT 3001/editors:
+#     it used to be group-writable by every editor while run.sh exec'd a
+#     python interpreter out of it)
 services:
   dashboard:
-    image: python:3.12-slim
+    # Pinned: an unpinned python:3.12-slim silently changes underneath a
+    # redeploy. Bump this tag deliberately (and re-run the tests) rather than
+    # inheriting whatever 3.12.x is current.
+    image: python:3.12.7-slim
     user: "3000:3001"
     command: ["/bin/sh", "/app/deploy/run.sh"]
     environment:
@@ -40,19 +47,35 @@ services:
       TRUENAS_HOST: "192.168.0.102"
       TRUENAS_USER: "truenas_admin"
       TRUENAS_PW: "REPLACE_ME"
+      # TLS verification for those TrueNAS API calls (they carry TRUENAS_PW).
+      # "0" = trust the NAS's self-signed cert, as before. Set "1" (or a CA
+      # bundle path inside the container) once the NAS has a trusted cert.
+      TRUENAS_VERIFY_SSL: "0"
     ports:
       # Bind only the interfaces the fleet actually uses (LAN for the base
       # rig, tailnet for remote editors) rather than 0.0.0.0 -- if the NAS
       # ever gains another interface it must not silently expose the
       # dashboard there. True tailnet-only would also drop the LAN bind.
-      - "192.168.0.102:8480:8480"
-      - "100.71.216.3:8480:8480"
+      #
+      # The addresses come from the environment so a NAS DHCP change or a
+      # tailnet IP rotation is a variable edit, not a hard outage: Docker
+      # fails with "cannot assign requested address" and the app never starts
+      # if a hardcoded IP no longer exists on the host. Set DASH_BIND_LAN /
+      # DASH_BIND_TAILNET in the app's env (or a .env next to this file).
+      - "${DASH_BIND_LAN:-192.168.0.102}:8480:8480"
+      - "${DASH_BIND_TAILNET:-100.71.216.3}:8480:8480"
     volumes:
       # ro: the container must never be able to modify its own code -- the
       # command: line executes /app/deploy/run.sh, so a writable /app plus
       # any write path into it is remote code execution in a container
       # holding TRUENAS_PW.
       - /mnt/tank/apps/ccsync-dashboard/app:/app:ro
+      # The dependency venv, on its own volume and owned 3000:3000 mode 700.
+      # It used to live at /data/venv, which was group `editors` and mode
+      # 770 -- so any editor could swap the interpreter run.sh execs and get
+      # code execution as the dashboard user, with TRUENAS_PW in the
+      # environment (AUDIT C-2). Keep it OUT of /data.
+      - /mnt/tank/apps/ccsync-dashboard/venv:/venv
       - /mnt/tank/apps/ccsync-dashboard/data:/data
       # rw so the /project-setup page can create new project folders (with
       # the standard template). Safe: the container runs as 3000:3001
@@ -60,3 +83,13 @@ services:
       # tree to, and setgid dirs keep the editors group on new folders.
       - /mnt/tank/TheCreatorsPool/Creators_Club/Projects:/projects:rw
     restart: unless-stopped
+    # Without this, `restart: unless-stopped` only covers a process that
+    # EXITS. A collector thread that died before entering its guarded loop
+    # (or a wedged event loop) leaves a container that answers nothing useful
+    # forever. /api/v1/health is unauthenticated by design for exactly this.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8480/api/v1/health', timeout=5).status == 200 else 1)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s

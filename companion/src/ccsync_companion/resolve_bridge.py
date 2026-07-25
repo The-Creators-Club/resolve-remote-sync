@@ -17,10 +17,41 @@ fixer.
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import sys
+import threading
 from typing import Any, Optional
+
+log = logging.getLogger("ccsync.resolve")
+
+# Serializes EVERY call into the Resolve C extension.
+#
+# Four threads call this module concurrently: the timeline watcher (every
+# poll_interval), the media-tree refresh thread (every 120 s), tray daemon
+# threads (Scan whole project / Copy this project's media in), and the
+# FIX-ALL worker (replace_clip per row). fusionscript.dll is not documented
+# as thread-safe and this module's own _pin_frozen_python3_home docstring
+# records it faulting 0xc0000005 -- which takes the whole windowed companion
+# down with zero log output. Reentrant because the public functions call
+# connect() internally (AUDIT_2 CORE-H4).
+_API_LOCK = threading.RLock()
+
+# Set process-wide by _pin_frozen_python3_home() so fusionscript.dll loads
+# OUR python3.dll. They must not be inherited by children: they point at the
+# outgoing process's _MEI... extraction dir, which the PyInstaller bootloader
+# deletes seconds later -- and the self-upgrade spawn, every rclone child,
+# os.startfile() and webbrowser.open() all inherit them (AUDIT_2 CORE-M6).
+PINNED_PYTHON_ENV_VARS = ("PYTHONHOME", "PYTHON3HOME")
+
+
+def sanitized_child_env(base: Optional[dict] = None) -> dict:
+    """A copy of the environment safe to hand to a child process."""
+    env = dict(os.environ if base is None else base)
+    for name in PINNED_PYTHON_ENV_VARS:
+        env.pop(name, None)
+    return env
 
 
 def _default_modules_dir() -> Optional[str]:
@@ -109,14 +140,35 @@ def _ensure_env_and_syspath() -> None:
 
 
 def connect():
-    """Return the Resolve scriptapp object, or None if unavailable. Never raises."""
-    try:
-        _ensure_env_and_syspath()
-        import DaVinciResolveScript as dvr_script  # type: ignore
+    """Return the Resolve scriptapp object, or None if unavailable. Never raises.
 
-        return dvr_script.scriptapp("Resolve")
-    except Exception:
-        return None
+    Logs WHY on failure. Without this, a wrong RESOLVE_SCRIPT_LIB, a missing
+    fusionscript.dll, a failed import and "Resolve simply isn't running" were
+    all indistinguishable -- same message to the caller, nothing in the log,
+    impossible to diagnose remotely (AUDIT_2 §2-low)."""
+    with _API_LOCK:
+        try:
+            _ensure_env_and_syspath()
+        except Exception:
+            log.warning("resolve: could not set up the scripting environment", exc_info=True)
+            return None
+        try:
+            import DaVinciResolveScript as dvr_script  # type: ignore
+        except Exception as exc:
+            log.debug(
+                "resolve: DaVinciResolveScript import failed (%s) -- RESOLVE_SCRIPT_API=%r "
+                "RESOLVE_SCRIPT_LIB=%r",
+                exc, os.environ.get("RESOLVE_SCRIPT_API"), os.environ.get("RESOLVE_SCRIPT_LIB"),
+            )
+            return None
+        try:
+            app = dvr_script.scriptapp("Resolve")
+        except Exception as exc:
+            log.debug("resolve: scriptapp('Resolve') raised (%s)", exc)
+            return None
+        if app is None:
+            log.debug("resolve: scriptapp('Resolve') returned None -- Resolve is not running")
+        return app
 
 
 def try_connect() -> bool:
@@ -178,6 +230,11 @@ def get_timeline_items() -> dict[str, Any]:
     Items with no media pool item (generators, titles, adjustment clips) or
     an empty "File Path" are skipped entirely — per SPEC.md's watcher spec.
     """
+    with _API_LOCK:
+        return _get_timeline_items_locked()
+
+
+def _get_timeline_items_locked() -> dict[str, Any]:
     resolve = connect()
     if resolve is None:
         return {"ok": False, "message": "DaVinci Resolve is not running", "items": [], "project_name": ""}
@@ -236,9 +293,17 @@ def get_timeline_items() -> dict[str, Any]:
                         }
                     )
     except Exception as exc:
-        return {"ok": False, "message": f"Resolve scripting error: {exc}", "items": [], "project_name": project_name}
+        log.warning("resolve: timeline enumeration failed: %s", exc, exc_info=True)
+        return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE, "items": [],
+                "project_name": project_name}
 
     return {"ok": True, "message": "", "items": items, "project_name": project_name}
+
+
+# Editor-facing. The raw f"Resolve scripting error: {exc}" reached tray
+# toasts and the fixer dialog verbatim, where it means nothing to anyone and
+# suggests no action (AUDIT_2 UX-16). The exception itself is logged.
+_SCRIPTING_ERROR_MESSAGE = "Resolve didn't answer. Make sure a project is open, then try again."
 
 
 # Defensive cap on media pool folder recursion depth: a real Resolve
@@ -316,6 +381,11 @@ def get_media_pool_items() -> dict[str, Any]:
     compound clips, generators, titles), are skipped entirely — same rule as
     get_timeline_items.
     """
+    with _API_LOCK:
+        return _get_media_pool_items_locked()
+
+
+def _get_media_pool_items_locked() -> dict[str, Any]:
     resolve = connect()
     if resolve is None:
         return {"ok": False, "message": "DaVinci Resolve is not running", "items": [], "project_name": ""}
@@ -348,7 +418,9 @@ def get_media_pool_items() -> dict[str, Any]:
     try:
         _walk_media_pool_folder(root_folder, project_name, items)
     except Exception as exc:
-        return {"ok": False, "message": f"Resolve scripting error: {exc}", "items": [], "project_name": project_name}
+        log.warning("resolve: media pool walk failed: %s", exc, exc_info=True)
+        return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE, "items": [],
+                "project_name": project_name}
 
     return {"ok": True, "message": "", "items": items, "project_name": project_name}
 
@@ -362,10 +434,19 @@ def replace_clip(media_pool_item, new_path: str) -> dict[str, Any]:
     """
     if media_pool_item is None:
         return {"ok": False, "message": "no media pool item to relink"}
-    try:
-        result = media_pool_item.ReplaceClip(new_path)
-    except Exception as exc:
-        return {"ok": False, "message": f"Resolve scripting error: {exc}"}
+    with _API_LOCK:
+        try:
+            result = media_pool_item.ReplaceClip(new_path)
+        except Exception as exc:
+            log.warning("resolve: ReplaceClip(%s) raised: %s", new_path, exc, exc_info=True)
+            return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
     if not result:
-        return {"ok": False, "message": f"ReplaceClip returned False for {new_path}"}
+        log.warning("resolve: ReplaceClip returned False for %s", new_path)
+        return {
+            "ok": False,
+            "message": (
+                "Copied the file in, but Resolve wouldn't relink it. Close the clip's "
+                "timeline and use tray → Scan whole project again."
+            ),
+        }
     return {"ok": True, "message": f"Relinked to {new_path}"}

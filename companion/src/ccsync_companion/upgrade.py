@@ -290,6 +290,18 @@ class UpgradeManager:
                 | subprocess.CREATE_NEW_PROCESS_GROUP
                 | subprocess.CREATE_NO_WINDOW
             )
+        # CRITICAL for onefile self-restart: without this, PyInstaller >=6
+        # has the spawned copy REUSE this process's _MEI extraction dir --
+        # which our bootloader deletes on exit moments later, leaving the
+        # new instance running from a vanished directory (broken tkinter,
+        # broken lazy imports, or an outright Tcl crash at startup -- all
+        # three seen live 2026-07-25). PYINSTALLER_RESET_ENVIRONMENT makes
+        # the child a fully independent instance with its own extraction.
+        env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("_PYI") and not k.startswith("_MEI")
+        }
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         subprocess.Popen(
             [str(exe)],
             cwd=str(exe.parent),
@@ -298,4 +310,5 @@ class UpgradeManager:
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
             close_fds=True,
+            env=env,
         )

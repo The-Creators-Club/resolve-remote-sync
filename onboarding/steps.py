@@ -791,6 +791,16 @@ def launch_companion(
                 | subprocess.CREATE_NEW_PROCESS_GROUP
                 | subprocess.CREATE_NO_WINDOW
             )
+        # This wizard is itself a frozen onefile app: strip inherited
+        # PyInstaller runtime vars and force the companion to be a fully
+        # independent instance with its OWN extraction dir, never a borrower
+        # of ours (which dies when the wizard closes) -- see the companion's
+        # upgrade._default_spawn for the live failure this prevents.
+        child_env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("_PYI") and not k.startswith("_MEI")
+        }
+        child_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         proc = popen(
             [str(exe_path)],
             cwd=str(Path(exe_path).parent),
@@ -799,6 +809,7 @@ def launch_companion(
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
             close_fds=True,
+            env=child_env,
         )
         sleep(3.0)
         return proc.poll() is None

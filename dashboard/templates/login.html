@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC — LOGIN{% endblock %}
+{% block layout %}
+  <main class="main login-main">
+    <div class="login-box">
+      <div class="side-head">[ SIGN IN ]</div>
+      <div class="muted">Use your TrueNAS username and password.</div>
+      {% if error %}<div class="login-error">▲ {{ error }}</div>{% endif %}
+      <form method="post" action="/login">
+        <input type="hidden" name="next" value="{{ next_path or '/' }}">
+        <label>USERNAME<br><input type="text" name="username" autofocus autocomplete="username"></label>
+        <label>PASSWORD<br><input type="password" name="password" autocomplete="current-password"></label>
+        <button class="btn login-btn" type="submit">[ LOGIN ]</button>
+      </form>
+    </div>
+  </main>
+{% endblock %}

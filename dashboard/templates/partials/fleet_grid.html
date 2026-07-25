@@ -1,0 +1,48 @@
+<div class="detail-head">
+  <span class="dot big {{ view.fleet_status }}">●</span>
+  <h1>FLEET OVERVIEW</h1>
+</div>
+<div class="rule">{{ "─" * 100 }}</div>
+
+<div class="cards">
+  {% for p in view.projects %}
+    <a class="card" href="/project/{{ p.slug }}">
+      <div><span class="dot {{ p.status }}">●</span> <span class="who">{{ p.label }}</span></div>
+      <div class="mono-sm muted">{{ p.editors | length }} editor{{ "s" if p.editors | length != 1 }}
+        {% if p.editors_behind %} · {{ p.editors_behind }} behind · {{ p.need_bytes_total | human_bytes }} queued{% else %} · all synced{% endif %}
+      </div>
+    </a>
+  {% else %}
+    <div class="muted">no projects yet — waiting for first Syncthing poll</div>
+  {% endfor %}
+</div>
+
+<div class="side-head" style="margin-top:2rem">[ COMPANIONS ]</div>
+<div class="rule">{{ "─" * 100 }}</div>
+{% if fleet.editors %}
+<table class="editors">
+  <thead><tr><th></th><th>EDITOR</th><th>MACHINE</th><th>LANES</th><th>VERSION</th><th>LAST REPORT</th></tr></thead>
+  <tbody>
+  {% for e in fleet.editors %}
+    <tr>
+      <td><span class="dot {{ e.status }}">●</span></td>
+      <td class="who">{{ e.editor_username }}
+        {% if not e.verified %}<span class="chip amber" title="this companion has not signed in with verified credentials">[ UNVERIFIED ]</span>{% endif %}
+      </td>
+      <td class="mono-sm">{{ e.machine }}</td>
+      <td>
+        {% for lane in e.lanes %}
+          <span class="chip lane {{ lane.chip }}" title="{{ lane.lane }}: {{ lane.state }}{% if lane.last_error %} — {{ lane.last_error }}{% endif %}">{{ lane.label }}:{{ lane.state }}</span>
+        {% endfor %}
+      </td>
+      <td class="mono-sm muted">{{ e.companion_version or "?" }}
+        {% if e.companion_outdated %}<span class="chip amber" title="current is {{ fleet.current_companion_version }}">[ OUT OF DATE ]</span>{% endif %}
+      </td>
+      <td class="muted">{{ e.received_at | ago }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="muted">no companion reports yet — set dashboard_url in each editor's ~/.ccsync/config.toml</div>
+{% endif %}

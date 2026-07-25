@@ -1,0 +1,16 @@
+<div class="missing-box">
+  <div class="side-head">[ MISSING ON {{ editor_label | upper }} ]
+    <span class="muted">refreshed {{ missing.refreshed_at | ago }}</span></div>
+  {% if missing.files %}
+    <ul class="missing-list">
+      {% for f in missing.files %}
+        <li><span class="fname">{{ f.name }}</span><span class="fsize">{{ f.size | human_bytes }}</span></li>
+      {% endfor %}
+    </ul>
+    {% if missing.truncated %}
+      <div class="amber-text">… and {{ need_items - (missing.files | length) }} more (list capped at {{ missing.files | length }})</div>
+    {% endif %}
+  {% else %}
+    <div class="muted">nothing cached yet — the collector refreshes missing-file lists every minute for out-of-sync editors</div>
+  {% endif %}
+</div>

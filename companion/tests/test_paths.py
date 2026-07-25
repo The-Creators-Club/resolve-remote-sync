@@ -190,3 +190,19 @@ def test_local_root_missing_from_config_never_false_positive_ok():
         is_windows=True,
     )
     assert result == OUT_OF_TREE
+
+
+def test_base_rig_stray_nas_media_is_out_of_tree():
+    """Base rig: local_root and canonical_prefix are BOTH the tree root on
+    the NAS drive, so media elsewhere on the same drive (Temp Transfer,
+    homes) must classify as OUT_OF_TREE (popup), not BAD_PREFIX (warning)."""
+    kwargs = dict(
+        local_root="T:\\Creators_Club",
+        canonical_prefix="T:\\Creators_Club",
+        exists_fn=lambda p: True,
+        is_windows=True,
+    )
+    assert classify_path("T:\\Creators_Club\\Projects\\2025\\FF4\\Nuclear\\a.wav", **kwargs) == OK
+    assert classify_path("T:\\Temp Transfer\\Creators Club\\x.braw", **kwargs) == OUT_OF_TREE
+    assert classify_path("G:\\Temp Transfer\\y.braw", **kwargs) == OUT_OF_TREE
+    assert classify_path("C:\\Users\\alex\\Downloads\\z.mp4", **kwargs) == OUT_OF_TREE

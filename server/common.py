@@ -248,3 +248,29 @@ def syncthing_api(method: str, gui_url: str, path: str, api_key: str,
 def ok(resp) -> bool:
     """True if a requests.Response looks like a 2xx success."""
     return resp is not None and 200 <= resp.status_code < 300
+
+
+def wait_for_job(job_id: int, timeout: float = 120.0, poll: float = 2.0):
+    """Block until a TrueNAS job finishes. Returns (state, error_or_None).
+
+    Several TrueNAS endpoints (filesystem.setperm among them) return a job id
+    immediately and do the work asynchronously, so a 200 from the POST only
+    means "accepted" — the call can still fail afterwards. Returns
+    ("TIMEOUT", msg) rather than raising if the job never settles.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(poll)
+        resp = truenas_api("GET", "/core/get_jobs", params={"id": job_id})
+        if not ok(resp):
+            continue
+        rows = resp.json()
+        if not rows:
+            continue
+        job = rows[0]
+        state = job.get("state")
+        if state in ("SUCCESS", "FAILED", "ABORTED"):
+            return state, job.get("error")
+    return "TIMEOUT", f"job {job_id} did not finish within {timeout}s"

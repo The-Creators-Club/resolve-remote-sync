@@ -2,6 +2,10 @@
 """Create the Creators_Club project template tree on the NAS, over SSH.
 
     python setup_tree.py --year 2025 --series FF4 --project Nuclear [--dry-run]
+    python setup_tree.py --year 2026 --series "Creator Profiles" --project "Season 1"
+
+Any year/series/project is valid; names with spaces work as long as they are
+quoted (they are shell-quoted before being sent to the NAS).
 
 Creates:
     /mnt/tank/TheCreatorsPool/Creators_Club/Projects/<year>/<series>/<project>/
@@ -63,14 +67,22 @@ def build_remote_script(base: str, owner: str, group: str) -> str:
 
     owner_group = shell_quote(f"{owner}:{group}")
     lines.append(f'echo "$SUDO_PW" | sudo -S -p "" chown -R {owner_group} {base_q} && echo "ownership set: {owner}:{group} on {base}"')
-    lines.append(f'echo "$SUDO_PW" | sudo -S -p "" find {base_q} -type d -exec chmod 2770 {{}} + && echo "permissions set: 2770 (setgid) on all directories under {base}"')
+    # Non-fatal: some datasets have ZFS aclmode=restricted, which blocks
+    # chmod outright (even for root). Ownership above still applies fine in
+    # that case; only the setgid bit is missing. `if` conditions are exempt
+    # from `set -e`, so this can't abort the rest of the script.
+    lines.append(
+        f'if echo "$SUDO_PW" | sudo -S -p "" find {base_q} -type d -exec chmod 2770 {{}} + >/dev/null 2>&1; then '
+        f'echo "permissions set: 2770 (setgid) on all directories under {base}"; '
+        f'else echo "permissions NOT set: chmod blocked on this dataset (likely ZFS aclmode=restricted) -- ownership above is still correct, only the setgid bit is missing"; fi'
+    )
     return "\n".join(lines)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--year", required=True, help="e.g. 2025")
-    ap.add_argument("--series", required=True, help="e.g. FF4")
+    ap.add_argument("--series", required=True, help="e.g. FF4, or \"Creator Profiles\" (quote names with spaces)")
     ap.add_argument("--project", required=True, help="e.g. Nuclear")
     ap.add_argument("--projects-root", default=DEFAULT_PROJECTS_ROOT,
                      help=f"default: {DEFAULT_PROJECTS_ROOT}")

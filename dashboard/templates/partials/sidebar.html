@@ -1,0 +1,20 @@
+<nav class="projects">
+  <div class="side-head">[ PROJECTS ]</div>
+  {% for p in view.projects %}
+    <div class="project-link {{ 'current' if p.slug == current_slug }}">
+      {% if toggle_editor %}
+      <input type="checkbox" class="proj-check" title="sync this project to {{ toggle_editor }}"
+             {{ 'checked' if p.slug in selected_slugs }}
+             hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}"
+             hx-target="closest .projects" hx-swap="outerHTML">
+      {% endif %}
+      <a class="proj-name" href="/project/{{ p.slug }}">
+        <span class="dot {{ p.status }}">●</span>
+        <span class="label">{{ p.label }}</span>
+      </a>
+      {% if p.editors_behind %}<span class="behind">{{ p.editors_behind }}⇣</span>{% endif %}
+    </div>
+  {% else %}
+    <div class="muted">no projects yet — waiting for first poll</div>
+  {% endfor %}
+</nav>

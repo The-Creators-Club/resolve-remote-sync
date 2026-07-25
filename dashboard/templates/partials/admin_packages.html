@@ -1,0 +1,76 @@
+<div class="admin-packages-box">
+  <div class="side-head">[ COMPANION PACKAGES ]
+    <span class="muted">Published companion builds. Editors are offered whichever version is CURRENT.</span></div>
+
+  {% if error %}
+    <div class="banner">▲ {{ error }}</div>
+  {% endif %}
+
+  {% if packages.packages %}
+    <table class="editors">
+      <thead><tr><th>VERSION</th><th>PLATFORM</th><th>SIZE</th><th>SHA256</th><th>PUBLISHED</th><th>BY</th><th></th><th></th></tr></thead>
+      <tbody>
+      {% for p in packages.packages %}
+        <tr class="editor-row">
+          <td class="mono-sm">{{ p.version }}
+            {% if p.is_current %}<span class="chip green">[ CURRENT ]</span>{% endif %}
+            {% if not p.file_exists %}<span class="chip red" title="row exists but the file is gone from the packages dir">[ FILE MISSING ]</span>{% endif %}
+          </td>
+          <td class="mono-sm muted">{{ p.platform }}</td>
+          <td class="mono-sm">{{ p.size_bytes | human_bytes }}</td>
+          <td class="mono-sm muted" title="{{ p.sha256 }}">{{ p.sha256[:12] }}…</td>
+          <td class="muted">{{ p.published_at | ago }}</td>
+          <td class="muted">{{ p.published_by }}</td>
+          <td>
+            {% if not p.is_current %}
+            <form class="inline-form" hx-post="/partials/admin/packages/current"
+                  hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+              <input type="hidden" name="platform" value="{{ p.platform }}">
+              <input type="hidden" name="version" value="{{ p.version }}">
+              <button class="btn" type="submit">[ MAKE CURRENT ]</button>
+            </form>
+            {% endif %}
+          </td>
+          <td>
+            {% if not p.is_current %}
+            <form class="inline-form" hx-post="/partials/admin/packages/delete"
+                  hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+              <input type="hidden" name="platform" value="{{ p.platform }}">
+              <input type="hidden" name="version" value="{{ p.version }}">
+              <button class="btn" type="submit">[ DELETE ]</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">nothing published yet</div>
+  {% endif %}
+
+  <div class="side-head" style="margin-top:1.2rem">[ OUT-OF-DATE MACHINES ]</div>
+  {% if packages.outdated_machines %}
+    <table class="editors">
+      <thead><tr><th>EDITOR</th><th>MACHINE</th><th>RUNNING</th><th>LAST REPORT</th></tr></thead>
+      <tbody>
+      {% for m in packages.outdated_machines %}
+        <tr class="editor-row">
+          <td class="who">{{ m.editor_username }}</td>
+          <td class="mono-sm">{{ m.machine }}</td>
+          <td class="mono-sm"><span class="chip amber">[ {{ m.companion_version or "?" }} ]</span></td>
+          <td class="muted">{{ m.received_at | ago }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">all reporting machines are on the current version</div>
+  {% endif %}
+
+  <div class="muted" style="margin-top:0.8rem">
+    Publish a new build from the base rig:
+    <span class="mono-sm">.\build_editor_package.ps1 -RebuildExe -Publish [-MakeCurrent]</span>
+    — each machine's tray then shows “Update now”.
+  </div>
+</div>

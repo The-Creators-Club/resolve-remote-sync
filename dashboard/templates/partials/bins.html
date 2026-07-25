@@ -1,0 +1,48 @@
+<div class="presence-box">
+  {% set nas = presence.nas %}
+  <div class="side-head">[ MEDIA PRESENCE ]
+    <span class="muted">NAS has {{ nas.n_originals }} original(s) · {{ nas.n_proxies }} proxy file(s)</span>
+  </div>
+  {% if presence.editors %}
+    {% for e in presence.editors %}
+      <div class="presence-editor">
+        <div class="presence-head">
+          <span class="dot {{ e.status }}">●</span>
+          <span class="who">{{ e.editor }}</span>
+          <span class="muted mono-sm">{{ e.machine }} · {{ e.mode }}</span>
+          {% if e.proxy_only %}<span class="chip green">PROXY-ONLY</span>{% endif %}
+          <span class="mono-sm">
+            originals {{ e.have.n_originals }}/{{ nas.n_originals }} ·
+            proxies {{ e.have.n_proxies }}/{{ nas.n_proxies }}
+            {% if e.offline %}· <span class="amber-text">{{ e.offline }} offline in Resolve</span>{% endif %}
+          </span>
+        </div>
+        {% if e.bins %}
+          {% for b in e.bins %}
+            <details class="bin">
+              <summary>▸ {{ b.bin_path or "(root)" }}
+                <span class="mono-sm {{ 'amber-text' if b.present < b.total else 'muted' }}">[{{ b.present }}/{{ b.total }} present]</span>
+              </summary>
+              <ul class="clip-list">
+                {% for c in b.clips %}
+                  <li>
+                    {% if c.uploading %}<span class="dot amber" title="uploading">⇡</span>
+                    {% elif c.present %}<span class="dot green" title="online">●</span>
+                    {% else %}<span class="dot red" title="offline">●</span>{% endif %}
+                    <span class="clip-name">{{ c.clip_name }}</span>
+                    {% if c.kind == "proxy" %}<span class="chip">proxy</span>{% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            </details>
+          {% endfor %}
+          {% if e.truncated %}<div class="muted mono-sm">(clip list truncated)</div>{% endif %}
+        {% else %}
+          <div class="muted mono-sm">no Resolve bin data — open this project in Resolve on that machine to populate it</div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="muted">no presence data reported yet for this project</div>
+  {% endif %}
+</div>

@@ -1,9 +1,18 @@
-# ccsync-companion config — example
+# ccsync-companion config — example, with every value filled in.
 #
-# Copy this file to ~/.ccsync/config.toml and fill in the blanks (the app
-# also writes this same content there automatically on first run — see
-# ccsync_companion/config.py: DEFAULT_TOML_TEXT). Restart the companion
-# after editing.
+# This file is a REFERENCE, not what you get on first run. Three things can
+# produce ~/.ccsync/config.toml, and they differ:
+#   1. installer/windows_bootstrap.ps1 or macos_bootstrap.sh — seeds it with
+#      the values it already knows (editor_name, local_root, remote,
+#      remote_root). This is the normal path and the one to prefer.
+#   2. the companion itself, if no config exists when it starts — writes
+#      ccsync_companion/config.py: DEFAULT_TOML_TEXT, which leaves the
+#      install-specific values BLANK on purpose.
+#   3. copying this file by hand and editing it.
+#
+# In cases 2 and 3 the companion logs a specific complaint per missing value
+# at startup (config.py: validate_config) rather than silently doing nothing.
+# Restart the companion after editing.
 
 # Your name/handle — used to build the "B-roll/Editor Added/<editor_name>"
 # destination suggested by the popup fixer.
@@ -20,21 +29,36 @@ local_root = "C:\\Creators_Club"
 # with this prefix but doesn't resolve under local_root.
 canonical_prefix = "P:\\"
 
-# Name of a pre-configured rclone remote (via `rclone config`) pointing at
-# the NAS, e.g. an SFTP remote. ccsync-companion does not configure rclone
-# remotes for you — set this up once with `rclone config`.
-remote = "nas"
+# Name of the rclone remote pointing at the NAS. Must match a stanza in
+# rclone.conf — the bootstrap installers create one called
+# "creators_club_sftp". ccsync-companion does not configure rclone remotes
+# for you.
+remote = "creators_club_sftp"
 
-# Root path on the remote under which project trees live.
-remote_root = "Creators_Club"
+# ABSOLUTE path on the NAS under which project trees live.
+#
+# This MUST be absolute. An SFTP session starts in your home directory on the
+# NAS (/mnt/tank/TheCreatorsPool/homes/<you>), so a relative value like
+# "Creators_Club" resolves to ~/Creators_Club — a path that doesn't exist —
+# and lane A would upload into your home directory instead of the shared
+# tree, with no error to show for it.
+remote_root = "/mnt/tank/TheCreatorsPool/Creators_Club"
 
-# Project relative paths to sync (informational for now — v1 syncs
-# local_root as a whole; kept here for the benchmark harness / future
-# per-project lane scoping).
-projects = ["Projects/2025/FF4/Nuclear"]
-# Popup destinations are prefixed with this project (editor-added media
-# must land inside a project, not at the Creators_Club root):
-active_project = "Projects/2025/FF4/Nuclear"
+# NEITHER OF THESE SCOPES WHAT SYNCS. Lanes A and B sync local_root against
+# remote_root as whole trees, so the server's structure is replicated
+# verbatim — every Projects/<year>/<series>/<project>, any year, any series,
+# any project, appearing at any time, with no config change here. Names with
+# spaces are fine.
+#
+# `projects` pairs positionally with `syncthing_folder_ids` for lane C's
+# folder-ID check, and nothing else.
+projects = [
+    "Projects/2025/FF4/Nuclear",
+    "Projects/2026/Creator Profiles/Season 1",
+]
+# Only the destination the popup fixer suggests for media added from outside
+# the tree. Blank means it suggests the tree root instead.
+active_project = "Projects/2026/Creator Profiles/Season 1"
 
 # Resolve timeline poll interval, in seconds.
 poll_interval = 3
@@ -69,3 +93,63 @@ rclone_path = "rclone"
 # Log file (rotating) — console logging is always on in addition to this.
 log_path = "~/.ccsync/companion.log"
 log_level = "INFO"
+
+# Dashboard reporter: periodically POSTs lane statuses to a server-side
+# dashboard so an admin can see editor health without remoting in. Defaults
+# to the dashboard's tailnet address (right for remote editors; the base rig
+# overrides with the LAN address). Set to "" to disable entirely -- the
+# reporter thread isn't even started. dashboard_token is sent as the
+# X-CCSync-Token header; ask the admin for the value.
+dashboard_url = "http://100.71.216.3:8480"
+dashboard_token = ""
+# Login gate: when true, the companion will not start sync lanes/the
+# sequencer, nor report under an identity, until the editor signs in via the
+# tray ("Sign in...") with their TrueNAS username+password and the dashboard
+# verifies it. The watcher, popup fixer, and tray still run pre-sign-in so
+# there's a way to sign in. Set false to trust editor_name above instead.
+require_login = true
+dashboard_report_interval = 60
+# Faster report cadence used while any sync lane is actively syncing, so the
+# dashboard's live transfer progress feels responsive. The heavier
+# local_manifest/media_tree payload sections still only go out at most every
+# dashboard_report_interval seconds even on these fast ticks.
+dashboard_report_interval_active = 5
+# How often the local disk media manifest (originals/proxies rollup, per
+# clip counts+bytes) is rescanned, on its own background thread.
+manifest_refresh_interval = 300
+# How often the Resolve media-pool BIN tree is rescanned for dashboard
+# reporting, on its own background thread.
+media_tree_refresh_interval = 120
+
+# Managed mode (active only when dashboard_url above is set): the dashboard
+# decides WHICH projects this editor has and in what order (GET
+# {dashboard_url}/api/v1/selection/{editor_name}), and a sequencer syncs
+# them one at a time instead of the whole tree continuously. How often the
+# sequencer re-fetches the ordered selection:
+selection_poll_interval = 60
+# How long (seconds) the sequencer waits for a project's Lane C
+# (Syncthing) sync to settle before moving on to the next project anyway:
+project_rotation_seconds = 600
+# How long (seconds) the sequencer idles between full passes once every
+# selected project is caught up (small edits still trickle during this
+# window -- every selected folder is unpaused while idle):
+sequencer_idle_seconds = 60
+
+# Set false on the base rig (direct LAN access to the NAS): it reads proxies
+# straight off the share, so lane B's local proxy mirror is pure waste.
+lane_b_enabled = true
+
+# Set false when this machine works entirely off the NAS share and should
+# never sync anything locally (base rig). Timeline watcher, popup fixer and
+# dashboard reporting keep working; all sync lanes stay off.
+sync_enabled = true
+
+# Set false to never show the media-outside-tree popup (base rig: raw media
+# legitimately lives outside the tree there). Still logged either way.
+popup_enabled = true
+
+# Machine role: "editor" (default -- full sync lanes) or "base" (the central
+# machine working directly off the NAS: implies sync_enabled false unless set
+# explicitly above; the out-of-tree popup stays on so stray media still gets
+# fixed into the tree).
+mode = "editor"

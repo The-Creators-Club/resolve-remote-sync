@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC — {{ project.label }}{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar?current={{ current_slug }}" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    <div hx-get="/partials/project/{{ project.slug }}" hx-trigger="every 10s" hx-swap="innerHTML">
+      {% include "partials/project_detail.html" %}
+    </div>
+    <div style="margin-top:1.4rem"
+         hx-get="/partials/project/{{ project.slug }}/bins" hx-trigger="load, every 5s" hx-swap="innerHTML">
+      {% if presence %}{% include "partials/bins.html" %}{% endif %}
+    </div>
+  </main>
+{% endblock %}

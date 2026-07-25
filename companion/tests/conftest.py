@@ -10,6 +10,19 @@ import pytest
 COMPANION_ROOT = Path(__file__).resolve().parent.parent
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ccsync_home(tmp_path, monkeypatch):
+    """Point config.CONFIG_DIR at a per-test temp dir so no test ever reads
+    (or writes) the REAL ~/.ccsync. Without this, tests constructing a
+    CompanionApp load whatever identity.json the developer's own live
+    companion has -- e.g. a signed-in role="base" identity flips
+    _sync_enabled at construction and test_role fails only on that machine,
+    only while signed in. (Observed 2026-07-25.)"""
+    from ccsync_companion import config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path / ".ccsync")
+
+
 def _find_rclone() -> str | None:
     """Look for a runnable rclone: PATH first, then the test-only portable
     binary at companion/.tools/rclone.exe (see README.md's "Tests" section —

@@ -1,0 +1,58 @@
+<div class="queue-box">
+  <div class="side-head">[ SYNC QUEUE — {{ queue.editor | upper }} ]
+    <span class="muted">one project at a time, top to bottom</span></div>
+  {% if queue.queue %}
+    <table class="editors">
+      <tbody>
+      {% for item in queue.queue %}
+        <tr class="editor-row {{ 'current-row' if item.is_current }}">
+          <td class="mono-sm muted">{{ loop.index }}.</td>
+          <td><span class="dot {{ item.status }}">●</span></td>
+          <td><span class="who">{{ item.label }}</span>
+              {% if item.is_current %}<span class="chip amber">[ SYNCING NOW ]</span>{% endif %}
+              {% if item.missing_project %}<span class="chip red" title="project no longer exists on the server">[ GONE ]</span>{% endif %}</td>
+          <td class="mono">{% if item.completion is not none %}[{{ item.completion | bar }}] {{ "%.0f" | format(item.completion) }}%{% else %}<span class="muted">no data yet</span>{% endif %}</td>
+          <td class="mono-sm">
+            {% if item.need_items %}{{ item.need_items }} files · {{ item.need_bytes | human_bytes }}
+              {% if item.rate_bytes_per_sec and item.rate_bytes_per_sec > 1 %} · {{ item.rate_bytes_per_sec | human_bytes }}/s{% endif %}
+              {% if item.eta_seconds %} · ETA {{ item.eta_seconds | eta }}{% endif %}
+            {% elif item.completion == 100 %}<span class="dot green">●</span> synced
+            {% else %}—{% endif %}
+          </td>
+          <td><button class="btn" hx-post="/partials/selection/{{ queue.editor }}/{{ item.slug }}/toggle"
+                      hx-target="closest .queue-box" hx-swap="outerHTML">[ UNTICK ]</button></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">Nothing ticked — nothing syncs to this machine. Tick a project below.</div>
+  {% endif %}
+
+  <div class="side-head" style="margin-top:1rem">[ FIX DESTINATION ROOT ]</div>
+  <div class="mono-sm root-line">
+    {% if queue.resolve_project %}
+      open in Resolve: <span class="who">{{ queue.resolve_project }}</span> →
+      {% if queue.root_label %}
+        files into <span class="who">{{ queue.root_label }}</span>
+        <span class="muted">({{ "admin-set" if queue.root_source == "admin" else "auto-matched, fixed" }};
+          admins change it in [ PROJECT ROOTS ])</span>
+      {% else %}
+        <span class="chip amber">[ NO MATCH ]</span>
+        <span class="muted">no tree project matched — an admin can map it in [ PROJECT ROOTS ]</span>
+      {% endif %}
+    {% else %}
+      <span class="muted">no Resolve project reported yet</span>
+    {% endif %}
+  </div>
+
+  {% if queue.available %}
+    <div class="side-head" style="margin-top:1rem">[ ADD TO QUEUE ]</div>
+    <div class="tick-list">
+      {% for p in queue.available %}
+        <button class="btn" hx-post="/partials/selection/{{ queue.editor }}/{{ p.slug }}/toggle"
+                hx-target="closest .queue-box" hx-swap="outerHTML">[ TICK ] {{ p.label }}</button>
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>

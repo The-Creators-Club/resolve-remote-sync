@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}CC SYNC{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">CREATORS CLUB <span class="dim">//</span> SYNC STATUS</a>
+    <a class="btn nav-link" href="/transfers">[ TRANSFERS ]</a>
+    {% if session_is_admin %}
+      <a class="btn nav-link" href="/admin/users">[ USERS ]</a>
+    {% endif %}
+    {% if view and not view.syncthing_reachable %}
+      <span class="banner">▲ SYNCTHING UNREACHABLE — data may be stale</span>
+    {% endif %}
+    <span class="stamp">updated {{ view.generated_at | ago if view else "" }}</span>
+    <span class="session">
+      {% if session_user %}
+        <span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>
+        <form method="post" action="/logout" class="inline-form"><button class="btn" type="submit">[ LOGOUT ]</button></form>
+      {% else %}
+        <a class="btn" href="/login">[ LOGIN ]</a>
+      {% endif %}
+    </span>
+  </header>
+  <div class="rule">{{ "─" * 120 }}</div>
+  <div class="layout">
+    {% block layout %}{% endblock %}
+  </div>
+</body>
+</html>

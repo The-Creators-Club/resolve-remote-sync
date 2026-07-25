@@ -1,0 +1,50 @@
+# TrueNAS custom-app compose for ccsync-dashboard.
+#
+# server/install_dashboard_app.py embeds this same structure as a Python dict
+# (keep the two in sync) and injects the secrets from env vars. This file is
+# the manual fallback: TrueNAS UI > Apps > Discover Apps > ... > Install via
+# YAML -- paste it and fill in the two REPLACE_ME values.
+#
+# Prereqs (the install script does these): host dirs
+#   /mnt/tank/apps/ccsync-dashboard/app   (the dashboard/ tree from this repo)
+#   /mnt/tank/apps/ccsync-dashboard/data  (SQLite + venv, persistent)
+# both owned 3000:3001 (broll:editors), mode 770.
+services:
+  dashboard:
+    image: python:3.12-slim
+    user: "3000:3001"
+    command: ["/bin/sh", "/app/deploy/run.sh"]
+    environment:
+      SYNCTHING_GUI_URL: "http://192.168.0.102:8384"
+      SYNCTHING_API_KEY: "REPLACE_ME"
+      DASH_REPORT_TOKEN: "REPLACE_ME"
+      # Login sessions: any stable random string; keep it the same across
+      # redeploys or everyone is logged out. SMB auth verifies TrueNAS
+      # passwords (the only method that works for non-admin users on 25.10).
+      DASH_SESSION_SECRET: "REPLACE_ME"
+      DASH_ADMIN_USERS: "truenas_admin"
+      DASH_DB_PATH: "/data/dashboard.db"
+      DASH_PORT: "8480"
+      # auto-provision Syncthing folders for new project dirs found here
+      DASH_PROJECTS_DIR: "/projects"
+      # Published companion builds (upgrade channel). Optional: defaults to
+      # a "packages" dir next to DASH_DB_PATH, i.e. /data/packages -- which
+      # is already persistent. Only set this to move them elsewhere.
+      # DASH_PACKAGES_DIR: "/data/packages"
+      # Admin "Users" section (create editor accounts, approve devices,
+      # set known passwords). Leave TRUENAS_PW blank to disable that section
+      # only -- everything else keeps working without it.
+      TRUENAS_HOST: "192.168.0.102"
+      TRUENAS_USER: "truenas_admin"
+      TRUENAS_PW: "REPLACE_ME"
+    ports:
+      - "8480:8480"
+    volumes:
+      - /mnt/tank/apps/ccsync-dashboard/app:/app
+      - /mnt/tank/apps/ccsync-dashboard/data:/data
+      # rw so the /project-setup page can create new project folders (with
+      # the standard template). Safe: the container runs as 3000:3001
+      # (broll:editors) -- the same owner:group setup_tree.py chowns the
+      # tree to, and setgid dirs keep the editors group on new folders.
+      - /mnt/tank/TheCreatorsPool/Creators_Club/Projects:/projects:rw
+    restart: unless-stopped

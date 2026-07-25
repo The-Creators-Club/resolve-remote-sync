@@ -27,6 +27,18 @@ class LaneStatus:
     last_error: Optional[str] = None
     last_sync: Optional[datetime] = None
     detail: str = ""
+    # Per-project (subtree) run + live transfer stats, groundwork for a
+    # sequencer built separately (see sync/rclone_lane.py).
+    current_project: Optional[str] = None
+    bytes_done: Optional[int] = None
+    bytes_total: Optional[int] = None
+    speed_bps: Optional[float] = None
+    eta_seconds: Optional[float] = None
+    # Per-file rclone --stats "transferring" entries, live during a run —
+    # see sync/rclone_lane.py:_handle_stderr_line. Each dict:
+    # {"name","direction","bytes_done","bytes_total","percentage",
+    #  "speed_bps","eta_seconds"}. Empty when idle or between stats ticks.
+    transfers: list = field(default_factory=list)
 
 
 class LaneAdapter(ABC):

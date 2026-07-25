@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Optional
@@ -25,6 +26,9 @@ log = logging.getLogger("ccsync.fixer")
 
 AUDIO_EXTS = {".wav", ".mp3", ".aif", ".aiff", ".flac", ".m4a", ".ogg"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".psd", ".exr"}
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
 
 
 class IgnoreTracker:
@@ -81,6 +85,97 @@ def suggest_destination(path: str, editor_name: str, project_prefix: str = "") -
     return f"{prefix}/{dest}" if prefix else dest
 
 
+def _tokenize(text: str) -> set[str]:
+    """Lowercase alnum-only tokens, split on any run of non-alnum chars."""
+    return {t.lower() for t in _TOKEN_RE.findall(text or "")}
+
+
+def match_project_dir(resolve_project_name: str, project_rel_paths: list[str]) -> Optional[str]:
+    """Best-effort match of the LIVE Resolve project name to one of the
+    tree's Projects/<year>/<series>/<project> directories, by token overlap.
+
+    Both sides are normalized to lowercase alnum-only tokens (split on any
+    run of non-alnum characters) before comparing. A candidate must share at
+    least one NON-YEAR token with `resolve_project_name` to qualify — a
+    project name that happens to contain a 4-digit year is not, by itself,
+    grounds to file media under every project from that year. The candidate
+    with the most overlapping tokens wins; a tie (or no qualifying
+    candidate) returns None rather than guessing.
+
+    Example: resolve_project_name="CCT Creator Profiles" matches tree dir
+    "2026/Creator Profiles/Season 1" (tokens creator+profiles overlap) and
+    NOT "2025/FF4/Nuclear" (no overlap).
+    """
+    if not resolve_project_name or not project_rel_paths:
+        return None
+
+    name_tokens = _tokenize(resolve_project_name)
+    if not name_tokens:
+        return None
+
+    best_score = 0
+    best_matches: list[str] = []
+    for rel in project_rel_paths:
+        path_tokens = _tokenize(rel)
+        overlap = name_tokens & path_tokens
+        non_year_overlap = {t for t in overlap if not _YEAR_RE.match(t)}
+        if not non_year_overlap:
+            continue
+        score = len(overlap)
+        if score > best_score:
+            best_score = score
+            best_matches = [rel]
+        elif score == best_score:
+            best_matches.append(rel)
+
+    if best_score == 0 or len(best_matches) != 1:
+        return None
+    return best_matches[0]
+
+
+def list_project_dirs(local_root: str) -> list[str]:
+    """Scan local_root/Projects/<year>/<series>/<project> for existing
+    project directories. Returns "<year>/<series>/<project>" rel-paths,
+    '/'-separated, sorted. Tolerant of a missing/partial tree — never
+    raises, just returns fewer (or no) entries.
+    """
+    if not local_root:
+        return []
+    projects_dir = Path(local_root) / "Projects"
+
+    def _subdirs(parent: Path) -> list[Path]:
+        try:
+            return sorted(p for p in parent.iterdir() if p.is_dir())
+        except OSError:
+            return []
+
+    rels: list[str] = []
+    for year_dir in _subdirs(projects_dir):
+        for series_dir in _subdirs(year_dir):
+            for project_dir in _subdirs(series_dir):
+                rels.append(f"{year_dir.name}/{series_dir.name}/{project_dir.name}")
+    return rels
+
+
+def pick_project_prefix(
+    resolve_project_name: str,
+    project_rel_paths: list[str],
+    project_prefix: str = "",
+) -> str:
+    """Fallback order for the popup suggestion base, per SPEC: the tree
+    project dir matching the CURRENT Resolve project name -> the configured
+    `active_project` (`project_prefix`) -> the tree root (no prefix, "").
+
+    Pure — `project_rel_paths` is expected to come from list_project_dirs,
+    kept as a separate argument here so this stays filesystem-free and
+    trivially testable.
+    """
+    matched = match_project_dir(resolve_project_name, project_rel_paths)
+    if matched:
+        return f"Projects/{matched}"
+    return project_prefix or ""
+
+
 def default_destination_dirs(editor_name: str, project_prefix: str = "") -> set[str]:
     editor = editor_name or "Unknown"
     dests = {"Audio/Music", "B-roll/Stills", f"B-roll/Editor Added/{editor}"}
@@ -128,18 +223,28 @@ def fix_clip(
     file_path: str,
     dest_rel: str,
     local_root: str,
-    media_pool_item: Any,
+    media_pool_items: Any,
     copy_fn=shutil.copy2,
     replace_clip_fn=resolve_bridge.replace_clip,
 ) -> dict[str, Any]:
-    """Copy `file_path` into local_root/dest_rel (collision-safe) then relink
-    `media_pool_item` to the copy via ReplaceClip.
+    """Copy `file_path` into local_root/dest_rel (collision-safe) once, then
+    relink EVERY media pool item in `media_pool_items` to that one copy via
+    ReplaceClip.
+
+    `media_pool_items` may be a single item (back-compat with callers/tests
+    that only ever deal with one) or a list — the same source file can be
+    referenced by several timeline items (e.g. the same clip cut onto
+    multiple places in the sequence), and popup.py collapses those into one
+    row per unique path (see popup.dedupe_out_of_tree_items), so fixing the
+    row has to relink all of them, not just the first.
 
     Returns {"ok": bool, "message": str, "copied_to": Optional[str]}. Never
     raises — every failure path (missing source, copy error, ReplaceClip
     failure) is reported in the returned dict. The original file at
     `file_path` is NEVER deleted or moved, regardless of outcome.
     """
+    items = media_pool_items if isinstance(media_pool_items, list) else [media_pool_items]
+
     src = Path(file_path)
     if not src.is_file():
         return {"ok": False, "message": f"source file not found: {file_path}", "copied_to": None}
@@ -152,16 +257,24 @@ def fix_clip(
     except OSError as exc:
         return {"ok": False, "message": f"copy failed: {exc}", "copied_to": None}
 
-    relink_result = replace_clip_fn(media_pool_item, str(dest_path))
-    if not relink_result.get("ok"):
+    failures: list[str] = []
+    for media_pool_item in items:
+        relink_result = replace_clip_fn(media_pool_item, str(dest_path))
+        if not relink_result.get("ok"):
+            failures.append(relink_result.get("message", "unknown error"))
+
+    if failures:
         return {
             "ok": False,
-            "message": f"copied to {dest_path} but relink failed: {relink_result.get('message')}",
+            "message": (
+                f"copied to {dest_path} but relink failed for {len(failures)}/{len(items)} "
+                f"item(s): {'; '.join(failures)}"
+            ),
             "copied_to": str(dest_path),
         }
 
     return {
         "ok": True,
-        "message": f"Fixed: copied to {dest_path} and relinked",
+        "message": f"Fixed: copied to {dest_path} and relinked {len(items)} item(s)",
         "copied_to": str(dest_path),
     }

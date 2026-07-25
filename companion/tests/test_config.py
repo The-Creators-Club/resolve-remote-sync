@@ -1,9 +1,11 @@
-"""Config file tests: first-run creation, TOML parsing, malformed fallback,
+﻿"""Config file tests: first-run creation, TOML parsing, malformed fallback,
 and DEFAULTS/DEFAULT_TOML_TEXT key parity."""
 
 from __future__ import annotations
 
 import re
+
+import pytest
 
 from ccsync_companion import config as config_mod
 
@@ -84,9 +86,130 @@ def test_default_toml_text_documents_every_default_key():
         )
 
 
+def _good_cfg(tmp_path, **overrides):
+    cfg = {
+        "editor_name": "ruskin",
+        "local_root": str(tmp_path),
+        "remote": "creators_club_sftp",
+        "remote_root": "/mnt/tank/TheCreatorsPool/Creators_Club",
+        "projects": ["Projects/2026/Creator Profiles/Season 1"],
+        "active_project": "Projects/2026/Creator Profiles/Season 1",
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def test_validate_config_accepts_a_fully_configured_install(tmp_path):
+    errors, warnings = config_mod.validate_config(_good_cfg(tmp_path))
+    assert errors == []
+    assert warnings == []
+
+
+def test_validate_config_flags_blank_remote_root(tmp_path):
+    errors, _ = config_mod.validate_config(_good_cfg(tmp_path, remote_root=""))
+    assert any("remote_root is blank" in p for p in errors)
+
+
+def test_validate_config_flags_relative_remote_root(tmp_path):
+    # The bug this exists for: "Creators_Club" looks configured but resolves
+    # to ~/Creators_Club on the NAS, so nothing lands in the shared tree.
+    errors, _ = config_mod.validate_config(_good_cfg(tmp_path, remote_root="Creators_Club"))
+    assert any("not absolute" in p for p in errors)
+
+
+def test_validate_config_flags_missing_local_root(tmp_path):
+    errors, _ = config_mod.validate_config(
+        _good_cfg(tmp_path, local_root=str(tmp_path / "does-not-exist"))
+    )
+    assert any("local_root does not exist" in p for p in errors)
+
+
+def test_validate_config_flags_a_default_first_run_config(tmp_path):
+    # Whatever the companion writes on first run must NOT look valid â€” that
+    # silence is exactly what made a broken install hard to diagnose.
+    path = tmp_path / "config.toml"
+    cfg = config_mod.load_config(path)
+    errors, _ = config_mod.validate_config(cfg)
+    assert errors, "a blank first-run config must report errors"
+
+
+def test_blank_projects_is_not_an_error(tmp_path):
+    # Lanes A and B sync local_root <-> remote_root as whole trees, so every
+    # year/series/project replicates regardless of what `projects` says.
+    # Treating these as blockers would flag a working install as broken.
+    errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, projects=[], active_project="")
+    )
+    assert errors == []
+    assert any("active_project is blank" in w for w in warnings)
+
+
+def test_validate_config_flags_mismatched_folder_id_pairing(tmp_path):
+    _, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, projects=["a", "b"], syncthing_folder_ids=["only-one"])
+    )
+    assert any("positional pairs" in w for w in warnings)
+
+
+def test_project_paths_with_spaces_are_accepted(tmp_path):
+    # Real series/project names have spaces ("Creator Profiles", "Season 1").
+    errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, active_project="Projects/2026/Creator Profiles/Season 1")
+    )
+    assert errors == []
+    assert warnings == []
+
+
+def test_validate_config_warns_on_non_http_dashboard_url(tmp_path):
+    _, warnings = config_mod.validate_config(_good_cfg(tmp_path, dashboard_url="dash.example.com"))
+    assert any("http:// or https://" in w for w in warnings)
+
+
+def test_validate_config_accepts_https_dashboard_url(tmp_path):
+    _, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, dashboard_url="https://dash.example.com", dashboard_token="tok")
+    )
+    assert not any("http:// or https://" in w for w in warnings)
+
+
+def test_validate_config_warns_on_blank_dashboard_token(tmp_path):
+    _, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, dashboard_url="https://dash.example.com", dashboard_token="")
+    )
+    assert any("dashboard_token is blank" in w for w in warnings)
+
+
+def test_validate_config_no_dashboard_warnings_when_url_blank(tmp_path):
+    _, warnings = config_mod.validate_config(_good_cfg(tmp_path, dashboard_url=""))
+    assert not any("dashboard" in w for w in warnings)
+
+
+def test_validate_config_flags_non_positive_dashboard_report_interval(tmp_path):
+    errors, _ = config_mod.validate_config(_good_cfg(tmp_path, dashboard_report_interval=0))
+    assert any("dashboard_report_interval must be a positive number" in e for e in errors)
+
+
+def test_validate_config_flags_non_numeric_dashboard_report_interval(tmp_path):
+    errors, _ = config_mod.validate_config(_good_cfg(tmp_path, dashboard_report_interval="soon"))
+    assert any("dashboard_report_interval must be a positive number" in e for e in errors)
+
+
+def test_default_remote_matches_installer_remote_name():
+    # Both bootstrap scripts write an rclone stanza named creators_club_sftp;
+    # if the default here drifts, lane A/B point at a nonexistent remote.
+    from pathlib import Path
+
+    installer_dir = Path(__file__).resolve().parents[2] / "installer"
+    ps1 = (installer_dir / "windows_bootstrap.ps1").read_text(encoding="utf-8")
+    sh = (installer_dir / "macos_bootstrap.sh").read_text(encoding="utf-8")
+    assert '$RemoteName = "creators_club_sftp"' in ps1
+    assert 'REMOTE_NAME="creators_club_sftp"' in sh
+    assert config_mod.DEFAULTS["remote"] == "creators_club_sftp"
+
+
 def test_config_example_toml_matches_default_keys():
     # config.example.toml (shipped alongside pyproject.toml) should also
-    # document every key — catches the file drifting from config.py.
+    # document every key â€” catches the file drifting from config.py.
     example_path = config_mod.CONFIG_DIR.parent  # not used; see below
     from pathlib import Path
 
@@ -97,3 +220,83 @@ def test_config_example_toml_matches_default_keys():
         assert re.search(pattern, example_text, re.MULTILINE), (
             f"config.example.toml is missing an assignment for '{key}'"
         )
+
+
+def test_mode_base_profile_disables_sync_but_keeps_popup(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('mode = "base"\n', encoding="utf-8")
+    cfg = config_mod.load_config(p)
+    # popup stays ON: base editors can still cut in media from outside the
+    # tree, and those clips need fixing into the project directory.
+    assert cfg["sync_enabled"] is False and cfg["popup_enabled"] is True
+
+
+def test_mode_base_explicit_keys_win(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('mode = "base"\npopup_enabled = false\nsync_enabled = true\n', encoding="utf-8")
+    cfg = config_mod.load_config(p)
+    assert cfg["sync_enabled"] is True and cfg["popup_enabled"] is False
+
+
+def test_mode_editor_defaults_unchanged(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('mode = "editor"\n', encoding="utf-8")
+    cfg = config_mod.load_config(p)
+    assert cfg["sync_enabled"] is True and cfg["popup_enabled"] is True
+
+
+def test_unknown_mode_warns_and_acts_as_editor(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('mode = "banana"\n', encoding="utf-8")
+    cfg = config_mod.load_config(p)
+    assert cfg["sync_enabled"] is True
+    _, warnings = config_mod.validate_config(cfg)
+    assert any("unknown mode" in w for w in warnings)
+
+
+# -- dashboard_report_interval_active / manifest_refresh_interval /
+# media_tree_refresh_interval -----------------------------------------------
+
+
+def test_new_reporting_keys_have_expected_defaults():
+    assert config_mod.DEFAULTS["dashboard_report_interval_active"] == 5
+    assert config_mod.DEFAULTS["manifest_refresh_interval"] == 300
+    assert config_mod.DEFAULTS["media_tree_refresh_interval"] == 120
+
+
+def test_load_config_creates_defaults_includes_new_reporting_keys(tmp_path):
+    path = tmp_path / "config.toml"
+    cfg = config_mod.load_config(path)
+    assert cfg["dashboard_report_interval_active"] == 5
+    assert cfg["manifest_refresh_interval"] == 300
+    assert cfg["media_tree_refresh_interval"] == 120
+
+
+@pytest.mark.parametrize(
+    "key", ["dashboard_report_interval_active", "manifest_refresh_interval", "media_tree_refresh_interval"]
+)
+def test_validate_config_flags_non_positive_new_interval_keys(tmp_path, key):
+    errors, _ = config_mod.validate_config(_good_cfg(tmp_path, **{key: 0}))
+    assert any(f"{key} must be a positive number" in e for e in errors)
+
+
+@pytest.mark.parametrize(
+    "key", ["dashboard_report_interval_active", "manifest_refresh_interval", "media_tree_refresh_interval"]
+)
+def test_validate_config_flags_non_numeric_new_interval_keys(tmp_path, key):
+    errors, _ = config_mod.validate_config(_good_cfg(tmp_path, **{key: "soon"}))
+    assert any(f"{key} must be a positive number" in e for e in errors)
+
+
+
+def test_version_matches_pyproject():
+    """config.VERSION is the single source of truth, but pyproject.toml
+    duplicates it (packaging requires a literal) -- publishing refuses on
+    drift, and this test catches it at development time."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with pyproject.open("rb") as fh:
+        data = tomllib.load(fh)
+    assert data["project"]["version"] == config_mod.VERSION

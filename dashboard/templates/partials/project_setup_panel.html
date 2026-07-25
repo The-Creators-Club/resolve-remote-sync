@@ -1,0 +1,75 @@
+<div class="roots-box project-setup-box">
+  <div class="side-head">[ PROJECT SETUP ]
+    <span class="muted">Resolve project: <span class="who">{{ setup.resolve_project }}</span></span></div>
+
+  {% if setup.error %}
+    <div class="banner">▲ {{ setup.error }}</div>
+  {% endif %}
+
+  {% if setup.created %}
+    <div class="side-head" style="margin-top:0.8rem">[ CREATED ]</div>
+    <div>
+      <span class="chip green">[ OK ]</span>
+      <span class="mono-sm">Projects/{{ setup.created.rel }}</span> created on the server
+      with the standard folder template{% if setup.created.mapped %},
+      and “{{ setup.resolve_project }}” now files into it{% endif %}.
+    </div>
+    <div class="muted" style="margin-top:0.4rem">
+      Sync (Syncthing folder) is provisioned automatically within ~5 minutes.
+      You can close this page.
+    </div>
+  {% elif setup.mapping %}
+    <div class="side-head" style="margin-top:0.8rem">[ ALREADY SET UP ]</div>
+    <div>
+      “{{ setup.mapping.resolve_project }}” files into
+      <span class="mono-sm">{{ setup.mapping.rel_path }}</span>
+      <span class="muted">({{ setup.mapping.source }}-set by {{ setup.mapping.updated_by }})</span>
+    </div>
+    <div class="muted" style="margin-top:0.4rem">
+      Mappings are fixed once set{% if setup.is_admin %} — as an admin you can change it
+      in the [ PROJECT ROOTS ] box on the <a href="/">fleet page</a>{% else %} — ask Alex
+      if this looks wrong{% endif %}.
+    </div>
+  {% else %}
+
+  <div class="side-head" style="margin-top:0.8rem">[ LINK TO AN EXISTING PROJECT ]</div>
+  <div class="muted">Pick the server folder this Resolve project belongs to.</div>
+  <form class="inline-form" style="margin-top:0.4rem"
+        hx-post="/partials/project-setup/link"
+        hx-target="closest .project-setup-box" hx-swap="outerHTML">
+    <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
+    <select name="root" required>
+      <option value="" disabled selected>choose a project…</option>
+      {% for p in setup.projects %}
+        <option value="{{ p.slug }}">{{ p.label }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn" type="submit">[ LINK ]</button>
+  </form>
+
+  <div class="side-head" style="margin-top:1.4rem">[ OR CREATE A NEW PROJECT ]</div>
+  {% if setup.projects_dir_ok %}
+    <div class="muted">Creates <span class="mono-sm">Projects/&lt;year&gt;/&lt;series&gt;/&lt;project&gt;</span>
+      on the server with the standard folders:
+      <span class="mono-sm">{{ setup.template_folders | join(", ") }}</span></div>
+    <form style="margin-top:0.5rem"
+          hx-post="/partials/project-setup/create"
+          hx-target="closest .project-setup-box" hx-swap="outerHTML">
+      <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
+      <input type="text" name="year" value="{{ setup.default_year }}" size="6" required
+             style="margin:0.2rem 0">
+      <input type="text" name="series" placeholder="series (e.g. Creator Profiles)" size="24" required
+             style="margin:0.2rem 0">
+      <input type="text" name="project" placeholder="project (e.g. Season 2)" size="20" required
+             style="margin:0.2rem 0">
+      <button class="btn" type="submit">[ CREATE &amp; LINK ]</button>
+    </form>
+  {% else %}
+    <div class="muted">Creating projects from the dashboard is unavailable
+      (the NAS Projects tree isn't mounted writable — DASH_PROJECTS_DIR).
+      Ask Alex to create the folder with <span class="mono-sm">server/setup_tree.py</span>,
+      then link it above.</div>
+  {% endif %}
+
+  {% endif %}
+</div>

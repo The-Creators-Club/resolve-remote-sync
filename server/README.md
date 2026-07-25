@@ -29,6 +29,17 @@ For first-time setup:
 See `../docs/SERVER.md` for the narrative admin-runbook version of this
 (onboarding an editor end-to-end, onboarding a project, delete/rename rules).
 
+**Steps 4 and 6 also have a dashboard equivalent.** If `ccsync-dashboard` is
+deployed with `TRUENAS_PW` set, its admin-only `/admin/users` page can create
+editor accounts and approve/name pending Syncthing devices from a browser
+instead of the CLI -- see "Admin: Users section" in `../docs/SERVER.md`. It's
+a convenience layer over these same two scripts' logic, not a replacement:
+the CLI scripts remain the tools of record and work whether or not the
+dashboard is deployed. Note it deliberately does NOT touch folder shares
+(step 6's old folder-sharing behavior) -- see "Workflow change" further down
+this doc and in SERVER.md, sharing is decided by the dashboard's per-editor
+selections, not by device approval.
+
 ## Env vars
 
 | Var | Required | Default | Used by |
@@ -65,12 +76,23 @@ inside the app's persistent storage).
 - **`setup_editor_account.py`** -- assumes an `editors` group should exist
   (creates it if missing) and that TrueNAS's `/user` API accepts the field
   names used here (`sshpubkey`, `smb`, `password_disabled`, `groups`).
-  **Open question, not resolved by this script:** TrueNAS's
-  `password_disabled` flag may also disable SMB auth for the same account
-  (SMB is password-hash based). The script sets `password_disabled=True`
-  only after verifying `smb` is still `True` afterward; if it isn't, it
-  rolls back and prints a warning asking a human to choose. See the
-  script's docstring for detail.
+  Also repairs the new account's **home directory permissions**, which is
+  not cosmetic -- see "The home directory trap" below. Safe and useful to
+  re-run against an existing editor; that's the supported way to repair a
+  broken home directory.
+
+  *`password_disabled` -- resolved (was an open question).* TrueNAS 25.10
+  refuses the combination outright rather than silently breaking SMB:
+
+  ```
+  HTTP 422  user_update.password_disabled:
+    "Password authentication may not be disabled for SMB users."
+  ```
+
+  The script attempts it, treats that specific 422 as the expected answer,
+  and leaves the account password-enabled with SMB working. SSH is still
+  effectively key-only because sshd itself runs with
+  `PasswordAuthentication no`.
 - **`install_syncthing_app.py`** -- **the riskiest script here** because
   TrueNAS SCALE's Apps API schema is not something this environment could
   inspect live (no NAS calls were made while writing this). It does a GET
@@ -96,6 +118,56 @@ inside the app's persistent storage).
   tailscale check assumes the app's container is literally named
   `tailscale` (per SPEC's "Current state" section) and execs `tailscale
   status --json` inside it via `docker exec` over SSH.
+
+## The home directory trap (why `setup_editor_account.py` sets permissions)
+
+Found the hard way onboarding the first real editor. Worth understanding
+before touching account setup, because the failure is completely silent from
+the editor's side.
+
+`home_create=True` makes the new home inherit the parent `homes` dataset's
+NFSv4 ACL. On this pool that ACL carries an inheritable
+`everyone@:rwxp...:fd----I:allow` ACE, so every editor home is created:
+
+```
+drwxrwxrwx broll:broll  /mnt/tank/TheCreatorsPool/homes/<editor>
+```
+
+world-writable, and owned by the dataset owner rather than the editor. sshd
+runs with `StrictModes yes`, which refuses public-key auth outright when the
+home directory is group/world-writable or not owned by the authenticating
+user. The only trace is in the NAS auth log:
+
+```
+Authentication refused: bad ownership or modes for directory
+/mnt/tank/TheCreatorsPool/homes/<editor>
+```
+
+The editor sees only rclone's generic
+`ssh: unable to authenticate, attempted methods [none publickey]` -- which is
+**identical to what you get when no key was ever installed**, so it reads as
+"the admin hasn't run the scripts yet" and sends you chasing the wrong thing.
+
+Two further traps when fixing it by hand:
+
+- **`chmod` doesn't work.** The dataset is `aclmode=restricted`, under which
+  `chmod` on a non-trivial ACL fails with `Operation not permitted` even as
+  root. (`chown` *does* work.) The script uses `filesystem.setperm` with
+  `stripacl` to replace the inherited ACL with a trivial 0700.
+- **`filesystem.setperm` is a job.** The POST returns a job id and 200 means
+  "accepted", not "done" -- `common.wait_for_job()` polls `/core/get_jobs`
+  for the real outcome.
+
+The script verifies the result by re-reading the directory over SSH and
+re-checking the exact two conditions sshd tests, rather than trusting the
+job's success.
+
+**Recommended, not done automatically:** the `homes` parent itself is still
+`drwxrwxrwx broll:broll` with that inheritable `everyone@` ACE. Per-home
+permissions are now set explicitly so new editors are fine either way, but
+the parent being world-writable means any account on the NAS can create or
+delete entries in it. Tightening it changes inheritance for everything under
+`homes/`, so it's left as a deliberate admin decision.
 
 ## Local verification (already done for these scripts; re-run if you edit them)
 

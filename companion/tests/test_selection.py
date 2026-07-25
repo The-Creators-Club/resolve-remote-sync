@@ -1,0 +1,317 @@
+"""Selection client tests: dashboard fetch, on-disk cache fallback, and
+disabled/never-raise behavior -- in the style of test_reporter.py (injected
+fake HTTP)."""
+
+from __future__ import annotations
+
+import json
+import logging
+
+from ccsync_companion.selection import SelectionClient
+
+
+def _cfg(**overrides):
+    cfg = {
+        "editor_name": "Alex",
+        "dashboard_url": "http://dash.example.com",
+        "dashboard_token": "tok123",
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+_SAMPLE = [
+    {"slug": "abcd-2026-ff5-nuclear", "label": "Nuclear", "rel_path": "2026/FF5/Nuclear", "position": 0, "active": True},
+    {"slug": "efgh-2026-ff5-blast", "label": "Blast", "rel_path": "2026/FF5/Blast", "position": 1, "active": True},
+]
+
+
+# -- fetch -----------------------------------------------------
+
+
+def test_fetch_success_writes_cache_and_returns_list(tmp_path):
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, headers, timeout))
+        return {"editor": "alex", "generated_at": "2026-07-24T00:00:00Z", "selection": _SAMPLE}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    result = client.fetch()
+
+    assert result == _SAMPLE
+    cache_path = tmp_path / "selection.json"
+    assert cache_path.exists()
+    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert "fetched_at" in cached
+    # Cache now stores the FULL response under "response", not just the
+    # "selection" list, so the sticky "project_roots" mapping survives a
+    # restart too -- see get_project_roots().
+    assert cached["response"]["selection"] == _SAMPLE
+    assert cached["response"]["editor"] == "alex"
+
+
+def test_fetch_url_uses_lowercased_editor_name(tmp_path):
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(url)
+        return {"selection": []}
+
+    client = SelectionClient(_cfg(editor_name="Alex"), tmp_path, http_get=fake_get)
+    client.fetch()
+    assert calls[0] == "http://dash.example.com/api/v1/selection/alex"
+
+
+def test_fetch_sends_token_header(tmp_path):
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(headers)
+        return {"selection": []}
+
+    client = SelectionClient(_cfg(dashboard_token="secret"), tmp_path, http_get=fake_get)
+    client.fetch()
+    assert calls[0]["X-CCSync-Token"] == "secret"
+
+
+def test_fetch_omits_token_header_when_blank(tmp_path):
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(headers)
+        return {"selection": []}
+
+    client = SelectionClient(_cfg(dashboard_token=""), tmp_path, http_get=fake_get)
+    client.fetch()
+    assert "X-CCSync-Token" not in calls[0]
+
+
+def test_fetch_failure_returns_none_and_does_not_raise(tmp_path):
+    def failing_get(url, headers, timeout):
+        raise RuntimeError("connection refused")
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=failing_get)
+    assert client.fetch() is None
+
+
+def test_fetch_failure_logs_once_per_streak(tmp_path, caplog):
+    def failing_get(url, headers, timeout):
+        raise RuntimeError("boom")
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=failing_get)
+    with caplog.at_level(logging.DEBUG, logger="ccsync.selection"):
+        client.fetch()
+        client.fetch()
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(warnings) == 1
+    assert len(debugs) == 1
+
+
+def test_fetch_bad_shape_returns_none(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {"nope": "not a selection"}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    assert client.fetch() is None
+
+
+# -- disabled -----------------------------------------------------
+
+
+def test_disabled_when_dashboard_url_blank(tmp_path):
+    client = SelectionClient(_cfg(dashboard_url=""), tmp_path, http_get=lambda *a: None)
+    assert client.enabled is False
+    assert client.fetch() is None
+
+
+# -- cache -----------------------------------------------------
+
+
+def test_load_cached_reads_previously_written_cache(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {"selection": _SAMPLE}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    client.fetch()
+
+    client2 = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: (_ for _ in ()).throw(RuntimeError()))
+    assert client2.load_cached() == _SAMPLE
+
+
+def test_load_cached_missing_file_returns_none(tmp_path):
+    client = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: None)
+    assert client.load_cached() is None
+
+
+def test_load_cached_malformed_json_returns_none(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "selection.json").write_text("not json {{{", encoding="utf-8")
+    client = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: None)
+    assert client.load_cached() is None
+
+
+# -- get() combined -----------------------------------------------------
+
+
+def test_get_returns_live_when_fetch_succeeds(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {"selection": _SAMPLE}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    selection, source = client.get()
+    assert selection == _SAMPLE
+    assert source == "live"
+
+
+def test_get_falls_back_to_cache_when_fetch_fails(tmp_path):
+    def fake_get_ok(url, headers, timeout):
+        return {"selection": _SAMPLE}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get_ok)
+    client.fetch()  # populate cache
+
+    def fake_get_fail(url, headers, timeout):
+        raise RuntimeError("down")
+
+    client2 = SelectionClient(_cfg(), tmp_path, http_get=fake_get_fail)
+    selection, source = client2.get()
+    assert selection == _SAMPLE
+    assert source == "cache"
+
+
+def test_get_returns_none_source_when_no_cache_and_fetch_fails(tmp_path):
+    def failing_get(url, headers, timeout):
+        raise RuntimeError("down")
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=failing_get)
+    selection, source = client.get()
+    assert selection is None
+    assert source == "none"
+
+
+def test_get_returns_none_source_when_disabled(tmp_path):
+    client = SelectionClient(_cfg(dashboard_url=""), tmp_path, http_get=lambda *a: None)
+    selection, source = client.get()
+    assert selection is None
+    assert source == "none"
+
+
+# -- full-response cache round trip -----------------------------------------------
+
+
+_SAMPLE_ROOTS = [
+    {"resolve_project": "CCT Creator Profiles", "slug": "abcd-2026-creators-s1",
+     "rel_path": "2026/Creator Profiles/Season 1", "source": "auto"},
+]
+
+
+def test_fetch_caches_full_response_including_project_roots(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {"selection": _SAMPLE, "project_roots": _SAMPLE_ROOTS}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    client.fetch()
+
+    cached = json.loads((tmp_path / "selection.json").read_text(encoding="utf-8"))
+    assert cached["response"]["project_roots"] == _SAMPLE_ROOTS
+
+
+def test_load_cached_still_returns_selection_list_from_full_response_cache(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {"selection": _SAMPLE, "project_roots": _SAMPLE_ROOTS}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    client.fetch()
+
+    client2 = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: (_ for _ in ()).throw(RuntimeError()))
+    assert client2.load_cached() == _SAMPLE
+
+
+def test_load_cached_tolerates_old_cache_format(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    old_format = {"fetched_at": "2026-01-01T00:00:00Z", "selection": _SAMPLE}
+    (tmp_path / "selection.json").write_text(json.dumps(old_format), encoding="utf-8")
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: None)
+    assert client.load_cached() == _SAMPLE
+
+
+def test_get_falls_back_to_cache_preserves_full_response_across_instances(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {"selection": _SAMPLE, "project_roots": _SAMPLE_ROOTS}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    client.fetch()  # populate cache
+
+    def fake_get_fail(url, headers, timeout):
+        raise RuntimeError("down")
+
+    client2 = SelectionClient(_cfg(), tmp_path, http_get=fake_get_fail)
+    selection, source = client2.get()
+    assert selection == _SAMPLE
+    assert source == "cache"
+    assert client2.get_project_roots() == {
+        "cct creator profiles": "Projects/2026/Creator Profiles/Season 1",
+    }
+
+
+# -- get_project_roots -----------------------------------------------------
+
+
+def test_get_project_roots_empty_when_never_fetched(tmp_path):
+    client = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: None)
+    assert client.get_project_roots() == {}
+
+
+def test_get_project_roots_empty_when_field_absent_older_server(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {"selection": _SAMPLE}  # no "project_roots" key at all
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    client.fetch()
+    assert client.get_project_roots() == {}
+
+
+def test_get_project_roots_maps_live_response_case_insensitively_with_projects_prefix(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {"selection": _SAMPLE, "project_roots": _SAMPLE_ROOTS}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    client.fetch()
+
+    roots = client.get_project_roots()
+    assert roots == {"cct creator profiles": "Projects/2026/Creator Profiles/Season 1"}
+    # lookup must be case-insensitive on the caller's side too -- the key
+    # itself is stored lowercased.
+    assert "CCT Creator Profiles".lower() in roots
+
+
+def test_get_project_roots_uses_cache_when_no_live_fetch_this_run(tmp_path):
+    def fake_get(url, headers, timeout):
+        return {"selection": _SAMPLE, "project_roots": _SAMPLE_ROOTS}
+
+    seeding_client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    seeding_client.fetch()
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: (_ for _ in ()).throw(RuntimeError()))
+    assert client.get_project_roots() == {
+        "cct creator profiles": "Projects/2026/Creator Profiles/Season 1",
+    }
+
+
+def test_get_project_roots_ignores_entries_missing_required_fields(tmp_path):
+    roots_with_gap = [
+        {"resolve_project": "", "slug": "x", "rel_path": "2026/A/B", "source": "auto"},
+        {"resolve_project": "Show", "slug": "y", "rel_path": "", "source": "auto"},
+        {"resolve_project": "Good Show", "slug": "z", "rel_path": "2026/C/D", "source": "admin"},
+    ]
+
+    def fake_get(url, headers, timeout):
+        return {"selection": [], "project_roots": roots_with_gap}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    client.fetch()
+    assert client.get_project_roots() == {"good show": "Projects/2026/C/D"}

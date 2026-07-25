@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC — FLEET{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    {% if queue %}
+      <div hx-get="/partials/queue{{ ('?as=' ~ queue.editor) if session_user and queue.editor != session_user else '' }}"
+           hx-trigger="every 10s" hx-swap="innerHTML">
+        {% include "partials/my_queue.html" %}
+      </div>
+    {% endif %}
+    <div hx-get="/partials/fleet" hx-trigger="every 15s" hx-swap="innerHTML">
+      {% include "partials/fleet_grid.html" %}
+    </div>
+    {% if session_user %}
+    <div style="margin-top:1.4rem" hx-get="/partials/project-roots" hx-trigger="every 30s" hx-swap="innerHTML">
+      {% include "partials/project_roots.html" %}
+    </div>
+    {% endif %}
+  </main>
+{% endblock %}

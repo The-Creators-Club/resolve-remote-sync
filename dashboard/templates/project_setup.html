@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC — PROJECT SETUP{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    {% include "partials/project_setup_panel.html" %}
+  </main>
+{% endblock %}

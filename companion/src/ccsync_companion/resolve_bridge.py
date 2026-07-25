@@ -54,12 +54,41 @@ def _default_script_lib() -> Optional[str]:
     return None
 
 
+def _pin_frozen_python3_home() -> None:
+    """Point fusionscript at the frozen bundle's own python3.dll.
+
+    fusionscript.dll has no static Python import: at load time it locates a
+    Python 3 itself -- PYTHON3HOME/PYTHONHOME first, else the PEP 514
+    registry (HK**\\SOFTWARE\\Python\\PythonCore\\<ver>\\InstallPath) -- and
+    LoadLibrary()s that install's python3.dll by full path. Inside the
+    PyInstaller exe that is fatal whenever the editor's registered Python
+    doesn't match our bundled 3.12: the stable-ABI forwarder drags a second,
+    uninitialized python3XY runtime into the process and the first C-API
+    call segfaults (0xc0000005). No installed Python at all just as
+    silently disables the bridge.
+
+    So when frozen, pin PYTHON3HOME/PYTHONHOME to sys._MEIPASS, where
+    build.spec now bundles the build interpreter's python3.dll -- that
+    forwarder resolves (by module name) to the python312.dll already loaded
+    in this process, on any machine, whatever Python is or isn't installed.
+    Deliberately overwrites any inherited value: inside this exe, the only
+    correct Python is our own.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+    if os.path.exists(os.path.join(meipass, "python3.dll")):
+        os.environ["PYTHON3HOME"] = meipass
+        os.environ["PYTHONHOME"] = meipass
+
+
 def _ensure_env_and_syspath() -> None:
     """Set up sys.path/env vars the standard Resolve way, honoring overrides.
 
     RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB, if already set in the
     environment, are left untouched (the whole point of the override).
     """
+    _pin_frozen_python3_home()
     api_dir = os.environ.get("RESOLVE_SCRIPT_API")
     if api_dir:
         modules_dir = os.path.join(api_dir, "Modules")
@@ -110,10 +139,27 @@ def _safe_clip_name(media_pool_item) -> str:
         return ""
 
 
+def _safe_folder_name(folder) -> str:
+    try:
+        name = folder.GetName()
+        return name if name else ""
+    except Exception:
+        return ""
+
+
+def _safe_project_name(project) -> str:
+    try:
+        name = project.GetName()
+        return name if name else ""
+    except Exception:
+        return ""
+
+
 def get_timeline_items() -> dict[str, Any]:
     """Enumerate every video+audio timeline item on the current timeline.
 
-    Returns {"ok": bool, "message": str, "items": [...]}. Never raises.
+    Returns {"ok": bool, "message": str, "items": [...], "project_name": str}.
+    Never raises.
 
     Each item dict: {
         "file_path": str,               # GetClipProperty()["File Path"]
@@ -124,12 +170,17 @@ def get_timeline_items() -> dict[str, Any]:
         "item_index": int,              # 0-based position within the track
     }
 
+    "project_name" is the current Resolve project's GetName() (empty string
+    if unavailable) — the watcher attaches it to OUT_OF_TREE items so the
+    popup fixer can suggest a destination inside the project actually being
+    edited, instead of a static config value (see fixer.match_project_dir).
+
     Items with no media pool item (generators, titles, adjustment clips) or
     an empty "File Path" are skipped entirely — per SPEC.md's watcher spec.
     """
     resolve = connect()
     if resolve is None:
-        return {"ok": False, "message": "DaVinci Resolve is not running", "items": []}
+        return {"ok": False, "message": "DaVinci Resolve is not running", "items": [], "project_name": ""}
 
     try:
         project_manager = resolve.GetProjectManager()
@@ -137,14 +188,16 @@ def get_timeline_items() -> dict[str, Any]:
     except Exception:
         project = None
     if project is None:
-        return {"ok": False, "message": "no project open in Resolve", "items": []}
+        return {"ok": False, "message": "no project open in Resolve", "items": [], "project_name": ""}
+
+    project_name = _safe_project_name(project)
 
     try:
         timeline = project.GetCurrentTimeline()
     except Exception:
         timeline = None
     if timeline is None:
-        return {"ok": False, "message": "no timeline open in Resolve", "items": []}
+        return {"ok": False, "message": "no timeline open in Resolve", "items": [], "project_name": project_name}
 
     items: list[dict[str, Any]] = []
     try:
@@ -183,9 +236,121 @@ def get_timeline_items() -> dict[str, Any]:
                         }
                     )
     except Exception as exc:
-        return {"ok": False, "message": f"Resolve scripting error: {exc}", "items": []}
+        return {"ok": False, "message": f"Resolve scripting error: {exc}", "items": [], "project_name": project_name}
 
-    return {"ok": True, "message": "", "items": items}
+    return {"ok": True, "message": "", "items": items, "project_name": project_name}
+
+
+# Defensive cap on media pool folder recursion depth: a real Resolve
+# project tree is never anywhere near this deep, but a malformed/circular
+# folder graph (or a test double) must not hang the watcher/tray thread.
+_MAX_MEDIA_POOL_DEPTH = 64
+
+
+def _walk_media_pool_folder(
+    folder, project_name: str, items: list[dict[str, Any]], depth: int = 0, bin_path: str = ""
+) -> None:
+    """Recurse the media pool, tagging every clip with its bin path.
+
+    `bin_path` is the "/"-joined chain of folder names BELOW the root
+    folder (the root itself is excluded) -- root-level clips get "", a
+    clip one bin deep gets e.g. "Interviews", two deep "Master/Interviews".
+    """
+    if depth > _MAX_MEDIA_POOL_DEPTH:
+        return
+
+    try:
+        clips = folder.GetClipList() or []
+    except Exception:
+        clips = []
+    for clip in clips:
+        try:
+            props = clip.GetClipProperty() or {}
+        except Exception:
+            props = {}
+        file_path = (props.get("File Path") or "").strip()
+        if not file_path:
+            continue  # timelines, compound clips, generators have no File Path
+        items.append(
+            {
+                "file_path": file_path,
+                "media_pool_item": clip,
+                "clip_name": _safe_clip_name(clip),
+                "resolve_project_name": project_name,
+                "bin_path": bin_path,
+            }
+        )
+
+    try:
+        subfolders = folder.GetSubFolderList() or []
+    except Exception:
+        subfolders = []
+    for subfolder in subfolders:
+        subfolder_name = _safe_folder_name(subfolder)
+        child_bin_path = f"{bin_path}/{subfolder_name}" if bin_path else subfolder_name
+        _walk_media_pool_folder(subfolder, project_name, items, depth + 1, child_bin_path)
+
+
+def get_media_pool_items() -> dict[str, Any]:
+    """Enumerate every media pool item (clip) anywhere in the current
+    project's media pool, recursively walking every bin — unlike
+    get_timeline_items, this finds media imported but never cut onto a
+    timeline.
+
+    Returns {"ok": bool, "message": str, "items": [...], "project_name": str}.
+    Never raises.
+
+    Each item dict: {
+        "file_path": str,               # GetClipProperty()["File Path"]
+        "media_pool_item": <object>,    # for ReplaceClip / identity checks
+        "clip_name": str,
+        "resolve_project_name": str,    # the current project's GetName()
+    }
+
+    Unlike get_timeline_items (where the watcher attaches
+    "resolve_project_name" itself), this function includes it directly on
+    every item, since there's no separate watcher layer in between here and
+    the popup/fixer for a manual whole-project scan (see app.scan_whole_project).
+
+    Items with no media pool item, or an empty "File Path" (timelines,
+    compound clips, generators, titles), are skipped entirely — same rule as
+    get_timeline_items.
+    """
+    resolve = connect()
+    if resolve is None:
+        return {"ok": False, "message": "DaVinci Resolve is not running", "items": [], "project_name": ""}
+
+    try:
+        project_manager = resolve.GetProjectManager()
+        project = project_manager.GetCurrentProject() if project_manager else None
+    except Exception:
+        project = None
+    if project is None:
+        return {"ok": False, "message": "no project open in Resolve", "items": [], "project_name": ""}
+
+    project_name = _safe_project_name(project)
+
+    try:
+        media_pool = project.GetMediaPool()
+    except Exception:
+        media_pool = None
+    if media_pool is None:
+        return {"ok": False, "message": "no media pool available", "items": [], "project_name": project_name}
+
+    try:
+        root_folder = media_pool.GetRootFolder()
+    except Exception:
+        root_folder = None
+    if root_folder is None:
+        return {"ok": False, "message": "no root folder in media pool", "items": [], "project_name": project_name}
+
+    items: list[dict[str, Any]] = []
+    try:
+        _walk_media_pool_folder(root_folder, project_name, items)
+    except Exception as exc:
+        return {"ok": False, "message": f"Resolve scripting error: {exc}", "items": [], "project_name": project_name}
+
+    return {"ok": True, "message": "", "items": items, "project_name": project_name}
 
 
 def replace_clip(media_pool_item, new_path: str) -> dict[str, Any]:

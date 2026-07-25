@@ -1,0 +1,85 @@
+<div class="admin-users-box">
+  <div class="side-head">[ USERS ]
+    <span class="muted">Create editor accounts, approve new Syncthing devices, set known passwords.</span></div>
+
+  {% if error %}
+    <div class="banner">▲ {{ error }}</div>
+  {% endif %}
+
+  {% if not admin_users.truenas_configured %}
+    <div class="muted">TRUENAS_PW is not configured on the dashboard — this section is unavailable.
+      Set TRUENAS_HOST / TRUENAS_USER / TRUENAS_PW on the app and redeploy.</div>
+  {% elif admin_users.error %}
+    <div class="banner">▲ {{ admin_users.error }}</div>
+  {% else %}
+
+  <div class="side-head" style="margin-top:0.8rem">[ DEVICES AWAITING APPROVAL ]</div>
+  {% if admin_users.pending_devices %}
+    <table class="editors">
+      <thead><tr><th>DEVICE ID</th><th>STATUS</th><th>CURRENT NAME</th><th>ASSIGN USERNAME</th><th></th></tr></thead>
+      <tbody>
+      {% for d in admin_users.pending_devices %}
+        <tr class="editor-row">
+          <td class="mono-sm">{{ d.device_id }}</td>
+          <td><span class="chip {{ 'amber' if d.status == 'pending' else 'red' }}">[ {{ d.status.upper() }} ]</span></td>
+          <td class="mono-sm muted">{{ d.current_name or "—" }}</td>
+          <td colspan="2">
+            <form class="inline-form" hx-post="/partials/admin/users/approve"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="device_id" value="{{ d.device_id }}">
+              <input type="text" name="username" placeholder="username" required>
+              <button class="btn" type="submit">[ APPROVE ]</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">none pending</div>
+  {% endif %}
+
+  <div class="side-head" style="margin-top:1.2rem">[ EDITOR ACCOUNTS ]</div>
+  {% if admin_users.editors %}
+    <table class="editors">
+      <thead><tr><th>USERNAME</th><th>UID</th><th>SSH KEY</th><th>SMB</th><th>LOCKED</th><th>SET PASSWORD</th></tr></thead>
+      <tbody>
+      {% for e in admin_users.editors %}
+        <tr class="editor-row">
+          <td class="who">{{ e.username }}</td>
+          <td class="mono-sm">{{ e.uid }}</td>
+          <td>{% if e.has_ssh_key %}<span class="chip green">[ SET ]</span>{% else %}<span class="chip red">[ MISSING ]</span>{% endif %}</td>
+          <td>{% if e.smb %}<span class="chip green">[ ON ]</span>{% else %}<span class="chip red">[ OFF ]</span>{% endif %}</td>
+          <td>{% if e.locked %}<span class="chip red">[ LOCKED ]</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>
+            <form class="inline-form" hx-post="/partials/admin/users/password"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ e.username }}">
+              <input type="password" name="password" placeholder="new password" required>
+              <button class="btn" type="submit">[ SET ]</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">no editor accounts yet</div>
+  {% endif %}
+
+  <div class="side-head" style="margin-top:1.2rem">[ CREATE NEW EDITOR ACCOUNT ]</div>
+  <form hx-post="/partials/admin/users/create" hx-target="closest .admin-users-box" hx-swap="outerHTML">
+    <input type="text" name="username" placeholder="username (e.g. jsmith)" required
+           style="display:block;margin:0.3rem 0;width:260px">
+    <input type="text" name="full_name" placeholder="full name (optional)"
+           style="display:block;margin:0.3rem 0;width:260px">
+    <textarea name="ssh_pubkey" placeholder="ssh-ed25519 AAAA... user@host" rows="2" required
+              style="display:block;margin:0.3rem 0;width:100%;max-width:520px"></textarea>
+    <input type="password" name="password"
+           placeholder="known password (optional — otherwise randomized and unusable for dashboard login)"
+           style="display:block;margin:0.3rem 0;width:420px">
+    <button class="btn" type="submit">[ CREATE ]</button>
+  </form>
+
+  {% endif %}
+</div>

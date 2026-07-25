@@ -7,10 +7,21 @@ bottom; most of it is one-time setup.
 
 You'll need, from the admin:
 - Your TrueNAS username (they set this up with `server/setup_editor_account.py`).
+  It is **lowercase** and case-sensitive.
 - The tailnet hostname/IP of the NAS (something like `truenas.tailXXXX.ts.net`
   or a `100.x.y.z` address).
 - The Resolve Project Server database name + credentials for the project(s)
   you're joining.
+- Which project(s) you're on, so you can fill in `projects` and
+  `active_project` in `~/.ccsync/config.toml` (the bootstrap script can't
+  know these).
+
+You'll also want a drive with real headroom for the local sync root --
+originals you add and every proxy that comes down both live there. If your
+system drive is tight, use `-LocalRoot` (step 2) to put it elsewhere.
+
+> **Do not map any NAS share to a drive letter of your own.**
+> This one is worth reading before you start; see the warning in section 2.1.
 
 ## 1. Install Tailscale and join the tailnet
 
@@ -34,16 +45,54 @@ responsiveness (see "Flaws" #5 in `../SPEC.md`).
 powershell -ExecutionPolicy Bypass -File installer\windows_bootstrap.ps1 -TailnetHost <tailnet-host> -EditorName <your-username>
 ```
 
+Add `-LocalRoot F:\Creators_Club` (any drive you like) if your system drive
+is short on space. An **elevated** PowerShell is preferred -- without it the
+script can't register a scheduled task and falls back to a registry autostart
+entry instead. Either way it completes; it just tells you which path it took.
+
 **Mac:**
 ```bash
 ./installer/macos_bootstrap.sh --tailnet-host <tailnet-host> --editor-name <your-username>
 ```
 
-This installs rclone + Syncthing, creates your local sync root
-(`C:\Creators_Club` on Windows, `~/Creators_Club` on Mac), maps `P:` (or
-prepares the LaunchAgent for `~/Creators_Club` on Mac), and writes an
-rclone remote config template. It prints your **Syncthing device ID** at
-the end -- copy that.
+This installs rclone + Syncthing, creates your local sync root, maps `P:` to
+it (Windows) or prepares the Mapped Mount (Mac), starts the Syncthing daemon
+and sets it to start at logon, writes an rclone remote config template, and
+seeds `~/.ccsync/config.toml`. It prints your **Syncthing device ID** at the
+end -- copy that.
+
+On Windows, `P:` shows up in Explorer as **TheCreatorsClub** so you can tell
+it apart from your own drives at a glance. Only project material belongs in
+there. (The name is cosmetic and per-user; Explorer may need a restart to
+show it.)
+
+### 2.1 Do NOT map any NAS share to another drive letter
+
+This is the single easiest way to silently break the whole design, and it
+produces no error message of any kind.
+
+Every clip path in the shared Resolve database is stored with the **host's**
+drive letter. If you `net use` (or otherwise mount) a NAS share to a letter
+that collides with one of those stored paths, Resolve will happily resolve
+those absolute paths straight against the live SMB mount -- and stream
+**full-resolution camera originals** over the tailnet for every playback.
+No warning, no relink prompt. Your local proxies and `P:` are simply ignored,
+and it just feels inexplicably slow.
+
+Concretely:
+
+- `P:` is reserved. The bootstrap script owns it.
+- **Do not map `T:`** -- it has been observed to collide with host-side paths
+  stored in the database.
+- Before mapping *any* NAS share to *any* letter, ask the admin which letters
+  the host machine uses locally, and avoid those. If you don't actually need
+  a second mount, don't create one -- everything you need arrives via `P:`.
+- On Mac the same hazard applies to mounting the NAS over SMB alongside your
+  Mapped Mount.
+
+If playback is unexpectedly slow, or the tray app shows little sync activity
+while Resolve is clearly pulling data, check your mapped drives first
+(`net use` on Windows, `mount` on Mac).
 
 If it warns that your SSH private key doesn't exist yet, generate one and
 send the admin the `.pub` half:
@@ -58,6 +107,56 @@ bootstrap script expects is `%USERPROFILE%\.ssh\ccsync_ed25519`.)
 
 The admin runs `server/accept_device.py` once per project you need access
 to. Nothing syncs on lane C (audio/GFX/AE/subs/docs) until this happens.
+
+## 3.5 About `~/.ccsync/config.toml`
+
+The bootstrap script fills in everything needed for syncing: `editor_name`,
+`local_root`, `remote`, `remote_root`. **You do not need to list projects.**
+
+The whole tree replicates. Lanes A and B sync `local_root` against
+`remote_root` as complete trees, so the server's structure is mirrored
+verbatim, whatever it contains:
+
+```
+Creators_Club/Projects/<year>/<series>/<project>/...
+```
+
+for example `Projects/2026/Creator Profiles/Season 1` alongside
+`Projects/2025/FF4/Nuclear` — any year, any series, any project, added at any
+time, with no config change on your side. Spaces in names are fine.
+
+Two optional keys exist and are easy to misread:
+
+| Key | What it actually does |
+|---|---|
+| `active_project` | Only the destination the popup fixer suggests when you add media from outside the tree. Blank just means it suggests the tree root. |
+| `projects` | Only pairs positionally with `syncthing_folder_ids` for lane C's folder-ID check. Nothing to do with what syncs. |
+
+One value worth understanding if you ever hand-edit it: `remote_root` must be
+an **absolute** NAS path (`/mnt/tank/TheCreatorsPool/Creators_Club`). SFTP
+sessions start in your home directory on the NAS, so a relative value like
+`Creators_Club` quietly means `~/Creators_Club` -- a directory that doesn't
+exist -- rather than the shared tree.
+
+The companion validates its config at startup and writes anything wrong to
+`~/.ccsync/companion.log`, separating problems that stop syncing from ones
+that merely degrade the popup. If something isn't syncing, read that first.
+
+If the admin runs the sync dashboard, they will also give you two values to
+add here: `dashboard_url` (e.g. `http://<tailnet-ip>:8480`) and
+`dashboard_token`. With those set, your companion reports its lane status to
+the dashboard once a minute so the admin can see sync health without asking
+you. Leaving `dashboard_url` blank disables this entirely.
+
+**Choosing what syncs (dashboard login).** Open the dashboard in a browser
+and sign in with your TrueNAS username and password. Tick the projects you
+want on this machine -- they sync **one at a time, in the order you ticked
+them**, and the dashboard shows live speed, files remaining, and ETA for
+the current one. Unticking stops that project syncing to you; files already
+on your disk stay there (delete them yourself if you need the space).
+Nothing syncs until you tick at least one project. With `dashboard_url` set,
+the companion follows your ticks automatically; if the dashboard is
+unreachable it keeps using the last selection it saw.
 
 ## 4. Connect DaVinci Resolve to the Project Server
 
@@ -131,7 +230,17 @@ warning pointing you back to this section.
   (editable) and a **Fix** button that copies the file into the tree,
   relinks the clip, and queues the upload for you. There's also an
   **Ignore** option (per-session) if you don't want to deal with it right
-  now.
+  now. The popup only sees clips on the **current timeline** — for media
+  you imported into bins but haven't cut in yet, use the tray's **Scan
+  whole project** to check the entire media pool at once.
+- **Onboarding a project you already started** (media scattered around your
+  own disk before you joined the sync system): use the tray's **Consolidate
+  pre-existing project…**. It scans the whole media pool, shows a report of
+  how much will be copied into the project folder and uploaded to the NAS,
+  and — once you confirm — copies every out-of-tree clip into the tree,
+  relinks Resolve, then uploads the originals and pulls any proxies. Your
+  scattered originals are **copied, never moved**, so nothing is at risk;
+  delete the old copies yourself once you've confirmed everything's up.
 - **Never reorganize/rename/delete folders on your own machine and expect
   it to reflect back to the NAS for video files.** Lane A (your uploads)
   never deletes anything on the NAS, by design (archival safety net) -- so

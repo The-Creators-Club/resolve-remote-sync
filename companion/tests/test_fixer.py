@@ -4,6 +4,7 @@ resolve_bridge / copy_fn — never touches a real Resolve instance)."""
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -188,3 +189,150 @@ def test_ignore_tracker_clear():
     tracker.ignore("clip.mov")
     tracker.clear()
     assert tracker.is_ignored("clip.mov") is False
+
+
+# -- fix_clip with multiple timeline items sharing one source file ---------
+
+
+def test_fix_clip_relinks_every_media_pool_item_from_one_copy(tmp_path):
+    calls = []
+
+    def fake_replace(mpi, new_path):
+        calls.append((mpi, new_path))
+        return {"ok": True, "message": "ok"}
+
+    src = tmp_path / "src.mov"
+    src.write_text("bytes")
+    local_root = tmp_path / "root"
+
+    result = fixer.fix_clip(
+        str(src), "Audio/Music", str(local_root), ["mpi-a", "mpi-b", "mpi-c"],
+        copy_fn=shutil.copy2, replace_clip_fn=fake_replace,
+    )
+
+    assert result["ok"] is True
+    assert "3 item(s)" in result["message"]
+    assert [c[0] for c in calls] == ["mpi-a", "mpi-b", "mpi-c"]
+    # every relink targets the SAME single copy, not three separate copies
+    assert len({c[1] for c in calls}) == 1
+
+
+def test_fix_clip_accepts_single_media_pool_item_back_compat(tmp_path):
+    src = tmp_path / "src" / "clip.mov"
+    src.parent.mkdir(parents=True)
+    src.write_text("video bytes")
+    local_root = tmp_path / "root"
+    media_pool_item = {}
+
+    result = fixer.fix_clip(
+        str(src), "B-roll/Editor Added/alex", str(local_root), media_pool_item,
+        replace_clip_fn=_fake_replace_clip_ok,
+    )
+
+    assert result["ok"] is True
+    assert media_pool_item["relinked_to"] is not None
+
+
+def test_fix_clip_reports_partial_relink_failure(tmp_path):
+    def fake_replace(mpi, new_path):
+        return {"ok": mpi != "bad", "message": "boom" if mpi == "bad" else "ok"}
+
+    src = tmp_path / "src.mov"
+    src.write_text("bytes")
+    local_root = tmp_path / "root"
+
+    result = fixer.fix_clip(
+        str(src), "Audio/Music", str(local_root), ["good", "bad"],
+        copy_fn=shutil.copy2, replace_clip_fn=fake_replace,
+    )
+
+    assert result["ok"] is False
+    assert "1/2" in result["message"]
+    assert result["copied_to"] is not None  # copy survives a partial relink failure
+
+
+# -- match_project_dir -------------------------------------------------------
+
+
+def test_match_project_dir_matches_on_token_overlap():
+    candidates = ["2026/Creator Profiles/Season 1", "2025/FF4/Nuclear"]
+    assert fixer.match_project_dir("CCT Creator Profiles", candidates) == "2026/Creator Profiles/Season 1"
+
+
+def test_match_project_dir_no_match_returns_none():
+    candidates = ["2025/FF4/Nuclear", "2026/Creator Profiles/Season 1"]
+    assert fixer.match_project_dir("Totally Unrelated Show", candidates) is None
+
+
+def test_match_project_dir_tie_returns_none():
+    candidates = ["2025/FF4/Nuclear Sunrise", "2026/Other/Nuclear Sunset"]
+    # both candidates share exactly one non-year token ("nuclear") with the
+    # project name -- equal score, ambiguous, must not guess.
+    assert fixer.match_project_dir("Nuclear Project", candidates) is None
+
+
+def test_match_project_dir_year_only_overlap_does_not_count():
+    candidates = ["2025/FF4/Nuclear"]
+    # "2025" overlaps, but it's a year token -- not enough to qualify alone.
+    assert fixer.match_project_dir("2025 Highlights", candidates) is None
+
+
+def test_match_project_dir_empty_project_name_returns_none():
+    assert fixer.match_project_dir("", ["2026/Creator Profiles/Season 1"]) is None
+
+
+def test_match_project_dir_empty_candidates_returns_none():
+    assert fixer.match_project_dir("CCT Creator Profiles", []) is None
+
+
+def test_match_project_dir_picks_higher_overlap_over_lower():
+    candidates = ["2026/Creator Profiles/Season 1", "2026/Creator/Misc"]
+    # "creator profiles season" -> 2 overlapping tokens with the first dir,
+    # only 1 ("creator") with the second -- first dir must win outright.
+    assert (
+        fixer.match_project_dir("Creator Profiles Season 1", candidates)
+        == "2026/Creator Profiles/Season 1"
+    )
+
+
+# -- list_project_dirs -------------------------------------------------------
+
+
+def test_list_project_dirs_scans_year_series_project_layout(tmp_path):
+    (tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1").mkdir(parents=True)
+    (tmp_path / "Projects" / "2025" / "FF4" / "Nuclear").mkdir(parents=True)
+    dirs = fixer.list_project_dirs(str(tmp_path))
+    assert "2026/Creator Profiles/Season 1" in dirs
+    assert "2025/FF4/Nuclear" in dirs
+
+
+def test_list_project_dirs_tolerates_missing_tree(tmp_path):
+    assert fixer.list_project_dirs(str(tmp_path / "does_not_exist")) == []
+
+
+def test_list_project_dirs_tolerates_blank_local_root():
+    assert fixer.list_project_dirs("") == []
+
+
+# -- pick_project_prefix (fallback order) ------------------------------------
+
+
+def test_pick_project_prefix_prefers_matched_resolve_project():
+    candidates = ["2026/Creator Profiles/Season 1", "2025/FF4/Nuclear"]
+    result = fixer.pick_project_prefix(
+        "CCT Creator Profiles", candidates, project_prefix="Projects/2025/FF4/Nuclear",
+    )
+    assert result == "Projects/2026/Creator Profiles/Season 1"
+
+
+def test_pick_project_prefix_falls_back_to_configured_project_prefix():
+    candidates = ["2026/Creator Profiles/Season 1"]
+    result = fixer.pick_project_prefix(
+        "Unrelated Show", candidates, project_prefix="Projects/2025/FF4/Nuclear",
+    )
+    assert result == "Projects/2025/FF4/Nuclear"
+
+
+def test_pick_project_prefix_falls_back_to_tree_root_when_nothing_matches():
+    result = fixer.pick_project_prefix("Unrelated Show", [], project_prefix="")
+    assert result == ""

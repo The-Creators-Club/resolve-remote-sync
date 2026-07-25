@@ -90,6 +90,35 @@ def test_slugify_case_insensitive():
     assert slugify("2025/FF4/NUCLEAR") == slugify("2025/ff4/nuclear")
 
 
+def test_slugify_handles_real_names_with_spaces():
+    # Series and project names are free text and routinely contain spaces —
+    # nothing here is specific to any one show.
+    assert slugify("2026/Creator Profiles/Season 1") == "2026-creator-profiles-season-1"
+    assert slugify("2027/Behind The Scenes/Ep 12 - Final Cut") == (
+        "2027-behind-the-scenes-ep-12-final-cut"
+    )
+
+
+def test_project_path_preserves_spaces_verbatim():
+    # The on-disk tree must mirror the source structure exactly; only the
+    # Syncthing folder *id* is slugified, never the path itself.
+    assert project_path(
+        "/mnt/tank/TheCreatorsPool/Creators_Club/Projects",
+        "2026", "Creator Profiles", "Season 1",
+    ) == "/mnt/tank/TheCreatorsPool/Creators_Club/Projects/2026/Creator Profiles/Season 1"
+
+
+def test_build_remote_script_quotes_paths_with_spaces():
+    # A space in a series/project name must not split into two shell words.
+    from setup_tree import build_remote_script  # noqa: PLC0415
+
+    base = "/mnt/tank/TheCreatorsPool/Creators_Club/Projects/2026/Creator Profiles/Season 1"
+    script = build_remote_script(base, "broll", "editors")
+    assert "'/mnt/tank/TheCreatorsPool/Creators_Club/Projects/2026/Creator Profiles/Season 1'" in script
+    # and never the bare, word-splittable form
+    assert " /mnt/tank/TheCreatorsPool/Creators_Club/Projects/2026/Creator Profiles/Season 1 " not in script
+
+
 def test_slugify_empty_raises():
     import pytest
     with pytest.raises(ValueError):

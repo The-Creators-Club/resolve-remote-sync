@@ -92,18 +92,26 @@ Tray icon needs the optional extra: `pip install -e ".[tray]"` (installs
 
 ## Config reference
 
-TOML at `~/.ccsync/config.toml`, written with sane (mostly empty) defaults on
-first run — see `config.example.toml` in this directory for the same content
-with inline comments. Restart the app after editing.
+TOML at `~/.ccsync/config.toml`. Normally the bootstrap installer
+(`installer/windows_bootstrap.ps1` / `macos_bootstrap.sh`) writes this file,
+seeded with the values it already knows — `editor_name`, `local_root`,
+`remote`, `remote_root` — leaving only `projects` and `active_project` for a
+human. If the companion starts and finds no config at all, it writes its own
+template with those install-specific values left **blank**, and then complains
+about each one at startup rather than pretending to work.
+
+`config.example.toml` in this directory is a filled-in reference, not a copy
+of what either of those produces. Restart the app after editing.
 
 | Key | Default | Notes |
 |---|---|---|
 | `editor_name` | `""` | Used to build the `B-roll/Editor Added/<editor_name>` popup destination. |
 | `local_root` | `""` | This machine's local project tree root. **Must be set.** |
 | `canonical_prefix` | `"P:\\"` | The shared-drive prefix Resolve's stored clip paths use (SPEC.md's Path canon). Used for BAD_PREFIX detection. |
-| `remote` | `"nas"` | Name of a pre-configured rclone remote. |
-| `remote_root` | `""` | Root path on the remote under which project trees live. |
-| `projects` | `[]` | Project relative paths (informational in v1; per-project lane scoping is a possible v2). |
+| `remote` | `"creators_club_sftp"` | Name of the rclone remote. Must match the stanza the bootstrap installer writes into `rclone.conf`. |
+| `remote_root` | `""` | **Absolute** NAS path under which project trees live, e.g. `/mnt/tank/TheCreatorsPool/Creators_Club`. Must be set, and must be absolute — see below. |
+| `projects` | `[]` | Positional pair for `syncthing_folder_ids` (lane C's folder-ID check). Does **not** scope what syncs. |
+| `active_project` | `""` | Destination the popup fixer suggests for editor-added media. Does **not** scope what syncs; blank just suggests the tree root. |
 | `poll_interval` | `3` | Resolve timeline poll interval, seconds. |
 | `scan_interval_up` | `300` | Lane A periodic full-pass interval, seconds. |
 | `scan_interval_down` | `120` | Lane B periodic full-pass interval, seconds. |
@@ -115,6 +123,72 @@ with inline comments. Restart the app after editing.
 | `rclone_path` | `"rclone"` | Path to the rclone binary; must be on PATH if left as the default. |
 | `log_path` | `"~/.ccsync/companion.log"` | Rotating log file. |
 | `log_level` | `"INFO"` | Python logging level name. |
+| `dashboard_url` | `""` | Base URL of the server sync dashboard (e.g. `http://<tailnet-ip>:8480`). Blank disables the reporter thread entirely. |
+| `dashboard_token` | `""` | Shared secret sent as `X-CCSync-Token` with each report; must match the server's `DASH_REPORT_TOKEN`. |
+| `dashboard_report_interval` | `60` | Seconds between status reports to the dashboard. |
+| `selection_poll_interval` | `60` | How often the sequencer refreshes the editor's project selection from the dashboard. |
+| `project_rotation_seconds` | `600` | Max time the sequencer spends on one project's lane-C turn before rotating to the next (starvation guard). |
+| `sequencer_idle_seconds` | `60` | Idle sleep between full passes over the queue. |
+| `lane_b_enabled` | `true` | Set `false` on the base rig (direct LAN access to the NAS): proxies are read straight off the share, so the local proxy mirror is skipped in both managed and legacy modes. |
+| `sync_enabled` | `true` | Set `false` when the machine works entirely off the NAS share (base rig): no sync lanes run at all; timeline watcher, popup fixer and dashboard reporting still work, lanes report idle with a "disabled" detail. |
+| `popup_enabled` | `true` | Set `false` to suppress the media-outside-tree popup entirely (still logged). |
+| `mode` | `"editor"` | Machine role. `"base"` = the central machine with direct NAS access: implies `sync_enabled = false` unless set explicitly. The out-of-tree popup stays ON in base mode — stray media outside the project directory on the NAS still needs fixing into the tree. |
+
+With `dashboard_url` set, a fault-isolated reporter thread
+(`reporter.py`) POSTs the current status of all three lanes to the
+dashboard's `/api/v1/report` endpoint on that interval, so the admin's
+fleet dashboard can show this editor's lane A/B health. Report failures
+never affect syncing; they are logged and retried on the next interval.
+The reporter keeps posting while sync is paused so the dashboard shows
+"paused" rather than a silent gap.
+
+### Managed mode (dashboard-driven selection, one project at a time)
+
+Setting `dashboard_url` also switches the sync lanes into **managed mode**:
+instead of each lane free-running over the whole tree, a sequencer
+(`sync/sequencer.py`) fetches this editor's ticked projects from the
+dashboard (cached at `~/.ccsync/state/selection.json` for offline starts)
+and syncs them **one at a time, in tick order**: lane A, then lane B (both
+scoped to that project's subtree), then the project's Syncthing folder gets
+its turn (other selected folders paused locally). Pending Syncthing folder
+offers for selected projects are auto-accepted with the correct local path
+and editor-side ignore patterns. No selection data (fresh install, dashboard
+down, nothing ticked) means **nothing syncs** -- that's the design: editors
+choose their projects on the dashboard. With `dashboard_url` blank the
+legacy whole-tree behavior is unchanged.
+
+### What actually syncs: the whole tree
+
+Lanes A and B run `rclone` between `local_root` and `remote:remote_root` as
+**whole trees**, filtered only by file type (video-outside-Proxy up,
+Proxy-contents down). The server's directory structure is therefore
+replicated verbatim on every editor machine:
+
+```
+Creators_Club/Projects/<year>/<series>/<project>/{AE,Audio,B-roll,...}
+```
+
+Any year, any series, any project — `Projects/2026/Creator Profiles/Season 1`
+and `Projects/2025/FF4/Nuclear` alike, including names with spaces — appear
+without any per-project configuration. New projects added on the server show
+up on the next lane-B pass. Neither `projects` nor `active_project` gates
+this; see their rows above for what they really do.
+
+### `remote_root` must be absolute
+
+An SFTP session lands in the editor's **home directory** on the NAS
+(`/mnt/tank/TheCreatorsPool/homes/<editor>`), not at the data root. So a
+relative `remote_root = "Creators_Club"` builds `creators_club_sftp:Creators_Club`,
+which resolves to `~/Creators_Club` — a directory that doesn't exist — instead
+of the shared tree. Lane A would upload into the editor's home directory and
+lane B would find nothing to bring down, with no error that points at the
+cause.
+
+`validate_config()` (called at startup, logged, never raises) rejects both a
+blank and a relative `remote_root` for this reason, along with a blank
+`editor_name`, `local_root`, `remote`, `projects`, or `active_project`. A
+half-configured install is otherwise entirely silent — nothing syncs and no
+lane reports why — so these are logged at ERROR with one line per problem.
 
 ### SPEC deviations (and why)
 

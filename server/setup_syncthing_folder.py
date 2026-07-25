@@ -58,7 +58,8 @@ def find_folder(gui_url: str, api_key: str, folder_id: str, dry_run: bool):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--project-rel-path", required=True, help="e.g. 2025/FF4/Nuclear")
+    ap.add_argument("--project-rel-path", required=True,
+                     help='e.g. 2025/FF4/Nuclear or "2026/Creator Profiles/Season 1"')
     ap.add_argument("--gui-url", default=os.environ.get("SYNCTHING_GUI_URL"),
                      help="e.g. http://192.168.0.102:8384 (or SYNCTHING_GUI_URL env var)")
     ap.add_argument("--api-key", default=os.environ.get("SYNCTHING_API_KEY"),

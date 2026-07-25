@@ -35,10 +35,25 @@ except ImportError:
 
 entry_point = "launcher.py"  # absolute-import shim; running the package __main__.py directly breaks relative imports
 
+# fusionscript.dll (Resolve's scripting library, loaded into this process at
+# runtime by resolve_bridge) links against the stable-ABI forwarder
+# python3.dll, which PyInstaller can't discover statically. If it isn't in
+# the bundle, Windows resolves it from whatever Python is installed on the
+# editor's machine: a same-version install works by luck, a mismatched one
+# (e.g. 3.13 vs our bundled 3.12) pulls a second uninitialized Python
+# runtime into the process and segfaults on the watcher's first Resolve
+# poll, and no install at all silently disables the Resolve bridge. Bundle
+# the build interpreter's own forwarder so the lookup never leaves the exe.
+extra_binaries = []
+if sys.platform == "win32":
+    _python3_dll = Path(sys.base_prefix) / "python3.dll"
+    if _python3_dll.exists():
+        extra_binaries.append((str(_python3_dll), "."))
+
 a = Analysis(
     [entry_point],
     pathex=["src"],
-    binaries=[],
+    binaries=extra_binaries,
     datas=[],
     hiddenimports=hidden_imports,
     hookspath=[],

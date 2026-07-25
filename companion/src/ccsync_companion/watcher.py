@@ -52,15 +52,27 @@ class TimelineWatcher:
         on_mapping_warning: Optional[Callable[[dict[str, Any]], None]] = None,
         ignore_tracker: Optional[IgnoreTracker] = None,
         get_timeline_items: Optional[Callable[[], dict[str, Any]]] = None,
+        on_project_changed: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.local_root = local_root
         self.canonical_prefix = canonical_prefix
         self.poll_interval = poll_interval
         self._on_out_of_tree = on_out_of_tree
         self._on_mapping_warning = on_mapping_warning
+        self._on_project_changed = on_project_changed
+        # Last NON-None project name seen -- deliberately NOT cleared when
+        # the bridge flaps to None (Resolve restarting, transient failure),
+        # so name -> None -> same name never refires on_project_changed.
+        self._last_seen_project: Optional[str] = None
         self.ignore_tracker = ignore_tracker if ignore_tracker is not None else IgnoreTracker()
         self._get_timeline_items = get_timeline_items or resolve_bridge.get_timeline_items
         self._warned_mapping: set[str] = set()
+        # Most recently seen Resolve project name (see resolve_bridge's
+        # "project_name" key), tracked across polls so other components
+        # (the dashboard reporter) can report which project is open without
+        # owning any Resolve-bridge concerns themselves. None when Resolve
+        # is closed/unreachable or the bridge result didn't carry a name.
+        self.last_resolve_project: Optional[str] = None
 
     def poll_once(self) -> dict[str, Any]:
         """Run one poll cycle. Returns a small summary dict; never raises."""
@@ -68,7 +80,20 @@ class TimelineWatcher:
             result = self._get_timeline_items()
         except Exception as exc:  # belt and braces on top of resolve_bridge's own catch-all
             log.debug("get_timeline_items raised: %s", exc)
+            self.last_resolve_project = None
             return {"ok": False, "message": str(exc), "out_of_tree": 0, "mapping_warnings": 0}
+
+        self.last_resolve_project = result.get("project_name") or None
+        if (
+            self.last_resolve_project is not None
+            and self.last_resolve_project != self._last_seen_project
+        ):
+            self._last_seen_project = self.last_resolve_project
+            if self._on_project_changed is not None:
+                try:
+                    self._on_project_changed(self.last_resolve_project)
+                except Exception:
+                    log.exception("on_project_changed callback failed")
 
         if not result.get("ok"):
             log.debug("timeline poll: %s", result.get("message"))
@@ -76,6 +101,7 @@ class TimelineWatcher:
 
         new_out_of_tree: list[dict[str, Any]] = []
         new_mapping_warnings = 0
+        resolve_project_name = result.get("project_name", "")
 
         for item in result.get("items", []):
             path = item.get("file_path", "")
@@ -87,6 +113,13 @@ class TimelineWatcher:
             if cls == OUT_OF_TREE:
                 if self.ignore_tracker.is_ignored(path):
                     continue
+                # Copy rather than mutate: `item` may be a shared/reused
+                # object from the caller's test double or a real Resolve
+                # wrapper -- popup.py needs to know which project was open
+                # in Resolve when this clip was seen (fixer.match_project_dir)
+                # without the watcher owning any popup-layer concerns.
+                item = dict(item)
+                item["resolve_project_name"] = resolve_project_name
                 new_out_of_tree.append(item)
             elif cls == BAD_PREFIX:
                 if key in self._warned_mapping:

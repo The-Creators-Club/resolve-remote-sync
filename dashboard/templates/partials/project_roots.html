@@ -1,0 +1,55 @@
+<div class="roots-box">
+  <div class="side-head">[ PROJECT ROOTS ]
+    <span class="muted">Resolve project → where fixed media files. Sticky: first auto-match is stored; only admins change these.</span></div>
+  {% if roots.mappings or roots.unmapped %}
+    <table class="editors">
+      <thead><tr><th>RESOLVE PROJECT</th><th>FILES INTO</th><th>SOURCE</th><th></th></tr></thead>
+      <tbody>
+      {% for m in roots.mappings %}
+        <tr class="editor-row">
+          <td class="who">{{ m.resolve_project }}</td>
+          <td class="mono-sm">{{ m.rel_path }}</td>
+          <td class="mono-sm muted">{{ m.source }}{{ " (" ~ m.updated_by ~ ")" if m.source == "admin" }}</td>
+          <td>
+            {% if roots.is_admin %}
+            <form class="inline-form" hx-post="/partials/project-roots" hx-target="closest .roots-box" hx-swap="outerHTML">
+              <input type="hidden" name="resolve_project" value="{{ m.resolve_project }}">
+              <select name="root" class="root-select">
+                {% for p in roots.projects %}
+                  <option value="{{ p.slug }}" {{ "selected" if p.slug == m.slug }}>{{ p.label }}</option>
+                {% endfor %}
+                <option value="">— remove (re-detect) —</option>
+              </select>
+              <button class="btn" type="submit">[ SET ]</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      {% for name in roots.unmapped %}
+        <tr class="editor-row">
+          <td class="who">{{ name }}</td>
+          <td><span class="chip amber">[ NO MATCH ]</span></td>
+          <td class="mono-sm muted">seen, unmapped</td>
+          <td>
+            {% if roots.is_admin %}
+            <form class="inline-form" hx-post="/partials/project-roots" hx-target="closest .roots-box" hx-swap="outerHTML">
+              <input type="hidden" name="resolve_project" value="{{ name }}">
+              <select name="root" class="root-select">
+                <option value="">— pick a project —</option>
+                {% for p in roots.projects %}
+                  <option value="{{ p.slug }}">{{ p.label }}</option>
+                {% endfor %}
+              </select>
+              <button class="btn" type="submit">[ SET ]</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">nothing yet — mappings appear when companions report an open Resolve project</div>
+  {% endif %}
+</div>

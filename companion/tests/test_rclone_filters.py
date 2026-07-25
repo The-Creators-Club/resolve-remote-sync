@@ -15,9 +15,11 @@ Two layers, per the task brief:
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -95,6 +97,82 @@ def test_build_down_command_shape(tmp_path):
     assert cmd[2] == "nas:Creators_Club"
     assert cmd[3] == "C:\\root"
     assert "--ignore-existing" not in cmd  # lane B is server-authoritative, no skip-if-exists
+
+
+# -- subpath (per-project) + --stats command building, pure -----------------
+
+
+def test_build_up_command_with_subpath_joins_both_endpoints(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    cmd = build_up_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file,
+        subpath="Projects/2026/FF5/Energy Transition",
+    )
+    assert cmd[2] == str(Path("C:\\root") / "Projects/2026/FF5/Energy Transition")
+    assert cmd[3] == "nas:Creators_Club/Projects/2026/FF5/Energy Transition"
+
+
+def test_build_down_command_with_subpath_joins_both_endpoints(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    cmd = build_down_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file,
+        subpath="Projects/2026/FF5/Energy Transition",
+    )
+    assert cmd[2] == "nas:Creators_Club/Projects/2026/FF5/Energy Transition"
+    assert cmd[3] == str(Path("C:\\root") / "Projects/2026/FF5/Energy Transition")
+
+
+def test_build_up_command_subpath_no_double_slash_with_trailing_slash_root(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    cmd = build_up_command(
+        "rclone", "C:\\root", "nas", "Creators_Club/", filter_file,
+        subpath="/Projects/2026/FF5/Energy Transition/",
+    )
+    assert cmd[3] == "nas:Creators_Club/Projects/2026/FF5/Energy Transition"
+    assert "//" not in cmd[3].split(":", 1)[1]
+
+
+def test_build_up_command_stats_interval_appends_flags(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    cmd = build_up_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file, stats_interval="10s",
+    )
+    assert cmd[-4:] == ["--stats", "10s", "--stats-log-level", "NOTICE"]
+
+
+def test_build_down_command_stats_interval_appends_flags(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    cmd = build_down_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file, stats_interval="10s",
+    )
+    assert cmd[-4:] == ["--stats", "10s", "--stats-log-level", "NOTICE"]
+
+
+def test_build_up_command_omitted_subpath_and_stats_unchanged(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    old = build_up_command("rclone", "C:\\root", "nas", "Creators_Club", filter_file, transfers=8)
+    new = build_up_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file, transfers=8,
+        subpath=None, stats_interval=None,
+    )
+    assert old == new
+
+
+def test_build_down_command_omitted_subpath_and_stats_unchanged(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    old = build_down_command("rclone", "C:\\root", "nas", "Creators_Club", filter_file, transfers=2)
+    new = build_down_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file, transfers=2,
+        subpath=None, stats_interval=None,
+    )
+    assert old == new
 
 
 def test_parse_json_log_counts_transfers_and_errors():
@@ -245,3 +323,81 @@ def test_lane_b_sync_propagates_rename(rclone_binary, fixture_tree, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert not (dst / "B-roll" / "Proxy" / "clip1.mov").exists(), "old name must be deleted locally"
     assert (dst / "B-roll" / "Proxy" / "clip1_renamed.mov").is_file(), "new name must appear locally"
+
+
+# -- integration: per-project (subpath) selection + --stats JSON shape ------
+
+
+@pytest.fixture
+def two_project_tree(tmp_path):
+    """Two project subtrees under Projects/, each with a video file outside
+    Proxy/, so a subpath-scoped run can be proven to touch only one of
+    them."""
+    src = tmp_path / "src"
+    proj1 = src / "Projects" / "2026" / "FF5" / "Energy Transition"
+    proj2 = src / "Projects" / "2026" / "FF5" / "Other Project"
+    proj1.mkdir(parents=True)
+    proj2.mkdir(parents=True)
+    (proj1 / "clip_proj1.mov").write_text("project one footage")
+    (proj2 / "clip_proj2.mov").write_text("project two footage")
+
+    old_time = time.time() - 3600
+    for f in src.rglob("*"):
+        if f.is_file():
+            os.utime(f, (old_time, old_time))
+
+    return src
+
+
+def test_lane_a_dry_run_with_subpath_selects_only_that_project(rclone_binary, two_project_tree, tmp_path):
+    filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    dst = tmp_path / "dst_up"
+    cmd = build_up_command(
+        rclone_binary, str(two_project_tree), None, str(dst), filter_file,
+        subpath="Projects/2026/FF5/Energy Transition",
+    )
+    # local->local: use a plain path instead of "remote:root" for the dest.
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd + ["--dry-run"], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+    log_text = proc.stderr
+    assert "clip_proj1.mov" in log_text
+    assert "clip_proj2.mov" not in log_text
+
+
+def test_rclone_json_log_stats_has_bytes_and_speed(rclone_binary, tmp_path):
+    """Gate test for the --use-json-log stats shape a live-stats reader
+    (RcloneLane's Popen-based runner) depends on: periodic "stats" records
+    on stderr with numeric "bytes"/"speed" fields."""
+    src = tmp_path / "src"
+    src.mkdir()
+    big_file = src / "big.bin"
+    big_file.write_bytes(os.urandom(8 * 1024 * 1024))  # ~8 MB
+    dst = tmp_path / "dst"
+
+    cmd = [
+        rclone_binary, "copy", str(src), str(dst),
+        "--use-json-log", "--verbose",
+        "--stats", "200ms", "--stats-log-level", "NOTICE",
+        "--bwlimit", "10M",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    stats_records = []
+    for line in proc.stderr.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        stats = record.get("stats")
+        if isinstance(stats, dict):
+            stats_records.append(stats)
+
+    assert len(stats_records) >= 1, proc.stderr
+    assert "bytes" in stats_records[0]
+    assert "speed" in stats_records[0]

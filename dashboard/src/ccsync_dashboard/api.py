@@ -28,6 +28,13 @@ LANE_LABELS = {
     "lane_c_syncthing": "C",
 }
 
+# Scratch/utility Resolve project names (lowercased) that must never drive
+# sticky-root auto-matching, the resolve_project_unmapped new-project prompt,
+# machine_state, or media-tree presence. Mirrors the companion's
+# ignored_resolve_projects config default -- kept server-side too so reports
+# from OLD companion versions (or any unfiltered code path) stay harmless.
+IGNORED_RESOLVE_PROJECTS = {"untitled project", "new doc"}
+
 
 def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
     conn = db.connect(request.app.state.settings.db_path)
@@ -1366,8 +1373,18 @@ def api_report(
     # Sticky fix-destination mapping: the FIRST successful auto-match of a
     # Resolve project name to a tree project is stored and never changes
     # automatically -- admins edit it on the dashboard thereafter.
+    #
+    # Scratch/utility Resolve projects are dropped HERE, server-side, as
+    # well as in the companion's watcher (config ignored_resolve_projects):
+    # this is the belt-and-braces that also covers old companion versions
+    # and any companion code path that reports the bridge's project name
+    # unfiltered. Without it, one report of "New Doc" (the Blackmagic Proxy
+    # Generator's helper project) gets echoed back as
+    # resolve_project_unmapped and pops a bogus NEW PROJECT dialog.
     detected_slug = None
     resolve_project = (payload.resolve_project or "").strip()
+    if resolve_project.lower() in IGNORED_RESOLVE_PROJECTS:
+        resolve_project = ""
     if resolve_project:
         existing = conn.execute(
             "SELECT project_slug FROM project_roots WHERE resolve_project = ?",
@@ -1430,6 +1447,8 @@ def api_report(
         # media_tree is keyed by the RESOLVE PROJECT NAME; map it to a slug via
         # the sticky project_roots table (same source as the fix-dest mapping).
         for resolve_name, clips in payload.media_tree.items():
+            if resolve_name.strip().lower() in IGNORED_RESOLVE_PROJECTS:
+                continue
             slug = _slug_for_resolve_name(conn, resolve_name)
             if slug is None:
                 continue

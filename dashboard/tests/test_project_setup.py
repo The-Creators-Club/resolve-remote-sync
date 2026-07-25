@@ -77,6 +77,24 @@ def test_report_flag_absent_when_matched_or_mapped_or_no_project(env):
     assert "resolve_project_unmapped" not in resp.json()
 
 
+def test_report_ignores_scratch_resolve_projects(env):
+    """'New Doc' (Blackmagic Proxy Generator) and 'Untitled Project' must never
+    be flagged unmapped, sticky-matched, or stored in machine_state -- even
+    when reported by an old companion with no client-side filter."""
+    client, conn, _pd = env
+    headers = {"X-CCSync-Token": TOKEN}
+    for name in ("New Doc", "new doc", "Untitled Project"):
+        resp = client.post("/api/v1/report", headers=headers, json=report(name))
+        assert resp.status_code == 200
+        assert "resolve_project_unmapped" not in resp.json(), name
+    rows = conn.execute("SELECT * FROM project_roots").fetchall()
+    assert rows == []
+    state = conn.execute(
+        "SELECT resolve_project FROM machine_state WHERE editor_username='jsmith'"
+    ).fetchone()
+    assert state["resolve_project"] is None
+
+
 # -- tiered permission on PUT /project-roots -----------------------------
 
 

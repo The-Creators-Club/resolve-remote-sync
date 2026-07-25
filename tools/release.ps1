@@ -384,3 +384,12 @@ Write-Host "     thing you are about to test is not the thing you just built."
 Write-Host ""
 Write-Rule
 if ($DryRun) { Write-Step "dry run complete -- nothing was built, written, published, or installed" }
+
+# Say the exit code out loud. Invoke-Native pipes native stderr through
+# 2>&1, and in Windows PowerShell 5.1 that wraps every stderr line in a
+# NativeCommandError record -- pytest writes to stderr even on a clean run,
+# so the script's IMPLICIT exit code came back -1/255 after a fully
+# successful build. Failure paths above all exit non-zero explicitly and are
+# unaffected; this only closes the success path, so a CI step or a wrapper
+# script can trust "did release.ps1 succeed?" (2026-07-25).
+exit 0

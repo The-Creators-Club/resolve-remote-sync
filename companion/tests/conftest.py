@@ -116,6 +116,32 @@ def _no_real_tk_windows(monkeypatch, request):
         )
 
 
+@pytest.fixture(autouse=True)
+def _single_instance_slot_is_free(monkeypatch):
+    """Pretend no other companion holds the single-instance slot.
+
+    The guard is a NAMED WINDOWS MUTEX (app.acquire_single_instance), so it
+    is global to the login session -- unlike ~/.ccsync, no tmp_path or HOME
+    redirection can isolate a test from it. When a real companion is running
+    on the developer's own machine, run() returns before constructing the
+    app and any test asserting on construction order fails, with a symptom
+    ("'construct' is not in list") that names nothing to do with the cause.
+
+    Observed 2026-07-25: the suite was green all afternoon *because* the
+    companion happened to be stopped, and went red the moment the fixed
+    build was installed and launched -- i.e. the test outcome depended on
+    the developer's desktop state, which is the same defect class as the
+    live-log and real-Tk-window guards above.
+
+    Tests that exercise the blocked path patch this to False themselves;
+    a test-level monkeypatch applies after this fixture and wins.
+    """
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod, "acquire_single_instance", lambda: True)
+    yield
+
+
 def _find_rclone() -> str | None:
     """Look for a runnable rclone: PATH first, then the test-only portable
     binary at companion/.tools/rclone.exe (see README.md's "Tests" section —

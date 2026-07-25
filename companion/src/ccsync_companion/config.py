@@ -23,7 +23,7 @@ else:  # pragma: no cover - project targets 3.12
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -195,7 +195,8 @@ watch_debounce_seconds = 10
 transfers = 4
 
 # Local Syncthing REST API base URL and API key. Leave syncthing_api_key
-# empty to read it from Syncthing's own config.xml (standard per-OS path).
+# empty to read it from Syncthing's own config.xml (the installer-managed
+# ccsync\syncthing-config home first, else the stock per-OS path).
 syncthing_url = "http://127.0.0.1:8384"
 syncthing_api_key = ""
 

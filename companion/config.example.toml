@@ -76,8 +76,11 @@ watch_debounce_seconds = 10
 transfers = 4
 
 # Local Syncthing REST API base URL and API key. Leave syncthing_api_key
-# empty to read it from Syncthing's own config.xml at the standard per-OS
-# path (see ccsync_companion/sync/syncthing_lane.py: default_config_xml_path).
+# empty to read it from Syncthing's own config.xml -- first from the
+# installer-managed Syncthing home (%LOCALAPPDATA%\ccsync\syncthing-config
+# on Windows, ~/.local/ccsync/syncthing-config on macOS), falling back to
+# the stock per-OS Syncthing path for hand-rolled setups (see
+# ccsync_companion/sync/syncthing_lane.py: default_config_xml_path).
 syncthing_url = "http://127.0.0.1:8384"
 syncthing_api_key = ""
 

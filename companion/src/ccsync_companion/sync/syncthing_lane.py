@@ -36,7 +36,18 @@ log = logging.getLogger("ccsync.sync.syncthing")
 HttpGetFn = Callable[[str, str, float], Any]
 
 
-def default_config_xml_path() -> Path:
+def ccsync_config_xml_path() -> Path:
+    """config.xml inside the Syncthing home our own bootstrap installers run
+    Syncthing with (windows_bootstrap.ps1: %LOCALAPPDATA%\\ccsync\\
+    syncthing-config, macos_bootstrap.sh: ~/.local/ccsync/syncthing-config).
+    """
+    if platform.system() == "Windows":
+        base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        return Path(base) / "ccsync" / "syncthing-config" / "config.xml"
+    return Path.home() / ".local" / "ccsync" / "syncthing-config" / "config.xml"
+
+
+def _stock_config_xml_path() -> Path:
     system = platform.system()
     if system == "Windows":
         base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
@@ -46,6 +57,25 @@ def default_config_xml_path() -> Path:
     # Linux isn't a SPEC.md target platform, but a reasonable fallback costs nothing.
     xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     return Path(xdg_config) / "syncthing" / "config.xml"
+
+
+def default_config_xml_path() -> Path:
+    """Where to read the API key from when the config doesn't override it.
+
+    The ccsync-managed home wins when its config.xml exists -- that's the
+    instance our installers actually start, and the stock location may hold
+    a stale config.xml from some earlier hand-run `syncthing` whose key
+    would 403 against the running instance. The stock per-OS path is only
+    used for hand-rolled setups; with neither present we still return the
+    managed path so the lane's "no API key (checked ...)" error points at
+    the location a ccsync install is supposed to have."""
+    managed = ccsync_config_xml_path()
+    if managed.exists():
+        return managed
+    stock = _stock_config_xml_path()
+    if stock.exists():
+        return stock
+    return managed
 
 
 def read_api_key_from_config(path: Path) -> Optional[str]:

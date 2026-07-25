@@ -10,10 +10,47 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from ccsync_companion.sync.base import STATE_ERROR, STATE_IDLE, STATE_SYNCING
+from ccsync_companion.sync import syncthing_lane
 from ccsync_companion.sync.syncthing_lane import (
     SyncthingLane,
+    default_config_xml_path,
     read_api_key_from_config,
 )
+
+# -- default config.xml location --------------------------------------
+
+
+@pytest.fixture
+def _windows_paths(tmp_path, monkeypatch):
+    """Pin platform to Windows and LOCALAPPDATA to tmp so the resolution
+    order is testable on any OS. Returns (managed, stock) config.xml paths."""
+    monkeypatch.setattr(syncthing_lane.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    managed = tmp_path / "ccsync" / "syncthing-config" / "config.xml"
+    stock = tmp_path / "Syncthing" / "config.xml"
+    return managed, stock
+
+
+def test_default_config_prefers_ccsync_managed_home(_windows_paths):
+    managed, stock = _windows_paths
+    managed.parent.mkdir(parents=True)
+    managed.write_text("<configuration/>", encoding="utf-8")
+    stock.parent.mkdir(parents=True)
+    stock.write_text("<configuration/>", encoding="utf-8")
+    assert default_config_xml_path() == managed
+
+
+def test_default_config_falls_back_to_stock_when_no_managed(_windows_paths):
+    managed, stock = _windows_paths
+    stock.parent.mkdir(parents=True)
+    stock.write_text("<configuration/>", encoding="utf-8")
+    assert default_config_xml_path() == stock
+
+
+def test_default_config_neither_exists_points_at_managed(_windows_paths):
+    managed, _stock = _windows_paths
+    assert default_config_xml_path() == managed
+
 
 # -- config.xml parsing -----------------------------------------------
 

@@ -886,3 +886,31 @@ def test_trash_toast_is_rate_limited_but_logging_is_not(tmp_path, monkeypatch):
     lane._last_backup_dir = str(backup)
     lane._notify_trash(fake_result)
     assert len(calls) == 2
+
+
+def test_tally_captures_completed_file_names():
+    from ccsync_companion.sync.rclone_lane import RcloneRunTally
+
+    tally = RcloneRunTally()
+    tally.feed_record({"level": "info", "msg": "Copied (new)", "object": "B-roll/a.mov"})
+    tally.feed_record({"level": "info", "msg": "Moved (server-side)", "object": "B-roll/b.mov"})
+    tally.feed_record({"level": "info", "msg": "Deleted", "object": "B-roll/old.mov"})
+    tally.feed_record({"level": "error", "msg": "boom"})
+    result = tally.result()
+    assert result.completed_files == ["B-roll/a.mov", "B-roll/b.mov"]
+    assert result.transferred == 3 and result.deleted == 1
+
+
+def test_lane_records_and_drains_completions(tmp_path):
+    from ccsync_companion.sync import rclone_lane as rl
+
+    lane = rl.RcloneLane(direction=rl.DIRECTION_UP, local_root=str(tmp_path),
+                         remote="nas", remote_root="CC", state_dir=tmp_path)
+    result = rl.RcloneRunResult(ok=True, transferred=2, errors=[], raw_returncode=0,
+                                completed_files=["B-roll/a.mov", "B-roll/b.mov"])
+    lane._record_completions(result, "Projects/2026/CCT/X")
+    drained = lane.pop_completions()
+    assert [d["name"] for d in drained] == [
+        "Projects/2026/CCT/X/B-roll/a.mov", "Projects/2026/CCT/X/B-roll/b.mov"]
+    assert all(d["direction"] == "up" and d["lane"] == lane.name for d in drained)
+    assert lane.pop_completions() == []      # drained means drained

@@ -379,11 +379,36 @@ def build_transfers_view(
     queues = [q for q in queues if q["n_files"] > 0]
     queues.sort(key=lambda q: (q["editor"] or "", q["label"], q["lane"]))
 
+    # Editors pushing lane C content TO the server (the NAS folder's own
+    # need) -- a 400 MB mp3 uploading via Syncthing was invisible in every
+    # view (2026-07-26). Attribution to a single editor isn't knowable from
+    # the folder need alone, so the row names the project and direction.
+    incoming_q = """SELECT label, slug, need_items, need_bytes FROM projects
+                    WHERE active=1 AND need_bytes > 0"""
+    for r in conn.execute(incoming_q):
+        rows.append({
+            "editor": "", "machine": "", "lane": "lane_c_syncthing",
+            "name": f"{r['label']} -- {r['need_items']} file(s) arriving at the server",
+            "direction": "up",
+            "bytes_done": None, "bytes_total": r["need_bytes"], "percentage": None,
+            "speed_bps": None, "eta_seconds": None, "granularity": "project",
+        })
+
+    history = [
+        {
+            "editor": h["editor_username"], "machine": h["machine"],
+            "lane": h["lane"], "name": h["name"], "direction": h["direction"],
+            "completed_at": h["completed_at"] or h["received_at"],
+        }
+        for h in db.fetch_transfer_history(conn, editor=editor, limit=50)
+    ]
+
     return {"generated_at": now, "transfers": rows,
             "fleet_speed_bps": sum((x["speed_bps"] or 0) for x in rows),
             "queues": queues,
             "queued_files": sum(q["n_files"] for q in queues),
-            "queued_bytes": sum(q["bytes"] or 0 for q in queues)}
+            "queued_bytes": sum(q["bytes"] or 0 for q in queues),
+            "history": history}
 
 
 def build_presence_view(
@@ -1794,6 +1819,15 @@ MAX_MANIFEST_FILES = 4000         # per project, per kind (db caps rows again)
 MAX_MEDIA_CLIPS = 4000            # per Resolve project
 
 
+class CompletedIn(BaseModel):
+    """One finished per-file transfer, from rclone's Copied/Moved records
+    (the dashboard's HISTORY section)."""
+    name: str = Field(max_length=512)
+    direction: str = Field(default="", max_length=16)
+    lane: str = Field(default="", max_length=64)
+    at: str = Field(default="", max_length=64)
+
+
 class TransferIn(BaseModel):
     name: str = Field(max_length=512)
     direction: str = Field(default="", max_length=16)
@@ -1853,6 +1887,8 @@ class ReportIn(BaseModel):
     # Generous but bounded (see SEC-4): current companions send exactly the
     # three lanes in LANE_LABELS.
     lanes: list[LaneReportIn] = Field(max_length=32)
+    # Completed-file feed for the HISTORY section (companions >= 0.4.11).
+    completed: list[CompletedIn] | None = Field(default=None, max_length=256)
     queue: list[str] | None = Field(default=None, max_length=MAX_REPORT_PROJECTS)
     current_project: str | None = Field(default=None, max_length=512)
     resolve_project: str | None = Field(default=None, max_length=512)
@@ -2038,6 +2074,13 @@ def api_report(
                 "eta_seconds": t.eta_seconds, "project_slug": t.project_slug,
             })
     db.replace_active_transfers(conn, editor, machine, transfer_rows, received_at)
+    if payload.completed:
+        db.add_transfer_history(
+            conn, editor, machine,
+            [{"lane": c.lane, "name": c.name, "direction": c.direction, "at": c.at}
+             for c in payload.completed],
+            received_at,
+        )
 
     if payload.local_manifest is not None:
         for rel, m in payload.local_manifest.items():

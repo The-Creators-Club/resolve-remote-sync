@@ -28,7 +28,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -938,6 +938,10 @@ class RcloneRunResult:
     # Whether any file was moved into --backup-dir this run (lane B) -- see
     # RcloneLane._notify_trash.
     deleted: int = 0
+    # Per-file names rclone reported as Copied/Moved this run (bounded, see
+    # RcloneRunTally.MAX_COMPLETED) -- the transfer HISTORY the dashboard
+    # shows; requested 2026-07-26.
+    completed_files: list = field(default_factory=list)
 
 
 class RcloneRunTally:
@@ -955,12 +959,15 @@ class RcloneRunTally:
 
     # Enough to explain a failure; the log file has the rest.
     MAX_ERRORS = 200
+    # Newest completions win when a run moves more than this.
+    MAX_COMPLETED = 200
 
     def __init__(self) -> None:
         self.transferred = 0
         self.deleted = 0
         self.error_count = 0
         self._errors: deque[str] = deque(maxlen=self.MAX_ERRORS)
+        self._completed: deque[str] = deque(maxlen=self.MAX_COMPLETED)
 
     def feed_record(self, record: dict) -> None:
         level = record.get("level", "")
@@ -975,6 +982,12 @@ class RcloneRunTally:
             self.transferred += 1
             if "Deleted" in msg:
                 self.deleted += 1
+            else:
+                # "object" is the file path relative to the transfer root
+                # ("B-roll/.../clip.mov") in rclone's per-file records.
+                name = str(record.get("object") or "")
+                if name:
+                    self._completed.append(name)
 
     def result(self) -> RcloneRunResult:
         return RcloneRunResult(
@@ -984,6 +997,7 @@ class RcloneRunTally:
             raw_returncode=0,
             error_count=self.error_count,
             deleted=self.deleted,
+            completed_files=list(self._completed),
         )
 
 
@@ -1179,6 +1193,9 @@ class RcloneLane(LaneAdapter):
         self._express_seq = 0
         # Lane B's --backup-dir for the run in flight (see _notify_trash).
         self._last_backup_dir: Optional[str] = None
+        # Completed-file events awaiting the next report (the dashboard's
+        # transfer HISTORY). Bounded; drained by pop_completions().
+        self._pending_completions: deque = deque(maxlen=400)
         # Monotonic stamp of the last trash TOAST, None until the first. A
         # large cleanup is spread across passes by --max-delete-size, and a
         # toast per pass for one continuing event trained the editor to
@@ -1518,6 +1535,8 @@ class RcloneLane(LaneAdapter):
                     self._status.current_project = None
                 return self.status()
 
+        self._record_completions(result, subpath)
+
         with self._lock:
             self._status.transferring = 0
             self._status.queued = 0
@@ -1565,6 +1584,37 @@ class RcloneLane(LaneAdapter):
                 self._status.detail = f"transferred {result.transferred} file(s)"
         self._notify_trash(result)
         return self.status()
+
+    def _record_completions(self, result: RcloneRunResult, subpath: Optional[str]) -> None:
+        """Queue this run's per-file completions for the next report -- the
+        dashboard's transfer HISTORY (requested 2026-07-26; before this,
+        finished files vanished from the live table with no trace). Names
+        are made project-relative-from-Projects/ when a subpath is known so
+        they read like every other path on the dashboard. Never raises."""
+        try:
+            if not result.completed_files:
+                return
+            at = datetime.now(timezone.utc).isoformat()
+            prefix = f"{subpath.strip('/')}/" if subpath else ""
+            for name in result.completed_files:
+                self._pending_completions.append({
+                    "name": f"{prefix}{name}",
+                    "direction": self.direction,
+                    "lane": self.name,
+                    "at": at,
+                })
+        except Exception:
+            log.debug("%s: recording completions failed", self.name, exc_info=True)
+
+    def pop_completions(self) -> list[dict]:
+        """Drain the completed-file events (reporter thread). Never raises."""
+        out: list[dict] = []
+        try:
+            while self._pending_completions:
+                out.append(self._pending_completions.popleft())
+        except Exception:
+            log.debug("%s: pop_completions failed", self.name, exc_info=True)
+        return out
 
     def _notify_trash(self, result: RcloneRunResult) -> None:
         """Tell the editor when lane B moved local files into .ccsync-trash.
@@ -2108,6 +2158,9 @@ class RcloneLane(LaneAdapter):
             self._express_record(result.transferred, tail or f"rclone exited {returncode}")
             return
         log.info("%s: express uploaded %d file(s)", self.name, result.transferred)
+        # Express files-from paths are already local_root-relative
+        # ("Projects/..."), so no subpath prefix.
+        self._record_completions(result, None)
         self._express_record(result.transferred, None)
 
     def _express_record(self, transferred: int, error: Optional[str]) -> None:

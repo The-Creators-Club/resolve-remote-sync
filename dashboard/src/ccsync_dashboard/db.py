@@ -209,6 +209,28 @@ DROP TABLE companion_packages;
 ALTER TABLE companion_packages_v11 RENAME TO companion_packages;
 """
 
+# v12: transfer history + the server's own lane C need. transfer_history is
+# the per-file completion feed the companions report (rclone Copied/Moved
+# records); bounded by prune. projects.need_* is the NAS Syncthing folder's
+# OWN needTotalItems/needBytes -- i.e. what editors are pushing TO the
+# server, which no view could show before (a 400 MB mp3 uploading via lane
+# C looked like "nothing happening", 2026-07-26).
+SCHEMA_V12 = """
+CREATE TABLE IF NOT EXISTS transfer_history (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  editor_username TEXT NOT NULL,
+  machine         TEXT NOT NULL,
+  lane            TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  direction       TEXT NOT NULL,
+  completed_at    TEXT NOT NULL,
+  received_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_transfer_history_at ON transfer_history(completed_at);
+ALTER TABLE projects ADD COLUMN need_items INTEGER;
+ALTER TABLE projects ADD COLUMN need_bytes INTEGER;
+"""
+
 # v3: fix-destination project-root visibility/override. The companion
 # auto-detects which project the editor is working in (Resolve project name
 # matched against the tree) and reports it; an editor/admin can override it
@@ -323,6 +345,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (9, SCHEMA_V9),
     (10, SCHEMA_V10),
     (11, SCHEMA_V11),
+    (12, SCHEMA_V12),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -499,6 +522,7 @@ def deactivate_missing_projects(
 def set_folder_status(
     conn: sqlite3.Connection, project_id: int, state: str | None,
     error: str | None, now: str,
+    need_items: int | None = None, need_bytes: int | None = None,
 ) -> None:
     """Record Syncthing's own health for this project's folder.
 
@@ -508,8 +532,9 @@ def set_folder_status(
     fetch_collector_status so a folder that has stopped syncing entirely
     can't keep showing a stale-but-plausible completion %."""
     conn.execute(
-        "UPDATE projects SET folder_state=?, folder_error=?, folder_state_at=? WHERE id=?",
-        (state, (error or None), now, project_id),
+        """UPDATE projects SET folder_state=?, folder_error=?, folder_state_at=?,
+             need_items=?, need_bytes=? WHERE id=?""",
+        (state, (error or None), now, need_items, need_bytes, project_id),
     )
 
 
@@ -1168,6 +1193,7 @@ def prune(conn: sqlite3.Connection, now: str) -> None:
         return (parse_iso(now) - dt.timedelta(days=days, hours=hours, seconds=seconds)).isoformat()
 
     conn.execute("DELETE FROM completion_history WHERE ts < ?", (cutoff(days=HISTORY_MAX_AGE_DAYS),))
+    conn.execute("DELETE FROM transfer_history WHERE received_at < ?", (cutoff(days=7),))
     # Thin rows older than 48h to one per (pair, hour); substr(ts,1,13) = YYYY-MM-DDTHH.
     conn.execute(
         """DELETE FROM completion_history WHERE ts < ? AND id NOT IN (
@@ -1508,6 +1534,46 @@ def prune_completion_not_shared(
         conn.execute("DELETE FROM missing_files WHERE project_id=? AND device_id=?",
                      (project_id, device_id))
     return len(victims)
+
+
+TRANSFER_HISTORY_CAP_PER_MACHINE = 300
+
+
+def add_transfer_history(
+    conn: sqlite3.Connection, editor: str, machine: str, entries: list[dict[str, Any]],
+    now: str,
+) -> None:
+    """Append completed-file events, keeping only the newest
+    TRANSFER_HISTORY_CAP_PER_MACHINE rows per (editor, machine)."""
+    for e in entries:
+        conn.execute(
+            """INSERT INTO transfer_history
+                 (editor_username, machine, lane, name, direction, completed_at, received_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (editor, machine, str(e.get("lane") or ""), str(e.get("name") or ""),
+             str(e.get("direction") or ""), str(e.get("at") or now), now),
+        )
+    if entries:
+        conn.execute(
+            """DELETE FROM transfer_history WHERE editor_username=? AND machine=?
+               AND id NOT IN (SELECT id FROM transfer_history
+                              WHERE editor_username=? AND machine=?
+                              ORDER BY id DESC LIMIT ?)""",
+            (editor, machine, editor, machine, TRANSFER_HISTORY_CAP_PER_MACHINE),
+        )
+
+
+def fetch_transfer_history(
+    conn: sqlite3.Connection, editor: str | None = None, limit: int = 50
+) -> list[dict[str, Any]]:
+    q = "SELECT * FROM transfer_history"
+    params: list[Any] = []
+    if editor is not None:
+        q += " WHERE editor_username=?"
+        params.append(editor)
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in conn.execute(q, params)]
 
 
 def fetch_sync_backlog(

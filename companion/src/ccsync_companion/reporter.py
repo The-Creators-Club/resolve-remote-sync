@@ -103,6 +103,7 @@ class DashboardReporter:
         get_identity_token: Optional[GetIdentityTokenFn] = None,
         on_report_response: Optional[OnReportResponseFn] = None,
         get_transport_health: Optional[Callable[[], dict[str, Any]]] = None,
+        get_completions: Optional[Callable[[], list]] = None,
     ) -> None:
         self._get_statuses = get_statuses
         self.cfg = cfg
@@ -115,6 +116,11 @@ class DashboardReporter:
         except (TypeError, ValueError):
             self.full_report_timeout = max(timeout, 30.0)
         self._get_queue_info = get_queue_info
+        # Drains the lanes' completed-file events (dashboard HISTORY).
+        # DRAIN semantics: events fetched here are gone from the lane, so a
+        # failed POST loses that tick's entries -- acceptable for a history
+        # feed, never for anything stronger.
+        self._get_completions = get_completions
         self._get_resolve_project = get_resolve_project
         self._get_local_manifest = get_local_manifest
         self._get_media_tree = get_media_tree
@@ -205,6 +211,14 @@ class DashboardReporter:
                 for status in statuses
             ],
         }
+        if self._get_completions is not None:
+            try:
+                completed = list(self._get_completions() or [])[:200]
+            except Exception:
+                log.exception("get_completions() failed")
+                completed = []
+            if completed:
+                payload["completed"] = completed
         if self._get_queue_info is not None:
             try:
                 queue, current_project = self._get_queue_info()

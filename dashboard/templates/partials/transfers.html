@@ -52,3 +52,23 @@
     </ul>
   </details>
 {% endfor %}
+
+<div class="side-head" style="margin-top:1.4rem">[ HISTORY ]
+  <span class="muted">recently completed files (lanes A/B, per companion reports; kept 7 days)</span>
+</div>
+{% if transfers.history %}
+<table class="editors">
+  <tbody>
+  {% for h in transfers.history %}
+    <tr>
+      {% if scope_admin %}<td class="who">{{ h.editor }}</td>{% endif %}
+      <td class="mono">{{ "⇡" if h.direction == "up" else "⇣" }}</td>
+      <td class="mono-sm">{{ h.name }}</td>
+      <td class="muted">{{ h.completed_at | ago }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="muted">nothing completed recently</div>
+{% endif %}

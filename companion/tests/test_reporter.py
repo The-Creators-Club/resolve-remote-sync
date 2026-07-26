@@ -865,3 +865,24 @@ def test_hand_edited_report_intervals_never_raise_in_the_constructor(caplog):
 
     assert reporter.report_interval == 60.0
     assert reporter.report_interval_active == 5.0
+
+
+def test_payload_carries_completions_when_provided():
+    from ccsync_companion.reporter import DashboardReporter
+    from ccsync_companion.sync.base import LaneStatus
+
+    events = [{"name": "Projects/X/a.mov", "direction": "up",
+               "lane": "lane_a_video_up", "at": "2026-07-26T08:00:00+00:00"}]
+    reporter = DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")],
+        {"dashboard_url": "http://x", "editor_name": "e"},
+        get_completions=lambda: list(events),
+    )
+    payload = reporter._build_payload()
+    assert payload["completed"] == events
+
+    reporter_none = DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")],
+        {"dashboard_url": "http://x", "editor_name": "e"},
+    )
+    assert "completed" not in reporter_none._build_payload()

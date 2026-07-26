@@ -744,6 +744,10 @@ class Collector:
                 project_id,
                 str(status.get("state") or "") or None,
                 str(status.get("error") or "") or None,
+                # The folder's OWN need = what editors are pushing TO the
+                # server (lane C uploads) -- shown on the transfers page.
+                int(status.get("needTotalItems", 0) or 0),
+                int(status.get("needBytes", 0) or 0),
             ))
             for device_id in shared:
                 device_row = self._device_ids.get(device_id)
@@ -768,8 +772,9 @@ class Collector:
                     fresh[(slug, device_id)] = need_items
 
         now = self.now_fn()
-        for project_id, state, error in folder_status:
-            db.set_folder_status(conn, project_id, state, error, now)
+        for project_id, state, error, f_need_items, f_need_bytes in folder_status:
+            db.set_folder_status(conn, project_id, state, error, now,
+                                 need_items=f_need_items, need_bytes=f_need_bytes)
         for project_id, device_row, comp, global_items, global_bytes in rows:
             completion = float(comp.get("completion", 0.0))
             need_items = int(comp.get("needItems", 0))

@@ -317,3 +317,33 @@ def test_prune_completion_not_shared(env):
     assert [r["project_id"] for r in left] == [pid]
     assert conn.execute("SELECT COUNT(*) FROM missing_files WHERE project_id=?",
                         (pid2,)).fetchone()[0] == 0
+
+
+def test_completed_feed_lands_in_history_and_incoming_need_shows(env):
+    client, conn, now = env
+    payload = report("ruskin", "EDIT-PC")
+    payload["completed"] = [
+        {"name": "Projects/2026/FF5/Energy Transition/B-roll/a.mov",
+         "direction": "up", "lane": "lane_a_video_up", "at": "2026-07-26T08:00:00+00:00"},
+    ]
+    assert client.post("/api/v1/report", json=payload, headers=hdr("ruskin")).status_code == 200
+
+    view = build_transfers_view(conn)
+    (h,) = view["history"]
+    assert h["editor"] == "ruskin" and h["direction"] == "up"
+    assert h["name"].endswith("B-roll/a.mov")
+
+    # scoping: another editor sees nothing
+    assert build_transfers_view(conn, editor="jane")["history"] == []
+
+    # server-side lane C need renders as an incoming project-level row
+    conn.execute("UPDATE projects SET need_items=1, need_bytes=420000000")
+    conn.commit()
+    rows = build_transfers_view(conn)["transfers"]
+    (incoming,) = [r for r in rows if r["direction"] == "up" and r["granularity"] == "project"]
+    assert "arriving at the server" in incoming["name"]
+
+    # page renders the HISTORY section
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    page = client.get("/partials/transfers")
+    assert "[ HISTORY ]" in page.text and "B-roll/a.mov" in page.text

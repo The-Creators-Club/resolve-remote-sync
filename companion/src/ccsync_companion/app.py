@@ -375,6 +375,7 @@ class CompanionApp:
             get_identity_token=lambda: self.identity.token,
             on_report_response=self._on_report_response,
             get_transport_health=self.transport_health,
+            get_completions=self._pop_lane_completions,
         )
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
@@ -1146,6 +1147,21 @@ class CompanionApp:
             self._sync_enabled = self._configured_sync_enabled
         else:
             self._sync_enabled = self._configured_sync_enabled and (role != "base")
+
+    def _pop_lane_completions(self) -> list:
+        """Drain every lane's completed-file events for the reporter (the
+        dashboard's transfer HISTORY). Lanes without the accessor (tests,
+        the Syncthing lane) contribute nothing."""
+        out: list = []
+        for lane in self.lanes:
+            pop = getattr(lane, "pop_completions", None)
+            if pop is None:
+                continue
+            try:
+                out.extend(pop())
+            except Exception:
+                log.exception("pop_completions failed for %s", getattr(lane, "name", lane))
+        return out
 
     def effective_mode(self) -> str:
         """"base" or "editor" -- the identity-derived role when signed in

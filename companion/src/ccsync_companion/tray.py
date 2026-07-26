@@ -651,11 +651,123 @@ def _confirm_grade_swap(app: "CompanionApp", to_server: bool) -> None:
         return
     try:
         ok, message = (app.swap_p_to_server() if to_server else app.swap_p_to_local())
+        if to_server and not ok:
+            from . import drive_swap
+
+            if drive_swap.is_auth_failure(message):
+                # Windows has no stored login for the server (the normal
+                # state on a fresh install). Ask for it and retry -- on
+                # success app.swap_p_to_server persists it to Credential
+                # Manager, so this dialog appears once per machine.
+                creds = _ask_server_credentials(app)
+                if creds is None:
+                    return  # editor cancelled; P: is already back on local
+                ok, message = app.swap_p_to_server(*creds)
     except Exception:
         log.exception("grade swap raised")
         _notify(app, "The P: swap failed. Tray → Copy diagnostics for your admin.")
         return
     _notify(app, message if ok else f"Swap stopped: {message}")
+
+
+def _ask_server_credentials(app: "CompanionApp") -> Optional[tuple[str, str]]:
+    """Username+password dialog for the grade-swap's auth retry: the same
+    TrueNAS login the editor signs in to the dashboard with, username
+    prefilled from the verified identity. Returns None on cancel. Same Tk
+    plumbing and popup lock as _show_sign_in_dialog."""
+    lock = getattr(app, "_popup_active_lock", None)
+    if lock is not None and not lock.acquire(blocking=False):
+        _notify(app, "Another CCSync window is already open. Close it first.")
+        return None
+    try:
+        return _ask_server_credentials_locked(app)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _ask_server_credentials_locked(app: "CompanionApp") -> Optional[tuple[str, str]]:
+    try:
+        import tkinter as tk
+
+        from . import theme
+    except Exception as exc:
+        log.warning("credentials dialog unavailable (%s)", exc)
+        _notify(app, "Couldn't open the login window. Restart CCSync and try again.")
+        return None
+
+    try:
+        root = tk.Tk()
+    except Exception as exc:
+        log.warning("credentials dialog failed to open (%s)", exc)
+        _notify(app, "Couldn't open the login window. Restart CCSync and try again.")
+        return None
+    result: list[Optional[tuple[str, str]]] = [None]
+    root.title("CCSYNC.EXE: server login")
+    theme.apply_window_icon(tk, root)
+    root.attributes("-topmost", True)
+    root.configure(bg=theme.BG, padx=18, pady=14)
+
+    tk.Label(root, text="► SERVER LOGIN", bg=theme.BG, fg=theme.RED,
+             font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+    tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+    tk.Label(root,
+             text=("Windows needs your server login to stream originals. Enter the "
+                   "same TrueNAS username and password you sign in with. It is "
+                   "saved on this machine, so you'll only be asked once."),
+             bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
+             wraplength=360).pack(anchor="w", pady=(6, 10))
+
+    form = tk.Frame(root, bg=theme.BG)
+    form.pack(anchor="w", fill="x")
+
+    tk.Label(form, text="username:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
+        row=0, column=0, sticky="w", pady=(0, 6))
+    username_var = tk.StringVar()
+    try:
+        username_var.set(app.editor_identity() or "")
+    except Exception:
+        pass
+    username_entry = tk.Entry(form, textvariable=username_var, font=theme.mono(10), width=28,
+                               bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
+                               relief="flat", highlightthickness=1,
+                               highlightbackground=theme.RED_DIM, highlightcolor=theme.RED)
+    username_entry.grid(row=0, column=1, sticky="w", pady=(0, 6), padx=(8, 0))
+
+    tk.Label(form, text="password:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
+        row=1, column=0, sticky="w")
+    password_var = tk.StringVar()
+    password_entry = tk.Entry(form, textvariable=password_var, font=theme.mono(10), width=28,
+                               show="*", bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
+                               relief="flat", highlightthickness=1,
+                               highlightbackground=theme.RED_DIM, highlightcolor=theme.RED)
+    password_entry.grid(row=1, column=1, sticky="w", padx=(8, 0))
+
+    error_label = tk.Label(root, text="", bg=theme.BG, fg=theme.RED, font=theme.mono(9),
+                            justify="left", anchor="w", wraplength=360)
+    error_label.pack(anchor="w", pady=(8, 0))
+
+    btn_bar = tk.Frame(root, bg=theme.BG)
+    btn_bar.pack(anchor="e", pady=(12, 0))
+
+    def _cancel():
+        root.destroy()
+
+    def _submit():
+        username = username_var.get().strip()
+        if not username or not password_var.get():
+            error_label.config(text="username and password are both required")
+            return
+        result[0] = (username, password_var.get())
+        root.destroy()
+
+    theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
+    theme.neon_button(tk, btn_bar, "CONNECT", _submit, primary=True).pack(side="left")
+    root.bind("<Return>", lambda _e: _submit())
+    root.protocol("WM_DELETE_WINDOW", _cancel)
+    (password_entry if username_var.get() else username_entry).focus_set()
+    root.mainloop()
+    return result[0]
 
 
 def _guarded(app: "CompanionApp", label: str, fn) -> None:

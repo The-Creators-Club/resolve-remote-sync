@@ -61,7 +61,39 @@ def test_swap_to_server_sequence_and_auth_hint():
 
     ok, msg = drive_swap.swap_to_server(unc, denied_run)
     assert not ok
-    assert "cmdkey /add:nas" in msg          # actionable credentials hint
+    assert drive_swap.is_auth_failure(msg)   # tray reacts by asking for login
+
+
+def test_is_auth_failure_recognises_console_prompt_cancel():
+    # The live 2026-07-26 failure: net use tried to prompt with no console.
+    assert drive_swap.is_auth_failure(
+        "System error 1223 has occurred. The operation was canceled by the "
+        "user. Enter the username for '100.71.216.3':")
+    assert drive_swap.is_auth_failure("The user name or password is incorrect.")
+    assert not drive_swap.is_auth_failure("System error 53: network path not found")
+
+
+def test_swap_to_server_with_credentials_and_persist():
+    calls = []
+    unc = "\\\\nas\\TheCreatorsPool\\Creators_Club"
+
+    def run(args):
+        calls.append(args)
+        return _proc(0, "")
+
+    ok, _ = drive_swap.swap_to_server(unc, run, username="alex", password="pw")
+    assert ok
+    assert calls[-1] == ["net", "use", "P:", unc, "/persistent:no", "/user:alex", "pw"]
+
+    calls.clear()
+    drive_swap.persist_credentials(unc, "alex", "pw", run)
+    assert calls == [["cmdkey", "/add:nas", "/user:alex", "/pass:pw"]]
+
+    # missing host/username -> silently does nothing
+    calls.clear()
+    drive_swap.persist_credentials("", "alex", "pw", run)
+    drive_swap.persist_credentials(unc, "", "pw", run)
+    assert calls == []
 
 
 def test_swap_to_local_prefers_loopback_then_subst():

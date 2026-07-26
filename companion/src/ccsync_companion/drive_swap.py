@@ -37,16 +37,24 @@ P_DRIVE = "P:"
 LOOPBACK_SHARE = "CCSync_P"
 
 # Windows error text fragments that mean "the server wants credentials".
-_AUTH_HINTS = ("denied", "logon", "credential", "password", "1326", "user name")
+# 1223/"canceled by the user"/"Enter the username" is net use trying to
+# PROMPT on a console this windowed exe doesn't have (seen live 2026-07-26):
+# same root cause, no credentials stored for the host.
+_AUTH_HINTS = ("denied", "logon", "credential", "password", "1326", "user name",
+               "1223", "canceled", "cancelled", "username")
 
 RunFn = Callable[..., "subprocess.CompletedProcess"]
 
 
 def _default_run(args: list[str]) -> "subprocess.CompletedProcess":
     creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+    # stdin=DEVNULL: net use PROMPTS for a username when the host wants
+    # credentials it doesn't have. There is no console to answer on, so
+    # without this the prompt half-hangs then dies as 1223 "canceled by the
+    # user". With it, the failure is immediate and classified as auth.
     return subprocess.run(
         args, capture_output=True, encoding="utf-8", errors="replace",
-        timeout=30, creationflags=creationflags,
+        timeout=30, creationflags=creationflags, stdin=subprocess.DEVNULL,
     )
 
 
@@ -105,27 +113,54 @@ def _error_tail(proc: "subprocess.CompletedProcess") -> str:
     return " ".join(text.split())[-200:]
 
 
-def swap_to_server(server_unc: str, run_fn: RunFn = _default_run) -> tuple[bool, str]:
+def is_auth_failure(message: str) -> bool:
+    """True when a swap_to_server failure message means "the server wants
+    credentials" -- the tray reacts by asking for the editor's server login
+    and retrying (tray._confirm_grade_swap)."""
+    return any(h in str(message or "").lower() for h in _AUTH_HINTS)
+
+
+def swap_to_server(
+    server_unc: str,
+    run_fn: RunFn = _default_run,
+    username: str = "",
+    password: str = "",
+) -> tuple[bool, str]:
     """Map P: to the server tree. On failure the caller MUST restore the
     local map (see app.swap_p_to_server) -- this function reports, it does
-    not roll back."""
+    not roll back. username/password (the editor's TrueNAS login) are passed
+    to net use when given -- the retry path after is_auth_failure()."""
     if not str(server_unc or "").strip():
         return False, "server_p_unc is not configured"
     _unmap(run_fn)
+    args = ["net", "use", P_DRIVE, str(server_unc), "/persistent:no"]
+    if username:
+        args += [f"/user:{username}", password or ""]
     try:
-        proc = run_fn(["net", "use", P_DRIVE, str(server_unc), "/persistent:no"])
+        proc = run_fn(args)
     except Exception as exc:
         return False, f"net use failed: {exc}"
     if proc.returncode != 0:
         message = _error_tail(proc) or f"net use exited {proc.returncode}"
-        if any(h in message.lower() for h in _AUTH_HINTS):
-            message += (
-                " -- Windows needs your server login saved once: run "
-                f"cmdkey /add:{_unc_host(server_unc)} /user:<your username> /pass"
-                " then try again."
-            )
         return False, message
     return True, "P: now shows the SERVER originals"
+
+
+def persist_credentials(
+    server_unc: str, username: str, password: str, run_fn: RunFn = _default_run,
+) -> None:
+    """Best-effort: store the server login in Windows Credential Manager so
+    every future swap (and Explorer itself) authenticates silently."""
+    host = _unc_host(server_unc)
+    if not (host and username):
+        return
+    try:
+        proc = run_fn(["cmdkey", f"/add:{host}", f"/user:{username}",
+                       f"/pass:{password or ''}"])
+        if proc.returncode != 0:
+            log.debug("cmdkey /add failed: %s", _error_tail(proc))
+    except Exception:
+        log.debug("cmdkey /add raised", exc_info=True)
 
 
 def swap_to_local(local_root: str, run_fn: RunFn = _default_run) -> tuple[bool, str]:

@@ -577,7 +577,13 @@ class CompanionApp:
         path = item.get("file_path", "")
         # While the user has DELIBERATELY pointed P: at the server (the
         # tray's grade-swap), canonical paths resolving off-machine is the
-        # chosen state, not a broken mapping.
+        # chosen state, not a broken mapping. Same while a swap is MID-FLIGHT:
+        # P: is briefly unmapped between the unmap and the remap, and warning
+        # about that window scared an editor into thinking the swap broke
+        # their setup (seen live 2026-07-26).
+        if getattr(self, "_p_swap_busy", False):
+            log.debug("mapping warning suppressed (P: swap in progress): %s", path)
+            return
         try:
             if self.p_mapping_mode() == "server":
                 log.debug("mapping warning suppressed (P: is grade-swapped to the server): %s", path)
@@ -1236,20 +1242,34 @@ class CompanionApp:
         self._p_mode_cache = (now, mode)
         return mode
 
-    def swap_p_to_server(self) -> tuple[bool, str]:
+    def swap_p_to_server(self, username: str = "", password: str = "") -> tuple[bool, str]:
         """Remap P: to the server tree for full-res grading. On failure the
         LOCAL map is restored before returning -- the worst outcome is
-        "nothing changed", never an unmapped P:."""
+        "nothing changed", never an unmapped P:.
+
+        username/password are the retry path: when the plain attempt fails
+        with an auth error (no stored Windows credentials for the server),
+        the tray asks for the editor's server login and calls again. On a
+        successful credentialed swap the login is persisted to Credential
+        Manager so every later swap is silent."""
         from . import drive_swap
 
         if not self.p_swap_available():
             return False, "grade-swap is not available on this machine"
-        ok, message = drive_swap.swap_to_server(self._server_p_unc())
-        if not ok:
-            restored, restore_msg = drive_swap.swap_to_local(
-                str(self.config.get("local_root", "")))
-            suffix = " P: was restored to your local copy." if restored else f" AND {restore_msg}"
-            message = message + suffix
+        unc = self._server_p_unc()
+        self._p_swap_busy = True
+        try:
+            ok, message = drive_swap.swap_to_server(unc, username=username,
+                                                    password=password)
+            if ok and username:
+                drive_swap.persist_credentials(unc, username, password)
+            if not ok:
+                restored, restore_msg = drive_swap.swap_to_local(
+                    str(self.config.get("local_root", "")))
+                suffix = " P: was restored to your local copy." if restored else f" AND {restore_msg}"
+                message = message + suffix
+        finally:
+            self._p_swap_busy = False
         self._p_mode_cache = None
         log.info("grade-swap to server: ok=%s (%s)", ok, message)
         return ok, message
@@ -1257,7 +1277,11 @@ class CompanionApp:
     def swap_p_to_local(self) -> tuple[bool, str]:
         from . import drive_swap
 
-        ok, message = drive_swap.swap_to_local(str(self.config.get("local_root", "")))
+        self._p_swap_busy = True
+        try:
+            ok, message = drive_swap.swap_to_local(str(self.config.get("local_root", "")))
+        finally:
+            self._p_swap_busy = False
         self._p_mode_cache = None
         log.info("grade-swap to local: ok=%s (%s)", ok, message)
         return ok, message

@@ -1506,7 +1506,7 @@ def test_swap_p_to_server_restores_local_on_failure(monkeypatch):
 
     restored = []
     monkeypatch.setattr(drive_swap, "swap_to_server",
-                        lambda unc, run_fn=None: (False, "Access is denied"))
+                        lambda unc, run_fn=None, **kw: (False, "Access is denied"))
     monkeypatch.setattr(drive_swap, "swap_to_local",
                         lambda root, run_fn=None: (restored.append(root) or True, "back"))
     stub = _swap_stub(monkeypatch)
@@ -1514,3 +1514,28 @@ def test_swap_p_to_server_restores_local_on_failure(monkeypatch):
     assert not ok
     assert restored == ["D:\\Creators_Club"]
     assert "restored to your local copy" in msg
+    assert stub._p_swap_busy is False        # busy flag always cleared
+
+
+def test_swap_p_to_server_persists_credentials_on_success(monkeypatch):
+    import os
+    if os.name != "nt":
+        import pytest
+        pytest.skip("windows-only feature")
+    from ccsync_companion import drive_swap
+
+    persisted = []
+    monkeypatch.setattr(drive_swap, "swap_to_server",
+                        lambda unc, run_fn=None, **kw: (True, "P: now shows the SERVER originals"))
+    monkeypatch.setattr(drive_swap, "persist_credentials",
+                        lambda unc, u, p, run_fn=None: persisted.append((u, p)))
+    stub = _swap_stub(monkeypatch)
+    from ccsync_companion.app import CompanionApp
+    ok, _ = CompanionApp.swap_p_to_server(stub, "alex", "pw")
+    assert ok
+    assert persisted == [("alex", "pw")]
+
+    # no credentials given -> nothing persisted
+    ok, _ = CompanionApp.swap_p_to_server(stub)
+    assert ok
+    assert persisted == [("alex", "pw")]

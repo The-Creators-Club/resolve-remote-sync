@@ -1133,6 +1133,7 @@ class ProgressWindow:
         self.root = root
         try:
             root.title(self.title)
+            theme.apply_window_icon(tk, root)
             root.attributes("-topmost", True)
             root.configure(bg=theme.BG, padx=18, pady=14)
             bar_style = theme.style_progressbar(ttk)
@@ -1288,6 +1289,7 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
     try:
         root = tk.Tk()
         root.title(title)
+        theme.apply_window_icon(tk, root)
         root.attributes("-topmost", True)
         root.configure(bg=theme.BG, padx=18, pady=14)
 

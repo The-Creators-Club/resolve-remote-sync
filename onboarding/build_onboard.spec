@@ -39,6 +39,10 @@ a = Analysis(
     datas=[
         (str(BOOTSTRAP_PS1), "."),
         (str(COMPANION_EXE), "."),   # bundled so onboard.exe installs everything
+        # Logo for the wizard window icon -- theme.apply_window_icon() reads
+        # it from sys._MEIPASS/ccsync_companion/assets/icon.png.
+        (str(COMPANION_SRC / "ccsync_companion" / "assets" / "icon.png"),
+         "ccsync_companion/assets"),
     ],
     hiddenimports=[
         "ccsync_companion",
@@ -104,5 +108,5 @@ exe = EXE(
     upx=False,
     runtime_tmpdir=None,
     console=False,  # GUI app -- no console window
-    icon=None,
+    icon=str(COMPANION_SRC / "ccsync_companion" / "assets" / "icon.ico"),
 )

@@ -54,7 +54,9 @@ a = Analysis(
     [entry_point],
     pathex=["src"],
     binaries=extra_binaries,
-    datas=[],
+    # The Creators Club logo: theme.apply_window_icon() reads it back out of
+    # sys._MEIPASS at this exact relative path for every popup window.
+    datas=[("src/ccsync_companion/assets/icon.png", "ccsync_companion/assets")],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
@@ -100,4 +102,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="src/ccsync_companion/assets/icon.ico",
 )

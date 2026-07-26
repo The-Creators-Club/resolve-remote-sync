@@ -30,6 +30,43 @@ RGB_AMBER = (255, 176, 46)
 RULE = "─" * 72  # terminal divider line
 
 
+def icon_path():
+    """Path to the Creators Club logo PNG bundled with the package, or None.
+
+    Works both from source (assets/ next to this file) and from a frozen
+    onefile build (extracted under sys._MEIPASS -- see build.spec's datas)."""
+    from pathlib import Path
+
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "ccsync_companion" / "assets" / "icon.png")
+    candidates.append(Path(__file__).resolve().parent / "assets" / "icon.png")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def apply_window_icon(tk_module, root) -> None:
+    """Set the Creators Club logo as this window's title-bar/taskbar icon.
+
+    Best-effort and never raises: an icon is decoration, and none of the
+    popups may die over it (headless test runs have no display at all). The
+    PhotoImage is parked on the root so it outlives this call -- Tk drops an
+    icon whose image gets garbage-collected, and each Tk root needs its own
+    image (a PhotoImage is bound to the interpreter that made it)."""
+    try:
+        path = icon_path()
+        if path is None:
+            return
+        image = tk_module.PhotoImage(file=str(path), master=root)
+        root._ccsync_icon_image = image
+        root.iconphoto(True, image)
+    except Exception:
+        pass
+
+
 def mono(size: int = 10, bold: bool = False) -> tuple:
     """Monospace font tuple for tkinter, per-platform."""
     family = "Consolas" if sys.platform == "win32" else (

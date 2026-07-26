@@ -318,6 +318,7 @@ def _show_sign_in_dialog_locked(app: "CompanionApp") -> None:
         _notify(app, "Couldn't open the sign-in window. Restart CCSync and try again.")
         return
     root.title("CCSYNC.EXE: sign in")
+    theme.apply_window_icon(tk, root)
     root.attributes("-topmost", True)
     root.configure(bg=theme.BG, padx=18, pady=14)
 
@@ -465,6 +466,7 @@ def _show_update_dialog_locked(app: "CompanionApp", info: dict) -> bool:
     try:
         root = tk.Tk()
         root.title(title)
+        theme.apply_window_icon(tk, root)
         root.attributes("-topmost", True)
         root.configure(bg=theme.BG, padx=18, pady=14)
 

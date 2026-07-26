@@ -136,7 +136,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$InstallerVersion = "1.0.5"
+$InstallerVersion = "1.0.6"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see

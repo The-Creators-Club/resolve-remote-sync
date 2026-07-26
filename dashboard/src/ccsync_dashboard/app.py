@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import api, auth, db, ui
@@ -132,6 +132,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ui.router)
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    # Browsers request /favicon.ico unprompted (the path is already in
+    # _OPEN_EXACT); serve the Creators Club logo instead of a 404. The
+    # <link rel="icon"> in base.html covers everything else.
+    favicon_file = STATIC_DIR / "favicon.ico"
+    if favicon_file.is_file():
+        @app.get("/favicon.ico", include_in_schema=False)
+        def favicon() -> FileResponse:
+            return FileResponse(str(favicon_file), media_type="image/x-icon")
+
     return app
 
 

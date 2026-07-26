@@ -84,6 +84,7 @@ class OnboardWizard:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title(WINDOW_TITLE)
+        theme.apply_window_icon(tk, self.root)
         self.root.geometry(WINDOW_SIZE)
         self.root.configure(bg=theme.BG)
         self.root.minsize(560, 480)

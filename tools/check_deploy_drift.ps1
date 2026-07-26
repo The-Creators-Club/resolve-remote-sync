@@ -402,3 +402,10 @@ if (-not $Quiet) {
     Write-Host "  Nothing was changed by this check. Runbook: docs\RELEASE.md"
 }
 Write-Host ""
+
+# Explicit, like tools\release.ps1. Without this the exit code is whatever
+# the last native command (git) happened to leave behind -- a clean run
+# reported 128, so anything wrapping this doctor read "everything is fine"
+# as a failure. The report is the output; the exit code says only that the
+# check itself ran. Drift is NOT signalled here -- read the VERDICT line.
+exit 0

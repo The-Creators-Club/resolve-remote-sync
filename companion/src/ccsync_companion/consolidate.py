@@ -371,6 +371,7 @@ def run_consolidation(
     state_fn: Optional[Callable[[dict[str, Any]], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     control: Optional["popup.BatchControl"] = None,
+    canonical_prefix: str = "",
 ) -> list[dict[str, Any]]:
     """Copy+relink every op (fixer.fix_clip never raises). Returns per-op
     results with file_path attached. Same shape/semantics as
@@ -448,6 +449,7 @@ def run_consolidation(
             (path, op["dest_rel"], local_root, op.get("media_pool_items", [])),
             on_bytes=_on_bytes,
             should_abort=control.should_abort_current if control is not None else None,
+            canonical_prefix=canonical_prefix or None,
         )
         outcome = dict(outcome)
         outcome["file_path"] = path

@@ -586,6 +586,33 @@ def _dest_dir_is_contained(dest_dir: Path, local_root_resolved: Path) -> bool:
     return common == os.path.normcase(str(local_root_resolved))
 
 
+def canonical_clip_path(dest_path: Any, local_root: str, canonical_prefix: str) -> str:
+    """The path to STORE IN RESOLVE for a file that physically lives at
+    `dest_path` under `local_root`.
+
+    Resolve project databases travel between machines, but local_root does
+    not: an editor's tree is D:\\Creators_Club while the base rig's is P:\\
+    directly -- only the canonical P:\\ drive resolves everywhere (SPEC's
+    path canon). Relinking to the PHYSICAL path meant a clip fixed on the
+    laptop opened as offline on every other machine (seen live 2026-07-26).
+    Falls back to the physical path when no prefix is configured or the
+    file isn't under local_root; when canonical_prefix IS local_root (the
+    base rig) this is the identity."""
+    physical = str(dest_path)
+    prefix = str(canonical_prefix or "").strip()
+    if not prefix:
+        return physical
+    try:
+        rel = os.path.relpath(physical, str(local_root))
+    except ValueError:
+        return physical  # different drives -- not under local_root
+    if rel == "." or rel.startswith(".."):
+        return physical
+    if not prefix.endswith(("\\", "/")):
+        prefix += os.sep
+    return prefix + rel
+
+
 def fix_clip(
     file_path: str,
     dest_rel: str,
@@ -595,6 +622,7 @@ def fix_clip(
     replace_clip_fn=resolve_bridge.replace_clip,
     on_bytes: Optional[Callable[[int, int], None]] = None,
     should_abort: Optional[Callable[[], bool]] = None,
+    canonical_prefix: str = "",
 ) -> dict[str, Any]:
     """Copy `file_path` into local_root/dest_rel (collision-safe) once, then
     relink EVERY DISTINCT media pool item in `media_pool_items` to that one
@@ -759,8 +787,9 @@ def fix_clip(
         }
 
     failures: list[str] = []
+    relink_path = canonical_clip_path(dest_path, local_root, canonical_prefix)
     for media_pool_item in items:
-        relink_result = replace_clip_fn(media_pool_item, str(dest_path))
+        relink_result = replace_clip_fn(media_pool_item, relink_path)
         if not relink_result.get("ok"):
             failures.append(relink_result.get("message", "unknown error"))
 

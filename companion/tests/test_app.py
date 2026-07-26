@@ -113,10 +113,12 @@ def test_scan_whole_project_shows_popup_for_out_of_tree_items(tmp_path, monkeypa
 
     captured = {}
 
-    def fake_show_popup(items, local_root, editor_name, ignore_tracker, project_prefix="", server_roots=None):
+    def fake_show_popup(items, local_root, editor_name, ignore_tracker, project_prefix="",
+                        server_roots=None, canonical_prefix=""):
         captured["items"] = items
         captured["local_root"] = local_root
         captured["server_roots"] = server_roots
+        captured["canonical_prefix"] = canonical_prefix
 
     monkeypatch.setattr(popup, "show_popup", fake_show_popup)
 
@@ -249,7 +251,8 @@ def test_scan_whole_project_passes_server_roots_through(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         popup, "show_popup",
-        lambda items, local_root, editor_name, ignore_tracker, project_prefix="", server_roots=None:
+        lambda items, local_root, editor_name, ignore_tracker, project_prefix="",
+               server_roots=None, canonical_prefix="":
         captured.__setitem__("server_roots", server_roots),
     )
 
@@ -311,7 +314,8 @@ def test_scan_whole_project_uses_the_cached_mapping_when_the_dashboard_is_down(
     captured = {}
     monkeypatch.setattr(
         popup, "show_popup",
-        lambda items, local_root, editor_name, ignore_tracker, project_prefix="", server_roots=None:
+        lambda items, local_root, editor_name, ignore_tracker, project_prefix="",
+               server_roots=None, canonical_prefix="":
         captured.__setitem__("server_roots", server_roots),
     )
 

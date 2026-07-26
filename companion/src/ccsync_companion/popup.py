@@ -332,6 +332,7 @@ def call_fix_clip(
     args: tuple,
     on_bytes: Optional[Callable[[int, int], None]] = None,
     should_abort: Optional[Callable[[], bool]] = None,
+    canonical_prefix: Optional[str] = None,
 ) -> dict[str, Any]:
     """Call `fix_clip_fn` with as many of the optional keyword arguments as it
     actually accepts, newest first.
@@ -342,10 +343,18 @@ def call_fix_clip(
     at a time on TypeError keeps every existing caller working; the final
     call is made OUTSIDE the loop so a genuine TypeError from inside fix_clip
     still surfaces instead of being retried into silence."""
-    attempts: list[dict[str, Any]] = []
+    base: dict[str, Any] = {"on_bytes": on_bytes}
     if should_abort is not None:
-        attempts.append({"on_bytes": on_bytes, "should_abort": should_abort})
-    attempts.append({"on_bytes": on_bytes})
+        base["should_abort"] = should_abort
+    if canonical_prefix is not None:
+        base["canonical_prefix"] = canonical_prefix
+    # Strip the NEWEST kwarg first on TypeError, so doubles written against
+    # each older signature keep working.
+    attempts: list[dict[str, Any]] = [dict(base)]
+    for newest in ("canonical_prefix", "should_abort"):
+        if newest in base:
+            base = {k: v for k, v in base.items() if k != newest}
+            attempts.append(dict(base))
     for kwargs in attempts:
         try:
             return fix_clip_fn(*args, **kwargs)
@@ -363,6 +372,7 @@ def perform_fix_all(
     state_fn: Optional[Callable[[dict[str, Any]], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     control: Optional[BatchControl] = None,
+    canonical_prefix: str = "",
 ) -> list[dict[str, Any]]:
     """Run fixer.fix_clip for every row, using `selections[file_path]` as the
     chosen destination (falling back to the row's suggested_dest if a path
@@ -470,6 +480,7 @@ def perform_fix_all(
             fix_clip_fn, (path, dest_rel, local_root, media_pool_items),
             on_bytes=_on_bytes,
             should_abort=control.should_abort_current if control is not None else None,
+            canonical_prefix=canonical_prefix or None,
         )
 
         outcome = dict(outcome)
@@ -526,6 +537,7 @@ class PopupDialog:
         ignore_tracker: "fixer.IgnoreTracker",
         on_done: Optional[Callable[[list[dict[str, Any]]], None]] = None,
         editor_name: str = "",
+        canonical_prefix: str = "",
     ) -> None:
         import tkinter as tk
         from tkinter import ttk
@@ -537,6 +549,7 @@ class PopupDialog:
         self.ignore_tracker = ignore_tracker
         self.on_done = on_done
         self.editor_name = editor_name
+        self.canonical_prefix = canonical_prefix
         self._fixing = False
         # Progress state published BY THE WORKER, read only by the Tk timer
         # tick. Tk is not thread-safe and this process has already shown Tk
@@ -859,6 +872,7 @@ class PopupDialog:
                 rows, selections, self.local_root,
                 state_fn=_publish, should_stop=lambda: self._stop_requested,
                 control=self._control,
+                canonical_prefix=self.canonical_prefix,
             )
             self._safe_after(lambda: self._fix_done(results))
 
@@ -1326,6 +1340,7 @@ def show_popup(
     ignore_tracker: "fixer.IgnoreTracker",
     project_prefix: str = "",
     server_roots: Optional[dict[str, str]] = None,
+    canonical_prefix: str = "",
 ) -> None:
     """Build and show the popup, falling back to a console listing (with the
     items auto-ignored so we don't spin forever re-popping the same clips)
@@ -1333,7 +1348,8 @@ def show_popup(
     """
     rows = build_popup_rows(out_of_tree_items, local_root, editor_name, project_prefix, server_roots)
     try:
-        dialog = PopupDialog(rows, local_root, ignore_tracker, editor_name=editor_name)
+        dialog = PopupDialog(rows, local_root, ignore_tracker, editor_name=editor_name,
+                             canonical_prefix=canonical_prefix)
         dialog.show()
     except Exception as exc:
         log.warning("popup unavailable (%s) -- falling back to console listing", exc)

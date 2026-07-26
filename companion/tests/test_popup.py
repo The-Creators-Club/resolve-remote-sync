@@ -1320,3 +1320,29 @@ def test_fix_done_closes_the_window_when_everything_worked():
 
     assert dialog.root.destroyed is True
     assert len(done) == 1
+
+
+def test_perform_fix_all_passes_canonical_prefix_and_degrades():
+    """canonical_prefix reaches a modern fix_clip; a legacy double without
+    the kwarg still works via call_fix_clip's degradation."""
+    from ccsync_companion.popup import perform_fix_all
+
+    seen = {}
+
+    def modern(path, dest_rel, local_root, items, on_bytes=None,
+               should_abort=None, canonical_prefix=""):
+        seen["canonical_prefix"] = canonical_prefix
+        return {"ok": True, "message": "", "copied_to": "x"}
+
+    rows = [{"file_path": "C:/x/a.mov", "suggested_dest": "B-roll", "media_pool_items": []}]
+    perform_fix_all(rows, {"C:/x/a.mov": "B-roll"}, "C:/root",
+                    fix_clip_fn=modern, canonical_prefix="P:\\")
+    assert seen["canonical_prefix"] == "P:\\"
+
+    def legacy(path, dest_rel, local_root, items, on_bytes=None):
+        seen["legacy_called"] = True
+        return {"ok": True, "message": "", "copied_to": "x"}
+
+    perform_fix_all(rows, {"C:/x/a.mov": "B-roll"}, "C:/root",
+                    fix_clip_fn=legacy, canonical_prefix="P:\\")
+    assert seen["legacy_called"] is True

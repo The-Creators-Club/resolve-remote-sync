@@ -637,6 +637,10 @@ class CompanionApp:
                 items, self.config["local_root"], self.editor_identity() or "", self.ignore_tracker,
                 project_prefix=self.config.get("active_project", ""),
                 server_roots=server_roots,
+                # Relinks must store the CANONICAL path (P:\...), never this
+                # machine's physical local_root -- the Resolve project
+                # travels, the drive layout does not (2026-07-26).
+                canonical_prefix=str(self.config.get("canonical_prefix", "")),
             )
         finally:
             self._popup_active_lock.release()
@@ -895,6 +899,7 @@ class CompanionApp:
                 # attribute (tests, and anything injected) must degrade to
                 # "no mid-file controls", not crash the copy.
                 control=getattr(window, "control", None),
+                canonical_prefix=str(self.config.get("canonical_prefix", "")),
             ))
             if should_stop():
                 return

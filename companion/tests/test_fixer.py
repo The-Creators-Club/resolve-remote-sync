@@ -1060,3 +1060,49 @@ def test_fix_clip_without_should_abort_behaves_exactly_as_before(tmp_path):
     assert result["ok"] is True
     assert "aborted" not in result
     assert (root / "Audio" / "Music" / "a.wav").read_bytes() == b"payload"
+
+
+# -- canonical relink path (the D:-vs-P: offline-clip bug, 2026-07-26) -----
+
+
+def test_canonical_clip_path_translates_local_root_to_prefix(tmp_path):
+    import os
+
+    dest = os.path.join(str(tmp_path), "root", "B-roll", "clip.mov")
+    got = fixer.canonical_clip_path(dest, os.path.join(str(tmp_path), "root"), "P:\\")
+    assert got == "P:\\" + os.path.join("B-roll", "clip.mov")
+
+    # no prefix configured -> physical path unchanged
+    assert fixer.canonical_clip_path(dest, os.path.join(str(tmp_path), "root"), "") == dest
+    # not under local_root -> physical path unchanged
+    outside = os.path.join(str(tmp_path), "elsewhere", "clip.mov")
+    assert fixer.canonical_clip_path(outside, os.path.join(str(tmp_path), "root"), "P:\\") == outside
+    # base rig identity: prefix IS local_root
+    root = os.path.join(str(tmp_path), "root")
+    assert fixer.canonical_clip_path(dest, root, root) == dest
+
+
+def test_fix_clip_relinks_to_canonical_path_not_physical(tmp_path):
+    """The Resolve project travels between machines; this machine's
+    local_root does not. Relinking to D:\...\clip.mov made the clip
+    offline everywhere but the machine that fixed it."""
+    src = tmp_path / "src" / "clip.mov"
+    src.parent.mkdir(parents=True)
+    src.write_text("video bytes")
+    local_root = tmp_path / "root"
+    media_pool_item = {}
+
+    result = fixer.fix_clip(
+        str(src), "B-roll/Editor Added/alex", str(local_root), media_pool_item,
+        replace_clip_fn=_fake_replace_clip_ok,
+        canonical_prefix="P:\\",
+    )
+
+    assert result["ok"] is True
+    # the file physically lands under local_root...
+    dest = local_root / "B-roll" / "Editor Added" / "alex" / "clip.mov"
+    assert dest.is_file()
+    # ...but Resolve is pointed at the canonical P:\ path
+    import os
+    assert media_pool_item["relinked_to"] == \
+        "P:\\" + os.path.join("B-roll", "Editor Added", "alex", "clip.mov")

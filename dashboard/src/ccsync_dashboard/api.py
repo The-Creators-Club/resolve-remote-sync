@@ -237,15 +237,33 @@ def build_project_view(conn: sqlite3.Connection, slug: str, now: str | None = No
     for r in db.fetch_editor_media_for_project(conn, slug):
         m = media_by_editor.setdefault(r["editor_username"], {
             "machine": r["machine"], "mode": r["mode"],
-            "n_originals": 0, "n_proxies": 0,
+            "n_originals": 0, "n_proxies": 0, "bytes_proxies": 0,
         })
         m["n_originals"] += r["n_originals"]
         m["n_proxies"] += r["n_proxies"]
+        m["bytes_proxies"] += r["bytes_proxies"] or 0
         if r["mode"] == "base":
             m["mode"] = "base"
     for e in editors:
         e["media"] = media_by_editor.get(e["editor_username"])
         e["report_only"] = False
+        # TOTAL sync progress for an editor: lane C content plus proxies,
+        # by bytes, with camera originals excluded -- they only ever live
+        # on the server. A single lane's percentage told the editor nothing
+        # ("SYNC (LANE C) 0%" while 263 of 283 proxies were already local,
+        # 2026-07-26). Falls back to the lane C completion when no manifest
+        # has arrived yet.
+        lane_c_global = e.get("global_bytes") or 0
+        lane_c_need = e.get("need_bytes") or 0
+        nas_proxy_bytes = nas.get("bytes_proxies") or 0
+        media = e["media"]
+        if media is not None and (lane_c_global or nas_proxy_bytes):
+            have = max(lane_c_global - lane_c_need, 0)
+            have += min(media.get("bytes_proxies") or 0, nas_proxy_bytes)
+            denom = lane_c_global + nas_proxy_bytes
+            e["synced_pct"] = round(100.0 * have / denom, 1) if denom else None
+        else:
+            e["synced_pct"] = e.get("completion")
     device_editors = {e["editor_username"] for e in editors if e["editor_username"]}
     for username, m in sorted(media_by_editor.items()):
         if username in device_editors:
@@ -261,7 +279,7 @@ def build_project_view(conn: sqlite3.Connection, slug: str, now: str | None = No
             "need_bytes": 0, "need_deletes": 0, "global_items": None,
             "global_bytes": None, "have_items": None, "rate_bytes_per_sec": None,
             "eta_seconds": None, "updated_at": last_report,
-            "report_only": True, "media": m, "mode": m["mode"],
+            "report_only": True, "media": m, "mode": m["mode"], "synced_pct": None,
             "status": health.presence_status(m["mode"], nas, have),
             "lanes": _lanes_view(lane_rows, now),
         })
@@ -377,6 +395,37 @@ def build_transfers_view(
             q["n_files"] = max(0, q["n_files"] - removed)
             q["bytes"] = max(0, (q["bytes"] or 0) - removed_bytes)
     queues = [q for q in queues if q["n_files"] > 0]
+
+    # A JUST-ticked project has no completion row and no manifest yet, so
+    # every source above is silent for its first minute or two while the
+    # share + index exchange spin up -- and the page said "everything that
+    # should be somewhere is there" mid-provisioning (2026-07-26). Show it
+    # as preparing instead of absent.
+    pending_q = """SELECT s.editor_username AS editor, s.project_slug AS slug, p.label
+                   FROM selections s JOIN projects p ON p.slug = s.project_slug AND p.active = 1"""
+    pending_params: list[Any] = []
+    if editor is not None:
+        pending_q += " WHERE s.editor_username = ?"
+        pending_params.append(editor)
+    queued_pairs = {(q["editor"], q["slug"]) for q in queues}
+    for r in conn.execute(pending_q, pending_params):
+        if (r["editor"], r["slug"]) in queued_pairs:
+            continue
+        has_completion = conn.execute(
+            """SELECT 1 FROM completion_current c
+               JOIN devices d ON d.id = c.device_id
+               JOIN projects p ON p.id = c.project_id
+               WHERE p.slug = ? AND d.editor_username = ?""",
+            (r["slug"], r["editor"]),
+        ).fetchone()
+        if has_completion:
+            continue  # known state: fully synced or already queued above
+        queues.append({
+            "editor": r["editor"], "machine": "", "slug": r["slug"],
+            "label": r["label"], "lane": "c", "direction": "down",
+            "kind": "preparing", "n_files": 0, "bytes": 0, "files": [],
+            "truncated": False, "manifest_truncated": False, "pending": True,
+        })
     queues.sort(key=lambda q: (q["editor"] or "", q["label"], q["lane"]))
 
     # Editors pushing lane C content TO the server (the NAS folder's own
@@ -406,7 +455,7 @@ def build_transfers_view(
     return {"generated_at": now, "transfers": rows,
             "fleet_speed_bps": sum((x["speed_bps"] or 0) for x in rows),
             "queues": queues,
-            "queued_files": sum(q["n_files"] for q in queues),
+            "queued_files": sum(q["n_files"] for q in queues if not q.get("pending")),
             "queued_bytes": sum(q["bytes"] or 0 for q in queues),
             "history": history}
 
@@ -893,6 +942,18 @@ def _require_selection_read(request: Request, editor: str) -> None:
     raise HTTPException(status_code=401, detail="log in, or present X-CCSync-Token")
 
 
+def _nudge_collector(request: Request) -> None:
+    """Ask the in-process collector to reconcile sharing promptly -- a tick
+    used to start syncing only after interval_enforce (up to 60s of dead
+    air after the click, 2026-07-26). Never raises; absent in some tests."""
+    collector = getattr(request.app.state, "collector", None)
+    if collector is not None:
+        try:
+            collector.nudge()
+        except Exception:
+            pass
+
+
 def _require_selection_write(request: Request, editor: str) -> str:
     settings = request.app.state.settings
     user = auth.get_session_user(request)
@@ -950,6 +1011,7 @@ def api_tick(
         raise HTTPException(status_code=404, detail=f"unknown or inactive project {slug!r}")
     added = db.add_selection(conn, editor, slug, created_by=user, now=db.utcnow_iso())
     conn.commit()
+    _nudge_collector(request)
     view = _selection_view(conn, editor)
     view["changed"] = added
     return view
@@ -963,6 +1025,7 @@ def api_untick(
     _require_selection_untick(request, editor)
     removed = db.remove_selection(conn, editor, slug)
     conn.commit()
+    _nudge_collector(request)
     view = _selection_view(conn, editor)
     view["changed"] = removed
     return view

@@ -39,9 +39,14 @@
       <span class="marker">▸</span>
       {% if scope_admin %}<span class="who">{{ q.editor }}</span>{% if q.machine %} <span class="muted">{{ q.machine }}</span>{% endif %} ·{% endif %}
       {{ q.label }}
+      {% if q.pending %}
+        <span class="chip amber">[ GETTING READY ]</span>
+        <span class="muted">just ticked; sharing and first file lists are being set up, syncing starts within a minute or two</span>
+      {% else %}
       <span class="mono">{{ "⇡" if q.direction == "up" else "⇣" }}</span>
       <span class="{{ 'amber-text' if q.n_files else 'muted' }}">{{ q.n_files }} file(s) · {{ q.bytes | human_bytes }}</span>
       <span class="chip">{{ "lane C" if q.lane == "c" else ("uploads" if q.direction == "up" else "proxies") }}</span>
+      {% endif %}
     </summary>
     <ul class="clip-list">
       {% for f in q.files %}

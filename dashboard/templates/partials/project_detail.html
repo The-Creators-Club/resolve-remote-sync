@@ -29,7 +29,7 @@
 {% if project.editors %}
 <table class="editors">
   <thead>
-    <tr><th></th><th>EDITOR</th><th>SYNC (LANE C)</th><th>HAS</th><th>MISSING</th>
+    <tr><th></th><th>EDITOR</th><th title="proxies + shared project files, by size. Camera originals live on the server and are not counted">SYNCED</th><th>HAS</th><th>MISSING</th>
         <th>MEDIA</th><th>LANES</th><th>LAST SEEN</th><th></th></tr>
   </thead>
   <tbody>
@@ -47,7 +47,7 @@
       <td class="mono muted">-</td>
       <td class="mono muted">-</td>
       {% else %}
-      <td class="mono"><span class="cssbar"><span class="fill" style="width:{{ [[e.completion or 0, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(e.completion or 0) }}%</td>
+      <td class="mono" title="everything this machine should hold: proxies + shared project files (originals stay on the server)"><span class="cssbar"><span class="fill" style="width:{{ [[e.synced_pct or 0, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(e.synced_pct or 0) }}%</td>
       <td class="mono">{% if e.global_items is not none %}{{ e.have_items }} / {{ e.global_items }} files{% else %}-{% endif %}</td>
       <td class="mono">{% if e.need_items %}{{ e.need_items }} files · {{ e.need_bytes | human_bytes }}{% else %}-{% endif %}</td>
       {% endif %}

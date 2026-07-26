@@ -411,6 +411,28 @@ class SyncthingLane(LaneAdapter):
             return status
 
         if missing_folders:
+            # A folder the server has OFFERED but the sequencer hasn't
+            # accepted yet is a freshly ticked project spinning up, not a
+            # broken lane -- C:error flashed on every tick for the minute
+            # the accept took (2026-07-26).
+            pending_ids: set = set()
+            try:
+                pending = self._get("/rest/cluster/pending/folders") or {}
+                if isinstance(pending, dict):
+                    pending_ids = set(pending.keys())
+            except Exception:
+                log.debug("pending folders check failed", exc_info=True)
+            missing_ids = {m.split(" ")[0] for m in missing_folders}
+            if missing_ids and missing_ids <= pending_ids:
+                status = LaneStatus(
+                    name=self.name, state=STATE_SYNCING, queued=0,
+                    detail=self._with_path_detail(
+                        f"setting up {len(missing_ids)} newly ticked project(s)",
+                        path_detail,
+                    ),
+                )
+                self._set_status(status)
+                return status
             status = LaneStatus(
                 name=self.name,
                 state=STATE_ERROR,

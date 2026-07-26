@@ -189,3 +189,37 @@ def test_projects_view_tree_nests_and_shortens(app_env):
     # the slugs rollup drives "open the chain containing the current project"
     assert "2026-cct-website-highlights-website-highlights" in tree["groups"]["2026"]["slugs"]
     assert "2025-ff4-nuclear" not in tree["groups"]["2026"]["slugs"]
+
+
+def test_synced_pct_combines_lane_c_and_proxies(app_env):
+    """The SYNCED column is total progress by bytes -- lane C content plus
+    proxies, originals excluded (they only live on the server). Lane C
+    alone said 0% while 263/283 proxies were already local (2026-07-26)."""
+    client, conn = app_env
+    pid, _did = seed(conn)   # lane C: global 5,000,000 bytes, need 1,000,000
+    now = dbmod.utcnow_iso()
+    # NAS holds 10,000,000 bytes of proxies; jsmith has 6,000,000 of them.
+    dbmod.replace_nas_media(conn, pid, [
+        ("B-roll/Proxy/a.mov", "proxy", ".mov", 6_000_000, 1),
+        ("B-roll/Proxy/b.mov", "proxy", ".mov", 4_000_000, 2),
+    ], "sig", 2, now)
+    dbmod.upsert_editor_media_project(
+        conn, editor="jsmith", machine="EDIT-PC", slug="2025-ff4-nuclear",
+        mode="editor", n_originals=0, bytes_originals=0, n_proxies=1,
+        bytes_proxies=6_000_000, truncated=False, now=now)
+    conn.commit()
+
+    body = client.get("/api/v1/projects/2025-ff4-nuclear").json()
+    (e,) = [x for x in body["editors"] if x["display_name"] == "jsmith"]
+    # have = (5M - 1M lane C) + 6M proxies = 10M of 15M total
+    assert e["synced_pct"] == 66.7
+    # lane C detail is still available untouched
+    assert e["completion"] == 62.5
+
+
+def test_synced_pct_falls_back_to_lane_c_without_a_manifest(app_env):
+    client, conn = app_env
+    seed(conn)
+    body = client.get("/api/v1/projects/2025-ff4-nuclear").json()
+    (e,) = [x for x in body["editors"] if x["display_name"] == "jsmith"]
+    assert e["synced_pct"] == e["completion"] == 62.5

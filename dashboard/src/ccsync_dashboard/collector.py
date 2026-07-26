@@ -61,6 +61,13 @@ class Collector:
         self.client = client or SyncthingClient.from_settings(settings)
         self.now_fn = now_fn
         self._stop = threading.Event()
+        # nudge(): the loop's sleep is interrupted and these kinds run on the
+        # next wake (<= ~5s) instead of waiting out their intervals. Ticking
+        # a project used to start syncing only after interval_enforce -- up
+        # to a minute of dead air after the click (2026-07-26).
+        self._wake = threading.Event()
+        self._nudge_lock = threading.Lock()
+        self._nudge_kinds: set[str] = set()
         self._thread: threading.Thread | None = None
         # Caches refreshed by the config cycle.
         self._project_ids: dict[str, int] = {}      # folder slug -> projects.id
@@ -76,8 +83,19 @@ class Collector:
         self._thread = threading.Thread(target=self._loop, name="dash-collector", daemon=True)
         self._thread.start()
 
+    def nudge(self, kinds: tuple[str, ...] = ("config", "enforce", "connections", "completion")) -> None:
+        """Run these kinds promptly (thread-safe, callable from request
+        handlers via app.state.collector). Never raises."""
+        try:
+            with self._nudge_lock:
+                self._nudge_kinds.update(kinds)
+            self._wake.set()
+        except Exception:
+            log.debug("nudge failed", exc_info=True)
+
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout=10)
 
@@ -129,7 +147,13 @@ class Collector:
                     # stops with it). Log-and-continue; the next tick retries.
                     log.exception("collector loop iteration failed; continuing")
                 remaining = min(nd - time.monotonic() for nd in next_due.values())
-                self._stop.wait(max(0.5, min(remaining, 5.0)))
+                self._wake.wait(max(0.5, min(remaining, 5.0)))
+                self._wake.clear()
+                with self._nudge_lock:
+                    nudged, self._nudge_kinds = set(self._nudge_kinds), set()
+                for kind in nudged:
+                    if kind in next_due:
+                        next_due[kind] = 0.0
         finally:
             conn.close()
 

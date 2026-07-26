@@ -347,3 +347,33 @@ def test_completed_feed_lands_in_history_and_incoming_need_shows(env):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
     page = client.get("/partials/transfers")
     assert "[ HISTORY ]" in page.text and "B-roll/a.mov" in page.text
+
+
+def test_freshly_ticked_project_shows_as_preparing(env):
+    """The first minute after a tick has no completion row and no manifest:
+    every queue source is silent while sharing spins up, and the page said
+    "everything that should be somewhere is there" (2026-07-26)."""
+    client, conn, now = env
+    dbmod.add_selection(conn, "ruskin", "2026-ff5-energy-transition", "ruskin", now)
+    conn.commit()
+
+    view = build_transfers_view(conn)
+    (q,) = [x for x in view["queues"] if x["editor"] == "ruskin"]
+    assert q.get("pending") is True
+    assert view["queued_files"] == 0            # pending rows don't count as files
+
+    # once completion data exists the pending row yields to real state
+    pid = conn.execute("SELECT id FROM projects WHERE slug='2026-ff5-energy-transition'").fetchone()["id"]
+    did = dbmod.upsert_device(conn, "DEV-R", "ruskin", False, now)
+    dbmod.upsert_completion(conn, pid, did, completion=100.0, need_items=0,
+                            need_bytes=0, need_deletes=0, global_items=5,
+                            global_bytes=50, now=now)
+    conn.commit()
+    view = build_transfers_view(conn)
+    assert [x for x in view["queues"] if x.get("pending")] == []
+
+    # and the page renders the preparing chip while pending
+    conn.execute("DELETE FROM completion_current")
+    conn.commit()
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    assert "GETTING READY" in client.get("/partials/transfers").text

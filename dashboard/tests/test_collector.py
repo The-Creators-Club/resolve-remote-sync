@@ -372,3 +372,12 @@ def test_item_finished_events_land_in_history_without_duplicates(conn, fake, col
     names = [r["name"] for r in dbm.fetch_transfer_history(conn)]
     assert any(n.endswith("next.mp3") for n in names)
     assert len(names) == 2
+
+
+def test_nudge_wakes_and_zeroes_intervals(conn, fake, collector):
+    """nudge() must interrupt the loop's sleep and run enforce/config
+    promptly -- a tick used to wait out interval_enforce (<=60s)."""
+    collector.nudge(("enforce",))
+    assert collector._wake.is_set()
+    with collector._nudge_lock:
+        assert "enforce" in collector._nudge_kinds

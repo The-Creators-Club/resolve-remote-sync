@@ -569,6 +569,11 @@ def partial_toggle(
             raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
         db.add_selection(conn, editor, slug, created_by=user, now=db.utcnow_iso())
     conn.commit()
+    # Reconcile Syncthing sharing promptly -- ticking used to wait out
+    # interval_enforce (up to 60s) before anything started (2026-07-26).
+    from .api import _nudge_collector
+
+    _nudge_collector(request)
     # Return the partial the control lives in.
     view_kind = request.query_params.get("view")
     if view_kind == "sidebar" or "sidebar" in (request.headers.get("hx-target") or ""):

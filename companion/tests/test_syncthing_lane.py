@@ -111,6 +111,8 @@ class _FakeSyncthingHandler(BaseHTTPRequestHandler):
             key = (q.get("folder"), q.get("device"))
             self._json(200, state.get("remote_completion", {}).get(
                 key, {"completion": 100, "needItems": 0, "needBytes": 0}))
+        elif self.path == "/rest/cluster/pending/folders":
+            self._json(200, state.get("pending_folders", {}))
         elif self.path == "/rest/system/connections":
             # Absent from fake_state -> 404, i.e. exactly what an older
             # Syncthing (or one mid-restart) does. The lane must treat that
@@ -513,3 +515,20 @@ def test_check_once_downloads_take_precedence_over_uploads(fake_syncthing_server
     status = lane.check_once()
     assert status.state == STATE_SYNCING
     assert status.queued == 4          # the download count, as before
+
+
+def test_pending_offered_folder_is_setup_not_error(fake_syncthing_server):
+    """A freshly ticked project: the server has offered the folder but the
+    sequencer hasn't accepted it yet. That flashed C:error on every tick."""
+    fake_syncthing_server.fake_state["pending_folders"] = {
+        "new-proj": {"offeredBy": {"SERVER": {"label": "2026/X/New"}}}}
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["new-proj"])
+    status = lane.check_once()
+    assert status.state == STATE_SYNCING
+    assert "setting up" in status.detail
+
+    # a missing folder that is NOT pending stays a real error
+    fake_syncthing_server.fake_state["pending_folders"] = {}
+    lane2 = _lane_for(fake_syncthing_server, expected_folder_ids=["new-proj"])
+    status = lane2.check_once()
+    assert status.state == STATE_ERROR

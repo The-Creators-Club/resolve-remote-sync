@@ -140,6 +140,46 @@ if ($RebuildExe) {
             $ErrorActionPreference = $prevEAP
             Pop-Location
         }
+        # Restamp dist\ccsync-release.json to describe THIS exe. Without it,
+        # every rebuild here left the manifest describing the previous
+        # tools\release.ps1 build, so publish and check_deploy_drift warned
+        # about provenance on every single ship. tests_run=false is honest:
+        # this path does not run the suites -- tools\release.ps1 remains the
+        # tested-build path and overwrites this stamp with tests_run=true.
+        if (Test-Path -LiteralPath $ExePath) {
+            try {
+                $mVer = Select-String -Path (Join-Path $CompanionDir "src\ccsync_companion\config.py") -Pattern '^VERSION\s*=\s*"([^"]+)"'
+                $stampVersion = if ($mVer) { $mVer.Matches[0].Groups[1].Value } else { "unknown" }
+                $gitCommit = (cmd /c "git -C ""$RepoRoot"" rev-parse --short HEAD 2>nul")
+                $gitDescribe = (cmd /c "git -C ""$RepoRoot"" describe --tags --always --dirty 2>nul")
+                $gitDirty = [bool](cmd /c "git -C ""$RepoRoot"" status --porcelain 2>nul")
+                $stampStamp = if ($gitDirty) { "$stampVersion+dirty" } else { $stampVersion }
+                $exeItem = Get-Item -LiteralPath $ExePath
+                $manifest = [ordered]@{
+                    version        = $stampVersion
+                    version_stamp  = $stampStamp
+                    platform       = "windows"
+                    artifact       = "ccsync-companion.exe"
+                    sha256         = (Get-FileHash -Algorithm SHA256 -LiteralPath $ExePath).Hash.ToLower()
+                    size_bytes     = $exeItem.Length
+                    built_at       = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    artifact_mtime = $exeItem.LastWriteTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    git_commit     = "$gitCommit".Trim()
+                    git_describe   = "$gitDescribe".Trim()
+                    git_dirty      = $gitDirty
+                    tests_run      = $false
+                    built_by       = "$env:USERNAME@$env:COMPUTERNAME"
+                    built_with     = "installer/build_editor_package.ps1"
+                }
+                $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+                [System.IO.File]::WriteAllText((Join-Path $CompanionDir "dist\ccsync-release.json"),
+                    ($manifest | ConvertTo-Json), $utf8NoBom)
+                Write-Step "stamped dist\ccsync-release.json (v$stampStamp, tests_run=false)"
+            }
+            catch {
+                Write-Warn2 "could not restamp ccsync-release.json: $($_.Exception.Message)"
+            }
+        }
     }
 }
 

@@ -208,13 +208,26 @@ if (Test-Path -LiteralPath $ExeInstalled) {
     Write-Row "size" "$([int]($instItem.Length/1KB)) KB"
     Write-Row "sha256" $installedSha
 
+    # 0. byte-identity with the freshly built artifact. This outranks every
+    # text source: the state marker and the log line both lag one process
+    # launch behind, so for the first seconds after an upgrade they still
+    # name the PREVIOUS build -- which made this check cry DRIFT one second
+    # after a successful ship (seen live 2026-07-26). Identical bytes ARE
+    # the built version; no cache can contradict that.
+    if ($builtSha -and ($builtSha -eq $installedSha) -and $builtVersion) {
+        $installedVersion = $builtVersion
+        $installedVersionSource = "sha256 is byte-identical to companion/dist"
+    }
+
     # 1. sidecar manifest
     $instManifest = Read-Manifest -Path $ManifestInstalled
-    if ($instManifest -and ("$($instManifest.sha256)" -eq $installedSha)) {
-        $installedVersion = "$($instManifest.version_stamp)"
-        $installedVersionSource = "ccsync-release.json beside the exe"
+    if (-not $installedVersion) {
+        if ($instManifest -and ("$($instManifest.sha256)" -eq $installedSha)) {
+            $installedVersion = "$($instManifest.version_stamp)"
+            $installedVersionSource = "ccsync-release.json beside the exe"
+        }
     }
-    elseif ($instManifest) {
+    if ($instManifest -and ("$($instManifest.sha256)" -ne $installedSha)) {
         Write-Unknown "ccsync-release.json beside the installed exe describes a DIFFERENT file (sha mismatch) -- ignoring it"
     }
 

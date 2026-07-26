@@ -1,0 +1,34 @@
+# Line endings.
+#
+# This repo is developed on Windows with core.autocrlf=true, which rewrites
+# LF to CRLF on checkout. That is harmless for the PowerShell and Python
+# files, and FATAL for anything a POSIX shell has to parse: a trailing CR
+# becomes part of the last token on every line.
+#
+# 2026-07-26: dashboard/deploy/run.sh shipped to the NAS with CRLF and the
+# container crash-looped on `set -eu` with "Illegal option -" -- dash was
+# reading the CR as an option character. The dashboard was down until the
+# file was normalised. installer/macos_bootstrap.sh had the same defect and
+# was already on the editor share, where it would have failed on the first
+# Mac install.
+#
+# Keep these rules ahead of any new shell script: eol=lf is checked out as
+# LF regardless of the developer's autocrlf setting.
+
+* text=auto
+
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# Shell scripts run on the NAS / macOS. Anything the container or a Mac
+# executes belongs here.
+dashboard/deploy/run.sh   text eol=lf
+installer/macos_bootstrap.sh text eol=lf
+
+# Windows-side scripts: CRLF is fine and matches what editors see.
+*.ps1  text eol=crlf
+
+# Binaries must never be touched.
+*.exe  binary
+*.png  binary
+*.ico  binary

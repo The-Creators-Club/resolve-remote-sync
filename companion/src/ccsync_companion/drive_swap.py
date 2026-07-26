@@ -10,7 +10,8 @@ Resolve project changes -- the path canon does all the work.
 Mechanics mirror windows_bootstrap.ps1's own mapping:
   local  = net use P: \\\\localhost\\CCSync_P   (loopback share of local_root)
            or the legacy `subst P: <local_root>` fallback
-  server = net use P: <server_p_unc>            (config key; e.g.
+  server = net use P: <server unc>              (derive_server_unc() below,
+           or the server_p_unc config override; e.g.
            \\\\100.65.15.123\\TheCreatorsPool\\Creators_Club over the tailnet)
 
 Sync is UNAFFECTED by the swap: every lane works on the physical
@@ -150,6 +151,30 @@ def swap_to_local(local_root: str, run_fn: RunFn = _default_run) -> tuple[bool, 
             "or re-run the installer"
         )
     return True, "P: is back to your local copy (proxies, via subst)"
+
+
+def derive_server_unc(dashboard_url: str, remote_root: str) -> str:
+    """The server tree's SMB path, derived from config every machine
+    already has -- so the grade-swap needs NO per-machine setup:
+
+      host  = dashboard_url's host (whichever address THIS machine uses to
+              reach the server: LAN for local editors, tailnet for remote)
+      share = remote_root beyond /mnt/<pool>/ (TrueNAS shares a dataset
+              under its own name: /mnt/tank/TheCreatorsPool/Creators_Club
+              serves as \\\\host\\TheCreatorsPool\\Creators_Club)
+
+    Returns "" when either part can't be derived."""
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(str(dashboard_url or "")).hostname or "").strip()
+        m = re.match(r"^/mnt/[^/]+/(.+)$", str(remote_root or "").strip().rstrip("/"))
+        if not host or not m:
+            return ""
+        share_path = m.group(1).replace("/", "\\")
+        return "\\\\" + host + "\\" + share_path
+    except Exception:
+        return ""
 
 
 def _unc_host(unc: str) -> str:

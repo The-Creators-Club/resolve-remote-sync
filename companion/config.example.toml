@@ -29,12 +29,14 @@ local_root = "C:\\Creators_Club"
 # with this prefix but doesn't resolve under local_root.
 canonical_prefix = "P:\\"
 
-# OPTIONAL: the server tree's SMB path, e.g.
-# "\\\\100.65.15.123\\TheCreatorsPool\\Creators_Club" (tailnet address for
-# remote editors). When set, the tray offers "Grade from server originals":
-# P: is momentarily remapped to this path so Resolve streams full-res frames
-# straight off the server, then swapped back to the local copy when done.
-# Syncing is unaffected either way (the lanes use local_root directly).
+# OPTIONAL override for the tray's "Grade from server originals" P: swap.
+# By default the server tree's SMB path is derived automatically: host from
+# dashboard_url below, share path from remote_root's part after /mnt/<pool>/
+# (TrueNAS shares datasets under their own names). So the feature just works
+# on every install with no extra setup. Set an explicit UNC here, e.g.
+# "\\\\100.65.15.123\\TheCreatorsPool\\Creators_Club", to override the
+# derivation, or "off" to hide the feature on this machine. Syncing is
+# unaffected either way (the lanes use local_root directly).
 # server_p_unc = ""
 
 # Name of the rclone remote pointing at the NAS. Must match a stanza in

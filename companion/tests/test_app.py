@@ -1458,6 +1458,7 @@ def _swap_stub(monkeypatch, mode="editor", unc="\\\\nas\\Pool\\CC"):
             return mode
 
     stub = _Stub()
+    stub._server_p_unc = lambda: CompanionApp._server_p_unc(stub)
     stub.p_swap_available = lambda: CompanionApp.p_swap_available(stub)
     stub.swap_to_server = lambda: CompanionApp.swap_p_to_server(stub)
     return stub
@@ -1472,6 +1473,28 @@ def test_p_swap_available_guards(monkeypatch):
     assert stub.p_swap_available() is True
     assert _swap_stub(monkeypatch, mode="base").p_swap_available() is False
     assert _swap_stub(monkeypatch, unc="").p_swap_available() is False
+
+
+def test_p_swap_available_derives_when_unconfigured(monkeypatch):
+    """Fleet-wide default: with server_p_unc unset, the UNC is derived from
+    dashboard_url + remote_root, so every companion install gets the swap."""
+    import os
+    if os.name != "nt":
+        import pytest
+        pytest.skip("windows-only feature")
+    stub = _swap_stub(monkeypatch, unc="")
+    stub.config = dict(stub.config)
+    stub.config.update({
+        "dashboard_url": "http://192.168.0.102:8480",
+        "remote_root": "/mnt/tank/TheCreatorsPool/Creators_Club",
+    })
+    assert stub._server_p_unc() == "\\\\192.168.0.102\\TheCreatorsPool\\Creators_Club"
+    assert stub.p_swap_available() is True
+
+    # explicit off switch hides the feature
+    stub.config["server_p_unc"] = "off"
+    assert stub._server_p_unc() == ""
+    assert stub.p_swap_available() is False
 
 
 def test_swap_p_to_server_restores_local_on_failure(monkeypatch):

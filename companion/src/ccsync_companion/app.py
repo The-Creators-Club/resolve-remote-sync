@@ -1185,15 +1185,31 @@ class CompanionApp:
 
     # -- P: grade-swap (drive_swap.py) ----------------------------------
 
+    def _server_p_unc(self) -> str:
+        """The grade-swap target: the explicit config value when set,
+        "none"/"off" to disable, else DERIVED from dashboard_url +
+        remote_root so every companion gets the feature with no setup."""
+        from . import drive_swap
+
+        value = str(self.config.get("server_p_unc", "")).strip()
+        if value.lower() in ("none", "off", "disabled"):
+            return ""
+        if value:
+            return value
+        return drive_swap.derive_server_unc(
+            str(self.config.get("dashboard_url", "")),
+            str(self.config.get("remote_root", "")),
+        )
+
     def p_swap_available(self) -> bool:
         """The tray shows the grade-swap only when it can work: Windows,
         editor role (the base rig's P: already IS the server), and a
-        configured server_p_unc."""
+        resolvable server UNC (explicit or derived)."""
         import os as _os
 
         if _os.name != "nt":
             return False
-        if not str(self.config.get("server_p_unc", "")).strip():
+        if not self._server_p_unc():
             return False
         try:
             return self.effective_mode() != "base"
@@ -1213,7 +1229,7 @@ class CompanionApp:
             mode = drive_swap.classify_p_target(
                 drive_swap.current_p_target(),
                 str(self.config.get("local_root", "")),
-                str(self.config.get("server_p_unc", "")),
+                self._server_p_unc(),
             )
         except Exception:
             mode = "none"
@@ -1228,7 +1244,7 @@ class CompanionApp:
 
         if not self.p_swap_available():
             return False, "grade-swap is not available on this machine"
-        ok, message = drive_swap.swap_to_server(str(self.config.get("server_p_unc", "")))
+        ok, message = drive_swap.swap_to_server(self._server_p_unc())
         if not ok:
             restored, restore_msg = drive_swap.swap_to_local(
                 str(self.config.get("local_root", "")))

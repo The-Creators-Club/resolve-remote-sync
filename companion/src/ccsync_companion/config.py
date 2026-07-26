@@ -122,7 +122,9 @@ DEFAULTS: dict[str, Any] = {
     "syncthing_url": "http://127.0.0.1:8384",
     "syncthing_api_key": "",
     # The server tree's SMB path for the tray's "Grade from server
-    # originals" P: swap (drive_swap.py). Empty = feature hidden.
+    # originals" P: swap (drive_swap.py). Empty = derive it from
+    # dashboard_url + remote_root (app._server_p_unc), so the feature is on
+    # fleet-wide by default; set a UNC to override, "off" to disable.
     "server_p_unc": "",
     # Expected Syncthing folder ID per entry in `projects` (addition; needed
     # to fulfil "verify the expected folder ID ... is configured + shared").
@@ -247,11 +249,11 @@ local_root = ""
 # to detect BAD_PREFIX (mapping-health) situations.
 canonical_prefix = "P:\\\\"
 
-# OPTIONAL: the server tree's SMB path, e.g.
-# "\\100.65.15.123\TheCreatorsPool\Creators_Club" (tailnet address for
-# remote editors). When set, the tray offers "Grade from server originals":
-# P: is momentarily remapped to this path so Resolve streams full-res
-# frames off the server, then swapped back to the local copy when done.
+# OPTIONAL override for the tray's "Grade from server originals" P: swap.
+# By default the server tree's SMB path is derived automatically from
+# dashboard_url's host + remote_root's path (so the feature just works on
+# every install). Set an explicit UNC here to override the derivation, or
+# "off" to hide the feature on this machine.
 # server_p_unc = ""
 
 # Name of the rclone remote pointing at the NAS. Must match the stanza the

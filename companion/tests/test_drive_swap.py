@@ -93,3 +93,20 @@ def test_swap_to_local_prefers_loopback_then_subst():
 def test_swap_to_server_unconfigured_refuses():
     ok, msg = drive_swap.swap_to_server("", lambda args: _proc(0))
     assert not ok and "not configured" in msg
+
+
+def test_derive_server_unc_from_existing_config():
+    """Zero-config fleet rollout: host from dashboard_url, share path from
+    remote_root's post-pool tail."""
+    f = drive_swap.derive_server_unc
+    assert f("http://192.168.0.102:8480",
+             "/mnt/tank/TheCreatorsPool/Creators_Club") == \
+        "\\\\192.168.0.102\\TheCreatorsPool\\Creators_Club"
+    assert f("http://100.71.216.3:8480",
+             "/mnt/tank/TheCreatorsPool/Creators_Club/") == \
+        "\\\\100.71.216.3\\TheCreatorsPool\\Creators_Club"
+    # underivable inputs -> "" (feature hidden, never a broken UNC)
+    assert f("", "/mnt/tank/X") == ""
+    assert f("http://host:1", "") == ""
+    assert f("http://host:1", "relative/path") == ""
+    assert f("http://host:1", "/mnt/tank") == ""

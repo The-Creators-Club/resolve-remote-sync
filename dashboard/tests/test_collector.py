@@ -330,3 +330,45 @@ def test_loop_survives_a_record_poll_run_exception(tmp_path, monkeypatch):
     # ticking) and stop() joined it cleanly.
     assert calls["n"] >= 5
     assert not collector._thread.is_alive()
+
+
+def test_item_finished_events_land_in_history_without_duplicates(conn, fake, collector):
+    """A lane C upload finishing between polls appeared in NO view
+    (2026-07-26): the server's ItemFinished events now feed transfer_history,
+    idempotently across cycles and across a Syncthing restart (event IDs
+    reset to 1)."""
+    fake.state["events"] = [
+        {"id": 1, "type": "ItemFinished", "time": "2026-07-26T08:30:00+00:00",
+         "data": {"folder": "2025-ff4-nuclear", "item": "Audio/Music/track.mp3",
+                  "action": "update", "type": "file", "error": None}},
+        {"id": 2, "type": "ItemFinished", "time": "2026-07-26T08:30:01+00:00",
+         "data": {"folder": "2025-ff4-nuclear", "item": "Audio/Music",
+                  "action": "update", "type": "dir", "error": None}},   # dirs skipped
+        {"id": 3, "type": "ItemFinished", "time": "2026-07-26T08:30:02+00:00",
+         "data": {"folder": "unknown-folder", "item": "x.mp3",
+                  "action": "update", "type": "file", "error": None}},  # unregistered
+    ]
+    collector.run_cycle(conn, ALL)
+
+    import ccsync_dashboard.db as dbm
+    rows = dbm.fetch_transfer_history(conn)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["lane"] == "lane_c_syncthing" and row["direction"] == "up"
+    assert row["name"].endswith("Audio/Music/track.mp3")
+    assert row["editor_username"] == "jsmith"     # the folder's single sharing editor
+
+    # second cycle: nothing new, no duplicates
+    collector.run_cycle(conn, ALL)
+    assert len(dbm.fetch_transfer_history(conn)) == 1
+
+    # syncthing restart: IDs reset; a fresh event with a small id still lands
+    fake.state["events"] = [
+        {"id": 1, "type": "ItemFinished", "time": "2026-07-26T09:00:00+00:00",
+         "data": {"folder": "2025-ff4-nuclear", "item": "Audio/Music/next.mp3",
+                  "action": "update", "type": "file", "error": None}},
+    ]
+    collector.run_cycle(conn, ALL)
+    names = [r["name"] for r in dbm.fetch_transfer_history(conn)]
+    assert any(n.endswith("next.mp3") for n in names)
+    assert len(names) == 2

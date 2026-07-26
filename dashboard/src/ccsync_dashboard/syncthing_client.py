@@ -207,6 +207,17 @@ class SyncthingClient:
         self.set_options(pending)
         return pending
 
+    def events(self, since: int, types: str = "ItemFinished",
+               limit: int = 200) -> list[dict[str, Any]]:
+        """Non-blocking read of Syncthing's event stream (timeout=0 returns
+        immediately). ItemFinished fires per file the SERVER finishes
+        syncing FROM the cluster -- i.e. editor lane C uploads arriving,
+        which polling alone can miss entirely for fast transfers."""
+        out = self._get("/rest/events", params={
+            "since": since, "events": types, "limit": limit, "timeout": 0,
+        })
+        return out if isinstance(out, list) else []
+
     def db_status(self, folder: str) -> dict[str, Any]:
         return self._get("/rest/db/status", {"folder": folder})
 

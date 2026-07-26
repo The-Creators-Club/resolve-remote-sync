@@ -143,6 +143,14 @@ class _Handler(BaseHTTPRequestHandler):
         elif url.path == "/rest/db/ignores":
             lines = state.get("ignores", {}).get(q.get("folder"), [])
             self._json({"ignore": lines, "expanded": lines})
+        elif url.path == "/rest/events":
+            since = int(q.get("since", 0))
+            limit = int(q.get("limit", 200))
+            evs = [e for e in state.get("events", [])
+                   if int(e.get("id", 0)) > since]
+            # Real Syncthing's limit keeps the NEWEST events, not the oldest
+            # -- the collector's restart detection depends on that.
+            self._json(evs[-limit:])
         elif url.path == "/rest/db/status":
             self._json(state["db_status"].get(q.get("folder"), {}))
         elif url.path == "/rest/db/completion":

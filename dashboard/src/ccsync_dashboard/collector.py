@@ -812,6 +812,60 @@ class Collector:
                 log.info("completion: dropped %d stale (project, device) pair(s) "
                          "no longer shared", pruned_pairs)
         self._incomplete = fresh
+        self._ingest_item_finished(conn, now)
+
+    def _ingest_item_finished(self, conn, now: str) -> None:
+        """Record files the SERVER finished receiving (Syncthing ItemFinished
+        events) into transfer_history -- lane C uploads completed. A 420 MB
+        mp3 crossed the LAN between two 60s polls and appeared in NO view
+        (2026-07-26); the event stream doesn't blink. Never fails the cycle."""
+        try:
+            stored = int(db.meta_get(conn, "syncthing_last_event_id") or 0)
+            # Event IDs restart at 1 when Syncthing restarts -- detect by
+            # asking for the newest event unconditionally.
+            newest = self.client.events(since=0, limit=1)
+            newest_id = int(newest[-1].get("id", 0)) if newest else 0
+            if newest_id < stored:
+                stored = 0
+            events = self.client.events(since=stored) if newest_id > stored else []
+            if not events:
+                return
+            entries = []
+            max_id = stored
+            for ev in events:
+                max_id = max(max_id, int(ev.get("id", 0)))
+                data = ev.get("data") or {}
+                if (ev.get("type") != "ItemFinished" or data.get("error")
+                        or data.get("action") != "update" or data.get("type") != "file"):
+                    continue
+                slug = str(data.get("folder") or "")
+                label = None
+                for row in conn.execute("SELECT label FROM projects WHERE slug=?", (slug,)):
+                    label = row["label"]
+                if label is None:
+                    continue
+                # Attribute to the folder's single sharing editor when
+                # unambiguous; the event doesn't say who sent the change.
+                editors = set()
+                for device_id in self._folder_devices.get(slug, []):
+                    for r in conn.execute(
+                        "SELECT editor_username FROM devices WHERE device_id=?", (device_id,)
+                    ):
+                        if r["editor_username"]:
+                            editors.add(r["editor_username"])
+                editor = editors.pop() if len(editors) == 1 else ""
+                entries.append((editor, {
+                    "lane": "lane_c_syncthing",
+                    "name": f"Projects/{label}/{data.get('item', '')}",
+                    "direction": "up",
+                    "at": str(ev.get("time") or now),
+                }))
+            for editor, entry in entries:
+                db.add_transfer_history(conn, editor, "", [entry], now)
+            if max_id > stored:
+                db.meta_set(conn, "syncthing_last_event_id", str(max_id))
+        except Exception:
+            log.debug("ItemFinished ingest failed", exc_info=True)
 
     def _run_remoteneed(self, conn) -> None:
         # Same shape as _run_completion: fetch every pair first, then write in

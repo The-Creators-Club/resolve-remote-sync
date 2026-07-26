@@ -687,3 +687,32 @@ def test_icon_image_cache_returns_same_object():
 
     assert _icon_image_cached("green") is _icon_image_cached("green")
     assert _icon_image_cached("green") is not _icon_image_cached("red")
+
+
+def test_wait_while_menu_open_caps_and_returns_immediately_when_closed():
+    import time as _time
+
+    from ccsync_companion import ui_state
+
+    ui_state.menu_open.clear()
+    t0 = _time.monotonic()
+    ui_state.wait_while_menu_open(max_wait=5.0)
+    assert _time.monotonic() - t0 < 0.05      # closed menu: no wait at all
+
+    ui_state.menu_open.set()
+    try:
+        t0 = _time.monotonic()
+        ui_state.wait_while_menu_open(max_wait=0.4, slice_seconds=0.1)
+        elapsed = _time.monotonic() - t0
+        # a wedged flag must never stall callers past the cap
+        assert 0.3 <= elapsed < 2.0
+    finally:
+        ui_state.menu_open.clear()
+
+
+def test_menu_open_guard_uses_the_shared_ui_state_flag():
+    from ccsync_companion import ui_state
+    from ccsync_companion.tray import _MenuOpenGuard
+
+    guard = _MenuOpenGuard()
+    assert guard._open is ui_state.menu_open

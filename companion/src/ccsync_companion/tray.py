@@ -110,10 +110,18 @@ class _MenuOpenGuard:
     what produced the random hover hangs (a menu rebuild DestroyMenu()s the
     handle being displayed; icon/tooltip NIM_MODIFYs force redraws under
     the cursor). On other backends install() is a no-op and is_open() stays
-    False, preserving the old always-update behavior."""
+    False, preserving the old always-update behavior.
+
+    The flag is the PROCESS-WIDE ui_state.menu_open: the menu's highlight
+    repaints run through a Python window procedure that needs the GIL, so
+    resolve_bridge defers its GIL-holding fusionscript calls while it is
+    set (a single Resolve poll froze the hover highlight for a second-plus,
+    2026-07-26)."""
 
     def __init__(self) -> None:
-        self._open = threading.Event()
+        from . import ui_state
+
+        self._open = ui_state.menu_open
 
     def install(self) -> None:
         try:

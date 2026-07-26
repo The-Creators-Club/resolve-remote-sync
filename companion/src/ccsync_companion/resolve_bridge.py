@@ -24,6 +24,8 @@ import sys
 import threading
 from typing import Any, Optional
 
+from . import ui_state
+
 log = logging.getLogger("ccsync.resolve")
 
 # Serializes EVERY call into the Resolve C extension.
@@ -230,6 +232,11 @@ def get_timeline_items() -> dict[str, Any]:
     Items with no media pool item (generators, titles, adjustment clips) or
     an empty "File Path" are skipped entirely — per SPEC.md's watcher spec.
     """
+    # Defer while the tray menu is open: a fusionscript call holds the GIL
+    # for its full native duration, and the open menu's highlight repaints
+    # run through a Python window procedure that needs that same GIL -- one
+    # poll here froze the hover highlight for a second-plus (2026-07-26).
+    ui_state.wait_while_menu_open()
     with _API_LOCK:
         return _get_timeline_items_locked()
 
@@ -381,6 +388,7 @@ def get_media_pool_items() -> dict[str, Any]:
     compound clips, generators, titles), are skipped entirely — same rule as
     get_timeline_items.
     """
+    ui_state.wait_while_menu_open()  # same GIL courtesy as get_timeline_items
     with _API_LOCK:
         return _get_media_pool_items_locked()
 

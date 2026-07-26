@@ -29,7 +29,7 @@
 
 <div class="side-head" style="margin-top:1.4rem">[ QUEUED ]
   <span class="muted">
-    {% if transfers.queues %}{{ transfers.queued_files }} file(s) · {{ transfers.queued_bytes | human_bytes }} still to sync, from the last reported disk manifests (may lag a few minutes)
+    {% if transfers.queues %}{{ transfers.queued_files }} file(s) · {{ transfers.queued_bytes | human_bytes }} waiting behind the transfers above, from the last reported disk manifests (may lag a few minutes)
     {% else %}everything that should be somewhere is there{% endif %}
   </span>
 </div>

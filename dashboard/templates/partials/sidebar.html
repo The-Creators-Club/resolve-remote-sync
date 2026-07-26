@@ -1,9 +1,8 @@
 {# Nested project tree: one collapsible group per label path segment
    (2026 > CCT > Website Highlights), each project shown by its LAST
-   segment. Groups on the current project's path render open; the
-   details-preserve script in base.html keeps manual open/close choices
-   across the 30s sidebar refresh. Small fleets open everything so nothing
-   hides behind a click. #}
+   segment. Everything is collapsed by default; only the chain containing
+   the page's current project renders open. The details-preserve script in
+   base.html keeps manual open/close choices across the 30s refresh. #}
 {% macro project_row(p) %}
   <div class="project-link {{ 'current' if p.slug == current_slug }}">
     {% if toggle_editor %}
@@ -23,7 +22,7 @@
   {% for name, child in node.groups | dictsort %}
     {% set group_path = (path ~ "/" ~ name) if path else name %}
     <details class="proj-group" data-key="grp:{{ group_path }}"
-             {{ "open" if (current_slug and current_slug in child.slugs) or (view.projects | length) <= 8 }}>
+             {{ "open" if current_slug and current_slug in child.slugs }}>
       <summary><span class="marker">▸</span> {{ name }}
         <span class="muted mono-sm">{{ child.slugs | length }}</span>
       </summary>

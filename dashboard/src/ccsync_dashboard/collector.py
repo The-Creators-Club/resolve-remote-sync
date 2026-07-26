@@ -785,6 +785,27 @@ class Collector:
             )
             if completion >= 100 and need_items == 0:
                 db.clear_missing_files(conn, project_id, device_row)
+
+        # Drop completion/missing rows for pairs no longer shared -- the
+        # in-memory _incomplete map already pruned them, but the DB rows
+        # lived forever and read as phantom sync backlog (see
+        # db.prune_completion_not_shared). Guarded on a non-empty share map
+        # so a Syncthing flap that briefly reports zero folders cannot
+        # wipe the whole completion cache in one cycle.
+        if self._folder_devices:
+            valid_pairs: list[tuple[int, int]] = []
+            for slug, shared in self._folder_devices.items():
+                pid = self._project_ids.get(slug)
+                if pid is None:
+                    continue
+                for device_id in shared:
+                    drow = self._device_ids.get(device_id)
+                    if drow is not None:
+                        valid_pairs.append((pid, drow))
+            pruned_pairs = db.prune_completion_not_shared(conn, valid_pairs)
+            if pruned_pairs:
+                log.info("completion: dropped %d stale (project, device) pair(s) "
+                         "no longer shared", pruned_pairs)
         self._incomplete = fresh
 
     def _run_remoteneed(self, conn) -> None:

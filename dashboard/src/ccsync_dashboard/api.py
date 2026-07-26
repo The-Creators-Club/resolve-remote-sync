@@ -318,16 +318,21 @@ def build_transfers_view(
         })
     rows.sort(key=lambda x: (x["speed_bps"] or 0), reverse=True)
 
-    # The full queue: everything still waiting, per (editor, machine,
-    # project) -- lanes A/B from the nas_media/editor_media manifest diff,
-    # lane C from Syncthing's missing-files cache. The table above only ever
-    # shows the <= --transfers files rclone has in flight right now.
+    # The queue: what is WAITING on the current sync job, per (editor,
+    # machine, project) -- lanes A/B from the nas_media/editor_media
+    # manifest diff, lane C from Syncthing's missing-files cache. Two
+    # scoping rules, both from the 2026-07-26 phantom-queue report:
+    # every source joins selections (only TICKED projects sync, so only
+    # ticked projects can be queued), and files already in the live table
+    # above are subtracted (queued means not yet syncing).
     queues = db.fetch_sync_backlog(conn, editor=editor)
     lane_c_q = """SELECT c.project_id, c.device_id AS device_row, c.need_items,
                          c.need_bytes, p.slug, p.label, d.editor_username
                   FROM completion_current c
                   JOIN projects p ON p.id = c.project_id
                   JOIN devices d ON d.id = c.device_id
+                  JOIN selections s ON s.editor_username = d.editor_username
+                                   AND s.project_slug = p.slug
                   WHERE d.is_server = 0 AND c.need_items > 0"""
     for r in conn.execute(lane_c_q):
         if editor is not None and (r["editor_username"] or "") != editor:
@@ -342,6 +347,36 @@ def build_transfers_view(
             "truncated": r["need_items"] > min(len(missing["files"]), 50),
             "manifest_truncated": False,
         })
+
+    # Subtract in-flight files: rclone transfer names are project-relative
+    # like the manifest rel_paths, with a basename fallback for safety.
+    active_by_editor: dict[str, set[str]] = {}
+    for t in rows:
+        if t.get("granularity") != "file":
+            continue
+        names = active_by_editor.setdefault(str(t["editor"] or ""), set())
+        name = str(t["name"] or "")
+        if name:
+            names.add(name)
+            names.add(name.rsplit("/", 1)[-1])
+    for q in queues:
+        active = active_by_editor.get(str(q["editor"] or ""), set())
+        if not active:
+            continue
+        kept = []
+        removed_bytes = 0
+        for f in q["files"]:
+            name = str(f.get("name") or "")
+            if name in active or name.rsplit("/", 1)[-1] in active:
+                removed_bytes += int(f.get("size") or 0)
+                continue
+            kept.append(f)
+        removed = len(q["files"]) - len(kept)
+        if removed:
+            q["files"] = kept
+            q["n_files"] = max(0, q["n_files"] - removed)
+            q["bytes"] = max(0, (q["bytes"] or 0) - removed_bytes)
+    queues = [q for q in queues if q["n_files"] > 0]
     queues.sort(key=lambda q: (q["editor"] or "", q["label"], q["lane"]))
 
     return {"generated_at": now, "transfers": rows,

@@ -1484,6 +1484,32 @@ def fetch_project_editors(conn: sqlite3.Connection, project_id: int) -> list[dic
     return [dict(r) for r in rows]
 
 
+def prune_completion_not_shared(
+    conn: sqlite3.Connection, valid_pairs: list[tuple[int, int]]
+) -> int:
+    """Delete completion_current + missing_files rows for (project, device)
+    pairs Syncthing no longer shares.
+
+    The collector only ever UPSERTS completion rows for currently-shared
+    pairs, so an untick (or a device removed from a folder) left the last
+    row behind forever -- surfacing as phantom sidebar editors-behind marks
+    and, worse, phantom [ QUEUED ] entries for projects the machine no
+    longer syncs (44 GB of "lane C need" from a long-gone misconfiguration,
+    2026-07-26). Returns the number of pairs removed."""
+    keep = set(valid_pairs)
+    victims = [
+        (r["project_id"], r["device_id"])
+        for r in conn.execute("SELECT project_id, device_id FROM completion_current")
+        if (r["project_id"], r["device_id"]) not in keep
+    ]
+    for project_id, device_id in victims:
+        conn.execute("DELETE FROM completion_current WHERE project_id=? AND device_id=?",
+                     (project_id, device_id))
+        conn.execute("DELETE FROM missing_files WHERE project_id=? AND device_id=?",
+                     (project_id, device_id))
+    return len(victims)
+
+
 def fetch_sync_backlog(
     conn: sqlite3.Connection, editor: str | None = None, files_per_group: int = 50
 ) -> list[dict[str, Any]]:

@@ -263,3 +263,57 @@ def test_sync_backlog_excludes_base_and_unselected(env):
         bytes_proxies=0, truncated=False, now=now)
     conn.commit()
     assert build_transfers_view(conn)["queues"] == []
+
+
+def test_queue_excludes_unticked_lane_c_and_in_flight_files(env):
+    """2026-07-26 phantom-queue report: stale Syncthing completion rows for
+    UNTICKED projects surfaced as 44 GB of queued lane C, and files already
+    in the live transfers table double-counted as queued."""
+    client, conn, now = env
+    _seed_backlog(conn, now)
+
+    # A stale completion row for a project ruskin has NOT ticked: a second
+    # project + device pair left over from an old configuration.
+    pid2 = dbmod.upsert_project(conn, "2025-old-thing", "2025/Old Thing", "/y", now)
+    did = dbmod.upsert_device(conn, "DEV-RUSKIN", "ruskin", False, now)
+    dbmod.upsert_completion(conn, pid2, did, completion=10.0, need_items=402,
+                            need_bytes=44_000_000_000, need_deletes=0,
+                            global_items=500, global_bytes=50_000_000_000, now=now)
+    conn.commit()
+    labels = [q["label"] for q in build_transfers_view(conn)["queues"]]
+    assert "2025/Old Thing" not in labels        # unticked -> not queued
+
+    # ...but the same row counts once the project is ticked
+    dbmod.add_selection(conn, "ruskin", "2025-old-thing", "ruskin", now)
+    conn.commit()
+    labels = [q["label"] for q in build_transfers_view(conn)["queues"]]
+    assert "2025/Old Thing" in labels
+
+    # in-flight files leave the queue: ruskin's report says b.mov is
+    # transferring right now, so the lane B backlog (exactly that file)
+    # empties and the group disappears; the lane A upload stays.
+    client.post("/api/v1/report", json=report("ruskin", "EDIT-PC"), headers=hdr("ruskin"))
+    view = build_transfers_view(conn)
+    down_groups = [q for q in view["queues"] if q["lane"] == "b" and q["editor"] == "ruskin"]
+    assert down_groups == []
+    assert [q["lane"] for q in view["queues"] if q["editor"] == "ruskin" and q["lane"] == "a"] == ["a"]
+
+
+def test_prune_completion_not_shared(env):
+    _client, conn, now = env
+    pid = dbmod.upsert_project(conn, "p-one", "P/One", "/1", now)
+    pid2 = dbmod.upsert_project(conn, "p-two", "P/Two", "/2", now)
+    did = dbmod.upsert_device(conn, "DEV-X", "jsmith", False, now)
+    for p in (pid, pid2):
+        dbmod.upsert_completion(conn, p, did, completion=50.0, need_items=3,
+                                need_bytes=30, need_deletes=0,
+                                global_items=6, global_bytes=60, now=now)
+        dbmod.replace_missing_files(conn, p, did, [("a.wav", 1)], False, now)
+    conn.commit()
+
+    removed = dbmod.prune_completion_not_shared(conn, [(pid, did)])
+    assert removed == 1
+    left = conn.execute("SELECT project_id FROM completion_current").fetchall()
+    assert [r["project_id"] for r in left] == [pid]
+    assert conn.execute("SELECT COUNT(*) FROM missing_files WHERE project_id=?",
+                        (pid2,)).fetchone()[0] == 0

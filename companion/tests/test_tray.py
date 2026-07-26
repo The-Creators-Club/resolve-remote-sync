@@ -633,3 +633,57 @@ def test_tooltip_shows_live_numbers_and_states():
 
     signed_out = _FakeApp({"dashboard_url": ""})
     assert "not signed in" in _tooltip_text(_tray_snapshot(signed_out))
+
+
+def test_menu_open_guard_tracks_the_popup_call(monkeypatch):
+    """While TrackPopupMenuEx blocks (menu open), is_open() must be True; the
+    flag must clear even if the call raises."""
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("pystray win32 backend only")
+    from pystray import _win32
+
+    from ccsync_companion import tray as tray_mod
+
+    seen = {}
+    guard = tray_mod._MenuOpenGuard()
+
+    def fake_track(*args, **kwargs):
+        seen["open_during"] = guard.is_open()
+        return 0
+
+    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx", fake_track, raising=True)
+    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
+    guard.install()
+
+    assert guard.is_open() is False
+    _win32.win32.TrackPopupMenuEx()
+    assert seen["open_during"] is True
+    assert guard.is_open() is False
+
+    # a raising call must still clear the flag
+    def raising_track(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
+    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx", raising_track, raising=True)
+    guard2 = tray_mod._MenuOpenGuard()
+    guard2.install()
+    with _pytest.raises(RuntimeError):
+        _win32.win32.TrackPopupMenuEx()
+    assert guard2.is_open() is False
+
+    # a second guard adopts the existing wrap instead of double-wrapping
+    guard3 = tray_mod._MenuOpenGuard()
+    guard3.install()
+    assert guard3._open is guard2._open
+
+
+def test_icon_image_cache_returns_same_object():
+    from ccsync_companion.tray import _icon_image_cached
+
+    assert _icon_image_cached("green") is _icon_image_cached("green")
+    assert _icon_image_cached("green") is not _icon_image_cached("red")

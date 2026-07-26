@@ -99,6 +99,65 @@ def _color_rgb(color_name: str) -> tuple[int, int, int]:
     return {"green": COLOR_GREEN, "orange": COLOR_ORANGE, "red": COLOR_RED}.get(color_name, COLOR_GREEN)
 
 
+class _MenuOpenGuard:
+    """Answers "is the tray's context menu open RIGHT NOW?" on Windows.
+
+    pystray's win32 backend shows the menu with a single blocking
+    win32.TrackPopupMenuEx call on the message-loop thread. Wrapping that
+    function with a flag gives the refresh thread a reliable open/closed
+    signal, so it can defer EVERY tray mutation (icon, tooltip, menu) while
+    the user is looking at the menu -- mutating any of them mid-open is
+    what produced the random hover hangs (a menu rebuild DestroyMenu()s the
+    handle being displayed; icon/tooltip NIM_MODIFYs force redraws under
+    the cursor). On other backends install() is a no-op and is_open() stays
+    False, preserving the old always-update behavior."""
+
+    def __init__(self) -> None:
+        self._open = threading.Event()
+
+    def install(self) -> None:
+        try:
+            if sys.platform != "win32":
+                return
+            from pystray import _win32  # type: ignore[attr-defined]
+
+            win = _win32.win32
+            if getattr(win, "_ccsync_menu_open_flag", None) is not None:
+                self._open = win._ccsync_menu_open_flag
+                return
+            original = win.TrackPopupMenuEx
+            flag = self._open
+
+            def tracked(*args, **kwargs):
+                flag.set()
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    flag.clear()
+
+            win.TrackPopupMenuEx = tracked
+            win._ccsync_menu_open_flag = flag
+        except Exception:
+            log.debug("menu-open guard unavailable", exc_info=True)
+
+    def is_open(self) -> bool:
+        return self._open.is_set()
+
+
+# One rendered image per color -- regenerating the identical 64x64 PIL image
+# (and the win32 HICON pystray derives from it) every refresh tick was pure
+# GDI churn.
+_ICON_IMAGE_CACHE: dict = {}
+
+
+def _icon_image_cached(color_name: str):
+    image = _ICON_IMAGE_CACHE.get(color_name)
+    if image is None:
+        image = _make_icon_image(color_name)
+        _ICON_IMAGE_CACHE[color_name] = image
+    return image
+
+
 def _make_icon_image(color_name: str):
     """Terminal-style tile: near-black rounded square, neon-red border, and a
     status-colored sync glyph (two chevrons) with a soft glow."""
@@ -815,19 +874,37 @@ def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.I
     first = _tray_snapshot(app)
     icon = pystray.Icon(
         "ccsync-companion",
-        _make_icon_image(first["color"]),
+        _icon_image_cached(first["color"]),
         _tooltip_text(first),
         menu=_build_menu(app, first),
     )
+    guard = _MenuOpenGuard()
+    guard.install()
     last_fingerprint = _menu_fingerprint(first)
+    last_color = first["color"]
+    last_title = _tooltip_text(first)
 
     def _refresh_loop() -> None:
-        nonlocal last_fingerprint
+        nonlocal last_fingerprint, last_color, last_title
         while not getattr(icon, "_ccsync_stop", False):
             try:
+                # While the menu is open, touch NOTHING -- re-check on a
+                # short interval so updates land right after it closes.
+                if guard.is_open():
+                    time.sleep(0.25)
+                    continue
                 snap = _tray_snapshot(app)
-                icon.icon = _make_icon_image(snap["color"])
-                icon.title = _tooltip_text(snap)
+                if guard.is_open():
+                    # Opened while we were gathering -- drop this tick.
+                    time.sleep(0.25)
+                    continue
+                if snap["color"] != last_color:
+                    icon.icon = _icon_image_cached(snap["color"])
+                    last_color = snap["color"]
+                title = _tooltip_text(snap)
+                if title != last_title:
+                    icon.title = title
+                    last_title = title
                 fingerprint = _menu_fingerprint(snap)
                 if fingerprint != last_fingerprint:
                     icon.menu = _build_menu(app, snap)

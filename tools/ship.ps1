@@ -70,6 +70,22 @@ $DashVersion = (Select-String -Path "dashboard\src\ccsync_dashboard\__init__.py"
 $CompanionVersion = (Select-String -Path "companion\src\ccsync_companion\config.py" -Pattern '^VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
 Write-Step "repo says: dashboard v$DashVersion, companion v$CompanionVersion"
 
+# --- fail fast if this companion version is already published ---------------
+# The publish guard refuses to reuse a version number for different bytes --
+# correctly -- but discovering that AFTER a five-minute PyInstaller build (and
+# a password prompt) wasted a run twice on 2026-07-26. The download endpoint
+# answers with the shared token, so check FIRST.
+if (-not $DashboardOnly) {
+    $pubCode = curl.exe -s -o NUL -w "%{http_code}" -H "X-CCSync-Token: $env:DASH_REPORT_TOKEN" `
+        "http://192.168.0.102:8480/api/v1/companion/package/windows/$CompanionVersion"
+    if ($pubCode -eq "200") {
+        Write-Fail "companion v$CompanionVersion is ALREADY published on the server."
+        Write-Step "bump VERSION in companion\src\ccsync_companion\config.py AND companion\pyproject.toml"
+        Write-Step "(and, if onboard.exe's contents changed, `$InstallerVersion in installer\windows_bootstrap.ps1 + onboarding\steps.py), then re-run"
+        exit 1
+    }
+}
+
 # --- 1. dashboard -----------------------------------------------------------
 Write-Host ""
 Write-Step "--- step 1: deploy dashboard ---"

@@ -619,8 +619,26 @@ def _append_stats_flags(cmd: list[str], stats_interval: Optional[str]) -> list[s
     return cmd
 
 
+# rclone's DEFAULT Windows local encoding maps forbidden characters to their
+# fullwidth forms (? -> ？) -- and QUOTES a name that already contains a
+# fullwidth form by prefixing U+201B (‛). The tree is full of legitimate
+# fullwidth punctuation (yt-dlp sanitizes YouTube titles that way), so lane B
+# downloaded "…有完沒完？….mov" as "…有完沒完‛？….mov": byte-identical to
+# rclone, but a DIFFERENT basename to Resolve, which matches proxies to clips
+# by exact name -- 29 of one editor's 68 proxies could never relink
+# (2026-07-26). This set is the default MINUS the punctuation mappings
+# (LtGt, DoubleQuote, Colon, Question, Asterisk, Pipe), so fullwidth names
+# round-trip verbatim in BOTH directions (lane A used to silently DE-encode
+# ？ to a raw ? on the NAS, too). The trade: a NAS name containing a raw
+# Windows-forbidden character now fails that file's transfer loudly instead
+# of being silently renamed -- surveyed 2026-07-26: zero such names exist,
+# and none can be created from Windows.
+LOCAL_ENCODING = "Slash,BackSlash,Ctl,RightSpace,RightPeriod,InvalidUtf8,Dot"
+
+
 def _transport_flags() -> list[str]:
-    """Bounds on a stalled peer, shared by both lanes.
+    """Bounds on a stalled peer plus the filename-encoding pin, shared by
+    every transfer command (lanes A/B and express).
 
     rclone's own idle default already covers most cases, but a peer that
     ACKs and then stalls (a Tailscale DERP flap, a hung TrueNAS SFTP
@@ -631,6 +649,7 @@ def _transport_flags() -> list[str]:
         "--timeout", "5m",
         "--contimeout", "60s",
         "--retries-sleep", "10s",
+        "--local-encoding", LOCAL_ENCODING,
     ]
 
 

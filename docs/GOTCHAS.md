@@ -337,6 +337,21 @@ of step with the published one for no gain.
   CCSYNC_SSH_HOSTKEY="$(ssh-keyscan -t ed25519 192.168.0.102 | awk '{print $2, $3}')"
   ```
 
+- **rclone silently rewrites fullwidth punctuation in filenames on
+  Windows.** Its default local encoding maps forbidden characters to
+  fullwidth forms (`?` -> `？`) and QUOTES a name that already contains a
+  fullwidth form by prefixing U+201B (`‛`). yt-dlp titles are full of
+  legitimate fullwidth punctuation, so lane B delivered proxies whose
+  basenames no longer matched their Resolve clips -- 29 of 68 proxies on
+  one editor's machine could never relink (2026-07-26, proven by
+  downloading one file and watching the `‛` appear). The reverse applied
+  on lane A: a local `？` uploaded as a raw `?`. Fixed by pinning
+  `--local-encoding` without the punctuation mappings on every transfer
+  command (rclone_lane.LOCAL_ENCODING). If a proxy-vs-source name ever
+  mismatches by exactly one `‛`, suspect a companion predating v0.4.8 --
+  and do NOT hand-rename the local file: pre-fix rclone treats the
+  corrected name as a different file and re-downloads the `‛` version.
+
 - **A Syncthing that connects and drops after exactly ~1 second is a
   device-list problem, not a network problem.** NAS-side log signature:
   `Established secure connection` then `Lost device connection ...

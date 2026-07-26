@@ -1209,3 +1209,35 @@ def test_express_lists_far_fewer_objects_than_a_full_pass(
         return best
 
     assert _listed(express_proc.stderr) < _listed(full_proc.stderr)
+
+
+def test_all_transfer_commands_pin_the_local_encoding(tmp_path):
+    """The proxy-relink incident (2026-07-26): rclone's default Windows
+    local encoding writes a name containing fullwidth punctuation with a
+    U+201B quote prefix, so the downloaded proxy's basename no longer
+    matches its Resolve clip. Every transfer command must pin the encoding
+    that round-trips fullwidth names verbatim."""
+    from ccsync_companion.sync.rclone_lane import (
+        LOCAL_ENCODING,
+        build_down_command,
+        build_express_command,
+        build_up_command,
+    )
+
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("+ **/Proxy/**\n- **\n", encoding="utf-8")
+    files_from = tmp_path / "files.txt"
+    files_from.write_text("x.mp4\n", encoding="utf-8")
+
+    up = build_up_command("rclone", r"C:\root", "nas", "CC", filter_file)
+    down = build_down_command("rclone", r"C:\root", "nas", "CC", filter_file)
+    express = build_express_command("rclone", r"C:\root", "nas", "CC", files_from)
+    for cmd in (up, down, express):
+        i = cmd.index("--local-encoding")
+        assert cmd[i + 1] == LOCAL_ENCODING
+    # the punctuation mappings must be OUT (they cause the quoting) and the
+    # structural ones IN (path separators and control chars stay mapped)
+    for gone in ("Question", "Colon", "DoubleQuote", "LtGt", "Asterisk", "Pipe"):
+        assert gone not in LOCAL_ENCODING
+    for kept in ("Slash", "BackSlash", "Ctl", "InvalidUtf8"):
+        assert kept in LOCAL_ENCODING

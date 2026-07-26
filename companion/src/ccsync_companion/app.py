@@ -575,6 +575,15 @@ class CompanionApp:
 
     def _handle_mapping_warning(self, item: dict[str, Any]) -> None:
         path = item.get("file_path", "")
+        # While the user has DELIBERATELY pointed P: at the server (the
+        # tray's grade-swap), canonical paths resolving off-machine is the
+        # chosen state, not a broken mapping.
+        try:
+            if self.p_mapping_mode() == "server":
+                log.debug("mapping warning suppressed (P: is grade-swapped to the server): %s", path)
+                return
+        except Exception:
+            pass
         # The log line keeps the internals (that's what diagnostics are for);
         # the toast an editor actually reads must name the thing they can fix
         # (AUDIT_2 UX-16).
@@ -1173,6 +1182,69 @@ class CompanionApp:
         if role is not None:
             return role
         return str(self.config.get("mode", "editor")).strip().lower() or "editor"
+
+    # -- P: grade-swap (drive_swap.py) ----------------------------------
+
+    def p_swap_available(self) -> bool:
+        """The tray shows the grade-swap only when it can work: Windows,
+        editor role (the base rig's P: already IS the server), and a
+        configured server_p_unc."""
+        import os as _os
+
+        if _os.name != "nt":
+            return False
+        if not str(self.config.get("server_p_unc", "")).strip():
+            return False
+        try:
+            return self.effective_mode() != "base"
+        except Exception:
+            return False
+
+    def p_mapping_mode(self) -> str:
+        """"local" | "server" | "other" | "none", cached briefly -- the
+        watcher consults this on every mapping warning."""
+        now = time.monotonic()
+        cached = getattr(self, "_p_mode_cache", None)
+        if cached is not None and now - cached[0] < 10.0:
+            return cached[1]
+        from . import drive_swap
+
+        try:
+            mode = drive_swap.classify_p_target(
+                drive_swap.current_p_target(),
+                str(self.config.get("local_root", "")),
+                str(self.config.get("server_p_unc", "")),
+            )
+        except Exception:
+            mode = "none"
+        self._p_mode_cache = (now, mode)
+        return mode
+
+    def swap_p_to_server(self) -> tuple[bool, str]:
+        """Remap P: to the server tree for full-res grading. On failure the
+        LOCAL map is restored before returning -- the worst outcome is
+        "nothing changed", never an unmapped P:."""
+        from . import drive_swap
+
+        if not self.p_swap_available():
+            return False, "grade-swap is not available on this machine"
+        ok, message = drive_swap.swap_to_server(str(self.config.get("server_p_unc", "")))
+        if not ok:
+            restored, restore_msg = drive_swap.swap_to_local(
+                str(self.config.get("local_root", "")))
+            suffix = " P: was restored to your local copy." if restored else f" AND {restore_msg}"
+            message = message + suffix
+        self._p_mode_cache = None
+        log.info("grade-swap to server: ok=%s (%s)", ok, message)
+        return ok, message
+
+    def swap_p_to_local(self) -> tuple[bool, str]:
+        from . import drive_swap
+
+        ok, message = drive_swap.swap_to_local(str(self.config.get("local_root", "")))
+        self._p_mode_cache = None
+        log.info("grade-swap to local: ok=%s (%s)", ok, message)
+        return ok, message
 
     def removable_projects(self) -> list[dict[str, str]]:
         """[{"slug", "rel"}] of the projects this machine currently syncs --

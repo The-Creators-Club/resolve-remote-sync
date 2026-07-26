@@ -745,3 +745,25 @@ def test_menu_lists_removable_projects():
     app.removable_projects = lambda: []
     fp_without = _menu_fingerprint(_tray_snapshot(app))
     assert fp_with != fp_without
+
+
+
+def test_menu_offers_grade_swap_and_label_flips():
+    from ccsync_companion.tray import _build_menu, _menu_fingerprint, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""})
+    app.p_swap_available = lambda: True
+    app.p_mapping_mode = lambda: "local"
+    labels = _menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert any("Grade from server originals" in l for l in labels)
+    fp_local = _menu_fingerprint(_tray_snapshot(app))
+
+    app.p_mapping_mode = lambda: "server"
+    labels = _menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert any("back to local proxies" in l for l in labels)
+    assert _menu_fingerprint(_tray_snapshot(app)) != fp_local
+
+    # hidden entirely when unavailable (base rig / unconfigured)
+    app2 = _FakeApp({"dashboard_url": ""})
+    labels = _menu_labels(_build_menu(app2, _tray_snapshot(app2)))
+    assert not any("Grade" in l for l in labels)

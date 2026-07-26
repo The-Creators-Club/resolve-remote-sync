@@ -614,6 +614,50 @@ def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
     _notify(app, message if ok else f"Remove stopped: {message}")
 
 
+def _confirm_grade_swap(app: "CompanionApp", to_server: bool) -> None:
+    """Confirm, then remap P: (see app.swap_p_to_server/_to_local). Runs on
+    a tray worker thread; takes the popup lock like every Tk dialog."""
+    from . import popup
+
+    lock = getattr(app, "_popup_active_lock", None)
+    if lock is not None and not lock.acquire(blocking=False):
+        _notify(app, "Another CCSync window is already open. Close it first.")
+        return
+    try:
+        gap = "\n\n"
+        if to_server:
+            body = (
+                "Point P: at the SERVER's tree so Resolve streams full-resolution "
+                "originals while you grade?" + gap +
+                "Pause playback first. Frames come over the network, so scrubbing "
+                "is only as fast as your connection." + gap +
+                "In Resolve, set Playback > Proxy Handling > Prefer Camera "
+                "Originals to actually use them." + gap +
+                "Syncing is not affected. Swap back from this menu when you're done."
+            )
+            confirmed = popup.confirm_dialog("CCSYNC.EXE: grade from server",
+                                             body, ok_label="SWAP P: TO SERVER")
+        else:
+            body = (
+                "Point P: back at this machine's local copy (proxies)?" + gap +
+                "Set Resolve's Playback > Proxy Handling back to Prefer Proxies."
+            )
+            confirmed = popup.confirm_dialog("CCSYNC.EXE: back to proxies",
+                                             body, ok_label="SWAP P: BACK")
+    finally:
+        if lock is not None:
+            lock.release()
+    if not confirmed:
+        return
+    try:
+        ok, message = (app.swap_p_to_server() if to_server else app.swap_p_to_local())
+    except Exception:
+        log.exception("grade swap raised")
+        _notify(app, "The P: swap failed. Tray → Copy diagnostics for your admin.")
+        return
+    _notify(app, message if ok else f"Swap stopped: {message}")
+
+
 def _guarded(app: "CompanionApp", label: str, fn) -> None:
     """Run a tray action, logging anything it raises.
 
@@ -699,6 +743,8 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     _get("setup_name", lambda: (getattr(app, "setup_project_available", None) or (lambda: None))(), None)
     _get("upgrade_info", lambda: (getattr(app, "upgrade_available", None) or (lambda: None))(), None)
     _get("removable", lambda: (getattr(app, "removable_projects", None) or (lambda: []))(), [])
+    _get("p_swap_available", lambda: (getattr(app, "p_swap_available", None) or (lambda: False))(), False)
+    _get("p_mode", lambda: (getattr(app, "p_mapping_mode", None) or (lambda: "none"))(), "none")
     snap["color"] = compute_overall_color(statuses, app)
     return snap
 
@@ -737,6 +783,7 @@ def _menu_fingerprint(snap: dict) -> tuple:
         snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
         snap["dashboard_url"], snap["color"],
         tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
+        snap.get("p_swap_available"), snap.get("p_mode"),
     )
 
 
@@ -827,6 +874,10 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         _spawn(app, "Set up project",
                lambda: getattr(app, "setup_current_project", lambda: None)())
 
+    def on_grade_swap(icon, item):
+        to_server = snap.get("p_mode") != "server"
+        _spawn(app, "Grade swap", lambda: _confirm_grade_swap(app, to_server))
+
     def on_remove_project(slug, rel):
         def handler(icon, item):
             _spawn(app, "Remove project", lambda: _confirm_remove_project(app, slug, rel))
@@ -896,6 +947,14 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
             on_toggle_pause, checked=(lambda paused: lambda item: paused)(snap["paused"]),
         ),
         pystray.MenuItem("Open my project folder", on_open_project_folder),
+        *([
+            pystray.MenuItem(
+                "Finish grading: P: back to local proxies"
+                if snap.get("p_mode") == "server"
+                else "Grade from server originals (swap P:)…",
+                on_grade_swap,
+            )
+        ] if snap.get("p_swap_available") else []),
         *dashboard_items,
         *setup_items,
         pystray.Menu.SEPARATOR,

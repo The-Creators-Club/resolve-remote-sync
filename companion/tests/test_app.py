@@ -1442,3 +1442,52 @@ def test_remove_project_refuses_unselected_slug(tmp_path):
     ok, msg = stub.remove("some-other-project")
     assert not ok and "not selected" in msg
     assert proj.exists()
+
+
+
+# -- P: grade-swap (2026-07-26) ---------------------------------------------
+
+
+def _swap_stub(monkeypatch, mode="editor", unc="\\\\nas\\Pool\\CC"):
+    from ccsync_companion.app import CompanionApp
+
+    class _Stub:
+        config = {"server_p_unc": unc, "local_root": "D:\\Creators_Club"}
+
+        def effective_mode(self):
+            return mode
+
+    stub = _Stub()
+    stub.p_swap_available = lambda: CompanionApp.p_swap_available(stub)
+    stub.swap_to_server = lambda: CompanionApp.swap_p_to_server(stub)
+    return stub
+
+
+def test_p_swap_available_guards(monkeypatch):
+    import os
+    if os.name != "nt":
+        import pytest
+        pytest.skip("windows-only feature")
+    stub = _swap_stub(monkeypatch)
+    assert stub.p_swap_available() is True
+    assert _swap_stub(monkeypatch, mode="base").p_swap_available() is False
+    assert _swap_stub(monkeypatch, unc="").p_swap_available() is False
+
+
+def test_swap_p_to_server_restores_local_on_failure(monkeypatch):
+    import os
+    if os.name != "nt":
+        import pytest
+        pytest.skip("windows-only feature")
+    from ccsync_companion import drive_swap
+
+    restored = []
+    monkeypatch.setattr(drive_swap, "swap_to_server",
+                        lambda unc, run_fn=None: (False, "Access is denied"))
+    monkeypatch.setattr(drive_swap, "swap_to_local",
+                        lambda root, run_fn=None: (restored.append(root) or True, "back"))
+    stub = _swap_stub(monkeypatch)
+    ok, msg = stub.swap_to_server()
+    assert not ok
+    assert restored == ["D:\\Creators_Club"]
+    assert "restored to your local copy" in msg

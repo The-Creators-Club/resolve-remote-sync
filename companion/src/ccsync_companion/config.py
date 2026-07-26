@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 log = logging.getLogger("ccsync.config")
 
-VERSION = "0.4.14"
+VERSION = "0.4.15"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -121,6 +121,9 @@ DEFAULTS: dict[str, Any] = {
     "express_max_batch": 200,
     "syncthing_url": "http://127.0.0.1:8384",
     "syncthing_api_key": "",
+    # The server tree's SMB path for the tray's "Grade from server
+    # originals" P: swap (drive_swap.py). Empty = feature hidden.
+    "server_p_unc": "",
     # Expected Syncthing folder ID per entry in `projects` (addition; needed
     # to fulfil "verify the expected folder ID ... is configured + shared").
     # Leave empty to skip the folder-id check for a project.
@@ -243,6 +246,13 @@ local_root = ""
 # (Windows: the "P:" virtual drive letter from SPEC.md's Path canon). Used
 # to detect BAD_PREFIX (mapping-health) situations.
 canonical_prefix = "P:\\\\"
+
+# OPTIONAL: the server tree's SMB path, e.g.
+# "\\100.65.15.123\TheCreatorsPool\Creators_Club" (tailnet address for
+# remote editors). When set, the tray offers "Grade from server originals":
+# P: is momentarily remapped to this path so Resolve streams full-res
+# frames off the server, then swapped back to the local copy when done.
+# server_p_unc = ""
 
 # Name of the rclone remote pointing at the NAS. Must match the stanza the
 # bootstrap installer wrote into rclone.conf. ccsync-companion does not

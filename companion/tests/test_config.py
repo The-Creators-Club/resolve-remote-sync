@@ -133,6 +133,7 @@ def test_default_toml_text_documents_every_default_key():
         "structure_clone_every_n_passes", "lane_c_pause_scheme",
         "lane_c_max_folder_concurrency", "orphan_scan_every_n_passes",
         "express_upload_enabled", "express_debounce_seconds", "express_max_batch",
+        "server_p_unc",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:

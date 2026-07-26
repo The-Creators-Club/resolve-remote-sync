@@ -4,6 +4,11 @@ Admin-facing runbook for TrueNAS-side operations. All scripts referenced
 live in `../server/`; see `../server/README.md` for env vars and per-script
 assumptions. Every script supports `--dry-run` -- use it first.
 
+When something breaks rather than needs doing, start at
+[GOTCHAS.md](GOTCHAS.md): container crash-loops, `--recreate` quietly
+replacing secrets with defaults, sudo-only Docker, and why `truenas_admin`
+cannot log in to the dashboard.
+
 ## Onboarding a new editor, end to end
 
 1. Get their SSH public key (`.pub` file -- they generate the keypair

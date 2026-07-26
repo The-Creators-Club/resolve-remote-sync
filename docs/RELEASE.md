@@ -12,6 +12,12 @@ is running *before* you spend an afternoon on a fix.
 .\tools\check_deploy_drift.ps1
 ```
 
+**And if something is already broken:** [GOTCHAS.md](GOTCHAS.md) collects the
+failures that have actually happened here, symptom first. Several of them
+produce an error naming a line that is perfectly correct (a CRLF in a shell
+script, a PowerShell exit code inherited from `git`, a staleness warning
+caused by `git checkout` rewriting mtimes).
+
 ---
 
 ## Why this file exists

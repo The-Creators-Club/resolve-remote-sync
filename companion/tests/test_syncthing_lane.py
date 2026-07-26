@@ -100,6 +100,17 @@ class _FakeSyncthingHandler(BaseHTTPRequestHandler):
         elif self.path.startswith("/rest/db/status"):
             folder_id = self.path.split("folder=")[-1]
             self._json(200, state["db_status"].get(folder_id, {"needTotalItems": 0}))
+        elif self.path == "/rest/system/status":
+            if "my_id" not in state:
+                self._json(404, {"error": "not found"})
+            else:
+                self._json(200, {"myID": state["my_id"]})
+        elif self.path.startswith("/rest/db/completion"):
+            from urllib.parse import parse_qs, urlparse
+            q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+            key = (q.get("folder"), q.get("device"))
+            self._json(200, state.get("remote_completion", {}).get(
+                key, {"completion": 100, "needItems": 0, "needBytes": 0}))
         elif self.path == "/rest/system/connections":
             # Absent from fake_state -> 404, i.e. exactly what an older
             # Syncthing (or one mid-restart) does. The lane must treat that
@@ -468,3 +479,37 @@ def test_db_status_query_encodes_the_folder_id(fake_syncthing_server, monkeypatc
     lane.check_once()
 
     assert "/rest/db/status?folder=a+b%26folder%3Dother" in seen
+
+
+def test_check_once_reports_outgoing_uploads_as_syncing(fake_syncthing_server):
+    """A lane C UPLOAD (this machine -> server) showed 'up to date'
+    everywhere for its whole duration (the 400 MB mp3, 2026-07-26):
+    needTotalItems only counts downloads. The remote device's own need IS
+    the upload in progress."""
+    fake_syncthing_server.fake_state["my_id"] = "AAAA"
+    fake_syncthing_server.fake_state["remote_completion"] = {
+        ("proj-1", "BBBB"): {"completion": 40.0, "needItems": 3, "needBytes": 420_000_000},
+    }
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    status = lane.check_once()
+    assert status.state == STATE_SYNCING
+    assert status.queued == 3
+    assert "sending 3 file(s)" in status.detail
+    assert "to the server" in status.detail
+
+    # drained -> back to idle
+    fake_syncthing_server.fake_state["remote_completion"] = {}
+    status = lane.check_once()
+    assert status.state == STATE_IDLE
+
+
+def test_check_once_downloads_take_precedence_over_uploads(fake_syncthing_server):
+    fake_syncthing_server.fake_state["my_id"] = "AAAA"
+    fake_syncthing_server.fake_state["db_status"]["proj-1"] = {"needTotalItems": 4}
+    fake_syncthing_server.fake_state["remote_completion"] = {
+        ("proj-1", "BBBB"): {"needItems": 2, "needBytes": 100},
+    }
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    status = lane.check_once()
+    assert status.state == STATE_SYNCING
+    assert status.queued == 4          # the download count, as before

@@ -207,6 +207,10 @@ class SyncthingLane(LaneAdapter):
         self._http_get = http_get or default_http_get
 
         self._status = LaneStatus(name=self.name)
+        # This instance's own device ID (cached; it never changes) -- needed
+        # to tell OUTGOING need (what remote devices still lack from us)
+        # apart from our own downloads. See check_once's sending branch.
+        self._my_device_id: Optional[str] = None
         # Last /rest/system/connections summary (AUDIT_2 C-6). Public via
         # connection_path_summary() so the reporter payload -- owned
         # elsewhere -- can send it to the dashboard without re-polling.
@@ -304,6 +308,27 @@ class SyncthingLane(LaneAdapter):
         if not path_detail:
             return detail
         return f"{detail}; {path_detail}" if detail else path_detail
+
+    def _get_my_device_id(self) -> str:
+        if self._my_device_id:
+            return self._my_device_id
+        try:
+            status = self._get("/rest/system/status")
+            my_id = str((status or {}).get("myID") or "")
+        except Exception:
+            my_id = ""
+        if my_id:
+            self._my_device_id = my_id
+        return my_id
+
+    @staticmethod
+    def _human_size(n: int) -> str:
+        size = float(n or 0)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size < 1024 or unit == "TB":
+                return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+            size /= 1024
+        return "?"
 
     def check_once(self) -> LaneStatus:
         """Single synchronous status check. Never raises."""
@@ -419,6 +444,31 @@ class SyncthingLane(LaneAdapter):
             except Exception:
                 log.debug("db/status check failed for folder %s", fid)
 
+        # OUTGOING need: what the folder's remote devices (the server) still
+        # lack from this machine. A 400 MB mp3 uploading via lane C showed
+        # "up to date" in the tray and idle on the dashboard the whole time
+        # (2026-07-26) -- needTotalItems only counts OUR downloads.
+        outgoing_items = 0
+        outgoing_bytes = 0
+        my_id = self._get_my_device_id()
+        if my_id:
+            for fid in expected:
+                folder = by_id.get(fid)
+                if folder is None:
+                    continue
+                for dev in folder.get("devices", []) or []:
+                    did = str(dev.get("deviceID") or "")
+                    if not did or did == my_id:
+                        continue
+                    try:
+                        comp = self._get(
+                            f"/rest/db/completion?{urlencode({'folder': fid, 'device': did})}"
+                        ) or {}
+                        outgoing_items += int(comp.get("needItems", 0) or 0)
+                        outgoing_bytes += int(comp.get("needBytes", 0) or 0)
+                    except Exception:
+                        log.debug("outgoing completion check failed for %s/%s", fid, did)
+
         if errored:
             status = LaneStatus(
                 name=self.name,
@@ -430,6 +480,14 @@ class SyncthingLane(LaneAdapter):
         elif queued > 0:
             status = LaneStatus(
                 name=self.name, state=STATE_SYNCING, queued=queued, detail=path_detail,
+            )
+        elif outgoing_items > 0:
+            status = LaneStatus(
+                name=self.name, state=STATE_SYNCING, queued=outgoing_items,
+                detail=self._with_path_detail(
+                    f"sending {outgoing_items} file(s) ({self._human_size(outgoing_bytes)}) to the server",
+                    path_detail,
+                ),
             )
         elif len(paused_folders) == len(expected):
             # Every folder paused: the sequencer pauses all but the current

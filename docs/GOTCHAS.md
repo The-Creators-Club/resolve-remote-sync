@@ -337,6 +337,13 @@ of step with the published one for no gain.
   CCSYNC_SSH_HOSTKEY="$(ssh-keyscan -t ed25519 192.168.0.102 | awk '{print $2, $3}')"
   ```
 
+- **DaVinci Resolve holds its attached proxy files open without
+  share-delete**, so lane B's move-to-trash of superseded proxies fails
+  with a lock error and retries every pass -- the tray says "tidying old
+  files in slices" indefinitely and the machine's manifest over-counts
+  proxies (99/69 on alex_laptop, 2026-07-26) until Resolve is closed once
+  and the sweep completes.
+
 - **rclone silently rewrites fullwidth punctuation in filenames on
   Windows.** Its default local encoding maps forbidden characters to
   fullwidth forms (`?` -> `？`) and QUOTES a name that already contains a

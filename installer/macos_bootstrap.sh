@@ -448,6 +448,53 @@ else
     fi
 fi
 
+# Seed the NAS as a known device via the RUNNING instance's REST API (an XML
+# edit behind a live daemon is silently overwritten). Without this entry a
+# fresh config drops every NAS connection as "unknown device" one second
+# after hello, in a permanent reconnect loop (alex_laptop, 2026-07-26).
+# autoAcceptFolders stays false on purpose: the companion's sequencer accepts
+# folder offers at the CORRECT local path, while Syncthing's own auto-accept
+# mangles this deployment's slash-labelled folders into flat directories.
+NAS_SYNCTHING_ID="${CCSYNC_NAS_SYNCTHING_ID:-CPGHYGU-KI5UFOR-GPOGIEP-5EW6BIP-ZNJNVY3-Q5GI5PN-TGI346D-MTKBSQR}"
+if [ "$DRY_RUN" = 1 ]; then
+    dry "would seed the NAS device $NAS_SYNCTHING_ID (addresses tcp://$TAILNET_HOST:22000, dynamic) into the running Syncthing via REST"
+elif [ -n "$NAS_SYNCTHING_ID" ] && [ -f "$SYNCTHING_HOME/config.xml" ]; then
+    ST_API_KEY="$(sed -n 's#.*<apikey>\([^<]*\)</apikey>.*#\1#p' "$SYNCTHING_HOME/config.xml" | head -n 1)"
+    if [ -z "$ST_API_KEY" ]; then
+        warn "no API key in $SYNCTHING_HOME/config.xml -- cannot seed the NAS device"
+    else
+        st_alive=0
+        for _i in 1 2 3 4 5 6 7 8 9 10; do
+            st_ping_code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-API-Key: $ST_API_KEY" \
+                http://127.0.0.1:8384/rest/system/ping 2>/dev/null || true)"
+            if [ "$st_ping_code" = "200" ]; then st_alive=1; break; fi
+            if [ "$st_ping_code" = "401" ] || [ "$st_ping_code" = "403" ]; then
+                warn "the Syncthing at 127.0.0.1:8384 rejected this config's API key -- a Syncthing from a different home owns the port. NOT seeding the NAS device."
+                break
+            fi
+            sleep 1
+        done
+        if [ "$st_alive" = 1 ]; then
+            if curl -s -H "X-API-Key: $ST_API_KEY" http://127.0.0.1:8384/rest/config/devices \
+                | grep -q "$NAS_SYNCTHING_ID"; then
+                skip "NAS device already in the Syncthing config"
+            else
+                st_seed_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                    -H "X-API-Key: $ST_API_KEY" -H "Content-Type: application/json" \
+                    -d "{\"deviceID\":\"$NAS_SYNCTHING_ID\",\"name\":\"truenas\",\"addresses\":[\"tcp://$TAILNET_HOST:22000\",\"dynamic\"],\"compression\":\"metadata\",\"introducer\":false,\"paused\":false,\"autoAcceptFolders\":false}" \
+                    http://127.0.0.1:8384/rest/config/devices 2>/dev/null || true)"
+                if [ "$st_seed_code" = "200" ]; then
+                    step "seeded the NAS device into Syncthing -- pairing needs no GUI clicks on either side"
+                else
+                    warn "could not seed the NAS Syncthing device (HTTP $st_seed_code)"
+                fi
+            fi
+        elif [ "$st_ping_code" != "401" ] && [ "$st_ping_code" != "403" ]; then
+            warn "Syncthing REST at 127.0.0.1:8384 did not come up -- NOT seeding the NAS device (re-run this script once it is running)"
+        fi
+    fi
+fi
+
 # ----------------------------------------------------------------------
 # 4. ~/Creators_Club local sync root
 # ----------------------------------------------------------------------

@@ -22,9 +22,13 @@
               </select>
               <button class="btn" type="submit">[ SET ]</button>
             </form>
+            <button class="btn" title="pick any folder under Projects/, not only registered projects"
+                    hx-get="/partials/project-roots/browse?resolve_project={{ m.resolve_project | urlencode }}"
+                    hx-target="#roots-browse-m{{ loop.index }}" hx-swap="innerHTML">[ BROWSE ]</button>
             {% endif %}
           </td>
         </tr>
+        <tr><td colspan="4"><div id="roots-browse-m{{ loop.index }}"></div></td></tr>
       {% endfor %}
       {% for name in roots.unmapped %}
         <tr class="editor-row">
@@ -43,9 +47,13 @@
               </select>
               <button class="btn" type="submit">[ SET ]</button>
             </form>
+            <button class="btn" title="pick any folder under Projects/, not only registered projects"
+                    hx-get="/partials/project-roots/browse?resolve_project={{ name | urlencode }}"
+                    hx-target="#roots-browse-u{{ loop.index }}" hx-swap="innerHTML">[ BROWSE ]</button>
             {% endif %}
           </td>
         </tr>
+        <tr><td colspan="4"><div id="roots-browse-u{{ loop.index }}"></div></td></tr>
       {% endfor %}
       </tbody>
     </table>

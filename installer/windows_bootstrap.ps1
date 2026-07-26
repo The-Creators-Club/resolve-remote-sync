@@ -85,6 +85,12 @@
     autostart registration and the launch-now step below are skipped with
     a note instead of a hard failure.
 
+.PARAMETER NasSyncthingId
+    The NAS Syncthing's device ID, seeded into this machine's Syncthing via
+    REST once the daemon is up -- a fresh config knows no devices and drops
+    every NAS connection as "unknown device" otherwise. The default is the
+    production NAS; pass "" to skip seeding.
+
 .PARAMETER DryRun
     Print what would happen without installing anything or touching the
     filesystem/registry/scheduled tasks.
@@ -117,12 +123,20 @@ param(
     [string]$DashboardUrl = "http://100.71.216.3:8480",
     [string]$DashboardToken = "",
 
+    # The NAS Syncthing's device ID, seeded into this machine's Syncthing so
+    # the two can pair without a human accepting anything in either GUI. A
+    # fresh `syncthing generate` config knows NO devices, so the NAS's
+    # connection attempts are dropped as "unknown device" 1 second after
+    # hello -- the alex_laptop reinstall flapping of 2026-07-26. Empty
+    # string skips the seeding entirely.
+    [string]$NasSyncthingId = "CPGHYGU-KI5UFOR-GPOGIEP-5EW6BIP-ZNJNVY3-Q5GI5PN-TGI346D-MTKBSQR",
+
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
 
-$InstallerVersion = "1.0.4"
+$InstallerVersion = "1.0.5"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -1004,6 +1018,90 @@ public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr 
     }
 }
 
+function Ensure-NasSyncthingDevice {
+    # Make sure this machine's Syncthing knows the NAS as a device, via the
+    # REST API of the RUNNING instance (an XML edit behind a live daemon is
+    # silently overwritten). Without this entry a fresh `syncthing generate`
+    # config drops every NAS connection as "unknown device" one second after
+    # hello, in a permanent reconnect loop (alex_laptop, 2026-07-26).
+    #
+    # autoAcceptFolders stays FALSE on purpose: folder offers are accepted by
+    # the companion's sequencer at the CORRECT local path. Syncthing's own
+    # auto-accept sanitizes the slash-labelled folders this deployment uses
+    # ("2026/CCT/..." -> "2026 CCT ...") into a flat dir at defaultFolderPath,
+    # which nothing else in the system would recognize.
+    #
+    # Warns and returns on every failure -- never throws, never blocks the
+    # remaining steps.
+    param(
+        [string]$ConfigXmlPath,
+        [string]$DeviceId,
+        [string]$NasHost
+    )
+    try {
+        if (-not (Test-Path -LiteralPath $ConfigXmlPath)) {
+            Write-Warn2 "no Syncthing config.xml at $ConfigXmlPath -- cannot seed the NAS device"
+            return
+        }
+        [xml]$cfgXml = Get-Content -LiteralPath $ConfigXmlPath -Raw
+        $apiKey = "$($cfgXml.configuration.gui.apikey)"
+        $guiAddress = "$($cfgXml.configuration.gui.address)"
+        if (-not $guiAddress) { $guiAddress = "127.0.0.1:8384" }
+        if (-not $apiKey) {
+            Write-Warn2 "no API key in $ConfigXmlPath -- cannot seed the NAS device"
+            return
+        }
+        $base = "http://$guiAddress"
+        $headers = @{ "X-API-Key" = $apiKey }
+
+        $alive = $false
+        for ($i = 0; $i -lt 20; $i++) {
+            try {
+                $null = Invoke-RestMethod -Headers $headers -Uri "$base/rest/system/ping" -TimeoutSec 3
+                $alive = $true
+                break
+            }
+            catch {
+                $httpStatus = 0
+                try { $httpStatus = [int]$_.Exception.Response.StatusCode } catch {}
+                if ($httpStatus -eq 401 -or $httpStatus -eq 403) {
+                    # Running, but it is NOT the instance this config belongs
+                    # to -- another Syncthing home owns the port. Seeding
+                    # would land in the wrong (or an ignored) config.
+                    Write-Warn2 "the Syncthing at $base rejected this config's API key -- a Syncthing from a different home owns the port. NOT seeding the NAS device; lane C needs that untangled first."
+                    return
+                }
+                Start-Sleep -Seconds 1
+            }
+        }
+        if (-not $alive) {
+            Write-Warn2 "Syncthing REST at $base did not come up within 20s -- NOT seeding the NAS device (re-run this script once it is running)"
+            return
+        }
+
+        $devices = @(Invoke-RestMethod -Headers $headers -Uri "$base/rest/config/devices" -TimeoutSec 10)
+        if ($devices | Where-Object { $_.deviceID -eq $DeviceId }) {
+            Write-Skip "NAS device already in the Syncthing config ($($DeviceId.Substring(0,7))...)"
+            return
+        }
+        $body = @{
+            deviceID          = $DeviceId
+            name              = "truenas"
+            addresses         = @("tcp://${NasHost}:22000", "dynamic")
+            compression       = "metadata"
+            introducer        = $false
+            paused            = $false
+            autoAcceptFolders = $false
+        } | ConvertTo-Json
+        $null = Invoke-RestMethod -Method Post -Headers $headers -Uri "$base/rest/config/devices" `
+            -Body $body -ContentType "application/json" -TimeoutSec 10
+        Write-Step "seeded the NAS device ($($DeviceId.Substring(0,7))...) into Syncthing -- pairing needs no GUI clicks on either side"
+    }
+    catch {
+        Write-Warn2 "could not seed the NAS Syncthing device: $($_.Exception.Message)"
+    }
+}
+
 # --------------------------------------------------------------------
 # 6. Syncthing config, daemon autostart, and start-now
 # --------------------------------------------------------------------
@@ -1015,6 +1113,9 @@ if ($DryRun) {
     Write-Step "[dry-run] would run: `"$syncthingPath`" generate --home=`"$SyncthingHome`" (if not already generated)"
     Write-Step "[dry-run] would register a hidden autostart running: `"$syncthingPath`" serve --no-browser --home=`"$SyncthingHome`""
     Write-Step "[dry-run] would start the Syncthing daemon now if it isn't already running"
+    if ($NasSyncthingId) {
+        Write-Step "[dry-run] would seed the NAS device $NasSyncthingId (addresses tcp://${TailnetHost}:22000, dynamic) into the running Syncthing via REST"
+    }
 }
 elseif (-not $syncthingPath) {
     # A null path here would run `& $null generate ...`, a terminating error
@@ -1066,6 +1167,11 @@ else {
             Write-Warn2 "could not start the Syncthing daemon: $($_.Exception.Message)"
             Write-Warn2 "start it by hand with: $SyncthingServeCmd"
         }
+    }
+
+    if ($NasSyncthingId) {
+        Ensure-NasSyncthingDevice -ConfigXmlPath "$SyncthingHome\config.xml" `
+            -DeviceId $NasSyncthingId -NasHost $TailnetHost
     }
 }
 

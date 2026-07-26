@@ -168,6 +168,25 @@ def _lanes_by_editor(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]
     return grouped
 
 
+def _project_tree(projects: list[dict[str, Any]]) -> dict[str, Any]:
+    """Nested {groups: {name: node}, projects: [...], slugs: [...]} built
+    from the slash-separated labels (2026/CCT/Website Highlights/...). The
+    sidebar renders it recursively: group rows per path segment, and each
+    project shown by its LAST segment only ("short"). `slugs` lists every
+    project under a node so the template can default-open the chain that
+    contains the page's current project."""
+    root: dict[str, Any] = {"groups": {}, "projects": [], "slugs": []}
+    for p in projects:
+        parts = [seg for seg in str(p["label"]).split("/") if seg]
+        node = root
+        node["slugs"].append(p["slug"])
+        for seg in parts[:-1]:
+            node = node["groups"].setdefault(seg, {"groups": {}, "projects": [], "slugs": []})
+            node["slugs"].append(p["slug"])
+        node["projects"].append({**p, "short": parts[-1] if parts else p["label"]})
+    return root
+
+
 def build_projects_view(conn: sqlite3.Connection, now: str | None = None) -> dict[str, Any]:
     now = now or db.utcnow_iso()
     collector = db.fetch_collector_status(conn)
@@ -195,6 +214,7 @@ def build_projects_view(conn: sqlite3.Connection, now: str | None = None) -> dic
         "syncthing_reachable": reachable,
         "fleet_status": health.fleet_status(p["status"] for p in projects),
         "projects": projects,
+        "tree": _project_tree(projects),
     }
 
 
@@ -207,6 +227,45 @@ def build_project_view(conn: sqlite3.Connection, slug: str, now: str | None = No
     reachable = collector["syncthing_reachable"]
     lanes_by_editor = _lanes_by_editor(conn)
     editors = [_editor_view(e, lanes_by_editor, reachable, now) for e in project["editors"]]
+
+    # "Who has what" must cover every machine that reports media on this
+    # project -- not only Syncthing (lane C) device rows. The base rig has no
+    # lane C device at all, so it was invisible in this table even while
+    # holding the authoritative copy of every original.
+    nas = db.fetch_nas_media_summary(conn, project["id"])
+    media_by_editor: dict[str, dict[str, Any]] = {}
+    for r in db.fetch_editor_media_for_project(conn, slug):
+        m = media_by_editor.setdefault(r["editor_username"], {
+            "machine": r["machine"], "mode": r["mode"],
+            "n_originals": 0, "n_proxies": 0,
+        })
+        m["n_originals"] += r["n_originals"]
+        m["n_proxies"] += r["n_proxies"]
+        if r["mode"] == "base":
+            m["mode"] = "base"
+    for e in editors:
+        e["media"] = media_by_editor.get(e["editor_username"])
+        e["report_only"] = False
+    device_editors = {e["editor_username"] for e in editors if e["editor_username"]}
+    for username, m in sorted(media_by_editor.items()):
+        if username in device_editors:
+            continue
+        lane_rows = lanes_by_editor.get(username, [])
+        last_report = max((r["received_at"] for r in lane_rows), default=None)
+        have = {"n_originals": m["n_originals"], "n_proxies": m["n_proxies"]}
+        editors.append({
+            "device_id": None, "device_row_id": None, "name": m["machine"],
+            "editor_username": username, "display_name": username,
+            "unmapped": False, "connected": False, "address": None,
+            "last_connected_at": None, "completion": None, "need_items": 0,
+            "need_bytes": 0, "need_deletes": 0, "global_items": None,
+            "global_bytes": None, "have_items": None, "rate_bytes_per_sec": None,
+            "eta_seconds": None, "updated_at": last_report,
+            "report_only": True, "media": m, "mode": m["mode"],
+            "status": health.presence_status(m["mode"], nas, have),
+            "lanes": _lanes_view(lane_rows, now),
+        })
+
     return {
         "generated_at": now,
         "syncthing_reachable": reachable,
@@ -219,6 +278,7 @@ def build_project_view(conn: sqlite3.Connection, slug: str, now: str | None = No
         "folder_state_at": project.get("folder_state_at"),
         "status": health.project_status(e["status"] for e in editors),
         "editors": editors,
+        "nas_media": nas,
         "project_row_id": project["id"],
     }
 
@@ -257,8 +317,38 @@ def build_transfers_view(
             "granularity": "project",
         })
     rows.sort(key=lambda x: (x["speed_bps"] or 0), reverse=True)
+
+    # The full queue: everything still waiting, per (editor, machine,
+    # project) -- lanes A/B from the nas_media/editor_media manifest diff,
+    # lane C from Syncthing's missing-files cache. The table above only ever
+    # shows the <= --transfers files rclone has in flight right now.
+    queues = db.fetch_sync_backlog(conn, editor=editor)
+    lane_c_q = """SELECT c.project_id, c.device_id AS device_row, c.need_items,
+                         c.need_bytes, p.slug, p.label, d.editor_username
+                  FROM completion_current c
+                  JOIN projects p ON p.id = c.project_id
+                  JOIN devices d ON d.id = c.device_id
+                  WHERE d.is_server = 0 AND c.need_items > 0"""
+    for r in conn.execute(lane_c_q):
+        if editor is not None and (r["editor_username"] or "") != editor:
+            continue
+        missing = db.fetch_missing(conn, r["project_id"], r["device_row"])
+        queues.append({
+            "editor": r["editor_username"], "machine": "",
+            "slug": r["slug"], "label": r["label"],
+            "lane": "c", "direction": "down", "kind": "everything else",
+            "n_files": r["need_items"], "bytes": r["need_bytes"],
+            "files": missing["files"][:50],
+            "truncated": r["need_items"] > min(len(missing["files"]), 50),
+            "manifest_truncated": False,
+        })
+    queues.sort(key=lambda q: (q["editor"] or "", q["label"], q["lane"]))
+
     return {"generated_at": now, "transfers": rows,
-            "fleet_speed_bps": sum((x["speed_bps"] or 0) for x in rows)}
+            "fleet_speed_bps": sum((x["speed_bps"] or 0) for x in rows),
+            "queues": queues,
+            "queued_files": sum(q["n_files"] for q in queues),
+            "queued_bytes": sum(q["bytes"] or 0 for q in queues)}
 
 
 def build_presence_view(
@@ -1349,8 +1439,20 @@ def api_admin_approve_device(payload: ApproveDeviceIn, request: Request) -> dict
 # ------------------------------------------- companion packages (upgrade channel)
 
 _PACKAGE_PLATFORMS = {"windows", "macos"}
+# 'companion' rows feed the fleet's self-upgrade channel (_upgrade_info);
+# 'onboard' rows are the full clean-install package (onboard.exe on Windows,
+# the bootstrap script on macOS) served by the UI's [ INSTALLER ] download.
+_PACKAGE_KINDS = {"companion", "onboard"}
 _PACKAGE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _PACKAGE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _package_filename(kind: str, platform: str, version: str) -> str:
+    """Server-chosen filename -- never taken from the upload, so the packages
+    dir can only ever contain these two shapes."""
+    if kind == "onboard":
+        return f"ccsync-onboard-{version}" + (".exe" if platform == "windows" else ".sh")
+    return f"ccsync-companion-{version}" + (".exe" if platform == "windows" else "")
 
 
 def _package_file(settings, row: sqlite3.Row | dict[str, Any]) -> Path:
@@ -1381,7 +1483,10 @@ def _upgrade_info(
     plat = (platform or "").strip().lower()
     if plat not in _PACKAGE_PLATFORMS:
         return None
-    current = db.get_current_package(conn, plat)
+    # kind='companion' explicitly: the fleet must never be offered the
+    # onboarding installer as a self-upgrade -- upgrade.py would rename it
+    # over the running companion exe.
+    current = db.get_current_package(conn, plat, kind="companion")
     if current is None or not running or running == current["version"]:
         return None
     return {
@@ -1398,6 +1503,7 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
     current: dict[str, str] = {}
     for row in db.fetch_companion_packages(conn):
         entry = {
+            "kind": row["kind"],
             "version": row["version"],
             "platform": row["platform"],
             "filename": row["filename"],
@@ -1408,7 +1514,10 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             "is_current": bool(row["is_current"]),
             "file_exists": _package_file(settings, row).is_file(),
         }
-        if entry["is_current"]:
+        # `current` keeps its pre-kind shape (platform -> version) and keeps
+        # meaning "the companion the fleet is offered" -- the onboard current
+        # is visible per-row via is_current.
+        if entry["is_current"] and entry["kind"] == "companion":
             current[entry["platform"]] = entry["version"]
         packages.append(entry)
     editors = build_editors_view(conn, now)
@@ -1442,6 +1551,7 @@ async def api_publish_package(
     sha256: str = "",
     make_current: int = 0,
     prune: int = 0,
+    kind: str = "companion",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """Publish a companion build: raw exe bytes as the request body (no
@@ -1467,23 +1577,31 @@ async def api_publish_package(
     user = _require_admin(request)
     settings = request.app.state.settings
     platform = platform.strip().lower()
+    kind = kind.strip().lower()
     if platform not in _PACKAGE_PLATFORMS:
         raise HTTPException(status_code=422, detail=f"platform must be one of {sorted(_PACKAGE_PLATFORMS)}")
+    if kind not in _PACKAGE_KINDS:
+        raise HTTPException(status_code=422, detail=f"kind must be one of {sorted(_PACKAGE_KINDS)}")
     if not _PACKAGE_VERSION_RE.match(version):
         raise HTTPException(status_code=422, detail="version must look like 1.2.3")
     sha = sha256.strip().lower()
     if not _PACKAGE_SHA256_RE.match(sha):
         raise HTTPException(status_code=422, detail="sha256 query param must be 64 hex chars")
-    if db.get_package(conn, platform, version) is not None:
+    if db.get_package(conn, platform, version, kind) is not None:
+        bump = (
+            "bump INSTALLER_VERSION in installer/windows_bootstrap.ps1 and onboarding/steps.py"
+            if kind == "onboard"
+            else "bump VERSION in companion/src/ccsync_companion/config.py"
+        )
         raise HTTPException(
             status_code=409,
-            detail=f"version {version} is already published for {platform} -- "
-                   "bump VERSION in companion/src/ccsync_companion/config.py and rebuild",
+            detail=f"{kind} version {version} is already published for {platform} -- "
+                   f"{bump} and rebuild",
         )
 
     dest_dir = settings.packages_path() / platform
     dest_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"ccsync-companion-{version}" + (".exe" if platform == "windows" else "")
+    filename = _package_filename(kind, platform, version)
     part = dest_dir / (filename + ".part")
     digest = hashlib.sha256()
     size = 0
@@ -1517,10 +1635,11 @@ async def api_publish_package(
     db.insert_companion_package(
         conn, version=version, platform=platform, filename=filename,
         sha256=sha, size_bytes=size, published_by=user, now=db.utcnow_iso(),
+        kind=kind,
     )
     if make_current:
-        db.set_current_package(conn, platform, version)
-    pruned = db.prune_companion_packages(conn, platform) if prune else []
+        db.set_current_package(conn, platform, version, kind)
+    pruned = db.prune_companion_packages(conn, platform, kind=kind) if prune else []
     # Commit BEFORE unlinking: the old order deleted the exe first, so a
     # failed commit left the file gone while the row survived ([ FILE
     # MISSING ] in the UI, 404 for any companion pointed at it).
@@ -1533,13 +1652,16 @@ async def api_publish_package(
 @router.post("/admin/packages/{platform}/{version}/current")
 def api_set_current_package(
     platform: str, version: str, request: Request,
+    kind: str = "companion",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """Set (or roll back) which version the fleet is offered."""
+    """Set (or roll back) which version the fleet is offered (kind=companion)
+    or which installer the download serves (kind=onboard)."""
     _require_admin(request)
     platform = platform.strip().lower()
-    if not db.set_current_package(conn, platform, version):
-        raise HTTPException(status_code=404, detail=f"no published {platform} package {version}")
+    kind = kind.strip().lower()
+    if not db.set_current_package(conn, platform, version, kind):
+        raise HTTPException(status_code=404, detail=f"no published {platform} {kind} package {version}")
     conn.commit()
     return {"ok": True, "view": build_packages_view(conn, request.app.state.settings)}
 
@@ -1547,20 +1669,22 @@ def api_set_current_package(
 @router.delete("/admin/packages/{platform}/{version}")
 def api_delete_package(
     platform: str, version: str, request: Request,
+    kind: str = "companion",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     _require_admin(request)
     settings = request.app.state.settings
     platform = platform.strip().lower()
-    row = db.get_package(conn, platform, version)
+    kind = kind.strip().lower()
+    row = db.get_package(conn, platform, version, kind)
     if row is None:
-        raise HTTPException(status_code=404, detail=f"no published {platform} package {version}")
+        raise HTTPException(status_code=404, detail=f"no published {platform} {kind} package {version}")
     if row["is_current"]:
         raise HTTPException(
             status_code=409,
             detail="cannot delete the current version -- make another version current first",
         )
-    db.delete_companion_package(conn, platform, version)
+    db.delete_companion_package(conn, platform, version, kind)
     conn.commit()
     _unlink_package_file(settings, row)
     return {"ok": True, "view": build_packages_view(conn, settings)}
@@ -1581,13 +1705,14 @@ def _require_package_read(request: Request) -> None:
 @router.get("/companion/package/{platform}/{version}")
 def api_download_package(
     platform: str, version: str, request: Request,
+    kind: str = "companion",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> FileResponse:
     _require_package_read(request)
     settings = request.app.state.settings
-    row = db.get_package(conn, platform.strip().lower(), version)
+    row = db.get_package(conn, platform.strip().lower(), version, kind.strip().lower())
     if row is None:
-        raise HTTPException(status_code=404, detail=f"no published {platform} package {version}")
+        raise HTTPException(status_code=404, detail=f"no published {platform} {kind} package {version}")
     path = _package_file(settings, row)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="package file missing on server")

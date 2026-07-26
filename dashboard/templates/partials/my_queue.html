@@ -11,7 +11,7 @@
           <td><span class="who">{{ item.label }}</span>
               {% if item.is_current %}<span class="chip amber">[ SYNCING NOW ]</span>{% endif %}
               {% if item.missing_project %}<span class="chip red" title="project no longer exists on the server">[ GONE ]</span>{% endif %}</td>
-          <td class="mono">{% if item.completion is not none %}[{{ item.completion | bar }}] {{ "%.0f" | format(item.completion) }}%{% else %}<span class="muted">no data yet</span>{% endif %}</td>
+          <td class="mono">{% if item.completion is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[item.completion, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(item.completion) }}%{% else %}<span class="muted">no data yet</span>{% endif %}</td>
           <td class="mono-sm">
             {% if item.need_items %}{{ item.need_items }} files · {{ item.need_bytes | human_bytes }}
               {% if item.rate_bytes_per_sec and item.rate_bytes_per_sec > 1 %} · {{ item.rate_bytes_per_sec | human_bytes }}/s{% endif %}

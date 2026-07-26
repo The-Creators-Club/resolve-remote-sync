@@ -180,6 +180,35 @@ SCHEMA_V10 = """
 ALTER TABLE machine_state ADD COLUMN companion_version TEXT;
 """
 
+# v11: package `kind` -- the upgrade channel now also hosts the onboarding
+# installer (onboard.exe / the macOS bootstrap), which the dashboard's
+# [ INSTALLER ] download serves. kind='companion' rows are what the fleet
+# self-upgrades to (see api._upgrade_info); kind='onboard' rows are the
+# full clean-install package a human downloads. The two are versioned
+# independently (companion VERSION vs INSTALLER_VERSION), so the UNIQUE
+# constraint must include kind -- which SQLite can only change by rebuild.
+SCHEMA_V11 = """
+CREATE TABLE companion_packages_v11 (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind         TEXT    NOT NULL DEFAULT 'companion',
+  version      TEXT    NOT NULL,
+  platform     TEXT    NOT NULL DEFAULT 'windows',
+  filename     TEXT    NOT NULL,
+  sha256       TEXT    NOT NULL,
+  size_bytes   INTEGER NOT NULL,
+  published_at TEXT    NOT NULL,
+  published_by TEXT    NOT NULL,
+  is_current   INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (kind, platform, version)
+);
+INSERT INTO companion_packages_v11
+  (id, kind, version, platform, filename, sha256, size_bytes, published_at, published_by, is_current)
+  SELECT id, 'companion', version, platform, filename, sha256, size_bytes, published_at, published_by, is_current
+  FROM companion_packages;
+DROP TABLE companion_packages;
+ALTER TABLE companion_packages_v11 RENAME TO companion_packages;
+"""
+
 # v3: fix-destination project-root visibility/override. The companion
 # auto-detects which project the editor is working in (Resolve project name
 # matched against the tree) and reports it; an editor/admin can override it
@@ -293,6 +322,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (8, SCHEMA_V8),
     (9, SCHEMA_V9),
     (10, SCHEMA_V10),
+    (11, SCHEMA_V11),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -687,12 +717,13 @@ def insert_companion_package(
     size_bytes: int,
     published_by: str,
     now: str,
+    kind: str = "companion",
 ) -> None:
     conn.execute(
         """INSERT INTO companion_packages
-             (version, platform, filename, sha256, size_bytes, published_at, published_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (version, platform, filename, sha256, size_bytes, now, published_by),
+             (kind, version, platform, filename, sha256, size_bytes, published_at, published_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (kind, version, platform, filename, sha256, size_bytes, now, published_by),
     )
 
 
@@ -701,68 +732,82 @@ def fetch_companion_packages(
 ) -> list[sqlite3.Row]:
     if platform is None:
         return conn.execute(
-            "SELECT * FROM companion_packages ORDER BY platform, published_at DESC"
+            "SELECT * FROM companion_packages ORDER BY kind, platform, published_at DESC"
         ).fetchall()
     return conn.execute(
-        "SELECT * FROM companion_packages WHERE platform=? ORDER BY published_at DESC",
+        "SELECT * FROM companion_packages WHERE platform=? "
+        "ORDER BY kind, published_at DESC",
         (platform,),
     ).fetchall()
 
 
-def get_package(conn: sqlite3.Connection, platform: str, version: str) -> sqlite3.Row | None:
+def get_package(
+    conn: sqlite3.Connection, platform: str, version: str, kind: str = "companion"
+) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT * FROM companion_packages WHERE platform=? AND version=?",
-        (platform, version),
+        "SELECT * FROM companion_packages WHERE kind=? AND platform=? AND version=?",
+        (kind, platform, version),
     ).fetchone()
 
 
-def get_current_package(conn: sqlite3.Connection, platform: str) -> sqlite3.Row | None:
+def get_current_package(
+    conn: sqlite3.Connection, platform: str, kind: str = "companion"
+) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT * FROM companion_packages WHERE platform=? AND is_current=1",
-        (platform,),
+        "SELECT * FROM companion_packages WHERE kind=? AND platform=? AND is_current=1",
+        (kind, platform),
     ).fetchone()
 
 
-def set_current_package(conn: sqlite3.Connection, platform: str, version: str) -> bool:
-    """Point `current` at (platform, version). False if that version is unknown."""
-    if get_package(conn, platform, version) is None:
+def set_current_package(
+    conn: sqlite3.Connection, platform: str, version: str, kind: str = "companion"
+) -> bool:
+    """Point `current` at (kind, platform, version). False if that version is
+    unknown. Currency is per (kind, platform): making an onboard build current
+    never touches which companion the fleet is offered, and vice versa."""
+    if get_package(conn, platform, version, kind) is None:
         return False
-    conn.execute("UPDATE companion_packages SET is_current=0 WHERE platform=?", (platform,))
     conn.execute(
-        "UPDATE companion_packages SET is_current=1 WHERE platform=? AND version=?",
-        (platform, version),
+        "UPDATE companion_packages SET is_current=0 WHERE kind=? AND platform=?",
+        (kind, platform),
+    )
+    conn.execute(
+        "UPDATE companion_packages SET is_current=1 WHERE kind=? AND platform=? AND version=?",
+        (kind, platform, version),
     )
     return True
 
 
 def delete_companion_package(
-    conn: sqlite3.Connection, platform: str, version: str
+    conn: sqlite3.Connection, platform: str, version: str, kind: str = "companion"
 ) -> sqlite3.Row | None:
     """Delete the row and return it (so the caller can unlink the file).
 
     The caller must have already refused to delete the current version --
     this function doesn't re-check.
     """
-    row = get_package(conn, platform, version)
+    row = get_package(conn, platform, version, kind)
     if row is None:
         return None
     conn.execute(
-        "DELETE FROM companion_packages WHERE platform=? AND version=?", (platform, version)
+        "DELETE FROM companion_packages WHERE kind=? AND platform=? AND version=?",
+        (kind, platform, version),
     )
     return row
 
 
 def prune_companion_packages(
-    conn: sqlite3.Connection, platform: str, keep: int = 2
+    conn: sqlite3.Connection, platform: str, keep: int = 2, kind: str = "companion"
 ) -> list[sqlite3.Row]:
     """Delete all but the current package and the `keep` newest non-current
-    ones. Returns the removed rows so the caller can unlink their files."""
+    ones of this kind. Returns the removed rows so the caller can unlink
+    their files."""
     victims = conn.execute(
         """SELECT * FROM companion_packages
-           WHERE platform=? AND is_current=0
+           WHERE kind=? AND platform=? AND is_current=0
            ORDER BY published_at DESC, id DESC
            LIMIT -1 OFFSET ?""",
-        (platform, keep),
+        (kind, platform, keep),
     ).fetchall()
     for row in victims:
         conn.execute("DELETE FROM companion_packages WHERE id=?", (row["id"],))
@@ -1437,6 +1482,83 @@ def fetch_project_editors(conn: sqlite3.Connection, project_id: int) -> list[dic
         (project_id,),
     )
     return [dict(r) for r in rows]
+
+
+def fetch_sync_backlog(
+    conn: sqlite3.Connection, editor: str | None = None, files_per_group: int = 50
+) -> list[dict[str, Any]]:
+    """File-level lane A/B backlog per (editor, machine, project): what the
+    machine still needs from the NAS (proxies, lane B down) and what it
+    holds that the NAS lacks (originals, lane A up) -- the rel_path diff of
+    `nas_media` against `editor_media`.
+
+    Scope: machines that have reported a per-file manifest for a SELECTED
+    project (an editor_media_project row proves a manifest arrived; without
+    one, "everything is missing" would just mean "no data yet"). Base-mode
+    machines are excluded -- the base rig IS the NAS tree. Numbers are as
+    fresh as the inputs: the NAS inventory walk (<= ~15 min) and the heavy
+    report's manifest (<= ~5 min), and files currently mid-transfer (at most
+    rclone's --transfers per lane) still count as queued until the next
+    manifest refresh. `files_per_group` caps the per-group name list only;
+    n_files/bytes are full totals."""
+    pair_q = """SELECT emp.editor_username AS editor, emp.machine,
+                       emp.project_slug AS slug, emp.truncated,
+                       p.id AS project_id, p.label
+                FROM editor_media_project emp
+                JOIN selections s ON s.editor_username = emp.editor_username
+                                 AND s.project_slug = emp.project_slug
+                JOIN projects p ON p.slug = emp.project_slug AND p.active = 1
+                WHERE emp.mode != 'base'"""
+    params: list[Any] = []
+    if editor is not None:
+        pair_q += " AND emp.editor_username = ?"
+        params.append(editor)
+    pair_q += " ORDER BY emp.editor_username, emp.machine, p.label"
+
+    down_totals_q = """SELECT COUNT(*), COALESCE(SUM(n.size), 0) FROM nas_media n
+                       WHERE n.project_id=? AND n.kind='proxy'
+                         AND NOT EXISTS (SELECT 1 FROM editor_media e
+                                         WHERE e.editor_username=? AND e.machine=?
+                                           AND e.project_slug=? AND e.rel_path=n.rel_path)"""
+    down_files_q = down_totals_q.replace(
+        "SELECT COUNT(*), COALESCE(SUM(n.size), 0)", "SELECT n.rel_path, n.size"
+    ) + " ORDER BY n.rel_path LIMIT ?"
+    up_totals_q = """SELECT COUNT(*), COALESCE(SUM(e.size), 0) FROM editor_media e
+                     WHERE e.editor_username=? AND e.machine=? AND e.project_slug=?
+                       AND e.kind='original'
+                       AND NOT EXISTS (SELECT 1 FROM nas_media n
+                                       WHERE n.project_id=? AND n.rel_path=e.rel_path)"""
+    up_files_q = up_totals_q.replace(
+        "SELECT COUNT(*), COALESCE(SUM(e.size), 0)", "SELECT e.rel_path, e.size"
+    ) + " ORDER BY e.rel_path LIMIT ?"
+
+    out: list[dict[str, Any]] = []
+    for pair in conn.execute(pair_q, params):
+        specs = [
+            ("down", "proxy",
+             (pair["project_id"], pair["editor"], pair["machine"], pair["slug"]),
+             down_totals_q, down_files_q),
+            ("up", "original",
+             (pair["editor"], pair["machine"], pair["slug"], pair["project_id"]),
+             up_totals_q, up_files_q),
+        ]
+        for direction, kind, args, totals_q, files_q in specs:
+            n_files, total_bytes = conn.execute(totals_q, args).fetchone()
+            if not n_files:
+                continue
+            files = [{"name": r[0], "size": r[1]}
+                     for r in conn.execute(files_q, (*args, files_per_group))]
+            out.append({
+                "editor": pair["editor"], "machine": pair["machine"],
+                "slug": pair["slug"], "label": pair["label"],
+                "lane": "a" if direction == "up" else "b",
+                "direction": direction, "kind": kind,
+                "n_files": int(n_files), "bytes": int(total_bytes),
+                "files": files, "truncated": int(n_files) > len(files),
+                # The manifest itself was capped: the diff may UNDERCOUNT.
+                "manifest_truncated": bool(pair["truncated"]),
+            })
+    return out
 
 
 def fetch_missing(

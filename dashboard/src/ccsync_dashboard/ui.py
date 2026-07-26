@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from . import auth, db, provision
@@ -256,9 +256,28 @@ async def partial_set_project_root(
     form = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
     name = form.get("resolve_project", "").strip()
     slug = form.get("root", "").strip() or None
+    # A rel path picked in the folder browser (any folder under Projects/,
+    # not only registered projects). The companion only ever consumes the
+    # mapping as a rel path (_project_roots_view falls back to the raw
+    # stored value), so an unregistered folder works end to end.
+    root_rel = form.get("root_rel", "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="resolve_project required")
-    if slug is None:
+    if root_rel:
+        from .api import ProjectSetupError, _safe_rel
+
+        try:
+            target, norm_rel = _safe_rel(settings, root_rel)
+        except ProjectSetupError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if not norm_rel or not target.is_dir():
+            raise HTTPException(status_code=404, detail=f"no such folder under Projects/: {root_rel!r}")
+        # Prefer the slug when the picked folder IS a registered project, so
+        # the dropdown keeps showing it as selected.
+        marker_slug = provision.read_marker(target)
+        db.admin_set_project_root(conn, name, marker_slug or norm_rel,
+                                  admin=user, now=db.utcnow_iso())
+    elif slug is None:
         db.delete_project_root(conn, name)
     else:
         exists = conn.execute(
@@ -269,6 +288,22 @@ async def partial_set_project_root(
         db.admin_set_project_root(conn, name, slug, admin=user, now=db.utcnow_iso())
     conn.commit()
     return _render(request, "partials/project_roots.html", _roots_context(conn, True))
+
+
+@router.get("/partials/project-roots/browse")
+def partial_project_roots_browse(
+    request: Request, resolve_project: str = "", rel: str = ""
+):
+    """The FILES INTO folder browser: any folder under Projects/ can be
+    picked as a Resolve project's destination root, not only the dropdown's
+    registered projects. Admin-gated like the setter it feeds."""
+    settings = request.app.state.settings
+    user = auth.get_session_user(request)
+    if user is None or not auth.is_admin(settings, user):
+        raise HTTPException(status_code=403 if user else 401,
+                            detail="admins only: destination roots are fixed once set")
+    return _render(request, "partials/project_roots_browse.html",
+                   _browse_context(request, resolve_project, rel))
 
 
 # -------------------------------------------------- project setup (new-project)
@@ -799,6 +834,61 @@ async def partial_admin_approve_device(request: Request):
     })
 
 
+# --------------------------------------------------------- installer download
+
+# The [ INSTALLER ] header link. Serves the CURRENT kind='onboard' package
+# (onboard.exe on Windows, the bootstrap script on macOS) -- the full
+# clean-install/repair package, NOT the bare companion exe. Session-gated by
+# app.py's login_gate like every other page: a new editor signs in here with
+# the same TrueNAS credentials the wizard itself will ask for. Downloading to
+# the local disk is the supported path -- running onboard.exe off the NAS
+# share locks the file for everyone and is refused by the wizard itself.
+
+def _detect_platform(user_agent: str) -> str:
+    ua = user_agent.lower()
+    if "mac os" in ua or "macintosh" in ua:
+        return "macos"
+    # Anything unrecognized falls back to windows: the fleet is Windows-first
+    # and /download/macos stays reachable directly.
+    return "windows"
+
+
+@router.get("/download")
+def page_download(request: Request):
+    plat = _detect_platform(request.headers.get("user-agent", ""))
+    return RedirectResponse(f"/download/{plat}", status_code=303)
+
+
+@router.get("/download/{platform}")
+def page_download_platform(
+    platform: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    platform = platform.strip().lower()
+    if platform not in ("windows", "macos"):
+        return PlainTextResponse("unknown platform -- use /download/windows or /download/macos",
+                                 status_code=404)
+    settings = request.app.state.settings
+    row = db.get_current_package(conn, platform, kind="onboard")
+    if row is None:
+        return PlainTextResponse(
+            f"no {platform} installer is published yet. Publish one from the base rig:\n"
+            "  .\\installer\\build_editor_package.ps1 -Publish -MakeCurrent",
+            status_code=404,
+        )
+    path = settings.packages_path() / row["platform"] / row["filename"]
+    if not path.is_file():
+        return PlainTextResponse("installer file is missing on the server -- re-publish it",
+                                 status_code=404)
+    # The stored (versioned) filename is what lands in the editor's Downloads
+    # folder, so "which installer did you run?" has an answer.
+    return FileResponse(
+        str(path),
+        media_type="application/octet-stream",
+        filename=row["filename"],
+        headers={"X-CCSync-SHA256": row["sha256"], "X-CCSync-Version": row["version"]},
+    )
+
+
 # --------------------------------------------------------- admin packages
 
 @router.get("/partials/admin/packages")
@@ -818,10 +908,11 @@ async def partial_admin_package_current(
     form = await _form(request)
     platform = form.get("platform", "").strip().lower()
     version = form.get("version", "").strip()
+    kind = form.get("kind", "companion").strip().lower()
 
     error = None
-    if not db.set_current_package(conn, platform, version):
-        error = f"no published {platform} package {version}"
+    if not db.set_current_package(conn, platform, version, kind):
+        error = f"no published {platform} {kind} package {version}"
     else:
         conn.commit()
 
@@ -840,15 +931,16 @@ async def partial_admin_package_delete(
     form = await _form(request)
     platform = form.get("platform", "").strip().lower()
     version = form.get("version", "").strip()
+    kind = form.get("kind", "companion").strip().lower()
 
     error = None
-    row = db.get_package(conn, platform, version)
+    row = db.get_package(conn, platform, version, kind)
     if row is None:
-        error = f"no published {platform} package {version}"
+        error = f"no published {platform} {kind} package {version}"
     elif row["is_current"]:
         error = "cannot delete the current version; make another version current first"
     else:
-        db.delete_companion_package(conn, platform, version)
+        db.delete_companion_package(conn, platform, version, kind)
         conn.commit()
         try:
             (settings.packages_path() / row["platform"] / row["filename"]).unlink(missing_ok=True)

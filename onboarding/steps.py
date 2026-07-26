@@ -43,7 +43,7 @@ from ccsync_companion import identity as identity_mod
 
 # -- constants ---------------------------------------------------------------
 
-INSTALLER_VERSION = "1.0.4"
+INSTALLER_VERSION = "1.0.5"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.
@@ -51,10 +51,13 @@ DEFAULT_BASE_DASHBOARD_URL = "http://192.168.0.102:8480"
 SSH_KEY_NAME = "ccsync_ed25519"
 DEFAULT_SSH_DIR = Path.home() / ".ssh"
 DEFAULT_LOCAL_ROOT = r"C:\Creators_Club"
-# Base rig works directly off the NAS pool mapping; local_root AND
-# canonical_prefix both point at the tree root there (see the base-rig
-# comments in companion config.example.toml).
-DEFAULT_BASE_LOCAL_ROOT = r"T:\Creators_Club"
+# Base rig works directly off the NAS share mapping. Since 2026-07-26 the
+# base rig maps P: to \\<nas>\TheCreatorsPool\Creators_Club -- the SAME
+# P:\Projects\... path canon remote editors see (their P: maps to the local
+# copy instead), so Resolve-stored clip paths are identical fleet-wide.
+# local_root AND canonical_prefix both point at that drive root (see the
+# base-rig comments in companion config.example.toml).
+DEFAULT_BASE_LOCAL_ROOT = "P:\\"
 # Same default windows_bootstrap.ps1's -RemoteRoot parameter ships (see
 # BOOTSTRAP_SCRIPT_NAME). ensure_config must force this too: the bootstrap's
 # own config-seeding step is skipped whenever config.toml already exists
@@ -741,9 +744,10 @@ def build_cleanup_plan(
 
     candidate_dirs: list[Path] = [COMPANION_BIN_DIR]
     # On the BASE rig, local_root (and the local_root read back out of an
-    # existing config.toml) IS the NAS pool mapping (T:\Creators_Club) --
-    # never a cleanup candidate. Only an editor's local_root is a real local
-    # directory the installer might have dropped exe copies into.
+    # existing config.toml) IS the NAS share mapping (P:\, historically
+    # T:\Creators_Club) -- never a cleanup candidate. Only an editor's
+    # local_root is a real local directory the installer might have dropped
+    # exe copies into.
     if role != "base":
         if local_root:
             candidate_dirs.append(Path(local_root))
@@ -752,9 +756,10 @@ def build_cleanup_plan(
             candidate_dirs.append(Path(config_root))
     candidate_dirs.append(Path(DEFAULT_LOCAL_ROOT))
     if role == "editor":
-        # Editors' P: is a subst of their local root -- the bootstrap
-        # historically installed the exe there. On the BASE rig P:/T: are
-        # SMB mappings of the NAS itself: never reach into those.
+        # Editors' P: is a subst/loopback share of their local root -- the
+        # bootstrap historically installed the exe there. On the BASE rig
+        # P: (and the legacy T:) are SMB mappings of the NAS itself: never
+        # reach into those.
         candidate_dirs.append(Path("P:/"))
     run_dir = _exe_dir_from_run_value(read_run_value(COMPANION_RUN_VALUE))
     if run_dir is not None:

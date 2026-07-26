@@ -217,3 +217,63 @@ def test_queue_shows_fixed_root_read_only(env):
     assert "open in Resolve:" in page.text
     assert "CCT Creator Profiles" in page.text
     assert "auto-matched, fixed" in page.text
+
+
+# -- FILES INTO folder browser (any folder, not only registered projects) ---
+
+
+@pytest.fixture
+def browse_env(tmp_path):
+    projects_dir = tmp_path / "Projects"
+    (projects_dir / "2026" / "CCT" / "Custom Folder").mkdir(parents=True)
+    settings = Settings(db_path=str(tmp_path / "rb.db"), session_secret=SECRET,
+                        report_token=TOKEN, admin_users=frozenset({"alex"}),
+                        projects_dir=str(projects_dir))
+    app = create_app(settings)
+    with TestClient(app) as client:
+        conn = dbmod.connect(tmp_path / "rb.db")
+        yield client, conn
+        conn.close()
+
+
+def as_admin(client):
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    return client
+
+
+def test_roots_browse_lists_folders_and_is_admin_only(browse_env):
+    client, _conn = browse_env
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
+    assert client.get("/partials/project-roots/browse?resolve_project=Doc&rel=").status_code == 403
+
+    r = as_admin(client).get("/partials/project-roots/browse?resolve_project=Doc&rel=2026/CCT")
+    assert r.status_code == 200
+    assert "Custom Folder" in r.text
+
+
+def test_admin_sets_root_to_an_unregistered_folder(browse_env):
+    """The browser may pick ANY folder under Projects/ -- the mapping stores
+    the rel path, which is exactly what the companion's fixer consumes."""
+    client, conn = browse_env
+    r = as_admin(client).post("/partials/project-roots", data={
+        "resolve_project": "My Documentary",
+        "root_rel": "2026/CCT/Custom Folder",
+    })
+    assert r.status_code == 200
+    row = conn.execute("SELECT * FROM project_roots WHERE resolve_project='My Documentary'").fetchone()
+    assert row["project_slug"] == "2026/CCT/Custom Folder"
+    assert row["source"] == "admin"
+
+    # the companion-facing view serves the rel path verbatim
+    from ccsync_dashboard.api import _project_roots_view
+    (mapping,) = _project_roots_view(conn)
+    assert mapping["rel_path"] == "2026/CCT/Custom Folder"
+
+
+def test_root_rel_validation(browse_env):
+    client, _conn = browse_env
+    as_admin(client)
+    assert client.post("/partials/project-roots", data={
+        "resolve_project": "Doc", "root_rel": "../escape"}).status_code == 422
+    assert client.post("/partials/project-roots", data={
+        "resolve_project": "Doc", "root_rel": "2026/Nope"}).status_code == 404

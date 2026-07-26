@@ -290,6 +290,75 @@ def test_check_once_no_api_key_anywhere(tmp_path):
     assert "API key" in status.last_error
 
 
+# -- per-home API-key fallback (alex_laptop, 2026-07-26) --------------------
+
+
+def _write_config_xml(path, key):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"<configuration><gui><apikey>{key}</apikey></gui></configuration>",
+        encoding="utf-8",
+    )
+
+
+def _http_get_requiring(accepted_key, seen_keys):
+    """Fake http_get: 403 unless called with `accepted_key`."""
+    import urllib.error
+
+    def http_get(url, api_key, timeout):
+        seen_keys.append(api_key)
+        if api_key != accepted_key:
+            raise urllib.error.HTTPError(url, 403, "Forbidden", None, None)
+        return {"ping": "pong"} if url.endswith("/ping") else {"folders": []}
+
+    return http_get
+
+
+def test_get_falls_back_to_the_stock_key_when_the_managed_key_is_rejected(_windows_paths):
+    """A preserved-but-stale managed home must not lock the lane out of a
+    veteran instance running from the stock home."""
+    managed, stock = _windows_paths
+    _write_config_xml(managed, "managed-key")
+    _write_config_xml(stock, "stock-key")
+    seen: list = []
+    lane = SyncthingLane(api_key="", http_get=_http_get_requiring("stock-key", seen))
+    status = lane.check_once()
+    assert status.state == STATE_IDLE
+    assert seen[:2] == ["managed-key", "stock-key"]
+    # The accepted key is remembered and tried first on the next poll.
+    seen.clear()
+    lane.check_once()
+    assert seen[0] == "stock-key"
+
+
+def test_check_once_all_keys_rejected_is_not_reported_as_not_running(_windows_paths):
+    managed, _stock = _windows_paths
+    _write_config_xml(managed, "managed-key")
+    lane = SyncthingLane(api_key="", http_get=_http_get_requiring("other-key", []))
+    status = lane.check_once()
+    assert status.state == STATE_ERROR
+    assert "rejected" in status.last_error
+    assert status.last_error != "Syncthing not running"
+
+
+def test_explicit_config_xml_path_scopes_key_discovery(_windows_paths, tmp_path):
+    """An explicit config_xml_path is authoritative: the stock home's key
+    must NOT be tried (tests and power users rely on that isolation)."""
+    _managed, stock = _windows_paths
+    _write_config_xml(stock, "stock-key")
+    explicit = tmp_path / "explicit" / "config.xml"
+    _write_config_xml(explicit, "explicit-key")
+    seen: list = []
+    lane = SyncthingLane(
+        api_key="",
+        config_xml_path=explicit,
+        http_get=_http_get_requiring("stock-key", seen),
+    )
+    status = lane.check_once()
+    assert status.state == STATE_ERROR
+    assert seen == ["explicit-key"]
+
+
 # -- relay detection (AUDIT_2 P3/C-6) ---------------------------------------
 
 

@@ -364,3 +364,63 @@ def test_ordinary_slugs_keep_their_plain_urls():
     assert calls[1]["url"] == (
         "http://127.0.0.1:8384/rest/db/status?folder=abcd-2026-ff5-nuclear"
     )
+
+
+# -- per-home API-key fallback (alex_laptop, 2026-07-26) --------------------
+
+
+def test_request_falls_back_across_homes_on_403(tmp_path, monkeypatch):
+    """A preserved-but-stale managed home's key must not silence every
+    sequencer write against a veteran instance from the stock home."""
+    import urllib.error
+
+    from ccsync_companion.sync import syncthing_lane as lane_mod
+
+    monkeypatch.setattr(lane_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    for rel, key in (("ccsync/syncthing-config/config.xml", "managed-key"),
+                     ("Syncthing/config.xml", "stock-key")):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            f"<configuration><gui><apikey>{key}</apikey></gui></configuration>",
+            encoding="utf-8",
+        )
+
+    seen = []
+
+    def fake_http_request(method, url, api_key, body, timeout):
+        seen.append(api_key)
+        if api_key != "stock-key":
+            raise urllib.error.HTTPError(url, 403, "Forbidden", None, None)
+        return {"folders": []}
+
+    admin = SyncthingAdmin(api_key="", http_request=fake_http_request)
+    assert admin.get_config() == {"folders": []}
+    assert seen == ["managed-key", "stock-key"]
+    # The accepted key is remembered and tried first afterwards.
+    seen.clear()
+    admin.get_config()
+    assert seen == ["stock-key"]
+
+
+def test_request_raises_the_auth_error_when_every_key_is_rejected(tmp_path, monkeypatch):
+    import urllib.error
+
+    from ccsync_companion.sync import syncthing_lane as lane_mod
+
+    monkeypatch.setattr(lane_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    p = tmp_path / "ccsync" / "syncthing-config" / "config.xml"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "<configuration><gui><apikey>managed-key</apikey></gui></configuration>",
+        encoding="utf-8",
+    )
+
+    def fake_http_request(method, url, api_key, body, timeout):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", None, None)
+
+    admin = SyncthingAdmin(api_key="", http_request=fake_http_request)
+    with pytest.raises(urllib.error.HTTPError):
+        admin.get_config()

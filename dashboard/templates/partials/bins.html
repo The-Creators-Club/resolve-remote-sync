@@ -5,8 +5,13 @@
   </div>
   {% if presence.editors %}
     {% for e in presence.editors %}
-      <div class="presence-editor">
-        <div class="presence-head">
+      {# The whole per-user section is collapsible -- a project with many
+         bins made the page unusably long. data-key + the details-preserve
+         script in base.html keep the open/closed choice across the 5s
+         htmx refresh, which would otherwise slam every section shut. #}
+      <details class="presence-editor" data-key="mp:{{ e.editor }}:{{ e.machine }}">
+        <summary class="presence-head">
+          <span class="marker">▸</span>
           <span class="dot {{ e.status }}">●</span>
           <span class="who">{{ e.editor }}</span>
           <span class="muted mono-sm">{{ e.machine }} · {{ e.mode }}</span>
@@ -16,10 +21,10 @@
             proxies {{ e.have.n_proxies }}/{{ nas.n_proxies }}
             {% if e.offline %}· <span class="amber-text">{{ e.offline }} offline in Resolve</span>{% endif %}
           </span>
-        </div>
+        </summary>
         {% if e.bins %}
           {% for b in e.bins %}
-            <details class="bin">
+            <details class="bin" data-key="bin:{{ e.editor }}:{{ e.machine }}:{{ b.bin_path }}">
               <summary>▸ {{ b.bin_path or "(root)" }}
                 <span class="mono-sm {{ 'amber-text' if b.present < b.total else 'muted' }}">[{{ b.present }}/{{ b.total }} present]</span>
               </summary>
@@ -40,7 +45,7 @@
         {% else %}
           <div class="muted mono-sm">no Resolve bin data. Open this project in Resolve on that machine to populate it</div>
         {% endif %}
-      </div>
+      </details>
     {% endfor %}
   {% else %}
     <div class="muted">no presence data reported yet for this project</div>

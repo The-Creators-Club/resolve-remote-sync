@@ -561,3 +561,75 @@ def test_icon_stop_actually_stops_the_refresh_loop():
         assert stopped == [True]
     finally:
         tray_mod.pystray.Icon = real_icon
+
+
+# -- snapshot + fingerprint (the 2026-07-26 right-click freeze) -------------
+
+
+def test_build_menu_accepts_a_prebuilt_snapshot():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": "http://192.168.0.102:8480"})
+    snap = _tray_snapshot(app)
+    labels = _menu_labels(_build_menu(app, snap))
+    assert "Open dashboard" in labels
+    assert "NOT SIGNED IN" in labels
+
+
+def test_fingerprint_stable_under_byte_churn_within_a_bucket():
+    """The menu must NOT be rebuilt for every stats tick while syncing --
+    each icon.menu assignment DestroyMenu()s a handle the user may have
+    open. Only a real state change (or a tenth of progress) rebuilds."""
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    def app_with(done):
+        app = _FakeApp({"dashboard_url": ""})
+        app.lane_statuses = lambda: [LaneStatus(
+            name="lane_a_video_up", state="syncing",
+            bytes_done=done, bytes_total=100_000_000_000,
+            speed_bps=50_000_000 + done % 999, eta_seconds=done % 100,
+        )]
+        return app
+
+    fp1 = _menu_fingerprint(_tray_snapshot(app_with(10_000_000_000)))
+    fp2 = _menu_fingerprint(_tray_snapshot(app_with(14_000_000_000)))  # same tenth
+    fp3 = _menu_fingerprint(_tray_snapshot(app_with(90_000_000_000)))  # different tenth
+    assert fp1 == fp2
+    assert fp1 != fp3
+
+    idle = _FakeApp({"dashboard_url": ""})
+    assert _menu_fingerprint(_tray_snapshot(idle)) != fp1
+
+
+def test_fingerprint_changes_on_pause_and_sign_in():
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""})
+    fp_plain = _menu_fingerprint(_tray_snapshot(app))
+    app.paused = True
+    fp_paused = _menu_fingerprint(_tray_snapshot(app))
+    assert fp_plain != fp_paused
+    app.paused = False
+    app.identity = _FakeIdentity("alex")
+    assert _menu_fingerprint(_tray_snapshot(app)) != fp_plain
+
+
+def test_tooltip_shows_live_numbers_and_states():
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: up to date"
+
+    app.lane_statuses = lambda: [LaneStatus(
+        name="lane_a_video_up", state="syncing", current_project="2026/CCT/Website Highlights",
+        speed_bps=50_000_000, eta_seconds=700,
+    )]
+    tip = _tooltip_text(_tray_snapshot(app))
+    assert "syncing" in tip and "/s" in tip and "left" in tip
+    assert len(tip) <= 127
+
+    app.paused = True
+    assert "PAUSED" in _tooltip_text(_tray_snapshot(app))
+
+    signed_out = _FakeApp({"dashboard_url": ""})
+    assert "not signed in" in _tooltip_text(_tray_snapshot(signed_out))

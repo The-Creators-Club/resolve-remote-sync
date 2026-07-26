@@ -119,3 +119,73 @@ def test_ui_pages_render(app_env):
 
     partial = client.get(f"/partials/project/2025-ff4-nuclear/missing/{DEVICE_ID}")
     assert partial.status_code == 200 and "Audio/Music/track1.wav" in partial.text
+
+
+# -- who-has-what: report-only machines + the sidebar tree (2026-07-26) -----
+
+
+def test_project_view_includes_report_only_machines(app_env):
+    """The base rig has no Syncthing (lane C) device, but it reports media
+    presence -- it must still appear in the project view's editors table."""
+    client, conn = app_env
+    seed(conn)
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_editor_media_project(
+        conn, editor="alex", machine="CREATOR_1", slug="2025-ff4-nuclear",
+        mode="base", n_originals=69, bytes_originals=10, n_proxies=69,
+        bytes_proxies=5, truncated=False, now=now)
+    conn.commit()
+
+    body = client.get("/api/v1/projects/2025-ff4-nuclear").json()
+    rows = {e["display_name"]: e for e in body["editors"]}
+    assert "alex" in rows
+    base = rows["alex"]
+    assert base["report_only"] is True
+    assert base["media"]["n_originals"] == 69
+    assert base["media"]["mode"] == "base"
+    assert base["completion"] is None      # lane C does not apply
+    assert base["device_id"] is None
+    # the device-backed row is untouched, and now carries media info too
+    assert rows["jsmith"]["report_only"] is False
+    assert rows["jsmith"]["media"] is None  # jsmith reported no media yet
+
+    # and the page renders the report-only row (BASE chip, no missing button)
+    page = client.get("/project/2025-ff4-nuclear")
+    assert page.status_code == 200
+    assert "alex" in page.text and "[ BASE ]" in page.text
+    assert "69/0 orig" in page.text  # NAS inventory not seeded -> denominator 0
+
+
+def test_project_view_media_attaches_to_device_rows(app_env):
+    client, conn = app_env
+    seed(conn)
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_editor_media_project(
+        conn, editor="jsmith", machine="EDIT-PC", slug="2025-ff4-nuclear",
+        mode="editor", n_originals=0, bytes_originals=0, n_proxies=42,
+        bytes_proxies=5, truncated=False, now=now)
+    conn.commit()
+
+    body = client.get("/api/v1/projects/2025-ff4-nuclear").json()
+    (editor,) = [e for e in body["editors"] if e["display_name"] == "jsmith"]
+    assert editor["report_only"] is False
+    assert editor["media"]["n_proxies"] == 42
+
+
+def test_projects_view_tree_nests_and_shortens(app_env):
+    client, conn = app_env
+    seed(conn)
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_project(conn, "2026-cct-website-highlights-website-highlights",
+                         "2026/CCT/Website Highlights/Website Highlights", "/data/y", now)
+    conn.commit()
+
+    tree = client.get("/api/v1/projects").json()["tree"]
+    ff4 = tree["groups"]["2025"]["groups"]["FF4"]
+    assert [p["short"] for p in ff4["projects"]] == ["Nuclear"]
+    assert ff4["projects"][0]["slug"] == "2025-ff4-nuclear"
+    wh = tree["groups"]["2026"]["groups"]["CCT"]["groups"]["Website Highlights"]
+    assert [p["short"] for p in wh["projects"]] == ["Website Highlights"]
+    # the slugs rollup drives "open the chain containing the current project"
+    assert "2026-cct-website-highlights-website-highlights" in tree["groups"]["2026"]["slugs"]
+    assert "2025-ff4-nuclear" not in tree["groups"]["2026"]["slugs"]

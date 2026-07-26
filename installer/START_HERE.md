@@ -5,9 +5,12 @@ proxies synced to your machine automatically. ~20 minutes, one time.
 
 ## Easiest: run onboard.exe (Windows)
 
-**Copy `onboard.exe` to your Desktop first, then run it from there** —
-never run it straight off this shared folder (it locks the file for
-everyone, and the installer refuses to run that way).
+The freshest copy is always on the dashboard: sign in and click
+`[ INSTALLER ]` in the header — it downloads the right installer for your
+computer straight to your Downloads folder. If you were pointed at this
+shared folder instead, **copy `onboard.exe` to your Desktop first, then run
+it from there** — never run it straight off the share (it locks the file
+for everyone, and the installer refuses to run that way).
 
 Follow the wizard: pick **REMOTE EDITOR** on the role page (BASE is only
 for the studio base rig). It cleans out any older CCSync install first,

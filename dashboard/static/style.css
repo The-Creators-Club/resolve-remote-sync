@@ -67,6 +67,33 @@ a { color: inherit; text-decoration: none; }
   background: var(--panel);
 }
 .side-head { color: var(--red); letter-spacing: 0.06em; margin-bottom: 0.6rem; }
+/* The tree gets its own scrollbar so hundreds of projects never stretch the
+   page; sticky keeps it in view while the main panel scrolls. */
+.project-tree {
+  max-height: calc(100vh - 9rem);
+  overflow-y: auto;
+  position: sticky;
+  top: 1rem;
+}
+details.proj-group > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 0.2rem 0.5rem;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+details.proj-group > summary::-webkit-details-marker { display: none; }
+details.proj-group > summary:hover { background: var(--field); color: var(--red-hot); }
+details.proj-group > summary .marker { color: var(--red-dim); }
+details.proj-group[open] > summary .marker {
+  display: inline-block;
+  transform: rotate(90deg);
+  color: var(--red-hot);
+}
+details.proj-group > summary .mono-sm { margin-left: auto; }
+.proj-group-body { margin-left: 0.9rem; border-left: 1px dotted #2a2a31; padding-left: 0.2rem; }
 .project-link {
   display: flex;
   align-items: baseline;
@@ -226,6 +253,43 @@ tr.current-row { background: var(--field); }
 .proj-name { display: flex; align-items: baseline; gap: 0.5rem; overflow: hidden; flex: 1; }
 .nav-link { margin-left: 1rem; }
 
+/* ---------------- progress bars ---------------- */
+/* Replaces the glyph bars ([██████░░░░]): sub-pixel-accurate, no font
+   dependence, and the width animates smoothly between refreshes. */
+.cssbar {
+  display: inline-block;
+  width: 110px;
+  height: 0.65rem;
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  vertical-align: baseline;
+}
+.cssbar .fill {
+  display: block;
+  height: 100%;
+  background: var(--red);
+  transition: width 0.6s linear;
+}
+
+/* ---------------- transfer queue ---------------- */
+details.queue-group > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 0.2rem 0.4rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+details.queue-group > summary::-webkit-details-marker { display: none; }
+details.queue-group > summary .marker { color: var(--red-dim); }
+details.queue-group[open] > summary .marker {
+  display: inline-block;
+  transform: rotate(90deg);
+  color: var(--red-hot);
+}
+details.queue-group > .clip-list li { justify-content: space-between; }
+
 /* ---------------- media presence / bins ---------------- */
 .presence-box {
   background: var(--panel);
@@ -237,6 +301,19 @@ tr.current-row { background: var(--field); }
   padding: 0.6rem 0;
 }
 .presence-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+/* Whole per-user section is a <details>: the summary row stays the flex
+   header it always was, with a rotating marker instead of the UA default. */
+summary.presence-head {
+  cursor: pointer;
+  list-style: none;
+}
+summary.presence-head::-webkit-details-marker { display: none; }
+summary.presence-head .marker { color: var(--red-dim); }
+details.presence-editor[open] > summary.presence-head .marker {
+  display: inline-block;
+  transform: rotate(90deg);
+  color: var(--red-hot);
+}
 details.bin { margin: 0.2rem 0 0.2rem 1rem; }
 details.bin > summary {
   cursor: pointer;

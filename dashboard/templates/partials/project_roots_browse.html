@@ -1,0 +1,50 @@
+<div class="roots-browse">
+  <div class="mono-sm" style="margin:0.4rem 0 0.2rem">
+    FILES INTO for <span class="who">{{ browse.resolve_project }}</span>:
+    <a class="btn" hx-get="/partials/project-roots/browse?rel=&resolve_project={{ browse.resolve_project | urlencode }}"
+       hx-target="closest .roots-browse" hx-swap="outerHTML" style="cursor:pointer">[ Projects ]</a>
+    {% for c in browse.crumbs %}
+      / <a class="btn" hx-get="/partials/project-roots/browse?rel={{ c.rel | urlencode }}&resolve_project={{ browse.resolve_project | urlencode }}"
+           hx-target="closest .roots-browse" hx-swap="outerHTML" style="cursor:pointer">{{ c.name }}</a>
+    {% endfor %}
+  </div>
+
+  {% if browse.error %}
+    <div class="banner">▲ {{ browse.error }}</div>
+  {% endif %}
+
+  {% if browse.rel and not browse.error %}
+    <form class="inline-form" hx-post="/partials/project-roots"
+          hx-target="closest .roots-box" hx-swap="outerHTML">
+      <input type="hidden" name="resolve_project" value="{{ browse.resolve_project }}">
+      <input type="hidden" name="root_rel" value="{{ browse.rel }}">
+      <button class="btn" type="submit">[ FILES GO INTO Projects/{{ browse.rel }} ]</button>
+    </form>
+  {% endif %}
+
+  <table class="editors" style="margin-top:0.4rem">
+    <tbody>
+    {% for e in browse.entries %}
+      <tr class="editor-row">
+        <td>
+          <a class="mono-sm" style="cursor:pointer"
+             hx-get="/partials/project-roots/browse?rel={{ e.rel | urlencode }}&resolve_project={{ browse.resolve_project | urlencode }}"
+             hx-target="closest .roots-browse" hx-swap="outerHTML">📁 {{ e.name }} /</a>
+          {% if e.is_project %}<span class="chip green">[ PROJECT ]</span>{% endif %}
+          {% if e.name_match %}<span class="chip green">[ SAME NAME ]</span>{% endif %}
+        </td>
+        <td>
+          <form class="inline-form" hx-post="/partials/project-roots"
+                hx-target="closest .roots-box" hx-swap="outerHTML">
+            <input type="hidden" name="resolve_project" value="{{ browse.resolve_project }}">
+            <input type="hidden" name="root_rel" value="{{ e.rel }}">
+            <button class="btn" type="submit">[ PICK ]</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td class="muted mono-sm">no subfolders here</td><td></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>

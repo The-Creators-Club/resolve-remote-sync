@@ -438,3 +438,106 @@ def test_fleet_view_tolerates_a_report_without_a_version(env):
 
     as_user(client, "alex")
     assert "[ VERSION UNKNOWN ]" in client.get("/partials/fleet").text
+
+
+# -- kind=onboard: the [ INSTALLER ] download --------------------------
+
+
+def publish_onboard(client, version, body=b"onboard-bytes", sha=None,
+                    make_current=0, platform="windows"):
+    sha = sha or hashlib.sha256(body).hexdigest()
+    return client.put(
+        f"/api/v1/admin/packages/{platform}/{version}"
+        f"?kind=onboard&sha256={sha}&make_current={make_current}",
+        content=body,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+
+
+def test_migration_v11_preserves_published_rows(tmp_path):
+    """A live pre-v11 database's package rows (including which one is
+    current) must survive the kind-column table rebuild as kind=companion."""
+    connection = dbmod.connect(tmp_path / "mig.db")
+    dbmod.migrate(connection, [s for s in dbmod._MIGRATION_STEPS if s[0] <= 10])
+    connection.execute(
+        """INSERT INTO companion_packages
+             (version, platform, filename, sha256, size_bytes,
+              published_at, published_by, is_current)
+           VALUES ('0.4.3', 'windows', 'ccsync-companion-0.4.3.exe', ?,
+                   123, '2026-07-25T00:00:00+00:00', 'alex', 1)""",
+        ("a" * 64,),
+    )
+    connection.commit()
+    dbmod.migrate(connection)
+    row = dbmod.get_current_package(connection, "windows")
+    assert row is not None
+    assert row["version"] == "0.4.3"
+    assert row["kind"] == "companion"
+    connection.close()
+
+
+def test_onboard_kind_versions_and_currency_are_separate(env):
+    client, conn, _settings = env
+    as_user(client, "alex")
+    assert publish(client, "1.0.0", body=b"companion", make_current=1).status_code == 200
+    # The same (platform, version) under the other kind is NOT a duplicate...
+    assert publish_onboard(client, "1.0.0", body=b"installer", make_current=1).status_code == 200
+    # ...but within a kind it still is.
+    assert publish_onboard(client, "1.0.0").status_code == 409
+
+    assert dbmod.get_current_package(conn, "windows")["version"] == "1.0.0"
+    onboard = dbmod.get_current_package(conn, "windows", kind="onboard")
+    assert onboard["filename"] == "ccsync-onboard-1.0.0.exe"
+
+    # Flipping the onboard current never touches which companion the fleet
+    # is offered.
+    publish_onboard(client, "1.0.1", body=b"installer2", make_current=1)
+    assert dbmod.get_current_package(conn, "windows")["version"] == "1.0.0"
+    assert dbmod.get_current_package(conn, "windows", kind="onboard")["version"] == "1.0.1"
+
+    # macOS onboard packages are scripts, not exes.
+    assert publish_onboard(client, "1.0.0", platform="macos").status_code == 200
+    assert dbmod.get_package(conn, "macos", "1.0.0", kind="onboard")["filename"] == "ccsync-onboard-1.0.0.sh"
+
+
+def test_upgrade_never_offers_the_onboard_package(env):
+    """upgrade.py renames whatever it downloads over the running companion
+    exe -- offering onboard.exe there would brick the machine."""
+    client, _conn, _settings = env
+    publish_onboard(as_user(client, "alex"), "1.0.0", make_current=1)
+    clear_user(client)
+    resp = client.post("/api/v1/report", json=report_payload("0.1.0"),
+                       headers=report_headers())
+    assert "upgrade" not in resp.json()
+
+
+def test_installer_download_route(env):
+    client, _conn, _settings = env
+    body = b"the-installer"
+    publish_onboard(as_user(client, "alex"), "1.0.4", body=body, make_current=1)
+    clear_user(client)
+
+    # Anonymous browser: bounced to login with the destination preserved.
+    resp = client.get("/download", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "/login" in resp.headers["location"]
+
+    # Any signed-in user, Windows UA: lands on the windows package.
+    as_user(client, "jsmith")
+    resp = client.get("/download", follow_redirects=False, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/download/windows"
+    resp = client.get("/download/windows")
+    assert resp.status_code == 200
+    assert resp.content == body
+    assert "ccsync-onboard-1.0.4.exe" in resp.headers["content-disposition"]
+    assert resp.headers["X-CCSync-Version"] == "1.0.4"
+
+    # Mac UA routes to the macos package, which is not published yet: a
+    # plain 404 with the publish command, not a broken download.
+    resp = client.get("/download", follow_redirects=False, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
+    assert resp.headers["location"] == "/download/macos"
+    assert client.get("/download/macos").status_code == 404
+    assert client.get("/download/amiga").status_code == 404

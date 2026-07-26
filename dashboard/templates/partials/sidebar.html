@@ -1,20 +1,51 @@
+{# Nested project tree: one collapsible group per label path segment
+   (2026 > CCT > Website Highlights), each project shown by its LAST
+   segment. Groups on the current project's path render open; the
+   details-preserve script in base.html keeps manual open/close choices
+   across the 30s sidebar refresh. Small fleets open everything so nothing
+   hides behind a click. #}
+{% macro project_row(p) %}
+  <div class="project-link {{ 'current' if p.slug == current_slug }}">
+    {% if toggle_editor %}
+    <input type="checkbox" class="proj-check" title="sync this project to {{ toggle_editor }}"
+           {{ 'checked' if p.slug in selected_slugs }}
+           hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}"
+           hx-target="closest .projects" hx-swap="outerHTML">
+    {% endif %}
+    <a class="proj-name" href="/project/{{ p.slug }}" title="{{ p.label }}">
+      <span class="dot {{ p.status }}">●</span>
+      <span class="label">{{ p.short if p.short is defined else p.label }}</span>
+    </a>
+    {% if p.editors_behind %}<span class="behind">{{ p.editors_behind }}⇣</span>{% endif %}
+  </div>
+{% endmacro %}
+{% macro render_node(node, path) %}
+  {% for name, child in node.groups | dictsort %}
+    {% set group_path = (path ~ "/" ~ name) if path else name %}
+    <details class="proj-group" data-key="grp:{{ group_path }}"
+             {{ "open" if (current_slug and current_slug in child.slugs) or (view.projects | length) <= 8 }}>
+      <summary><span class="marker">▸</span> {{ name }}
+        <span class="muted mono-sm">{{ child.slugs | length }}</span>
+      </summary>
+      <div class="proj-group-body">
+        {{ render_node(child, group_path) }}
+        {% for p in child.projects %}{{ project_row(p) }}{% endfor %}
+      </div>
+    </details>
+  {% endfor %}
+{% endmacro %}
 <nav class="projects">
   <div class="side-head">[ PROJECTS ]</div>
-  {% for p in view.projects %}
-    <div class="project-link {{ 'current' if p.slug == current_slug }}">
-      {% if toggle_editor %}
-      <input type="checkbox" class="proj-check" title="sync this project to {{ toggle_editor }}"
-             {{ 'checked' if p.slug in selected_slugs }}
-             hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}"
-             hx-target="closest .projects" hx-swap="outerHTML">
+  <div class="project-tree">
+    {% if view.tree is defined %}
+      {{ render_node(view.tree, "") }}
+      {% for p in view.tree.projects %}{{ project_row(p) }}{% endfor %}
+      {% if not view.tree.groups and not view.tree.projects %}
+        <div class="muted">no projects yet, waiting for first poll</div>
       {% endif %}
-      <a class="proj-name" href="/project/{{ p.slug }}">
-        <span class="dot {{ p.status }}">●</span>
-        <span class="label">{{ p.label }}</span>
-      </a>
-      {% if p.editors_behind %}<span class="behind">{{ p.editors_behind }}⇣</span>{% endif %}
-    </div>
-  {% else %}
-    <div class="muted">no projects yet, waiting for first poll</div>
-  {% endfor %}
+    {% else %}
+      {% for p in view.projects %}{{ project_row(p) }}
+      {% else %}<div class="muted">no projects yet, waiting for first poll</div>{% endfor %}
+    {% endif %}
+  </div>
 </nav>

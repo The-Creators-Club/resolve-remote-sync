@@ -20,12 +20,17 @@ from __future__ import annotations
 
 import json
 import logging
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote, urlencode
 
-from .syncthing_lane import default_config_xml_path, read_api_key_from_config
+from .syncthing_lane import (
+    default_api_key_paths,
+    default_config_xml_path,
+    read_api_key_from_config,
+)
 
 log = logging.getLogger("ccsync.sync.syncthing_admin")
 
@@ -98,7 +103,16 @@ class SyncthingAdmin:
         self.base_url = syncthing_url.rstrip("/")
         self._configured_api_key = api_key
         self._http_request = http_request or globals()["http_request"]
+        # Same key-discovery scoping as SyncthingLane: an explicit
+        # config_xml_path is authoritative; the default wiring tries every
+        # known home's key against the live instance (a preserved-but-stale
+        # managed home 403'ing against a veteran stock instance silently
+        # disabled every sequencer write on alex_laptop, 2026-07-26).
+        self.api_key_paths: list[Path] = (
+            [config_xml_path] if config_xml_path else default_api_key_paths()
+        )
         self.config_xml_path = config_xml_path or default_config_xml_path()
+        self._active_api_key = ""
         self.timeout = timeout
         # Syncthing COMMITS THE CONFIG AND RESTARTS THE FOLDER on a config
         # write, which on a rig with many folders routinely takes longer
@@ -112,14 +126,43 @@ class SyncthingAdmin:
             return self._configured_api_key
         return read_api_key_from_config(self.config_xml_path) or ""
 
+    def _api_key_candidates(self) -> list[str]:
+        """Ordered, deduplicated keys to try: the config override alone when
+        set, else the last-accepted key first, then each home's config.xml."""
+        if self._configured_api_key:
+            return [self._configured_api_key]
+        candidates: list[str] = []
+        if self._active_api_key:
+            candidates.append(self._active_api_key)
+        for path in self.api_key_paths:
+            key = read_api_key_from_config(path)
+            if key and key not in candidates:
+                candidates.append(key)
+        return candidates
+
     def _request(
         self, method: str, path: str, body: Optional[dict] = None, timeout: Optional[float] = None
     ) -> Any:
-        api_key = self._resolve_api_key()
+        """One request with per-home API-key fallback: 401/403 means the key
+        belongs to a different Syncthing home than the running instance, so
+        the next candidate is tried; every other failure propagates
+        unchanged per this class's never-swallow contract."""
         url = f"{self.base_url}{path}"
-        return self._http_request(
-            method, url, api_key, body, self.timeout if timeout is None else timeout
-        )
+        effective_timeout = self.timeout if timeout is None else timeout
+        last_auth_error: Optional[Exception] = None
+        for api_key in self._api_key_candidates() or [""]:
+            try:
+                result = self._http_request(method, url, api_key, body, effective_timeout)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    last_auth_error = exc
+                    continue
+                raise
+            if api_key:
+                self._active_api_key = api_key
+            return result
+        assert last_auth_error is not None  # loop always runs at least once
+        raise last_auth_error
 
     def _write_request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
         """A config-mutating request, on the longer write timeout."""

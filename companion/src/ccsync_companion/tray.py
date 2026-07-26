@@ -177,18 +177,31 @@ def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> 
     LaneStatus.detail and left `state` at "idle" (AUDIT_2 UX-1). `OK` is now
     gone entirely: a lane says either what it is doing or why it is not.
     """
+    paused = False
+    problems = False
+    if app is not None:
+        try:
+            problems = bool(getattr(app, "config_problems", None))
+        except Exception:
+            pass
+        try:
+            paused = bool(app.is_paused())
+        except Exception:
+            pass
+    return _format_lane_line_from(status, paused=paused, problems=problems)
+
+
+def _format_lane_line_from(status: LaneStatus, paused: bool, problems: bool) -> str:
+    """_format_lane_line with the app state already snapshotted -- what the
+    menu build actually uses, so rendering never calls back into app."""
     label = lane_label(status.name)
     # Pause is checked FIRST: no lane ever sets state="paused" (the sequencer
     # owns pause, the lanes don't know), so after clicking Pause all three
     # lines still read as normal (AUDIT_2 UX-2).
-    if app is not None:
-        try:
-            if getattr(app, "config_problems", None):
-                return f"{label}: NOT SYNCING (this machine isn't set up yet)"
-            if app.is_paused():
-                return f"{label}: PAUSED"
-        except Exception:
-            pass
+    if problems:
+        return f"{label}: NOT SYNCING (this machine isn't set up yet)"
+    if paused:
+        return f"{label}: PAUSED"
     if status.state == STATE_ERROR:
         return f"{label}: PROBLEM. {classify_lane_error(status.last_error)}"
     detail = str(status.detail or "")
@@ -538,14 +551,118 @@ def _current_project_line(app: "CompanionApp") -> Optional[str]:
     return None
 
 
-def _build_menu(app: "CompanionApp") -> "pystray.Menu":
-    statuses = app.lane_statuses()
-    lane_items = [
-        pystray.MenuItem(_format_lane_line(s, app), None, enabled=False) for s in statuses
-    ]
+def _tray_snapshot(app: "CompanionApp") -> dict:
+    """Everything the tray renders, gathered ONCE on the refresh thread.
+
+    The menu build used to call app.lane_statuses(), is_paused(),
+    upgrade_available() etc. inline -- so any of those stalling (a Syncthing
+    config write holds locks for up to 30 s) stalled menu construction, and
+    with the win32 backend that can stall the tray's message loop: the
+    right-click freeze seen on 2026-07-26. Every getter here is wrapped; a
+    failing one degrades to a default instead of taking the tray down."""
+    try:
+        statuses = app.lane_statuses()
+    except Exception:
+        log.exception("lane_statuses() failed")
+        statuses = []
+    snap: dict = {"statuses": statuses}
+
+    def _get(name, fn, default):
+        try:
+            snap[name] = fn()
+        except Exception:
+            log.exception("%s failed", name)
+            snap[name] = default
 
     identity = getattr(app, "identity", None)
-    signed_in = identity is not None and identity.valid()
+    _get("signed_in", lambda: identity is not None and identity.valid(), False)
+    _get("identity_label", lambda: _identity_status_label(app), "NOT SIGNED IN")
+    _get("paused", lambda: bool(app.is_paused()), False)
+    _get("problems", lambda: bool(getattr(app, "config_problems", None)), False)
+    _get("dashboard_url", lambda: _dashboard_url(app), "")
+    _get("sequencer_line", lambda: _sequencer_line(app), None)
+    _get("current_project_line", lambda: _current_project_line(app), None)
+    _get("setup_name", lambda: (getattr(app, "setup_project_available", None) or (lambda: None))(), None)
+    _get("upgrade_info", lambda: (getattr(app, "upgrade_available", None) or (lambda: None))(), None)
+    snap["color"] = compute_overall_color(statuses, app)
+    return snap
+
+
+def _progress_bucket(status: LaneStatus) -> Optional[int]:
+    """Tenths of progress for a syncing lane -- the granularity at which a
+    menu rebuild is worth the (small) risk of touching a menu the user has
+    open. The LIVE numbers move to the tooltip, which is always safe to
+    update."""
+    if status.state != STATE_SYNCING:
+        return None
+    if status.bytes_total:
+        return int(min(status.bytes_done or 0, status.bytes_total) * 10 // status.bytes_total)
+    if status.bytes_done:
+        return int(status.bytes_done // (5 << 30))  # 5 GB steps with no known total
+    return 0
+
+
+def _menu_fingerprint(snap: dict) -> tuple:
+    """Everything that should trigger a menu REBUILD when it changes.
+
+    Deliberately coarser than the rendered text: pystray's win32 backend
+    DestroyMenu()s the live menu handle on every icon.menu assignment, so a
+    rebuild while the menu is open freezes it -- and with TPM_RETURNCMD the
+    returned index is then resolved against the NEW callback list, i.e. a
+    click can fire the WRONG item. Rebuilding only on real state changes
+    (not every byte counted) makes that window rare instead of every 5 s."""
+    lanes = tuple(
+        (s.name, s.state, str(s.detail or ""), str(s.last_error or ""),
+         str(s.current_project or ""), bool(s.queued), _progress_bucket(s))
+        for s in snap["statuses"]
+    )
+    return (
+        lanes, snap["identity_label"], snap["signed_in"], snap["paused"],
+        snap["problems"], snap["sequencer_line"], snap["current_project_line"],
+        snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
+        snap["dashboard_url"], snap["color"],
+    )
+
+
+def _tooltip_text(snap: dict) -> str:
+    """The hover tooltip: the LIVE numbers, updated every refresh (a title
+    update is a plain Shell_NotifyIcon NIM_MODIFY -- unlike a menu rebuild
+    it can never disturb an open menu). Windows truncates at ~127 chars."""
+    if snap["problems"]:
+        return "CCSync: NOT SET UP (nothing syncs)"
+    if not snap["signed_in"]:
+        return "CCSync: not signed in (nothing syncs)"
+    if snap["paused"]:
+        return "CCSync: PAUSED"
+    for status in snap["statuses"]:
+        if status.state == STATE_ERROR:
+            return f"CCSync: PROBLEM with {lane_label(status.name).split(' (')[0]}"
+    for status in snap["statuses"]:
+        if status.state == STATE_SYNCING:
+            parts = ["CCSync: syncing"]
+            if status.current_project:
+                parts.append(str(status.current_project)[-40:])
+            if status.speed_bps:
+                parts.append(f"{human_bytes(int(status.speed_bps))}/s")
+            if status.eta_seconds:
+                parts.append(f"{human_duration(status.eta_seconds)} left")
+            return " · ".join(parts)[:127]
+    return "CCSync: up to date"
+
+
+def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Menu":
+    if snap is None:
+        snap = _tray_snapshot(app)
+    statuses = snap["statuses"]
+    lane_items = [
+        pystray.MenuItem(
+            _format_lane_line_from(s, paused=snap["paused"], problems=snap["problems"]),
+            None, enabled=False,
+        )
+        for s in statuses
+    ]
+
+    signed_in = snap["signed_in"]
 
     def on_sync_now(icon, item):
         _spawn(app, "Sync now", app.sync_now)
@@ -557,13 +674,18 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
         _spawn(app, "Bring an existing project's media in", app.consolidate_project)
 
     def on_toggle_pause(icon, item):
-        _guarded(app, "Pause/resume", app.toggle_pause)
+        # _spawn, not _guarded: menu callbacks run ON the tray's message
+        # loop (win32), and toggle_pause can hold sequencer/Syncthing config
+        # writes for many seconds -- the whole tray froze until it returned
+        # (seen live 2026-07-26).
+        _spawn(app, "Pause/resume", app.toggle_pause)
 
     def on_open_dashboard(icon, item):
-        _open_dashboard(_dashboard_url(app))
+        url = snap["dashboard_url"]
+        _spawn(app, "Open dashboard", lambda: _open_dashboard(url))
 
     def on_open_log(icon, item):
-        _open_log(app.log_path)
+        _spawn(app, "Open log", lambda: _open_log(app.log_path))
 
     def on_copy_diagnostics(icon, item):
         _spawn(app, "Copy diagnostics for your admin", app.copy_diagnostics)
@@ -591,31 +713,19 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
 
     dashboard_items = (
         [pystray.MenuItem("Open dashboard", on_open_dashboard)]
-        if _dashboard_url(app) else []
+        if snap["dashboard_url"] else []
     )
     # Present only while the open Resolve project has no server-side root
     # (see project_setup.py) -- clicking opens the /project-setup deep link.
-    setup_name = None
-    try:
-        _get_setup = getattr(app, "setup_project_available", None)
-        if _get_setup is not None:
-            setup_name = _get_setup()
-    except Exception:
-        log.exception("setup_project_available() failed")
+    setup_name = snap["setup_name"]
     setup_items = (
         [pystray.MenuItem(f"Set up '{setup_name}' on the server…", on_setup_project)]
         if setup_name else []
     )
     # Present only while the dashboard advertises a different published
-    # version (see upgrade.py) -- the 5s menu-rebuild loop makes this
-    # appear/disappear live, same pattern as dashboard_items above.
-    upgrade_info = None
-    try:
-        _get_upgrade = getattr(app, "upgrade_available", None)
-        if _get_upgrade is not None:
-            upgrade_info = _get_upgrade()
-    except Exception:
-        log.exception("upgrade_available() failed")
+    # version (see upgrade.py) -- the fingerprint-gated rebuild loop makes
+    # this appear/disappear, same pattern as dashboard_items above.
+    upgrade_info = snap["upgrade_info"]
     # The label is NOT "Update available" unconditionally: the dashboard
     # advertises whatever it publishes as `current`, newer or older (see
     # upgrade.py's "different, not newer"). This rig ran v0.4.5 while the
@@ -629,24 +739,21 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
         if upgrade_info else []
     )
     identity_items = [
-        pystray.MenuItem(_identity_status_label(app), None, enabled=False),
+        pystray.MenuItem(snap["identity_label"], None, enabled=False),
         pystray.MenuItem("Sign out", on_sign_out) if signed_in
         else pystray.MenuItem("► Sign in… (nothing syncs until you do)", on_sign_in),
     ]
 
     problem_items = []
-    try:
-        if app.config_problems:
-            problem_items = [pystray.MenuItem(
-                "⚠ NOT SET UP: nothing will sync (Copy diagnostics for your admin)",
-                None, enabled=False,
-            )]
-    except Exception:
-        pass
+    if snap["problems"]:
+        problem_items = [pystray.MenuItem(
+            "⚠ NOT SET UP: nothing will sync (Copy diagnostics for your admin)",
+            None, enabled=False,
+        )]
 
     state_items = [
         pystray.MenuItem(line, None, enabled=False)
-        for line in (_sequencer_line(app), _current_project_line(app))
+        for line in (snap["sequencer_line"], snap["current_project_line"])
         if line
     ]
 
@@ -664,8 +771,8 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Sync now", on_sync_now),
         pystray.MenuItem(
-            "▶ Resume syncing (currently PAUSED)" if app.is_paused() else "⏸ Pause syncing",
-            on_toggle_pause, checked=lambda item: app.is_paused(),
+            "▶ Resume syncing (currently PAUSED)" if snap["paused"] else "⏸ Pause syncing",
+            on_toggle_pause, checked=(lambda paused: lambda item: paused)(snap["paused"]),
         ),
         pystray.MenuItem("Open my project folder", on_open_project_folder),
         *dashboard_items,
@@ -687,28 +794,42 @@ def _build_menu(app: "CompanionApp") -> "pystray.Menu":
     )
 
 
-def start_tray(app: "CompanionApp", refresh_interval: float = 5.0) -> "pystray.Icon":
+def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.Icon":
     """Start the tray icon on a background thread. Returns the Icon (call
-    .stop() to remove it). The icon color is refreshed every
-    `refresh_interval` seconds from app.lane_statuses(); the menu is rebuilt
-    lazily by pystray each time it's opened (dynamic menu factory)."""
+    .stop() to remove it).
 
+    Refresh model (2026-07-26, after the right-click/hover freezes):
+      - icon color and TOOLTIP update every `refresh_interval` seconds --
+        both are plain Shell_NotifyIcon modifications, safe at any time, and
+        the tooltip carries the live speed/ETA numbers;
+      - the MENU is rebuilt only when its fingerprint changes. pystray's
+        win32 backend DestroyMenu()s the live menu handle on every icon.menu
+        assignment, so the old rebuild-every-5s loop could destroy a menu
+        the user had open (freeze) and then resolve the clicked index
+        against the NEW callback list (wrong action). Rebuilding only on
+        real state changes makes that window rare and keeps an open menu
+        stable under the cursor."""
+
+    first = _tray_snapshot(app)
     icon = pystray.Icon(
         "ccsync-companion",
-        _make_icon_image(compute_overall_color(app.lane_statuses(), app)),
-        "ccsync-companion",
-        menu=_build_menu(app),
+        _make_icon_image(first["color"]),
+        _tooltip_text(first),
+        menu=_build_menu(app, first),
     )
-    # pystray re-evaluates a Menu built from a generator/callable lazily on
-    # open in some backends but not all; rebuilding icon.menu on each refresh
-    # keeps status lines fresh everywhere.
+    last_fingerprint = _menu_fingerprint(first)
 
     def _refresh_loop() -> None:
+        nonlocal last_fingerprint
         while not getattr(icon, "_ccsync_stop", False):
             try:
-                statuses = app.lane_statuses()
-                icon.icon = _make_icon_image(compute_overall_color(statuses, app))
-                icon.menu = _build_menu(app)
+                snap = _tray_snapshot(app)
+                icon.icon = _make_icon_image(snap["color"])
+                icon.title = _tooltip_text(snap)
+                fingerprint = _menu_fingerprint(snap)
+                if fingerprint != last_fingerprint:
+                    icon.menu = _build_menu(app, snap)
+                    last_fingerprint = fingerprint
             except Exception:
                 log.exception("tray refresh failed")
             time.sleep(refresh_interval)

@@ -6,11 +6,43 @@
   <title>{% block title %}CC SYNC{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js" defer></script>
+  <script>
+    // Keep <details data-key> open/closed choices across htmx innerHTML
+    // swaps: the bins panel refreshes every 5s and the sidebar every 30s,
+    // which would otherwise slam every section back to its server-rendered
+    // default. Both states are recorded, so a section the server renders
+    // open (e.g. the current project's group) stays closed if the user
+    // closed it.
+    (function () {
+      var state = {};
+      document.addEventListener("htmx:beforeSwap", function (evt) {
+        var t = evt.detail.target;
+        if (!t || !t.querySelectorAll) return;
+        var seen = {};
+        t.querySelectorAll("details[data-key]").forEach(function (d) {
+          seen[d.getAttribute("data-key")] = d.hasAttribute("open");
+        });
+        state[t.id || "_"] = seen;
+      });
+      document.addEventListener("htmx:afterSwap", function (evt) {
+        var t = evt.detail.target;
+        if (!t || !t.querySelector) return;
+        var seen = state[t.id || "_"] || {};
+        Object.keys(seen).forEach(function (key) {
+          var d = t.querySelector('details[data-key="' + CSS.escape(key) + '"]');
+          if (!d) return;
+          if (seen[key]) d.setAttribute("open", "");
+          else d.removeAttribute("open");
+        });
+      });
+    })();
+  </script>
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/">CREATORS CLUB <span class="dim">//</span> SYNC STATUS</a>
     <a class="btn nav-link" href="/transfers">[ TRANSFERS ]</a>
+    <a class="btn nav-link" href="/download" title="download the latest CC Sync installer for this computer">[ INSTALLER ]</a>
     {% if session_is_admin %}
       <a class="btn nav-link" href="/admin/users">[ USERS ]</a>
     {% endif %}

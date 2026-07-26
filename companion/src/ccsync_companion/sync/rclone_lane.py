@@ -1431,7 +1431,11 @@ class RcloneLane(LaneAdapter):
             self._status.eta_seconds = None
             self._status.transfers = []
 
-        stats_interval = None if self._legacy_run else "10s"
+        # 2s, not 10s: this feeds the per-file progress the dashboard and
+        # tray show, and with a 10s tick the end-to-end staleness (stats +
+        # 5s report + page poll) reached ~18s -- bars that "update really
+        # slowly". Parsing one small JSON line every 2s is negligible.
+        stats_interval = None if self._legacy_run else "2s"
         try:
             cmd = self._build_command(
                 subpath=subpath,

@@ -18,7 +18,8 @@
 
 .PARAMETER Destination
     Where to assemble the package. Defaults to the canonical location on the
-    NAS, T:\Creators_Club\Assets\Software\CC_Sync -- this is the single
+    NAS, P:\Assets\Software\CC_Sync (the base rig's P: maps to
+    \\<nas>\TheCreatorsPool\Creators_Club since 2026-07-26) -- the single
     source of truth for editor packages, so every update lands there and
     there is only ever one copy to reason about. An existing folder is
     overwritten file-by-file, not deleted.
@@ -52,6 +53,12 @@
     stale exe, and on a version the server already has (bump VERSION and
     rebuild). Prompts for the dashboard admin password.
 
+    Also uploads onboarding/dist/onboard.exe as the kind=onboard package
+    (version = $InstallerVersion from windows_bootstrap.ps1) -- that is what
+    the dashboard's [ INSTALLER ] download serves. Skipped with a warning
+    when onboard.exe is missing, older than the companion exe it should
+    bundle, or already published at this installer version.
+
 .PARAMETER MakeCurrent
     With -Publish: immediately make the uploaded version the one offered to
     the fleet. Without it the build is staged and you flip [ MAKE CURRENT ]
@@ -77,7 +84,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Destination = "T:\Creators_Club\Assets\Software\CC_Sync",
+    [string]$Destination = "P:\Assets\Software\CC_Sync",
     [switch]$RebuildExe,
     [switch]$RebuildOnboard,
     [switch]$DryRun,
@@ -402,8 +409,44 @@ if ($Publish) {
     $mc = if ($MakeCurrent) { 1 } else { 0 }
     $uri = "$DashboardUrl/api/v1/admin/packages/windows/${version}?sha256=$sha&make_current=$mc"
 
+    # --- the onboarding installer rides along as kind=onboard --------------
+    # It bundles the companion exe, so a stale one hands new editors an old
+    # companion (the 2026-07-25 rollout failure). Problems here only skip the
+    # installer upload; the companion publish still proceeds.
+    $onboardVersion = ""
+    $onboardSha = ""
+    $onboardUri = ""
+    $onboardSkipReason = ""
+    $bootstrapPs1 = Join-Path $RepoRoot "installer\windows_bootstrap.ps1"
+    $mIv = Select-String -Path $bootstrapPs1 -Pattern '^\$InstallerVersion\s*=\s*"([^"]+)"'
+    $stepsPy = Join-Path $RepoRoot "onboarding\steps.py"
+    $mIv2 = Select-String -Path $stepsPy -Pattern '^INSTALLER_VERSION\s*=\s*"([^"]+)"'
+    if (-not $mIv -or -not $mIv2) {
+        $onboardSkipReason = "could not parse the installer version from windows_bootstrap.ps1 / steps.py"
+    }
+    elseif ($mIv.Matches[0].Groups[1].Value -ne $mIv2.Matches[0].Groups[1].Value) {
+        $onboardSkipReason = "installer version drift: windows_bootstrap.ps1 says '$($mIv.Matches[0].Groups[1].Value)', steps.py says '$($mIv2.Matches[0].Groups[1].Value)'"
+    }
+    elseif (-not (Test-Path -LiteralPath $OnboardExePath)) {
+        $onboardSkipReason = "no onboard.exe at $OnboardExePath (build with -RebuildOnboard)"
+    }
+    elseif ((Get-Item -LiteralPath $OnboardExePath).LastWriteTime -lt (Get-Item -LiteralPath $ExePath).LastWriteTime) {
+        $onboardSkipReason = "onboard.exe is OLDER than the companion exe it should bundle -- re-run with -RebuildOnboard"
+    }
+    else {
+        $onboardVersion = $mIv.Matches[0].Groups[1].Value
+        $onboardSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $OnboardExePath).Hash.ToLower()
+        $onboardUri = "$DashboardUrl/api/v1/admin/packages/windows/${onboardVersion}?kind=onboard&sha256=$onboardSha&make_current=$mc"
+    }
+
     if ($DryRun) {
         Write-Step "[dry-run] would publish v$version ($([int]((Get-Item -LiteralPath $ExePath).Length/1KB)) KB, sha256 $($sha.Substring(0,12))...) via PUT $uri as $AdminUser"
+        if ($onboardSkipReason) {
+            Write-Warn2 "[dry-run] installer upload would be SKIPPED: $onboardSkipReason"
+        }
+        else {
+            Write-Step "[dry-run] would publish installer v$onboardVersion ($([int]((Get-Item -LiteralPath $OnboardExePath).Length/1KB)) KB, sha256 $($onboardSha.Substring(0,12))...) via PUT $onboardUri"
+        }
     }
     else {
         $securePw = Read-Host "dashboard password for '$AdminUser'" -AsSecureString
@@ -442,12 +485,50 @@ if ($Publish) {
         }
         Write-Step "published v$version to $DashboardUrl$(if ($MakeCurrent) { ' and made it CURRENT' })"
         try {
-            $retained = ($result.view.packages | Where-Object { $_.platform -eq "windows" } |
+            $retained = ($result.view.packages | Where-Object { $_.platform -eq "windows" -and $_.kind -eq "companion" } |
                 ForEach-Object { "$($_.version)$(if ($_.is_current) { '*' })" }) -join ", "
-            Write-Step "windows packages on server (* = current): $retained"
+            Write-Step "windows companion packages on server (* = current): $retained"
         } catch {}
         if (-not $MakeCurrent) {
             Write-Step "NOTE: v$version is staged but NOT current -- flip [ MAKE CURRENT ] on the dashboard admin page (or re-run with -MakeCurrent)"
+        }
+
+        # --- upload the onboarding installer -------------------------------
+        if ($onboardSkipReason) {
+            Write-Warn2 "installer upload SKIPPED: $onboardSkipReason"
+        }
+        else {
+            try {
+                $null = Invoke-RestMethod -Method Put -Uri $onboardUri -InFile $OnboardExePath `
+                    -ContentType "application/octet-stream" -WebSession $dashSession
+                Write-Step "published installer v$onboardVersion (kind=onboard)$(if ($MakeCurrent) { ' and made it CURRENT' }) -- the dashboard's [ INSTALLER ] download now serves it"
+            }
+            catch {
+                $status = 0
+                try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+                if ($status -eq 409) {
+                    # Same version already on the server. Fine when the exe is
+                    # byte-identical; a silent trap when it was rebuilt without
+                    # an INSTALLER_VERSION bump -- so compare hashes and say so.
+                    $serverSha = ""
+                    try {
+                        $view = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/admin/packages" -WebSession $dashSession
+                        $serverSha = ($view.packages | Where-Object {
+                            $_.kind -eq "onboard" -and $_.platform -eq "windows" -and $_.version -eq $onboardVersion
+                        } | Select-Object -First 1).sha256
+                    } catch {}
+                    if ($serverSha -and $serverSha -ne $onboardSha) {
+                        Write-Warn2 "installer v$onboardVersion is already published WITH DIFFERENT CONTENT -- the server keeps the OLD build."
+                        Write-Warn2 "bump `$InstallerVersion in installer\windows_bootstrap.ps1 AND INSTALLER_VERSION in onboarding\steps.py, then re-run with -RebuildOnboard -Publish"
+                    }
+                    else {
+                        Write-Step "installer v$onboardVersion is already published (unchanged) -- nothing to do"
+                    }
+                }
+                else {
+                    Write-Warn2 "installer publish failed: $($_.Exception.Message)"
+                }
+            }
         }
     }
 }

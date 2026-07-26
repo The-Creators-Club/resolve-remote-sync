@@ -30,7 +30,7 @@
 <table class="editors">
   <thead>
     <tr><th></th><th>EDITOR</th><th>SYNC (LANE C)</th><th>HAS</th><th>MISSING</th>
-        <th>LANES A/B</th><th>LAST SEEN</th><th></th></tr>
+        <th>MEDIA</th><th>LANES</th><th>LAST SEEN</th><th></th></tr>
   </thead>
   <tbody>
   {% for e in project.editors %}
@@ -38,12 +38,25 @@
       <td><span class="dot {{ e.status }}">●</span></td>
       <td>
         <span class="who">{{ e.display_name }}</span>
+        {% if e.report_only and e.mode == "base" %}<span class="chip green" title="the base rig works directly off the NAS tree; nothing syncs to it">[ BASE ]</span>{% endif %}
         {% if e.unmapped %}<span class="chip amber" title="device not named after a TrueNAS username. Run accept_device.py --device-name">[ UNMAPPED ]</span>{% endif %}
-        <span class="conn {{ 'on' if e.connected else 'off' }}">{{ "online" if e.connected else "offline" }}</span>
+        {% if not e.report_only %}<span class="conn {{ 'on' if e.connected else 'off' }}">{{ "online" if e.connected else "offline" }}</span>{% endif %}
       </td>
-      <td class="mono">[{{ e.completion | bar }}] {{ "%.0f" | format(e.completion or 0) }}%</td>
+      {% if e.report_only %}
+      <td class="mono muted" title="no Syncthing device on this machine; lane C does not apply">-</td>
+      <td class="mono muted">-</td>
+      <td class="mono muted">-</td>
+      {% else %}
+      <td class="mono"><span class="cssbar"><span class="fill" style="width:{{ [[e.completion or 0, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(e.completion or 0) }}%</td>
       <td class="mono">{% if e.global_items is not none %}{{ e.have_items }} / {{ e.global_items }} files{% else %}-{% endif %}</td>
       <td class="mono">{% if e.need_items %}{{ e.need_items }} files · {{ e.need_bytes | human_bytes }}{% else %}-{% endif %}</td>
+      {% endif %}
+      <td class="mono">
+        {% if e.media %}
+          <span title="camera originals on this machine's disk / on the NAS">{{ e.media.n_originals }}/{{ project.nas_media.n_originals }} orig</span>
+          · <span title="proxies on this machine's disk / on the NAS">{{ e.media.n_proxies }}/{{ project.nas_media.n_proxies }} proxy</span>
+        {% else %}<span class="muted" title="no media manifest reported yet">-</span>{% endif %}
+      </td>
       <td>
         {% for lane in e.lanes %}
           <span class="chip lane {{ lane.chip }}" title="{{ lane.lane }} on {{ lane.machine }}: {{ lane.state }}{% if lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.label }}:{{ lane.state }}</span>
@@ -51,15 +64,15 @@
           <span class="muted" title="no companion report received">no reports</span>
         {% endfor %}
       </td>
-      <td class="muted">{{ (e.last_connected_at if not e.connected else e.updated_at) | ago }}</td>
+      <td class="muted">{{ (e.updated_at if e.report_only or e.connected else e.last_connected_at) | ago }}</td>
       <td>
-        {% if e.need_items %}
+        {% if e.need_items and e.device_id %}
         <button class="btn" hx-get="/partials/project/{{ project.slug }}/missing/{{ e.device_id }}"
                 hx-target="#missing-{{ loop.index }}" hx-swap="innerHTML">[ MISSING FILES ]</button>
         {% endif %}
       </td>
     </tr>
-    <tr><td colspan="8"><div id="missing-{{ loop.index }}" hx-preserve="true"></div></td></tr>
+    <tr><td colspan="9"><div id="missing-{{ loop.index }}" hx-preserve="true"></div></td></tr>
   {% endfor %}
   </tbody>
 </table>

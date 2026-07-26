@@ -337,6 +337,26 @@ of step with the published one for no gain.
   CCSYNC_SSH_HOSTKEY="$(ssh-keyscan -t ed25519 192.168.0.102 | awk '{print $2, $3}')"
   ```
 
+- **A Syncthing that connects and drops after exactly ~1 second is a
+  device-list problem, not a network problem.** NAS-side log signature:
+  `Established secure connection` then `Lost device connection ...
+  error="reading length: EOF"` one second later, forever. TLS succeeding
+  means the certificate (device ID) is right; the EOF means the OTHER side
+  read the hello and hung up because the dialing device is not in its own
+  config -- a fresh `syncthing generate` config knows nobody
+  (alex_laptop, 2026-07-26). The bootstraps now seed the NAS device via
+  REST; if it recurs, also check for TWO syncthing.exe processes from
+  different homes (`Get-Process syncthing | Select-Object Id, Path`).
+- **An editor machine can run Syncthing from a different home than the
+  ccsync-managed one** (`%LOCALAPPDATA%\ccsync\syncthing-config`). The
+  companion used to statically prefer the managed home's API key, so every
+  REST call 403'd against the veteran instance: lane C reported a
+  misleading error AND every sequencer write (ignores, versioning, folder
+  policy) was silently dead -- the folder then indexes the 30 GiB of media
+  lanes A/B own. The companion now tries every known home's key against
+  the live instance; the lane error text distinguishes "not running" from
+  "running but rejected every known API key".
+
 ---
 
 ## 8. Tests that depend on your desktop

@@ -36,7 +36,7 @@ being verified against v0.4.5.
 The folder handed to a new editor lives at one canonical location:
 
 ```
-T:\Creators_Club\Assets\Software\CC_Sync
+P:\Assets\Software\CC_Sync
 ```
 
 (on the NAS at `/mnt/tank/TheCreatorsPool/Creators_Club/Assets/Software/CC_Sync`)
@@ -72,6 +72,18 @@ previous build** (nothing is auto-pruned any more, so rollback stays
 available); add `?prune=1` to the publish URL if you deliberately want the
 old current-plus-2 trimming. Full runbook: `docs/SERVER.md` → "Publishing a
 companion update".
+
+`-Publish` also uploads `onboarding/dist/onboard.exe` as the `kind=onboard`
+package (version = `$InstallerVersion`), which the dashboard serves to any
+signed-in user via the `[ INSTALLER ]` header link (`/download` — picks
+Windows or macOS from the browser). That download is the supported way to
+hand an editor the installer: onboard.exe refuses to run from the NAS share
+anyway, and the dashboard copy can't drift behind the way a hand-copied one
+does. The upload is skipped with a warning when onboard.exe is stale or its
+version wasn't bumped (`$InstallerVersion` in `windows_bootstrap.ps1` AND
+`INSTALLER_VERSION` in `onboarding/steps.py`). The macOS slot has no
+automated publisher yet; if you need it, publish `macos_bootstrap.sh` by
+hand: `PUT /api/v1/admin/packages/macos/<version>?kind=onboard&sha256=...`.
 
 Contents (10 files, all copied by `build_editor_package.ps1`):
 

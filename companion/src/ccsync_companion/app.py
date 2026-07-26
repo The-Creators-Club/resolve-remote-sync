@@ -1125,7 +1125,8 @@ class CompanionApp:
         let a dashboard-supplied role="editor" override the machine's own
         `mode="base"` / `sync_enabled=false` -- so any sign-in by an account
         outside DASH_ADMIN_USERS started full sync lanes on the base rig,
-        where local_root IS the live NAS share (T:\\Creators_Club). Lane B is
+        where local_root IS the live NAS share (P:\\, historically
+        T:\\Creators_Club). Lane B is
         a deleting `rclone sync` DOWNWARD from that user's empty SFTP home,
         i.e. it would delete the NAS's real Proxy/ files under every selected
         project (AUDIT_2 CORE-C1). A machine that says it does not sync must

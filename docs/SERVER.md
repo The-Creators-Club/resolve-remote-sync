@@ -443,7 +443,12 @@ updates silently). Publish flow, from the base rig:
    dashboard admin password and PUTs the exe to
    `/api/v1/admin/packages/windows/<version>`.
 3. Without `-MakeCurrent`, the build is staged: flip `[ MAKE CURRENT ]` in
-   the `[ COMPANION PACKAGES ]` box on `/admin/users` when ready.
+   the `[ PUBLISHED PACKAGES ]` box on `/admin/users` when ready. The same
+   publish run also uploads `onboard.exe` as the `kind=onboard` package
+   (versioned by `$InstallerVersion`), which the dashboard's `[ INSTALLER ]`
+   header link serves to any signed-in user -- bump the installer version in
+   `installer/windows_bootstrap.ps1` AND `onboarding/steps.py` whenever
+   onboard.exe's contents change, or the upload is skipped.
 4. Watch the fleet grid: each machine's VERSION cell goes amber until its
    editor takes the tray's offer ("Update available → vX.Y" when the
    published build is newer; "Roll back to vX.Y" when you have deliberately
@@ -457,7 +462,7 @@ side effect of publishing a new one -- the safer default, since rollback is
 only as deep as the builds still on disk. To get the old "current + 2 newest
 per platform" behaviour back, add `?prune=1` to the publish URL for that one
 publish. Deleting a build stays a deliberate act (`[ DELETE ]` in
-`[ COMPANION PACKAGES ]`); the current version can never be deleted.
+`[ PUBLISHED PACKAGES ]`); the current version can never be deleted.
 
 **Nothing is offered to a companion that doesn't report its platform.**
 An unknown platform used to be treated as `windows`, which meant a Mac could

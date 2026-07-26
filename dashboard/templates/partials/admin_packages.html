@@ -1,6 +1,6 @@
 <div class="admin-packages-box">
-  <div class="side-head">[ COMPANION PACKAGES ]
-    <span class="muted">Published companion builds. Editors are offered whichever version is CURRENT.</span></div>
+  <div class="side-head">[ PUBLISHED PACKAGES ]
+    <span class="muted">companion: what the fleet self-upgrades to. onboard: the full installer served by [ INSTALLER ]. CURRENT is per kind and platform.</span></div>
 
   {% if error %}
     <div class="banner">▲ {{ error }}</div>
@@ -8,10 +8,11 @@
 
   {% if packages.packages %}
     <table class="editors">
-      <thead><tr><th>VERSION</th><th>PLATFORM</th><th>SIZE</th><th>SHA256</th><th>PUBLISHED</th><th>BY</th><th></th><th></th></tr></thead>
+      <thead><tr><th>KIND</th><th>VERSION</th><th>PLATFORM</th><th>SIZE</th><th>SHA256</th><th>PUBLISHED</th><th>BY</th><th></th><th></th></tr></thead>
       <tbody>
       {% for p in packages.packages %}
         <tr class="editor-row">
+          <td class="mono-sm muted">{{ p.kind }}</td>
           <td class="mono-sm">{{ p.version }}
             {% if p.is_current %}<span class="chip green">[ CURRENT ]</span>{% endif %}
             {% if not p.file_exists %}<span class="chip red" title="row exists but the file is gone from the packages dir">[ FILE MISSING ]</span>{% endif %}
@@ -25,6 +26,7 @@
             {% if not p.is_current %}
             <form class="inline-form" hx-post="/partials/admin/packages/current"
                   hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+              <input type="hidden" name="kind" value="{{ p.kind }}">
               <input type="hidden" name="platform" value="{{ p.platform }}">
               <input type="hidden" name="version" value="{{ p.version }}">
               <button class="btn" type="submit">[ MAKE CURRENT ]</button>
@@ -35,6 +37,7 @@
             {% if not p.is_current %}
             <form class="inline-form" hx-post="/partials/admin/packages/delete"
                   hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+              <input type="hidden" name="kind" value="{{ p.kind }}">
               <input type="hidden" name="platform" value="{{ p.platform }}">
               <input type="hidden" name="version" value="{{ p.version }}">
               <button class="btn" type="submit">[ DELETE ]</button>
@@ -69,8 +72,8 @@
   {% endif %}
 
   <div class="muted" style="margin-top:0.8rem">
-    Publish a new build from the base rig:
-    <span class="mono-sm">.\build_editor_package.ps1 -RebuildExe -Publish [-MakeCurrent]</span>
-    Each machine's tray then shows “Update now”.
+    Publish new builds from the base rig:
+    <span class="mono-sm">.\build_editor_package.ps1 -RebuildExe -RebuildOnboard -Publish [-MakeCurrent]</span>
+    uploads both the companion and the installer. Each machine's tray then shows “Update now”.
   </div>
 </div>

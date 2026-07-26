@@ -113,7 +113,7 @@ shortens the warning; `-DryRun` prints every step and changes nothing.
 ```
 
 This assembles the editor package at
-`T:\Creators_Club\Assets\Software\CC_Sync` (including the new
+`P:\Assets\Software\CC_Sync` (including the new
 `ccsync-release.json`) and uploads the exe:
 
 ```

@@ -196,3 +196,70 @@ def test_report_without_media_leaves_tables_untouched(env):
     light = report("ruskin", "RUSKIN-PC")
     client.post("/api/v1/report", json=light, headers=hdr("ruskin"))
     assert dbmod.fetch_editor_media_for_project(conn, "2026-ff5-energy-transition")
+
+
+# -- the full sync queue (transfers page [ QUEUED ] section) ----------------
+
+
+def _seed_backlog(conn, now):
+    """ruskin's EDIT-PC selected the project, reported a manifest holding one
+    proxy (of the NAS's two) plus one local-only original -- so the backlog
+    is: 1 proxy down (lane B), 1 original up (lane A)."""
+    dbmod.add_selection(conn, "ruskin", "2026-ff5-energy-transition", "ruskin", now)
+    dbmod.upsert_editor_media_project(
+        conn, editor="ruskin", machine="EDIT-PC", slug="2026-ff5-energy-transition",
+        mode="editor", n_originals=1, bytes_originals=500, n_proxies=1,
+        bytes_proxies=10, truncated=False, now=now)
+    dbmod.replace_editor_media(conn, "ruskin", "EDIT-PC", "2026-ff5-energy-transition", [
+        ("B-roll/Proxy/a.mov", "proxy", 10),
+        ("B-roll/Editor Added/new.braw", "original", 500),
+    ], now)
+    conn.commit()
+
+
+def test_sync_backlog_diffs_both_directions(env):
+    client, conn, now = env
+    _seed_backlog(conn, now)
+
+    view = build_transfers_view(conn)
+    by_lane = {q["lane"]: q for q in view["queues"]}
+    assert set(by_lane) == {"a", "b"}
+
+    down = by_lane["b"]
+    assert down["direction"] == "down" and down["editor"] == "ruskin"
+    assert down["n_files"] == 1 and down["bytes"] == 10
+    assert down["files"] == [{"name": "B-roll/Proxy/b.mov", "size": 10}]
+    assert down["truncated"] is False
+
+    up = by_lane["a"]
+    assert up["direction"] == "up"
+    assert up["files"] == [{"name": "B-roll/Editor Added/new.braw", "size": 500}]
+    assert view["queued_files"] == 2 and view["queued_bytes"] == 510
+
+    # editor scoping hides other people's queues
+    assert build_transfers_view(conn, editor="jsmith")["queues"] == []
+
+    # and the transfers partial renders the queue section
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    page = client.get("/partials/transfers")
+    assert page.status_code == 200
+    assert "[ QUEUED ]" in page.text
+    assert "B-roll/Proxy/b.mov" in page.text
+
+
+def test_sync_backlog_excludes_base_and_unselected(env):
+    client, conn, now = env
+    # base rig reports a manifest but is never "behind"
+    dbmod.upsert_editor_media_project(
+        conn, editor="alex", machine="CREATOR_1", slug="2026-ff5-energy-transition",
+        mode="base", n_originals=2, bytes_originals=200, n_proxies=2,
+        bytes_proxies=20, truncated=False, now=now)
+    dbmod.replace_editor_media(conn, "alex", "CREATOR_1", "2026-ff5-energy-transition",
+                               [("B-roll/a.braw", "original", 100)], now)
+    # jsmith reported a manifest but never selected the project
+    dbmod.upsert_editor_media_project(
+        conn, editor="jsmith", machine="PC-2", slug="2026-ff5-energy-transition",
+        mode="editor", n_originals=0, bytes_originals=0, n_proxies=0,
+        bytes_proxies=0, truncated=False, now=now)
+    conn.commit()
+    assert build_transfers_view(conn)["queues"] == []

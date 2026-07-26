@@ -120,6 +120,26 @@ def default_config_xml_path() -> Path:
     return managed
 
 
+def default_api_key_paths() -> list[Path]:
+    """Every config.xml a live 127.0.0.1:8384 instance's key might be in:
+    the ccsync-managed home first, then the stock per-OS home.
+
+    Static preference between the two homes has now bitten in BOTH
+    directions: a stale stock config 403'ing against the managed instance
+    (the original default_config_xml_path fix), and -- on alex_laptop,
+    2026-07-26 -- a preserved managed home 403'ing against a veteran stock
+    instance, which silenced every sequencer write (no ignores, no folder
+    policy) while lane C reported a misleading error. The only reliable
+    arbiter of "which key is right" is the running instance itself, so
+    callers try each candidate against it in order (see _get/_request)."""
+    paths = [ccsync_config_xml_path(), _stock_config_xml_path()]
+    unique: list[Path] = []
+    for p in paths:
+        if p not in unique:
+            unique.append(p)
+    return unique
+
+
 def read_api_key_from_config(path: Path) -> Optional[str]:
     """Parse Syncthing's config.xml for <gui><apikey>. Returns None on any
     failure (missing file, malformed XML, no apikey element) — never raises.
@@ -172,7 +192,16 @@ class SyncthingLane(LaneAdapter):
         # `expected_folder_ids_fn` (e.g. Sequencer.expected_folder_slugs) and
         # it is evaluated fresh on every poll.
         self.expected_folder_ids_fn = expected_folder_ids_fn
+        # An EXPLICIT config_xml_path scopes key discovery to that one file
+        # (tests, power users); only the default wiring fans out over every
+        # known home -- see default_api_key_paths for why.
+        self.api_key_paths: list[Path] = (
+            [config_xml_path] if config_xml_path else default_api_key_paths()
+        )
         self.config_xml_path = config_xml_path or default_config_xml_path()
+        # The key the running instance last accepted -- tried first so steady
+        # state costs no extra requests.
+        self._active_api_key = ""
         self.timeout = timeout
         self.poll_interval = poll_interval
         self._http_get = http_get or default_http_get
@@ -194,9 +223,39 @@ class SyncthingLane(LaneAdapter):
             return self._configured_api_key
         return read_api_key_from_config(self.config_xml_path) or ""
 
+    def _api_key_candidates(self) -> list[str]:
+        """Ordered, deduplicated keys to try: the config override alone when
+        set, else the last-accepted key first, then each home's config.xml."""
+        if self._configured_api_key:
+            return [self._configured_api_key]
+        candidates: list[str] = []
+        if self._active_api_key:
+            candidates.append(self._active_api_key)
+        for path in self.api_key_paths:
+            key = read_api_key_from_config(path)
+            if key and key not in candidates:
+                candidates.append(key)
+        return candidates
+
     def _get(self, path: str) -> Any:
-        api_key = self._resolve_api_key()
-        return self._http_get(f"{self.base_url}{path}", api_key, self.timeout)
+        """GET with per-home API-key fallback: a 401/403 means "running, but
+        that key belongs to a different Syncthing home", so the next
+        candidate is tried; any other failure propagates unchanged."""
+        url = f"{self.base_url}{path}"
+        last_auth_error: Optional[Exception] = None
+        for api_key in self._api_key_candidates() or [""]:
+            try:
+                result = self._http_get(url, api_key, self.timeout)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    last_auth_error = exc
+                    continue
+                raise
+            if api_key:
+                self._active_api_key = api_key
+            return result
+        assert last_auth_error is not None  # loop always runs at least once
+        raise last_auth_error
 
     def _set_status(self, status: LaneStatus) -> None:
         with self._lock:
@@ -248,8 +307,7 @@ class SyncthingLane(LaneAdapter):
 
     def check_once(self) -> LaneStatus:
         """Single synchronous status check. Never raises."""
-        api_key = self._resolve_api_key()
-        if not api_key:
+        if not self._api_key_candidates():
             status = LaneStatus(
                 name=self.name,
                 state=STATE_ERROR,
@@ -260,6 +318,23 @@ class SyncthingLane(LaneAdapter):
 
         try:
             self._get("/rest/system/ping")
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                # Running, but owned by a different home than any key we
+                # hold -- "not running" here sent the 2026-07-26 laptop
+                # debugging in exactly the wrong direction.
+                checked = ", ".join(str(p) for p in self.api_key_paths)
+                status = LaneStatus(
+                    name=self.name,
+                    state=STATE_ERROR,
+                    last_error=f"Syncthing is running but rejected every known API key (checked {checked})",
+                )
+            else:
+                status = LaneStatus(
+                    name=self.name, state=STATE_ERROR, last_error="Syncthing not running"
+                )
+            self._set_status(status)
+            return status
         except Exception:
             status = LaneStatus(name=self.name, state=STATE_ERROR, last_error="Syncthing not running")
             self._set_status(status)

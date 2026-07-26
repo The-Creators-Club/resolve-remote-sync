@@ -926,6 +926,28 @@ def build_down_command(
     return _append_stats_flags(cmd, stats_interval)
 
 
+# rclone's closing notice when any fatal error occurred. It is the LAST
+# error line, printed after the actual cause -- surfacing it verbatim gave
+# the tray "Fatal error received - not attempting retries" with the real
+# reason buried in a log too long to read (2026-07-26).
+_FATAL_NOTICE = "fatal error received"
+
+
+def _most_informative_error(errors: list) -> str:
+    """The error line most worth showing a human: the first line that is
+    NOT the generic fatal-notice, else whatever exists."""
+    for line in errors:
+        if _FATAL_NOTICE not in str(line).lower():
+            return str(line)
+    return str(errors[-1]) if errors else ""
+
+
+def _is_max_delete_abort(errors: list) -> bool:
+    """Did this run stop because --max-delete/--max-delete-size tripped?"""
+    return any("max-delete" in str(line).lower() or "max delete" in str(line).lower()
+               for line in errors)
+
+
 @dataclass
 class RcloneRunResult:
     ok: bool
@@ -1569,10 +1591,32 @@ class RcloneLane(LaneAdapter):
                     f"transferred {result.transferred} file(s), paused at the "
                     f"{int(max_duration_seconds)}s project budget"
                 )
+            elif returncode != 0 and _is_max_delete_abort(result.errors):
+                # The --max-delete/--max-delete-size safety valve tripped:
+                # rclone exits FATAL, but this is the cap doing its job --
+                # one oversized cleanup (the 2026-07-26 ‛-name transition
+                # moved ~30 GB in 20 GB slices) is throttled across passes,
+                # not broken. Painting the lane red said "Something went
+                # wrong" for hours of correct behavior.
+                log.info(
+                    "%s: delete safety cap reached this pass -- the cleanup "
+                    "continues next pass (%s)", self.name,
+                    result.errors[0] if result.errors else "",
+                )
+                self._status.state = STATE_IDLE
+                self._status.last_error = None
+                self._status.last_sync = datetime.now(timezone.utc)
+                self._status.detail = (
+                    f"transferred {result.transferred} file(s); tidying old files "
+                    "in slices (safety cap), continues next pass"
+                )
             elif returncode != 0:
                 self._status.state = STATE_ERROR
-                tail = result.errors[-1] if result.errors else stderr_text.strip()[-300:]
-                self._status.last_error = tail or f"rclone exited {returncode}"
+                self._status.last_error = (
+                    _most_informative_error(result.errors)
+                    or stderr_text.strip()[-300:]
+                    or f"rclone exited {returncode}"
+                )
             else:
                 if result.errors:
                     log.info("%s: %d transient error line(s), run succeeded (last: %s)",

@@ -914,3 +914,35 @@ def test_lane_records_and_drains_completions(tmp_path):
         "Projects/2026/CCT/X/B-roll/a.mov", "Projects/2026/CCT/X/B-roll/b.mov"]
     assert all(d["direction"] == "up" and d["lane"] == lane.name for d in drained)
     assert lane.pop_completions() == []      # drained means drained
+
+
+def test_max_delete_abort_is_a_bounded_stop_not_an_error(tmp_path):
+    """The --max-delete-size safety valve tripping is the cap WORKING -- an
+    oversized cleanup continues next pass. It painted the lane red with the
+    useless closing notice for hours (2026-07-26)."""
+    lines = [
+        '{"level":"info","msg":"a.mov: Copied (new)","object":"a.mov"}\n',
+        '{"level":"error","msg":"Delete exceeded --max-delete-size threshold, aborting"}\n',
+        '{"level":"error","msg":"Fatal error received - not attempting retries"}\n',
+    ]
+    calls = []
+    lane = _make_lane(tmp_path, direction=DIRECTION_DOWN,
+                      popen_factory=_make_popen_factory(lines, returncode=7, calls=calls))
+    status = lane.run_once()
+    assert status.state == STATE_IDLE
+    assert status.last_error is None
+    assert "continues next pass" in status.detail
+
+
+def test_generic_fatal_surfaces_the_cause_not_the_closing_notice(tmp_path):
+    lines = [
+        '{"level":"error","msg":"sftp: connection lost"}\n',
+        '{"level":"error","msg":"Fatal error received - not attempting retries"}\n',
+    ]
+    calls = []
+    lane = _make_lane(tmp_path, direction=DIRECTION_DOWN,
+                      popen_factory=_make_popen_factory(lines, returncode=7, calls=calls))
+    status = lane.run_once()
+    assert status.state == STATE_ERROR
+    assert "connection lost" in status.last_error
+    assert "not attempting retries" not in status.last_error

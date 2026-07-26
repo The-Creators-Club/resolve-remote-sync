@@ -310,3 +310,61 @@ def test_base_rig_stray_nas_media_is_out_of_tree():
     assert classify_path("T:\\Temp Transfer\\Creators Club\\x.braw", **kwargs) == OUT_OF_TREE
     assert classify_path("G:\\Temp Transfer\\y.braw", **kwargs) == OUT_OF_TREE
     assert classify_path("C:\\Users\\alex\\Downloads\\z.mp4", **kwargs) == OUT_OF_TREE
+
+
+# -- loopback-share P: (the 0.4.10 canonical relinks, 2026-07-26) ----------
+
+
+def test_delooped_translates_localhost_share(monkeypatch):
+    from ccsync_companion import paths
+
+    monkeypatch.setattr(paths, "_local_share_target",
+                        lambda share: r"D:\Creators_Club" if share == "CCSync_P" else None)
+    assert paths._delooped("\\\\localhost\\CCSync_P\\Projects\\x.mp4") == \
+        r"D:\Creators_Club\Projects\x.mp4"
+    # remote hosts and non-UNC paths come back unchanged
+    assert paths._delooped("\\\\NAS\\Share\\x.mp4") == "\\\\NAS\\Share\\x.mp4"
+    assert paths._delooped(r"D:\x.mp4") == r"D:\x.mp4"
+
+
+def test_canonical_clip_on_loopback_share_is_ok_not_bad_prefix(monkeypatch):
+    """An editor's P: is a loopback SHARE (\localhost\CCSync_P ->
+    local_root), so realpath answers UNC -- which is local_root in disguise.
+    Every canonically-relinked clip read as BAD_PREFIX until translated."""
+    from ccsync_companion import paths
+
+    paths.clear_prefix_cache()
+    monkeypatch.setattr(paths, "_local_share_target",
+                        lambda share: r"D:\Creators_Club")
+    monkeypatch.setattr(paths.os, "name", "nt")
+
+    got = paths.classify_path(
+        r"P:\Projects\2026\CCT\X\clip.mp4",
+        local_root=r"D:\Creators_Club",
+        canonical_prefix="P:\\",
+        exists_fn=lambda p: True,
+        is_windows=True,
+        realpath_fn=lambda p: p.replace("P:\\", "\\\\localhost\\CCSync_P\\", 1),
+    )
+    paths.clear_prefix_cache()
+    assert got == paths.OK
+
+
+def test_missing_canonical_clip_on_healthy_loopback_share_is_missing(monkeypatch):
+    from ccsync_companion import paths
+
+    paths.clear_prefix_cache()
+    monkeypatch.setattr(paths, "_local_share_target",
+                        lambda share: r"D:\Creators_Club")
+    monkeypatch.setattr(paths.os, "name", "nt")
+
+    got = paths.classify_path(
+        r"P:\Projects\2026\CCT\X\not-downloaded.braw",
+        local_root=r"D:\Creators_Club",
+        canonical_prefix="P:\\",
+        exists_fn=lambda p: False,
+        is_windows=True,
+        realpath_fn=lambda p: p.replace("P:\\", "\\\\localhost\\CCSync_P\\", 1),
+    )
+    paths.clear_prefix_cache()
+    assert got == paths.MISSING          # healthy mapping, file just not local

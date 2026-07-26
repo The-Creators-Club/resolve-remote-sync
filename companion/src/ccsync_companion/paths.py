@@ -46,6 +46,8 @@ from __future__ import annotations
 import ntpath
 import os
 import posixpath
+import re
+import subprocess
 import threading
 import time
 from typing import Callable, Optional
@@ -75,6 +77,70 @@ def _norm(path: str, platform_module=os.path) -> str:
     return platform_module.normcase(platform_module.normpath(str(path)))
 
 
+# share name -> (stamp, local path or None). `net share` spawns a process;
+# the target of a share changes ~never, so cache generously.
+_share_cache: dict[str, tuple[float, Optional[str]]] = {}
+_SHARE_CACHE_TTL_SECONDS = 60.0
+_UNC_RE = re.compile(r"^\\\\([^\\]+)\\([^\\]+)(.*)$")
+
+
+def _local_share_target(share: str) -> Optional[str]:
+    """The local directory behind a share of THIS machine, via `net share
+    <name>`. None when the share is unknown or the output unparseable (the
+    labels are localized; the path itself is recognizable as <drive>:\\...)."""
+    now = time.monotonic()
+    cached = _share_cache.get(share.lower())
+    if cached is not None and now - cached[0] < _SHARE_CACHE_TTL_SECONDS:
+        return cached[1]
+    target: Optional[str] = None
+    try:
+        creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+        proc = subprocess.run(
+            ["net", "share", share], capture_output=True, encoding="utf-8",
+            errors="replace", timeout=10, creationflags=creationflags,
+        )
+        if proc.returncode == 0:
+            # Locale-proof parse: `net share` labels are localized, but the
+            # value we want is the first thing shaped like an absolute
+            # local path on its own field.
+            for line in proc.stdout.splitlines():
+                m = re.search(r"([A-Za-z]:\\\S(?:.*\S)?)\s*$", line.strip())
+                if m:
+                    target = m.group(1)
+                    break
+    except Exception:
+        target = None
+    _share_cache[share.lower()] = (now, target)
+    return target
+
+
+def _delooped(resolved: str) -> str:
+    """Translate a UNC path whose host is THIS machine back to the shared
+    directory's local path.
+
+    The editors' P: is a LOOPBACK SHARE mapping (\\\\localhost\\CCSync_P ->
+    local_root; b29a263 made that the primary mapping for the Explorer
+    label), so realpath("P:\\...") answers \\\\localhost\\CCSync_P\\... --
+    which IS local_root in disguise, but string-matches nothing. Untranslated
+    it made every canonically-relinked clip read as BAD_PREFIX the moment
+    0.4.10 started storing P:\\ paths (2026-07-26). Non-UNC and remote-host
+    paths come back unchanged."""
+    m = _UNC_RE.match(str(resolved))
+    if not m or os.name != "nt":
+        return resolved
+    host, share, rest = m.group(1), m.group(2), m.group(3)
+    local_names = {"localhost", "127.0.0.1", "::1"}
+    computer = os.environ.get("COMPUTERNAME", "")
+    if computer:
+        local_names.add(computer.lower())
+    if host.lower() not in local_names:
+        return resolved
+    target = _local_share_target(share)
+    if not target:
+        return resolved
+    return target.rstrip("\\/") + rest
+
+
 def _is_under(norm_path: str, norm_root: str, sep: str) -> bool:
     if not norm_root:
         return False
@@ -100,7 +166,16 @@ def _prefix_resolves_under_root(
         if cached is not None and now - cached[0] < _PREFIX_CACHE_TTL_SECONDS:
             return cached[1]
     try:
-        healthy = _is_under(_norm(resolve(canonical_prefix), plat), norm_root, sep)
+        healthy = _is_under(_norm(_delooped(resolve(canonical_prefix)), plat), norm_root, sep)
+        if not healthy:
+            # Filesystem-identity fallback: on setups where the loopback
+            # share can't be translated (localized `net share`, exotic
+            # mappings), the prefix root and local_root being the SAME
+            # directory is still provable by stat identity.
+            try:
+                healthy = os.path.samefile(str(canonical_prefix), str(norm_root))
+            except OSError:
+                pass
     except Exception:
         # The probe itself failed (not "the mapping is wrong"). Don't cry
         # wolf: a raising realpath must never produce a warning per clip.
@@ -164,10 +239,15 @@ def classify_path(
             return BAD_PREFIX
         if norm_root:
             try:
-                real = _norm(resolve(path), plat)
+                real = _norm(_delooped(resolve(path)), plat)
             except Exception:
                 real = norm_path
             if _is_under(real, norm_root, sep):
+                return OK
+            # The clip exists on the canonical prefix and the PREFIX itself
+            # is healthy (loopback share / subst landing on local_root):
+            # this is the designed steady state, not a broken mapping.
+            if _prefix_resolves_under_root(canonical_prefix, norm_root, plat, sep, resolve):
                 return OK
         # Exists (the mapping resolves to something real) but not under
         # local_root -- a genuinely broken mapping (wrong subst/mount

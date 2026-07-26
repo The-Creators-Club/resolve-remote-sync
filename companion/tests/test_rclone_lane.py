@@ -849,3 +849,40 @@ def test_a_raising_on_trash_callback_never_fails_the_run(tmp_path):
 
     lane._backup_dir = _spy_backup_dir
     assert lane.run_once(subpath="Projects/2026/FF5/Alpha").state == STATE_IDLE
+
+
+def test_trash_toast_is_rate_limited_but_logging_is_not(tmp_path, monkeypatch):
+    """One continuing cleanup (spread over runs by --max-delete-size) must
+    not toast on every pass -- 30 minutes between toasts, log every time."""
+    from ccsync_companion.sync import rclone_lane as rl
+
+    calls = []
+    lane = rl.RcloneLane(
+        direction=rl.DIRECTION_DOWN, local_root=str(tmp_path), remote="nas",
+        remote_root="CC", state_dir=tmp_path, on_trash=lambda d: calls.append(d),
+    )
+    backup = tmp_path / ".ccsync-trash" / "20260726-1"
+    backup.mkdir(parents=True)
+    (backup / "x.mov").write_text("x")
+
+    fake_result = rl.RcloneRunResult(ok=True, transferred=0, errors=[],
+                                     raw_returncode=0, deleted=1)
+
+    t = {"now": 1000.0}
+    monkeypatch.setattr(rl.time, "monotonic", lambda: t["now"])
+
+    lane._last_backup_dir = str(backup)
+    lane._notify_trash(fake_result)
+    assert len(calls) == 1
+
+    # next run, 60s later: moved again -> logged, NOT toasted
+    t["now"] += 60
+    lane._last_backup_dir = str(backup)
+    lane._notify_trash(fake_result)
+    assert len(calls) == 1
+
+    # after the cooldown: toast again
+    t["now"] += rl.TRASH_NOTIFY_COOLDOWN_SECONDS + 1
+    lane._last_backup_dir = str(backup)
+    lane._notify_trash(fake_result)
+    assert len(calls) == 2

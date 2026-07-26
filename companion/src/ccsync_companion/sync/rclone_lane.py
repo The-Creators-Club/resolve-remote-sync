@@ -63,6 +63,10 @@ DIRECTION_DOWN = "down"
 # rule, deletes become "Moved into backup dir"; without it, rclone aborts
 # with "destination and parameter to --backup-dir mustn't overlap".
 TRASH_DIR_NAME = ".ccsync-trash"
+# At most one files-moved-to-trash TOAST per lane per this many seconds --
+# --max-delete-size spreads one large cleanup across many runs, and each run
+# used to toast (see _notify_trash). Warnings still log every run.
+TRASH_NOTIFY_COOLDOWN_SECONDS = 1800.0
 TRASH_EXCLUDE_RULE = f"- /{TRASH_DIR_NAME}/**"
 
 # Blast-radius bound on lane B's sync (AUDIT_2 §4.2 safety row). Measured:
@@ -1175,6 +1179,13 @@ class RcloneLane(LaneAdapter):
         self._express_seq = 0
         # Lane B's --backup-dir for the run in flight (see _notify_trash).
         self._last_backup_dir: Optional[str] = None
+        # Monotonic stamp of the last trash TOAST, None until the first. A
+        # large cleanup is spread across passes by --max-delete-size, and a
+        # toast per pass for one continuing event trained the editor to
+        # dismiss it unread (2026-07-26, the ‛-name transition). The log
+        # line stays per-run. (None, not 0.0: monotonic() starts near zero
+        # on a fresh boot, and 0.0 would swallow the FIRST toast.)
+        self._last_trash_notify_at: Optional[float] = None
         self._express_status: dict = {
             "enabled": self._express_enabled,
             "runs": 0,
@@ -1589,6 +1600,11 @@ class RcloneLane(LaneAdapter):
             "nothing was deleted, recover them from there",
             self.name, result.deleted, backup_dir,
         )
+        now = time.monotonic()
+        if (self._last_trash_notify_at is not None
+                and now - self._last_trash_notify_at < TRASH_NOTIFY_COOLDOWN_SECONDS):
+            return
+        self._last_trash_notify_at = now
         try:
             self.on_trash(str(backup_dir))
         except Exception:

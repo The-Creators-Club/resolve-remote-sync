@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -258,6 +259,45 @@ class SelectionClient:
         return selection
 
     # -- combined -----------------------------------------------------
+    def untick(self, slug: str) -> tuple[bool, str]:
+        """Remove this editor's tick for `slug` on the dashboard (DELETE
+        /api/v1/selection/<editor>/<slug>, companion token + identity auth).
+
+        The tray's "Remove this project from this machine" calls this FIRST:
+        while the tick stands, the server keeps the Syncthing folder shared
+        and deleting the local copy just errors the folder. Returns
+        (ok, message); never raises. On success the in-memory selection TTL
+        is zeroed so the sequencer drops the project on its next poll."""
+        if not self.enabled:
+            return False, "dashboard_url is not configured"
+        editor = str(self._editor_name_fn() or "").strip().lower()
+        if not editor:
+            return False, "no editor identity yet -- sign in first"
+        url = (
+            f"{self.dashboard_url.rstrip('/')}/api/v1/selection/"
+            f"{quote(editor, safe='')}/{quote(str(slug), safe='')}"
+        )
+        headers = {}
+        if self.dashboard_token:
+            headers["X-CCSync-Token"] = self.dashboard_token
+        if self._identity_token_fn is not None:
+            try:
+                identity_token = self._identity_token_fn()
+            except Exception:
+                identity_token = None
+            if identity_token:
+                headers["X-CCSync-Identity"] = identity_token
+        req = urllib.request.Request(url, headers=headers, method="DELETE")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                resp.read()
+        except urllib.error.HTTPError as exc:
+            return False, f"dashboard refused the untick (HTTP {exc.code})"
+        except Exception as exc:
+            return False, f"dashboard unreachable: {exc}"
+        self._last_response_at = 0.0
+        return True, "unticked"
+
     def get(self) -> tuple[Optional[list[dict]], str]:
         """Fetch live, falling back to the cache, falling back to nothing.
 

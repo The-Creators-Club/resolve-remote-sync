@@ -1358,3 +1358,83 @@ def test_selection_client_gets_the_identity_token_getter(tmp_path):
     app.selection_client.fetch(force=True)
 
     assert headers[0].get("X-CCSync-Identity") == token
+
+
+# -- Remove this project from this machine (2026-07-26) ---------------------
+
+
+def _remove_stub(tmp_path, untick_ok=True, mode="editor"):
+    """A minimal object exposing exactly what remove_project_from_machine
+    reads, so the ordering guarantees are testable without a full app."""
+    from ccsync_companion.app import CompanionApp
+
+    root = tmp_path / "Creators_Club"
+    proj = root / "Projects" / "2026" / "CCT" / "Website Highlights" / "Website Highlights"
+    proj.mkdir(parents=True)
+    (proj / "clip.braw").write_bytes(b"x")
+
+    class _Selection:
+        def __init__(self):
+            self.unticked = []
+
+        def get(self):
+            return ([{"slug": "2026-cct-website-highlights-website-highlights",
+                      "rel_path": "2026/CCT/Website Highlights/Website Highlights"}], "live")
+
+        def untick(self, slug):
+            self.unticked.append(slug)
+            return (True, "unticked") if untick_ok else (False, "dashboard unreachable")
+
+    class _Admin:
+        def __init__(self):
+            self.removed = []
+
+        def remove_folder(self, folder_id):
+            self.removed.append(folder_id)
+
+    class _Stub:
+        _managed = True
+        config = {"local_root": str(root)}
+
+        def effective_mode(self):
+            return mode
+
+    stub = _Stub()
+    stub.selection_client = _Selection()
+    stub.syncthing_admin = _Admin()
+    stub.removable_projects = lambda: CompanionApp.removable_projects(stub)
+    stub.remove = lambda slug: CompanionApp.remove_project_from_machine(stub, slug)
+    return stub, proj
+
+
+def test_remove_project_untick_unshare_delete_in_order(tmp_path):
+    stub, proj = _remove_stub(tmp_path)
+    ok, msg = stub.remove("2026-cct-website-highlights-website-highlights")
+    assert ok, msg
+    assert stub.selection_client.unticked == ["2026-cct-website-highlights-website-highlights"]
+    assert stub.syncthing_admin.removed == ["2026-cct-website-highlights-website-highlights"]
+    assert not proj.exists()
+    assert "server copy is untouched" in msg
+
+
+def test_remove_project_stops_before_deleting_when_untick_fails(tmp_path):
+    stub, proj = _remove_stub(tmp_path, untick_ok=False)
+    ok, msg = stub.remove("2026-cct-website-highlights-website-highlights")
+    assert not ok
+    assert "nothing was deleted" in msg
+    assert proj.exists()                     # the local copy survives intact
+    assert stub.syncthing_admin.removed == []
+
+
+def test_remove_project_refuses_on_base_rig(tmp_path):
+    stub, proj = _remove_stub(tmp_path, mode="base")
+    ok, msg = stub.remove("2026-cct-website-highlights-website-highlights")
+    assert not ok and "base rig" in msg
+    assert proj.exists()
+
+
+def test_remove_project_refuses_unselected_slug(tmp_path):
+    stub, proj = _remove_stub(tmp_path)
+    ok, msg = stub.remove("some-other-project")
+    assert not ok and "not selected" in msg
+    assert proj.exists()

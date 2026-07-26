@@ -96,3 +96,40 @@ def test_queue_ui_and_toggle(env):
     client.post("/partials/selection/jsmith/2025-ff4-nuclear/toggle")
     page = client.get("/project/2025-ff4-nuclear")
     assert "SELECTED BY:" in page.text and "jsmith" in page.text
+
+
+# -- companion untick (the tray's "Remove this project from this machine") --
+
+
+def companion_headers(editor="jsmith"):
+    return {"X-CCSync-Token": TOKEN,
+            "X-CCSync-Identity": auth.make_identity_token(SECRET, editor)}
+
+
+def test_companion_can_untick_its_own_selection(env):
+    client, conn = env
+    as_user(client, "jsmith")
+    client.put("/api/v1/selection/jsmith/2025-ff4-nuclear")
+    client.cookies.delete(auth.COOKIE_NAME)
+
+    r = client.delete("/api/v1/selection/jsmith/2025-ff4-nuclear",
+                      headers=companion_headers("jsmith"))
+    assert r.status_code == 200 and r.json()["changed"] is True
+    assert conn.execute("SELECT COUNT(*) FROM selections WHERE editor_username='jsmith'").fetchone()[0] == 0
+
+
+def test_companion_cannot_untick_someone_elses_selection(env):
+    client, conn = env
+    as_user(client, "ruskin")
+    client.put("/api/v1/selection/ruskin/2025-ff4-nuclear")
+    client.cookies.delete(auth.COOKIE_NAME)
+
+    # identity says jsmith, target says ruskin -> refused
+    r = client.delete("/api/v1/selection/ruskin/2025-ff4-nuclear",
+                      headers=companion_headers("jsmith"))
+    assert r.status_code == 401
+    # token without identity -> refused (session secret is configured)
+    r = client.delete("/api/v1/selection/ruskin/2025-ff4-nuclear",
+                      headers={"X-CCSync-Token": TOKEN})
+    assert r.status_code == 401
+    assert conn.execute("SELECT COUNT(*) FROM selections WHERE editor_username='ruskin'").fetchone()[0] == 1

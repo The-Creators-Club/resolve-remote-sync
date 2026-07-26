@@ -221,6 +221,12 @@ def classify_lane_error(last_error: Optional[str]) -> str:
     text = str(last_error or "").lower()
     if not text:
         return "Something went wrong. Tray → Copy diagnostics for your admin."
+    if "marker missing" in text:
+        # The editor deleted a project's local folder while it was still
+        # ticked -- routine when cycling projects, and nothing was lost
+        # (the server copy is untouched). Say what to do, not PROBLEM.
+        return ("A project folder was deleted on this machine while still ticked. "
+                "Untick it on the dashboard, or use Advanced → Remove a project from this machine.")
     if any(k in text for k in ("no space", "enospc", "disk full", "not enough space")):
         return "Your disk is full. Free up space and it will resume."
     if any(k in text for k in (
@@ -569,6 +575,45 @@ def _show_update_dialog_locked(app: "CompanionApp", info: dict) -> bool:
     return bool(confirmed["value"])
 
 
+def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
+    """Confirm, then untick + unshare + delete a project's local copy (see
+    app.remove_project_from_machine for the ordering guarantees). Runs on a
+    tray worker thread; takes the popup lock like every other Tk dialog."""
+    from . import popup
+
+    lock = getattr(app, "_popup_active_lock", None)
+    if lock is not None and not lock.acquire(blocking=False):
+        _notify(app, "Another CCSync window is already open. Close it first.")
+        return
+    try:
+        body = (
+            "Remove '" + rel + "' from THIS machine?" + "\n\n"
+            "This unticks the project on the dashboard, stops syncing it here, "
+            "and deletes the local copy to free disk space." + "\n\n"
+            "The server's copy is NOT touched, and nothing you uploaded is lost. "
+            "If you recently added footage, check the dashboard's TRANSFERS page "
+            "shows no pending uploads for this machine first." + "\n\n"
+            "Tick the project again any time to sync it back."
+        )
+        confirmed = popup.confirm_dialog(
+            "CCSYNC.EXE: remove project",
+            body,
+            ok_label="REMOVE FROM THIS MACHINE",
+        )
+    finally:
+        if lock is not None:
+            lock.release()
+    if not confirmed:
+        return
+    try:
+        ok, message = app.remove_project_from_machine(slug)
+    except Exception:
+        log.exception("remove_project_from_machine(%s) raised", slug)
+        _notify(app, "Remove failed. Tray → Copy diagnostics for your admin.")
+        return
+    _notify(app, message if ok else f"Remove stopped: {message}")
+
+
 def _guarded(app: "CompanionApp", label: str, fn) -> None:
     """Run a tray action, logging anything it raises.
 
@@ -653,6 +698,7 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     _get("current_project_line", lambda: _current_project_line(app), None)
     _get("setup_name", lambda: (getattr(app, "setup_project_available", None) or (lambda: None))(), None)
     _get("upgrade_info", lambda: (getattr(app, "upgrade_available", None) or (lambda: None))(), None)
+    _get("removable", lambda: (getattr(app, "removable_projects", None) or (lambda: []))(), [])
     snap["color"] = compute_overall_color(statuses, app)
     return snap
 
@@ -690,6 +736,7 @@ def _menu_fingerprint(snap: dict) -> tuple:
         snap["problems"], snap["sequencer_line"], snap["current_project_line"],
         snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
         snap["dashboard_url"], snap["color"],
+        tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
     )
 
 
@@ -780,6 +827,11 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         _spawn(app, "Set up project",
                lambda: getattr(app, "setup_current_project", lambda: None)())
 
+    def on_remove_project(slug, rel):
+        def handler(icon, item):
+            _spawn(app, "Remove project", lambda: _confirm_remove_project(app, slug, rel))
+        return handler
+
     dashboard_items = (
         [pystray.MenuItem("Open dashboard", on_open_dashboard)]
         if snap["dashboard_url"] else []
@@ -856,6 +908,14 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
                 "Bring an existing project's media into the synced folder…",
                 on_consolidate_project,
             ),
+            *([pystray.Menu.SEPARATOR] if snap.get("removable") else []),
+            *[
+                pystray.MenuItem(
+                    "Remove '" + proj["rel"].split("/")[-1] + "' from this machine…",
+                    on_remove_project(proj["slug"], proj["rel"]),
+                )
+                for proj in snap.get("removable", [])
+            ],
             pystray.MenuItem(f"ccsync-companion v{config_mod.VERSION}", None, enabled=False),
         )),
         pystray.Menu.SEPARATOR,

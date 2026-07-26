@@ -424,3 +424,11 @@ def test_request_raises_the_auth_error_when_every_key_is_rejected(tmp_path, monk
     admin = SyncthingAdmin(api_key="", http_request=fake_http_request)
     with pytest.raises(urllib.error.HTTPError):
         admin.get_config()
+
+
+def test_remove_folder_sends_delete():
+    admin, calls = _admin()
+    admin.remove_folder("2026-cct-website-highlights-website-highlights")
+    assert calls[-1]["method"] == "DELETE"
+    assert calls[-1]["url"].endswith(
+        "/rest/config/folders/2026-cct-website-highlights-website-highlights")

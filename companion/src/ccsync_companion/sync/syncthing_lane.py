@@ -409,7 +409,12 @@ class SyncthingLane(LaneAdapter):
                 state = str(db_status.get("state", "") or "")
                 errors = int(db_status.get("errors", 0) or 0)
                 if state == "error" or errors > 0:
-                    detail = db_status.get("stateChanged") or state or f"{errors} error(s)"
+                    # The actual error TEXT, not just the state name: "folder
+                    # marker missing" is the tell for "project deleted
+                    # locally while still ticked", which the tray turns into
+                    # an instruction instead of a generic PROBLEM line.
+                    err_text = str(db_status.get("error") or "")
+                    detail = err_text or db_status.get("stateChanged") or state or f"{errors} error(s)"
                     errored.append(f"{fid} ({detail})")
             except Exception:
                 log.debug("db/status check failed for folder %s", fid)

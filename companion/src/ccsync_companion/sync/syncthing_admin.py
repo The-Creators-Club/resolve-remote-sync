@@ -264,6 +264,14 @@ class SyncthingAdmin:
         self.set_folder_paused(folder_id, False)
         return result
 
+    def remove_folder(self, folder_id: str) -> Any:
+        """DELETE the folder from the local Syncthing config. Files on disk
+        are untouched -- Syncthing simply stops tracking them, which is
+        exactly what "Remove this project from this machine" needs before
+        the local copy is deleted (a still-configured folder would go into
+        the folder-marker-missing error state instead)."""
+        return self._write_request("DELETE", self._folder_path(folder_id))
+
     def set_ignores(self, folder_id: str, lines: list[str]) -> Any:
         return self._write_request(
             "POST", self._query("/rest/db/ignores", {"folder": folder_id}), {"ignore": lines}

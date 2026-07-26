@@ -844,6 +844,30 @@ def _require_selection_write(request: Request, editor: str) -> str:
     return user
 
 
+def _require_selection_untick(request: Request, editor: str) -> str:
+    """_require_selection_write, plus the companion's token + a MATCHING
+    identity header -- for UNTICK ONLY. The tray's "Remove this project from
+    this machine" must untick before deleting (a delete while ticked just
+    errors the Syncthing folder), so a machine may remove ITS OWN ticks.
+    Ticking stays session-only on purpose: a compromised shared token plus
+    one identity must not be able to start syncing projects TO machines."""
+    settings = request.app.state.settings
+    token = request.headers.get("x-ccsync-token", "")
+    if token_ok(settings.report_token, token):
+        if not settings.session_secret:
+            return f"companion:{editor}"  # lab carve-out, same as reads
+        identity = request.headers.get("x-ccsync-identity", "")
+        id_user = auth.read_identity_token(settings.session_secret, identity)
+        if id_user is not None and id_user == editor:
+            return f"companion:{editor}"
+        raise HTTPException(
+            status_code=401,
+            detail="X-CCSync-Identity required (and must match the editor) alongside "
+                   "X-CCSync-Token -- sign in from the companion tray",
+        )
+    return _require_selection_write(request, editor)
+
+
 @router.get("/selection/{editor}")
 def api_get_selection(
     editor: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
@@ -876,7 +900,7 @@ def api_untick(
     editor: str, slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
     editor = editor.strip().lower()
-    _require_selection_write(request, editor)
+    _require_selection_untick(request, editor)
     removed = db.remove_selection(conn, editor, slug)
     conn.commit()
     view = _selection_view(conn, editor)

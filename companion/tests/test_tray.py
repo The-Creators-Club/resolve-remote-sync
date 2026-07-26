@@ -716,3 +716,32 @@ def test_menu_open_guard_uses_the_shared_ui_state_flag():
 
     guard = _MenuOpenGuard()
     assert guard._open is ui_state.menu_open
+
+
+# -- Remove a project from this machine (menu + friendly marker error) ------
+
+
+def test_marker_missing_becomes_an_instruction_not_a_problem():
+    from ccsync_companion.tray import classify_lane_error
+
+    text = classify_lane_error('folder(s) in error: 2026-cct-x (folder marker missing)')
+    assert "deleted" in text and "Untick" in text
+    assert "Copy diagnostics" not in text
+
+
+def test_menu_lists_removable_projects():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""})
+    app.removable_projects = lambda: [
+        {"slug": "2026-cct-website-highlights-website-highlights",
+         "rel": "2026/CCT/Website Highlights/Website Highlights"}]
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "Remove 'Website Highlights' from this machine…" in labels
+
+    # and the fingerprint changes when the removable set changes
+    from ccsync_companion.tray import _menu_fingerprint
+    fp_with = _menu_fingerprint(_tray_snapshot(app))
+    app.removable_projects = lambda: []
+    fp_without = _menu_fingerprint(_tray_snapshot(app))
+    assert fp_with != fp_without

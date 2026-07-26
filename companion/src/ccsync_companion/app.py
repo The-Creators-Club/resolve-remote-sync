@@ -1153,6 +1153,103 @@ class CompanionApp:
             return role
         return str(self.config.get("mode", "editor")).strip().lower() or "editor"
 
+    def removable_projects(self) -> list[dict[str, str]]:
+        """[{"slug", "rel"}] of the projects this machine currently syncs --
+        what the tray's "Remove a project from this machine" submenu lists.
+        Empty on the base rig (its tree IS the server tree), in legacy mode,
+        and when no selection is known."""
+        if not self._managed or self.selection_client is None:
+            return []
+        try:
+            if self.effective_mode() == "base":
+                return []
+        except Exception:
+            return []
+        try:
+            entries, _source = self.selection_client.get()
+        except Exception:
+            log.exception("removable_projects: selection read failed")
+            return []
+        out: list[dict[str, str]] = []
+        for entry in entries or []:
+            slug = str(entry.get("slug") or "").strip()
+            rel = str(entry.get("rel_path") or entry.get("label") or "").strip()
+            if slug and rel:
+                out.append({"slug": slug, "rel": rel})
+        return out
+
+    def remove_project_from_machine(self, slug: str) -> tuple[bool, str]:
+        """The safe order for "I'm done with this project here":
+
+          1. untick it on the dashboard (the server unshares the Syncthing
+             folder; lanes stop scheduling it);
+          2. drop the folder from the LOCAL Syncthing config, so the
+             deletion below can never be read as content to propagate and
+             never strands the folder in marker-missing;
+          3. delete the local copy.
+
+        Any failure stops BEFORE the deletion step -- the worst outcome is
+        "nothing was deleted". The server's copy is never touched: lane A
+        never mirrors deletions, and by step 3 nothing is watching. Returns
+        (ok, human message); never raises. Runs on a tray worker thread."""
+        from .sync.repath import normalized_safe_rel
+
+        slug = str(slug or "").strip()
+        if not slug:
+            return False, "no project given"
+        if not self._managed or self.selection_client is None:
+            return False, "not in managed mode"
+        if self.effective_mode() == "base":
+            return False, "refusing on the base rig: its tree IS the server tree"
+        rel = next((p["rel"] for p in self.removable_projects() if p["slug"] == slug), None)
+        if rel is None:
+            return False, "that project is not selected on this machine"
+        safe_rel = normalized_safe_rel(rel)
+        if not safe_rel:
+            return False, f"unsafe project path {rel!r} -- nothing was deleted"
+
+        ok, message = self.selection_client.untick(slug)
+        if not ok:
+            return False, f"could not untick on the dashboard ({message}) -- nothing was deleted"
+        log.info("remove_project: unticked %s on the dashboard", slug)
+
+        if self.syncthing_admin is not None:
+            try:
+                self.syncthing_admin.remove_folder(slug)
+                log.info("remove_project: removed local Syncthing folder %s", slug)
+            except Exception as exc:
+                # A folder that was never configured locally is fine; any
+                # other failure means Syncthing may still be watching --
+                # deleting now would propagate or error, so stop here.
+                if "404" not in str(exc):
+                    log.exception("remove_project: could not remove local folder %s", slug)
+                    return False, (
+                        "the project was unticked, but the local Syncthing folder could "
+                        "not be removed -- nothing was deleted. Try again in a minute."
+                    )
+
+        local_root = str(self.config.get("local_root", "")).strip()
+        if not local_root:
+            return False, "the project was unticked, but local_root is not configured -- nothing was deleted"
+        target = (Path(local_root) / "Projects" / Path(*safe_rel.split("/"))).resolve()
+        projects_root = (Path(local_root) / "Projects").resolve()
+        if projects_root not in target.parents:
+            return False, f"refusing to delete {target} (outside {projects_root})"
+        if not target.exists():
+            return True, f"'{rel}' is no longer synced here (its folder was already gone)"
+        try:
+            import shutil
+
+            shutil.rmtree(target)
+        except Exception as exc:
+            log.exception("remove_project: rmtree failed for %s", target)
+            return False, (
+                f"'{rel}' was unticked and unshared, but some files could not be "
+                f"deleted ({exc}). Delete the folder by hand -- it is safe now."
+            )
+        log.info("remove_project: deleted %s", target)
+        return True, f"'{rel}' removed from this machine. The server copy is untouched."
+
     def editor_identity(self) -> Optional[str]:
         """The editor name to use for reporting/destination-suggestion
         (instead of trusting raw cfg["editor_name"]): the verified sign-in

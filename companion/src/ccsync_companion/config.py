@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 log = logging.getLogger("ccsync.config")
 
-VERSION = "0.4.16"
+VERSION = "0.4.17"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -193,6 +193,13 @@ DEFAULTS: dict[str, Any] = {
     # False on the base rig (direct LAN access to the NAS): it reads proxies
     # straight off the share, so mirroring them locally is pure waste.
     "lane_b_enabled": True,
+    # False = never repoint a clip's proxy attachment at the synced copy in
+    # the tree. On by default: a project built elsewhere carries absolute
+    # proxy paths (G:\Temp Transfer, F:\Resolve Renders in Place, the base
+    # rig's legacy T:) that exist on no editor's machine, and an explicit
+    # stale path beats SPEC.md:40's adjacent-Proxy auto-link -- so the clip
+    # goes Media Offline next to a perfectly good proxy. See proxy_relink.py.
+    "proxy_relink_enabled": True,
     # False = no sync lanes at all: the machine works directly off the NAS
     # share (base rig). The companion still runs the timeline watcher, popup
     # fixer, and dashboard reporter; lanes report idle with a "disabled"
@@ -410,6 +417,12 @@ project_roots_ttl = 300
 # Set false on the base rig (direct LAN access to the NAS): it reads proxies
 # straight off the share, so lane B's local proxy mirror is pure waste.
 lane_b_enabled = true
+
+# Repoint a clip's PROXY at the copy in the tree when the project's stored
+# proxy path is stale (built on another machine, e.g. a temp transfer drive) or
+# was never linked. Only ever repoints -- never copies, moves or deletes.
+# Set false to leave every proxy attachment exactly as the project stores it.
+proxy_relink_enabled = true
 
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and

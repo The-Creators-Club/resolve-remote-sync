@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 
 from . import config as config_mod
 from . import popup
+from . import proxy_relink
 from . import resolve_bridge
 from . import upgrade as upgrade_mod
 from .fixer import IgnoreTracker, _dest_dir_is_contained
@@ -1208,6 +1209,39 @@ class CompanionApp:
         tree = {project_name: clips} if project_name else {}
         with self._media_tree_lock:
             self._media_tree_cache = tree
+
+        # Piggy-backed on this walk rather than given its own thread: it needs
+        # exactly the same media pool enumeration, and that call is the
+        # expensive part (one locked trip into fusionscript per clip).
+        self._relink_proxies_once(result.get("items", []))
+
+    def _relink_proxies_once(self, items: list[dict[str, Any]]) -> None:
+        """Repoint stale/unlinked proxy attachments at the copies lane B
+        synced into the tree. Fault-isolated: never raises, never blocks the
+        media-tree refresh.
+
+        Costs nothing in the steady state -- once every clip's proxy resolves,
+        plan_relinks() returns [] and no Resolve calls are made at all.
+        """
+        if not bool(self.config.get("proxy_relink_enabled", True)):
+            return
+        if self._local_root_is_broken():
+            # With a blank local_root nothing classifies as in-tree, so this
+            # would either no-op or (worse) act on the wrong clips.
+            return
+        try:
+            ops = proxy_relink.plan_relinks(
+                items,
+                self.config.get("local_root", ""),
+                str(self.config.get("canonical_prefix", "")),
+                exists_fn=self._exists_fn,
+            )
+            if not ops:
+                return
+            log.info("proxy relink: %d clip(s) need their proxy repointed", len(ops))
+            proxy_relink.apply_relinks(ops, resolve_bridge.link_proxy_media)
+        except Exception:
+            log.exception("proxy relink pass failed")
 
     def _media_tree_loop(self) -> None:
         while not self._media_tree_stop_event.is_set():

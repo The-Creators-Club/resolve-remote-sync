@@ -350,6 +350,14 @@ def _walk_media_pool_folder(
                 "clip_name": _safe_clip_name(clip),
                 "resolve_project_name": project_name,
                 "bin_path": bin_path,
+                # The clip's SECOND path. Independent of "File Path" and not
+                # shown by Reveal in Folder, so a clip can look correctly
+                # linked while its proxy points at a drive that has never
+                # existed here -- see proxy_relink.py.
+                "proxy_path": (props.get("Proxy Media Path") or "").strip(),
+                # "1920x1080" when the proxy resolves, "Offline" when
+                # attached but unreachable, "None" when there is none.
+                "proxy_state": (props.get("Proxy") or "").strip(),
             }
         )
 
@@ -458,3 +466,30 @@ def replace_clip(media_pool_item, new_path: str) -> dict[str, Any]:
             ),
         }
     return {"ok": True, "message": f"Relinked to {new_path}"}
+
+
+def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
+    """Point `media_pool_item`'s PROXY at `proxy_path`. Never raises.
+
+    Distinct from replace_clip: that repoints the ORIGINAL, this repoints the
+    separate proxy attachment (see proxy_relink.py for why the two drift
+    apart). Resolve validates the pairing itself and returns False on a
+    timecode/frame-count mismatch, so a same-named but wrong file is refused
+    rather than silently attached.
+    """
+    if media_pool_item is None:
+        return {"ok": False, "message": "no media pool item to relink"}
+    if not proxy_path:
+        return {"ok": False, "message": "no proxy path given"}
+    with _API_LOCK:
+        try:
+            result = media_pool_item.LinkProxyMedia(proxy_path)
+        except Exception as exc:
+            log.warning("resolve: LinkProxyMedia(%s) raised: %s", proxy_path, exc, exc_info=True)
+            return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
+    if not result:
+        return {
+            "ok": False,
+            "message": f"Resolve wouldn't accept {proxy_path} as this clip's proxy",
+        }
+    return {"ok": True, "message": f"Proxy relinked to {proxy_path}"}

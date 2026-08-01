@@ -39,6 +39,8 @@ Why split: no single tool expresses "video up-only, proxy down-only, rest both w
 
 **Resolve behavior:** editors run Playback → Proxy Handling → *Prefer Proxies* (original offline locally → proxy plays); host prefers camera originals. Auto-link requires same filename + timecode in the adjacent `Proxy/` folder — BPG guarantees this.
 
+**Proxy relink (companion, added 2026-08-01):** auto-link only applies when the clip has NO proxy attached. A clip stores a second, independent `Proxy Media Path` beside its `File Path`, and an explicit stale value **beats** auto-link — Resolve never looks in the adjacent `Proxy/` folder. Projects built elsewhere therefore arrive carrying that machine's absolute proxy paths (a temp transfer drive, a local render-in-place folder, the base rig's legacy `T:`), which exist on no editor's machine: the proxy reads `Offline`, Resolve falls back to an original that lane A deliberately never downloaded, and the clip goes Media Offline next to a byte-perfect proxy. Note that `Reveal in Folder` and the Media Offline prompt both show the *original* path, so the clip looks correctly linked. `companion/src/ccsync_companion/proxy_relink.py` repoints such clips at the in-tree copy during the media-pool walk (every `media_tree_refresh_interval`), for in-tree originals only, only when a proxy is actually on disk, and always writing the canonical `P:\` spelling so the project stays portable. Repoint-only: it never copies, moves or deletes, and Resolve itself refuses a proxy whose timecode/frame count doesn't match. Off via `proxy_relink_enabled = false`.
+
 ## Components to build
 
 New repo: `E:\Projects\resolve-remote-sync`

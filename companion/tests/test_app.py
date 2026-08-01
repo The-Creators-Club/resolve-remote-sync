@@ -5,6 +5,7 @@ real Tk window (headless CI-safe, same ethos as test_watcher.py)."""
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -883,6 +884,72 @@ def test_refresh_media_tree_once_keeps_non_ignored_project(tmp_path, monkeypatch
     monkeypatch.setattr(
         resolve_bridge, "get_media_pool_items",
         lambda: _mp_result(_item("clip.mov"), project_name="Real Project"),
+    )
+    app._refresh_media_tree_once()
+    assert "Real Project" in app.get_media_tree()
+
+
+# -- proxy relink rides along on the media-tree walk (see proxy_relink.py) ---
+
+
+def _proxy_item(app, name="A001.braw", proxy_path="G:\\gone\\Proxy\\A001.mov",
+                proxy_state="Offline"):
+    """A clip inside the tree whose proxy IS on disk but is mis-addressed."""
+    root = app.config["local_root"]
+    original = os.path.join(root, "Interviews", name)
+    proxy_dir = os.path.join(root, "Interviews", "Proxy")
+    os.makedirs(proxy_dir, exist_ok=True)
+    proxy = os.path.join(proxy_dir, os.path.splitext(name)[0] + ".mov")
+    with open(proxy, "wb") as fh:
+        fh.write(b"proxy")
+    item = _item(original)
+    item["proxy_path"] = proxy_path
+    item["proxy_state"] = proxy_state
+    return item, proxy
+
+
+def test_media_tree_refresh_repoints_a_stale_proxy(tmp_path, monkeypatch):
+    app = _make_app(tmp_path)
+    item, proxy = _proxy_item(app)
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items", lambda: _mp_result(item)
+    )
+    calls: list[tuple[Any, str]] = []
+    monkeypatch.setattr(
+        resolve_bridge, "link_proxy_media",
+        lambda mpi, path: calls.append((mpi, path)) or {"ok": True, "message": ""},
+    )
+    app._refresh_media_tree_once()
+    assert calls == [(item["media_pool_item"], proxy)]
+
+
+def test_proxy_relink_can_be_switched_off(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, proxy_relink_enabled=False)
+    item, _ = _proxy_item(app)
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items", lambda: _mp_result(item)
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        resolve_bridge, "link_proxy_media",
+        lambda mpi, path: calls.append(path) or {"ok": True, "message": ""},
+    )
+    app._refresh_media_tree_once()
+    assert calls == []
+
+
+def test_a_failing_proxy_relink_never_breaks_the_media_tree(tmp_path, monkeypatch):
+    """The tree cache is the reporter's data source -- a Resolve refusal on
+    an unrelated proxy must not cost us it."""
+    app = _make_app(tmp_path)
+    item, _ = _proxy_item(app)
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(item, project_name="Real Project"),
+    )
+    monkeypatch.setattr(
+        resolve_bridge, "link_proxy_media",
+        lambda mpi, path: (_ for _ in ()).throw(RuntimeError("fusionscript died")),
     )
     app._refresh_media_tree_once()
     assert "Real Project" in app.get_media_tree()

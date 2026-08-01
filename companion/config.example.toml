@@ -217,6 +217,15 @@ project_roots_ttl = 300
 # COMMENTED OUT, deliberately -- see sync_enabled directly below for why.
 # lane_b_enabled = true
 
+# Repoint a clip's PROXY at the copy in the tree when the project's stored
+# proxy path is stale or was never linked. A project built on another machine
+# carries that machine's absolute proxy paths (a temp transfer drive, a local
+# render folder, the base rig's legacy mapping); those exist on no editor's
+# machine, and an explicit stale path beats the adjacent-Proxy auto-link, so
+# the clip reads Media Offline next to a perfectly good proxy. Only ever
+# repoints -- never copies, moves or deletes.
+proxy_relink_enabled = true
+
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
 # dashboard reporting keep working; all sync lanes stay off.

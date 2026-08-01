@@ -221,6 +221,14 @@ class CompanionApp:
         # popup and the user-initiated "Scan whole project" tray action
         # both trying to open a Tk root at once.
         self._popup_active_lock = threading.Lock()
+        # Batches that turned up while a popup was ON SCREEN, shown the
+        # moment it closes (2026-08-01). Tk still permits only one root at a
+        # time, but "one at a time" no longer means "the rest are thrown
+        # away" -- see _show_out_of_tree_popup. GUARDED BY _popup_queue_lock.
+        self._popup_queue: list[dict[str, Any]] = []
+        self._popup_queue_keys: set[str] = set()
+        self._popup_showing_keys: set[str] = set()
+        self._popup_queue_lock = threading.Lock()
         # Serializes consolidate_project() with itself, and lets the
         # self-upgrade refuse to swap the exe mid-copy (AUDIT_2 CORE-H8/M13).
         # Separate from _popup_active_lock on purpose: consolidate holds THIS
@@ -613,53 +621,137 @@ class CompanionApp:
             except Exception:
                 log.debug("tray notify failed (backend may not support it)")
 
+    def _queue_popup_batch(self, items: list[dict[str, Any]], snooze: bool) -> int:
+        """Hold a batch that arrived while a popup was up. Returns the number
+        of clips newly queued.
+
+        Deduped against BOTH the batch on screen and everything already
+        queued: the watcher re-reports the same out-of-tree clips on every
+        poll (3 s), so without this an editor who left one popup open for ten
+        minutes would close it into a couple of hundred identical dialogs --
+        which is the opposite of being allowed to decide."""
+        from .watcher import _norm_key
+
+        fresh: list[dict[str, Any]] = []
+        with self._popup_queue_lock:
+            for item in items:
+                key = _norm_key(item.get("file_path", ""))
+                if key in self._popup_showing_keys or key in self._popup_queue_keys:
+                    continue
+                self._popup_queue_keys.add(key)
+                fresh.append(item)
+            if fresh:
+                self._popup_queue.append({"items": fresh, "snooze": snooze})
+        return len(fresh)
+
+    def _take_popup_batch(self) -> Optional[dict[str, Any]]:
+        """Next queued batch, or None. Also republishes `_popup_showing_keys`
+        so anything arriving during THAT dialog dedupes against it.
+
+        Skips clips the editor dismissed while the batch was waiting: SKIP in
+        one dialog has to mean skipped, not "asked again in four seconds"."""
+        from .watcher import _norm_key
+
+        while True:
+            with self._popup_queue_lock:
+                if not self._popup_queue:
+                    self._popup_showing_keys = set()
+                    return None
+                batch = self._popup_queue.pop(0)
+                self._popup_queue_keys -= {
+                    _norm_key(item.get("file_path", "")) for item in batch["items"]
+                }
+            items = [
+                item for item in batch["items"]
+                if not self.ignore_tracker.is_ignored(item.get("file_path", ""))
+            ]
+            if not items:
+                continue
+            with self._popup_queue_lock:
+                self._popup_showing_keys = {
+                    _norm_key(item.get("file_path", "")) for item in items
+                }
+            return {"items": items, "snooze": batch["snooze"]}
+
     def _show_out_of_tree_popup(self, items: list[dict[str, Any]], snooze: bool = False) -> None:
         """Build server_roots and show the popup for `items`. Blocks until
-        the dialog closes (popup.show_popup runs a Tk mainloop), so this is
-        guarded by `_popup_active_lock`: only one popup -- whether raised by
-        the passive watcher or a user-initiated "Scan whole project" -- may
-        be open at a time, since Tk is not safe to touch from two threads
-        at once. Safe to call from any thread.
+        the dialog (and anything queued behind it) closes -- popup.show_popup
+        runs a Tk mainloop. Safe to call from any thread.
+
+        `_popup_active_lock` still serializes the dialogs, because Tk permits
+        only one live root in this process: a second one is what stranded the
+        sign-in and update dialogs (AUDIT_2 CORE-M3 -> CORE-H8). What changed
+        (2026-08-01) is the fate of a batch that loses that race. It used to
+        be DROPPED with a "popup already open" toast that the watcher re-fired
+        every 3 s, and every clip found while the editor was reading a dialog
+        was silently lost. Now it is QUEUED and shown the instant the current
+        popup closes: as many popups as there are batches, and the editor
+        decides on every clip.
 
         `snooze` stamps the batch's paths AFTER the lock is won. Stamping
         before the attempt meant a batch that merely LOST the lock race was
         snoozed the full 300 s despite never having been shown (AUDIT_2
-        CORE-M2)."""
-        if not self._popup_active_lock.acquire(blocking=False):
-            log.info("popup already open -- skipping (%d clip(s) not shown)", len(items))
-            self._notify_tray("A popup is already open. Close it first.", "ccsync-companion")
-            return
-        try:
-            if snooze:
-                from .watcher import _norm_key
+        CORE-M2) -- a queued batch is stamped instead, which is not the same
+        thing: it IS going to be shown, and the stamp is what stops the
+        watcher re-queueing it on every poll while it waits."""
+        from .watcher import _norm_key
 
+        if not self._popup_active_lock.acquire(blocking=False):
+            queued = self._queue_popup_batch(items, snooze)
+            if snooze:
                 self._popup_snooze_stamp(
                     [_norm_key(item.get("file_path", "")) for item in items],
                     time.monotonic(),
                 )
-            server_roots, source = self._server_roots_result()
-            if source == "unreachable":
-                # Falling through to fixer.match_project_dir's token-overlap
-                # guess means the SAME clip gets a different destination than
-                # it had five minutes ago, silently (AUDIT_2 CORE-H9).
-                log.error("popup suppressed: cannot reach the dashboard for project roots")
-                self._notify_tray(
-                    "Can't reach the server right now, so CCSync doesn't know where this "
-                    "media belongs. It'll ask again once the connection is back. Nothing "
-                    "was changed.", "ccsync-companion")
-                return
-
-            popup.show_popup(
-                items, self.config["local_root"], self.editor_identity() or "", self.ignore_tracker,
-                project_prefix=self.config.get("active_project", ""),
-                server_roots=server_roots,
-                # Relinks must store the CANONICAL path (P:\...), never this
-                # machine's physical local_root -- the Resolve project
-                # travels, the drive layout does not (2026-07-26).
-                canonical_prefix=str(self.config.get("canonical_prefix", "")),
-            )
+            if queued:
+                log.info("popup already open -- %d clip(s) queued for when it closes", queued)
+            return
+        try:
+            with self._popup_queue_lock:
+                self._popup_showing_keys = {
+                    _norm_key(item.get("file_path", "")) for item in items
+                }
+            batch: Optional[dict[str, Any]] = {"items": items, "snooze": snooze}
+            while batch is not None:
+                self._show_one_popup(batch["items"], snooze=bool(batch["snooze"]))
+                batch = self._take_popup_batch()
         finally:
+            with self._popup_queue_lock:
+                self._popup_showing_keys = set()
             self._popup_active_lock.release()
+
+    def _show_one_popup(self, items: list[dict[str, Any]], snooze: bool) -> None:
+        """One dialog, start to finish. The caller holds
+        `_popup_active_lock`; returning here means the next queued batch (if
+        any) gets its turn."""
+        if snooze:
+            from .watcher import _norm_key
+
+            self._popup_snooze_stamp(
+                [_norm_key(item.get("file_path", "")) for item in items],
+                time.monotonic(),
+            )
+        server_roots, source = self._server_roots_result()
+        if source == "unreachable":
+            # Falling through to fixer.match_project_dir's token-overlap
+            # guess means the SAME clip gets a different destination than
+            # it had five minutes ago, silently (AUDIT_2 CORE-H9).
+            log.error("popup suppressed: cannot reach the dashboard for project roots")
+            self._notify_tray(
+                "Can't reach the server right now, so CCSync doesn't know where this "
+                "media belongs. It'll ask again once the connection is back. Nothing "
+                "was changed.", "ccsync-companion")
+            return
+
+        popup.show_popup(
+            items, self.config["local_root"], self.editor_identity() or "", self.ignore_tracker,
+            project_prefix=self.config.get("active_project", ""),
+            server_roots=server_roots,
+            # Relinks must store the CANONICAL path (P:\...), never this
+            # machine's physical local_root -- the Resolve project
+            # travels, the drive layout does not (2026-07-26).
+            canonical_prefix=str(self.config.get("canonical_prefix", "")),
+        )
 
     def scan_whole_project(self) -> None:
         """User-initiated (tray) full media-pool scan for out-of-tree media.

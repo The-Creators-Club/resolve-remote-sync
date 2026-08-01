@@ -5,6 +5,7 @@ real Tk window (headless CI-safe, same ethos as test_watcher.py)."""
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -348,7 +349,10 @@ def test_selection_client_editor_name_fn_wired_to_editor_identity(tmp_path):
 # -- concurrent-popup guard ------------------------------------------
 
 
-def test_scan_whole_project_skips_when_popup_already_active(tmp_path, monkeypatch):
+def test_scan_whole_project_queues_when_popup_already_active(tmp_path, monkeypatch):
+    """A batch that loses the Tk lock is QUEUED, not dropped: it used to be
+    thrown away behind an "already open" toast, so every clip found while the
+    editor read a dialog was lost."""
     other = tmp_path / "other"
     other.mkdir()
     path = other / "clip.mov"
@@ -368,8 +372,95 @@ def test_scan_whole_project_skips_when_popup_already_active(tmp_path, monkeypatc
     finally:
         app._popup_active_lock.release()
 
+    # Nothing shown while the lock was held...
     assert called == []
-    assert any("already open" in msg for msg, _title in app._tray_icon.notifications)
+    # ...and no nagging toast about it.
+    assert not any("already open" in msg for msg, _title in app._tray_icon.notifications)
+    # ...but the clip is waiting, not gone.
+    assert [i["file_path"] for i in app._popup_queue[0]["items"]] == [str(path)]
+
+
+def test_queued_batch_is_shown_when_the_open_popup_closes(tmp_path, monkeypatch):
+    """The queue drains in the same _show_out_of_tree_popup call that held the
+    lock -- that is what makes it "as many popups as it takes"."""
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+
+    other = tmp_path / "other"
+    other.mkdir()
+    first = other / "first.mov"
+    first.touch()
+    second = other / "second.mov"
+    second.touch()
+
+    shown: list[list[str]] = []
+
+    def _fake_show(items, *a, **kw):
+        shown.append([i["file_path"] for i in items])
+        if len(shown) == 1:
+            # Arrives while the first dialog is on screen.
+            app._show_out_of_tree_popup([_item(str(second))], snooze=True)
+
+    monkeypatch.setattr(popup, "show_popup", _fake_show)
+
+    app._show_out_of_tree_popup([_item(str(first))], snooze=True)
+
+    assert shown == [[str(first)], [str(second)]]
+    assert app._popup_queue == []
+    assert app._popup_showing_keys == set()
+    assert not app._popup_active_lock.locked()
+
+
+def test_queue_dedupes_the_watchers_repeat_reports(tmp_path, monkeypatch):
+    """The watcher re-reports the same out-of-tree clips every 3 s poll. Ten
+    minutes of that must not become 200 identical dialogs."""
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+
+    other = tmp_path / "other"
+    other.mkdir()
+    path = other / "clip.mov"
+    path.touch()
+
+    app._popup_active_lock.acquire()
+    try:
+        for _ in range(50):
+            app._show_out_of_tree_popup([_item(str(path))], snooze=True)
+    finally:
+        app._popup_active_lock.release()
+
+    assert len(app._popup_queue) == 1
+    assert len(app._popup_queue[0]["items"]) == 1
+
+
+def test_queued_clip_dismissed_meanwhile_is_not_re_asked(tmp_path, monkeypatch):
+    """SKIP in one dialog means skipped -- not asked again four seconds later
+    because the clip was already sitting in the queue."""
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+
+    other = tmp_path / "other"
+    other.mkdir()
+    first = other / "first.mov"
+    first.touch()
+    second = other / "second.mov"
+    second.touch()
+
+    shown: list[list[str]] = []
+
+    def _fake_show(items, *a, **kw):
+        shown.append([i["file_path"] for i in items])
+        if len(shown) == 1:
+            app._show_out_of_tree_popup([_item(str(second))], snooze=True)
+            # ...and the editor SKIPs it before the first dialog closes.
+            app.ignore_tracker.ignore(str(second))
+
+    monkeypatch.setattr(popup, "show_popup", _fake_show)
+
+    app._show_out_of_tree_popup([_item(str(first))], snooze=True)
+
+    assert shown == [[str(first)]]
+    assert app._popup_queue == []
 
 
 def test_handle_out_of_tree_and_scan_whole_project_share_the_lock(tmp_path, monkeypatch):
@@ -388,11 +479,15 @@ def test_handle_out_of_tree_and_scan_whole_project_share_the_lock(tmp_path, monk
     app._popup_active_lock.acquire()
     try:
         app._handle_out_of_tree([_item(str(path))])
+        # _handle_out_of_tree hands off to a daemon thread.
+        for thread in threading.enumerate():
+            if thread.name == "ccsync-popup":
+                thread.join(timeout=5)
     finally:
         app._popup_active_lock.release()
 
     assert called == []
-    assert any("already open" in msg for msg, _title in app._tray_icon.notifications)
+    assert [i["file_path"] for i in app._popup_queue[0]["items"]] == [str(path)]
 
 
 # -- existing _handle_out_of_tree gating is unaffected -----------------------

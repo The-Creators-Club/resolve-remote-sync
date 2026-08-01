@@ -200,7 +200,13 @@ def _dry_run_command(
     if direction == rclone_lane.DIRECTION_UP:
         cmd = rclone_lane.build_up_command(**common)
     else:
-        cmd = rclone_lane.build_down_command(**common)
+        # Same stability gate the real lane B run uses, read from the same
+        # cfg key -- a preview that counted proxies the real run will skip
+        # (because they are still being written) would promise the editor
+        # files that then don't arrive.
+        cmd = rclone_lane.build_down_command(
+            **common, min_age_seconds=rclone_lane.lane_b_min_age_seconds(cfg)
+        )
     # build_up/down_command always add --verbose so the REAL runs get
     # per-file INFO log lines for parse_json_log() -- but a dry run only
     # needs the NOTICE-level "Skipped ... as --dry-run is set" lines and the

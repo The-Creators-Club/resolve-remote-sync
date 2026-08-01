@@ -79,6 +79,13 @@ scan_interval_up = 300
 # Lane B (proxies, down) periodic full-pass interval, in seconds.
 scan_interval_down = 120
 
+# Lane B stability gate: don't download a proxy whose mtime is newer than
+# this. The Blackmagic Proxy Generator writes each proxy at its FINAL name
+# and grows it in place for minutes, so without this lane B ships truncated
+# proxies once per pass and sweeps each superseded partial into
+# .ccsync-trash. 0 disables the gate.
+lane_b_min_age_seconds = 120
+
 # Lane A watchdog file-stability debounce, in seconds.
 watch_debounce_seconds = 10
 

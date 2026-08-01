@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from ccsync_companion.sync.rclone_lane import (
+    LANE_B_MIN_AGE_SECONDS,
     ExpressListError,
     RcloneTuning,
     build_down_command,
@@ -138,6 +139,66 @@ def test_build_down_command_shape(tmp_path):
     # backup_dir is opt-in so consolidate.py's --dry-run keeps reporting
     # "Skipped delete" (not "Skipped move into backup dir") per object.
     assert "--backup-dir" not in cmd
+    # Stability gate, on by default -- see LANE_B_MIN_AGE_SECONDS.
+    assert cmd[cmd.index("--min-age") + 1] == "120s"
+
+
+def test_lane_b_min_age_keeps_a_proxy_still_being_written_out_of_the_run(tmp_path):
+    """The Blackmagic Proxy Generator writes each proxy AT ITS FINAL NAME and
+    grows it in place (measured: 933 s for a 203 MB proxy). Lane B is a 120 s
+    periodic sync, so without a gate it shipped the same growing file
+    truncated ~7 times, re-downloading it from byte 0 each pass and sweeping
+    every superseded partial into .ccsync-trash via --backup-dir."""
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("+ **/Proxy/**\n- **\n")
+    cmd = build_down_command("rclone", "C:\\root", "nas", "Creators_Club", filter_file)
+
+    assert "--min-age" in cmd
+    # Must be a real gate, not a token one: lane B's own pass interval is
+    # 120 s, so anything shorter still catches files mid-write.
+    seconds = int(cmd[cmd.index("--min-age") + 1].rstrip("s"))
+    assert seconds >= 120
+
+
+def test_lane_b_min_age_is_configurable_and_can_be_disabled(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+
+    raised = build_down_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file, min_age_seconds=300,
+    )
+    assert raised[raised.index("--min-age") + 1] == "300s"
+
+    off = build_down_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", filter_file, min_age_seconds=0,
+    )
+    assert "--min-age" not in off
+
+
+def test_lane_b_min_age_seconds_reads_config():
+    from ccsync_companion.sync.rclone_lane import LANE_B_MIN_AGE_SECONDS, lane_b_min_age_seconds
+
+    assert lane_b_min_age_seconds(None) == LANE_B_MIN_AGE_SECONDS
+    assert lane_b_min_age_seconds({}) == LANE_B_MIN_AGE_SECONDS
+    assert lane_b_min_age_seconds({"lane_b_min_age_seconds": 300}) == 300
+    assert lane_b_min_age_seconds({"lane_b_min_age_seconds": 0}) == 0
+    # Garbage falls back to the default rather than disabling the gate, and a
+    # negative value can never become an "everything is old enough" -0s.
+    assert lane_b_min_age_seconds({"lane_b_min_age_seconds": "nonsense"}) == LANE_B_MIN_AGE_SECONDS
+    assert lane_b_min_age_seconds({"lane_b_min_age_seconds": -5}) == 0
+
+
+def test_lane_b_run_passes_the_configured_min_age(tmp_path):
+    """The flag has to survive the RcloneLane -> build_down_command hop; the
+    unit above would pass with the lane never wiring cfg through."""
+    from ccsync_companion.sync.rclone_lane import DIRECTION_DOWN, RcloneLane
+
+    lane = RcloneLane(
+        DIRECTION_DOWN, str(tmp_path / "root"), "nas", "Creators_Club",
+        state_dir=tmp_path / "state", cfg={"lane_b_min_age_seconds": 240},
+    )
+    cmd = lane._build_command()
+    assert cmd[cmd.index("--min-age") + 1] == "240s"
 
 
 def test_build_down_command_backup_dir_makes_deletes_recoverable(tmp_path):
@@ -634,6 +695,21 @@ def test_lane_b_sync_propagates_rename(rclone_binary, fixture_tree, tmp_path):
     assert (dst / "B-roll" / "Proxy" / "clip1_renamed.mov").is_file(), "new name must appear locally"
 
 
+def _age_past_the_lane_b_gate(*roots: Path) -> None:
+    """Backdate every file under `roots` past lane B's --min-age.
+
+    The end-to-end tests below build the REAL lane B argv, which carries
+    --min-age (LANE_B_MIN_AGE_SECONDS). A fixture written a millisecond ago
+    is precisely what that flag exists to skip, so without this the run
+    becomes a no-op and the assertions below would pass vacuously -- or, for
+    the delete/trash tests, fail outright."""
+    old = time.time() - (LANE_B_MIN_AGE_SECONDS * 2)
+    for root in roots:
+        for path in root.rglob("*"):
+            if path.is_file():
+                os.utime(path, (old, old))
+
+
 def test_lane_b_backup_dir_makes_every_delete_recoverable(rclone_binary, tmp_path):
     """AUDIT_2 DEL-2, against the real binary.
 
@@ -656,6 +732,8 @@ def test_lane_b_backup_dir_makes_every_delete_recoverable(rclone_binary, tmp_pat
     (dst / "Local" / "Proxy").mkdir(parents=True)
     (dst / "Local" / "Proxy" / "orphan.mov").write_text("also local-only")
     (dst / "original_master.braw").write_text("camera original, not yet uploaded")
+
+    _age_past_the_lane_b_gate(src, dst)
 
     filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
     trash = dst / ".ccsync-trash" / "20260725-120000"
@@ -680,6 +758,42 @@ def test_lane_b_backup_dir_makes_every_delete_recoverable(rclone_binary, tmp_pat
     assert (dst / "Sub" / "Proxy" / "shared.mov").is_file()
 
 
+def test_lane_b_does_not_ship_a_proxy_that_is_still_being_written(rclone_binary, tmp_path):
+    """The actual regression, against real rclone rather than the argv.
+
+    Simulates what the Blackmagic Proxy Generator leaves on the NAS: a file
+    at its FINAL name, currently a fraction of its eventual size. The pass
+    must skip it entirely (an editor with no proxy is strictly better off
+    than one holding a truncated .mov whose moov index doesn't exist yet),
+    and must copy it once it stops changing."""
+    src = tmp_path / "nas"
+    dst = tmp_path / "local"
+    (src / "Sub" / "Proxy").mkdir(parents=True)
+    dst.mkdir()
+    growing = src / "Sub" / "Proxy" / "half_written.mov"
+    growing.write_text("ftyp...mdat...")  # no moov yet -- BPG writes it last
+
+    filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
+
+    def _run() -> None:
+        cmd = build_down_command(rclone_binary, str(dst), None, str(src), filter_file)
+        cmd[2] = str(src)
+        cmd[3] = str(dst)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+
+    _run()
+    assert not (dst / "Sub" / "Proxy" / "half_written.mov").exists(), (
+        "lane B downloaded a proxy that was still being written"
+    )
+
+    # Generation finishes: the file stops changing and ages past the gate.
+    growing.write_text("ftyp...mdat...moov")
+    _age_past_the_lane_b_gate(src)
+    _run()
+    assert (dst / "Sub" / "Proxy" / "half_written.mov").read_text() == "ftyp...mdat...moov"
+
+
 def test_lane_b_second_pass_does_not_re_delete_the_trash(rclone_binary, tmp_path):
     """The backup dir mirrors the source layout, so `.ccsync-trash/<ts>/Sub/
     Proxy/x.mov` matches `**/Proxy/**`. Without the exclude rule the next
@@ -690,6 +804,7 @@ def test_lane_b_second_pass_does_not_re_delete_the_trash(rclone_binary, tmp_path
     src.mkdir()
     (dst / "Sub" / "Proxy").mkdir(parents=True)
     (dst / "Sub" / "Proxy" / "doomed.mov").write_text("local only")
+    _age_past_the_lane_b_gate(src, dst)
 
     filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
     for stamp in ("20260725-120000", "20260725-121000"):
@@ -719,6 +834,7 @@ def test_rclone_lane_run_once_puts_deletes_in_the_trash_end_to_end(rclone_binary
     (local_root / subpath / "Proxy").mkdir(parents=True)
     (local_root / subpath / "Proxy" / "local_only.mov").write_text("hours of GPU time")
     (local_root / subpath / "master.braw").write_text("camera original")
+    _age_past_the_lane_b_gate(local_root, nas)
 
     lane = RcloneLane(
         direction=DIRECTION_DOWN,

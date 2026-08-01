@@ -58,6 +58,10 @@ DEFAULTS: dict[str, Any] = {
     # different defaults (300s / 120s) — split into two keys (addition).
     "scan_interval_up": 300,
     "scan_interval_down": 120,
+    # Lane B skips proxies whose mtime is newer than this, so a proxy the
+    # Blackmagic Proxy Generator is still writing on the NAS is not shipped
+    # truncated (see sync/rclone_lane.py: LANE_B_MIN_AGE_SECONDS). 0 = off.
+    "lane_b_min_age_seconds": 120,
     # Debounce window for the Lane A watchdog file events (addition; SPEC.md
     # says "10s debounce" for lane A but doesn't name a config key for it).
     "watch_debounce_seconds": 10,
@@ -284,6 +288,13 @@ scan_interval_up = 300
 
 # Lane B (proxies, down) periodic full-pass interval, in seconds.
 scan_interval_down = 120
+
+# Lane B stability gate: don't download a proxy whose mtime is newer than
+# this. The Blackmagic Proxy Generator writes each proxy at its FINAL name
+# and grows it in place for minutes, so without this lane B ships truncated
+# proxies once per pass and sweeps each superseded partial into
+# .ccsync-trash. 0 disables the gate.
+lane_b_min_age_seconds = 120
 
 # Lane A watchdog file-stability debounce, in seconds.
 watch_debounce_seconds = 10

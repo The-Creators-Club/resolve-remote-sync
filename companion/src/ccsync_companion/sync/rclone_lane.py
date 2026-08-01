@@ -150,6 +150,31 @@ DEFAULT_ORDER_BY_DOWN = "size,ascending"
 LANE_A_MIN_AGE_SECONDS = 120
 LANE_A_MIN_AGE = f"{LANE_A_MIN_AGE_SECONDS}s"
 
+# -- lane B stability gate (2026-08-01) ------------------------------------
+#
+# The same gate on the download side, added for a failure the fleet actually
+# hit. The Blackmagic Proxy Generator writes each proxy AT ITS FINAL NAME and
+# grows it in place -- measured on the NAS: a 203 MB proxy spent 933 s that
+# way -- while lane B was a 120 s periodic `sync` with no age check at all.
+# It therefore sampled the same growing file ~7 times and shipped a truncated
+# .mov every pass.
+#
+# It was not silent corruption: QuickTime writes the `moov` index LAST (these
+# proxies are ftyp/wide/mdat/moov), so a truncated proxy has no index and
+# simply won't open -- and the pass after generation finished repaired it.
+# The damage was everything around that. Each partial was re-downloaded from
+# byte 0 (~700 MB of transfer for that one 203 MB proxy), and every
+# superseded copy was moved into <local_root>/.ccsync-trash by --backup-dir
+# (verified: rclone backs up OVERWRITTEN files, not just deleted ones),
+# firing "files moved to .ccsync-trash" toasts that blamed the wrong cause.
+#
+# --min-age is a STRONGER guard here than on lane A. Lane A's L-14 caveat is
+# that Windows copy tools PRESERVE the source mtime, so a 40 GB .braw that
+# landed a second ago can already look two hours old. A file being actively
+# WRITTEN has a genuinely advancing mtime, which is exactly what --min-age
+# reads. Set to 0 to disable the gate.
+LANE_B_MIN_AGE_SECONDS = 120
+
 # -- express lane A (AUDIT_2 C-2 / P9) -------------------------------------
 EXPRESS_DEFAULT_ENABLED = True
 # Batch cap. Beyond this the batch is dropped and the periodic full pass --
@@ -180,6 +205,16 @@ def _cfg_int(cfg: Optional[dict], key: str, default: int) -> int:
     except (TypeError, ValueError):
         log.warning("rclone tuning: %s=%r is not an integer -- using %d", key, cfg.get(key), default)
         return default
+
+
+def lane_b_min_age_seconds(cfg: Optional[dict]) -> int:
+    """Lane B's stability gate, in seconds (0 = off).
+
+    A module-level helper rather than an RcloneTuning field: tuning is
+    transport shape (chunk sizes, concurrency), this is a correctness gate,
+    and consolidate.py has to reach it for its --dry-run argv so the preview
+    it shows the editor matches what the real run will actually do."""
+    return max(0, _cfg_int(cfg, "lane_b_min_age_seconds", LANE_B_MIN_AGE_SECONDS))
 
 
 @dataclass(frozen=True)
@@ -881,6 +916,7 @@ def build_down_command(
     backup_dir: str | None = None,
     max_duration_seconds: float | None = None,
     tuning: Optional[RcloneTuning] = None,
+    min_age_seconds: int = LANE_B_MIN_AGE_SECONDS,
 ) -> list[str]:
     """Lane B: `rclone sync` NAS -> editor, proxies only.
 
@@ -908,6 +944,14 @@ def build_down_command(
         "--filter-from", str(filter_file),
         "--ignore-case",  # see build_up_command -- same case-sensitivity gap
     ]
+    if min_age_seconds > 0:
+        # See LANE_B_MIN_AGE_SECONDS. Without this, a proxy still being
+        # written on the NAS is shipped truncated, once per pass, and each
+        # superseded partial is swept into .ccsync-trash by --backup-dir
+        # below. MUST stay ahead of that flag in argv order only for
+        # readability -- rclone does not care, humans reading a logged
+        # command line do.
+        cmd += ["--min-age", f"{int(min_age_seconds)}s"]
     if backup_dir:
         cmd += ["--backup-dir", str(backup_dir)]
     cmd += [
@@ -1137,6 +1181,9 @@ class RcloneLane(LaneAdapter):
         # rather than rclone's -- the flags are the fix, config is only the
         # override seam (C-5).
         self.tuning = RcloneTuning.from_cfg(cfg)
+        # Lane B only -- keeps a proxy that is still being written on the NAS
+        # out of the run entirely (see LANE_B_MIN_AGE_SECONDS).
+        self.min_age_seconds = lane_b_min_age_seconds(cfg)
         # Last orphan-.partial scan (P8/P15/C-7): REPORTED, never deleted.
         self._orphans: Optional[dict] = None
 
@@ -1275,7 +1322,7 @@ class RcloneLane(LaneAdapter):
             self.rclone_path, self.local_root, self.remote, self.remote_root,
             filter_file, self.transfers, subpath=subpath, stats_interval=stats_interval,
             backup_dir=backup_dir, max_duration_seconds=max_duration_seconds,
-            tuning=self.tuning,
+            tuning=self.tuning, min_age_seconds=self.min_age_seconds,
         )
 
     # -- LaneAdapter ---------------------------------------------------

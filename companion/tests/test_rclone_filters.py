@@ -1357,3 +1357,94 @@ def test_all_transfer_commands_pin_the_local_encoding(tmp_path):
         assert gone not in LOCAL_ENCODING
     for kept in ("Slash", "BackSlash", "Ctl", "InvalidUtf8"):
         assert kept in LOCAL_ENCODING
+
+
+# ===========================================================================
+# Express/periodic overlap: the periodic pass must not re-upload what the
+# express run already has in flight (2026-08-02 -- measured on an editor's
+# machine, the same .mov climbing on two concurrent connections while the
+# uplink was already saturated).
+# ===========================================================================
+
+
+def test_escape_filter_pattern_quotes_every_glob_metacharacter():
+    from ccsync_companion.sync.rclone_lane import escape_filter_pattern
+
+    assert escape_filter_pattern("plain.mov") == "plain.mov"
+    assert escape_filter_pattern("[BM Cloud]/a.mov") == r"\[BM Cloud\]/a.mov"
+    assert escape_filter_pattern("a{1,2}?.mov") == r"a\{1,2\}\?.mov"
+    assert escape_filter_pattern("star*.mov") == r"star\*.mov"
+    # The backslash is the escape character itself -- it must be escaped
+    # first, or every other escape it introduces would be double-escaped.
+    assert escape_filter_pattern("back" + chr(92) + "slash.mov") == "back" + chr(92) * 2 + "slash.mov"
+
+
+def test_exclude_rules_come_first_and_the_terminator_survives():
+    """First-match-wins: an exclude after `+ *.mov` would never fire, and
+    validate_filter_file still demands `- **` last."""
+    rules = build_filter_rules_up(["B-roll/a.mov", "Interviews/b.braw"])
+    assert rules[0] == "- /B-roll/a.mov"
+    assert rules[1] == "- /Interviews/b.braw"
+    assert rules.index("- /B-roll/a.mov") < rules.index("+ *.mov")
+    assert rules[-1] == "- **"
+
+
+def test_no_excludes_is_byte_identical_to_the_old_rule_list():
+    """The overlap fix must be inert when express isn't running."""
+    assert build_filter_rules_up() == build_filter_rules_up([])
+
+
+def test_relativize_express_path_against_the_runs_subpath():
+    from ccsync_companion.sync.rclone_lane import RcloneLane as L
+
+    r = L._relativize_to_subpath
+    assert r("Projects/2026/P/B-roll/a.mov", "Projects/2026/P") == "B-roll/a.mov"
+    assert r("Projects/2026/P/B-roll/a.mov", None) == "Projects/2026/P/B-roll/a.mov"
+    # --ignore-case is on, so casing drift in a shared parent must still match
+    assert r("Projects/2026/p/B-roll/a.mov", "Projects/2026/P") == "B-roll/a.mov"
+    # A different project's file would never be seen by this run anyway
+    assert r("Projects/2026/OTHER/a.mov", "Projects/2026/P") is None
+    assert r("Projects/2026/P", "Projects/2026/P") is None
+    assert r("", "Projects/2026/P") is None
+    bs = chr(92)  # a Windows-style rel, as the watcher can hand it over
+    assert r(bs.join(["", "Projects", "2026", "P", "B-roll", "a.mov"]),
+             "Projects/2026/P") == "B-roll/a.mov"
+
+
+def test_lane_a_dry_run_skips_an_in_flight_express_path(rclone_binary, fixture_tree, tmp_path):
+    """Against the REAL binary: the excluded file is skipped, its siblings
+    are not."""
+    filter_file = write_filter_file(
+        build_filter_rules_up(["B-roll/Editor Added/alex/clip3.mov"]),
+        tmp_path / "filter_up.txt",
+    )
+    dst = tmp_path / "dst_up"
+    cmd = build_up_command(rclone_binary, str(fixture_tree), None, str(dst), filter_file)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd + ["--dry-run"], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+    assert "clip3.mov" not in proc.stderr      # express owns it right now
+    assert "Proxynotreal.mov" in proc.stderr   # everything else still uploads
+
+
+def test_escaped_metacharacters_exclude_only_the_literal_file(rclone_binary, tmp_path):
+    """An unescaped `[ab]` would be a character class and would wrongly
+    exclude `a.mov`/`b.mov` too. Proven against the real binary."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "[ab].mov").write_text("literal brackets")
+    (src / "a.mov").write_text("must still upload")
+    old = time.time() - 3600
+    for f in src.rglob("*"):
+        os.utime(f, (old, old))
+
+    filter_file = write_filter_file(build_filter_rules_up(["[ab].mov"]), tmp_path / "f.txt")
+    dst = tmp_path / "dst"
+    cmd = build_up_command(rclone_binary, str(src), None, str(dst), filter_file)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+    assert not (dst / "[ab].mov").exists()  # excluded, literally
+    assert (dst / "a.mov").exists()         # NOT caught by a stray class

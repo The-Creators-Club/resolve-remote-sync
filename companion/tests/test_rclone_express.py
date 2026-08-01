@@ -39,6 +39,8 @@ from ccsync_companion.sync.rclone_lane import (
     DIRECTION_UP,
     RcloneLane,
     build_express_command,
+    build_filter_rules_down,
+    build_filter_rules_up,
     build_up_command,
     build_down_command,
     path_matches_lane_a_filter,
@@ -890,3 +892,88 @@ def test_no_known_rels_fn_at_all_still_uses_the_legacy_heuristic(tmp_path):
     path = str(tmp_path / "Projects/2026/Series/Show/clip.mov")
     assert _project_rel_for_path(root, path, None) == "Projects/2026/Series/Show"
     assert _project_rel_for_path(root, path, []) is None
+
+
+# ===========================================================================
+# The periodic pass must stand down on paths express already has in flight
+# (2026-08-02): both use --ignore-existing, but while express is still
+# uploading, the destination doesn't exist yet for the periodic pass to skip,
+# so the same file went up twice at once over an already-saturated uplink.
+# ===========================================================================
+
+
+def _filter_rules(lane, subpath=None):
+    """Build a periodic lane A command and read back the filter file it wrote."""
+    lane._build_command(subpath=subpath)
+    return [
+        line.strip()
+        for line in lane._filter_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_periodic_filter_excludes_paths_express_is_uploading(tmp_path):
+    lane = _make_lane(tmp_path)
+    with lane._express_inflight_lock:
+        lane._express_inflight |= {"Projects/2026/P/B-roll/a.mov"}
+
+    rules = _filter_rules(lane, subpath="Projects/2026/P")
+    assert rules[0] == "- /B-roll/a.mov"
+    assert rules[-1] == "- **"
+
+
+def test_periodic_filter_is_unchanged_when_express_is_idle(tmp_path):
+    lane = _make_lane(tmp_path)
+    assert _filter_rules(lane, subpath="Projects/2026/P") == build_filter_rules_up()
+
+
+def test_another_projects_inflight_path_does_not_touch_this_run(tmp_path):
+    lane = _make_lane(tmp_path)
+    with lane._express_inflight_lock:
+        lane._express_inflight |= {"Projects/2026/OTHER/a.mov"}
+    assert _filter_rules(lane, subpath="Projects/2026/P") == build_filter_rules_up()
+
+
+def test_lane_b_filter_never_gets_express_excludes(tmp_path):
+    """Express is lane A only; lane B's rules must stay exactly as they were
+    (an exclude leaking in here would skip a proxy download)."""
+    lane = _make_lane(tmp_path, direction=DIRECTION_DOWN)
+    with lane._express_inflight_lock:
+        lane._express_inflight |= {"Projects/2026/P/B-roll/a.mov"}
+    lane._build_command(subpath="Projects/2026/P")
+    rules = [l.strip() for l in lane._filter_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert rules == build_filter_rules_down()
+
+
+def test_inflight_claim_is_registered_during_the_run_and_released_after(tmp_path):
+    """The claim must be visible WHILE rclone runs and gone afterwards."""
+    seen: list[list[str]] = []
+    root = tmp_path / "local"
+    _old_file(root, "Projects/2026/P/B-roll/a.mov")
+
+    def popen_factory(cmd, **kwargs):
+        seen.append(sorted(lane._express_inflight))
+        return _FakeExpressProc("", 0)
+
+    lane = _make_lane(tmp_path, popen_factory=popen_factory)
+    lane.notify_path_changed(str(root / "Projects/2026/P/B-roll/a.mov"))
+    _flush_now(lane)
+
+    assert seen == [["Projects/2026/P/B-roll/a.mov"]]   # held during the run
+    assert lane.express_inflight_paths() == []           # released after
+
+
+def test_a_crashing_express_run_still_releases_its_claim(tmp_path):
+    """A leaked claim would exclude those paths from EVERY future periodic
+    pass -- stranding the file permanently, which is worse than duplicating."""
+    root = tmp_path / "local"
+    _old_file(root, "Projects/2026/P/B-roll/a.mov")
+
+    def popen_factory(cmd, **kwargs):
+        raise OSError("rclone vanished")
+
+    lane = _make_lane(tmp_path, popen_factory=popen_factory)
+    lane.notify_path_changed(str(root / "Projects/2026/P/B-roll/a.mov"))
+    _flush_now(lane)
+
+    assert lane.express_inflight_paths() == []

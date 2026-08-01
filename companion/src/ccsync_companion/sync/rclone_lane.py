@@ -31,7 +31,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from .base import (
     STATE_ERROR,
@@ -274,14 +274,38 @@ def _win_creationflags() -> int:
     return 0
 
 
-def build_filter_rules_up() -> list[str]:
+# rclone filter patterns are globs: these characters carry meaning and must
+# be escaped to match a literal filename. Backslash first -- it is the escape
+# character itself, so escaping it after the others would double-escape them.
+_FILTER_METACHARACTERS = "\\*?[]{}"
+
+
+def escape_filter_pattern(text: str) -> str:
+    """Quote a literal path for use as an rclone filter pattern.
+
+    Real filenames in this tree contain `[`, `]` and `{` (`F:\\[BM Cloud]`,
+    bracketed download names), and an unescaped one would silently turn into
+    a character class matching the WRONG set of files -- in an exclude rule,
+    that means skipping files nobody asked to skip.
+    """
+    return "".join("\\" + ch if ch in _FILTER_METACHARACTERS else ch for ch in str(text))
+
+
+def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list[str]:
     """Lane A: video files anywhere EXCEPT under a Proxy/ dir, nothing else.
 
     Both the nested (`**/Proxy/**`) and root-level (`/Proxy/**`) forms are
     needed: rclone's `**/` requires at least one leading path component, so
     a Proxy/ dir at the tree root would slip past the nested rule alone.
+
+    `exclude_paths` are paths (relative to THIS run's source dir, `/`-separated)
+    that the express lane is uploading right now -- see
+    RcloneLane._express_inflight for why. They go FIRST because rclone filter
+    matching is first-match-wins, so a later `+ *.mov` would otherwise win and
+    the file would be uploaded twice concurrently.
     """
-    rules = ["- **/Proxy/**", "- /Proxy/**"]
+    rules = [f"- /{escape_filter_pattern(rel)}" for rel in (exclude_paths or [])]
+    rules += ["- **/Proxy/**", "- /Proxy/**"]
     rules += [f"+ *{ext}" for ext in VIDEO_EXTS]
     rules.append("- **")
     return rules
@@ -1249,6 +1273,13 @@ class RcloneLane(LaneAdapter):
         # Two concurrent rclones on the same tree are safe here *because*
         # both are upload-only `copy --ignore-existing`.
         self._express_run_lock = threading.Lock()
+        # Paths the CURRENT express run has in flight, so the periodic pass
+        # can filter them out instead of racing it for the same bytes (see
+        # _build_command). Its own lock: _build_command reads this from the
+        # periodic thread while the express thread is writing it, and it must
+        # not queue behind either of the run locks.
+        self._express_inflight: set[str] = set()
+        self._express_inflight_lock = threading.Lock()
         self._express_lock = threading.Lock()  # guards the pending map/timer
         # rel(posix) -> (last observed size, first seen monotonic)
         self._express_pending: dict[str, tuple[int, float]] = {}
@@ -1283,9 +1314,43 @@ class RcloneLane(LaneAdapter):
         }
 
     # -- filter file -------------------------------------------------
-    def _ensure_filter_file(self) -> Path:
-        rules = build_filter_rules_up() if self.direction == DIRECTION_UP else build_filter_rules_down()
+    def _ensure_filter_file(self, exclude_paths: Optional[Iterable[str]] = None) -> Path:
+        rules = (
+            build_filter_rules_up(exclude_paths)
+            if self.direction == DIRECTION_UP
+            else build_filter_rules_down()
+        )
         return write_filter_file(rules, self._filter_file)
+
+    def express_inflight_paths(self) -> list[str]:
+        """Snapshot of what the express lane is uploading right now
+        (local_root-relative, `/`-separated). Sorted so the filter file is
+        deterministic for a given set."""
+        with self._express_inflight_lock:
+            return sorted(self._express_inflight)
+
+    @staticmethod
+    def _relativize_to_subpath(rel: str, subpath: Optional[str]) -> Optional[str]:
+        """Re-express a local_root-relative express path against this run's
+        source dir (`local_root/subpath`), or None when it falls outside.
+
+        Lane A copies `local_root/<subpath>`, so its filter patterns are
+        anchored there, while express paths are always local_root-relative.
+        Compared case-insensitively because lane A runs --ignore-case and the
+        two strings can differ only in the casing of a shared parent.
+        """
+        clean = str(rel or "").replace("\\", "/").strip("/")
+        if not clean:
+            return None
+        sub = str(subpath or "").replace("\\", "/").strip("/")
+        if not sub:
+            return clean
+        if clean.lower() == sub.lower():
+            return None  # the subpath itself is a directory, not a file
+        prefix = sub.lower() + "/"
+        if not clean.lower().startswith(prefix):
+            return None  # a different project -- this run would never see it
+        return clean[len(prefix):] or None
 
     def _backup_dir(self, subpath: Optional[str] = None) -> str:
         """Where lane B's deletions go instead of away.
@@ -1306,13 +1371,33 @@ class RcloneLane(LaneAdapter):
         stats_interval: Optional[str] = None,
         max_duration_seconds: Optional[float] = None,
     ) -> list[str]:
-        filter_file = self._ensure_filter_file()
         if self.direction == DIRECTION_UP:
+            # Don't re-upload what express already has in flight. Both runs
+            # use --ignore-existing, but neither has finished, so the
+            # destination doesn't exist yet for either to skip -- measured on
+            # an editor's machine 2026-08-02, the same .mov climbing on two
+            # concurrent connections and splitting a saturated uplink between
+            # them. Express wins the race by design (it is the low-latency
+            # path); anything it drops is still missing next pass, so this
+            # loses nothing.
+            excludes = [
+                rel for rel in (
+                    self._relativize_to_subpath(p, subpath)
+                    for p in self.express_inflight_paths()
+                ) if rel
+            ]
+            if excludes:
+                log.info(
+                    "%s: deferring %d path(s) to the in-flight express run",
+                    self.name, len(excludes),
+                )
+            filter_file = self._ensure_filter_file(excludes)
             return build_up_command(
                 self.rclone_path, self.local_root, self.remote, self.remote_root,
                 filter_file, self.transfers, subpath=subpath, stats_interval=stats_interval,
                 max_duration_seconds=max_duration_seconds, tuning=self.tuning,
             )
+        filter_file = self._ensure_filter_file()
         # Remembered so the run can tell the editor WHERE its files went --
         # see _notify_trash. Safe as instance state: run_once holds _run_lock,
         # and only lane A has the (separately locked) express path.
@@ -2224,6 +2309,15 @@ class RcloneLane(LaneAdapter):
             list_file, transfers=self.transfers, tuning=self.tuning,
         )
         log.info("%s: express upload of %d path(s)", self.name, len(rels))
+        # Claim these paths BEFORE the child starts: a periodic pass that
+        # builds its filter file in the gap between spawn and claim would
+        # upload them alongside us, which is the whole thing this prevents.
+        # Normalized the way write_files_from_list does, so the strings match
+        # what rclone was actually handed.
+        claimed = {str(r).replace("\\", "/").strip().strip("/") for r in rels}
+        claimed.discard("")
+        with self._express_inflight_lock:
+            self._express_inflight |= claimed
         try:
             returncode, stderr_text = self._express_spawn(cmd)
         except Exception as exc:
@@ -2231,6 +2325,11 @@ class RcloneLane(LaneAdapter):
             self._express_record(0, str(exc))
             return
         finally:
+            # Released even on a crash/timeout: a leaked claim would exclude
+            # these paths from EVERY future periodic pass, so a failed express
+            # run would strand them permanently -- worse than the duplication.
+            with self._express_inflight_lock:
+                self._express_inflight -= claimed
             # Our own scratch artifact, in our own state dir -- the only
             # thing this feature ever removes. Never user data.
             try:

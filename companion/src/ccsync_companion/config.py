@@ -200,6 +200,12 @@ DEFAULTS: dict[str, Any] = {
     # stale path beats SPEC.md:40's adjacent-Proxy auto-link -- so the clip
     # goes Media Offline next to a perfectly good proxy. See proxy_relink.py.
     "proxy_relink_enabled": True,
+    # False = shut down silently even mid-upload. On by default: Windows'
+    # own "this app is preventing you from shutting down" screen carries the
+    # warning, and the editor keeps a "Shut down anyway" button. Nothing is
+    # lost either way -- but rclone cannot resume an SFTP upload, so the
+    # file in flight restarts from zero. See shutdown_guard.py.
+    "shutdown_warning_enabled": True,
     # False = no sync lanes at all: the machine works directly off the NAS
     # share (base rig). The companion still runs the timeline watcher, popup
     # fixer, and dashboard reporter; lanes report idle with a "disabled"
@@ -423,6 +429,11 @@ lane_b_enabled = true
 # was never linked. Only ever repoints -- never copies, moves or deletes.
 # Set false to leave every proxy attachment exactly as the project stores it.
 proxy_relink_enabled = true
+
+# Warn on the Windows shutdown/restart/log-off screen while a sync is still
+# in flight, naming how much is left. The editor always keeps a "Shut down
+# anyway" button. Set false to switch off silently mid-upload.
+shutdown_warning_enabled = true
 
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and

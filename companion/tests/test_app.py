@@ -1701,3 +1701,96 @@ def test_swap_p_to_server_persists_credentials_on_success(monkeypatch):
     ok, _ = CompanionApp.swap_p_to_server(stub)
     assert ok
     assert persisted == [("alex", "pw")]
+
+
+# --- shutdown guard wiring (shutdown_guard.py owns the policy) -------------
+
+def _busy_lane():
+    from ccsync_companion.sync.base import STATE_SYNCING, LaneStatus
+
+    class Lane:
+        name = "lane_a"
+
+        def status(self):
+            return LaneStatus(name="lane_a", state=STATE_SYNCING,
+                              bytes_done=0, bytes_total=10 * 1024**3)
+
+    return Lane()
+
+
+def test_shutdown_reason_names_the_sync_in_flight(tmp_path):
+    app = _make_app(tmp_path)
+    app.lanes = [_busy_lane()]
+    reason = app._shutdown_block_reason()
+    assert reason and "still syncing" in reason
+
+
+def test_no_shutdown_reason_when_lanes_are_idle(tmp_path):
+    from ccsync_companion.sync.base import LaneStatus
+
+    class Idle:
+        name = "lane_a"
+
+        def status(self):
+            return LaneStatus(name="lane_a")
+
+    app = _make_app(tmp_path)
+    app.lanes = [Idle()]
+    assert app._shutdown_block_reason() is None
+
+
+def test_pausing_sync_also_stops_warning_about_shutdown(tmp_path):
+    """Pause means the editor already chose to stop syncing; nagging them at
+    the shutdown screen after that is just noise."""
+    app = _make_app(tmp_path)
+    app.lanes = [_busy_lane()]
+    app._paused = True
+    assert app._shutdown_block_reason() is None
+
+
+def test_a_lane_that_cannot_report_status_never_blocks_shutdown(tmp_path):
+    class Broken:
+        name = "lane_a"
+
+        def status(self):
+            raise RuntimeError("boom")
+
+    app = _make_app(tmp_path)
+    app.lanes = [Broken()]
+    assert app._shutdown_block_reason() is None
+
+
+def test_shutdown_warning_can_be_switched_off(tmp_path):
+    from ccsync_companion import shutdown_guard as sg
+
+    app = _make_app(tmp_path, shutdown_warning_enabled=False)
+    app._start_shutdown_guard()
+    assert type(app._shutdown_guard) is sg.ShutdownGuard
+    assert app._shutdown_guard.active is False
+
+
+def test_shutdown_releases_the_guard(tmp_path):
+    """A guard left holding a block reason would keep refusing shutdowns on
+    behalf of a companion that has already exited."""
+    stopped = []
+
+    class Guard:
+        def stop(self):
+            stopped.append(True)
+
+    app = _make_app(tmp_path)
+    app._shutdown_guard = Guard()
+    app.shutdown()
+    assert stopped == [True]
+    assert app._shutdown_guard is None
+
+
+def test_a_guard_that_fails_to_stop_does_not_break_shutdown(tmp_path):
+    class Guard:
+        def stop(self):
+            raise RuntimeError("boom")
+
+    app = _make_app(tmp_path)
+    app._shutdown_guard = Guard()
+    app.shutdown()
+    assert app._shutdown_guard is None

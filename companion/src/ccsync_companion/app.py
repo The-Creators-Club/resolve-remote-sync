@@ -27,6 +27,7 @@ from . import config as config_mod
 from . import popup
 from . import proxy_relink
 from . import resolve_bridge
+from . import shutdown_guard as shutdown_guard_mod
 from . import upgrade as upgrade_mod
 from .fixer import IgnoreTracker, _dest_dir_is_contained
 from .identity import IdentityManager
@@ -254,6 +255,10 @@ class CompanionApp:
         self.identity_check_interval = config_mod.coerce_numeric(cfg, "identity_check_interval", 60)
         self._identity_stop_event = threading.Event()
         self._identity_thread: Optional[threading.Thread] = None
+        # Warns on the Windows shutdown screen while a sync is in flight --
+        # see shutdown_guard.py. Built in start(), because until then there
+        # are no lanes to have a status.
+        self._shutdown_guard: Optional[shutdown_guard_mod.ShutdownGuard] = None
         self._tray_icon = None
         # Config errors that STOP syncing. Computed HERE, not just in run(),
         # because the gates that consume it (the out-of-tree popup, FIX ALL,
@@ -2118,6 +2123,39 @@ class CompanionApp:
             target=self.watcher.run, args=(self._stop_event,), name="ccsync-watcher", daemon=True
         )
         self._watcher_thread.start()
+        self._start_shutdown_guard()
+
+    def _start_shutdown_guard(self) -> None:
+        """Ask Windows to say "still syncing" on the shutdown screen.
+
+        Never fatal: an editor whose guard fails to start syncs exactly as
+        before, they just do not get the warning."""
+        if self._shutdown_guard is not None:
+            return
+        try:
+            self._shutdown_guard = shutdown_guard_mod.make_shutdown_guard(
+                self._shutdown_block_reason,
+                enabled=bool(self.config.get("shutdown_warning_enabled", True)),
+            )
+            self._shutdown_guard.start()
+        except Exception:
+            log.exception("failed to start the shutdown guard")
+
+    def _shutdown_block_reason(self) -> Optional[str]:
+        """What to show on the shutdown screen, or None to let it proceed.
+
+        Called by Windows on its own thread with a few seconds of patience at
+        most, so it does nothing but read the lane statuses (documented cheap
+        and non-blocking) -- no Resolve calls, no disk, no network.
+        """
+        if self._paused or self.config_problems:
+            return None
+        try:
+            statuses = [lane.status() for lane in self.lanes]
+        except Exception:
+            log.exception("shutdown guard: could not read lane statuses")
+            return None
+        return shutdown_guard_mod.describe_pending(statuses)
 
     def _sweep_stale_tmp_files(self) -> None:
         from . import fixer as fixer_mod
@@ -2169,6 +2207,14 @@ class CompanionApp:
 
     def shutdown(self) -> None:
         self._stop_event.set()
+        # First: a guard still holding a block reason would make the machine
+        # refuse to shut down on behalf of a companion that is exiting.
+        guard, self._shutdown_guard = self._shutdown_guard, None
+        if guard is not None:
+            try:
+                guard.stop()
+            except Exception:
+                log.exception("failed to stop the shutdown guard")
         self._stop_lanes()
         try:
             self.reporter.stop()

@@ -226,6 +226,14 @@ project_roots_ttl = 300
 # repoints -- never copies, moves or deletes.
 proxy_relink_enabled = true
 
+# Warn on the Windows shutdown/restart/log-off screen while a sync is still
+# in flight, naming how much is left, so nobody switches off mid-upload
+# without knowing. The editor always keeps a "Shut down anyway" button --
+# this never actually prevents a shutdown. Files are never lost, but rclone
+# cannot resume an SFTP upload, so whatever was part-way through starts
+# again from the beginning. Does not cover sleep.
+shutdown_warning_enabled = true
+
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
 # dashboard reporting keep working; all sync lanes stay off.

@@ -1794,3 +1794,84 @@ def test_a_guard_that_fails_to_stop_does_not_break_shutdown(tmp_path):
     app._shutdown_guard = Guard()
     app.shutdown()
     assert app._shutdown_guard is None
+
+
+def test_keep_awake_holds_while_a_lane_is_busy(tmp_path):
+    from ccsync_companion import shutdown_guard as sg
+
+    app = _make_app(tmp_path)
+    app.lanes = [_busy_lane()]
+    guard = sg._WindowsKeepAwake(
+        lambda: app._shutdown_block_reason() is not None,
+        set_state_fn=lambda flags: sg.ES_CONTINUOUS,
+    )
+    assert guard.apply_once() is True
+
+
+def test_keep_awake_lets_an_idle_machine_sleep(tmp_path):
+    from ccsync_companion import shutdown_guard as sg
+    from ccsync_companion.sync.base import LaneStatus
+
+    class Idle:
+        name = "lane_a"
+
+        def status(self):
+            return LaneStatus(name="lane_a")
+
+    app = _make_app(tmp_path)
+    app.lanes = [Idle()]
+    guard = sg._WindowsKeepAwake(
+        lambda: app._shutdown_block_reason() is not None,
+        set_state_fn=lambda flags: sg.ES_CONTINUOUS,
+    )
+    assert guard.apply_once() is False
+
+
+def test_keep_awake_can_be_switched_off(tmp_path):
+    from ccsync_companion import shutdown_guard as sg
+
+    app = _make_app(tmp_path, keep_awake_while_syncing=False)
+    app._start_keep_awake()
+    assert type(app._keep_awake) is sg.KeepAwakeGuard
+    assert app._keep_awake.held is False
+
+
+def test_shutdown_releases_both_power_guards(tmp_path):
+    """Either guard left holding its state would outlive the companion: one
+    refusing shutdowns, the other refusing sleep."""
+    stopped = []
+
+    class Guard:
+        def __init__(self, label):
+            self.label = label
+
+        def stop(self):
+            stopped.append(self.label)
+
+    app = _make_app(tmp_path)
+    app._shutdown_guard = Guard("shutdown")
+    app._keep_awake = Guard("keep-awake")
+    app.shutdown()
+    assert sorted(stopped) == ["keep-awake", "shutdown"]
+    assert app._shutdown_guard is None
+    assert app._keep_awake is None
+
+
+def test_a_failing_shutdown_guard_does_not_strand_the_keep_awake(tmp_path):
+    """The stop loop must keep going past a guard that throws, or the second
+    guard silently keeps the machine awake forever."""
+    stopped = []
+
+    class Boom:
+        def stop(self):
+            raise RuntimeError("boom")
+
+    class Guard:
+        def stop(self):
+            stopped.append("keep-awake")
+
+    app = _make_app(tmp_path)
+    app._shutdown_guard = Boom()
+    app._keep_awake = Guard()
+    app.shutdown()
+    assert stopped == ["keep-awake"]

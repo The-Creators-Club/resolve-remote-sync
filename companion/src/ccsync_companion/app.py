@@ -259,6 +259,7 @@ class CompanionApp:
         # see shutdown_guard.py. Built in start(), because until then there
         # are no lanes to have a status.
         self._shutdown_guard: Optional[shutdown_guard_mod.ShutdownGuard] = None
+        self._keep_awake: Optional[shutdown_guard_mod.KeepAwakeGuard] = None
         self._tray_icon = None
         # Config errors that STOP syncing. Computed HERE, not just in run(),
         # because the gates that consume it (the out-of-tree popup, FIX ALL,
@@ -2124,6 +2125,24 @@ class CompanionApp:
         )
         self._watcher_thread.start()
         self._start_shutdown_guard()
+        self._start_keep_awake()
+
+    def _start_keep_awake(self) -> None:
+        """Stop the idle timer sleeping the machine mid-transfer.
+
+        The shutdown guard only sees deliberate shutdowns; a machine that
+        simply idles into sleep never sends WM_QUERYENDSESSION at all, and
+        that is the likelier way an overnight upload dies."""
+        if self._keep_awake is not None:
+            return
+        try:
+            self._keep_awake = shutdown_guard_mod.make_keep_awake_guard(
+                lambda: self._shutdown_block_reason() is not None,
+                enabled=bool(self.config.get("keep_awake_while_syncing", True)),
+            )
+            self._keep_awake.start()
+        except Exception:
+            log.exception("failed to start the keep-awake guard")
 
     def _start_shutdown_guard(self) -> None:
         """Ask Windows to say "still syncing" on the shutdown screen.
@@ -2209,12 +2228,17 @@ class CompanionApp:
         self._stop_event.set()
         # First: a guard still holding a block reason would make the machine
         # refuse to shut down on behalf of a companion that is exiting.
+        # Likewise a keep-awake guard still holding ES_SYSTEM_REQUIRED would
+        # leave the machine unable to sleep with nothing left to sync.
         guard, self._shutdown_guard = self._shutdown_guard, None
-        if guard is not None:
+        awake, self._keep_awake = self._keep_awake, None
+        for power_guard, label in ((guard, "shutdown"), (awake, "keep-awake")):
+            if power_guard is None:
+                continue
             try:
-                guard.stop()
+                power_guard.stop()
             except Exception:
-                log.exception("failed to stop the shutdown guard")
+                log.exception("failed to stop the %s guard", label)
         self._stop_lanes()
         try:
             self.reporter.stop()

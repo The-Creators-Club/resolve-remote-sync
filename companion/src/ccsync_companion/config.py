@@ -206,6 +206,13 @@ DEFAULTS: dict[str, Any] = {
     # lost either way -- but rclone cannot resume an SFTP upload, so the
     # file in flight restarts from zero. See shutdown_guard.py.
     "shutdown_warning_enabled": True,
+    # False = let the machine idle into sleep mid-upload. On by default:
+    # sleep sends no WM_QUERYENDSESSION, so the shutdown warning above never
+    # sees it, and an overnight upload is likelier to die this way than to
+    # be switched off deliberately. Holds the SYSTEM idle timer only -- the
+    # screen still blanks -- and cannot stop a deliberate Start -> Sleep or
+    # a closing lid. See shutdown_guard.py.
+    "keep_awake_while_syncing": True,
     # False = no sync lanes at all: the machine works directly off the NAS
     # share (base rig). The companion still runs the timeline watcher, popup
     # fixer, and dashboard reporter; lanes report idle with a "disabled"
@@ -434,6 +441,12 @@ proxy_relink_enabled = true
 # in flight, naming how much is left. The editor always keeps a "Shut down
 # anyway" button. Set false to switch off silently mid-upload.
 shutdown_warning_enabled = true
+
+# Keep the machine from idling into sleep while a sync is still running.
+# The screen still blanks; only the system idle timer is held, and only for
+# as long as something is actually transferring. Cannot stop a deliberate
+# Start -> Sleep or a closing lid. Set false to let it sleep regardless.
+keep_awake_while_syncing = true
 
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and

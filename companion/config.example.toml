@@ -234,6 +234,15 @@ proxy_relink_enabled = true
 # again from the beginning. Does not cover sleep.
 shutdown_warning_enabled = true
 
+# Keep the machine from idling into sleep while a sync is still running --
+# sleep never triggers the shutdown warning above, and an overnight upload
+# is likelier to die that way than to be switched off deliberately. Holds
+# the SYSTEM idle timer only, so the screen still blanks on schedule, and
+# only for as long as something is actually transferring. It cannot stop a
+# deliberate Start -> Sleep or a closing laptop lid; nothing in user space
+# can. Set false to let the machine sleep regardless.
+keep_awake_while_syncing = true
+
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
 # dashboard reporting keep working; all sync lanes stay off.

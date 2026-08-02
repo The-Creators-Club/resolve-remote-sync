@@ -10,15 +10,20 @@ upload).
 from __future__ import annotations
 
 import sys
+import time
 
 import pytest
 
-from ccsync_companion import shutdown_guard
 from ccsync_companion.shutdown_guard import (
+    ES_CONTINUOUS,
+    ES_SYSTEM_REQUIRED,
     MAX_REASON_CHARS,
+    KeepAwakeGuard,
     ShutdownGuard,
+    _WindowsKeepAwake,
     _WindowsShutdownGuard,
     describe_pending,
+    make_keep_awake_guard,
     make_shutdown_guard,
 )
 from ccsync_companion.sync.base import (
@@ -287,3 +292,183 @@ def test_stopping_a_guard_that_never_started_is_harmless():
     guard = _WindowsShutdownGuard(lambda: None)
     guard.stop()
     assert guard.active is False
+
+
+# --- keep-awake ------------------------------------------------------------
+
+class _FakeExecutionState:
+    """Stand-in for SetThreadExecutionState: records flags, returns the
+    previous state like the real one (0 means failure)."""
+
+    def __init__(self, fail=False):
+        self.calls: list[int] = []
+        self.fail = fail
+
+    def __call__(self, flags: int) -> int:
+        self.calls.append(flags)
+        return 0 if self.fail else ES_CONTINUOUS
+
+
+def _keep_awake(busy_fn, fake=None):
+    fake = fake or _FakeExecutionState()
+    return _WindowsKeepAwake(busy_fn, set_state_fn=fake, poll_seconds=0.01), fake
+
+
+def test_a_busy_lane_holds_off_the_idle_timer():
+    guard, fake = _keep_awake(lambda: True)
+    assert guard.apply_once() is True
+    assert fake.calls == [ES_CONTINUOUS | ES_SYSTEM_REQUIRED]
+
+
+def test_the_display_is_never_held_awake():
+    """ES_DISPLAY_REQUIRED would leave editors with a screen that refuses to
+    blank all night. We are keeping the upload alive, not the monitor."""
+    guard, fake = _keep_awake(lambda: True)
+    guard.apply_once()
+    assert all(not (flags & 0x00000002) for flags in fake.calls)
+
+
+def test_es_continuous_is_always_set():
+    """Without ES_CONTINUOUS the call nudges the idle timer once instead of
+    holding it -- the subtly-broken version that looks like it works."""
+    guard, fake = _keep_awake(lambda: True)
+    guard.apply_once()
+    assert all(flags & ES_CONTINUOUS for flags in fake.calls)
+
+
+def test_an_idle_machine_is_left_alone_entirely():
+    guard, fake = _keep_awake(lambda: False)
+    assert guard.apply_once() is False
+    assert fake.calls == []
+
+
+def test_the_idle_timer_is_released_when_the_sync_finishes():
+    busy = [True]
+    guard, fake = _keep_awake(lambda: busy[0])
+    guard.apply_once()
+    busy[0] = False
+    assert guard.apply_once() is False
+    assert fake.calls == [ES_CONTINUOUS | ES_SYSTEM_REQUIRED, ES_CONTINUOUS]
+
+
+def test_windows_is_only_called_when_the_answer_changes():
+    """Re-asserting every poll works but churns powercfg's requests list,
+    burying any real diagnosis in noise."""
+    guard, fake = _keep_awake(lambda: True)
+    for _ in range(5):
+        guard.apply_once()
+    assert len(fake.calls) == 1
+
+
+def test_a_crashing_busy_check_lets_the_machine_sleep():
+    """Failing the other way would keep an editor's PC awake all night."""
+    def boom():
+        raise RuntimeError("kaboom")
+
+    guard, fake = _keep_awake(boom)
+    assert guard.apply_once() is False
+    assert fake.calls == []
+
+
+def test_a_failed_call_is_not_recorded_as_held():
+    """SetThreadExecutionState returns 0 on failure. Believing it worked
+    would mean never issuing the release, and never retrying."""
+    guard, fake = _keep_awake(lambda: True, _FakeExecutionState(fail=True))
+    assert guard.apply_once() is False
+    assert guard.held is False
+
+
+def test_a_failed_call_is_retried_on_the_next_poll():
+    fake = _FakeExecutionState(fail=True)
+    guard, _ = _keep_awake(lambda: True, fake)
+    guard.apply_once()
+    guard.apply_once()
+    assert len(fake.calls) == 2
+
+
+def test_a_raising_call_leaves_the_state_unheld():
+    def explode(flags):
+        raise OSError("SetThreadExecutionState blew up")
+
+    guard = _WindowsKeepAwake(lambda: True, set_state_fn=explode)
+    assert guard.apply_once() is False
+
+
+def test_the_loop_releases_the_idle_timer_when_it_stops():
+    """A thread that dies still holding ES_SYSTEM_REQUIRED is the failure
+    that leaves a machine unable to sleep with nothing left to sync."""
+    guard, fake = _keep_awake(lambda: True)
+    guard.start()
+    deadline = time.monotonic() + 5.0
+    while not guard.held and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert guard.held, "never took the idle timer"
+    guard.stop()
+    assert guard.held is False
+    assert fake.calls[0] == ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+    assert fake.calls[-1] == ES_CONTINUOUS
+
+
+def test_the_loop_notices_a_sync_finishing_without_being_stopped():
+    busy = [True]
+    guard, fake = _keep_awake(lambda: busy[0])
+    guard.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not guard.held and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert guard.held
+        busy[0] = False
+        deadline = time.monotonic() + 5.0
+        while guard.held and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert guard.held is False, "held the idle timer after the sync finished"
+    finally:
+        guard.stop()
+
+
+def test_stopping_a_keep_awake_that_never_started_is_harmless():
+    guard, fake = _keep_awake(lambda: True)
+    guard.stop()
+    assert guard.held is False
+    assert fake.calls == []
+
+
+def test_starting_twice_runs_one_loop():
+    guard, fake = _keep_awake(lambda: False)
+    guard.start()
+    first = guard._thread
+    guard.start()
+    try:
+        assert guard._thread is first
+    finally:
+        guard.stop()
+
+
+def test_keep_awake_is_a_no_op_when_switched_off():
+    guard = make_keep_awake_guard(lambda: True, enabled=False)
+    assert type(guard) is KeepAwakeGuard
+    guard.start()
+    guard.stop()
+    assert guard.held is False
+
+
+def test_keep_awake_is_a_no_op_off_windows(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert type(make_keep_awake_guard(lambda: True)) is KeepAwakeGuard
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only guard")
+def test_the_real_keep_awake_talks_to_windows():
+    """The genuine SetThreadExecutionState, taken and released -- no fakes.
+    Verified by powercfg elsewhere; here we only assert it does not fail."""
+    guard = make_keep_awake_guard(lambda: True)
+    guard.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not guard.held and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert guard.held, "Windows refused ES_SYSTEM_REQUIRED"
+    finally:
+        guard.stop()
+    assert guard.held is False

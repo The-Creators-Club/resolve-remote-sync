@@ -1,4 +1,7 @@
-"""Warn the editor before Windows shuts down on top of an in-flight sync.
+"""Keep a machine from vanishing part-way through an upload.
+
+Two guards, one cause. Both live here because they answer the same question
+-- "is anything actually moving right now?" -- from the same predicate.
 
 On 2026-08-02 ruskin's machine went away at 02:44:35 with three camera
 originals part-uploaded -- 19.3 GB of partials on the server, and nothing on
@@ -21,12 +24,26 @@ explanation, never a lock. Two properties matter and are load-bearing:
     never be able to trap someone at their desk, so the reason callback is
     fully fault-isolated and every unexpected path returns "allow".
 
-Scope: this covers shutdown, restart and log-off. It does NOT cover sleep,
-which arrives as WM_POWERBROADCAST and is a separate decision (keeping a
-machine awake to finish an upload is a policy change, not a warning).
+That covers shutdown, restart and log-off. It does NOT cover sleep, which
+never sends WM_QUERYENDSESSION at all -- and sleep is the likelier way a
+machine goes quiet at 02:44. So the second guard, _WindowsKeepAwake, holds
+ES_SYSTEM_REQUIRED while a lane is busy, which stops the idle timer from
+sleeping the machine out from under a transfer. Its constraints:
+
+  * ES_SYSTEM_REQUIRED only, never ES_DISPLAY_REQUIRED. The screen still
+    blanks on schedule; we are keeping the upload alive, not the monitor.
+  * The execution state is per-THREAD and only lasts as long as the thread
+    that set it, so the keep-awake loop must stay alive to hold it -- it is
+    not a fire-and-forget call.
+  * It cannot stop a DELIBERATE sleep (Start -> Sleep, or a closing lid).
+    Nothing in user space can, and the shutdown guard above is what covers
+    the deliberate case.
+  * Failing open means letting the machine sleep. A bug in here that held
+    the state forever would keep someone's PC awake all night, so every
+    error path releases.
 
 The pure decision logic lives in describe_pending() so it can be tested on
-any platform; only _WindowsShutdownGuard touches ctypes.
+any platform; only the two _Windows* classes touch ctypes.
 """
 
 from __future__ import annotations
@@ -53,6 +70,19 @@ WM_ENDSESSION = 0x0016
 
 _WINDOW_CLASS = "CCSyncShutdownGuard"
 _WINDOW_TITLE = "CCSync"
+
+# SetThreadExecutionState flags. ES_CONTINUOUS makes the request stick until
+# withdrawn (without it the call only resets the idle timer once, which is
+# the subtly-broken version of this feature); ES_SYSTEM_REQUIRED is the
+# system idle timer alone. ES_DISPLAY_REQUIRED is deliberately absent -- an
+# upload does not need the monitor on, and holding it would leave editors
+# staring at a screen that never blanks.
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+# How often the keep-awake loop re-asks whether anything is moving. Far
+# below any sleep timer worth having, and cheap: it reads lane statuses.
+KEEP_AWAKE_POLL_SECONDS = 30.0
 
 
 # --- formatting (local copies: tray.py imports pystray at module scope) -----
@@ -421,3 +451,151 @@ def make_shutdown_guard(
     if not enabled or sys.platform != "win32":
         return ShutdownGuard()
     return _WindowsShutdownGuard(reason_fn)
+
+
+# --- keep-awake ------------------------------------------------------------
+
+class KeepAwakeGuard:
+    """No-op base: every non-Windows platform, and Windows when disabled."""
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    @property
+    def held(self) -> bool:
+        return False
+
+
+class _WindowsKeepAwake(KeepAwakeGuard):
+    """Hold off the system idle timer for as long as a lane is busy.
+
+    The loop exists because SetThreadExecutionState is scoped to the calling
+    thread: the state evaporates when that thread ends, so something has to
+    stay alive holding it. Polling also means the state is withdrawn within
+    KEEP_AWAKE_POLL_SECONDS of the sync finishing, rather than lingering
+    until the companion exits.
+    """
+
+    def __init__(
+        self,
+        busy_fn: Callable[[], bool],
+        set_state_fn: Optional[Callable[[int], int]] = None,
+        poll_seconds: float = KEEP_AWAKE_POLL_SECONDS,
+    ) -> None:
+        self._busy_fn = busy_fn
+        self._set_state_fn = set_state_fn
+        self._poll_seconds = poll_seconds
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._held = False
+
+    @property
+    def held(self) -> bool:
+        return self._held
+
+    # -- the part worth testing --------------------------------------------
+
+    def _is_busy(self) -> bool:
+        try:
+            return bool(self._busy_fn())
+        except Exception:
+            # Fail towards letting the machine sleep: a guard bug that kept
+            # every editor's PC awake overnight would be worse than a missed
+            # upload, and the next poll will pick it up if it recovers.
+            log.exception("keep-awake: busy check failed -- allowing sleep")
+            return False
+
+    def apply_once(self) -> bool:
+        """Re-assert (or withdraw) the request. Returns whether it is held.
+
+        Only calls Windows on a CHANGE. Re-asserting ES_CONTINUOUS every
+        poll would work, but it makes powercfg's requests list churn and
+        buries any real diagnosis in noise.
+        """
+        busy = self._is_busy()
+        if busy == self._held:
+            return self._held
+        flags = (ES_CONTINUOUS | ES_SYSTEM_REQUIRED) if busy else ES_CONTINUOUS
+        fn = self._set_state_fn
+        if fn is None:
+            return self._held
+        try:
+            if not fn(flags):
+                # Returns the previous state, or 0 on failure.
+                log.warning("keep-awake: SetThreadExecutionState(0x%x) failed", flags)
+                return self._held
+        except Exception:
+            log.exception("keep-awake: SetThreadExecutionState failed")
+            return self._held
+        self._held = busy
+        log.info(
+            "keep-awake: %s the system idle timer while syncing",
+            "holding off" if busy else "released",
+        )
+        return self._held
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._stop.clear()
+        try:
+            self._thread = threading.Thread(
+                target=self._loop, name="ccsync-keep-awake", daemon=True
+            )
+            self._thread.start()
+        except Exception:
+            log.exception("keep-awake: could not start its thread")
+            self._thread = None
+
+    def stop(self) -> None:
+        thread, self._thread = self._thread, None
+        self._stop.set()
+        if thread is not None and thread.is_alive():
+            # The loop releases the state in its own finally, and it must be
+            # the SAME thread that set it -- releasing from here would be a
+            # no-op on a state this thread never held.
+            thread.join(timeout=max(2.0, self._poll_seconds / 4))
+
+    def _loop(self) -> None:
+        if self._set_state_fn is None:
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.SetThreadExecutionState.restype = wintypes.DWORD
+                kernel32.SetThreadExecutionState.argtypes = [wintypes.DWORD]
+                self._set_state_fn = kernel32.SetThreadExecutionState
+            except Exception:
+                log.exception("keep-awake: ctypes unavailable -- machines may sleep mid-sync")
+                return
+        try:
+            while True:
+                self.apply_once()
+                if self._stop.wait(self._poll_seconds):
+                    break
+        except Exception:
+            log.exception("keep-awake: loop stopped")
+        finally:
+            # Never leave the idle timer suppressed by a thread that is
+            # about to die -- on this thread, while it still exists.
+            try:
+                if self._held and self._set_state_fn is not None:
+                    self._set_state_fn(ES_CONTINUOUS)
+            except Exception:
+                log.exception("keep-awake: could not release the idle timer")
+            self._held = False
+
+
+def make_keep_awake_guard(
+    busy_fn: Callable[[], bool], enabled: bool = True
+) -> KeepAwakeGuard:
+    """The keep-awake guard for this platform. Always startable."""
+    if not enabled or sys.platform != "win32":
+        return KeepAwakeGuard()
+    return _WindowsKeepAwake(busy_fn)

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -89,6 +90,17 @@ RCLONE_EXIT_MAX_DURATION = 10
 # during a big ingest (AUDIT_3 M-8). The counting happens incrementally
 # (RcloneRunTally); this is only what a human/last_error needs to see.
 STDERR_TAIL_LINES = 200
+
+# How long to wait for the stderr reader thread AFTER rclone itself has
+# exited. Everything still unread is already sitting in the pipe buffer
+# (64 KB at most) by then, so a healthy reader finishes in milliseconds --
+# but the read only ends at EOF, and EOF only comes when the LAST holder of
+# the write handle closes it. A grandchild that inherited it (an ssh helper,
+# an AV shim) keeps the pipe open after rclone is gone, and an unbounded
+# join() then blocked _run_once_locked forever WHILE HOLDING _run_lock,
+# which stalls the sequencer's whole project rotation. Bounded: a truncated
+# stderr tail is a far smaller loss than a wedged lane.
+STDERR_READER_JOIN_SECONDS = 30.0
 
 # -- transport tuning (AUDIT_2 §4.1 P1/P2, §4.2 table) ---------------------
 #
@@ -188,6 +200,16 @@ EXPRESS_PENDING_MAX_SECONDS = 1800.0
 # How old an express list file must be before a lane start treats it as
 # debris from a hard kill. Comfortably longer than any express run.
 EXPRESS_LIST_STALE_SECONDS = 86400.0
+
+
+class SpawnCancelled(RuntimeError):
+    """stop() landed between "we decided to run rclone" and the spawn.
+
+    Raised from inside the spawn critical section so the caller can tell a
+    deliberate stand-down apart from a real failure: an orphaned rclone
+    outlives the parent on Windows, so a self-upgrade that spawns here would
+    leave the old process's upload racing the new process's lanes (AUDIT_2
+    C-7 / KNOWN_BUGS B13). Never paints a lane red."""
 
 
 def _cfg_str(cfg: Optional[dict], key: str, default: str) -> str:
@@ -1115,6 +1137,55 @@ def parse_json_log(text: str) -> RcloneRunResult:
     return tally.result()
 
 
+# -- project identity for a transfer row -----------------------------------
+#
+# The dashboard's `transfers.project_slug` column (api.TransferIn ->
+# db.replace_active_transfers) was always NULL: it accepts and persists the
+# field, and the companion never sent it, so a live transfer could only ever
+# be shown by file path. The slug is the project's IMMUTABLE identity from
+# its .ccsync-project marker -- it survives a rename/move on the NAS, which
+# a rel path does not, so it is the only stable key to join a transfer row
+# to a project.
+#
+# Intentional copy of dashboard provision.MARKER_FILENAME/SLUG_RE/read_marker
+# (and fixer.MARKER_FILENAME) rather than an import: this module deliberately
+# depends on nothing above sync/, and fixer pulls in resolve_bridge. Same
+# duplication posture as VIDEO_EXTS above -- keep them in sync.
+MARKER_FILENAME = ".ccsync-project"
+# A marker is a plain JSON file on a share every editor can write, and this
+# value crosses the wire into a dashboard URL segment/Syncthing folder id, so
+# a hand-dropped {"slug": "../../etc"} must not get that far.
+SLUG_RE = re.compile(r"^[a-z0-9-]+$")
+# The dashboard declares `project_slug: str | None = Field(max_length=128)`
+# on TransferIn, and pydantic rejects the WHOLE report body on a violation --
+# which would take lane status, presence and the upgrade advertisement down
+# with it, for a cosmetic field. Nothing upstream bounds a marker slug's
+# length, so the sender does: over the cap, the field is simply omitted.
+MAX_PROJECT_SLUG_CHARS = 128
+
+
+def read_project_slug(directory) -> Optional[str]:
+    """The .ccsync-project marker's slug for a project dir, or None.
+
+    None for missing/unreadable/malformed markers and for a slug that fails
+    SLUG_RE -- callers treat that as "no attribution" and omit the field
+    rather than sending a guess. Never raises."""
+    try:
+        raw = (Path(directory) / MARKER_FILENAME).read_text(encoding="utf-8-sig")
+        slug = str(json.loads(raw).get("slug", "")).strip()
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    if not slug:
+        return None
+    if not SLUG_RE.match(slug):
+        log.debug(
+            "ignoring the project marker in %s: slug %r is not a valid identity",
+            directory, slug,
+        )
+        return None
+    return slug
+
+
 def _project_rel_for_path(
     local_root: str, path: str, known_rels: Optional[list[str]] = None
 ) -> Optional[str]:
@@ -1139,9 +1210,19 @@ def _project_rel_for_path(
     try:
         rel = Path(path).relative_to(Path(local_root))
     except ValueError:
+        log.debug("express/watchdog: %r is outside local_root %r", path, local_root)
         return None
     parts = rel.parts
-    if len(parts) < 2 or parts[0] != "Projects":
+    # Case-INSENSITIVE, like every other comparison in this function (and
+    # like the --ignore-case both lanes run with): a mapped `P:\projects\...`
+    # or a local_root the editor typed in lower case used to fail this one
+    # literal check while the rest of the path was lowercased anyway, so the
+    # file silently waited for the next full rotation with nothing logged.
+    if len(parts) < 2 or parts[0].lower() != "projects":
+        log.debug(
+            "express/watchdog: %r is not under a 'Projects' directory of %r -- "
+            "the periodic pass owns it", path, local_root,
+        )
         return None
     inner = [p.lower() for p in parts[1:]]
 
@@ -1152,11 +1233,23 @@ def _project_rel_for_path(
             segs = [s.lower() for s in known.strip("/").split("/") if s]
             if len(segs) < len(inner) and inner[: len(segs)] == segs and len(segs) > best_len:
                 best, best_len = known, len(segs)
-        return f"Projects/{best}" if best else None
+        if not best:
+            log.debug(
+                "express/watchdog: %r matches none of the %d known project rel(s)",
+                path, len(known_rels),
+            )
+            return None
+        return f"Projects/{best}"
 
     if len(parts) < 4:
+        log.debug(
+            "express/watchdog: %r is above the legacy year/series/project depth", path
+        )
         return None
-    return "/".join(parts[:4])
+    # "Projects" spelled canonically, not as it happens to be cased on disk:
+    # this string becomes an rclone subpath on the NAS, which IS case
+    # sensitive.
+    return "/".join(["Projects", *parts[1:4]])
 
 
 class RcloneLane(LaneAdapter):
@@ -1210,6 +1303,13 @@ class RcloneLane(LaneAdapter):
         self.min_age_seconds = lane_b_min_age_seconds(cfg)
         # Last orphan-.partial scan (P8/P15/C-7): REPORTED, never deleted.
         self._orphans: Optional[dict] = None
+        # subpath -> marker slug, for the project_slug on each transfer row.
+        # POSITIVE results only: a project dir whose marker hasn't synced down
+        # yet (lane C delivers it) must not be remembered as "no slug" for the
+        # life of the process. A slug is immutable and travels with its
+        # directory, so a cached one can never go stale -- a move changes the
+        # subpath, i.e. the cache key.
+        self._project_slug_cache: dict[str, str] = {}
 
         # Backward-compat seam: a caller that injects a custom subprocess_run
         # (and no popen_factory) keeps the old subprocess.run() code path —
@@ -1236,6 +1336,13 @@ class RcloneLane(LaneAdapter):
         # racing the newly-spawned companion's own lane B is two concurrent
         # syncs of the same destination).
         self._proc = None
+        # Held across "check the stop flag -> spawn -> publish the handle",
+        # and taken again by _kill_running_process. Without it there was a
+        # window in which stop() looked at _proc, found None (the child was
+        # about to be created), returned -- and the spawn then started an
+        # rclone that outlived the parent (KNOWN_BUGS B13). Never held while
+        # waiting on the child.
+        self._proc_lock = threading.Lock()
         self._observer = None  # watchdog Observer, lane A only
         self._debounce_timer: Optional[threading.Timer] = None
         self._lock = threading.Lock()
@@ -1285,6 +1392,10 @@ class RcloneLane(LaneAdapter):
         self._express_pending: dict[str, tuple[int, float]] = {}
         self._express_timer: Optional[threading.Timer] = None
         self._express_proc = None
+        # The express twin of _proc_lock: _express_stop() must never be able
+        # to look for a child in the instant between "the shutdown flag was
+        # last checked" and "the handle is published" (KNOWN_BUGS B13).
+        self._express_proc_lock = threading.Lock()
         self._express_shutdown = threading.Event()
         # "Pause syncing" (tray) -- distinct from _express_shutdown, which is
         # latched off by stop() for a whole thread generation. See
@@ -1493,8 +1604,14 @@ class RcloneLane(LaneAdapter):
         # old lane B `sync` racing the new process's lane B over the same
         # destination (AUDIT_2 L-12/C-7).
         self._kill_running_process()
-        if self._debounce_timer is not None:
-            self._debounce_timer.cancel()
+        # OBSERVER FIRST, TIMER SECOND (legacy whole-tree mode). The other
+        # order left a window: cancel the timer, then a file event still
+        # being delivered by the live observer called
+        # _schedule_debounced_run() -- which arms a NEW timer under _lock,
+        # a lock stop() wasn't holding -- and run_once() fired on a stopped
+        # lane seconds later. Stopping and JOINING the observer first means
+        # no handler can still be in flight; _schedule_debounced_run's own
+        # _stop_event check (also under _lock) closes what the join cannot.
         if self._observer is not None:
             try:
                 self._observer.stop()
@@ -1502,6 +1619,10 @@ class RcloneLane(LaneAdapter):
             except Exception:
                 pass
             self._observer = None
+        with self._lock:
+            timer, self._debounce_timer = self._debounce_timer, None
+        if timer is not None:
+            timer.cancel()
 
     def _express_stop(self) -> None:
         """Disarm the express path and end an in-flight express rclone.
@@ -1517,36 +1638,40 @@ class RcloneLane(LaneAdapter):
             self._express_pending = {}
         if timer is not None:
             timer.cancel()
-        proc = self._express_proc
-        if proc is None:
-            return
-        try:
-            if proc.poll() is not None:
+        # Read the handle under the SPAWN lock, not bare. The shutdown flag
+        # above is set before we take it, so the two possible interleavings
+        # are now both safe: either we get the lock first (and the spawn
+        # about to happen sees the flag and stands down), or the spawner got
+        # it first (and by the time we have it, _express_proc is published
+        # and we can terminate it). Before this, "None" simply meant "the
+        # child is a microsecond away from existing" (KNOWN_BUGS B13).
+        with self._express_proc_lock:
+            proc = self._express_proc
+            if proc is None:
                 return
-            log.info("%s: terminating in-flight express rclone on stop()", self.name)
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                proc.kill()
-        except Exception:
-            log.debug("%s: could not terminate express rclone child", self.name, exc_info=True)
+            self._terminate_child(proc, "express rclone")
 
     def _kill_running_process(self) -> None:
-        proc = self._proc
-        if proc is None:
-            return
+        with self._proc_lock:
+            proc = self._proc
+            if proc is None:
+                return
+            self._terminate_child(proc, "rclone")
+
+    def _terminate_child(self, proc, what: str) -> None:
+        """terminate -> wait -> kill, never raising. Shared by both stop
+        paths; the caller holds the matching spawn lock."""
         try:
             if proc.poll() is not None:
                 return
-            log.info("%s: terminating in-flight rclone on stop()", self.name)
+            log.info("%s: terminating in-flight %s on stop()", self.name, what)
             proc.terminate()
             try:
                 proc.wait(timeout=5)
             except Exception:
                 proc.kill()
         except Exception:
-            log.debug("%s: could not terminate rclone child", self.name, exc_info=True)
+            log.debug("%s: could not terminate the %s child", self.name, what, exc_info=True)
 
     def status(self) -> LaneStatus:
         with self._lock:
@@ -1603,6 +1728,17 @@ class RcloneLane(LaneAdapter):
     def _run_once_locked(
         self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None
     ) -> LaneStatus:
+        # A stopped lane must not START a run. run_once() is called from the
+        # periodic loop, the debounce timer AND (in managed mode) the
+        # sequencer, none of which can be sure stop() didn't land while they
+        # were queued on _run_lock -- and everything below this point ends in
+        # a spawned rclone that outlives the parent on Windows (KNOWN_BUGS
+        # B13). Cheap and re-checked again immediately before the spawn,
+        # because rclone_available() and _build_command() take real time.
+        if self._stop_event.is_set():
+            log.debug("%s: run skipped -- the lane is stopping", self.name)
+            return self.status()
+
         available, msg = rclone_available(self.rclone_path)
         if not available:
             with self._lock:
@@ -1657,6 +1793,12 @@ class RcloneLane(LaneAdapter):
 
         if self._legacy_run:
             try:
+                # Same guard as the Popen path, minus the handle: this seam
+                # blocks in subprocess_run and hands back a finished process,
+                # so there is nothing for stop() to kill -- the pre-spawn
+                # check is the only cancellation point it has.
+                with self._proc_lock:
+                    self._raise_if_stopping("run")
                 proc = self.subprocess_run(
                     cmd,
                     capture_output=True,
@@ -1665,6 +1807,8 @@ class RcloneLane(LaneAdapter):
                     errors="replace",
                     creationflags=_win_creationflags(),
                 )
+            except SpawnCancelled:
+                return self._stand_down_status()
             except Exception as exc:
                 with self._lock:
                     self._status.state = STATE_ERROR
@@ -1678,6 +1822,8 @@ class RcloneLane(LaneAdapter):
         else:
             try:
                 returncode, stderr_text, result = self._run_popen(cmd)
+            except SpawnCancelled:
+                return self._stand_down_status()
             except Exception as exc:
                 with self._lock:
                     self._status.state = STATE_ERROR
@@ -1836,6 +1982,32 @@ class RcloneLane(LaneAdapter):
         except Exception:
             log.exception("%s: on_trash callback failed", self.name)
 
+    # -- spawn cancellation (KNOWN_BUGS B13) ------------------------------
+    def _raise_if_stopping(self, what: str) -> None:
+        """Stand down if stop() has landed. Caller holds the spawn lock."""
+        if self._stop_event.is_set():
+            log.info(
+                "%s: %s cancelled -- stop() landed before rclone was started",
+                self.name, what,
+            )
+            raise SpawnCancelled(f"{self.name}: {what} cancelled by stop()")
+
+    def _stand_down_status(self) -> LaneStatus:
+        """Clear the SYNCING bookkeeping a cancelled run had already set.
+
+        Deliberately IDLE, not ERROR: a lane that was told to stop did not
+        fail, and painting it red would make every self-upgrade/sign-out look
+        like a broken lane on the grid."""
+        with self._lock:
+            self._status.state = STATE_IDLE
+            self._status.transferring = 0
+            self._status.speed_bps = None
+            self._status.eta_seconds = None
+            self._status.transfers = []
+            self._status.current_project = None
+            self._status.detail = "stopped before this pass started"
+        return self.status()
+
     # -- Popen-based runner with live --stats JSON parsing ---------------
     def _run_popen(self, cmd: list[str]) -> tuple[int, str, RcloneRunResult]:
         """Run rclone, parsing its stderr AS IT ARRIVES.
@@ -1845,15 +2017,28 @@ class RcloneLane(LaneAdapter):
         RcloneRunTally for why keeping all of it was a memory problem on real
         ingests (AUDIT_3 M-8)."""
         factory = self.popen_factory or subprocess.Popen
-        proc = factory(
-            cmd,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_win_creationflags(),
-        )
+        # SPAWN AND PUBLISH ATOMICALLY. _kill_running_process() takes the
+        # same lock, so it can no longer see `_proc is None` for a child that
+        # is about to exist and return having killed nothing (KNOWN_BUGS
+        # B13). The lock is released before proc.wait(), so stop() is never
+        # blocked for longer than a spawn.
+        with self._proc_lock:
+            self._raise_if_stopping("run")
+            proc = factory(
+                cmd,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=_win_creationflags(),
+            )
+            # Published so stop() can end this child instead of orphaning it.
+            self._proc = proc
         tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
         tally = RcloneRunTally()
+        # Set when the reader is abandoned (see the join below): a reader
+        # still blocked on a pipe a grandchild is holding open must not go on
+        # writing this run's status/tally into the NEXT run's.
+        abandoned = threading.Event()
 
         def _reader() -> None:
             # Never let a decode/IO error escape this thread: with no
@@ -1864,6 +2049,8 @@ class RcloneLane(LaneAdapter):
             # deadlocking _run_lock (and the whole sequencer) forever.
             try:
                 for line in proc.stderr:
+                    if abandoned.is_set():
+                        return
                     tail.append(line)
                     self._handle_stderr_line(line, tally)
             except Exception:
@@ -1880,14 +2067,35 @@ class RcloneLane(LaneAdapter):
             target=_reader, name=f"ccsync-{self.name}-stderr-reader", daemon=True
         )
         reader_thread.start()
-        # Published so stop() can end this child instead of orphaning it.
-        self._proc = proc
         try:
             returncode = proc.wait()
         finally:
-            self._proc = None
-        reader_thread.join()
-        return returncode, "".join(tail), tally.result()
+            with self._proc_lock:
+                if self._proc is proc:
+                    self._proc = None
+        # BOUNDED (see STDERR_READER_JOIN_SECONDS): rclone has exited, so a
+        # reader that is still blocked is waiting on a write handle some
+        # grandchild inherited and will never close. Waiting forever here
+        # wedged _run_lock and with it the sequencer's rotation.
+        reader_thread.join(timeout=STDERR_READER_JOIN_SECONDS)
+        if reader_thread.is_alive():
+            abandoned.set()
+            log.warning(
+                "%s: rclone exited but its stderr pipe is still open after %.0fs "
+                "(a grandchild inherited the write handle) -- continuing with a "
+                "truncated log tail rather than blocking the lane",
+                self.name, STDERR_READER_JOIN_SECONDS,
+            )
+        try:
+            tail_text = "".join(list(tail))
+            result = tally.result()
+        except RuntimeError:
+            # An abandoned reader mutated a deque mid-snapshot. Both are
+            # diagnostics/counters for a run that has already finished, so a
+            # partial answer beats raising into the lane's error state.
+            tail_text = ""
+            result = RcloneRunTally().result()
+        return returncode, tail_text, result
 
     def _handle_stderr_line(self, line: str, tally: Optional[RcloneRunTally] = None) -> None:
         """Live --stats parse for ONE stderr line, plus the run tally.
@@ -1909,17 +2117,64 @@ class RcloneLane(LaneAdapter):
         stats = record.get("stats")
         if not isinstance(stats, dict):
             return
+        # The project this run is for, read and released before resolving the
+        # slug: that can touch the disk (the marker), and _lock is on the
+        # tray's and the reporter's read path.
+        with self._lock:
+            subpath = self._status.current_project
+        project_slug = self._project_slug_for_subpath(subpath)
         with self._lock:
             self._status.bytes_done = stats.get("bytes")
             self._status.bytes_total = stats.get("totalBytes")
             self._status.speed_bps = stats.get("speed")
             self._status.eta_seconds = stats.get("eta")
-            self._status.transfers = self._normalize_transferring(stats.get("transferring"))
+            self._status.transfers = self._normalize_transferring(
+                stats.get("transferring"), project_slug
+            )
 
-    def _normalize_transferring(self, transferring: Optional[list]) -> list[dict]:
+    def _project_slug_for_subpath(self, subpath: Optional[str]) -> Optional[str]:
+        """The marker slug for this run's project, or None.
+
+        None for a whole-tree run (no subpath) and for a project whose marker
+        hasn't arrived yet -- callers omit the field entirely in that case
+        rather than inventing one from the rel path, which is exactly the
+        guess the slug exists to avoid (a renamed project keeps its slug and
+        changes its rel). Never raises."""
+        key = str(subpath or "").strip().strip("/").replace("\\", "/")
+        if not key:
+            return None
+        cached = self._project_slug_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            slug = read_project_slug(Path(self.local_root) / Path(*key.split("/")))
+        except Exception:
+            log.debug("%s: could not read the project marker for %s", self.name, key,
+                      exc_info=True)
+            return None
+        if slug and len(slug) > MAX_PROJECT_SLUG_CHARS:
+            log.warning(
+                "%s: not reporting project_slug for %s -- %d chars exceeds the "
+                "%d the dashboard accepts, and an over-long value would 422 the "
+                "whole report", self.name, key, len(slug), MAX_PROJECT_SLUG_CHARS,
+            )
+            return None
+        if slug:
+            self._project_slug_cache[key] = slug
+        return slug
+
+    def _normalize_transferring(
+        self, transferring: Optional[list], project_slug: Optional[str] = None
+    ) -> list[dict]:
         """Normalize rclone --stats JSON's "transferring" array (per-file, live
         mid-transfer only -- absent/empty between files or once idle) into the
-        dashboard's "transfers" shape. Direction is fixed per-lane."""
+        dashboard's "transfers" shape. Direction is fixed per-lane.
+
+        `project_slug` is the dashboard's TransferIn.project_slug (persisted
+        by db.replace_active_transfers). The KEY IS OMITTED when the lane has
+        no project attribution -- a whole-tree run, or a project dir whose
+        marker hasn't synced down yet -- so the column stays NULL instead of
+        carrying a guessed identity."""
         direction = DIRECTION_UP if self.direction == DIRECTION_UP else DIRECTION_DOWN
         if not transferring:
             return []
@@ -1927,17 +2182,18 @@ class RcloneLane(LaneAdapter):
         for entry in transferring:
             if not isinstance(entry, dict):
                 continue
-            result.append(
-                {
-                    "name": entry.get("name"),
-                    "direction": direction,
-                    "bytes_done": entry.get("bytes"),
-                    "bytes_total": entry.get("size"),
-                    "percentage": entry.get("percentage"),
-                    "speed_bps": entry.get("speed"),
-                    "eta_seconds": entry.get("eta"),
-                }
-            )
+            row = {
+                "name": entry.get("name"),
+                "direction": direction,
+                "bytes_done": entry.get("bytes"),
+                "bytes_total": entry.get("size"),
+                "percentage": entry.get("percentage"),
+                "speed_bps": entry.get("speed"),
+                "eta_seconds": entry.get("eta"),
+            }
+            if project_slug:
+                row["project_slug"] = project_slug
+            result.append(row)
         return result
 
     # -- periodic pass ---------------------------------------------------
@@ -2036,6 +2292,15 @@ class RcloneLane(LaneAdapter):
 
     def _schedule_debounced_run(self) -> None:
         with self._lock:
+            # Checked UNDER _lock, which stop() also takes to disarm the
+            # timer: a watchdog event delivered while stop() was running used
+            # to arm a fresh timer just after stop() had cancelled the old
+            # one, firing run_once() on a stopped lane seconds later. Now the
+            # two orderings are both safe -- either stop() cancels the timer
+            # we armed, or we see its already-set event and arm nothing.
+            if self._stop_event.is_set():
+                log.debug("%s: not arming a debounced run -- the lane is stopping", self.name)
+                return
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
             self._debounce_timer = threading.Timer(self.watch_debounce_seconds, self._debounced_fire)
@@ -2043,6 +2308,12 @@ class RcloneLane(LaneAdapter):
             self._debounce_timer.start()
 
     def _debounced_fire(self) -> None:
+        # A timer that was already counting down when stop() cancelled it can
+        # still have fired (Timer.cancel only helps before the deadline), so
+        # the check is repeated here and again inside _run_once_locked.
+        if self._stop_event.is_set():
+            log.debug("%s: debounced run skipped -- the lane is stopping", self.name)
+            return
         try:
             self.run_once()
         except Exception:
@@ -2235,15 +2506,58 @@ class RcloneLane(LaneAdapter):
         # Non-blocking: if an express run is already uploading, keep the
         # batch and try again next window rather than piling up rclones.
         if not self._express_run_lock.acquire(blocking=False):
-            with self._express_lock:
-                for rel in ready:
-                    self._express_pending.setdefault(rel, (-1, time.monotonic()))
-                self._express_arm_timer_locked()
+            self._express_requeue(ready, batch)
             return
         try:
+            # LAST CHECK BEFORE THE SPAWN, under the run lock. Everything
+            # between the check at the top of this method and here --
+            # partitioning (a stat per path), the lock acquisition, then
+            # rclone_available()'s own subprocess and the list-file write
+            # inside _express_run -- takes real time, and stop() lands in it
+            # routinely during a self-upgrade. _express_spawn re-checks once
+            # more while holding the handle lock; this one keeps us from
+            # writing a list file and claiming in-flight paths for a run
+            # that is about to be refused (KNOWN_BUGS B13).
+            if self._express_shutdown.is_set() or self._express_paused.is_set():
+                log.debug(
+                    "%s: express window dropped -- the lane stopped/paused while "
+                    "the batch was being prepared", self.name,
+                )
+                return
             self._express_run(ready)
         finally:
             self._express_run_lock.release()
+
+    def _express_requeue(self, ready: list[str], batch: dict[str, tuple[int, float]]) -> None:
+        """Hand a batch that lost the run lock back to the next window.
+
+        Keeps each path's ORIGINAL first_seen: re-stamping it here restarted
+        the EXPRESS_PENDING_MAX_SECONDS give-up clock every window, so a path
+        that kept losing this lock was re-stat'd forever instead of being
+        handed to the periodic pass. And it respects _express_max_batch like
+        every other insertion point -- an unbounded requeue could grow the
+        pending map past the cap notify_path_changed() enforces.
+
+        The size is deliberately re-seeded to -1 so the next window re-stats
+        and re-proves stability rather than trusting an observation this run
+        has already acted on."""
+        dropped = 0
+        with self._express_lock:
+            for index, rel in enumerate(ready):
+                if rel in self._express_pending:
+                    continue
+                if len(self._express_pending) >= self._express_max_batch:
+                    dropped = len(ready) - index
+                    break
+                seen = batch.get(rel)
+                first_seen = seen[1] if seen else time.monotonic()
+                self._express_pending[rel] = (-1, first_seen)
+            self._express_arm_timer_locked()
+        if dropped > 0:
+            log.debug(
+                "%s: express requeue hit the %d-path cap -- %d path(s) left to "
+                "the periodic pass", self.name, self._express_max_batch, dropped,
+            )
 
     def _express_partition(
         self, batch: dict[str, tuple[int, float]]
@@ -2320,6 +2634,11 @@ class RcloneLane(LaneAdapter):
             self._express_inflight |= claimed
         try:
             returncode, stderr_text = self._express_spawn(cmd)
+        except SpawnCancelled:
+            # stop() won the race by a hair. Not a failure and not a counter:
+            # the paths are still on disk and the next generation's periodic
+            # pass owns them.
+            return
         except Exception as exc:
             log.warning("%s: express upload failed to run: %s", self.name, exc)
             self._express_record(0, str(exc))
@@ -2361,12 +2680,27 @@ class RcloneLane(LaneAdapter):
             self._express_status["last_error"] = error
             self._express_status["last_run"] = datetime.now(timezone.utc).isoformat()
 
+    def _raise_if_express_stopping(self) -> None:
+        """Stand down if _express_stop() has landed. Caller holds
+        _express_proc_lock."""
+        if self._express_shutdown.is_set():
+            log.info(
+                "%s: express upload cancelled -- stop() landed before rclone was started",
+                self.name,
+            )
+            raise SpawnCancelled(f"{self.name}: express upload cancelled by stop()")
+
     def _express_spawn(self, cmd: list[str]) -> tuple[int, str]:
         """Run the express argv. Mirrors run_once()'s two code paths (the
         injected-subprocess_run seam for tests, Popen otherwise) but keeps
         its OWN child handle: stop() must be able to end an express upload
         without touching the periodic run's, and vice versa."""
         if self._legacy_run:
+            # Nothing to publish on this seam (subprocess_run blocks and
+            # returns a finished process), so the pre-spawn check is the only
+            # cancellation point stop() gets.
+            with self._express_proc_lock:
+                self._raise_if_express_stopping()
             proc = self.subprocess_run(
                 cmd,
                 capture_output=True,
@@ -2378,14 +2712,22 @@ class RcloneLane(LaneAdapter):
             return proc.returncode, (proc.stderr or "")
 
         factory = self.popen_factory or subprocess.Popen
-        proc = factory(
-            cmd,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_win_creationflags(),
-        )
-        self._express_proc = proc
+        # CHECK, SPAWN AND PUBLISH UNDER ONE LOCK -- the fix for the orphaned
+        # express child (KNOWN_BUGS B13). _express_stop() sets the shutdown
+        # flag and then takes this same lock, so it can no longer slip
+        # through the gap where _express_proc was still None because the
+        # child was one statement away from existing. The lock is released
+        # before the read/wait below, so stop() never waits on a transfer.
+        with self._express_proc_lock:
+            self._raise_if_express_stopping()
+            proc = factory(
+                cmd,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=_win_creationflags(),
+            )
+            self._express_proc = proc
         try:
             # Single pipe: read to EOF, then wait. No second stream to
             # deadlock against.
@@ -2400,5 +2742,7 @@ class RcloneLane(LaneAdapter):
                 stderr_text = ""
             returncode = proc.wait()
         finally:
-            self._express_proc = None
+            with self._express_proc_lock:
+                if self._express_proc is proc:
+                    self._express_proc = None
         return returncode, stderr_text

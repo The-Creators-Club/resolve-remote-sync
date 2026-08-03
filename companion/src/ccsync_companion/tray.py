@@ -846,6 +846,11 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
 
     identity = getattr(app, "identity", None)
     _get("signed_in", lambda: identity is not None and identity.valid(), False)
+    # compute_overall_color() has always consulted this; the tooltip and the
+    # menu did not, so an install running with require_login=false and three
+    # healthy lanes was told "not signed in (nothing syncs)" while everything
+    # synced perfectly.
+    _get("require_login", lambda: bool(getattr(app, "_require_login", True)), True)
     _get("identity_label", lambda: _identity_status_label(app), "NOT SIGNED IN")
     _get("paused", lambda: bool(app.is_paused()), False)
     _get("problems", lambda: bool(getattr(app, "config_problems", None)), False)
@@ -905,7 +910,7 @@ def _tooltip_text(snap: dict) -> str:
     it can never disturb an open menu). Windows truncates at ~127 chars."""
     if snap["problems"]:
         return "CCSync: NOT SET UP (nothing syncs)"
-    if not snap["signed_in"]:
+    if not snap["signed_in"] and snap.get("require_login", True):
         return "CCSync: not signed in (nothing syncs)"
     if snap["paused"]:
         return "CCSync: PAUSED"
@@ -1022,10 +1027,18 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         ), pystray.Menu.SEPARATOR]
         if upgrade_info else []
     )
+    # "nothing syncs until you do" is only TRUE when login is required. With
+    # require_login=false the lanes are already running under editor_name, and
+    # telling the editor otherwise sends them chasing a sign-in they don't
+    # need -- the same check compute_overall_color() already makes.
+    sign_in_label = (
+        "► Sign in… (nothing syncs until you do)"
+        if snap.get("require_login", True) else "Sign in…"
+    )
     identity_items = [
         pystray.MenuItem(snap["identity_label"], None, enabled=False),
         pystray.MenuItem("Sign out", on_sign_out) if signed_in
-        else pystray.MenuItem("► Sign in… (nothing syncs until you do)", on_sign_in),
+        else pystray.MenuItem(sign_in_label, on_sign_in),
     ]
 
     problem_items = []

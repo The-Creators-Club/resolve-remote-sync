@@ -35,11 +35,62 @@ log = logging.getLogger("ccsync.manifest")
 # per-file lists get truncated.
 MAX_PER_FILE_ENTRIES = 2000
 
+# Cap on the NUMBER OF PROJECTS reported (KNOWN_BUGS B6). This module used to
+# emit one key per marker-bearing dir with no cap at all, while the dashboard
+# capped `local_manifest` at 64 keys with a RAISING pydantic validator -- so a
+# 65th project 422'd the entire heavy report and, because an idle companion
+# only ever sends heavy ticks, took this machine off the fleet grid completely.
+# Worst placed is the BASE RIG, whose local_root is the whole NAS tree at P:\
+# -- it hits 64 first and holds the authoritative copy of everything.
+#
+# The dashboard now truncates rather than rejecting (api.MAX_REPORT_PROJECTS),
+# so this is no longer load-bearing for availability -- but capping HERE is
+# what decides WHICH 64 survive, and it also saves walking 200 project dirs
+# every refresh. Keep the value in step with api.MAX_REPORT_PROJECTS.
+MAX_PROJECTS = 64
+
 GetSelectedRelsFn = Callable[[], Optional[set]]
+
+# Module-level so the "reported fewer projects than exist" warning fires on a
+# CHANGE rather than every refresh_interval forever (the warn-once pattern
+# used in reporter.py/watcher.py). None = nothing logged yet.
+_last_truncation_logged: Optional[int] = None
 
 
 def _is_proxy_path(rel_parts: tuple) -> bool:
     return any(part.lower() == "proxy" for part in rel_parts)
+
+
+def _project_priority(local_root: str, project_rel: str, selected_rels: Optional[set]):
+    """Sort key deciding which projects survive MAX_PROJECTS.
+
+    Selected projects first -- they are the ones the editor is actually
+    syncing, and the ones whose per-file lists the dashboard's presence view
+    needs. Then most-recently-touched, so an active shoot outranks a 2019
+    archive on a base rig holding hundreds. `rel` last, purely so the order is
+    stable/deterministic between refreshes.
+    """
+    selected = 0 if (selected_rels is not None and project_rel in selected_rels) else 1
+    try:
+        mtime = os.stat(
+            os.path.join(local_root, "Projects", project_rel.replace("/", os.sep))
+        ).st_mtime
+    except OSError:
+        mtime = 0.0
+    return (selected, -mtime, project_rel)
+
+
+def prioritize_project_rels(
+    local_root: str, project_rels: list[str], selected_rels: Optional[set] = None,
+    max_projects: int = MAX_PROJECTS,
+) -> tuple[list[str], int]:
+    """(the rels to report, how many were dropped). Never raises."""
+    if len(project_rels) <= max_projects:
+        return list(project_rels), 0
+    ordered = sorted(
+        project_rels, key=lambda rel: _project_priority(local_root, rel, selected_rels)
+    )
+    return ordered[:max_projects], len(project_rels) - max_projects
 
 
 def scan_local_manifest(
@@ -54,10 +105,30 @@ def scan_local_manifest(
     every other project still gets exact rollups, just with originals/
     proxies=None. `selected_rels=None` means every project is rollup-only.
     """
+    global _last_truncation_logged
+
     result: dict[str, dict[str, Any]] = {}
     # Selection rels union in so a just-selected project whose marker file
     # hasn't synced down yet still gets a rollup (see fixer.list_project_dirs).
     project_rels = fixer.list_project_dirs(local_root, extra_rels=selected_rels or ())
+    # B6: cap the project COUNT, keeping the ones that matter (see
+    # prioritize_project_rels). Applied before the walk, so the dropped
+    # projects cost nothing to skip.
+    project_rels, dropped = prioritize_project_rels(
+        local_root, project_rels, selected_rels
+    )
+    if dropped != _last_truncation_logged:
+        _last_truncation_logged = dropped
+        if dropped:
+            log.warning(
+                "media manifest reports %d of %d project(s): the dashboard accepts at most "
+                "%d per report (B6). Ticked projects and the most recently touched are kept; "
+                "%d older project(s) are not in this machine's presence data.",
+                len(project_rels), len(project_rels) + dropped, MAX_PROJECTS, dropped,
+            )
+        else:
+            log.info("media manifest is no longer truncated (%d project(s))",
+                     len(project_rels))
     for project_rel in project_rels:
         project_dir = Path(local_root) / "Projects" / project_rel.replace("/", os.sep)
         include_files = selected_rels is not None and project_rel in selected_rels

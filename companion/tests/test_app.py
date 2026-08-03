@@ -782,10 +782,7 @@ def test_run_tray_start_non_import_error_still_runs_shutdown(tmp_path, monkeypat
 # -- toggle_pause: legacy mode must respect lane_b_enabled (finding) --------
 
 
-def test_toggle_pause_legacy_mode_skips_lane_b_on_resume_when_disabled(tmp_path):
-    app = _make_app(tmp_path, dashboard_url="", sync_enabled=True, lane_b_enabled=False)
-    assert app._managed is False
-
+def _instrument_lanes(app) -> tuple[list[str], list[str]]:
     started: list[str] = []
     stopped: list[str] = []
     for lane in app.lanes:
@@ -797,6 +794,18 @@ def test_toggle_pause_legacy_mode_skips_lane_b_on_resume_when_disabled(tmp_path)
 
         lane.start = _start
         lane.stop = _stop
+    return started, stopped
+
+
+def test_toggle_pause_legacy_mode_skips_lane_b_on_resume_when_disabled(tmp_path):
+    # require_login=False, i.e. this machine trusts editor_name: without it
+    # resume is refused outright (see the pair of tests below) and this test
+    # would pass for the wrong reason.
+    app = _make_app(tmp_path, dashboard_url="", sync_enabled=True, lane_b_enabled=False,
+                    require_login=False)
+    assert app._managed is False
+
+    started, stopped = _instrument_lanes(app)
 
     app.toggle_pause()  # pause -> _stop_lanes()
     assert app.is_paused() is True
@@ -807,6 +816,76 @@ def test_toggle_pause_legacy_mode_skips_lane_b_on_resume_when_disabled(tmp_path)
     assert app.is_paused() is False
     assert "lane_a_video_up" in started
     assert "lane_b_proxy_down" not in started  # lane_b_enabled=False
+
+
+# -- B10: Pause -> Resume must not start lanes with nobody signed in --------
+
+
+def test_toggle_pause_resume_refuses_to_start_lanes_when_not_signed_in(tmp_path):
+    """B10 [verified]. start() and on_signed_in() both gate _start_lanes() on
+    require_login; toggle_pause's resume path did not -- so on a legacy
+    (blank dashboard_url) machine that had correctly left its lanes down, ⏸
+    then ▶ synced everything under an unverified identity and set
+    _lanes_started=True. The previous version of the test above asserted the
+    lanes DID start, which is why this shipped."""
+    app = _make_app(tmp_path, dashboard_url="", sync_enabled=True, lane_b_enabled=True)
+    assert app._managed is False
+    assert app._require_login is True
+    assert app.identity.valid() is False
+
+    app.start = lambda: None  # never start real threads here
+    started, _stopped = _instrument_lanes(app)
+
+    app.toggle_pause()  # pause
+    assert app.is_paused() is True
+    started.clear()
+
+    app.toggle_pause()  # resume, still signed out
+    assert app.is_paused() is False
+    assert started == [], "resume started sync lanes with nobody signed in"
+    assert app._lanes_started is False
+    assert all("sign in required" in lane.status().detail for lane in app.lanes)
+
+
+def test_toggle_pause_resume_does_start_lanes_once_signed_in(tmp_path):
+    """The other half: the gate must not brick ▶ for a signed-in editor."""
+    app = _make_app(tmp_path, dashboard_url="", sync_enabled=True, lane_b_enabled=True)
+
+    class _SignedIn:
+        role = None
+        username = "alex"
+        token = "t"
+        last_upgrade_info = None
+
+        def valid(self):
+            return True
+
+    app.identity = _SignedIn()
+    started, _stopped = _instrument_lanes(app)
+
+    app.toggle_pause()  # pause
+    started.clear()
+    app.toggle_pause()  # resume
+
+    assert app.is_paused() is False
+    assert "lane_a_video_up" in started
+    assert app._lanes_started is True
+
+
+def test_toggle_pause_resume_refuses_in_managed_mode_when_not_signed_in(tmp_path):
+    """Managed mode has the same hole: resume unpaused the sequencer AND lane
+    A's express upload -- which pushes every new clip to the NAS on its own
+    timer -- with no verified identity."""
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    app.sequencer = _FakeSequencer()
+
+    app.toggle_pause()  # pause
+    assert app._lane_a.express_paused() is True
+
+    app.toggle_pause()  # resume, still signed out
+    assert app.is_paused() is False
+    assert app.sequencer.events == ["pause"], "the sequencer was resumed unsigned"
+    assert app._lane_a.express_paused() is True, "express uploads resumed unsigned"
 
 
 # -- managed _stop_lanes must also stop lane A (finding) --------------------
@@ -1071,10 +1150,19 @@ def test_consolidate_refuses_while_config_problems_exist(tmp_path, monkeypatch):
     assert called == []
 
 
-def test_consolidate_releases_the_popup_lock_before_the_long_copy(tmp_path, monkeypatch):
-    """AUDIT_2 CORE-M13: the lock was held across run_consolidation --
-    potentially hours -- during which every watcher popup was dropped with
-    "A popup is already open" and the new-project prompt starved."""
+def test_consolidate_holds_the_popup_lock_while_its_window_is_up(tmp_path, monkeypatch):
+    """B11, which REVERSES half of AUDIT_2 CORE-M13.
+
+    CORE-M13 released the lock before the copy so watcher popups weren't
+    starved -- but ProgressWindow opens a real tk.Tk() ROOT and holds it for
+    the whole copy, so what that actually bought was a live root with the
+    lock free: any watcher popup landing in that window opens a SECOND root,
+    which is the wedged-Tcl condition the lock exists to prevent (CORE-M3 ->
+    CORE-H8), and for PopupDialog it means a batch auto-ignored and never
+    re-offered this session. The starvation CORE-M13 was avoiding no longer
+    applies the same way: since 2026-08-01 a batch that loses the lock is
+    QUEUED, and consolidate drains the queue the moment its window closes
+    (see the test below). The lock IS released afterwards."""
     from ccsync_companion import consolidate
 
     other = tmp_path / "other"
@@ -1093,15 +1181,62 @@ def test_consolidate_releases_the_popup_lock_before_the_long_copy(tmp_path, monk
     monkeypatch.setattr(popup, "ProgressWindow", _FakeProgressWindow)
 
     held = {}
-    monkeypatch.setattr(
-        consolidate, "run_consolidation",
-        lambda *a, **k: held.setdefault("during_copy", app._popup_active_lock.locked()) or [],
-    )
+
+    def _record_lock_state(*a, **k):
+        held.setdefault("during_copy", app._popup_active_lock.locked())
+        return []
+
+    monkeypatch.setattr(consolidate, "run_consolidation", _record_lock_state)
     app._lane_a.run_once = lambda subpath=None: None
     app._lane_b.run_once = lambda subpath=None: None
 
     app.consolidate_project()
-    assert held["during_copy"] is False
+    assert held["during_copy"] is True, "a second Tk root could open over the progress window"
+    assert not app._popup_active_lock.locked(), "the lock outlived the consolidate"
+
+
+def test_consolidate_shows_the_batches_queued_while_its_window_was_up(tmp_path, monkeypatch):
+    """The other half of holding the lock: a watcher batch that lost the race
+    is queued, and must be shown the moment the progress window closes --
+    not left waiting for the next 300 s snooze cycle."""
+    from ccsync_companion import consolidate
+
+    other = tmp_path / "other"
+    other.mkdir()
+    stray = other / "A001.braw"
+    stray.write_bytes(b"x" * 10)
+    late = other / "A002.braw"
+    late.write_bytes(b"x" * 10)
+
+    app = _make_app(tmp_path, sync_enabled=True, active_project="Projects/2026/X/Y")
+    monkeypatch.setattr(resolve_bridge, "get_media_pool_items",
+                        lambda: _mp_result(_item(str(stray))))
+    monkeypatch.setattr(consolidate, "reconcile_with_nas",
+                        lambda *a, **k: {"ok": True, "uploads": {"count": 1, "bytes": 1},
+                                         "downloads": {"count": 0, "bytes": 0}})
+    monkeypatch.setattr("ccsync_companion.popup.confirm_dialog", lambda *a, **k: True)
+    monkeypatch.setattr(popup, "ProgressWindow", _FakeProgressWindow)
+
+    shown: list[list[str]] = []
+    monkeypatch.setattr(
+        popup, "show_popup",
+        lambda items, *a, **k: shown.append([i["file_path"] for i in items]),
+    )
+
+    def _copy_and_race(*a, **k):
+        # A clip found by the watcher WHILE the progress window is up.
+        app._show_out_of_tree_popup([_item(str(late))])
+        return []
+
+    monkeypatch.setattr(consolidate, "run_consolidation", _copy_and_race)
+    app._lane_a.run_once = lambda subpath=None: None
+    app._lane_b.run_once = lambda subpath=None: None
+
+    app.consolidate_project()
+
+    assert shown == [[str(late)]], "the queued batch was never shown"
+    assert app._popup_queue == []
+    assert app._popup_queue_keys == set()
 
 
 # -- DEL-3: config errors actually stop syncing -----------------------------
@@ -1420,7 +1555,11 @@ class _FakeSequencer:
 
 
 def test_toggle_pause_pauses_and_resumes_the_express_lane(tmp_path):
-    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    # require_login=False: resume is a START, and since the toggle_pause login
+    # gate (B10) an unsigned machine correctly refuses to resume ANYTHING --
+    # which would make this test pass for the wrong reason.
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True,
+                    require_login=False)
     app.sequencer = _FakeSequencer()
 
     app.toggle_pause()
@@ -1875,3 +2014,313 @@ def test_a_failing_shutdown_guard_does_not_strand_the_keep_awake(tmp_path):
     app._keep_awake = Guard()
     app.shutdown()
     assert stopped == ["keep-awake"]
+
+
+# --- B9: a disconnected NAS must not keep the machine awake forever --------
+
+
+def _lane(name, **kw):
+    from ccsync_companion.sync.base import LaneStatus
+
+    class Lane:
+        def __init__(self):
+            self.name = name
+
+        def status(self):
+            return LaneStatus(name=name, **kw)
+
+    return Lane()
+
+
+def test_a_stalled_lane_stops_blocking_shutdown_after_the_stale_window(tmp_path):
+    """B9. Lane C reports "syncing" from a NEED COUNT, so a NAS that went off
+    overnight with four unreceived files left _shutdown_block_reason()
+    returning a sentence forever: ES_CONTINUOUS|ES_SYSTEM_REQUIRED held
+    permanently (the PC never slept again until the companion restarted) and
+    every shutdown interrupted with zero bytes in flight."""
+    from ccsync_companion import shutdown_guard as sg
+    from ccsync_companion.sync.base import STATE_SYNCING
+
+    clock = {"now": 0.0}
+    app = _make_app(tmp_path)
+    app.lanes = [_lane("lane_c_syncthing", state=STATE_SYNCING, queued=4)]
+    app._pending_tracker = sg.PendingTracker(
+        stale_seconds=180.0, clock=lambda: clock["now"])
+
+    assert app._shutdown_block_reason() is not None
+    clock["now"] += 3600
+    assert app._shutdown_block_reason() is None
+
+
+def test_the_liveness_thresholds_come_from_config(tmp_path):
+    """Editors run a prebuilt exe, so both bounds are config keys: tuning a
+    machine in the field must not need a rebuild."""
+    app = _make_app(tmp_path, keep_awake_stale_seconds=45,
+                    keep_awake_max_hold_seconds=600)
+    assert app._pending_tracker._stale_seconds == 45.0
+    assert app._pending_tracker._max_hold_seconds == 600.0
+
+
+def test_a_tuned_stale_window_actually_changes_the_verdict(tmp_path):
+    from ccsync_companion.sync.base import STATE_SYNCING
+
+    app = _make_app(tmp_path, keep_awake_stale_seconds=30)
+    app.lanes = [_lane("lane_c_syncthing", state=STATE_SYNCING, queued=4)]
+    clock = {"now": 0.0}
+    app._pending_tracker._clock = lambda: clock["now"]
+
+    assert app._shutdown_block_reason() is not None
+    clock["now"] += 31
+    assert app._shutdown_block_reason() is None
+
+
+@pytest.mark.parametrize("bad", ["3 minutes", 0, -5, None])
+def test_a_hand_edited_threshold_never_crashes_construction(tmp_path, bad):
+    """CompanionApp is constructed before anything can report a config
+    problem, and in the windowed build a raise here is the exe vanishing with
+    no tray and no log line (CORE-H2/M4). Bad values fall back to the shipped
+    defaults instead."""
+    from ccsync_companion import shutdown_guard as sg
+
+    app = _make_app(tmp_path, keep_awake_stale_seconds=bad,
+                    keep_awake_max_hold_seconds=bad)
+    assert app._pending_tracker._stale_seconds == sg.PROGRESS_STALE_SECONDS
+    assert app._pending_tracker._max_hold_seconds == sg.MAX_HOLD_SECONDS
+
+
+def test_a_config_without_the_thresholds_uses_the_shipped_defaults(tmp_path):
+    """An older config.toml (or any dict that predates the keys) must behave
+    exactly as before."""
+    from ccsync_companion import shutdown_guard as sg
+
+    app = _make_app(tmp_path)
+    assert "keep_awake_stale_seconds" not in app.config
+    assert app._pending_tracker._stale_seconds == sg.PROGRESS_STALE_SECONDS
+    assert app._pending_tracker._max_hold_seconds == sg.MAX_HOLD_SECONDS
+
+
+def test_a_lane_with_no_syncthing_peer_does_not_block_shutdown(tmp_path):
+    """The connectivity half: lane C's poll already caches
+    /rest/system/connections, and an empty connected set means its backlog has
+    nowhere to go."""
+    from ccsync_companion.sync.base import STATE_SYNCING
+
+    app = _make_app(tmp_path)
+    lane_c_name = app._lane_c.name
+    app.lanes = [_lane(lane_c_name, state=STATE_SYNCING, queued=4)]
+
+    app._lane_c.connection_path_summary = lambda: {
+        "devices": {}, "relayed": [], "direct": []}
+    assert app._shutdown_block_reason() is None
+
+    app._pending_tracker.reset()
+    app._lane_c.connection_path_summary = lambda: {
+        "devices": {"ABC": "tcp-client"}, "relayed": [], "direct": ["ABC"]}
+    assert app._shutdown_block_reason() is not None
+
+
+def test_an_unpolled_syncthing_lane_still_blocks_shutdown(tmp_path):
+    """"Can't tell" must never silence the warning -- before the first
+    successful connections poll the summary is empty."""
+    from ccsync_companion.sync.base import STATE_SYNCING
+
+    app = _make_app(tmp_path)
+    app.lanes = [_lane(app._lane_c.name, state=STATE_SYNCING, queued=4)]
+    app._lane_c.connection_path_summary = lambda: {}
+    assert app._shutdown_block_reason() is not None
+
+
+def test_lane_peer_states_survives_a_lane_that_raises(tmp_path):
+    app = _make_app(tmp_path)
+
+    def boom():
+        raise RuntimeError("syncthing lane exploded")
+
+    app._lane_c.connection_path_summary = boom
+    assert app._lane_peer_states() == {}
+
+
+def test_both_power_guards_read_the_same_liveness_verdict(tmp_path):
+    """One tracker, shared: the keep-awake loop's 30 s poll is what keeps the
+    samples fresh for the shutdown guard, which is only ever called once, at
+    the instant someone clicks Shut down."""
+    from ccsync_companion import shutdown_guard as sg
+    from ccsync_companion.sync.base import STATE_SYNCING
+
+    clock = {"now": 0.0}
+    app = _make_app(tmp_path)
+    app.lanes = [_lane("lane_a", state=STATE_SYNCING, queued=1)]
+    app._pending_tracker = sg.PendingTracker(
+        stale_seconds=120.0, clock=lambda: clock["now"])
+    guard = sg._WindowsKeepAwake(
+        lambda: app._shutdown_block_reason() is not None,
+        set_state_fn=lambda flags: sg.ES_CONTINUOUS,
+    )
+    assert guard.apply_once() is True
+    clock["now"] += 600
+    assert guard.apply_once() is False, "held the idle timer for a stalled lane"
+    assert app._shutdown_block_reason() is None
+
+
+# --- B11: copy_diagnostics opens a Tk root, so it takes the popup lock -----
+
+
+class _FakeTkRoot:
+    """A stand-in for the hidden clipboard root -- no window, ever."""
+
+    instances: list = []
+
+    def __init__(self):
+        self.text = None
+        self.destroyed = False
+        _FakeTkRoot.instances.append(self)
+
+    def withdraw(self):
+        pass
+
+    def clipboard_clear(self):
+        self.text = ""
+
+    def clipboard_append(self, text):
+        self.text = (self.text or "") + text
+
+    def update(self):
+        pass
+
+    def destroy(self):
+        self.destroyed = True
+
+
+def test_copy_diagnostics_refuses_while_another_window_is_open(tmp_path):
+    """B11. Every other tk.Tk() site takes _popup_active_lock; this one did
+    not, so a watcher popup on a sibling thread and this hidden root could be
+    live at once -- the wedged-Tcl condition the lock exists to prevent. It
+    also bypassed apply_upgrade's popup-lock guard, so a self-upgrade could
+    swap the exe while a Tk root was live."""
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    app._popup_active_lock.acquire()
+    try:
+        assert app.copy_diagnostics() is False
+    finally:
+        app._popup_active_lock.release()
+    # ...and the admin is not left with nothing: it went to the log instead.
+    assert any("log" in msg for msg, _title in app._tray_icon.notifications)
+
+
+def test_copy_diagnostics_holds_the_lock_while_its_root_is_alive(tmp_path, monkeypatch):
+    import tkinter
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    _FakeTkRoot.instances.clear()
+    locked_during = []
+
+    def _fake_tk():
+        locked_during.append(app._popup_active_lock.locked())
+        return _FakeTkRoot()
+
+    monkeypatch.setattr(tkinter, "Tk", _fake_tk)
+
+    assert app.copy_diagnostics() is True
+    assert locked_during == [True]
+    assert not app._popup_active_lock.locked(), "the lock outlived the clipboard root"
+    assert _FakeTkRoot.instances[0].destroyed is True
+    assert "CCSYNC DIAGNOSTICS" in (_FakeTkRoot.instances[0].text or "")
+
+
+def test_copy_diagnostics_releases_the_lock_when_the_clipboard_fails(tmp_path, monkeypatch):
+    import tkinter
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+
+    def _boom():
+        raise RuntimeError("no display")
+
+    monkeypatch.setattr(tkinter, "Tk", _boom)
+    assert app.copy_diagnostics() is False
+    assert not app._popup_active_lock.locked()
+
+
+# --- the popup queue must not strand a batch ------------------------------
+
+
+def test_a_batch_queued_in_the_release_gap_is_still_shown(tmp_path, monkeypatch):
+    """A thread finishing its last dialog sees an empty queue, and only THEN
+    releases the lock. A batch queued in that gap had nobody left to show it
+    -- and because its paths stay in _popup_queue_keys, every later sighting
+    of those clips deduped against a batch that would never be shown, so they
+    were lost for the rest of the session."""
+    app = _make_app(tmp_path)
+    first = _item(str(tmp_path / "first.mov"))
+    late = _item(str(tmp_path / "late.mov"))
+
+    shown: list[list[str]] = []
+    monkeypatch.setattr(
+        popup, "show_popup",
+        lambda items, *a, **k: shown.append([i["file_path"] for i in items]),
+    )
+
+    real_take = app._take_popup_batch
+    raced: list[bool] = []
+
+    def take_and_race():
+        batch = real_take()
+        if batch is None and not raced:
+            raced.append(True)
+            # Exactly the gap: another thread queues after this one has
+            # already seen an empty queue but before it releases the lock.
+            app._queue_popup_batch([late], snooze=False)
+        return batch
+
+    app._take_popup_batch = take_and_race
+    app._show_out_of_tree_popup([first])
+
+    assert shown == [[first["file_path"]], [late["file_path"]]]
+    assert app._popup_queue == []
+    assert app._popup_queue_keys == set()
+
+
+def test_a_batch_that_loses_the_race_is_still_queued_not_dropped(tmp_path, monkeypatch):
+    app = _make_app(tmp_path)
+    item = _item(str(tmp_path / "clip.mov"))
+    monkeypatch.setattr(popup, "show_popup", lambda *a, **k: None)
+
+    app._popup_active_lock.acquire()  # a dialog is on screen
+    try:
+        app._show_out_of_tree_popup([item])
+        assert len(app._popup_queue) == 1
+    finally:
+        app._popup_active_lock.release()
+
+    shown: list[list[str]] = []
+    monkeypatch.setattr(
+        popup, "show_popup",
+        lambda items, *a, **k: shown.append([i["file_path"] for i in items]),
+    )
+    app._drain_stranded_popup_batches()
+    assert shown == [[item["file_path"]]]
+
+
+# --- shutdown() must not run twice ----------------------------------------
+
+
+def test_shutdown_is_idempotent(tmp_path):
+    """The tray's Quit calls shutdown() and then icon.stop(), which lets
+    run()'s finally clause call it again -- two overlapping teardowns racing
+    two _stop_lanes()/reporter.stop() sequences (RcloneLane.stop racing
+    itself over self._observer = None)."""
+    app = _make_app(tmp_path)
+    calls: list[str] = []
+    for lane in app.lanes:
+        lane.stop = lambda name=lane.name: calls.append(name)
+    app.reporter.stop = lambda: calls.append("reporter")
+    app.manifest_cache.stop = lambda: calls.append("manifest")
+
+    app.shutdown()
+    first = list(calls)
+    app.shutdown()
+
+    assert calls == first, "shutdown() ran its teardown twice"
+    assert "reporter" in first

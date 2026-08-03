@@ -237,6 +237,22 @@ def parse_upgrade(resp: Any) -> Optional[dict[str, Any]]:
             "size_bytes": info.get("size_bytes")}
 
 
+def advertised_size(info: Any) -> Optional[int]:
+    """`size_bytes` as a usable positive int, or None.
+
+    None for anything unusable -- absent (an older dashboard), zero, negative,
+    non-numeric, or larger than the hard ceiling. Callers must treat None as
+    "unknown size", never as zero: a bogus value must not be able to refuse a
+    legitimate update or wave a huge one through. Never raises."""
+    try:
+        size = int((info or {}).get("size_bytes") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if size <= 0 or size > MAX_DOWNLOAD_BYTES:
+        return None
+    return size
+
+
 # --------------------------------------------------------------- wording
 #
 # The offer is "different, not newer" by design (see the module docstring),
@@ -433,16 +449,31 @@ class UpgradeManager:
         if token:
             headers["X-CCSync-Token"] = token
 
+        # The dashboard publishes size_bytes as the byte count it actually
+        # wrote (api.py's publish handler), and it was parsed by parse_upgrade
+        # and then read by nothing: neither the flat 200 MB free-space margin
+        # nor the download ceiling consulted it. A 250 MB build downloaded
+        # onto 210 MB of free space still passed the check and only failed at
+        # the last write.
+        advertised = advertised_size(info)
+
         try:
             free = shutil.disk_usage(str(dest_dir)).free
-            if free < MIN_FREE_BYTES_MARGIN:
+            needed = MIN_FREE_BYTES_MARGIN + (advertised or 0)
+            if free < needed:
                 log.warning(
-                    "upgrade: only %.0f MB free at %s -- refusing to download the update",
-                    free / 1_000_000, dest_dir,
+                    "upgrade: %.0f MB free at %s but the update needs %.0f MB "
+                    "(+ margin) -- refusing to download it",
+                    free / 1_000_000, dest_dir, needed / 1_000_000,
                 )
                 return None
         except Exception:
             log.debug("upgrade: free-space check failed; continuing", exc_info=True)
+
+        # The advertised size is the tighter of the two ceilings whenever the
+        # server gave us one: a body that outgrows it is not the build we were
+        # offered, and there is no reason to write the rest of it to disk.
+        ceiling = min(MAX_DOWNLOAD_BYTES, advertised) if advertised else MAX_DOWNLOAD_BYTES
 
         tmp = dest_dir / _NEW_NAME
         digest = hashlib.sha256()
@@ -458,10 +489,10 @@ class UpgradeManager:
                         if not chunk:
                             break
                         written += len(chunk)
-                        if written > MAX_DOWNLOAD_BYTES:
+                        if written > ceiling:
                             raise ValueError(
                                 f"update exceeded the "
-                                f"{MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB ceiling"
+                                f"{ceiling // (1024 * 1024)} MB ceiling"
                             )
                         fh.write(chunk)
                         digest.update(chunk)

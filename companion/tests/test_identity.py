@@ -243,12 +243,66 @@ class _FakeHTTPError(urllib.error.HTTPError):
 
 
 def test_verify_credentials_401_returns_ok_false():
+    """The dashboard is FastAPI: every refusal on /api/v1/verify is an
+    HTTPException, which serialises to {"detail": ...}. This test used to
+    build a {"error": ...} body -- a shape the dashboard has never sent --
+    which is what let the companion's own read of "error" look correct while
+    the real, actionable sentence was dropped on every sign-in (B18)."""
     def fake_post(url, data, headers, timeout):
-        raise _FakeHTTPError(401, json.dumps({"error": "bad username or password"}).encode())
+        raise _FakeHTTPError(401, json.dumps({"detail": "bad username or password"}).encode())
 
     result = verify_credentials("http://dash.example.com", "alex", "wrong", http_post=fake_post)
     assert result["ok"] is False
-    assert "error" in result
+    assert result["error"] == "bad username or password"
+
+
+def test_verify_credentials_surfaces_the_403_editors_group_message():
+    """The single most likely first-run failure: a working NAS account that
+    simply is not in the `editors` group. The dashboard answers with a
+    one-line fix; the editor used to see "sign-in failed (HTTP 403)"."""
+    detail = ("'rsmith' is not in the 'editors' group on the NAS -- ask an admin to "
+              "add the account in Admin > Users")
+
+    def fake_post(url, data, headers, timeout):
+        raise _FakeHTTPError(403, json.dumps({"detail": detail}).encode())
+
+    result = verify_credentials("http://dash.example.com", "rsmith", "pw", http_post=fake_post)
+    assert result["ok"] is False
+    assert result["error"] == detail
+
+
+def test_verify_credentials_403_without_a_body_still_says_what_to_do():
+    """403 had NO entry in the fallback map, so an unreadable body produced
+    the useless generic "sign-in failed (HTTP 403)"."""
+    def fake_post(url, data, headers, timeout):
+        raise _FakeHTTPError(403, b"")
+
+    result = verify_credentials("http://dash.example.com", "rsmith", "pw", http_post=fake_post)
+    assert "editors" in result["error"]
+    assert "HTTP 403" not in result["error"]
+
+
+def test_verify_credentials_still_accepts_a_legacy_error_body():
+    """verify_credentials' own failure dicts use "error", and
+    onboarding/steps.py renders both through the same helper -- so the old
+    key stays supported, just second."""
+    def fake_post(url, data, headers, timeout):
+        raise _FakeHTTPError(401, json.dumps({"error": "legacy shape"}).encode())
+
+    assert verify_credentials("http://dash.example.com", "alex", "x",
+                              http_post=fake_post)["error"] == "legacy shape"
+
+
+def test_a_pydantic_422_detail_list_is_not_shown_to_the_editor():
+    """FastAPI's validation errors send `detail` as a LIST of error dicts.
+    Rendering that at an editor is worse than the per-status fallback."""
+    body = json.dumps({"detail": [{"loc": ["body", "username"], "msg": "field required"}]})
+
+    def fake_post(url, data, headers, timeout):
+        raise _FakeHTTPError(422, body.encode())
+
+    result = verify_credentials("http://dash.example.com", "alex", "x", http_post=fake_post)
+    assert result["error"] == "sign-in failed (HTTP 422)"
 
 
 def test_verify_credentials_401_without_json_body_uses_default_message():
@@ -462,3 +516,58 @@ def test_plaintext_check_never_raises(_reset_plaintext_warning):
     identity_mod._warn_if_plaintext(None)
     identity_mod._warn_if_plaintext(5)
     identity_mod._warn_if_plaintext("")
+
+
+# -- the report token /api/v1/verify hands back (cross-component minor) ------
+
+
+def _verify_ok(report_token="fresh-token", username="alex"):
+    def fake_post(url, data, headers, timeout):
+        return {"ok": True, "username": username, "token": _token(username=username),
+                "role": "editor", "report_token": report_token}
+    return fake_post
+
+
+def test_verify_credentials_returns_the_report_token():
+    """/api/v1/verify has always returned `report_token` (dashboard api.py)
+    and onboarding consumes it, but this module dropped it -- so a tray
+    sign-in on a machine with a stale config.toml `dashboard_token` succeeded
+    and then 401'd every single report, forever."""
+    result = verify_credentials("http://dash.example.com", "alex", "pw",
+                                http_post=_verify_ok())
+    assert result["report_token"] == "fresh-token"
+
+
+def test_sign_in_publishes_the_report_token_into_cfg(tmp_path, monkeypatch):
+    monkeypatch.setattr(identity_mod.config_mod, "CONFIG_DIR", tmp_path)
+    cfg = {"dashboard_url": "http://dash.example.com", "dashboard_token": "STALE"}
+    mgr = identity_mod.IdentityManager(cfg, http_post=_verify_ok())
+    ok, error = mgr.sign_in("alex", "pw")
+    assert ok is True and error is None
+    assert mgr.report_token == "fresh-token"
+    # the one dict every consumer reads from now carries the fresh token
+    assert cfg["dashboard_token"] == "fresh-token"
+
+
+def test_the_report_token_survives_a_restart(tmp_path, monkeypatch):
+    """config.toml is written by the installer, not by the running companion,
+    so identity.json is where the freshest token lives -- and it has to be
+    republished into cfg before the reporter is built."""
+    monkeypatch.setattr(identity_mod.config_mod, "CONFIG_DIR", tmp_path)
+    identity_mod.IdentityManager(
+        {"dashboard_url": "http://d", "dashboard_token": "STALE"},
+        http_post=_verify_ok()).sign_in("alex", "pw")
+
+    restarted_cfg = {"dashboard_url": "http://d", "dashboard_token": "STALE"}
+    mgr = identity_mod.IdentityManager(restarted_cfg)
+    assert restarted_cfg["dashboard_token"] == "fresh-token"
+    assert mgr.report_token == "fresh-token"
+
+
+def test_an_older_dashboard_without_a_report_token_changes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(identity_mod.config_mod, "CONFIG_DIR", tmp_path)
+    cfg = {"dashboard_url": "http://d", "dashboard_token": "CONFIGURED"}
+    mgr = identity_mod.IdentityManager(cfg, http_post=_verify_ok(report_token=None))
+    assert mgr.sign_in("alex", "pw")[0] is True
+    assert cfg["dashboard_token"] == "CONFIGURED"
+    assert mgr.report_token is None

@@ -33,7 +33,7 @@ from .. import config as config_mod
 from ..selection import SelectionClient
 from .rclone_lane import clone_directory_tree
 from .repath import ProjectRepather, normalized_safe_rel
-from .syncthing_admin import STIGNORE_LINES, SyncthingAdmin
+from .syncthing_admin import STIGNORE_LINES, SyncthingAdmin, missing_ignore_lines
 
 log = logging.getLogger("ccsync.sync.sequencer")
 
@@ -73,10 +73,18 @@ def _item_is_valid(item: dict) -> bool:
     contained under local_root (repath.normalized_safe_rel -- a `..`, `\\` or
     drive-letter segment reaches lane A's SOURCE path, where
     `rclone copy C:\\ nas:...` would upload every video on the editor's C:
-    drive; AUDIT_2 L-7), and active (when present) must not be explicitly
-    False. A dashboard row whose project record is gone (LEFT JOIN ->
-    rel_path NULL) must never reach a path join -- str(None) == "None" would
-    move the project directory to "...\\Projects\\None" (AUDIT D-4).
+    drive; AUDIT_2 L-7), slug must be a non-blank str, and active (when
+    present) must not be explicitly False. A dashboard row whose project
+    record is gone (LEFT JOIN -> rel_path NULL) must never reach a path join
+    -- str(None) == "None" would move the project directory to
+    "...\\Projects\\None" (AUDIT D-4).
+
+    slug is validated for the same reason rel_path is, one layer along: it
+    becomes the SYNCTHING FOLDER ID, and _process_project's
+    `str(item.get("slug"))` turned a NULL slug into the literal folder id
+    "None" -- every pause/unpause/set_ignores/status call of that project's
+    turn then addressed a folder called "None", and "None" stuck around
+    forever as a key in the bookkeeping dicts.
 
     Goes through the SHARED normalize-then-validate helper: this used to
     validate the raw string while repath.py stripped a leading "/" first, so
@@ -86,6 +94,9 @@ def _item_is_valid(item: dict) -> bool:
     if not isinstance(rel, str) or not rel.strip():
         return False
     if normalized_safe_rel(rel) is None:
+        return False
+    slug = item.get("slug")
+    if not isinstance(slug, str) or not slug.strip():
         return False
     if item.get("active") is False:
         return False
@@ -240,11 +251,15 @@ class Sequencer:
         # Slugs already processed in the current pass -- notify_change must
         # not re-prepend them (AUDIT_2 L-10).
         self._processed_slugs: set[str] = set()
-        # Slugs whose accept_folder() failed part-way: the folder exists in
-        # Syncthing but its ignores never landed, so it must stay paused --
-        # including through the leak-recovery sweeps, which would otherwise
-        # undo the protection a few seconds later (AUDIT_2 L-3).
-        self._accept_failed: set[str] = set()
+        # Slugs whose .stignore is NOT known to be in place -- either
+        # accept_folder() failed part-way (the folder exists in Syncthing but
+        # its ignores never landed) or this turn's re-assertion failed. Such
+        # a folder must stay paused, including through the leak-recovery
+        # sweeps, which would otherwise undo the protection a few seconds
+        # later (AUDIT_2 L-3). Cleared ONLY by a set_ignores that actually
+        # returned, and pruned when a slug leaves the selection: a stale
+        # entry excluded a slug from every _unpause_all sweep forever.
+        self._ignores_unconfirmed: set[str] = set()
         # How many times each project has been processed since its last
         # structure clone (AUDIT_2 C-3). Missing == never cloned.
         self._clone_ages: dict[str, int] = {}
@@ -534,7 +549,10 @@ class Sequencer:
         Runs REGARDLESS of the pause scheme -- with the scheme off this is
         the only thing that releases a folder an older companion (or a
         crashed rotate-scheme pass) left paused, and a folder left paused
-        means lane C silently carries nothing for that project."""
+        means lane C silently carries nothing for that project.
+
+        Every folder is VERIFIED against the live .stignore before it is
+        released -- see _verify_startup_ignores."""
         self._apply_lane_c_pacing()
         cached: Optional[list[dict]] = None
         try:
@@ -543,7 +561,73 @@ class Sequencer:
             log.exception("sequencer: failed to load cached selection for startup unpause")
         if cached:
             self._update_known_selection(cached)
+            self._verify_startup_ignores(cached)
             self._unpause_all(cached)
+
+    def _verify_startup_ignores(self, selection: list[dict]) -> None:
+        """One GET /rest/db/ignores per selected folder, at startup, BEFORE
+        the leak-recovery sweep releases anything.
+
+        Neither latch that protects a half-filtered folder survives the
+        process: _ignores_unconfirmed here and
+        SyncthingAdmin._ignores_unconfirmed are both in-memory. So a
+        companion killed between accept_folder's folder-config write and its
+        set_ignores -- or one whose last run ended with the B5 re-assert
+        still failing -- came back up knowing nothing, and _unpause_all
+        released a `sendreceive` folder with no .stignore. Lane C then
+        indexes and offers every .braw/.mov original and the whole Proxy/
+        tree bidirectionally, until that project's first turn re-asserts the
+        ignores: up to a full rotation x N projects.
+
+        Verify-and-latch only; it deliberately does NOT re-assert here.
+        _reassert_folder_policy at the head of each project's lane C turn is
+        already the retry path, it runs under the same fault isolation as
+        everything else in a turn, and re-asserting N folders inline would
+        put N config commits (each of which restarts and rescans a folder)
+        between launch and the first byte of sync.
+
+        A fetch failure counts as unconfirmed, matching _maybe_auto_accept's
+        fail-closed posture: waiting one rotation for a folder whose
+        filtering we could not read is cheap, putting an unfiltered
+        sendreceive folder online is not. A 404 is the exception -- that
+        folder is not configured locally at all, so there is nothing to run
+        unfiltered and the unpause that follows 404s just as harmlessly."""
+        getter = getattr(self.admin, "get_ignores", None)
+        if getter is None:  # an admin double that predates the getter
+            return
+        for item in selection:
+            if self._stop_event.is_set():
+                return
+            if not _item_is_valid(item):
+                continue
+            slug = str(item.get("slug"))
+            try:
+                fetched = getter(slug)
+            except Exception as exc:
+                if _is_not_found(exc):
+                    log.debug("sequencer: folder %s not configured locally yet", slug)
+                    continue
+                log.warning(
+                    "sequencer: could not read folder %s's ignores at startup (%s) -- "
+                    "treating it as unfiltered and leaving it paused until a re-assert "
+                    "lands", slug, exc,
+                )
+                with self._lock:
+                    self._ignores_unconfirmed.add(slug)
+                continue
+            missing = missing_ignore_lines(fetched)
+            if not missing:
+                continue
+            # One line per unconfirmed folder, with the reason: a folder that
+            # verifies clean must cost nothing and say nothing.
+            log.warning(
+                "sequencer: folder %s is missing %d of its %d ignore patterns (e.g. %s) "
+                "-- leaving it paused until a re-assert lands rather than releasing an "
+                "unfiltered sendreceive folder",
+                slug, len(missing), len(STIGNORE_LINES), ", ".join(missing[:3]),
+            )
+            with self._lock:
+                self._ignores_unconfirmed.add(slug)
 
     def _park_paused(self) -> None:
         with self._lock:
@@ -580,15 +664,53 @@ class Sequencer:
             self._rel_to_slug = rel_to_slug
             self._slug_to_item = slug_to_item
             self._last_selection = list(selection)
+        self._prune_bookkeeping(set(slug_to_item))
+
+    def _prune_bookkeeping(self, live_slugs: set[str]) -> None:
+        """Drop per-slug bookkeeping for projects that are no longer
+        selected. These dicts/sets are keyed by slug and were append-only, so
+        every project an editor ever ticked stayed in memory for the life of
+        the process -- and, worse, a stale _ignores_unconfirmed entry
+        PERMANENTLY excluded that slug from every leak-recovery unpause sweep
+        (_unpause_all), so re-ticking the project left its folder stuck
+        paused with nothing to release it.
+
+        _paused_by_us is deliberately NOT pruned here: it is the only record
+        of a folder this sequencer actually paused, and _release_paused_folders
+        is scoped to it rather than to the selection, so dropping an
+        unselected slug would strand that folder paused forever. It drains
+        itself instead -- on a successful unpause, and on a 404 (see
+        _set_paused)."""
+        with self._lock:
+            self._ignores_unconfirmed &= live_slugs
+            for ages in (self._clone_ages, self._orphan_ages):
+                for slug in [s for s in ages if s not in live_slugs]:
+                    ages.pop(slug, None)
+
+    def _ignores_unconfirmed_for(self, slug: str) -> bool:
+        """Whether this folder's .stignore is NOT known to be in place, so no
+        sweep may unpause it. Two sources: this sequencer's own latch, and
+        the admin's half-accepted-folder record (SyncthingAdmin.accept_folder
+        writes the folder config BEFORE it can set ignores, so a failure
+        there leaves a real, existing, unfiltered folder -- B14)."""
+        with self._lock:
+            if str(slug) in self._ignores_unconfirmed:
+                return True
+        confirmed = getattr(self.admin, "ignores_confirmed", None)
+        if confirmed is None:
+            return False
+        try:
+            return not confirmed(slug)
+        except Exception:
+            log.debug("sequencer: ignores_confirmed(%s) failed", slug, exc_info=True)
+            return False
 
     def _unpause_all(self, selection: list[dict]) -> None:
-        with self._lock:
-            held_paused = set(self._accept_failed)
         for item in selection:
             slug = item.get("slug")
             if not slug:
                 continue
-            if str(slug) in held_paused:
+            if self._ignores_unconfirmed_for(slug):
                 # Deliberately excluded from every leak-recovery sweep: this
                 # folder has no .stignore, so unpausing it means lane C
                 # indexes and offers every .braw/.mov original and every
@@ -611,8 +733,10 @@ class Sequencer:
         in steady state it costs zero config writes rather than one per
         project per project."""
         with self._lock:
-            slugs = sorted(self._paused_by_us - self._accept_failed)
+            slugs = sorted(self._paused_by_us)
         for slug in slugs:
+            if self._ignores_unconfirmed_for(slug):
+                continue
             self._set_paused(slug, False)
 
     def _set_paused(self, slug: str, paused: bool) -> bool:
@@ -631,6 +755,12 @@ class Sequencer:
         except Exception as exc:
             if _is_not_found(exc):
                 log.debug("sequencer: folder %s not configured locally yet", slug)
+                # There is no folder to be left paused, so stop tracking it:
+                # a folder removed from Syncthing while we had it paused
+                # otherwise stayed in _paused_by_us for the life of the
+                # process, retried on every single project boundary.
+                with self._lock:
+                    self._paused_by_us.discard(slug)
             else:
                 log.exception(
                     "sequencer: failed to %s folder %s", "pause" if paused else "unpause", slug
@@ -730,9 +860,10 @@ class Sequencer:
     def _process_project(self, item: dict, ordered_selected: list[dict]) -> None:
         if not _item_is_valid(item):
             log.warning(
-                "sequencer: skipping selection item with invalid/inactive rel_path "
-                "(slug=%s) -- refusing to build a path from it",
-                item.get("slug"),
+                "sequencer: skipping selection item with an invalid/inactive rel_path or "
+                "slug (slug=%r, rel_path=%r) -- refusing to build a local path or a "
+                "Syncthing folder id from it",
+                item.get("slug"), item.get("rel_path"),
             )
             return
         rel_path = _item_rel(item)
@@ -908,13 +1039,7 @@ class Sequencer:
             self._in_lane_c_turn = True
             self._lane_c_idle.clear()
         try:
-            accepted = self._maybe_auto_accept(slug, rel_path)
-            with self._lock:
-                if accepted:
-                    self._accept_failed.discard(slug)
-                else:
-                    self._accept_failed.add(slug)
-            if not accepted:
+            if not self._maybe_auto_accept(slug, rel_path):
                 # accept_folder creates the folder PAUSED, sets ignores, then
                 # unpauses -- so that a failed set_ignores leaves it paused
                 # rather than syncing unfiltered. Unpausing it here anyway
@@ -924,6 +1049,8 @@ class Sequencer:
                 # and offers every .braw/.mov original and every Proxy/ file
                 # for the life of the install -- a straight lane-direction
                 # violation (AUDIT_2 L-3).
+                with self._lock:
+                    self._ignores_unconfirmed.add(slug)
                 log.warning(
                     "sequencer: folder %s could not be accepted cleanly -- leaving it "
                     "paused rather than syncing without ignores", slug,
@@ -936,7 +1063,28 @@ class Sequencer:
             # companion, by hand in the Syncthing GUI, or before DEL-6 was
             # fixed stayed un-ignored and unversioned forever (AUDIT_2 L-3/
             # P6/DEL-6).
-            self._reassert_folder_policy(slug)
+            #
+            # It is also the ONLY retry of a half-accepted folder's ignores
+            # (the folder has left pending_folders(), so nothing offers it
+            # again) -- which is why the latch below is cleared HERE, on a
+            # set_ignores that actually returned, and not merely because the
+            # slug was absent from pending_folders() (B14).
+            if not self._reassert_folder_policy(slug):
+                # B5: this used to be swallowed by a bare log.exception and
+                # the unpause below ran anyway, putting a sendreceive folder
+                # with no known .stignore online -- lane C then offers every
+                # original video and the whole Proxy/ tree bidirectionally,
+                # duplicating lanes A/B and propagating any local video
+                # delete to the NAS and every other editor.
+                with self._lock:
+                    self._ignores_unconfirmed.add(slug)
+                log.warning(
+                    "sequencer: could not confirm ignores for folder %s -- leaving it "
+                    "paused rather than syncing without them", slug,
+                )
+                return
+            with self._lock:
+                self._ignores_unconfirmed.discard(slug)
 
             # AUDIT_2 P4/C-1: pausing every OTHER selected folder for the
             # duration of this turn costs N(N-1) config commits per pass
@@ -978,21 +1126,43 @@ class Sequencer:
         self._wait_for_folder_sync(slug, base_slugs)
         self._verify_current_folder_unpaused(slug)
 
-    def _reassert_folder_policy(self, slug: str) -> None:
-        """Ignores + versioning, per turn, for the current folder only."""
+    def _reassert_folder_policy(self, slug: str) -> bool:
+        """Ignores + versioning, per turn, for the current folder only.
+
+        Returns False when the ignores are NOT known to have landed, so the
+        caller can leave the folder paused -- the same guarantee
+        SyncthingAdmin.accept_folder makes, which this used to throw away by
+        catching every non-404 with a bare log.exception and returning
+        normally (B5). A config write that merely exceeds
+        config_write_timeout is the expected trigger: the codebase documents
+        those routinely outlast the read timeout, which is why
+        config_write_timeout exists at all.
+
+        A 404 is NOT a failure here: it means the folder is not configured
+        locally at all, so there is nothing to run unfiltered -- and the
+        unpause that follows 404s just as harmlessly. Reporting it as a
+        failure would put a WARNING per project per pass in the log for every
+        folder the editor has not been offered yet (AUDIT_2 L-11).
+
+        Versioning is reported separately: a folder without versioning is a
+        DEL-6 risk, not a lane-direction violation, and blocking the unpause
+        on it would stop lane C entirely for a folder whose ignores are fine.
+        """
         try:
             self.admin.set_ignores(slug, STIGNORE_LINES)
         except Exception as exc:
             if _is_not_found(exc):
                 log.debug("sequencer: folder %s not configured locally yet", slug)
-                return
+                return True
             log.exception("sequencer: could not re-assert ignores for %s", slug)
+            return False
         try:
             self.admin.ensure_versioning(slug)
         except Exception as exc:
             if _is_not_found(exc):
-                return
+                return True
             log.exception("sequencer: could not ensure versioning for %s", slug)
+        return True
 
     def _verify_current_folder_unpaused(self, slug: str) -> None:
         """Confirm the turn actually left this folder running.
@@ -1019,12 +1189,29 @@ class Sequencer:
 
     def _maybe_auto_accept(self, slug: str, rel_path: str) -> bool:
         """Returns True when the folder is (or already was) usable, False
-        when an accept was needed and failed."""
+        when an accept was needed and failed -- or when we could not find out
+        whether one was needed.
+
+        Fail-CLOSED on a pending_folders() failure: "can't tell" used to
+        return True, which released a folder the previous turn had
+        deliberately latched paused (its ignores never landed) on the
+        strength of one failed GET. Waiting one rotation for a folder whose
+        filtering is uncertain is cheap; putting an unfiltered sendreceive
+        folder online is not (B14)."""
         try:
             pending = self.admin.pending_folders() or {}
-        except Exception:
-            log.exception("sequencer: pending_folders() failed")
-            return True  # can't tell it needs accepting -- treat as already fine
+        except Exception as exc:
+            if _is_not_found(exc):
+                # No pending-folders endpoint at all (a Syncthing predating
+                # /rest/cluster/pending/folders). That is a definite "nothing
+                # is pending", not a "can't tell".
+                log.debug("sequencer: no pending-folders endpoint -- nothing to accept")
+                return True
+            log.exception(
+                "sequencer: pending_folders() failed -- treating %s as unusable this turn",
+                slug,
+            )
+            return False
         if not isinstance(pending, dict) or slug not in pending:
             return True
         try:

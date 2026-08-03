@@ -6,7 +6,12 @@ from __future__ import annotations
 
 import pytest
 
-from ccsync_companion.sync.syncthing_admin import STIGNORE_LINES, SyncthingAdmin
+from ccsync_companion.sync.syncthing_admin import (
+    PARTIAL_IGNORE_LINES,
+    STIGNORE_LINES,
+    SyncthingAdmin,
+    missing_ignore_lines,
+)
 
 
 def _admin(**kwargs):
@@ -114,6 +119,59 @@ def test_accept_folder_leaves_folder_paused_when_set_ignores_fails():
     # syncing without the video/Proxy ignores in place.
     assert [c["method"] for c in calls] == ["POST", "POST"]
     assert calls[0]["body"]["paused"] is True
+    # ...and the caller can still tell, on any LATER pass, that this folder
+    # exists but is unfiltered. It has left pending_folders() by now, so
+    # "it's not pending, therefore it's fine" is exactly the wrong reading
+    # (B14) -- nothing will ever offer it again.
+    assert admin.ignores_confirmed("abcd-nuclear") is False
+
+
+def test_ignores_confirmed_is_true_for_folders_this_process_never_accepted():
+    """Absence of evidence about a long-accepted folder is not evidence of a
+    missing .stignore -- the sequencer re-asserts the ignores once per turn
+    regardless."""
+    admin, _calls = _admin()
+    assert admin.ignores_confirmed("some-veteran-folder") is True
+
+
+def test_a_successful_accept_leaves_nothing_unconfirmed():
+    admin, _calls = _admin()
+    admin.accept_folder(
+        "abcd-nuclear", label="2026/FF5/Nuclear",
+        local_path="/local/Projects/2026/FF5/Nuclear",
+        offered_by_device_id="DEVICE-1",
+    )
+    assert admin.ignores_confirmed("abcd-nuclear") is True
+
+
+def test_a_later_set_ignores_clears_the_half_accepted_latch():
+    """The per-turn re-assert is the only retry a half-accepted folder gets,
+    so a set_ignores that finally returns has to release the latch --
+    otherwise the folder stays paused forever and lane C carries nothing for
+    that project."""
+    fail = {"ignores": True}
+    calls = []
+
+    def fake_http_request(method, url, api_key, body, timeout):
+        calls.append({"method": method, "url": url, "body": body})
+        if method == "POST" and "ignores" in url and fail["ignores"]:
+            raise RuntimeError("config write timed out")
+        return {}
+
+    admin = SyncthingAdmin(
+        syncthing_url="http://127.0.0.1:8384", api_key="testkey", http_request=fake_http_request,
+    )
+    with pytest.raises(RuntimeError):
+        admin.accept_folder(
+            "abcd-nuclear", label="2026/FF5/Nuclear",
+            local_path="/local/Projects/2026/FF5/Nuclear",
+            offered_by_device_id="DEVICE-1",
+        )
+    assert admin.ignores_confirmed("abcd-nuclear") is False
+
+    fail["ignores"] = False
+    admin.set_ignores("abcd-nuclear", STIGNORE_LINES)
+    assert admin.ignores_confirmed("abcd-nuclear") is True
 
 
 def test_stignore_lines_include_braw_and_proxy_patterns():
@@ -137,6 +195,32 @@ def test_stignore_lines_cover_the_fixers_partial_temp_files():
     it out to every other ticked editor, permanently."""
     assert "(?i)**/*.ccsync-tmp" in STIGNORE_LINES
     assert "(?i)*.ccsync-tmp" in STIGNORE_LINES
+
+
+def test_stignore_lines_cover_rclones_orphaned_partial_files():
+    """KNOWN_BUGS B12: rclone runs --inplace=false, so lane A writes
+    "<name>.<token>.partial" (express: ".<token>.exp.partial") and renames on
+    completion. A lane A killed mid-transfer of a 40 GB .braw orphans one, and
+    lane A never deletes -- so the NAS indexed the orphan and lane C fanned it
+    out to every ticked editor, where path_matches_lane_a_filter returns False
+    and nothing ever removes it."""
+    import fnmatch
+
+    from ccsync_companion.sync.rclone_lane import (
+        EXPRESS_PARTIAL_SUFFIX,
+        PARTIAL_SUFFIX,
+    )
+
+    assert "(?i)**/*.partial" in STIGNORE_LINES
+    assert "(?i)*.partial" in STIGNORE_LINES
+    # the real temp names, not just the suffix constant
+    globs = [line[len("(?i)"):] for line in STIGNORE_LINES if "/" not in line]
+    for name in (f"A001.braw.42048420{PARTIAL_SUFFIX}",
+                 f"A001.braw.42048420{EXPRESS_PARTIAL_SUFFIX}"):
+        assert any(fnmatch.fnmatch(name.lower(), g.lower()) for g in globs), name
+    # ...and a COMPLETED file (the suffix is dropped by the rename) still syncs
+    assert not any(fnmatch.fnmatch("Timeline.drp", g) for g in globs
+                   if g.endswith(".partial"))
 
 
 # -- versioning (AUDIT_2 DEL-6) ---------------------------------------------
@@ -226,6 +310,56 @@ def test_system_status_get():
     admin, calls = _admin()
     admin.system_status()
     assert calls[0]["url"] == "http://127.0.0.1:8384/rest/system/status"
+
+
+# -- reading ignores back (restart gap) -------------------------------------
+
+
+def test_get_ignores_reads_the_db_ignores_endpoint_on_the_read_timeout():
+    """The read side of set_ignores, and the only way to answer "is this
+    folder actually filtered?" across a restart -- ignores_confirmed() is
+    in-memory, so it says nothing about a folder the PREVIOUS run left half
+    accepted."""
+    admin, calls = _admin()
+    admin.get_ignores("abcd-nuclear")
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["url"] == "http://127.0.0.1:8384/rest/db/ignores?folder=abcd-nuclear"
+    assert calls[0]["body"] is None
+    assert calls[0]["timeout"] == 5.0  # a GET, not a config commit
+
+
+def test_missing_ignore_lines_accepts_a_complete_stignore():
+    assert missing_ignore_lines({"ignore": list(STIGNORE_LINES), "expanded": []}) == []
+
+
+def test_missing_ignore_lines_tolerates_extra_lines_and_whitespace():
+    """Asks "is everything we need present?", not "is this byte-identical to
+    what we would write?" -- a hand-edited .stignore or an older companion's
+    leftovers must not latch a folder over cosmetics."""
+    fetched = {"ignore": ["  " + line + " " for line in STIGNORE_LINES] + ["(?i)*.tmp", ""]}
+    assert missing_ignore_lines(fetched) == []
+
+
+@pytest.mark.parametrize("fetched", [
+    {"ignore": None},        # Syncthing's answer for a folder with NO .stignore
+    {"ignore": []},          # an empty one
+    {},                      # no key at all
+    None,                    # no body
+    "not-a-body",            # a shape we do not recognise
+])
+def test_missing_ignore_lines_fails_closed_on_every_non_list_shape(fetched):
+    assert missing_ignore_lines(fetched) == list(STIGNORE_LINES)
+
+
+def test_missing_ignore_lines_names_a_missing_partial_pattern():
+    """B12's .partial pair is load-bearing: without it a 39 GB orphaned
+    rclone partial is indexed and fanned out to every other ticked editor."""
+    partial_free = [line for line in STIGNORE_LINES if line not in PARTIAL_IGNORE_LINES]
+    assert missing_ignore_lines({"ignore": partial_free}) == PARTIAL_IGNORE_LINES
+
+
+def test_missing_ignore_lines_accepts_a_bare_list_body():
+    assert missing_ignore_lines(list(STIGNORE_LINES)) == []
 
 
 def test_set_ignores_direct_call():

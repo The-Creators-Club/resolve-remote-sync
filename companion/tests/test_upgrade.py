@@ -148,6 +148,75 @@ def test_download_without_dashboard_url(tmp_path):
     assert mgr.download_and_verify(_info(), tmp_path) is None
 
 
+# -- size_bytes: parsed since forever, read by nothing ------------------
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (200, 200),
+    ("200", 200),
+    (None, None),
+    (0, None),
+    (-5, None),
+    ("huge", None),
+    (upgrade_mod.MAX_DOWNLOAD_BYTES + 1, None),
+])
+def test_advertised_size_only_trusts_a_usable_number(raw, expected):
+    """A bogus value must not be able to refuse a legitimate update, nor wave
+    an oversized one through -- both directions are "unknown"."""
+    assert upgrade_mod.advertised_size({"size_bytes": raw}) == expected
+
+
+def test_advertised_size_of_a_missing_or_broken_info_is_unknown():
+    assert upgrade_mod.advertised_size(None) is None
+    assert upgrade_mod.advertised_size({}) is None
+    assert upgrade_mod.advertised_size("not-a-dict") is None
+
+
+def test_the_free_space_check_accounts_for_the_advertised_size(tmp_path, monkeypatch):
+    """The check was a flat 200 MB margin that never consulted size_bytes, so
+    a 250 MB build downloaded onto 210 MB of free space passed it and only
+    failed at the last write."""
+    import shutil as _shutil
+
+    body = b"x" * 4096
+    info = _info(body=body)
+    info["size_bytes"] = 250 * 1024 * 1024
+
+    class _Usage:
+        free = upgrade_mod.MIN_FREE_BYTES_MARGIN + 10 * 1024 * 1024
+
+    monkeypatch.setattr(_shutil, "disk_usage", lambda path: _Usage())
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(body))
+    assert mgr.download_and_verify(info, tmp_path) is None
+    assert list(tmp_path.iterdir()) == []
+
+    class _Plenty:
+        free = upgrade_mod.MIN_FREE_BYTES_MARGIN + 400 * 1024 * 1024
+
+    monkeypatch.setattr(_shutil, "disk_usage", lambda path: _Plenty())
+    assert mgr.download_and_verify(info, tmp_path) is not None
+
+
+def test_a_body_bigger_than_the_advertised_size_is_abandoned(tmp_path):
+    """The advertised size is the tighter of the two ceilings: a body that
+    outgrows it is not the build we were offered, and there is no reason to
+    write the rest of it to disk before the sha check notices."""
+    info = _info(body=b"y" * 100)
+    info["size_bytes"] = 10
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"y" * 100))
+    assert mgr.download_and_verify(info, tmp_path) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_upgrade_with_no_advertised_size_still_downloads(tmp_path):
+    """Older dashboards send no size_bytes at all -- unknown must not block."""
+    body = b"new-exe-bytes"
+    info = _info(body=body)
+    info.pop("size_bytes")
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(body))
+    assert mgr.download_and_verify(info, tmp_path) is not None
+
+
 # -- apply() ------------------------------------------------------------
 
 

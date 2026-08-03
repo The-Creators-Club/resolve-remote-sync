@@ -410,6 +410,60 @@ def test_perform_fix_all_publishes_rich_per_chunk_state(tmp_path):
     assert seen[-1]["batch_bytes_done"] == 4000
 
 
+def test_the_fixer_dialog_gets_the_app_icon_like_every_other_root():
+    """PopupDialog._build was the one root that never called
+    theme.apply_window_icon, so the dialog an editor sees most often -- the
+    one asking about their media -- showed the default Tk feather and read as
+    "some random program". Source-level because the real window cannot be
+    built in a test (see conftest._no_real_tk_windows)."""
+    import inspect
+
+    from ccsync_companion import popup
+
+    for builder in (popup.PopupDialog._build, popup.ProgressWindow._show):
+        source = inspect.getsource(builder)
+        assert "apply_window_icon" in source, f"{builder.__qualname__} has no app icon"
+
+
+def test_the_batch_bar_never_counts_bytes_that_were_not_copied(tmp_path):
+    """`batch_done += file_total` ran for EVERY row, including aborted and
+    failed ones -- and fixer.fix_clip deletes both artifacts of a failed or
+    abandoned attempt before returning, so the bar, the "X of Y done" text and
+    RateEstimator's speed/ETA were all credited with bytes that are not on
+    disk. Worst exactly where the editor is watching hardest: a run where
+    things went wrong."""
+    from ccsync_companion import popup
+
+    good = tmp_path / "good.mov"
+    good.write_bytes(b"x" * 1000)
+    bad = tmp_path / "bad.mov"
+    bad.write_bytes(b"y" * 3000)
+    skipped = tmp_path / "skipped.mov"
+    skipped.write_bytes(b"z" * 6000)
+    rows = [
+        {"file_path": str(p), "suggested_dest": "D", "clip_name": p.name,
+         "media_pool_items": []}
+        for p in (good, bad, skipped)
+    ]
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None):
+        if path.endswith("good.mov"):
+            return {"ok": True, "message": "ok", "copied_to": dest}
+        if path.endswith("bad.mov"):
+            return {"ok": False, "message": "disk full"}
+        return {"ok": False, "aborted": True, "message": "skipped by you"}
+
+    seen = []
+    popup.perform_fix_all(rows, {}, str(tmp_path), fix_clip_fn=fake_fix,
+                          state_fn=seen.append)
+
+    assert seen[-1]["batch_bytes_total"] == 10000
+    assert seen[-1]["batch_bytes_done"] == 1000
+    assert seen[-1]["fixed"] == 1
+    assert seen[-1]["failed"] == 1
+    assert seen[-1]["skipped"] == 1
+
+
 def test_perform_fix_all_stops_between_files_never_mid_file(tmp_path):
     """UX-9's cancel. Between files ONLY: aborting a copy in flight is
     exactly what strands an orphaned multi-GB .ccsync-tmp for lane C to fan

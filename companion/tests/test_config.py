@@ -134,6 +134,11 @@ def test_default_toml_text_documents_every_default_key():
         "lane_c_max_folder_concurrency", "orphan_scan_every_n_passes",
         "express_upload_enabled", "express_debounce_seconds", "express_max_batch",
         "server_p_unc",
+        # Power-guard liveness thresholds: same class again. They exist so a
+        # machine can be tuned in the field without a rebuild, but the shipped
+        # numbers are measured defaults -- pinning them in every first-run file
+        # is how a later re-tune reaches nobody.
+        "keep_awake_stale_seconds", "keep_awake_max_hold_seconds",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -143,6 +148,115 @@ def test_default_toml_text_documents_every_default_key():
         assert re.search(pattern, config_mod.DEFAULT_TOML_TEXT, re.MULTILINE), (
             f"DEFAULT_TOML_TEXT is missing an assignment for '{key}'"
         )
+
+
+# config.example.toml is the third way a config.toml comes into existence
+# (its own header says so: copy it and edit it), and nothing checked it
+# against DEFAULTS at all -- the DEFAULT_TOML_TEXT check above only compares
+# the code to the file the COMPANION writes on first run. A key that exists
+# in neither form here is a documented feature an editor cannot discover.
+#
+# These three are documented COMMENTED OUT on purpose:
+#   * sync_enabled / lane_b_enabled -- an explicit key in the file always
+#     beats MODE_PROFILES, so a copied-and-edited example carrying
+#     `sync_enabled = true` makes mode = "base" dead, and the base rig's
+#     local_root IS the NAS share (AUDIT_2 CORE-M5 / the S-7 twin).
+#   * server_p_unc -- an OVERRIDE for a value that is otherwise derived, so
+#     writing one in pins a host that only ever needs pinning by hand.
+#   * keep_awake_stale_seconds / keep_awake_max_hold_seconds -- tunable in
+#     the field (editors run a prebuilt exe), but the shipped values are the
+#     measured defaults, and an explicit copy in every config.toml is how a
+#     later re-tune reaches nobody.
+EXAMPLE_COMMENTED_OUT = {
+    "sync_enabled", "lane_b_enabled", "server_p_unc",
+    "keep_awake_stale_seconds", "keep_awake_max_hold_seconds",
+}
+
+
+def _example_toml_text() -> str:
+    from pathlib import Path
+
+    path = Path(config_mod.__file__).resolve().parents[2] / "config.example.toml"
+    return path.read_text(encoding="utf-8")
+
+
+def test_config_example_documents_every_default_key():
+    text = _example_toml_text()
+    missing = []
+    for key in config_mod.DEFAULTS:
+        if key in EXAMPLE_COMMENTED_OUT:
+            pattern = rf"^#\s*{re.escape(key)} = "
+        else:
+            pattern = rf"^{re.escape(key)} = "
+        if not re.search(pattern, text, re.MULTILINE):
+            missing.append(key)
+    assert missing == [], f"config.example.toml is missing: {missing}"
+
+
+def test_config_example_invents_no_keys_the_code_does_not_read():
+    """The other drift direction: a typo'd or retired key in the example is
+    a setting an editor can write, restart for, and watch do nothing."""
+    text = _example_toml_text()
+    assignments = set(re.findall(r"^#?\s*([a-z_][a-z0-9_]*) = ", text, re.MULTILINE))
+    unknown = sorted(assignments - set(config_mod.DEFAULTS))
+    assert unknown == [], f"config.example.toml documents keys nothing reads: {unknown}"
+
+
+def test_the_keep_awake_thresholds_match_the_guard_module():
+    """DEFAULTS and shutdown_guard's constants are two copies of the same two
+    numbers (the constants are the fallback when a config dict predates the
+    keys). Drift would mean a machine tuned by config and a machine falling
+    back to the code disagreeing about when a lane is stalled."""
+    from ccsync_companion import shutdown_guard
+
+    assert config_mod.DEFAULTS["keep_awake_stale_seconds"] == \
+        shutdown_guard.PROGRESS_STALE_SECONDS
+    assert config_mod.DEFAULTS["keep_awake_max_hold_seconds"] == \
+        shutdown_guard.MAX_HOLD_SECONDS
+
+
+def test_the_example_documents_the_real_default_values():
+    """A commented-out default that has drifted from the code is worse than
+    no documentation: it is a number an admin will copy and trust."""
+    text = _example_toml_text()
+    for key in ("keep_awake_stale_seconds", "keep_awake_max_hold_seconds"):
+        match = re.search(rf"^#\s*{key} = ([0-9.]+)$", text, re.MULTILINE)
+        assert match, f"{key} is not documented with a value"
+        assert float(match.group(1)) == float(config_mod.DEFAULTS[key])
+
+
+@pytest.mark.parametrize("bad", ["3 minutes", 0, -5, None, [180]])
+def test_a_bad_keep_awake_threshold_warns_but_never_stops_syncing(tmp_path, bad):
+    """These only tune how patient the power guards are. Making them errors
+    would set config_problems -- which stops every lane (DEL-3) and, because
+    _shutdown_block_reason() returns None on config_problems, switches off the
+    very guard the key was being tuned for."""
+    errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, keep_awake_stale_seconds=bad))
+    assert errors == []
+    assert any("keep_awake_stale_seconds" in w for w in warnings)
+
+    errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, keep_awake_max_hold_seconds=bad))
+    assert errors == []
+    assert any("keep_awake_max_hold_seconds" in w for w in warnings)
+
+
+def test_good_keep_awake_thresholds_are_silent(tmp_path):
+    errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, keep_awake_stale_seconds=45,
+                  keep_awake_max_hold_seconds=3600))
+    assert errors == []
+    assert warnings == []
+
+
+def test_config_example_parses_as_toml_and_loads():
+    """It is meant to be copied to ~/.ccsync/config.toml verbatim."""
+    import tomllib
+
+    data = tomllib.loads(_example_toml_text())
+    assert data["local_root"]
+    assert set(data) <= set(config_mod.DEFAULTS)
 
 
 def _good_cfg(tmp_path, **overrides):

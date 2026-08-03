@@ -10,6 +10,7 @@ upload).
 from __future__ import annotations
 
 import sys
+import threading
 import time
 
 import pytest
@@ -19,6 +20,7 @@ from ccsync_companion.shutdown_guard import (
     ES_SYSTEM_REQUIRED,
     MAX_REASON_CHARS,
     KeepAwakeGuard,
+    PendingTracker,
     ShutdownGuard,
     _WindowsKeepAwake,
     _WindowsShutdownGuard,
@@ -153,6 +155,273 @@ def test_only_malformed_statuses_allow_the_shutdown():
             raise RuntimeError("boom")
 
     assert describe_pending([Broken()]) is None
+
+
+# --- B8: the logs have to go somewhere an admin can read ------------------
+
+def test_this_modules_log_records_reach_the_ccsync_log():
+    """B8 [verified]. This was the only module using
+    logging.getLogger(__name__) -- "ccsync_companion.shutdown_guard", which
+    setup_logging() attaches no handler to. Records propagated to the
+    unconfigured root logger, and in the windowed (console=False) build
+    stderr is None, so WARNING+ hit logging.lastResort and vanished while
+    INFO/DEBUG never appeared at all. Both of this module's features became
+    undiagnosable from companion.log or tray -> Copy diagnostics."""
+    from ccsync_companion import shutdown_guard
+
+    assert shutdown_guard.log.name == "ccsync.shutdown_guard"
+
+
+def test_every_module_logs_under_the_ccsync_logger():
+    """The general form of B8: setup_logging() only ever adds handlers to
+    "ccsync", so a logger named anything else is a silently-discarded
+    module."""
+    import importlib
+    import pkgutil
+
+    import ccsync_companion
+
+    offenders = []
+    for info in pkgutil.walk_packages(ccsync_companion.__path__,
+                                      ccsync_companion.__name__ + "."):
+        try:
+            module = importlib.import_module(info.name)
+        except Exception:  # optional dependency (pystray/PIL) -- not our concern
+            continue
+        logger = getattr(module, "log", None)
+        name = getattr(logger, "name", None)
+        if name is None:
+            continue
+        if name != "ccsync" and not name.startswith("ccsync."):
+            offenders.append(f"{info.name} -> {name}")
+    assert offenders == [], f"these modules log where nothing is listening: {offenders}"
+
+
+# --- B9: "busy" needs a liveness bound ------------------------------------
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def _tracker(clock=None, **kw):
+    clock = clock or _Clock()
+    return PendingTracker(clock=clock, **kw), clock
+
+
+def test_a_lane_that_has_just_gone_busy_always_counts():
+    """The first sample starts the liveness clock -- a transfer must never be
+    suppressed at the moment it starts."""
+    tracker, _clock = _tracker()
+    statuses = [LaneStatus(name="lane_c", state=STATE_SYNCING, queued=4)]
+    assert tracker.describe(statuses) is not None
+
+
+def test_a_lane_that_never_moves_stops_blocking_the_shutdown():
+    """B9. Tailscale drops / the NAS goes off overnight with four unreceived
+    files: lane C reports `syncing` from a NEED COUNT forever, so every
+    shutdown was interrupted with zero bytes in flight and the machine was
+    held awake until the companion restarted."""
+    tracker, clock = _tracker(stale_seconds=180.0)
+    statuses = [LaneStatus(name="lane_c", state=STATE_SYNCING, queued=4)]
+
+    assert tracker.describe(statuses) is not None
+    clock.advance(170)
+    assert tracker.describe(statuses) is not None, "gave up while still inside the window"
+    clock.advance(20)
+    assert tracker.describe(statuses) is None
+
+
+def test_a_lane_that_keeps_moving_keeps_blocking():
+    """The other direction: a genuine slow overnight upload must keep the
+    machine awake for as long as bytes keep arriving."""
+    tracker, clock = _tracker(stale_seconds=180.0)
+    done = [0]
+
+    def statuses():
+        return [LaneStatus(name="lane_a", state=STATE_SYNCING,
+                           bytes_done=done[0], bytes_total=40 * 1024**3)]
+
+    for _ in range(20):
+        assert tracker.describe(statuses()) is not None
+        clock.advance(170)
+        done[0] += 1024**3
+
+
+def test_a_dropping_queue_counts_as_movement_for_a_lane_with_no_byte_counts():
+    """Lane C reports no byte totals at all, so the need count falling is the
+    only progress it can ever show."""
+    tracker, clock = _tracker(stale_seconds=100.0)
+    for queued in (9, 8, 7, 6):
+        assert tracker.describe(
+            [LaneStatus(name="lane_c", state=STATE_SYNCING, queued=queued)]
+        ) is not None
+        clock.advance(90)
+
+
+def test_a_stalled_lane_starts_counting_again_once_it_moves():
+    tracker, clock = _tracker(stale_seconds=100.0)
+    stuck = [LaneStatus(name="lane_c", state=STATE_SYNCING, queued=4)]
+    tracker.describe(stuck)
+    clock.advance(200)
+    assert tracker.describe(stuck) is None
+    assert tracker.describe(
+        [LaneStatus(name="lane_c", state=STATE_SYNCING, queued=3)]
+    ) is not None
+
+
+def test_going_idle_re_arms_the_grace_period():
+    """A lane that finishes and later starts a fresh transfer must not
+    inherit the stale timestamp of the last one."""
+    tracker, clock = _tracker(stale_seconds=100.0)
+    busy = [LaneStatus(name="lane_a", state=STATE_SYNCING, queued=1)]
+    tracker.describe(busy)
+    clock.advance(200)
+    assert tracker.describe(busy) is None
+
+    tracker.describe([LaneStatus(name="lane_a")])  # idle -- forget it
+    clock.advance(10)
+    assert tracker.describe(busy) is not None
+
+
+def test_a_lane_with_no_connected_peer_is_a_backlog_not_a_transfer():
+    """Lane C sets STATE_SYNCING purely from need counts, independent of
+    whether any device is actually connected."""
+    tracker, _clock = _tracker()
+    statuses = [LaneStatus(name="lane_c", state=STATE_SYNCING, queued=4)]
+    assert tracker.describe(statuses, {"lane_c": False}) is None
+    assert tracker.describe(statuses, {"lane_c": True}) is not None
+
+
+def test_an_unknown_peer_state_never_silences_the_warning():
+    """"Can't tell" must behave exactly like the old code -- lanes A and B
+    have no connectivity signal at all."""
+    tracker, _clock = _tracker()
+    statuses = [LaneStatus(name="lane_a", state=STATE_SYNCING, queued=1)]
+    assert tracker.describe(statuses, {}) is not None
+    assert tracker.describe(statuses, {"lane_a": None}) is not None
+    assert tracker.describe(statuses, None) is not None
+
+
+def test_peer_state_can_come_from_the_status_itself():
+    """Forward compatibility: a LaneStatus that grows a peer_connected field
+    needs no change in here."""
+    class _Status:
+        name = "lane_c"
+        state = STATE_SYNCING
+        queued = 4
+        peer_connected = False
+
+    tracker, _clock = _tracker()
+    assert tracker.describe([_Status()]) is None
+
+
+def test_one_disconnected_lane_does_not_silence_a_live_one():
+    tracker, _clock = _tracker()
+    statuses = [
+        LaneStatus(name="lane_c", state=STATE_SYNCING, queued=4),
+        LaneStatus(name="lane_a", state=STATE_SYNCING, queued=1),
+    ]
+    assert tracker.describe(statuses, {"lane_c": False}) is not None
+
+
+def test_the_hold_ceiling_eventually_stands_down():
+    """The backstop staleness cannot see: a lane whose numbers churn but
+    never finish (rclone wedged in SFTP retries) would otherwise hold the
+    idle timer for days."""
+    tracker, clock = _tracker(stale_seconds=100.0, max_hold_seconds=3600.0)
+    done = [0]
+    blocked_for = 0.0
+    while True:
+        done[0] += 1
+        reason = tracker.describe(
+            [LaneStatus(name="lane_a", state=STATE_SYNCING, bytes_done=done[0],
+                        bytes_total=10**12)]
+        )
+        if reason is None:
+            break
+        clock.advance(60)
+        blocked_for += 60
+        assert blocked_for <= 3660, "the ceiling never fired"
+    assert blocked_for >= 3600
+
+
+def test_the_ceiling_resets_once_everything_is_idle():
+    tracker, clock = _tracker(stale_seconds=100.0, max_hold_seconds=600.0)
+    busy = [LaneStatus(name="lane_a", state=STATE_SYNCING, queued=1)]
+    tracker.describe(busy)
+    clock.advance(700)
+    tracker.describe([LaneStatus(name="lane_a")])  # settled
+    clock.advance(10)
+    assert tracker.describe(busy) is not None
+
+
+def test_the_tracker_agrees_with_describe_pending_on_a_live_snapshot():
+    tracker, _clock = _tracker()
+    statuses = [LaneStatus(name="lane_a", state=STATE_SYNCING,
+                           bytes_done=10 * 1024**3, bytes_total=33 * 1024**3,
+                           eta_seconds=4800)]
+    assert tracker.describe(statuses) == describe_pending(statuses)
+
+
+def test_paused_and_errored_lanes_are_still_never_blocking():
+    tracker, _clock = _tracker()
+    assert tracker.describe([LaneStatus(name="a", state=STATE_PAUSED, queued=9)]) is None
+    assert tracker.describe([LaneStatus(name="b", state=STATE_ERROR, queued=9)]) is None
+
+
+def test_a_tracker_that_blows_up_allows_the_shutdown():
+    """Every failure path in the liveness check means "not blocking": a bug
+    in here must be able to cost a warning, never to trap someone."""
+    def boom():
+        raise RuntimeError("clock exploded")
+
+    tracker = PendingTracker(clock=boom)
+    assert tracker.describe([LaneStatus(name="a", state=STATE_SYNCING)]) is None
+
+
+@pytest.mark.parametrize("bad", [0, -1, "soon", None, [180]])
+def test_a_bad_threshold_falls_back_to_the_shipped_default(bad):
+    """Both thresholds are hand-editable config keys. This is the layer that
+    would MISBEHAVE rather than crash on a bad one: a stale window of 0 marks
+    every lane stalled on its second sample, i.e. it silently switches both
+    guards off."""
+    from ccsync_companion import shutdown_guard
+
+    tracker = PendingTracker(stale_seconds=bad, max_hold_seconds=bad)
+    assert tracker._stale_seconds == shutdown_guard.PROGRESS_STALE_SECONDS
+    assert tracker._max_hold_seconds == shutdown_guard.MAX_HOLD_SECONDS
+
+
+def test_a_zero_stale_window_does_not_silently_disable_the_guards():
+    clock = _Clock()
+    tracker = PendingTracker(stale_seconds=0, clock=clock)
+    statuses = [LaneStatus(name="lane_c", state=STATE_SYNCING, queued=4)]
+    tracker.describe(statuses)
+    clock.advance(30)
+    assert tracker.describe(statuses) is not None, "a 0 config value switched the guard off"
+
+
+def test_tuned_thresholds_are_honoured():
+    tracker, clock = _tracker(stale_seconds=30.0)
+    statuses = [LaneStatus(name="lane_c", state=STATE_SYNCING, queued=4)]
+    assert tracker.describe(statuses) is not None
+    clock.advance(31)
+    assert tracker.describe(statuses) is None
+
+
+def test_the_tracker_does_not_grow_without_bound():
+    tracker, clock = _tracker()
+    for n in range(50):
+        tracker.describe([LaneStatus(name=f"lane_{n}", state=STATE_SYNCING, queued=1)])
+        clock.advance(1)
+    assert len(tracker._seen) == 1
 
 
 # --- the WM_QUERYENDSESSION policy ----------------------------------------
@@ -292,6 +561,94 @@ def test_stopping_a_guard_that_never_started_is_harmless():
     guard = _WindowsShutdownGuard(lambda: None)
     guard.stop()
     assert guard.active is False
+
+
+def test_a_guard_whose_pump_died_can_be_started_again(monkeypatch):
+    """The pump thread ends on ANY failure inside it (ctypes unavailable,
+    RegisterClassW/CreateWindowExW failing, the message loop raising) and
+    used to leave a dead Thread object in _thread -- so start() early-returned
+    forever, `active` quietly reported False, and (before the logger fix) the
+    exception explaining it went nowhere."""
+    guard = _WindowsShutdownGuard(lambda: None)
+    attempts = []
+
+    def dead_pump():
+        attempts.append(1)
+        guard._ready.set()  # exactly what the real failure paths do
+
+    monkeypatch.setattr(guard, "_pump", dead_pump)
+
+    guard.start()
+    deadline = time.monotonic() + 5.0
+    while guard._thread is not None and guard._thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    guard.start()
+
+    assert len(attempts) == 2, "a guard with a dead pump was never restartable"
+
+
+def test_a_live_guard_is_not_started_twice(monkeypatch):
+    guard = _WindowsShutdownGuard(lambda: None)
+    started = []
+    running = threading.Event()
+
+    def slow_pump():
+        started.append(1)
+        guard._ready.set()
+        running.wait(5.0)
+
+    monkeypatch.setattr(guard, "_pump", slow_pump)
+    guard.start()
+    try:
+        guard.start()
+        assert len(started) == 1
+    finally:
+        running.set()
+
+
+def test_a_keep_awake_whose_loop_died_can_be_started_again(monkeypatch):
+    guard, _fake = _keep_awake(lambda: False)
+    attempts = []
+    monkeypatch.setattr(guard, "_loop", lambda: attempts.append(1))
+
+    guard.start()
+    deadline = time.monotonic() + 5.0
+    while guard._thread is not None and guard._thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    guard.start()
+
+    assert len(attempts) == 2
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs a real window class")
+def test_the_window_class_and_its_wndproc_are_given_back_on_stop():
+    """RegisterClassW registers CLASS NAME -> our ctypes callback for the
+    whole PROCESS. stop() used to leave both in place, so a second guard took
+    the ERROR_CLASS_ALREADY_EXISTS branch and its CreateWindowExW dispatched
+    WM_NCCREATE into the first guard's callback -- which may by then have been
+    garbage-collected. Non-deterministic, and exactly what a
+    build/start/stop/drop sequence sets up."""
+    guard = make_shutdown_guard(lambda: None, enabled=True)
+    guard.start()
+    assert guard.active
+    assert guard._class_registered is True
+    guard.stop()
+    assert guard._class_registered is False
+    assert guard._wndproc_ref is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs a real window class")
+def test_a_second_guard_registers_its_own_class_after_the_first_stops():
+    first = make_shutdown_guard(lambda: None, enabled=True)
+    first.start()
+    first.stop()
+    second = make_shutdown_guard(lambda: None, enabled=True)
+    second.start()
+    try:
+        assert second.active, "the second guard got no window -- no warning at all"
+        assert second._class_registered is True, "it reused a callback nobody holds"
+    finally:
+        second.stop()
 
 
 # --- keep-awake ------------------------------------------------------------

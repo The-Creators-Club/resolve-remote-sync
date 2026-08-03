@@ -51,11 +51,22 @@ from __future__ import annotations
 import logging
 import sys
 import threading
-from typing import Callable, Iterable, Optional
+import time
+from typing import Any, Callable, Iterable, Optional
 
 from .sync.base import STATE_ERROR, STATE_PAUSED, STATE_SYNCING
 
-log = logging.getLogger(__name__)
+# "ccsync.shutdown_guard", NOT __name__. setup_logging() only ever attaches
+# handlers to the "ccsync" logger, so a record emitted under
+# "ccsync_companion.shutdown_guard" propagates to the unconfigured ROOT
+# logger instead -- and in the windowed (console=False) PyInstaller build
+# sys.stderr is None, so logging.lastResort swallows WARNING+ silently and
+# INFO/DEBUG vanish outright. Every line this module has ever logged was
+# invisible in both companion.log and tray -> Copy diagnostics, which is
+# exactly the pair of features an editor asks about after a machine went
+# away mid-upload. Every other module in the package uses "ccsync.<x>";
+# test_shutdown_guard.py now asserts that for all of them.
+log = logging.getLogger("ccsync.shutdown_guard")
 
 # ShutdownBlockReasonCreate silently fails past MAX_STR_BLOCKREASON (256
 # wide chars including the terminator). Failing to set a reason while still
@@ -84,6 +95,34 @@ ES_SYSTEM_REQUIRED = 0x00000001
 # below any sleep timer worth having, and cheap: it reads lane statuses.
 KEEP_AWAKE_POLL_SECONDS = 30.0
 
+# --- liveness bounds (PendingTracker) --------------------------------------
+#
+# "Busy" on its own is not a reason to keep a machine awake or to interrupt
+# a shutdown, because every lane reports busy from a NUMBER, not from bytes
+# arriving: SyncthingLane sets STATE_SYNCING purely from needTotalItems /
+# outgoing needItems, so a NAS that went away overnight with four unreceived
+# files leaves lane C "syncing" forever. That held ES_CONTINUOUS |
+# ES_SYSTEM_REQUIRED permanently (the PC never slept again until the
+# companion restarted) and put "still syncing" on every shutdown screen with
+# zero bytes in flight -- which is precisely the cry-wolf failure this module
+# says in its own docstring it must not have.
+#
+# So a lane only counts as blocking while it is demonstrably ALIVE:
+#   * its status has CHANGED within PROGRESS_STALE_SECONDS (any of state,
+#     queued, transferring, bytes_done/total, last_sync), and
+#   * nothing positively tells us there is no peer to move bytes to.
+# A lane that has just become busy is always given the benefit of the doubt
+# (its first sample starts the clock), so a genuine transfer is never
+# suppressed at the moment it starts.
+PROGRESS_STALE_SECONDS = 180.0
+
+# Backstop for the case staleness cannot see: a lane whose numbers churn but
+# never finish (rclone wedged in SFTP retries, re-listing the same backlog
+# every pass). After this much CONTINUOUS blocking we stand down until the
+# lanes actually settle -- a machine held awake for a third of a day has
+# stopped being a warning and become a fault.
+MAX_HOLD_SECONDS = 8 * 3600.0
+
 
 # --- formatting (local copies: tray.py imports pystray at module scope) -----
 
@@ -110,20 +149,16 @@ def _human_duration(seconds: Optional[float]) -> str:
 
 # --- the decision ----------------------------------------------------------
 
-def describe_pending(statuses: Iterable) -> Optional[str]:
-    """The sentence Windows should show, or None to allow the shutdown.
+def busy_lanes(statuses: Iterable) -> list:
+    """The lanes that have work outstanding, in the order given.
 
-    None means "nothing is moving" -- the overwhelmingly common case, and the
-    one that must stay silent. A lane counts as busy when it is actively
-    syncing or still has queued items; PAUSED and ERROR lanes do not, because
-    in neither case is shutting down going to lose progress that continuing
-    to sit there would have saved.
+    A lane counts as busy when it is actively syncing or still has queued
+    items; PAUSED and ERROR lanes do not, because in neither case is shutting
+    down going to lose progress that continuing to sit there would have
+    saved. One malformed status must not decide the whole question, so it is
+    skipped rather than allowed to raise.
     """
-    busy = False
-    bytes_left = 0
-    have_bytes = False
-    eta_seconds = 0.0
-
+    busy: list = []
     for status in statuses or []:
         try:
             state = str(getattr(status, "state", "") or "")
@@ -132,8 +167,22 @@ def describe_pending(statuses: Iterable) -> Optional[str]:
             queued = int(getattr(status, "queued", 0) or 0)
             if state != STATE_SYNCING and queued <= 0:
                 continue
-            busy = True
+            busy.append(status)
+        except Exception:
+            log.debug("shutdown guard: skipping unreadable lane status", exc_info=True)
+            continue
+    return busy
 
+
+def _render_pending(busy: list) -> Optional[str]:
+    """The sentence Windows should show for already-judged-busy lanes."""
+    if not busy:
+        return None
+    bytes_left = 0
+    have_bytes = False
+    eta_seconds = 0.0
+    for status in busy:
+        try:
             total = getattr(status, "bytes_total", None)
             done = getattr(status, "bytes_done", None)
             if total:
@@ -147,12 +196,8 @@ def describe_pending(statuses: Iterable) -> Optional[str]:
                 # the sum. Overstating it would push people to switch off.
                 eta_seconds = max(eta_seconds, float(eta))
         except Exception:
-            # One malformed status must not decide the whole question.
             log.debug("shutdown guard: skipping unreadable lane status", exc_info=True)
             continue
-
-    if not busy:
-        return None
 
     head = "CCSync is still syncing"
     if have_bytes:
@@ -164,6 +209,208 @@ def describe_pending(statuses: Iterable) -> Optional[str]:
         head + ". Any file part-way uploaded has to start again from the "
         "beginning next time you switch on."
     )[:MAX_REASON_CHARS]
+
+
+def describe_pending(statuses: Iterable) -> Optional[str]:
+    """The sentence Windows should show, or None to allow the shutdown.
+
+    None means "nothing is moving" -- the overwhelmingly common case, and the
+    one that must stay silent.
+
+    STATELESS: this answers "does any lane have work outstanding", which is
+    only half the question. Production goes through PendingTracker.describe(),
+    which adds the liveness bound a single snapshot cannot have (see
+    PROGRESS_STALE_SECONDS).
+    """
+    return _render_pending(busy_lanes(statuses))
+
+
+def _progress_fingerprint(status: Any) -> tuple:
+    """Everything about a lane that MOVES while bytes move.
+
+    Deliberately includes queued/transferring/last_sync as well as the byte
+    counters: lane C reports no byte totals at all, so a folder finishing and
+    the need count dropping is the only movement it ever shows."""
+    def _num(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return (
+        str(getattr(status, "state", "") or ""),
+        _num(getattr(status, "queued", 0)),
+        _num(getattr(status, "transferring", 0)),
+        _num(getattr(status, "bytes_done", 0)),
+        _num(getattr(status, "bytes_total", 0)),
+        str(getattr(status, "last_sync", "") or ""),
+    )
+
+
+def _positive_or(value: Any, fallback: float, label: str) -> float:
+    """A positive float, or `fallback` with a line saying why. Never raises."""
+    try:
+        number = float(value)
+        if number > 0:
+            return number
+    except (TypeError, ValueError):
+        pass
+    log.error("shutdown guard: %s=%r is not a positive number -- using %r",
+              label, value, fallback)
+    return float(fallback)
+
+
+class PendingTracker:
+    """describe_pending() with a memory: the liveness bound (see above).
+
+    One instance per app, shared by BOTH guards -- the keep-awake loop's
+    30-second poll is what keeps the progress samples fresh, and the shutdown
+    guard then reads the same verdict rather than deciding from one snapshot
+    taken at the instant someone clicked Shut down.
+
+    Never raises. Every failure path in here means "not blocking": a bug in
+    the liveness check must be able to cost a warning, never to trap someone
+    at a machine that will not switch off or keep a PC awake all night.
+    """
+
+    def __init__(
+        self,
+        stale_seconds: float = PROGRESS_STALE_SECONDS,
+        max_hold_seconds: float = MAX_HOLD_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        # Both are config keys (keep_awake_stale_seconds /
+        # keep_awake_max_hold_seconds), so both arrive here hand-editable.
+        # config.coerce_numeric already screens them, but this is the layer
+        # that would MISBEHAVE rather than crash on a bad one -- a stale
+        # window of 0 marks every lane stalled on its second sample, i.e. it
+        # silently switches both guards off -- so it screens them again.
+        self._stale_seconds = _positive_or(stale_seconds, PROGRESS_STALE_SECONDS,
+                                           "stale_seconds")
+        self._max_hold_seconds = _positive_or(max_hold_seconds, MAX_HOLD_SECONDS,
+                                              "max_hold_seconds")
+        self._clock = clock
+        self._lock = threading.Lock()
+        # lane name -> (fingerprint, monotonic time it last CHANGED)
+        self._seen: dict[str, tuple[tuple, float]] = {}
+        self._holding_since: Optional[float] = None
+        self._stale_logged: set = set()
+        self._ceiling_logged = False
+
+    def reset(self) -> None:
+        """Forget every sample (used by tests and anything that restarts the
+        lanes -- a fresh start deserves a fresh grace period)."""
+        with self._lock:
+            self._seen.clear()
+            self._holding_since = None
+            self._stale_logged = set()
+            self._ceiling_logged = False
+
+    def describe(
+        self,
+        statuses: Iterable,
+        peer_states: Optional[dict] = None,
+    ) -> Optional[str]:
+        """The sentence to show, or None to allow the shutdown/sleep.
+
+        `peer_states` is {lane name: True/False/None}. False means we
+        POSITIVELY know there is nowhere for this lane's bytes to go (lane C
+        with no connected Syncthing device); None/absent means unknown, which
+        never vetoes -- "can't tell" must not silence a real warning.
+        """
+        try:
+            now = self._clock()
+            busy = busy_lanes(statuses)
+            # Windows calls the shutdown guard on ITS thread while the
+            # keep-awake loop polls on another; both land here.
+            with self._lock:
+                alive = [s for s in busy if self._is_alive(s, now, peer_states)]
+                self._forget_settled(busy)
+                return self._apply_ceiling(alive, now)
+        except Exception:
+            log.exception("shutdown guard: liveness check failed -- not blocking")
+            return None
+
+    # -- internals ----------------------------------------------------------
+
+    def _is_alive(self, status: Any, now: float, peer_states: Optional[dict]) -> bool:
+        name = str(getattr(status, "name", "") or "")
+        if self._peer_state(status, name, peer_states) is False:
+            self._log_once(
+                name, "%s reports work outstanding but has no connected peer -- "
+                "not counting it as a reason to stay on", name or "a lane",
+            )
+            return False
+        try:
+            fingerprint = _progress_fingerprint(status)
+        except Exception:
+            log.debug("shutdown guard: unreadable progress fingerprint", exc_info=True)
+            return True
+        previous = self._seen.get(name)
+        if previous is None or previous[0] != fingerprint:
+            # First sighting, or something moved: the clock restarts here, so
+            # a lane that has only just gone busy always counts.
+            self._seen[name] = (fingerprint, now)
+            self._stale_logged.discard(name)
+            return True
+        if (now - previous[1]) < self._stale_seconds:
+            return True
+        self._log_once(
+            name,
+            "%s has reported the same backlog for %.0f minutes with nothing moving "
+            "-- treating it as stalled, not as a sync worth staying on for",
+            name or "a lane", (now - previous[1]) / 60.0,
+        )
+        return False
+
+    @staticmethod
+    def _peer_state(status: Any, name: str, peer_states: Optional[dict]) -> Optional[bool]:
+        if peer_states:
+            try:
+                state = peer_states.get(name)
+            except Exception:
+                state = None
+            if state is not None:
+                return bool(state)
+        # Also honoured off the status itself, so a lane that grows a
+        # peer_connected field later needs no change here.
+        state = getattr(status, "peer_connected", None)
+        return None if state is None else bool(state)
+
+    def _forget_settled(self, busy: list) -> None:
+        """Drop lanes that are no longer busy, so one that goes idle and then
+        busy again gets a fresh grace period instead of inheriting a stale
+        timestamp -- and so the dict cannot grow without bound."""
+        live_names = set()
+        for status in busy:
+            live_names.add(str(getattr(status, "name", "") or ""))
+        for name in [n for n in self._seen if n not in live_names]:
+            self._seen.pop(name, None)
+            self._stale_logged.discard(name)
+
+    def _apply_ceiling(self, alive: list, now: float) -> Optional[str]:
+        if not alive:
+            self._holding_since = None
+            self._ceiling_logged = False
+            return None
+        if self._holding_since is None:
+            self._holding_since = now
+        elif (now - self._holding_since) >= self._max_hold_seconds:
+            if not self._ceiling_logged:
+                self._ceiling_logged = True
+                log.warning(
+                    "a lane has been busy for %.1f hours without settling -- standing "
+                    "down: no more shutdown warnings or keep-awake until it does",
+                    (now - self._holding_since) / 3600.0,
+                )
+            return None
+        return _render_pending(alive)
+
+    def _log_once(self, key: str, message: str, *args: Any) -> None:
+        if key in self._stale_logged:
+            return
+        self._stale_logged.add(key)
+        log.info(message, *args)
 
 
 # --- the guard -------------------------------------------------------------
@@ -204,8 +451,12 @@ class _WindowsShutdownGuard(ShutdownGuard):
         # ctypes callbacks are garbage-collected like any other object; a
         # WNDPROC that gets collected while Windows still holds the pointer
         # is a crash inside USER32 with no Python traceback. Hold the
-        # reference for the lifetime of the guard.
+        # reference for as long as the WINDOW CLASS that names it is
+        # registered -- and the class is registered PROCESS-wide, so it
+        # outlives this object unless we unregister it (see
+        # _release_window_class).
         self._wndproc_ref = None
+        self._class_registered = False
 
     # -- the part worth testing --------------------------------------------
 
@@ -264,7 +515,15 @@ class _WindowsShutdownGuard(ShutdownGuard):
     # -- lifecycle ----------------------------------------------------------
 
     def start(self) -> None:
-        if self._thread is not None:
+        # is_alive(), not "is not None": the pump thread ends on ANY failure
+        # inside it (ctypes unavailable, RegisterClassW/CreateWindowExW
+        # failing, the message loop raising) and used to leave `_thread`
+        # holding a dead Thread object -- so start() early-returned forever
+        # and the guard could never be restarted, while `active` quietly
+        # reported False and (before the logger fix above) the exception
+        # explaining it went nowhere.
+        thread = self._thread
+        if thread is not None and thread.is_alive():
             return
         self._ready.clear()
         try:
@@ -309,6 +568,44 @@ class _WindowsShutdownGuard(ShutdownGuard):
 
     # -- window + message pump ---------------------------------------------
 
+    def _release_window_class(self, user32: Any, hinstance: Any) -> None:
+        """Give the process-wide window class back, then drop the WNDPROC.
+
+        RegisterClassW registers CLASS NAME -> our ctypes callback for the
+        whole process, and stop() used to leave both in place. A second guard
+        in the same process then took the ERROR_CLASS_ALREADY_EXISTS branch
+        and its CreateWindowExW dispatched WM_NCCREATE into the first guard's
+        callback -- which by then may have been garbage-collected. That is a
+        non-deterministic crash inside USER32 with no Python traceback; the
+        build/start/stop/drop sequence in test_shutdown_guard.py is exactly
+        the shape that reaches it.
+
+        Order matters and is the whole point: the callback reference is only
+        released once Windows has accepted the unregister (which it refuses
+        while any window of the class still exists). If it refuses, we keep
+        holding the reference -- a few hundred wasted bytes beats an access
+        violation."""
+        if not self._class_registered or user32 is None:
+            if not self._class_registered:
+                self._wndproc_ref = None
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32.UnregisterClassW.restype = wintypes.BOOL
+            user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+            if user32.UnregisterClassW(_WINDOW_CLASS, hinstance):
+                self._class_registered = False
+                self._wndproc_ref = None
+            else:
+                log.debug(
+                    "shutdown guard: UnregisterClassW refused (err=%s) -- keeping the "
+                    "window procedure alive", ctypes.get_last_error(),
+                )
+        except Exception:
+            log.debug("shutdown guard: could not unregister its window class", exc_info=True)
+
     def _pump(self) -> None:
         try:
             import ctypes
@@ -318,6 +615,8 @@ class _WindowsShutdownGuard(ShutdownGuard):
             self._ready.set()
             return
 
+        user32 = None
+        hinstance = None
         try:
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -408,7 +707,12 @@ class _WindowsShutdownGuard(ShutdownGuard):
             wndclass.lpfnWndProc = self._wndproc_ref
             wndclass.hInstance = hinstance
             wndclass.lpszClassName = _WINDOW_CLASS
-            if not user32.RegisterClassW(ctypes.byref(wndclass)):
+            if user32.RegisterClassW(ctypes.byref(wndclass)):
+                # Only the guard that REGISTERED the class may unregister it
+                # (see _release_window_class); a guard reusing an existing
+                # registration must leave the owner's callback alone.
+                self._class_registered = True
+            else:
                 err = ctypes.get_last_error()
                 # 1410 = ERROR_CLASS_ALREADY_EXISTS: a previous guard in this
                 # process registered it. Reuse it rather than giving up.
@@ -428,6 +732,10 @@ class _WindowsShutdownGuard(ShutdownGuard):
             log.info("shutdown guard: watching for shutdown (hwnd=%s)", self._hwnd)
         except Exception:
             log.exception("shutdown guard: could not create its window -- no warning on shutdown")
+            self._hwnd = None
+            # Half-built is still registered: give the class back here too,
+            # or the next guard reuses a callback nobody is holding.
+            self._release_window_class(user32, hinstance)
             self._ready.set()
             return
         finally:
@@ -442,6 +750,10 @@ class _WindowsShutdownGuard(ShutdownGuard):
             log.exception("shutdown guard: message loop stopped")
         finally:
             self._hwnd = None
+            # The window is gone by now (WM_CLOSE -> WM_DESTROY -> quit), so
+            # UnregisterClassW can succeed -- which is the only moment it is
+            # safe to let go of the WNDPROC.
+            self._release_window_class(user32, hinstance)
 
 
 def make_shutdown_guard(
@@ -540,7 +852,12 @@ class _WindowsKeepAwake(KeepAwakeGuard):
     # -- lifecycle ----------------------------------------------------------
 
     def start(self) -> None:
-        if self._thread is not None:
+        # is_alive(), for the same reason as the shutdown guard's start():
+        # the loop thread exits on any failure (ctypes unavailable, the loop
+        # raising) and a dead Thread object left here made the guard
+        # permanently un-restartable.
+        thread = self._thread
+        if thread is not None and thread.is_alive():
             return
         self._stop.clear()
         try:

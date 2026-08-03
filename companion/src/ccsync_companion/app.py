@@ -260,6 +260,26 @@ class CompanionApp:
         # are no lanes to have a status.
         self._shutdown_guard: Optional[shutdown_guard_mod.ShutdownGuard] = None
         self._keep_awake: Optional[shutdown_guard_mod.KeepAwakeGuard] = None
+        # Shared by BOTH power guards: "busy" alone is not a reason to keep a
+        # machine awake or interrupt a shutdown, and this is what remembers
+        # whether anything has actually MOVED. The keep-awake loop's 30 s poll
+        # is what keeps its samples fresh. Both thresholds are config keys
+        # because editors run a prebuilt exe: tuning them must not need a
+        # rebuild. coerce_numeric never raises here (construction must survive
+        # a hand-edited value) and PendingTracker screens them again.
+        self._pending_tracker = shutdown_guard_mod.PendingTracker(
+            stale_seconds=config_mod.coerce_numeric(
+                cfg, "keep_awake_stale_seconds",
+                shutdown_guard_mod.PROGRESS_STALE_SECONDS),
+            max_hold_seconds=config_mod.coerce_numeric(
+                cfg, "keep_awake_max_hold_seconds",
+                shutdown_guard_mod.MAX_HOLD_SECONDS),
+        )
+        # shutdown() is called from the tray's Quit AND from run()'s finally
+        # (and by the self-upgrade); running the teardown twice raced two
+        # _stop_lanes()/reporter.stop() sequences against each other.
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_started = False
         self._tray_icon = None
         # Config errors that STOP syncing. Computed HERE, not just in run(),
         # because the gates that consume it (the out-of-tree popup, FIX ALL,
@@ -693,7 +713,8 @@ class CompanionApp:
         every 3 s, and every clip found while the editor was reading a dialog
         was silently lost. Now it is QUEUED and shown the instant the current
         popup closes: as many popups as there are batches, and the editor
-        decides on every clip.
+        decides on every clip. The drain at the end closes the gap in that
+        hand-off (see _drain_stranded_popup_batches).
 
         `snooze` stamps the batch's paths AFTER the lock is won. Stamping
         before the attempt meant a batch that merely LOST the lock race was
@@ -713,19 +734,50 @@ class CompanionApp:
             if queued:
                 log.info("popup already open -- %d clip(s) queued for when it closes", queued)
             return
+        self._run_popup_batches({"items": items, "snooze": snooze})
+        # A batch queued in the gap between this thread's last
+        # _take_popup_batch() (which saw an empty queue) and its release of
+        # the lock had nobody left to show it -- and because its paths STAY in
+        # _popup_queue_keys, _queue_popup_batch() dedupes every later sighting
+        # of the same clips against a batch that will never be shown, so those
+        # clips are lost for the rest of the session.
+        self._drain_stranded_popup_batches()
+
+    def _run_popup_batches(self, batch: Optional[dict[str, Any]]) -> None:
+        """Show `batch` and everything queued behind it, then release the
+        popup lock. THE CALLER MUST ALREADY HOLD `_popup_active_lock`."""
+        from .watcher import _norm_key
+
         try:
-            with self._popup_queue_lock:
-                self._popup_showing_keys = {
-                    _norm_key(item.get("file_path", "")) for item in items
-                }
-            batch: Optional[dict[str, Any]] = {"items": items, "snooze": snooze}
             while batch is not None:
+                with self._popup_queue_lock:
+                    self._popup_showing_keys = {
+                        _norm_key(item.get("file_path", "")) for item in batch["items"]
+                    }
                 self._show_one_popup(batch["items"], snooze=bool(batch["snooze"]))
                 batch = self._take_popup_batch()
         finally:
             with self._popup_queue_lock:
                 self._popup_showing_keys = set()
             self._popup_active_lock.release()
+
+    def _drain_stranded_popup_batches(self) -> None:
+        """Show anything left in the queue with no dialog thread to show it.
+
+        Called after releasing the popup lock (by the popup path and by
+        consolidate). A failed acquire is not a problem: whoever holds the
+        lock now runs the same drain when they finish."""
+        while True:
+            with self._popup_queue_lock:
+                if not self._popup_queue:
+                    return
+            if not self._popup_active_lock.acquire(blocking=False):
+                return
+            batch = self._take_popup_batch()
+            if batch is None:
+                self._popup_active_lock.release()
+                return
+            self._run_popup_batches(batch)
 
     def _show_one_popup(self, items: list[dict[str, Any]], snooze: bool) -> None:
         """One dialog, start to finish. The caller holds
@@ -956,6 +1008,7 @@ class CompanionApp:
             )
             return
 
+        results: list[dict[str, Any]] = []
         if not self._popup_active_lock.acquire(blocking=False):
             self._notify_tray("A popup is already open. Close it first.", "ccsync-companion")
             return
@@ -986,41 +1039,56 @@ class CompanionApp:
             ):
                 log.info("consolidate: cancelled by user")
                 return
+            log.info("consolidate: copying %d clip(s) into %s",
+                     plan["count"], project_prefix or "tree")
+            # UX-10: this used to be a MULTI-HOUR silence between two toasts,
+            # with no progress and no cancel -- even though run_consolidation
+            # already accepted a progress_fn and rclone_lane already populates
+            # bytes_done/speed_bps/eta_seconds every 10 s. One window covers
+            # both phases: the local copy, then the lane A upload.
+            #
+            # STILL UNDER THE POPUP LOCK, deliberately: this REVERSES half of
+            # AUDIT_2 CORE-M13, and that reversal was reviewed and kept -- do
+            # not "restore" the early release. ProgressWindow opens a real tk.Tk()
+            # ROOT and keeps it for the whole copy, so releasing the lock first
+            # left a live root with the lock free -- any watcher popup landing
+            # in that window opened a SECOND root, which is the exact condition
+            # the lock exists to prevent (CORE-M3 -> CORE-H8: a wedged Tcl
+            # interpreter, and for PopupDialog a batch that gets auto-ignored
+            # and never re-offered this session). What made holding it
+            # unaffordable in CORE-M13 was that a losing batch was DROPPED;
+            # since 2026-08-01 it is QUEUED instead, and _drain_stranded_popup_
+            # batches() below shows the queue the moment this window closes.
+            window = popup.ProgressWindow(
+                "COPYING THIS PROJECT'S MEDIA IN",
+                "Your original files are COPIED, never moved. Everything stays where it is.",
+            )
+
+            def _work(publish, should_stop):
+                # window.control carries [ SKIP THIS FILE ] / [ CANCEL ALL ]
+                # down to the per-chunk abort check inside the copy;
+                # should_stop is still the between-files
+                # [ STOP AFTER THIS FILE ].
+                results.extend(consolidate.run_consolidation(
+                    plan["ops"], local_root, state_fn=publish, should_stop=should_stop,
+                    # getattr: a progress-window double without the newer
+                    # attribute (tests, and anything injected) must degrade to
+                    # "no mid-file controls", not crash the copy.
+                    control=getattr(window, "control", None),
+                    canonical_prefix=str(self.config.get("canonical_prefix", "")),
+                ))
+                if should_stop():
+                    return
+                self._consolidate_upload_phase(
+                    subpath, reconcile, consolidate, publish, should_stop)
+
+            window.run(_work)
         finally:
-            # Released BEFORE the copy: run_consolidation can take hours on a
-            # real project, and holding this starves every watcher popup and
-            # the new-project prompt for the duration (AUDIT_2 CORE-M13).
             self._popup_active_lock.release()
-
-        log.info("consolidate: copying %d clip(s) into %s", plan["count"], project_prefix or "tree")
-        # UX-10: this used to be a MULTI-HOUR silence between two toasts,
-        # with no progress and no cancel -- even though run_consolidation
-        # already accepted a progress_fn and rclone_lane already populates
-        # bytes_done/speed_bps/eta_seconds every 10 s. One window covers both
-        # phases: the local copy, then the lane A upload.
-        window = popup.ProgressWindow(
-            "COPYING THIS PROJECT'S MEDIA IN",
-            "Your original files are COPIED, never moved. Everything stays where it is.",
-        )
-        results: list[dict[str, Any]] = []
-
-        def _work(publish, should_stop):
-            # window.control carries [ SKIP THIS FILE ] / [ CANCEL ALL ] down
-            # to the per-chunk abort check inside the copy; should_stop is
-            # still the between-files [ STOP AFTER THIS FILE ].
-            results.extend(consolidate.run_consolidation(
-                plan["ops"], local_root, state_fn=publish, should_stop=should_stop,
-                # getattr: a progress-window double without the newer
-                # attribute (tests, and anything injected) must degrade to
-                # "no mid-file controls", not crash the copy.
-                control=getattr(window, "control", None),
-                canonical_prefix=str(self.config.get("canonical_prefix", "")),
-            ))
-            if should_stop():
-                return
-            self._consolidate_upload_phase(subpath, reconcile, consolidate, publish, should_stop)
-
-        window.run(_work)
+        # Anything the watcher found while that window was up is queued, not
+        # lost -- show it now rather than making the editor wait for the next
+        # 300 s snooze cycle.
+        self._drain_stranded_popup_batches()
 
         # Skipped-by-the-user is its own outcome: fix_clip has already deleted
         # the half-copied file and relinked nothing, so it is neither a
@@ -1683,7 +1751,7 @@ class CompanionApp:
         already running, or if login is still not actually satisfied."""
         if self._lanes_started:
             return
-        if self._require_login and not self.identity.valid():
+        if self._login_gate_blocks_sync():
             return
         try:
             self._start_lanes()
@@ -1937,8 +2005,29 @@ class CompanionApp:
         return f"{stamp} ({remaining / 3600:.1f}h from now)"
 
     def copy_diagnostics(self) -> bool:
-        """Put build_diagnostics() on the clipboard. Returns success."""
+        """Put build_diagnostics() on the clipboard. Returns success.
+
+        Takes `_popup_active_lock` like every other tk.Tk() site in this
+        process. It is a hidden root, but Tk does not care: opening it while
+        the fixer dialog is up is the "another Tk root has run on a sibling
+        thread" condition that wedges the Tcl interpreter, and the dialog it
+        wedges is the one whose batch then gets auto-ignored (AUDIT_2
+        CORE-M3/H8). It also bypassed apply_upgrade's `if
+        self._popup_active_lock.locked()` guard, so a self-upgrade could swap
+        the exe out from under a live root.
+
+        Never leaves the admin with nothing: if a window is already open the
+        diagnostics go to the log instead, which is what the fallback path
+        below does too."""
         text = self.build_diagnostics()
+        if not self._popup_active_lock.acquire(blocking=False):
+            log.info("copy diagnostics: another CCSync window is open -- logging instead")
+            log.info("DIAGNOSTICS:\n%s", text)
+            self._notify_tray(
+                "Another CCSync window is open, so the diagnostics went to the log "
+                "instead (tray → Open log). Close it and try again to get them on the "
+                "clipboard.", "ccsync-companion")
+            return False
         try:
             import tkinter as tk
 
@@ -1961,6 +2050,8 @@ class CompanionApp:
                 "Couldn't reach the clipboard. The diagnostics were written to the log "
                 "instead (tray → Open log).", "ccsync-companion")
             return False
+        finally:
+            self._popup_active_lock.release()
 
     def lane_statuses(self) -> list[LaneStatus]:
         statuses = [lane.status() for lane in self.lanes]
@@ -2024,10 +2115,33 @@ class CompanionApp:
                     "pause" if self._paused else "resume", getattr(lane, "name", lane),
                 )
 
+    def _login_gate_blocks_sync(self) -> bool:
+        """The one gate start() and on_signed_in() both apply before letting
+        any lane run: require_login with no verified identity."""
+        return bool(self._require_login and not self.identity.valid())
+
     def toggle_pause(self) -> None:
         self._paused = not self._paused
         if not self._sync_enabled:
             log.info("pause toggled but sync_enabled=false -- nothing to pause")
+            return
+        if not self._paused and self._login_gate_blocks_sync():
+            # RESUME IS A START. start() and on_signed_in() both refuse to
+            # run lanes without a verified identity; this path called
+            # _start_lanes() (legacy) / sequencer.resume() (managed) with no
+            # such check, so on a machine that had correctly left its lanes
+            # down, clicking Pause then Resume synced everything under an
+            # unverified identity and set _lanes_started=True. Same after a
+            # token expiry, which sets _lanes_started=False for exactly this
+            # reason.
+            self._mark_lanes_pending_login()
+            log.warning(
+                "resume ignored: sign-in required (require_login=true) and nobody is "
+                "signed in -- sync lanes stay down"
+            )
+            self._notify_tray(
+                "You're not signed in, so nothing will sync. Right-click the tray icon "
+                "→ Sign in…", "ccsync-companion")
             return
         if self._managed and self.sequencer is not None:
             try:
@@ -2070,7 +2184,7 @@ class CompanionApp:
                 "sync lanes/sequencer NOT started: %d config problem(s) that stop syncing",
                 len(self.config_problems),
             )
-        elif self._require_login and not self.identity.valid():
+        elif self._login_gate_blocks_sync():
             # Not signed in yet: do NOT start sync lanes/the sequencer (same
             # spirit as the sync_enabled=False path above -- lanes stay
             # idle with a clear reason). The watcher, popup fixer, and tray
@@ -2165,7 +2279,8 @@ class CompanionApp:
 
         Called by Windows on its own thread with a few seconds of patience at
         most, so it does nothing but read the lane statuses (documented cheap
-        and non-blocking) -- no Resolve calls, no disk, no network.
+        and non-blocking) and a cached connection summary -- no Resolve calls,
+        no disk, no network.
         """
         if self._paused or self.config_problems:
             return None
@@ -2174,7 +2289,39 @@ class CompanionApp:
         except Exception:
             log.exception("shutdown guard: could not read lane statuses")
             return None
-        return shutdown_guard_mod.describe_pending(statuses)
+        # PendingTracker, not the stateless describe_pending(): a lane reports
+        # "syncing" from a NEED COUNT, so a NAS that went away overnight kept
+        # this machine awake and un-shutdownable indefinitely with nothing in
+        # flight.
+        return self._pending_tracker.describe(statuses, self._lane_peer_states())
+
+    def _lane_peer_states(self) -> dict[str, Optional[bool]]:
+        """{lane name: True/False/None} -- False ONLY where we positively know
+        there is nobody to move bytes to.
+
+        Lane C is the one lane that can answer this cheaply: its poll loop
+        already caches /rest/system/connections for the relay diagnostics, and
+        an empty connected-device set means the server is unreachable, so its
+        outstanding need count is a backlog, not a transfer. Lanes A/B (rclone
+        over SFTP) have no equivalent signal, so they are left unknown -- and
+        unknown never vetoes a warning.
+        """
+        states: dict[str, Optional[bool]] = {}
+        lane_c = getattr(self, "_lane_c", None)
+        summary_fn = getattr(lane_c, "connection_path_summary", None)
+        if summary_fn is None:
+            return states
+        try:
+            summary = summary_fn() or {}
+        except Exception:
+            log.debug("connection_path_summary() failed", exc_info=True)
+            return states
+        if not isinstance(summary, dict) or "devices" not in summary:
+            # No poll has succeeded yet (or an older lane): "can't tell".
+            return states
+        devices = summary.get("devices")
+        states[str(getattr(lane_c, "name", "") or "")] = bool(devices)
+        return states
 
     def _sweep_stale_tmp_files(self) -> None:
         from . import fixer as fixer_mod
@@ -2225,6 +2372,16 @@ class CompanionApp:
                 log.exception("identity expiry watcher failed")
 
     def shutdown(self) -> None:
+        # ONCE. The tray's Quit calls shutdown() and then icon.stop(), which
+        # lets run()'s `finally` call it again; the self-upgrade calls it too
+        # (request_shutdown). Two overlapping teardowns raced two
+        # _stop_lanes()/reporter.stop() sequences -- including RcloneLane.stop
+        # racing itself over `self._observer = None`.
+        with self._shutdown_lock:
+            if self._shutdown_started:
+                log.debug("shutdown() already ran -- ignoring the repeat call")
+                return
+            self._shutdown_started = True
         self._stop_event.set()
         # First: a guard still holding a block reason would make the machine
         # refuse to shut down on behalf of a companion that is exiting.

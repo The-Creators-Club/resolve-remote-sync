@@ -886,3 +886,185 @@ def test_payload_carries_completions_when_provided():
         {"dashboard_url": "http://x", "editor_name": "e"},
     )
     assert "completed" not in reporter_none._build_payload()
+
+
+# -- B6: the payload never grows past what the dashboard will accept --------
+
+
+def _big_manifest(n_projects, n_files):
+    """The shape KNOWN_BUGS B6 names: N projects x 2 file lists x N entries.
+    manifest.MAX_PER_FILE_ENTRIES is 2000 and MAX_PROJECTS is 64, so
+    (64, 2000) is the real worst case a base rig produces."""
+    return {
+        f"2026/FF5/P{i:03d}": {
+            "n_originals": n_files, "bytes_originals": n_files * 10**9,
+            "n_proxies": n_files, "bytes_proxies": n_files * 10**8,
+            "truncated": False,
+            "originals": [[f"Footage/Day 1/CAM A/A{j:06d}_C001_0101AB.braw", 12345678]
+                          for j in range(n_files)],
+            "proxies": [[f"Proxy/Footage/Day 1/CAM A/A{j:06d}_C001_0101AB.mov", 123456]
+                        for j in range(n_files)],
+        }
+        for i in range(n_projects)
+    }
+
+
+def _reporter_with(manifest=None, tree=None, queue=None, calls=None):
+    from ccsync_companion.sync.base import LaneStatus
+
+    def fake_post(url, data, headers, timeout):
+        if calls is not None:
+            calls.append(data)
+        return {}
+
+    return DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")],
+        _cfg(),
+        http_post=fake_post,
+        get_local_manifest=(lambda: manifest) if manifest is not None else None,
+        get_media_tree=(lambda: tree) if tree is not None else None,
+        get_queue_info=(lambda: (queue, None)) if queue is not None else None,
+    )
+
+
+def test_an_oversized_heavy_payload_sheds_sections_instead_of_413ing(caplog):
+    """B6's lower-trigger variant: the dashboard refuses a body over 8 MiB,
+    and that refusal costs the WHOLE report -- lane status, transfers,
+    machine_state, presence and the upgrade advertisement with it. 64
+    projects x 2000 file entries blows past 8 MB and nothing here measured
+    the payload at all."""
+    calls = []
+    reporter = _reporter_with(manifest=_big_manifest(64, 2000), calls=calls)
+    with caplog.at_level(logging.WARNING, logger="ccsync.reporter"):
+        reporter.post_once(light=False)
+
+    assert len(calls) == 1
+    sent = calls[0]
+    assert reporter_mod.payload_size(sent) <= reporter_mod.PAYLOAD_BUDGET_BYTES
+    # the LANE CORE always survives -- that is the whole point
+    assert sent["lanes"][0]["name"] == "lane_a_video_up"
+    assert sent["editor_name"] and sent["machine"]
+    # rollups survive; only the per-file lists were shed, and it was logged
+    assert sent["local_manifest"]["2026/FF5/P000"]["n_originals"] == 2000
+    assert sent["local_manifest"]["2026/FF5/P000"]["originals"] is None
+    assert sent["local_manifest"]["2026/FF5/P000"]["truncated"] is True
+    assert "per-file lists" in " ".join(r.getMessage() for r in caplog.records)
+
+
+def test_a_payload_that_fits_is_left_completely_alone():
+    calls = []
+    manifest = _big_manifest(3, 5)
+    _reporter_with(manifest=manifest, calls=calls).post_once(light=False)
+    assert calls[0]["local_manifest"] == manifest
+    assert calls[0]["local_manifest"]["2026/FF5/P000"]["originals"] is not None
+
+
+def test_fit_payload_drops_the_heavy_sections_last_and_keeps_the_report():
+    """Worst case: even with everything else shed the body is still too big.
+    A LIGHT report that arrives beats a HEAVY one that 413s."""
+    reporter = _reporter_with()
+    payload = {
+        "editor_name": "alex", "machine": "PC", "lanes": [{"name": "lane_a_video_up"}],
+        "media_tree": {"Big": [{"clip_name": "x" * 400} for _ in range(40000)]},
+        "local_manifest": {"only": {"n_originals": 1, "originals": None, "proxies": None}},
+    }
+    fitted = reporter._fit_payload(dict(payload), budget=4096)
+    assert reporter_mod.payload_size(fitted) <= 4096
+    assert "media_tree" not in fitted          # the biggest section goes first
+    assert fitted["lanes"] == [{"name": "lane_a_video_up"}]
+    assert fitted["editor_name"] == "alex" and fitted["machine"] == "PC"
+
+    # ...and when even that is not enough, local_manifest goes too
+    payload["local_manifest"] = {f"p{i}": {"n_originals": i} for i in range(400)}
+    fitted = reporter._fit_payload(dict(payload), budget=1024)
+    assert reporter_mod.payload_size(fitted) <= 1024
+    assert "media_tree" not in fitted and "local_manifest" not in fitted
+
+
+def test_the_queue_is_capped_at_the_dashboards_ceiling(caplog):
+    calls = []
+    reporter = _reporter_with(queue=[f"slug-{i}" for i in range(120)], calls=calls)
+    with caplog.at_level(logging.WARNING, logger="ccsync.reporter"):
+        reporter.post_once(light=True)
+    assert len(calls[0]["queue"]) == reporter_mod.MAX_REPORT_PROJECTS
+    assert "queued project(s)" in " ".join(r.getMessage() for r in caplog.records)
+
+
+def test_server_side_truncation_is_logged_by_the_companion(caplog):
+    """The dashboard now truncates rather than rejecting, and says so in the
+    reply. "the dashboard is not showing everything this machine has" has to
+    be discoverable from THIS log too."""
+    from ccsync_companion.sync.base import LaneStatus
+
+    reporter = DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")],
+        _cfg(),
+        http_post=lambda *a: {"ok": True, "truncated": {"local_manifest": 12}},
+    )
+    with caplog.at_level(logging.WARNING, logger="ccsync.reporter"):
+        reporter.post_once()
+    assert "truncated this report" in " ".join(r.getMessage() for r in caplog.records)
+
+
+def test_the_report_token_is_read_per_post_not_cached_at_construction():
+    """/api/v1/verify hands back the current fleet report token and
+    identity.IdentityManager republishes it into this same cfg dict at
+    sign-in. Cached at construction, a stale config.toml `dashboard_token`
+    (rotated on the server, or mistyped at install) 401'd every report
+    forever with a successful tray sign-in sitting right next to it."""
+    from ccsync_companion.sync.base import LaneStatus
+
+    seen = []
+
+    def fake_post(url, data, headers, timeout):
+        seen.append(headers.get("X-CCSync-Token"))
+        return {}
+
+    cfg = _cfg(dashboard_token="STALE")
+    reporter = DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")], cfg,
+        http_post=fake_post)
+    reporter.post_once()
+    cfg["dashboard_token"] = "fresh-from-verify"      # what sign-in does
+    reporter.post_once()
+    assert seen == ["STALE", "fresh-from-verify"]
+
+
+def test_a_blanked_cfg_token_falls_back_to_the_constructed_value():
+    from ccsync_companion.sync.base import LaneStatus
+
+    seen = []
+
+    def fake_post(url, data, headers, timeout):
+        seen.append(headers.get("X-CCSync-Token"))
+        return {}
+
+    cfg = _cfg(dashboard_token="tok123")
+    reporter = DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")], cfg,
+        http_post=fake_post)
+    cfg["dashboard_token"] = ""
+    reporter.post_once()
+    assert seen == ["tok123"]
+
+
+def test_shedding_never_mutates_the_manifest_cache():
+    """ManifestCache.get() returns a SHALLOW copy, so its per-project dicts
+    are shared with the live cache. Stripping the file lists in place would
+    blank them until the next full rescan (manifest_refresh_interval later),
+    silently degrading every subsequent report too."""
+    from ccsync_companion import manifest as manifest_mod
+    from ccsync_companion.sync.base import LaneStatus
+
+    cache = manifest_mod.ManifestCache({"local_root": ""})
+    cache._cache = _big_manifest(64, 2000)
+    before = {rel: len(e["originals"]) for rel, e in cache._cache.items()}
+
+    reporter = DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")], _cfg(),
+        http_post=lambda *a: {}, get_local_manifest=cache.get)
+    reporter.post_once(light=False)
+
+    after = {rel: len(e["originals"]) for rel, e in cache._cache.items()}
+    assert after == before
+    assert all(e["truncated"] is False for e in cache._cache.values())

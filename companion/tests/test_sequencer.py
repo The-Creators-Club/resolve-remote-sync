@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import threading
 import time
+import urllib.error
 from pathlib import Path
 
 import pytest
 
 from ccsync_companion.sync.sequencer import STATE_NO_SELECTION, STATE_PAUSED, Sequencer
+from ccsync_companion.sync.syncthing_admin import PARTIAL_IGNORE_LINES, STIGNORE_LINES
 
 
 # -- fakes -----------------------------------------------------
@@ -43,7 +45,20 @@ class FakeAdmin:
         self.pause_calls = []
         self.pending = {}
         self.accept_calls = []
+        # Slugs whose accept_folder() blows up where the real one does: in
+        # the set_ignores that FOLLOWS the folder-config write.
         self.accept_raises = set()
+        # Slugs whose set_ignores fails outright (a config write that
+        # exceeds config_write_timeout is the documented trigger).
+        self.ignore_raises = set()
+        # What GET /rest/db/ignores reports per folder. A slug ABSENT from
+        # this dict models the normal state -- a folder Syncthing has and
+        # that is correctly filtered; tests opt in to the broken states
+        # (None = no .stignore at all, [] = empty, a short list = partial).
+        self.folder_ignores = {}
+        self.get_ignores_calls = []
+        self.get_ignores_raises = set()
+        self.get_ignores_404 = set()
         self.status_by_slug = {}
         self.status_calls = []
         self.ignore_calls = []
@@ -55,6 +70,8 @@ class FakeAdmin:
         self.my_id = "SELF-DEVICE"
         self.folder_devices = {}
         self.max_folder_concurrency_calls = []
+        # Mirrors SyncthingAdmin._ignores_unconfirmed.
+        self._ignores_unconfirmed = set()
 
     def set_folder_paused(self, folder_id, paused):
         self.pause_calls.append((folder_id, paused))
@@ -70,6 +87,16 @@ class FakeAdmin:
         return dict(self.pending)
 
     def accept_folder(self, folder_id, label, local_path, offered_by_device_id):
+        """Mirrors syncthing_admin.accept_folder's REAL ordering: the folder
+        config is POSTed first (the /rest/db/ignores endpoint addresses an
+        existing folder, so it cannot come first), then ignores, then the
+        unpause.
+
+        The fake used to raise BEFORE popping `pending`, unlike the real
+        admin -- which is the only reason
+        test_failed_accept_leaves_the_folder_paused passed: every later pass
+        saw the folder still pending and re-entered the accept path instead
+        of the release path the bug actually lives on (B14)."""
         self.accept_calls.append(
             {
                 "folder_id": folder_id,
@@ -78,14 +105,39 @@ class FakeAdmin:
                 "offered_by_device_id": offered_by_device_id,
             }
         )
+        self._ignores_unconfirmed.add(folder_id)
+        self.pending.pop(folder_id, None)   # the folder now EXISTS...
+        self.paused_state[folder_id] = True  # ...paused, and unfiltered
+        self.folder_ignores[folder_id] = None  # ...with no .stignore yet
+        self.events.append(("accept", folder_id))
         if folder_id in self.accept_raises:
             raise RuntimeError("set_ignores timed out; folder left paused")
-        self.pending.pop(folder_id, None)
+        self.set_ignores(folder_id, list(STIGNORE_LINES))
+        self.set_folder_paused(folder_id, False)
         return {}
 
     def set_ignores(self, folder_id, lines):
         self.ignore_calls.append((folder_id, list(lines)))
+        self.events.append(("ignores", folder_id))
+        if folder_id in self.ignore_raises:
+            raise RuntimeError("config write timed out")
+        self.folder_ignores[folder_id] = list(lines)
+        self._ignores_unconfirmed.discard(folder_id)
         return {}
+
+    def get_ignores(self, folder_id):
+        self.get_ignores_calls.append(folder_id)
+        self.events.append(("get_ignores", folder_id))
+        if folder_id in self.get_ignores_404:
+            raise urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
+        if folder_id in self.get_ignores_raises:
+            raise RuntimeError("syncthing unreachable")
+        if folder_id not in self.folder_ignores:
+            return {"ignore": list(STIGNORE_LINES), "expanded": []}
+        return {"ignore": self.folder_ignores[folder_id], "expanded": []}
+
+    def ignores_confirmed(self, folder_id):
+        return folder_id not in self._ignores_unconfirmed
 
     def ensure_versioning(self, folder_id, folder=None):
         self.versioning_calls.append(folder_id)
@@ -524,6 +576,30 @@ def test_process_project_skips_item_with_null_rel_path():
     assert lane_b.calls == []
 
 
+def test_process_project_skips_item_with_null_slug(caplog):
+    """The slug becomes the SYNCTHING FOLDER ID. `str(item.get("slug"))`
+    turned a NULL slug into the literal id "None", so every pause/unpause/
+    set_ignores/status call of that turn addressed a folder called "None" --
+    and "None" then stuck around forever as a key in the bookkeeping dicts."""
+    items = [{"slug": None, "rel_path": "2026/FF5/Alpha", "position": 0, "active": True}]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    with caplog.at_level("WARNING", logger="ccsync.sync.sequencer"):
+        seq.start()
+        time.sleep(0.2)
+        seq.stop()
+
+    assert lane_a.calls == []
+    assert lane_b.calls == []
+    assert admin.pause_calls == []
+    assert admin.ignore_calls == []
+    assert seq.expected_folder_slugs() == []
+    assert seq.known_rels() == []
+    assert any("slug=None" in r.getMessage() for r in caplog.records), caplog.records
+
+
 def test_known_rels_excludes_invalid_or_inactive_items():
     items = [
         _item("s-a", "2026/FF5/Alpha", 0),
@@ -631,31 +707,131 @@ def test_failed_accept_leaves_the_folder_paused():
     when set_ignores fails. Its own caller broke that guarantee 1 ms later by
     unpausing unconditionally -- and since the folder then leaves
     pending_folders(), NOTHING ever retried the ignores, so lane C indexed
-    and offered every .braw/.mov original for the life of the install."""
+    and offered every .braw/.mov original for the life of the install.
+
+    Now runs against a FakeAdmin with the real accept ordering, so the folder
+    really does leave `pending` on the failed accept: every pass after the
+    first takes the "already accepted" path, which is where B14 lived. The
+    ignores never land here (ignore_raises), so the folder must stay paused
+    through every turn AND every leak-recovery sweep."""
     items = [_item("s-a", "2026/FF5/Alpha", 0)]
     selection = FakeSelectionClient(selection=items)
     admin = FakeAdmin()
     admin.pending = {"s-a": {"offeredBy": {"DEVICE-1": {}}}}
-    admin.accept_raises.add("s-a")
-    seq, lane_a, lane_b, events = _build(selection, admin)
+    admin.accept_raises.add("s-a")   # half-accept: folder exists, unfiltered
+    admin.ignore_raises.add("s-a")   # ...and every retry of the ignores fails too
+    seq, lane_a, lane_b, events = _build(selection, admin, sequencer_idle_seconds=0.02)
 
     seq.start()
     # Let several passes go by: the turn must never unpause it, and neither
     # may the leak-recovery sweeps that run between passes.
-    assert _wait_until(lambda: len(admin.accept_calls) >= 3, timeout=5.0)
+    assert _wait_until(lambda: len(lane_a.calls) >= 3, timeout=5.0)
     # Snapshot BEFORE stop(), whose own sweep is a separate concern.
     during_the_passes = list(admin.pause_calls)
     seq.stop()
 
-    unpauses = [c for c in during_the_passes if c == ("s-a", False)]
-    # At most the single pre-lane unpause of the FIRST pass, i.e. before the
-    # first accept attempt could reveal the problem. Never once the folder is
-    # known to have landed without its ignores.
-    assert len(unpauses) <= 1, during_the_passes
-    # No ignores/versioning reassertion either -- the folder isn't usable.
-    assert admin.ignore_calls == []
+    assert ("s-a", False) not in during_the_passes, during_the_passes
+    assert admin.paused_state["s-a"] is True
+    # The per-turn re-assert is the ONLY retry a half-accepted folder gets
+    # (it has left pending_folders() for good), so it must keep trying.
+    assert admin.ignore_calls, "nothing ever retried the ignores"
     # And the pass moved on rather than dying.
     assert lane_a.calls
+
+
+def test_half_accepted_folder_is_only_released_once_its_ignores_land():
+    """B14: accept_folder POSTs the folder config BEFORE set_ignores, so a
+    failed set_ignores leaves a folder that exists, carries no .stignore and
+    is gone from pending_folders(). The next pass then saw "not pending" and
+    read that as "fine", discarded the latch and unpaused it. The release
+    must wait for a set_ignores that actually returned."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    admin.pending = {"s-a": {"offeredBy": {"DEVICE-1": {}}}}
+    admin.accept_raises.add("s-a")  # only the accept fails; the retry succeeds
+    seq, lane_a, lane_b, events = _build(selection, admin, sequencer_idle_seconds=0.02)
+
+    seq.start()
+    assert _wait_until(lambda: ("s-a", False) in admin.pause_calls, timeout=5.0)
+    seq.stop()
+
+    # The folder was never unpaused before the ignores landed.
+    first_unpause = events.index(("pause", "s-a", False))
+    first_ignores = events.index(("ignores", "s-a"))
+    assert first_ignores < first_unpause, events[:first_unpause + 1]
+    assert admin.ignores_confirmed("s-a")
+
+
+def test_a_failed_ignores_reassert_never_unpauses_the_folder():
+    """B5: _reassert_folder_policy caught every non-404 from set_ignores with
+    a bare log.exception and returned normally, so _lane_c_turn could not
+    tell and unpaused a `sendreceive` folder whose .stignore was not known to
+    be in place -- lane C then indexes and offers every .braw/.mov original
+    and the whole Proxy/ tree bidirectionally, duplicating lanes A/B and
+    propagating any local video delete to the NAS and every other editor.
+
+    A config write that merely exceeds config_write_timeout is enough; the
+    codebase documents those routinely outlast the read timeout."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()  # nothing pending: accepted long ago
+    admin.paused_state["s-a"] = True  # and left paused by the previous run
+    admin.ignore_raises.add("s-a")
+    seq, lane_a, lane_b, events = _build(selection, admin, sequencer_idle_seconds=0.02)
+
+    seq.start()
+    assert _wait_until(lambda: len(admin.ignore_calls) >= 3, timeout=5.0)
+    during_the_passes = list(admin.pause_calls)
+    seq.stop()
+
+    assert ("s-a", False) not in during_the_passes, during_the_passes
+    assert admin.paused_state["s-a"] is True
+    # Fault isolation is intact: lanes A/B still ran, the loop did not die.
+    assert lane_a.calls
+
+
+def test_pending_folders_failure_is_fail_closed():
+    """B14: "can't tell whether this folder needs accepting" used to return
+    True, releasing a folder a previous turn had deliberately latched paused
+    on the strength of one failed GET."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+
+    def boom():
+        raise RuntimeError("syncthing unreachable")
+
+    admin.pending_folders = boom
+    seq, lane_a, lane_b, events = _build(selection, admin, sequencer_idle_seconds=0.02)
+
+    seq.start()
+    assert _wait_until(lambda: len(lane_a.calls) >= 2, timeout=5.0)
+    during_the_passes = list(admin.pause_calls)
+    seq.stop()
+
+    assert ("s-a", False) not in during_the_passes, during_the_passes
+    # Nothing is re-asserted on a folder whose state we could not read.
+    assert admin.ignore_calls == []
+    assert lane_a.calls
+
+
+def test_a_clean_turn_clears_the_ignores_latch():
+    """A latched slug is excluded from every leak-recovery unpause sweep, so
+    the latch has to be released the moment a set_ignores actually lands --
+    otherwise one bad pass strands the folder paused for the life of the
+    process."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._ignores_unconfirmed.add("s-a")  # latched by an earlier failed pass
+
+    seq.start()
+    assert _wait_until(lambda: ("s-a", False) in admin.pause_calls, timeout=5.0)
+    seq.stop()
+
+    assert seq._ignores_unconfirmed == set()
 
 
 def test_successful_turn_reasserts_ignores_and_versioning_every_turn():
@@ -780,6 +956,218 @@ def test_release_before_lanes_costs_nothing_when_no_folder_is_paused():
 
     seq._release_paused_folders()
     assert admin.pause_calls == []
+
+
+# -- startup ignores verification ------------------------------------------
+#
+# Neither latch that protects a half-filtered folder survives the process, so
+# a companion killed between accept_folder's config write and its set_ignores
+# came back up knowing nothing and _unpause_all released a `sendreceive`
+# folder with no .stignore -- lane C then offers every .braw/.mov original
+# and the whole Proxy/ tree bidirectionally until that project's first turn.
+
+
+def _first(events, wanted):
+    """Index of `wanted` in the shared event list, or None."""
+    return events.index(wanted) if wanted in events else None
+
+
+def test_startup_verifies_ignores_and_releases_a_clean_folder():
+    """A folder that verifies clean must proceed exactly as before: released
+    by the startup leak-recovery sweep, not held back until its first turn."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+    admin.paused_state["s-a"] = True  # left paused by a crashed previous run
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    assert _wait_until(lambda: ("s-a", False) in admin.pause_calls, timeout=3.0)
+    seq.stop()
+
+    assert admin.get_ignores_calls[0] == "s-a"
+    # The GET came first, and the release happened on the STARTUP sweep --
+    # before the first turn's re-assert, which is the pre-existing behaviour
+    # this must not regress.
+    assert _first(events, ("get_ignores", "s-a")) < _first(events, ("pause", "s-a", False))
+    ignores_idx = _first(events, ("ignores", "s-a"))
+    assert ignores_idx is None or _first(events, ("pause", "s-a", False)) < ignores_idx
+
+
+def test_startup_leaves_a_folder_with_no_stignore_paused():
+    """The exact restart gap: accept_folder POSTed the folder config, the
+    process died before set_ignores, and the next launch's leak-recovery
+    sweep would have unpaused an unfiltered sendreceive folder."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+    admin.paused_state["s-a"] = True
+    admin.folder_ignores["s-a"] = None  # folder exists, no .stignore at all
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    assert _wait_until(lambda: ("s-a", False) in admin.pause_calls, timeout=3.0)
+    seq.stop()
+
+    # Released only AFTER a set_ignores that actually landed -- never by the
+    # startup sweep.
+    assert _first(events, ("ignores", "s-a")) < _first(events, ("pause", "s-a", False))
+
+
+def test_startup_leaves_a_folder_with_partial_ignores_paused():
+    """A .stignore that predates a pattern the current build considers
+    load-bearing is not "filtered enough": without the .partial pair (B12) a
+    39 GB orphaned rclone partial is offered to every other editor."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+    admin.paused_state["s-a"] = True
+    admin.folder_ignores["s-a"] = [
+        line for line in STIGNORE_LINES if line not in PARTIAL_IGNORE_LINES
+    ]
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    assert _wait_until(lambda: ("s-a", False) in admin.pause_calls, timeout=3.0)
+    seq.stop()
+
+    assert _first(events, ("ignores", "s-a")) < _first(events, ("pause", "s-a", False))
+
+
+def test_startup_ignores_fetch_error_is_fail_closed():
+    """Same posture as _maybe_auto_accept: waiting one rotation for a folder
+    whose filtering we could not read is cheap, putting an unfiltered
+    sendreceive folder online is not."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+    admin.paused_state["s-a"] = True
+    admin.get_ignores_raises.add("s-a")
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    assert _wait_until(lambda: ("s-a", False) in admin.pause_calls, timeout=3.0)
+    seq.stop()
+
+    assert _first(events, ("ignores", "s-a")) < _first(events, ("pause", "s-a", False))
+
+
+def test_startup_ignores_verification_is_a_bounded_one_get_per_folder():
+    """One GET per selected folder AT STARTUP -- not per pass, and not per
+    project turn."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0), _item("s-b", "2026/FF5/Bravo", 1)]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin, sequencer_idle_seconds=0.02)
+
+    seq.start()
+    assert _wait_until(lambda: len(lane_a.calls) >= 6, timeout=5.0)
+    seq.stop()
+
+    assert sorted(admin.get_ignores_calls) == ["s-a", "s-b"], admin.get_ignores_calls
+
+
+@pytest.mark.parametrize(
+    "fetched, expect_latched",
+    [
+        (None, True),                                   # no .stignore at all
+        ([], True),                                     # empty .stignore
+        (["(?i)*.braw"], True),                         # nowhere near complete
+        (list(STIGNORE_LINES), False),                  # exactly right
+        (list(STIGNORE_LINES) + ["(?i)*.tmp"], False),  # extra lines are fine
+    ],
+)
+def test_startup_verification_latch_matrix(fetched, expect_latched):
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+    admin.folder_ignores["s-a"] = fetched
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq._verify_startup_ignores(items)
+
+    assert (seq._ignores_unconfirmed == {"s-a"}) is expect_latched
+
+
+def test_startup_verification_stays_quiet_about_folders_not_configured_locally():
+    """A 404 means the editor has not been offered that folder yet: there is
+    nothing to run unfiltered, and latching it would put a WARNING per
+    selected-but-unaccepted folder in the log on every launch."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+    admin.get_ignores_404.add("s-a")
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq._verify_startup_ignores(items)
+
+    assert seq._ignores_unconfirmed == set()
+
+
+def test_startup_verification_skips_invalid_items_and_survives_an_old_admin():
+    items = [{"slug": None, "rel_path": "2026/FF5/Alpha", "position": 0, "active": True}]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq._verify_startup_ignores(items)
+    assert admin.get_ignores_calls == []      # never addresses a folder id "None"
+    assert seq._ignores_unconfirmed == set()
+
+    admin.get_ignores = None                  # an admin double predating the getter
+    seq._verify_startup_ignores([_item("s-a", "2026/FF5/Alpha", 0)])
+    assert seq._ignores_unconfirmed == set()
+
+
+# -- bookkeeping is bounded ------------------------------------------------
+
+
+def test_bookkeeping_is_pruned_when_a_project_leaves_the_selection():
+    """These are keyed by slug and were append-only, so every project an
+    editor ever ticked stayed in memory for the life of the process -- and a
+    stale _ignores_unconfirmed entry PERMANENTLY excluded that slug from
+    every leak-recovery unpause sweep, so re-ticking the project left its
+    folder stuck paused with nothing left to release it."""
+    selection = FakeSelectionClient(selection=[])
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq._ignores_unconfirmed = {"s-gone", "s-a"}
+    seq._clone_ages = {"s-gone": 3, "s-a": 2}
+    seq._orphan_ages = {"s-gone": 3, "s-a": 2}
+
+    seq._update_known_selection([_item("s-a", "2026/FF5/Alpha", 0)])
+
+    assert seq._ignores_unconfirmed == {"s-a"}
+    assert set(seq._clone_ages) == {"s-a"}
+    assert set(seq._orphan_ages) == {"s-a"}
+
+    # ...and the de-selected slug is no longer held back from the sweeps.
+    seq._unpause_all([
+        _item("s-gone", "2026/FF5/Gone", 0),
+        _item("s-a", "2026/FF5/Alpha", 1),
+    ])
+    assert ("s-gone", False) in admin.pause_calls
+    assert ("s-a", False) not in admin.pause_calls
+
+
+def test_a_folder_removed_from_syncthing_stops_being_tracked_as_paused():
+    """_paused_by_us is the only record of a folder this sequencer paused, so
+    it is deliberately NOT pruned against the selection -- but a folder that
+    no longer exists in Syncthing cannot be left paused, and retrying it on
+    every project boundary forever is pure noise."""
+    selection = FakeSelectionClient(selection=[])
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    def gone(folder_id, paused):
+        raise urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
+
+    admin.set_folder_paused = gone
+    seq._paused_by_us.add("s-gone")
+    seq._release_paused_folders()
+
+    assert seq._paused_by_us == set()
 
 
 # -- expected_folder_slugs (AUDIT_2 L-6/UX-3 wiring) ------------------------

@@ -204,3 +204,65 @@ def test_hand_edited_refresh_interval_never_raises_in_the_constructor(tmp_path, 
     assert manifest_mod.ManifestCache(
         {"local_root": str(tmp_path), "manifest_refresh_interval": 45}
     ).refresh_interval == 45.0
+
+
+# -- B6: the project-count cap ---------------------------------------------
+
+
+def test_scan_caps_the_number_of_projects_reported(tmp_path, caplog):
+    """KNOWN_BUGS B6: this module emitted one key per marker-bearing dir with
+    NO cap, while the dashboard capped local_manifest at 64 with a raising
+    validator -- so a 65th project 422'd the entire heavy report and, because
+    an idle companion only ever sends heavy ticks, took the machine off the
+    fleet grid. Worst placed is the base rig, whose local_root is the whole
+    NAS tree at P:\\."""
+    manifest_mod._last_truncation_logged = None
+    for i in range(manifest_mod.MAX_PROJECTS + 6):
+        _touch(_make_project(tmp_path, "2026", "FF5", f"P{i:03d}") / "a.mov", size=10)
+
+    with caplog.at_level(logging.WARNING, logger="ccsync.manifest"):
+        result = manifest_mod.scan_local_manifest(str(tmp_path))
+    assert len(result) == manifest_mod.MAX_PROJECTS
+    # truncation is LOGGED, never silent
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "6 older project(s)" in logged
+    assert "64 of 70 project(s)" in logged
+
+
+def test_selected_projects_always_survive_the_cap(tmp_path):
+    """The editor's TICKED projects are the ones being synced and the ones
+    whose per-file lists the presence view needs -- they must never be the
+    entries that get dropped."""
+    manifest_mod._last_truncation_logged = None
+    for i in range(manifest_mod.MAX_PROJECTS + 5):
+        _touch(_make_project(tmp_path, "2026", "FF5", f"P{i:03d}") / "a.mov", size=10)
+    # the LAST project alphabetically would otherwise be a natural casualty
+    selected = {"2026/FF5/P000", f"2026/FF5/P{manifest_mod.MAX_PROJECTS + 4:03d}"}
+
+    result = manifest_mod.scan_local_manifest(str(tmp_path), selected_rels=selected)
+    assert len(result) == manifest_mod.MAX_PROJECTS
+    for rel in selected:
+        assert rel in result
+        assert result[rel]["originals"] == [["a.mov", 10]]
+
+
+def test_prioritize_is_a_no_op_below_the_cap(tmp_path):
+    rels = ["2026/FF5/A", "2026/FF5/B"]
+    kept, dropped = manifest_mod.prioritize_project_rels(str(tmp_path), rels, None)
+    assert kept == rels and dropped == 0
+
+
+def test_prioritize_keeps_the_most_recently_touched(tmp_path):
+    """A base rig holds hundreds of projects going back years; an active
+    shoot must outrank a 2019 archive."""
+    import os
+
+    rels = []
+    for i in range(6):
+        d = _make_project(tmp_path, "2026", "FF5", f"P{i}")
+        os.utime(d, (1_600_000_000 + i * 1000, 1_600_000_000 + i * 1000))
+        rels.append(f"2026/FF5/P{i}")
+    kept, dropped = manifest_mod.prioritize_project_rels(
+        str(tmp_path), rels, None, max_projects=2)
+    assert dropped == 4
+    assert set(kept) == {"2026/FF5/P5", "2026/FF5/P4"}

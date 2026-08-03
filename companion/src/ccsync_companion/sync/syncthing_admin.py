@@ -47,8 +47,22 @@ _VIDEO_EXTS = [
     ".r3d", ".crm", ".mpg", ".mpeg", ".wmv", ".webm", ".insv", ".360",
 ]
 
+# rclone's default --inplace=false writes "<name>.<token>.partial" (express:
+# "<name>.<token>.exp.partial") next to the destination and renames on
+# completion, so a lane A killed mid-transfer orphans one -- and lane A never
+# deletes. On the NAS side those orphans were indexed and fanned out over lane
+# C to every ticked editor; on THIS side the same suffix must be ignored so a
+# partial that lands here (or one lane B leaves behind) is never offered back
+# up. Same two forms as the .ccsync-tmp pair below, for the same reason: the
+# extension patterns match by EXTENSION and match neither (KNOWN_BUGS B12).
+# Kept byte-identical to server/common.PARTIAL_IGNORE_LINES and dashboard
+# provision.PARTIAL_IGNORE_LINES -- server/tests/test_cross_component.py
+# asserts that across all three builders.
+PARTIAL_IGNORE_LINES = ["(?i)**/*.partial", "(?i)*.partial"]
+
 STIGNORE_LINES: list[str] = (
     [f"(?i)*{ext}" for ext in _VIDEO_EXTS]
+    + PARTIAL_IGNORE_LINES
     # The fixer copies to "<dest>.ccsync-tmp" then os.replace()s it into
     # place. The extension patterns above match by EXTENSION, so
     # "A001.braw.ccsync-tmp" matches none of them -- lane C would upload a
@@ -67,6 +81,29 @@ FOLDER_VERSIONING: dict = {
     "type": "staggered",
     "params": {"cleanInterval": "3600", "maxAge": "2592000"},
 }
+
+
+def missing_ignore_lines(fetched: Any) -> list[str]:
+    """Which of STIGNORE_LINES are absent from a GET /rest/db/ignores body.
+
+    An empty list means this folder's .stignore carries every load-bearing
+    pattern -- the per-extension video lines, the .partial pair, the
+    .ccsync-tmp pair and the Proxy patterns -- so lane C cannot offer
+    anything lanes A/B already own.
+
+    Fails CLOSED on every shape that is not a list of lines: Syncthing sends
+    `{"ignore": null}` for a folder with no .stignore AT ALL, which is the
+    single most dangerous state a `sendreceive` folder can be unpaused in
+    and the one an unrecognised shape most likely means. Extra lines
+    (a hand-edited .stignore, an older companion's leftovers) are fine --
+    this asks "is everything we need present?", not "is this byte-identical
+    to what we would write?", so a folder is never latched over cosmetics.
+    """
+    lines = fetched.get("ignore") if isinstance(fetched, dict) else fetched
+    if not isinstance(lines, (list, tuple)):
+        return list(STIGNORE_LINES)
+    present = {str(line).strip() for line in lines}
+    return [want for want in STIGNORE_LINES if want not in present]
 
 
 def http_request(
@@ -120,6 +157,17 @@ class SyncthingAdmin:
         # pause sweep half-applied -- worst case every selected folder
         # paused and lane C fully stopped (AUDIT_2 L-11).
         self.config_write_timeout = config_write_timeout
+        # Folder IDs whose accept_folder() got as far as writing the folder
+        # config but NOT as far as a confirmed set_ignores. Such a folder
+        # EXISTS in Syncthing's config (so it has left pending_folders() and
+        # nothing will ever re-offer it) while carrying no .stignore at all
+        # -- unpausing it makes lane C index and offer every .braw/.mov
+        # original and the whole Proxy/ tree bidirectionally. The set_ignores
+        # POST cannot be issued before the folder exists (the endpoint is
+        # per-folder and 404s otherwise), so the half-accepted window is
+        # tracked instead: see ignores_confirmed(), which the sequencer's
+        # leak-recovery unpause sweeps consult.
+        self._ignores_unconfirmed: set[str] = set()
 
     def _resolve_api_key(self) -> str:
         if self._configured_api_key:
@@ -247,7 +295,17 @@ class SyncthingAdmin:
 
         Versioning is set at creation, not bolted on later: a folder that
         pulls and then deletes before the first ensure_versioning() would
-        lose the file outright (AUDIT_2 DEL-6)."""
+        lose the file outright (AUDIT_2 DEL-6).
+
+        "Left paused" is only half the guarantee, though: the folder config
+        is necessarily POSTed FIRST (set_ignores addresses an existing
+        folder), so a failed set_ignores leaves a folder that exists,
+        carries no ignores, and has left pending_folders() -- nothing will
+        ever offer it again, so the "it stays paused" promise has to survive
+        past this call. It does, via ignores_confirmed(): the id is marked
+        unconfirmed BEFORE the config write and only cleared by a set_ignores
+        that actually returned."""
+        self._ignores_unconfirmed.add(str(folder_id))
         folder_config = {
             "id": folder_id,
             "label": label,
@@ -272,10 +330,38 @@ class SyncthingAdmin:
         the folder-marker-missing error state instead)."""
         return self._write_request("DELETE", self._folder_path(folder_id))
 
+    def get_ignores(self, folder_id: str) -> Any:
+        """GET /rest/db/ignores?folder=<id> -- what this folder's .stignore
+        actually contains right now.
+
+        {"ignore": ["(?i)*.braw", ...], "expanded": [...]}, with `ignore`
+        null for a folder that has none at all.
+
+        The read side of set_ignores, and the only way to answer "is this
+        folder actually filtered?" across a restart: ignores_confirmed()
+        below is in-memory only, so it says nothing at all about a folder
+        half-accepted by the PREVIOUS run -- which is exactly the folder the
+        sequencer's startup leak-recovery sweep is about to unpause. A GET,
+        so the short read timeout, not config_write_timeout."""
+        return self._request("GET", self._query("/rest/db/ignores", {"folder": folder_id}))
+
     def set_ignores(self, folder_id: str, lines: list[str]) -> Any:
-        return self._write_request(
+        result = self._write_request(
             "POST", self._query("/rest/db/ignores", {"folder": folder_id}), {"ignore": lines}
         )
+        # Only a call that actually RETURNED clears the half-accepted latch
+        # -- a timed-out config write is exactly the case this exists for.
+        self._ignores_unconfirmed.discard(str(folder_id))
+        return result
+
+    def ignores_confirmed(self, folder_id: str) -> bool:
+        """False only while this process knows a folder's ignores are NOT in
+        place: accept_folder() wrote the folder config and the set_ignores
+        that followed never returned. True for every other folder, including
+        ones this instance has never touched -- absence of evidence about a
+        long-accepted folder is not evidence of a missing .stignore, and the
+        sequencer re-asserts the ignores once per turn anyway."""
+        return str(folder_id) not in self._ignores_unconfirmed
 
     # -- status -----------------------------------------------------
     def folder_status(self, folder_id: str) -> Any:

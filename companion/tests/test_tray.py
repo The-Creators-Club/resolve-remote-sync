@@ -170,6 +170,31 @@ def test_menu_shows_sign_in_when_not_signed_in():
     assert "NOT SIGNED IN" in labels
 
 
+def test_menu_does_not_claim_nothing_syncs_when_login_is_not_required():
+    """With require_login=false the lanes are already running under
+    editor_name, so "(nothing syncs until you do)" sends the editor chasing a
+    sign-in they don't need. compute_overall_color() has always made this
+    check; the menu and the tooltip did not."""
+    from ccsync_companion.tray import _build_menu
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity(None))
+    app._require_login = False
+    labels = _menu_labels(_build_menu(app))
+    assert "Sign in…" in labels
+    assert not any("nothing syncs" in label for label in labels)
+
+
+def test_tooltip_does_not_claim_nothing_syncs_when_login_is_not_required():
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity(None))
+    app._require_login = False
+    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: up to date"
+
+    app._require_login = True
+    assert "not signed in" in _tooltip_text(_tray_snapshot(app))
+
+
 def test_menu_shows_sign_out_and_status_when_signed_in():
     from ccsync_companion.tray import _build_menu
 

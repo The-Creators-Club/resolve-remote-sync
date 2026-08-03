@@ -13,7 +13,14 @@ Dashboard contract (already built server-side; this module only calls it):
     auth headers (it's the open bootstrap-trust endpoint).
       200 -> {"ok": true, "username": "<lowercased>", "token": "<opaque>",
               "role": "base" | "editor"}
-      401 -> bad credentials / 429 -> throttled / 503 -> login not configured
+      401 -> bad credentials / 403 -> account exists but is not in the NAS
+      `editors` group / 429 -> throttled / 503 -> login not configured, or
+      TrueNAS unreachable (retryable)
+    EVERY non-2xx body is FastAPI's {"detail": "<sentence>"} -- NOT
+    {"error": ...}. The sentence is written to be shown to the editor
+    verbatim; _http_error_message reads it, and falls back to a per-status
+    default only when the body is missing or unreadable. onboarding/steps.py
+    reuses that helper, so the install gate says the same thing the tray does.
     The token is "v2.identity.<user_b64url>.<expires_epoch>.<hexsig>" --
     OPAQUE to this module except for reading the username (base64url field 2,
     padding-less) and the expiry (field 3) back out of it (parse_token). The
@@ -88,15 +95,23 @@ def load_identity(path: Path) -> Optional[dict[str, Any]]:
     return data
 
 
-def save_identity(path: Path, username: str, token: str, role: Optional[str] = None) -> None:
-    """Write {username, token, role, verified_at} to `path`. Writes to a
-    sibling temp file then replaces -- not a full fsync-durable atomic
-    write, but enough to avoid a reader ever seeing a half-written file."""
+def save_identity(path: Path, username: str, token: str, role: Optional[str] = None,
+                  report_token: Optional[str] = None) -> None:
+    """Write {username, token, role, report_token, verified_at} to `path`.
+    Writes to a sibling temp file then replaces -- not a full fsync-durable
+    atomic write, but enough to avoid a reader ever seeing a half-written file.
+
+    `report_token` is the SHARED fleet report token /api/v1/verify hands back
+    (api.py's `report_token` key). It is not an identity, but this file is the
+    only thing the companion rewrites at runtime, and a stale
+    config.toml `dashboard_token` otherwise 401s every report forever with a
+    successful tray sign-in sitting right next to it -- see IdentityManager."""
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "username": username,
         "token": token,
         "role": role,
+        "report_token": report_token,
         "verified_at": datetime.now(timezone.utc).isoformat(),
     }
     tmp_path = path.with_name(path.name + ".tmp")
@@ -147,20 +162,40 @@ def is_valid(identity: Optional[dict[str, Any]], now: Callable[[], float] = time
 
 def _http_error_message(exc: urllib.error.HTTPError) -> str:
     """Best-effort human-readable message for a non-2xx /api/v1/verify
-    response -- tries the JSON body's "error" field first, then falls back
-    to a per-status-code default per the dashboard's documented contract."""
+    response -- the JSON body's message first, then a per-status-code default.
+
+    THE BODY KEY IS "detail", NOT "error" (KNOWN_BUGS B18). FastAPI's
+    HTTPException serialises to {"detail": ...} and every refusal the
+    dashboard raises on this route uses it (api.py's login/verify handlers).
+    This function read "error" -- a shape the dashboard never sends -- so the
+    actionable sentence never reached the editor and they got the generic
+    per-status fallback instead. "error" is still accepted second, because
+    verify_credentials' OWN failure dicts use that key and onboarding/steps.py
+    passes them through the same rendering.
+    """
     data: Any = {}
     try:
         body = exc.read()
         data = json.loads(body.decode("utf-8")) if body else {}
     except Exception:
         data = {}
-    if isinstance(data, dict) and data.get("error"):
-        return str(data["error"])
+    if isinstance(data, dict):
+        for key in ("detail", "error"):
+            value = data.get(key)
+            # A pydantic 422 sends detail as a LIST of error dicts, which is
+            # not something to show an editor -- fall through to the map.
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     return {
         401: "invalid username or password",
+        # 403 had no entry at all, so an editor with a working NAS account
+        # that simply is not in the `editors` group -- the single most likely
+        # first-run failure, and the one with a one-line fix -- was told
+        # "sign-in failed (HTTP 403)".
+        403: ("this account is not allowed to sync -- ask an admin to add it to the "
+              "'editors' group on the NAS"),
         429: "too many sign-in attempts -- try again shortly",
-        503: "sign-in is not available on this server",
+        503: "sign-in is not available on this server right now -- try again shortly",
     }.get(exc.code, f"sign-in failed (HTTP {exc.code})")
 
 
@@ -245,6 +280,13 @@ def verify_credentials(
         # Absent on older dashboards -- .get() leaves it None, the
         # "no role info" case _apply_identity_role() falls back from.
         "role": resp.get("role"),
+        # The shared fleet report token. /api/v1/verify has always returned
+        # it (api.py) and onboarding consumes it, but THIS module dropped it
+        # -- so a tray sign-in on a machine whose config.toml
+        # `dashboard_token` was stale (rotated, or a bad copy-paste at
+        # install) succeeded and then 401'd every single report, forever,
+        # with nothing on screen connecting the two.
+        "report_token": resp.get("report_token"),
         # Conditional upgrade advertisement (absent = up to date / older
         # dashboard) -- handed to UpgradeManager by app.sign_in().
         "upgrade": resp.get("upgrade"),
@@ -274,6 +316,42 @@ class IdentityManager:
         # UpgradeManager. Deliberately NOT persisted: the reporter refreshes
         # this every report interval anyway.
         self.last_upgrade_info: Optional[dict[str, Any]] = None
+        # A report token from a previous run's sign-in beats config.toml from
+        # the moment this object exists -- IdentityManager is built before the
+        # reporter and the selection client (app.py), and both read
+        # cfg["dashboard_token"] per request.
+        self._adopt_report_token()
+
+    def _adopt_report_token(self) -> None:
+        """Publish the signed-in report token into `cfg["dashboard_token"]`.
+
+        /api/v1/verify returns the shared fleet report token; the companion
+        used to throw it away, so a stale config.toml `dashboard_token` --
+        rotated on the server, or mistyped at install -- meant every report
+        401'd forever even though the tray said "signed in as ...". config.toml
+        is written by the installer, not by the running companion, so the
+        freshest value lives in identity.json and is republished here into the
+        one dict every consumer reads from. Never raises."""
+        try:
+            with self._lock:
+                identity = self._identity or {}
+                token = str(identity.get("report_token") or "").strip()
+            if not token:
+                return
+            if str(self.cfg.get("dashboard_token", "") or "").strip() != token:
+                log.info("using the report token from the last sign-in "
+                         "(config.toml's dashboard_token is stale or unset)")
+            self.cfg["dashboard_token"] = token
+        except Exception:
+            log.debug("could not adopt the signed-in report token", exc_info=True)
+
+    @property
+    def report_token(self) -> Optional[str]:
+        """The shared fleet report token captured at sign-in, or None. NOT an
+        identity -- see save_identity."""
+        with self._lock:
+            identity = self._identity or {}
+            return str(identity.get("report_token") or "").strip() or None
 
     def valid(self) -> bool:
         with self._lock:
@@ -331,8 +409,13 @@ class IdentityManager:
         verified_username = str(result.get("username") or username).strip()
         token = str(result.get("token") or "")
         role = result.get("role")
+        # Absent/blank on an older dashboard (or one with no report token
+        # configured): keep whatever was already in play rather than blanking
+        # a working token.
+        report_token = str(result.get("report_token") or "").strip() or self.report_token
         try:
-            save_identity(self.path, verified_username, token, role=role)
+            save_identity(self.path, verified_username, token, role=role,
+                          report_token=report_token)
         except OSError as exc:
             log.warning("sign_in: failed to persist identity to %s: %s", self.path, exc)
 
@@ -341,8 +424,10 @@ class IdentityManager:
                 "username": verified_username,
                 "token": token,
                 "role": role,
+                "report_token": report_token,
                 "verified_at": datetime.now(timezone.utc).isoformat(),
             }
+        self._adopt_report_token()
         if not self.valid():
             # The dashboard's response didn't yield a usable (parseable,
             # non-expired) token -- treat this as a failed sign-in rather

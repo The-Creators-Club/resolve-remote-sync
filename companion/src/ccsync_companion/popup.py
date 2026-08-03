@@ -486,7 +486,14 @@ def perform_fix_all(
         outcome = dict(outcome)
         outcome["file_path"] = path
         results.append(outcome)
-        batch_done += file_total
+        if outcome.get("ok"):
+            batch_done += file_total
+        # else: nothing was copied that still exists. fixer.fix_clip deletes
+        # both artifacts of an aborted or failed attempt before returning, so
+        # counting file_total here credited the batch with bytes that are no
+        # longer on disk -- inflating the bar, the "X of Y done" text and
+        # RateEstimator's speed/ETA, on exactly the runs (skips, failures)
+        # where the editor is most likely to be reading them.
 
         if progress_fn is not None:
             try:
@@ -587,6 +594,11 @@ class PopupDialog:
 
     def _build(self, tk, ttk, theme, rows, local_root) -> None:
         self.root.title("CCSYNC.EXE")
+        # Every other root in this process sets the app icon; the one an
+        # editor sees most often -- the media-outside-tree dialog -- showed
+        # the default Tk feather, which reads as "some random program is
+        # asking about my media".
+        theme.apply_window_icon(tk, self.root)
         self.root.attributes("-topmost", True)
         self.root.configure(bg=theme.BG, padx=18, pady=14)
         self.root.grid_columnconfigure(0, weight=1)

@@ -69,6 +69,35 @@ OnReportResponseFn = Callable[[Any], None]
 # shows up on the dashboard quickly, rather than waiting a full interval.
 INITIAL_DELAY_SECONDS = 2.0
 
+# The dashboard refuses a report body over 8 MiB outright (413, from
+# app.MAX_REPORT_BODY_BYTES) -- and that refusal costs the WHOLE report:
+# lane status, transfers, machine_state, presence and the upgrade
+# advertisement all go with it. Nothing here measured the payload at all, so
+# 64 projects x 2 file lists x 2000 entries sailed straight past the limit and
+# the machine went dark on the fleet grid (KNOWN_BUGS B6).
+#
+# The budget is the server's ceiling minus room for JSON overhead and headers.
+# _fit_payload sheds the heavy sections in order of least value until the body
+# fits; the lane/status core of the report is never shed, because a report
+# that arrives with no presence data is worth far more than one that never
+# arrives.
+MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+PAYLOAD_BUDGET_BYTES = 7 * 1024 * 1024
+# Mirror of dashboard api.MAX_REPORT_PROJECTS -- keys in local_manifest /
+# media_tree / queue. The server truncates past this; sending fewer keeps the
+# choice of WHICH projects survive on this side, where the selection is known.
+MAX_REPORT_PROJECTS = 64
+
+
+def payload_size(payload: dict[str, Any]) -> int:
+    """Serialized size of the report body, or 0 if it can't be measured (a
+    payload that won't serialize is the http_post's problem, not this
+    guard's)."""
+    try:
+        return len(json.dumps(payload).encode("utf-8"))
+    except (TypeError, ValueError):
+        return 0
+
 
 def default_http_post(url: str, data: dict, headers: dict, timeout: float) -> Any:
     body = json.dumps(data).encode("utf-8")
@@ -225,7 +254,16 @@ class DashboardReporter:
             except Exception:
                 log.exception("get_queue_info() failed")
                 queue, current_project = [], None
-            payload["queue"] = list(queue)
+            # Capped for the same reason as local_manifest (B6): the server's
+            # `queue` field takes at most MAX_REPORT_PROJECTS entries, and it
+            # used to reject the whole report over the 65th.
+            queue = list(queue)
+            if len(queue) > MAX_REPORT_PROJECTS:
+                log.warning(
+                    "reporting the first %d of %d queued project(s): the dashboard's "
+                    "queue field takes no more (B6)", MAX_REPORT_PROJECTS, len(queue))
+                queue = queue[:MAX_REPORT_PROJECTS]
+            payload["queue"] = queue
             payload["current_project"] = current_project
         if self._get_resolve_project is not None:
             try:
@@ -257,6 +295,93 @@ class DashboardReporter:
                     log.exception("get_media_tree() failed")
         return payload
 
+    def _fit_payload(
+        self, payload: dict[str, Any], budget: int = PAYLOAD_BUDGET_BYTES
+    ) -> dict[str, Any]:
+        """Shed heavy sections until the body fits inside `budget` (B6).
+
+        Least-valuable-first, and each step is logged so a truncated report is
+        never silent:
+
+          1. per-file manifest lists  -- the rollup counts/bytes stay exact,
+             which is what the fleet grid actually renders;
+          2. media_tree clip lists    -- trimmed to a bounded head;
+          3. project keys             -- the manifest's own priority order
+             already put ticked/recent projects first;
+          4. the heavy sections entirely -- a LIGHT report that arrives beats
+             a HEAVY one that 413s and takes lane status with it.
+
+        Never raises: a payload that cannot be measured is passed through
+        untouched (the POST will fail and be retried like any other failure).
+        """
+        size = payload_size(payload)
+        if size <= budget:
+            return payload
+
+        manifest = payload.get("local_manifest")
+        if isinstance(manifest, dict):
+            # COPIES, never in-place edits: ManifestCache.get() returns a
+            # shallow copy, so its per-project dicts are shared with the live
+            # cache -- stripping them here would blank the cached file lists
+            # until the next full rescan (manifest_refresh_interval later).
+            stripped = 0
+            trimmed: dict[str, Any] = {}
+            for rel, entry in manifest.items():
+                if (isinstance(entry, dict)
+                        and (entry.get("originals") is not None
+                             or entry.get("proxies") is not None)):
+                    entry = {**entry, "originals": None, "proxies": None,
+                             "truncated": True}
+                    stripped += 1
+                trimmed[rel] = entry
+            if stripped:
+                payload["local_manifest"] = manifest = trimmed
+                log.warning(
+                    "report payload is %.1f MB (budget %.1f MB): dropped the per-file "
+                    "lists from %d project(s); rollup counts are unaffected",
+                    size / 1e6, budget / 1e6, stripped)
+                size = payload_size(payload)
+                if size <= budget:
+                    return payload
+
+        tree = payload.get("media_tree")
+        if isinstance(tree, dict) and tree:
+            # `tree` is _build_payload's own top-level dict and clips[:500]
+            # builds a new list, so nothing the media-tree cache owns is
+            # touched here either.
+            clips_dropped = 0
+            for name, clips in list(tree.items()):
+                if isinstance(clips, list) and len(clips) > 500:
+                    clips_dropped += len(clips) - 500
+                    tree[name] = clips[:500]
+            if clips_dropped:
+                log.warning("report payload still %.1f MB: trimmed %d media-pool clip(s)",
+                            size / 1e6, clips_dropped)
+                size = payload_size(payload)
+                if size <= budget:
+                    return payload
+
+        if isinstance(manifest, dict) and len(manifest) > 1:
+            keep = max(1, len(manifest) // 2)
+            log.warning("report payload still %.1f MB: reporting %d of %d project(s)",
+                        size / 1e6, keep, len(manifest))
+            payload["local_manifest"] = dict(list(manifest.items())[:keep])
+            size = payload_size(payload)
+            if size <= budget:
+                return payload
+
+        for key in ("media_tree", "local_manifest"):
+            if payload.get(key) is not None:
+                log.warning(
+                    "report payload still %.1f MB: dropping %r entirely so the rest of "
+                    "the report (lane status, transfers, presence) still reaches the "
+                    "dashboard", size / 1e6, key)
+                payload.pop(key, None)
+                size = payload_size(payload)
+                if size <= budget:
+                    return payload
+        return payload
+
     def post_once(self, light: bool = False) -> None:
         """Build and send a single report. Raises on failure -- callers
         (the report loop) are responsible for fault isolation.
@@ -282,8 +407,15 @@ class DashboardReporter:
 
         url = f"{self.dashboard_url.rstrip('/')}/api/v1/report"
         headers = {"Content-Type": "application/json"}
-        if self.dashboard_token:
-            headers["X-CCSync-Token"] = self.dashboard_token
+        # Read from cfg per post, not from the value cached at construction:
+        # IdentityManager republishes the report token /api/v1/verify hands
+        # back into this same dict on sign-in, and a stale config.toml
+        # `dashboard_token` otherwise 401s every report forever with a
+        # successful tray sign-in sitting right next to it (see identity.py's
+        # _adopt_report_token). The cached value is the fallback.
+        token = str(self.cfg.get("dashboard_token", "") or "").strip() or self.dashboard_token
+        if token:
+            headers["X-CCSync-Token"] = token
         if self._get_identity_token is not None:
             try:
                 identity_token = self._get_identity_token()
@@ -294,6 +426,11 @@ class DashboardReporter:
                 headers["X-CCSync-Identity"] = identity_token
 
         payload = self._build_payload(light=light, editor_name=editor_name)
+        if not light:
+            # B6: the dashboard 413s a body over MAX_REPORT_BODY_BYTES, and
+            # that costs the WHOLE report -- lane status included. Shed the
+            # heavy sections until it fits rather than let that happen.
+            payload = self._fit_payload(payload)
         # A FULL report carries local_manifest + media_tree: a 2000-clip
         # project's media tree plus the per-file manifest cannot cross any
         # real WAN link in 5 s, so those two sections never reached the
@@ -302,6 +439,16 @@ class DashboardReporter:
         # which is what makes live transfer progress feel responsive.
         timeout = self.timeout if light else self.full_report_timeout
         resp = self._http_post(url, payload, headers, timeout)
+        # The dashboard truncates rather than rejecting an oversized section
+        # (B6) and says so in the reply. Log it: "the dashboard is not showing
+        # everything this machine has" must be discoverable from this log, not
+        # only from the server's.
+        try:
+            dropped = resp.get("truncated") if isinstance(resp, dict) else None
+        except Exception:
+            dropped = None
+        if dropped:
+            log.warning("the dashboard truncated this report: %s", dropped)
         if self._on_report_response is not None:
             try:
                 self._on_report_response(resp)

@@ -9,6 +9,7 @@ this module's fake is modeled on).
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 import time
@@ -685,6 +686,41 @@ class TestProjectRelForPath:
     def test_outside_projects_tree(self, tmp_path):
         assert self._f(tmp_path, Path("Elsewhere/a.mov"), ["2026/CCT/Show"]) is None
 
+    def test_projects_component_is_matched_case_insensitively(self, tmp_path):
+        """Every other comparison in this function lowercases (and both lanes
+        run rclone --ignore-case), but the first component used to be compared
+        against the literal "Projects" -- so a mapped `P:\\projects\\...`, or
+        an editor whose local_root is spelled in lower case, returned None and
+        the clip silently waited for the next full rotation."""
+        knowns = ["2026/CCT/Show"]
+        assert (
+            self._f(tmp_path, Path("projects/2026/CCT/Show/a.mov"), knowns)
+            == "Projects/2026/CCT/Show"
+        )
+        assert (
+            self._f(tmp_path, Path("PROJECTS/2026/CCT/Show/a.mov"), knowns)
+            == "Projects/2026/CCT/Show"
+        )
+
+    def test_legacy_fallback_canonicalizes_the_projects_component(self, tmp_path):
+        """The returned rel becomes an rclone subpath on the NAS, which IS
+        case sensitive -- so the first component must be the canonical
+        "Projects" no matter how it is cased on the local disk."""
+        assert (
+            self._f(tmp_path, Path("projects/2026/Series/Show/a.mov"), None)
+            == "Projects/2026/Series/Show"
+        )
+
+    def test_a_rejected_path_says_why_at_debug_level(self, tmp_path, caplog):
+        """"No log line" was half the bug: a path the express lane declined to
+        attribute left no trace at all to diagnose."""
+        with caplog.at_level("DEBUG", logger="ccsync.sync.rclone"):
+            assert self._f(tmp_path, Path("Elsewhere/a.mov"), ["2026/CCT/Show"]) is None
+            assert self._f(tmp_path, Path("Projects/2026/X/Y/a.mov"), ["2026/CCT/Show"]) is None
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("not under a 'Projects' directory" in m for m in messages)
+        assert any("matches none of the" in m for m in messages)
+
 
 # ===========================================================================
 # AUDIT_3 M-8: stderr is parsed incrementally and only a tail is retained
@@ -946,3 +982,201 @@ def test_generic_fatal_surfaces_the_cause_not_the_closing_notice(tmp_path):
     assert status.state == STATE_ERROR
     assert "connection lost" in status.last_error
     assert "not attempting retries" not in status.last_error
+
+
+# ===========================================================================
+# transfers[].project_slug -- the dashboard accepts and persists it
+# (api.TransferIn / db.replace_active_transfers) and the companion never sent
+# it, so the column was always NULL and a live transfer could only be
+# identified by file path.
+# ===========================================================================
+
+
+SUBPATH = "Projects/2026/FF5/Energy Transition"
+
+
+def _project_with_marker(lane, subpath=SUBPATH, slug="energy-transition"):
+    project_dir = Path(lane.local_root) / subpath
+    project_dir.mkdir(parents=True, exist_ok=True)
+    if slug is not None:
+        (project_dir / ".ccsync-project").write_text(
+            json.dumps({"slug": slug}), encoding="utf-8"
+        )
+    return project_dir
+
+
+class _SnapshottingProc:
+    """A fake rclone whose stderr yields lazily, so the test can read the
+    lane's LIVE status between lines -- transfers[] is cleared when a run
+    finishes, so mid-run is the only place to see it."""
+
+    def __init__(self, lane, lines: list[str], snapshots: list) -> None:
+        self._lane = lane
+        self._lines = lines
+        self._snapshots = snapshots
+
+    @property
+    def stderr(self):
+        def gen():
+            for line in self._lines:
+                yield line
+                self._snapshots.append(list(self._lane.status().transfers))
+        return gen()
+
+    def wait(self) -> int:
+        return 0
+
+
+def _live_transfer_rows(lane, subpath):
+    """Run a pass and return the transfer rows as the dashboard would see
+    them mid-run."""
+    snapshots: list = []
+    lane.popen_factory = lambda cmd, **kwargs: _SnapshottingProc(
+        lane, TRANSFERRING_STATS_LINES, snapshots
+    )
+    lane.run_once(subpath=subpath)
+    live = [rows for rows in snapshots if rows]
+    assert live, "precondition: the fake stream has a live transferring entry"
+    return live[0]
+
+
+def test_transfer_rows_carry_the_project_slug_of_the_running_project(tmp_path):
+    """The slug, not the rel path: it is the project's immutable identity and
+    survives the rename/move that makes a rel path a bad join key."""
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    _project_with_marker(lane, slug="energy-transition")
+
+    rows = _live_transfer_rows(lane, SUBPATH)
+
+    assert rows[0]["name"] == "clip.mov"
+    assert rows[0]["project_slug"] == "energy-transition"
+    # ...and nothing else about the row shape changed.
+    assert rows[0]["direction"] == DIRECTION_UP
+    assert rows[0]["bytes_total"] == 5000
+
+
+def test_transfer_rows_omit_the_slug_when_the_marker_has_not_arrived(tmp_path):
+    """Lane C delivers the marker; until it does, the field must be ABSENT
+    rather than a rel path masquerading as a slug -- the dashboard leaves the
+    column NULL, which is exactly the honest answer."""
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    _project_with_marker(lane, slug=None)  # dir exists, no marker
+
+    rows = _live_transfer_rows(lane, SUBPATH)
+
+    assert "project_slug" not in rows[0]
+
+
+def test_a_whole_tree_run_sends_no_project_slug(tmp_path):
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    Path(lane.local_root).mkdir(parents=True, exist_ok=True)
+
+    rows = _live_transfer_rows(lane, None)
+
+    assert "project_slug" not in rows[0]
+
+
+def test_an_invalid_marker_slug_is_not_forwarded(tmp_path):
+    """A marker is a plain JSON file on a share every editor can write, and
+    this value becomes a dashboard URL segment / Syncthing folder id."""
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    _project_with_marker(lane, slug="../../etc")
+
+    rows = _live_transfer_rows(lane, SUBPATH)
+
+    assert "project_slug" not in rows[0]
+
+
+def test_an_over_long_slug_is_dropped_rather_than_422ing_the_report(tmp_path):
+    """TransferIn.project_slug is Field(max_length=128) and pydantic rejects
+    the WHOLE body on a violation -- lane status, presence and the upgrade
+    advertisement would all be lost with it. Nothing upstream bounds a marker
+    slug's length, so the sender does."""
+    from ccsync_companion.sync.rclone_lane import MAX_PROJECT_SLUG_CHARS
+
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    _project_with_marker(lane, slug="a" * (MAX_PROJECT_SLUG_CHARS + 1))
+
+    rows = _live_transfer_rows(lane, SUBPATH)
+
+    assert "project_slug" not in rows[0]
+    # ...and one exactly at the cap still goes.
+    lane._project_slug_cache.clear()
+    _project_with_marker(lane, slug="b" * MAX_PROJECT_SLUG_CHARS)
+    rows = _live_transfer_rows(lane, SUBPATH)
+    assert rows[0]["project_slug"] == "b" * MAX_PROJECT_SLUG_CHARS
+
+
+class TestReadProjectSlug:
+    def _dir(self, tmp_path, text=None):
+        project = tmp_path / "p"
+        project.mkdir(parents=True, exist_ok=True)
+        if text is not None:
+            (project / ".ccsync-project").write_text(text, encoding="utf-8")
+        return project
+
+    def test_reads_the_slug(self, tmp_path):
+        from ccsync_companion.sync.rclone_lane import read_project_slug
+
+        assert read_project_slug(self._dir(tmp_path, '{"slug": "creator-pool"}')) == "creator-pool"
+
+    def test_missing_malformed_and_blank_are_all_none(self, tmp_path):
+        from ccsync_companion.sync.rclone_lane import read_project_slug
+
+        assert read_project_slug(self._dir(tmp_path)) is None
+        assert read_project_slug(self._dir(tmp_path, "not json")) is None
+        assert read_project_slug(self._dir(tmp_path, '{"slug": "  "}')) is None
+        assert read_project_slug(self._dir(tmp_path, '{}')) is None
+
+    def test_a_slug_that_is_not_an_identity_is_refused(self, tmp_path):
+        from ccsync_companion.sync.rclone_lane import read_project_slug
+
+        for bad in ("../../etc", "a/b", "Season 1", "UPPER"):
+            assert read_project_slug(self._dir(tmp_path, json.dumps({"slug": bad}))) is None
+
+    def test_a_bom_prefixed_marker_still_parses(self, tmp_path):
+        """Markers are hand-editable on an SMB share; Notepad writes a BOM."""
+        from ccsync_companion.sync.rclone_lane import read_project_slug
+
+        project = tmp_path / "p"
+        project.mkdir()
+        (project / ".ccsync-project").write_bytes(
+            b"\xef\xbb\xbf" + json.dumps({"slug": "bom-project"}).encode("utf-8")
+        )
+        assert read_project_slug(project) == "bom-project"
+
+
+def test_the_slug_lookup_caches_hits_but_retries_misses(tmp_path, monkeypatch):
+    """The stats tick is every 2s for the length of a run, so the marker read
+    is cached -- but caching a MISS would pin "no slug" for the life of the
+    process on a project whose marker is still on its way down lane C."""
+    from ccsync_companion.sync import rclone_lane as rclone_mod
+
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    reads: list = []
+    real = rclone_mod.read_project_slug
+
+    def counting(directory):
+        reads.append(str(directory))
+        return real(directory)
+
+    monkeypatch.setattr(rclone_mod, "read_project_slug", counting)
+
+    _project_with_marker(lane, slug=None)
+    assert lane._project_slug_for_subpath(SUBPATH) is None
+    assert lane._project_slug_for_subpath(SUBPATH) is None
+    assert len(reads) == 2, "a miss must be retried -- the marker may arrive later"
+
+    _project_with_marker(lane, slug="energy-transition")
+    assert lane._project_slug_for_subpath(SUBPATH) == "energy-transition"
+    assert lane._project_slug_for_subpath(SUBPATH) == "energy-transition"
+    assert len(reads) == 3, "a hit is cached: the slug is immutable"
+
+
+def test_normalize_transferring_defaults_to_no_slug(tmp_path):
+    """The helper stays callable on its own (it is exercised directly by the
+    tests above and by any future caller that only wants the row shape)."""
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    rows = lane._normalize_transferring([{"name": "a.mov", "bytes": 1, "size": 2}])
+    assert rows[0]["name"] == "a.mov"
+    assert "project_slug" not in rows[0]

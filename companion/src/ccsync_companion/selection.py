@@ -76,6 +76,7 @@ class SelectionClient:
         self._identity_token_fn = identity_token_fn
 
         self.dashboard_url = str(cfg.get("dashboard_url", "")).strip()
+        # Kept as a fallback only -- see report_token().
         self.dashboard_token = str(cfg.get("dashboard_token", "")).strip()
         # Evaluated per fetch, not just once here -- so a tray sign-in as a
         # verified identity (app.py's editor_identity()) redirects which
@@ -88,6 +89,7 @@ class SelectionClient:
         self._editor_name_fn = editor_name_fn or (lambda: cfg.get("editor_name", ""))
 
         self._cache_path = self.state_dir / CACHE_FILENAME
+
         # Fault-isolation logging state: WARNING on the first failure of a
         # streak, DEBUG for repeats -- mirrors reporter.py's pattern.
         self._error_logged = False
@@ -122,6 +124,17 @@ class SelectionClient:
     @property
     def enabled(self) -> bool:
         return bool(self.dashboard_url)
+
+    def report_token(self) -> str:
+        """The shared fleet token for the X-CCSync-Token header, read from cfg
+        PER REQUEST rather than cached at construction.
+
+        /api/v1/verify hands the current report token back at sign-in, and
+        identity.IdentityManager republishes it into this same cfg dict -- so
+        a config.toml `dashboard_token` that has been rotated on the server
+        (or mistyped at install) stops 401-ing every selection fetch the
+        moment the editor signs in, instead of forever."""
+        return str(self.cfg.get("dashboard_token", "") or "").strip() or self.dashboard_token
 
     # -- fetch -----------------------------------------------------
     def fetch(self, force: bool = False) -> Optional[list[dict]]:
@@ -189,8 +202,9 @@ class SelectionClient:
         answers it) and degrade through the existing failure path if it
         doesn't."""
         headers: dict[str, str] = {}
-        if self.dashboard_token:
-            headers["X-CCSync-Token"] = self.dashboard_token
+        token = self.report_token()
+        if token:
+            headers["X-CCSync-Token"] = token
         if self._identity_token_fn is not None:
             try:
                 identity_token = self._identity_token_fn()
@@ -278,8 +292,9 @@ class SelectionClient:
             f"{quote(editor, safe='')}/{quote(str(slug), safe='')}"
         )
         headers = {}
-        if self.dashboard_token:
-            headers["X-CCSync-Token"] = self.dashboard_token
+        token = self.report_token()
+        if token:
+            headers["X-CCSync-Token"] = token
         if self._identity_token_fn is not None:
             try:
                 identity_token = self._identity_token_fn()

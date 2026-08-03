@@ -213,6 +213,24 @@ DEFAULTS: dict[str, Any] = {
     # screen still blanks -- and cannot stop a deliberate Start -> Sleep or
     # a closing lid. See shutdown_guard.py.
     "keep_awake_while_syncing": True,
+    # The liveness bound BOTH power guards above apply before a lane counts
+    # as a reason to stay on (shutdown_guard.PendingTracker). A lane reports
+    # "syncing" from a NEED COUNT, not from bytes arriving, so without these
+    # a NAS that went away overnight held the idle timer forever and put
+    # "still syncing" on every shutdown screen with nothing in flight.
+    #
+    # keep_awake_stale_seconds: how long a lane may report the SAME backlog
+    # -- no change in state/queued/bytes/last_sync -- before it is treated as
+    # stalled rather than transferring. Too low and a slow single-file
+    # transfer whose counters tick rarely reads as stalled; too high and a
+    # dead link keeps the machine awake for that long after every drop.
+    "keep_awake_stale_seconds": 180.0,
+    # keep_awake_max_hold_seconds: the backstop staleness cannot see -- a
+    # lane whose numbers churn but never finish (rclone wedged in SFTP
+    # retries). After this much CONTINUOUS blocking both guards stand down
+    # until the lanes actually settle. Raise it on a machine that genuinely
+    # uploads for longer than this in one unbroken run.
+    "keep_awake_max_hold_seconds": 8 * 3600.0,
     # False = no sync lanes at all: the machine works directly off the NAS
     # share (base rig). The companion still runs the timeline watcher, popup
     # fixer, and dashboard reporter; lanes report idle with a "disabled"
@@ -447,6 +465,18 @@ shutdown_warning_enabled = true
 # as long as something is actually transferring. Cannot stop a deliberate
 # Start -> Sleep or a closing lid. Set false to let it sleep regardless.
 keep_awake_while_syncing = true
+
+# What "actually transferring" means for BOTH guards above: a lane that has
+# reported the same backlog for keep_awake_stale_seconds, or that has been
+# blocking continuously for keep_awake_max_hold_seconds, is treated as
+# stalled and stops holding the machine. The values below ARE the defaults;
+# uncomment only to tune a specific machine (an editor on a link so slow that
+# a single file's counters tick less often than that, say). Left commented
+# out for the same reason as the transport tuning above -- an explicit value
+# in every first-run file pins it, so a later re-tune would never reach an
+# existing install.
+# keep_awake_stale_seconds = 180.0
+# keep_awake_max_hold_seconds = 28800.0
 
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
@@ -717,6 +747,25 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
         except (TypeError, ValueError):
             errors.append(
                 f"{key} must be a number >= 0 (0 disables it), got {cfg.get(key)!r}"
+            )
+
+    # WARNINGS, not errors, and deliberately so. Everything in the numeric
+    # loop above either crashes construction or scopes what syncs; these two
+    # only tune how patient the shutdown/keep-awake guards are, and
+    # coerce_numeric already falls back to the packaged default. Making them
+    # errors would mean a typo in a power-management knob sets
+    # config_problems -- which STOPS every lane (DEL-3) and, since
+    # _shutdown_block_reason() returns None on config_problems, switches off
+    # the very guards the key was being tuned for.
+    for key in ("keep_awake_stale_seconds", "keep_awake_max_hold_seconds"):
+        try:
+            value = float(cfg.get(key, DEFAULTS[key]))
+            if value <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            warnings.append(
+                f"{key} must be a positive number, got {cfg.get(key)!r} -- "
+                f"using the default ({DEFAULTS[key]})"
             )
 
     scheme = str(cfg.get("lane_c_pause_scheme", DEFAULTS["lane_c_pause_scheme"])).strip().lower()

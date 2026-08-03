@@ -241,7 +241,35 @@ shutdown_warning_enabled = true
 # only for as long as something is actually transferring. It cannot stop a
 # deliberate Start -> Sleep or a closing laptop lid; nothing in user space
 # can. Set false to let the machine sleep regardless.
+#
+# "Actually transferring" is enforced, not assumed (see shutdown_guard.py):
+# a lane whose backlog has not changed for a few minutes, or that has no
+# connected peer at all, is treated as stalled -- so a NAS that went away
+# overnight can no longer hold this machine awake, or interrupt every
+# shutdown, with nothing in flight.
 keep_awake_while_syncing = true
+
+# The two numbers behind that sentence. They bound BOTH guards above (the
+# shutdown warning and the keep-awake), because a lane reports "syncing"
+# from a NEED COUNT, not from bytes arriving.
+#
+# keep_awake_stale_seconds: how long a lane may report the SAME backlog --
+#   no change in state, queued count, byte counters or last sync -- before it
+#   counts as stalled rather than transferring. Lower it on a machine where a
+#   dropped link should stop mattering sooner; raise it if a genuinely slow
+#   single-file transfer (counters ticking rarely) reads as stalled.
+# keep_awake_max_hold_seconds: the backstop for a lane whose numbers churn
+#   but never finish (rclone wedged in SFTP retries). After this much
+#   CONTINUOUS blocking both guards stand down until things settle. Raise it
+#   on a machine that really does upload for longer than this in one run.
+#
+# The values shown ARE the defaults (3 minutes and 8 hours). A bad value is
+# logged as a config warning and the default is used -- it never stops
+# syncing. COMMENTED OUT for the same reason as the transport tuning above:
+# writing them into every config pins them, so a later re-tune of a
+# measured-good default would never reach an existing install.
+# keep_awake_stale_seconds = 180.0
+# keep_awake_max_hold_seconds = 28800.0
 
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and

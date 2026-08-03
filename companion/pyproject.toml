@@ -12,7 +12,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tray = ["pystray>=0.19", "Pillow>=10"]
+# pyobjc-framework-Cocoa is pinned here rather than left to pystray: we call
+# AppKit/Foundation DIRECTLY (shutdown_guard's NSWorkspace notifications and
+# the app-activation policy that keeps this out of the Dock), so the import
+# has to be guaranteed by our own dependency list. pystray happens to pull
+# pyobjc in today; a future release choosing a different backend would take
+# our code with it. sys_platform marker so Windows installs stay unchanged.
+tray = [
+    "pystray>=0.19",
+    "Pillow>=10",
+    "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
+]
 dev = ["pytest>=8"]
 
 [project.scripts]

@@ -13,7 +13,10 @@
          then confirms /api/v1/health reports the repo's dashboard VERSION.
       2. PUBLISH    installer\build_editor_package.ps1 -RebuildExe
          -RebuildOnboard -Publish -MakeCurrent  (prompts once for your
-         dashboard admin password).
+         dashboard admin password), then an ADVISORY check of the macOS
+         companion channel -- that binary can only be built on a Mac
+         (tools/release_macos.sh), so it goes stale silently otherwise.
+         Warning only; it never gates the local upgrade.
       3. LOCAL      installer\windows_upgrade.ps1 with the exe just built,
          then tools\check_deploy_drift.ps1.
 
@@ -142,6 +145,49 @@ if ($LASTEXITCODE -ne 0) {
     Write-Fail "build_editor_package.ps1 exited $LASTEXITCODE -- stopping before the local upgrade"
     exit 1
 }
+
+# --- 2b. is the macOS companion channel keeping up? (advisory) --------------
+# Nothing in this script can build it -- PyInstaller does not cross-compile, so
+# the Mac binary comes from tools/release_macos.sh run on the Mac. Without this
+# line the macOS channel goes stale in silence while every Windows ship reports
+# success. Advisory ONLY: it never gates step 3 and never changes the exit code.
+#
+# GET, not HEAD: the route is registered GET-only and answers HEAD with 405
+# (measured against the live dashboard, 2026-08-03 -- `allow: GET`). So ask
+# for the first BYTE instead: FileResponse honours Range (206 + content-range,
+# also measured), the X-CCSync-* headers ride along on the partial response,
+# and a server that ignored the Range would at worst send a body we throw at
+# NUL under a 15 s cap. -D - dumps the headers to stdout; the token still
+# never touches curl's command line.
+$macHeaders = ""
+try {
+    $macHeaders = Invoke-CurlWithToken `
+        -Uri "http://192.168.0.102:8480/api/v1/companion/package/macos/current" `
+        -Token $env:DASH_REPORT_TOKEN `
+        -ExtraArgs @("-D", "-", "-o", "NUL", "-r", "0-0", "--max-time", "15")
+}
+catch {
+    $macHeaders = ""
+}
+$macHeaderText = ($macHeaders | Out-String)
+$macVersion = ""
+$mMac = [regex]::Match($macHeaderText, '(?im)^X-CCSync-Version:\s*(\S+)\s*$')
+if ($mMac.Success) { $macVersion = $mMac.Groups[1].Value }
+if ($macVersion) {
+    if ($macVersion -eq $CompanionVersion) {
+        Write-Step "macos companion channel is at v$macVersion -- level with this repo"
+    }
+    else {
+        Write-Host "[ship] WARNING: macos companion channel at v$macVersion (repo v$CompanionVersion) -- run tools/release_macos.sh on the Mac" -ForegroundColor Yellow
+    }
+}
+elseif ($macHeaderText -match '\s404\s') {
+    Write-Step "NOTE: no macos companion package published yet -- Mac editors have nothing to install (tools/release_macos.sh on the Mac)"
+}
+else {
+    Write-Step "NOTE: could not read the macos companion channel -- not checked (this is advisory only)"
+}
+
 if ($SkipLocalUpgrade) {
     Write-Step "done (-SkipLocalUpgrade). Editors get the tray offer; this machine stays as-is."
     exit 0

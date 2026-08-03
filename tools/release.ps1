@@ -17,9 +17,15 @@
 
       1. VERSION PARITY. companion/src/ccsync_companion/config.py's VERSION is
          the single source of truth. companion/pyproject.toml must agree, and
-         the installer version constant is duplicated between
-         installer/windows_bootstrap.ps1 and onboarding/steps.py -- all
-         mismatches are listed and the build refuses to start.
+         the installer version constant is duplicated three ways --
+         installer/windows_bootstrap.ps1, onboarding/steps.py and
+         installer/macos_bootstrap.sh -- all mismatches are listed and the
+         build refuses to start.
+
+         This script builds the WINDOWS artifact. PyInstaller does not
+         cross-compile, so the macOS companion is built on the Mac by
+         tools/release_macos.sh, which mirrors these steps and publishes to
+         the same dashboard channel.
       2. TESTS. Both suites, each with its own venv python (-SkipTests to
          skip; the manifest records that you did).
       3. BUILD. PyInstaller against companion/build.spec, invoked exactly the
@@ -82,6 +88,7 @@ $ConfigPy = Join-Path $CompanionDir "src\ccsync_companion\config.py"
 $PyprojectToml = Join-Path $CompanionDir "pyproject.toml"
 $BootstrapPs1 = Join-Path $RepoRoot "installer\windows_bootstrap.ps1"
 $OnboardSteps = Join-Path $RepoRoot "onboarding\steps.py"
+$BootstrapSh = Join-Path $RepoRoot "installer\macos_bootstrap.sh"
 $DistDir = Join-Path $CompanionDir "dist"
 $ExePath = Join-Path $DistDir "ccsync-companion.exe"
 $ManifestPath = Join-Path $DistDir "ccsync-release.json"
@@ -144,11 +151,16 @@ if (-not $Version) {
 $PyprojectVersion = Get-Capture -Path $PyprojectToml -Pattern '^version\s*=\s*"([^"]+)"'
 $BootstrapVersion = Get-Capture -Path $BootstrapPs1 -Pattern '^\$InstallerVersion\s*=\s*"([^"]+)"'
 $OnboardVersion = Get-Capture -Path $OnboardSteps -Pattern '^INSTALLER_VERSION\s*=\s*"([^"]+)"'
+# Third copy of the SAME installer number, on the macOS side. It ships in the
+# editor package and is what a Mac install prints; drift here means the Mac
+# and Windows installers claim to be the same release when they are not.
+$MacBootstrapVersion = Get-Capture -Path $BootstrapSh -Pattern '^INSTALLER_VERSION="([^"]+)"'
 
 Write-Step "companion VERSION (config.py, authoritative): $Version"
 Write-Step "companion version (pyproject.toml):           $PyprojectVersion"
 Write-Step "installer version (windows_bootstrap.ps1):    $BootstrapVersion"
 Write-Step "installer version (onboarding/steps.py):      $OnboardVersion"
+Write-Step "installer version (macos_bootstrap.sh):       $MacBootstrapVersion"
 
 $mismatches = @()
 if ($PyprojectVersion -ne $Version) {
@@ -160,11 +172,18 @@ if (-not $BootstrapVersion) {
 if (-not $OnboardVersion) {
     $mismatches += "could not parse INSTALLER_VERSION from onboarding/steps.py"
 }
+if (-not $MacBootstrapVersion) {
+    $mismatches += "could not parse INSTALLER_VERSION from installer/macos_bootstrap.sh"
+}
 if ($BootstrapVersion -and $OnboardVersion -and ($BootstrapVersion -ne $OnboardVersion)) {
-    # Two separate constants for one artifact pair: the bootstrap script and
-    # the onboard.exe that bundles it. Drift here ships an installer that
-    # reports a version it isn't.
+    # Three separate constants for one installer release: the Windows
+    # bootstrap script, the onboard.exe that bundles it, and the macOS
+    # bootstrap script shipped in the same editor package. Drift ships an
+    # installer that reports a version it isn't.
     $mismatches += "installer version drift: windows_bootstrap.ps1 says '$BootstrapVersion', onboarding/steps.py says '$OnboardVersion'"
+}
+if ($BootstrapVersion -and $MacBootstrapVersion -and ($BootstrapVersion -ne $MacBootstrapVersion)) {
+    $mismatches += "installer version drift: windows_bootstrap.ps1 says '$BootstrapVersion', installer/macos_bootstrap.sh says '$MacBootstrapVersion'"
 }
 
 if ($mismatches.Count -gt 0) {
@@ -173,7 +192,7 @@ if ($mismatches.Count -gt 0) {
     foreach ($m in $mismatches) { Write-Host "    - $m" -ForegroundColor Red }
     Write-Host ""
     Write-Step "fix: set companion/src/ccsync_companion/config.py VERSION and companion/pyproject.toml version to the SAME value"
-    Write-Step "     (installer version is its own number -- keep windows_bootstrap.ps1 and onboarding/steps.py in step)"
+    Write-Step "     (installer version is its own number -- keep windows_bootstrap.ps1, onboarding/steps.py and installer/macos_bootstrap.sh in step)"
     exit 1
 }
 Write-Step "version parity OK"

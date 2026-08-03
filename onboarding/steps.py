@@ -43,12 +43,17 @@ from ccsync_companion import identity as identity_mod
 
 # -- constants ---------------------------------------------------------------
 
-# Bump this AND $InstallerVersion in installer/windows_bootstrap.ps1 together
-# -- build_editor_package.ps1 refuses to publish on drift between the two.
+# Bump this AND $InstallerVersion in installer/windows_bootstrap.ps1 AND
+# INSTALLER_VERSION in installer/macos_bootstrap.sh together -- one installer
+# number covers all three, and build_editor_package.ps1 / tools/release.ps1
+# refuse on drift between any of them.
 # 1.0.15: the fleet token moved off the bootstrap's command line into
 # CCSYNC_DASHBOARD_TOKEN in its environment (run_bootstrap below), which is a
 # contract between this file and that script; they must ship as a pair.
-INSTALLER_VERSION = "1.0.15"
+# 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
+# macos_uninstall.sh). Nothing changed on the Windows side; the number is
+# shared, so it moves when either platform's installer does.
+INSTALLER_VERSION = "1.0.16"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.

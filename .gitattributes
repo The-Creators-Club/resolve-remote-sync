@@ -25,6 +25,8 @@
 dashboard/deploy/run.sh   text eol=lf
 installer/macos_bootstrap.sh text eol=lf
 installer/macos_uninstall.sh text eol=lf
+# Written on Windows, runs only on the Mac (it refuses on any other uname).
+tools/release_macos.sh   text eol=lf
 
 # Windows-side scripts: CRLF is fine and matches what editors see.
 *.ps1  text eol=crlf

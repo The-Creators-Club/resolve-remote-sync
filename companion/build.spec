@@ -21,6 +21,14 @@ block_cipher = None
 # only bundle them if they're actually installed in the build environment,
 # so a headless build doesn't fail trying to collect missing packages.
 hidden_imports = ["watchdog", "watchdog.observers", "watchdog.events"]
+if sys.platform == "darwin":
+    # watchdog picks its backend at import time inside a try/except chain
+    # (fsevents on darwin, ReadDirectoryChangesW on win32, inotify on linux),
+    # which PyInstaller's static analysis cannot follow -- so the macOS build
+    # collects only the generic observers package and falls back to the
+    # polling observer at runtime, or fails outright. The Windows backend is
+    # a stdlib-ctypes affair and needs no help; this one is a C extension.
+    hidden_imports.append("watchdog.observers.fsevents")
 try:
     import pystray  # noqa: F401
     import PIL  # noqa: F401
@@ -35,6 +43,17 @@ except ImportError:
 
 entry_point = "launcher.py"  # absolute-import shim; running the package __main__.py directly breaks relative imports
 
+# Windows wants a .ico and we ship one. macOS wants an .icns, which this repo
+# does not have, and handing PyInstaller the .ico there is not "no icon" -- it
+# tries to convert it (needing Pillow's icns support) and fails the build. The
+# macOS artifact is a BARE executable, not a .app bundle (no BUNDLE step
+# below): it is launched by a LaunchAgent and lives in the menu bar via
+# pystray, so it has no Dock presence to put an icon on anyway. The window
+# icon (assets/icon.png, collected in datas) is unaffected on every platform.
+exe_icon = None
+if sys.platform == "win32":
+    exe_icon = "src/ccsync_companion/assets/icon.ico"
+
 # fusionscript.dll (Resolve's scripting library, loaded into this process at
 # runtime by resolve_bridge) links against the stable-ABI forwarder
 # python3.dll, which PyInstaller can't discover statically. If it isn't in
@@ -44,6 +63,16 @@ entry_point = "launcher.py"  # absolute-import shim; running the package __main_
 # runtime into the process and segfaults on the watcher's first Resolve
 # poll, and no install at all silently disables the Resolve bridge. Bundle
 # the build interpreter's own forwarder so the lookup never leaves the exe.
+#
+# macOS: the same class of problem exists in theory -- fusionscript.so is
+# loaded into this process by resolve_bridge and locates its own Python --
+# but the mechanism differs (dyld + PYTHONHOME rather than the PEP 514
+# registry + python3.dll), and resolve_bridge._pin_frozen_python3_home()
+# already points PYTHONHOME/PYTHON3HOME at sys._MEIPASS on every platform.
+# Nothing is added here for darwin on purpose: bundling a libpython that
+# Resolve does not actually ask for is a good way to load a SECOND runtime
+# into the process. Revisit only if the first real-Mac Resolve bridge test
+# shows fusionscript failing to find a Python (see docs/GOTCHAS.md).
 extra_binaries = []
 if sys.platform == "win32":
     _python3_dll = Path(sys.base_prefix) / "python3.dll"
@@ -100,7 +129,14 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
+    # None = PyInstaller AD-HOC signs the macOS binary itself (`codesign -s -`),
+    # which is not optional on Apple silicon: an unsigned arm64 binary is killed
+    # by the kernel on launch. Do NOT set a Developer ID here without also
+    # sorting out notarisation -- a signed-but-unnotarised binary is worse off
+    # with Gatekeeper than an ad-hoc one. tools/release_macos.sh verifies the
+    # signature with `codesign -dv` after every build and refuses to publish
+    # one that has none.
     codesign_identity=None,
     entitlements_file=None,
-    icon="src/ccsync_companion/assets/icon.ico",
+    icon=exe_icon,
 )

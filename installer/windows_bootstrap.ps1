@@ -149,12 +149,17 @@ if ([string]::IsNullOrEmpty($DashboardToken) -and $env:CCSYNC_DASHBOARD_TOKEN) {
 }
 $env:CCSYNC_DASHBOARD_TOKEN = $null
 
-# Bump this AND INSTALLER_VERSION in onboarding/steps.py together --
-# build_editor_package.ps1 refuses to publish on drift between the two.
+# Bump this AND INSTALLER_VERSION in onboarding/steps.py AND
+# INSTALLER_VERSION in installer/macos_bootstrap.sh together -- one installer
+# number covers all three, and build_editor_package.ps1 / tools\release.ps1
+# refuse on drift between any of them.
 # 1.0.15: the fleet token moved off this script's command line into
 # CCSYNC_DASHBOARD_TOKEN in its environment (see the block just above), which
 # is a contract between this script and steps.py; they must ship as a pair.
-$InstallerVersion = "1.0.15"
+# 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
+# macos_uninstall.sh). Nothing changed on the Windows side; the number is
+# shared, so it moves when either platform's installer does.
+$InstallerVersion = "1.0.16"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see

@@ -59,6 +59,14 @@
     when onboard.exe is missing, older than the companion exe it should
     bundle, or already published at this installer version.
 
+    And installer/macos_bootstrap.sh as the macos kind=onboard package (same
+    installer version, checked three ways), which is what /download hands a
+    Mac. It is byte-scanned for CR first: a CRLF copy would fail on the
+    editor's Mac on its very first line, and this is the last place that can
+    catch it. The macOS COMPANION binary is NOT published here -- it cannot
+    be built on Windows; run tools/release_macos.sh on the Mac. This script
+    warns when that channel has fallen behind the repo version.
+
 .PARAMETER MakeCurrent
     With -Publish: immediately make the uploaded version the one offered to
     the fleet. Without it the build is staged and you flip [ MAKE CURRENT ]
@@ -118,6 +126,27 @@ function Set-Failed {
     param([string]$Reason)
     $script:FinalExitCode = 1
     Write-Warn2 "FAILED: $Reason"
+}
+
+function Test-FileHasCr {
+    # Byte-level CR scan -- the last line of defense before a Mac executes a
+    # file this repo produced. A single 0x0D makes /bin/bash read the CR as
+    # part of the last token on every line ("set -eu" -> "Illegal option -"),
+    # which is exactly how dashboard/deploy/run.sh crash-looped the container
+    # on 2026-07-26. .gitattributes marks *.sh eol=lf, but a checkout with a
+    # stale index, a hand-edit in a Windows editor, or a copy through a tool
+    # that "helpfully" normalises can all reintroduce it -- and the failure
+    # surfaces on the editor's Mac, not here.
+    param([string]$Path)
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        return ([Array]::IndexOf($bytes, [byte]13) -ge 0)
+    }
+    catch {
+        # Unreadable is not "clean": callers treat $true as "do not ship it".
+        Write-Warn2 "could not read $Path for a CRLF check: $($_.Exception.Message)"
+        return $true
+    }
 }
 
 Write-Step "repo root: $RepoRoot"
@@ -242,6 +271,7 @@ $Files = @(
     @{ Src = "installer\windows_upgrade.ps1";     Dst = "windows_upgrade.ps1" },
     @{ Src = "installer\windows_uninstall.ps1";   Dst = "windows_uninstall.ps1" },
     @{ Src = "installer\macos_bootstrap.sh";      Dst = "macos_bootstrap.sh" },
+    @{ Src = "installer\macos_uninstall.sh";      Dst = "macos_uninstall.sh" },
     @{ Src = "docs\EDITOR_SETUP.md";              Dst = "EDITOR_SETUP.md" },
     @{ Src = "companion\config.example.toml";     Dst = "config.example.toml" },
     @{ Src = "companion\dist\ccsync-companion.exe"; Dst = "ccsync-companion.exe" },
@@ -479,11 +509,18 @@ if ($Publish) {
     $mIv = Select-String -Path $bootstrapPs1 -Pattern '^\$InstallerVersion\s*=\s*"([^"]+)"'
     $stepsPy = Join-Path $RepoRoot "onboarding\steps.py"
     $mIv2 = Select-String -Path $stepsPy -Pattern '^INSTALLER_VERSION\s*=\s*"([^"]+)"'
-    if (-not $mIv -or -not $mIv2) {
-        $onboardSkipReason = "could not parse the installer version from windows_bootstrap.ps1 / steps.py"
+    # Third copy of the same number: the macOS bootstrap ships in the same
+    # editor package and is published to the macos onboard slot below.
+    $bootstrapSh = Join-Path $RepoRoot "installer\macos_bootstrap.sh"
+    $mIv3 = Select-String -Path $bootstrapSh -Pattern '^INSTALLER_VERSION="([^"]+)"'
+    if (-not $mIv -or -not $mIv2 -or -not $mIv3) {
+        $onboardSkipReason = "could not parse the installer version from windows_bootstrap.ps1 / steps.py / macos_bootstrap.sh"
     }
     elseif ($mIv.Matches[0].Groups[1].Value -ne $mIv2.Matches[0].Groups[1].Value) {
         $onboardSkipReason = "installer version drift: windows_bootstrap.ps1 says '$($mIv.Matches[0].Groups[1].Value)', steps.py says '$($mIv2.Matches[0].Groups[1].Value)'"
+    }
+    elseif ($mIv.Matches[0].Groups[1].Value -ne $mIv3.Matches[0].Groups[1].Value) {
+        $onboardSkipReason = "installer version drift: windows_bootstrap.ps1 says '$($mIv.Matches[0].Groups[1].Value)', macos_bootstrap.sh says '$($mIv3.Matches[0].Groups[1].Value)'"
     }
     elseif (-not (Test-Path -LiteralPath $OnboardExePath)) {
         $onboardSkipReason = "no onboard.exe at $OnboardExePath (build with -RebuildOnboard)"
@@ -497,12 +534,43 @@ if ($Publish) {
         $onboardUri = "$DashboardUrl/api/v1/admin/packages/windows/${onboardVersion}?kind=onboard&sha256=$onboardSha&make_current=$mc"
     }
 
+    # --- the macOS bootstrap rides along as the macos kind=onboard package ---
+    # /download serves this to anyone on a Mac, so it has to be published from
+    # here or it silently stays whatever was uploaded by hand months ago. It is
+    # computed independently of the Windows installer above: a stale onboard.exe
+    # must not stop the .sh from shipping, and vice versa. Same shared installer
+    # version number (checked three ways above).
+    $macOnboardVersion = ""
+    $macOnboardSha = ""
+    $macOnboardUri = ""
+    $macOnboardSkipReason = ""
+    if (-not $mIv -or -not $mIv3) {
+        $macOnboardSkipReason = "could not parse the installer version from windows_bootstrap.ps1 / macos_bootstrap.sh"
+    }
+    elseif ($mIv.Matches[0].Groups[1].Value -ne $mIv3.Matches[0].Groups[1].Value) {
+        $macOnboardSkipReason = "installer version drift: windows_bootstrap.ps1 says '$($mIv.Matches[0].Groups[1].Value)', macos_bootstrap.sh says '$($mIv3.Matches[0].Groups[1].Value)'"
+    }
+    elseif (-not (Test-Path -LiteralPath $bootstrapSh)) {
+        $macOnboardSkipReason = "no macos_bootstrap.sh at $bootstrapSh"
+    }
+    elseif (Test-FileHasCr -Path $bootstrapSh) {
+        $macOnboardSkipReason = "macos_bootstrap.sh contains CARRIAGE RETURNS -- a Mac's bash would fail on the first line. Fix the checkout (git add --renormalize installer/macos_bootstrap.sh, or re-clone with the .gitattributes rules in place) before publishing"
+    }
+    else {
+        $macOnboardVersion = $mIv3.Matches[0].Groups[1].Value
+        $macOnboardSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $bootstrapSh).Hash.ToLower()
+        $macOnboardUri = "$DashboardUrl/api/v1/admin/packages/macos/${macOnboardVersion}?kind=onboard&sha256=$macOnboardSha&make_current=$mc"
+    }
+
     # A skipped installer upload is a FAILED ship, not a footnote: the whole
     # point of -Publish is that the dashboard's [ INSTALLER ] download serves
     # the build just made. Warning-and-continuing here (while ship.ps1 checked
     # only $LASTEXITCODE) is the same root cause as B23.
     if ($onboardSkipReason) {
         Set-Failed "the onboarding installer was NOT published: $onboardSkipReason"
+    }
+    if ($macOnboardSkipReason) {
+        Set-Failed "the macOS bootstrap was NOT published: $macOnboardSkipReason"
     }
 
     if ($DryRun) {
@@ -513,6 +581,14 @@ if ($Publish) {
         else {
             Write-Step "[dry-run] would publish installer v$onboardVersion ($([int]((Get-Item -LiteralPath $OnboardExePath).Length/1KB)) KB, sha256 $($onboardSha.Substring(0,12))...) via PUT $onboardUri"
         }
+        if ($macOnboardSkipReason) {
+            Write-Warn2 "[dry-run] macOS bootstrap upload would be SKIPPED: $macOnboardSkipReason"
+        }
+        else {
+            Write-Step "[dry-run] macos_bootstrap.sh is LF-clean ($([int]((Get-Item -LiteralPath $bootstrapSh).Length/1KB)) KB)"
+            Write-Step "[dry-run] would publish macOS bootstrap v$macOnboardVersion (sha256 $($macOnboardSha.Substring(0,12))...) via PUT $macOnboardUri"
+        }
+        Write-Step "[dry-run] would then check the macos COMPANION channel against repo v$version (build it on the Mac with tools/release_macos.sh)"
     }
     else {
         $securePw = Read-Host "dashboard password for '$AdminUser'" -AsSecureString
@@ -597,6 +673,78 @@ if ($Publish) {
                     Set-Failed "the onboarding installer upload failed"
                 }
             }
+        }
+
+        # --- upload the macOS bootstrap (macos, kind=onboard) ---------------
+        # Nothing below may abort the Windows flow: by this point the companion
+        # and the Windows installer are already published, and leaving this
+        # function early would skip the advisory too. Failures Set-Failed.
+        $packagesView = $null
+        try { $packagesView = $result.view } catch {}
+        if ($macOnboardSkipReason) {
+            Write-Warn2 "macOS bootstrap upload SKIPPED: $macOnboardSkipReason"
+        }
+        else {
+            try {
+                $macResult = Invoke-RestMethod -Method Put -Uri $macOnboardUri -InFile $bootstrapSh `
+                    -ContentType "application/octet-stream" -WebSession $dashSession
+                Write-Step "published macOS bootstrap v$macOnboardVersion (macos, kind=onboard)$(if ($MakeCurrent) { ' and made it CURRENT' }) -- /download now serves it to Macs"
+                try { if ($macResult.view) { $packagesView = $macResult.view } } catch {}
+            }
+            catch {
+                $status = 0
+                try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+                if ($status -eq 409) {
+                    # Same rule as the Windows installer: identical bytes are
+                    # fine, different bytes at the same version mean the server
+                    # keeps the OLD script and every new Mac editor runs it.
+                    $macServerSha = ""
+                    try {
+                        $view2 = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/admin/packages" -WebSession $dashSession
+                        $macServerSha = ($view2.packages | Where-Object {
+                            $_.kind -eq "onboard" -and $_.platform -eq "macos" -and $_.version -eq $macOnboardVersion
+                        } | Select-Object -First 1).sha256
+                        $packagesView = $view2
+                    } catch {}
+                    if ($macServerSha -and $macServerSha -ne $macOnboardSha) {
+                        Write-Warn2 "macOS bootstrap v$macOnboardVersion is already published WITH DIFFERENT CONTENT -- the server keeps the OLD script."
+                        Write-Warn2 "bump INSTALLER_VERSION in installer\macos_bootstrap.sh AND `$InstallerVersion in installer\windows_bootstrap.ps1 AND INSTALLER_VERSION in onboarding\steps.py, then re-run with -Publish"
+                        Set-Failed "the macOS bootstrap the fleet serves is NOT the one in this repo"
+                    }
+                    else {
+                        Write-Step "macOS bootstrap v$macOnboardVersion is already published (unchanged) -- nothing to do"
+                    }
+                }
+                else {
+                    Write-Warn2 "macOS bootstrap publish failed: $($_.Exception.Message)"
+                    Set-Failed "the macOS bootstrap upload failed"
+                }
+            }
+        }
+
+        # --- advisory: is the macOS COMPANION channel keeping up? -----------
+        # This script cannot build it (PyInstaller does not cross-compile), so
+        # the Mac side goes stale silently while every Windows ship succeeds.
+        # Advisory only -- it never changes the exit code.
+        $macCurrent = ""
+        if ($packagesView) {
+            try {
+                $macCurrent = "$(($packagesView.packages | Where-Object {
+                    $_.platform -eq "macos" -and $_.kind -eq "companion" -and $_.is_current
+                } | Select-Object -First 1).version)"
+            } catch {}
+        }
+        if (-not $packagesView) {
+            Write-Step "NOTE: could not read the packages view -- macos companion channel not checked"
+        }
+        elseif (-not $macCurrent) {
+            Write-Warn2 "no macos companion package is published at all (repo v$version) -- Mac editors have nothing to install; run tools/release_macos.sh on the Mac"
+        }
+        elseif ($macCurrent -ne $version) {
+            Write-Warn2 "macos companion channel at v$macCurrent (repo v$version) -- run tools/release_macos.sh on the Mac"
+        }
+        else {
+            Write-Step "macos companion channel is at v$macCurrent -- level with this repo"
         }
     }
 }

@@ -85,7 +85,7 @@ version wasn't bumped (`$InstallerVersion` in `windows_bootstrap.ps1` AND
 automated publisher yet; if you need it, publish `macos_bootstrap.sh` by
 hand: `PUT /api/v1/admin/packages/macos/<version>?kind=onboard&sha256=...`.
 
-Contents (10 files, all copied by `build_editor_package.ps1`):
+Contents (11 files, all copied by `build_editor_package.ps1`):
 
 | File | Why it's there |
 |---|---|
@@ -96,6 +96,7 @@ Contents (10 files, all copied by `build_editor_package.ps1`):
 | `windows_upgrade.ps1` | Manual upgrade: swaps the exe, keeps identity/config. |
 | `windows_uninstall.ps1` | Removal; `-Full` also drops sign-in + Syncthing identity. |
 | `macos_bootstrap.sh` | rclone + Syncthing only -- see the macOS status note above. |
+| `macos_uninstall.sh` | Mac removal; mirrors `windows_uninstall.ps1` semantics and never touches the SSD. |
 | `EDITOR_SETUP.md` | The long-form setup reference. Copied **flat**, so its commands must not reference an `installer\` prefix or `../` links. |
 | `config.example.toml` | Reference copy of every companion config key. |
 | `ccsync-companion.exe` | The tray app itself, for the manual path and repairs. |

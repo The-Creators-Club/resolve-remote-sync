@@ -39,7 +39,10 @@
       DASHBOARD  GET /api/v1/health -> "version" (unauthenticated; still
                  present if that response is ever trimmed to ok+version).
                  With -AdminUser, also the CURRENT published companion
-                 package -- the version the fleet will self-upgrade to.
+                 package -- the version the fleet will self-upgrade to --
+                 for windows AND macos, plus an advisory when the macOS
+                 companion channel is behind the repo (that binary is built
+                 on a Mac by tools/release_macos.sh; nothing here can).
 
     Changes nothing: no files, no registry, no processes, no git. The only
     network calls are GETs (plus a login POST if you pass -AdminUser).
@@ -132,12 +135,16 @@ $RepoVersion = Get-Capture -Path (Join-Path $CompanionDir "src\ccsync_companion\
 $PyprojectVersion = Get-Capture -Path (Join-Path $CompanionDir "pyproject.toml") -Pattern '^version\s*=\s*"([^"]+)"'
 $BootstrapVersion = Get-Capture -Path (Join-Path $RepoRoot "installer\windows_bootstrap.ps1") -Pattern '^\$InstallerVersion\s*=\s*"([^"]+)"'
 $OnboardVersion = Get-Capture -Path (Join-Path $RepoRoot "onboarding\steps.py") -Pattern '^INSTALLER_VERSION\s*=\s*"([^"]+)"'
+# One installer number, three copies -- the third is the macOS bootstrap that
+# ships in the same editor package and is published to the macos onboard slot.
+$MacBootstrapVersion = Get-Capture -Path (Join-Path $RepoRoot "installer\macos_bootstrap.sh") -Pattern '^INSTALLER_VERSION="([^"]+)"'
 $DashRepoVersion = Get-Capture -Path (Join-Path $RepoRoot "dashboard\src\ccsync_dashboard\__init__.py") -Pattern '^VERSION\s*=\s*"([^"]+)"'
 
 Write-Row "companion VERSION" $RepoVersion
 Write-Row "  pyproject.toml" $PyprojectVersion
 Write-Row "installer version" $BootstrapVersion
 Write-Row "  onboarding/steps.py" $OnboardVersion
+Write-Row "  macos_bootstrap.sh" $MacBootstrapVersion
 Write-Row "dashboard VERSION" $DashRepoVersion
 
 $gitDescribe = "$(cmd /c "git -C ""$RepoRoot"" describe --tags --always --dirty 2>nul")".Trim()
@@ -145,8 +152,12 @@ if ($gitDescribe) { Write-Row "git" $gitDescribe }
 
 if ($RepoVersion -and ($RepoVersion -eq $PyprojectVersion)) { Write-Ok "companion version parity (config.py == pyproject.toml)" }
 else { Write-Drift "companion version parity: config.py '$RepoVersion' vs pyproject.toml '$PyprojectVersion'" }
-if ($BootstrapVersion -and ($BootstrapVersion -eq $OnboardVersion)) { Write-Ok "installer version parity (bootstrap == onboarding)" }
-else { Write-Drift "installer version parity: windows_bootstrap.ps1 '$BootstrapVersion' vs onboarding/steps.py '$OnboardVersion'" }
+if ($BootstrapVersion -and ($BootstrapVersion -eq $OnboardVersion) -and ($BootstrapVersion -eq $MacBootstrapVersion)) {
+    Write-Ok "installer version parity (windows bootstrap == onboarding == macos bootstrap)"
+}
+else {
+    Write-Drift "installer version parity: windows_bootstrap.ps1 '$BootstrapVersion' vs onboarding/steps.py '$OnboardVersion' vs macos_bootstrap.sh '$MacBootstrapVersion'"
+}
 
 # --- BUILT -----------------------------------------------------------------
 
@@ -374,6 +385,9 @@ if ($AdminUser) {
         else {
             $pkgs = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/admin/packages" `
                 -WebSession $dashSession -TimeoutSec 15
+            # `current` is platform -> version and only ever names the
+            # COMPANION (build_packages_view); the onboard rows carry their own
+            # is_current, so they are listed per kind below.
             $curWin = "$($pkgs.current.windows)"
             Write-Row "current windows package" $curWin
             $all = ($pkgs.packages | Where-Object { $_.platform -eq "windows" } |
@@ -382,6 +396,33 @@ if ($AdminUser) {
             if ($curWin -and $RepoVersion) {
                 if ($curWin -eq $RepoVersion) { Write-Ok "the fleet's current package matches the repo version" }
                 else { Write-Drift "fleet is offered v$curWin but the repo is v$RepoVersion -- publish (see docs/RELEASE.md)" }
+            }
+
+            # macOS, same rows. The Mac binary is built by tools/release_macos.sh
+            # ON A MAC (PyInstaller does not cross-compile), so nothing that runs
+            # on this rig can keep this channel current -- which is exactly why it
+            # is worth printing next to the Windows one.
+            $curMac = "$($pkgs.current.macos)"
+            if (-not $curMac) { $curMac = "(none published)" }
+            Write-Row "current macos package" $curMac
+            $allMacCompanion = ($pkgs.packages | Where-Object { $_.platform -eq "macos" -and $_.kind -eq "companion" } |
+                ForEach-Object { if ($_.is_current) { "$($_.version)*" } else { "$($_.version)" } }) -join ", "
+            $allMacOnboard = ($pkgs.packages | Where-Object { $_.platform -eq "macos" -and $_.kind -eq "onboard" } |
+                ForEach-Object { if ($_.is_current) { "$($_.version)*" } else { "$($_.version)" } }) -join ", "
+            if (-not $allMacCompanion) { $allMacCompanion = "(none)" }
+            if (-not $allMacOnboard) { $allMacOnboard = "(none)" }
+            Write-Row "published (macos)" "companion: $allMacCompanion | onboard: $allMacOnboard"
+            # Advisory: never part of the VERDICT and never an exit code.
+            if ($RepoVersion) {
+                if ("$($pkgs.current.macos)" -eq $RepoVersion) {
+                    Write-Ok "macos companion channel is level with the repo (v$RepoVersion)"
+                }
+                elseif ("$($pkgs.current.macos)") {
+                    Write-Drift "macos companion current is v$($pkgs.current.macos), repo is v$RepoVersion -- Mac build lagging, run tools/release_macos.sh on the Mac (advisory)"
+                }
+                else {
+                    Write-Drift "no macos companion package published at all (repo v$RepoVersion) -- Mac build lagging, run tools/release_macos.sh on the Mac (advisory)"
+                }
             }
             foreach ($o in $pkgs.outdated_machines) {
                 Write-Drift "machine behind: $($o.machine) ($($o.editor_username)) on v$($o.companion_version), last seen $($o.received_at)"

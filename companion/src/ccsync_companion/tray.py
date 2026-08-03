@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw
 
 from . import config as config_mod
 from . import resolve_bridge
+from . import ui_dispatch
 from . import upgrade as upgrade_mod
 from .sync.base import STATE_ERROR, STATE_PAUSED, STATE_SYNCING, LaneStatus
 
@@ -408,6 +409,14 @@ def _show_sign_in_dialog(app: "CompanionApp") -> None:
 
 
 def _show_sign_in_dialog_locked(app: "CompanionApp") -> None:
+    """Caller holds the popup lock; ui_dispatch decides WHERE the root gets
+    built -- this thread on Windows, the main thread on macOS. The lock stays
+    on the caller's side (see _show_sign_in_dialog): dispatch is a transport,
+    not a second lock."""
+    ui_dispatch.dispatch(lambda: _build_sign_in_dialog(app))
+
+
+def _build_sign_in_dialog(app: "CompanionApp") -> None:
     try:
         import tkinter as tk
 
@@ -546,6 +555,13 @@ def _show_update_dialog(app: "CompanionApp") -> None:
 
 
 def _show_update_dialog_locked(app: "CompanionApp", info: dict) -> bool:
+    """Caller holds the popup lock (see _show_update_dialog); ui_dispatch
+    only decides which thread builds the root -- this one on Windows, the
+    main one on macOS."""
+    return ui_dispatch.dispatch(lambda: _build_update_dialog(app, info))
+
+
+def _build_update_dialog(app: "CompanionApp", info: dict) -> bool:
     try:
         import tkinter as tk
 
@@ -720,6 +736,12 @@ def _ask_server_credentials(app: "CompanionApp") -> Optional[tuple[str, str]]:
 
 
 def _ask_server_credentials_locked(app: "CompanionApp") -> Optional[tuple[str, str]]:
+    """Caller holds the popup lock (see _ask_server_credentials); ui_dispatch
+    only decides which thread builds the root."""
+    return ui_dispatch.dispatch(lambda: _build_credentials_dialog(app))
+
+
+def _build_credentials_dialog(app: "CompanionApp") -> Optional[tuple[str, str]]:
     try:
         import tkinter as tk
 
@@ -1228,6 +1250,15 @@ def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.I
 
     icon.stop = _stop  # type: ignore[method-assign]
 
-    icon_thread = threading.Thread(target=icon.run, daemon=True)
-    icon_thread.start()
+    if ui_dispatch.uses_main_thread():
+        # macOS: NSStatusItem is main-thread-only, so the icon cannot live on
+        # a worker thread the way it does on Windows. run_detached() installs
+        # it against the runloop that is ALREADY the main thread's -- the one
+        # ui_dispatch.serve() is about to enter (Tk-Aqua drives NSApp). This
+        # is the first-Mac-run spike: if the two runloops refuse to coexist,
+        # nothing here silently papers over it.
+        icon.run_detached()
+    else:
+        icon_thread = threading.Thread(target=icon.run, daemon=True)
+        icon_thread.start()
     return icon

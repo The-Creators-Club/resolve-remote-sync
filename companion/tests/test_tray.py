@@ -885,3 +885,130 @@ def test_the_tooltip_names_the_drive():
     app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
     app._root_absent = True
     assert "disconnected" in _tooltip_text(_tray_snapshot(app))
+
+
+# ===========================================================================
+# macOS port: the tray dialogs build their roots through ui_dispatch
+# ===========================================================================
+
+
+def _record_tray_dispatch(monkeypatch, run: bool = False):
+    from ccsync_companion import ui_dispatch
+
+    calls: list = []
+
+    def _dispatch(fn):
+        calls.append(fn)
+        return fn() if run else None
+
+    monkeypatch.setattr(ui_dispatch, "dispatch", _dispatch)
+    return calls
+
+
+def test_the_three_tray_dialogs_go_through_ui_dispatch(monkeypatch):
+    """Sign-in, update and server-login each built a tk.Tk() on a tray worker
+    thread. On macOS that thread may not touch Tk-Aqua at all, so the root
+    build + mainloop is dispatched; on Windows dispatch is inline and the
+    behaviour is unchanged."""
+    from ccsync_companion import tray as tray_mod
+
+    app = _UpgradeApp()
+    calls = _record_tray_dispatch(monkeypatch)
+
+    tray_mod._show_sign_in_dialog_locked(app)
+    tray_mod._show_update_dialog_locked(app, {"version": "9.9.9"})
+    tray_mod._ask_server_credentials_locked(app)
+
+    assert len(calls) == 3 and all(callable(fn) for fn in calls)
+
+
+def test_the_popup_lock_is_held_by_the_caller_not_by_dispatch(monkeypatch):
+    """LOCK AUDIT. _popup_active_lock is taken OUTSIDE dispatch and is still
+    held while the dialog body runs -- dispatch is a transport, not a second
+    lock, and it must not invert the order."""
+    from ccsync_companion import tray as tray_mod
+
+    app = _UpgradeApp()
+    held: list = []
+
+    def _dispatch(fn):
+        held.append(("at dispatch", app._popup_active_lock.locked()))
+        return fn()
+
+    monkeypatch.setattr(tray_mod.ui_dispatch, "dispatch", _dispatch)
+    monkeypatch.setattr(tray_mod, "_build_sign_in_dialog",
+                        lambda a: held.append(("in body", a._popup_active_lock.locked())))
+
+    tray_mod._show_sign_in_dialog(app)
+
+    assert held == [("at dispatch", True), ("in body", True)]
+    assert not app._popup_active_lock.locked(), "the lock outlived the dialog"
+
+
+def test_the_update_dialog_answer_survives_the_dispatch_round_trip(monkeypatch):
+    """The return value is the whole point here: a dropped False would apply
+    an update nobody confirmed."""
+    from ccsync_companion import tray as tray_mod
+
+    app = _UpgradeApp()
+    _record_tray_dispatch(monkeypatch, run=True)
+    monkeypatch.setattr(tray_mod, "_build_update_dialog", lambda a, i: True)
+    assert tray_mod._show_update_dialog_locked(app, {"version": "9.9.9"}) is True
+    monkeypatch.setattr(tray_mod, "_build_update_dialog", lambda a, i: False)
+    assert tray_mod._show_update_dialog_locked(app, {"version": "9.9.9"}) is False
+
+
+def test_the_credentials_dialog_answer_survives_the_dispatch_round_trip(monkeypatch):
+    from ccsync_companion import tray as tray_mod
+
+    app = _UpgradeApp()
+    _record_tray_dispatch(monkeypatch, run=True)
+    monkeypatch.setattr(tray_mod, "_build_credentials_dialog", lambda a: ("alex", "pw"))
+    assert tray_mod._ask_server_credentials_locked(app) == ("alex", "pw")
+
+
+def test_the_icon_runs_on_a_thread_on_windows_and_detached_on_macos(monkeypatch):
+    """pystray's win32 backend owns a message loop of its own on a daemon
+    thread (unchanged). On macOS NSStatusItem is main-thread-only, so the
+    icon is installed detached against the runloop ui_dispatch.serve() runs."""
+    import threading
+    import time
+
+    import ccsync_companion.tray as tray_mod
+
+    events: list = []
+
+    class _FakeIcon:
+        def __init__(self, *a, **k):
+            self.icon = None
+            self.menu = None
+
+        def stop(self):
+            pass
+
+        def run(self):
+            events.append(("run", threading.current_thread().name))
+
+        def run_detached(self):
+            events.append(("run_detached", threading.current_thread().name))
+
+    real_icon = tray_mod.pystray.Icon
+    try:
+        tray_mod.pystray.Icon = _FakeIcon
+
+        monkeypatch.setattr(tray_mod.ui_dispatch, "uses_main_thread", lambda: False)
+        icon = tray_mod.start_tray(_FakeApp({"dashboard_url": ""}), refresh_interval=0.01)
+        icon.stop()
+        deadline = time.monotonic() + 5.0
+        while not events and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert events and events[0][0] == "run"
+        assert events[0][1] != threading.current_thread().name
+
+        events.clear()
+        monkeypatch.setattr(tray_mod.ui_dispatch, "uses_main_thread", lambda: True)
+        icon = tray_mod.start_tray(_FakeApp({"dashboard_url": ""}), refresh_interval=0.01)
+        icon.stop()
+        assert events == [("run_detached", threading.current_thread().name)]
+    finally:
+        tray_mod.pystray.Icon = real_icon

@@ -2772,3 +2772,137 @@ def test_the_activation_policy_never_raises_without_pyobjc(monkeypatch):
     app_mod._set_darwin_activation_policy()
     monkeypatch.setattr(app_mod.sys, "platform", "darwin", raising=False)
     app_mod._set_darwin_activation_policy()
+
+
+# ===========================================================================
+# macOS port: main-thread UI dispatch (inline, and therefore inert, on win32)
+# ===========================================================================
+
+
+def test_copy_diagnostics_builds_its_hidden_root_through_ui_dispatch(tmp_path, monkeypatch):
+    """Hidden or not, it is a Tk root on a tray worker thread -- on macOS it
+    has to be built on the main thread like every dialog."""
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    calls: list = []
+    monkeypatch.setattr(ui_dispatch, "dispatch", lambda fn: calls.append(fn))
+
+    assert app.copy_diagnostics() is True
+    assert len(calls) == 1 and callable(calls[0])
+    assert not app._popup_active_lock.locked()
+
+
+def test_copy_diagnostics_survives_a_stopped_dispatcher(tmp_path, monkeypatch):
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+
+    def _stopped(fn):
+        raise ui_dispatch.UIDispatchStopped("stopped")
+
+    monkeypatch.setattr(ui_dispatch, "dispatch", _stopped)
+    assert app.copy_diagnostics() is False
+    assert not app._popup_active_lock.locked(), "the lock outlived the failure"
+    assert any("log" in msg for msg, _title in app._tray_icon.notifications)
+
+
+def test_shutdown_stops_the_ui_dispatcher_last(tmp_path, monkeypatch):
+    """Ordering: a thread that asks for a dialog mid-shutdown must find the
+    dispatcher still serving; stopping it first would park that thread on a
+    main thread that has left its mainloop."""
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    order: list = []
+    app._stop_lanes = lambda: order.append("lanes")
+    app.reporter.stop = lambda: order.append("reporter")
+    app.manifest_cache.stop = lambda: order.append("manifest")
+    monkeypatch.setattr(ui_dispatch, "stop", lambda: order.append("ui_dispatch"))
+
+    app.shutdown()
+
+    assert order[-1] == "ui_dispatch", f"UI dispatch stopped too early: {order}"
+    assert "lanes" in order and "reporter" in order
+
+
+def test_shutdown_survives_a_ui_dispatcher_that_refuses_to_stop(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+
+    def _boom():
+        raise RuntimeError("pump wedged")
+
+    monkeypatch.setattr(ui_dispatch, "stop", _boom)
+    with caplog.at_level(logging.ERROR, logger="ccsync.app"):
+        app.shutdown()  # must not raise out of the tray's Quit handler
+    assert any("UI dispatcher" in r.getMessage() for r in caplog.records)
+
+
+def test_run_on_windows_starts_no_dispatcher_and_keeps_its_wait_loop(tmp_path, monkeypatch):
+    """The Windows guarantee: ui_dispatch.start() returns None, active() is
+    None, and run() blocks on the same _stop_event loop it always has."""
+    from ccsync_companion import tray as tray_mod
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    app.start = lambda: None
+    monkeypatch.setattr(tray_mod, "start_tray", lambda _a: _FakeTray())
+    monkeypatch.setattr(ui_dispatch, "_active", None)
+
+    threading.Timer(0.05, app._stop_event.set).start()
+    app.run()
+
+    assert ui_dispatch.active() is None
+
+
+def test_run_on_the_main_thread_ui_platform_serves_instead_of_polling(tmp_path, monkeypatch):
+    """macOS shape: the dispatcher is started BEFORE the tray (the icon is
+    installed against its runloop), and the main thread then serves dialogs
+    until _stop_event -- it never enters the Windows poll loop."""
+    from ccsync_companion import tray as tray_mod
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    app.start = lambda: None
+    order: list = []
+
+    class _FakeDispatcher:
+        def __init__(self):
+            self.served = []
+
+        def serve(self, stop_event=None):
+            order.append("serve")
+            self.served.append(stop_event)
+
+        def stop(self):
+            order.append("dispatcher stop")
+
+    dispatcher = _FakeDispatcher()
+
+    def _start(*a, **k):
+        order.append("ui start")
+        monkeypatch.setattr(ui_dispatch, "_active", dispatcher)
+        return dispatcher
+
+    monkeypatch.setattr(ui_dispatch, "_active", None)
+    monkeypatch.setattr(ui_dispatch, "start", _start)
+    monkeypatch.setattr(ui_dispatch, "stop", dispatcher.stop)
+
+    def _start_tray(_a):
+        order.append("tray")
+        return _FakeTray()
+
+    monkeypatch.setattr(tray_mod, "start_tray", _start_tray)
+    app.start = lambda: order.append("app start")
+
+    app.run()  # serve() returns immediately -> run() falls through to shutdown
+
+    assert order[:4] == ["ui start", "app start", "tray", "serve"]
+    assert order[-1] == "dispatcher stop"
+    assert dispatcher.served == [app._stop_event]

@@ -1400,3 +1400,82 @@ def test_perform_fix_all_passes_canonical_prefix_and_degrades():
     perform_fix_all(rows, {"C:/x/a.mov": "B-roll"}, "C:/root",
                     fix_clip_fn=legacy, canonical_prefix="P:\\")
     assert seen["legacy_called"] is True
+
+
+# ===========================================================================
+# macOS port: every root goes through ui_dispatch (inline on Windows)
+# ===========================================================================
+
+
+def _record_dispatch(monkeypatch, run: bool = False):
+    """Replace ui_dispatch.dispatch with a recorder. `run=False` means the
+    dialog body is never executed, which is how these tests stay honest about
+    conftest._no_real_tk_windows."""
+    from ccsync_companion import ui_dispatch
+
+    calls: list = []
+
+    def _dispatch(fn):
+        calls.append(fn)
+        return fn() if run else None
+
+    monkeypatch.setattr(ui_dispatch, "dispatch", _dispatch)
+    return calls
+
+
+def test_confirm_dialog_builds_its_root_through_ui_dispatch(monkeypatch):
+    """On macOS the root and its mainloop must land on the main thread; on
+    Windows dispatch is inline, so this changes nothing there."""
+    from ccsync_companion import popup
+
+    calls = _record_dispatch(monkeypatch)
+    assert popup.confirm_dialog("T", "body") is False  # nothing ran -> safe default
+    assert len(calls) == 1 and callable(calls[0])
+
+
+def test_confirm_dialog_treats_a_stopped_dispatcher_as_no_display(monkeypatch):
+    """Shutdown races: dispatch raises rather than blocking, and the answer
+    an unanswerable confirm gives is still "do nothing"."""
+    from ccsync_companion import popup, ui_dispatch
+
+    def _stopped(fn):
+        raise ui_dispatch.UIDispatchStopped("stopped")
+
+    monkeypatch.setattr(ui_dispatch, "dispatch", _stopped)
+    assert popup.confirm_dialog("T", "body", ok_label="PROCEED") is False
+
+
+def test_show_popup_dispatches_construction_AND_mainloop_together(monkeypatch):
+    """PopupDialog.__init__ builds the Tk root and show() runs its mainloop --
+    split across the dispatch boundary they would land on two threads."""
+    from ccsync_companion import fixer as fixer_mod
+    from ccsync_companion import popup
+
+    calls = _record_dispatch(monkeypatch)
+    built: list = []
+
+    class _FakeDialog:
+        def __init__(self, *a, **k):
+            built.append("init")
+
+        def show(self):
+            built.append("show")
+
+    monkeypatch.setattr(popup, "PopupDialog", _FakeDialog)
+    items = [{"file_path": r"G:\raw\A001.braw", "media_pool_item": object(),
+              "clip_name": "A001", "resolve_project_name": ""}]
+    popup.show_popup(items, r"C:\Creators_Club", "alex", fixer_mod.IgnoreTracker())
+
+    assert len(calls) == 1
+    assert built == [], "the dialog must be built INSIDE the dispatched call"
+    calls[0]()
+    assert built == ["init", "show"]
+
+
+def test_progress_window_show_goes_through_ui_dispatch(monkeypatch):
+    from ccsync_companion import popup
+
+    calls = _record_dispatch(monkeypatch)
+    window = popup.ProgressWindow("COPYING")
+    window._show()
+    assert len(calls) == 1 and callable(calls[0])

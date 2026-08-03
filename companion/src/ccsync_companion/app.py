@@ -31,6 +31,7 @@ from . import proxy_relink
 from . import resolve_bridge
 from . import root_guard as root_guard_mod
 from . import shutdown_guard as shutdown_guard_mod
+from . import ui_dispatch
 from . import upgrade as upgrade_mod
 from .fixer import IgnoreTracker, _dest_dir_is_contained
 from .identity import IdentityManager
@@ -2516,14 +2517,20 @@ class CompanionApp:
         try:
             import tkinter as tk
 
-            root = tk.Tk()
-            try:
-                root.withdraw()
-                root.clipboard_clear()
-                root.clipboard_append(text)
-                root.update()
-            finally:
-                root.destroy()
+            # Hidden or not, it is a Tk root: same door as every dialog, so on
+            # macOS it is built on the main thread instead of this tray worker
+            # (ui_dispatch); on Windows it runs inline, exactly as before.
+            def _copy_via_tk() -> None:
+                root = tk.Tk()
+                try:
+                    root.withdraw()
+                    root.clipboard_clear()
+                    root.clipboard_append(text)
+                    root.update()
+                finally:
+                    root.destroy()
+
+            ui_dispatch.dispatch(_copy_via_tk)
             log.info("diagnostics copied to clipboard (%d chars)", len(text))
             self._notify_tray(
                 "Diagnostics copied. Paste them to your admin in a message.", "ccsync-companion")
@@ -2937,6 +2944,18 @@ class CompanionApp:
             except Exception:
                 log.exception("shutdown: failed to join %s", getattr(thread, "name", thread))
 
+        # LAST, after every thread that can ask for a window has been told to
+        # stop and joined: on macOS this is the main thread's Tk pump, so
+        # stopping it any earlier would leave a mid-shutdown dialog (the
+        # watcher's popup, a confirm) blocked forever on a main thread that
+        # no longer services the queue. Anything still waiting is unblocked
+        # with UIDispatchStopped and takes its no-display default. On Windows
+        # there is no dispatcher and this is a no-op.
+        try:
+            ui_dispatch.stop()
+        except Exception:
+            log.exception("shutdown: failed to stop the UI dispatcher")
+
     def run(self) -> None:
         try:
             setup_logging(self.config)
@@ -2979,6 +2998,19 @@ class CompanionApp:
         # transferring against the tree after the companion is gone (AUDIT_2
         # CORE-M8).
         try:
+            # BEFORE start() and before the tray: start() launches the watcher,
+            # which can ask for a popup within a poll interval, and on macOS
+            # the tray icon is installed against the runloop this dispatcher's
+            # hidden root brings up. A dialog requested before serve() begins
+            # waits in the queue instead of building a root on a worker thread.
+            # On Windows start() does nothing at all and dispatch stays inline.
+            try:
+                ui_dispatch.start()
+            except Exception:
+                log.exception(
+                    "could not start main-thread UI dispatch -- dialogs will be built "
+                    "on their calling threads (fine on Windows, unreliable on macOS)")
+
             self.start()
 
             try:
@@ -3027,8 +3059,15 @@ class CompanionApp:
             cleanup_timer.daemon = True
             cleanup_timer.start()
 
-            while not self._stop_event.is_set():
-                self._stop_event.wait(1.0)
+            dispatcher = ui_dispatch.active()
+            if dispatcher is not None:
+                # macOS: the main thread belongs to Tk/AppKit from here until
+                # shutdown -- serve() runs the hidden root's mainloop and
+                # returns when _stop_event is set (tray Quit, self-upgrade).
+                dispatcher.serve(self._stop_event)
+            else:
+                while not self._stop_event.is_set():
+                    self._stop_event.wait(1.0)
         except KeyboardInterrupt:
             log.info("shutting down (KeyboardInterrupt)")
         finally:

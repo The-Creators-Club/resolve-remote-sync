@@ -19,7 +19,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import fixer, resolve_bridge
+from . import fixer, resolve_bridge, ui_dispatch
 
 log = logging.getLogger("ccsync.popup")
 
@@ -1155,68 +1155,76 @@ class ProgressWindow:
 
         from . import theme
 
-        root = tk.Tk()
-        self.root = root
-        try:
-            root.title(self.title)
-            theme.apply_window_icon(tk, root)
-            root.attributes("-topmost", True)
-            root.configure(bg=theme.BG, padx=18, pady=14)
-            bar_style = theme.style_progressbar(ttk)
-
-            tk.Label(root, text=f"► {self.title}", bg=theme.BG, fg=theme.RED,
-                     font=theme.mono(12, bold=True), anchor="w", justify="left").pack(anchor="w")
-            tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
-            if self.subtitle:
-                tk.Label(root, text=self.subtitle, bg=theme.BG, fg=theme.MUTED,
-                         font=theme.mono(9), anchor="w", justify="left",
-                         wraplength=560).pack(anchor="w", pady=(4, 8))
-
-            self._file_label = tk.Label(root, text="", bg=theme.BG, fg=theme.TEXT,
-                                        font=theme.mono(9), anchor="w", justify="left",
-                                        wraplength=560)
-            self._file_label.pack(anchor="w", fill="x")
-            self._file_bar = ttk.Progressbar(root, style=bar_style, mode="determinate",
-                                             maximum=1000, length=560)
-            self._file_bar.pack(anchor="w", fill="x", pady=(2, 8))
-
-            self._batch_label = tk.Label(root, text="", bg=theme.BG, fg=theme.MUTED,
-                                         font=theme.mono(9), anchor="w", justify="left",
-                                         wraplength=560)
-            self._batch_label.pack(anchor="w", fill="x")
-            self._batch_bar = ttk.Progressbar(root, style=bar_style, mode="determinate",
-                                              maximum=1000, length=560)
-            self._batch_bar.pack(anchor="w", fill="x", pady=(2, 8))
-
-            # Same three controls as the fixer dialog, same order and same
-            # safety rule: SKIP/CANCEL ALL abandon the file in flight, which
-            # is only allowed because fixer.fix_clip deletes the partial
-            # before returning (CORE-H5).
-            controls_bar = tk.Frame(root, bg=theme.BG)
-            controls_bar.pack(anchor="w", pady=(4, 0))
-            self._stop_btn = theme.neon_button(tk, controls_bar, "STOP AFTER THIS FILE",
-                                               self._on_stop, primary=False)
-            self._stop_btn.pack(side="left", padx=(0, 18))
-            self._skip_btn = theme.neon_button(tk, controls_bar, "SKIP THIS FILE",
-                                               self._on_skip_current_file, primary=False)
-            self._skip_btn.pack(side="left", padx=(0, 18))
-            self._cancel_btn = theme.neon_button(tk, controls_bar, "CANCEL ALL",
-                                                 self._on_cancel_all, primary=True)
-            self._cancel_btn.pack(side="left")
-
-            # The X means "stop this" -- it cancels the batch (with the
-            # partial cleaned up) instead of silently leaving the copy
-            # running behind a closed window. The window itself closes when
-            # the worker has actually stopped.
-            root.protocol("WM_DELETE_WINDOW", self._on_cancel_all)
-            root.after(250, self._tick)
-            root.mainloop()
-        finally:
+        # Root, widgets and mainloop all on ONE thread: the caller's on
+        # Windows, the main thread on macOS (ui_dispatch). The worker started
+        # by run() keeps publishing from its own thread either way -- it only
+        # touches self._state, never a widget.
+        def _build_and_show() -> None:
+            root = tk.Tk()
+            self.root = root
             try:
-                root.destroy()
-            except Exception:
-                pass
-            self.root = None
+                root.title(self.title)
+                theme.apply_window_icon(tk, root)
+                root.attributes("-topmost", True)
+                root.configure(bg=theme.BG, padx=18, pady=14)
+                bar_style = theme.style_progressbar(ttk)
+
+                tk.Label(root, text=f"► {self.title}", bg=theme.BG, fg=theme.RED,
+                         font=theme.mono(12, bold=True), anchor="w",
+                         justify="left").pack(anchor="w")
+                tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+                if self.subtitle:
+                    tk.Label(root, text=self.subtitle, bg=theme.BG, fg=theme.MUTED,
+                             font=theme.mono(9), anchor="w", justify="left",
+                             wraplength=560).pack(anchor="w", pady=(4, 8))
+
+                self._file_label = tk.Label(root, text="", bg=theme.BG, fg=theme.TEXT,
+                                            font=theme.mono(9), anchor="w", justify="left",
+                                            wraplength=560)
+                self._file_label.pack(anchor="w", fill="x")
+                self._file_bar = ttk.Progressbar(root, style=bar_style, mode="determinate",
+                                                 maximum=1000, length=560)
+                self._file_bar.pack(anchor="w", fill="x", pady=(2, 8))
+
+                self._batch_label = tk.Label(root, text="", bg=theme.BG, fg=theme.MUTED,
+                                             font=theme.mono(9), anchor="w", justify="left",
+                                             wraplength=560)
+                self._batch_label.pack(anchor="w", fill="x")
+                self._batch_bar = ttk.Progressbar(root, style=bar_style, mode="determinate",
+                                                  maximum=1000, length=560)
+                self._batch_bar.pack(anchor="w", fill="x", pady=(2, 8))
+
+                # Same three controls as the fixer dialog, same order and same
+                # safety rule: SKIP/CANCEL ALL abandon the file in flight, which
+                # is only allowed because fixer.fix_clip deletes the partial
+                # before returning (CORE-H5).
+                controls_bar = tk.Frame(root, bg=theme.BG)
+                controls_bar.pack(anchor="w", pady=(4, 0))
+                self._stop_btn = theme.neon_button(tk, controls_bar, "STOP AFTER THIS FILE",
+                                                   self._on_stop, primary=False)
+                self._stop_btn.pack(side="left", padx=(0, 18))
+                self._skip_btn = theme.neon_button(tk, controls_bar, "SKIP THIS FILE",
+                                                   self._on_skip_current_file, primary=False)
+                self._skip_btn.pack(side="left", padx=(0, 18))
+                self._cancel_btn = theme.neon_button(tk, controls_bar, "CANCEL ALL",
+                                                     self._on_cancel_all, primary=True)
+                self._cancel_btn.pack(side="left")
+
+                # The X means "stop this" -- it cancels the batch (with the
+                # partial cleaned up) instead of silently leaving the copy
+                # running behind a closed window. The window itself closes when
+                # the worker has actually stopped.
+                root.protocol("WM_DELETE_WINDOW", self._on_cancel_all)
+                root.after(250, self._tick)
+                root.mainloop()
+            finally:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+                self.root = None
+
+        ui_dispatch.dispatch(_build_and_show)
 
     def _on_stop(self) -> None:
         """Graceful: the file in flight is finished first."""
@@ -1307,12 +1315,11 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
         return False
 
     result = {"ok": False}
-    # tk.Tk() itself can raise/wedge when other Tk roots have run on sibling
-    # threads in this process (Tcl is thread-touchy) -- treat ANY dialog
-    # failure like "no display": log + safe-default False, never a silent
-    # dead thread (that failure mode was seen live on the update dialog,
-    # 2026-07-25).
-    try:
+
+    # The root and its mainloop go through ui_dispatch: inline on Windows
+    # (same thread, same behaviour as always), on the MAIN thread on macOS,
+    # where Tk-Aqua may not be touched from anywhere else.
+    def _build_and_show() -> None:
         root = tk.Tk()
         root.title(title)
         theme.apply_window_icon(tk, root)
@@ -1339,6 +1346,15 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
         theme.neon_button(tk, btn_bar, ok_label, _ok, primary=True).pack(side="left")
         root.protocol("WM_DELETE_WINDOW", _cancel)
         root.mainloop()
+
+    # tk.Tk() itself can raise/wedge when other Tk roots have run on sibling
+    # threads in this process (Tcl is thread-touchy) -- treat ANY dialog
+    # failure like "no display": log + safe-default False, never a silent
+    # dead thread (that failure mode was seen live on the update dialog,
+    # 2026-07-25). A stopped dispatcher (shutdown) raises here too, and lands
+    # on the same safe default.
+    try:
+        ui_dispatch.dispatch(_build_and_show)
     except Exception as exc:
         log.warning("confirm dialog failed (%s) -- defaulting to cancel", exc)
         return False
@@ -1359,10 +1375,17 @@ def show_popup(
     if tkinter can't create a window in this environment.
     """
     rows = build_popup_rows(out_of_tree_items, local_root, editor_name, project_prefix, server_roots)
-    try:
+
+    # Construction AND mainloop on one thread: the caller's on Windows, the
+    # main one on macOS (ui_dispatch). PopupDialog.__init__ builds the root,
+    # so both halves have to be inside the same dispatched call.
+    def _build_and_show() -> None:
         dialog = PopupDialog(rows, local_root, ignore_tracker, editor_name=editor_name,
                              canonical_prefix=canonical_prefix)
         dialog.show()
+
+    try:
+        ui_dispatch.dispatch(_build_and_show)
     except Exception as exc:
         log.warning("popup unavailable (%s) -- falling back to console listing", exc)
         # The docstring above promised the items are auto-ignored; the

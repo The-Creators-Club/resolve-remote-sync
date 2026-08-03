@@ -173,3 +173,116 @@ def test_enforce_skipped_when_syncthing_reports_no_my_id(conn, fake, collector):
     # ...and the NAS was not re-classified as an editor device
     row = conn.execute("SELECT is_server FROM devices WHERE device_id=?", (SERVER_ID,)).fetchone()
     assert row["is_server"] == 1
+
+
+# -- B16: a machine-style device name must not be read as an editor ---------
+
+
+LAPTOP_ID = "ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP"
+
+
+def _add_second_folder(fake, slug="2026-ff5-alpha"):
+    fake.state["folders"].append({
+        "id": slug, "label": "2026/FF5/Alpha",
+        "path": "/data/Projects/2026/FF5/Alpha",
+        "devices": [{"deviceID": SERVER_ID}],
+        "type": "sendreceive", "ignorePerms": True,
+    })
+    return slug
+
+
+def test_a_machine_named_device_is_not_unshared_from_everything(conn, fake, collector):
+    """B16: `alex-laptop` is username-SHAPED, so resolve_editor_username read
+    it as editor "alex-laptop" -- an account that does not exist and has no
+    selections rows. The preserve rule only kept devices whose editor resolved
+    to None, so a device with a real-but-empty editor was removed from every
+    folder it was shared with, and the enforce brake counted DEVICES (one) so
+    it never fired."""
+    collector.run_cycle(conn, ["config", "enforce"])          # seed jsmith
+    slug2 = _add_second_folder(fake)
+
+    # The laptop is approved AFTER the seed and shared with both folders.
+    fake.state["devices"].append({"deviceID": LAPTOP_ID, "name": "alex-laptop"})
+    for folder in fake.state["folders"]:
+        folder["devices"].append({"deviceID": LAPTOP_ID})
+
+    collector.run_cycle(conn, ["config", "enforce"])
+    assert LAPTOP_ID in folder_devices(fake)
+    assert LAPTOP_ID in {d["deviceID"] for f in fake.state["folders"]
+                         if f["id"] == slug2 for d in f["devices"]}
+    # ...and it was NOT recorded as an editor account
+    row = conn.execute("SELECT editor_username FROM devices WHERE device_id=?",
+                       (LAPTOP_ID,)).fetchone()
+    assert row["editor_username"] is None
+
+
+def test_a_device_named_after_a_real_editor_is_still_managed(conn, fake, collector):
+    """The fix must not turn every device unmapped: an account the dashboard
+    has a record of still drives shares from its ticks."""
+    collector.run_cycle(conn, ["config", "enforce"])
+    assert folder_devices(fake) == {SERVER_ID, EDITOR_ID, EDITOR2_ID}
+    dbmod.remove_selection(conn, "jsmith", SLUG)
+    conn.commit()
+    collector.run_cycle(conn, ["config", "enforce"])
+    assert folder_devices(fake) == {SERVER_ID, EDITOR2_ID}    # jsmith unshared
+
+
+def test_a_reporting_editor_counts_as_known_even_with_no_selections(conn, fake, collector):
+    """An editor whose companion reports is a real account -- machine_state's
+    editor_username comes from a signed identity token, never from a Syncthing
+    device label."""
+    dbmod.upsert_machine_state(conn, "rsmith", "RS-PC", None, dbmod.utcnow_iso(),
+                               verified=True)
+    conn.commit()
+    assert "rsmith" in dbmod.known_editor_usernames(conn)
+    assert dbmod.resolve_editor_username(
+        "rsmith", dbmod.known_editor_usernames(conn)) == "rsmith"
+    assert dbmod.resolve_editor_username(
+        "alex-laptop", dbmod.known_editor_usernames(conn)) is None
+    # with no account list at all, the old shape-only behaviour is kept
+    assert dbmod.resolve_editor_username("alex-laptop") == "alex-laptop"
+
+
+def test_known_editor_records_outlive_the_evidence(conn):
+    """An editor who unticks every project is still an editor: enforce must
+    still be willing to unshare their devices."""
+    now = dbmod.utcnow_iso()
+    dbmod.add_selection(conn, "jsmith", SLUG, "admin", now)
+    conn.commit()
+    assert "jsmith" in dbmod.known_editor_usernames(conn)
+    dbmod.record_known_editor(conn, "jsmith", "seed", now)
+    dbmod.remove_selection(conn, "jsmith", SLUG)
+    conn.commit()
+    assert "jsmith" in dbmod.known_editor_usernames(conn)
+
+
+def test_the_brake_counts_share_removals_not_devices(conn, fake, collector):
+    """The brake capped DEVICES, so one device being unshared from all 40
+    folders scored 1 and sailed under the limit -- exactly the B16 shape it
+    was meant to catch. DASH_ENFORCE_MAX_REMOVALS is named after share
+    removals and now counts them."""
+    collector.settings = Settings(
+        **{**collector.settings.__dict__, "enforce_max_share_removals": 3})
+    slugs = [SLUG] + [_add_second_folder(fake, f"2026-ff5-p{i}") for i in range(4)]
+    collector.run_cycle(conn, ["config", "enforce"])
+    now = dbmod.utcnow_iso()
+    for slug in slugs:
+        dbmod.add_selection(conn, "jsmith", slug, "admin", now)
+    conn.commit()
+    collector.run_cycle(conn, ["config", "enforce"])
+    for slug in slugs:
+        devices = {d["deviceID"] for f in fake.state["folders"]
+                   if f["id"] == slug for d in f["devices"]}
+        assert EDITOR_ID in devices
+
+    # One device, five folders: 5 share removals > the limit of 3 -> refused.
+    for slug in slugs:
+        dbmod.remove_selection(conn, "jsmith", slug)
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+    still_shared = [
+        slug for slug in slugs
+        if EDITOR_ID in {d["deviceID"] for f in fake.state["folders"]
+                         if f["id"] == slug for d in f["devices"]}
+    ]
+    assert still_shared == slugs        # nothing was unshared

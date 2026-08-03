@@ -17,7 +17,7 @@ from typing import Any, Iterator, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import VERSION, auth, db, health
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -545,11 +545,16 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
             "lanes": [],
         })
     verified = db.fetch_verified_map(conn)
+    # B17: the companion has been sending transport_health every heavy tick
+    # and ReportIn dropped it, so nothing could tell a RELAYED editor from a
+    # merely slow one -- exactly the case the companion's own docstring names.
+    transport = db.fetch_transport_map(conn)
     result = []
     for entry in machines.values():
         key = (entry["editor_username"], entry["machine"])
         entry["status"] = health.worst(l["chip"] for l in entry["lanes"])
         entry["verified"] = verified.get(key, False)
+        entry["transport"] = transport.get(key) or {}
         entry["companion_version"] = (
             (machine_versions.get(key) or {}).get("companion_version")
             or entry["companion_version"]
@@ -1507,8 +1512,35 @@ class SetPasswordIn(BaseModel):
 
 
 class ApproveDeviceIn(BaseModel):
-    device_id: str = Field(min_length=1)
+    device_id: str = Field(min_length=1, max_length=128)
     username: str = Field(min_length=1, max_length=32)
+
+
+# Intentional copy of server/accept_device.py's DEVICE_ID_RE: 8 dash-separated
+# groups of 7 base32 characters (RFC 4648 minus 0/1/8/9). Deliberately lenient
+# -- it does not verify the interleaved Luhn check characters, only the shape,
+# so a typo'd-but-well-formed ID still reaches Syncthing (which does check
+# them) rather than being rejected here for the wrong reason.
+#
+# The shape was checked on the SERVER SCRIPT side only, so a truncated paste
+# into the dashboard's approve dialog went straight through to Syncthing and
+# came back as a generic 502 with no hint at what was wrong.
+_DEVICE_ID_RE = re.compile(r"^[A-Z2-7]{7}(-[A-Z2-7]{7}){7}$")
+
+
+def normalize_device_id(device_id: str) -> str:
+    """Uppercase + shape-check a Syncthing device ID, or raise ValueError.
+    Mirrors server/accept_device.normalize_device_id."""
+    cleaned = str(device_id or "").strip().upper()
+    if not _DEVICE_ID_RE.match(cleaned):
+        raise ValueError(
+            f"{device_id!r} is not a Syncthing device ID. Expected 8 groups of 7 "
+            f"characters (A-Z, 2-7) separated by dashes, e.g. P56IOI7-MZJNU2Y-"
+            f"IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2 -- copy it whole, it "
+            f"is 63 characters. Adding a malformed ID creates a device entry that "
+            f"can never connect."
+        )
+    return cleaned
 
 
 @router.get("/admin/users")
@@ -1518,7 +1550,10 @@ def api_admin_users(request: Request) -> dict[str, Any]:
 
 
 @router.post("/admin/users")
-def api_admin_create_user(payload: CreateEditorIn, request: Request) -> dict[str, Any]:
+def api_admin_create_user(
+    payload: CreateEditorIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
     _require_admin(request)
     truenas = _truenas_client_or_503(request)
     username = payload.username.strip().lower()
@@ -1538,6 +1573,10 @@ def api_admin_create_user(payload: CreateEditorIn, request: Request) -> dict[str
             result["password_set"] = True
     except TrueNASError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # The account provably exists now -- record it so a device named after it
+    # is treated as an editor rather than as an unmapped machine (B16).
+    db.record_known_editor(conn, username, "admin")
+    conn.commit()
     return {"ok": True, "result": result, "view": build_admin_users_view(request.app.state.settings)}
 
 
@@ -1567,7 +1606,10 @@ def api_admin_set_password(username: str, payload: SetPasswordIn, request: Reque
 
 
 @router.post("/admin/devices/approve")
-def api_admin_approve_device(payload: ApproveDeviceIn, request: Request) -> dict[str, Any]:
+def api_admin_approve_device(
+    payload: ApproveDeviceIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
     _require_admin(request)
     settings = request.app.state.settings
     if not settings.syncthing_url:
@@ -1575,11 +1617,20 @@ def api_admin_approve_device(payload: ApproveDeviceIn, request: Request) -> dict
     username = payload.username.strip().lower()
     if not is_valid_username(username):
         raise HTTPException(status_code=422, detail="username must be a valid TrueNAS-style username")
+    try:
+        device_id = normalize_device_id(payload.device_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     syncthing = SyncthingClient.from_settings(settings)
     try:
-        syncthing.approve_device(payload.device_id.strip(), username)
+        syncthing.approve_device(device_id, username)
     except SyncthingError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # An admin naming the device is the dashboard's strongest evidence that
+    # this username is a real editor account -- record it, so the enforce
+    # cycle is allowed to manage the device's shares (B16).
+    db.record_known_editor(conn, username, "admin")
+    conn.commit()
     return {"ok": True, "view": build_admin_users_view(settings)}
 
 
@@ -1877,9 +1928,82 @@ def api_download_package(
 # string that reaches a DB column is capped, every list is capped, and the two
 # free-form dicts have a key-count cap -- so the whole payload has a bounded
 # worst case even before the request-size middleware in app.py.
-MAX_REPORT_PROJECTS = 64          # keys in local_manifest / media_tree
+#
+# THESE CEILINGS TRUNCATE, THEY DO NOT REJECT (KNOWN_BUGS B6). They used to be
+# pydantic `max_length`/raising validators, which fire BEFORE the route body
+# runs -- so a machine with a 65th project 422'd its entire HEAVY report and
+# lost lane status, transfers, machine_state, presence AND the upgrade
+# advertisement with it. An idle companion only ever sends heavy ticks, so it
+# vanished from the fleet grid completely, with one WARNING and then DEBUG
+# forever. Worst placed of all is the base rig, whose local_root is the whole
+# NAS tree: it hits the cap first and holds the authoritative copy of
+# everything. Media presence for the 65th project is a real loss; the whole
+# machine going dark is a much bigger one.
+#
+# Truncation keeps the FIRST N entries in the order the companion sent them:
+# the companion prioritises (selected projects first, then most recently
+# touched -- see companion manifest.scan_local_manifest), so its order is the
+# best available signal about what matters. Every truncation is logged here
+# and echoed in the reply under "truncated" so it can never be silent.
+MAX_REPORT_PROJECTS = 64          # keys in local_manifest / media_tree / queue
 MAX_MANIFEST_FILES = 4000         # per project, per kind (db caps rows again)
 MAX_MEDIA_CLIPS = 4000            # per Resolve project
+
+
+def _truncate_report_sections(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
+    """Slice the oversized sections of a raw report body down to the ceilings
+    above, returning (new_body, {section: entries_dropped}).
+
+    Runs as a `mode="before"` validator, i.e. on the RAW dict, so pydantic
+    only ever builds models for the entries that survive -- truncating after
+    validation would have meant parsing the whole oversized payload first,
+    which is the cost this is here to bound.
+    """
+    dropped: dict[str, int] = {}
+    out = dict(data)
+
+    for key in ("local_manifest", "media_tree"):
+        value = out.get(key)
+        if isinstance(value, dict) and len(value) > MAX_REPORT_PROJECTS:
+            dropped[key] = len(value) - MAX_REPORT_PROJECTS
+            out[key] = dict(list(value.items())[:MAX_REPORT_PROJECTS])
+
+    queue = out.get("queue")
+    if isinstance(queue, list) and len(queue) > MAX_REPORT_PROJECTS:
+        dropped["queue"] = len(queue) - MAX_REPORT_PROJECTS
+        out["queue"] = queue[:MAX_REPORT_PROJECTS]
+
+    manifest = out.get("local_manifest")
+    if isinstance(manifest, dict):
+        files_dropped = 0
+        trimmed: dict[str, Any] = {}
+        for rel, project in manifest.items():
+            if isinstance(project, dict):
+                for kind in ("originals", "proxies"):
+                    entries = project.get(kind)
+                    if isinstance(entries, list) and len(entries) > MAX_MANIFEST_FILES:
+                        files_dropped += len(entries) - MAX_MANIFEST_FILES
+                        project = {**project, kind: entries[:MAX_MANIFEST_FILES],
+                                   "truncated": True}
+            trimmed[rel] = project
+        if files_dropped:
+            dropped["manifest_files"] = files_dropped
+            out["local_manifest"] = trimmed
+
+    tree = out.get("media_tree")
+    if isinstance(tree, dict):
+        clips_dropped = 0
+        trimmed_tree: dict[str, Any] = {}
+        for name, clips in tree.items():
+            if isinstance(clips, list) and len(clips) > MAX_MEDIA_CLIPS:
+                clips_dropped += len(clips) - MAX_MEDIA_CLIPS
+                clips = clips[:MAX_MEDIA_CLIPS]
+            trimmed_tree[name] = clips
+        if clips_dropped:
+            dropped["media_clips"] = clips_dropped
+            out["media_tree"] = trimmed_tree
+
+    return out, dropped
 
 
 class CompletedIn(BaseModel):
@@ -1927,10 +2051,11 @@ class ManifestProjectIn(BaseModel):
     n_proxies: int = Field(default=0, ge=0, le=10_000_000)
     bytes_proxies: int = Field(default=0, ge=0, le=2**60)
     truncated: bool = False
-    originals: list[tuple[str, int | None]] | None = Field(
-        default=None, max_length=MAX_MANIFEST_FILES)
-    proxies: list[tuple[str, int | None]] | None = Field(
-        default=None, max_length=MAX_MANIFEST_FILES)
+    # No max_length: _truncate_report_sections has already sliced these to
+    # MAX_MANIFEST_FILES on the raw body (a raising cap here 422'd the whole
+    # report -- see B6).
+    originals: list[tuple[str, int | None]] | None = None
+    proxies: list[tuple[str, int | None]] | None = None
 
 
 class MediaClipIn(BaseModel):
@@ -1939,6 +2064,83 @@ class MediaClipIn(BaseModel):
     file_path: str | None = Field(default=None, max_length=1024)
     kind: str | None = Field(default=None, max_length=32)
     present: bool = False
+
+
+class SyncthingTransportIn(BaseModel):
+    """companion sync/syncthing_lane.summarize_connections() -- CONNECTED
+    devices only, so "offline" and "relayed" stay different problems."""
+    devices: dict[str, str] | None = None
+    relayed: list[str] | None = Field(default=None, max_length=256)
+    direct: list[str] | None = Field(default=None, max_length=256)
+
+
+class OrphanReportIn(BaseModel):
+    """companion sync/rclone_lane.orphan_report() -- the `.partial` files lane
+    A leaves on the NAS when it is killed mid-transfer, and the local
+    .ccsync-trash. Reported only; nothing ever deletes them."""
+    count: int | None = Field(default=None, ge=0)
+    bytes: int | None = Field(default=None, ge=0)
+
+
+class LaneOrphansIn(BaseModel):
+    partials: OrphanReportIn | None = None
+    trash: OrphanReportIn | None = None
+
+
+class ExpressReportIn(BaseModel):
+    """companion sync/rclone_lane.express_report(). An express failure is
+    deliberately a warning + counter rather than STATE_ERROR, so without
+    these the server has no way to see one at all."""
+    enabled: bool | None = None
+    runs: int | None = Field(default=None, ge=0)
+    files_uploaded: int | None = Field(default=None, ge=0)
+    dropped_over_cap: int | None = Field(default=None, ge=0)
+    last_error: str | None = Field(default=None, max_length=2000)
+    last_run: str | None = Field(default=None, max_length=64)
+    last_files: int | None = Field(default=None, ge=0)
+
+
+class TransportHealthIn(BaseModel):
+    """The companion's `transport_health` payload (B17).
+
+    Every field is optional and every sub-model tolerates extra keys, because
+    this is a diagnostic channel: a companion that grows a new counter must
+    never 422 its whole report against an older dashboard.
+    """
+    syncthing: SyncthingTransportIn | None = None
+    orphans: dict[str, LaneOrphansIn] | None = None
+    express: ExpressReportIn | None = None
+
+
+def flatten_transport_health(
+    health: "TransportHealthIn | None", now: str
+) -> dict[str, Any] | None:
+    """TransportHealthIn -> the flat columns machine_state stores (B17).
+
+    Returns None when the companion sent nothing (a LIGHT tick), which
+    upsert_machine_state treats as "leave the stored values alone" rather
+    than "clear them". The orphan counters are summed across lanes: which
+    rclone lane left a `.partial` on the NAS is a companion-log question, the
+    grid only needs "this machine is leaving junk behind"."""
+    if health is None:
+        return None
+    flat: dict[str, Any] = {"at": now}
+    if health.syncthing is not None:
+        flat["relayed"] = len(health.syncthing.relayed or [])
+        flat["direct"] = len(health.syncthing.direct or [])
+    if health.orphans:
+        partials = 0
+        partial_bytes = 0
+        for lane in health.orphans.values():
+            if lane.partials is not None:
+                partials += lane.partials.count or 0
+                partial_bytes += lane.partials.bytes or 0
+        flat["orphan_partials"] = partials
+        flat["orphan_partial_bytes"] = partial_bytes
+    if health.express is not None:
+        flat["express_dropped"] = health.express.dropped_over_cap
+        flat["express_last_error"] = health.express.last_error
+    return flat
 
 
 class ReportIn(BaseModel):
@@ -1952,7 +2154,9 @@ class ReportIn(BaseModel):
     lanes: list[LaneReportIn] = Field(max_length=32)
     # Completed-file feed for the HISTORY section (companions >= 0.4.11).
     completed: list[CompletedIn] | None = Field(default=None, max_length=256)
-    queue: list[str] | None = Field(default=None, max_length=MAX_REPORT_PROJECTS)
+    # Truncated, not rejected: an editor ticking a 65th project must not take
+    # their whole machine off the fleet grid (B6).
+    queue: list[str] | None = None
     current_project: str | None = Field(default=None, max_length=512)
     resolve_project: str | None = Field(default=None, max_length=512)
     # Media-presence (companions >= 0.3); all optional -> absent leaves tables
@@ -1960,6 +2164,32 @@ class ReportIn(BaseModel):
     mode: str | None = Field(default=None, max_length=32)   # 'base' | 'editor'
     local_manifest: dict[str, ManifestProjectIn] | None = None   # keyed by project rel
     media_tree: dict[str, list[MediaClipIn]] | None = None       # keyed by RESOLVE PROJECT NAME
+    # Connection-path + orphan diagnostics the companion has been computing
+    # and sending every heavy tick since 0.4.x, which this model used to drop
+    # on the floor (pydantic extra='ignore') -- so a RELAYED editor and a
+    # merely slow one stayed indistinguishable on the fleet grid, and the
+    # orphaned-.partial / express-failure counters that exist ONLY to give
+    # the server visibility reached nobody (KNOWN_BUGS B17).
+    transport_health: TransportHealthIn | None = None
+    # Set by _truncate_report_sections, never by the client: {section:
+    # entries dropped}. Echoed in the reply and logged, so a truncated report
+    # is loud rather than silent (B6).
+    truncated: dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _truncate_rather_than_reject(cls, data):
+        """Slice oversized sections down to the ceilings instead of 422-ing.
+
+        See MAX_REPORT_PROJECTS: a raising cap fires before the route body,
+        so ONE project over the line cost the machine its lane status,
+        transfers, presence and upgrade advertisement too -- it disappeared
+        from the fleet grid entirely (B6)."""
+        if not isinstance(data, dict):
+            return data
+        out, dropped = _truncate_report_sections(data)
+        out["truncated"] = dropped        # client-supplied value is discarded
+        return out
 
     @field_validator("machine")
     @classmethod
@@ -1983,21 +2213,10 @@ class ReportIn(BaseModel):
         lane_report_current row for a bogus name (SEC-4)."""
         return [lane for lane in lanes if lane.name in LANE_LABELS]
 
-    @field_validator("local_manifest", "media_tree")
-    @classmethod
-    def _cap_project_keys(cls, value):
-        if value is not None and len(value) > MAX_REPORT_PROJECTS:
-            raise ValueError(f"too many projects (max {MAX_REPORT_PROJECTS})")
-        return value
-
-    @field_validator("media_tree")
-    @classmethod
-    def _cap_clips(cls, value):
-        if value is not None:
-            for name, clips in value.items():
-                if len(clips) > MAX_MEDIA_CLIPS:
-                    raise ValueError(f"too many clips for {name!r} (max {MAX_MEDIA_CLIPS})")
-        return value
+    # NOTE: the project-key / clip-count / manifest-file ceilings are applied
+    # by _truncate_rather_than_reject above, on the raw body. They were
+    # raising validators here until B6 -- see MAX_REPORT_PROJECTS for why a
+    # raise was the wrong shape.
 
 
 @router.post("/report")
@@ -2055,6 +2274,23 @@ def api_report(
             detail="X-CCSync-Identity does not match editor_name",
         )
     verified = id_user is not None and id_user == editor
+    if verified:
+        # A signed identity token is the dashboard's OWN evidence that this
+        # is a real editor account -- the one thing that distinguishes an
+        # editor from a username-shaped machine name later, when the enforce
+        # cycle decides whether a device may be unshared (B16).
+        db.record_known_editor(conn, editor, "report", received_at)
+
+    # B6: a truncated section is never silent. The report was ACCEPTED (the
+    # alternative -- 422 -- took the whole machine off the fleet grid), but
+    # somebody has to be able to see that presence data was dropped.
+    if payload.truncated:
+        log.warning(
+            "report from %s/%s was truncated to fit the ceilings: %s -- the report was "
+            "accepted, but these entries are not in the dashboard's picture",
+            editor, machine,
+            ", ".join(f"{k}: {v} dropped" for k, v in sorted(payload.truncated.items())),
+        )
 
     for lane in payload.lanes:
         db.upsert_lane_report(
@@ -2120,6 +2356,7 @@ def api_report(
         resolve_project=resolve_project or None, verified=verified,
         platform=(payload.platform or "").strip().lower() or None,
         companion_version=(payload.companion_version or "").strip() or None,
+        transport=flatten_transport_health(payload.transport_health, received_at),
     )
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
@@ -2172,7 +2409,13 @@ def api_report(
             db.replace_media_tree(conn, editor, machine, slug, rows, received_at)
 
     conn.commit()
-    result = {"ok": True, "lanes": len(payload.lanes), "received_at": received_at}
+    result: dict[str, Any] = {
+        "ok": True, "lanes": len(payload.lanes), "received_at": received_at}
+    # B6: tell the companion what was dropped so the truncation is visible on
+    # BOTH sides -- the companion logs this and can shed the section itself
+    # next tick rather than resending something the server will trim again.
+    if payload.truncated:
+        result["truncated"] = payload.truncated
     # Upgrade channel: piggyback on the report reply so an out-of-date
     # companion learns about the current build with no extra request. Key
     # absent = up to date (or nothing published, or version unreported).

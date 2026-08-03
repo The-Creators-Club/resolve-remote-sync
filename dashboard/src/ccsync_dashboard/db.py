@@ -14,7 +14,7 @@ import datetime as dt
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Container, Iterable, Mapping
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -231,6 +231,39 @@ ALTER TABLE projects ADD COLUMN need_items INTEGER;
 ALTER TABLE projects ADD COLUMN need_bytes INTEGER;
 """
 
+# v13: two things nothing on the server could see.
+#
+# (a) transport_health -- the companion has computed and SENT this every heavy
+#     tick since 0.4.x and ReportIn dropped it silently (KNOWN_BUGS B17), so
+#     "this editor's lane C is riding the public relay pool at 1-5 MB/s" and
+#     "this editor is just slow" looked identical on the fleet grid. Flattened
+#     into machine_state rather than stored as a JSON blob: the grid needs to
+#     sort/flag on these, and the raw structure is a diagnostic, not a record.
+#     Same for the orphaned-.partial and express-lane failure counters, which
+#     the companion documents as existing ONLY to give the server visibility.
+#
+# (b) known_editors -- an append-only record of usernames the dashboard has
+#     CONFIRMED are editor accounts. resolve_editor_username() treats any
+#     username-SHAPED Syncthing device name as an editor, so a device approved
+#     as "alex-laptop" resolved to an editor with no selections rows and the
+#     enforce cycle unshared it from every folder it was on (KNOWN_BUGS B16).
+#     A name that is merely username-shaped is now treated as UNMAPPED (and
+#     therefore left alone) until it appears here.
+SCHEMA_V13 = """
+ALTER TABLE machine_state ADD COLUMN transport_relayed INTEGER;
+ALTER TABLE machine_state ADD COLUMN transport_direct INTEGER;
+ALTER TABLE machine_state ADD COLUMN orphan_partials INTEGER;
+ALTER TABLE machine_state ADD COLUMN orphan_partial_bytes INTEGER;
+ALTER TABLE machine_state ADD COLUMN express_dropped INTEGER;
+ALTER TABLE machine_state ADD COLUMN express_last_error TEXT;
+ALTER TABLE machine_state ADD COLUMN transport_at TEXT;
+CREATE TABLE IF NOT EXISTS known_editors (
+  editor_username TEXT PRIMARY KEY,
+  first_seen      TEXT NOT NULL,
+  source          TEXT NOT NULL    -- 'report' | 'seed' | 'selection' | 'admin'
+);
+"""
+
 # v3: fix-destination project-root visibility/override. The companion
 # auto-detects which project the editor is working in (Resolve project name
 # matched against the tree) and reports it; an editor/admin can override it
@@ -346,6 +379,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (10, SCHEMA_V10),
     (11, SCHEMA_V11),
     (12, SCHEMA_V12),
+    (13, SCHEMA_V13),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -450,18 +484,86 @@ def migrate(
         version = target_version
 
 
-def resolve_editor_username(device_name: str) -> str | None:
+def resolve_editor_username(
+    device_name: str, known_editors: Container[str] | None = None
+) -> str | None:
     """Map a Syncthing device name to a TrueNAS username, or None if unmapped.
 
     Convention: accept_device.py --device-name <username>. When the flag was
     omitted the name is the device ID itself -- never treat that as a person.
+
+    `known_editors` is the set of usernames the dashboard has a POSITIVE
+    record of (see known_editor_usernames). Being username-SHAPED is not
+    enough: machine names look exactly like usernames ("alex-laptop",
+    "edit-pc"), and a device approved under one used to resolve to an editor
+    account that does not exist, with no selections rows -- so the enforce
+    cycle read it as "this editor is ticked for nothing" and unshared the
+    device from every folder it was on (KNOWN_BUGS B16). An unresolvable name
+    is UNMAPPED, and unmapped devices are never added or removed by enforce,
+    which is the fail-safe direction.
+
+    `known_editors=None` keeps the old shape-only behaviour, for the callers
+    (and tests) that have no database to consult.
     """
     if _DEVICE_ID_RE.match(device_name):
         return None
     candidate = device_name.strip().lower()
-    if _USERNAME_RE.match(candidate):
-        return candidate
-    return None
+    if not _USERNAME_RE.match(candidate):
+        return None
+    if known_editors is not None and candidate not in known_editors:
+        return None
+    return candidate
+
+
+# Where a known-editor record can come from. 'report' means a companion
+# reported under that name; 'admin' an explicit admin action; 'seed'/
+# 'selection' a project tick.
+KNOWN_EDITOR_SOURCES = ("report", "seed", "selection", "admin")
+
+
+def record_known_editor(
+    conn: sqlite3.Connection, editor: str, source: str, now: str | None = None
+) -> None:
+    """Remember that `editor` is a real editor account (append-only).
+
+    Called from the paths where the dashboard has evidence rather than a
+    guess: a report under a signed identity, an admin approving a device or
+    creating an account, a project tick, and the one-shot share seed. The
+    record must OUTLIVE the evidence -- an editor who unticks every project
+    is still an editor, and enforce must still be willing to unshare their
+    devices."""
+    name = str(editor or "").strip().lower()
+    if not name or not _USERNAME_RE.match(name):
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO known_editors (editor_username, first_seen, source) "
+        "VALUES (?, ?, ?)",
+        (name, now or utcnow_iso(), source),
+    )
+
+
+def known_editor_usernames(conn: sqlite3.Connection) -> set[str]:
+    """Every username the dashboard has a positive record of.
+
+    Four sources, all of them evidence that the account exists rather than
+    that a string looks like a username: the append-only known_editors table,
+    anyone with a project ticked, anyone with a stored preference, and anyone
+    whose companion has reported (machine_state.editor_username comes from a
+    verified identity token, or at minimum from a holder of the fleet report
+    token -- never from a Syncthing device label, which is the thing being
+    validated here)."""
+    names: set[str] = set()
+    for sql in (
+        "SELECT DISTINCT editor_username FROM known_editors",
+        "SELECT DISTINCT editor_username FROM selections",
+        "SELECT DISTINCT editor_username FROM editor_prefs",
+        "SELECT DISTINCT editor_username FROM machine_state",
+    ):
+        for row in conn.execute(sql):
+            name = str(row[0] or "").strip().lower()
+            if name:
+                names.add(name)
+    return names
 
 
 def compute_rate_ema(
@@ -539,15 +641,20 @@ def set_folder_status(
 
 
 def upsert_device(
-    conn: sqlite3.Connection, device_id: str, name: str, is_server: bool, now: str
+    conn: sqlite3.Connection, device_id: str, name: str, is_server: bool, now: str,
+    known_editors: Container[str] | None = None,
 ) -> int:
+    """`known_editors` is passed through to resolve_editor_username -- the
+    collector computes it once per cycle rather than per device. Omitted, the
+    mapping falls back to a shape check (see B16)."""
     conn.execute(
         """INSERT INTO devices (device_id, name, editor_username, is_server, first_seen, last_seen)
            VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(device_id) DO UPDATE SET
              name=excluded.name, editor_username=excluded.editor_username,
              is_server=excluded.is_server, last_seen=excluded.last_seen""",
-        (device_id, name, resolve_editor_username(name), int(is_server), now, now),
+        (device_id, name, resolve_editor_username(name, known_editors),
+         int(is_server), now, now),
     )
     return conn.execute("SELECT id FROM devices WHERE device_id=?", (device_id,)).fetchone()[0]
 
@@ -913,12 +1020,23 @@ def upsert_machine_state(
     detected_project_root: str | None, now: str,
     resolve_project: str | None = None, verified: bool = False,
     platform: str | None = None, companion_version: str | None = None,
+    transport: Mapping[str, Any] | None = None,
 ) -> None:
+    """`transport` is summarize_transport_health()'s flattened dict, or None.
+
+    None leaves the stored transport columns ALONE rather than nulling them:
+    the companion only computes transport_health on HEAVY ticks, so a LIGHT
+    report must not wipe the relay/orphan state between two heavy ones (same
+    rule the media tables follow)."""
+    t = dict(transport or {})
     conn.execute(
         """INSERT INTO machine_state
              (editor_username, machine, detected_project_root, reported_at,
-              resolve_project, verified, platform, companion_version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              resolve_project, verified, platform, companion_version,
+              transport_relayed, transport_direct, orphan_partials,
+              orphan_partial_bytes, express_dropped, express_last_error,
+              transport_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(editor_username, machine) DO UPDATE SET
              detected_project_root=excluded.detected_project_root,
              reported_at=excluded.reported_at,
@@ -926,11 +1044,55 @@ def upsert_machine_state(
              verified=excluded.verified,
              platform=COALESCE(excluded.platform, machine_state.platform),
              companion_version=COALESCE(excluded.companion_version,
-                                        machine_state.companion_version)""",
+                                        machine_state.companion_version),
+             transport_relayed=COALESCE(excluded.transport_relayed,
+                                        machine_state.transport_relayed),
+             transport_direct=COALESCE(excluded.transport_direct,
+                                       machine_state.transport_direct),
+             orphan_partials=COALESCE(excluded.orphan_partials,
+                                      machine_state.orphan_partials),
+             orphan_partial_bytes=COALESCE(excluded.orphan_partial_bytes,
+                                           machine_state.orphan_partial_bytes),
+             express_dropped=COALESCE(excluded.express_dropped,
+                                      machine_state.express_dropped),
+             express_last_error=CASE WHEN excluded.transport_at IS NULL
+                                     THEN machine_state.express_last_error
+                                     ELSE excluded.express_last_error END,
+             transport_at=COALESCE(excluded.transport_at,
+                                   machine_state.transport_at)""",
         (editor, machine, detected_project_root, now, resolve_project, int(verified),
-         platform, companion_version),
+         platform, companion_version,
+         t.get("relayed"), t.get("direct"), t.get("orphan_partials"),
+         t.get("orphan_partial_bytes"), t.get("express_dropped"),
+         t.get("express_last_error"), t.get("at")),
     )
     evict_extra_machines(conn, editor)
+
+
+def fetch_transport_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> the transport/orphan diagnostics for the fleet grid.
+
+    Nothing in production could tell a RELAYED editor from a merely slow one:
+    Syncthing devices are added with addresses:["dynamic"] and relays left at
+    their `true` default, so lane C can silently ride the public relay pool at
+    1-5 MB/s. `relayed` being non-zero is the whole answer (B17)."""
+    return {
+        (r["editor_username"], r["machine"]): {
+            "relayed": r["transport_relayed"],
+            "direct": r["transport_direct"],
+            "orphan_partials": r["orphan_partials"],
+            "orphan_partial_bytes": r["orphan_partial_bytes"],
+            "express_dropped": r["express_dropped"],
+            "express_last_error": r["express_last_error"],
+            "at": r["transport_at"],
+        }
+        for r in conn.execute(
+            """SELECT editor_username, machine, transport_relayed, transport_direct,
+                      orphan_partials, orphan_partial_bytes, express_dropped,
+                      express_last_error, transport_at
+               FROM machine_state"""
+        )
+    }
 
 
 def evict_extra_machines(

@@ -142,3 +142,104 @@ def test_report_upserts_and_transition_history(app_env):
     assert editors[0]["status"] == "red"
     lane_a = next(l for l in editors[0]["lanes"] if l["lane"] == "lane_a_video_up")
     assert lane_a["last_error"] == "rclone exit 1"
+
+
+# -- B17: transport_health crosses the wire and reaches the grid ------------
+
+
+def transport_payload(**over):
+    health = {
+        "syncthing": {
+            "devices": {"NASNASN-NASNASN": "relay-client"},
+            "relayed": ["NASNASN-NASNASN"],
+            "direct": [],
+        },
+        "orphans": {
+            "lane_a": {"partials": {"count": 3, "bytes": 41_000_000_000},
+                       "trash": {"count": 0, "bytes": 0}},
+        },
+        "express": {"enabled": True, "runs": 12, "files_uploaded": 40,
+                    "dropped_over_cap": 7, "last_error": "rclone exit 1",
+                    "last_run": "2026-07-26T08:00:00+00:00", "last_files": 2},
+    }
+    health.update(over)
+    p = payload()
+    p["transport_health"] = health
+    return p
+
+
+def test_transport_health_is_persisted_and_shown_on_the_fleet_grid(app_env):
+    """B17: the companion computed transport_health every heavy tick and
+    ReportIn dropped it (pydantic extra='ignore'), so `grep transport_health`
+    over dashboard/ came back empty -- a RELAYED editor and a merely slow one
+    stayed indistinguishable on the fleet grid, and the orphaned-.partial and
+    express-failure counters that exist ONLY for server visibility reached
+    nobody."""
+    client, conn = app_env
+    assert client.post("/api/v1/report", json=transport_payload(),
+                       headers=report_headers()).status_code == 200
+
+    row = conn.execute(
+        """SELECT transport_relayed, transport_direct, orphan_partials,
+                  orphan_partial_bytes, express_dropped, express_last_error,
+                  transport_at
+           FROM machine_state WHERE editor_username='jsmith'""").fetchone()
+    assert row["transport_relayed"] == 1
+    assert row["transport_direct"] == 0
+    assert row["orphan_partials"] == 3
+    assert row["orphan_partial_bytes"] == 41_000_000_000
+    assert row["express_dropped"] == 7
+    assert row["express_last_error"] == "rclone exit 1"
+    assert row["transport_at"]
+
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "admin"))
+    entry = client.get("/api/v1/editors").json()["editors"][0]
+    assert entry["transport"]["relayed"] == 1
+    assert entry["transport"]["orphan_partials"] == 3
+
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "[ RELAYED: 1 ]" in page.text
+    assert "[ ORPHANS: 3 ]" in page.text
+    assert "[ EXPRESS FAILED ]" in page.text
+
+
+def test_a_direct_only_machine_is_not_flagged_as_relayed(app_env):
+    client, _ = app_env
+    p = transport_payload(syncthing={"devices": {}, "relayed": [], "direct": ["A", "B"]},
+                          orphans={}, express={"enabled": True, "dropped_over_cap": 0})
+    assert client.post("/api/v1/report", json=p, headers=report_headers()).status_code == 200
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "admin"))
+    page = client.get("/")
+    assert "[ RELAYED" not in page.text
+    assert "direct:2" in page.text
+
+
+def test_a_light_report_does_not_wipe_the_stored_transport_state(app_env):
+    """The companion only computes transport_health on HEAVY ticks; the LIGHT
+    ticks in between must not clear what the last heavy one recorded."""
+    client, conn = app_env
+    client.post("/api/v1/report", json=transport_payload(), headers=report_headers())
+    client.post("/api/v1/report", json=payload(), headers=report_headers())  # light
+    row = conn.execute(
+        "SELECT transport_relayed, express_last_error FROM machine_state").fetchone()
+    assert row["transport_relayed"] == 1
+    assert row["express_last_error"] == "rclone exit 1"
+
+
+def test_an_unknown_transport_health_key_does_not_reject_the_report(app_env):
+    """A companion that grows a new counter must never 422 its whole report
+    against an older dashboard -- the whole reason this field was dropped
+    silently in the first place."""
+    client, _ = app_env
+    p = transport_payload()
+    p["transport_health"]["future_counter"] = {"a": 1}
+    p["transport_health"]["express"]["brand_new"] = 5
+    assert client.post("/api/v1/report", json=p,
+                       headers=report_headers()).status_code == 200
+
+
+def test_a_report_without_transport_health_still_works(app_env):
+    client, _ = app_env
+    assert client.post("/api/v1/report", json=payload(),
+                       headers=report_headers()).status_code == 200

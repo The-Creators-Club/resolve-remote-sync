@@ -180,7 +180,9 @@ def test_create_editor_refuses_to_hijack_a_non_editor_account(env):
 
 def test_approve_pending_device(env):
     client, _truenas, syncthing = env
-    new_id = "NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1"
+    # A real Syncthing device ID is base32 minus 0/1/8/9 -- the approve route
+    # now shape-checks it the same way accept_device.py always did.
+    new_id = "NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX"
     syncthing.state["pending_devices"] = {new_id: {"name": "", "address": "100.9.9.9:22000"}}
 
     as_user(client, "alex")

@@ -40,6 +40,10 @@ DEFAULT_TRUENAS_USER = "truenas_admin"
 DEFAULT_DATASET_ROOT = "/mnt/tank/TheCreatorsPool"
 DEFAULT_CC_ROOT = DEFAULT_DATASET_ROOT + "/Creators_Club"
 DEFAULT_PROJECTS_ROOT = DEFAULT_CC_ROOT + "/Projects"
+# The shared b-roll archive: browsable proxies editors link against, plus
+# the search index that serves them. Beside Projects/ under Creators_Club,
+# which is what makes it P:\Assets\B-roll Archive on an editor's machine.
+DEFAULT_BROLL_ARCHIVE_ROOT = DEFAULT_CC_ROOT + "/Assets/B-roll Archive"
 DEFAULT_DATASET_OWNER = "broll"
 EDITORS_GROUP = "editors"
 
@@ -88,14 +92,30 @@ def slugify(text: str) -> str:
     return slug
 
 
+# rclone runs with its default --inplace=false, so lane A writes
+# "<name>.<token>.partial" (and the express run "<name>.<token>.exp.partial")
+# into the NAS project dir -- which is also a sendreceive Syncthing root. A
+# lane A killed mid-transfer of a 40 GB .braw leaves that behind, lane A never
+# deletes, and the extension patterns above match by EXTENSION so
+# "A001.braw.42048420.partial" matched NONE of them: the NAS indexed the
+# 39 GB orphan and fanned it out over lane C to every editor with the project
+# ticked, where nothing ever removes it (KNOWN_BUGS B12). Both forms are
+# emitted for parity with the Proxy/.ccsync-tmp patterns above; keep this
+# list byte-identical to dashboard provision.build_stignore_lines() and
+# companion sync/syncthing_admin.STIGNORE_LINES (server/tests/
+# test_cross_component.py asserts exactly that).
+PARTIAL_IGNORE_LINES = ["(?i)**/*.partial", "(?i)*.partial"]
+
+
 def build_stignore_lines() -> list[str]:
     """Build the .stignore content for a project's Syncthing folder.
 
     One case-insensitive line per video extension, plus a case-insensitive
     line ignoring any Proxy/ directory anywhere in the tree (proxies travel
-    via rclone lane B, not Syncthing).
+    via rclone lane B, not Syncthing) and rclone's orphaned .partial files.
     """
     lines = [f"(?i)*{ext}" for ext in VIDEO_EXTENSIONS]
+    lines.extend(PARTIAL_IGNORE_LINES)
     # Bare name matches a Proxy dir at ANY depth including the folder root;
     # the **/ variants alone would miss a root-level Proxy/.
     lines.append("(?i)Proxy")

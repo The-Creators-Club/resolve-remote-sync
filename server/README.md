@@ -63,7 +63,7 @@ by the dashboard's per-editor selections, not by device approval.
 
 | Var | Required | Default | Used by |
 |---|---|---|---|
-| `TRUENAS_PW` | yes | -- | every script that talks to TrueNAS (SSH password + REST API basic auth) |
+| `TRUENAS_PW` | yes | -- | every script that talks to TrueNAS (SSH password + REST API basic auth); `setup_syncthing_folder.py` also uses it to read the project's `.ccsync-project` marker over SSH when deriving the folder id (skip with `--slug` or `--no-marker-read`) |
 | `TRUENAS_HOST` | no | `192.168.0.102` | same |
 | `TRUENAS_USER` | no | `truenas_admin` | same |
 | `SYNCTHING_GUI_URL` | no (or pass `--gui-url`) | -- | `setup_syncthing_folder.py`, `accept_device.py`, `check_health.py` |

@@ -6,14 +6,16 @@ model depends on workers=1; see db.py).
 """
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import ClientDisconnect
 
-from . import api, auth, db, ui
+from . import api, auth, broll, db, ui
 from .collector import Collector
 from .settings import Settings
 
@@ -41,9 +43,17 @@ MAX_REPORT_BODY_BYTES = 8 * 1024 * 1024
 # api_publish_package also counts the bytes it actually receives, because
 # Content-Length is advisory for a chunked request.
 MAX_PACKAGE_BODY_BYTES = 200 * 1024 * 1024
+# Routes whose body is BUFFERED IN MEMORY downstream (FastAPI reads the whole
+# thing before the route function runs), so the gate counts the bytes itself
+# and stops at the ceiling. Content-Length is advisory: a chunked request
+# carries none at all, which is what made the cap bypassable (KNOWN_BUGS B15).
 _BODY_LIMITS = {"/api/v1/report": ("POST", MAX_REPORT_BODY_BYTES)}
 # (path prefix, method, limit) -- the packages route has the platform and
-# version in its path, so it can't be matched exactly.
+# version in its path, so it can't be matched exactly. These are declaration
+# checks ONLY: api_publish_package streams its body to disk and counts the
+# bytes as it goes (api.py), so buffering it here would turn a 200 MB upload
+# into 200 MB of resident memory -- exactly what this middleware exists to
+# prevent.
 _BODY_LIMIT_PREFIXES = (
     ("/api/v1/admin/packages/", "PUT", MAX_PACKAGE_BODY_BYTES),
 )
@@ -51,6 +61,26 @@ _BODY_LIMIT_PREFIXES = (
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+
+    # The b-roll ingest routes are a WRITE path that no session protects (the
+    # indexer is not a browser), so the token guarding them is a credential and
+    # is validated before anything else happens. Refusing to start is the point:
+    # a blank token used to fall through to the b-roll app's own dev mode, where
+    # any logged-in editor -- or a stolen session cookie -- could repoint every
+    # clip's archive path, and a placeholder token is a credential published in
+    # this repo. Neither may be reachable by accident.
+    broll_ingest_token = (settings.broll_ingest_token
+                          or os.environ.get("BROLL_INGEST_TOKEN", "")).strip()
+    if settings.broll_enabled:
+        problem = broll.check_ingest_token(broll_ingest_token)
+        if problem:
+            raise RuntimeError(
+                f"DASH_BROLL_ENABLED=1 but BROLL_INGEST_TOKEN {problem}. The b-roll "
+                f"ingest endpoints are an unauthenticated write path for the indexer; "
+                f"they are never served without a strong token. Set BROLL_INGEST_TOKEN "
+                f"(e.g. `openssl rand -hex 24`) and redeploy, or set "
+                f"DASH_BROLL_ENABLED=0 to run the dashboard without the b-roll UI."
+            )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -74,30 +104,114 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Creators Club Sync Dashboard", lifespan=lifespan)
     app.state.settings = settings
 
+    def _too_large(limit: int) -> JSONResponse:
+        return JSONResponse(
+            {"detail": f"request body too large (max {limit} bytes)"},
+            status_code=413,
+        )
+
+    def _declared_too_large(request, limit: int) -> bool:
+        """Content-Length says it is over the ceiling. A missing header is NOT
+        a pass -- that is a chunked request, which _buffer_body handles. Only
+        reading this header is what made the cap bypassable (B15)."""
+        declared = request.headers.get("content-length")
+        if declared is None:
+            return False
+        try:
+            return int(declared) > limit
+        except ValueError:
+            return True   # unparseable length: refuse rather than guess
+
+    def _report_auth_denial(request) -> JSONResponse | None:
+        """The /api/v1/report token check, run BEFORE the body is read.
+
+        /api/v1/report is in _OPEN_EXACT (the companion authenticates with
+        X-CCSync-Token, not a session), and its route signature is
+        `payload: ReportIn` -- so FastAPI used to read and pydantic-validate
+        the entire body before api_report ever looked at the token. Any host
+        on the LAN/tailnet could therefore spend the container's memory and
+        CPU with no credentials at all (KNOWN_BUGS B15). api_report repeats
+        this check verbatim: this is the belt, that is the braces, and a
+        direct-to-route unit test must still 401.
+        """
+        if settings.report_token:
+            if not api.token_ok(settings.report_token,
+                                request.headers.get("x-ccsync-token", "")):
+                return JSONResponse(
+                    {"detail": "bad or missing X-CCSync-Token"}, status_code=401)
+            return None
+        if not settings.report_token_optional:
+            return JSONResponse(
+                {"detail": "report token not configured on server (set DASH_REPORT_TOKEN)"},
+                status_code=401,
+            )
+        return None
+
+    async def _buffer_body(request, limit: int) -> bool:
+        """Read the body in chunks, stopping at `limit`, and re-arm the
+        request so the route still sees it.
+
+        Returns True when the ceiling was exceeded. Nothing downstream reads
+        from the socket afterwards: the replayed receive channel hands over
+        the bytes already buffered here, which is what bounds the memory a
+        single request can cost regardless of what Content-Length claimed.
+        """
+        chunks: list[bytes] = []
+        size = 0
+        try:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > limit:
+                    return True
+                chunks.append(chunk)
+        except ClientDisconnect:
+            return False
+        body = b"".join(chunks)
+
+        async def replay():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request._body = body
+        request._receive = replay
+        return False
+
     @app.middleware("http")
     async def body_size_gate(request, call_next):
-        limit = None
         exact = _BODY_LIMITS.get(request.url.path)
         if exact is not None and request.method == exact[0]:
             limit = exact[1]
-        else:
-            for prefix, method, value in _BODY_LIMIT_PREFIXES:
-                if request.method == method and request.url.path.startswith(prefix):
-                    limit = value
-                    break
-        if limit is not None:
-            declared = request.headers.get("content-length")
-            if declared is not None:
-                try:
-                    too_big = int(declared) > limit
-                except ValueError:
-                    too_big = True
-                if too_big:
-                    return JSONResponse(
-                        {"detail": f"request body too large (max {limit} bytes)"},
-                        status_code=413,
-                    )
+            if _declared_too_large(request, limit):
+                return _too_large(limit)
+            # Credentials first: never spend memory or a pydantic parse on an
+            # unauthenticated body.
+            if request.url.path == "/api/v1/report":
+                denial = _report_auth_denial(request)
+                if denial is not None:
+                    return denial
+            if await _buffer_body(request, limit):
+                return _too_large(limit)
+            return await call_next(request)
+        for prefix, method, value in _BODY_LIMIT_PREFIXES:
+            if request.method == method and request.url.path.startswith(prefix):
+                if _declared_too_large(request, value):
+                    return _too_large(value)
+                break
         return await call_next(request)
+
+    def _broll_ingest_token_ok(request) -> bool:
+        """The indexer writing to /broll/api/ingest/* is not a browser.
+
+        This only decides whether the request may SKIP the login gate; the
+        mounted sub-app is wrapped in broll.BrollGate, which re-checks the same
+        token on every ingest request and fails closed. So a session alone never
+        reaches ingest, and neither does a deployment that somehow got here with
+        no token (create_app refuses to build one, and the token validated there
+        is the token captured here -- the environment is not re-read per
+        request, where it could have been mutated).
+        """
+        if not broll_ingest_token:
+            return False
+        return api.token_ok(broll_ingest_token, request.headers.get("x-ingest-token", ""))
 
     def _companion_token_ok(request) -> bool:
         # api.token_ok is hmac.compare_digest: `==` on a shared secret leaks
@@ -115,10 +229,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             or (path.startswith("/api/v1/selection/") and _companion_token_ok(request))
             # companion downloads published upgrade packages the same way
             or (path.startswith("/api/v1/companion/package/") and _companion_token_ok(request))
+            # the indexer pushing into the mounted b-roll app, token-gated
+            or (path.startswith("/broll/api/ingest/") and _broll_ingest_token_ok(request))
         ):
             return await call_next(request)
         if auth.get_session_user(request) is None:
-            if path.startswith("/api/"):
+            # /broll/api and /broll/media are fetched by JS and by <video>, which
+            # cannot follow a 303 to an HTML login page -- the SPA would parse
+            # the page as JSON and the player would fail opaquely. Answer them
+            # the same way the dashboard's own API does.
+            if path.startswith(("/api/", "/broll/api/", "/broll/media/")):
                 return JSONResponse({"detail": "login required"}, status_code=401)
             # Preserve the destination through login (e.g. the companion's
             # /project-setup deep link) -- ui.py's _safe_next re-validates it.
@@ -130,6 +250,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(api.router)
     app.include_router(ui.router)
+
+    # Mounted AFTER the routers so a b-roll route can never shadow a dashboard
+    # one, and behind a flag so the fleet dashboard never depends on the b-roll
+    # code being present. mount_broll() reports mounted/absent/degraded; only a
+    # fully working mount is advertised in the nav (ui.py), because a link to a
+    # page that 500s on every request is worse than no link.
+    app.state.broll_status = (
+        broll.mount_broll(app, broll_ingest_token) if settings.broll_enabled
+        else broll.ABSENT
+    )
+    app.state.broll_mounted = app.state.broll_status == broll.MOUNTED
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

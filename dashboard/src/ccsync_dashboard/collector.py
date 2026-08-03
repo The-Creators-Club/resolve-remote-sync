@@ -43,6 +43,32 @@ SYNCTHING_FREE_KINDS = ("prune",)
 # to act on a directory that doesn't have one.
 STFOLDER = ".stfolder"
 
+# Per-folder settings the collector REPAIRS on existing folders, not just sets
+# at create time (KNOWN_BUGS B19). `setup_syncthing_folder.py --force` PUTs a
+# whole folder object built from scratch, so it silently reset both knobs to
+# Syncthing's defaults -- and unlike .stignore there was no repair pass, so a
+# project re-forced to fix its path pulled at maxConcurrentWrites=2 over the
+# WAN forever with nothing logged. Folders created by the server script rather
+# than by this collector never got the tuning at all.
+#
+# The canonical values live in provision.build_folder_config (one source of
+# truth); this list is only which of its keys are repairable drift. Deliberately
+# NOT the whole folder object: `devices` is the enforce cycle's, `path`/`label`
+# are the retarget branch's, and `versioning` must never be silently rewritten.
+FOLDER_TUNING_KEYS = ("maxConcurrentWrites", "pullerMaxPendingKiB")
+
+
+def folder_tuning_drift(folder: dict) -> dict:
+    """{key: canonical value} for every tuned knob the live folder disagrees
+    with (missing counts as disagreeing). Empty dict = nothing to repair."""
+    canonical = provision.build_folder_config("_", "_", "/_", [])
+    return {
+        key: canonical[key]
+        for key in FOLDER_TUNING_KEYS
+        if folder.get(key) != canonical[key]
+    }
+
+
 # A retarget onto a directory holding less than this fraction of the media the
 # dashboard last inventoried for that project is refused: a half-copied move
 # would otherwise make the server's rescan mark ~everything deleted and
@@ -76,6 +102,10 @@ class Collector:
         self._my_id = ""
         self._incomplete: dict[tuple[str, str], int] = {}  # (slug, device ID) -> needItems
         self._inventory_cursor = 0   # round-robin over projects for the NAS walk
+        # Device IDs already warned about in _run_enforce (username-shaped
+        # name, no matching editor account -- see B16). Warn-once, not every
+        # cycle forever.
+        self._warned_unknown_editor: set[str] = set()
 
     # ------------------------------------------------------------ lifecycle
 
@@ -343,6 +373,18 @@ class Collector:
         if existing is None:
             if not self._creatable(slug, rel, projects_dir):
                 return
+            other = self._duplicate_path_folder(slug, expected_path, folders_by_id)
+            if other is not None:
+                log.error(
+                    "REFUSING to provision folder %s (%s): folder %s is ALREADY serving "
+                    "that directory. This is the folder-id divergence: the collector "
+                    "keys on the marker's immutable slug, while "
+                    "setup_syncthing_folder.py derives the id with slugify(rel) -- so a "
+                    "MOVED project gets a second Syncthing folder over the same dir, "
+                    "which no editor is shared with. Delete the stray folder in "
+                    "Syncthing (keep the one editors are on), or pass --slug %s to the "
+                    "server script.", slug, rel, other, slug)
+                return
             # Created unshared: the selections table + enforce cycle
             # decide which editor devices get each folder.
             folder = provision.build_folder_config(slug, rel, prefix, [])
@@ -354,6 +396,10 @@ class Collector:
 
         self._ensure_ignores(slug)
 
+        # Folder-settings drift is repaired in the SAME put as any path/label
+        # change, so a drifted folder that also moved costs one config write
+        # rather than two (each of which restarts the folder in Syncthing).
+        drift = folder_tuning_drift(existing)
         old_path = str(existing.get("path", "")).rstrip("/")
         if old_path != expected_path:
             if not self._retarget_ok(conn, slug, old_path, rel, projects_dir, prefix):
@@ -361,6 +407,7 @@ class Collector:
             existing = dict(existing)
             existing["path"] = expected_path
             existing["label"] = rel
+            existing.update(drift)
             self.client.put_folder(slug, existing)
             db.upsert_project(conn, slug, rel, expected_path, self.now_fn())
             conn.commit()
@@ -369,8 +416,34 @@ class Collector:
         elif str(existing.get("label", "")) != rel:
             existing = dict(existing)
             existing["label"] = rel
+            existing.update(drift)
             self.client.put_folder(slug, existing)
             log.info("fixed label drift on folder %s -> %s", slug, rel)
+        elif drift:
+            existing = dict(existing)
+            existing.update(drift)
+            self.client.put_folder(slug, existing)
+            log.warning(
+                "REPAIRED WAN puller tuning on folder %s: %s -- this project was pulling "
+                "at Syncthing's defaults over the WAN, with nothing logged",
+                slug,
+                ", ".join(f"{k}={v}" for k, v in sorted(drift.items())))
+
+    @staticmethod
+    def _duplicate_path_folder(
+        slug: str, expected_path: str, folders_by_id: dict
+    ) -> str | None:
+        """The id of an existing folder already serving `expected_path`, or
+        None. Two Syncthing folders over one directory each index and pull it
+        independently -- and only one of them is the folder editors are shared
+        with, so the other silently diverges."""
+        want = str(expected_path).rstrip("/")
+        for folder_id, folder in folders_by_id.items():
+            if folder_id == slug:
+                continue
+            if str(folder.get("path", "")).rstrip("/") == want:
+                return folder_id
+        return None
 
     @staticmethod
     def _creatable(slug: str, rel: str, projects_dir: Path) -> bool:
@@ -498,10 +571,22 @@ class Collector:
             my_id = self._my_id
         self._my_id = my_id
         now = self.now_fn()
+        # One query per cycle, not one per device: the device -> editor mapping
+        # is only allowed to name an account the dashboard actually knows
+        # about (see db.resolve_editor_username / B16).
+        #
+        # An EMPTY known set means a database that has never seeded -- the same
+        # bootstrap hole _run_enforce's seed pass documents. Fall back to the
+        # shape-only mapping there, or a first cycle would label every device
+        # unmapped and the fleet views would come up blank until the enforce
+        # pass ran. The label is display/attribution only; the authority for
+        # unsharing is the validated mapping in _run_enforce.
+        known_editors = db.known_editor_usernames(conn) or None
         for dev in cfg.get("devices", []):
             device_id = dev["deviceID"]
             self._device_ids[device_id] = db.upsert_device(
-                conn, device_id, dev.get("name") or device_id, device_id == my_id, now
+                conn, device_id, dev.get("name") or device_id, device_id == my_id, now,
+                known_editors=known_editors,
             )
         seen: list[str] = []
         self._folder_devices = {}
@@ -520,8 +605,15 @@ class Collector:
         """Reconcile Syncthing folder shares with the selections table.
 
         Selections are the authority for MAPPED editor devices. Unmapped
-        devices (name not a username) are never added or removed. Only the
-        `devices` list of a folder is ever modified.
+        devices are never added or removed. Only the `devices` list of a
+        folder is ever modified.
+
+        "Mapped" means the device's name resolves to an editor account the
+        dashboard has a POSITIVE record of -- not merely one that is
+        username-SHAPED. Machine names look exactly like usernames, so a
+        device approved as `alex-laptop` used to resolve to an editor with no
+        selections rows, which read as "ticked for nothing" and got it
+        unshared from every folder it was on (KNOWN_BUGS B16).
         """
         cfg = self.client.config()
         my_id = str(self.client.system_status().get("myID", "") or "")
@@ -532,23 +624,28 @@ class Collector:
             log.error("skipping enforce: syncthing reported an empty myID")
             return
         folders = cfg.get("folders", [])
-        id_to_editor: dict[str, str | None] = {
-            d["deviceID"]: db.resolve_editor_username(d.get("name") or "")
-            for d in cfg.get("devices", [])
-            if d["deviceID"] != my_id
-        }
-        editor_devices: dict[str, set[str]] = {}
-        for device_id, editor in id_to_editor.items():
-            if editor:
-                editor_devices.setdefault(editor, set()).add(device_id)
+        devices = [d for d in cfg.get("devices", []) if d["deviceID"] != my_id]
 
         if db.meta_get(conn, "selections_seeded") is None:
+            # THE SEED IS THE BOOTSTRAP, so it deliberately uses the
+            # shape-only mapping: on a fresh database there are no known
+            # editors yet, and requiring one here would deadlock (no
+            # selections -> no known editors -> no selections). It is safe
+            # because seeding only ever ADDS a selection for a share that
+            # already exists -- it can never produce a removal -- and every
+            # editor it seeds is recorded as known, which is what the enforce
+            # pass below then validates against.
+            shape_map: dict[str, str | None] = {
+                d["deviceID"]: db.resolve_editor_username(d.get("name") or "")
+                for d in devices
+            }
             now = self.now_fn()
             seeded = 0
             for folder in sorted(folders, key=lambda f: f.get("label") or f["id"]):
                 for dev in folder.get("devices", []):
-                    editor = id_to_editor.get(dev["deviceID"])
+                    editor = shape_map.get(dev["deviceID"])
                     if editor and db.add_selection(conn, editor, folder["id"], "seed", now):
+                        db.record_known_editor(conn, editor, "seed", now)
                         seeded += 1
             # Only claim the one-shot seed is DONE when the snapshot could
             # actually have produced selections. A first container start that
@@ -557,7 +654,7 @@ class Collector:
             # an empty selections table as authoritative and unshare every
             # editor from every folder, fleet-wide, silently (see the
             # seed-flag finding).
-            if folders and any(editor for editor in id_to_editor.values()):
+            if folders and any(editor for editor in shape_map.values()):
                 db.meta_set(conn, "selections_seeded", now)
                 # Commit the seed before the HTTP loop below: holding a write
                 # transaction open across Syncthing calls is what makes an
@@ -568,7 +665,36 @@ class Collector:
                 log.warning(
                     "not marking selections as seeded: %d folder(s), %d mapped editor device(s) "
                     "in this snapshot -- retrying next cycle",
-                    len(folders), sum(1 for e in id_to_editor.values() if e))
+                    len(folders), sum(1 for e in shape_map.values() if e))
+
+        # Resolved AFTER the seed, so anything it just recorded counts.
+        known_editors = db.known_editor_usernames(conn)
+        id_to_editor: dict[str, str | None] = {
+            d["deviceID"]: db.resolve_editor_username(d.get("name") or "", known_editors)
+            for d in devices
+        }
+        editor_devices: dict[str, set[str]] = {}
+        for device_id, editor in id_to_editor.items():
+            if editor:
+                editor_devices.setdefault(editor, set()).add(device_id)
+        for dev in devices:
+            name = str(dev.get("name") or "")
+            device_id = dev["deviceID"]
+            # Username-SHAPED but not a known account: almost always a MACHINE
+            # name (alex-laptop, edit-pc) approved as a device. Treated as
+            # unmapped, i.e. left exactly as it is. Warned once per device per
+            # process -- every 60s forever would be noise, and silence here is
+            # what made B16 invisible.
+            if (id_to_editor.get(device_id) is None
+                    and db.resolve_editor_username(name) is not None
+                    and device_id not in self._warned_unknown_editor):
+                self._warned_unknown_editor.add(device_id)
+                log.warning(
+                    "device %r (%s) has a username-shaped name that matches no editor "
+                    "account the dashboard knows -- treating it as UNMAPPED and leaving "
+                    "its folder shares alone. If this really is an editor, tick a project "
+                    "for them (or rename the device to their username).",
+                    name, device_id)
 
         selections = db.fetch_all_selections(conn)
         plans: list[tuple[str, set[str], set[str]]] = []   # (slug, desired, actual)
@@ -590,14 +716,24 @@ class Collector:
         # starting, devices not yet approved, a renamed device). Refuse the
         # removals -- additions still apply -- and say so loudly. Raise
         # DASH_ENFORCE_MAX_REMOVALS to override deliberately.
-        removal_devices = {d for _slug, desired, actual in plans for d in (actual - desired)}
+        #
+        # COUNTED IN SHARE REMOVALS -- (folder, device) pairs -- not distinct
+        # devices. The old device count meant ONE device being unshared from
+        # all 40 folders scored 1 and sailed under the limit, which is exactly
+        # the shape of the B16 failure it was supposed to catch: the setting
+        # is named max_share_removals and now measures share removals.
+        removals = [(slug, d) for slug, desired, actual in plans for d in (actual - desired)]
+        removal_devices = {d for _slug, d in removals}
         limit = self.settings.enforce_max_share_removals
-        skip_removals = len(removal_devices) > limit
+        skip_removals = len(removals) > limit
         if skip_removals:
             log.error(
-                "REFUSING to unshare %d device(s) in one enforce cycle (limit %d): %s. Additions "
-                "still applied; raise DASH_ENFORCE_MAX_REMOVALS to override.",
-                len(removal_devices), limit, ", ".join(sorted(removal_devices)))
+                "REFUSING %d share removal(s) in one enforce cycle (limit %d): %d device(s) "
+                "(%s) across %d folder(s). Additions still applied; raise "
+                "DASH_ENFORCE_MAX_REMOVALS to override.",
+                len(removals), limit, len(removal_devices),
+                ", ".join(sorted(removal_devices)),
+                len({slug for slug, _d in removals}))
 
         for slug, desired, actual in plans:
             if skip_removals:

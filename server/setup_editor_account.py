@@ -64,6 +64,31 @@ from common import (
 # TrueNAS already does for the .ssh subdirectory it creates.
 HOME_MODE = "700"
 
+# The PARENT dataset every editor home is created under (see the `home` value
+# in main()'s user-create body -- with home_create=True TrueNAS appends the
+# username itself, so this is the parent, never a home).
+HOMES_PARENT = "/mnt/tank/TheCreatorsPool/homes"
+
+# Paths ensure_home_permissions must refuse outright. `/`, `/nonexistent` and
+# `/var/empty` are the classic no-home sentinels; HOMES_PARENT is here because
+# a hand-created account whose `home` was set to the parent instead of
+# <parent>/<username> would otherwise get
+# `filesystem.setperm mode:700 stripacl:True` applied to the SHARED dataset
+# root -- stripping the ACL off every other editor's route in over SMB.
+FORBIDDEN_HOME_PATHS = ("/", "/nonexistent", "/var/empty", "/mnt", "/root",
+                        "/home", HOMES_PARENT)
+
+
+def is_forbidden_home(home: str) -> bool:
+    """True when `home` is a path whose permissions must never be rewritten:
+    blank, a no-home sentinel, or a shared parent dataset. Trailing slashes
+    are noise, not a difference."""
+    cleaned = str(home or "").strip()
+    if not cleaned:
+        return True
+    normalized = cleaned.rstrip("/") or "/"
+    return normalized in {p.rstrip("/") or "/" for p in FORBIDDEN_HOME_PATHS}
+
 # The same shape installer/windows_bootstrap.ps1 enforces on -EditorName
 # (lowercased there, because unix usernames are case-sensitive and a mismatch
 # only ever surfaces as a generic SSH auth failure on the editor's side).
@@ -138,9 +163,11 @@ def ensure_home_permissions(home: str, uid: int, unix_gid: int, username: str) -
     inherited ACL with a trivial one; a plain chmod would fail with EPERM
     because the dataset is aclmode=restricted.
     """
-    if not home or home in ("/", "/nonexistent", "/var/empty"):
-        print(f"WARNING: refusing to touch permissions on home path {home!r} for {username}",
-              file=sys.stderr)
+    if is_forbidden_home(home):
+        print(f"WARNING: refusing to touch permissions on home path {home!r} for {username} "
+              f"-- it is a shared parent or a no-home sentinel, and setperm here would "
+              f"strip the ACL off every other editor's path in. Fix the account's home to "
+              f"{HOMES_PARENT}/{username} and re-run.", file=sys.stderr)
         return False
 
     body = {
@@ -293,7 +320,7 @@ def main():
             "groups": [gid],
             # With home_create=True, `home` is the PARENT dir — TrueNAS
             # appends the username itself (25.10 API semantics).
-            "home": "/mnt/tank/TheCreatorsPool/homes",
+            "home": HOMES_PARENT,
             "home_create": True,
             "shell": "/usr/bin/bash",
             # Stays False: 25.10 rejects password_disabled for SMB users

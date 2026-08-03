@@ -88,7 +88,14 @@ EXPECTED_CATALOG_FIELDS = ("name", "latest_version")
 
 
 def app_already_installed(dry_run: bool) -> bool:
-    resp = truenas_api("GET", "/app", params={"query-filters": f'[["name","=","{APP_NAME}"]]'}, dry_run=dry_run)
+    # No query-filters param: the 25.10 middleware was observed returning []
+    # for a filtered GET /app even when the app exists (2026-07-24 live run) --
+    # same fix and same rationale as install_dashboard_app.app_installed().
+    # With the filter, a re-run against a NAS that already has Syncthing
+    # concluded "not installed", POSTed a create for the live production app,
+    # got an opaque 422, and printed advice telling the admin to delete it.
+    # Fetch the full list and filter client-side.
+    resp = truenas_api("GET", "/app", dry_run=dry_run)
     if dry_run:
         return False
     if not ok(resp):

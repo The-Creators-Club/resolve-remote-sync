@@ -113,6 +113,28 @@ def test_slugify_matches_server_convention():
     assert provision.slugify("2025/FF4/Nuclear") == "2025-ff4-nuclear"
 
 
+def test_stignore_excludes_rclones_orphaned_partials(tmp_path):
+    """KNOWN_BUGS B12: lane A runs rclone with --inplace=false, writing
+    "<name>.<token>.partial" into the NAS project dir -- which is also a
+    sendreceive Syncthing root. The video-extension patterns match by
+    EXTENSION and matched none of them, so a 39 GB orphan left by an
+    interrupted upload was indexed and fanned out over lane C to every editor
+    with the project ticked, where nothing ever deletes it."""
+    import fnmatch
+
+    lines = provision.build_stignore_lines()
+    assert provision.PARTIAL_IGNORE_LINES == ["(?i)**/*.partial", "(?i)*.partial"]
+    for pattern in provision.PARTIAL_IGNORE_LINES:
+        assert pattern in lines
+    globs = [line[len("(?i)"):] for line in lines if "/" not in line]
+    for name in ("A001_C001.braw.42048420.partial",
+                 "A001_C001.braw.42048420.exp.partial"):
+        assert any(fnmatch.fnmatch(name.lower(), g.lower()) for g in globs), name
+    # the completed file (rclone renames the suffix away) still syncs
+    assert not any(fnmatch.fnmatch("Timeline.drp", g)
+                   for g in globs if g.endswith(".partial"))
+
+
 @pytest.fixture
 def fake():
     server = FakeSyncthing().start()
@@ -488,3 +510,89 @@ def test_provision_fails_loud_on_missing_dir(conn, fake, tmp_path):
     assert results["provision"] is False
     run = conn.execute("SELECT * FROM poll_runs WHERE kind='provision'").fetchone()
     assert "does not exist" in run["error"]
+
+
+def test_provision_repairs_wan_puller_tuning_on_existing_folders(conn, fake, tmp_path):
+    """KNOWN_BUGS B19: `setup_syncthing_folder.py --force` PUTs a folder object
+    built from scratch, so it reset maxConcurrentWrites/pullerMaxPendingKiB to
+    Syncthing's defaults permanently -- and unlike .stignore there was no
+    repair pass, so re-forcing a folder to fix its path left that project
+    pulling at maxConcurrentWrites=2 over the WAN forever, nothing logged.
+    Folders created by the server script rather than by the collector never
+    had the tuning at all -- which is the state the fake starts in."""
+    from ccsync_dashboard.collector import folder_tuning_drift
+
+    make_tree(tmp_path)
+    collector = collector_for(fake, tmp_path)
+    slug = "2025-ff4-nuclear"
+    live = next(f for f in fake.state["folders"] if f["id"] == slug)
+    assert folder_tuning_drift(live)          # the fake's folder has neither knob
+
+    collector.run_cycle(conn, ["provision"])
+    live = next(f for f in fake.state["folders"] if f["id"] == slug)
+    assert live["maxConcurrentWrites"] == 32
+    assert live["pullerMaxPendingKiB"] == 65536
+    # the repair preserved everything else about the folder
+    assert live["label"] == "2025/FF4/Nuclear"
+    assert live["path"] == "/data/Projects/2025/FF4/Nuclear"
+    assert {d["deviceID"] for d in live["devices"]} == {SERVER_ID, EDITOR_ID, EDITOR2_ID}
+
+    # ...and it converges: a second cycle writes nothing.
+    fake.state.pop("put_folder_calls", None)
+    collector.run_cycle(conn, ["provision"])
+    assert "put_folder_calls" not in fake.state
+
+
+def test_a_force_reset_is_repaired_next_cycle(conn, fake, tmp_path):
+    make_tree(tmp_path)
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision"])
+    slug = "2026-ff5-energy-transition"
+
+    # simulate `setup_syncthing_folder.py --force`: the knobs are gone
+    for folder in fake.state["folders"]:
+        if folder["id"] == slug:
+            folder.pop("maxConcurrentWrites", None)
+            folder.pop("pullerMaxPendingKiB", None)
+    collector.run_cycle(conn, ["provision"])
+    repaired = next(f for f in fake.state["folders"] if f["id"] == slug)
+    assert repaired["maxConcurrentWrites"] == 32
+    assert repaired["pullerMaxPendingKiB"] == 65536
+
+
+def test_provision_refuses_a_second_folder_over_the_same_directory(conn, fake, tmp_path):
+    """The folder-id divergence (KNOWN_BUGS §4 minors): the collector keys on
+    the marker's immutable slug, `setup_syncthing_folder.py` derives the id
+    with slugify(rel). For a MOVED project those disagree, so an admin
+    repairing ignores with the server script creates a SECOND Syncthing
+    folder over the same directory -- one no editor is shared with, which
+    fails the collector every cycle. Never add to the confusion."""
+    make_tree(tmp_path)
+    # the dir carries an adopted marker whose slug is not slugify(rel)...
+    provision.write_marker(tmp_path / "2026/FF5/Energy Transition", "adopted-slug")
+    # ...and a folder created the server script's way already serves it
+    fake.state["folders"].append({
+        "id": "2026-ff5-energy-transition", "label": "2026/FF5/Energy Transition",
+        "path": "/data/Projects/2026/FF5/Energy Transition",
+        "devices": [{"deviceID": SERVER_ID}, {"deviceID": EDITOR_ID}],
+        "type": "sendreceive", "ignorePerms": True,
+    })
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision"])
+
+    ids = [f["id"] for f in fake.state["folders"]]
+    assert "adopted-slug" not in ids                  # nothing was created
+    assert ids.count("2026-ff5-energy-transition") == 1
+    # the existing folder is untouched, editors still shared
+    live = next(f for f in fake.state["folders"] if f["id"] == "2026-ff5-energy-transition")
+    assert {d["deviceID"] for d in live["devices"]} == {SERVER_ID, EDITOR_ID}
+
+
+def test_duplicate_path_folder_ignores_the_folder_itself():
+    from ccsync_dashboard.collector import Collector
+
+    folders = {"a": {"path": "/data/Projects/X"}, "b": {"path": "/data/Projects/Y/"}}
+    assert Collector._duplicate_path_folder("a", "/data/Projects/X", folders) is None
+    assert Collector._duplicate_path_folder("c", "/data/Projects/X", folders) == "a"
+    assert Collector._duplicate_path_folder("c", "/data/Projects/Y", folders) == "b"
+    assert Collector._duplicate_path_folder("c", "/data/Projects/Z", folders) is None

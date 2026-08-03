@@ -60,6 +60,20 @@ class Settings:
     # change needed.
     packages_dir: str = ""
 
+    # Serve the b-roll search UI at /broll from inside this process, so editors
+    # get one URL and one login instead of a second service to reach and sign
+    # in to. Off by default: the dashboard must not depend on the b-roll code
+    # being present, and a deployment without it should behave exactly as
+    # before. See broll.py.
+    broll_enabled: bool = False
+    # Shared secret the indexer presents as X-Ingest-Token to write into the
+    # b-roll database. MANDATORY when broll_enabled: create_app refuses to
+    # build an app with a blank, placeholder or short one rather than serve a
+    # write path that a session cookie alone can reach (see
+    # broll.check_ingest_token). Read from the same env var the b-roll app
+    # itself reads, so the two can never disagree.
+    broll_ingest_token: str = ""
+
     # Auto-provisioning: when projects_dir is a mounted copy of the server's
     # Projects tree, the collector creates a Syncthing folder (and shares it
     # with every known editor device) for any project dir that lacks one.
@@ -151,6 +165,8 @@ class Settings:
             truenas_user=env.get("TRUENAS_USER", "truenas_admin"),
             truenas_pw=env.get("TRUENAS_PW", ""),
             truenas_verify_ssl=verify_ssl("TRUENAS_VERIFY_SSL"),
+            broll_enabled=env.get("DASH_BROLL_ENABLED", "") == "1",
+            broll_ingest_token=env.get("BROLL_INGEST_TOKEN", "").strip(),
             packages_dir=env.get("DASH_PACKAGES_DIR", ""),
             projects_dir=env.get("DASH_PROJECTS_DIR", ""),
             syncthing_data_prefix=env.get("DASH_SYNCTHING_DATA_PREFIX", "/data/Projects"),

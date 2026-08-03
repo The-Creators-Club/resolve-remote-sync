@@ -103,6 +103,18 @@ def unquoted_occurrences(script: str, needle: str) -> int:
 CHOWN_STUB = "#!/bin/sh\nexit 0\n"
 
 
+class _Resp:
+    """Minimal stand-in for a requests.Response, enough for common.ok()."""
+
+    def __init__(self, status_code=200, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
 def run_remote_script(script: str, workdir: Path):
     """Execute a generated remote script with a stub sudo. Returns CompletedProcess."""
     bindir = workdir / "stubbin"
@@ -394,13 +406,19 @@ def test_paths_differ_ignores_trailing_slash():
     assert setup_syncthing_folder.paths_differ("", "/data/Projects/x")
 
 
-def test_syncthing_folder_refuses_id_collision(monkeypatch, capsys):
+def test_syncthing_folder_refuses_id_collision(no_ssh, capsys):
+    # --no-marker-read: this test is about the slugify id-collision, and
+    # without it the marker read runs first -- live SSH where paramiko +
+    # TRUENAS_PW exist, a MARKER_UNAVAILABLE refusal where they don't --
+    # either way never reaching the guard under test.
+    monkeypatch = no_ssh
     monkeypatch.setattr(
         setup_syncthing_folder, "find_folder",
         lambda *a, **k: {"id": "2026-cct-season-1", "path": "/data/Projects/2026/CCT/Season-1"},
     )
     monkeypatch.setattr(sys, "argv", [
         "setup_syncthing_folder.py", "--project-rel-path", "2026/CCT/Season 1",
+        "--no-marker-read",
         "--gui-url", "http://example.invalid:8384", "--api-key", "k",
     ])
     rc = setup_syncthing_folder.main()
@@ -410,6 +428,391 @@ def test_syncthing_folder_refuses_id_collision(monkeypatch, capsys):
     assert "REFUSING" in err
     assert "/data/Projects/2026/CCT/Season-1" in err   # existing
     assert "/data/Projects/2026/CCT/Season 1" in err   # requested
+
+
+@pytest.fixture
+def no_ssh(monkeypatch):
+    """Make any real SSH from a unit test a hard failure.
+
+    TRUENAS_PW is set on the maintainer's own workstation (ship.ps1 requires
+    it), so a test that reaches setup_syncthing_folder's marker read without
+    monkeypatching it would silently open a LIVE connection to the NAS and
+    pass -- while proving nothing and depending on the state of a real
+    project directory.
+    """
+    def boom(*a, **k):
+        raise AssertionError("this test must not open an SSH connection")
+
+    monkeypatch.setattr(common, "ssh_client", boom)
+    return monkeypatch
+
+
+def test_syncthing_folder_force_keeps_the_wan_puller_tuning(no_ssh, capsys):
+    """B19: a --force PUT sends a COMPLETE folder object, so every key absent
+    from it is reset to the Syncthing default. Omitting the tuning left the
+    project pulling at maxConcurrentWrites=2 over the WAN forever, with
+    nothing logged and no repair pass anywhere to notice."""
+    monkeypatch = no_ssh
+    sent = {}
+
+    def fake_api(method, gui_url, path, api_key, **kwargs):
+        sent.setdefault(method, []).append((path, kwargs.get("json_body")))
+        return _Resp(200, {})
+
+    monkeypatch.setattr(
+        setup_syncthing_folder, "find_folder",
+        lambda *a, **k: {"id": "2026-cct-season-1",
+                         "path": "/data/Projects/2026/CCT/OldName",
+                         "devices": [{"deviceID": "AAA", "introducedBy": ""}]},
+    )
+    monkeypatch.setattr(setup_syncthing_folder, "find_folder_by_path", lambda *a, **k: None)
+    monkeypatch.setattr(setup_syncthing_folder, "syncthing_api", fake_api)
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", "2026/CCT/Season 1",
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k", "--force",
+        # this test is about the folder object, not the identity
+        "--slug", "2026-cct-season-1",
+    ])
+
+    assert setup_syncthing_folder.main() == 0
+    put_path, folder = sent["PUT"][0]
+    assert put_path == "/rest/config/folders/2026-cct-season-1"
+    assert folder["maxConcurrentWrites"] == 32
+    assert folder["pullerMaxPendingKiB"] == 65536
+    # existing device shares are still preserved by the retarget
+    assert folder["devices"] == [{"deviceID": "AAA", "introducedBy": ""}]
+
+
+def test_syncthing_folder_create_carries_the_wan_puller_tuning(no_ssh, capsys):
+    monkeypatch = no_ssh
+    sent = {}
+
+    def fake_api(method, gui_url, path, api_key, **kwargs):
+        sent.setdefault(method, []).append((path, kwargs.get("json_body")))
+        return _Resp(200, {})
+
+    monkeypatch.setattr(setup_syncthing_folder, "find_folder", lambda *a, **k: None)
+    monkeypatch.setattr(setup_syncthing_folder, "find_folder_by_path", lambda *a, **k: None)
+    monkeypatch.setattr(setup_syncthing_folder, "syncthing_api", fake_api)
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", "2026/CCT/Season 1",
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k",
+        "--no-marker-read",
+    ])
+
+    assert setup_syncthing_folder.main() == 0
+    _path, folder = sent["POST"][0]
+    assert folder["maxConcurrentWrites"] == 32
+    assert folder["pullerMaxPendingKiB"] == 65536
+
+
+def test_syncthing_folder_tuning_matches_the_dashboard_collector():
+    """The canonical values live in the dashboard's provision.build_folder_config
+    (AUDIT_2 P6/§4.2). Two copies with no cross-check is how they drift."""
+    provision = (Path(__file__).resolve().parents[2] /
+                 "dashboard" / "src" / "ccsync_dashboard" / "provision.py").read_text(encoding="utf-8")
+    for key, value in setup_syncthing_folder.FOLDER_PULL_TUNING.items():
+        assert f'"{key}": {value}' in provision, f"{key} drifted from provision.py"
+
+
+@pytest.mark.parametrize("rel", [
+    "../../etc",
+    "2026/../../../etc",
+    "2026/./CCT",
+    "2026//CCT",
+    ".ssh",
+])
+def test_syncthing_folder_refuses_a_traversing_rel_path(rel, no_ssh, capsys):
+    """`--project-rel-path "../../etc"` used to produce folder id "etc" at
+    /data/Projects/../../etc and sendreceive-sync the container's /etc. Every
+    sibling script routes through common.project_path_rel; this one didn't."""
+    monkeypatch = no_ssh
+    monkeypatch.setattr(
+        setup_syncthing_folder, "syncthing_api",
+        lambda *a, **k: pytest.fail("a rejected path must reach no API call"))
+    monkeypatch.setattr(
+        setup_syncthing_folder, "find_folder",
+        lambda *a, **k: pytest.fail("a rejected path must reach no API call"))
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", rel,
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k",
+    ])
+
+    assert setup_syncthing_folder.main() == 1
+    assert "invalid --project-rel-path" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Folder-ID derivation -- the id is the project's IMMUTABLE marker slug, not
+# slugify(current path). A moved project used to get a SECOND folder.
+# --------------------------------------------------------------------------
+
+SSF = setup_syncthing_folder  # this section names it a lot
+
+
+def _fake_run_ssh(marker_body, rc=0, err=""):
+    """Stand in for common.run_ssh against the marker-read command. `marker_body`
+    None means the directory carries no marker."""
+    def run_ssh(cmd, dry_run=False, timeout=120):
+        assert "MARKER-PRESENT" in cmd and ".ccsync-project" in cmd
+        if rc != 0:
+            return rc, "", err
+        if marker_body is None:
+            return 0, "MARKER-ABSENT\n", ""
+        return 0, "MARKER-PRESENT\n" + marker_body + "\n", ""
+    return run_ssh
+
+
+class TestReadMarkerSlug:
+    def test_reads_and_validates_a_real_marker(self, monkeypatch):
+        monkeypatch.setattr(SSF, "run_ssh", _fake_run_ssh(
+            '{"slug": "2026-cct-season-1", "created_by": "setup_tree"}'))
+        status, detail = SSF.read_marker_slug("/mnt/tank/x/Projects", "2027/Moved/Elsewhere")
+        assert status == SSF.MARKER_PRESENT
+        # the slug travels with the DIRECTORY: it does not match the new path
+        assert detail == "2026-cct-season-1"
+        assert detail != common.slugify("2027/Moved/Elsewhere")
+
+    def test_absent_marker_is_absent_not_a_failure(self, monkeypatch):
+        monkeypatch.setattr(SSF, "run_ssh", _fake_run_ssh(None))
+        status, _detail = SSF.read_marker_slug("/mnt/tank/x/Projects", "2026/CCT/Season 1")
+        assert status == SSF.MARKER_ABSENT
+
+    def test_marker_with_no_slug_is_invalid(self, monkeypatch):
+        monkeypatch.setattr(SSF, "run_ssh", _fake_run_ssh('{"created_by": "someone"}'))
+        status, detail = SSF.read_marker_slug("/mnt/tank/x/Projects", "2026/CCT/Season 1")
+        assert status == SSF.MARKER_INVALID
+        assert "no slug" in detail
+
+    def test_marker_slug_failing_slug_re_is_invalid(self, monkeypatch):
+        # provision.read_marker enforces the same charset for the same reason:
+        # the slug becomes a Syncthing folder id and a dashboard URL segment.
+        monkeypatch.setattr(SSF, "run_ssh", _fake_run_ssh('{"slug": "../../etc"}'))
+        status, _detail = SSF.read_marker_slug("/mnt/tank/x/Projects", "2026/CCT/Season 1")
+        assert status == SSF.MARKER_INVALID
+
+    def test_ssh_failure_is_unavailable_not_absent(self, monkeypatch):
+        monkeypatch.setattr(SSF, "run_ssh",
+                            _fake_run_ssh(None, rc=1, err="Permission denied"))
+        status, detail = SSF.read_marker_slug("/mnt/tank/x/Projects", "2026/CCT/Season 1")
+        assert status == SSF.MARKER_UNAVAILABLE
+        assert "Permission denied" in detail
+
+    def test_a_raising_run_ssh_never_escapes(self, monkeypatch):
+        def boom(*a, **k):
+            raise common.EnvError("Required environment variable TRUENAS_PW is not set.")
+
+        monkeypatch.setattr(SSF, "run_ssh", boom)
+        status, detail = SSF.read_marker_slug("/mnt/tank/x/Projects", "2026/CCT/Season 1")
+        assert status == SSF.MARKER_UNAVAILABLE
+        assert "TRUENAS_PW" in detail
+
+
+class TestChooseFolderId:
+    REL = "2027/Moved/Elsewhere"
+
+    def test_explicit_slug_wins_over_everything(self):
+        fid, source, refusal = SSF.choose_folder_id(
+            self.REL, "2026-cct-season-1", SSF.MARKER_PRESENT, "something-else")
+        assert (fid, refusal) == ("2026-cct-season-1", "")
+        assert source == "--slug"
+
+    def test_invalid_explicit_slug_refuses(self):
+        fid, _source, refusal = SSF.choose_folder_id(
+            self.REL, "Not A Slug", SSF.MARKER_ABSENT, "")
+        assert fid == "" and "invalid --slug" in refusal
+
+    def test_marker_beats_the_current_path(self):
+        # THE regression: a moved project keeps its identity.
+        fid, source, refusal = SSF.choose_folder_id(
+            self.REL, "", SSF.MARKER_PRESENT, "2026-cct-season-1")
+        assert (fid, refusal) == ("2026-cct-season-1", "")
+        assert ".ccsync-project" in source
+        assert fid != common.slugify(self.REL)
+
+    def test_absent_marker_falls_back_to_slugify(self):
+        fid, source, refusal = SSF.choose_folder_id(
+            self.REL, "", SSF.MARKER_ABSENT, "/mnt/tank/x/Projects/2027/Moved/Elsewhere")
+        assert (fid, refusal) == (common.slugify(self.REL), "")
+        assert "slugify" in source
+
+    def test_unreadable_marker_refuses_rather_than_falling_back(self):
+        fid, _source, refusal = SSF.choose_folder_id(
+            self.REL, "", SSF.MARKER_INVALID, "marker at /p/.ccsync-project carries no slug")
+        assert fid == ""
+        assert "REFUSING" in refusal
+        assert "--slug" in refusal            # tells you how to proceed
+        assert "write_marker.py" in refusal   # ...and how to repair it
+
+    def test_unavailable_marker_refuses_and_names_all_three_ways_out(self):
+        fid, _source, refusal = SSF.choose_folder_id(
+            self.REL, "", SSF.MARKER_UNAVAILABLE, "TRUENAS_PW is not set")
+        assert fid == ""
+        assert "REFUSING" in refusal
+        for escape in ("--slug", "TRUENAS_PW", "--no-marker-read"):
+            assert escape in refusal
+
+
+def test_syncthing_folder_uses_the_marker_slug_for_a_moved_project(no_ssh, capsys):
+    """End-to-end: the project moved from 2026/CCT/Season 1 to 2027/Archive/S1
+    but kept its identity. The script must operate on the EXISTING folder,
+    not create a second one under slugify(new path)."""
+    monkeypatch = no_ssh
+    sent = {}
+
+    def fake_api(method, gui_url, path, api_key, **kwargs):
+        sent.setdefault(method, []).append((path, kwargs.get("json_body")))
+        return _Resp(200, {})
+
+    seen_ids = []
+
+    def fake_find_folder(gui_url, api_key, folder_id, dry_run):
+        seen_ids.append(folder_id)
+        if folder_id == "2026-cct-season-1":
+            return {"id": "2026-cct-season-1",
+                    "path": "/data/Projects/2027/Archive/S1",
+                    "devices": [{"deviceID": "AAA", "introducedBy": ""}]}
+        return None
+
+    monkeypatch.setattr(SSF, "run_ssh", _fake_run_ssh('{"slug": "2026-cct-season-1"}'))
+    monkeypatch.setattr(SSF, "find_folder", fake_find_folder)
+    monkeypatch.setattr(SSF, "syncthing_api", fake_api)
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", "2027/Archive/S1",
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k",
+    ])
+
+    assert SSF.main() == 0
+    out = capsys.readouterr().out
+    # looked the folder up by its marker slug, never by slugify(new path)
+    assert seen_ids == ["2026-cct-season-1"]
+    assert "2027-archive-s1" not in seen_ids
+    assert "folder id: 2026-cct-season-1" in out
+    assert ".ccsync-project marker" in out
+    # nothing was created: the existing folder already points at this path
+    assert "POST" not in sent or all(p != "/rest/config/folders" for p, _ in sent.get("POST", []))
+
+
+def test_syncthing_folder_refuses_a_second_folder_over_the_same_path(no_ssh, capsys):
+    """Belt-and-braces: whatever the id came from, never put a second folder
+    over a directory that already has one. This is the moved-project failure
+    in its final form -- the collector's marker-slug folder is already there
+    and we are about to add a slugify(rel) twin beside it."""
+    monkeypatch = no_ssh
+
+    def fake_api(method, gui_url, path, api_key, **kwargs):
+        pytest.fail(f"a refused duplicate must write nothing ({method} {path})")
+
+    monkeypatch.setattr(SSF, "find_folder", lambda *a, **k: None)
+    monkeypatch.setattr(
+        SSF, "find_folder_by_path",
+        lambda gui_url, api_key, path, folder_id, dry_run: {
+            "id": "2026-cct-season-1", "path": path})
+    monkeypatch.setattr(SSF, "syncthing_api", fake_api)
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", "2027/Archive/S1",
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k",
+        "--no-marker-read",
+    ])
+
+    assert SSF.main() == 1
+    err = capsys.readouterr().err
+    assert "REFUSING" in err
+    assert "2026-cct-season-1" in err                    # the real identity
+    assert "--slug 2026-cct-season-1" in err             # the way forward
+    assert "/data/Projects/2027/Archive/S1" in err
+
+
+def test_syncthing_folder_duplicate_guard_also_applies_to_force(no_ssh, capsys):
+    monkeypatch = no_ssh
+    monkeypatch.setattr(
+        SSF, "find_folder",
+        lambda *a, **k: {"id": "2027-archive-s1", "path": "/data/Projects/Somewhere/Else"})
+    monkeypatch.setattr(
+        SSF, "find_folder_by_path",
+        lambda gui_url, api_key, path, folder_id, dry_run: {
+            "id": "2026-cct-season-1", "path": path})
+    monkeypatch.setattr(
+        SSF, "syncthing_api",
+        lambda *a, **k: pytest.fail("a refused duplicate must write nothing"))
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", "2027/Archive/S1",
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k",
+        "--no-marker-read", "--force",
+    ])
+
+    assert SSF.main() == 1
+    assert "REFUSING" in capsys.readouterr().err
+
+
+def test_find_folder_by_path_ignores_our_own_id_and_trailing_slashes(monkeypatch):
+    folders = [
+        {"id": "ours", "path": "/data/Projects/A"},
+        {"id": "theirs", "path": "/data/Projects/B/"},
+    ]
+    monkeypatch.setattr(SSF, "syncthing_api", lambda *a, **k: _Resp(200, folders))
+
+    # our own folder at that path is not a duplicate
+    assert SSF.find_folder_by_path("u", "k", "/data/Projects/A", "ours", False) is None
+    # ...but somebody else's is, trailing slash and all
+    twin = SSF.find_folder_by_path("u", "k", "/data/Projects/B", "ours", False)
+    assert twin and twin["id"] == "theirs"
+    # and an unoccupied path is clear
+    assert SSF.find_folder_by_path("u", "k", "/data/Projects/C", "ours", False) is None
+
+
+def test_syncthing_folder_refuses_when_the_marker_cannot_be_read(no_ssh, capsys):
+    """No TRUENAS_PW / NAS unreachable must NOT silently degrade to
+    slugify(rel) -- that is precisely how the divergent id gets created."""
+    monkeypatch = no_ssh
+
+    def boom(*a, **k):
+        raise common.EnvError("Required environment variable TRUENAS_PW is not set.")
+
+    monkeypatch.setattr(SSF, "run_ssh", boom)
+    monkeypatch.setattr(
+        SSF, "find_folder",
+        lambda *a, **k: pytest.fail("must refuse before touching Syncthing"))
+    monkeypatch.setattr(
+        SSF, "syncthing_api",
+        lambda *a, **k: pytest.fail("must refuse before touching Syncthing"))
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", "2026/CCT/Season 1",
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k",
+    ])
+
+    assert SSF.main() == 1
+    err = capsys.readouterr().err
+    assert "REFUSING" in err and "TRUENAS_PW" in err
+
+
+def test_syncthing_folder_marker_read_needs_no_ssh_when_slug_is_given(no_ssh, capsys):
+    """--slug is the documented escape hatch for "I know the identity but
+    cannot reach the NAS" -- it must not try SSH at all (the no_ssh fixture
+    turns any attempt into a failure)."""
+    monkeypatch = no_ssh
+    sent = {}
+
+    def fake_api(method, gui_url, path, api_key, **kwargs):
+        sent.setdefault(method, []).append((path, kwargs.get("json_body")))
+        return _Resp(200, {})
+
+    monkeypatch.setattr(SSF, "find_folder", lambda *a, **k: None)
+    monkeypatch.setattr(SSF, "find_folder_by_path", lambda *a, **k: None)
+    monkeypatch.setattr(SSF, "syncthing_api", fake_api)
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", "2027/Archive/S1",
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k",
+        "--slug", "2026-cct-season-1",
+    ])
+
+    assert SSF.main() == 0
+    _path, folder = sent["POST"][0]
+    assert folder["id"] == "2026-cct-season-1"
+    assert folder["path"] == "/data/Projects/2027/Archive/S1"
+    # the LABEL stays the rel path: collector.py writes it to projects.label
+    # and sequencer.py makes it the editor's on-disk dir + rclone subpath.
+    assert folder["label"] == "2027/Archive/S1"
 
 
 def test_syncthing_folder_same_path_still_skips(monkeypatch, capsys):
@@ -551,10 +954,23 @@ def test_install_dashboard_keeps_editors_out_of_data_and_the_venv(monkeypatch, c
     capsys.readouterr()
     joined = "\n".join(cmds)
 
-    assert "3000:3001" not in joined, "the editors group must not own data/ or venv/"
-    assert "chown -R 3000:3000" in joined
-    assert "/data" in joined and "chmod 770" in joined
-    assert "/venv" in joined and "chmod 700" in joined
+    # Per-command, not over the whole run: the b-roll ARCHIVE root is prepared
+    # by its own later command and is deliberately broll:EDITORS 2770, exactly
+    # like Projects/ -- editors browse it over SMB as P:\Assets\B-roll Archive.
+    # This assertion is about the app's private dirs, which is where C-2 was.
+    dirs_cmd = next(c for c in cmds if "/venv" in c and "mkdir -p" in c)
+    assert "3000:3001" not in dirs_cmd, "the editors group must not own data/ or venv/"
+    assert "chown -R 3000:3000" in dirs_cmd
+    assert "/data" in dirs_cmd and "chmod 770" in dirs_cmd
+    assert "/venv" in dirs_cmd and "chmod 700" in dirs_cmd
+    # ...and the archive root that IS mounted gets prepared, with the editors
+    # group and without the 770 that would lock them out of their own archive.
+    archive = next(c for c in cmds if common.DEFAULT_BROLL_ARCHIVE_ROOT in c)
+    assert "chown 3000:3001" in archive and "chmod 2770" in archive
+    assert "chmod 770 " not in archive
+    assert "broll-data" not in joined, (
+        "<host-root>/broll-data was never mounted by anything"
+    )
     # a pre-C-2 deployment's editor-writable venv is MOVED aside, never
     # deleted (standing no-deletion rule)
     retire = next(c for c in cmds if "venv.quarantined." in c)
@@ -564,6 +980,140 @@ def test_install_dashboard_keeps_editors_out_of_data_and_the_venv(monkeypatch, c
     volumes = _dashboard_service()["volumes"]
     assert any(v.endswith("/venv:/venv") for v in volumes)
     assert not any("/data/venv" in v for v in volumes)
+
+
+# --------------------------------------------------------------------------
+# --dry-run prints the whole compose body -- and must print no secret in it
+# --------------------------------------------------------------------------
+
+# Distinctive, and each one a plausible real value for its variable: the point
+# is to grep the ENTIRE dry-run transcript for them afterwards.
+DRY_RUN_SECRETS = {
+    "SYNCTHING_API_KEY": "syncthingKEYsentinel7Xq2",
+    "DASH_REPORT_TOKEN": "reportTOKENsentinel5f0c7dd7ab034350",
+    "DASH_SESSION_SECRET": "sessionSECRETsentinel0f34e25168de40",
+    # Strong on purpose: a weak one is legitimately quoted back in the refusal
+    # message (it is a placeholder from a published list), which would make
+    # this test assert the wrong thing.
+    "BROLL_INGEST_TOKEN": "ingestTOKENsentinel4b7d1e9a03c6",
+    "TRUENAS_PW": "truenasPWsentinelHunter2xyz",
+}
+
+
+def _dry_run_transcript(monkeypatch, capsys, env=None) -> str:
+    """Everything a --dry-run puts in front of the admin: stdout, stderr, and
+    every command it would have sent over SSH."""
+    cmds: list = []
+
+    def record(cmd, dry_run=False, timeout=120):
+        cmds.append(cmd)
+        return 0, "", ""
+
+    for name, value in (env if env is not None else DRY_RUN_SECRETS).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(install_dashboard_app, "run_ssh", record)
+    monkeypatch.setattr(sys, "argv", ["install_dashboard_app.py", "--dry-run"])
+    assert install_dashboard_app.main() == 0
+    captured = capsys.readouterr()
+    return "\n".join([captured.out, captured.err, *cmds])
+
+
+def test_dry_run_never_prints_a_secret(monkeypatch, capsys):
+    """--dry-run exists so an admin can eyeball the compose body before a real
+    deploy, and it printed four live credentials in the clear to do it: only
+    TRUENAS_PW was masked. Terminal scrollback and pasted bug reports are not
+    where the fleet's report token belongs."""
+    transcript = _dry_run_transcript(monkeypatch, capsys)
+
+    for name, value in DRY_RUN_SECRETS.items():
+        assert value not in transcript, f"{name} leaked into --dry-run output"
+        assert f"<{name}-not-shown-in-dry-run>" in transcript, (
+            f"{name} is not represented in the compose body at all"
+        )
+
+
+def test_dry_run_still_shows_the_configuration_it_exists_to_show(monkeypatch, capsys):
+    """Masking the class, not the body: everything that is not a credential
+    stays readable, or the dry-run cannot do its job."""
+    transcript = _dry_run_transcript(monkeypatch, capsys)
+
+    for visible in (install_dashboard_app.LAN_BIND_IP,
+                    install_dashboard_app.TAILNET_BIND_IP,
+                    install_dashboard_app.DEFAULT_IMAGE,
+                    install_dashboard_app.DEFAULT_HOST_ROOT,
+                    common.DEFAULT_BROLL_ARCHIVE_ROOT,
+                    "/api/v1/health", "DASH_DB_PATH", "3000:3001"):
+        assert visible in transcript, f"--dry-run no longer shows {visible!r}"
+
+
+def test_dry_run_says_whether_a_secret_is_set_without_saying_what_it_is(monkeypatch, capsys):
+    """Whether DASH_SESSION_SECRET is configured is not itself a secret -- and
+    a blank one logs the whole fleet out on deploy, so the dry-run must still
+    distinguish the two states."""
+    env = dict(DRY_RUN_SECRETS)
+    monkeypatch.delenv("SYNCTHING_API_KEY", raising=False)
+    env.pop("SYNCTHING_API_KEY")
+    transcript = _dry_run_transcript(monkeypatch, capsys, env)
+
+    assert "<SYNCTHING_API_KEY-unset-dry-run>" in transcript
+    assert "<DASH_REPORT_TOKEN-not-shown-in-dry-run>" in transcript
+
+
+def test_every_secret_bearing_compose_key_is_masked(monkeypatch, capsys):
+    """The list is the fix, not the four instances. A new credential added to
+    compose_config and not to SECRET_ENV_VARS is a new leak, so check the
+    membership rather than trusting the list to be maintained."""
+    env_keys = set(_dashboard_service()["environment"])
+    assert set(install_dashboard_app.SECRET_ENV_VARS) <= env_keys, (
+        "SECRET_ENV_VARS names an env var the compose body no longer carries"
+    )
+    # Every value that came in through a secret-shaped parameter is masked --
+    # i.e. nothing in SECRET_ENV_VARS is passed through raw somewhere else too.
+    transcript = _dry_run_transcript(monkeypatch, capsys)
+    for name in install_dashboard_app.SECRET_ENV_VARS:
+        assert transcript.count(f"<{name}-") >= 1
+
+
+def test_masking_happens_after_validation_not_before(monkeypatch, capsys):
+    """Order matters: the placeholder is 38 characters and would sail past the
+    length check the real value was meant to face. Validation must see the real
+    token, so a placeholder BROLL_INGEST_TOKEN is still refused."""
+    # The mask itself would pass a naive strength check -- which is exactly why
+    # it must never reach one.
+    mask = install_dashboard_app.dry_run_mask("BROLL_INGEST_TOKEN", "anything")
+    assert install_dashboard_app.weak_ingest_token(mask) is None
+
+    env = dict(DRY_RUN_SECRETS, BROLL_INGEST_TOKEN="REPLACE_ME")
+    monkeypatch.setenv("DASH_BROLL_ENABLED", "1")
+    transcript = _dry_run_transcript(monkeypatch, capsys, env)
+
+    assert "would FAIL" in transcript and "BROLL_INGEST_TOKEN" in transcript
+    assert "REPLACE_ME" in transcript, (
+        "the refusal names the placeholder it found -- a published constant, "
+        "and the only way the message is actionable"
+    )
+    # ...and the compose body still carries the mask, not the placeholder value
+    assert "'BROLL_INGEST_TOKEN': '<BROLL_INGEST_TOKEN-" in transcript
+
+
+def test_a_real_deploy_still_receives_the_actual_secrets(monkeypatch):
+    """The masking is for the printed body only. A real deploy must hand the
+    container the real values, and must still refuse to run without the three
+    mandatory ones."""
+    for name, value in DRY_RUN_SECRETS.items():
+        monkeypatch.setenv(name, value)
+
+    real = install_dashboard_app.resolve_compose_secrets(
+        False, DRY_RUN_SECRETS["BROLL_INGEST_TOKEN"])
+    assert real == DRY_RUN_SECRETS, "a real deploy would ship masked placeholders"
+
+    masked = install_dashboard_app.resolve_compose_secrets(
+        True, DRY_RUN_SECRETS["BROLL_INGEST_TOKEN"])
+    assert all(v.startswith("<") and v.endswith(">") for v in masked.values())
+
+    monkeypatch.delenv("DASH_SESSION_SECRET")
+    with pytest.raises(common.EnvError):
+        install_dashboard_app.resolve_compose_secrets(False, "x")
 
 
 # --------------------------------------------------------------------------
@@ -629,6 +1179,37 @@ def test_env_keys_match_compose():
         f"only in dict={sorted(dict_keys - yaml_keys)}"
     )
     assert "TRUENAS_VERIFY_SSL" in dict_keys
+
+
+def test_volumes_match_compose():
+    """The env keys have had a drift test for a while; the volume list did not,
+    and that is precisely where the b-roll deploy broke. Two bind mounts were
+    added to both files, one of which was never populated and one of which
+    pointed at a directory nothing prepared -- neither visible from the outside,
+    because a missing mount just makes the feature quietly absent.
+    """
+    text = _compose_text()
+    vol_block = text.split("\n    volumes:", 1)[1].split("\n    restart:", 1)[0]
+    yaml_vols = [
+        line.strip().lstrip("- ").strip().strip('"').strip("'")
+        for line in vol_block.splitlines()
+        if line.strip().startswith("- ")
+    ]
+    dict_vols = _dashboard_service()["volumes"]
+    assert yaml_vols == dict_vols, (
+        f"compose.yaml and compose_config() volumes drifted:\n"
+        f"  only in yaml={[v for v in yaml_vols if v not in dict_vols]}\n"
+        f"  only in dict={[v for v in dict_vols if v not in yaml_vols]}"
+    )
+    # ...and the two b-roll mounts are the ones with a history: the code mount
+    # must be read-only like /app, and the data mount must be the shared
+    # archive (common.DEFAULT_BROLL_ARCHIVE_ROOT), not some private directory
+    # under the app root that nothing ever writes to.
+    assert "/mnt/tank/apps/ccsync-dashboard/broll-web:/broll-app:ro" in dict_vols
+    assert f"{common.DEFAULT_BROLL_ARCHIVE_ROOT}:/broll-data:rw" in dict_vols
+    assert not any("broll-data:/broll-data" in v for v in dict_vols), (
+        "the b-roll data mount is the shared archive, not <host-root>/broll-data"
+    )
 
 
 def test_truenas_verify_ssl_defaults_to_current_behaviour():
@@ -791,6 +1372,85 @@ def test_sudo_pw_preamble_consumes_exactly_one_stdin_line(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# B24 -- the 25.10 filtered GET /app returns [] even when the app exists
+# --------------------------------------------------------------------------
+
+def test_install_syncthing_app_does_not_use_query_filters(monkeypatch):
+    """The middleware was observed returning [] for a filtered GET /app on a
+    NAS that HAD the app (2026-07-24 live). With the filter, a re-run
+    concluded "not installed", POSTed a create for the live production app,
+    got an opaque 422, and told the admin to delete the healthy app.
+    install_dashboard_app fetches the full list and filters client-side."""
+    import install_syncthing_app
+
+    seen = {}
+
+    def fake_api(method, path, **kwargs):
+        seen["method"] = method
+        seen["path"] = path
+        seen["params"] = kwargs.get("params")
+        return _Resp(200, [{"name": "syncthing"}, {"name": "ccsync-dashboard"}])
+
+    monkeypatch.setattr(install_syncthing_app, "truenas_api", fake_api)
+
+    assert install_syncthing_app.app_already_installed(dry_run=False) is True
+    assert seen["path"] == "/app"
+    assert not seen["params"], "query-filters is the broken call (B24)"
+
+
+def test_install_syncthing_app_reports_absent_when_the_list_lacks_it(monkeypatch):
+    import install_syncthing_app
+
+    monkeypatch.setattr(install_syncthing_app, "truenas_api",
+                        lambda *a, **k: _Resp(200, [{"name": "ccsync-dashboard"}]))
+    assert install_syncthing_app.app_already_installed(dry_run=False) is False
+
+
+def test_no_server_script_reintroduces_the_filtered_app_query():
+    # Same defect, same fix -- keep every /app caller in step. Comments may
+    # mention query-filters (they explain why it is gone); code may not.
+    server_dir = Path(__file__).resolve().parents[1]
+    for name in ("install_syncthing_app.py", "install_dashboard_app.py"):
+        for lineno, line in enumerate((server_dir / name).read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            assert "query-filters" not in line, f"{name}:{lineno} {line.strip()}"
+
+
+# --------------------------------------------------------------------------
+# setup_editor_account -- never setperm/stripacl a SHARED parent dataset
+# --------------------------------------------------------------------------
+
+def test_forbidden_home_paths_include_the_shared_homes_dataset():
+    """`filesystem.setperm mode:700 stripacl:True` against the homes dataset
+    root breaks every other editor's SMB path in. A hand-created account whose
+    `home` points at the parent (instead of <parent>/<username>) is exactly how
+    you get there -- the create body in main() passes the PARENT by design."""
+    for path in ("/", "/nonexistent", "/var/empty", "",
+                 setup_editor_account.HOMES_PARENT,
+                 setup_editor_account.HOMES_PARENT + "/",
+                 "/mnt", "/home", "/root"):
+        assert setup_editor_account.is_forbidden_home(path), path
+
+
+def test_a_real_editor_home_is_not_forbidden():
+    assert not setup_editor_account.is_forbidden_home(
+        setup_editor_account.HOMES_PARENT + "/jsmith")
+    assert not setup_editor_account.is_forbidden_home(
+        setup_editor_account.HOMES_PARENT + "/jsmith/")
+
+
+def test_ensure_home_permissions_refuses_the_shared_parent(monkeypatch, capsys):
+    monkeypatch.setattr(
+        setup_editor_account, "truenas_api",
+        lambda *a, **k: pytest.fail("setperm must never reach the API for a shared parent"))
+
+    assert setup_editor_account.ensure_home_permissions(
+        setup_editor_account.HOMES_PARENT, 3010, 3001, "jsmith") is False
+    assert "refusing to touch permissions" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
 # Low items: username + device id validation
 # --------------------------------------------------------------------------
 
@@ -809,6 +1469,32 @@ def test_normalize_device_id():
                 good.replace("P", "0", 1), good.replace("-", "")):
         with pytest.raises(ValueError):
             accept_device.normalize_device_id(bad)
+
+
+def test_device_name_warnings_spell_out_the_editor_mapping_contract():
+    """KNOWN_BUGS B16: the device NAME is what the dashboard maps to an editor
+    account, and that mapping decides which projects the device is shared
+    with. A machine name ("alex-laptop") is username-SHAPED, so it used to
+    resolve to an editor with no selections and get the device unshared from
+    every folder. The dashboard is the only component holding the account
+    list, so it does the real check -- this script's job is to make the
+    contract impossible to miss."""
+    good = "P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2"
+
+    # no name at all -> unmapped, said plainly
+    [note] = accept_device.check_device_name(good, good)
+    assert "UNMAPPED" in note
+
+    # not a username at all -> unmapped
+    [note] = accept_device.check_device_name("Alex's Laptop", good)
+    assert "UNMAPPED" in note and "username" in note
+
+    # username-shaped -> the contract, because this is the ambiguous case
+    [note] = accept_device.check_device_name("alex-laptop", good)
+    assert "TrueNAS USERNAME" in note
+    assert "machine name" in note
+    [note] = accept_device.check_device_name("jsmith", good)
+    assert "TrueNAS USERNAME" in note
 
 
 def test_accept_device_without_folder_id_touches_no_folders(monkeypatch, capsys):

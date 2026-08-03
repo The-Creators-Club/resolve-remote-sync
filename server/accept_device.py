@@ -50,6 +50,42 @@ from common import ok, syncthing_api
 # wrong reason.
 DEVICE_ID_RE = re.compile(r"^[A-Z2-7]{7}(-[A-Z2-7]{7}){7}$")
 
+# The device NAME is not cosmetic: the dashboard maps a Syncthing device to an
+# editor account by it (db.resolve_editor_username), and that mapping decides
+# which projects the device is shared with. Same charset as the dashboard's
+# _USERNAME_RE so the two ends agree on what could even be a username.
+#
+# A name that is merely username-SHAPED is not enough on the dashboard side any
+# more: machine names look exactly like usernames ("alex-laptop", "edit-pc"),
+# and a device approved under one used to resolve to an editor account with no
+# selections, which the enforce cycle read as "ticked for nothing" and unshared
+# from every folder it was on (KNOWN_BUGS B16). The dashboard is the only
+# component holding the editor account list, so it does the real check; this
+# script's job is to make the contract impossible to miss.
+USERNAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
+
+
+def check_device_name(device_name: str, device_id: str) -> list[str]:
+    """Warnings (possibly empty) about a --device-name the dashboard will not
+    be able to map to an editor. Never raises: an unmapped device still works,
+    it is just managed by hand rather than by project ticks."""
+    name = str(device_name or "").strip()
+    if name == device_id:
+        return ["no --device-name given: this device is UNMAPPED. The dashboard will "
+                "not manage its folder shares -- pass --device-name <editor's TrueNAS "
+                "username> to have project ticks drive them."]
+    if not USERNAME_RE.match(name.lower()):
+        return [f"--device-name {name!r} is not a TrueNAS-style username, so the "
+                f"dashboard will treat this device as UNMAPPED and never touch its "
+                f"folder shares. Use the editor's account name (lowercase; letters, "
+                f"digits, '.', '_', '-')."]
+    return [f"--device-name must be the editor's TrueNAS USERNAME, not their machine "
+            f"name: the dashboard maps device -> editor by it and shares projects "
+            f"accordingly. {name!r} is only honoured if an editor account by that name "
+            f"is known to the dashboard (it has ticked a project, reported, or been "
+            f"created in Admin > Users); otherwise the device is left UNMAPPED and its "
+            f"shares are managed by hand."]
+
 
 def normalize_device_id(device_id: str) -> str:
     """Uppercase + shape-check a Syncthing device ID, or raise ValueError."""
@@ -74,7 +110,11 @@ def main():
                          "dashboard's enforcement owns sharing for mapped editors and will "
                          "reconcile it away; use this only for an unmanaged editor or a "
                          "repair while the dashboard is down.")
-    ap.add_argument("--device-name", default=None, help="human-readable label, defaults to --device-id")
+    ap.add_argument("--device-name", default=None,
+                    help="the editor's TrueNAS USERNAME (NOT their machine name) -- the "
+                         "dashboard maps device -> editor by this and shares their ticked "
+                         "projects accordingly. Defaults to --device-id, which leaves the "
+                         "device unmapped.")
     ap.add_argument("--gui-url", default=os.environ.get("SYNCTHING_GUI_URL"))
     ap.add_argument("--api-key", default=os.environ.get("SYNCTHING_API_KEY"))
     ap.add_argument("--dry-run", action="store_true")
@@ -96,6 +136,9 @@ def main():
     gui_url = args.gui_url or "<gui-url-unset-dry-run>"
     api_key = args.api_key or "<api-key-unset-dry-run>"
     device_name = args.device_name or args.device_id
+
+    for warning in check_device_name(device_name, args.device_id):
+        print(f"NOTE: {warning}")
 
     # Step 1: informational only.
     resp = syncthing_api("GET", gui_url, "/rest/cluster/pending/devices", api_key, dry_run=args.dry_run)

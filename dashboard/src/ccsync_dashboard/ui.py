@@ -86,6 +86,12 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     user = auth.get_session_user(request)
     context.setdefault("session_user", user)
     context.setdefault("session_is_admin", auth.is_admin(settings, user))
+    # Only offer the B-ROLL link when the mount FULLY took (broll.MOUNTED).
+    # The import is guarded, so a missing or stale /broll-app leaves the
+    # dashboard running with the feature absent; and a mount whose data root
+    # could not be prepared is mounted "degraded", answering every request with
+    # a 500. A nav link to either is worse than no link.
+    context.setdefault("broll_mounted", getattr(request.app.state, "broll_mounted", False))
     return templates.TemplateResponse(request=request, name=name, context=context)
 
 

@@ -189,13 +189,15 @@ def base_payload(**extra):
     lambda p: p["lanes"][0].update(last_sync="S" * 65),
     lambda p: p["lanes"][0].update(current_project="C" * 513),
     lambda p: p["lanes"][0].update(transfers=[{"name": "n" * 513}]),
-    lambda p: p.update(local_manifest={f"p{i}": {"n_originals": 1} for i in range(65)}),
-    lambda p: p.update(media_tree={f"p{i}": [] for i in range(65)}),
     lambda p: p.update(media_tree={"P": [{"clip_name": "c" * 513}]}),
     lambda p: p.update(local_manifest={"p": {"n_originals": -5}}),
     lambda p: p.update(local_manifest={"p": {"n_originals": 10_000_001}}),
 ])
 def test_report_fields_are_capped(report_client, mutate):
+    """Per-VALUE caps still reject: a 513-char clip name or a negative file
+    count is a broken companion, not a big one. The per-COLLECTION caps
+    (projects/queue/clips/manifest files) truncate instead -- see
+    test_a_sixty_fifth_project_does_not_take_the_machine_off_the_grid."""
     payload = base_payload()
     mutate(payload)
     resp = report_client.post("/api/v1/report", json=payload, headers=report_headers())
@@ -217,6 +219,190 @@ def test_report_machine_is_stripped(report_client):
     machines = {r[0] for r in conn.execute("SELECT DISTINCT machine FROM lane_report_current")}
     conn.close()
     assert machines == {"PC"}
+
+
+# -- B6: an oversized report is truncated, never rejected -------------------
+
+
+def test_a_sixty_fifth_project_does_not_take_the_machine_off_the_grid(report_client):
+    """B6: MAX_REPORT_PROJECTS was a RAISING pydantic validator, and pydantic
+    runs before the route body -- so the 65th project 422'd the whole HEAVY
+    report and took lane status, transfers, machine_state, presence and the
+    upgrade advertisement with it. An idle companion only ever sends heavy
+    ticks, so the machine vanished from the fleet grid entirely. Worst placed
+    is the base rig, whose local_root is the whole NAS tree."""
+    payload = base_payload(
+        local_manifest={f"2026/FF5/P{i}": {"n_originals": i} for i in range(200)},
+        media_tree={f"Project {i}": [] for i in range(70)},
+        queue=[f"slug-{i}" for i in range(100)],
+    )
+    resp = report_client.post("/api/v1/report", json=payload, headers=report_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    # ...and the truncation is REPORTED, not silent
+    assert body["truncated"]["local_manifest"] == 200 - 64
+    assert body["truncated"]["media_tree"] == 70 - 64
+    assert body["truncated"]["queue"] == 100 - 64
+
+    # the machine is on the grid, with its lane row intact
+    conn = dbmod.connect(report_client.app.state.settings.db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM lane_report_current").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM machine_state").fetchone()[0] == 1
+        # the surviving 64 are the FIRST 64 the companion sent (it prioritises)
+        kept = {r[0] for r in conn.execute(
+            "SELECT DISTINCT project_slug FROM editor_media_project")}
+        assert len(kept) == 64
+    finally:
+        conn.close()
+
+
+def test_an_oversized_clip_list_is_trimmed_not_rejected(report_client):
+    """A Resolve project with more than MAX_MEDIA_CLIPS clips in its media
+    pool must lose the tail of its bin tree, not the whole report."""
+    payload = base_payload(media_tree={
+        "Big": [{"clip_name": f"c{i}", "present": True} for i in range(4100)]})
+    resp = report_client.post("/api/v1/report", json=payload, headers=report_headers())
+    assert resp.status_code == 200
+    assert resp.json()["truncated"]["media_clips"] == 100
+
+
+def test_an_oversized_manifest_file_list_is_trimmed_not_rejected(report_client):
+    payload = base_payload(local_manifest={"2026/FF5/Huge": {
+        "n_originals": 5000,
+        "originals": [[f"a/{i}.braw", 10] for i in range(4200)],
+    }})
+    resp = report_client.post("/api/v1/report", json=payload, headers=report_headers())
+    assert resp.status_code == 200
+    assert resp.json()["truncated"]["manifest_files"] == 200
+
+
+def test_a_report_within_the_ceilings_reports_no_truncation(report_client):
+    payload = base_payload(
+        local_manifest={f"2026/FF5/P{i}": {"n_originals": 1} for i in range(64)},
+        queue=[f"slug-{i}" for i in range(64)])
+    body = report_client.post("/api/v1/report", json=payload,
+                              headers=report_headers()).json()
+    assert "truncated" not in body
+
+
+def test_truncation_slices_the_raw_body_before_pydantic_builds_models():
+    """The slice runs as a mode='before' validator: truncating AFTER
+    validation would mean parsing the whole oversized payload first, which is
+    the cost this bounds."""
+    from ccsync_dashboard.api import MAX_REPORT_PROJECTS, _truncate_report_sections
+
+    raw = {"local_manifest": {f"p{i}": {"n_originals": 1} for i in range(100)}}
+    out, dropped = _truncate_report_sections(raw)
+    assert len(out["local_manifest"]) == MAX_REPORT_PROJECTS
+    assert dropped == {"local_manifest": 100 - MAX_REPORT_PROJECTS}
+    assert len(raw["local_manifest"]) == 100      # the input is not mutated
+
+
+# -- B15: the report body gate is unbypassable and pre-auth -----------------
+
+
+def _chunks(count, size, counter=None):
+    """A body httpx sends with Transfer-Encoding: chunked (no Content-Length),
+    recording how many chunks were actually pulled off it."""
+    def gen():
+        for _ in range(count):
+            if counter is not None:
+                counter["pulled"] += 1
+            yield b"x" * size
+    return gen()
+
+
+def test_a_chunked_body_cannot_bypass_the_report_size_cap(report_client):
+    """B15: body_size_gate read Content-Length and nothing else, so a chunked
+    request -- which has none -- skipped the check entirely. uvicorn then
+    buffered the whole thing and the single-worker container was OOM-killed,
+    taking the fleet's only sync-status view down with it."""
+    from ccsync_dashboard.app import MAX_REPORT_BODY_BYTES
+
+    resp = report_client.post(
+        "/api/v1/report",
+        content=_chunks(12, 1024 * 1024),          # 12 MB, no Content-Length
+        headers={**report_headers(), "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 413
+    assert str(MAX_REPORT_BODY_BYTES) in resp.json()["detail"]
+
+
+def test_a_declared_oversize_body_is_still_refused_up_front(report_client):
+    """The cheap Content-Length rejection stays: an honest client is told to
+    stop before it sends 8 MB."""
+    resp = report_client.post(
+        "/api/v1/report",
+        content=b"x" * 16,
+        headers={**report_headers(), "Content-Type": "application/json",
+                 "Content-Length": "99999999"},
+    )
+    assert resp.status_code == 413
+    # an unparseable length is refused rather than guessed at
+    resp = report_client.post(
+        "/api/v1/report", content=b"x" * 16,
+        headers={**report_headers(), "Content-Type": "application/json",
+                 "Content-Length": "not-a-number"},
+    )
+    assert resp.status_code in (400, 413)
+
+
+def test_a_bad_token_never_reaches_the_body(report_client):
+    """B15's other half: /api/v1/report is in _OPEN_EXACT with
+    `payload: ReportIn`, so FastAPI read and pydantic-validated the entire
+    body before api_report checked X-CCSync-Token. An unauthenticated caller
+    got to spend the container's memory and CPU at will."""
+    counter = {"pulled": 0}
+    resp = report_client.post(
+        "/api/v1/report",
+        content=_chunks(12, 1024 * 1024, counter),
+        headers={"X-CCSync-Token": "wrong", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 401
+    assert counter["pulled"] == 0            # not one byte was read
+
+    # ...and the token check beats VALIDATION too: a body that would 422 if
+    # parsed answers 401, because it is never parsed.
+    resp = report_client.post("/api/v1/report", json={"garbage": True},
+                              headers={"X-CCSync-Token": "wrong"})
+    assert resp.status_code == 401
+
+
+def test_an_unconfigured_report_token_is_refused_before_the_body_too(tmp_path):
+    settings = Settings(db_path=str(tmp_path / "notok.db"), session_secret=SECRET)
+    with TestClient(create_app(settings)) as client:
+        counter = {"pulled": 0}
+        resp = client.post("/api/v1/report", content=_chunks(4, 1024, counter),
+                           headers={"Content-Type": "application/json"})
+        assert resp.status_code == 401
+        assert "DASH_REPORT_TOKEN" in resp.json()["detail"]
+        assert counter["pulled"] == 0
+
+
+def test_a_legal_report_still_round_trips_through_the_gate(report_client):
+    """The gate replays the buffered body into the route; a normal report must
+    be entirely unaffected by it."""
+    payload = base_payload(local_manifest={
+        f"2026/FF5/P{i}": {"n_originals": 3, "bytes_originals": 999}
+        for i in range(8)
+    })
+    resp = report_client.post("/api/v1/report", json=payload, headers=report_headers())
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+
+
+def test_the_package_route_is_not_buffered_by_the_gate():
+    """api_publish_package streams its 200 MB body to disk and counts bytes as
+    it goes; buffering it in the middleware would make the memory ceiling the
+    thing it was added to remove. Only exact-matched (in-memory) routes are
+    buffered."""
+    from ccsync_dashboard import app as appmod
+
+    assert set(appmod._BODY_LIMITS) == {"/api/v1/report"}
+    assert appmod._BODY_LIMIT_PREFIXES[0][0] == "/api/v1/admin/packages/"
 
 
 def test_upgrade_is_not_offered_for_an_unreported_platform(tmp_path):
@@ -321,7 +507,16 @@ def test_deploy_requirements_match_pyproject_dependencies():
     hash-stamps it -- so a dependency added only to pyproject.toml makes the
     container boot and then fail at import, without even re-running pip."""
     pyproject = tomllib.loads((DASHBOARD_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    # The optional `broll` group counts as declared: those packages are not
+    # imported by ccsync_dashboard, but the container mounts the b-roll app
+    # in-process and its imports fail without them. Both directions still
+    # matter -- something in requirements.txt and in neither list is
+    # unaccounted-for, which is what this test exists to catch.
     declared = {_requirement_name(d): d.strip() for d in pyproject["project"]["dependencies"]}
+    declared.update({
+        _requirement_name(d): d.strip()
+        for d in pyproject["project"].get("optional-dependencies", {}).get("broll", [])
+    })
     deployed = {
         _requirement_name(line): line.strip()
         for line in (DASHBOARD_ROOT / "deploy" / "requirements.txt").read_text(
@@ -333,6 +528,22 @@ def test_deploy_requirements_match_pyproject_dependencies():
         f"only in pyproject={sorted(set(declared) - set(deployed))}, "
         f"only in requirements={sorted(set(deployed) - set(declared))}"
     )
+
+
+def test_dashboard_version_does_not_drift():
+    """__init__.VERSION is what release.ps1 and check_deploy_drift.ps1 read,
+    and what /api/v1/health reports; pyproject's version is what a pip install
+    of this package would carry. They had drifted three releases apart (0.3.5
+    vs 0.2.0) with nothing checking -- cosmetic only while the container runs
+    from PYTHONPATH, and a wrong answer the moment it doesn't."""
+    from ccsync_dashboard import VERSION
+
+    pyproject = tomllib.loads((DASHBOARD_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["project"]["version"] == VERSION, (
+        f"dashboard/pyproject.toml version={pyproject['project']['version']} but "
+        f"ccsync_dashboard.VERSION={VERSION} -- bump both"
+    )
+    assert re.fullmatch(r"\d+\.\d+\.\d+", VERSION)
 
 
 def test_shared_secrets_are_compared_in_constant_time():

@@ -49,6 +49,23 @@ def classify_media(rel_parts: Iterable[str], ext: str) -> str | None:
 
 
 def slugify(text: str) -> str:
+    """Path -> stable id, byte-identical to server/common.slugify.
+
+    NOT the authority for a project's identity. `slugify(rel)` and THE
+    MARKER'S SLUG agree only for a project that has never moved: the marker
+    slug is immutable and travels with the directory, which is what lets the
+    collector retarget a moved/renamed project instead of treating it as a
+    delete plus a brand-new project (see read_marker / MARKER_FILENAME, and
+    collector._provision_slug).
+
+    `server/setup_syncthing_folder.py` derives the folder id with slugify(rel)
+    instead, so for a project that HAS moved the two disagree: the script's
+    find_folder misses the real folder and creates a SECOND Syncthing folder
+    over the same directory -- one that no editor is shared with and that
+    fails the collector every cycle. The collector is authoritative here;
+    Collector._duplicate_path_folder refuses to add to the confusion and says
+    what to fix. Use the dashboard (or --slug from the marker) to repair a
+    moved project's folder, not a bare --project-rel-path."""
     text = text.replace("\\", "/").strip().lower()
     parts = [p for p in re.split(r"[^a-z0-9]+", text) if p]
     slug = "-".join(parts)
@@ -57,8 +74,18 @@ def slugify(text: str) -> str:
     return slug
 
 
+# Intentional copy of server/common.py's PARTIAL_IGNORE_LINES. rclone's
+# default --inplace=false writes "<name>.<token>.partial" into the project dir
+# on the NAS -- also a sendreceive Syncthing root -- and lane A never deletes,
+# so a killed transfer's multi-GB orphan used to be indexed and fanned out to
+# every ticked editor (KNOWN_BUGS B12). The extension patterns match by
+# EXTENSION and so matched none of them.
+PARTIAL_IGNORE_LINES = ["(?i)**/*.partial", "(?i)*.partial"]
+
+
 def build_stignore_lines() -> list[str]:
     lines = [f"(?i)*{ext}" for ext in VIDEO_EXTENSIONS]
+    lines.extend(PARTIAL_IGNORE_LINES)
     lines.append("(?i)Proxy")
     lines.append("(?i)**/Proxy")
     lines.append("(?i)**/Proxy/**")

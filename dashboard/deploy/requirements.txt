@@ -9,3 +9,14 @@ uvicorn>=0.29
 jinja2>=3.1
 requests>=2.31
 smbprotocol>=1.13
+
+# --- b-roll UI (mounted at /broll when DASH_BROLL_ENABLED=1) ----------------
+# Runtime deps of broll-platform's web/ app. `fastapi`, `uvicorn` and
+# `jinja2` above already cover the rest of it.
+#
+# `fastembed` is deliberately NOT here. It is optional in the b-roll app
+# (app/semantic.py degrades to keyword-only without it) and on first use it
+# downloads a ~100 MB model from Hugging Face at runtime -- a container-egress
+# and cold-start decision to make deliberately, not to inherit by accident.
+numpy>=1.26
+rapidfuzz>=3.0

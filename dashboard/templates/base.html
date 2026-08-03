@@ -43,6 +43,11 @@
   <header class="topbar">
     <a class="brand" href="/">CREATORS CLUB <span class="dim">//</span> SYNC STATUS</a>
     <a class="btn nav-link" href="/transfers">[ TRANSFERS ]</a>
+    {% if broll_mounted %}
+    {# Trailing slash matters: the b-roll SPA uses document-relative URLs, so at
+       /broll (no slash) they would resolve against the dashboard root. #}
+    <a class="btn nav-link" href="/broll/">[ B-ROLL ]</a>
+    {% endif %}
     <a class="btn nav-link" href="/download" title="download the latest CC Sync installer for this computer">[ INSTALLER ]</a>
     {% if session_is_admin %}
       <a class="btn nav-link" href="/admin/users">[ USERS ]</a>

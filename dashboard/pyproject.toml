@@ -4,7 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccsync-dashboard"
-version = "0.2.0"
+# Kept in lockstep with ccsync_dashboard.__init__.VERSION -- release.ps1 and
+# check_deploy_drift.ps1 read only __init__.py, so this drifted three releases
+# behind unnoticed. test_hardening.test_dashboard_version_does_not_drift is
+# the guard.
+version = "0.3.5"
 description = "Creators Club Sync fleet dashboard: per-project, per-editor sync status served off the NAS"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,6 +20,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Runtime deps of the b-roll web app, which this container mounts in-process at
+# /broll when DASH_BROLL_ENABLED=1. Not dependencies of ccsync_dashboard itself
+# -- the package imports none of them -- but they must be installed in the
+# deployed venv or the mount fails at import. deploy/requirements.txt carries
+# them for that reason; test_deploy_requirements_match_pyproject_dependencies
+# checks both directions against this list.
+#
+# `fastembed` is deliberately absent: optional in the b-roll app (semantic
+# search degrades to keyword-only) and it downloads a ~100 MB model from
+# Hugging Face on first use.
+broll = [
+    "numpy>=1.26",
+    "rapidfuzz>=3.0",
+]
+
 dev = [
     "pytest>=7.4",
     "httpx>=0.27",

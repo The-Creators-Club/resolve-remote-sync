@@ -219,3 +219,35 @@ def test_the_cadences_remain_overridable():
     })
     assert env.interval_inventory == 300.0
     assert env.interval_completion == 30.0
+
+
+# -- B19: the tuning is REPAIRED on existing folders, not just set at create -
+
+
+def test_folder_tuning_drift_reports_missing_and_wrong_values():
+    from ccsync_dashboard.collector import FOLDER_TUNING_KEYS, folder_tuning_drift
+
+    good = provision.build_folder_config("s", "2026/FF5/Alpha", "/data/Projects", [])
+    assert folder_tuning_drift(good) == {}
+    # what `setup_syncthing_folder.py --force` leaves behind: the keys gone
+    # entirely, so Syncthing falls back to maxConcurrentWrites=2.
+    forced = {k: v for k, v in good.items() if k not in FOLDER_TUNING_KEYS}
+    assert folder_tuning_drift(forced) == {
+        "maxConcurrentWrites": 32, "pullerMaxPendingKiB": 65536}
+    # a hand-edited wrong value counts too, and only the drifted key is named
+    assert folder_tuning_drift({**good, "maxConcurrentWrites": 2}) == {
+        "maxConcurrentWrites": 32}
+
+
+def test_only_the_tuning_keys_are_ever_repaired():
+    """The repair pass must not become "rewrite the whole folder object":
+    `devices` belongs to the enforce cycle, path/label to the retarget branch,
+    and `versioning` is the deletion safety net -- silently rewriting any of
+    them from a template would be a much worse bug than the one being fixed."""
+    from ccsync_dashboard.collector import FOLDER_TUNING_KEYS, folder_tuning_drift
+
+    good = provision.build_folder_config("s", "2026/FF5/Alpha", "/data/Projects", ["D1"])
+    mangled = {**good, "devices": [], "versioning": {}, "type": "sendonly",
+               "path": "/somewhere/else", "label": "wrong"}
+    assert folder_tuning_drift(mangled) == {}
+    assert set(FOLDER_TUNING_KEYS) == {"maxConcurrentWrites", "pullerMaxPendingKiB"}

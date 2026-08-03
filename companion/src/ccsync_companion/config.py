@@ -283,15 +283,22 @@ DEFAULT_TOML_TEXT = """\
 editor_name = ""
 
 # Absolute path to this machine's local copy of the project tree, e.g.
-# "C:\\\\Creators_Club" (Windows) or "/Users/you/Creators_Club" (macOS).
+# "C:\\\\Creators_Club" (Windows), "/Volumes/<SSD>/Creators_Club" (macOS on an
+# external drive -- the usual macOS setup) or "/Users/you/Creators_Club".
 local_root = ""
 
 # The canonical shared-drive prefix used in Resolve's stored clip paths
 # (Windows: the "P:" virtual drive letter from SPEC.md's Path canon). Used
-# to detect BAD_PREFIX (mapping-health) situations.
+# to detect BAD_PREFIX (mapping-health) situations. KEEP "P:\\" ON macOS TOO:
+# it is the string every Resolve project in the fleet actually stores, and a
+# Mac reaches it through Resolve's own Mapped Mount preference (which the
+# installer sets) rather than through a drive letter. Changing it here makes
+# this machine's projects unopenable everywhere else.
 canonical_prefix = "P:\\\\"
 
 # OPTIONAL override for the tray's "Grade from server originals" P: swap.
+# WINDOWS ONLY -- macOS has no drive namespace to remap, so this key does
+# nothing there and the tray item does not appear.
 # By default the server tree's SMB path is derived automatically from
 # dashboard_url's host + remote_root's path (so the feature just works on
 # every install). Set an explicit UNC here to override the derivation, or

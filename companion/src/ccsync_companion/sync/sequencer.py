@@ -1004,7 +1004,32 @@ class Sequencer:
             return False
         return True
 
+    def _local_root_is_present(self) -> bool:
+        """Is the tree actually mounted right now?
+
+        Defence in depth behind app.py's root guard: the structure clone ends
+        in a local `mkdir -p` loop, so against an absent local_root -- a macOS
+        editor's external SSD unplugged -- it would BUILD the whole project
+        scaffolding on the machine's internal disk, at exactly the path lane B
+        then syncs into. Fails open on an unreadable probe, same as the lane's
+        own check."""
+        try:
+            root = str(self.local_root or "").strip()
+            # Path("") is Path(".") -- the PROCESS CWD, which is always a
+            # directory and is C:\Windows\system32 for a Run-key autostart.
+            # A blank local_root must never read as "the tree is here".
+            return bool(root) and Path(root).is_dir()
+        except Exception:
+            log.debug("sequencer: could not check local_root", exc_info=True)
+            return True
+
     def _clone_structure(self, subpath: str) -> None:
+        if not self._local_root_is_present():
+            log.warning(
+                "sequencer: not cloning the structure for %s -- local_root %s is not "
+                "a directory (drive disconnected?)", subpath, self.local_root,
+            )
+            return
         try:
             created = self._clone_tree_fn(
                 rclone_path=str(self.cfg.get("rclone_path", "rclone")),

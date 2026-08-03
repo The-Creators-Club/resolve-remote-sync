@@ -1310,6 +1310,11 @@ class RcloneLane(LaneAdapter):
         # directory, so a cached one can never go stale -- a move changes the
         # subpath, i.e. the cache key.
         self._project_slug_cache: dict[str, str] = {}
+        # Warn-once latch for the missing-local_root refusal below: the
+        # periodic loop, the debounce timer and the sequencer all call
+        # run_once(), so an unplugged drive would otherwise write a WARNING
+        # every few seconds for as long as it stays out.
+        self._root_missing_logged = False
 
         # Backward-compat seam: a caller that injects a custom subprocess_run
         # (and no popen_factory) keeps the old subprocess.run() code path —
@@ -1715,6 +1720,40 @@ class RcloneLane(LaneAdapter):
         with self._lock:
             return dict(self._orphans) if self._orphans else None
 
+    # -- the tree has to actually be there --------------------------------
+    def _local_root_is_present(self) -> bool:
+        """Is local_root a directory right now?
+
+        Fails OPEN (True) if the probe itself raises, which os.path.isdir
+        effectively never does -- it already swallows OSError and answers
+        False. The alternative, treating an unanswerable probe as "absent",
+        would let one exotic filesystem error stop an editor syncing with no
+        way to override it."""
+        try:
+            present = os.path.isdir(str(self.local_root))
+        except Exception:
+            log.debug("%s: could not check local_root", self.name, exc_info=True)
+            return True
+        if present:
+            # Re-arm the warning, so a SECOND disconnect is reported too.
+            self._root_missing_logged = False
+        return present
+
+    def _note_local_root_missing(self) -> None:
+        """Park the lane idle with a detail an editor can act on."""
+        with self._lock:
+            self._status.state = STATE_IDLE
+            self._status.detail = "local root missing (drive disconnected?)"
+            self._status.transferring = 0
+            self._status.current_project = None
+        if not self._root_missing_logged:
+            self._root_missing_logged = True
+            log.warning(
+                "%s: not running -- local_root %s is not a directory. If this is an "
+                "external drive, plug it back in; syncing resumes on its own.",
+                self.name, self.local_root,
+            )
+
     def run_once(
         self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None
     ) -> LaneStatus:
@@ -1728,6 +1767,19 @@ class RcloneLane(LaneAdapter):
     def _run_once_locked(
         self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None
     ) -> LaneStatus:
+        # THE SAFETY LINE, and it is first for a reason. This lane is
+        # `rclone sync <NAS> <local_root>` in the DOWN direction. Against a
+        # local_root that is not there -- a macOS editor's external SSD
+        # unplugged, an unmounted drive letter -- rclone does not fail: it
+        # CREATES the destination and fills the machine's internal disk with
+        # the project that was supposed to live on the SSD. Up-direction is no
+        # better: an empty source against a `copy` is a no-op today, but it is
+        # one refactor away from being a mirror. app.py's root guard normally
+        # pauses the lanes long before this, and this check is what holds if
+        # that guard's thread ever dies.
+        if not self._local_root_is_present():
+            self._note_local_root_missing()
+            return self.status()
         # A stopped lane must not START a run. run_once() is called from the
         # periodic loop, the debounce timer AND (in managed mode) the
         # sequencer, none of which can be sure stop() didn't land while they
@@ -2597,6 +2649,15 @@ class RcloneLane(LaneAdapter):
         return ready, deferred
 
     def _express_run(self, rels: list[str]) -> None:
+        # Same gate as the periodic pass, for the same reason: express builds
+        # a --files-from list of paths RELATIVE TO local_root, so against a
+        # tree that has gone away every entry names a file that no longer
+        # exists. Nothing is lost by standing down -- the paths are still on
+        # the drive, and the periodic pass owns them when it returns.
+        if not self._local_root_is_present():
+            log.debug("%s: express upload skipped -- local root missing "
+                      "(drive disconnected?)", self.name)
+            return
         if not self.remote or not self.remote_root:
             # Unconfigured remote: `rclone copy src ":"` is not a shape we
             # want to hand a real binary. Same posture as the lsf helpers.

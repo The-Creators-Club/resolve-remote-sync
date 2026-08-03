@@ -83,6 +83,13 @@ def _make_popen_factory(lines: list[str], returncode: int, calls: list[list[str]
 
 
 def _make_lane(tmp_path, direction=DIRECTION_UP, popen_factory=None, subprocess_run=None):
+    # local_root must EXIST. Since the external-SSD work, _run_once_locked
+    # refuses to spawn anything against a local_root that is not a directory
+    # -- lane B is `rclone sync` DOWN, and against an absent /Volumes/<SSD>
+    # it would create the directory on the boot disk and fill it. A lane
+    # pointed at a directory nobody created is a disconnected drive, not a
+    # working install (same reasoning as test_app._make_local_root).
+    (tmp_path / "local").mkdir(parents=True, exist_ok=True)
     kwargs = dict(
         direction=direction,
         local_root=str(tmp_path / "local"),
@@ -798,6 +805,9 @@ def test_lane_b_reports_the_trash_dir_when_the_backup_dir_was_used(tmp_path):
     notices: list[str] = []
     lines = ['{"level":"info","msg":"old.mov: Deleted"}\n']
     calls: list[list[str]] = []
+    # local_root must EXIST -- see _make_lane above (this lane is built
+    # inline because it needs an on_trash callback).
+    (tmp_path / "local").mkdir(parents=True, exist_ok=True)
     lane = RcloneLane(
         direction=DIRECTION_DOWN,
         local_root=str(tmp_path / "local"),
@@ -1180,3 +1190,40 @@ def test_normalize_transferring_defaults_to_no_slug(tmp_path):
     rows = lane._normalize_transferring([{"name": "a.mov", "bytes": 1, "size": 2}])
     assert rows[0]["name"] == "a.mov"
     assert "project_slug" not in rows[0]
+
+
+# -- the drive has to actually be there (root_guard.py's defence in depth) ---
+
+
+def test_a_missing_local_root_parks_the_lane_and_spawns_nothing(tmp_path):
+    """THE safety line. Lane B is `rclone sync <NAS> <local_root>`: against a
+    local_root that is not there -- a macOS editor's external SSD unplugged --
+    rclone does not fail, it CREATES the destination and fills the machine's
+    internal disk with the project that belongs on the SSD.
+
+    app.py's root guard normally pauses the lanes long before this. This
+    check is what holds if that guard's thread ever dies."""
+    calls: list[list[str]] = []
+    factory = _make_popen_factory(STATS_LINES, returncode=0, calls=calls)
+    lane = _make_lane(tmp_path, direction=DIRECTION_DOWN, popen_factory=factory)
+    Path(lane.local_root).rmdir()  # the drive goes away
+
+    status = lane.run_once("Projects/2026/FF5/Alpha")
+
+    assert calls == [], "rclone was spawned against a tree that is not mounted"
+    assert status.state == STATE_IDLE
+    assert status.detail == "local root missing (drive disconnected?)"
+
+
+def test_the_lane_runs_again_the_moment_the_root_comes_back(tmp_path):
+    calls: list[list[str]] = []
+    factory = _make_popen_factory(STATS_LINES, returncode=0, calls=calls)
+    lane = _make_lane(tmp_path, direction=DIRECTION_DOWN, popen_factory=factory)
+    root = Path(lane.local_root)
+    root.rmdir()
+    lane.run_once()
+    assert calls == []
+
+    root.mkdir(parents=True)
+    lane.run_once()
+    assert len(calls) == 1

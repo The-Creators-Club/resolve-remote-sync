@@ -124,6 +124,9 @@ class _InstrumentedLock:
 
 
 def _make_lane(tmp_path, popen_factory=None, direction=DIRECTION_UP, debounce=30.0, cfg=None):
+    # local_root must EXIST: the lane refuses to spawn against a local_root
+    # that is not a directory -- see test_rclone_lane's _make_lane.
+    (tmp_path / "local").mkdir(parents=True, exist_ok=True)
     return RcloneLane(
         direction=direction,
         local_root=str(tmp_path / "local"),

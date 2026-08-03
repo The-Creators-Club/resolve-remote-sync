@@ -17,6 +17,7 @@ import encodings.idna  # noqa: F401
 import logging
 import logging.handlers
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -24,9 +25,11 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
+from . import paths as paths_mod
 from . import popup
 from . import proxy_relink
 from . import resolve_bridge
+from . import root_guard as root_guard_mod
 from . import shutdown_guard as shutdown_guard_mod
 from . import upgrade as upgrade_mod
 from .fixer import IgnoreTracker, _dest_dir_is_contained
@@ -84,6 +87,22 @@ _ERROR_ALREADY_EXISTS = 183
 # lifetime -- Windows releases a mutex when its last handle closes.
 _single_instance_token: Any = None
 
+# Set by upgrade._default_spawn on the CHILD it launches, naming the pid the
+# child is replacing. The self-upgrade spawns the new build BEFORE the old
+# process has exited (it has to: request_shutdown() comes after the spawn, so
+# a failed launch can still roll the whole swap back). On Windows the named
+# mutex is released the instant the old process dies and the new one simply
+# wins by timing; on posix the pid file is a LIVENESS check, and the dying
+# predecessor is very much alive for the second or two its lanes take to stop
+# -- so the freshly-installed build exited immediately with "another
+# ccsync-companion is already running", leaving the machine with NO companion
+# until the next login. The wait below is the fix, and it is deliberately
+# narrow: only the pid we were told we replace, only for as long as a normal
+# shutdown takes.
+_REPLACES_PID_ENV = "CCSYNC_REPLACES_PID"
+PREDECESSOR_WAIT_SECONDS = 20.0
+PREDECESSOR_POLL_SECONDS = 0.25
+
 
 def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
@@ -99,19 +118,84 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def _acquire_lock_file() -> bool:
+def _replaced_pid() -> Optional[int]:
+    """The pid this process was spawned to replace, or None. READS AND
+    REMOVES the variable: it describes exactly one hand-off, and leaving it
+    in os.environ would have every child we ever launch (rclone, osascript,
+    the NEXT self-upgrade's spawn) inherit a stale claim."""
+    raw = os.environ.pop(_REPLACES_PID_ENV, None)
+    try:
+        pid = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _wait_for_predecessor(
+    pid: int,
+    replaces_pid: Optional[int],
+    alive_fn: Callable[[int], bool],
+    clock: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    timeout: float = PREDECESSOR_WAIT_SECONDS,
+    poll_seconds: float = PREDECESSOR_POLL_SECONDS,
+) -> bool:
+    """Wait (briefly) for the process we are replacing to let go of the slot.
+
+    True means it died and the slot is ours. False means "not our
+    predecessor, or it never went away" -- and then the caller behaves
+    exactly as it always did, i.e. this instance exits with the
+    already-running message. Bounded on purpose: a predecessor that is wedged
+    rather than shutting down is a genuine second instance, and starting a
+    second companion over it is what the guard exists to prevent."""
+    if replaces_pid is None or replaces_pid != pid:
+        return False
+    log.info(
+        "single-instance: pid %s holds the slot and is the build we are replacing "
+        "-- waiting up to %.0fs for it to exit", pid, timeout,
+    )
+    deadline = clock() + timeout
+    while clock() < deadline:
+        if not alive_fn(pid):
+            log.info("single-instance: pid %s has exited -- taking the slot", pid)
+            return True
+        sleep_fn(poll_seconds)
+    log.warning(
+        "single-instance: pid %s is still running %.0fs after the self-upgrade "
+        "spawned this build -- treating it as a live second instance", pid, timeout,
+    )
+    return False
+
+
+def _acquire_lock_file(
+    alive_fn: Optional[Callable[[int], bool]] = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    wait_seconds: float = PREDECESSOR_WAIT_SECONDS,
+) -> bool:
     """Portable fallback: a pid file with a liveness check. A stale file from
     a crashed/killed companion must never lock the editor out permanently."""
     global _single_instance_token
     path = config_mod.CONFIG_DIR / _SINGLE_INSTANCE_LOCKFILE
+    # Popped unconditionally, before any early return: it must not survive
+    # into a child of ours whatever happens below.
+    replaces_pid = _replaced_pid()
+    # Resolved by NAME, not bound as a default: tests monkeypatch the module
+    # global, and a default argument would have captured the real one at
+    # import time.
+    is_alive = alive_fn if alive_fn is not None else _pid_is_alive
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             existing = int(path.read_text(encoding="utf-8").strip() or 0)
         except (OSError, ValueError):
             existing = 0
-        if existing and existing != os.getpid() and _pid_is_alive(existing):
-            return False
+        if existing and existing != os.getpid() and is_alive(existing):
+            if not _wait_for_predecessor(
+                existing, replaces_pid, is_alive, clock=clock, sleep_fn=sleep_fn,
+                timeout=wait_seconds,
+            ):
+                return False
         path.write_text(str(os.getpid()), encoding="utf-8")
         _single_instance_token = path
         return True
@@ -127,6 +211,11 @@ def acquire_single_instance() -> bool:
     global _single_instance_token
     if sys.platform != "win32":
         return _acquire_lock_file()
+    # Windows never has to WAIT for the build it replaces: the named mutex is
+    # released the instant the predecessor's last handle closes, so the
+    # newcomer wins by timing. Read (and drop) the variable anyway, so it
+    # cannot inherit into every rclone this process goes on to launch.
+    _replaced_pid()
     try:
         import ctypes
         from ctypes import wintypes
@@ -147,8 +236,44 @@ def acquire_single_instance() -> bool:
         return _acquire_lock_file()
 
 
+def _osascript_run(argv: list) -> None:
+    """Run an osascript argv with a sanitized environment. A module-level
+    seam so tests can assert what would be shown without spawning anything.
+
+    sanitized_child_env because PYTHONHOME/PYTHON3HOME are pinned at this
+    process's _MEI dir for fusionscript, and a child inheriting them starts a
+    Python pointed at a directory that is about to vanish (AUDIT_2 CORE-M6).
+    Blocking, deliberately: this is the last thing the process does before
+    exiting, so there is nothing left to keep responsive."""
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        argv,
+        check=False,
+        timeout=120,
+        env=resolve_bridge.sanitized_child_env(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _warn_already_running() -> None:
     log.warning("another ccsync-companion is already running -- this instance is exiting")
+    if sys.platform == "darwin":
+        # The macOS twin of the MessageBoxW below. Without it, double-clicking
+        # the companion while it is already running does nothing visible at
+        # all -- so the editor clicks it again, and again, and concludes it is
+        # broken. `display alert` (not `display notification`): this is an
+        # answer to something the user just did, and a banner that auto-
+        # dismisses is exactly what they will miss.
+        try:
+            _osascript_run([
+                "/usr/bin/osascript", "-e",
+                'display alert "CCSync is already running." message '
+                '"Look for the CCSync icon in the menu bar."',
+            ])
+        except Exception:
+            log.debug("could not show the already-running alert", exc_info=True)
+        return
     if sys.platform != "win32":
         return
     try:
@@ -164,6 +289,38 @@ def _warn_already_running() -> None:
         )
     except Exception:
         log.debug("could not show the already-running message box", exc_info=True)
+
+
+# NSApplicationActivationPolicyAccessory. A menu-bar-only agent: no Dock
+# icon, no application menu, no window that can be Cmd-Tabbed to.
+_NS_ACTIVATION_POLICY_ACCESSORY = 1
+
+
+def _set_darwin_activation_policy() -> None:
+    """Make the companion a menu-bar accessory rather than a Dock app.
+
+    macOS decides an app's shape from its activation policy, and a bare
+    PyInstaller binary (no .app bundle, no Info.plist LSUIElement) defaults to
+    Regular: a Dock icon that bounces at login, an application menu, and a
+    Cmd-Tab entry -- for a background agent whose entire UI is one menu-bar
+    icon. Worse, the Dock icon is a Quit button an editor will find and press.
+
+    Lazy import inside the try, like shutdown_guard's AppKit paths: this
+    module must import on a machine that has never heard of pyobjc, and a Mac
+    without it simply keeps the Dock icon. Never raises, never on Windows.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import AppKit
+
+        AppKit.NSApplication.sharedApplication().setActivationPolicy_(
+            _NS_ACTIVATION_POLICY_ACCESSORY
+        )
+        log.debug("macOS activation policy set to Accessory (menu bar only)")
+    except Exception:
+        log.debug("could not set the macOS activation policy -- the companion may "
+                  "show a Dock icon", exc_info=True)
 
 
 def _fallback_logging(cfg: dict[str, Any]) -> None:
@@ -195,6 +352,20 @@ def _fallback_logging(cfg: dict[str, Any]) -> None:
         logging.StreamHandler() if sys.stderr is not None else logging.NullHandler()
     )
     log.error("log_path %r is unusable and the default failed too -- no log file", broken)
+
+
+# The exact validate_config() problem that a disconnected sync drive
+# produces. Matched as a prefix, not a substring: "local_root is blank" is a
+# different failure with the same first word and must NOT be demoted (see
+# CompanionApp._demote_removable_root_problem).
+_LOCAL_ROOT_MISSING_PREFIX = "local_root does not exist:"
+
+# What a lane says while the tree is not there. Read by tray.py through the
+# normal detail channel, same as the pending-login/misconfigured details.
+_LANE_ROOT_ABSENT_DETAIL = (
+    "PAUSED: your Creators Club drive is disconnected -- plug it back in and "
+    "syncing resumes on its own"
+)
 
 
 class CompanionApp:
@@ -293,6 +464,26 @@ class CompanionApp:
             log.exception("validate_config() failed")
             self.config_problems, self.config_warnings = [], []
 
+        # -- external-SSD root state (root_guard.py) ----------------------
+        # An editor's tree lives on a drive that gets unplugged. That is a
+        # RUNTIME state, not a broken install, and it must be recoverable
+        # without restarting the companion -- see _demote_removable_root_
+        # problem() for the startup half and _on_root_absent/_on_root_present
+        # for the running half. Plain bools: they are written by the guard
+        # thread and read by the tray/watcher/lane gates, and under the GIL a
+        # bool assignment is the one thing that needs no lock.
+        self._root_absent = False
+        self._root_state = root_guard_mod.ROOT_UNKNOWN
+        self._root_guard: Optional[root_guard_mod.RootGuard] = None
+        # Once-per-episode gates: an unplugged drive is a state, not an event,
+        # and the guard is free to re-fire (absent -> misplaced) within one.
+        self._root_absent_announced = False
+        self._root_misplaced_announced = False
+        # The "local_root does not exist" problem demoted out of
+        # config_problems, kept for diagnostics.
+        self._root_demoted_problem: Optional[str] = None
+        self._demote_removable_root_problem()
+
         # Managed mode: the dashboard decides which projects this editor
         # has and in what order (see selection.py / sync/sequencer.py).
         # Non-managed ("legacy") mode is the original whole-tree,
@@ -352,6 +543,9 @@ class CompanionApp:
         self.manifest_cache = ManifestCache(
             cfg,
             get_selected_rels=self._selected_project_rels if self._managed else None,
+            # An empty scan while the drive is out reads as a mass deletion on
+            # the dashboard's presence view -- see ManifestCache.refresh_once.
+            root_present_fn=self.root_is_present,
         )
 
         # Resolve media-pool BIN tree cache (get_media_tree()) -- refreshed
@@ -421,6 +615,11 @@ class CompanionApp:
             ignore_tracker=self.ignore_tracker,
             on_project_changed=self._on_resolve_project_changed,
             ignored_projects=cfg.get("ignored_resolve_projects"),
+            # While the sync drive is out, nothing on the timeline can be
+            # classified honestly: every clip is either OUT_OF_TREE (an
+            # unfixable popup) or BAD_PREFIX (a warning storm), and neither
+            # names the actual problem. The watcher stands down instead.
+            root_present_fn=self.root_is_present,
         )
 
     def _on_report_response(self, resp: Any) -> None:
@@ -523,6 +722,257 @@ class CompanionApp:
         self._lane_c = lane_c
         return [lane_a, lane_b, lane_c]
 
+    # -- external-SSD root guard (root_guard.py) --------------------------
+    def _demote_removable_root_problem(self) -> None:
+        """Turn "local_root does not exist" into a runtime state, for the one
+        local_root that legitimately comes and goes.
+
+        config_problems is computed ONCE, in __init__, and _start_lanes()
+        refuses to start on any entry in it (DEL-3). That is right for a
+        typo'd remote_root and wrong for a Mac whose SSD was unplugged at
+        login: the install is perfect, the drive is simply out, and the
+        editor would find sync permanently dead until they thought to restart
+        the companion -- with a tray line telling them the machine "isn't set
+        up", which is not true and names nothing they can fix.
+
+        Deliberately narrow. It demotes only when local_root-existence is the
+        ONLY failing condition (anything else genuinely does need fixing
+        first), only for the exact "does not exist" problem (a BLANK
+        local_root is a real misconfiguration and stays one), and only for a
+        root the machine has reason to believe is removable -- macOS +
+        /Volumes, or a root the volume record knows. validate_config() itself
+        is untouched: `ccsync-companion` run from a terminal, and the
+        dashboard, must still be told the truth about the tree.
+
+        The lanes then start on the first on_present() instead of at
+        startup. Never raises: a failure here just leaves the problem in
+        place, i.e. today's behaviour.
+        """
+        try:
+            problems = list(self.config_problems or [])
+            if len(problems) != 1:
+                return
+            problem = str(problems[0])
+            if not problem.startswith(_LOCAL_ROOT_MISSING_PREFIX):
+                return
+            local_root = str(self.config.get("local_root", "") or "").strip()
+            if not root_guard_mod.local_root_is_removable(local_root):
+                return
+            self.config_problems = []
+            self._root_demoted_problem = problem
+            self._root_absent = True
+            self._root_state = root_guard_mod.ROOT_ABSENT
+            log.warning(
+                "local_root %s is not there at startup, but it is on a removable "
+                "volume -- treating this as a disconnected drive rather than a "
+                "broken install. Sync lanes will start on their own when it comes "
+                "back.", local_root,
+            )
+        except Exception:
+            log.exception("could not classify the missing local_root -- leaving it "
+                          "as a config problem")
+
+    def root_is_present(self) -> bool:
+        """False only while the tree is KNOWN to be gone. Read by the watcher
+        gate and the lane/scan refusals; "can't tell" is always True, because
+        a probe that has not answered must not switch anything off."""
+        return not self._root_absent
+
+    def _start_root_guard(self) -> None:
+        """Watch for the sync drive coming and going.
+
+        Never fatal: a guard that fails to start leaves the companion exactly
+        as it was before this existed -- the per-lane isdir() gates
+        (rclone_lane, sequencer, manifest) are the defence that holds even
+        with no guard at all."""
+        if self._root_guard is not None:
+            return
+        try:
+            self._root_guard = root_guard_mod.RootGuard(
+                str(self.config.get("local_root", "") or ""),
+                on_present=self._on_root_present,
+                on_absent=self._on_root_absent,
+            )
+            self._root_guard.start()
+        except Exception:
+            log.exception("failed to start the sync-drive guard")
+
+    def _on_root_absent(self, state: str) -> None:
+        """The tree is gone (unplugged, ghost directory, or mounted at the
+        wrong path). Stop cleanly and say so, ONCE.
+
+        Pausing here deliberately does NOT touch self._paused: that is the
+        editor's own tray toggle, and flipping it from a background thread
+        would leave "Resume syncing" ticked with nobody having clicked
+        anything -- and would then be un-resumed by the drive coming back."""
+        try:
+            self._root_state = str(state)
+            self._root_absent = True
+            if not self._root_absent_announced:
+                self._root_absent_announced = True
+                log.warning(
+                    "sync paused: local_root %s is not available (%s)",
+                    self.config.get("local_root"), state,
+                )
+                self._notify_tray(
+                    "Sync paused — your Creators Club drive is disconnected.",
+                    "ccsync-companion",
+                )
+            self._root_pause_lanes()
+            if state == root_guard_mod.ROOT_MISPLACED:
+                self._warn_root_misplaced()
+        except Exception:
+            log.exception("root guard: could not pause for a disconnected drive")
+
+    def _on_root_present(self) -> None:
+        """The tree is back. Re-record the volume, resume, and go now."""
+        try:
+            was_absent = self._root_absent
+            self._root_absent = False
+            self._root_state = root_guard_mod.ROOT_PRESENT
+            self._root_absent_announced = False
+            self._root_misplaced_announced = False
+            # Best effort, and only ever a no-op on Windows: this is what
+            # keeps the recorded UUID/mount point true after a reformat or a
+            # rename, which is what makes `misplaced` detectable next time.
+            try:
+                root_guard_mod.refresh_volume_record(
+                    str(self.config.get("local_root", "") or "")
+                )
+            except Exception:
+                log.debug("root guard: volume record refresh failed", exc_info=True)
+            # The prefix probe memoises "does P:\ land under local_root" for a
+            # couple of seconds, and every sample taken while the drive was
+            # out said no. Drop them rather than let a stale one produce one
+            # last BAD_PREFIX warning after the drive is back.
+            try:
+                paths_mod.clear_prefix_cache()
+            except Exception:
+                log.debug("could not clear the prefix cache", exc_info=True)
+            if not was_absent:
+                # The guard's first sighting on a healthy machine. Nothing was
+                # paused, so there is nothing to resume and nothing to say.
+                return
+            log.info("local_root %s is back -- resuming sync",
+                     self.config.get("local_root"))
+            self._root_resume_lanes()
+            self._notify_tray("Drive reconnected — sync resumed.", "ccsync-companion")
+        except Exception:
+            log.exception("root guard: could not resume after the drive came back")
+
+    def _warn_root_misplaced(self) -> None:
+        """The one case the editor MUST act on: the drive is mounted, but at
+        /Volumes/<Name> 1 because a leftover empty directory occupies the
+        real path. Nothing the companion can do fixes that -- adopting the
+        numbered path would be worse, since it changes on every replug -- so
+        this is a dialog, once per episode.
+
+        Routed through the EXISTING popup plumbing (_popup_active_lock +
+        popup.confirm_dialog on a daemon thread), because Tk permits one root
+        in this process and every other dialog in the companion goes through
+        the same door."""
+        if self._root_misplaced_announced:
+            return
+        self._root_misplaced_announced = True
+        local_root = str(self.config.get("local_root", "") or "")
+        mount_point = root_guard_mod.mount_point_for(local_root) or local_root
+        log.error(
+            "the sync drive is mounted somewhere other than %s -- a leftover "
+            "directory is occupying it", mount_point,
+        )
+        self._notify_tray(
+            "Your Creators Club drive is mounted at the wrong path. Sync is paused "
+            "until it is fixed — see the CCSync window.", "ccsync-companion")
+        body = (
+            f"Your Creators Club drive is plugged in, but macOS mounted it "
+            f"somewhere other than {mount_point}.\n\n"
+            f"That happens when an empty leftover folder is already sitting at "
+            f"{mount_point}, so the drive gets a numbered name instead "
+            f"({mount_point} 1). The numbered name changes every time you plug "
+            f"in, so CCSync will not sync into it.\n\n"
+            f"To fix it:\n"
+            f"  1. Eject the drive.\n"
+            f"  2. Delete the leftover empty folder at {mount_point}.\n"
+            f"  3. Plug the drive back in and check it appears as {mount_point}.\n\n"
+            f"Syncing resumes on its own once it does. Nothing has been deleted "
+            f"and nothing has been synced to the wrong place."
+        )
+        threading.Thread(
+            target=self._show_root_misplaced_dialog, args=(body,),
+            name="ccsync-root-misplaced", daemon=True,
+        ).start()
+
+    def _show_root_misplaced_dialog(self, body: str) -> None:
+        """The misplaced-drive dialog, on its own thread and under the popup
+        lock like every other Tk root here. If a window is already open the
+        toast above has already carried the message -- do not queue a modal
+        the editor will meet minutes later with no context."""
+        if not self._popup_active_lock.acquire(blocking=False):
+            log.info("misplaced-drive dialog: another CCSync window is open -- "
+                     "the tray notification carried the message instead")
+            return
+        try:
+            popup.confirm_dialog(
+                "CCSYNC.EXE: drive mounted at the wrong path", body, ok_label="OK",
+            )
+        except Exception:
+            log.exception("could not show the misplaced-drive dialog")
+        finally:
+            self._popup_active_lock.release()
+
+    def _root_pause_lanes(self) -> None:
+        """Stop everything that writes to the tree, cleanly."""
+        if self._managed and self.sequencer is not None:
+            try:
+                self.sequencer.pause()
+            except Exception:
+                log.exception("root guard: sequencer.pause() failed")
+        elif self._lanes_started:
+            try:
+                self._stop_lanes()
+            except Exception:
+                log.exception("root guard: could not stop the lanes")
+            self._lanes_started = False
+        # The sequencer only owns the ROTATION; lane A's express upload runs
+        # off the watchdog on its own timer (AUDIT_3 M-3).
+        self._set_express_paused(True)
+
+    def _root_resume_lanes(self) -> None:
+        """The counterpart. Honours every OTHER reason sync might be down --
+        the editor's own pause, the sign-in gate, a real config problem --
+        because a returning drive is not consent to start syncing."""
+        if self._paused:
+            log.info("drive is back, but syncing is paused from the tray -- leaving it")
+            return
+        if self.config_problems or self._login_gate_blocks_sync():
+            return
+        if not self._lanes_started:
+            try:
+                self._start_lanes()
+            except Exception:
+                log.exception("root guard: failed to start the sync lanes")
+        elif self._managed and self.sequencer is not None:
+            try:
+                self.sequencer.resume()
+            except Exception:
+                log.exception("root guard: sequencer.resume() failed")
+        self._set_express_paused(False)
+        # Do not make the editor wait a whole rotation for the work that piled
+        # up while the drive was out.
+        if self._managed and self.sequencer is not None:
+            try:
+                self.sequencer.trigger_pass_now()
+            except Exception:
+                log.exception("root guard: could not trigger an immediate pass")
+
+    def _mark_lanes_root_absent(self) -> None:
+        for lane in self.lanes:
+            try:
+                with lane._lock:
+                    lane._status.detail = _LANE_ROOT_ABSENT_DETAIL
+            except Exception:
+                pass
+
     # -- watcher callbacks -----------------------------------------------
     def _local_root_is_broken(self) -> bool:
         """True when config validation flagged local_root itself. With a
@@ -531,7 +981,14 @@ class CompanionApp:
         the whole project's media into the autostart working directory
         (C:\\Windows\\system32 for a Run-key launch) and relinks Resolve
         there. The popup must not be offered at all in that state (AUDIT_2
-        CORE-H1)."""
+        CORE-H1).
+
+        A disconnected sync drive counts, and for the same reason with a
+        different cause: every clip classifies OUT_OF_TREE, and a FIX ALL
+        would copy the project's media into a ghost directory on the Mac's
+        internal disk."""
+        if self._root_absent:
+            return True
         return any("local_root" in str(problem) for problem in self.config_problems)
 
     def _prune_popup_snooze(self, now: float) -> None:
@@ -827,6 +1284,12 @@ class CompanionApp:
         recently dismissed). Still respects ignore_tracker. Safe to call
         from the tray thread; blocks until any resulting popup is closed.
         """
+        if self._root_absent:
+            log.warning("scan whole project refused: the sync drive is disconnected")
+            self._notify_tray(
+                "Your Creators Club drive is disconnected, so CCSync can't tell where "
+                "your media is. Plug it back in and try again.", "ccsync-companion")
+            return
         if self._local_root_is_broken():
             log.error("scan whole project refused: local_root is misconfigured")
             self._notify_tray(
@@ -1656,6 +2119,16 @@ class CompanionApp:
                 len(self.config_problems), config_mod.CONFIG_PATH,
             )
             return
+        if self._root_absent:
+            # The tree is not there. Unlike a config problem this needs no
+            # restart and no admin: _on_root_present() calls back in here the
+            # moment the drive returns.
+            self._mark_lanes_root_absent()
+            log.warning(
+                "sync lanes/sequencer NOT started: local_root %s is not available "
+                "(the drive is disconnected)", self.config.get("local_root"),
+            )
+            return
         if not self._sync_enabled:
             # Base rig: works directly off the NAS share; no lanes, no
             # sequencer, no watchdog. Watcher/fixer/reporter still run.
@@ -1939,6 +2412,11 @@ class CompanionApp:
         section("managed mode", lambda: self._managed)
         section("lanes started", lambda: self._lanes_started)
         section("local_root", lambda: self.config.get("local_root"))
+        section("sync drive", lambda: (
+            f"{self._root_state}"
+            + (" (root-absent problem demoted from config: "
+               f"{self._root_demoted_problem})" if self._root_demoted_problem else "")
+        ))
         section("remote", lambda: f"{self.config.get('remote')}:{self.config.get('remote_root')}")
         section("dashboard_url", lambda: self.config.get("dashboard_url"))
         section("rclone available", lambda: _rclone_lane.rclone_available(
@@ -2103,24 +2581,28 @@ class CompanionApp:
     def is_paused(self) -> bool:
         return self._paused
 
-    def _toggle_express_pause(self) -> None:
-        """Pause/resume lane A's express upload alongside the sequencer.
+    def _set_express_paused(self, paused: bool) -> None:
+        """Pause/resume lane A's express upload.
 
         Public lane API (pause_express/resume_express), never the lane's
         privates. getattr-guarded because tests and future lane adapters may
         not implement it; fault-isolated because pause must never raise out
-        of a tray callback."""
+        of a tray callback (or, since the root guard, out of a poll thread)."""
         for lane in (getattr(self, "_lane_a", None), getattr(self, "_lane_b", None)):
-            fn = getattr(lane, "pause_express" if self._paused else "resume_express", None)
+            fn = getattr(lane, "pause_express" if paused else "resume_express", None)
             if fn is None:
                 continue
             try:
                 fn()
             except Exception:
                 log.exception(
-                    "toggle_pause: failed to %s express on %s",
-                    "pause" if self._paused else "resume", getattr(lane, "name", lane),
+                    "failed to %s express on %s",
+                    "pause" if paused else "resume", getattr(lane, "name", lane),
                 )
+
+    def _toggle_express_pause(self) -> None:
+        """Match the express lane to the tray's pause state."""
+        self._set_express_paused(self._paused)
 
     def _login_gate_blocks_sync(self) -> bool:
         """The one gate start() and on_signed_in() both apply before letting
@@ -2191,6 +2673,17 @@ class CompanionApp:
                 "sync lanes/sequencer NOT started: %d config problem(s) that stop syncing",
                 len(self.config_problems),
             )
+        elif self._root_absent:
+            # Deferred, not refused: the drive was out when the companion
+            # launched (an SSD that was unplugged at login, or a Mac that woke
+            # up before it mounted). _start_root_guard() below is what starts
+            # the lanes for real, on the first present sighting.
+            self._mark_lanes_root_absent()
+            log.warning(
+                "sync lanes/sequencer deferred: local_root %s is not available yet "
+                "-- they start on their own when the drive comes back",
+                self.config.get("local_root"),
+            )
         elif self._login_gate_blocks_sync():
             # Not signed in yet: do NOT start sync lanes/the sequencer (same
             # spirit as the sync_enabled=False path above -- lanes stay
@@ -2247,6 +2740,7 @@ class CompanionApp:
         self._watcher_thread.start()
         self._start_shutdown_guard()
         self._start_keep_awake()
+        self._start_root_guard()
 
     def _start_keep_awake(self) -> None:
         """Stop the idle timer sleeping the machine mid-transfer.
@@ -2276,6 +2770,12 @@ class CompanionApp:
             self._shutdown_guard = shutdown_guard_mod.make_shutdown_guard(
                 self._shutdown_block_reason,
                 enabled=bool(self.config.get("shutdown_warning_enabled", True)),
+                # macOS only: logout and `launchctl bootout` arrive as SIGTERM,
+                # whose default disposition kills the interpreter mid-write.
+                # Without a callback to run, shutdown_guard deliberately leaves
+                # SIGTERM alone (a handler with nothing to call would swallow it
+                # and hang the bootout) -- so this argument is the whole feature.
+                on_shutdown=self.shutdown,
             )
             self._shutdown_guard.start()
         except Exception:
@@ -2289,7 +2789,11 @@ class CompanionApp:
         and non-blocking) and a cached connection summary -- no Resolve calls,
         no disk, no network.
         """
-        if self._paused or self.config_problems:
+        # A disconnected drive means nothing CAN be moving, whatever the lanes
+        # still say about their last backlog -- and telling an editor their
+        # unplugged machine is "still syncing" on the shutdown screen is the
+        # cry-wolf failure this guard is written to avoid.
+        if self._paused or self.config_problems or self._root_absent:
             return None
         try:
             statuses = [lane.status() for lane in self.lanes]
@@ -2396,7 +2900,12 @@ class CompanionApp:
         # leave the machine unable to sleep with nothing left to sync.
         guard, self._shutdown_guard = self._shutdown_guard, None
         awake, self._keep_awake = self._keep_awake, None
-        for power_guard, label in ((guard, "shutdown"), (awake, "keep-awake")):
+        # The root guard goes with them: its callbacks START LANES, and one
+        # firing during teardown would leave a sequencer and an rclone child
+        # running in a process that is exiting.
+        root, self._root_guard = self._root_guard, None
+        for power_guard, label in ((guard, "shutdown"), (awake, "keep-awake"),
+                                   (root, "sync-drive")):
             if power_guard is None:
                 continue
             try:
@@ -2433,6 +2942,7 @@ class CompanionApp:
             setup_logging(self.config)
         except Exception:
             _fallback_logging(self.config)
+        _set_darwin_activation_policy()
         log.info("ccsync-companion v%s starting", config_mod.VERSION)
         log.info("config: %s", config_mod.CONFIG_PATH)
 

@@ -497,3 +497,81 @@ def test_a_real_project_that_merely_starts_the_same_is_not_ignored(tmp_path, nam
     )
     w.poll_once()
     assert w.last_resolve_project == name
+
+
+# -- the sync drive is out (root_guard.py) ----------------------------------
+
+
+def test_the_poll_stands_down_while_the_root_is_absent():
+    """A macOS editor's tree lives on an external SSD that gets unplugged.
+    While it is out EVERY clip misclassifies: the ones on the canonical
+    prefix as BAD_PREFIX (one mapping-health warning per clip, none of which
+    names the real problem) and the rest as OUT_OF_TREE (a popup offering to
+    copy media into a directory that does not exist)."""
+    calls: list[str] = []
+    warnings: list[dict] = []
+    watcher = TimelineWatcher(
+        local_root="/Volumes/T7/Creators_Club",
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: calls.append("poll") or {
+            "ok": True, "project_name": "Doc", "items": []},
+        on_mapping_warning=warnings.append,
+        root_present_fn=lambda: False,
+    )
+
+    result = watcher.poll_once()
+
+    assert calls == [], "Resolve was polled with no tree to classify against"
+    assert result["ok"] is False
+    assert "drive disconnected" in result["message"]
+    assert warnings == []
+
+
+def test_the_gate_leaves_the_open_project_alone():
+    """Resolve is still open with the project the editor is working on -- it
+    is the MEDIA that is unreachable, not the app -- so the dashboard must
+    keep showing the truth while the drive is out."""
+    present = {"value": True}
+    watcher = TimelineWatcher(
+        local_root="/Volumes/T7/Creators_Club",
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: {"ok": True, "project_name": "Doc", "items": []},
+        root_present_fn=lambda: present["value"],
+    )
+    watcher.poll_once()
+    assert watcher.last_resolve_project == "Doc"
+
+    present["value"] = False
+    watcher.poll_once()
+    assert watcher.last_resolve_project == "Doc"
+
+
+def test_a_raising_gate_polls_anyway():
+    """Fail open: a broken gate costs a few misclassified clips, never the
+    whole watcher."""
+    calls: list[str] = []
+
+    def _boom():
+        raise RuntimeError("no")
+
+    watcher = TimelineWatcher(
+        local_root="/Volumes/T7/Creators_Club",
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: calls.append("poll") or {
+            "ok": True, "project_name": "Doc", "items": []},
+        root_present_fn=_boom,
+    )
+    assert watcher.poll_once()["ok"] is True
+    assert calls == ["poll"]
+
+
+def test_no_gate_means_the_old_behaviour():
+    calls: list[str] = []
+    watcher = TimelineWatcher(
+        local_root="/Volumes/T7/Creators_Club",
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: calls.append("poll") or {
+            "ok": True, "project_name": "Doc", "items": []},
+    )
+    assert watcher.poll_once()["ok"] is True
+    assert calls == ["poll"]

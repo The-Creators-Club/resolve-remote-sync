@@ -266,3 +266,48 @@ def test_prioritize_keeps_the_most_recently_touched(tmp_path):
         str(tmp_path), rels, None, max_projects=2)
     assert dropped == 4
     assert set(kept) == {"2026/FF5/P5", "2026/FF5/P4"}
+
+
+# -- the tree has to actually be there (root_guard.py) ----------------------
+
+
+def test_a_rescan_is_skipped_while_the_root_is_absent(tmp_path):
+    """An empty scan is NOT the same answer as no scan. The manifest is this
+    machine's "which files do I hold" report and the dashboard diffs it -- a
+    macOS editor unplugging their SSD would otherwise report every project as
+    zero files, indistinguishable server-side from having deleted the lot."""
+    project = _make_project(tmp_path, "2026", "FF5", "Alpha")
+    _touch(project / "clip.mov", 10)
+
+    present = {"value": True}
+    cache = manifest_mod.ManifestCache(
+        {"local_root": str(tmp_path)}, root_present_fn=lambda: present["value"]
+    )
+    cache.refresh_once()
+    good = cache.get()
+    assert good["2026/FF5/Alpha"]["n_originals"] == 1
+
+    # The drive goes away, and with it the whole tree.
+    present["value"] = False
+    cache.refresh_once()
+
+    assert cache.get() == good, "an unplugged drive was reported as an empty tree"
+
+
+def test_the_default_gate_is_a_plain_isdir(tmp_path):
+    """No callable wired in (legacy construction, tests): the cache answers
+    for itself rather than scanning a tree that is not there."""
+    missing = manifest_mod.ManifestCache({"local_root": str(tmp_path / "gone")})
+    assert missing._root_is_present() is False
+    here = manifest_mod.ManifestCache({"local_root": str(tmp_path)})
+    assert here._root_is_present() is True
+
+
+def test_a_raising_gate_scans_anyway(tmp_path):
+    """Fail open: a broken gate must cost a wasted walk, never the whole
+    manifest."""
+    def _boom():
+        raise RuntimeError("no")
+
+    cache = manifest_mod.ManifestCache({"local_root": str(tmp_path)}, root_present_fn=_boom)
+    assert cache._root_is_present() is True

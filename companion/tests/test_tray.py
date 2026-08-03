@@ -792,3 +792,96 @@ def test_menu_offers_grade_swap_and_label_flips():
     app2 = _FakeApp({"dashboard_url": ""})
     labels = _menu_labels(_build_menu(app2, _tray_snapshot(app2)))
     assert not any("Grade" in l for l in labels)
+
+
+# -- the sync drive is out (root_guard.py) ----------------------------------
+
+
+def test_lane_lines_say_the_drive_is_disconnected():
+    """An editor whose SSD is unplugged must read "PAUSED — drive
+    disconnected", not "this machine isn't set up yet" -- the first names a
+    five-second fix, the second sends them to their admin."""
+    from ccsync_companion.tray import _format_lane_line_from
+
+    line = _format_lane_line_from(
+        _status("lane_b_proxy_down", "idle"), paused=False, problems=False,
+        root_absent=True,
+    )
+    assert "PAUSED" in line and "drive disconnected" in line
+
+
+def test_the_drive_line_outranks_the_not_set_up_line():
+    from ccsync_companion.tray import _format_lane_line_from
+
+    line = _format_lane_line_from(
+        _status("lane_a_video_up", "idle"), paused=False, problems=True,
+        root_absent=True,
+    )
+    assert "drive disconnected" in line
+
+
+def test_lane_lines_are_unchanged_when_the_drive_is_there():
+    from ccsync_companion.tray import _format_lane_line_from
+
+    status = _status("lane_a_video_up", "idle")
+    assert (_format_lane_line_from(status, paused=False, problems=False)
+            == _format_lane_line_from(status, paused=False, problems=False,
+                                      root_absent=False))
+
+
+def test_a_lane_error_while_the_drive_is_out_is_not_a_deleted_project():
+    """Unplugging an external SSD takes every .stfolder with it, so Syncthing
+    reports exactly what it reports when the editor DELETED a project -- and
+    that message's advice ("untick it on the dashboard") would unshare a
+    project sitting safely on a drive in the editor's bag."""
+    from ccsync_companion.tray import classify_lane_error
+
+    raw = "folder(s) in error: 2026-cct-x (folder marker missing)"
+    assert "deleted on this machine" in classify_lane_error(raw)
+    swapped = classify_lane_error(raw, root_absent=True)
+    assert "disconnected" in swapped
+    assert "untick" not in swapped.lower()
+    assert "nothing was deleted" in swapped
+
+
+def test_the_snapshot_carries_root_absent_and_the_fingerprint_changes():
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    before = _tray_snapshot(app)
+    assert before["root_absent"] is False
+    fp_before = _menu_fingerprint(before)
+
+    app._root_absent = True
+    after = _tray_snapshot(app)
+
+    assert after["root_absent"] is True
+    # Without this the menu keeps its stale lane lines: the rebuild is
+    # fingerprint-gated (pystray's win32 backend DestroyMenu()s a live menu
+    # on every icon.menu assignment, so rebuilds are deliberately rare).
+    assert _menu_fingerprint(after) != fp_before
+
+
+def test_the_menu_lane_lines_pick_the_drive_wording_up():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app._root_absent = True
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert any("drive disconnected" in label for label in labels)
+
+
+def test_the_icon_goes_orange_while_the_drive_is_out():
+    """Orange, not red: nothing is broken and nothing is lost -- plugging the
+    drive back in resumes sync on its own."""
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app._root_absent = True
+    assert compute_overall_color(_idle3(), app) == "orange"
+
+
+def test_the_tooltip_names_the_drive():
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app._root_absent = True
+    assert "disconnected" in _tooltip_text(_tray_snapshot(app))

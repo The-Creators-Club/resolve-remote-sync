@@ -2339,3 +2339,436 @@ def test_shutdown_is_idempotent(tmp_path):
 
     assert calls == first, "shutdown() ran its teardown twice"
     assert "reporter" in first
+
+
+# --- external-SSD root guard (root_guard.py) -------------------------------
+#
+# A macOS editor's tree lives on an external SSD that gets unplugged
+# routinely. Everything here is exercised on Windows through the app's own
+# seams (self._root_absent and the guard's two callbacks); nothing spawns
+# diskutil and nothing depends on the host OS.
+
+
+def _pretend_darwin(monkeypatch) -> None:
+    import sys as _sys
+
+    monkeypatch.setattr(_sys, "platform", "darwin", raising=False)
+
+
+def _darwin_app(tmp_path, monkeypatch, **overrides) -> CompanionApp:
+    """A macOS-shaped app whose local_root is on an SSD that is NOT plugged
+    in -- i.e. /Volumes/T7/Creators_Club does not exist."""
+    _pretend_darwin(monkeypatch)
+    cfg = _cfg(tmp_path, **overrides)
+    cfg["local_root"] = "/Volumes/T7/Creators_Club"
+    return CompanionApp(cfg)
+
+
+def test_a_missing_removable_root_is_demoted_out_of_config_problems(tmp_path, monkeypatch):
+    """config_problems is computed ONCE in __init__ and _start_lanes()
+    refuses on any entry -- so an SSD unplugged at login used to brick sync
+    until the editor thought to restart the companion, under a tray line
+    saying the machine "isn't set up": not true, and naming nothing they
+    could fix."""
+    from ccsync_companion import config as config_mod
+
+    app = _darwin_app(tmp_path, monkeypatch)
+
+    assert app.config_problems == []
+    assert app._root_absent is True
+    assert "local_root does not exist" in (app._root_demoted_problem or "")
+    # validate_config itself is untouched: the CLI and the dashboard must
+    # still be told the truth about the tree.
+    errors, _warnings = config_mod.validate_config(app.config)
+    assert any("local_root does not exist" in e for e in errors)
+
+
+def test_the_demotion_does_not_apply_to_a_blank_local_root(tmp_path, monkeypatch):
+    """A blank local_root is a real misconfiguration -- every destination
+    becomes CWD-relative (AUDIT_2 CORE-H1) -- and stays a config error."""
+    _pretend_darwin(monkeypatch)
+    app = CompanionApp(_cfg(tmp_path, local_root=""))
+    assert any("local_root is blank" in p for p in app.config_problems)
+    assert app._root_absent is False
+
+
+def test_the_demotion_does_not_apply_to_an_internal_root(tmp_path, monkeypatch):
+    """A typo'd path on the internal disk is not a disconnected drive."""
+    _pretend_darwin(monkeypatch)
+    app = CompanionApp(_cfg(tmp_path, local_root=str(tmp_path / "nope")))
+    assert any("local_root does not exist" in p for p in app.config_problems)
+    assert app._root_absent is False
+
+
+def test_the_demotion_does_not_apply_when_something_else_is_broken(tmp_path, monkeypatch):
+    """Anything else in config_problems genuinely needs fixing first, so the
+    lanes stay down for the reason they always did."""
+    app = _darwin_app(tmp_path, monkeypatch, remote_root="")
+    assert len(app.config_problems) >= 1
+    assert app._root_absent is False
+
+
+def test_lanes_are_deferred_while_the_drive_is_out(tmp_path, monkeypatch):
+    """Deferred, not refused: _start_lanes() is the gate every entry point
+    goes through (start(), on_signed_in(), toggle_pause()), and the lane
+    detail has to name the drive, not the setup."""
+    app = _darwin_app(tmp_path, monkeypatch, sync_enabled=True)
+    started: list[str] = []
+    for lane in app.lanes:
+        lane.start = lambda name=lane.name: started.append(name)
+
+    app._start_lanes()
+
+    assert started == []
+    assert app._lanes_started is False
+    details = [str(s.detail) for s in app.lane_statuses()]
+    assert all("drive is disconnected" in d for d in details)
+
+
+def test_on_present_starts_the_deferred_lanes_and_clears_the_prefix_cache(
+    tmp_path, monkeypatch
+):
+    from ccsync_companion import paths as paths_mod
+    from ccsync_companion import root_guard as root_guard_mod
+
+    # require_login=False: _root_resume_lanes honours every OTHER reason sync
+    # might be down, and an unsigned-in machine is one of them.
+    app = _darwin_app(tmp_path, monkeypatch, sync_enabled=True, require_login=False)
+    app._tray_icon = _FakeTray()
+    started: list[str] = []
+    monkeypatch.setattr(app, "_start_lanes", lambda: started.append("start"))
+    cleared: list[str] = []
+    monkeypatch.setattr(paths_mod, "clear_prefix_cache", lambda: cleared.append("x"))
+    refreshed: list[str] = []
+    monkeypatch.setattr(root_guard_mod, "refresh_volume_record",
+                        lambda root, **kw: refreshed.append(root))
+
+    app._on_root_present()
+
+    assert started == ["start"]
+    assert app._root_absent is False
+    assert cleared == ["x"]
+    assert refreshed == ["/Volumes/T7/Creators_Club"]
+    assert any("reconnected" in msg for msg, _title in app._tray_icon.notifications)
+
+
+def test_on_present_says_nothing_when_the_drive_was_never_gone(tmp_path, monkeypatch):
+    """The guard's FIRST sighting on a healthy machine fires on_present too.
+    Nothing was paused, so there is nothing to resume and nothing to say."""
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    started: list[str] = []
+    monkeypatch.setattr(app, "_start_lanes", lambda: started.append("start"))
+
+    app._on_root_present()
+
+    assert started == []
+    assert app._tray_icon.notifications == []
+
+
+def test_on_absent_pauses_the_sequencer_and_toasts_once(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    app._tray_icon = _FakeTray()
+    events: list[str] = []
+    monkeypatch.setattr(app.sequencer, "pause", lambda: events.append("pause"))
+    monkeypatch.setattr(app, "_set_express_paused",
+                        lambda paused: events.append(f"express={paused}"))
+
+    app._on_root_absent("absent")
+    app._on_root_absent("absent")
+
+    assert events == ["pause", "express=True", "pause", "express=True"]
+    assert app._root_absent is True
+    # The toast is once per EPISODE, not once per 5 s poll.
+    toasts = [m for m, _t in app._tray_icon.notifications if "disconnected" in m]
+    assert len(toasts) == 1
+    assert "Sync paused" in toasts[0]
+
+
+def test_on_absent_does_not_touch_the_editors_own_pause_toggle(tmp_path, monkeypatch):
+    """self._paused is the tray's checkbox. Flipping it from a poll thread
+    would leave "Resume syncing" ticked with nobody having clicked it."""
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com")
+    monkeypatch.setattr(app.sequencer, "pause", lambda: None)
+    app._on_root_absent("absent")
+    assert app.is_paused() is False
+
+
+def test_the_drive_coming_back_does_not_override_a_deliberate_pause(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com")
+    app._paused = True
+    resumed: list[str] = []
+    monkeypatch.setattr(app.sequencer, "resume", lambda: resumed.append("resume"))
+    monkeypatch.setattr(app, "_start_lanes", lambda: resumed.append("start"))
+
+    app._root_absent = True
+    app._on_root_present()
+
+    assert resumed == []
+
+
+def test_on_present_resumes_and_triggers_an_immediate_pass(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com",
+                    sync_enabled=True, require_login=False)
+    app._lanes_started = True
+    app._root_absent = True
+    events: list[str] = []
+    monkeypatch.setattr(app.sequencer, "resume", lambda: events.append("resume"))
+    monkeypatch.setattr(app.sequencer, "trigger_pass_now",
+                        lambda: events.append("trigger"))
+
+    app._on_root_present()
+
+    assert events == ["resume", "trigger"]
+
+
+def test_a_misplaced_drive_pops_one_dialog_per_episode(tmp_path, monkeypatch):
+    """The one case the editor must ACT on: the drive is mounted at
+    "/Volumes/T7 1" because a leftover folder occupies /Volumes/T7. Routed
+    through the EXISTING popup lock + popup.confirm_dialog, not new UI
+    plumbing."""
+    app = _darwin_app(tmp_path, monkeypatch, dashboard_url="http://dash.example.com")
+    app._tray_icon = _FakeTray()
+    monkeypatch.setattr(app.sequencer, "pause", lambda: None)
+    shown: list[tuple[str, str]] = []
+    done = threading.Event()
+
+    def _fake_confirm(title, body, **kwargs):
+        shown.append((title, body))
+        done.set()
+        return True
+
+    monkeypatch.setattr(popup, "confirm_dialog", _fake_confirm)
+
+    app._on_root_absent("misplaced")
+    assert done.wait(5.0), "the misplaced-drive dialog never opened"
+    # Same episode: the second sighting must not stack another modal.
+    app._on_root_absent("misplaced")
+
+    assert len(shown) == 1
+    title, body = shown[0]
+    assert "wrong path" in title
+    assert "/Volumes/T7" in body
+    assert "Eject" in body and "leftover" in body
+
+
+def test_the_misplaced_dialog_defers_to_a_window_already_on_screen(tmp_path, monkeypatch):
+    """Tk permits one root in this process, and the toast has already
+    carried the message -- do not queue a modal the editor meets minutes
+    later with no context."""
+    app = _darwin_app(tmp_path, monkeypatch)
+    shown: list[str] = []
+    monkeypatch.setattr(popup, "confirm_dialog",
+                        lambda *a, **k: shown.append("shown") or True)
+    app._popup_active_lock.acquire()
+    try:
+        app._show_root_misplaced_dialog("body")
+    finally:
+        app._popup_active_lock.release()
+    assert shown == []
+
+
+def test_scan_whole_project_is_gated_on_the_drive(tmp_path, monkeypatch):
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    app._root_absent = True
+    called: list[str] = []
+    monkeypatch.setattr(resolve_bridge, "get_media_pool_items",
+                        lambda: called.append("scan") or _mp_result())
+
+    app.scan_whole_project()
+
+    assert called == []
+    assert any("disconnected" in msg for msg, _t in app._tray_icon.notifications)
+
+
+def test_the_shutdown_warning_is_suppressed_while_the_drive_is_out(tmp_path):
+    """Nothing can be moving with the tree unplugged, whatever backlog the
+    lanes still report -- and "still syncing" on the shutdown screen of an
+    unplugged machine is exactly the cry-wolf failure the guard avoids."""
+    app = _make_app(tmp_path)
+    app._root_absent = True
+    assert app._shutdown_block_reason() is None
+
+
+def test_the_shutdown_guard_is_given_the_apps_shutdown_path(tmp_path, monkeypatch):
+    """On macOS, logout and `launchctl bootout` arrive as SIGTERM, and
+    shutdown_guard deliberately installs NO handler without a callback to
+    run (one that did nothing would swallow SIGTERM and hang the bootout) --
+    so this argument is the whole feature."""
+    from ccsync_companion import shutdown_guard as sg
+
+    app = _make_app(tmp_path)
+    captured: dict = {}
+
+    def _fake_make(reason_fn, enabled=True, on_shutdown=None):
+        captured["on_shutdown"] = on_shutdown
+        return sg.ShutdownGuard()
+
+    monkeypatch.setattr(sg, "make_shutdown_guard", _fake_make)
+    app._start_shutdown_guard()
+    assert captured["on_shutdown"] == app.shutdown
+
+
+def test_the_watcher_stands_down_while_the_drive_is_out(tmp_path):
+    """Without this every clip on the timeline misclassifies -- BAD_PREFIX
+    warning storms and OUT_OF_TREE popups offering to copy media into a
+    directory that does not exist."""
+    app = _make_app(tmp_path)
+    polled: list[str] = []
+    app.watcher._get_timeline_items = lambda: polled.append("poll") or {
+        "ok": True, "items": [], "project_name": "X"}
+
+    assert app.watcher.poll_once()["ok"] is True
+    app._root_absent = True
+    result = app.watcher.poll_once()
+
+    assert result["ok"] is False
+    assert "drive disconnected" in result["message"]
+    assert polled == ["poll"]
+
+
+def test_the_manifest_cache_is_given_the_root_gate(tmp_path):
+    app = _make_app(tmp_path)
+    assert app.manifest_cache._root_present_fn == app.root_is_present
+
+
+def test_root_is_present_is_true_unless_we_know_otherwise(tmp_path):
+    app = _make_app(tmp_path)
+    assert app.root_is_present() is True
+    app._root_absent = True
+    assert app.root_is_present() is False
+
+
+# --- the self-upgrade respawn race (CCSYNC_REPLACES_PID) -------------------
+
+
+def test_the_lock_file_waits_for_the_predecessor_it_replaces(monkeypatch, tmp_path):
+    """upgrade._default_spawn launches the new build BEFORE this one exits
+    (it must: request_shutdown() comes after the spawn, so a failed launch
+    can still roll the swap back). On posix the pid file is a LIVENESS
+    check, and the dying predecessor is alive for as long as its lanes take
+    to stop -- so the freshly-installed build exited immediately and the
+    machine was left with NO companion until the next login."""
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path / "cc")
+    (tmp_path / "cc").mkdir(parents=True)
+    (tmp_path / "cc" / app_mod._SINGLE_INSTANCE_LOCKFILE).write_text(
+        "4242", encoding="utf-8")
+    monkeypatch.setenv(app_mod._REPLACES_PID_ENV, "4242")
+
+    alive = {"value": True}
+    slept: list[float] = []
+
+    def _sleep(seconds):
+        slept.append(seconds)
+        alive["value"] = False  # the predecessor finishes its shutdown
+
+    assert app_mod._acquire_lock_file(
+        alive_fn=lambda pid: alive["value"], sleep_fn=_sleep
+    ) is True
+    assert slept, "it raced through instead of waiting"
+    assert (tmp_path / "cc" / app_mod._SINGLE_INSTANCE_LOCKFILE).read_text(
+        encoding="utf-8") == str(os.getpid())
+    # Popped, so no child of ours inherits a stale claim.
+    assert app_mod._REPLACES_PID_ENV not in os.environ
+
+
+def test_a_predecessor_that_never_dies_falls_through_to_already_running(
+    monkeypatch, tmp_path
+):
+    """Bounded on purpose: a predecessor that is wedged rather than shutting
+    down IS a live second instance, and starting over it is what the guard
+    exists to prevent."""
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path / "cc")
+    (tmp_path / "cc").mkdir(parents=True)
+    (tmp_path / "cc" / app_mod._SINGLE_INSTANCE_LOCKFILE).write_text(
+        "4242", encoding="utf-8")
+    monkeypatch.setenv(app_mod._REPLACES_PID_ENV, "4242")
+
+    clock = {"now": 0.0}
+
+    def _tick(seconds):
+        clock["now"] += seconds
+
+    assert app_mod._acquire_lock_file(
+        alive_fn=lambda pid: True, clock=lambda: clock["now"], sleep_fn=_tick,
+    ) is False
+
+
+def test_an_unrelated_live_holder_is_never_waited_for(monkeypatch, tmp_path):
+    """Only the pid we were TOLD we replace. A different companion holding
+    the slot is refused immediately, exactly as before."""
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path / "cc")
+    (tmp_path / "cc").mkdir(parents=True)
+    (tmp_path / "cc" / app_mod._SINGLE_INSTANCE_LOCKFILE).write_text(
+        "999999", encoding="utf-8")
+    monkeypatch.setenv(app_mod._REPLACES_PID_ENV, "4242")
+
+    slept: list[float] = []
+    assert app_mod._acquire_lock_file(
+        alive_fn=lambda pid: True, sleep_fn=slept.append
+    ) is False
+    assert slept == []
+
+
+def test_the_replaces_pid_variable_is_popped_even_when_unused(monkeypatch, tmp_path):
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path / "cc")
+    monkeypatch.setenv(app_mod._REPLACES_PID_ENV, "4242")
+    app_mod._acquire_lock_file()
+    assert app_mod._REPLACES_PID_ENV not in os.environ
+
+
+# --- macOS: the already-running alert + the activation policy --------------
+
+
+def test_the_already_running_warning_uses_osascript_on_darwin(monkeypatch):
+    """Without it, double-clicking the companion while it is already running
+    does nothing visible at all -- so the editor clicks again, and again,
+    and concludes it is broken."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod.sys, "platform", "darwin", raising=False)
+    spawned: list[list] = []
+    monkeypatch.setattr(app_mod, "_osascript_run", spawned.append)
+
+    app_mod._warn_already_running()
+
+    assert len(spawned) == 1
+    argv = spawned[0]
+    assert argv[0] == "/usr/bin/osascript" and argv[1] == "-e"
+    assert "display alert" in argv[2]
+    assert "CCSync is already running." in argv[2]
+    assert "menu bar" in argv[2]
+
+
+def test_the_already_running_warning_is_a_no_op_on_linux(monkeypatch):
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod.sys, "platform", "linux", raising=False)
+    spawned: list[list] = []
+    monkeypatch.setattr(app_mod, "_osascript_run", spawned.append)
+    app_mod._warn_already_running()
+    assert spawned == []
+
+
+def test_the_activation_policy_never_raises_without_pyobjc(monkeypatch):
+    """The module must import and run on a machine that has never heard of
+    pyobjc -- the AppKit import is lazy, inside the try."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod.sys, "platform", "win32", raising=False)
+    app_mod._set_darwin_activation_policy()
+    monkeypatch.setattr(app_mod.sys, "platform", "darwin", raising=False)
+    app_mod._set_darwin_activation_policy()

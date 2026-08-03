@@ -728,6 +728,17 @@ class UpgradeManager:
 
         env = resolve_bridge.sanitized_child_env(env)
         env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        # The new build is launched BEFORE this one exits -- it has to be, or
+        # a failed launch could not roll the swap back -- so for a second or
+        # two there really are two companions, and the single-instance guard
+        # is entitled to refuse the newcomer. On Windows the named mutex is
+        # released the instant we die and the child simply wins by timing; on
+        # posix the guard is a pid file with a LIVENESS check, and the dying
+        # predecessor is alive for exactly as long as its lanes take to stop.
+        # This tells the child WHOSE pid it may wait for (app._acquire_lock_
+        # file). Set on every platform: harmless where it is not needed, and
+        # one less thing to be platform-conditional about.
+        env["CCSYNC_REPLACES_PID"] = str(os.getpid())
         subprocess.Popen(
             [str(exe)],
             cwd=str(exe.parent),

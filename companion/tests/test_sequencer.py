@@ -4,6 +4,7 @@ test_reporter.py's threaded fault-isolation tests."""
 
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
 import urllib.error
@@ -194,9 +195,19 @@ def _item(slug, rel_path, position, label=None):
     return {"slug": slug, "label": label or rel_path, "rel_path": rel_path, "position": position, "active": True}
 
 
+# local_root must EXIST. _clone_structure() refuses to mkdir anything under a
+# tree that is not mounted (the external-SSD guard: on a Mac an absent
+# /Volumes/<SSD> would have the whole project scaffolding built on the boot
+# disk instead), so a sequencer pointed at a path nobody created reads as a
+# disconnected drive and skips the clone. Nothing is ever written here -- the
+# clone is either faked outright or short-circuits on the blank `remote`.
+_FAKE_LOCAL_ROOT = str(Path(tempfile.gettempdir()) / "ccsync-tests-sequencer-root")
+Path(_FAKE_LOCAL_ROOT).mkdir(parents=True, exist_ok=True)
+
+
 def _cfg(**overrides):
     cfg = {
-        "local_root": "/local",
+        "local_root": _FAKE_LOCAL_ROOT,
         "selection_poll_interval": 0.02,
         "project_rotation_seconds": 5.0,
         "sequencer_idle_seconds": 0.02,
@@ -339,7 +350,7 @@ def test_auto_accept_only_for_pending_selected_folder_with_correct_local_path():
     assert len(admin.accept_calls) == 1
     call = admin.accept_calls[0]
     assert call["folder_id"] == "s-a"
-    assert call["local_path"] == str(Path("/local") / "Projects" / "2026/FF5/Alpha")
+    assert call["local_path"] == str(Path(_FAKE_LOCAL_ROOT) / "Projects" / "2026/FF5/Alpha")
     assert call["offered_by_device_id"] == "DEVICE-1"
     assert all(c["folder_id"] != "unrelated-slug" for c in admin.accept_calls)
 
@@ -1287,3 +1298,49 @@ def test_a_trailing_slash_rel_path_still_builds_a_clean_subpath():
 
     assert lane_a.calls[0] == "Projects/2026/FF5/Alpha"
     assert seq.known_rels() == ["2026/FF5/Alpha"]
+
+
+# -- the tree has to actually be mounted (root_guard.py's defence in depth) --
+
+
+def _clone_spy_sequencer(local_root, calls):
+    admin = FakeAdmin()
+    selection = FakeSelectionClient([])
+    return Sequencer(
+        FakeLane("lane_a", admin.events), FakeLane("lane_b", admin.events),
+        admin, selection, _cfg(local_root=local_root),
+        folder_status_poll_seconds=0.02,
+        clone_tree_fn=lambda **kwargs: calls.append(kwargs) or 0,
+    )
+
+
+def test_the_structure_clone_refuses_when_local_root_is_not_mounted(tmp_path):
+    """clone_directory_tree ends in a local `mkdir -p` loop. Against an
+    absent local_root -- a macOS editor's external SSD unplugged -- it would
+    build the whole project scaffolding on the machine's internal disk, at
+    exactly the path lane B then syncs into."""
+    calls: list[dict] = []
+    seq = _clone_spy_sequencer(str(tmp_path / "not-mounted"), calls)
+
+    seq._clone_structure("Projects/2026/FF5/Alpha")
+
+    assert calls == []
+
+
+def test_the_structure_clone_runs_when_local_root_is_there(tmp_path):
+    calls: list[dict] = []
+    root = tmp_path / "mounted"
+    root.mkdir()
+    seq = _clone_spy_sequencer(str(root), calls)
+
+    seq._clone_structure("Projects/2026/FF5/Alpha")
+
+    assert len(calls) == 1
+    assert calls[0]["subpath"] == "Projects/2026/FF5/Alpha"
+
+
+def test_a_blank_local_root_never_clones(tmp_path):
+    calls: list[dict] = []
+    seq = _clone_spy_sequencer("", calls)
+    seq._clone_structure("Projects/2026/FF5/Alpha")
+    assert calls == []

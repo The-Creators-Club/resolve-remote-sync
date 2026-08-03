@@ -108,6 +108,10 @@ def _recording_popen(calls: list, stderr_text: str = DEFAULT_STDERR, returncode:
 
 
 def _make_lane(tmp_path, cfg=None, popen_factory=None, direction=DIRECTION_UP, debounce=0.05):
+    # local_root must EXIST: the lane (periodic AND express) refuses to run
+    # against a local_root that is not a directory -- see test_rclone_lane's
+    # _make_lane for why that gate is there.
+    (tmp_path / "local").mkdir(parents=True, exist_ok=True)
     return RcloneLane(
         direction=direction,
         local_root=str(tmp_path / "local"),
@@ -977,3 +981,23 @@ def test_a_crashing_express_run_still_releases_its_claim(tmp_path):
     _flush_now(lane)
 
     assert lane.express_inflight_paths() == []
+
+
+def test_express_stands_down_when_the_local_root_is_gone(tmp_path):
+    """Same gate as the periodic pass: the express run builds a
+    --files-from list of paths RELATIVE TO local_root, so against a tree that
+    has been unplugged every entry names a file that is not there. Nothing is
+    lost -- the paths are still on the drive, and the periodic pass owns them
+    when it returns."""
+    import shutil
+
+    calls: list = []
+    lane = _make_lane(tmp_path, popen_factory=_recording_popen(calls))
+    _old_file(Path(lane.local_root), "Projects/2026/FF5/Alpha/clip.mov")
+
+    lane._express_run(["Projects/2026/FF5/Alpha/clip.mov"])
+    assert len(calls) == 1, "sanity: express normally runs"
+
+    shutil.rmtree(lane.local_root)
+    lane._express_run(["Projects/2026/FF5/Alpha/clip.mov"])
+    assert len(calls) == 1, "express spawned rclone against an unmounted tree"

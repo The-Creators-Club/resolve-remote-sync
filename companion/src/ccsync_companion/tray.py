@@ -81,6 +81,11 @@ def compute_overall_color(
         try:
             if getattr(app, "config_problems", None):
                 return "red"
+            if getattr(app, "_root_absent", False):
+                # Orange, not red: nothing is broken and nothing is lost --
+                # the drive is out, and plugging it back in resumes sync on
+                # its own. Same visual as paused, which is what it is.
+                return "orange"
             if not _identity_is_valid(app) and getattr(app, "_require_login", True):
                 return "orange"
             if app.is_paused():
@@ -211,7 +216,7 @@ def human_duration(seconds: Optional[float]) -> str:
     return f"~{secs // 3600}h {(secs % 3600) // 60}m"
 
 
-def classify_lane_error(last_error: Optional[str]) -> str:
+def classify_lane_error(last_error: Optional[str], root_absent: bool = False) -> str:
     """Turn rclone's verbatim stderr tail into something actionable.
 
     rclone_lane surfaces f"rclone exited {rc}" plus the last 300 chars of
@@ -219,6 +224,17 @@ def classify_lane_error(last_error: Optional[str]) -> str:
     action (AUDIT_2 UX-16). The raw text stays in the log and in
     Copy diagnostics."""
     text = str(last_error or "").lower()
+    if root_absent:
+        # EVERY lane error means the same thing while the tree is gone, and
+        # none of the wordings below is the truth. The one that actively
+        # misleads is lane C's marker-missing message: unplugging an external
+        # SSD takes every .stfolder with it, so Syncthing reports exactly what
+        # it reports when the editor DELETED a project -- and the advice
+        # ("untick it on the dashboard") would unshare a project that is
+        # perfectly intact, sitting on a drive in the editor's bag. Nothing in
+        # here is a reason to act; plugging the drive back in is.
+        return ("Your Creators Club drive is disconnected, so syncing is paused. "
+                "Plug it back in and it resumes on its own -- nothing was deleted.")
     if not text:
         return "Something went wrong. Tray → Copy diagnostics for your admin."
     if "marker missing" in text:
@@ -252,6 +268,7 @@ def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> 
     """
     paused = False
     problems = False
+    root_absent = False
     if app is not None:
         try:
             problems = bool(getattr(app, "config_problems", None))
@@ -261,22 +278,38 @@ def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> 
             paused = bool(app.is_paused())
         except Exception:
             pass
-    return _format_lane_line_from(status, paused=paused, problems=problems)
+        try:
+            root_absent = bool(getattr(app, "_root_absent", False))
+        except Exception:
+            pass
+    return _format_lane_line_from(
+        status, paused=paused, problems=problems, root_absent=root_absent
+    )
 
 
-def _format_lane_line_from(status: LaneStatus, paused: bool, problems: bool) -> str:
+def _format_lane_line_from(
+    status: LaneStatus, paused: bool, problems: bool, root_absent: bool = False
+) -> str:
     """_format_lane_line with the app state already snapshotted -- what the
     menu build actually uses, so rendering never calls back into app."""
     label = lane_label(status.name)
     # Pause is checked FIRST: no lane ever sets state="paused" (the sequencer
     # owns pause, the lanes don't know), so after clicking Pause all three
     # lines still read as normal (AUDIT_2 UX-2).
+    #
+    # A disconnected sync drive outranks even the not-set-up line: it is the
+    # only state here the editor can fix in five seconds, and calling it
+    # "this machine isn't set up" would send them to their admin instead of
+    # to the cable.
+    if root_absent:
+        return f"{label}: PAUSED — drive disconnected"
     if problems:
         return f"{label}: NOT SYNCING (this machine isn't set up yet)"
     if paused:
         return f"{label}: PAUSED"
     if status.state == STATE_ERROR:
-        return f"{label}: PROBLEM. {classify_lane_error(status.last_error)}"
+        return (f"{label}: PROBLEM. "
+                f"{classify_lane_error(status.last_error, root_absent=root_absent)}")
     detail = str(status.detail or "")
     if "sign in required" in detail.lower():
         return f"{label}: NOT SYNCING (sign in first)"
@@ -854,6 +887,11 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     _get("identity_label", lambda: _identity_status_label(app), "NOT SIGNED IN")
     _get("paused", lambda: bool(app.is_paused()), False)
     _get("problems", lambda: bool(getattr(app, "config_problems", None)), False)
+    # The sync drive (root_guard.py): an unplugged external SSD is a PAUSE,
+    # not a fault, and it has to say so on every lane line -- otherwise the
+    # tray reports "PROBLEM ... a project folder was deleted on this machine"
+    # for a project sitting safely on a drive in the editor's bag.
+    _get("root_absent", lambda: bool(getattr(app, "_root_absent", False)), False)
     _get("dashboard_url", lambda: _dashboard_url(app), "")
     _get("sequencer_line", lambda: _sequencer_line(app), None)
     _get("current_project_line", lambda: _current_project_line(app), None)
@@ -896,7 +934,8 @@ def _menu_fingerprint(snap: dict) -> tuple:
     )
     return (
         lanes, snap["identity_label"], snap["signed_in"], snap["paused"],
-        snap["problems"], snap["sequencer_line"], snap["current_project_line"],
+        snap["problems"], snap.get("root_absent"),
+        snap["sequencer_line"], snap["current_project_line"],
         snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
         snap["dashboard_url"], snap["color"],
         tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
@@ -910,6 +949,8 @@ def _tooltip_text(snap: dict) -> str:
     it can never disturb an open menu). Windows truncates at ~127 chars."""
     if snap["problems"]:
         return "CCSync: NOT SET UP (nothing syncs)"
+    if snap.get("root_absent"):
+        return "CCSync: PAUSED — your drive is disconnected"
     if not snap["signed_in"] and snap.get("require_login", True):
         return "CCSync: not signed in (nothing syncs)"
     if snap["paused"]:
@@ -936,7 +977,10 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     statuses = snap["statuses"]
     lane_items = [
         pystray.MenuItem(
-            _format_lane_line_from(s, paused=snap["paused"], problems=snap["problems"]),
+            _format_lane_line_from(
+                s, paused=snap["paused"], problems=snap["problems"],
+                root_absent=bool(snap.get("root_absent")),
+            ),
             None, enabled=False,
         )
         for s in statuses

@@ -197,9 +197,14 @@ class ManifestCache:
         cfg: dict[str, Any],
         get_selected_rels: Optional[GetSelectedRelsFn] = None,
         size_fn: Callable[[str], int] = os.path.getsize,
+        root_present_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.cfg = cfg
         self.local_root = cfg.get("local_root", "")
+        # "Is the tree actually here?" -- app.root_is_present when the
+        # companion wires one in, else a plain isdir on local_root. See
+        # _root_is_present() for why an empty scan is worse than no scan.
+        self._root_present_fn = root_present_fn
         # coerce_numeric, not float(): ManifestCache is constructed inside
         # CompanionApp.__init__, so a hand-edited "5m" here took the windowed
         # exe down with no tray and no log line (AUDIT_2 CORE-M4's family).
@@ -228,8 +233,31 @@ class ManifestCache:
         with self._lock:
             return dict(self._cache)
 
+    def _root_is_present(self) -> bool:
+        """Whether local_root is there to be scanned. Never raises; an
+        unanswerable probe is True, i.e. "scan as before"."""
+        try:
+            if self._root_present_fn is not None:
+                return bool(self._root_present_fn())
+            return os.path.isdir(str(self.local_root))
+        except Exception:
+            log.debug("manifest cache: could not check local_root", exc_info=True)
+            return True
+
     def refresh_once(self) -> None:
-        """Rescan and update the cache. Never raises."""
+        """Rescan and update the cache. Never raises.
+
+        A scan is SKIPPED entirely while the tree is missing, rather than
+        allowed to produce an empty one. The manifest is this machine's
+        "which files do I hold" report, and the dashboard's presence view
+        diffs it: a macOS editor unplugging their SSD would otherwise report
+        every project as zero files -- indistinguishable, server-side, from
+        having deleted the lot. Holding the last good scan is the honest
+        answer to "we cannot see the disk right now"."""
+        if not self._root_is_present():
+            log.debug("manifest cache: local_root %s is not available -- keeping the "
+                      "last scan rather than reporting an empty tree", self.local_root)
+            return
         try:
             selected_rels = None
             if self._get_selected_rels is not None:

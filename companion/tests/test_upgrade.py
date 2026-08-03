@@ -887,3 +887,30 @@ def test_windows_spawn_keeps_its_creation_flags(tmp_path, windows, popen_calls):
     )
     assert "start_new_session" not in kwargs
     assert kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+
+
+def test_the_spawn_names_the_pid_it_replaces(tmp_path, darwin, popen_calls):
+    """The new build is launched BEFORE this one exits (it has to be:
+    request_shutdown() comes after the spawn, so a failed launch can still
+    roll the whole swap back). For those few seconds there really are two
+    companions, and app.py's posix single-instance guard -- a pid file with a
+    LIVENESS check -- would refuse the newcomer and leave the machine with NO
+    companion until the next login. This is what tells the child whose pid it
+    may briefly wait for."""
+    exe = tmp_path / "ccsync-companion"
+
+    UpgradeManager._default_spawn(exe)
+
+    (_argv, kwargs), = popen_calls
+    assert kwargs["env"]["CCSYNC_REPLACES_PID"] == str(os.getpid())
+
+
+def test_the_replaced_pid_is_set_on_windows_too(tmp_path, windows, popen_calls):
+    """Harmless where the named mutex already handles it, and one less thing
+    to be platform-conditional about."""
+    exe = tmp_path / "ccsync-companion.exe"
+
+    UpgradeManager._default_spawn(exe)
+
+    (_argv, kwargs), = popen_calls
+    assert kwargs["env"]["CCSYNC_REPLACES_PID"] == str(os.getpid())

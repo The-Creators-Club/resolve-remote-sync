@@ -56,6 +56,7 @@ class TimelineWatcher:
         get_timeline_items: Optional[Callable[[], dict[str, Any]]] = None,
         on_project_changed: Optional[Callable[[str], None]] = None,
         ignored_projects: Optional[list[str]] = None,
+        root_present_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.local_root = local_root
         self.canonical_prefix = canonical_prefix
@@ -76,6 +77,14 @@ class TimelineWatcher:
         # counts them up, and an exact-match list let every new number
         # through (seen live 2026-07-25).
         self._ignored_projects = config_mod.normalize_ignored_projects(ignored_projects)
+        # "Is local_root actually here?" (app.root_is_present -> root_guard.py).
+        # A macOS editor's tree lives on an external SSD that gets unplugged,
+        # and while it is out EVERY clip on the timeline misclassifies: the
+        # ones on the canonical prefix as BAD_PREFIX (a mapping-health warning
+        # per clip, none of which names the real problem) and the rest as
+        # OUT_OF_TREE (a popup offering to copy media into a directory that
+        # does not exist). None = no gate, i.e. the behaviour before this.
+        self._root_present_fn = root_present_fn
         self.ignore_tracker = ignore_tracker if ignore_tracker is not None else IgnoreTracker()
         self._get_timeline_items = get_timeline_items or resolve_bridge.get_timeline_items
         self._warned_mapping: set[str] = set()
@@ -88,6 +97,13 @@ class TimelineWatcher:
 
     def poll_once(self) -> dict[str, Any]:
         """Run one poll cycle. Returns a small summary dict; never raises."""
+        if not self._root_is_present():
+            # Deliberately BEFORE the Resolve call: last_resolve_project is
+            # left alone (Resolve is still open with the project the editor is
+            # working on -- it is the media that is unreachable, not the app),
+            # so the dashboard keeps showing the truth while the drive is out.
+            return {"ok": False, "message": "local root is not available (drive "
+                    "disconnected?)", "out_of_tree": 0, "mapping_warnings": 0}
         try:
             result = self._get_timeline_items()
         except Exception as exc:  # belt and braces on top of resolve_bridge's own catch-all
@@ -197,6 +213,18 @@ class TimelineWatcher:
             "out_of_tree": len(new_out_of_tree),
             "mapping_warnings": new_mapping_warnings,
         }
+
+    def _root_is_present(self) -> bool:
+        """False only when the gate POSITIVELY says the tree is gone. A
+        missing or raising callable is "carry on": a broken gate must cost a
+        few misclassified clips, never the whole watcher."""
+        if self._root_present_fn is None:
+            return True
+        try:
+            return bool(self._root_present_fn())
+        except Exception:
+            log.debug("root-present check failed -- polling anyway", exc_info=True)
+            return True
 
     def run(self, stop_event: threading.Event) -> None:
         """Blocking supervised loop — run this in its own thread."""

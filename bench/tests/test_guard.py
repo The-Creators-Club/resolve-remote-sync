@@ -93,6 +93,44 @@ def test_empty_dir_clears_a_bench_destination(tmp_path: Path):
     assert list(dest.iterdir()) == []
 
 
+def test_empty_dir_raises_when_the_destination_could_not_be_emptied(tmp_path: Path, monkeypatch):
+    """`rmtree(ignore_errors=True)` can leave files behind without saying so --
+    which is exactly how a warm destination survives into a timed download."""
+    dest = tmp_path / "_bench_down" / "0"
+    dest.mkdir(parents=True)
+    (dest / "warm.bin").write_bytes(b"locked by another process")
+
+    monkeypatch.setattr(guard.shutil, "rmtree", lambda *a, **k: None)  # the silent-failure case
+
+    with pytest.raises(guard.CleanupFailed) as exc:
+        guard.empty_dir(dest)
+    assert "warm.bin" in str(exc.value)
+
+
+def test_redact_hides_an_obscured_password_in_an_rclone_spec():
+    """`rclone reveal` is the exact inverse of `rclone obscure`, so an obscured
+    password is a live credential, not a hash."""
+    spec = ":smb,host=nas,user=editor1,pass=Xy9_secretObscured:pool/Creators_Club/_bench/large/up"
+    redacted = guard.redact(spec)
+    assert "Xy9_secretObscured" not in redacted
+    assert "pass=***" in redacted
+    # everything else survives, so the message is still diagnosable
+    assert "host=nas" in redacted
+    assert "pool/Creators_Club/_bench/large/up" in redacted
+
+
+def test_redact_leaves_credential_free_paths_alone():
+    assert guard.redact("E:\\scratch\\_bench\\large") == "E:\\scratch\\_bench\\large"
+    assert guard.redact(":sftp,host=h,user=u:CC/_bench") == ":sftp,host=h,user=u:CC/_bench"
+
+
+def test_a_refusal_message_never_quotes_the_password():
+    spec = ":smb,host=nas,user=editor1,pass=Xy9_secretObscured:pool/Creators_Club/Projects"
+    with pytest.raises(guard.DestructiveEndpointRefused) as exc:
+        guard.assert_scratch_path(spec, action="rclone purge")
+    assert "Xy9_secretObscured" not in str(exc.value)
+
+
 def test_rclone_cleanup_remote_refuses_config_derived_live_path(monkeypatch):
     """The audit's concrete scenario: bench.toml's remote_path edited from
     'Creators_Club/_bench' to 'Creators_Club' -> `rclone purge` must not run."""

@@ -141,6 +141,11 @@ def run_matrix(
                     all_results.append(result)
                     continue
                 for params in combos:
+                    # Registered before the skip-cached check on purpose: a
+                    # resumed matrix whose every combo is already recorded
+                    # still wrote to the remote on the earlier run, and that
+                    # scratch subtree must still be cleaned up at the end.
+                    pending_cleanup.setdefault((engine, dataset_name, direction), endpoint)
                     for repeat_index in range(repeats):
                         key = RunResult(
                             engine=engine, dataset=dataset_name, direction=direction,
@@ -177,7 +182,6 @@ def run_matrix(
                         append_result(results_file, result)
                         known_keys.add(result.key())
                         all_results.append(result)
-                        pending_cleanup.setdefault((engine, dataset_name, direction), endpoint)
 
                         if dest_dir is not None and dest_dir.exists():
                             try:
@@ -185,13 +189,25 @@ def run_matrix(
                             except guard.DestructiveEndpointRefused as exc:
                                 progress(f"    -> cleanup skipped: {exc}")
 
-    # iperf3: not tied to a lane/dataset, just up + down against the configured host.
-    if "iperf3" in engines:
+    # iperf3: not tied to a lane/dataset, just up + down against the configured
+    # host. It carries the synthetic "net" lane, so --lanes filters it like any
+    # other lane rather than sweeping regardless.
+    if "iperf3" in engines and (only_lanes is None or NET_LANE in only_lanes):
         runner = REGISTRY["iperf3"]
         endpoint = cfg.get("endpoints", {}).get("iperf3", {})
         params_cfg = cfg.get("params", {}).get("iperf3", {})
         for direction in ("up", "down"):
-            combos = runner.param_matrix(params_cfg, direction)
+            try:
+                combos = runner.param_matrix(params_cfg, direction)
+            except Exception as exc:  # noqa: BLE001 -- a bad [params.iperf3] section
+                # Must not escape run_matrix: `_cleanup_endpoints` below is the
+                # only thing that removes what the file engines wrote.
+                progress(f"    -> FAILED to expand params for iperf3 {direction}: {exc}")
+                result = _crashed("iperf3", "network", direction, {}, NET_LANE, 0, exc)
+                _report_one(result, progress)
+                append_result(results_file, result)
+                all_results.append(result)
+                continue
             for params in combos:
                 for repeat_index in range(repeats):
                     key = RunResult(
@@ -259,7 +275,11 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--config", required=True, help="path to bench.toml")
     p.add_argument("--rerun", action="store_true", help="re-run combos already present in results.jsonl")
     p.add_argument("--engines", help="comma-separated engine allowlist (default: all in bench.toml)")
-    p.add_argument("--lanes", help="comma-separated lane allowlist, e.g. A,B,C (default: all in bench.toml)")
+    p.add_argument(
+        "--lanes",
+        help="comma-separated lane allowlist, e.g. A,B,C (default: all in bench.toml). "
+             f"iperf3 belongs to the synthetic lane '{NET_LANE}' and is filtered by this too.",
+    )
     p.add_argument(
         "--allow-destructive-endpoint",
         action="store_true",

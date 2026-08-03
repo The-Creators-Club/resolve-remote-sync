@@ -33,6 +33,13 @@ def param_matrix(cfg: dict[str, Any], direction: str) -> list[dict[str, Any]]:
 
 
 def _obscure(password: str) -> str:
+    """rclone's own obscuring of a password, for the on-the-fly spec.
+
+    Obscured is **not** hashed -- `rclone reveal` is the exact inverse -- so the
+    resulting spec is a live credential. It never goes onto a result row:
+    everything that could carry it (guard refusals, cleanup failures, rclone's
+    own stderr) is passed through `guard.redact()` first.
+    """
     try:
         proc = subprocess.run(
             ["rclone", "obscure", password], capture_output=True, text=True, timeout=15

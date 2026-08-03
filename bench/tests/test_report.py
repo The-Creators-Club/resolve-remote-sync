@@ -116,6 +116,32 @@ def test_render_report_contains_lane_sections_and_winner():
     assert "--transfers 8" in md
 
 
+def test_zero_multi_thread_streams_is_printed_not_dropped():
+    """`--multi-thread-streams 0` is falsy but load-bearing: rclone's default
+    is 4, so omitting the flag recommends a config that was never measured --
+    quite possibly the one that lost."""
+    rows = [_r("rclone_sftp", "large", "up", {"transfers": 8, "multi_thread_streams": 0}, 90.0)]
+    md = render_report(rows)
+    assert "--multi-thread-streams 0" in md
+
+
+def test_a_nonzero_multi_thread_streams_winner_still_prints_its_value():
+    rows = [_r("rclone_smb", "large", "up", {"transfers": 4, "multi_thread_streams": 8}, 90.0)]
+    md = render_report(rows)
+    assert "--multi-thread-streams 8" in md
+
+
+def test_the_printed_flags_match_the_winning_params_exactly():
+    """0 beating 4 must not be reported as 4."""
+    rows = [
+        _r("rclone_smb", "large", "up", {"transfers": 4, "multi_thread_streams": 0}, 120.0),
+        _r("rclone_smb", "large", "up", {"transfers": 4, "multi_thread_streams": 4}, 60.0),
+    ]
+    md = render_report(rows)
+    recommendation = md.split("Recommended per-lane config")[1]
+    assert "Exact flags: `rclone copy ... --transfers 4 --multi-thread-streams 0`" in recommendation
+
+
 def test_chunk_size_flag_is_rendered_in_kib():
     rows = [_r("rclone_sftp", "large", "up", {"transfers": 8, "sftp_chunk_size_kib": 255}, 90.0)]
     md = render_report(rows)

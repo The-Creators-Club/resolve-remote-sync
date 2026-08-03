@@ -158,10 +158,17 @@ def _fmt_params(params: dict[str, Any]) -> str:
 
 
 def _rclone_flags(params: dict[str, Any]) -> str:
+    """The exact rclone flags that reproduce a measured run.
+
+    Every swept value is emitted explicitly, including zeros. A falsy value is
+    not "unset": `--multi-thread-streams 0` disables multi-threading, whereas
+    *omitting* the flag selects rclone's default of 4. Dropping a zero here
+    would print a recommendation for a config this benchmark never ran, and
+    quite possibly the one it measured as slower.
+    """
     flags = [f"--transfers {params.get('transfers', 4)}"]
-    mts = params.get("multi_thread_streams", 0)
-    if mts:
-        flags.append(f"--multi-thread-streams {mts}")
+    if "multi_thread_streams" in params:
+        flags.append(f"--multi-thread-streams {params['multi_thread_streams']}")
     if "sftp_chunk_size_kib" in params:
         flags.append(f"--sftp-chunk-size {params['sftp_chunk_size_kib']}Ki")
     elif "sftp_chunk_size_mb" in params:

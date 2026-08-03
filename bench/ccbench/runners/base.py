@@ -41,6 +41,14 @@ from ccbench.dataset import read_manifest
 
 STDERR_TAIL_CHARS = 2000
 
+# A timed run must move (near enough) the whole dataset. Anything materially
+# short means the destination was already warm -- a pre-clean that quietly did
+# nothing, an `rmtree(ignore_errors=True)` that left files behind, a seed that
+# half-succeeded -- and the seconds measured belong to a partial transfer. The
+# margin exists only because the tools' own byte accounting can differ from the
+# manifest total by a rounding step, not to tolerate skipped files.
+SHORT_TRANSFER_RATIO = 0.99
+
 
 def free_port() -> int:
     """A currently-unused localhost TCP port (best-effort; there's an
@@ -189,6 +197,27 @@ def parse_size(value: str, unit: str) -> int | None:
         return int(float(value) * factor)
     except ValueError:
         return None
+
+
+def short_transfer_reason(tool: str, num_bytes: int, expected_bytes: int) -> str:
+    """Why `num_bytes` is not a usable measurement of moving `expected_bytes`,
+    or "" when it is.
+
+    Zero is the obvious case (nothing moved at all); a *partial* move is the
+    dangerous one, because it still produces a plausible-looking row with a
+    short `seconds` and a `verified=True` from a presence+size check that only
+    ever looks at what did land.
+    """
+    if expected_bytes <= 0:
+        return ""
+    if num_bytes <= 0:
+        return f"{tool} transferred 0 bytes -- nothing was moved, timing is meaningless"
+    if num_bytes < expected_bytes * SHORT_TRANSFER_RATIO:
+        return (
+            f"{tool} transferred {num_bytes} of {expected_bytes} expected bytes -- the "
+            f"destination was already partly warm, timing is meaningless"
+        )
+    return ""
 
 
 def expand_sweep(values: Any, default: list[Any]) -> list[Any]:

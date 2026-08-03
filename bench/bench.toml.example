@@ -33,6 +33,11 @@ small = "data/small"
 # ---------------------------------------------------------------------------
 # Lanes, matching SPEC.md's three sync lanes. "direction" is up, down, or
 # both (both = run the dataset in each direction separately).
+#
+# Lane C is bidirectional in production, but no engine here can measure a
+# two-way sync as one number -- "both" is the honest spelling of it, and the
+# syncthing runner rejects direction = "bidirectional" rather than measure one
+# way and label it two.
 # ---------------------------------------------------------------------------
 [lanes.A]
 dataset = "large"

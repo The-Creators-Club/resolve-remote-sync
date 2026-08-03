@@ -137,8 +137,14 @@ def run(
     try:
         if direction == "up":
             # Pre-clean (untimed, guarded) so a repeat isn't "already there".
+            # `safe_rmtree` ignores errors, so prove it actually emptied.
             if target_root.exists():
                 guard.safe_rmtree(target_root, action="pre-clean robocopy target")
+                if target_root.exists() and any(target_root.iterdir()):
+                    raise guard.CleanupFailed(
+                        f"pre-clean left files in {target_root!r} -- the timed copy would "
+                        f"skip what is already there"
+                    )
             rc, out, err, seconds = _robocopy(dataset_dir, target_root, mt, transfer_timeout)
         elif direction == "down":
             if dest_dir is None:
@@ -160,6 +166,8 @@ def run(
             )
     except guard.DestructiveEndpointRefused as exc:
         return _failed(f"refused: {exc}")
+    except guard.CleanupFailed as exc:
+        return _failed(f"pre-clean failed: {exc}")
     except Exception as exc:  # subprocess.TimeoutExpired and friends
         return _failed(f"exception: {exc}")
 
@@ -179,10 +187,14 @@ def run(
         bytes_source = "robocopy-summary"
 
     expected_bytes = base.manifest_bytes(dataset_dir)
-    if bytes_source == "robocopy-summary" and expected_bytes > 0 and num_bytes == 0:
-        result = _failed("robocopy copied 0 bytes -- nothing was moved, timing is meaningless")
-        result.seconds = seconds
-        return result
+    if bytes_source == "robocopy-summary":
+        # Zero *or* materially short: either way the destination was already
+        # warm and the seconds belong to a partial copy, not a transfer.
+        short = base.short_transfer_reason("robocopy", num_bytes, expected_bytes)
+        if short:
+            result = _failed(short)
+            result.seconds = seconds
+            return result
 
     verified = False
     verify_method = "none"

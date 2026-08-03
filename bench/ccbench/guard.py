@@ -26,6 +26,14 @@ handed to `rclone purge`:
 
 Deliberately conservative: anything it cannot confidently parse is treated as
 "no scratch marker found", i.e. refused.
+
+One more thing lives here because every destructive call routes through it:
+`redact()`. An rclone on-the-fly spec carries the credential inline
+(`:smb,host=h,user=u,pass=<obscured>:share/path`), and `rclone reveal` turns
+that back into the plaintext password -- so a refusal message quoting the
+target verbatim would put a reversible credential into `results.jsonl` and the
+rendered report. Every message this module raises is redacted; so is anything
+else that puts a remote spec on a result row.
 """
 
 from __future__ import annotations
@@ -39,9 +47,38 @@ SCRATCH_MARKER = "_bench"
 _WINDOWS_ABS = re.compile(r"^[A-Za-z]:[\\/]")
 _SEPARATORS = re.compile(r"[\\/]+")
 
+# rclone connection-string parameters that must never be echoed. Values are
+# base64-ish (obscured passwords) or paths, and never contain ',' or ':' -- the
+# two characters that delimit a connection string.
+_SECRET_PARAM_RE = re.compile(
+    r"\b(pass|password|pass2|key_pem|api_key|token|secret_access_key|client_secret)=[^,:]*",
+    re.IGNORECASE,
+)
+
+REDACTED = "***"
+
 
 class DestructiveEndpointRefused(RuntimeError):
     """Raised instead of deleting a path that carries no `_bench` component."""
+
+
+class CleanupFailed(RuntimeError):
+    """A pre-clean/empty step could not be proven to have worked.
+
+    Not the same as a refusal: the guard allowed the delete, the delete itself
+    didn't happen (a timed-out `rclone purge`, an `rmtree(ignore_errors=True)`
+    that left a locked file behind). Callers must fail the run instead of
+    timing a transfer into a warm destination.
+    """
+
+
+def redact(target: str | Path) -> str:
+    """`target` with any inline credential replaced by `***`.
+
+    Safe to put in a result row, a log line or the report. `rclone reveal` is
+    reversible, so an obscured password is a credential, not a hash.
+    """
+    return _SECRET_PARAM_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", str(target))
 
 
 _allow_destructive = False
@@ -90,7 +127,7 @@ def assert_scratch_path(target: str | Path, *, action: str = "delete") -> None:
     if _allow_destructive:
         return
     raise DestructiveEndpointRefused(
-        f"refusing to {action} {target!r}: no {SCRATCH_MARKER!r} component in the path. "
+        f"refusing to {action} {redact(target)!r}: no {SCRATCH_MARKER!r} component in the path. "
         f"Point the endpoint at a scratch subtree (e.g. .../{SCRATCH_MARKER}) or re-run with "
         f"--allow-destructive-endpoint if you really mean it."
     )
@@ -108,9 +145,22 @@ def empty_dir(path: str | Path, *, action: str = "empty destination") -> None:
 
     Used before every timed download: a warm destination makes rclone/robocopy
     skip files that are already there, so the run would measure nothing.
+
+    `rmtree(ignore_errors=True)` can leave files behind (a locked handle, a
+    permission error) without saying so, which is exactly how a warm
+    destination survives into a timed run. So the result is checked and
+    `CleanupFailed` is raised if anything is still there -- the caller must
+    fail the run rather than measure a partial download.
     """
     target = Path(path)
     if target.exists():
         assert_scratch_path(target, action=action)
         shutil.rmtree(target, ignore_errors=True)
     target.mkdir(parents=True, exist_ok=True)
+    leftovers = [p.name for p in target.iterdir()]
+    if leftovers:
+        raise CleanupFailed(
+            f"could not {action} {redact(target)!r}: {len(leftovers)} entry/entries survived "
+            f"the delete (e.g. {leftovers[:3]}). Timing a transfer into a warm destination "
+            f"measures nothing."
+        )

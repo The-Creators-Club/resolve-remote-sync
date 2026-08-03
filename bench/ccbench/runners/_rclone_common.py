@@ -173,23 +173,35 @@ def seed_remote(dataset_dir: Path, remote_root: str, timeout: float | None) -> N
     except OSError as exc:
         raise SeedFailed(f"seed copy could not start: {exc}") from exc
     if rc != 0:
-        raise SeedFailed(f"seed copy exit {rc}: {base.tail(err, 500)}")
+        raise SeedFailed(f"seed copy exit {rc}: {guard.redact(base.tail(err, 500))}")
 
 
 def cleanup_remote(remote_root: str, timeout: float = 120) -> None:
     """`rclone purge` the remote scratch subtree -- guarded by ccbench.guard.
 
     Raises DestructiveEndpointRefused when the target isn't a `_bench` path.
+
+    A non-zero exit is tolerated: on the first run of a combo the path simply
+    doesn't exist yet, and `purge` says so. A *timeout* or a failure to start
+    rclone is not tolerated -- when this runs as the untimed pre-clean before
+    an upload, "the purge may or may not have happened" means the next timed
+    run may be copying into a warm destination, so it raises `CleanupFailed`
+    and the caller fails the run instead of publishing the number.
     """
     guard.assert_scratch_path(remote_root, action="rclone purge")
     try:
         subprocess.run(
             ["rclone", "purge", remote_root], capture_output=True, text=True, timeout=timeout
         )
-    except (subprocess.TimeoutExpired, OSError):
-        # A purge failure is not fatal (the path may simply not exist yet);
-        # the guard above is the part that must never be skipped.
-        pass
+    except subprocess.TimeoutExpired as exc:
+        raise guard.CleanupFailed(
+            f"rclone purge of {guard.redact(remote_root)!r} timed out after {exc.timeout}s -- "
+            f"the destination may still hold data from a previous run"
+        ) from exc
+    except OSError as exc:
+        raise guard.CleanupFailed(
+            f"rclone purge of {guard.redact(remote_root)!r} could not start: {exc}"
+        ) from exc
 
 
 def remote_listing(remote_root: str, timeout: float = 300) -> dict[str, int] | None:
@@ -324,6 +336,8 @@ def do_transfer(
             )
     except guard.DestructiveEndpointRefused as exc:
         return fail(f"refused: {exc}")
+    except guard.CleanupFailed as exc:
+        return fail(f"pre-clean failed: {exc}")
     except SeedFailed as exc:
         return fail(f"seed failed: {exc}")
     except subprocess.TimeoutExpired as exc:
@@ -333,7 +347,11 @@ def do_transfer(
 
     if rc != 0:
         result = fail(f"rclone exit {rc}")
-        result.stderr_tail = base.tail(err)
+        # rclone echoes the whole connection string back in its "failed to
+        # create file system for ..." errors, and that string carries
+        # `pass=<obscured>` -- which `rclone reveal` turns back into the
+        # plaintext. Never let it into results.jsonl.
+        result.stderr_tail = guard.redact(base.tail(err))
         result.seconds = seconds
         return result
 
@@ -346,13 +364,17 @@ def do_transfer(
         bytes_source = "rclone-stats"
 
     expected_bytes = base.manifest_bytes(dataset_dir)
-    if bytes_source == "rclone-stats" and expected_bytes > 0 and num_bytes == 0:
-        # Nothing actually moved: the destination was already populated (or
-        # the source was empty). Timing this measures nothing, so say so.
-        result = fail("rclone transferred 0 bytes -- nothing was moved, timing is meaningless")
-        result.seconds = seconds
-        result.stderr_tail = base.tail(err)
-        return result
+    if bytes_source == "rclone-stats":
+        # Nothing (or not enough) actually moved: the destination was already
+        # populated, in whole or in part. Timing this measures nothing, so say
+        # so -- a partial row is worse than a missing one, because it looks
+        # fast AND passes the presence+size verification of what did land.
+        short = base.short_transfer_reason("rclone", num_bytes, expected_bytes)
+        if short:
+            result = fail(short)
+            result.seconds = seconds
+            result.stderr_tail = guard.redact(base.tail(err))
+            return result
 
     verified = False
     verify_method = "none"

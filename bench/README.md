@@ -84,7 +84,10 @@ dir.
    `results/results.jsonl` (append-only). Re-running the same command is
    *resumable* -- combos already recorded are skipped; pass `--rerun` to
    force everything to run again. Use `--engines rclone_sftp,syncthing` or
-   `--lanes A,B` to scope a run.
+   `--lanes A,B` to scope a run. The iperf3 sweep belongs to the synthetic
+   lane `net`, so `--lanes A,B` skips it and `--lanes net` runs only it.
+   Remote scratch cleanup still happens at the end of a fully-resumed run,
+   even when every combo was already recorded.
 
 5. **Read the report**:
    ```powershell
@@ -115,10 +118,27 @@ when it is on.
   rclone's own `stats.bytes` (via `--use-json-log`), robocopy's `Bytes :`
   summary, the size of what actually landed for syncthing. If that can't be
   parsed the manifest total is substituted and the row's `bytes_source` says
-  `manifest-fallback`. A run that moved 0 bytes is recorded as a **failure**,
-  because timing it measures nothing.
+  `manifest-fallback`. A run that moved 0 bytes -- **or materially less than
+  the dataset holds** -- is recorded as a **failure**, because timing a
+  transfer into a destination that was already (partly) warm measures nothing.
+  A partial row is the dangerous one: it looks fast *and* passes the
+  presence+size verification of whatever did land.
 - **The download destination is emptied before every timed "down" run**
   (guarded), so a warm destination can't make rclone/robocopy skip everything.
+  `rmtree` can leave files behind without complaining, so the result is
+  checked and the run fails if anything survived. Likewise a pre-clean
+  (`rclone purge`) that timed out fails the run instead of being assumed to
+  have worked.
+- **Syncthing completion needs the index, not just an idle folder.** An empty
+  folder that has just been added is idle with `needBytes == 0` before it has
+  heard from the peer; the runner waits (untimed) for the pair to connect and
+  requires `globalBytes` to have reached what was seeded before it believes a
+  zero.
+- **Credentials never reach `results.jsonl` or the report.** rclone's SMB
+  connection string carries `pass=<obscured>`, and `rclone obscure` is
+  reversible with `rclone reveal` -- so every path that could echo a remote
+  spec onto a result row (guard refusals, cleanup failures, rclone's own
+  stderr) goes through `guard.redact()` first.
 - **The untimed "seed" copy that populates the remote for a "down" run fails
   the run** on a non-zero exit or a timeout, instead of being swallowed.
 - **Remote cleanup happens once, after the whole matrix**, never between two
@@ -185,6 +205,23 @@ recommendation says so in bold).
 - `keep_remote_data = false` (default) cleans up the NAS-side (or ephemeral
   syncthing) test data **once, after the whole matrix**; set `true` in
   `bench.toml` to leave it for manual inspection.
+- **syncthing** runner measures one direction at a time: it seeds one side and
+  times the other receiving it. `direction = "bidirectional"` is therefore
+  **rejected** (a skipped row saying so) rather than measured one-way under a
+  two-way label -- use `direction = "both"`, which produces separate `up` and
+  `down` rows.
+- **syncthing 1.x and 2.x are both supported, by detection.** v2 reorganised
+  the CLI (the daemon needs the `serve` subcommand, `generate` lost
+  `--no-default-folder`, `--device-id` became a `device-id` subcommand, and
+  config/database are two directories). The runner probes
+  `syncthing --version` once per binary, caches the major, and picks the
+  matching command shape; an unrecognised major is a **skipped** row with a
+  clear message rather than a guess, because a daemon started with flags it
+  silently reinterprets would produce a row that looks measured. Only process
+  spawning and config generation differ -- the REST endpoints the measurement
+  depends on are identical on both. On v2 the runner passes an explicit
+  `--data` inside its temp workspace, so a bench run never writes into the
+  machine's real syncthing database.
 - **syncthing** runner spins up two ephemeral instances on loopback
   (temp config dirs, random high ports, relays/discovery/NAT disabled, one
   shared folder) and polls `/rest/db/status` for completion. This is fully

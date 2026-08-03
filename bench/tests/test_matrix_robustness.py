@@ -258,6 +258,97 @@ def test_cli_flag_sets_the_destructive_override(tmp_path, monkeypatch):
     assert args_default.allow_destructive_endpoint is False
 
 
+def _fake_file_runner(order: list[str]):
+    return types.SimpleNamespace(
+        ENGINE="fake", available=lambda: (True, "fake"),
+        param_matrix=lambda cfg, direction: [{"p": 1}],
+        run=lambda dataset_dir, direction, endpoint, params, **kw: (
+            order.append(f"run{kw.get('repeat_index', 0)}") or RunResult(
+                engine="fake", dataset=kw.get("dataset_name", ""), direction=direction,
+                params=params, seconds=1.0, num_bytes=100, MB_s=50.0, verified=True,
+                lane=kw.get("lane", ""), repeat_index=kw.get("repeat_index", 0),
+            )
+        ),
+        cleanup_endpoint=lambda endpoint, dataset_name, direction: order.append("cleanup"),
+    )
+
+
+def _fake_iperf3_runner():
+    return types.SimpleNamespace(
+        ENGINE="iperf3", available=lambda: (True, "iperf3"),
+        param_matrix=lambda cfg, direction: [{"parallel": 1}],
+        run=lambda dataset_dir, direction, endpoint, params, **kw: RunResult(
+            engine="iperf3", dataset="network", direction=direction, params=params,
+            seconds=1.0, num_bytes=100, MB_s=50.0, verified=True, lane=kw.get("lane", ""),
+            repeat_index=kw.get("repeat_index", 0),
+        ),
+    )
+
+
+def test_a_resumed_matrix_still_cleans_up_what_the_first_run_wrote(tmp_path, monkeypatch):
+    """Every combo already in results.jsonl means no run happens -- but the
+    earlier run did write to the remote scratch subtree, and nothing else ever
+    removes it."""
+    order: list[str] = []
+    _register(monkeypatch, _fake_file_runner(order))
+
+    ds = _dataset(tmp_path)
+    cfg = _cfg(tmp_path, {"large": str(ds)}, {"A": {"dataset": "large", "direction": "up"}})
+
+    matrix.run_matrix(cfg, progress=_silent)
+    assert order == ["run0", "cleanup"]
+
+    order.clear()
+    results = matrix.run_matrix(cfg, progress=_silent)  # everything skip-cached
+    assert results == []
+    assert order == ["cleanup"]
+
+
+def test_lanes_filter_applies_to_iperf3_too(tmp_path, monkeypatch):
+    """`ccbench run --lanes A` asked for one lane; the iperf3 sweep is lane
+    'net' and has no business running."""
+    monkeypatch.setitem(matrix.REGISTRY, "iperf3", _fake_iperf3_runner())
+
+    cfg = _cfg(tmp_path, {}, {})
+    cfg["engines"]["include"] = ["iperf3"]
+    cfg["params"]["iperf3"] = {"parallel": [1]}
+    cfg["endpoints"]["iperf3"] = {"host": "100.1.1.1"}
+
+    assert matrix.run_matrix(cfg, only_lanes=["A"], progress=_silent) == []
+    assert matrix.run_matrix(cfg, only_lanes=["net"], progress=_silent)
+
+
+def test_a_bad_iperf3_params_section_does_not_skip_remote_cleanup(tmp_path, monkeypatch):
+    """The iperf3 sweep sits between the file engines and `_cleanup_endpoints`.
+    An exception escaping it would leave the NAS scratch subtree behind."""
+    order: list[str] = []
+    _register(monkeypatch, _fake_file_runner(order))
+
+    def bad_param_matrix(cfg, direction):
+        raise ValueError("duration_s must be a number")
+
+    monkeypatch.setitem(
+        matrix.REGISTRY, "iperf3",
+        types.SimpleNamespace(
+            ENGINE="iperf3", available=lambda: (True, "iperf3"),
+            param_matrix=bad_param_matrix, run=lambda *a, **k: None,
+        ),
+    )
+
+    ds = _dataset(tmp_path)
+    cfg = _cfg(tmp_path, {"large": str(ds)}, {"A": {"dataset": "large", "direction": "up"}})
+    cfg["engines"]["include"] = ["fake", "iperf3"]
+    cfg["params"]["iperf3"] = {"duration_s": "ten"}
+
+    results = matrix.run_matrix(cfg, progress=_silent)
+
+    assert "cleanup" in order
+    failures = [r for r in results if not r.ok]
+    assert len(failures) == 2  # one per direction, recorded rather than raised
+    assert all("duration_s" in r.reason for r in failures)
+    assert all(r.lane == "net" for r in failures)
+
+
 def test_iperf3_rows_carry_the_net_lane(tmp_path, monkeypatch):
     runner = types.SimpleNamespace(
         ENGINE="iperf3", available=lambda: (True, "iperf3"),

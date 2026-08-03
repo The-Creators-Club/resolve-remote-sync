@@ -120,6 +120,102 @@ def test_zero_bytes_moved_is_a_failed_measurement(tmp_path, monkeypatch):
     assert "0 bytes" in result.reason
 
 
+def test_a_partial_transfer_is_a_failed_measurement_too(tmp_path, monkeypatch):
+    """A pre-clean that only half-worked leaves a warm destination: rclone
+    skips what's already there, moves a fraction, and finishes fast. That row
+    would otherwise look like the best result in the sweep -- and `_winner`
+    *prefers* verified rows, which a presence+size check of what did land
+    happily grants."""
+    ds_dir = _dataset(tmp_path)
+    expected = dataset_mod.read_manifest(ds_dir)["total_bytes"]
+    monkeypatch.setattr(_rclone_common, "available", lambda: (True, "rclone"))
+    monkeypatch.setattr(_rclone_common, "cleanup_remote", lambda *a, **k: None)
+    _fake_transfer(monkeypatch, stderr=_json_stats_log(expected // 4), seconds=0.2)
+
+    result = _do_up(tmp_path, dataset_dir=ds_dir)
+
+    assert not result.ok
+    assert "already partly warm" in result.reason
+    assert str(expected) in result.reason
+
+
+def test_a_full_transfer_is_not_flagged_as_short(tmp_path, monkeypatch):
+    ds_dir = _dataset(tmp_path)
+    expected = dataset_mod.read_manifest(ds_dir)["total_bytes"]
+    monkeypatch.setattr(_rclone_common, "available", lambda: (True, "rclone"))
+    monkeypatch.setattr(_rclone_common, "cleanup_remote", lambda *a, **k: None)
+    _fake_transfer(monkeypatch, stderr=_json_stats_log(expected), seconds=2.0)
+
+    assert _do_up(tmp_path, dataset_dir=ds_dir).ok
+
+
+def test_a_pre_clean_that_could_not_be_proven_fails_the_run(tmp_path, monkeypatch):
+    """A timed-out `rclone purge` is not "probably fine": the next timed upload
+    would copy into a destination that may still hold the previous run."""
+    ds_dir = _dataset(tmp_path)
+    monkeypatch.setattr(_rclone_common, "available", lambda: (True, "rclone"))
+
+    def timed_out_purge(*_a, **_k):
+        raise guard.CleanupFailed("rclone purge timed out after 120s")
+
+    monkeypatch.setattr(_rclone_common, "cleanup_remote", timed_out_purge)
+    ran = []
+    _fake_transfer(monkeypatch, on_call=ran.append)
+
+    result = _do_up(tmp_path, dataset_dir=ds_dir)
+
+    assert not result.ok
+    assert "pre-clean failed" in result.reason
+    assert ran == []  # the timed copy never started
+
+
+def test_cleanup_remote_raises_on_a_timeout_instead_of_swallowing_it(monkeypatch):
+    def timeout(*_a, **_k):
+        raise subprocess.TimeoutExpired(["rclone", "purge"], 120)
+
+    monkeypatch.setattr(_rclone_common.subprocess, "run", timeout)
+    with pytest.raises(guard.CleanupFailed):
+        _rclone_common.cleanup_remote("nas:Creators_Club/_bench/large/up")
+
+
+def test_cleanup_remote_tolerates_a_nonzero_exit(monkeypatch):
+    """First run of a combo: the scratch path doesn't exist yet and `purge`
+    says so. That is not a cleanup failure."""
+    monkeypatch.setattr(
+        _rclone_common.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 3, "", "directory not found"),
+    )
+    _rclone_common.cleanup_remote("nas:Creators_Club/_bench/large/up")
+
+
+def test_an_smb_password_never_reaches_the_result_row(tmp_path, monkeypatch):
+    """rclone_smb builds `:smb,...,pass=<obscured>:path`, and `rclone reveal`
+    is reversible -- so neither a refusal nor rclone's own stderr may carry it
+    into results.jsonl or the report."""
+    ds_dir = _dataset(tmp_path)
+    secret = "Xy9_obscuredSecret"
+    live_spec = f":smb,host=nas,user=editor1,pass={secret}:pool/Creators_Club/Projects/2026"
+    monkeypatch.setattr(_rclone_common, "available", lambda: (True, "rclone"))
+    _fake_transfer(monkeypatch)
+
+    refused = _do_up(tmp_path, dataset_dir=ds_dir, remote_root=live_spec)
+    assert not refused.ok
+    assert secret not in refused.reason
+    assert secret not in refused.to_json()
+
+    # and the same for rclone's own error output, which echoes the spec back
+    scratch_spec = f":smb,host=nas,user=editor1,pass={secret}:pool/Creators_Club/_bench/up"
+    monkeypatch.setattr(_rclone_common, "cleanup_remote", lambda *a, **k: None)
+    _fake_transfer(
+        monkeypatch, rc=1,
+        stderr=f'Failed to create file system for "{scratch_spec}": connection refused',
+    )
+    failed = _do_up(tmp_path, dataset_dir=ds_dir, remote_root=scratch_spec)
+    assert not failed.ok
+    assert secret not in failed.to_json()
+    assert "pass=***" in failed.stderr_tail
+
+
 def test_up_refuses_to_run_when_the_remote_is_not_a_scratch_path(tmp_path, monkeypatch):
     ds_dir = _dataset(tmp_path)
     monkeypatch.setattr(_rclone_common, "available", lambda: (True, "rclone"))
@@ -149,7 +245,13 @@ def test_down_empties_the_destination_before_timing(tmp_path, monkeypatch):
     def on_call(cmd):
         seen["dest_contents"] = [p.name for p in dest.iterdir()]
 
-    _fake_transfer(monkeypatch, stderr=_json_stats_log(999), on_call=on_call)
+    # report the whole dataset as moved: a short byte count is (correctly) a
+    # failed measurement now, and this test is about the pre-clean, not that.
+    _fake_transfer(
+        monkeypatch,
+        stderr=_json_stats_log(dataset_mod.read_manifest(ds_dir)["total_bytes"]),
+        on_call=on_call,
+    )
 
     result = _rclone_common.do_transfer(
         engine="rclone_sftp", dataset_name="large", dataset_dir=ds_dir, direction="down",
@@ -269,7 +371,11 @@ def test_no_purge_runs_after_a_timed_transfer(tmp_path, monkeypatch):
 
     order: list[str] = []
     monkeypatch.setattr(_rclone_common, "cleanup_remote", lambda *a, **k: order.append("purge"))
-    _fake_transfer(monkeypatch, stderr=_json_stats_log(1000), on_call=lambda cmd: order.append("copy"))
+    _fake_transfer(
+        monkeypatch,
+        stderr=_json_stats_log(dataset_mod.read_manifest(ds_dir)["total_bytes"]),
+        on_call=lambda cmd: order.append("copy"),
+    )
 
     _do_up(tmp_path, dataset_dir=ds_dir)
 

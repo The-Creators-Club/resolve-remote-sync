@@ -101,6 +101,24 @@ SYNCTHING_HOME="$HOME/.local/ccsync/syncthing-config"
 KEY_FILE_PATH="$HOME/.ssh/ccsync_ed25519"
 REMOTE_NAME="creators_club_sftp"
 
+# Private, per-run staging for downloaded archives.
+#
+# The fixed /tmp/ccsync-*.zip and /tmp/ccsync-*-extract paths this replaces are
+# world-writable and PREDICTABLE: on a shared Mac any other local account could
+# pre-create /tmp/ccsync-rclone-extract containing its own `rclone` binary (or
+# win the race on the zip), and this script would copy it to $BIN_DIR and make
+# it the editor's rclone_path -- a binary that then runs on every sync with
+# the editor's NAS credentials. `mkdir -p` on an existing attacker-owned dir
+# succeeds, and `unzip -o` would not necessarily overwrite a planted file whose
+# name is not in the archive. Windows already stages per-user ($env:TEMP).
+# mktemp -d creates a fresh 0700 dir owned by us, and the trap removes it.
+STAGE_DIR=""
+if [ "$DRY_RUN" != 1 ]; then
+    STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ccsync-stage.XXXXXXXX")"
+    # shellcheck disable=SC2064  # expand STAGE_DIR now, on purpose
+    trap "rm -rf '$STAGE_DIR'" EXIT INT TERM
+fi
+
 ensure_dir() {
     local path="$1"
     if [ -d "$path" ]; then
@@ -178,8 +196,8 @@ else
         else
             ZIP_URL="https://downloads.rclone.org/rclone-current-osx-amd64.zip"
         fi
-        ZIP_PATH="/tmp/ccsync-rclone.zip"
-        EXTRACT_DIR="/tmp/ccsync-rclone-extract"
+        ZIP_PATH="$STAGE_DIR/rclone.zip"
+        EXTRACT_DIR="$STAGE_DIR/rclone-extract"
         if [ "$DRY_RUN" = 1 ]; then
             dry "would download $ZIP_URL, extract, and copy rclone to $BIN_DIR"
         else
@@ -283,8 +301,8 @@ else
             return 1
         }
 
-        ZIP_PATH="/tmp/ccsync-syncthing.zip"
-        EXTRACT_DIR="/tmp/ccsync-syncthing-extract"
+        ZIP_PATH="$STAGE_DIR/syncthing.zip"
+        EXTRACT_DIR="$STAGE_DIR/syncthing-extract"
         if [ "$DRY_RUN" = 1 ]; then
             dry "would resolve the latest syncthing-macos-${ASSET_ARCH}-<version>.zip via the GitHub API, download, unzip, and copy syncthing to $BIN_DIR"
         else

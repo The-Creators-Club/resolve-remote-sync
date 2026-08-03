@@ -234,7 +234,13 @@ if (Test-Path -LiteralPath $ExeInstalled) {
     # 2. the upgrade.py version marker
     if (-not $installedVersion) {
         if (Test-Path -LiteralPath $VersionMarker) {
-            $marker = (Get-Content -LiteralPath $VersionMarker -Raw -Encoding UTF8).Trim()
+            # Get-Content -Raw returns $null (not "") for a ZERO-BYTE file, and
+            # $null.Trim() is a terminating error under $ErrorActionPreference
+            # = "Stop" -- so an empty marker took this whole script down before
+            # it ever printed a VERDICT, and ship.ps1 runs it as its final
+            # step. companion upgrade.py can leave a 0-byte marker behind.
+            $rawMarker = Get-Content -LiteralPath $VersionMarker -Raw -Encoding UTF8
+            $marker = "$rawMarker".Trim()
             if ($marker) {
                 $installedVersion = $marker
                 $installedVersionSource = "~/.ccsync/state/last_version.txt"

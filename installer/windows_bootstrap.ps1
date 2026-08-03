@@ -136,7 +136,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$InstallerVersion = "1.0.14"
+# The fleet token is a credential and a native process's command line is
+# readable by ANY unprivileged process on the machine (Get-CimInstance
+# Win32_Process), so onboard.exe hands it over in the environment instead of on
+# argv -- see onboarding/steps.py's run_bootstrap, and server/common.py which
+# pipes its secrets over stdin for the same reason (AUDIT SEC-2).
+# -DashboardToken stays for hand-runs; the environment wins when the parameter
+# is blank, and is cleared immediately so nothing this script launches inherits
+# it.
+if ([string]::IsNullOrEmpty($DashboardToken) -and $env:CCSYNC_DASHBOARD_TOKEN) {
+    $DashboardToken = $env:CCSYNC_DASHBOARD_TOKEN
+}
+$env:CCSYNC_DASHBOARD_TOKEN = $null
+
+# Bump this AND INSTALLER_VERSION in onboarding/steps.py together --
+# build_editor_package.ps1 refuses to publish on drift between the two.
+# 1.0.15: the fleet token moved off this script's command line into
+# CCSYNC_DASHBOARD_TOKEN in its environment (see the block just above), which
+# is a contract between this script and steps.py; they must ship as a pair.
+$InstallerVersion = "1.0.15"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -279,6 +297,101 @@ function Invoke-MappingCommand {
     $script:MappedWhileElevated = $true
     cmd /c "$CommandLine >nul 2>&1"
     return ($LASTEXITCODE -eq 0)
+}
+
+# Parses the combined output of `subst` + `net use` for ONE drive letter.
+# Pure text in, object out, so it can be reasoned about without a machine.
+#
+#   subst   -> "P:\: => C:\Creators_Club"
+#   net use -> "OK           P:        \\localhost\CCSync_P   Microsoft Windows Network"
+#              "Unavailable  P:        \\nas\TheCreatorsPool  Microsoft Windows Network"
+#
+# The `net use` status column is localised and is sometimes blank, so it is
+# deliberately not matched -- the letter followed by a UNC path is the signal,
+# and "Unavailable"/"Disconnected" rows count as MAPPED (that is the whole
+# point: a persistent mapping to a sleeping NAS is still a mapping).
+function ConvertFrom-DriveMapReport {
+    param([string]$Report, [string]$Letter = "P")
+
+    $result = [PSCustomObject]@{ Mapped = $false; Kind = "none"; Target = "" }
+    if ([string]::IsNullOrEmpty($Report)) { return $result }
+    $L = [regex]::Escape($Letter)
+
+    foreach ($line in ($Report -split "`r?`n")) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+
+        $substMatch = [regex]::Match($trimmed, "(?i)^$L`:\\?:\s*=>\s*(.+)$")
+        if ($substMatch.Success) {
+            $result.Mapped = $true
+            $result.Kind = "subst"
+            $result.Target = $substMatch.Groups[1].Value.Trim()
+            return $result
+        }
+
+        $netMatch = [regex]::Match($trimmed, "(?i)(^|\s)$L`:\s+(\\\\\S+)")
+        if ($netMatch.Success) {
+            $result.Mapped = $true
+            $result.Kind = "netuse"
+            $result.Target = $netMatch.Groups[2].Value.Trim()
+            return $result
+        }
+    }
+    return $result
+}
+
+# Reads the CURRENT USER's DOS device map for one drive letter, at the user's
+# own integrity level. Returns $null when the state could NOT be determined --
+# callers MUST treat $null as "somebody else's mapping" and refuse to touch it.
+#
+# WHY not `Test-Path "P:\"` (B21, and the same root cause as INST-1/INST-15):
+# drive letters live in a per-logon-session device map that UAC additionally
+# splits between the linked tokens, so an ELEVATED run cannot see the mapping
+# the unelevated session holds -- yet the teardown below runs via
+# Invoke-AtUserIntegrity inside that very session. And Test-Path reports
+# $false for a DISCONNECTED persistent mapping (NAS asleep, Tailscale not up
+# -- both likely at bootstrap time) that is still in the device map and will
+# reconnect. Both read as "there is no P: here", after which the teardown
+# deleted the base rig's real NAS mapping and section 5 recreated P: as a
+# loopback of a local folder, taking every P:\Projects\... clip path in the
+# Resolve database offline.
+function Get-DriveMapping {
+    param([string]$Letter = "P")
+
+    $tempRoot = $env:TEMP
+    if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = [System.IO.Path]::GetTempPath() }
+    $tmp = Join-Path $tempRoot ("ccsync-drivemap-" + [Guid]::NewGuid().ToString("N").Substring(0, 8) + ".txt")
+    # Redirection happens INSIDE cmd: a PowerShell-level redirect wraps native
+    # stderr in a NativeCommandError, fatal under $ErrorActionPreference='Stop'
+    # when nothing is mapped at all.
+    $cmdLine = "(subst & net use) > `"$tmp`" 2>&1"
+    $report = $null
+    try {
+        if ($IsElevated) {
+            # Read-only probe, so it runs even under -DryRun: without it an
+            # elevated dry run would report the wrong verdict, which is the
+            # bug this function exists to fix.
+            Invoke-AtUserIntegrity $cmdLine | Out-Null
+        }
+        else {
+            cmd /c $cmdLine
+        }
+        # The exit code is `net use`'s and is noise (non-zero when there are no
+        # connections at all). The file is the signal.
+        if (Test-Path -LiteralPath $tmp) {
+            $report = Get-Content -LiteralPath $tmp -Raw -ErrorAction SilentlyContinue
+            if ($null -eq $report) { $report = "" }
+        }
+    }
+    catch {
+        $report = $null
+    }
+    finally {
+        try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch {}
+    }
+
+    if ($null -eq $report) { return $null }
+    return (ConvertFrom-DriveMapReport -Report $report -Letter $Letter)
 }
 
 function Test-IsElevated {
@@ -521,20 +634,74 @@ else {
 }
 
 # Make sure BinDir is on this user's PATH (idempotent).
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($null -eq $userPath) { $userPath = "" }
-if ($userPath -split ";" -contains $BinDir) {
+#
+# Read through the registry, NOT [Environment]::GetEnvironmentVariable: that
+# EXPANDS a REG_EXPAND_SZ value, while SetEnvironmentVariable writes back a
+# plain REG_SZ -- so a user PATH containing "%USERPROFILE%\bin" would be
+# permanently rewritten to the literal expansion of today's profile path,
+# silently breaking that entry on a roamed/renamed profile. DoNotExpandEnvir-
+# onmentNames gives the raw value, and the kind is preserved on write.
+$userPathRaw = ""
+$userPathKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+try {
+    $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
+    if ($envKey) {
+        try {
+            $raw = $envKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($null -ne $raw) { $userPathRaw = "$raw" }
+            $kind = $envKey.GetValueKind("Path")
+            if ($kind) { $userPathKind = $kind }
+        }
+        finally {
+            $envKey.Close()
+        }
+    }
+}
+catch {
+    # No Environment key / no Path value yet -- a brand-new profile. "" and
+    # ExpandString are the right starting point.
+    $userPathRaw = ""
+}
+
+if ($userPathRaw -split ";" -contains $BinDir) {
     Write-Skip "$BinDir already on user PATH"
 }
 else {
+    # Only the %VAR%-bearing case needs the raw registry write. Everywhere else
+    # keep [Environment]::SetEnvironmentVariable, which additionally broadcasts
+    # WM_SETTINGCHANGE so Explorer-launched processes pick the change up
+    # without a logoff.
+    $pathHasVars = ($userPathRaw -match '%[^%]+%')
     if ($DryRun) {
-        Write-Step "[dry-run] would add $BinDir to user PATH"
+        if ($pathHasVars) {
+            Write-Step "[dry-run] would add $BinDir to user PATH, writing it back as $userPathKind so the existing %VAR% entries stay unexpanded"
+        }
+        else {
+            Write-Step "[dry-run] would add $BinDir to user PATH"
+        }
     }
     else {
         $newPath = $BinDir
-        if ($userPath.Length -gt 0) { $newPath = $userPath + ";" + $BinDir }
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        Write-Step "added $BinDir to user PATH (restart your terminal to pick it up)"
+        if ($userPathRaw.Length -gt 0) { $newPath = $userPathRaw + ";" + $BinDir }
+        try {
+            if ($pathHasVars) {
+                $envKeyW = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
+                try {
+                    $envKeyW.SetValue("Path", $newPath, $userPathKind)
+                }
+                finally {
+                    $envKeyW.Close()
+                }
+                Write-Step "added $BinDir to user PATH, preserving its %VAR% entries (log off and back on to pick it up)"
+            }
+            else {
+                [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+                Write-Step "added $BinDir to user PATH (restart your terminal to pick it up)"
+            }
+        }
+        catch {
+            Write-Warn2 "could not update the user PATH: $($_.Exception.Message). Add $BinDir by hand (Settings > System > About > Advanced system settings > Environment Variables)."
+        }
     }
 }
 
@@ -733,13 +900,28 @@ $ShareName = "CCSync_P"
 # P:\Projects\... path in the Resolve database resolve to a nearly-empty
 # local tree. Detected outside the -DryRun branch on purpose, so a dry run
 # reports the refusal instead of describing a remap that would never happen.
+#
+# Detection goes through Get-DriveMapping, NOT Test-Path (B21): Test-Path is
+# blind to the unelevated session's mappings when this script runs elevated,
+# and blind to a disconnected persistent mapping in every case -- the two
+# situations where getting this wrong destroys the base rig. "Can't tell"
+# counts as foreign.
 $existingDisplayRoot = $null
-if (Test-Path "P:\") {
-    $existingP = $null
-    try { $existingP = Get-PSDrive -Name P -ErrorAction Stop } catch {}
-    if ($existingP) { $existingDisplayRoot = $existingP.DisplayRoot }
-    if ((-not [string]::IsNullOrWhiteSpace($existingDisplayRoot)) -and
-        (-not ($existingDisplayRoot -match '^\\\\localhost\\CCSync_P$'))) {
+$pMapping = Get-DriveMapping -Letter "P"
+if ($null -eq $pMapping) {
+    $script:PIsForeign = $true
+    $existingDisplayRoot = "<could not be determined>"
+    Write-Warn2 "could not read this logon session's drive mappings, so P: is being treated as somebody else's and left alone. That is deliberate: guessing 'there is no P:' here is how a real NAS mapping gets deleted."
+}
+elseif ($pMapping.Mapped) {
+    $existingDisplayRoot = $pMapping.Target
+    if ($pMapping.Kind -eq "subst") {
+        Write-Step "P: is a subst mapping of '$existingDisplayRoot' -- this installer's own style, safe to replace"
+    }
+    elseif ($existingDisplayRoot -match '^(?i)\\\\localhost\\CCSync_P$') {
+        Write-Step "P: is our own loopback share '$existingDisplayRoot' -- safe to replace"
+    }
+    else {
         $script:PIsForeign = $true
     }
 }
@@ -1143,10 +1325,34 @@ else {
         $existingStRun = $null
     }
 
-    if ($existingStRun) {
-        Write-Skip "Syncthing autostart already registered: $RunKeyPath\$stRunName"
+    # The Run value points at the .vbs shim, so it looks identical no matter
+    # WHERE Syncthing was found -- the real command line lives in the .cmd
+    # beside it. Checking only that the registry value exists reported "already
+    # registered" for an entry whose .cmd still launched a syncthing.exe that
+    # had since been uninstalled, moved by a winget upgrade, or replaced by a
+    # different install path: Syncthing then never starts at logon and lane C
+    # is silently dead, with a green install behind it. macOS already compares
+    # the plist's Program against the detected binary (macos_bootstrap.sh);
+    # Windows never got the same check. Compare the baked line, and repair.
+    $stCmdPath = "$BinDir\$stRunName.cmd"
+    $stBakedOk = $false
+    if ($existingStRun -and (Test-Path -LiteralPath $stCmdPath)) {
+        try {
+            $stBaked = Get-Content -LiteralPath $stCmdPath -Raw -ErrorAction Stop
+            if ("$stBaked" -match [regex]::Escape($syncthingPath)) { $stBakedOk = $true }
+        }
+        catch {
+            $stBakedOk = $false
+        }
+    }
+
+    if ($existingStRun -and $stBakedOk) {
+        Write-Skip "Syncthing autostart already registered and pointing at $syncthingPath"
     }
     else {
+        if ($existingStRun) {
+            Write-Step "Syncthing autostart exists but its command line does not point at $syncthingPath -- rewriting it"
+        }
         # HKCU Run (not a scheduled task) on purpose: never needs elevation,
         # so the daemon's autostart can't be the thing that fails to register.
         Register-HiddenRunEntry -Name $stRunName -CommandLine $SyncthingServeCmd | Out-Null

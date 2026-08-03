@@ -435,6 +435,145 @@ class TestBootstrapCapabilityWarnings:
         assert steps.bootstrap_capability_warnings(output)
 
 
+# -- bootstrap_hard_failure (B7) ----------------------------------------------
+
+
+class TestBootstrapHardFailure:
+    """A hard bootstrap abort must never be reported to the editor as a
+    successful install just because a capability warning also fired."""
+
+    RCLONE_MISS = ["rclone is NOT installed."]
+
+    def test_clean_exit_is_not_a_failure(self):
+        assert steps.bootstrap_hard_failure(0, []) is False
+        assert steps.bootstrap_hard_failure(0, self.RCLONE_MISS) is False
+
+    def test_capability_exit_code_is_not_a_failure(self):
+        # exit 3 = windows_bootstrap.ps1's capability summary; the script ran
+        # to the end. The Finish page shows "NOT ready yet", not RETRY.
+        assert steps.BOOTSTRAP_CAPABILITY_EXIT_CODE == 3
+        assert steps.bootstrap_hard_failure(3, self.RCLONE_MISS) is False
+
+    def test_hard_abort_with_a_capability_warning_is_still_a_failure(self):
+        # THE regression. $ErrorActionPreference="Stop":
+        # Add-CapabilityMiss "rclone is NOT installed" fires at line ~558, the
+        # P: mapping block then throws and the script exits 1 -- before the
+        # companion install and before the capability summary. P: was
+        # unmounted and never recreated. The old check
+        # (`exit_code != 0 and not capability_problems`) said "fine".
+        assert steps.bootstrap_hard_failure(1, self.RCLONE_MISS) is True
+
+    def test_hard_abort_without_capability_warnings_is_a_failure(self):
+        assert steps.bootstrap_hard_failure(1, []) is True
+        assert steps.bootstrap_hard_failure(255, []) is True
+
+    def test_bare_exit_3_with_nothing_parsed_is_a_failure(self):
+        # Without the CAPABILITY MISSING lines the Finish page has nothing to
+        # show and would render a green DONE -- exactly INST-5.
+        assert steps.bootstrap_hard_failure(3, []) is True
+
+    def test_unparsable_exit_code_is_a_failure(self):
+        assert steps.bootstrap_hard_failure(None, self.RCLONE_MISS) is True
+        assert steps.bootstrap_hard_failure("boom", []) is True
+
+    def test_end_to_end_against_the_real_bootstrap_output_shape(self):
+        # The exact stdout of the failing run: a capability miss, then a
+        # terminating error out of the P: section.
+        output = (
+            f"[ccsync] installer v{steps.INSTALLER_VERSION} -- configuring for editor 'jsmith'\n"
+            "[ccsync] WARNING: CAPABILITY MISSING: rclone is NOT installed. "
+            "Lanes A and B cannot run at all on this machine.\n"
+            "[ccsync] unmounting P:...\n"
+            "New-SmbShare : The network path was not found.\n"
+        )
+        problems = steps.bootstrap_capability_warnings(output)
+        assert problems  # the warning really is there...
+        assert steps.bootstrap_hard_failure(1, problems) is True  # ...and it still failed
+
+
+# -- effective_install_role (B20) ---------------------------------------------
+
+
+class TestEffectiveInstallRole:
+    """Which install actually runs. Only one of the two roles is destructive:
+    the editor flow does `subst P: /D` + `net use P: /delete /y` and remaps P:
+    at a loopback share of a LOCAL folder. On the base rig P: IS the NAS share
+    every P:\\Projects\\... path in the Resolve database resolves through."""
+
+    def test_verified_role_beats_the_radio(self):
+        # The default radio is "editor"; re-running on the base rig used to
+        # dispatch on it and destroy the NAS mapping.
+        assert steps.effective_install_role("editor", "base") == "base"
+        assert steps.effective_install_role("base", "editor") == "editor"
+
+    def test_matching_roles_pass_through(self):
+        assert steps.effective_install_role("editor", "editor") == "editor"
+        assert steps.effective_install_role("base", "base") == "base"
+
+    def test_falls_back_to_the_radio_when_the_dashboard_sends_no_role(self):
+        # Older dashboards omit "role" entirely (see verify_account).
+        assert steps.effective_install_role("editor", None) == "editor"
+        assert steps.effective_install_role("base", "") == "base"
+        assert steps.effective_install_role("editor", "   ") == "editor"
+
+    def test_unrecognised_verified_role_falls_back_to_the_radio(self):
+        assert steps.effective_install_role("editor", "admin") == "editor"
+
+    def test_case_and_whitespace_are_tolerated(self):
+        assert steps.effective_install_role("editor", " BASE ") == "base"
+        assert steps.effective_install_role(" Editor ", None) == "editor"
+
+    def test_two_unknowns_land_on_the_non_destructive_role(self):
+        # "base" never touches a drive mapping, so it is the only safe
+        # default when nothing is usable.
+        assert steps.effective_install_role(None, None) == "base"
+        assert steps.effective_install_role("nonsense", "nonsense") == "base"
+
+
+def _onboard_method_source(name: str) -> str:
+    """The body of one OnboardWizard method, straight out of the source file.
+    onboard.py builds a Tk root in __init__ and has no display in CI, so the
+    handful of decisions that live in the GUI layer are pinned this way."""
+    import ast
+
+    path = Path(steps.__file__).resolve().parent / "onboard.py"
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(source, node) or ""
+    raise AssertionError(f"onboard.py has no method named {name!r} any more")
+
+
+def test_onboard_dispatches_the_install_on_the_effective_role():
+    """The B20 defect in one line: _on_begin_install picked its worker from
+    self.role_var (the radio button), so a base-rig re-run with the default
+    "editor" selection ran _clean_slate("editor") -> unmount_p=True."""
+    body = _onboard_method_source("_on_begin_install")
+    assert "_worker_base" in body and "_worker_editor" in body
+    assert "_effective_role()" in body
+    assert "role_var" not in body, "the install dispatch still keys on the radio button"
+
+
+def test_onboard_treats_a_hard_bootstrap_abort_as_a_failure():
+    """B7: the editor worker must branch on the exit code, not merely on
+    whether any capability warning was parsed out of the output."""
+    body = _onboard_method_source("_worker_editor")
+    assert "bootstrap_hard_failure" in body
+    assert "and not capability_problems" not in body
+
+
+def test_onboard_base_worker_preflights_the_companion_exe():
+    """B22: _clean_slate("base") taskkills the companion, deletes every
+    autostart entry and unlinks the binary. find_companion_exe must be checked
+    BEFORE that, or a package with no bundled exe leaves the machine with
+    nothing and RETRY fails identically forever."""
+    code = "\n".join(line for line in _onboard_method_source("_worker_base").splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "find_companion_exe" in code
+    assert code.index("find_companion_exe") < code.index("_clean_slate")
+
+
 # -- validate_local_root (INST-21) --------------------------------------------
 
 
@@ -482,6 +621,20 @@ class TestValidateLocalRoot:
     def test_allows_p_drive_for_the_base_rig(self):
         # The base flow never touches drive mappings.
         assert self._ok(r"P:\Creators_Club", role="base", drives=("C", "P")) is None
+
+    def test_rejects_a_bare_volume_root_for_an_editor(self):
+        # windows_bootstrap.ps1 hands local_root to `New-SmbShare -FullAccess`
+        # and then maps P: at it: "D:\" publishes the ENTIRE volume read/write
+        # over the loopback share.
+        for value in ("D:\\", "D:/", "d:\\", "D:\\\\"):
+            problem = self._ok(value)
+            assert problem is not None, value
+            assert "whole volume" in problem
+
+    def test_allows_a_bare_volume_root_for_the_base_rig(self):
+        # DEFAULT_BASE_LOCAL_ROOT is exactly "P:\\" -- the NAS share mapping.
+        assert self._ok(steps.DEFAULT_BASE_LOCAL_ROOT, role="base",
+                        drives=("C", "P")) is None
 
     def test_a_broken_drive_probe_never_blocks_the_install(self):
         def exploding(letter):
@@ -555,8 +708,35 @@ def test_run_bootstrap_builds_expected_powershell_command(tmp_path):
     assert "-TailnetHost" in cmd and "100.71.216.3" in cmd
     assert "-EditorName" in cmd and "jsmith" in cmd
     assert "-DashboardUrl" in cmd and "http://100.71.216.3:8480" in cmd
-    assert "-DashboardToken" in cmd and "report-secret" in cmd
     assert "-LocalRoot" in cmd and r"F:\Creators_Club" in cmd
+    # The fleet token travels in the environment, NEVER on argv: a native
+    # process's command line is readable by any unprivileged process via
+    # Get-CimInstance Win32_Process (AUDIT SEC-2).
+    assert "-DashboardToken" not in cmd
+    assert "report-secret" not in cmd
+    assert captured["kwargs"]["env"]["CCSYNC_DASHBOARD_TOKEN"] == "report-secret"
+
+
+def test_run_bootstrap_keeps_the_fleet_token_off_the_command_line(tmp_path):
+    script = tmp_path / "windows_bootstrap.ps1"
+    script.write_text("# fake")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _FakeResult(returncode=0, stdout="")
+
+    steps.run_bootstrap(
+        editor_name="jsmith", dashboard_token="5f0c7dd7ab03435090",
+        tailnet_host="h", run=fake_run, script_path=script,
+    )
+    assert not any("5f0c7dd7ab03435090" in str(part) for part in captured["cmd"])
+    # ...and the rest of the parent environment is still handed down, so the
+    # bootstrap keeps seeing PATH/LOCALAPPDATA/TEMP.
+    env = captured["kwargs"]["env"]
+    assert env["CCSYNC_DASHBOARD_TOKEN"] == "5f0c7dd7ab03435090"
+    assert "PATH" in env or "Path" in env
 
 
 def test_run_bootstrap_omits_local_root_when_not_given(tmp_path):

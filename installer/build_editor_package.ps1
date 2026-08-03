@@ -104,6 +104,22 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $CompanionDir = Join-Path $RepoRoot "companion"
 $ExePath = Join-Path $CompanionDir "dist\ccsync-companion.exe"
 
+# The exit code this script finally reports. Everything below warns and carries
+# on -- an incomplete package is still worth assembling, and one locked
+# destination file must not abort the publish -- but "carried on" is NOT
+# "succeeded", and tools\ship.ps1 gates step 3 solely on $LASTEXITCODE. Exiting
+# 0 with a STALE package meant ship printed "ship complete" while every new
+# editor still got the previous onboard.exe (B23, seen live 2026-07-25 when an
+# editor had onboard.exe open off the share). Set this instead of exiting
+# early, so the publish and the provenance report still run.
+$script:FinalExitCode = 0
+
+function Set-Failed {
+    param([string]$Reason)
+    $script:FinalExitCode = 1
+    Write-Warn2 "FAILED: $Reason"
+}
+
 Write-Step "repo root: $RepoRoot"
 Write-Step "destination: $Destination"
 
@@ -308,11 +324,13 @@ Write-Host "=================================================================="
 if ($missing.Count -gt 0) {
     Write-Warn2 "$($missing.Count) source file(s) missing -- package is INCOMPLETE:"
     foreach ($m in $missing) { Write-Host "    $m" }
+    Set-Failed "$($missing.Count) source file(s) missing -- the package on the share is INCOMPLETE"
 }
 if ($copyFailed.Count -gt 0) {
     Write-Warn2 "$($copyFailed.Count) file(s) could not be copied (locked?) -- package is STALE for:"
     foreach ($m in $copyFailed) { Write-Host "    $m" }
     Write-Warn2 "re-run this script once the lock clears to finish the package"
+    Set-Failed "$($copyFailed.Count) file(s) could not be copied -- the package on the share is STALE"
 }
 if ($missing.Count -eq 0 -and $copyFailed.Count -eq 0) {
     Write-Step "package assembled: $($Files.Count) files"
@@ -479,6 +497,14 @@ if ($Publish) {
         $onboardUri = "$DashboardUrl/api/v1/admin/packages/windows/${onboardVersion}?kind=onboard&sha256=$onboardSha&make_current=$mc"
     }
 
+    # A skipped installer upload is a FAILED ship, not a footnote: the whole
+    # point of -Publish is that the dashboard's [ INSTALLER ] download serves
+    # the build just made. Warning-and-continuing here (while ship.ps1 checked
+    # only $LASTEXITCODE) is the same root cause as B23.
+    if ($onboardSkipReason) {
+        Set-Failed "the onboarding installer was NOT published: $onboardSkipReason"
+    }
+
     if ($DryRun) {
         Write-Step "[dry-run] would publish v$version ($([int]((Get-Item -LiteralPath $ExePath).Length/1KB)) KB, sha256 $($sha.Substring(0,12))...) via PUT $uri as $AdminUser"
         if ($onboardSkipReason) {
@@ -560,6 +586,7 @@ if ($Publish) {
                     if ($serverSha -and $serverSha -ne $onboardSha) {
                         Write-Warn2 "installer v$onboardVersion is already published WITH DIFFERENT CONTENT -- the server keeps the OLD build."
                         Write-Warn2 "bump `$InstallerVersion in installer\windows_bootstrap.ps1 AND INSTALLER_VERSION in onboarding\steps.py, then re-run with -RebuildOnboard -Publish"
+                        Set-Failed "the installer the fleet serves is NOT the one just built"
                     }
                     else {
                         Write-Step "installer v$onboardVersion is already published (unchanged) -- nothing to do"
@@ -567,8 +594,20 @@ if ($Publish) {
                 }
                 else {
                     Write-Warn2 "installer publish failed: $($_.Exception.Message)"
+                    Set-Failed "the onboarding installer upload failed"
                 }
             }
         }
     }
 }
+
+# --- final verdict --------------------------------------------------------
+# tools\ship.ps1 gates the local upgrade (and its "ship complete" line) on this
+# exit code and nothing else.
+if ($script:FinalExitCode -ne 0) {
+    Write-Host ""
+    Write-Warn2 "=================================================================="
+    Write-Warn2 "THIS RUN DID NOT FULLY SUCCEED -- see the FAILED line(s) above."
+    Write-Warn2 "=================================================================="
+}
+exit $script:FinalExitCode

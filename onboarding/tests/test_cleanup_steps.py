@@ -442,6 +442,26 @@ class TestEnsureConfig:
         assert "transfers = 8" in text
         assert 'mode = "base"' in text
 
+    def test_cp1252_config_does_not_raise_after_clean_slate(self, tmp_path):
+        # A config.toml saved by Notepad in cp1252 raises UnicodeDecodeError,
+        # which is a ValueError and NOT an OSError -- it escaped the handler
+        # and surfaced as "install failed" AFTER _clean_slate had removed the
+        # working install, with RETRY failing identically forever.
+        path = tmp_path / "config.toml"
+        path.write_bytes('editor_name = "Jos\xe9"\ntransfers = 8\n'.encode("cp1252"))
+
+        steps.ensure_config(
+            "editor", editor_name="jose", dashboard_url="u", dashboard_token="t",
+            local_root="D:\\CC", config_path=path,
+        )
+
+        text = path.read_text(encoding="utf-8")
+        assert 'editor_name = "jose"' in text
+        assert 'mode = "editor"' in text
+        # the unreadable original is preserved beside it, not silently binned
+        salvaged = [p for p in tmp_path.iterdir() if ".unreadable-" in p.name]
+        assert len(salvaged) == 1
+
     def test_missing_file_starts_from_companion_default(self, tmp_path):
         path = tmp_path / "config.toml"
         steps.ensure_config(

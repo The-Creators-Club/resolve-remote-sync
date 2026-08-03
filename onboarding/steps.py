@@ -43,7 +43,12 @@ from ccsync_companion import identity as identity_mod
 
 # -- constants ---------------------------------------------------------------
 
-INSTALLER_VERSION = "1.0.14"
+# Bump this AND $InstallerVersion in installer/windows_bootstrap.ps1 together
+# -- build_editor_package.ps1 refuses to publish on drift between the two.
+# 1.0.15: the fleet token moved off the bootstrap's command line into
+# CCSYNC_DASHBOARD_TOKEN in its environment (run_bootstrap below), which is a
+# contract between this file and that script; they must ship as a pair.
+INSTALLER_VERSION = "1.0.15"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.
@@ -118,6 +123,12 @@ CAPTURE_TEXT_KWARGS: dict[str, Any] = {
 # into a "completed with N warnings -- this machine is NOT ready" finish page
 # instead of DONE (INST-5).
 CAPABILITY_MARKER = "CAPABILITY MISSING:"
+# windows_bootstrap.ps1's capability-summary exit code (its section 11,
+# "if ($script:CapabilityMisses.Count -gt 0) { ... exit 3 }"). It is the ONLY
+# non-zero exit that means "the script ran to the end". Every other non-zero
+# exit is a terminating error under $ErrorActionPreference = "Stop" somewhere
+# in the middle -- see bootstrap_hard_failure.
+BOOTSTRAP_CAPABILITY_EXIT_CODE = 3
 # Phrasings older bootstraps used for the same three misses, kept so an
 # onboard.exe paired with a stale windows_bootstrap.ps1 still flags them.
 _LEGACY_CAPABILITY_PHRASES = (
@@ -465,15 +476,27 @@ def run_bootstrap(
         "-TailnetHost", tailnet_host,
         "-EditorName", editor_name,
         "-DashboardUrl", dashboard_url,
-        "-DashboardToken", dashboard_token,
     ]
     if local_root:
         cmd += ["-LocalRoot", str(local_root)]
     if companion_exe_source:
         cmd += ["-CompanionExeSource", str(companion_exe_source)]
 
+    # The fleet token is a credential, and a native process's command line is
+    # readable by ANY unprivileged process on the machine
+    # (Get-CimInstance Win32_Process). It therefore travels in the child's
+    # environment, not on argv -- the same reason server/common.py pipes its
+    # sudo password over stdin (AUDIT SEC-2). windows_bootstrap.ps1 reads
+    # $env:CCSYNC_DASHBOARD_TOKEN when -DashboardToken is blank; the parameter
+    # stays for hand-runs. onboard.exe always ships its own paired copy of the
+    # script (find_bootstrap_script prefers sys._MEIPASS), so the two halves
+    # can never be mismatched here.
+    child_env = dict(os.environ)
+    child_env["CCSYNC_DASHBOARD_TOKEN"] = str(dashboard_token or "")
+
     try:
-        result = run(cmd, timeout=BOOTSTRAP_TIMEOUT_SECONDS, **CAPTURE_TEXT_KWARGS)
+        result = run(cmd, timeout=BOOTSTRAP_TIMEOUT_SECONDS, env=child_env,
+                     **CAPTURE_TEXT_KWARGS)
     except subprocess.TimeoutExpired as exc:
         partial = ((exc.stdout or "") if isinstance(exc.stdout, str) else "") + (
             (exc.stderr or "") if isinstance(exc.stderr, str) else ""
@@ -527,6 +550,76 @@ def bootstrap_capability_warnings(bootstrap_output: str) -> list[str]:
             seen.add(message)
             found.append(message)
     return found
+
+
+def bootstrap_hard_failure(exit_code: Any, capability_problems: Optional[list[str]] = None) -> bool:
+    """True when a bootstrap exit means "the install did NOT finish", as
+    opposed to "it finished, but this machine is missing a capability".
+
+    windows_bootstrap.ps1 runs under $ErrorActionPreference = "Stop" and exits
+    exactly BOOTSTRAP_CAPABILITY_EXIT_CODE from the capability summary at the
+    very bottom of the script. Any OTHER non-zero exit is a terminating error
+    part-way through -- the P: teardown/remap, the tool installs, the
+    companion step -- with everything after it never run.
+
+    The two states can co-occur, and that is the whole reason this function
+    exists (B7). `Add-CapabilityMiss "rclone is NOT installed"` fires early;
+    the P: mapping block then throws and the script exits 1 long before the
+    summary. Keying only on "did any capability warning appear" made the
+    wizard skip its failure branch and tell the editor "everything else
+    installed fine" while P: had been unmounted and never recreated and the
+    companion was never installed. The signal that separates the two cases is
+    the exit code, so use it.
+
+    A bare exit 3 with no parsable CAPABILITY MISSING lines is treated as a
+    hard failure too: without those lines the Finish page has nothing to show
+    and would render a green DONE, which is the exact outcome INST-5 exists to
+    prevent.
+    """
+    try:
+        code = int(exit_code)
+    except (TypeError, ValueError):
+        return True
+    if code == 0:
+        return False
+    if code == BOOTSTRAP_CAPABILITY_EXIT_CODE and capability_problems:
+        return False
+    return True
+
+
+# -- role resolution (which install actually runs) -----------------------------
+
+INSTALL_ROLES = ("editor", "base")
+
+
+def effective_install_role(picked_role: Optional[str], verified_role: Optional[str]) -> str:
+    """The role the install must actually RUN as, given the radio button the
+    editor picked and the role the dashboard verified the account as.
+
+    The verified role wins whenever the dashboard sent a recognised one. The
+    radio is a guess made before anyone signed in; `verified_role` is what
+    /api/v1/verify says the account is, and it is already what the companion
+    itself obeys once it starts (see write_identity's role param).
+
+    This matters because the roles are not symmetric in cost (B20): an
+    "editor" install tears P: down (`subst P: /D` + `net use P: /delete /y`)
+    and recreates it as a loopback share of a LOCAL folder. Run that on the
+    base rig -- whose P: is the real NAS share every P:\\Projects\\... clip
+    path in the Resolve database resolves through -- and the whole tree goes
+    offline. Dispatching on the radio meant a base-rig re-run with the default
+    "editor" selection did exactly that, while the wizard printed an amber
+    note saying it knew better.
+    """
+    verified = str(verified_role or "").strip().lower()
+    if verified in INSTALL_ROLES:
+        return verified
+    picked = str(picked_role or "").strip().lower()
+    if picked in INSTALL_ROLES:
+        return picked
+    # Neither is usable. "base" is the non-destructive one -- it never touches
+    # a drive mapping -- so an unknown role must land there, not on the branch
+    # that unmounts P:.
+    return "base"
 
 
 # -- identity + config finalization --------------------------------------------
@@ -588,6 +681,13 @@ def finalize_config_identity(username: str, config_path: Optional[Path] = None) 
 # $ErrorActionPreference = "Stop" -- a nonexistent drive is a hard abort
 # AFTER _clean_slate() has removed the previous install (INST-21).
 _DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+# "D:\", "D:/", "D:\\\\" -- a bare volume root with nothing after it. The base
+# rig legitimately uses one (P:\ IS the NAS share mapping); an editor must
+# never, because windows_bootstrap.ps1 hands local_root to
+# `New-SmbShare -FullAccess` and then maps P: at it, publishing the ENTIRE
+# volume -- Windows, Program Files, every other user's profile -- read/write
+# over the loopback share, and pointing lane B's proxy downloads at it.
+_DRIVE_ROOT_RE = re.compile(r"^[A-Za-z]:[\\/]*$")
 
 
 def validate_local_root(
@@ -619,6 +719,12 @@ def validate_local_root(
         return "use a full path starting with a drive letter, e.g. C:\\Creators_Club"
 
     drive = raw[0].upper()
+    if role != "base" and _DRIVE_ROOT_RE.match(raw):
+        return (
+            f"{drive}:\\ on its own is the whole volume -- the install shares "
+            f"this folder over the network and maps P: at it, so pick a folder "
+            f"inside the drive instead, e.g. {drive}:\\Creators_Club"
+        )
     if role != "base" and drive == "P":
         # The install unmounts P: and remaps it AT this folder; pointing the
         # folder at P: means Ensure-Dir runs against a drive that no longer
@@ -1078,6 +1184,20 @@ def ensure_config(
     try:
         text = path.read_text(encoding="utf-8-sig")
     except OSError:
+        text = config_mod.DEFAULT_TOML_TEXT
+    except (UnicodeDecodeError, ValueError):
+        # A config.toml saved in cp1252 (Notepad's old default, and what an
+        # editor gets from "Save As" on a machine with a non-UTF-8 locale)
+        # raises UnicodeDecodeError -- a ValueError, NOT an OSError, so it used
+        # to escape this handler and surface as "install failed" AFTER
+        # _clean_slate had already removed the working install, with RETRY
+        # failing identically forever. Merging into a file we cannot read is
+        # not possible, so start from the companion's own defaults and keep the
+        # unreadable original beside it rather than throwing it away.
+        try:
+            path.replace(path.with_name(path.name + f".unreadable-{int(time.time())}"))
+        except OSError:
+            pass
         text = config_mod.DEFAULT_TOML_TEXT
 
     forced: dict[str, str] = {

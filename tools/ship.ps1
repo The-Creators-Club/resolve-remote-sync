@@ -50,6 +50,23 @@ $ErrorActionPreference = "Continue"
 function Write-Step { param([string]$m) Write-Host "[ship] $m" }
 function Write-Fail { param([string]$m) Write-Host "[ship] FAILED: $m" -ForegroundColor Red }
 
+# curl.exe is kept (it is the only thing here that reliably reports a bare HTTP
+# status without downloading the body), but the fleet token NEVER rides on its
+# command line: a native process's argv is readable by any unprivileged process
+# via `Get-CimInstance Win32_Process`, and both calls below run while an editor
+# may be logged in. `-K -` makes curl read its config -- headers included --
+# from stdin instead. Same principle as server/common.py piping the sudo
+# password over stdin (AUDIT SEC-2).
+function Invoke-CurlWithToken {
+    param(
+        [string]$Uri,
+        [string]$Token,
+        [string[]]$ExtraArgs = @()
+    )
+    $config = "header = `"X-CCSync-Token: $Token`"" + "`n"
+    return ($config | curl.exe -s -K - @ExtraArgs $Uri)
+}
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 Write-Step "repo root: $RepoRoot"
@@ -76,8 +93,10 @@ Write-Step "repo says: dashboard v$DashVersion, companion v$CompanionVersion"
 # a password prompt) wasted a run twice on 2026-07-26. The download endpoint
 # answers with the shared token, so check FIRST.
 if (-not $DashboardOnly) {
-    $pubCode = curl.exe -s -o NUL -w "%{http_code}" -H "X-CCSync-Token: $env:DASH_REPORT_TOKEN" `
-        "http://192.168.0.102:8480/api/v1/companion/package/windows/$CompanionVersion"
+    $pubCode = Invoke-CurlWithToken `
+        -Uri "http://192.168.0.102:8480/api/v1/companion/package/windows/$CompanionVersion" `
+        -Token $env:DASH_REPORT_TOKEN `
+        -ExtraArgs @("-o", "NUL", "-w", "%{http_code}")
     if ($pubCode -eq "200") {
         Write-Fail "companion v$CompanionVersion is ALREADY published on the server."
         Write-Step "bump VERSION in companion\src\ccsync_companion\config.py AND companion\pyproject.toml"
@@ -97,7 +116,8 @@ if ($LASTEXITCODE -ne 0) {
 Start-Sleep -Seconds 8
 $live = ""
 try {
-    $health = curl.exe -s -H "X-CCSync-Token: $env:DASH_REPORT_TOKEN" "http://192.168.0.102:8480/api/v1/health" | ConvertFrom-Json
+    $health = Invoke-CurlWithToken -Uri "http://192.168.0.102:8480/api/v1/health" `
+        -Token $env:DASH_REPORT_TOKEN | ConvertFrom-Json
     $live = "$($health.version)"
 }
 catch {}

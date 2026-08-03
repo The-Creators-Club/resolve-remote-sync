@@ -100,6 +100,9 @@ class OnboardWizard:
         self.verified_username: Optional[str] = None
         self.identity_token: Optional[str] = None
         self.verified_role: Optional[str] = None
+        # What the radio said before verify_account overrode it, kept only so
+        # the install page can explain the switch (see show_install / B20).
+        self.picked_role: Optional[str] = None
         self.report_token: str = ""
         self.bootstrap_output: str = ""
         self.device_id: Optional[str] = None
@@ -111,6 +114,9 @@ class OnboardWizard:
         self.install_warnings: list[str] = []
         self._installing = False
         self._local_root_trace: Optional[str] = None
+
+        self._last_back_btn = None
+        self._install_back_btn = None
 
         self.container = tk.Frame(self.root, bg=theme.BG, padx=22, pady=18)
         self.container.pack(fill="both", expand=True)
@@ -130,10 +136,18 @@ class OnboardWizard:
 
     def _nav_bar(self, frame, back: Optional[Callable] = None, next_: Optional[Callable] = None,
                  next_label: str = "NEXT", next_enabled: bool = True):
+        """Returns the NEXT widget (or None when the page has no NEXT). The
+        BACK widget is published on self._last_back_btn instead of returned --
+        show_install needs a handle on it to disable it during the install, and
+        reading it off this method's return value silently got None on exactly
+        the page that has no NEXT button."""
         bar = tk.Frame(frame, bg=theme.BG)
         bar.pack(side="bottom", fill="x", pady=(16, 0))
+        self._last_back_btn = None
         if back is not None:
-            theme.neon_button(tk, bar, "BACK", back, primary=False).pack(side="left")
+            back_btn = theme.neon_button(tk, bar, "BACK", back, primary=False)
+            back_btn.pack(side="left")
+            self._last_back_btn = back_btn
         if next_ is not None:
             btn = theme.neon_button(tk, bar, next_label, next_ if next_enabled else (lambda: None), primary=True)
             btn.pack(side="right")
@@ -351,6 +365,20 @@ class OnboardWizard:
                 self.identity_token = result.get("token")
                 self.verified_role = result.get("role")
                 self.report_token = result.get("report_token") or ""
+                # B20: the account's role -- not the radio button -- decides
+                # which install runs, because only one of them is destructive.
+                # Snap the radio to it here, BEFORE the install page renders,
+                # so the role-keyed defaults (_on_role_changed's local_root
+                # and dashboard URL) follow it too instead of seeding a base
+                # rig's config.toml with an editor's C:\Creators_Club.
+                picked = self.role_var.get()
+                effective = steps.effective_install_role(picked, self.verified_role)
+                if effective != picked:
+                    self.picked_role = picked
+                    self.role_var.set(effective)
+                    self._on_role_changed()
+                else:
+                    self.picked_role = None
                 self.show_install()
 
             self._safe_after(_ui)
@@ -359,9 +387,16 @@ class OnboardWizard:
 
     # -- page 4: install --------------------------------------------------
 
+    def _effective_role(self) -> str:
+        """The role the install will actually run as. Belt-and-braces with the
+        role_var snap in _on_verify: every destructive decision on this page
+        goes through here, so the radio alone can never select the P:-teardown
+        path on an account the dashboard verified as 'base' (B20)."""
+        return steps.effective_install_role(self.role_var.get(), self.verified_role)
+
     def show_install(self) -> None:
         frame = self._new_page()
-        role = self.role_var.get()
+        role = self._effective_role()
         _heading(frame, f"STEP 4: INSTALL  (signed in as {self.verified_username})")
         if role == "base":
             _label(frame, "This removes every trace of older CCSync versions, installs\n"
@@ -374,9 +409,11 @@ class OnboardWizard:
                            "Syncthing (if needed) and the companion app. Safe to re-run.",
                    wraplength=560).pack(anchor="w", pady=(0, 10))
 
-        if self.verified_role and self.verified_role != role:
-            _label(frame, f"note: the dashboard says this account is '{self.verified_role}' but you "
-                           f"picked '{role}' -- the account's role wins once the companion signs in.",
+        if self.picked_role and self.picked_role != role:
+            _label(frame, f"note: you picked '{self.picked_role}', but the dashboard says this "
+                           f"account is '{role}' -- so this is a '{role}' install. That is the "
+                           f"account's role, which the companion obeys anyway, and only the "
+                           f"'editor' install unmaps and re-creates the P: drive.",
                    fg=theme.AMBER, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(0, 8))
 
         form = tk.Frame(frame, bg=theme.BG)
@@ -422,7 +459,13 @@ class OnboardWizard:
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        self._install_back_btn = self._nav_bar(frame, back=self.show_signin, next_=None)
+        # This page has no NEXT, so _nav_bar's return value is None -- which is
+        # what made the "disable BACK while installing" guard below dead code
+        # (clicking BACK mid-_clean_slate destroyed the log widget under the
+        # worker thread, whose next _append_log raised TclError into an
+        # invisible handler). Take the BACK widget from _last_back_btn instead.
+        self._nav_bar(frame, back=self.show_signin, next_=None)
+        self._install_back_btn = self._last_back_btn
 
     def _append_log(self, text: str) -> None:
         def _ui():
@@ -433,7 +476,7 @@ class OnboardWizard:
         self._safe_after(_ui)
 
     def _local_root_problem(self) -> Optional[str]:
-        return steps.validate_local_root(self.local_root_var.get(), self.role_var.get())
+        return steps.validate_local_root(self.local_root_var.get(), self._effective_role())
 
     def _revalidate_local_root(self) -> None:
         """Enable/disable BEGIN INSTALL from the local_root field's validity,
@@ -465,7 +508,14 @@ class OnboardWizard:
             self._install_back_btn.config(state="disabled", fg=theme.MUTED)
         self._append_log("starting install…")
 
-        worker = self._worker_base if self.role_var.get() == "base" else self._worker_editor
+        # B20: the VERIFIED role, never the radio. _worker_editor's
+        # _clean_slate("editor") sets unmount_p=True -- `subst P: /D` +
+        # `net use P: /delete /y` -- and on the base rig P: is the real NAS
+        # share mapping every P:\Projects\... clip path in Resolve resolves
+        # through. A default-radio re-run there used to destroy it.
+        role = self._effective_role()
+        worker = self._worker_base if role == "base" else self._worker_editor
+        self._append_log(f"role: {role}")
         threading.Thread(target=worker, daemon=True).start()
 
     def _clean_slate(self, role: str) -> None:
@@ -552,15 +602,36 @@ class OnboardWizard:
             self.bootstrap_output = output
             self._append_log(output)
 
-            # A non-zero exit is now ALSO how the bootstrap reports a
-            # hard-capability miss (no rclone, no Syncthing, no device ID).
+            # The bootstrap owns config.toml's seeding path and may have
+            # written it itself (it only skips when the file already exists),
+            # so re-assert the one key the wizard is authoritative on: the
+            # verified username. Normally a no-op; tolerant of every failure.
+            # This is the call site steps.finalize_config_identity was written
+            # and tested for and had never actually been wired into.
+            steps.finalize_config_identity(self.verified_username)
+
+            # Exit 3 is how the bootstrap reports a hard-capability miss (no
+            # rclone, no Syncthing, no device ID) after running to the end.
             # Those are not retryable -- re-running produces the identical
             # result -- so they go to the Finish page in its "NOT ready"
             # state rather than looping the editor on RETRY INSTALL (INST-5).
+            #
+            # Any OTHER non-zero exit is a terminating error part-way through,
+            # and it can carry capability warnings with it: the rclone miss
+            # fires long before the P: mapping block that then throws. Treating
+            # "any capability warning" as proof of a soft failure told the
+            # editor "everything else installed fine" while P: had been
+            # unmounted and never recreated (B7). bootstrap_hard_failure keys
+            # on the exit code, which is the signal that tells them apart.
             capability_problems = steps.bootstrap_capability_warnings(output)
             self.install_warnings.extend(capability_problems)
-            if exit_code != 0 and not capability_problems:
-                self._append_log(f"bootstrap exited with code {exit_code} -- see log above.")
+            if steps.bootstrap_hard_failure(exit_code, capability_problems):
+                self._append_log(
+                    f"bootstrap exited with code {exit_code} -- it stopped part-way "
+                    f"through, so this install did NOT finish (only exit "
+                    f"{steps.BOOTSTRAP_CAPABILITY_EXIT_CODE} means 'finished, but "
+                    f"something is missing'). See the log above."
+                )
                 self._safe_after(lambda: self._install_failed())
                 return
             if capability_problems:
@@ -578,11 +649,31 @@ class OnboardWizard:
 
     def _worker_base(self) -> None:
         try:
+            # PRE-FLIGHT, before anything destructive (B22). _clean_slate
+            # taskkills the running companion, deletes all four ALL_RUN_VALUES
+            # autostart entries and unlinks the binary; install_companion()
+            # then raises FileNotFoundError when the exe was never bundled,
+            # leaving the machine with no companion, no autostart and no
+            # rollback -- and RETRY fails identically forever. The editor
+            # worker already checks this first; do the same here.
+            try:
+                companion_src = steps.find_companion_exe()
+            except FileNotFoundError as exc:
+                self._append_log(
+                    f"companion app not bundled with this installer ({exc}). "
+                    "Nothing has been changed on this machine. Get a complete "
+                    "CC_Sync package (onboard.exe next to ccsync-companion.exe) "
+                    "and run that instead."
+                )
+                self._safe_after(lambda: self._install_failed())
+                return
+            self._append_log(f"found bundled companion app: {companion_src}")
+
             self._clean_slate("base")
             self._write_config_and_identity("base")
 
             self._append_log("installing companion app…")
-            exe = steps.install_companion()
+            exe = steps.install_companion(src=companion_src)
             self._append_log(f"companion installed: {exe}")
             steps.register_companion_autostart(exe)
             self._append_log("autostart registered.")

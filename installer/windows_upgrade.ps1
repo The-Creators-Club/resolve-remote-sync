@@ -33,7 +33,14 @@
     Report actions without performing them.
 
 .EXAMPLE
-    .\windows_upgrade.ps1 -DashboardToken 5f0c7dd7ab0343509e5730ce5198967f2176ad8ec700bf1a
+    # <token> is the 48-hex fleet token your admin gave you. Deliberately NOT
+    # a real value: this file ships to every editor inside the CC_Sync package
+    # (build_editor_package.ps1), and a literal token in the help text is a
+    # published credential. Note also that the value lands on this process's
+    # command line, which any unprivileged process on the machine can read via
+    # Get-CimInstance Win32_Process -- prefer letting onboard.exe write
+    # dashboard_token into ~/.ccsync/config.toml and omitting this parameter.
+    .\windows_upgrade.ps1 -DashboardToken <token>
 #>
 [CmdletBinding()]
 param(

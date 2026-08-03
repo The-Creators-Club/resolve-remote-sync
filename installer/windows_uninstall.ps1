@@ -114,6 +114,32 @@ if ($task) {
 }
 else { Write-Skip "no scheduled task: CCSync-SubstP" }
 
+# CCSync-OneShot-<hex> tasks: windows_bootstrap.ps1's Invoke-AtUserIntegrity
+# registers one per mapping command to run it at the user's own integrity
+# level, and unregisters it in a finally -- but only if the process survives
+# that long. Its own 30s wait, an aborted run, or onboard.exe's bootstrap
+# timeout killing the powershell leaves them behind, one per attempt, forever.
+# This script only ever knew about CCSync-SubstP, so -Full left them
+# accumulating in Task Scheduler on every machine that ever hit the path.
+$oneShots = @()
+try {
+    $oneShots = @(Get-ScheduledTask -TaskName "CCSync-OneShot-*" -ErrorAction SilentlyContinue)
+}
+catch { $oneShots = @() }
+if ($oneShots.Count -gt 0) {
+    foreach ($t in $oneShots) {
+        if ($DryRun) { Write-Step "[dry-run] would unregister orphaned scheduled task: $($t.TaskName)" }
+        else {
+            try {
+                Unregister-ScheduledTask -TaskName $t.TaskName -Confirm:$false -ErrorAction Stop
+                Write-Step "unregistered orphaned scheduled task: $($t.TaskName)"
+            }
+            catch { Write-Warn2 "could not unregister task $($t.TaskName): $($_.Exception.Message)" }
+        }
+    }
+}
+else { Write-Skip "no orphaned CCSync-OneShot-* scheduled tasks" }
+
 # --- 3. P: drive mapping --------------------------------------------------
 # D-8: on the BASE rig, P:/T: are real SMB mappings of the NAS itself that
 # this installer never created (onboarding/steps.py's build_cleanup_plan
@@ -213,8 +239,29 @@ else { Write-Skip "no bin dir: $BinDir" }
 # ...and the user PATH entry windows_bootstrap.ps1 added for it. Leaving a
 # dangling PATH entry behind is what makes "uninstall then reinstall" produce
 # a subtly different environment from a fresh machine.
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($null -eq $userPath) { $userPath = "" }
+#
+# Read the RAW registry value, not [Environment]::GetEnvironmentVariable:
+# that expands a REG_EXPAND_SZ Path, and SetEnvironmentVariable writes back a
+# plain REG_SZ, so a "%USERPROFILE%\bin" entry gets permanently rewritten to
+# today's literal profile path. This script inflicts that on any machine it is
+# run on -- including one the bootstrap never touched, where the loop below
+# finds nothing to remove but the rewrite happens anyway.
+$userPath = ""
+$userPathKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+try {
+    $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
+    if ($envKey) {
+        try {
+            $raw = $envKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($null -ne $raw) { $userPath = "$raw" }
+            $kind = $envKey.GetValueKind("Path")
+            if ($kind) { $userPathKind = $kind }
+        }
+        finally { $envKey.Close() }
+    }
+}
+catch { $userPath = "" }
+
 $pathParts = @($userPath -split ";")
 $keptParts = @($pathParts | Where-Object { $_ -and ($_.TrimEnd("\") -ne $BinDir.TrimEnd("\")) })
 if ($pathParts.Count -eq $keptParts.Count) {
@@ -225,8 +272,18 @@ elseif ($DryRun) {
 }
 else {
     try {
-        [Environment]::SetEnvironmentVariable("Path", ($keptParts -join ";"), "User")
-        Write-Step "removed $BinDir from the user PATH"
+        if ($userPath -match '%[^%]+%') {
+            # Preserve the value kind so the surviving %VAR% entries stay
+            # unexpanded. No WM_SETTINGCHANGE broadcast on this path.
+            $envKeyW = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
+            try { $envKeyW.SetValue("Path", ($keptParts -join ";"), $userPathKind) }
+            finally { $envKeyW.Close() }
+            Write-Step "removed $BinDir from the user PATH (log off and back on to pick it up)"
+        }
+        else {
+            [Environment]::SetEnvironmentVariable("Path", ($keptParts -join ";"), "User")
+            Write-Step "removed $BinDir from the user PATH"
+        }
     }
     catch { Write-Warn2 "could not update the user PATH: $($_.Exception.Message)" }
 }

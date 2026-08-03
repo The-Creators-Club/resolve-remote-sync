@@ -7,6 +7,8 @@ import hashlib
 import io
 import os
 import pathlib
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -668,3 +670,220 @@ def test_the_wording_helpers_never_raise_on_hostile_input():
             "newer", "older", "same", "unknown")
     assert upgrade_mod.parse_version(_Hostile()) is None
     assert upgrade_mod.compare_to_running(_Hostile()) == "unknown"
+
+
+# ===========================================================================
+# macOS port (KNOWN_BUGS #8): the swap assumed the Windows shape of the binary
+#
+# The macOS artifact is a bare single-file Mach-O called `ccsync-companion`
+# -- no .exe, no .app. The download name was hardcoded `.new.exe`, the
+# verified download was never given an execute bit (open("wb") is 0644, so
+# the respawn would have failed with EACCES), and the detach was a Windows
+# creationflags mask with no POSIX equivalent. Windows behaviour must come out
+# of this byte-identical, so every darwin test below has a win32 twin.
+# ===========================================================================
+
+
+@pytest.fixture
+def chmods(monkeypatch):
+    """Records every os.chmod the module makes, and performs none of them."""
+    calls = []
+    monkeypatch.setattr(os, "chmod", lambda path, mode, **kw: calls.append((Path(path), mode)))
+    return calls
+
+
+@pytest.fixture
+def darwin(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+
+
+def test_the_download_name_follows_the_platform(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert upgrade_mod.new_download_name() == "ccsync-companion.new.exe"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert upgrade_mod.new_download_name() == "ccsync-companion.new"
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert upgrade_mod.new_download_name() == "ccsync-companion.new"
+
+
+def test_the_download_is_made_executable_on_macos(tmp_path, darwin, chmods):
+    """open("wb") leaves 0644 under the usual umask and macOS will not exec
+    that -- the swap would rename a non-executable file over the companion and
+    the respawn would die with EACCES. os.replace preserves the mode, so
+    chmodding the download carries through both renames."""
+    body = b"new-mach-o-bytes"
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(body))
+    path = mgr.download_and_verify(_info(body=body), tmp_path)
+
+    assert path == tmp_path / "ccsync-companion.new", "no .exe on a Mac"
+    assert path.read_bytes() == body
+    assert chmods == [(path, 0o755)]
+
+
+def test_windows_downloads_the_exe_name_and_never_chmods(tmp_path, windows, chmods):
+    """The Windows path must be untouched: os.chmod there only toggles the
+    read-only bit, and calling it on the pending build is a way to fail an
+    upgrade for nothing."""
+    body = b"new-exe-bytes"
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(body))
+    path = mgr.download_and_verify(_info(body=body), tmp_path)
+
+    assert path == tmp_path / "ccsync-companion.new.exe"
+    assert chmods == []
+
+
+def test_a_download_that_fails_verification_is_never_made_executable(
+    tmp_path, darwin, chmods,
+):
+    """Order matters: an unverified download must not be runnable, however
+    briefly."""
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"tampered"))
+    assert mgr.download_and_verify(_info(body=b"expected-bytes"), tmp_path) is None
+    assert chmods == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_chmod_failure_does_not_refuse_the_update(tmp_path, darwin, monkeypatch, caplog):
+    """chmod can fail with EPERM on exotic mounts where the file is already
+    executable. Refusing a working update over that would be worse than the
+    alternative: if the binary really cannot be executed, the spawn fails and
+    _apply_inner rolls the whole swap back."""
+    def blocked(path, mode, **kw):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(os, "chmod", blocked)
+    body = b"new-mach-o-bytes"
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(body))
+    with caplog.at_level("WARNING", logger="ccsync.upgrade"):
+        path = mgr.download_and_verify(_info(body=body), tmp_path)
+
+    assert path is not None and path.read_bytes() == body
+    assert any("execute bit" in r.message for r in caplog.records)
+
+
+# -- the swap, with an extensionless binary -----------------------------
+
+
+@pytest.fixture
+def mac_exe(tmp_path, monkeypatch, darwin):
+    """The macOS artifact: `ccsync-companion`, no extension, no bundle."""
+    exe = tmp_path / "ccsync-companion"
+    exe.write_bytes(b"old-mach-o-bytes")
+    monkeypatch.setattr(upgrade_mod.sys, "executable", str(exe))
+    monkeypatch.setattr(upgrade_mod, "is_frozen", lambda: True)
+    return exe
+
+
+def test_apply_swaps_an_extensionless_binary(mac_exe, chmods):
+    body = b"new-mach-o-bytes"
+    spawned, shutdowns = [], []
+    mgr = UpgradeManager(
+        _cfg(),
+        http_open=_fake_open(body),
+        spawn_fn=lambda exe: spawned.append(Path(exe)),
+        request_shutdown=lambda: shutdowns.append(True),
+    )
+    mgr.note_report_response({"upgrade": _info(body=body)})
+    assert mgr.apply() is True
+
+    assert mac_exe.read_bytes() == body
+    old = mac_exe.with_name("ccsync-companion.old")
+    assert old.read_bytes() == b"old-mach-o-bytes"
+    assert spawned == [mac_exe]
+    assert shutdowns == [True]
+    # chmodded while it was still the .new download, not after the swap
+    assert chmods == [(mac_exe.with_name("ccsync-companion.new"), 0o755)]
+    assert not mac_exe.with_name("ccsync-companion.new").exists()
+    assert not mac_exe.with_name("ccsync-companion.new.exe").exists()
+
+
+def test_apply_rolls_an_extensionless_binary_back(mac_exe, chmods):
+    def bad_spawn(exe):
+        raise OSError("exec format error")
+
+    mgr = UpgradeManager(
+        _cfg(), http_open=_fake_open(b"new-mach-o-bytes"), spawn_fn=bad_spawn,
+    )
+    mgr.note_report_response({"upgrade": _info(body=b"new-mach-o-bytes")})
+    assert mgr.apply() is False
+
+    assert mac_exe.read_bytes() == b"old-mach-o-bytes", "the running build must be restored"
+    assert not mac_exe.with_name("ccsync-companion.old").exists()
+    assert not mac_exe.with_name("ccsync-companion.new").exists(), (
+        "a refused ~20 MB build must not be left behind"
+    )
+
+
+def test_cleanup_old_removes_an_extensionless_leftover(tmp_path, darwin):
+    exe = tmp_path / "ccsync-companion"
+    old = tmp_path / "ccsync-companion.old"
+    old.write_bytes(b"stale")
+    assert cleanup_old_exe(exe) is True
+    assert not old.exists()
+    assert cleanup_old_exe(exe) is False
+
+
+# -- _default_spawn -----------------------------------------------------
+
+
+@pytest.fixture
+def popen_calls(monkeypatch):
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return object()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    return calls
+
+
+def test_posix_spawn_detaches_with_a_new_session(tmp_path, darwin, popen_calls, monkeypatch):
+    """POSIX has no creationflags (passing one raises). setsid() is the
+    equivalent: the child gets its own session and process group, so it
+    survives this process's death and takes no signal aimed at the dying
+    parent. The macOS LaunchAgent is RunAtLoad-only with no KeepAlive, so
+    nothing else would ever bring the new build up."""
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", "/tmp/_MEI999")
+    monkeypatch.setenv("_MEIPASS2", "/tmp/_MEI999")
+    exe = tmp_path / "ccsync-companion"
+
+    UpgradeManager._default_spawn(exe)
+
+    (argv, kwargs), = popen_calls
+    assert argv == [str(exe)]
+    assert kwargs["start_new_session"] is True
+    assert "creationflags" not in kwargs, "creationflags is a Windows-only kwarg"
+    assert kwargs["cwd"] == str(exe.parent)
+    for handle in ("stdin", "stdout", "stderr"):
+        assert kwargs[handle] == subprocess.DEVNULL
+    # the onefile hygiene is platform-neutral and must survive the port
+    env = kwargs["env"]
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert not [k for k in env if k.startswith("_PYI") or k.startswith("_MEI")]
+
+
+@pytest.mark.skipif(not hasattr(subprocess, "DETACHED_PROCESS"),
+                    reason="Windows-only creation flags")
+def test_windows_spawn_keeps_its_creation_flags(tmp_path, windows, popen_calls):
+    """Byte-identical to before the macOS port: DETACHED_PROCESS decouples
+    from this soon-dead process and CREATE_NO_WINDOW stops Windows allocating
+    the empty console whose closure killed the companion (2026-07-25)."""
+    exe = tmp_path / "ccsync-companion.exe"
+
+    UpgradeManager._default_spawn(exe)
+
+    (argv, kwargs), = popen_calls
+    assert argv == [str(exe)]
+    assert kwargs["creationflags"] == (
+        subprocess.DETACHED_PROCESS
+        | subprocess.CREATE_NEW_PROCESS_GROUP
+        | subprocess.CREATE_NO_WINDOW
+    )
+    assert "start_new_session" not in kwargs
+    assert kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"

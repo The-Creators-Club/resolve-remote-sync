@@ -312,6 +312,114 @@ def test_base_rig_stray_nas_media_is_out_of_tree():
     assert classify_path("C:\\Users\\alex\\Downloads\\z.mp4", **kwargs) == OUT_OF_TREE
 
 
+# -- macOS editors: a canonical P:\ prefix on a posix host ------------------
+#
+# There is no P: drive on a Mac: Resolve reaches the canonical path through
+# its Mapped Mount preference while the tree physically sits at local_root.
+# So os.path.exists("P:\\Projects\\x") is False on every Mac, healthy or
+# broken, and realpath("P:\\") resolves RELATIVE TO THE CWD -- the probe has
+# to go through the local twin and the prefix health has to come from the
+# tree being present. is_windows=False is the seam (the same one the posix
+# tests above use); the local twin is built with the HOST separator, so the
+# exists_fn below is spelling-tolerant.
+
+MAC_ROOT = "/Volumes/T7/Creators_Club"
+MAC_CLIP = r"P:\Projects\2026\CCT\Panel\A001_C061.braw"
+MAC_TWIN = MAC_ROOT + "/Projects/2026/CCT/Panel/A001_C061.braw"
+
+
+def _exists_only(*present):
+    wanted = {p.lower().replace("\\", "/") for p in present}
+
+    def _exists(path):
+        return str(path).lower().replace("\\", "/") in wanted
+
+    return _exists
+
+
+def _mac(path, **kwargs):
+    kwargs.setdefault("exists_fn", _exists_only())
+    kwargs.setdefault("root_present_fn", lambda _root: True)
+    return classify_path(
+        path, local_root=MAC_ROOT, canonical_prefix="P:\\", is_windows=False, **kwargs
+    )
+
+
+def test_mac_canonical_clip_present_in_the_local_tree_is_ok():
+    """Without the local-twin probe every clip on a healthy Mac misclassifies:
+    nothing can stat "P:\\Projects\\..." there."""
+    assert _mac(MAC_CLIP, exists_fn=_exists_only(MAC_TWIN)) == OK
+
+
+def test_mac_case_and_separator_variants_are_ok_too():
+    assert _mac("p:/projects/2026/cct/panel/a001_c061.braw",
+                exists_fn=_exists_only(MAC_TWIN)) == OK
+
+
+def test_mac_canonical_clip_not_downloaded_yet_is_missing_when_the_tree_is_there():
+    # The designed steady state: lane A is upload-only, so the original lives
+    # on the NAS only. Must not warn.
+    assert _mac(MAC_CLIP) == MISSING
+
+
+def test_mac_canonical_clip_with_the_tree_absent_is_a_mapping_warning():
+    # The drive that holds the tree isn't mounted (the T7 is unplugged) --
+    # THE macOS equivalent of `subst P:` never running at login.
+    assert _mac(MAC_CLIP, root_present_fn=lambda _root: False) == BAD_PREFIX
+
+
+def test_mac_prefix_health_never_calls_realpath():
+    """realpath("P:\\") on posix answers something CWD-relative: either a
+    BAD_PREFIX storm or, if it raises, a permanently masked breakage."""
+    calls = []
+
+    assert _mac(MAC_CLIP, realpath_fn=lambda p: calls.append(p) or p) == MISSING
+    assert calls == []
+
+
+def test_mac_prefix_health_probe_is_cached_like_the_windows_one():
+    calls = []
+
+    def counting_isdir(root):
+        calls.append(root)
+        return True
+
+    for i in range(50):
+        classify_path(
+            rf"P:\Projects\clip{i}.braw",
+            local_root=MAC_ROOT,
+            canonical_prefix="P:\\",
+            exists_fn=_exists_only(),
+            is_windows=False,
+            root_present_fn=counting_isdir,
+        )
+    assert len(calls) == 1
+
+
+def test_mac_local_root_spelling_is_still_ok():
+    assert _mac(MAC_TWIN) == OK
+
+
+def test_mac_media_outside_the_tree_is_still_a_popup_candidate():
+    assert _mac("/Users/jane/Desktop/clip.mov", exists_fn=lambda _p: True) == OUT_OF_TREE
+
+
+def test_mac_base_rig_identity_prefix_is_untouched():
+    """A posix canonical prefix (prefix == local_root, or a real mount point)
+    keeps the realpath-based probe -- only the drive-style P:\\ case changes."""
+    calls = []
+    got = classify_path(
+        "/Volumes/CreatorsClub/Projects/clip.mov",
+        local_root="/Users/jane/Creators_Club",
+        canonical_prefix="/Volumes/CreatorsClub",
+        exists_fn=_always_false,
+        is_windows=False,
+        realpath_fn=lambda p: calls.append(p) or _mapped_mount_to_home(p),
+    )
+    assert got == MISSING
+    assert calls == ["/Volumes/CreatorsClub"]
+
+
 # -- loopback-share P: (the 0.4.10 canonical relinks, 2026-07-26) ----------
 
 

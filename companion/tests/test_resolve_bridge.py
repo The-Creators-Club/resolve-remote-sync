@@ -4,6 +4,10 @@ requirements)."""
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 from ccsync_companion import resolve_bridge
 
 
@@ -419,3 +423,71 @@ def test_pin_frozen_python3_home_noop_when_not_frozen(monkeypatch):
     import os as _os
     assert "PYTHON3HOME" not in _os.environ
     assert "PYTHONHOME" not in _os.environ
+
+
+@pytest.mark.parametrize(
+    "bundled", ["libpython3.12.dylib", "Python3"]
+)
+def test_pin_frozen_python3_home_pins_a_bundled_libpython_on_macos(monkeypatch, tmp_path, bundled):
+    """fusionscript.so finds its Python the same way fusionscript.dll does."""
+    (tmp_path / bundled).write_bytes(b"")
+    monkeypatch.setattr(resolve_bridge.sys, "platform", "darwin")
+    monkeypatch.setattr(resolve_bridge.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.delenv("PYTHON3HOME", raising=False)
+    monkeypatch.delenv("PYTHONHOME", raising=False)
+
+    resolve_bridge._pin_frozen_python3_home()
+
+    import os as _os
+    assert _os.environ["PYTHON3HOME"] == str(tmp_path)
+    assert _os.environ["PYTHONHOME"] == str(tmp_path)
+
+
+def test_pin_frozen_python3_home_leaves_a_macos_bundle_without_a_libpython_alone(
+    monkeypatch, tmp_path
+):
+    """Fail-open: pinning PYTHONHOME at a directory with no Python in it
+    breaks the interpreter far more thoroughly than an unpinned
+    fusionscript ever could -- and python3.dll is never there on a Mac."""
+    (tmp_path / "python3.dll").write_bytes(b"")
+    monkeypatch.setattr(resolve_bridge.sys, "platform", "darwin")
+    monkeypatch.setattr(resolve_bridge.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.delenv("PYTHON3HOME", raising=False)
+    monkeypatch.delenv("PYTHONHOME", raising=False)
+
+    resolve_bridge._pin_frozen_python3_home()
+
+    import os as _os
+    assert "PYTHON3HOME" not in _os.environ
+    assert "PYTHONHOME" not in _os.environ
+
+
+def test_macos_clip_path_flavor_is_logged_once(monkeypatch, caplog):
+    """The open hardware question: does Resolve on a Mac hand back the stored
+    canonical `P:\\...` string or the Mapped-Mount-resolved local path? One
+    INFO line on the first successful poll answers it from the editor's log."""
+    monkeypatch.setattr(resolve_bridge.sys, "platform", "darwin")
+    monkeypatch.setattr(resolve_bridge, "_darwin_path_flavor_logged", False)
+    items = [
+        {"file_path": r"P:\Projects\2026\a.braw"},
+        {"file_path": "/Volumes/T7/Creators_Club/Projects/2026/b.braw"},
+    ]
+
+    with caplog.at_level(logging.INFO, logger="ccsync.resolve"):
+        resolve_bridge._log_darwin_clip_path_flavor(items)
+        resolve_bridge._log_darwin_clip_path_flavor(items)
+
+    lines = [r.getMessage() for r in caplog.records if "clip path" in r.getMessage()]
+    assert len(lines) == 1
+    assert "1 of 2" in lines[0]
+
+
+def test_clip_path_flavor_log_is_darwin_only(monkeypatch, caplog):
+    monkeypatch.setattr(resolve_bridge.sys, "platform", "win32")
+    monkeypatch.setattr(resolve_bridge, "_darwin_path_flavor_logged", False)
+
+    with caplog.at_level(logging.INFO, logger="ccsync.resolve"):
+        resolve_bridge._log_darwin_clip_path_flavor([{"file_path": r"P:\a.braw"}])
+
+    assert [r for r in caplog.records if "clip path" in r.getMessage()] == []
+    assert resolve_bridge._darwin_path_flavor_logged is False

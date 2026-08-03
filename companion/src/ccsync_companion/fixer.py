@@ -22,6 +22,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from . import canon
 from . import resolve_bridge
 
 log = logging.getLogger("ccsync.fixer")
@@ -597,20 +598,13 @@ def canonical_clip_path(dest_path: Any, local_root: str, canonical_prefix: str) 
     laptop opened as offline on every other machine (seen live 2026-07-26).
     Falls back to the physical path when no prefix is configured or the
     file isn't under local_root; when canonical_prefix IS local_root (the
-    base rig) this is the identity."""
-    physical = str(dest_path)
-    prefix = str(canonical_prefix or "").strip()
-    if not prefix:
-        return physical
-    try:
-        rel = os.path.relpath(physical, str(local_root))
-    except ValueError:
-        return physical  # different drives -- not under local_root
-    if rel == "." or rel.startswith(".."):
-        return physical
-    if not prefix.endswith(("\\", "/")):
-        prefix += os.sep
-    return prefix + rel
+    base rig) this is the identity.
+
+    canon.local_to_canonical owns the spelling: joining the prefix to the
+    relative part with the HOST separator emits `P:\\Projects/2026/x.braw` on
+    a Mac, and that mixed spelling goes straight into every other machine's
+    project database via ReplaceClip."""
+    return canon.local_to_canonical(dest_path, local_root, canonical_prefix)
 
 
 def fix_clip(

@@ -141,6 +141,77 @@ def test_exists_fn_that_raises_is_treated_as_absent():
     assert plan([item(BRAW, STALE_PROXY, "Offline")], boom) == []
 
 
+# -- macOS editors: a canonical original on a posix host ----------------------
+#
+# is_windows=False is the posix host (the same seam test_paths.py uses). The
+# original is still spelled `P:\...` -- that is what the fleet's project
+# databases store -- so the proxy beside it must be derived with ntpath and
+# linked in canonical spelling, while the "does it exist" probe goes to the
+# local twin under local_root.
+
+MAC_ROOT = "/Volumes/T7/Creators_Club"
+MAC_PANEL = r"P:\Projects\2026\CCT\Interviews\Panel"
+MAC_BRAW = MAC_PANEL + r"\A001_04182004_C061.braw"
+MAC_PROXY = MAC_PANEL + r"\Proxy\A001_04182004_C061.mov"
+MAC_TWIN_PROXY = MAC_ROOT + "/Projects/2026/CCT/Interviews/Panel/Proxy/A001_04182004_C061.mov"
+
+
+def exists_any_spelling(*present):
+    wanted = {p.lower().replace("\\", "/") for p in present}
+    return lambda path: str(path).lower().replace("\\", "/") in wanted
+
+
+def test_mac_canonical_original_derives_an_all_backslash_proxy_path():
+    """posixpath.dirname("P:\\...\\a.braw") answers the whole string, and
+    posixpath.join would emit `P:\\...\\Proxy/a.mov` into the project."""
+    got = proxy_relink.expected_proxy_paths(MAC_BRAW, is_windows=False)
+    assert got == [
+        MAC_PANEL + r"\Proxy\A001_04182004_C061.mov",
+        MAC_PANEL + r"\Proxy\A001_04182004_C061.mp4",
+    ]
+    assert all("/" not in p for p in got)
+
+
+def test_mac_canonical_original_is_in_tree():
+    assert proxy_relink.is_in_tree(MAC_BRAW, MAC_ROOT, CANON, is_windows=False)
+    assert proxy_relink.is_in_tree(
+        MAC_ROOT + "/Projects/2026/a.braw", MAC_ROOT, CANON, is_windows=False
+    )
+    assert not proxy_relink.is_in_tree(
+        "/Users/jane/Movies/a.mov", MAC_ROOT, CANON, is_windows=False
+    )
+
+
+def test_mac_proxy_is_found_via_the_local_twin_and_linked_canonically():
+    found = proxy_relink.find_proxy_on_disk(
+        MAC_BRAW, MAC_ROOT, CANON,
+        exists_fn=exists_any_spelling(MAC_TWIN_PROXY), is_windows=False,
+    )
+    assert found == MAC_PROXY
+
+
+def test_mac_stale_g_drive_proxy_is_repointed_at_the_canonical_copy():
+    ops = proxy_relink.plan_relinks(
+        [item(MAC_BRAW, STALE_PROXY, "Offline", name="")],
+        MAC_ROOT, CANON,
+        exists_fn=exists_any_spelling(MAC_TWIN_PROXY), is_windows=False,
+    )
+    assert len(ops) == 1
+    assert ops[0]["new_proxy"] == MAC_PROXY
+    # the fallback name comes from basename(), which posixpath would answer
+    # with the whole `P:\...` string
+    assert ops[0]["clip_name"] == "A001_04182004_C061.braw"
+    assert ops[0]["reason"] == "stale"
+
+
+def test_mac_proxy_that_is_not_synced_down_yet_is_not_an_op():
+    ops = proxy_relink.plan_relinks(
+        [item(MAC_BRAW, STALE_PROXY, "Offline")],
+        MAC_ROOT, CANON, exists_fn=exists_any_spelling(), is_windows=False,
+    )
+    assert ops == []
+
+
 # -- applying -----------------------------------------------------------------
 
 

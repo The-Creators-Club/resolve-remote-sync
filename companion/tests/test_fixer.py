@@ -1082,6 +1082,21 @@ def test_canonical_clip_path_translates_local_root_to_prefix(tmp_path):
     assert fixer.canonical_clip_path(dest, root, root) == dest
 
 
+def test_canonical_clip_path_is_all_backslashes_from_a_posix_tree():
+    """A macOS editor's tree is at /Volumes/T7/Creators_Club, but what goes
+    into the project database via ReplaceClip must be the fleet's canonical
+    Windows spelling. Joining the prefix to the relative part with the HOST
+    separator emits `P:\\Projects/2026/...`, and that mixed path travels to
+    every other machine in the fleet."""
+    got = fixer.canonical_clip_path(
+        "/Volumes/T7/Creators_Club/Projects/2026/CCT/Panel/A001_C061.braw",
+        "/Volumes/T7/Creators_Club",
+        "P:\\",
+    )
+    assert got == r"P:\Projects\2026\CCT\Panel\A001_C061.braw"
+    assert "/" not in got
+
+
 def test_fix_clip_relinks_to_canonical_path_not_physical(tmp_path):
     """The Resolve project travels between machines; this machine's
     local_root does not. Relinking to D:\...\clip.mov made the clip

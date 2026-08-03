@@ -48,6 +48,8 @@ import os
 import posixpath
 from typing import Any, Callable, Iterable, Optional
 
+from . import canon
+
 log = logging.getLogger("ccsync.proxy_relink")
 
 # Blackmagic Proxy Generator writes H.264 in a QuickTime container next to
@@ -75,6 +77,20 @@ def _plat(is_windows: Optional[bool]):
     return ntpath if windows else posixpath
 
 
+def _plat_for(path: str, is_windows: Optional[bool]):
+    """The path module for THIS string, falling back to the caller's/host's.
+
+    A canonically-spelled `P:\\...` is handled with ntpath whatever the host
+    is: on a Mac, posixpath.dirname("P:\\...\\a.braw") answers the whole
+    string and posixpath.join would emit `P:\\...\\Proxy/a.mov` -- a mixed
+    spelling that goes into every other machine's project database (see this
+    module's rule at the top: the new path is derived from the original's own
+    spelling and must stay fleet-portable).
+    """
+    plat = canon.plat_for(path)
+    return plat if plat is ntpath else _plat(is_windows)
+
+
 def _norm(path: str, plat) -> str:
     return plat.normcase(plat.normpath(str(path)))
 
@@ -99,8 +115,10 @@ def is_in_tree(path: str, local_root: str, canonical_prefix: str,
     """
     if not path:
         return False
-    plat = _plat(is_windows)
-    return _is_under(path, local_root, plat) or _is_under(path, canonical_prefix, plat)
+    return (
+        _is_under(path, local_root, _plat_for(local_root, is_windows))
+        or canon.is_canonical(path, canonical_prefix)
+    )
 
 
 def expected_proxy_paths(original_path: str, is_windows: Optional[bool] = None) -> list[str]:
@@ -109,7 +127,7 @@ def expected_proxy_paths(original_path: str, is_windows: Optional[bool] = None) 
     whole tree is built on (SPEC.md:13)."""
     if not original_path:
         return []
-    plat = _plat(is_windows)
+    plat = _plat_for(original_path, is_windows)
     parent = plat.dirname(str(original_path))
     stem = plat.splitext(plat.basename(str(original_path)))[0]
     if not stem:
@@ -117,18 +135,13 @@ def expected_proxy_paths(original_path: str, is_windows: Optional[bool] = None) 
     return [plat.join(parent, PROXY_DIR_NAME, stem + ext) for ext in PROXY_EXTENSIONS]
 
 
-def _local_twin(path: str, local_root: str, canonical_prefix: str, plat) -> Optional[str]:
+def _local_twin(path: str, local_root: str, canonical_prefix: str) -> Optional[str]:
     """The same file expressed under local_root instead of the canonical
     prefix. Only used to ANSWER "does it exist" on a process that can't see
-    the P: mapping (it is per-logon-session, so a service or a remote shell
-    has no P: even though the editor's own Resolve does). The linked path is
-    always the canonical one."""
-    if not (local_root and canonical_prefix):
-        return None
-    if not _is_under(path, canonical_prefix, plat):
-        return None
-    rest = str(path)[len(str(canonical_prefix)):].lstrip("\\/")
-    return plat.join(str(local_root).rstrip("\\/"), rest) if rest else None
+    the P: mapping -- it is per-logon-session, so a service or a remote shell
+    has no P: even though the editor's own Resolve does, and a macOS editor
+    has no P: at all. The linked path is always the canonical one."""
+    return canon.canonical_to_local(path, local_root, canonical_prefix)
 
 
 def find_proxy_on_disk(
@@ -141,9 +154,8 @@ def find_proxy_on_disk(
     """The proxy that exists on disk for `original_path`, in the original's
     own spelling -- or None. Never raises."""
     check = exists_fn if exists_fn is not None else os.path.exists
-    plat = _plat(is_windows)
     for candidate in expected_proxy_paths(original_path, is_windows):
-        for probe in (candidate, _local_twin(candidate, local_root, canonical_prefix, plat)):
+        for probe in (candidate, _local_twin(candidate, local_root, canonical_prefix)):
             if not probe:
                 continue
             try:
@@ -173,7 +185,6 @@ def plan_relinks(
     "new_proxy", "reason"} where reason is "stale" (a proxy was attached but
     unreachable) or "unlinked" (none attached and auto-link never fired).
     """
-    plat = _plat(is_windows)
     ops: list[dict[str, Any]] = []
     for item in items or []:
         try:
@@ -191,6 +202,7 @@ def plan_relinks(
             if not new_proxy:
                 continue  # nothing synced down yet -- lane B's problem, not ours
             old_proxy = str(item.get("proxy_path") or "").strip()
+            plat = _plat_for(file_path, is_windows)
             if old_proxy and _norm(old_proxy, plat) == _norm(new_proxy, plat):
                 # Already pointed here and still not working: the file is
                 # unreadable, not mis-addressed. Relinking would change

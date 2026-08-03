@@ -6,14 +6,25 @@ dashboard's api._upgrade_info). The reporter hands every report response to
 UpgradeManager.note_report_response(); when an upgrade is available the tray
 grows an "Update now" item, and apply() does the whole swap:
 
-    download to <exe dir>/ccsync-companion.new.exe -> sha256 verify
+    download to <exe dir>/ccsync-companion.new[.exe] -> sha256 verify
+    -> chmod 0o755                   (POSIX only -- see _make_executable)
     -> os.replace(exe, exe.old)      (a RUNNING exe can't be overwritten on
                                       Windows, but it CAN be renamed on the
-                                      same volume -- hence same-dir download)
+                                      same volume -- hence same-dir download.
+                                      macOS needs the same dance for a
+                                      different reason: overwriting a running
+                                      Mach-O in place breaks its pages and
+                                      its ad-hoc signature)
     -> os.replace(new, exe)
     -> spawn the new exe detached    (failure here ROLLS BACK both renames
                                       and keeps the current build running)
     -> request_shutdown()
+
+Platform shape: Windows ships `ccsync-companion.exe`; macOS ships a bare
+single-file Mach-O called `ccsync-companion` (no extension, no .app bundle),
+ad-hoc signed by PyInstaller -- the signature is part of the file, so it
+travels through os.replace untouched. Every name and every spawn flag below
+is therefore platform-derived, never hardcoded to the Windows shape.
 
 The stale `.old` is deleted on the NEXT startup (cleanup_old_exe) because the
 new process may start while the old one still holds its own image briefly.
@@ -55,7 +66,10 @@ SpawnFn = Callable[[Path], Any]
 
 # Generous: editors may be on slow links and the exe is ~20 MB.
 DOWNLOAD_TIMEOUT = 600.0
-_NEW_NAME = "ccsync-companion.new.exe"
+_NEW_STEM = "ccsync-companion.new"
+# Platform-neutral: appended to whatever the running binary is called, so it
+# is `ccsync-companion.exe.old` on Windows and `ccsync-companion.old` on macOS
+# without any per-platform spelling.
 _OLD_SUFFIX = ".old"
 # The published exe is ~20 MB. A ceiling stops a hostile or broken response
 # filling the editor's disk (there was none at all), and the free-space check
@@ -123,6 +137,20 @@ def platform_key() -> str:
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
+
+
+def new_download_name() -> str:
+    """The temp filename the update is streamed to, beside the running binary.
+
+    This was hardcoded to `ccsync-companion.new.exe`, which on macOS would
+    have written a Windows-shaped name next to (and then renamed it over) an
+    extensionless Mach-O. Harmless on its own -- os.replace does not care what
+    a file is called -- but it is the same "the exe is a .exe" assumption that
+    hid the missing chmod, and a leftover `.new.exe` on a Mac is a support
+    call. Derived from sys.platform, never from the advertised URL: the URL is
+    server-supplied and the dashboard's macOS package path has no extension at
+    all."""
+    return _NEW_STEM + (".exe" if sys.platform == "win32" else "")
 
 
 class _RedirectRefused(Exception):
@@ -426,9 +454,9 @@ class UpgradeManager:
 
     # -- download ------------------------------------------------------
     def download_and_verify(self, info: dict[str, Any], dest_dir: Path) -> Optional[Path]:
-        """Stream the advertised build to dest_dir/ccsync-companion.new.exe
-        and verify its sha256. Returns the path, or None on any failure
-        (temp file removed). Never raises."""
+        """Stream the advertised build to dest_dir/<new_download_name()> and
+        verify its sha256. Returns the path, or None on any failure (temp file
+        removed). Never raises."""
         url = str(info.get("url") or "")
         base = str(self.cfg.get("dashboard_url", "")).strip().rstrip("/")
         # ORIGIN PINNING (CORE-M10): an absolute URL is only followed when it
@@ -475,7 +503,7 @@ class UpgradeManager:
         # offered, and there is no reason to write the rest of it to disk.
         ceiling = min(MAX_DOWNLOAD_BYTES, advertised) if advertised else MAX_DOWNLOAD_BYTES
 
-        tmp = dest_dir / _NEW_NAME
+        tmp = dest_dir / new_download_name()
         digest = hashlib.sha256()
         written = 0
         try:
@@ -525,7 +553,38 @@ class UpgradeManager:
             log.warning("upgrade: sha256 mismatch on downloaded build -- discarding it")
             self._unlink_quietly(tmp)
             return None
+        self._make_executable(tmp)
         return tmp
+
+    @staticmethod
+    def _make_executable(path: Path) -> None:
+        """Give the verified download the execute bit on POSIX.
+
+        A file created by open("wb") is 0644 under the usual umask, and macOS
+        will not exec it -- so the swap would rename a non-executable file
+        over the companion and the respawn would fail with EACCES. Windows has
+        no execute bit and os.chmod there only toggles read-only, so it is
+        never called on win32.
+
+        AFTER the sha256 check, deliberately: an unverified download must
+        never be made runnable, however briefly. os.replace preserves the
+        mode, so setting it here carries through both renames to the installed
+        path -- no chmod is needed once the binary is in place.
+
+        Never raises, and a failure does NOT abort the upgrade: chmod can be a
+        no-op-with-EPERM on exotic mounts where the file is already executable,
+        and refusing a working update over that would be worse than the
+        alternative -- if the file really cannot be executed, _apply_inner's
+        spawn fails and rolls the whole swap back."""
+        if sys.platform == "win32":
+            return
+        try:
+            os.chmod(path, 0o755)
+        except OSError as exc:
+            log.warning(
+                "upgrade: could not set the execute bit on %s (%s) -- continuing; "
+                "if the new build cannot start, the swap rolls back", path, exc,
+            )
 
     # -- the swap ------------------------------------------------------
     def apply(self) -> bool:
@@ -568,7 +627,7 @@ class UpgradeManager:
         except Exception as exc:
             log.warning("upgrade: could not move the new exe into place: %s -- rolling back", exc)
             self._rollback(old, exe, aside=None)
-            # The new build is still parked at .new.exe and we are not going
+            # The new build is still parked at the .new download and we are not going
             # to run it -- don't leave 20 MB behind.
             self._unlink_quietly(new)
             return False
@@ -597,7 +656,7 @@ class UpgradeManager:
         _apply_inner -> apply() -> app.apply_upgrade() -> the tray's dialog
         handler, killing the tray daemon thread to invisible stderr WHILE
         `exe` did not exist -- renamed to `.old`, with the new build parked
-        at `.new.exe` (AUDIT_2 CORE-H7). Rollback is the last line of
+        at the `.new` download (AUDIT_2 CORE-H7). Rollback is the last line of
         defence; it may not have a failure mode of its own."""
         restored = False
         try:
@@ -633,15 +692,24 @@ class UpgradeManager:
         # console if the exe is ever a console build again -- closing that
         # mystery window kills the companion (seen live 2026-07-25). All std
         # handles to DEVNULL; build.spec is console=False since 0.3.2.
-        creationflags = 0
+        detach: dict[str, Any] = {}
         if sys.platform == "win32":
-            creationflags = (
+            detach["creationflags"] = (
                 subprocess.DETACHED_PROCESS
                 | subprocess.CREATE_NEW_PROCESS_GROUP
                 | subprocess.CREATE_NO_WINDOW
             )
-        # CRITICAL for onefile self-restart: without this, PyInstaller >=6
-        # has the spawned copy REUSE this process's _MEI extraction dir --
+        else:
+            # POSIX has no creationflags at all (passing one raises), so the
+            # detach is start_new_session=True: setsid() gives the child its
+            # own session and process group, so it outlives this process and
+            # never takes a signal aimed at the dying parent's group. This
+            # matters more on macOS than on Windows -- the LaunchAgent is
+            # RunAtLoad-only with no KeepAlive, so nothing else will ever
+            # bring the new build up if this spawn dies with us.
+            detach["start_new_session"] = True
+        # CRITICAL for onefile self-restart on EVERY platform: without this,
+        # PyInstaller >=6 has the spawned copy REUSE this process's _MEI dir --
         # which our bootloader deletes on exit moments later, leaving the
         # new instance running from a vanished directory (broken tkinter,
         # broken lazy imports, or an outright Tcl crash at startup -- all
@@ -666,7 +734,7 @@ class UpgradeManager:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
             close_fds=True,
             env=env,
+            **detach,
         )

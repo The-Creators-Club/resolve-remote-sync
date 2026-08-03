@@ -9,6 +9,10 @@ upload).
 
 from __future__ import annotations
 
+import logging
+import os
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -19,14 +23,21 @@ from ccsync_companion.shutdown_guard import (
     ES_CONTINUOUS,
     ES_SYSTEM_REQUIRED,
     MAX_REASON_CHARS,
+    NS_TERMINATE_CANCEL,
+    NS_TERMINATE_NOW,
+    TERMINATE_EPISODE_SECONDS,
     KeepAwakeGuard,
     PendingTracker,
     ShutdownGuard,
+    _DarwinKeepAwake,
+    _DarwinShutdownGuard,
     _WindowsKeepAwake,
     _WindowsShutdownGuard,
+    caffeinate_command,
     describe_pending,
     make_keep_awake_guard,
     make_shutdown_guard,
+    should_cancel_terminate,
 )
 from ccsync_companion.sync.base import (
     STATE_ERROR,
@@ -517,10 +528,23 @@ def test_the_guard_is_a_no_op_when_switched_off():
     assert guard.active is False
 
 
-def test_no_op_off_windows(monkeypatch):
+def test_macos_gets_the_darwin_guard(monkeypatch):
+    """Macs used to get nothing at all: no warning on Quit, and a logout that
+    killed the companion where it stood."""
     monkeypatch.setattr(sys, "platform", "darwin")
     guard = make_shutdown_guard(lambda: "syncing", enabled=True)
+    assert isinstance(guard, _DarwinShutdownGuard)
+
+
+def test_the_darwin_guard_is_a_no_op_when_switched_off(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    guard = make_shutdown_guard(lambda: "syncing", enabled=False)
     assert type(guard) is ShutdownGuard
+
+
+def test_no_op_on_platforms_with_no_guard(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert type(make_shutdown_guard(lambda: "syncing", enabled=True)) is ShutdownGuard
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only guard")
@@ -810,8 +834,20 @@ def test_keep_awake_is_a_no_op_when_switched_off():
     assert guard.held is False
 
 
-def test_keep_awake_is_a_no_op_off_windows(monkeypatch):
+def test_macos_gets_the_darwin_keep_awake(monkeypatch):
+    """A Mac that idles into sleep mid-upload loses the same hours a Windows
+    box does, and caffeinate -i is the same request ES_SYSTEM_REQUIRED is."""
     monkeypatch.setattr(sys, "platform", "darwin")
+    assert isinstance(make_keep_awake_guard(lambda: True), _DarwinKeepAwake)
+
+
+def test_the_darwin_keep_awake_is_a_no_op_when_switched_off(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert type(make_keep_awake_guard(lambda: True, enabled=False)) is KeepAwakeGuard
+
+
+def test_keep_awake_is_a_no_op_on_platforms_with_no_guard(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
     assert type(make_keep_awake_guard(lambda: True)) is KeepAwakeGuard
 
 
@@ -829,3 +865,593 @@ def test_the_real_keep_awake_talks_to_windows():
     finally:
         guard.stop()
     assert guard.held is False
+
+
+# --- macOS: caffeinate instead of SetThreadExecutionState -------------------
+#
+# Every one of these runs on Windows with no pyobjc and no /usr/bin: the
+# child process is injected, so what is under test is the policy, which is
+# the half that decides whether a Mac sleeps on top of a live upload.
+
+class _FakeCaffeinate:
+    """Stand-in for the caffeinate child: Popen's four-method surface."""
+
+    def __init__(self, ignore_terminate: bool = False):
+        self.returncode = None
+        self.terminated = 0
+        self.killed = 0
+        self.waits: list = []
+        self.ignore_terminate = ignore_terminate
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated += 1
+        if not self.ignore_terminate:
+            self.returncode = -signal.SIGTERM
+
+    def kill(self):
+        self.killed += 1
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("caffeinate", timeout)
+        return self.returncode
+
+    def die(self, returncode: int = 0):
+        """The child going away on its own, with us none the wiser."""
+        self.returncode = returncode
+
+
+class _FakeSpawner:
+    def __init__(self, error: Exception = None, returns=_FakeCaffeinate):
+        self.argvs: list = []
+        self.children: list = []
+        self.error = error
+        self.returns = returns
+
+    def __call__(self, argv):
+        self.argvs.append(list(argv))
+        if self.error is not None:
+            raise self.error
+        if self.returns is None:
+            return None
+        child = self.returns()
+        self.children.append(child)
+        return child
+
+
+def _darwin_keep_awake(busy_fn, spawner=None, **kw):
+    spawner = spawner if spawner is not None else _FakeSpawner()
+    kw.setdefault("poll_seconds", 0.01)
+    kw.setdefault("stop_grace_seconds", 0.05)
+    return _DarwinKeepAwake(busy_fn, spawn_fn=spawner, **kw), spawner
+
+
+def test_the_caffeinate_command_asks_for_idle_sleep_only():
+    """-d is ES_DISPLAY_REQUIRED's twin: it would leave editors with a screen
+    that refuses to blank all night. We are keeping the upload alive."""
+    argv = caffeinate_command()
+    assert argv[0].endswith("caffeinate")
+    assert "-i" in argv
+    assert "-d" not in argv
+
+
+def test_caffeinate_is_told_to_die_with_the_companion():
+    """-w <our pid>: a companion that is SIGKILLed never gets to terminate
+    the child, and a forgotten caffeinate keeps a Mac awake until reboot."""
+    argv = caffeinate_command()
+    assert argv[argv.index("-w") + 1] == str(os.getpid())
+    assert caffeinate_command(1234)[-1] == "1234"
+
+
+def test_a_busy_lane_starts_caffeinate():
+    guard, spawner = _darwin_keep_awake(lambda: True)
+    assert guard.apply_once() is True
+    assert spawner.argvs == [caffeinate_command()]
+
+
+def test_an_idle_mac_is_left_alone_entirely():
+    guard, spawner = _darwin_keep_awake(lambda: False)
+    assert guard.apply_once() is False
+    assert spawner.argvs == []
+
+
+def test_caffeinate_is_started_once_not_every_poll():
+    guard, spawner = _darwin_keep_awake(lambda: True)
+    for _ in range(5):
+        guard.apply_once()
+    assert len(spawner.argvs) == 1
+
+
+def test_caffeinate_is_stopped_when_the_sync_finishes():
+    busy = [True]
+    guard, spawner = _darwin_keep_awake(lambda: busy[0])
+    guard.apply_once()
+    child = spawner.children[0]
+    busy[0] = False
+    assert guard.apply_once() is False
+    assert child.terminated == 1
+    assert child.killed == 0
+    assert guard.held is False
+
+
+def test_a_caffeinate_that_ignores_sigterm_is_killed():
+    """It holds the idle timer for as long as it lives, so "it did not stop"
+    cannot be where we give up -- that is a Mac that never sleeps again."""
+    busy = [True]
+    spawner = _FakeSpawner(returns=lambda: _FakeCaffeinate(ignore_terminate=True))
+    guard, _ = _darwin_keep_awake(lambda: busy[0], spawner)
+    guard.apply_once()
+    child = spawner.children[0]
+    busy[0] = False
+    guard.apply_once()
+    assert child.terminated == 1
+    assert child.killed == 1
+
+
+def test_a_caffeinate_that_died_on_its_own_is_replaced():
+    """The child can go away without us (killed, missing binary on a
+    stripped image). Believing we still hold the idle timer would let the
+    Mac sleep on top of a live transfer."""
+    guard, spawner = _darwin_keep_awake(lambda: True)
+    guard.apply_once()
+    spawner.children[0].die(0)
+    assert guard.apply_once() is True
+    assert len(spawner.argvs) == 2
+
+
+def test_an_unpollable_child_is_treated_as_gone():
+    class _Unpollable(_FakeCaffeinate):
+        def poll(self):
+            raise OSError("no such process")
+
+    spawner = _FakeSpawner(returns=_Unpollable)
+    guard, _ = _darwin_keep_awake(lambda: True, spawner)
+    guard.apply_once()
+    guard.apply_once()
+    assert len(spawner.argvs) == 2, "a phantom hold costs a night's upload"
+
+
+def test_a_failed_spawn_lets_the_mac_sleep_rather_than_raising(caplog):
+    """No caffeinate on this image, or fork failed. Fail-open: the machine
+    may sleep, the companion carries on."""
+    guard, spawner = _darwin_keep_awake(
+        lambda: True, _FakeSpawner(error=FileNotFoundError("/usr/bin/caffeinate"))
+    )
+    with caplog.at_level(logging.DEBUG, logger="ccsync.shutdown_guard"):
+        assert guard.apply_once() is False
+        assert guard.apply_once() is False
+    assert guard.held is False
+    complaints = [r for r in caplog.records if "may sleep" in r.getMessage()]
+    assert len(complaints) == 1, "a broken spawn must not spam the log every poll"
+
+
+def test_a_failed_spawn_is_retried_on_the_next_poll():
+    guard, spawner = _darwin_keep_awake(
+        lambda: True, _FakeSpawner(error=OSError("EAGAIN"))
+    )
+    guard.apply_once()
+    guard.apply_once()
+    assert len(spawner.argvs) == 2
+
+
+def test_a_spawner_that_returns_nothing_is_not_recorded_as_held():
+    guard, _ = _darwin_keep_awake(lambda: True, _FakeSpawner(returns=None))
+    assert guard.apply_once() is False
+    assert guard.held is False
+
+
+def test_a_crashing_busy_check_lets_the_mac_sleep():
+    def boom():
+        raise RuntimeError("kaboom")
+
+    guard, spawner = _darwin_keep_awake(boom)
+    assert guard.apply_once() is False
+    assert spawner.argvs == []
+
+
+def test_the_darwin_loop_stops_caffeinate_when_the_guard_stops():
+    """stop() while a lane is mid-transfer: the child must not outlive the
+    companion's own keep-awake decision."""
+    guard, spawner = _darwin_keep_awake(lambda: True)
+    guard.start()
+    deadline = time.monotonic() + 5.0
+    while not guard.held and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert guard.held, "never took the idle timer"
+    guard.stop()
+    assert guard.held is False
+    assert spawner.children[0].terminated >= 1
+
+
+def test_the_darwin_loop_notices_a_sync_finishing_without_being_stopped():
+    busy = [True]
+    guard, spawner = _darwin_keep_awake(lambda: busy[0])
+    guard.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not guard.held and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert guard.held
+        busy[0] = False
+        deadline = time.monotonic() + 5.0
+        while guard.held and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert guard.held is False, "held the idle timer after the sync finished"
+        assert spawner.children[0].terminated == 1
+    finally:
+        guard.stop()
+
+
+def test_stopping_a_darwin_keep_awake_that_never_started_is_harmless():
+    guard, spawner = _darwin_keep_awake(lambda: True)
+    guard.stop()
+    assert guard.held is False
+    assert spawner.argvs == []
+
+
+def test_stop_reaps_a_child_no_loop_ever_owned():
+    """A child process can be ended from any thread (unlike the Windows
+    execution state), so stop() is the backstop for a loop that never ran."""
+    guard, spawner = _darwin_keep_awake(lambda: True)
+    guard.apply_once()
+    guard.stop()
+    assert spawner.children[0].terminated == 1
+    assert guard.held is False
+
+
+def test_a_darwin_keep_awake_whose_loop_died_can_be_started_again(monkeypatch):
+    guard, _spawner = _darwin_keep_awake(lambda: False)
+    attempts = []
+    monkeypatch.setattr(guard, "_loop", lambda: attempts.append(1))
+
+    guard.start()
+    deadline = time.monotonic() + 5.0
+    while guard._thread is not None and guard._thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    guard.start()
+
+    assert len(attempts) == 2
+
+
+def test_starting_the_darwin_loop_twice_runs_one_loop():
+    guard, _spawner = _darwin_keep_awake(lambda: False)
+    guard.start()
+    first = guard._thread
+    try:
+        guard.start()
+        assert guard._thread is first
+    finally:
+        guard.stop()
+
+
+# --- macOS: the Quit policy -------------------------------------------------
+#
+# There is no macOS equivalent of ShutdownBlockReasonCreate, so this is a
+# warning rather than a block -- and the one property it must never lose is
+# that a second attempt always goes through.
+
+def test_an_idle_mac_never_cancels_a_quit():
+    assert should_cancel_terminate(1000.0, None, busy=False) is False
+    assert should_cancel_terminate(1000.0, 999.0, busy=False) is False
+
+
+def test_the_first_quit_mid_upload_is_cancelled_once():
+    assert should_cancel_terminate(1000.0, None, busy=True) is True
+
+
+def test_a_second_quit_in_the_same_episode_always_goes_through():
+    """The hard requirement. Someone who has read the notification and quit
+    again has answered the question; a guard that argues twice is one people
+    force-quit past -- and then never trust on the night it is right."""
+    assert should_cancel_terminate(1000.0, 999.0, busy=True) is False
+    assert should_cancel_terminate(1000.0 + TERMINATE_EPISODE_SECONDS - 1, 1000.0,
+                                   busy=True) is False
+
+
+def test_a_genuinely_later_attempt_is_worth_warning_about_again():
+    assert should_cancel_terminate(1000.0 + TERMINATE_EPISODE_SECONDS, 1000.0,
+                                   busy=True) is True
+
+
+def test_a_clock_that_went_backwards_allows_the_quit():
+    assert should_cancel_terminate(900.0, 1000.0, busy=True) is False
+
+
+def test_an_unusable_clock_allows_the_quit():
+    assert should_cancel_terminate("now", None, busy=True) is True
+    assert should_cancel_terminate("now", 1000.0, busy=True) is False
+
+
+def test_a_bad_episode_length_falls_back_to_the_shipped_default():
+    assert should_cancel_terminate(1000.0, 995.0, busy=True, episode_seconds=0) is False
+    assert should_cancel_terminate(2000.0, 995.0, busy=True, episode_seconds="soon") is True
+
+
+class _FakeSignals:
+    """Stand-in for signal.signal: records installs, returns the previous
+    handler like the real one. No real signals are ever sent in these tests."""
+
+    def __init__(self, previous=signal.SIG_DFL):
+        self.installed: list = []
+        self.current = previous
+
+    def __call__(self, signum, handler):
+        self.installed.append((signum, handler))
+        previous, self.current = self.current, handler
+        return previous
+
+
+def _darwin_guard(reason_fn, on_shutdown=None, notify=None, signals=None,
+                  clock=None, install=None):
+    notes = [] if notify is None else notify
+    signals = signals if signals is not None else _FakeSignals()
+    guard = _DarwinShutdownGuard(
+        reason_fn,
+        on_shutdown=on_shutdown,
+        notify_fn=notes.append if isinstance(notes, list) else notes,
+        signal_fn=signals,
+        install_delegate_fn=install if install is not None else (lambda: None),
+        clock=clock or _Clock(),
+    )
+    return guard, notes, signals
+
+
+def test_nothing_pending_allows_the_quit_and_says_nothing():
+    guard, notes, _ = _darwin_guard(lambda: None)
+    assert guard.handle_should_terminate() == NS_TERMINATE_NOW
+    assert notes == []
+
+
+def test_a_quit_mid_upload_is_delayed_once_with_an_explanation():
+    guard, notes, _ = _darwin_guard(lambda: "CCSync is still syncing -- 19.3 GB left")
+    assert guard.handle_should_terminate() == NS_TERMINATE_CANCEL
+    assert notes == ["CCSync is still syncing -- 19.3 GB left"]
+
+
+def test_quitting_again_straight_after_is_never_refused():
+    guard, notes, _ = _darwin_guard(lambda: "still syncing")
+    assert guard.handle_should_terminate() == NS_TERMINATE_CANCEL
+    assert guard.handle_should_terminate() == NS_TERMINATE_NOW
+    assert guard.handle_should_terminate() == NS_TERMINATE_NOW
+    assert len(notes) == 1, "warned twice about the same quit"
+
+
+def test_a_much_later_quit_is_warned_about_again():
+    clock = _Clock()
+    guard, notes, _ = _darwin_guard(lambda: "still syncing", clock=clock)
+    assert guard.handle_should_terminate() == NS_TERMINATE_CANCEL
+    clock.advance(TERMINATE_EPISODE_SECONDS + 1)
+    assert guard.handle_should_terminate() == NS_TERMINATE_CANCEL
+    assert len(notes) == 2
+
+
+def test_a_crashing_reason_callback_allows_the_quit():
+    def boom():
+        raise RuntimeError("kaboom")
+
+    guard, notes, _ = _darwin_guard(boom)
+    assert guard.handle_should_terminate() == NS_TERMINATE_NOW
+    assert notes == []
+
+
+def test_a_crashing_clock_allows_the_quit():
+    def boom():
+        raise RuntimeError("clock exploded")
+
+    guard, _notes, _ = _darwin_guard(lambda: "still syncing", clock=boom)
+    assert guard.handle_should_terminate() == NS_TERMINATE_NOW
+
+
+def test_a_notification_that_cannot_be_shown_does_not_change_the_answer():
+    def explode(text):
+        raise OSError("osascript missing")
+
+    guard, _notes, _ = _darwin_guard(lambda: "still syncing", notify=explode)
+    assert guard.handle_should_terminate() == NS_TERMINATE_CANCEL
+
+
+def test_the_quit_warning_is_truncated_like_the_windows_one():
+    guard, notes, _ = _darwin_guard(lambda: "z" * 4000)
+    assert guard.handle_should_terminate() == NS_TERMINATE_CANCEL
+    assert len(notes[0]) == MAX_REASON_CHARS
+
+
+# --- macOS: SIGTERM (logout / launchctl bootout) ---------------------------
+
+def test_a_sigterm_handler_is_installed_for_logout():
+    """launchd sends SIGTERM at logout and on `launchctl bootout`. The
+    default disposition kills the interpreter where it stands -- part-way
+    through a state write, with no lane shutdown."""
+    stopped = []
+    guard, _notes, signals = _darwin_guard(lambda: None, on_shutdown=lambda: stopped.append(1))
+    guard.start()
+    try:
+        assert [signum for signum, _h in signals.installed] == [signal.SIGTERM]
+        handler = signals.installed[0][1]
+        handler(signal.SIGTERM, None)
+        assert stopped == [1], "SIGTERM did not reach the companion's shutdown"
+    finally:
+        guard.stop()
+
+
+def test_the_previous_sigterm_handler_is_chained():
+    """Additive, never in the way: whatever had SIGTERM before us may well be
+    what actually ends the process."""
+    seen = []
+    signals = _FakeSignals(previous=lambda signum, frame: seen.append("previous"))
+    guard, _notes, _ = _darwin_guard(lambda: None, on_shutdown=lambda: seen.append("ours"),
+                                     signals=signals)
+    guard.start()
+    try:
+        signals.installed[0][1](signal.SIGTERM, None)
+    finally:
+        guard.stop()
+    assert seen == ["ours", "previous"]
+
+
+def test_a_crashing_shutdown_callback_does_not_escape_the_signal_handler():
+    """A signal handler that throws lands the exception in whatever unrelated
+    line of code happened to be running."""
+    def boom():
+        raise RuntimeError("shutdown exploded")
+
+    guard, _notes, signals = _darwin_guard(lambda: None, on_shutdown=boom)
+    guard.start()
+    try:
+        signals.installed[0][1](signal.SIGTERM, None)  # must not raise
+    finally:
+        guard.stop()
+
+
+def test_sigterm_is_left_alone_with_no_shutdown_callback():
+    """A handler that does nothing would SWALLOW SIGTERM and leave
+    `launchctl bootout` hanging until launchd's SIGKILL -- strictly worse
+    than the default disposition."""
+    guard, _notes, signals = _darwin_guard(lambda: None, on_shutdown=None)
+    guard.start()
+    try:
+        assert signals.installed == []
+    finally:
+        guard.stop()
+
+
+def test_the_previous_sigterm_handler_is_put_back_on_stop():
+    original = lambda signum, frame: None  # noqa: E731
+    signals = _FakeSignals(previous=original)
+    guard, _notes, _ = _darwin_guard(lambda: None, on_shutdown=lambda: None, signals=signals)
+    guard.start()
+    guard.stop()
+    assert signals.current is original
+    assert guard.active is False
+
+
+def test_a_registrar_that_refuses_is_not_fatal():
+    """signal.signal() raises ValueError off the main thread. That costs a
+    tidy logout, never the companion's startup."""
+    def refuse(signum, handler):
+        raise ValueError("signal only works in main thread")
+
+    guard, _notes, _ = _darwin_guard(lambda: None, on_shutdown=lambda: None, signals=refuse)
+    guard.start()
+    assert guard.active is False
+    guard.stop()
+
+
+def test_the_sigterm_handler_is_installed_once():
+    guard, _notes, signals = _darwin_guard(lambda: None, on_shutdown=lambda: None)
+    guard.start()
+    guard.start()
+    try:
+        assert len(signals.installed) == 1
+    finally:
+        guard.stop()
+
+
+# --- macOS: the AppKit half is optional ------------------------------------
+
+def test_a_delegate_install_failure_is_not_fatal():
+    def explode():
+        raise RuntimeError("AppKit said no")
+
+    guard, _notes, _ = _darwin_guard(lambda: None, install=explode)
+    guard.start()  # must not raise
+    assert guard.active is False
+    guard.stop()
+
+
+def test_the_delegate_is_given_back_on_stop():
+    undone = []
+    guard, _notes, _ = _darwin_guard(lambda: None, install=lambda: lambda: undone.append(1))
+    guard.start()
+    assert guard.active is True
+    guard.stop()
+    assert undone == [1]
+    assert guard.active is False
+
+
+def test_the_delegate_half_no_ops_without_pyobjc():
+    """This is the real code path on any machine without AppKit -- including
+    every machine that runs this test suite. It must return None, not raise:
+    the SIGTERM half is worth having on its own."""
+    guard = _DarwinShutdownGuard(lambda: None)
+    if sys.platform == "darwin":
+        pytest.skip("AppKit may genuinely be importable here")
+    assert guard._install_app_delegate() is None
+
+
+@pytest.fixture
+def fake_foundation(monkeypatch):
+    """Just enough of pyobjc's Foundation to build the delegate class.
+
+    The ObjC bridge is not what needs testing; the three lines of dispatch
+    inside applicationShouldTerminate_ are, and they are unreachable on a
+    machine with no AppKit -- which is every machine that runs this suite."""
+    import types
+
+    from ccsync_companion import shutdown_guard as mod
+
+    module = types.ModuleType("Foundation")
+
+    class NSObject:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def init(self):
+            return self
+
+    module.NSObject = NSObject
+    monkeypatch.setitem(sys.modules, "Foundation", module)
+    # monkeypatch restores the real cache afterwards, so a Mac that has
+    # already built the genuine class does not end up holding this one.
+    monkeypatch.setattr(mod, "_APP_DELEGATE_CLASS", None)
+    return mod
+
+
+def test_the_delegate_class_is_built_once_per_process(fake_foundation):
+    """Defining an ObjC class registers its NAME with the runtime, and doing
+    that twice raises -- so a guard that is stopped and started again would
+    get an exception where a warning should be."""
+    first = fake_foundation._app_delegate_class()
+    second = fake_foundation._app_delegate_class()
+    assert first is second
+
+
+def test_the_delegate_asks_the_guard(fake_foundation):
+    guard, notes, _ = _darwin_guard(lambda: "still syncing")
+    delegate = fake_foundation._app_delegate_class().alloc().init()
+    delegate.guard = guard
+    assert delegate.applicationShouldTerminate_(None) == NS_TERMINATE_CANCEL
+    assert delegate.applicationShouldTerminate_(None) == NS_TERMINATE_NOW
+    assert len(notes) == 1
+
+
+def test_a_delegate_with_no_guard_allows_the_quit(fake_foundation):
+    delegate = fake_foundation._app_delegate_class().alloc().init()
+    assert delegate.applicationShouldTerminate_(None) == NS_TERMINATE_NOW
+
+
+def test_a_delegate_whose_guard_explodes_allows_the_quit(fake_foundation):
+    class _Exploding:
+        def handle_should_terminate(self):
+            raise RuntimeError("boom")
+
+    delegate = fake_foundation._app_delegate_class().alloc().init()
+    delegate.guard = _Exploding()
+    assert delegate.applicationShouldTerminate_(None) == NS_TERMINATE_NOW
+
+
+def test_the_darwin_guard_survives_a_start_stop_with_every_seam_defaulted():
+    """No callback (so no SIGTERM handler), no AppKit (so no delegate): the
+    guard still starts and stops cleanly and reports itself inactive."""
+    guard = _DarwinShutdownGuard(lambda: None)
+    guard.start()
+    try:
+        assert guard.active is False
+    finally:
+        guard.stop()

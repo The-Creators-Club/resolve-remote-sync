@@ -1425,6 +1425,13 @@ class CompanionApp:
     def p_mapping_mode(self) -> str:
         """"local" | "server" | "other" | "none", cached briefly -- the
         watcher consults this on every mapping warning."""
+        if os.name != "nt":
+            # No drive namespace off Windows: there is no P: to classify, and
+            # drive_swap's default runner would try to spawn `net`/`subst`,
+            # which don't exist on macOS -- once per mapping warning. Resolve's
+            # Mapped Mount preference is the equivalent there and isn't
+            # machine-inspectable, so answer "none" and stay quiet.
+            return "none"
         now = time.monotonic()
         cached = getattr(self, "_p_mode_cache", None)
         if cached is not None and now - cached[0] < 10.0:

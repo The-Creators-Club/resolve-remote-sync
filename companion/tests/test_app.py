@@ -1776,6 +1776,21 @@ def test_p_swap_available_guards(monkeypatch):
     assert _swap_stub(monkeypatch, unc="").p_swap_available() is False
 
 
+def test_p_mapping_mode_is_none_off_windows(monkeypatch):
+    """macOS has no drive namespace: `net use`/`subst` don't exist, and the
+    watcher asks for this on EVERY mapping warning -- drive_swap's default
+    runner would try to spawn a missing binary each time."""
+    from ccsync_companion import app as app_mod
+    from ccsync_companion.app import CompanionApp
+
+    monkeypatch.setattr(app_mod.os, "name", "posix")
+    stub = _swap_stub(monkeypatch)
+
+    assert CompanionApp.p_mapping_mode(stub) == "none"
+    # and nothing was cached, so the Windows path is unaffected next call
+    assert getattr(stub, "_p_mode_cache", None) is None
+
+
 def test_p_swap_available_derives_when_unconfigured(monkeypatch):
     """Fleet-wide default: with server_p_unc unset, the UNC is derived from
     dashboard_url + remote_root, so every companion install gets the swap."""

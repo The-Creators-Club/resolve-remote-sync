@@ -39,6 +39,13 @@ Windows case-insensitivity and separator differences ('/' vs '\\') are
 handled the same way resolve_bridge.py does it: os.path.normcase(os.path.
 normpath(...)) — normcase folds case AND normalizes separators to '\\' on
 Windows, and is a no-op beyond normpath on posix.
+
+That last clause is why anything touching the CANONICAL PREFIX goes through
+canon.py instead: on a macOS editor the prefix is still "P:\\" (Resolve
+reaches it through its Mapped Mount preference) while the host is posix, so
+the prefix must be compared with ntpath and translated to local_root before
+it is ever handed to the filesystem — os.path.exists("P:\\Projects\\x") is
+False on every Mac, healthy or broken.
 """
 
 from __future__ import annotations
@@ -51,6 +58,8 @@ import subprocess
 import threading
 import time
 from typing import Callable, Optional
+
+from . import canon
 
 OK = "OK"
 OUT_OF_TREE = "OUT_OF_TREE"
@@ -150,21 +159,50 @@ def _is_under(norm_path: str, norm_root: str, sep: str) -> bool:
     return norm_path.startswith(root_with_sep)
 
 
+def _fn_key(fn) -> str:
+    return getattr(fn, "__qualname__", repr(fn))
+
+
 def _prefix_resolves_under_root(
     canonical_prefix: str,
     norm_root: str,
     plat,
     sep: str,
     resolve: Callable[[str], str],
+    posix_drive_prefix: bool = False,
+    root_present_fn: Optional[Callable[[str], bool]] = None,
 ) -> bool:
     """Does the canonical prefix itself (P:\\, /Volumes/CreatorsClub) resolve
-    to somewhere under local_root? Cached for _PREFIX_CACHE_TTL_SECONDS."""
-    key = (str(canonical_prefix), norm_root, sep, getattr(resolve, "__qualname__", repr(resolve)))
+    to somewhere under local_root? Cached for _PREFIX_CACHE_TTL_SECONDS.
+
+    `posix_drive_prefix` says the prefix is a Windows drive root while the
+    host is posix (a macOS editor: canonical_prefix stays "P:\\", Resolve
+    reaches it through its Mapped Mount preference). realpath() cannot answer
+    there -- there is no drive namespace, so "P:\\" resolves RELATIVE TO THE
+    CWD -- which would either compare unequal and storm BAD_PREFIX over every
+    clip, or raise and be swallowed by the fail-open guard below, permanently
+    masking a genuinely broken install. The honest signal on that host is
+    whether the local tree is present at all; `root_present_fn` is the seam a
+    future root-guard can veto through (default os.path.isdir).
+    """
+    key = (
+        str(canonical_prefix), norm_root, sep, _fn_key(resolve),
+        bool(posix_drive_prefix), _fn_key(root_present_fn),
+    )
     now = time.monotonic()
     with _prefix_cache_lock:
         cached = _prefix_cache.get(key)
         if cached is not None and now - cached[0] < _PREFIX_CACHE_TTL_SECONDS:
             return cached[1]
+    if posix_drive_prefix:
+        present = root_present_fn if root_present_fn is not None else os.path.isdir
+        try:
+            healthy = bool(present(norm_root))
+        except Exception:
+            healthy = True  # same fail-open ethos as the probe below
+        with _prefix_cache_lock:
+            _prefix_cache[key] = (now, healthy)
+        return healthy
     try:
         healthy = _is_under(_norm(_delooped(resolve(canonical_prefix)), plat), norm_root, sep)
         if not healthy:
@@ -192,12 +230,15 @@ def classify_path(
     exists_fn: Optional[Callable[[str], bool]] = None,
     is_windows: Optional[bool] = None,
     realpath_fn: Optional[Callable[[str], str]] = None,
+    root_present_fn: Optional[Callable[[str], bool]] = None,
 ) -> str:
     """Classify a single clip path. Never raises.
 
     `exists_fn` and `is_windows` are injectable for tests so both Windows-
     and posix-style paths can be exercised from either host OS. They default
-    to os.path.exists and the real host platform.
+    to os.path.exists and the real host platform. `root_present_fn` is only
+    consulted on the posix + drive-style-prefix path (a macOS editor) -- see
+    _prefix_resolves_under_root.
     """
     windows = is_windows if is_windows is not None else (os.name == "nt")
     plat = ntpath if windows else posixpath
@@ -213,13 +254,26 @@ def classify_path(
     if norm_root and _is_under(norm_path, norm_root, sep):
         return OK
 
+    # Membership in the canonical prefix is judged in the PREFIX's spelling,
+    # not the host's: on a Mac the prefix is still "P:\" and posixpath would
+    # neither fold its case nor its separators (canon.plat_for).
+    on_prefix = bool(canonical_prefix) and canon.is_canonical(path, canonical_prefix)
+
+    # A canonical path is a fleet-portable STRING, never a local one: on
+    # posix nothing can stat "P:\Projects\x", so exists() would answer False
+    # for every clip in the project and the whole timeline would misclassify.
+    # Probe the file where it physically lives instead.
+    local_twin = None
+    posix_drive_prefix = on_prefix and not windows and canon.is_drive_style(canonical_prefix)
+    if posix_drive_prefix:
+        local_twin = canon.canonical_to_local(path, local_root, canonical_prefix)
+
     try:
-        exists = bool(check_exists(path))
+        exists = bool(check_exists(local_twin if local_twin else path))
     except Exception:
         exists = False
 
-    norm_prefix = _norm(canonical_prefix, plat) if canonical_prefix else ""
-    if norm_prefix and norm_path.startswith(norm_prefix):
+    if on_prefix:
         resolve = realpath_fn if realpath_fn is not None else os.path.realpath
         # On a correctly-mapped machine (subst P: -> local_root) canonical-
         # prefix paths are the HEALTHY state: realpath resolves the subst
@@ -234,9 +288,16 @@ def classify_path(
             # there is the mapping failure SPEC component 2 requires a
             # warning for, and it is by far the most common one: `subst P:`
             # didn't run at login (AUDIT_2 L-15).
-            if _prefix_resolves_under_root(canonical_prefix, norm_root, plat, sep, resolve):
+            if _prefix_resolves_under_root(canonical_prefix, norm_root, plat, sep, resolve,
+                                           posix_drive_prefix, root_present_fn):
                 return MISSING
             return BAD_PREFIX
+        if local_twin:
+            # The twin IS under local_root by construction, and it exists:
+            # the clip is downloaded and correctly addressed. There is
+            # nothing for realpath to add (and on posix it cannot answer for
+            # "P:\" at all).
+            return OK
         if norm_root:
             try:
                 real = _norm(_delooped(resolve(path)), plat)
@@ -247,7 +308,8 @@ def classify_path(
             # The clip exists on the canonical prefix and the PREFIX itself
             # is healthy (loopback share / subst landing on local_root):
             # this is the designed steady state, not a broken mapping.
-            if _prefix_resolves_under_root(canonical_prefix, norm_root, plat, sep, resolve):
+            if _prefix_resolves_under_root(canonical_prefix, norm_root, plat, sep, resolve,
+                                           posix_drive_prefix, root_present_fn):
                 return OK
         # Exists (the mapping resolves to something real) but not under
         # local_root -- a genuinely broken mapping (wrong subst/mount

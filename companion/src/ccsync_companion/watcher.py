@@ -20,6 +20,7 @@ import logging
 import threading
 from typing import Any, Callable, Optional
 
+from . import canon
 from . import config as config_mod
 from . import resolve_bridge
 from .fixer import IgnoreTracker
@@ -125,15 +126,18 @@ class TimelineWatcher:
         # poll? See the _warned_mapping reset below.
         prefix_healthy = False
         prefix_broken = False
-        norm_prefix = _norm_key(self.canonical_prefix) if self.canonical_prefix else ""
 
         for item in result.get("items", []):
             path = item.get("file_path", "")
             if not path:
                 continue
             cls = classify_path(path, self.local_root, self.canonical_prefix)
+            # _norm_key is the HOST's normalization -- fine for de-duplicating
+            # what this process saw, but it can't judge membership of a
+            # canonical "P:\" prefix on a Mac (posixpath folds neither case
+            # nor separators), which is what drives the re-arm bookkeeping.
             key = _norm_key(path)
-            under_prefix = bool(norm_prefix) and key.startswith(norm_prefix)
+            under_prefix = canon.is_canonical(path, self.canonical_prefix)
             if under_prefix:
                 # OK and MISSING both mean the prefix RESOLVES (paths.py
                 # probes the prefix, not the file) -- i.e. the mapping is

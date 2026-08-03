@@ -106,9 +106,27 @@ def _pin_frozen_python3_home() -> None:
     in this process, on any machine, whatever Python is or isn't installed.
     Deliberately overwrites any inherited value: inside this exe, the only
     correct Python is our own.
+
+    fusionscript.so on macOS locates its Python the same way, so the darwin
+    branch is the same pin -- but only when the bundle actually carries a
+    libpython to point at. Pinning PYTHONHOME at a directory with no Python
+    in it breaks the interpreter far more thoroughly than an unpinned
+    fusionscript ever could, so a bundle without one is left alone
+    (fail-open) and the bridge falls back to whatever Python the machine has.
     """
     meipass = getattr(sys, "_MEIPASS", None)
     if not meipass:
+        return
+    if sys.platform == "darwin":
+        bundled = (
+            "libpython3.12.dylib",
+            os.path.join("Python3.framework", "Versions", "3.12", "Python3"),
+            "Python3",
+        )
+        if not any(os.path.exists(os.path.join(meipass, name)) for name in bundled):
+            return
+        os.environ["PYTHON3HOME"] = meipass
+        os.environ["PYTHONHOME"] = meipass
         return
     if os.path.exists(os.path.join(meipass, "python3.dll")):
         os.environ["PYTHON3HOME"] = meipass
@@ -304,7 +322,43 @@ def _get_timeline_items_locked() -> dict[str, Any]:
         return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE, "items": [],
                 "project_name": project_name}
 
+    _log_darwin_clip_path_flavor(items)
     return {"ok": True, "message": "", "items": items, "project_name": project_name}
+
+
+# One-shot, first successful poll of the process only.
+_darwin_path_flavor_logged = False
+
+
+def _log_darwin_clip_path_flavor(items: list[dict[str, Any]]) -> None:
+    """Record ONCE, on macOS, which spelling Resolve hands back for clips.
+
+    Open hardware question: the fleet's project databases store canonical
+    `P:\\Projects\\...` strings, and a Mac reaches them through Resolve's
+    Mapped Mount preference. Whether GetClipProperty then reports the stored
+    canonical string or the mount-resolved local path decides what
+    classification, the fixer and the proxy relinker are actually looking at
+    -- and it can only be answered on real hardware. One INFO line in the
+    editor's log answers it without asking anyone to run anything.
+    """
+    global _darwin_path_flavor_logged
+    if _darwin_path_flavor_logged or sys.platform != "darwin" or not items:
+        return
+    _darwin_path_flavor_logged = True
+    try:
+        paths = [str(item.get("file_path") or "") for item in items]
+        # Drive-rooted ("P:\...") is the canonical spelling; anything else on
+        # a Mac is the Mapped Mount already resolved to a local path.
+        canonical = [p for p in paths if p[1:2] == ":"]
+        log.info(
+            "resolve (macOS): %d of %d timeline clip paths came back in canonical "
+            "drive spelling; first canonical=%r first other=%r",
+            len(canonical), len(paths),
+            canonical[0] if canonical else "",
+            next((p for p in paths if p[1:2] != ":"), ""),
+        )
+    except Exception:
+        log.debug("resolve: could not sample the macOS clip path flavor", exc_info=True)
 
 
 # Editor-facing. The raw f"Resolve scripting error: {exc}" reached tray

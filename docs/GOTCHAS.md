@@ -69,6 +69,15 @@ git check-attr eol -- dashboard/deploy/run.sh
 and the second was already on the editor share, where the first Mac install
 would have failed identically.
 
+The blanket `*.sh text eol=lf` rule covers new files, but every shell script
+that leaves this machine is **also** listed by name, deliberately: a
+one-line diff is the only thing that makes "is this file safe on a Mac?"
+reviewable. `installer/macos_uninstall.sh` and `tools/release_macos.sh` were
+added on 2026-08-03. `build_editor_package.ps1 -Publish` now refuses to
+publish `macos_bootstrap.sh` at all if a byte-scan finds a CR in it -- the
+`.sh` is served to Macs by the dashboard's `[ INSTALLER ]` link, where a
+single CR makes it fail on the first line (`bad interpreter: bash^M`).
+
 Audit the whole tree at once:
 
 ```powershell
@@ -260,8 +269,13 @@ Two machines will never get there on their own:
 - **Pre-0.4.0 companions** predate the self-upgrade mechanism. They need the
   manual path: `windows_upgrade.ps1` from the share, per
   `installer/FIRST_UPGRADE.md`.
-- **Mac editors** get no offer at all. The channel carries a Windows package
-  only; they use `macos_bootstrap.sh` from the share.
+- **Mac editors** are offered only what the **macOS** channel carries, which
+  a Windows ship never updates (PyInstaller does not cross-compile -- see
+  RELEASE.md, "The macOS release"). Between Mac build sessions they keep
+  their build and are correctly *not* flagged out of date; the advisory
+  printed by `ship.ps1` / `build_editor_package.ps1` /
+  `check_deploy_drift.ps1` is the reminder to run
+  `./tools/release_macos.sh --publish --make-current` on the Mac.
 
 ### Ordering: companion before dashboard
 
@@ -415,3 +429,139 @@ python server\install_dashboard_app.py --recreate --dry-run   # ALWAYS dry-run f
 git check-attr eol -- <file>                      # is this file going to break on POSIX
 Set-ExecutionPolicy -Scope Process Bypass         # fresh window
 ```
+
+---
+
+## 10. macOS
+
+Nothing in this section has been paid for in debugging time **yet** -- the
+macOS port is code-complete and unvalidated (`installer/MACOS_FIRST_RUN.md`).
+These are the traps the implementation is written around, recorded here so
+the first real Mac session recognises them instead of rediscovering them.
+
+### Resolve's Mapped Mount is TWO files, and `config.dat` alone does nothing
+
+Resolve keeps the preference in both:
+
+| File | Shape | Whose form |
+|---|---|---|
+| `config.dat` | `Site.<n>.FS.<i>.Root` / `.MappedRoot` | the engine's mirror |
+| `.config.data` | `IoFsMount_<i>` / `IoFsMappedMount_<i>` + `IoFsNum` | the GUI's own form |
+
+Both live in `~/Library/Preferences/Blackmagic Design/DaVinci Resolve/`
+(**no** `Preferences` subfolder, unlike Windows). Editing `config.dat` alone
+looks like it worked and then silently reverts, because the GUI form is what
+Resolve rebuilds `config.dat` from on the next launch. The installer's helper
+edits both or neither.
+
+### Resolve rewrites its preferences ON QUIT -- and never pre-create them
+
+Two consequences, and the helper refuses rather than guessing on either:
+
+- **Resolve running → exit 3.** An edit made while Resolve is open is
+  overwritten when it quits. Quit Resolve, re-run
+  `macos_bootstrap.sh --resolve-mapping-only`.
+- **No `config.dat` at all → exit 4, nothing created.** A missing file means
+  Resolve has never completed a first run, and first-run onboarding
+  regenerates the whole config -- so a preference file invented by an
+  installer would be thrown away along with everything else in it. "Launch
+  Resolve once, quit, re-run" is the fix, not a workaround.
+
+Other exit codes worth knowing: `5` unrecognised format (nothing touched),
+`6`/`7` from `verify` only (no mapping / mapped elsewhere), `8` I/O.
+
+### `MacDIO`, not `DIO`
+
+The direct-IO key in `config.dat` is platform-specific and Resolve ignores
+the wrong one. New entries the helper writes on macOS carry `MacDIO = 1`;
+`DIO = 1` is the Windows spelling. Same idea in `.config.data`, where the
+field is `IoFsDirectIO_<i>`.
+
+Also: Resolve appends its own trailing filesystem entry (`/Volumes` on
+macOS, `ResolveVirtual` on Windows) and expects it **last**, so the helper
+inserts in front of it.
+
+### The Mac App Store build keeps its preferences somewhere else
+
+If Resolve came from the App Store, the config directory is inside its
+container:
+
+```
+~/Library/Containers/com.blackmagic-design.DaVinciResolve/Data/Library/Preferences/Blackmagic Design/DaVinci Resolve
+```
+
+The helper checks the normal location first and the container second,
+choosing whichever actually holds a `config.dat`; `BMD_RESOLVE_CONFIG_DIR`
+overrides both (and is used as-is, so an override with no `config.dat`
+reports "never launched" rather than silently falling back to a different
+profile).
+
+### Quarantine is set by browsers, not by `curl`
+
+`com.apple.quarantine` comes from the *downloader*, not from the file:
+
+| How it arrived | Quarantined? |
+|---|---|
+| Safari/Chrome (the dashboard's `[ INSTALLER ]` link) | **yes** |
+| `curl` / `urllib` (the bootstrap's companion download, the tray self-upgrade) | no |
+| copied off a share, `scp`, AirDrop from a trusted device | no |
+
+Quarantine blocks **executing** the file. So a browser-downloaded
+`ccsync-onboard-*.sh` needs `xattr -d com.apple.quarantine <file>` *or* to be
+run as `bash <file>` -- passing it to `bash` as an argument is not an
+execution of the file and is unaffected. The bootstrap strips the attribute
+from the companion binary anyway, belt and braces, because **a quarantined
+binary launched by launchd fails with no dialog and no log line at all** --
+the symptom is a LaunchAgent that appears to load and a menu bar with
+nothing in it.
+
+### `/Volumes` ghost directories and numbered remounts
+
+An unclean eject leaves an empty **directory** at `/Volumes/<Name>` on the
+boot disk. `os.path.isdir()` and `[ -d ]` both say yes to it, which is why
+neither is ever the only check in this codebase: `rclone sync <NAS>
+<local_root>` against that path does not fail, it fills the Mac's internal
+disk with the project that was supposed to be on the SSD.
+
+With the ghost in place, the real drive then mounts at `/Volumes/<Name> 1` --
+a name that **changes between replugs** and must never be adopted as a sync
+root or baked into Resolve's Mapped Mount.
+
+Both are refused, never adapted to: the installer aborts with the fix, and
+the companion's `root_guard.py` classifies a ghost as `absent` (pause, wait)
+and a numbered remount as `misplaced` (pause, and show the editor a dialog).
+`misplaced` is only distinguishable when a `VolumeUUID` was recorded in
+`~/.ccsync/volume.json` at install time; without one it degrades to
+`absent`, which says the same thing with less detail.
+
+Diagnosing by hand: `ls /Volumes` shows the name either way; `mount` lists
+only real mounts. Present in `ls` and absent from `mount` = ghost. The fix is
+always eject → `sudo rmdir "/Volumes/<Name>"` (rmdir, **not** `rm -rf`: it
+refuses if anything real is in there) → replug.
+
+### launchd gives the companion a minimal PATH
+
+A LaunchAgent job inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin`. Neither
+`/opt/homebrew/bin` nor `~/.local/ccsync/bin` is on it, so
+`shutil.which("rclone")` fails and lanes A/B report "rclone not found on
+PATH" forever, on a machine where `rclone` works fine in Terminal (INST-7).
+The bootstrap therefore seeds `rclone_path` in `config.toml` with an
+**absolute** path. Anything else the companion shells out to needs the same
+treatment.
+
+### The companion's LaunchAgent has no `KeepAlive`, and does have `AbandonProcessGroup`
+
+Both are load-bearing and both look like omissions:
+
+- **No `KeepAlive`.** The companion self-upgrades by replacing its own
+  binary and re-execing. With `KeepAlive`, launchd *also* restarts the
+  process it just saw exit, and the Mac ends up running two companions
+  fighting over the single-instance lock and the sync queue.
+- **`AbandonProcessGroup = true`.** Without it launchd kills the whole
+  process group when the main process exits -- taking the freshly re-execed
+  upgrade child with it, i.e. an upgrade that removes the companion.
+
+The plist is rewritten (after a `launchctl bootout`) whenever it points at
+the wrong program or is missing either property. It runs the binary
+directly: there is no `.app` and no `open -a` indirection, so launchd
+supervises the real process.

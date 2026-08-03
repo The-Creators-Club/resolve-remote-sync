@@ -20,7 +20,9 @@ You'll need, from the admin:
 
 You'll also want a drive with real headroom for the local sync root --
 originals you add and every proxy that comes down both live there. If your
-system drive is tight, use `-LocalRoot` (step 2) to put it elsewhere.
+system drive is tight, use `-LocalRoot` (Windows) / `--local-root` (Mac) in
+step 2 to put it elsewhere. On a Mac that is normally the external SSD you
+edit from; see section 6.2 for what happens when you unplug it.
 
 > **Do not map any NAS share to a drive letter of your own.**
 > This one is worth reading before you start; see the warning in section 2.1.
@@ -65,19 +67,39 @@ it install the companion (the tray app) for you -- otherwise you'd copy
 from there. Don't keep it anywhere else; that folder is the only one the
 script starts at logon.
 
-**Mac** -- read this first: there is currently **no companion app for
-macOS**. The script below sets up rclone and Syncthing only, which means no
-tray app, no automatic upload of media you add, no out-of-tree popup and no
-dashboard reporting. Check with the admin before going ahead:
+**Mac** -- get the script from the dashboard: sign in and click
+`[ INSTALLER ]` in the header, which serves `ccsync-onboard-<version>.sh` to
+a Mac browser. Then, in Terminal:
 ```bash
-./macos_bootstrap.sh --tailnet-host <tailnet-host> --editor-name <your-username>
+cd ~/Downloads
+chmod +x ccsync-onboard-*.sh
+./ccsync-onboard-*.sh --tailnet-host <tailnet-host> --editor-name <your-username> --local-root "/Volumes/<YourSSD>/Creators_Club"
 ```
 
+`--local-root` is the one flag worth getting right: point it at the external
+SSD you edit from (see section 6.2). Leave it off and everything lands in
+`~/Creators_Club` on your internal disk. `DASHBOARD_TOKEN=<token-from-admin>`
+in front of the command is what lets it download and install the companion
+app; without it the script sets everything else up and tells you, loudly,
+that nothing on the Mac will sync by itself.
+
+Because the file came from a browser it carries macOS's quarantine flag,
+which blocks *executing* it. Either clear it once --
+`xattr -d com.apple.quarantine ccsync-onboard-*.sh` -- or skip the `chmod`
+and run `bash ccsync-onboard-*.sh ...` instead: handing the file to `bash`
+as an argument is not an execution of the file, so quarantine does not
+apply.
+
 This installs rclone + Syncthing, creates your local sync root, maps `P:` to
-it (Windows) or prepares the Mapped Mount (Mac), starts the Syncthing daemon
-and sets it to start at logon, writes an rclone remote config template, and
-seeds `~/.ccsync/config.toml`. It prints your **Syncthing device ID** at the
-end -- copy that.
+it (Windows) or sets Resolve's Mapped Mount for you (Mac, section 6), starts
+the Syncthing daemon and sets it to start at logon, writes an rclone remote
+config template, seeds `~/.ccsync/config.toml`, and installs the companion
+app. It prints your **Syncthing device ID** at the end -- copy that.
+
+Every step checks the current state before acting and says what it did or
+skipped, so re-running it is safe and is the normal way to fix a typo'd
+flag. A dry run (`-DryRun` on Windows, `--dry-run` on the Mac) prints what it
+would do and touches nothing.
 
 On Windows, `P:` shows up in Explorer as **TheCreatorsClub** so you can tell
 it apart from your own drives at a glance. Only project material belongs in
@@ -227,16 +249,67 @@ didn't shoot/add yourself -- proxies travel down to you, originals travel
 up from whoever added them). The studio base rig is configured the
 opposite way (prefers camera originals) since it holds everything locally.
 
-## 6. Mac only: Mapped Mount preference (manual, one-time)
-
-Resolve's scripting API cannot set this -- it's a manual step, and the
-companion app can only *detect* if it's missing, not fix it.
+## 6. Mac only: Mapped Mount preference (set for you; check it once)
 
 All paths in the shared database are stored in the **Windows-style form**
 `P:\Projects\<year>\<series>\<project>\...` (since that's the host's path
-convention). On your Mac, the same files live under `~/Creators_Club/...`.
-Resolve's **Mapped Mount** feature is what lets a Mac resolve `P:\...` paths
-to your local `~/Creators_Club` folder.
+convention). On your Mac, the same files live under your local root (e.g.
+`/Volumes/<YourSSD>/Creators_Club/...`). Resolve's **Mapped Mount** feature
+is what lets a Mac resolve `P:\...` paths to that folder. There is no `P:`
+drive on a Mac and there never will be -- the Mapped Mount does that job.
+
+**The bootstrap script sets this for you.** Resolve has no scripting API for
+the preference, but it keeps it in plain-text files the installer can edit,
+so a normal run ends with `DONE FOR YOU: Resolve maps P:\ to <your root>`.
+Both files are backed up (timestamped, next to the originals) before
+anything is written.
+
+It can only do that while **Resolve is quit**, and only if Resolve has been
+launched at least once on this Mac. So one of these lines may appear at the
+end of the run instead:
+
+- *"NOT DONE -- Resolve was running."* Resolve rewrites its preferences when
+  it quits, so an edit made while it is open would be thrown away. Quit
+  Resolve completely, then re-run just that step:
+  ```bash
+  ./ccsync-onboard-*.sh --resolve-mapping-only --local-root "/Volumes/<YourSSD>/Creators_Club"
+  ```
+- *"NOT DONE -- Resolve has never been launched on this Mac."* Resolve
+  writes its preference files on its own first run and the installer will
+  not invent them. Launch Resolve once, quit it, then run the same
+  `--resolve-mapping-only` command above.
+
+`--resolve-mapping-only` touches nothing else -- no NAS, no account, no
+sync -- and it is safe to re-run: if the mapping is already right it says
+`already maps P:\ to ... -- nothing written` and exits.
+
+**To check it by eye:** DaVinci Resolve > Preferences (Cmd+,) > **Media
+Storage**. Your local root should be listed with `P:\` as its mapped path.
+Restart Resolve and look again -- if it has vanished, tell the admin (that
+would mean Resolve rewrote the file over the top of the edit).
+
+**The real test:** open a timeline with a clip whose stored path is
+`P:\Projects\...` and confirm it plays (via proxy) without a manual relink
+prompt. If Resolve prompts you to locate the file, the mapping isn't right
+yet.
+
+**For the admin -- a read-only check that works with Resolve open.** The
+mapping tool is embedded in the bootstrap script; extract and ask it:
+
+```bash
+sed -n '/^# ---CCSYNC-MAPPING-HELPER-BEGIN---$/,/^# ---CCSYNC-MAPPING-HELPER-END---$/p' \
+    ccsync-onboard-*.sh > /tmp/ccsync_mapping.py
+python3 /tmp/ccsync_mapping.py verify --local-root "/Volumes/<YourSSD>/Creators_Club"
+```
+
+Exit `0` = mapped correctly, `6` = no `P:\` mapping at all, `7` = mapped
+somewhere else (it prints where), `4` = Resolve has no preference files yet.
+`verify` never writes anything.
+
+### 6.1 Setting it by hand (fallback)
+
+Only needed if the installer said it could not do it, or you passed
+`--skip-resolve-mapping`.
 
 **DaVinci Resolve > Preferences (Cmd+,) > Media Storage tab**, find the
 **Mapped Mount** section (older/newer Resolve versions may label this
@@ -245,21 +318,82 @@ another; that's it):
 
 1. Click **Add Mount** (or the `+` under that table).
 2. **Local Path** (or "Actual Path" -- whatever the left/first column is
-   called): browse to `/Users/<you>/Creators_Club` (i.e. `~/Creators_Club`).
+   called): browse to your local root, e.g.
+   `/Volumes/<YourSSD>/Creators_Club`.
 3. **Mapped Path** (or "Remote Path" -- the right/second column): enter it
    in the Windows-style form the database uses: `P:\`
 4. Save / close Preferences.
 
-To sanity-check it worked: open a timeline that has a clip whose stored
-path is `P:\Projects\...`, and confirm it plays (via proxy) without a
-manual relink prompt. If Resolve prompts you to locate the file, the
-mapping isn't right yet -- double check the two path forms above are typed
-exactly as shown (trailing colon+backslash on the mapped side matters).
+Type the two path forms exactly as shown -- the trailing colon+backslash on
+the mapped side matters.
 
 The companion app checks this at startup by asking Resolve for a timeline
-clip's resolved path and confirming it lands inside your local
-`~/Creators_Club`; if it doesn't, you'll get a "mapping looks wrong" tray
-warning pointing you back to this section.
+clip's resolved path and confirming it lands inside your local root; if it
+doesn't, you'll get a "mapping looks wrong" tray warning pointing you back
+to this section. That check is behavioural, so it catches a mapping that
+Resolve later dropped as well as one that was never set.
+
+### 6.2 Mac only: the sync drive, and unplugging it
+
+Your local root normally lives on the external SSD you edit from
+(`--local-root "/Volumes/<YourSSD>/Creators_Club"`). Remember there is no
+`P:` drive on a Mac -- Resolve's Mapped Mount (section 6) is what stands in
+for it. Three things follow from the SSD.
+
+**Unplugging is fine.** The companion watches the volume. Pull the drive
+mid-sync and it pauses every lane, the menu-bar icon goes orange, and the
+menu says `PAUSED — drive disconnected`. Plug it back in and syncing
+resumes on its own -- there is nothing to click, and nothing is lost beyond
+the transfer that was in flight (files restart, they do not corrupt).
+
+**macOS will ask for permission to read the drive, once.** The first time
+the companion (or rclone) touches a removable volume, macOS shows a
+"…would like to access files on a removable volume" prompt. **Allow it.**
+If you decline, syncing fails in ways that look like a broken install; you
+can undo the mistake in System Settings > Privacy & Security > Files and
+Folders.
+
+**The one failure that needs you: a leftover folder at `/Volumes/<Name>`.**
+If the drive is ever ejected uncleanly, macOS can leave an empty *directory*
+behind at the path the volume used to occupy. It looks exactly like the
+mounted drive to anything that just checks "does this path exist" -- and
+worse, the next time you plug the real drive in, macOS mounts it at
+`/Volumes/<Name> 1` instead, a name that changes on every replug.
+
+Both the installer and the companion refuse to touch that: the installer
+aborts, and the companion pauses and shows you a window rather than syncing
+terabytes onto your internal disk. The fix belongs to you and takes a
+minute:
+
+1. Eject the drive (Finder, or `diskutil eject "/Volumes/<Name>"`).
+2. `sudo rmdir "/Volumes/<Name>"` -- `rmdir`, **not** `rm -rf`: it refuses
+   if the directory is not empty, which would mean real files live there
+   and you should ask the admin before deleting anything.
+3. Plug the drive back in, confirm it appears as `/Volumes/<Name>` (no
+   number), and carry on. Sync resumes by itself.
+
+You can see the current state with `ls /Volumes` (the drive should appear
+once, unnumbered) and `mount | grep Volumes` (it should be listed there --
+if the name shows in `ls` but not in `mount`, it is a leftover directory).
+
+### 6.3 Mac only: files downloaded through a browser
+
+macOS tags anything a browser downloads with `com.apple.quarantine`, and a
+quarantined file cannot be *executed* -- which is why the bootstrap script
+needs one of the two workarounds in section 2 (`xattr -d
+com.apple.quarantine <file>`, or run it as `bash <file>`, which is not an
+execution of the file).
+
+The companion app itself is not affected: the installer downloads it with
+`curl` (which sets no quarantine) and strips the attribute anyway before
+installing it. `xattr -l ~/.local/ccsync/bin/ccsync-companion` should print
+nothing. If it ever does list `com.apple.quarantine` -- e.g. because
+somebody hand-downloaded the binary through Safari -- the app will fail to
+start with no visible error at all; clear it with:
+
+```bash
+xattr -d com.apple.quarantine ~/.local/ccsync/bin/ccsync-companion
+```
 
 ## 7. You're set up. What to expect day to day
 

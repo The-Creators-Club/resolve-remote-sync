@@ -2,11 +2,12 @@
 
 Per-editor bootstrap scripts that get a new remote editor's Windows or Mac
 machine ready for the sync system: Tailscale, rclone, Syncthing (installed
-**and running**), the local sync root, the `P:` mapping (Windows) or Mapped
-Mount prep (Mac -- the actual Resolve preference is a manual step, see
-`../docs/EDITOR_SETUP.md`), rclone remote config, a seeded companion config,
-and a companion-app autostart entry (best-effort, since the companion app is
-built separately in `companion/` and may not exist on disk yet).
+**and running**), the local sync root (verified as a real mount when it is
+on an external volume), the `P:` mapping (Windows) or Resolve's **Mapped
+Mount** preference (Mac -- set automatically while Resolve is quit; see
+`../docs/EDITOR_SETUP.md` step 6 for the manual fallback), rclone remote
+config, a seeded companion config, and the companion app itself plus its
+autostart entry.
 
 **Status:** the Windows script has now been run end-to-end on a real editor
 machine (`DESKTOP-LQQ41TC`, 2026-07-24); the bugs that run exposed are fixed
@@ -14,22 +15,28 @@ here and listed under "Fixed after the first live run" below. `onboard.exe`
 (built from `onboarding/`) wraps it and is the path a new Windows editor
 should actually take.
 
-**macOS is not a supported editor platform yet.** `macos_bootstrap.sh` is
-syntax-checked with `bash -n` and exercised with `--dry-run` under Git Bash
-only -- it has never been run on an actual Mac. More importantly **there is
-no macOS companion app**: nothing in this repo builds or ships one, so the
-script sets up rclone and Syncthing and stops. A Mac editor ends up with no
-tray app, no lane A/B sync, no out-of-tree popup and no dashboard reporting.
-The script now says so loudly at the top. Don't hand this package to a Mac
-editor without talking to them first.
+**macOS status: code-complete, pending first real-Mac validation
+(2026-08-03).** The whole path now exists -- a macOS companion build
+(`tools/release_macos.sh`), an installer that downloads and installs it, sets
+Resolve's Mapped Mount and verifies the external SSD, and an uninstaller --
+but **not one line of the macOS-only code has run on a Mac**. `bash -n`
+clean, `--dry-run` exercised under Git Bash, the Resolve mapping helper
+unit-tested from its extracted source (32 tests); `diskutil`, `launchctl`,
+`xattr`, pyobjc and the preference edit itself are written from
+documentation and research, not from a live run. Treat the first install as a
+**supervised** one and walk
+[`MACOS_FIRST_RUN.md`](MACOS_FIRST_RUN.md) -- the ordered first-session
+checklist, with the expected output and the failure shape for every step.
 
 **Building and shipping a companion release is documented in
 [`../docs/RELEASE.md`](../docs/RELEASE.md)** — `tools\release.ps1` (parity
 check + tests + PyInstaller + provenance manifest), then
 `build_editor_package.ps1 -Publish -MakeCurrent`, then verify with
-`tools\check_deploy_drift.ps1`. Read it before concluding that a fix "didn't
-work": on 2026-07-25 a rig ran v0.4.3 for an afternoon while every fix was
-being verified against v0.4.5.
+`tools\check_deploy_drift.ps1`. The macOS companion is a **second** build on
+a **second machine** (`./tools/release_macos.sh --publish --make-current` --
+PyInstaller does not cross-compile), also in RELEASE.md. Read it before
+concluding that a fix "didn't work": on 2026-07-25 a rig ran v0.4.3 for an
+afternoon while every fix was being verified against v0.4.5.
 
 ## The editor package
 
@@ -79,11 +86,27 @@ signed-in user via the `[ INSTALLER ]` header link (`/download` — picks
 Windows or macOS from the browser). That download is the supported way to
 hand an editor the installer: onboard.exe refuses to run from the NAS share
 anyway, and the dashboard copy can't drift behind the way a hand-copied one
-does. The upload is skipped with a warning when onboard.exe is stale or its
-version wasn't bumped (`$InstallerVersion` in `windows_bootstrap.ps1` AND
-`INSTALLER_VERSION` in `onboarding/steps.py`). The macOS slot has no
-automated publisher yet; if you need it, publish `macos_bootstrap.sh` by
-hand: `PUT /api/v1/admin/packages/macos/<version>?kind=onboard&sha256=...`.
+does. The upload is refused when onboard.exe is stale or its version wasn't
+bumped -- and the installer version now lives in **three**
+files that must agree (`$InstallerVersion` in `windows_bootstrap.ps1`,
+`INSTALLER_VERSION` in `onboarding/steps.py`, `INSTALLER_VERSION` in
+`macos_bootstrap.sh`).
+
+The same `-Publish` run uploads `macos_bootstrap.sh` as the **macos**
+`kind=onboard` package, so `/download` serves the current script to anyone on
+a Mac. It is computed independently of the Windows upload (a stale
+`onboard.exe` must not stop the `.sh` from shipping, and vice versa), and it
+is refused outright if a byte-scan finds a carriage return in the file -- a
+Mac's `bash` fails on the first line of a CRLF script. Either upload being
+skipped now **fails** the ship rather than warning.
+
+What `-Publish` **cannot** do is build the macOS *companion*: PyInstaller
+does not cross-compile. That is one command on a Mac
+(`./tools/release_macos.sh --publish --make-current`), and until it is run
+the macos companion channel stays where it was -- `build_editor_package.ps1`,
+`tools/ship.ps1` and `tools/check_deploy_drift.ps1` each print an advisory
+when they notice the gap. See
+[`../docs/RELEASE.md`](../docs/RELEASE.md) → "The macOS release".
 
 Contents (11 files, all copied by `build_editor_package.ps1`):
 
@@ -95,7 +118,7 @@ Contents (11 files, all copied by `build_editor_package.ps1`):
 | `windows_bootstrap.ps1` | Manual/repair install path (what `onboard.exe` drives internally). |
 | `windows_upgrade.ps1` | Manual upgrade: swaps the exe, keeps identity/config. |
 | `windows_uninstall.ps1` | Removal; `-Full` also drops sign-in + Syncthing identity. |
-| `macos_bootstrap.sh` | rclone + Syncthing only -- see the macOS status note above. |
+| `macos_bootstrap.sh` | The Mac install/repair path. Also published to the dashboard, which is where Mac editors should get it (`[ INSTALLER ]` → `/download`). |
 | `macos_uninstall.sh` | Mac removal; mirrors `windows_uninstall.ps1` semantics and never touches the SSD. |
 | `EDITOR_SETUP.md` | The long-form setup reference. Copied **flat**, so its commands must not reference an `installer\` prefix or `../` links. |
 | `config.example.toml` | Reference copy of every companion config key. |
@@ -194,23 +217,138 @@ Steps (each idempotent, each prints what it did/skipped):
 ## macos_bootstrap.sh
 
 ```bash
-./macos_bootstrap.sh --tailnet-host truenas.tailnet.ts.net --editor-name jsmith
+DASHBOARD_TOKEN=<token> ./macos_bootstrap.sh \
+    --tailnet-host truenas.tailnet.ts.net --editor-name jsmith \
+    --local-root "/Volumes/RigSSD/Creators_Club"
 ```
 
-Equivalent steps using `brew` where available, falling back to direct `curl`
-downloads of official release archives otherwise. Accepts `--local-root`
-(default `~/Creators_Club`) and `--remote-root`. Uses a path instead of a
-drive letter (Resolve's Mapped Mount preference bridges the two -- manual,
-one-time, documented in `../docs/EDITOR_SETUP.md`, since it isn't exposed by
-the scripting API). Syncthing is wired to autostart via a `LaunchAgent` plist
-in `~/Library/LaunchAgents/`, and the script now **loads it** (`launchctl
-bootstrap`, falling back to `launchctl load`) rather than just printing the
-command. The companion step is dead code today -- there is no macOS companion
-build for it to find, so it always warns and skips; see the macOS status note
-at the top of this file.
+The same steps as the Windows script, using `brew` where available and
+falling back to direct `curl` downloads of official release archives
+otherwise. Every step checks current state before acting and prints what it
+did or skipped, so it is safe to re-run -- which is the supported way to fix
+a typo'd flag. It does **not** run `tailscale up` or generate SSH keys;
+those stay interactive one-time steps.
 
-`--dry-run` prints every action it would take without touching the filesystem
-or writing any LaunchAgent.
+| Flag | Default | Notes |
+|---|---|---|
+| `--tailnet-host` | *(required)* | Tailnet hostname or `100.x.y.z` of the NAS. |
+| `--editor-name` | *(required)* | TrueNAS username. Lowercased automatically. |
+| `--local-root` | `$HOME/Creators_Club` | Normally the editing SSD: `/Volumes/<Name>/Creators_Club`. See the external-volume rules below. |
+| `--remote-root` | `/mnt/tank/TheCreatorsPool/Creators_Club` | Must be absolute -- SFTP lands in the editor's NAS home directory. |
+| `--companion-file` | *(none)* | Install the companion from a local file instead of downloading it (no `DASHBOARD_TOKEN` needed). The supervised-first-install path. |
+| `--companion-version` | `current` | Published version to fetch. |
+| `--companion-path` | `$HOME/.local/ccsync/bin/ccsync-companion` | Where the binary lives and what the LaunchAgent runs. |
+| `--skip-resolve-mapping` | off | Leave Resolve's Mapped Mount alone. |
+| `--resolve-mapping-only` | off | Set the Mapped Mount and do nothing else -- needs no NAS, no account, and not even `--tailnet-host`. This is what the error messages tell editors to re-run. |
+| `--dry-run` | off | Prints every action, touches nothing (no filesystem writes, no LaunchAgent). |
+
+Environment: `DASHBOARD_URL` (default the tailnet address) and
+`DASHBOARD_TOKEN` (empty), which the admin's onboarding tooling sets.
+
+**The local sync root, when it is on an external volume.** A `--local-root`
+under `/Volumes` is verified to be a **real mount**, not merely an existing
+directory. Two failure modes are refused rather than adapted to, because
+adapting silently syncs terabytes to the wrong place: a *ghost directory*
+left at `/Volumes/<Name>` by an unclean eject (every "does the path exist"
+check passes, and the sync lands on the internal disk), and a *numbered
+remount* at `/Volumes/<Name> 1` caused by that ghost (a name that changes on
+every replug). Both abort with the human fix spelled out -- eject,
+`sudo rmdir` the leftover, replug. On success the volume's `VolumeUUID`,
+mount point and local root are recorded in `~/.ccsync/volume.json` (mode
+600), which is the contract the companion's root guard reads to tell "the
+SSD is unplugged" apart from "the tree is missing". A non-APFS filesystem is
+warned about, not refused.
+
+**The companion.** Downloaded from
+`GET <dashboard>/api/v1/companion/package/macos/current` with
+`X-CCSync-Token`, verified against the `X-CCSync-SHA256` response header
+before it is installed (no header or a mismatch = not installed, loudly),
+staged and `chmod +x`'d, then quarantine-stripped with `xattr -d
+com.apple.quarantine` -- a quarantined binary launched by launchd fails with
+no dialog at all. Skipped as already-installed when the sha matches. If it
+cannot be installed, the run ends with an unmissable "THE SYNC APP IS NOT
+INSTALLED ON THIS MAC" block **and a non-zero exit**, because everything
+else succeeding otherwise reads as a finished install.
+
+Its LaunchAgent (`com.creatorsclub.ccsync.companion`) runs the binary
+directly -- no `.app`, no `open -a` -- with `RunAtLoad`, **no `KeepAlive`**
+(which would race the self-upgrade's re-exec and leave two companions
+fighting over the instance lock) and **`AbandonProcessGroup`** (without it
+launchd kills the upgrade child along with the process it replaced). The
+plist is rewritten and reloaded whenever it points somewhere else or is
+missing either property. Syncthing's agent is written **and loaded** the same
+way (`launchctl bootstrap`, falling back to `launchctl load`).
+
+**Resolve's Mapped Mount** (`P:\` → the local root) is set for the editor by
+a python3 helper embedded in this script, which edits both of Resolve's
+plain-text preference files losslessly, atomically, and after a timestamped
+backup of each -- while Resolve is quit. Distinct outcomes are reported
+distinctly, and each names the exact command to re-run: Resolve running
+(exit 3), Resolve never launched so there are no preference files to patch
+(exit 4, nothing created), unrecognised format (exit 5), no `python3`.
+The closing summary's step 6 is worded for what actually happened, never for
+what was intended, and the manual walkthrough stays in
+`../docs/EDITOR_SETUP.md` step 6. Full reasoning: `SPEC.md` flaw 7 and
+`../docs/GOTCHAS.md` § 10.
+
+The helper's source lives in exactly one place -- the quoted heredoc between
+the `CCSYNC-MAPPING-HELPER` sentinel comments --
+and `companion/tests/test_resolve_mapping_helper.py` extracts and imports
+*that* range, so the module under test is byte-for-byte the module the
+installer runs. The sentinels are load-bearing; don't reword them.
+
+## macos_uninstall.sh
+
+```bash
+./macos_uninstall.sh [--full] [--dry-run]
+```
+
+The macOS counterpart of `windows_uninstall.ps1`, with the same semantics.
+**It never touches synced media** -- the project tree on the SSD is left
+exactly as it is in both modes, and the closing summary says so by path.
+
+Default mode stops and removes what this installer put in
+`~/.local/ccsync` (companion + Syncthing binaries and the Syncthing
+identity), removes both LaunchAgents (booting them out *before* deleting the
+plists), and drops only the `[creators_club_sftp]` stanza from
+`~/.config/rclone/rclone.conf`. `--full` also removes `~/.ccsync` --
+except `~/.ccsync/state`, which holds the prompts this machine has already
+answered once and for all; deleting it makes every dismissed prompt come
+back after a reinstall, which reads as "the fix didn't work".
+
+Deliberately left alone: Homebrew-installed Tailscale/rclone/Syncthing
+(shared with other tools -- `brew uninstall` them yourself), the rclone SSH
+key in `~/.ssh` (shared location; `--full` just says where it is), and
+**Resolve's Mapped Mount preference** -- it is Resolve's own configuration,
+harmless without CCSync, and removing it would mean editing Resolve's
+preference files behind the editor's back. One closing line says how to
+remove it by hand.
+
+Processes are matched by pattern and then filtered to those whose executable
+actually lives under `~/.local/ccsync`, so a Mac running its own Homebrew
+Syncthing for personal files keeps it.
+
+## How the macOS pieces are distributed
+
+Unlike Windows, **the macOS companion is never on the `P:` editor share.**
+That package carries the Windows exe plus the two `.sh` scripts; the Mac
+binary is served only from the dashboard's package channel, which is also
+where the bootstrap fetches it from. So:
+
+- the **bootstrap script** reaches a Mac editor via the dashboard's
+  `[ INSTALLER ]` link (`/download` picks macOS from the User-Agent and
+  serves `ccsync-onboard-<version>.sh`), published by
+  `build_editor_package.ps1 -Publish`;
+- the **companion binary** reaches them via
+  `/api/v1/companion/package/macos/current` -- at install time through the
+  bootstrap, and afterwards through the tray's own self-upgrade -- published
+  by `tools/release_macos.sh --publish --make-current` **on a Mac**;
+- a browser download of the `.sh` **is** quarantined (that is the
+  downloader's doing, not the file's). Quarantine blocks *executing* it:
+  `xattr -d com.apple.quarantine ccsync-onboard-*.sh`, or just run
+  `bash ccsync-onboard-*.sh …`, which is unaffected. The companion binary is
+  fetched by `curl`, which sets no quarantine, and the script strips it
+  anyway.
 
 ## Fixed after the first live run (2026-07-24)
 
@@ -268,16 +406,30 @@ on a new editor's machine. Recorded here because most of these fail
   verified against a live winget source -- if any 404, the script falls back
   to the next method (scoop/direct download for rclone and Syncthing; a
   printed manual URL for Tailscale).
-- **Companion app packaging.** Windows is settled: a single
-  `ccsync-companion.exe`, installed to `%LOCALAPPDATA%\ccsync\bin` and
-  autostarted from there. The Mac side is **not** -- `macos_bootstrap.sh`
-  looks for a `.app` bundle that nothing in this repo builds or ships, so
-  its companion step always skips. Until a `.app` exists (and is notarized,
-  or shipped with documented `xattr -dr com.apple.quarantine` instructions),
-  macOS editors have no companion at all.
+- **Companion app packaging.** Windows: a single `ccsync-companion.exe` in
+  `%LOCALAPPDATA%\ccsync\bin`, autostarted from there. macOS: a **bare
+  arm64 Mach-O** named `ccsync-companion` in `~/.local/ccsync/bin` --
+  deliberately *not* a `.app` bundle, so the LaunchAgent execs the real
+  process instead of going through `open -a` and losing sight of it. It is
+  **ad-hoc signed** (PyInstaller does this; `release_macos.sh` fails the
+  build if the signature is missing, since an unsigned arm64 binary is
+  killed on launch by the kernel) and **not notarized** -- which is fine
+  precisely because it is never browser-downloaded: `curl` and the tray's
+  self-upgrade set no quarantine, and the installer strips the attribute
+  regardless. The Dock icon is suppressed at runtime via
+  `NSApplicationActivationPolicyAccessory`, so it presents as a menu-bar
+  agent. All of this is **unverified on real hardware** -- see
+  `MACOS_FIRST_RUN.md`.
 - Both scripts assume the editor will run `ssh-keygen` themselves (or the
   admin will send them a keypair) for the rclone SFTP remote -- neither
   script generates one, since a fresh keypair with no matching account yet is
   dead weight; the script just checks for the file and warns if it's missing.
-- The macOS script's `launchctl bootstrap gui/$(id -u)` path has not been
-  exercised on a real Mac.
+- **Every macOS-only code path is unexercised on real hardware**:
+  `launchctl bootstrap gui/$(id -u)`, `diskutil info -plist` /
+  `plutil -extract` output shapes, `xattr`, `pgrep -f "DaVinci Resolve"`,
+  `osascript` alerts, the pyobjc app-delegate install, `caffeinate`, and the
+  two Resolve preference formats (the helper reads each file's own
+  numbering base -- `.config.data`'s `IoFs<F>_<i>` and `config.dat`'s
+  `Site.<n>.FS.<i>` alike -- but a real macOS file confirming those bases
+  is still outstanding).
+  `MACOS_FIRST_RUN.md` turns each of these into a checkable step.

@@ -133,5 +133,20 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
    will be rejected there, which is why that step is non-fatal-with-a-NOTE by design.
    Incidental: the NAS `editors` group contains a machine-shaped real account
    (`alex_laptop`) — a live cousin of B16; consider renaming it if it's a machine.
-8. **macOS self-upgrade remains latent-broken** (no chmod, hardcoded `.new.exe`) —
-   untouched because the macOS build is still "NOT SHIPPED YET"; fix before shipping it.
+8. **macOS — CODE-COMPLETE 2026-08-03, PENDING FIRST REAL-MAC VALIDATION.** The
+   self-upgrade gap is **RESOLVED**: `upgrade.py` derives both the platform key and the
+   staged filename from `sys.platform` (`ccsync-companion.new` on darwin, `.new.exe`
+   only on Windows) and chmods `0o755` after the sha256 verify but before the swap, and the
+   respawn is `start_new_session` with `CCSYNC_REPLACES_PID` set so the new process waits
+   out its predecessor's posix lock instead of exiting as a duplicate
+   (`platform_key`, `new_download_name`, `_make_executable`). Shipped alongside
+   it: path canon (`canon.py`), the external-SSD root guard (`root_guard.py` + lane-level
+   `isdir` gates), darwin keep-awake (`caffeinate`) and shutdown guard (SIGTERM →
+   graceful; **no** shutdown-blocking screen on macOS — honest reduced parity), installer
+   1.0.16 (`macos_bootstrap.sh` with the automatic Resolve Mapped Mount, plus
+   `macos_uninstall.sh`), the dashboard's `macos` package channel, and the Mac-side build
+   command `tools/release_macos.sh`. **None of it has run on a Mac yet** — every
+   macOS-only path (diskutil, launchctl, xattr, pyobjc, the Resolve preference edit) is
+   written from documentation, not from a live run. Treat macOS as code-complete, not
+   validated, until the supervised first-session checklist in
+   `installer/MACOS_FIRST_RUN.md` has been walked end to end.

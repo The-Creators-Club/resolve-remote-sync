@@ -59,11 +59,15 @@ The countermeasures are:
 | Companion version (dup) | `companion/pyproject.toml` → `version` | Must equal the above. `tools/release.ps1` and `build_editor_package.ps1 -Publish` both refuse on drift. |
 | Installer version | `installer/windows_bootstrap.ps1` → `$InstallerVersion` | Separate number; the bootstrap script's own version. |
 | Installer version (dup) | `onboarding/steps.py` → `INSTALLER_VERSION` | Must equal the above (`onboard.exe` bundles the bootstrap script). Parity is enforced by `tools/release.ps1`. |
+| Installer version (dup) | `installer/macos_bootstrap.sh` → `INSTALLER_VERSION` | Third copy of the **same** number — the macOS bootstrap ships as the `macos` `kind=onboard` package and is versioned by it. Parity is now **three-way**: enforced by `tools/release.ps1` and `build_editor_package.ps1 -Publish` (which refuses to publish either onboard package on drift), reported by `tools/check_deploy_drift.ps1`, and warned about by `tools/release_macos.sh` (which publishes none of the three, so it reports rather than fails). |
+| macOS companion build | `tools/release_macos.sh` | Carries **no** version of its own: it reads `config.py`/`pyproject.toml` for the companion version and all three installer constants for the parity report. Runs only on a Mac (`--dry-run` degrades to inspection mode elsewhere). |
 | Dashboard VERSION | `dashboard/src/ccsync_dashboard/__init__.py` → `VERSION` | Ships separately (Docker). Served by `GET /api/v1/health`. Bump it when you deploy dashboard changes, otherwise the live/repo comparison can never detect a stale container. |
 
 Bumping the companion means editing **two** files (`config.py` and
-`pyproject.toml`) to the same value. The build refuses to start otherwise and
-lists every mismatch it found.
+`pyproject.toml`) to the same value. Bumping the *installer* means editing
+**three** (`windows_bootstrap.ps1`, `onboarding/steps.py`,
+`macos_bootstrap.sh`). The build refuses to start otherwise and lists every
+mismatch it found.
 
 Version numbers must look like `1.2.3` — the dashboard rejects anything else
 (`_PACKAGE_VERSION_RE`), so no `0.4.5-dev` or `0.4.5rc1` in `config.py`.
@@ -198,6 +202,93 @@ whatever you are about to test is not what you just built.
 
 ---
 
+## The macOS release (a second machine, a second command)
+
+**PyInstaller does not cross-compile.** Nothing on the Windows base rig can
+produce the Mac binary, so the release above is a *Windows* release that
+happens to also publish the macOS *bootstrap script*. The macOS **companion**
+channel does not move until someone runs one command on a Mac:
+
+```bash
+git pull && ./tools/release_macos.sh --publish --make-current
+```
+
+That is the whole macOS ship. It refuses to start on anything but macOS
+(`--dry-run` degrades to inspection mode on the base rig, for the parity and
+provenance half only), and does, stopping at the first failure:
+
+1. **Platform** — `uname -s` must say `Darwin`; prints the arch and OS
+   version.
+2. **Version parity + provenance** — `config.py` vs `pyproject.toml` (fatal
+   on drift), the three installer constants (reported, not fatal — this
+   script publishes none of those files), `^\d+\.\d+\.\d+$`, and
+   `git rev-parse/describe/status`. A dirty tree does not block the build but
+   stamps the manifest `<version>+dirty`.
+3. **venv + tests** — `python3 -m venv companion/.venv`,
+   `pip install -e '.[dev,tray]' pyinstaller` (the `tray` extra is what
+   carries pystray/Pillow/pyobjc; without it the build silently has no
+   menu-bar icon), then the full companion suite. `--skip-tests` records
+   `tests_run: false` in the manifest.
+4. **Build + signature** — `PyInstaller build.spec --noconfirm`, then
+   `codesign -dv`. PyInstaller ad-hoc signs macOS binaries; an **unsigned**
+   arm64 binary is killed on launch by the kernel, so a missing signature is
+   a hard failure here rather than a mystery on the editor's Mac. `file` is
+   then read for the real arch and anything but `arm64` is warned about.
+5. **Manifest** — `companion/dist/ccsync-release.json`, same field names and
+   order as the Windows one plus `platform: "macos"` and a **measured**
+   `arch`. Warns if any `companion/src/**.py` is newer than the binary.
+6. **Publish** — a pre-flight ranged GET (one byte) using the
+   `dashboard_token` already in `~/.ccsync/config.toml`, so "already
+   published" is discovered before the password prompt rather than as a 409
+   after the build; then `POST /api/v1/login` (password read from the
+   terminal, never argv) and
+   `PUT /api/v1/admin/packages/macos/<version>?kind=companion&sha256=…&make_current=1`
+   with the raw binary as the body.
+
+The artifact is a **bare `ccsync-companion` Mach-O**, not a zip and not a
+`.app`. It never goes on the `P:\Assets\Software\CC_Sync` share — that
+package carries the Windows exe and the two `.sh` scripts. The dashboard's
+package channel is the *only* place a macOS companion is ever served from,
+including for a fresh install: `macos_bootstrap.sh` fetches
+`GET /api/v1/companion/package/macos/current` and verifies the bytes against
+the `X-CCSync-SHA256` response header.
+
+### What the lag looks like, and why it is expected
+
+A Windows ship (`build_editor_package.ps1 -Publish -MakeCurrent`) publishes
+the Windows companion, `onboard.exe`, **and** `macos_bootstrap.sh` as the
+`macos` `kind=onboard` package. It cannot publish the macOS companion. So
+between the Windows ship and the next Mac build session:
+
+- the dashboard's `[ PUBLISHED PACKAGES ]` box shows the current `macos`
+  `companion` at an older version than the current `windows` one;
+- Mac editors keep running the build they have and are **not** offered an
+  update — "out of date" is always computed against the current package for
+  *that machine's own platform*, so a Mac shows `[ OUT OF DATE ]` only once
+  the macOS channel itself moves ahead of it;
+- `build_editor_package.ps1`, `tools/ship.ps1` and
+  `tools/check_deploy_drift.ps1` all print an advisory saying so (a 1-byte
+  ranged GET against the download route — which is GET-only; HEAD is a 405).
+
+**That advisory is not a failure.** It is the honest statement that half the
+fleet has not been built yet. It never blocks the Windows flow. Clear it by
+running the one command above on the Mac.
+
+**First publish:** until `release_macos.sh --publish` has ever run, there is
+no `macos` companion package at all, the advisory reads "Mac editors have
+nothing to install", and `macos_bootstrap.sh` fails its companion download
+with "no published macOS package" — which the script reports as the
+unmissable THE SYNC APP IS NOT INSTALLED block and a non-zero exit. Publish
+first, install second. (`--companion-file <path>` installs from a local copy
+instead, which is the supervised-first-install path in
+`installer/MACOS_FIRST_RUN.md`.)
+
+Mac editors are still never pushed to: each companion learns about the new
+version on its next report and its editor has to click **Update now** in the
+menu bar, exactly as on Windows.
+
+---
+
 ## The doctor: `tools/check_deploy_drift.ps1`
 
 Read-only: no files, no registry, no processes, no git writes; GETs only
@@ -294,3 +385,11 @@ has four fallbacks rather than one.
 
 These are PowerShell 5.1 scripts. Execution policy on a fresh shell:
 `Set-ExecutionPolicy -Scope Process Bypass`.
+
+On the Mac (bash, and only there):
+
+```bash
+./tools/release_macos.sh                        # parity + tests + build + sign + manifest
+./tools/release_macos.sh --dry-run              # show the pipeline, change nothing
+./tools/release_macos.sh --publish --make-current   # ship to the Mac editors
+```

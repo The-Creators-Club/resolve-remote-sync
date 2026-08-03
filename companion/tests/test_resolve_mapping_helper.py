@@ -225,6 +225,31 @@ def test_windows_style_trailing_entry_also_stays_last(helper, monkeypatch, tmp_p
     assert "Site.1.FS.1.DIO = 1" in dat
 
 
+def test_a_zero_based_config_dat_keeps_its_own_numbering(helper, monkeypatch, tmp_path):
+    # Every sample seen so far numbers Site.N.FS from 1, but the helper reads
+    # the base from the file (as it already did for .config.data's IoFs_N):
+    # renumbering a 0-based file from 1 would silently rewrite Resolve's own
+    # entries.
+    zero_based = (
+        MAC_DAT.replace("Site.1.FS.2.", "Site.1.FS.TMP.")
+        .replace("Site.1.FS.1.", "Site.1.FS.0.")
+        .replace("Site.1.FS.TMP.", "Site.1.FS.1.")
+    )
+    config_dir = write_prefs(tmp_path / "prefs", dat=zero_based)
+
+    assert apply(helper, monkeypatch, config_dir) == helper.EXIT_OK
+
+    dat = read(config_dir, "config.dat")
+    assert "Site.1.FS.Count = 3" in dat
+    # Resolve's first entry kept its number; ours slotted in at 1; the
+    # /Volumes auto-entry is still last, still in the file's own base.
+    assert "Site.1.FS.0.Root = /Users/ed/Movies" in dat
+    assert f"Site.1.FS.1.Root = {LOCAL_ROOT}" in dat
+    assert "Site.1.FS.1.MappedRoot = P:\\" in dat
+    assert "Site.1.FS.2.Root = /Volumes" in dat
+    assert "Site.1.FS.3." not in dat
+
+
 def test_apply_repoints_an_existing_mapping_at_the_new_root(helper, monkeypatch, tmp_path):
     config_dir = write_prefs(
         tmp_path / "prefs",

@@ -738,6 +738,16 @@ class ConfigDat(MappingFile):
             entry.add_line(match.group(4), i, match.group(6),
                            match.group(1), match.group(5))
         self.entries = [found[k] for k in sorted(found)]
+        # Resolve's own numbering base, taken from the file rather than
+        # assumed -- every sample seen so far is 1-based, but if a real
+        # config.dat ever numbers from FS.0, renumbering it from 1 would
+        # silently rewrite Resolve's own entries. 1-based when the file has
+        # nothing to learn from (matches every observed sample).
+        self.base = min(found) if found else 1
+        if self.base not in (0, 1):
+            self.warnings.append(
+                "%s numbers its filesystems from %d; keeping that base"
+                % (self.pref.path, self.base))
         if declared != len(self.entries):
             self.warnings.append(
                 "%s says Site.%d.FS.Count = %d but %d entries are present; "
@@ -745,7 +755,8 @@ class ConfigDat(MappingFile):
                 % (self.pref.path, self.site, declared, len(self.entries)))
 
     def key_text(self, field, position, indent, sep, value):
-        return "%sSite.%d.FS.%d.%s%s%s" % (indent, self.site, position, field, sep, value)
+        return "%sSite.%d.FS.%d.%s%s%s" % (
+            indent, self.site, self.base + position - 1, field, sep, value)
 
     def count_text(self, value):
         return "%sSite.%d.FS.Count%s%s" % (self.count_indent, self.site,

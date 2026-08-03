@@ -1005,6 +1005,11 @@ class _DarwinShutdownGuard(ShutdownGuard):
             # strictly worse than the default disposition.
             log.debug("shutdown guard: no shutdown callback -- leaving SIGTERM alone")
             return
+        # If the hardware spike shows signal.signal never fires because the
+        # main thread is parked inside NSApp.run() (Python signal handlers
+        # only run between bytecodes there), swap this seam for
+        # PyObjCTools.MachSignals.signal -- it is what pystray's own darwin
+        # backend uses for SIGINT, for exactly this reason.
         fn = self._signal_fn or signal.signal
         try:
             # ValueError off the main thread; AttributeError on a platform

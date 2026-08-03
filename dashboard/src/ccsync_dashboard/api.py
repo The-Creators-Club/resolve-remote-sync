@@ -1906,9 +1906,27 @@ def api_download_package(
     kind: str = "companion",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> FileResponse:
+    """Download a published package by exact version, or the magic version
+    "current" to get whatever is current for that (kind, platform).
+
+    "current" is handled INSIDE this route on purpose -- a second route like
+    /companion/package/{platform}/current would depend on decorator ordering
+    to not be shadowed by this one. A fresh macOS bootstrap has no version to
+    ask for, so it fetches .../package/macos/current?kind=onboard and verifies
+    the bytes against the X-CCSync-SHA256 header below.
+    """
     _require_package_read(request)
     settings = request.app.state.settings
-    row = db.get_package(conn, platform.strip().lower(), version, kind.strip().lower())
+    plat, kind = platform.strip().lower(), kind.strip().lower()
+    if version.strip().lower() == "current":
+        row = db.get_current_package(conn, plat, kind=kind)
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no current {platform} {kind} package is published",
+            )
+    else:
+        row = db.get_package(conn, plat, version, kind)
     if row is None:
         raise HTTPException(status_code=404, detail=f"no published {platform} {kind} package {version}")
     path = _package_file(settings, row)

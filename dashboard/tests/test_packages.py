@@ -541,3 +541,92 @@ def test_installer_download_route(env):
     assert resp.headers["location"] == "/download/macos"
     assert client.get("/download/macos").status_code == 404
     assert client.get("/download/amiga").status_code == 404
+
+
+# -- version="current": discovery for a fresh bootstrap ----------------
+
+
+def test_download_current_serves_the_current_package(env):
+    """A fresh machine has no version to ask for, so it asks for "current"
+    and verifies the bytes against the headers."""
+    client, _conn, _settings = env
+    publish(as_user(client, "alex"), "0.2.0", body=b"v2-bytes", make_current=1)
+    publish(client, "0.3.0", body=b"v3-bytes", make_current=1)
+    clear_user(client)
+
+    resp = client.get("/api/v1/companion/package/windows/current",
+                      headers={"X-CCSync-Token": "sekrit"})
+    assert resp.status_code == 200
+    assert resp.content == b"v3-bytes"
+    assert resp.headers["X-CCSync-Version"] == "0.3.0"
+    assert resp.headers["X-CCSync-SHA256"] == hashlib.sha256(b"v3-bytes").hexdigest()
+    assert "ccsync-companion-0.3.0.exe" in resp.headers["content-disposition"]
+
+    # An admin rollback moves "current" backwards, and so does this route.
+    as_user(client, "alex").post("/api/v1/admin/packages/windows/0.2.0/current")
+    clear_user(client)
+    resp = client.get("/api/v1/companion/package/windows/current",
+                      headers={"X-CCSync-Token": "sekrit"})
+    assert resp.content == b"v2-bytes"
+    assert resp.headers["X-CCSync-Version"] == "0.2.0"
+
+
+def test_download_current_404_when_nothing_is_current(env):
+    client, _conn, _settings = env
+    # Published but never made current -- discovery must not guess.
+    publish(as_user(client, "alex"), "0.2.0", body=b"v2-bytes", make_current=0)
+    clear_user(client)
+    token = {"X-CCSync-Token": "sekrit"}
+
+    resp = client.get("/api/v1/companion/package/windows/current", headers=token)
+    assert resp.status_code == 404
+    assert "current" in resp.json()["detail"]
+    # Nothing at all published for the other platform/kind either.
+    assert client.get("/api/v1/companion/package/macos/current",
+                      headers=token).status_code == 404
+    assert client.get("/api/v1/companion/package/windows/current?kind=onboard",
+                      headers=token).status_code == 404
+
+
+def test_download_current_is_per_platform_and_per_kind(env):
+    """kind=onboard&platform=macos is exactly what the mac bootstrap asks
+    for: it must get the .sh, never the Windows exe or the companion."""
+    client, _conn, _settings = env
+    as_user(client, "alex")
+    publish(client, "0.2.0", body=b"win-companion", make_current=1)
+    publish_onboard(client, "1.0.4", body=b"win-installer", make_current=1)
+    publish_platform(client, "macos", "0.2.0", body=b"mac-companion", make_current=1)
+    publish_onboard(client, "1.0.4", body=b"#!/bin/sh\necho hi\n",
+                    make_current=1, platform="macos")
+    clear_user(client)
+    token = {"X-CCSync-Token": "sekrit"}
+
+    resp = client.get("/api/v1/companion/package/macos/current?kind=onboard",
+                      headers=token)
+    assert resp.status_code == 200
+    assert resp.content == b"#!/bin/sh\necho hi\n"
+    assert resp.headers["X-CCSync-Version"] == "1.0.4"
+    assert resp.headers["X-CCSync-SHA256"] == hashlib.sha256(b"#!/bin/sh\necho hi\n").hexdigest()
+    assert "ccsync-onboard-1.0.4.sh" in resp.headers["content-disposition"]
+
+    # The three neighbouring channels stay distinct.
+    assert client.get("/api/v1/companion/package/macos/current",
+                      headers=token).content == b"mac-companion"
+    assert client.get("/api/v1/companion/package/windows/current",
+                      headers=token).content == b"win-companion"
+    assert client.get("/api/v1/companion/package/windows/current?kind=onboard",
+                      headers=token).content == b"win-installer"
+
+
+def test_download_current_is_token_gated(env):
+    """The middleware's path-prefix gate covers "current" like any other
+    version -- no anonymous discovery of the installer."""
+    client, _conn, _settings = env
+    publish_onboard(as_user(client, "alex"), "1.0.4", make_current=1, platform="macos")
+    clear_user(client)
+
+    url = "/api/v1/companion/package/macos/current?kind=onboard"
+    assert client.get(url).status_code == 401
+    assert client.get(url, headers={"X-CCSync-Token": "wrong"}).status_code == 401
+    assert client.get(url, headers={"X-CCSync-Token": "sekrit"}).status_code == 200
+    assert as_user(client, "jsmith").get(url).status_code == 200

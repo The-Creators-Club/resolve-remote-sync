@@ -8,12 +8,17 @@
 #   - Syncthing   (brew, else direct zip to the same bin dir) + a
 #                 LaunchAgent that is written AND loaded, so the daemon is
 #                 actually running (lane C is dead without it)
-#   - the local sync root (--local-root, default ~/Creators_Club -- Resolve's
-#     Mapped Mount preference points here; see docs/EDITOR_SETUP.md, that
-#     part is manual)
+#   - the local sync root (--local-root, default ~/Creators_Club). On an
+#     external SSD (/Volumes/<Name>/...) the volume is verified to be a REAL
+#     mount -- never a leftover ghost directory -- and its UUID recorded in
+#     ~/.ccsync/volume.json
 #   - rclone remote config stanza template in ~/.config/rclone/rclone.conf
+#   - the companion binary itself (--companion-file, else downloaded from the
+#     dashboard with DASHBOARD_TOKEN and checksum-verified) plus its
+#     LaunchAgent autostart entry
 #   - a seeded companion config at ~/.ccsync/config.toml
-#   - a LaunchAgent autostart entry for the companion app, if it exists yet
+#   - Resolve's Mapped Mount preference (P:\ -> the local root), edited
+#     directly in Resolve's own preference files while Resolve is quit
 #   - prints this machine's Syncthing device ID at the end
 #
 # Every step checks current state before acting and prints a line saying
@@ -21,14 +26,20 @@
 #
 # This script does NOT run `tailscale up` (joining the tailnet) or generate
 # SSH keys -- those are one-time interactive/manual steps, see
-# docs/EDITOR_SETUP.md. It also does NOT set Resolve's Mapped Mount
-# preference -- that can't be scripted (Resolve scripting API doesn't
-# expose it), see docs/EDITOR_SETUP.md for the manual walkthrough.
+# docs/EDITOR_SETUP.md.
+#
+# NOTHING IN THIS FILE HAS RUN ON A REAL MAC YET (pending first real-Mac
+# validation, 2026-08-03). The macOS-only paths -- diskutil, launchctl,
+# xattr, the Resolve preference edit -- are written from documentation and
+# research, not from a live run. Treat the first install as a supervised one.
 #
 # Usage:
 #   ./macos_bootstrap.sh --tailnet-host truenas.tailnet.ts.net --editor-name jsmith [--dry-run]
+#   ./macos_bootstrap.sh --resolve-mapping-only [--local-root /Volumes/Rig/Creators_Club]
 #
 set -u
+
+INSTALLER_VERSION="1.0.16"
 
 DRY_RUN=0
 TAILNET_HOST=""
@@ -38,11 +49,31 @@ LOCAL_ROOT="$HOME/Creators_Club"
 # on the NAS, so a relative remote root resolves under ~/ and silently misses
 # the real project tree.
 REMOTE_ROOT="/mnt/tank/TheCreatorsPool/Creators_Club"
-COMPANION_APP_PATH="$HOME/Applications/CCSyncCompanion.app"
+COMPANION_PATH="$HOME/.local/ccsync/bin/ccsync-companion"
+COMPANION_FILE=""
+COMPANION_VERSION="current"
+SKIP_RESOLVE_MAPPING=0
+RESOLVE_MAPPING_ONLY=0
+
+# Overridable from the environment (the admin's onboarding tooling sets both);
+# defaulted here so `set -u` never trips on them.
+DASHBOARD_URL="${DASHBOARD_URL:-http://100.71.216.3:8480}"
+DASHBOARD_TOKEN="${DASHBOARD_TOKEN:-}"
 
 usage() {
     echo "Usage: $0 --tailnet-host <host> --editor-name <name> [--local-root <path>]"
-    echo "          [--remote-root <abs-path>] [--companion-app-path <path>] [--dry-run]"
+    echo "          [--remote-root <abs-path>] [--companion-file <path>]"
+    echo "          [--companion-version <x.y.z|current>] [--companion-path <path>]"
+    echo "          [--skip-resolve-mapping] [--dry-run]"
+    echo "       $0 --resolve-mapping-only [--local-root <path>] [--dry-run]"
+    echo ""
+    echo "  --companion-file      install the companion from a local file instead of"
+    echo "                        downloading it (no DASHBOARD_TOKEN needed)"
+    echo "  --companion-version   published version to fetch (default: current)"
+    echo "  --companion-path      where the companion binary lives"
+    echo "                        (default: \$HOME/.local/ccsync/bin/ccsync-companion)"
+    echo "  --skip-resolve-mapping   leave Resolve's Mapped Mount alone"
+    echo "  --resolve-mapping-only   set Resolve's Mapped Mount and do nothing else"
     exit 1
 }
 
@@ -56,8 +87,16 @@ while [ $# -gt 0 ]; do
             LOCAL_ROOT="$2"; shift 2 ;;
         --remote-root)
             REMOTE_ROOT="$2"; shift 2 ;;
-        --companion-app-path)
-            COMPANION_APP_PATH="$2"; shift 2 ;;
+        --companion-file)
+            COMPANION_FILE="$2"; shift 2 ;;
+        --companion-version)
+            COMPANION_VERSION="$2"; shift 2 ;;
+        --companion-path)
+            COMPANION_PATH="$2"; shift 2 ;;
+        --skip-resolve-mapping)
+            SKIP_RESOLVE_MAPPING=1; shift ;;
+        --resolve-mapping-only)
+            RESOLVE_MAPPING_ONLY=1; shift ;;
         --dry-run)
             DRY_RUN=1; shift ;;
         -h|--help)
@@ -67,8 +106,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ -z "$TAILNET_HOST" ] || [ -z "$EDITOR_NAME" ]; then
-    usage
+# --resolve-mapping-only touches nothing that needs a NAS or an account, so it
+# must not demand the two arguments a full install needs -- it is the command
+# the error messages below tell editors to re-run after quitting Resolve.
+if [ "$RESOLVE_MAPPING_ONLY" != 1 ]; then
+    if [ -z "$TAILNET_HOST" ] || [ -z "$EDITOR_NAME" ]; then
+        usage
+    fi
 fi
 
 step() { echo "[ccsync] $1"; }
@@ -90,8 +134,6 @@ case "$REMOTE_ROOT" in
     *) warn "--remote-root '$REMOTE_ROOT' is not absolute. The SFTP session starts in your home directory on the NAS, so a relative path resolves under ~/ and will not find the project tree. Prefix it with '/'." ;;
 esac
 
-step "configuring for editor '$EDITOR_NAME', local root '$LOCAL_ROOT', NAS '$TAILNET_HOST'"
-
 BIN_DIR="$HOME/.local/ccsync/bin"
 CC_ROOT="$LOCAL_ROOT"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
@@ -100,6 +142,17 @@ RCLONE_CONF_PATH="$RCLONE_CONF_DIR/rclone.conf"
 SYNCTHING_HOME="$HOME/.local/ccsync/syncthing-config"
 KEY_FILE_PATH="$HOME/.ssh/ccsync_ed25519"
 REMOTE_NAME="creators_club_sftp"
+CCSYNC_CONFIG_DIR="$HOME/.ccsync"
+CCSYNC_CONFIG_PATH="$CCSYNC_CONFIG_DIR/config.toml"
+VOLUME_JSON_PATH="$CCSYNC_CONFIG_DIR/volume.json"
+COMPANION_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.companion.plist"
+CANONICAL_PREFIX='P:\'
+
+if [ "$RESOLVE_MAPPING_ONLY" = 1 ]; then
+    step "ccsync macOS bootstrap $INSTALLER_VERSION -- Resolve mapping only, local root '$CC_ROOT'"
+else
+    step "ccsync macOS bootstrap $INSTALLER_VERSION -- editor '$EDITOR_NAME', local root '$CC_ROOT', NAS '$TAILNET_HOST'"
+fi
 
 # Private, per-run staging for downloaded archives.
 #
@@ -134,6 +187,895 @@ ensure_dir() {
 }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# Minimal JSON string escaping -- a volume name may legitimately contain a
+# quote or a backslash, and an unescaped one produces a volume.json the
+# companion cannot parse.
+json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+sha256_of() {
+    [ -f "$1" ] || return 1
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' | tr 'A-Z' 'a-z'
+}
+
+# ----------------------------------------------------------------------
+# Resolve Mapped Mount (P:\ -> the local root)
+# ----------------------------------------------------------------------
+# Resolve has no scripting API for this preference, so the python3 helper
+# embedded at the bottom of this file edits Resolve's own preference files
+# (config.dat + .config.data) while Resolve is quit. Defined up here because
+# --resolve-mapping-only runs it and exits before anything else happens.
+RESOLVE_MAPPING_STATUS="unset"
+
+# The helper's source lives in ONE place: the quoted heredoc below, between
+# the sentinel comment lines. Not one character of it is expanded by the
+# shell. The sentinels are load-bearing -- write_mapping_helper() seds
+# between them, and companion/tests/test_resolve_mapping_helper.py extracts
+# and imports the same range, so the module the tests cover is byte-for-byte
+# the module the installer runs. Keep them exactly as they are.
+#
+# It is ~700 lines of python; the install steps resume right after it.
+emit_mapping_helper() {
+    cat <<'CCSYNC_MAPPING_HELPER_PY'
+# ---CCSYNC-MAPPING-HELPER-BEGIN---
+r"""Set DaVinci Resolve's Mapped Mount (P:\ -> a local root) on macOS.
+
+The shared project database stores every clip path in Windows form
+(P:\Projects\...). A Mac only resolves those paths if Resolve has a Mapped
+Mount entry pointing P:\ at the local copy of the tree. That preference has
+no scripting API, so this module edits the two plain-text preference files
+Resolve keeps, WHILE RESOLVE IS QUIT:
+
+  config.dat      the engine's mirror   (Site.<n>.FS.<i>.Root / .MappedRoot)
+  .config.data    the GUI's own form    (IoFsMount_<i> / IoFsMappedMount_<i>)
+
+Both must agree. Editing config.dat alone has no lasting effect, because the
+GUI form is what Resolve rewrites config.dat from on the next launch.
+
+Config directory, first match wins:
+  1. $BMD_RESOLVE_CONFIG_DIR            (explicit override; also the test hook)
+  2. ~/Library/Preferences/Blackmagic Design/DaVinci Resolve
+     (no "Preferences" subfolder on macOS, unlike Windows)
+  3. ~/Library/Containers/com.blackmagic-design.DaVinciResolve/Data/Library/
+     Preferences/Blackmagic Design/DaVinci Resolve       (Mac App Store build)
+Whichever of 2/3 contains config.dat wins. A MISSING config.dat means Resolve
+has never completed its first run: this module then DEFERS, and never creates
+one, because first-run onboarding regenerates the whole config anyway.
+
+Subcommands: apply, verify (read-only), remove. Every write is atomic
+(tempfile + os.replace), preceded by a timestamped backup of BOTH files, and
+lossless: unknown keys, blank-line structure, indentation, spacing and the
+file's line-ending style all survive untouched.
+
+Exit codes:
+  0  apply:  mapping applied, or already correct (nothing written)
+     verify: mapping is present and points at --local-root
+     remove: entry removed, or already absent
+  2  bad usage (argparse)
+  3  DaVinci Resolve is running -- quit it first, nothing was touched
+  4  Resolve's preference files were not found (never launched, or a
+     non-standard config directory) -- nothing was created
+  5  the preference files are not in the expected format (no FS.Count / no
+     IoFsNum) -- nothing was touched
+  6  verify only: no mapping for the mapped root at all
+  7  verify only: a mapping exists but points somewhere else
+  8  the preference files could not be read or written
+
+Pure stdlib, python3.9-compatible (macOS Command Line Tools python3), and
+importable on any platform: this file is embedded verbatim in
+installer/macos_bootstrap.sh between the CCSYNC-MAPPING-HELPER sentinels, and
+companion/tests/test_resolve_mapping_helper.py extracts and imports it from
+there -- so the code the installer runs is the code the tests cover.
+
+NOT YET VALIDATED ON A REAL MAC (2026-08-03). The file formats and key names
+come from a live Resolve 21 install plus community research; the numbering
+base of .config.data's IoFs* keys is read from the file rather than assumed,
+and the /Volumes auto-entry is kept last. Verify against a real Mac before
+trusting it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+EXIT_OK = 0
+EXIT_RESOLVE_RUNNING = 3
+EXIT_CONFIG_MISSING = 4
+EXIT_FORMAT_UNRECOGNISED = 5
+EXIT_MAPPING_ABSENT = 6
+EXIT_MAPPING_WRONG = 7
+EXIT_IO_ERROR = 8
+
+CONFIG_DAT_NAME = "config.dat"
+CONFIG_DATA_NAME = ".config.data"
+DEFAULT_MAPPED_ROOT = "P:" + "\\"
+
+# Resolve appends its own filesystem entry for /Volumes (macOS) or the
+# ResolveVirtual pseudo-mount (Windows) and expects it LAST. Ours goes in
+# front of it so the renumbering leaves it last.
+TRAILING_ROOTS = ("/Volumes", "ResolveVirtual")
+
+
+class HelperError(Exception):
+    """An error with a specific process exit code."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def warn(message):
+    sys.stderr.write("[ccsync] WARNING: %s\n" % message)
+
+
+def say(message):
+    sys.stdout.write("[ccsync] %s\n" % message)
+
+
+# --------------------------------------------------------------- discovery
+
+
+def candidate_config_dirs(home=None):
+    """The standard macOS Resolve preference directories, in priority order."""
+    home = os.path.expanduser("~") if home is None else home
+    return [
+        os.path.join(home, "Library", "Preferences",
+                     "Blackmagic Design", "DaVinci Resolve"),
+        os.path.join(home, "Library", "Containers",
+                     "com.blackmagic-design.DaVinciResolve", "Data", "Library",
+                     "Preferences", "Blackmagic Design", "DaVinci Resolve"),
+    ]
+
+
+def find_config_dir(env=None, home=None):
+    """Return the config directory to patch, or None when Resolve has none."""
+    env = os.environ if env is None else env
+    override = (env.get("BMD_RESOLVE_CONFIG_DIR") or "").strip()
+    if override:
+        # Used as-is: an override that holds no config.dat must still report
+        # "Resolve never launched" rather than silently falling back to a
+        # different profile than the caller asked for.
+        return override
+    for path in candidate_config_dirs(home):
+        if os.path.isfile(os.path.join(path, CONFIG_DAT_NAME)):
+            return path
+    return None
+
+
+def resolve_is_running():
+    """True when a DaVinci Resolve process is up (pgrep, like the installer)."""
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", "DaVinci Resolve"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except (OSError, ValueError):
+        # No pgrep (not macOS): we cannot tell, and claiming "running" would
+        # block the only code path that does anything.
+        return False
+    return proc.returncode == 0
+
+
+# -------------------------------------------------------------- path compare
+
+
+def norm_local(path):
+    path = (path or "").strip()
+    if len(path) > 1:
+        path = path.rstrip("/")
+    return path
+
+
+def same_local(a, b):
+    return norm_local(a) == norm_local(b)
+
+
+def norm_mapped(path):
+    return (path or "").strip().rstrip("\\").lower()
+
+
+def same_mapped(a, b):
+    a, b = norm_mapped(a), norm_mapped(b)
+    return bool(a) and a == b
+
+
+def sep_for(sep, value):
+    """The " = " between key and value, fixed up for a value being written
+    into a line that used to be empty: Resolve writes "Key = " with a
+    trailing space, but a file (or an editor) that trimmed it would otherwise
+    give us "Key =P:\\"."""
+    if value != "" and not sep.endswith((" ", "\t")):
+        return sep + " "
+    return sep
+
+
+# ---------------------------------------------------------------- text files
+
+
+class PrefFile:
+    """One preference file, loaded losslessly: unknown lines, blank-line
+    structure, indentation, spacing and line-ending style all survive a
+    round trip untouched."""
+
+    def __init__(self, path, lines, newline, trailing_newline, mode):
+        self.path = path
+        self.lines = lines
+        self.newline = newline
+        self.trailing_newline = trailing_newline
+        self.mode = mode
+        self.original = list(lines)
+
+    @classmethod
+    def load(cls, path):
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError as exc:
+            raise HelperError(EXIT_IO_ERROR, "cannot read %s: %s" % (path, exc))
+        text = raw.decode("utf-8", "surrogateescape")
+        crlf = text.count("\r\n")
+        lf = text.count("\n") - crlf
+        newline = "\r\n" if crlf and crlf >= lf else "\n"
+        lines = [ln[:-1] if ln.endswith("\r") else ln for ln in text.split("\n")]
+        trailing = False
+        if lines and lines[-1] == "":
+            lines.pop()
+            trailing = True
+        return cls(path, lines, newline, trailing, mode)
+
+    def render(self):
+        text = self.newline.join(self.lines)
+        if self.trailing_newline:
+            text += self.newline
+        return text
+
+    def changed(self):
+        return self.lines != self.original
+
+    def backup(self, stamp):
+        dest = "%s.ccsync-backup-%s" % (self.path, stamp)
+        try:
+            shutil.copy2(self.path, dest)
+        except OSError as exc:
+            raise HelperError(EXIT_IO_ERROR,
+                              "cannot back up %s: %s" % (self.path, exc))
+        return dest
+
+    def save(self):
+        """Atomic: write a sibling temp file, match the original's mode, and
+        os.replace() it over the original -- an interrupted run can never
+        leave Resolve with a half-written preference file."""
+        payload = self.render().encode("utf-8", "surrogateescape")
+        directory = os.path.dirname(self.path) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".ccsync-", dir=directory)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp, self.mode)
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise HelperError(EXIT_IO_ERROR,
+                              "cannot write %s: %s" % (self.path, exc))
+
+
+class Edits:
+    """Line-level edit plan, applied in one pass so every untouched line keeps
+    its exact original bytes and its position relative to unknown lines."""
+
+    def __init__(self):
+        self.replace = {}
+        self.drop = set()
+        self.insert_before = {}
+
+    def add_before(self, index, texts):
+        self.insert_before.setdefault(index, []).extend(texts)
+
+    def add_after(self, index, texts):
+        self.add_before(index + 1, texts)
+
+    def apply(self, lines):
+        out = []
+        for i, line in enumerate(lines):
+            out.extend(self.insert_before.get(i, ()))
+            if i in self.drop:
+                continue
+            out.append(self.replace.get(i, line))
+        out.extend(self.insert_before.get(len(lines), ()))
+        return out
+
+
+class Entry:
+    """One filesystem entry, as a set of key=value lines in the file."""
+
+    def __init__(self, index):
+        self.index = index
+        self.values = {}
+        self.formats = {}
+        self.key_lines = []          # (field, line_no) in file order
+        self.added = []              # (field, value) fields not in the file yet
+
+    def add_line(self, field, line_no, value, indent, sep):
+        self.key_lines.append((field, line_no))
+        if field not in self.values:
+            self.values[field] = value
+            self.formats[field] = (indent, sep)
+
+    def get(self, field, default=""):
+        return self.values.get(field, default)
+
+    def has(self, field):
+        return field in self.values or any(f == field for f, _ in self.added)
+
+    def set(self, field, value):
+        if field in self.values:
+            self.values[field] = value
+        else:
+            self.added = [(f, v) for f, v in self.added if f != field]
+            self.added.append((field, value))
+
+    @property
+    def first_line(self):
+        return min(no for _, no in self.key_lines)
+
+    @property
+    def last_line(self):
+        return max(no for _, no in self.key_lines)
+
+    def default_format(self):
+        if self.key_lines:
+            return self.formats[self.key_lines[0][0]]
+        return ("", " = ")
+
+
+class MappingFile:
+    """Shared plan/rebuild logic for the two preference formats."""
+
+    ROOT_FIELD = ""
+    MAPPED_FIELD = ""
+    DIO_FIELDS = ()
+    NAME = ""
+    BLANK_SEPARATOR = False      # does the format group entries with blanks?
+
+    def __init__(self, pref):
+        self.pref = pref
+        self.warnings = []
+        self.entries = []
+        self.count_line = -1
+        self.count_indent = ""
+        self.count_sep = " = "
+        self.parse()
+
+    # -- subclass hooks ---------------------------------------------------
+    def parse(self):
+        raise NotImplementedError
+
+    def key_text(self, field, position, indent, sep, value):
+        raise NotImplementedError
+
+    def count_text(self, value):
+        raise NotImplementedError
+
+    def new_entry_fields(self, local_root, mapped_root):
+        raise NotImplementedError
+
+    def insert_position(self):
+        return len(self.entries)
+
+    # -- reading ----------------------------------------------------------
+    def root_of(self, entry):
+        return entry.get(self.ROOT_FIELD)
+
+    def mapped_of(self, entry):
+        return entry.get(self.MAPPED_FIELD)
+
+    def entry_for_mapped(self, mapped_root):
+        found = [e for e in self.entries if same_mapped(self.mapped_of(e), mapped_root)]
+        if len(found) > 1:
+            self.warnings.append(
+                "%s has %d entries mapping %s; only the first was used"
+                % (self.NAME, len(found), mapped_root))
+        return found[0] if found else None
+
+    def mapping_state(self, local_root, mapped_root):
+        entry = self.entry_for_mapped(mapped_root)
+        if entry is None:
+            return ("absent", None)
+        root = self.root_of(entry)
+        return ("correct" if same_local(root, local_root) else "wrong", root)
+
+    # -- writing ----------------------------------------------------------
+    def plan_apply(self, local_root, mapped_root):
+        entry = self.entry_for_mapped(mapped_root)
+        if entry is not None:
+            if same_local(self.root_of(entry), local_root):
+                return "already-correct"
+            entry.set(self.ROOT_FIELD, local_root)
+            self.rebuild(list(self.entries))
+            return "repointed"
+        for candidate in self.entries:
+            if same_local(self.root_of(candidate), local_root):
+                candidate.set(self.MAPPED_FIELD, mapped_root)
+                if self.DIO_FIELDS and not any(candidate.has(f) for f in self.DIO_FIELDS):
+                    candidate.set(self.DIO_FIELDS[0], "1")
+                self.rebuild(list(self.entries))
+                return "mapped-existing"
+        order = list(self.entries)
+        order.insert(self.insert_position(),
+                     self.new_entry_fields(local_root, mapped_root))
+        self.rebuild(order)
+        return "added"
+
+    def plan_remove(self, mapped_root):
+        entry = self.entry_for_mapped(mapped_root)
+        if entry is None:
+            return "absent"
+        self.rebuild([e for e in self.entries if e is not entry])
+        return "removed"
+
+    def rebuild(self, order):
+        """order: existing Entry objects and/or [(field, value), ...] lists for
+        brand-new entries, in their final order."""
+        edits = Edits()
+        lines = self.pref.lines
+        kept = [item for item in order if isinstance(item, Entry)]
+        indent, sep = (kept[0].default_format() if kept
+                       else (self.count_indent, self.count_sep))
+
+        for position, item in enumerate(order, start=1):
+            if not isinstance(item, Entry):
+                continue
+            for field, line_no in item.key_lines:
+                field_indent, field_sep = item.formats.get(field, (indent, sep))
+                value = item.values.get(field, "")
+                text = self.key_text(field, position, field_indent,
+                                     sep_for(field_sep, value), value)
+                if text != lines[line_no]:
+                    edits.replace[line_no] = text
+            for field, value in item.added:
+                edits.add_after(item.last_line,
+                                [self.key_text(field, position, indent,
+                                               sep_for(sep, value), value)])
+
+        # entries that are going away
+        for entry in self.entries:
+            if entry in kept:
+                continue
+            block = sorted(no for _, no in entry.key_lines)
+            edits.drop.update(block)
+            after, before = block[-1] + 1, block[0] - 1
+            if after < len(lines) and lines[after].strip() == "":
+                edits.drop.add(after)
+            elif before >= 0 and lines[before].strip() == "":
+                edits.drop.add(before)
+
+        # the brand-new entry, if any
+        for position, item in enumerate(order, start=1):
+            if isinstance(item, Entry):
+                continue
+            block = [self.key_text(field, position, indent,
+                                   sep_for(sep, value), value)
+                     for field, value in item]
+            gap = [""] if self.BLANK_SEPARATOR else []
+            following = [e for e in order[position:] if isinstance(e, Entry)]
+            if following:
+                edits.add_before(following[0].first_line, block + gap)
+            elif kept:
+                edits.add_after(kept[-1].last_line, gap + block)
+            else:
+                edits.add_after(self.count_line, gap + block)
+
+        count_text = self.count_text(str(len(order)))
+        if count_text != lines[self.count_line]:
+            edits.replace[self.count_line] = count_text
+
+        self.pref.lines = edits.apply(lines)
+
+
+RE_FS_COUNT = re.compile(r"^(\s*)Site\.(\d+)\.FS\.Count(\s*=\s*)(.*)$")
+RE_FS_FIELD = re.compile(r"^(\s*)Site\.(\d+)\.FS\.(\d+)\.([A-Za-z][A-Za-z0-9]*)(\s*=\s*)(.*)$")
+
+
+class ConfigDat(MappingFile):
+    """config.dat -- Site.<n>.FS.<i>.<field> = <value>."""
+
+    ROOT_FIELD = "Root"
+    MAPPED_FIELD = "MappedRoot"
+    DIO_FIELDS = ("MacDIO", "DIO")
+    NAME = CONFIG_DAT_NAME
+    BLANK_SEPARATOR = True
+
+    def parse(self):
+        lines = self.pref.lines
+        counts = []
+        for i, line in enumerate(lines):
+            match = RE_FS_COUNT.match(line)
+            if match:
+                counts.append((i, int(match.group(2)), match.group(1),
+                               match.group(3), match.group(4).strip()))
+        if not counts:
+            raise HelperError(
+                EXIT_FORMAT_UNRECOGNISED,
+                "%s has no Site.<n>.FS.Count line" % self.pref.path)
+        self.count_line, self.site, self.count_indent, self.count_sep, raw = counts[0]
+        try:
+            declared = int(raw)
+        except ValueError:
+            raise HelperError(
+                EXIT_FORMAT_UNRECOGNISED,
+                "%s has an unreadable Site.%d.FS.Count value %r"
+                % (self.pref.path, self.site, raw))
+        if len(counts) > 1:
+            self.warnings.append(
+                "%s declares filesystems for %d Sites (%s); only Site.%d was patched"
+                % (self.pref.path, len(counts),
+                   ", ".join(str(c[1]) for c in counts), self.site))
+
+        found = {}
+        for i, line in enumerate(lines):
+            match = RE_FS_FIELD.match(line)
+            if not match or int(match.group(2)) != self.site:
+                continue
+            index = int(match.group(3))
+            entry = found.get(index)
+            if entry is None:
+                entry = found[index] = Entry(index)
+            entry.add_line(match.group(4), i, match.group(6),
+                           match.group(1), match.group(5))
+        self.entries = [found[k] for k in sorted(found)]
+        if declared != len(self.entries):
+            self.warnings.append(
+                "%s says Site.%d.FS.Count = %d but %d entries are present; "
+                "the count was corrected"
+                % (self.pref.path, self.site, declared, len(self.entries)))
+
+    def key_text(self, field, position, indent, sep, value):
+        return "%sSite.%d.FS.%d.%s%s%s" % (indent, self.site, position, field, sep, value)
+
+    def count_text(self, value):
+        return "%sSite.%d.FS.Count%s%s" % (self.count_indent, self.site,
+                                           self.count_sep, value)
+
+    def new_entry_fields(self, local_root, mapped_root):
+        # MacDIO, not DIO: the key is platform-specific and Resolve ignores
+        # the wrong one.
+        return [("Type", "IOFileSys"),
+                ("Root", local_root),
+                ("MappedRoot", mapped_root),
+                ("MacDIO", "1"),
+                ("BrightClip", "0")]
+
+    def insert_position(self):
+        if self.entries:
+            last = self.root_of(self.entries[-1]).strip()
+            for reserved in TRAILING_ROOTS:
+                if last == reserved or last.startswith(reserved + "/"):
+                    return len(self.entries) - 1
+        return len(self.entries)
+
+
+RE_IOFS_NUM = re.compile(r"^(\s*)IoFsNum(\s*=\s*)(.*)$")
+RE_IOFS_FIELD = re.compile(r"^(\s*)IoFs(MappedMount|Mount|DirectIO|[A-Za-z]+)_(\d+)(\s*=\s*)(.*)$")
+
+
+class ConfigData(MappingFile):
+    """.config.data -- IoFsNum / IoFs<Field>_<i> = <value>."""
+
+    ROOT_FIELD = "Mount"
+    MAPPED_FIELD = "MappedMount"
+    DIO_FIELDS = ("DirectIO",)
+    NAME = CONFIG_DATA_NAME
+
+    def parse(self):
+        lines = self.pref.lines
+        nums = []
+        for i, line in enumerate(lines):
+            match = RE_IOFS_NUM.match(line)
+            if match:
+                nums.append((i, match.group(1), match.group(2), match.group(3).strip()))
+        if not nums:
+            raise HelperError(EXIT_FORMAT_UNRECOGNISED,
+                              "%s has no IoFsNum line" % self.pref.path)
+        self.count_line, self.count_indent, self.count_sep, raw = nums[0]
+        try:
+            declared = int(raw)
+        except ValueError:
+            raise HelperError(
+                EXIT_FORMAT_UNRECOGNISED,
+                "%s has an unreadable IoFsNum value %r" % (self.pref.path, raw))
+
+        found = {}
+        for i, line in enumerate(lines):
+            match = RE_IOFS_FIELD.match(line)
+            if not match:
+                continue
+            index = int(match.group(3))
+            entry = found.get(index)
+            if entry is None:
+                entry = found[index] = Entry(index)
+            entry.add_line(match.group(2), i, match.group(5),
+                           match.group(1), match.group(4))
+        self.entries = [found[k] for k in sorted(found)]
+        # Resolve's own numbering base, taken from the file rather than
+        # assumed: 0-based when there is nothing to learn from.
+        self.base = min(found) if found else 0
+        if self.base not in (0, 1):
+            self.warnings.append(
+                "%s numbers its mounts from %d; keeping that base"
+                % (self.pref.path, self.base))
+        if declared != len(self.entries):
+            self.warnings.append(
+                "%s says IoFsNum = %d but %d mounts are present; the count "
+                "was corrected" % (self.pref.path, declared, len(self.entries)))
+
+    def key_text(self, field, position, indent, sep, value):
+        return "%sIoFs%s_%d%s%s" % (indent, field, self.base + position - 1, sep, value)
+
+    def count_text(self, value):
+        return "%sIoFsNum%s%s" % (self.count_indent, self.count_sep, value)
+
+    def new_entry_fields(self, local_root, mapped_root):
+        return [("Mount", local_root),
+                ("MappedMount", mapped_root),
+                ("DirectIO", "1")]
+
+
+# ------------------------------------------------------------------ commands
+
+
+def load_pair(config_dir):
+    """Load both preference files, or raise with the right exit code."""
+    paths = [os.path.join(config_dir, CONFIG_DAT_NAME),
+             os.path.join(config_dir, CONFIG_DATA_NAME)]
+    missing = [p for p in paths if not os.path.isfile(p)]
+    if missing:
+        raise HelperError(
+            EXIT_CONFIG_MISSING,
+            "%s not found -- DaVinci Resolve has not completed a first run "
+            "with this preference directory (%s). Launch Resolve once, quit "
+            "it, then re-run." % (", ".join(os.path.basename(p) for p in missing),
+                                  config_dir))
+    return ConfigDat(PrefFile.load(paths[0])), ConfigData(PrefFile.load(paths[1]))
+
+
+def resolve_config_dir(args):
+    config_dir = args.config_dir or find_config_dir()
+    if not config_dir or not os.path.isdir(config_dir):
+        raise HelperError(
+            EXIT_CONFIG_MISSING,
+            "no DaVinci Resolve preference directory found (looked in %s). "
+            "Launch Resolve once, quit it, then re-run."
+            % " and ".join(candidate_config_dirs()))
+    return config_dir
+
+
+def flush_warnings(files):
+    for handle in files:
+        for message in handle.warnings:
+            warn(message)
+
+
+def cmd_apply(args, running_probe):
+    if running_probe():
+        raise HelperError(
+            EXIT_RESOLVE_RUNNING,
+            "DaVinci Resolve is running. It rewrites its preferences on quit, "
+            "so an edit made now would be thrown away. Quit Resolve and "
+            "re-run.")
+    config_dir = resolve_config_dir(args)
+    dat, data = load_pair(config_dir)
+    actions = [dat.plan_apply(args.local_root, args.mapped_root),
+               data.plan_apply(args.local_root, args.mapped_root)]
+    flush_warnings((dat, data))
+    changed = [f for f in (dat, data) if f.pref.changed()]
+    if not changed:
+        say("Resolve already maps %s to %s (%s) -- nothing written"
+            % (args.mapped_root, args.local_root, config_dir))
+        return EXIT_OK
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for handle in (dat, data):
+        say("backed up %s" % handle.pref.backup(stamp))
+    for handle in changed:
+        handle.pref.save()
+        say("updated %s (%s)" % (handle.pref.path,
+                                 actions[0] if handle is dat else actions[1]))
+    say("Resolve now maps %s to %s" % (args.mapped_root, args.local_root))
+    return EXIT_OK
+
+
+def cmd_verify(args, running_probe):
+    config_dir = resolve_config_dir(args)
+    dat, data = load_pair(config_dir)
+    states = [dat.mapping_state(args.local_root, args.mapped_root),
+              data.mapping_state(args.local_root, args.mapped_root)]
+    names = [dat.pref.path, data.pref.path]
+    if all(state == "correct" for state, _ in states):
+        say("Resolve maps %s to %s" % (args.mapped_root, args.local_root))
+        return EXIT_OK
+    if all(state == "absent" for state, _ in states):
+        say("no %s mapping in %s" % (args.mapped_root, config_dir))
+        return EXIT_MAPPING_ABSENT
+    for (state, root), name in zip(states, names):
+        if state == "wrong":
+            say("%s maps %s to %s, not %s" % (name, args.mapped_root, root,
+                                              args.local_root))
+        elif state == "absent":
+            say("%s has no %s mapping" % (name, args.mapped_root))
+    return EXIT_MAPPING_WRONG
+
+
+def cmd_remove(args, running_probe):
+    if running_probe():
+        raise HelperError(
+            EXIT_RESOLVE_RUNNING,
+            "DaVinci Resolve is running -- quit it and re-run.")
+    config_dir = resolve_config_dir(args)
+    dat, data = load_pair(config_dir)
+    dat.plan_remove(args.mapped_root)
+    data.plan_remove(args.mapped_root)
+    flush_warnings((dat, data))
+    changed = [f for f in (dat, data) if f.pref.changed()]
+    if not changed:
+        say("no %s mapping to remove in %s" % (args.mapped_root, config_dir))
+        return EXIT_OK
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for handle in (dat, data):
+        say("backed up %s" % handle.pref.backup(stamp))
+    for handle in changed:
+        handle.pref.save()
+        say("removed the %s mapping from %s" % (args.mapped_root, handle.pref.path))
+    return EXIT_OK
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="ccsync-resolve-mapping",
+        description="Set/inspect DaVinci Resolve's Mapped Mount preference.")
+    parser.add_argument("command", choices=("apply", "verify", "remove"))
+    parser.add_argument("--local-root", default="",
+                        help="local path the mapped root stands for")
+    parser.add_argument("--mapped-root", default=DEFAULT_MAPPED_ROOT,
+                        help="Windows-form prefix stored in the database")
+    parser.add_argument("--config-dir", default="",
+                        help="Resolve preference directory (default: "
+                             "$BMD_RESOLVE_CONFIG_DIR, else the standard ones)")
+    return parser
+
+
+def main(argv=None, running_probe=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    running_probe = resolve_is_running if running_probe is None else running_probe
+    if args.command in ("apply", "verify") and not args.local_root:
+        parser.error("--local-root is required for %s" % args.command)
+    # A trailing slash the caller typed must not end up in the file: Resolve
+    # compares these strings, and "/Volumes/X/CC/" != "/Volumes/X/CC".
+    args.local_root = norm_local(args.local_root)
+    handler = {"apply": cmd_apply, "verify": cmd_verify, "remove": cmd_remove}[args.command]
+    try:
+        return handler(args, running_probe)
+    except HelperError as exc:
+        warn(exc.message)
+        return exc.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+# ---CCSYNC-MAPPING-HELPER-END---
+CCSYNC_MAPPING_HELPER_PY
+}
+
+# Extract the helper to $1, preferring sed on this script (so a hand-edited
+# copy of the file is what runs) and falling back to the heredoc above, which
+# is what happens when this script was piped into bash and $0 is not a file.
+write_mapping_helper() {
+    local dest="$1"
+    if [ -r "$0" ]; then
+        sed -n '/^# ---CCSYNC-MAPPING-HELPER-BEGIN---$/,/^# ---CCSYNC-MAPPING-HELPER-END---$/p' "$0" > "$dest" 2>/dev/null
+        if [ -s "$dest" ]; then
+            return 0
+        fi
+    fi
+    emit_mapping_helper > "$dest"
+}
+
+resolve_mapping_manual_instructions() {
+    echo "      Set it by hand instead (one-time):"
+    echo "        DaVinci Resolve > Preferences (Cmd+,) > Media Storage,"
+    echo "        add a Mapped Mount: local path $CC_ROOT, mapped path $CANONICAL_PREFIX"
+    echo "        (see docs/EDITOR_SETUP.md step 6)"
+}
+
+run_resolve_mapping() {
+    if [ "$SKIP_RESOLVE_MAPPING" = 1 ]; then
+        RESOLVE_MAPPING_STATUS="skipped"
+        skip "Resolve Mapped Mount (--skip-resolve-mapping)"
+        return 0
+    fi
+    step "configuring Resolve's Mapped Mount ($CANONICAL_PREFIX -> $CC_ROOT)..."
+    if [ ! -d "$CC_ROOT" ]; then
+        warn "the local root $CC_ROOT does not exist (yet) -- the mapping will still be written, but Resolve cannot resolve $CANONICAL_PREFIX paths until it does."
+    fi
+    if ! have_cmd python3; then
+        RESOLVE_MAPPING_STATUS="no-python"
+        warn "python3 was not found, so Resolve's Mapped Mount was NOT set."
+        warn "Install the Command Line Tools (xcode-select --install) and re-run: $0 --resolve-mapping-only"
+        resolve_mapping_manual_instructions >&2
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        RESOLVE_MAPPING_STATUS="dry-run"
+        dry "would run the embedded helper: python3 <helper> apply --local-root \"$CC_ROOT\" --mapped-root '$CANONICAL_PREFIX' (edits Resolve's config.dat and .config.data, backing both up first)"
+        return 0
+    fi
+
+    local helper rc
+    helper="$STAGE_DIR/ccsync_resolve_mapping.py"
+    write_mapping_helper "$helper"
+    if [ ! -s "$helper" ]; then
+        RESOLVE_MAPPING_STATUS="error"
+        warn "could not extract the Resolve mapping helper from $0 -- Mapped Mount NOT set."
+        resolve_mapping_manual_instructions >&2
+        return 0
+    fi
+
+    python3 "$helper" apply --local-root "$CC_ROOT" --mapped-root "$CANONICAL_PREFIX"
+    rc=$?
+    case "$rc" in
+        0)
+            RESOLVE_MAPPING_STATUS="ok"
+            step "Mapped Mount configured: $CANONICAL_PREFIX -> $CC_ROOT"
+            ;;
+        3)
+            RESOLVE_MAPPING_STATUS="running"
+            warn "Resolve is running -- quit it and re-run: $0 --resolve-mapping-only"
+            warn "(Resolve rewrites its preferences when it quits, so an edit made now would be thrown away. Nothing was changed.)"
+            ;;
+        4)
+            RESOLVE_MAPPING_STATUS="never-launched"
+            warn "Resolve has never been launched on this Mac -- launch it once, quit it, then re-run: $0 --resolve-mapping-only"
+            warn "(Resolve writes its preference files on first run; this script will not invent them.)"
+            ;;
+        5)
+            RESOLVE_MAPPING_STATUS="format"
+            warn "Resolve's preferences are not in the format this installer knows -- nothing was changed."
+            warn "Set the Mapped Mount manually per docs/EDITOR_SETUP.md step 6:"
+            resolve_mapping_manual_instructions >&2
+            ;;
+        *)
+            RESOLVE_MAPPING_STATUS="error"
+            warn "the Resolve mapping helper failed (exit $rc) -- Mapped Mount NOT set."
+            resolve_mapping_manual_instructions >&2
+            ;;
+    esac
+    return 0
+}
+
+if [ "$RESOLVE_MAPPING_ONLY" = 1 ]; then
+    run_resolve_mapping
+    echo ""
+    if [ "$RESOLVE_MAPPING_STATUS" = "ok" ] || [ "$RESOLVE_MAPPING_STATUS" = "dry-run" ]; then
+        step "done -- nothing else was touched (--resolve-mapping-only)."
+        exit 0
+    fi
+    warn "the Mapped Mount was NOT set (see above). Nothing else was touched (--resolve-mapping-only)."
+    exit 1
+fi
 
 ensure_dir "$BIN_DIR"
 
@@ -514,8 +1456,153 @@ elif [ -n "$NAS_SYNCTHING_ID" ] && [ -f "$SYNCTHING_HOME/config.xml" ]; then
 fi
 
 # ----------------------------------------------------------------------
-# 4. ~/Creators_Club local sync root
+# 4. Local sync root (usually an external SSD)
 # ----------------------------------------------------------------------
+# The Mac editors keep the tree on a plug-in SSD, which macOS mounts at
+# /Volumes/<Name>. Two failure modes have to be refused rather than adapted
+# to, because adapting silently syncs terabytes to the wrong place:
+#
+#   * a GHOST DIRECTORY. An unclean eject can leave a plain, empty
+#     /Volumes/<Name> directory behind on the boot disk. It looks exactly
+#     like the mounted volume to `[ -d ]`, so every check based on "does the
+#     path exist" passes -- and the whole sync then lands on the internal
+#     drive, filling it.
+#   * a NUMBERED REMOUNT. With that ghost directory in place, the real SSD
+#     mounts at "/Volumes/<Name> 1" instead. Following it would bake a name
+#     that changes on the next replug into config.toml and into Resolve's
+#     Mapped Mount.
+#
+# The fix for both is the same and belongs to the human: eject, remove the
+# leftover directory, replug. So: verify, explain, and abort.
+mounted_paths() {
+    # `mount` prints "<device> on <path> (<opts>)" -- volume names contain
+    # spaces, so cut on " on " / " (" instead of whitespace fields.
+    mount 2>/dev/null | sed -n 's/^.* on \(.*\) (.*)$/\1/p'
+}
+
+is_mount_point() {
+    mounted_paths | grep -qxF "$1"
+}
+
+# Prints "/Volumes/<Name> 1"-style siblings that ARE mounted, if any.
+numbered_variant_of() {
+    local base="$1" mp found=""
+    while IFS= read -r mp; do
+        case "$mp" in
+            "$base "[0-9]|"$base "[0-9][0-9]) found="$mp"; break ;;
+        esac
+    done <<VOLUMES
+$(mounted_paths)
+VOLUMES
+    printf '%s' "$found"
+}
+
+ghost_directory_abort() {
+    local mount_point="$1" numbered="$2"
+    echo "" >&2
+    warn "**********************************************************************"
+    warn "$mount_point IS NOT A MOUNTED VOLUME."
+    warn ""
+    if [ -n "$numbered" ]; then
+        warn "Your drive is actually mounted at:"
+        warn "    $numbered"
+        warn ""
+        warn "That happens when a leftover directory already occupies"
+        warn "$mount_point, so macOS mounts the real drive under a numbered"
+        warn "name. The numbered name changes between replugs, so it must NOT"
+        warn "be used as the sync root."
+    else
+        warn "There is a directory at that path, but nothing is mounted on it --"
+        warn "the classic leftover from an unclean eject. Syncing into it would"
+        warn "fill your Mac's internal disk instead of the SSD."
+    fi
+    warn ""
+    warn "Fix it, then re-run this script:"
+    warn "  1. eject the drive (Finder, or: diskutil eject \"$mount_point\")"
+    warn "  2. remove the leftover directory:"
+    warn "       sudo rmdir \"$mount_point\""
+    warn "     (rmdir, not rm -rf: it refuses if the directory is NOT empty,"
+    warn "      which would mean real files live there and you need help.)"
+    warn "  3. unplug and replug the drive, confirm it appears as"
+    warn "     $mount_point, and run this script again."
+    warn "**********************************************************************"
+    echo "" >&2
+    exit 1
+}
+
+CC_VOLUME_MOUNT=""
+CC_VOLUME_UUID=""
+CC_VOLUME_FSTYPE=""
+case "$CC_ROOT" in
+    /Volumes/*)
+        CC_VOLUME_REST="${CC_ROOT#/Volumes/}"
+        CC_VOLUME_MOUNT="/Volumes/${CC_VOLUME_REST%%/*}"
+        step "local root is on the external volume $CC_VOLUME_MOUNT -- verifying it is really mounted..."
+        if [ "$DRY_RUN" = 1 ]; then
+            dry "would verify $CC_VOLUME_MOUNT is a real mount (diskutil info -plist + mount), read its VolumeUUID, and write $VOLUME_JSON_PATH (mode 600)"
+        else
+            CC_NUMBERED="$(numbered_variant_of "$CC_VOLUME_MOUNT")"
+            if [ ! -d "$CC_VOLUME_MOUNT" ]; then
+                if [ -n "$CC_NUMBERED" ]; then
+                    ghost_directory_abort "$CC_VOLUME_MOUNT" "$CC_NUMBERED"
+                fi
+                warn "$CC_VOLUME_MOUNT does not exist -- plug the drive in (and unlock it if it is encrypted), then re-run this script."
+                exit 1
+            fi
+            if ! is_mount_point "$CC_VOLUME_MOUNT"; then
+                ghost_directory_abort "$CC_VOLUME_MOUNT" "$CC_NUMBERED"
+            fi
+            if [ -n "$CC_NUMBERED" ]; then
+                warn "another volume is mounted at '$CC_NUMBERED' as well. $CC_VOLUME_MOUNT is a real mount so this run continues, but two drives with the same name are how the wrong one gets synced -- rename one of them."
+            fi
+            CC_VOL_PLIST="$STAGE_DIR/volinfo.plist"
+            if ! diskutil info -plist "$CC_VOLUME_MOUNT" > "$CC_VOL_PLIST" 2>/dev/null; then
+                warn "diskutil does not recognise $CC_VOLUME_MOUNT as a volume, even though something is mounted there. Refusing to guess -- check 'diskutil list' and 'mount', then re-run."
+                exit 1
+            fi
+            # plutil is the supported reader; the sed fallback covers the
+            # older plutil that has no -extract.
+            CC_VOLUME_UUID="$(plutil -extract VolumeUUID raw -o - "$CC_VOL_PLIST" 2>/dev/null | head -n 1 | tr -d '\r')"
+            if [ -z "$CC_VOLUME_UUID" ]; then
+                CC_VOLUME_UUID="$(sed -n '/<key>VolumeUUID<\/key>/{n;s#.*<string>\(.*\)</string>.*#\1#p;}' "$CC_VOL_PLIST" | head -n 1)"
+            fi
+            CC_VOLUME_FSTYPE="$(plutil -extract FilesystemType raw -o - "$CC_VOL_PLIST" 2>/dev/null | head -n 1 | tr -d '\r')"
+            if [ -z "$CC_VOLUME_FSTYPE" ]; then
+                CC_VOLUME_FSTYPE="$(sed -n '/<key>FilesystemType<\/key>/{n;s#.*<string>\(.*\)</string>.*#\1#p;}' "$CC_VOL_PLIST" | head -n 1)"
+            fi
+            if [ -z "$CC_VOLUME_UUID" ]; then
+                warn "could not read a VolumeUUID for $CC_VOLUME_MOUNT. The volume record will be written without one, and the companion's root guard will have only the mount point to go on."
+            else
+                step "volume $CC_VOLUME_MOUNT is mounted (UUID $CC_VOLUME_UUID, filesystem ${CC_VOLUME_FSTYPE:-unknown})"
+            fi
+            case "$CC_VOLUME_FSTYPE" in
+                apfs|APFS) ;;
+                "") warn "could not determine the filesystem of $CC_VOLUME_MOUNT." ;;
+                *) warn "$CC_VOLUME_MOUNT is formatted $CC_VOLUME_FSTYPE, not APFS. exFAT/HFS+ drives lose macOS metadata and, on exFAT, cannot store the case-sensitive names some project trees use. APFS is what this deployment is tested against." ;;
+            esac
+
+            # Contract with the companion: its root guard reads this file to
+            # tell "the SSD is unplugged" (do nothing, wait) apart from "the
+            # SSD is mounted but empty" (a real problem), and refreshes it
+            # when the volume legitimately changes.
+            ensure_dir "$CCSYNC_CONFIG_DIR"
+            chmod 700 "$CCSYNC_CONFIG_DIR" 2>/dev/null || true
+            cat > "$VOLUME_JSON_PATH" <<VOLJSON
+{
+  "volume_uuid": "$(json_escape "$CC_VOLUME_UUID")",
+  "mount_point": "$(json_escape "$CC_VOLUME_MOUNT")",
+  "local_root": "$(json_escape "$CC_ROOT")"
+}
+VOLJSON
+            chmod 600 "$VOLUME_JSON_PATH" 2>/dev/null || warn "could not chmod 600 $VOLUME_JSON_PATH"
+            step "recorded the sync volume in $VOLUME_JSON_PATH"
+        fi
+        ;;
+    *)
+        skip "local root $CC_ROOT is not under /Volumes -- no external-volume checks"
+        ;;
+esac
+
 ensure_dir "$CC_ROOT"
 
 # ----------------------------------------------------------------------
@@ -595,25 +1682,126 @@ if [ ! -f "$KEY_FILE_PATH" ]; then
 fi
 
 # ----------------------------------------------------------------------
-# 6. Companion autostart (guarded -- app may not exist yet)
+# 6. Companion binary
 # ----------------------------------------------------------------------
-step "checking companion app at $COMPANION_APP_PATH..."
-COMPANION_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.companion.plist"
-COMPANION_MISSING=0
-if [ ! -e "$COMPANION_APP_PATH" ]; then
+# The companion is what actually syncs. It is a single binary at
+# $COMPANION_PATH (NOT a .app bundle -- the LaunchAgent execs it directly, so
+# there is no `open -a` indirection and launchd can see the real process).
+COMPANION_READY=0
+COMPANION_MISSING=1
+COMPANION_FAIL_REASON=""
+
+step "checking the companion at $COMPANION_PATH..."
+COMPANION_INSTALLED_SHA=""
+if [ -f "$COMPANION_PATH" ]; then
+    COMPANION_INSTALLED_SHA="$(sha256_of "$COMPANION_PATH" || true)"
+fi
+
+COMPANION_SOURCE=""
+COMPANION_SOURCE_SHA=""
+if [ -n "$COMPANION_FILE" ]; then
+    if [ ! -f "$COMPANION_FILE" ]; then
+        COMPANION_FAIL_REASON="--companion-file '$COMPANION_FILE' does not exist"
+        warn "$COMPANION_FAIL_REASON"
+    elif [ "$DRY_RUN" = 1 ]; then
+        dry "would install the companion from $COMPANION_FILE to $COMPANION_PATH"
+        COMPANION_READY=1
+    else
+        COMPANION_SOURCE="$COMPANION_FILE"
+        COMPANION_SOURCE_SHA="$(sha256_of "$COMPANION_FILE" || true)"
+        step "companion source: $COMPANION_FILE (sha256 ${COMPANION_SOURCE_SHA:-unknown})"
+    fi
+elif [ -z "$DASHBOARD_TOKEN" ]; then
+    COMPANION_FAIL_REASON="no --companion-file was given and DASHBOARD_TOKEN is not set, so there was nothing to install from"
+    if [ -n "$COMPANION_INSTALLED_SHA" ]; then
+        # Something is already installed; leave it alone and say so.
+        COMPANION_FAIL_REASON=""
+        skip "companion already installed at $COMPANION_PATH -- no DASHBOARD_TOKEN, so it was not checked for updates"
+        COMPANION_READY=1
+    fi
+else
+    COMPANION_URL="${DASHBOARD_URL%/}/api/v1/companion/package/macos/$COMPANION_VERSION"
+    if [ "$DRY_RUN" = 1 ]; then
+        dry "would download $COMPANION_URL (X-CCSync-Token), verify it against the X-CCSync-SHA256 header, and install it to $COMPANION_PATH"
+        COMPANION_READY=1
+    else
+        COMPANION_DL="$STAGE_DIR/ccsync-companion.download"
+        COMPANION_HDRS="$STAGE_DIR/ccsync-companion.headers"
+        step "downloading the companion from $COMPANION_URL ..."
+        if ! curl -fsSL -H "X-CCSync-Token: $DASHBOARD_TOKEN" -D "$COMPANION_HDRS" \
+                -o "$COMPANION_DL" "$COMPANION_URL"; then
+            COMPANION_FAIL_REASON="the download from $COMPANION_URL failed (wrong DASHBOARD_TOKEN, no tailnet route to the dashboard, or no published macOS package)"
+            warn "$COMPANION_FAIL_REASON"
+        else
+            COMPANION_EXPECTED_SHA="$(grep -i '^X-CCSync-SHA256:' "$COMPANION_HDRS" 2>/dev/null \
+                | tail -n 1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tr 'A-Z' 'a-z')"
+            COMPANION_SOURCE_SHA="$(sha256_of "$COMPANION_DL" || true)"
+            if [ -z "$COMPANION_EXPECTED_SHA" ]; then
+                # No header, no verification, no install: an unverified binary
+                # that runs with the editor's NAS credentials is exactly what
+                # the checksum is for.
+                COMPANION_FAIL_REASON="the dashboard sent no X-CCSync-SHA256 header, so the download could not be verified and was NOT installed"
+                warn "$COMPANION_FAIL_REASON"
+            elif [ "$COMPANION_EXPECTED_SHA" != "$COMPANION_SOURCE_SHA" ]; then
+                COMPANION_FAIL_REASON="the downloaded companion does not match its published checksum (expected $COMPANION_EXPECTED_SHA, got ${COMPANION_SOURCE_SHA:-none}) -- NOT installed"
+                warn "$COMPANION_FAIL_REASON"
+                warn "Tell the admin: either the published package is corrupt or something is rewriting the download."
+            else
+                COMPANION_SOURCE="$COMPANION_DL"
+                step "downloaded companion verified against its published sha256"
+            fi
+        fi
+    fi
+fi
+
+if [ -n "$COMPANION_SOURCE" ]; then
+    if [ -n "$COMPANION_INSTALLED_SHA" ] && [ "$COMPANION_INSTALLED_SHA" = "$COMPANION_SOURCE_SHA" ]; then
+        skip "companion already installed and identical (sha256 $COMPANION_INSTALLED_SHA)"
+        COMPANION_READY=1
+    else
+        ensure_dir "$(dirname "$COMPANION_PATH")"
+        # A running companion holds its own binary open; boot the agent out
+        # first so the replacement is not fighting a live process. Best
+        # effort -- a fresh install has no agent to boot out.
+        if [ -f "$COMPANION_PLIST" ]; then
+            launchctl bootout "gui/$(id -u)" "$COMPANION_PLIST" >/dev/null 2>&1 || true
+        fi
+        COMPANION_STAGED="${COMPANION_PATH}.ccsync-new"
+        if ! cp "$COMPANION_SOURCE" "$COMPANION_STAGED"; then
+            COMPANION_FAIL_REASON="could not stage the companion at $COMPANION_STAGED"
+            warn "$COMPANION_FAIL_REASON"
+            rm -f "$COMPANION_STAGED"
+        else
+            chmod +x "$COMPANION_STAGED"
+            mv "$COMPANION_STAGED" "$COMPANION_PATH"
+            # Downloaded files carry com.apple.quarantine, and a quarantined
+            # binary launched by launchd fails with no visible dialog at all.
+            xattr -d com.apple.quarantine "$COMPANION_PATH" 2>/dev/null || true
+            step "installed the companion: $COMPANION_PATH (sha256 ${COMPANION_SOURCE_SHA:-unknown})"
+            COMPANION_READY=1
+        fi
+    fi
+fi
+
+if [ "$COMPANION_READY" = 1 ]; then
+    COMPANION_MISSING=0
+fi
+
+# ----------------------------------------------------------------------
+# 6a. Companion LaunchAgent
+# ----------------------------------------------------------------------
+if [ "$COMPANION_MISSING" = 1 ]; then
     # INST-6: this used to be one skippable WARNING line in the middle of an
     # otherwise successful-looking run that ended with "Bootstrap complete"
     # and a device ID -- so a Mac editor reasonably concluded they were set
     # up. They are not: without the companion there are NO sync lanes, no
     # popup fixer, no dashboard reporting and no project selection on this
     # machine. Say that unmissably.
-    COMPANION_MISSING=1
     echo ""
     warn "**********************************************************************"
     warn "THE SYNC APP IS NOT INSTALLED ON THIS MAC."
     warn ""
-    warn "No companion app was found at:"
-    warn "    $COMPANION_APP_PATH"
+    warn "Reason: ${COMPANION_FAIL_REASON:-no companion binary at $COMPANION_PATH}"
     warn ""
     warn "That app is what actually syncs. Without it, NOTHING on this Mac will:"
     warn "  - upload your camera originals to the NAS      (lane A)"
@@ -621,30 +1809,53 @@ if [ ! -e "$COMPANION_APP_PATH" ]; then
     warn "  - sync audio / AE / graphics / subtitles / .drp (lane C)"
     warn "  - report status to the dashboard, or let you pick projects"
     warn ""
-    warn "A macOS build of the companion is NOT SHIPPED YET. Everything this"
-    warn "script configured (Tailscale, rclone, Syncthing, the rclone remote)"
-    warn "is real and correct, but this Mac cannot sync on its own until the"
-    warn "app exists. Tell the admin you ran this on a Mac before relying on it."
+    warn "Everything else this script configured (Tailscale, rclone, Syncthing,"
+    warn "the rclone remote) is real and correct, but this Mac cannot sync on"
+    warn "its own until the companion is installed. Re-run this script with"
+    warn "DASHBOARD_TOKEN set, or with --companion-file pointing at the macOS"
+    warn "build the admin sent you."
     warn "**********************************************************************"
     echo ""
+    # An agent pointing at a binary that is not there just spams launchd
+    # errors on every logon, and a later successful run would skip it as
+    # "already present". Remove ours.
+    if [ -f "$COMPANION_PLIST" ] && [ ! -f "$COMPANION_PATH" ]; then
+        if [ "$DRY_RUN" = 1 ]; then
+            dry "would remove the companion LaunchAgent left by an earlier run: $COMPANION_PLIST"
+        else
+            warn "removing the companion LaunchAgent left by an earlier run: $COMPANION_PLIST"
+            launchctl bootout "gui/$(id -u)" "$COMPANION_PLIST" >/dev/null 2>&1 || true
+            rm -f "$COMPANION_PLIST"
+        fi
+    fi
 else
     COMPANION_PLIST_PROGRAM="$(plist_program "$COMPANION_PLIST")"
-    # The companion agent runs `open -a <app>`, so ProgramArguments[0] is
-    # "open" and the app path is the third element. Compare that instead.
-    COMPANION_PLIST_APP=""
-    if [ -f "$COMPANION_PLIST" ]; then
-        COMPANION_PLIST_APP="$(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$COMPANION_PLIST" \
-            | grep -o '<string>[^<]*</string>' | sed -E 's#</?string>##g' | sed -n '3p')"
+    COMPANION_PLIST_OK=0
+    if [ -f "$COMPANION_PLIST" ] && [ "$COMPANION_PLIST_PROGRAM" = "$COMPANION_PATH" ] \
+       && grep -q "AbandonProcessGroup" "$COMPANION_PLIST" 2>/dev/null \
+       && ! grep -q "KeepAlive" "$COMPANION_PLIST" 2>/dev/null; then
+        COMPANION_PLIST_OK=1
     fi
-    if [ -f "$COMPANION_PLIST" ] && [ -n "$COMPANION_PLIST_PROGRAM" ] && [ "$COMPANION_PLIST_APP" = "$COMPANION_APP_PATH" ]; then
+    if [ "$COMPANION_PLIST_OK" = 1 ]; then
         skip "companion LaunchAgent already present and correct: $COMPANION_PLIST"
     else
         if [ -f "$COMPANION_PLIST" ]; then
-            step "companion LaunchAgent points at '$COMPANION_PLIST_APP' but the app is at '$COMPANION_APP_PATH' -- rewriting it"
+            step "companion LaunchAgent needs rewriting (runs '$COMPANION_PLIST_PROGRAM'; the companion is at '$COMPANION_PATH')"
         fi
         if [ "$DRY_RUN" = 1 ]; then
-            dry "would write LaunchAgent plist: $COMPANION_PLIST (runs open -a $COMPANION_APP_PATH)"
+            dry "would write LaunchAgent plist: $COMPANION_PLIST (runs $COMPANION_PATH directly)"
         else
+            ensure_dir "$LAUNCH_AGENTS_DIR"
+            # NO KeepAlive, deliberately. The companion upgrades itself by
+            # replacing its own binary and re-execing; with KeepAlive, launchd
+            # ALSO restarts the process it just saw exit, and the machine ends
+            # up running two companions that fight over the single-instance
+            # lock and the sync queue.
+            #
+            # AbandonProcessGroup, also deliberately: without it launchd kills
+            # the whole process group when the main process exits, which takes
+            # the freshly re-execed upgrade child with it. (Both flagged for
+            # first real-Mac validation.)
             cat > "$COMPANION_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -654,11 +1865,11 @@ else
     <string>com.creatorsclub.ccsync.companion</string>
     <key>ProgramArguments</key>
     <array>
-        <string>open</string>
-        <string>-a</string>
-        <string>$COMPANION_APP_PATH</string>
+        <string>$COMPANION_PATH</string>
     </array>
     <key>RunAtLoad</key>
+    <true/>
+    <key>AbandonProcessGroup</key>
     <true/>
 </dict>
 </plist>
@@ -683,8 +1894,6 @@ fi
 # The companion's own first-run template leaves these blank, which silently
 # yields a non-functional install -- notably `remote`, which must match the
 # rclone remote name created above.
-CCSYNC_CONFIG_DIR="$HOME/.ccsync"
-CCSYNC_CONFIG_PATH="$CCSYNC_CONFIG_DIR/config.toml"
 
 # rclone_path must be absolute (see the config below). Fall back to the bare
 # name only when rclone genuinely isn't installed -- there is nothing better
@@ -720,7 +1929,7 @@ else
 editor_name = "$EDITOR_NAME"
 
 # This machine's local copy of the project tree. Resolve's Mapped Mount
-# preference must point P:\ here -- see docs/EDITOR_SETUP.md.
+# preference points P:\ here -- macos_bootstrap.sh sets that up.
 local_root = "$CC_ROOT"
 
 # The shared-drive prefix used in Resolve's stored clip paths.
@@ -767,8 +1976,8 @@ log_level = "INFO"
 # Sync dashboard: reporting, managed one-at-a-time sync, and the tray's
 # "Open dashboard" link. Tailnet address; token from the admin. Override
 # at bootstrap time via DASHBOARD_URL / DASHBOARD_TOKEN env vars.
-dashboard_url = "${DASHBOARD_URL:-http://100.71.216.3:8480}"
-dashboard_token = "${DASHBOARD_TOKEN:-}"
+dashboard_url = "$DASHBOARD_URL"
+dashboard_token = "$DASHBOARD_TOKEN"
 TOML
     # SEC-14: this file carries the fleet dashboard_token, and `cat >` uses
     # the default umask (world-readable on a stock Mac). Lock down both the
@@ -778,6 +1987,11 @@ TOML
     step "wrote seeded companion config: $CCSYNC_CONFIG_PATH (mode 600, dir 700 -- it holds the dashboard token)"
     step "  the whole project tree syncs as-is; set active_project in that file only if you want popup-fixed media filed into a specific project."
 fi
+
+# ----------------------------------------------------------------------
+# 6c. Resolve's Mapped Mount preference
+# ----------------------------------------------------------------------
+run_resolve_mapping
 
 # ----------------------------------------------------------------------
 # 7. Print Syncthing device ID
@@ -798,6 +2012,40 @@ device_id_legacy() {
       | head -n 1
 }
 
+# The Mapped Mount line of the closing summary, worded for what actually
+# happened rather than for what was intended.
+print_resolve_mapping_step() {
+    case "$RESOLVE_MAPPING_STATUS" in
+        ok)
+            echo "   6. DONE FOR YOU: Resolve maps $CANONICAL_PREFIX to $CC_ROOT"
+            echo "      (check in Preferences > Media Storage if you want to see it)"
+            ;;
+        running)
+            echo "   6. NOT DONE -- Resolve was running. Quit Resolve completely,"
+            echo "      then run:  $0 --resolve-mapping-only"
+            ;;
+        never-launched)
+            echo "   6. NOT DONE -- Resolve has never been launched on this Mac."
+            echo "      Launch it once, quit it, then run:"
+            echo "        $0 --resolve-mapping-only"
+            ;;
+        format)
+            echo "   6. NOT DONE -- Resolve's preferences are in a format this"
+            echo "      installer does not recognise. Set the Mapped Mount by hand:"
+            resolve_mapping_manual_instructions
+            ;;
+        skipped)
+            echo "   6. SKIPPED (--skip-resolve-mapping). Resolve needs a Mapped"
+            echo "      Mount before $CANONICAL_PREFIX paths resolve on this Mac:"
+            resolve_mapping_manual_instructions
+            ;;
+        *)
+            echo "   6. NOT DONE -- the Mapped Mount could not be set automatically."
+            resolve_mapping_manual_instructions
+            ;;
+    esac
+}
+
 step "determining this machine's Syncthing device ID..."
 if [ "$DRY_RUN" = 1 ]; then
     dry "would parse the device ID from: $SYNCTHING_BIN generate --home=$SYNCTHING_HOME"
@@ -816,7 +2064,7 @@ else
 
     echo ""
     echo "=================================================================="
-    echo " Bootstrap complete."
+    echo " Bootstrap complete (installer $INSTALLER_VERSION)."
     echo ""
     if [ -z "$DEVICE_ID" ]; then
         warn "could not determine the Syncthing device ID automatically."
@@ -838,14 +2086,19 @@ else
     echo "   2. generate an SSH keypair for rclone if you haven't already:"
     echo "        ssh-keygen -t ed25519 -f \"$KEY_FILE_PATH\""
     echo "      and send the .pub file to the admin"
-    echo "   3. SIGN IN: right-click the CCSync menu-bar icon and choose"
-    echo "      \"Sign in...\", using the SAME TrueNAS username and password"
-    echo "      the admin gave you. NOTHING SYNCS UNTIL YOU DO THIS -- signing"
-    echo "      in on the dashboard WEBSITE is not the same thing."
+    if [ "$COMPANION_MISSING" = 1 ]; then
+        echo "   3. INSTALL THE SYNC APP -- it is not on this Mac yet (see the"
+        echo "      block above). Until it is, there is no menu-bar icon and"
+        echo "      nothing syncs."
+    else
+        echo "   3. SIGN IN: right-click the CCSync menu-bar icon and choose"
+        echo "      \"Sign in...\", using the SAME TrueNAS username and password"
+        echo "      the admin gave you. NOTHING SYNCS UNTIL YOU DO THIS -- signing"
+        echo "      in on the dashboard WEBSITE is not the same thing."
+    fi
     echo "   4. connect DaVinci Resolve to the Project Server"
     echo "   5. Playback > Proxy Handling > Prefer Proxies"
-    echo "   6. Preferences > Media Storage > add $CC_ROOT as a Mapped"
-    echo "      Mount for P:\\  (manual, one-time -- see docs/EDITOR_SETUP.md)"
+    print_resolve_mapping_step
     echo "   7. do NOT mount any NAS share over SMB alongside this -- see the"
     echo "      drive-letter/mount warning in docs/EDITOR_SETUP.md"
     echo "=================================================================="
@@ -854,10 +2107,14 @@ else
     # cannot scroll away (INST-6).
     if [ "$COMPANION_MISSING" = 1 ]; then
         echo ""
-        warn "REMINDER: the sync app is NOT installed on this Mac (see the block"
-        warn "above). Tailscale, rclone, Syncthing and the rclone remote are all"
-        warn "configured -- but nothing will sync by itself, and step 3 above has"
-        warn "no menu-bar icon to right-click yet. Do not report yourself ready."
+        warn "REMINDER: THE SYNC APP IS NOT INSTALLED ON THIS MAC."
+        warn "${COMPANION_FAIL_REASON:-no companion binary at $COMPANION_PATH}"
+        warn "companion NOT installed -- pass DASHBOARD_TOKEN or --companion-file"
+        warn "and re-run this script. Tailscale, rclone, Syncthing and the rclone"
+        warn "remote are configured, but nothing will sync by itself and step 3"
+        warn "above has no menu-bar icon to right-click. Do not report yourself"
+        warn "ready."
         echo ""
+        exit 1
     fi
 fi

@@ -330,3 +330,32 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     matching is first-match-wins (a later `+ *.mov` would otherwise win): `- ._*` at the
     head of both `build_filter_rules_up()` and `build_filter_rules_down()`. Worth pairing
     with a sweep for `._*` already uploaded, since the tree predates the fix.
+
+13. **MAC-9, critical: the installer emptied rclone.conf on macOS — FIXED in 1.0.18.**
+    `macos_bootstrap.sh`'s "the stanza disagrees with the values you passed" branch —
+    i.e. **re-running the installer**, the normal upgrade path — rewrote the remote by
+    passing the seven-line stanza through `awk -v stanza=...`. macOS ships BWK awk, which
+    rejects a `-v` value containing a newline:
+
+        awk: newline in string [creators_club_sftp]... at source line 1
+        exit 2, zero bytes written
+
+    The script then `chmod`ped and `mv`d that empty output over `~/.config/rclone/
+    rclone.conf` with **no check on awk's exit status and no check that the output was
+    non-empty**, destroying every remote in the file — credentials for unrelated remotes
+    included, directly contradicting the comment above it ("every other remote in the
+    file is preserved"). GNU awk accepts multi-line `-v` values, so no Linux or CI run
+    ever reproduced it. Hit live on the first real Mac, 2026-08-04: lanes A and B went
+    from an SSH-auth failure to `didn't find section in config file`.
+
+    Fixed in two layers, because either alone is insufficient: awk now only DELETES the
+    old section (single-line `-v`, no newline anywhere) and the shell appends the stanza;
+    and nothing is swapped into place until awk has succeeded, the new section is present,
+    and **every other section the file started with is still there**, with a timestamped
+    backup kept. Mutation-verified: reintroducing the old awk fails 3 of the 7 tests in
+    `companion/tests/test_rclone_stanza_rewrite.py` while the other 4 still pass, because
+    the verify-before-swap layer refuses the write and leaves the config intact — a
+    data-destroying bug becomes a clean failure with a fix-it-by-hand message. The tests
+    run the real function out of the real script under the local `awk`, which is the only
+    way this class of bug is visible at all. Side effect: the rewritten section moves to
+    the end of the file (rclone is order-independent).

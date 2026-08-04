@@ -215,6 +215,63 @@ ensure_dir() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# ---CCSYNC-RCLONE-STANZA-BEGIN---
+# rewrite_rclone_stanza <conf-path> <section-name> <stanza-text>
+#
+# Replace one [section] in an rclone.conf, preserving every other remote in
+# it. Returns non-zero WITHOUT touching the file if anything goes wrong.
+#
+# MAC-9, live on the first real Mac (2026-08-04): this used to pass the
+# multi-line stanza through `awk -v stanza=...`. macOS ships BWK awk, which
+# REJECTS a -v value containing a newline --
+#     awk: newline in string [creators_club_sftp]... at source line 1
+# -- exits 2, and writes NOTHING. The old code then chmod'd and mv'd that
+# empty output over rclone.conf, so an editor re-running the installer lost
+# every remote in the file, credentials included. GNU awk accepts multi-line
+# -v values, which is why it survived every Linux/CI run.
+#
+# So: awk only DELETES the old section (single-line -v, no newline anywhere),
+# the shell appends the new stanza, and nothing is swapped into place until
+# awk has succeeded AND every other section that was in the original is still
+# present in the result. A timestamped backup is kept either way.
+rewrite_rclone_stanza() {
+    _rrs_conf="$1"; _rrs_name="$2"; _rrs_stanza="$3"
+    [ -f "$_rrs_conf" ] || return 1
+
+    _rrs_tmp="$(mktemp "${_rrs_conf}.ccsync.XXXXXX")" || return 1
+    if ! awk -v sect="[$_rrs_name]" '
+            /^\[/ { inside = ($0 == sect) }
+            !inside
+        ' "$_rrs_conf" > "$_rrs_tmp"; then
+        rm -f "$_rrs_tmp"
+        return 1
+    fi
+    printf '\n%s' "$_rrs_stanza" >> "$_rrs_tmp" || { rm -f "$_rrs_tmp"; return 1; }
+
+    # The new stanza must be there...
+    if ! grep -qxF "[$_rrs_name]" "$_rrs_tmp"; then
+        rm -f "$_rrs_tmp"
+        return 1
+    fi
+    # ...and so must every OTHER section the file started with. This is the
+    # check that would have caught MAC-9 before the mv.
+    _rrs_lost=""
+    for _rrs_sect in $(grep -o '^\[[^]]*\]' "$_rrs_conf" | grep -vxF "[$_rrs_name]"); do
+        grep -qxF "$_rrs_sect" "$_rrs_tmp" || _rrs_lost="$_rrs_lost $_rrs_sect"
+    done
+    if [ -n "$_rrs_lost" ]; then
+        rm -f "$_rrs_tmp"
+        return 1
+    fi
+
+    cp "$_rrs_conf" "${_rrs_conf}.ccsync-backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    # Same permissions as the file we are replacing; rclone.conf can hold
+    # credentials for other remotes.
+    chmod 600 "$_rrs_tmp"
+    mv "$_rrs_tmp" "$_rrs_conf"
+}
+# ---CCSYNC-RCLONE-STANZA-END---
+
 # Minimal JSON string escaping -- a volume name may legitimately contain a
 # quote or a backslash, and an unescaped one produces a volume.json the
 # companion cannot parse.
@@ -1747,18 +1804,11 @@ elif [ "$has_section" = 1 ]; then
     if [ "$DRY_RUN" = 1 ]; then
         dry "would rewrite the [$REMOTE_NAME] stanza in $RCLONE_CONF_PATH (other remotes untouched):"
         echo "$STANZA"
-    else
-        RCLONE_TMP="$(mktemp "${RCLONE_CONF_PATH}.ccsync.XXXXXX")"
-        awk -v sect="[$REMOTE_NAME]" -v stanza="$STANZA" '
-            $0 == sect { inside=1; printf "%s\n", stanza; next }
-            inside && /^\[/ { inside=0 }
-            !inside { print }
-        ' "$RCLONE_CONF_PATH" > "$RCLONE_TMP"
-        # Same permissions as the file we are replacing; rclone.conf can hold
-        # credentials for other remotes.
-        chmod 600 "$RCLONE_TMP"
-        mv "$RCLONE_TMP" "$RCLONE_CONF_PATH"
+    elif rewrite_rclone_stanza "$RCLONE_CONF_PATH" "$REMOTE_NAME" "$STANZA"; then
         step "rewrote the [$REMOTE_NAME] stanza in $RCLONE_CONF_PATH (host=$TAILNET_HOST, user=$EDITOR_NAME)"
+    else
+        warn "could not rewrite the [$REMOTE_NAME] stanza in $RCLONE_CONF_PATH -- it was LEFT UNTOUCHED, nothing was lost."
+        warn "Fix it by hand: set host = $TAILNET_HOST and user = $EDITOR_NAME under [$REMOTE_NAME], then re-run this script."
     fi
 else
     if [ "$DRY_RUN" = 1 ]; then

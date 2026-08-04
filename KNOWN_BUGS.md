@@ -12,6 +12,11 @@ suite-by-suite. All five test suites are green:
 | onboarding | 139 passed (run under companion/.venv — onboarding/.venv lacks pytest) |
 | bench | 157 passed, 1 skipped (iperf3 not on PATH) |
 
+*Counts as of 2026-08-05, on macOS:* companion **1586 passed, 18 skipped** (grew with
+the MAC-6/7/9 regression tests); onboarding **197 passed, 18 failed** — the failures are
+Windows-shaped tests running unguarded on darwin, see item 15. dashboard/server/bench
+unchanged and not re-run here (no fastapi/paramiko in the Mac venv).
+
 The original worklist (file:line, failure scenarios, fix hints) is archived verbatim at
 `docs/bug-hunt-2026-08.md`. Summary of what was done, then the follow-ups that remain.
 
@@ -275,7 +280,7 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     with a sentence naming the problem, since stripping alone would turn a 422 into a
     misleading 401.
 
-    **MAC-8, critical — FIXED in installer 1.0.18:** the same class of defect took the
+    **MAC-8, critical — FIXED, shipped in installer 1.0.19:** the same class of defect took the
     whole wizard down on macOS. `OnboardWizard._safe_after()` marshalled every background
     result to the UI with `self.root.after(0, fn)` **called from the worker thread**. On
     Windows/Tk 8.6 that works, which is why it shipped; on macOS with Tk 9 it raises
@@ -294,7 +299,12 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     created and re-armed **on the main thread**, so only `queue.put()` ever crosses the
     boundary. Verified against the real `OnboardWizard` driving the real page-3 worker.
 
-11. **Lane C has never run on macOS — the pairing is one-sided.** Everything the installer
+11. **Lane C — RESOLVED 2026-08-05.** It now runs: the NAS shared the folders with this
+    Mac's device, the sequencer accepted them, and lane C is delivering (audio, AE, subs,
+    b-roll). The blocker was never client-side, which is the point worth keeping:
+    everything the installer owns was already correct and the machine still synced
+    nothing. Original diagnosis, for the next editor who reports the same silence:
+    **the pairing is one-sided.** Everything the installer
     owns is in place on the first real Mac: the binary (`~/.local/ccsync/bin/syncthing`,
     installed by `macos_bootstrap.sh`), the LaunchAgent, the NAS device seeded into the
     local config, and the API key auto-discovered from the managed `config.xml` (so a blank
@@ -359,3 +369,34 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     run the real function out of the real script under the local `awk`, which is the only
     way this class of bug is visible at all. Side effect: the rewritten section moves to
     the end of the file (rclone is order-independent).
+
+14. **rclone's real error never reaches the log.** `sync/rclone_lane.py:515` logs
+    `(proc.stderr or "").strip()[:300]` — the **first** 300 characters. For any SFTP
+    remote, rclone's host-key `NOTICE` is ~260 of them, so the actual failure is always
+    truncated mid-sentence. Live cost, 2026-08-05: an SSH auth failure that had stopped
+    lanes A and B entirely appeared in the log as `CRITICAL: Failed to create file system
+    for` and nothing else — no remote, no reason. Finding it took a hand-run of the same
+    command, which is exactly what the log line exists to avoid. Log the tail instead, or
+    filter the NOTICE line out before truncating.
+
+15. **The onboarding suite is red on macOS: 18 failed, 197 passed.** All in
+    `test_steps.py` / `test_cleanup_steps.py`, all Windows-shaped assertions (PowerShell
+    argv, drive letters, UNC paths, `.exe` fallbacks, registry Run values) executed
+    unguarded on darwin — the same class as MAC-2 for the companion suite. Pre-existing
+    and unrelated to any 2026-08-05 change (verified identical with the tree stashed), but
+    it means the suite cannot gate the platform the wizard now ships to. Either give the
+    Windows-only tests a `platform=` seam like the rest of `steps.py` has, or skip them on
+    darwin — silently passing on 91% is worse than an honest skip.
+
+16. **The companion's TCC grants do not survive a self-upgrade.** It is ad-hoc signed
+    (`TeamIdentifier=not set`), so its Full Disk Access identity is a hash of the binary
+    and every upgrade presents as a different program needing a fresh grant. On a Mac
+    whose sync root is an external volume — the deployment this port exists for — losing
+    that grant means the tree becomes unreadable to the companion after an update, with no
+    error that names the cause. `rclone` and `syncthing` are properly signed and need
+    granting once. Either sign the companion with a stable identity, or have the tray
+    surface "macOS is blocking access to the sync volume" when a post-upgrade read fails.
+
+Session-2 macOS findings in full — MAC-6 through MAC-9, what is now proven on real
+hardware, and the outstanding list these items come from — are written up in
+`docs/macos-first-run-2026-08-05.md`.

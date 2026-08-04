@@ -2962,7 +2962,6 @@ class CompanionApp:
             setup_logging(self.config)
         except Exception:
             _fallback_logging(self.config)
-        _set_darwin_activation_policy()
         log.info("ccsync-companion v%s starting", config_mod.VERSION)
         log.info("config: %s", config_mod.CONFIG_PATH)
 
@@ -3011,6 +3010,25 @@ class CompanionApp:
                 log.exception(
                     "could not start main-thread UI dispatch -- dialogs will be built "
                     "on their calling threads (fine on Windows, unreliable on macOS)")
+
+            # AFTER the Tk root, and the order is load-bearing on macOS.
+            # NSApp is a singleton and the FIRST caller decides its class.
+            # Tk-Aqua installs its own NSApplication subclass (TKApplication)
+            # and then sends it selectors only that subclass implements. When
+            # this ran first -- it used to, above the "starting" line -- pyobjc
+            # created a plain NSApplication, and Tk's very first colour lookup
+            # died in the ObjC runtime, not in Python:
+            #     -[NSApplication macOSVersion]: unrecognized selector
+            #     … GetRGBA → TkpGetColor → Tk_GetColor → Tk_InitOptions
+            # An uncaught NSException aborts the process (libc++abi), so the
+            # try/except around ui_dispatch.start() cannot see it and the
+            # companion vanished at startup with nothing after "config OK"
+            # in the log. Verified on macOS 15.7.4 / Tk 9.0, 2026-08-04.
+            # Once Tk owns NSApp, sharedApplication() returns the TKApplication
+            # -- an NSApplication subclass -- so the policy call still works.
+            # shutdown_guard's AppKit half is safe for the same reason: it is
+            # started from self.start(), below.
+            _set_darwin_activation_policy()
 
             self.start()
 

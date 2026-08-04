@@ -2772,6 +2772,52 @@ def test_the_already_running_warning_is_a_no_op_on_linux(monkeypatch):
     assert spawned == []
 
 
+def test_run_sets_the_activation_policy_only_after_the_tk_root_exists(
+    tmp_path, monkeypatch
+):
+    """Ordering regression, and it is not cosmetic: it decides whether the
+    companion starts at all on a Mac.
+
+    NSApp is a singleton whose class is fixed by its first caller. Tk-Aqua
+    installs TKApplication and then sends it TKApplication-only selectors; if
+    pyobjc's sharedApplication() got there first, NSApp is a plain
+    NSApplication and Tk aborts the PROCESS from the ObjC runtime --
+    `-[NSApplication macOSVersion]: unrecognized selector`, thrown under
+    Tk_GetColor before tkinter.Tk() ever returns. libc++abi terminates on the
+    uncaught NSException, so no Python handler anywhere can catch it: the
+    binary just dies after "config OK" with no traceback of its own.
+    Observed on macOS 15.7.4 / Tk 9.0 (A7, 2026-08-04) and fixed by moving
+    the call below ui_dispatch.start(). Do not hoist it back up.
+    """
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import tray as tray_mod
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    app.start = lambda: None
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        ui_dispatch, "start", lambda *a, **kw: order.append("tk-root")
+    )
+    monkeypatch.setattr(
+        app_mod, "_set_darwin_activation_policy", lambda: order.append("nsapp")
+    )
+
+    def stop_here(_app):
+        app._stop_event.set()
+        return None
+
+    monkeypatch.setattr(tray_mod, "start_tray", stop_here)
+
+    app.run()
+
+    assert order == ["tk-root", "nsapp"], (
+        "the activation policy must be set AFTER the Tk root is built, or "
+        "Tk-Aqua aborts the process on macOS"
+    )
+
+
 def test_the_activation_policy_never_raises_without_pyobjc(monkeypatch):
     """The module must import and run on a machine that has never heard of
     pyobjc -- the AppKit import is lazy, inside the try."""

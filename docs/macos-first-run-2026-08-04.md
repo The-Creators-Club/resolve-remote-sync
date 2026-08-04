@@ -262,6 +262,60 @@ this test currently proves nothing about the Windows path either.
 
 ---
 
+## MAC-5. The activation-policy call ran before Tk, so the companion aborted at startup on every Mac — CRITICAL [fixed]
+
+Found in **session 2** (same day), on the first attempt at **A7**. The
+companion died instantly, `zsh: abort`, with nothing after `config OK` in
+`~/.ccsync/companion.log`.
+
+- **Where:** `app.py` — `_set_darwin_activation_policy()` was called at the
+  top of `run()`, above the `starting` log line and ~40 lines before
+  `ui_dispatch.start()`.
+- **Defect:** `NSApp` is a singleton whose **class is fixed by its first
+  caller**. That helper calls `AppKit.NSApplication.sharedApplication()`,
+  creating a plain `NSApplication`. Tk-Aqua expects to install its own
+  subclass (`TKApplication`) and then sends it selectors only that subclass
+  implements, so `tkinter.Tk()` died in the ObjC runtime during its first
+  colour lookup:
+
+  ```
+  *** Terminating app due to uncaught exception 'NSInvalidArgumentException',
+      reason: '-[NSApplication macOSVersion]: unrecognized selector sent to instance'
+      … GetRGBA → TkpGetColor → Tk_GetColor → Tk_Get3DBorder → Tk_InitOptions
+        → TkCreateFrame → Tkapp_New → _tkinter_create
+  libc++abi: terminating due to uncaught exception of type NSException
+  ```
+
+- **Why no Python handler helped:** an uncaught `NSException` aborts the
+  process via `libc++abi`. The `try/except Exception` wrapped around
+  `ui_dispatch.start()` never sees it, and there is no Python traceback —
+  just a stack of C frames and a dead binary. On a real editor's Mac this is
+  a companion that starts, writes four normal log lines, and disappears.
+- **Confirmed by A/B**, companion venv, macOS 15.7.4 / Tcl-Tk **9.0**:
+
+  | order | result |
+  |---|---|
+  | `sharedApplication()` → `tkinter.Tk()` | **abort** (the trace above) |
+  | `tkinter.Tk()` → `sharedApplication()` | **`B survived`** |
+
+- **Fix:** the call moved below `ui_dispatch.start()`, with the reasoning
+  inline and a `test_app.py` ordering regression test
+  (`test_run_sets_the_activation_policy_only_after_the_tk_root_exists`).
+  Once Tk owns `NSApp`, `sharedApplication()` returns the `TKApplication` —
+  an `NSApplication` subclass — so the policy still applies.
+  `shutdown_guard`'s AppKit half was already safe: it starts from
+  `self.start()`, after the root exists.
+- **⚠️ The published macOS companion 0.4.20 has this bug and cannot start.**
+  It is `current` for the `macos` package. Nothing has taken it (no Mac has
+  the companion installed yet), but it must be superseded before any Mac
+  installs — bump `VERSION` and publish the fix.
+- **Cheap generalisation, not yet done:** anything that touches `AppKit`
+  before the Tk root now has this failure mode. There are exactly two
+  callers today and both are correct; a third would be silent until someone
+  runs it on a Mac.
+
+---
+
 ## Observations (not defects)
 
 - **pyobjc/AppKit is genuinely available in the venv and the darwin guard does
@@ -345,7 +399,7 @@ pass.
 
 | Checklist | Status |
 |---|---|
-| A7 menu-bar smoke run | **not run** — needs a human watching the menu bar |
+| A7 menu-bar smoke run | **attempted, crashed** — MAC-5; fixed, needs a rebuild and a retry |
 | A8 publish | not run, deliberately |
 | B1 Tk dialogs vs pystray's AppKit loop | **open** — gates Batch-3 UI design |
 | B2 Resolve bridge binding + clip-path spelling | **open** — also gates MAC-3 |

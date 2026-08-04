@@ -148,10 +148,14 @@ class TimelineWatcher:
             if not path:
                 continue
             cls = classify_path(path, self.local_root, self.canonical_prefix)
-            # _norm_key is the HOST's normalization -- fine for de-duplicating
-            # what this process saw, but it can't judge membership of a
-            # canonical "P:\" prefix on a Mac (posixpath folds neither case
-            # nor separators), which is what drives the re-arm bookkeeping.
+            # _norm_key normalizes in the spelling the path is WRITTEN in
+            # (canon.norm -> ntpath for a canonical "P:\..." string, the
+            # host's os.path for a real local one), so the warn-once key
+            # folds case and separators on a Mac too. It used to be the raw
+            # host normalization, which on posix folded neither -- so one
+            # broken mapping could warn once per spelling Resolve happened to
+            # return. Membership is still canon.is_canonical's job, not this
+            # key's.
             key = _norm_key(path)
             under_prefix = canon.is_canonical(path, self.canonical_prefix)
             if under_prefix:

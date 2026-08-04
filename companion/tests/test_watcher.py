@@ -3,6 +3,10 @@ get_timeline_items callable, never touching a real Resolve instance."""
 
 from __future__ import annotations
 
+import os
+import shutil
+from pathlib import Path
+
 import pytest
 
 from ccsync_companion import paths
@@ -84,15 +88,35 @@ def test_poll_once_debounces_ignored_out_of_tree_paths(tmp_path):
     assert captured == []
 
 
-def _subst(monkeypatch, prefix, target):
-    """Pretend `subst <prefix> <target>` is (or isn't) in place, by way of the
-    realpath() call paths.classify_path makes on the PREFIX."""
+def _subst(monkeypatch, prefix, target, local_root=None):
+    """Pretend the canonical-prefix mapping is (or isn't) in place -- on
+    EITHER host, because the two hosts prove it two different ways.
+
+    Windows: `subst P: <target>`, probed by realpath(PREFIX). Faking realpath
+    is the whole simulation.
+
+    macOS: there is no drive namespace at all, so
+    paths._prefix_resolves_under_root takes its `posix_drive_prefix` branch
+    and never calls realpath -- it asks whether LOCAL_ROOT is present instead
+    (root_present_fn, default os.path.isdir), which is the honest signal when
+    the tree lives on an external SSD. A test that only faked realpath
+    therefore drove nothing on a Mac: the mapping always read healthy and
+    these tests observed zero warnings (first real macOS run, 2026-08-04).
+    Pass `local_root` and the broken/fixed state is simulated the way a Mac
+    actually experiences it -- the tree is there, or it isn't.
+    """
     def fake_realpath(p):
         p = str(p)
         if p.upper().startswith(prefix.upper()):
             return target + p[len(prefix):] if target else p
         return p
     monkeypatch.setattr(paths.os.path, "realpath", fake_realpath)
+    if os.name != "nt" and local_root is not None:
+        root = Path(local_root)
+        if target:
+            root.mkdir(parents=True, exist_ok=True)
+        elif root.exists():
+            shutil.rmtree(root)
     paths.clear_prefix_cache()
 
 
@@ -123,12 +147,15 @@ def test_poll_once_warns_when_the_subst_never_ran(tmp_path, monkeypatch):
     """AUDIT_2 L-15: the PRIMARY mapping failure -- `subst P:` didn't run at
     login, so P:\\ resolves to itself -- produced zero warnings, because the
     classifier keyed on the missing FILE rather than the prefix."""
-    _subst(monkeypatch, "P:\\", "")  # P:\ resolves to P:\, i.e. nowhere useful
+    # local_root is a SUBDIR of tmp_path so _subst can remove it on posix
+    # (where "the mapping is broken" means the tree isn't there).
+    local_root = str(tmp_path / "tree")
+    _subst(monkeypatch, "P:\\", "", local_root)  # P:\ resolves to P:\, i.e. nowhere useful
     item = make_timeline_item(r"P:\Projects\clip.mov")
 
     warnings = []
     watcher = TimelineWatcher(
-        local_root=str(tmp_path),
+        local_root=local_root,
         canonical_prefix="P:\\",
         on_mapping_warning=lambda i: warnings.append(i["file_path"]),
         get_timeline_items=lambda: _ok_result(item),
@@ -144,22 +171,23 @@ def test_mapping_warning_re_arms_after_the_mapping_is_fixed(tmp_path, monkeypatc
     breaks again next week) was silent the second time."""
     item = make_timeline_item(r"P:\Projects\clip.mov")
     warnings = []
+    local_root = str(tmp_path / "tree")
     watcher = TimelineWatcher(
-        local_root=str(tmp_path),
+        local_root=local_root,
         canonical_prefix="P:\\",
         on_mapping_warning=lambda i: warnings.append(i["file_path"]),
         get_timeline_items=lambda: _ok_result(item),
     )
 
-    _subst(monkeypatch, "P:\\", "")            # broken
+    _subst(monkeypatch, "P:\\", "", local_root)            # broken
     watcher.poll_once()
     assert len(warnings) == 1
 
-    _subst(monkeypatch, "P:\\", str(tmp_path) + "\\")  # editor fixes it
+    _subst(monkeypatch, "P:\\", local_root + "\\", local_root)  # editor fixes it
     watcher.poll_once()
     assert watcher._warned_mapping == set()
 
-    _subst(monkeypatch, "P:\\", "")            # and it breaks again
+    _subst(monkeypatch, "P:\\", "", local_root)            # and it breaks again
     watcher.poll_once()
     assert len(warnings) == 2
 

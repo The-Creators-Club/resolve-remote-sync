@@ -1593,7 +1593,8 @@ class CompanionApp:
         if not root or not str(subpath or "").strip():
             return False
         try:
-            return _dest_dir_is_contained(Path(root) / subpath, Path(root).resolve())
+            return _dest_dir_is_contained(
+                Path(root) / subpath, Path(root).resolve(), subpath)
         except Exception:
             log.debug("containment check failed for %r", subpath, exc_info=True)
             return False

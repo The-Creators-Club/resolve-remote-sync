@@ -138,6 +138,59 @@ function Get-VenvPython {
     return "python"
 }
 
+function Install-CompanionEditable {
+    <#
+        Create the companion venv if it is missing and install the package
+        EDITABLE into it, exactly as tools/release_macos.sh step 3/6 does.
+
+        Why this exists: until 2026-08-04 nothing on Windows ever ran
+        `pip install -e .`, because Get-VenvPython only LOCATES an
+        interpreter and reuses whatever venv already sits in companion\.venv.
+        Every Windows consumer of pyproject.toml reads it with a regex, so a
+        UTF-8 BOM committed at 0f5d99d (PowerShell Set-Content's default)
+        went unnoticed here and detonated on the first Mac that tried a clean
+        install -- pip's binary tomllib.load rejects a BOM, so there was no
+        way to build the companion at all. A release that never exercises an
+        install cannot catch a broken package definition.
+
+        ".[dev,tray]" mirrors the macOS script: dev is pytest, and tray
+        carries pystray/Pillow, without which build.spec's import probe
+        silently drops the tray and the editor gets a companion with no
+        menu-bar icon.
+    #>
+    param([string]$ProjectDir)
+
+    $py = Join-Path $ProjectDir ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $py)) {
+        Write-Step "no venv at $py -- creating one"
+        if ($DryRun) {
+            Write-Step "[dry-run] would run: python -m venv .venv   (in $ProjectDir)"
+        }
+        else {
+            $code = Invoke-Native -Exe "python" -ArgList @("-m", "venv", ".venv") -WorkingDir $ProjectDir
+            if ($code -ne 0) {
+                Write-Fail "python -m venv failed (exit $code) -- is python on PATH?"
+                exit 1
+            }
+        }
+    }
+
+    if ($DryRun) {
+        Write-Step "[dry-run] would run: $py -m pip install --disable-pip-version-check -e .[dev,tray]   (in $ProjectDir)"
+        return
+    }
+
+    Write-Step "installing the companion (editable) + test/tray extras ..."
+    $code = Invoke-Native -Exe $py -ArgList @(
+        "-m", "pip", "install", "--disable-pip-version-check", "-e", ".[dev,tray]"
+    ) -WorkingDir $ProjectDir
+    if ($code -ne 0) {
+        Write-Fail "pip install -e .[dev,tray] failed (exit $code) -- NOT building. A TOMLDecodeError on line 1 means pyproject.toml has a UTF-8 BOM; re-save it without one."
+        exit 1
+    }
+    Write-Step "editable install OK"
+}
+
 # --- 1. version parity -----------------------------------------------------
 
 Write-Host ""
@@ -245,6 +298,10 @@ else {
 Write-Host ""
 Write-Step "--- step 2/5: tests ---"
 
+# The editable install runs even with -SkipTests: it is what proves the
+# package definition is sound, and step 3 is about to build from this venv.
+Install-CompanionEditable -ProjectDir $CompanionDir
+
 if ($SkipTests) {
     Write-Warn2 "-SkipTests: both suites skipped (recorded in the manifest as tests_run=false)"
 }
@@ -253,20 +310,33 @@ else {
         @{ Name = "companion"; Dir = $CompanionDir },
         @{ Name = "dashboard"; Dir = $DashboardDir }
     )
-    foreach ($s in $suites) {
-        $py = Get-VenvPython -ProjectDir $s.Dir -Label $s.Name
-        if ($DryRun) {
-            Write-Step "[dry-run] would run: $py -m pytest -q   (in $($s.Dir))"
-            continue
+    # pytest exits 0 when tests SKIP, so a missing rclone would silently drop
+    # the 24 integration tests that prove lane A carries video up-only and
+    # lane B carries **/Proxy/** down-only -- the most destructive thing in
+    # the system to get backwards -- and still hand us a green suite. In a
+    # release, absent rclone is a failure, not a skip (see
+    # companion/tests/conftest.py::rclone_binary).
+    $prevRequireRclone = $env:CCSYNC_REQUIRE_RCLONE
+    $env:CCSYNC_REQUIRE_RCLONE = "1"
+    try {
+        foreach ($s in $suites) {
+            $py = Get-VenvPython -ProjectDir $s.Dir -Label $s.Name
+            if ($DryRun) {
+                Write-Step "[dry-run] would run: $py -m pytest -q   (in $($s.Dir), CCSYNC_REQUIRE_RCLONE=1)"
+                continue
+            }
+            Write-Step "running $($s.Name) tests..."
+            $code = Invoke-Native -Exe $py -ArgList @("-m", "pytest", "-q") -WorkingDir $s.Dir
+            if ($code -ne 0) {
+                Write-Host ""
+                Write-Fail "$($s.Name) tests exited $code -- NOT building. Fix the tests, or re-run with -SkipTests if you know why."
+                exit 1
+            }
+            Write-Step "$($s.Name) tests passed"
         }
-        Write-Step "running $($s.Name) tests..."
-        $code = Invoke-Native -Exe $py -ArgList @("-m", "pytest", "-q") -WorkingDir $s.Dir
-        if ($code -ne 0) {
-            Write-Host ""
-            Write-Fail "$($s.Name) tests exited $code -- NOT building. Fix the tests, or re-run with -SkipTests if you know why."
-            exit 1
-        }
-        Write-Step "$($s.Name) tests passed"
+    }
+    finally {
+        $env:CCSYNC_REQUIRE_RCLONE = $prevRequireRclone
     }
 }
 

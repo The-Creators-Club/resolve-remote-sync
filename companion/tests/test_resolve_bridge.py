@@ -386,7 +386,12 @@ def test_replace_clip_none_media_pool_item():
     assert result["ok"] is False
 
 
-def test_pin_frozen_python3_home_sets_env_when_bundled(monkeypatch, tmp_path):
+def test_pin_frozen_python3_home_sets_env_when_bundled(monkeypatch, tmp_path, windows):
+    # `windows`: _pin_frozen_python3_home branches on sys.platform, and this
+    # case is the WINDOWS branch -- python3.dll is a Windows artifact. On a
+    # Mac the unfaked test took the darwin branch, found no libpython beside
+    # it and returned early, so the assertions below saw the inherited value
+    # (MAC-2a). The darwin branch has its own tests further down.
     (tmp_path / "python3.dll").write_bytes(b"")
     monkeypatch.setattr(resolve_bridge.sys, "_MEIPASS", str(tmp_path), raising=False)
     # An inherited value must be OVERWRITTEN, not honored -- inside the

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from ccsync_companion.paths import (
@@ -423,6 +425,11 @@ def test_mac_base_rig_identity_prefix_is_untouched():
 # -- loopback-share P: (the 0.4.10 canonical relinks, 2026-07-26) ----------
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="a loopback SMB share mapped to a drive letter is a Windows-only "
+           "mechanism -- _delooped returns early on any other host by design",
+)
 def test_delooped_translates_localhost_share(monkeypatch):
     from ccsync_companion import paths
 
@@ -436,7 +443,7 @@ def test_delooped_translates_localhost_share(monkeypatch):
 
 
 def test_canonical_clip_on_loopback_share_is_ok_not_bad_prefix(monkeypatch):
-    """An editor's P: is a loopback SHARE (\localhost\CCSync_P ->
+    r"""An editor's P: is a loopback SHARE (\\localhost\CCSync_P ->
     local_root), so realpath answers UNC -- which is local_root in disguise.
     Every canonically-relinked clip read as BAD_PREFIX until translated."""
     from ccsync_companion import paths

@@ -19,7 +19,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import fixer, resolve_bridge, ui_dispatch
+from . import canon, fixer, resolve_bridge, ui_dispatch
 
 log = logging.getLogger("ccsync.popup")
 
@@ -278,7 +278,11 @@ def build_popup_rows(
             {
                 "file_path": path,
                 "media_pool_items": item.get("media_pool_items", []),
-                "clip_name": item.get("clip_name") or os.path.basename(path),
+                # canon.basename, not os.path.basename: `path` is Resolve's
+                # own "File Path", which on a Mac can be a canonical P:\
+                # spelling -- posixpath.basename would answer the WHOLE path
+                # and the row would show it where a filename belongs (MAC-3).
+                "clip_name": item.get("clip_name") or canon.basename(path),
                 "suggested_dest": fixer.suggest_destination(path, editor_name, effective_prefix),
                 # Carried through so the dialog's dropdown can be built from
                 # the SAME prefix the suggestion used, instead of offering
@@ -454,7 +458,7 @@ def perform_fix_all(
             # back-compat with any caller still building rows the old way.
             media_pool_items = [row["media_pool_item"]] if "media_pool_item" in row else []
 
-        name = row.get("clip_name") or os.path.basename(path)
+        name = row.get("clip_name") or canon.basename(path)
         file_total = _safe_size(path)
         completed_before = batch_done
         # Checked ONCE per file, before the copy: a cloud placeholder makes
@@ -1013,7 +1017,7 @@ class PopupDialog:
             head = summarize_fix_results(results, len(batch), stopped_early)
             blocks: list[str] = []
             if aborted:
-                names = ", ".join(os.path.basename(r["file_path"]) for r in aborted[:6])
+                names = ", ".join(canon.basename(r["file_path"]) for r in aborted[:6])
                 blocks.append(
                     f"You skipped: {names}. Nothing was copied in or relinked for "
                     f"them, and the half-copied files were deleted. "
@@ -1031,7 +1035,7 @@ class PopupDialog:
                 # not a bare "FAILED" -- the destination lives on an SMB share
                 # whose metadata isn't refreshed until the handle closes, so
                 # nothing outside this process can tell the user which failed.
-                shown = "\n".join(f"✗ {os.path.basename(r['file_path'])}: {r['message']}"
+                shown = "\n".join(f"✗ {canon.basename(r['file_path'])}: {r['message']}"
                                   for r in failures[:12])
                 if len(failures) > 12:
                     shown += f"\n… and {len(failures) - 12} more (see tray → Open log)"

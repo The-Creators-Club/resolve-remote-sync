@@ -52,6 +52,19 @@ def is_drive_style(prefix) -> bool:
     return bool(_DRIVE_STYLE_RE.match(str(prefix or "").strip()))
 
 
+def is_drive_rooted(path) -> bool:
+    """Is this string drive-rooted ("C:", "P:\\x", "c:/projects/x")?
+
+    Distinct from is_drive_style, which matches only a BARE root. The reason
+    this is host-independent: on posix such a string is a perfectly legal
+    RELATIVE directory name, so `Path("/root") / "C:/Windows/Temp"` lands
+    inside the tree and a containment check based on joining will approve it
+    (pathlib re-roots only on a leading separator). Anything validating free
+    text that will be joined to a root has to reject the spelling itself.
+    """
+    return bool(_DRIVE_ROOTED_RE.match(str(path or "").strip()))
+
+
 def plat_for(path_or_prefix):
     """The path module that understands THIS string's spelling.
 
@@ -68,6 +81,33 @@ def plat_for(path_or_prefix):
 
 def _norm(path, plat) -> str:
     return plat.normcase(plat.normpath(str(path)))
+
+
+def norm(path) -> str:
+    """normcase+normpath in the spelling THIS string is written in.
+
+    The public form of `_norm` for callers that hold one path and no prefix
+    to judge it against: dedupe keys, ignore sets, warn-once bookkeeping.
+    Use it anywhere `os.path.normcase(os.path.normpath(x))` was used on a
+    value that might be a canonical `P:\\...` string, which on posix folds
+    neither case nor separators and so silently stops deduplicating.
+
+    On Windows this is exactly the old expression (os.path IS ntpath there),
+    and for a real posix path plat_for returns os.path -- so it is a no-op
+    everywhere it was already correct.
+    """
+    return _norm(path, plat_for(path))
+
+
+def basename(path) -> str:
+    """The filename part, in the spelling THIS string is written in.
+
+    `posixpath.basename(r"P:\\Desktop\\track.wav")` answers the WHOLE string
+    -- backslash is an ordinary filename character on posix -- so a UI that
+    falls back to the basename for a display name renders a full path where
+    a filename belongs.
+    """
+    return plat_for(path).basename(str(path))
 
 
 def _is_under(path, root, plat) -> bool:

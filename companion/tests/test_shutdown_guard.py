@@ -1446,10 +1446,20 @@ def test_a_delegate_whose_guard_explodes_allows_the_quit(fake_foundation):
     assert delegate.applicationShouldTerminate_(None) == NS_TERMINATE_NOW
 
 
-def test_the_darwin_guard_survives_a_start_stop_with_every_seam_defaulted():
+def test_the_darwin_guard_survives_a_start_stop_with_no_appkit():
     """No callback (so no SIGTERM handler), no AppKit (so no delegate): the
-    guard still starts and stops cleanly and reports itself inactive."""
-    guard = _DarwinShutdownGuard(lambda: None)
+    guard still starts and stops cleanly and reports itself inactive.
+
+    "No AppKit" is now INJECTED rather than assumed. The test used to default
+    every seam and rely on pyobjc being unimportable -- true on Windows CI,
+    false on any real Mac, where the tray extra installs
+    pyobjc-framework-Cocoa. There the default install_delegate_fn genuinely
+    installed a delegate and `active` was True, so the test failed while the
+    product was doing exactly the right thing (first real macOS run,
+    2026-08-04). The AppKit-present path is covered by the fake_foundation
+    tests above.
+    """
+    guard = _DarwinShutdownGuard(lambda: None, install_delegate_fn=lambda: None)
     guard.start()
     try:
         assert guard.active is False

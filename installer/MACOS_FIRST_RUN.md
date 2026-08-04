@@ -451,9 +451,11 @@ coming down the wire.
     pre-existing entries kept their numbers.
   - [ ] **The `/Volumes` auto-entry:** Resolve appends its own filesystem
     entry for `/Volumes` and expects it **last**. Confirm it is still last in
-    `config.dat` after the edit -- and record whether `.config.data` carries
-    its own `/Volumes` entry too (the code keeps the trailing entry last in
-    both, on the assumption that it does).
+    `config.dat` after the edit -- and in `.config.data` **if that file
+    carries one**. Both files now share one `insert_position()`, so the rule
+    applies to whichever of them actually has a trailing entry; a
+    `.config.data` with no `/Volumes` line (which is what the 2026-08-04 Mac
+    had) simply appends. Record which shape you saw.
   - [ ] **`MacDIO`, not `DIO`:** the new entry should carry `MacDIO = 1` in
     `config.dat` and `IoFsDirectIO_<i> = 1` in `.config.data`. Record what
     Resolve's *own* entries use.

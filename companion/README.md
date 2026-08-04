@@ -293,12 +293,30 @@ cd companion
 
 The integration tests in `test_rclone_filters.py` need a real `rclone`
 binary. `tests/conftest.py`'s `rclone_binary` fixture checks `PATH` first,
-then falls back to a **test-only** portable binary at `companion/.tools/
-rclone.exe` (downloaded from rclone.org for this build, NOT installed
-system-wide, NOT added to PATH, NOT referenced by any production code path —
-`config.py`'s `rclone_path` default remains plain `"rclone"`). If neither is
-found, those specific tests skip with a clear message rather than failing
-the whole run. `.tools/` is gitignored.
+then these, in order:
+
+1. `companion/.tools/rclone[.exe]` — a **test-only** portable binary
+   (downloaded from rclone.org for this build, NOT installed system-wide,
+   NOT added to PATH, NOT referenced by any production code path;
+   `config.py`'s `rclone_path` default remains plain `"rclone"`).
+   `.tools/` is gitignored, so this only ever exists on a machine where
+   someone put it there by hand.
+2. `~/.local/ccsync/bin/rclone` — where `macos_bootstrap.sh` installs it.
+3. `%LOCALAPPDATA%\ccsync\bin\rclone.exe` — where `windows_bootstrap.ps1`
+   installs it.
+
+2 and 3 matter because the installed rclone is deliberately kept **off**
+PATH (INST-7: launchd gives a LaunchAgent
+`PATH=/usr/bin:/bin:/usr/sbin:/sbin`), so a correctly-installed machine is
+exactly the one where `shutil.which` comes up empty.
+
+If none is found those specific tests skip with a message naming every
+location searched — **unless `CCSYNC_REQUIRE_RCLONE=1`**, which turns the
+skip into a failure. Both release scripts set it: `pytest` exits 0 when
+tests skip, so 24 skipped lane-direction tests would otherwise read as a
+green suite and authorise a build whose real-rclone coverage never ran.
+That is what happened on the first macOS run (2026-08-04) — the fallback
+was hardcoded to `rclone.exe`, so it could never match on a Mac.
 
 ## Build (PyInstaller)
 

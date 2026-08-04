@@ -70,6 +70,22 @@ TRASH_DIR_NAME = ".ccsync-trash"
 TRASH_NOTIFY_COOLDOWN_SECONDS = 1800.0
 TRASH_EXCLUDE_RULE = f"- /{TRASH_DIR_NAME}/**"
 
+# In-progress sidecars that live INSIDE a Proxy/ dir and must never be pulled
+# down. Lane B's include is `**/Proxy/**`, which is every byte under the
+# directory -- so while DaVinci Resolve generates a proxy on the base rig it
+# writes `.<name>.tmp` (the growing output) plus a 0-byte `.<name>.lock`, and
+# both matched. Observed live 2026-08-04: a 2.3 GB `.Z6B_4317-004.tmp` was
+# re-downloaded to an editor on three consecutive passes because it changed
+# between every one, and Resolve renames it away on completion, so not one of
+# those bytes could ever be useful. `.partial` is rclone's own half-written
+# marker; the .stignore builders already exclude it (server/common.py's
+# PARTIAL_IGNORE_LINES, KNOWN_BUGS B12) but the rclone filters never did.
+#
+# No leading `/`: an rclone pattern with no slash matches the basename at any
+# depth, the same way `+ *.mov` does in build_filter_rules_up. Case is
+# handled by --ignore-case on the transfer commands.
+IN_PROGRESS_EXCLUDE_RULES = ["- *.tmp", "- *.lock", "- *.partial"]
+
 # Blast-radius bound on lane B's sync (AUDIT_2 §4.2 safety row). Measured:
 # rclone stops deleting once the cap is hit and exits non-zero, and under
 # --dry-run it caps the reported `deletes` count -- which can only ever turn
@@ -340,9 +356,14 @@ def build_filter_rules_down() -> list[str]:
     the source layout, so `.ccsync-trash/<ts>/Sub/Proxy/x.mov` matches
     `**/Proxy/**` and would otherwise be both re-deleted every pass and
     rejected by rclone's backup-dir overlap check.
+
+    IN_PROGRESS_EXCLUDE_RULES come next, and before the `+ **/Proxy/**`
+    include for the same first-match-wins reason: they are what stops the
+    lane pulling a proxy Resolve is still writing (see the constant).
     """
     return [
         TRASH_EXCLUDE_RULE,
+        *IN_PROGRESS_EXCLUDE_RULES,
         "+ /Proxy/",
         "+ /Proxy/**",
         "+ **/Proxy/",

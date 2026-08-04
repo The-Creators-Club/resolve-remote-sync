@@ -24,7 +24,7 @@ import sys
 import threading
 from typing import Any, Optional
 
-from . import ui_state
+from . import canon, ui_state
 
 log = logging.getLogger("ccsync.resolve")
 
@@ -200,7 +200,18 @@ def try_connect() -> bool:
 
 
 def _norm_path(p: str) -> str:
-    return os.path.normcase(os.path.normpath(str(p)))
+    """Normalize for use as a dedupe/ignore KEY.
+
+    Delegates to canon.norm rather than using the host's os.path directly:
+    the strings that reach here are Resolve clip paths, which on a Mac may be
+    canonical `P:\\...` spellings. posixpath.normcase is a no-op and treats
+    `\\` as an ordinary filename character, so the host version silently
+    stopped folding case and separators on macOS -- taking the popup dedupe,
+    IgnoreTracker and the watcher's warn-once key down with it (MAC-3, first
+    real macOS run 2026-08-04). Unchanged on Windows, and unchanged for real
+    posix paths.
+    """
+    return canon.norm(p)
 
 
 def _safe_clip_name(media_pool_item) -> str:

@@ -77,12 +77,18 @@ def test_filter_rules_down_allows_proxy_dir_and_contents_then_excludes_rest():
     # Proxy/x.mov` matches `**/Proxy/**` and would otherwise be re-deleted
     # every pass -- and rclone rejects a --backup-dir that overlaps the
     # destination unless the filter excludes it (AUDIT_2 DEL-2).
+    # The in-progress excludes sit between the two for the same
+    # first-match-wins reason: they must beat `+ **/Proxy/**`, or Resolve's
+    # `.<name>.tmp` / `.<name>.lock` render sidecars get pulled down (and
+    # re-pulled every pass, since the .tmp changes between them).
     assert rules == [
         "- /.ccsync-trash/**",
+        "- *.tmp", "- *.lock", "- *.partial",
         "+ /Proxy/", "+ /Proxy/**",
         "+ **/Proxy/", "+ **/Proxy/**",
         "- **",
     ]
+    assert rules.index("- *.tmp") < rules.index("+ **/Proxy/**")
 
 
 def test_filter_rules_up_excludes_root_level_proxy():
@@ -792,6 +798,40 @@ def test_lane_b_does_not_ship_a_proxy_that_is_still_being_written(rclone_binary,
     _age_past_the_lane_b_gate(src)
     _run()
     assert (dst / "Sub" / "Proxy" / "half_written.mov").read_text() == "ftyp...mdat...moov"
+
+
+def test_lane_b_never_pulls_resolves_in_progress_proxy_sidecars(rclone_binary, tmp_path):
+    """Resolve's proxy-generation temporaries must not cross the wire.
+
+    While generating a proxy, Resolve writes `.<name>.tmp` (the growing
+    output) and a 0-byte `.<name>.lock` beside the finished files. Lane B's
+    include is `**/Proxy/**` -- every byte under the directory -- so both
+    matched, and because the .tmp changes between passes it was re-fetched
+    every single time. Seen live on 2026-08-04: a 2.3 GB `.Z6B_4317-004.tmp`
+    downloaded to an editor on three consecutive passes. Resolve renames it
+    away on completion, so none of those bytes could ever be used.
+    """
+    src = tmp_path / "nas"
+    dst = tmp_path / "local"
+    proxy = src / "Sub" / "Proxy"
+    proxy.mkdir(parents=True)
+    dst.mkdir()
+
+    (proxy / "finished.mov").write_text("a real proxy")
+    (proxy / ".Z6B_4317-004.tmp").write_text("2.3 GB of in-flight render, pretend")
+    (proxy / ".Z6B_4317-004.lock").write_text("")
+    (proxy / "half.partial").write_text("rclone's own half-written marker")
+    _age_past_the_lane_b_gate(src)
+
+    filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
+    cmd = build_down_command(rclone_binary, str(dst), None, str(src), filter_file)
+    cmd[2] = str(src)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    landed = sorted(p.name for p in (dst / "Sub" / "Proxy").iterdir())
+    assert landed == ["finished.mov"], f"lane B pulled in-progress sidecars: {landed}"
 
 
 def test_lane_b_second_pass_does_not_re_delete_the_trash(rclone_binary, tmp_path):

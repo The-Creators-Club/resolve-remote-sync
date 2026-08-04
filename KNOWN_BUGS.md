@@ -145,8 +145,38 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
    graceful; **no** shutdown-blocking screen on macOS — honest reduced parity), installer
    1.0.16 (`macos_bootstrap.sh` with the automatic Resolve Mapped Mount, plus
    `macos_uninstall.sh`), the dashboard's `macos` package channel, and the Mac-side build
-   command `tools/release_macos.sh`. **None of it has run on a Mac yet** — every
-   macOS-only path (diskutil, launchctl, xattr, pyobjc, the Resolve preference edit) is
-   written from documentation, not from a live run. Treat macOS as code-complete, not
-   validated, until the supervised first-session checklist in
-   `installer/MACOS_FIRST_RUN.md` has been walked end to end.
+   command `tools/release_macos.sh`.
+
+   **UPDATE 2026-08-04 — it has now BUILT and TESTED on a Mac; it has still not RUN on
+   one.** First real hardware (arm64, macOS 15.7.4): `release_macos.sh` produces a signed
+   arm64 binary, a clean-venv editable install succeeds, and the companion suite is
+   **1563 passed / 18 skipped / 0 failed** with every skip genuinely Windows-only and all
+   24 real-rclone lane-direction tests executing. Five defects were found and fixed
+   (`docs/macos-first-run-2026-08-04.md`, summarised in `installer/README.md`):
+
+   - **MAC-1, critical:** a UTF-8 BOM on `companion/pyproject.toml` (introduced by the
+     0.4.20 bump itself) made `pip install -e .` impossible, so no macOS build could be
+     produced at all. It also broke `test_version_matches_pyproject` on **every** host —
+     `main` was red everywhere and nobody knew, because `tools/release.ps1` never
+     installed the package and every other Windows reader of that file uses a regex.
+   - **MAC-4, major:** the rclone test fixture looked for a hardcoded `rclone.exe`, so
+     the 24 tests proving lane A is up-only and lane B is down-only skipped silently on
+     every Mac while `pytest` still exited 0 — a false green on the most destructive
+     path in the system.
+   - **MAC-3:** `resolve_bridge._norm_path` and popup's basename fallback used the host's
+     `os.path` on canonical `P:\` strings, which on posix folds nothing and returns whole
+     paths from `basename` — silently disabling the popup dedupe and the duplicate-
+     `ReplaceClip` guard behind it.
+   - A drive-rooted `dest_rel` (`C:/Windows/Temp`) passed the containment check on posix,
+     where it is an ordinary relative join.
+   - **D5:** the Resolve mapping helper kept the trailing `/Volumes` entry last in
+     `config.dat` but not `.config.data`, contradicting its own documentation; and its
+     atomic save silently re-owns a root-owned `.config.data`.
+
+   **Still true: no macOS RUNTIME path has executed** — `diskutil`, `launchctl`, `xattr`,
+   pyobjc, the Resolve preference *write*, `caffeinate`, the external-SSD root guard and
+   the self-upgrade swap remain written-from-documentation. Checklist sections A7–H are
+   unrun, and the external-SSD drills (E) are blocked on choosing a drive and filesystem.
+   Treat macOS as **builds-and-tests-clean, runtime-unvalidated** until the supervised
+   first-session checklist in `installer/MACOS_FIRST_RUN.md` has been walked end to end;
+   `installer/README.md` → "Next steps for macOS" has the ordered plan.

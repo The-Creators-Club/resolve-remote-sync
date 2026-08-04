@@ -565,13 +565,22 @@ def remove_reserved_name(path: Path) -> Optional[str]:
         return str(path)
 
 
-def _dest_dir_is_contained(dest_dir: Path, local_root_resolved: Path) -> bool:
+def _dest_dir_is_contained(dest_dir: Path, local_root_resolved: Path,
+                           dest_rel: str | None = None) -> bool:
     """True iff `dest_dir`, once resolved, is local_root itself or somewhere
     under it. dest_rel is free text from an editable combobox (popup.py) --
     an absolute path, a drive-relative "\\Escaped\\Dir" (pathlib re-roots on
     the current drive when the right-hand side starts with a separator), or
     a "..\\..\\" traversal must all be rejected rather than silently copied
-    (and Resolve relinked) outside the tree (AUDIT D-6)."""
+    (and Resolve relinked) outside the tree (AUDIT D-6).
+
+    Pass `dest_rel` (the un-joined right-hand side) wherever it is available:
+    a drive-rooted spelling like "C:/Windows/Temp" is caught by pathlib's
+    re-rooting on Windows, but on posix it is an ordinary relative directory
+    name, so the join lands INSIDE the tree and this check would approve it.
+    The spelling has to be refused before the join (MAC-3, 2026-08-04)."""
+    if dest_rel is not None and canon.is_drive_rooted(dest_rel):
+        return False
     try:
         resolved = dest_dir.resolve()
     except OSError:
@@ -690,7 +699,7 @@ def fix_clip(
         return {"ok": False, "message": f"bad local_root: {exc}", "copied_to": None}
 
     dest_dir = Path(local_root) / dest_rel.replace("/", os.sep)
-    if not _dest_dir_is_contained(dest_dir, local_root_resolved):
+    if not _dest_dir_is_contained(dest_dir, local_root_resolved, dest_rel):
         return {
             "ok": False,
             "message": f"refusing destination outside local_root: {dest_rel}",

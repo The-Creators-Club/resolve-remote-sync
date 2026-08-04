@@ -751,9 +751,18 @@ def test_run_logs_and_reraises_when_construction_raises(monkeypatch, tmp_path, c
 
 def test_run_tray_start_non_import_error_still_runs_shutdown(tmp_path, monkeypatch):
     from ccsync_companion import tray as tray_mod
+    from ccsync_companion import ui_dispatch
 
     app = _make_app(tmp_path)  # sync_enabled=False -> _start_lanes() is inert
     app.start = lambda: None  # skip real watcher/reporter/manifest threads
+
+    # This test is about the TRAY failing, not about UI dispatch. On a Mac
+    # app.run() would otherwise start a real main-thread dispatcher, whose
+    # _make_root() calls tkinter.Tk() and trips conftest._no_real_tk_windows
+    # -- an error in teardown, with the body still passing (MAC-2e). Force
+    # the inline path so this test means the same thing on every host; the
+    # dispatcher-serving path has its own test below.
+    monkeypatch.setattr(ui_dispatch, "start", lambda *a, **kw: None)
 
     shutdown_calls = []
     real_shutdown = app.shutdown
@@ -2844,9 +2853,22 @@ def test_shutdown_survives_a_ui_dispatcher_that_refuses_to_stop(tmp_path, monkey
     assert any("UI dispatcher" in r.getMessage() for r in caplog.records)
 
 
-def test_run_on_windows_starts_no_dispatcher_and_keeps_its_wait_loop(tmp_path, monkeypatch):
+def test_run_on_windows_starts_no_dispatcher_and_keeps_its_wait_loop(
+    tmp_path, monkeypatch, windows
+):
     """The Windows guarantee: ui_dispatch.start() returns None, active() is
-    None, and run() blocks on the same _stop_event loop it always has."""
+    None, and run() blocks on the same _stop_event loop it always has.
+
+    Takes the `windows` fixture, and that is the entire point of this edit:
+    the test used to fake nothing at all. Its notion of "on Windows" was the
+    REAL host, so it only passed because it was written on a Windows box --
+    and on a Mac it started a real dispatcher, called tkinter.Tk() and tripped
+    conftest._no_real_tk_windows. Worse, it still passed its own assertion
+    there, because the guard's RuntimeError propagates out of
+    MainThreadDispatcher.start() before `_active = dispatcher` runs -- so
+    `active()` was None for entirely the wrong reason and the test proved
+    nothing about the Windows path on either host (MAC-2e).
+    """
     from ccsync_companion import tray as tray_mod
     from ccsync_companion import ui_dispatch
 
@@ -2854,6 +2876,10 @@ def test_run_on_windows_starts_no_dispatcher_and_keeps_its_wait_loop(tmp_path, m
     app.start = lambda: None
     monkeypatch.setattr(tray_mod, "start_tray", lambda _a: _FakeTray())
     monkeypatch.setattr(ui_dispatch, "_active", None)
+
+    # Belt and braces: prove start() bailed on the platform check rather than
+    # by raising on its way to a real Tk root.
+    assert ui_dispatch.platform_mode() == ui_dispatch.MODE_INLINE
 
     threading.Timer(0.05, app._stop_event.set).start()
     app.run()

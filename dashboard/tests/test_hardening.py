@@ -506,7 +506,10 @@ def test_deploy_requirements_match_pyproject_dependencies():
     """run.sh installs deploy/requirements.txt into the persistent venv and
     hash-stamps it -- so a dependency added only to pyproject.toml makes the
     container boot and then fail at import, without even re-running pip."""
-    pyproject = tomllib.loads((DASHBOARD_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    # utf-8-sig, not utf-8: a BOM here would make this test fail for a reason
+    # that has nothing to do with what it checks. companion's
+    # test_no_pyproject_carries_a_utf8_bom owns BOM policy for the whole repo.
+    pyproject = tomllib.loads((DASHBOARD_ROOT / "pyproject.toml").read_text(encoding="utf-8-sig"))
     # The optional `broll` group counts as declared: those packages are not
     # imported by ccsync_dashboard, but the container mounts the b-roll app
     # in-process and its imports fail without them. Both directions still
@@ -538,7 +541,10 @@ def test_dashboard_version_does_not_drift():
     from PYTHONPATH, and a wrong answer the moment it doesn't."""
     from ccsync_dashboard import VERSION
 
-    pyproject = tomllib.loads((DASHBOARD_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    # utf-8-sig, not utf-8: a BOM here would make this test fail for a reason
+    # that has nothing to do with what it checks. companion's
+    # test_no_pyproject_carries_a_utf8_bom owns BOM policy for the whole repo.
+    pyproject = tomllib.loads((DASHBOARD_ROOT / "pyproject.toml").read_text(encoding="utf-8-sig"))
     assert pyproject["project"]["version"] == VERSION, (
         f"dashboard/pyproject.toml version={pyproject['project']['version']} but "
         f"ccsync_dashboard.VERSION={VERSION} -- bump both"

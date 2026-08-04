@@ -1,4 +1,4 @@
-﻿"""Config file tests: first-run creation, TOML parsing, malformed fallback,
+"""Config file tests: first-run creation, TOML parsing, malformed fallback,
 and DEFAULTS/DEFAULT_TOML_TEXT key parity."""
 
 from __future__ import annotations
@@ -514,14 +514,64 @@ def test_validate_config_flags_non_numeric_popup_snooze_seconds(tmp_path):
 def test_version_matches_pyproject():
     """config.VERSION is the single source of truth, but pyproject.toml
     duplicates it (packaging requires a literal) -- publishing refuses on
-    drift, and this test catches it at development time."""
+    drift, and this test catches it at development time.
+
+    Reads utf-8-sig, not a binary tomllib.load: this test is about VERSION
+    PARITY, and it should not be the thing that fails when someone's editor
+    leaves a BOM behind (it was, at 0f5d99d -- see
+    test_no_pyproject_carries_a_utf8_bom below, which owns that job now, and
+    config.py's load_config for the same reasoning)."""
     import tomllib
     from pathlib import Path
 
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
-    with pyproject.open("rb") as fh:
-        data = tomllib.load(fh)
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8-sig"))
     assert data["project"]["version"] == config_mod.VERSION
+
+
+def test_no_pyproject_carries_a_utf8_bom():
+    """Every pyproject.toml in the repo must parse as RAW BYTES.
+
+    pip/setuptools reads pyproject.toml with a binary tomllib.load, and
+    tomllib rejects a leading BOM -- so a BOM here is not a cosmetic
+    encoding wart, it is "pip install -e . cannot run on this repo at all".
+    That is exactly what happened at 0f5d99d: the 0.4.20 version bump was
+    written by PowerShell's Set-Content, which prepends a BOM even when
+    overwriting a BOM-less file (the same hazard config.py:539 documents for
+    config.toml), and no Windows code path noticed because every Windows
+    consumer of pyproject.toml reads it with a regex and tools/release.ps1
+    never installs the package. A Mac running the first clean editable
+    install found it in step 3/6 of the release.
+
+    Deliberately binary: reading utf-8-sig here would defeat the point.
+
+    Scope note: a BOM on *companion's own* pyproject.toml never reaches this
+    assertion -- pytest reads [tool.pytest.ini_options] out of that same file
+    and dies at startup with "Invalid statement (at line 1, column 1)" and
+    exit code 4, which the release scripts' `|| fail` already catches. What
+    this test adds is the SIBLING projects (bench/, dashboard/), whose
+    pyprojects nothing else parses strictly, plus a named, greppable failure
+    for the next person instead of a bare usage error.
+    """
+    import tomllib
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    pyprojects = sorted(repo_root.glob("*/pyproject.toml"))
+    # A glob that silently found nothing would make this test vacuously green.
+    assert pyprojects, f"no */pyproject.toml under {repo_root} -- has the layout moved?"
+
+    for path in pyprojects:
+        raw = path.read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf"), (
+            f"{path.relative_to(repo_root)} starts with a UTF-8 BOM -- "
+            "pip's binary tomllib.load will reject it and nothing can build. "
+            "Re-save the file as UTF-8 WITHOUT BOM."
+        )
+        # Not just the BOM: prove the file is actually loadable the way pip
+        # loads it, so any other byte-level breakage fails here too.
+        with path.open("rb") as fh:
+            tomllib.load(fh)
 
 
 def test_ignored_resolve_projects_default_and_coercion(tmp_path):

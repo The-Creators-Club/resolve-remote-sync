@@ -138,7 +138,12 @@ def test_trailing_separator_on_local_root_is_absorbed(root, posix_host):
         MAC_ROOT + "/Projects/2026/CCT/Panel/A001_C061.braw"
 
 
+@pytest.mark.skipif(not WIN_HOST, reason="a drive-rooted local_root is a Windows shape")
 def test_canonical_translates_on_windows_too():
+    # The RESULT is deliberately host-spelled (canonical_to_local ends in
+    # os.path.join, because the caller hands it to the local filesystem), so
+    # this literal is only reachable on Windows -- same guard as
+    # test_base_rig_identity_never_produces_a_drive_relative_path below.
     assert canon.canonical_to_local(CLIP, r"F:\Creators_Club", CANON) == \
         r"F:\Creators_Club\Projects\2026\CCT\Panel\A001_C061.braw"
 
@@ -182,7 +187,10 @@ def test_prefix_trailing_separator_variants_emit_the_same_canonical_path(prefix,
     assert got == r"P:\Projects\a.braw"
 
 
+@pytest.mark.skipif(not WIN_HOST, reason="a drive-rooted local_root is a Windows shape")
 def test_local_to_canonical_on_windows_matches_the_old_join():
+    # The INPUT is a Windows local path: os.path.relpath cannot decompose
+    # "F:\Creators_Club\..." on posix, so this case cannot arise on a Mac.
     got = canon.local_to_canonical(r"F:\Creators_Club\B-roll\clip.mov", r"F:\Creators_Club", CANON)
     assert got == r"P:\B-roll\clip.mov"
 
@@ -224,6 +232,99 @@ def test_round_trip_through_both_directions_is_stable(posix_host):
     canonical = canon.local_to_canonical(physical, MAC_ROOT, CANON)
     assert canonical == CLIP
     assert canon.canonical_to_local(canonical, MAC_ROOT, CANON) == physical
+
+
+# -- norm / basename ----------------------------------------------------------
+#
+# These two are the fix for MAC-3: resolve_bridge._norm_path and popup's
+# display-name fallback used the HOST's os.path on strings that may be
+# canonical "P:\..." spellings. On posix that folds neither case nor
+# separators, and basename answers the whole string. Every test below is
+# written to pass IDENTICALLY on both hosts -- that is the whole point, so
+# none of them may carry a skipif.
+
+
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        (r"P:\Projects\Clip.mov", r"p:/projects/CLIP.MOV"),
+        (r"C:\Users\alex\Desktop\clip.mov", r"c:\USERS\alex\DESKTOP\clip.MOV"),
+        (r"P:\Projects\.\a\..\a\x.braw", r"P:\Projects\a\x.braw"),
+    ],
+)
+def test_norm_folds_case_and_separators_in_canonical_paths(a, b):
+    assert canon.norm(a) == canon.norm(b)
+
+
+def test_norm_is_the_host_rule_for_real_local_paths():
+    # A posix path has no drive and no backslash, so plat_for hands back the
+    # host's os.path and nothing changes for the base rig or a Mac's own
+    # /Volumes tree.
+    assert canon.norm("/Volumes/T7/Creators_Club/a.mov") == \
+        os.path.normcase(os.path.normpath("/Volumes/T7/Creators_Club/a.mov"))
+
+
+def test_norm_does_not_collapse_genuinely_different_paths():
+    assert canon.norm(r"P:\Creators_Club") != canon.norm(r"P:\Creators_ClubExtra")
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        (r"P:\Desktop\track.wav", "track.wav"),
+        (r"C:\Users\alex\clip.mov", "clip.mov"),
+        ("P:/Projects/a.braw", "a.braw"),
+        ("/Volumes/T7/Creators_Club/a.mov", "a.mov"),
+        ("bare.mov", "bare.mov"),
+        ("", ""),
+    ],
+)
+def test_basename_reads_canonical_and_posix_paths_alike(path, expected):
+    assert canon.basename(path) == expected
+
+
+# -- is_drive_rooted ----------------------------------------------------------
+
+
+# The tests above run on Windows, where os.path IS ntpath -- so they cannot
+# tell whether plat_for did anything. These repeat the load-bearing ones with
+# the host forced to posix, which is the only way to prove MAC-3 on a Windows
+# box: without the fix, every assertion here fails.
+
+
+def test_norm_still_folds_canonical_paths_on_a_mac(posix_host):
+    assert canon.norm(r"P:\Projects\Clip.mov") == canon.norm(r"p:/projects/CLIP.MOV")
+
+
+def test_norm_leaves_posix_paths_to_posix_rules_on_a_mac(posix_host):
+    # posixpath.normcase is a no-op, so case is significant on a real Mac
+    # path -- and must stay that way.
+    assert canon.norm("/Volumes/T7/a.mov") != canon.norm("/volumes/t7/A.MOV")
+
+
+def test_basename_of_a_canonical_path_on_a_mac_is_the_filename(posix_host):
+    # The defect verbatim: posixpath.basename(r"P:\Desktop\track.wav") is the
+    # WHOLE string, so the popup rendered a full path as a clip name.
+    assert canon.basename(r"P:\Desktop\track.wav") == "track.wav"
+
+
+def test_basename_of_a_posix_path_on_a_mac_is_unchanged(posix_host):
+    assert canon.basename("/Volumes/T7/Creators_Club/a.mov") == "a.mov"
+
+
+@pytest.mark.parametrize(
+    "path", ["C:", "C:\\", "P:\\Projects\\x", "c:/windows/temp", " T:\\x ", "Q:x"]
+)
+def test_drive_rooted_spellings_are_detected(path):
+    assert canon.is_drive_rooted(path) is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["", None, "Projects/2026", "B-roll\\Stills", "/Volumes/T7", "\\\\nas\\share", "..\\evil"],
+)
+def test_non_drive_rooted_spellings_are_not(path):
+    assert canon.is_drive_rooted(path) is False
 
 
 def test_a_different_drive_is_not_under_local_root():

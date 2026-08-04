@@ -191,9 +191,16 @@ def test_apply_adds_the_mapping_to_both_files(helper, monkeypatch, tmp_path):
 
     data = read(config_dir, ".config.data")
     assert "IoFsNum = 3" in data
-    assert f"IoFsMount_2 = {LOCAL_ROOT}" in data
-    assert "IoFsMappedMount_2 = P:\\" in data
-    assert "IoFsDirectIO_2 = 1" in data
+    # Ours takes slot 1, in FRONT of the /Volumes auto-entry, exactly as in
+    # config.dat above. This assertion used to read `IoFsMount_2` -- i.e. it
+    # enshrined our entry being appended AFTER /Volumes, because
+    # insert_position() was a ConfigDat-only override. The two files ended up
+    # with different orderings for the same mapping, and the docs claimed
+    # otherwise. MAC-D5, first real Mac 2026-08-04.
+    assert f"IoFsMount_1 = {LOCAL_ROOT}" in data
+    assert "IoFsMappedMount_1 = P:\\" in data
+    assert "IoFsDirectIO_1 = 1" in data
+    assert "IoFsMount_2 = /Volumes" in data
 
 
 def test_the_volumes_auto_entry_stays_last_after_renumbering(helper, monkeypatch, tmp_path):
@@ -209,6 +216,51 @@ def test_the_volumes_auto_entry_stays_last_after_renumbering(helper, monkeypatch
     assert roots[-1] == "Site.1.FS.3.Root = /Volumes"
     # ...and the pre-existing first entry kept its number and its values.
     assert "Site.1.FS.1.Root = /Users/ed/Movies" in dat
+
+
+def test_the_volumes_auto_entry_stays_last_in_config_data_too(helper, monkeypatch, tmp_path):
+    """The .config.data half of the same rule -- the one that was missing.
+
+    ConfigData inherited the base insert_position() (plain append), so our
+    entry landed after Resolve's trailing /Volumes entry while config.dat put
+    it in front. Both files now share the base-class implementation.
+    """
+    config_dir = write_prefs(tmp_path / "prefs")
+
+    apply(helper, monkeypatch, config_dir)
+
+    data = read(config_dir, ".config.data")
+    mounts = [line for line in data.splitlines() if line.startswith("IoFsMount_")]
+    assert mounts[-1].endswith("/Volumes"), mounts
+    assert mounts == [
+        "IoFsMount_0 = /Users/ed/Movies",
+        f"IoFsMount_1 = {LOCAL_ROOT}",
+        "IoFsMount_2 = /Volumes",
+    ]
+    # Unknown keys are still untouched and still in place.
+    assert "SomeOtherSetting = 7" in data
+
+
+def test_a_config_data_without_a_volumes_entry_just_appends(helper, monkeypatch, tmp_path):
+    """The shape the first real Mac actually had (2026-08-04): config.dat
+    carried a /Volumes auto-entry, .config.data carried none. With nothing to
+    step over, the new entry appends -- and the count still matches."""
+    no_volumes = """IoFsNum = 1
+IoFsMount_1 = /Users/leso/Movies
+IoFsMappedMount_1 =
+IoFsDirectIO_1 = 1
+SomeOtherSetting = 7
+"""
+    config_dir = write_prefs(tmp_path / "prefs", data=no_volumes)
+
+    assert apply(helper, monkeypatch, config_dir) == helper.EXIT_OK
+
+    data = read(config_dir, ".config.data")
+    assert "IoFsNum = 2" in data
+    # 1-based in, 1-based out -- the file's own numbering is preserved.
+    assert "IoFsMount_1 = /Users/leso/Movies" in data
+    assert f"IoFsMount_2 = {LOCAL_ROOT}" in data
+    assert "IoFsMappedMount_2 = P:\\" in data
 
 
 def test_windows_style_trailing_entry_also_stays_last(helper, monkeypatch, tmp_path):

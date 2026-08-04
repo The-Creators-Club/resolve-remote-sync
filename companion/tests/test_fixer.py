@@ -1070,7 +1070,13 @@ def test_canonical_clip_path_translates_local_root_to_prefix(tmp_path):
 
     dest = os.path.join(str(tmp_path), "root", "B-roll", "clip.mov")
     got = fixer.canonical_clip_path(dest, os.path.join(str(tmp_path), "root"), "P:\\")
-    assert got == "P:\\" + os.path.join("B-roll", "clip.mov")
+    # Hardcoded backslashes, NOT "P:\\" + os.path.join(...): the canonical
+    # spelling is a fleet-wide constant, not a property of the host running
+    # the test. Deriving it from os.path.join demanded "P:\B-roll/clip.mov"
+    # on macOS -- i.e. it asserted the exact mixed spelling that
+    # test_canonical_clip_path_is_all_backslashes_from_a_posix_tree below
+    # exists to forbid. The two contradicted each other on a Mac (MAC-2b).
+    assert got == r"P:\B-roll\clip.mov"
 
     # no prefix configured -> physical path unchanged
     assert fixer.canonical_clip_path(dest, os.path.join(str(tmp_path), "root"), "") == dest
@@ -1098,7 +1104,7 @@ def test_canonical_clip_path_is_all_backslashes_from_a_posix_tree():
 
 
 def test_fix_clip_relinks_to_canonical_path_not_physical(tmp_path):
-    """The Resolve project travels between machines; this machine's
+    r"""The Resolve project travels between machines; this machine's
     local_root does not. Relinking to D:\...\clip.mov made the clip
     offline everywhere but the machine that fixed it."""
     src = tmp_path / "src" / "clip.mov"
@@ -1117,7 +1123,7 @@ def test_fix_clip_relinks_to_canonical_path_not_physical(tmp_path):
     # the file physically lands under local_root...
     dest = local_root / "B-roll" / "Editor Added" / "alex" / "clip.mov"
     assert dest.is_file()
-    # ...but Resolve is pointed at the canonical P:\ path
-    import os
-    assert media_pool_item["relinked_to"] == \
-        "P:\\" + os.path.join("B-roll", "Editor Added", "alex", "clip.mov")
+    # ...but Resolve is pointed at the canonical P:\ path, spelled with
+    # backslashes on every host (see the note in
+    # test_canonical_clip_path_translates_local_root_to_prefix).
+    assert media_pool_item["relinked_to"] == r"P:\B-roll\Editor Added\alex\clip.mov"

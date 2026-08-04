@@ -24,7 +24,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import fixer, popup
+from . import canon, fixer, popup
 from .sync import rclone_lane
 
 log = logging.getLogger("ccsync.consolidate")
@@ -430,7 +430,7 @@ def run_consolidation(
             control.begin_file()
 
         path = op["file_path"]
-        name = os.path.basename(path)
+        name = canon.basename(path)
         size = int(op.get("size") or 0)
         before = batch_done
 

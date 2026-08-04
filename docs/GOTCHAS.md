@@ -479,7 +479,13 @@ field is `IoFsDirectIO_<i>`.
 
 Also: Resolve appends its own trailing filesystem entry (`/Volumes` on
 macOS, `ResolveVirtual` on Windows) and expects it **last**, so the helper
-inserts in front of it.
+inserts in front of it — in **both** `config.dat` and `.config.data`. That
+symmetry is newer than it looks: `insert_position()` was a `ConfigDat`-only
+override until 2026-08-04, so `.config.data` appended *after* its `/Volumes`
+entry while `config.dat` inserted before, and the two files disagreed about
+the order of the same mapping. The first real Mac hid it — its `.config.data`
+had no `/Volumes` entry at all, which is a legitimate shape and still just
+appends.
 
 ### The Mac App Store build keeps its preferences somewhere else
 

@@ -692,14 +692,9 @@ def chmods(monkeypatch):
     return calls
 
 
-@pytest.fixture
-def darwin(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "darwin")
-
-
-@pytest.fixture
-def windows(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32")
+# `darwin` and `windows` now live in conftest.py so every module shares one
+# spelling -- and so `windows` can supply the win32-only subprocess constants
+# that this module's _default_spawn tests need on a Mac (MAC-2a).
 
 
 def test_the_download_name_follows_the_platform(monkeypatch):

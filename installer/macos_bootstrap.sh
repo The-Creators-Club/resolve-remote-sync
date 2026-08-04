@@ -413,13 +413,17 @@ class PrefFile:
         self.trailing_newline = trailing_newline
         self.mode = mode
         self.original = list(lines)
+        # Filled in by load(); -1 means "unknown" (a hand-built instance).
+        self.uid = -1
 
     @classmethod
     def load(cls, path):
         try:
             with open(path, "rb") as handle:
                 raw = handle.read()
-            mode = stat.S_IMODE(os.stat(path).st_mode)
+            info = os.stat(path)
+            mode = stat.S_IMODE(info.st_mode)
+            uid = info.st_uid
         except OSError as exc:
             raise HelperError(EXIT_IO_ERROR, "cannot read %s: %s" % (path, exc))
         text = raw.decode("utf-8", "surrogateescape")
@@ -431,7 +435,9 @@ class PrefFile:
         if lines and lines[-1] == "":
             lines.pop()
             trailing = True
-        return cls(path, lines, newline, trailing, mode)
+        handle = cls(path, lines, newline, trailing, mode)
+        handle.uid = uid
+        return handle
 
     def render(self):
         text = self.newline.join(self.lines)
@@ -451,10 +457,38 @@ class PrefFile:
                               "cannot back up %s: %s" % (self.path, exc))
         return dest
 
+    def ownership_warning(self):
+        """A warning string if saving will change this file's owner, else None.
+
+        On the first real Mac (2026-08-04) `.config.data` was owned by ROOT
+        with mode 666, while `config.dat` beside it was owned by the user.
+        Mode 666 means the atomic save below succeeds -- but mkstemp creates
+        the temp as the RUNNING user and os.replace keeps the temp's owner,
+        so a root-owned file silently comes back user-owned. Harmless in all
+        likelihood (Resolve runs as the user), but it is a change nothing in
+        the design intended and re-running the helper cannot undo it. Say so
+        rather than let it be discovered later.
+        """
+        if self.uid < 0:
+            return None
+        try:
+            me = os.geteuid()
+        except AttributeError:      # non-posix; the helper is macOS-only
+            return None
+        if self.uid == me:
+            return None
+        return ("%s is owned by uid %d, not you (uid %d) -- its mode allows the "
+                "write, but the atomic replace will leave it owned by YOU. "
+                "Nothing here can restore the original owner; note it before "
+                "continuing." % (self.path, self.uid, me))
+
     def save(self):
         """Atomic: write a sibling temp file, match the original's mode, and
         os.replace() it over the original -- an interrupted run can never
-        leave Resolve with a half-written preference file."""
+        leave Resolve with a half-written preference file.
+
+        Preserves MODE but not OWNER -- see ownership_warning().
+        """
         payload = self.render().encode("utf-8", "surrogateescape")
         directory = os.path.dirname(self.path) or "."
         fd, tmp = tempfile.mkstemp(prefix=".ccsync-", dir=directory)
@@ -575,6 +609,24 @@ class MappingFile:
         raise NotImplementedError
 
     def insert_position(self):
+        """Where the new entry goes: in front of Resolve's own trailing
+        filesystem entry, if this file has one.
+
+        Lives on the BASE class so config.dat and .config.data behave the
+        same way. It used to be a ConfigDat-only override, so .config.data
+        appended AFTER any /Volumes entry -- contradicting both
+        MACOS_FIRST_RUN.md D5 and GOTCHAS.md, which say the trailing entry is
+        kept last in both, and leaving the two files with different orderings
+        for the same mapping. The first real Mac (2026-08-04) happened to
+        have no /Volumes line in .config.data at all, so the divergence was
+        invisible there -- but the tests exercised precisely the branch that
+        is wrong.
+        """
+        if self.entries:
+            last = (self.root_of(self.entries[-1]) or "").strip()
+            for reserved in TRAILING_ROOTS:
+                if last == reserved or last.startswith(reserved + "/"):
+                    return len(self.entries) - 1
         return len(self.entries)
 
     # -- reading ----------------------------------------------------------
@@ -771,14 +823,6 @@ class ConfigDat(MappingFile):
                 ("MacDIO", "1"),
                 ("BrightClip", "0")]
 
-    def insert_position(self):
-        if self.entries:
-            last = self.root_of(self.entries[-1]).strip()
-            for reserved in TRAILING_ROOTS:
-                if last == reserved or last.startswith(reserved + "/"):
-                    return len(self.entries) - 1
-        return len(self.entries)
-
 
 RE_IOFS_NUM = re.compile(r"^(\s*)IoFsNum(\s*=\s*)(.*)$")
 RE_IOFS_FIELD = re.compile(r"^(\s*)IoFs(MappedMount|Mount|DirectIO|[A-Za-z]+)_(\d+)(\s*=\s*)(.*)$")
@@ -898,6 +942,13 @@ def cmd_apply(args, running_probe):
         say("Resolve already maps %s to %s (%s) -- nothing written"
             % (args.mapped_root, args.local_root, config_dir))
         return EXIT_OK
+    # Before any write: a file we do not own comes back owned by us, and no
+    # re-run can put that back. Warn, do not refuse -- mode 666 makes the
+    # write legitimate and blocking here would strand the install.
+    for handle in changed:
+        message = handle.pref.ownership_warning()
+        if message:
+            warn(message)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for handle in (dat, data):
         say("backed up %s" % handle.pref.backup(stamp))

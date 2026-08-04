@@ -273,11 +273,16 @@ fi
 if [ "$SKIP_TESTS" = 1 ]; then
     warn "--skip-tests: the companion suite was skipped (recorded in the manifest as tests_run=false)"
 elif [ "$DRY_RUN" = 1 ]; then
-    dry "would run: \$VENV/bin/python -m pytest -q   (in $COMPANION_DIR)"
+    dry "would run: CCSYNC_REQUIRE_RCLONE=1 \$VENV/bin/python -m pytest -q   (in $COMPANION_DIR)"
 else
     step "running the companion tests..."
-    ( cd "$COMPANION_DIR" && "$VENV_PY" -m pytest -q ) \
-        || fail "companion tests failed -- NOT building. Fix them, or re-run with --skip-tests if you know why."
+    # CCSYNC_REQUIRE_RCLONE=1: pytest exits 0 when tests SKIP, and on a Mac
+    # the rclone fixture used to look for a hardcoded "rclone.exe" -- so the
+    # 24 tests that invoke a REAL rclone to prove lane A is up-only and lane
+    # B is down-only silently no-op'd and the suite still read green (MAC-4,
+    # 2026-08-04). In a release that is a failure, not a skip.
+    ( cd "$COMPANION_DIR" && CCSYNC_REQUIRE_RCLONE=1 "$VENV_PY" -m pytest -q ) \
+        || fail "companion tests failed -- NOT building. Fix them, or re-run with --skip-tests if you know why. (A missing rclone now FAILS rather than skipping: install it, or put ~/.local/ccsync/bin on PATH.)"
     step "companion tests passed"
 fi
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -142,19 +143,89 @@ def _single_instance_slot_is_free(monkeypatch):
     yield
 
 
-def _find_rclone() -> str | None:
-    """Look for a runnable rclone: PATH first, then the test-only portable
-    binary at companion/.tools/rclone.exe (see README.md's "Tests" section —
-    this binary is NOT installed system-wide and isn't on PATH; it's only
-    used by these tests so the filter-rule integration tests can actually
-    invoke rclone rather than being permanently skipped).
+@pytest.fixture
+def darwin(monkeypatch):
+    """Fake a macOS host.
+
+    Patches the global `sys` module, which every module that reads
+    `sys.platform` shares -- including ui_dispatch.platform_mode(), which
+    reads it live at call time rather than caching a constant.
     """
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    """Fake a Windows host, COMPLETELY.
+
+    Faking sys.platform alone is not enough: it sends code into win32
+    branches that then touch attributes only present in Windows' stdlib.
+    upgrade.UpgradeManager._default_spawn is the worked example -- it reads
+    subprocess.DETACHED_PROCESS, which does not exist on macOS, so the test
+    died with AttributeError instead of exercising the branch (MAC-2a, first
+    real macOS run 2026-08-04). Supplying the constants makes the fake
+    self-consistent, so these tests genuinely cover the Windows path from any
+    host rather than skipping.
+
+    The values are the real Win32 ones; nothing here executes them.
+    """
+    import subprocess
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    for name, value in (
+        ("DETACHED_PROCESS", 0x00000008),
+        ("CREATE_NEW_PROCESS_GROUP", 0x00000200),
+        ("CREATE_NO_WINDOW", 0x08000000),
+        ("CREATE_NEW_CONSOLE", 0x00000010),
+    ):
+        if not hasattr(subprocess, name):
+            monkeypatch.setattr(subprocess, name, value, raising=False)
+
+
+def _rclone_candidates() -> list[Path]:
+    """Every place a usable rclone might sit, in priority order after PATH.
+
+    The old version of this looked ONLY at `.tools/rclone.exe`, which cannot
+    exist on a Mac for two independent reasons: the name is wrong (the binary
+    is `rclone`, no extension) and `.tools/` is gitignored, so a fresh clone
+    has no such directory at all. The result was 24 lane-direction tests
+    skipping silently on every Mac -- the tests that prove lane A carries
+    video UP only and lane B carries **/Proxy/** DOWN only, which is the most
+    destructive thing in the system to get backwards (found on the first real
+    macOS run, 2026-08-04).
+
+    So we also consult the path the INSTALLER actually uses. The companion's
+    rclone is deliberately kept off PATH -- that is what the `rclone_path`
+    config key and the INST-7 comment in the generated config.toml are about
+    (launchd hands a LaunchAgent PATH=/usr/bin:/bin:/usr/sbin:/sbin) -- so a
+    correctly-installed machine is precisely the one where `which` fails.
+    """
+    exe = "rclone.exe" if os.name == "nt" else "rclone"
+    # Test-only portable copy, developer machines (see README's "Tests").
+    candidates = [COMPANION_ROOT / ".tools" / exe]
+    if os.name == "nt":
+        # windows_bootstrap.ps1's BinDir. Only meaningful on Windows: with no
+        # LOCALAPPDATA the fallback would name ~/ccsync/bin, which is nothing.
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            candidates.append(Path(local_appdata) / "ccsync" / "bin" / exe)
+    else:
+        # macos_bootstrap.sh's BIN_DIR.
+        candidates.append(Path.home() / ".local" / "ccsync" / "bin" / exe)
+    return candidates
+
+
+def _find_rclone() -> str | None:
+    """Look for a runnable rclone: PATH first, then _rclone_candidates()."""
     found = shutil.which("rclone")
     if found:
         return found
-    local = COMPANION_ROOT / ".tools" / "rclone.exe"
-    if local.exists():
-        return str(local)
+    for candidate in _rclone_candidates():
+        if candidate.exists():
+            return str(candidate)
     return None
 
 
@@ -172,10 +243,26 @@ def write_project_marker(project_dir, slug: str = "test-slug") -> None:
 
 @pytest.fixture(scope="session")
 def rclone_binary() -> str:
+    """A real rclone to shell out to, or a skip -- unless the caller insists.
+
+    Set CCSYNC_REQUIRE_RCLONE=1 to turn the skip into a hard failure. Both
+    release scripts do, because pytest exits 0 when tests skip: 24 skipped
+    lane-direction tests otherwise read as a green suite and authorise a
+    build whose real-rclone coverage never ran.
+    """
     path = _find_rclone()
-    if path is None:
-        pytest.skip("rclone not found on PATH or at companion/.tools/rclone.exe")
-    return path
+    if path is not None:
+        return path
+
+    searched = "\n  ".join(["PATH"] + [str(c) for c in _rclone_candidates()])
+    message = f"rclone not found. Searched:\n  {searched}"
+    if os.environ.get("CCSYNC_REQUIRE_RCLONE") == "1":
+        pytest.fail(
+            f"{message}\n\nCCSYNC_REQUIRE_RCLONE=1 is set, so this is a failure "
+            "rather than a skip -- these tests invoke a real rclone to prove the "
+            "lane A/B filter directions, and a release must not be cut without them."
+        )
+    pytest.skip(message)
 
 
 def make_timeline_item(

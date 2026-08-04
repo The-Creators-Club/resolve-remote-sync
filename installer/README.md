@@ -15,18 +15,70 @@ here and listed under "Fixed after the first live run" below. `onboard.exe`
 (built from `onboarding/`) wraps it and is the path a new Windows editor
 should actually take.
 
-**macOS status: code-complete, pending first real-Mac validation
-(2026-08-03).** The whole path now exists -- a macOS companion build
+**macOS status: builds and tests clean on a real Mac; the RUNTIME is still
+unvalidated (2026-08-04).** The whole path exists -- a macOS companion build
 (`tools/release_macos.sh`), an installer that downloads and installs it, sets
-Resolve's Mapped Mount and verifies the external SSD, and an uninstaller --
-but **not one line of the macOS-only code has run on a Mac**. `bash -n`
-clean, `--dry-run` exercised under Git Bash, the Resolve mapping helper
-unit-tested from its extracted source (32 tests); `diskutil`, `launchctl`,
-`xattr`, pyobjc and the preference edit itself are written from
-documentation and research, not from a live run. Treat the first install as a
+Resolve's Mapped Mount and verifies the external SSD, and an uninstaller.
+
+What a real Mac has now done (arm64, macOS 15.7.4, Python 3.12.13), and what
+it has not:
+
+| | |
+|---|---|
+| **Done** | Sections A1–A6 of the checklist: a signed arm64 binary built by `release_macos.sh`; a clean-venv `pip install -e ".[dev,tray]"`; the full companion suite **1563 passed, 18 skipped, 0 failed**, with all 18 skips genuinely Windows-only; all 24 real-rclone lane-direction tests executed; the Resolve mapping helper run in `verify` mode against live preference files |
+| **Not done** | Every macOS **runtime** path: `diskutil`, `launchctl`, `xattr`, the Resolve preference *write*, `caffeinate`, the external-SSD root guard, the self-upgrade swap, the menu-bar tray. Sections A7–H are unrun |
+
+That first run (`docs/macos-first-run-2026-08-04.md`) found five defects, four
+of them in code or test infrastructure that had never been exercised
+anywhere. They are fixed -- see "Fixed by the first Mac run" below -- but a
+green suite is not a validated port. Treat the first install as a
 **supervised** one and walk
 [`MACOS_FIRST_RUN.md`](MACOS_FIRST_RUN.md) -- the ordered first-session
 checklist, with the expected output and the failure shape for every step.
+
+### Fixed by the first Mac run (2026-08-04)
+
+- **MAC-1 — a UTF-8 BOM on `companion/pyproject.toml` made the package
+  uninstallable.** pip reads pyproject with a binary `tomllib.load`, which
+  rejects a BOM, so `pip install -e .` died and there was no way to build a
+  macOS companion at all. Introduced by the 0.4.20 version bump itself
+  (PowerShell `Set-Content` prepends one); invisible on Windows because every
+  Windows consumer of that file parses it with a regex and `release.ps1`
+  never installed the package. It also broke `test_version_matches_pyproject`
+  on **every** host, so `main` was red everywhere. Guarded now by a test that
+  binary-loads every `pyproject.toml` in the repo.
+- **MAC-4 — the rclone test gate looked for `rclone.exe`,** so on a Mac the
+  24 tests that invoke a real rclone to prove lane A is video-up-only and
+  lane B is `**/Proxy/**`-down-only skipped silently and `pytest` still
+  exited 0. The fixture is platform-aware and also consults
+  `~/.local/ccsync/bin/rclone` (the installer's own path, deliberately off
+  `PATH` per INST-7); `CCSYNC_REQUIRE_RCLONE=1`, which both release scripts
+  set, makes an absent rclone a failure rather than a skip.
+- **MAC-3 — canonical `P:\` paths were parsed with posix semantics.**
+  `resolve_bridge._norm_path` and popup's display-name fallback used the
+  host's `os.path`; on posix `normcase` is a no-op and `basename` answers the
+  *whole* string. That silently disabled the popup's dedupe (its own
+  docstring records the blank-Combobox bug that dedupe prevents, and
+  `fixer.fix_clip` guards a duplicate `ReplaceClip` behind it) and would have
+  rendered full paths where filenames belong. Both now route through
+  `canon.plat_for()`, which `canon.py` already used for exactly this.
+- **A drive-rooted destination escaped the containment check on posix** --
+  `Path(root) / "C:/Windows/Temp"` is an ordinary relative join there, so
+  free text from the popup's editable combobox landed inside the tree and was
+  approved. Refused explicitly now.
+- **D5 — the mapping helper was asymmetric.** `insert_position()` was a
+  `ConfigDat`-only override, so `.config.data` appended *after* Resolve's
+  trailing `/Volumes` entry while `config.dat` inserted in front, and the docs
+  claimed both did the same. Moved to the base class. Also: `.config.data` on
+  that Mac is root-owned mode 666, and the atomic save silently transfers
+  ownership to the running user -- now warned about before the write.
+
+Two test-infrastructure findings from the same run are worth knowing because
+they mean coverage was weaker than the numbers implied: the "no dispatcher
+starts on Windows" test **faked nothing at all** (it was green by accident of
+being written on a Windows box, and on macOS its assertion still passed for
+the wrong reason), and the darwin shutdown-guard test asserted "no AppKit"
+while a real Mac has pyobjc installed. Both now inject what they claim.
 
 **Building and shipping a companion release is documented in
 [`../docs/RELEASE.md`](../docs/RELEASE.md)** — `tools\release.ps1` (parity
@@ -428,8 +480,48 @@ on a new editor's machine. Recorded here because most of these fail
   `launchctl bootstrap gui/$(id -u)`, `diskutil info -plist` /
   `plutil -extract` output shapes, `xattr`, `pgrep -f "DaVinci Resolve"`,
   `osascript` alerts, the pyobjc app-delegate install, `caffeinate`, and the
-  two Resolve preference formats (the helper reads each file's own
-  numbering base -- `.config.data`'s `IoFs<F>_<i>` and `config.dat`'s
-  `Site.<n>.FS.<i>` alike -- but a real macOS file confirming those bases
-  is still outstanding).
+  Resolve preference **write** (the two formats' numbering bases are no
+  longer guesswork -- a real Mac's files were read on 2026-08-04 and both are
+  1-based, `MacDIO = 1`, with the `/Volumes` auto-entry last in `config.dat`
+  and **absent entirely** from `.config.data` -- but nothing has written to
+  them yet).
   `MACOS_FIRST_RUN.md` turns each of these into a checkable step.
+
+## Next steps for macOS
+
+In order. Each one is blocked by the one above it.
+
+1. **Commit and cut a Mac build.** `main` at `0f5d99d` cannot `pip install`
+   at all, so nothing downstream is possible until the BOM fix lands.
+   Then `./tools/release_macos.sh` on the Mac — no `--skip-tests` and no
+   `--allow-dirty` this time, so the manifest records `tests_run: true`
+   against a clean tree.
+2. **A7 — the menu-bar smoke run.** Needs a human watching: does the tray
+   icon appear, does a Tk dialog open without deadlocking against pystray's
+   AppKit run loop (**B1**, still open and gating any further macOS UI work)?
+   This is the first thing that exercises the main-thread UI dispatcher for
+   real.
+3. **A8 — publish**, then **C1–C7**, the install drill on a machine that has
+   not been hand-primed. The current Mac has a half-finished bootstrap on it
+   (rclone, syncthing, a seeded `config.toml`, an unloaded Syncthing
+   LaunchAgent) — either wipe that first or the drill proves nothing.
+4. **B2 — what path spelling does Resolve on macOS actually return?**
+   Answer it from the live bridge: canonical `P:\…` strings, or Mapped-Mount
+   resolved `/Volumes/…` paths? The MAC-3 fix is safe either way (`plat_for`
+   picks `ntpath` only for drive-rooted or backslash-bearing strings), so
+   this no longer blocks anything — but it decides whether the popup/fixer
+   layer is doing real work or a no-op on that host.
+5. **D1–D6 — the Resolve mapping write**, then quit/relaunch Resolve and
+   confirm the mapping survives. Diff both backups afterwards. Expect the
+   ownership warning on `.config.data`; record whether Resolve minds.
+6. **E1–E4 — the external-SSD drills**, which are the point of the port and
+   are currently inert: `config.toml` has
+   `local_root = /Users/leso/Creators_Club`, i.e. the internal disk, so the
+   root guard can never fire. **Blocked on a decision**: the only external
+   volume present is ExFAT and already holds unrelated material, and ExFAT
+   has no POSIX permissions or symlinks. Pick a drive and a filesystem
+   before running these.
+7. **F1–F5 self-upgrade**, **G1–G3 caffeinate**, **H1–H5 uninstall.**
+
+Only after E–H should `KNOWN_BUGS.md` item 8 or the status block above be
+softened further.

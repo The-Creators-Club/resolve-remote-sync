@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
+from . import luts as luts_mod
 from . import paths as paths_mod
 from . import popup
 from . import proxy_relink
@@ -556,6 +557,14 @@ class CompanionApp:
         self._media_tree_lock = threading.Lock()
         self._media_tree_stop_event = threading.Event()
         self._media_tree_thread: Optional[threading.Thread] = None
+
+        # Shared LUT library (luts.py): the link manager plus the cached
+        # stray scan the tray reads. Built here so stray_lut_count() is safe
+        # to call before _start_lut_link() has run (the tray builds its menu
+        # from the moment it starts).
+        self._lut_links: Any = None
+        self._lut_lock = threading.Lock()
+        self._stray_luts: list[dict[str, Any]] = []
 
         # Self-upgrade channel (upgrade.py): availability is fed by the
         # reporter's response callback below and by sign_in()'s verify
@@ -2748,7 +2757,109 @@ class CompanionApp:
         self._watcher_thread.start()
         self._start_shutdown_guard()
         self._start_keep_awake()
+        self._start_lut_link()
         self._start_root_guard()
+
+    def _start_lut_link(self) -> None:
+        """Keep Resolve's LUT directory pointed at the synced LUT library.
+
+        Runs on EVERY machine including the base rig: the base rig syncs
+        nothing (its local_root IS the NAS share) but it is where the library
+        is curated, so it needs the link most of all.
+
+        Its own thread, and never fatal: the check touches the filesystem and,
+        on a first run, copies files -- neither belongs on the startup path,
+        and an editor whose link cannot be made simply keeps the LUTs they
+        already have."""
+        try:
+            self._lut_links = luts_mod.LutLinkManager(
+                self.config, config_mod.resolved_local_root(self.config)
+            )
+        except Exception:
+            log.exception("failed to build the LUT link manager")
+            return
+        if not self._lut_links.enabled:
+            log.info("LUT sync disabled by config (lut_sync_enabled=false)")
+            return
+        try:
+            threading.Thread(
+                target=self._lut_link_loop, name="ccsync-luts", daemon=True
+            ).start()
+        except Exception:
+            log.exception("failed to start the LUT link thread")
+
+    def _lut_link_loop(self) -> None:
+        interval = config_mod.coerce_numeric(self.config, "lut_check_interval", 900)
+        if interval <= 0:
+            interval = 900
+        while not self._stop_event.is_set():
+            try:
+                self._lut_links.check()
+            except Exception:
+                log.debug("luts: periodic check failed", exc_info=True)
+            try:
+                # Cached for the tray: the scan walks Resolve's LUT folder,
+                # which must never happen on the tray's message loop.
+                strays = self._lut_links.find_strays()
+                with self._lut_lock:
+                    self._stray_luts = strays
+            except Exception:
+                log.debug("luts: stray scan failed", exc_info=True)
+            if self._stop_event.wait(interval):
+                return
+
+    def stray_lut_count(self) -> int:
+        """How many LUTs this machine has that the shared library does not.
+        Cheap accessor for the tray -- the scan itself runs on the LUT
+        thread above."""
+        with self._lut_lock:
+            return len(self._stray_luts)
+
+    def share_stray_luts(self) -> None:
+        """Tray action: copy this machine's unshared LUTs into the library.
+
+        Confirms first, naming what would be copied: this publishes files to
+        every other editor in the fleet, which is not something to do on a
+        single mis-click. Copies only -- the editor's own copy stays exactly
+        where Resolve already knows about it.
+        """
+        if self._lut_links is None:
+            self._notify_tray("LUT sharing is not set up on this machine.")
+            return
+        with self._lut_lock:
+            strays = list(self._stray_luts)
+        if not strays:
+            self._notify_tray("No LUTs to share -- the library already has everything here.")
+            return
+        library = self._lut_links.library()
+        if not library.is_dir():
+            self._notify_tray(
+                "The shared LUT library hasn't synced to this machine yet -- try again later."
+            )
+            return
+        total_mb = sum(int(s.get("size") or 0) for s in strays) / (1024 * 1024)
+        preview = "\n".join(f"  • {s['name']}" for s in strays[:12])
+        if len(strays) > 12:
+            preview += f"\n  … and {len(strays) - 12} more"
+        confirmed = popup.confirm_dialog(
+            "Share these LUTs with the team?",
+            f"{len(strays)} LUT(s) on this machine ({total_mb:.1f} MB) are not in the shared "
+            f"library.\n\nCopying them to {library} puts them on every editor's machine. "
+            f"Your own copies stay where they are.\n\n{preview}",
+            ok_label="SHARE",
+        )
+        if not confirmed:
+            return
+        result = self._lut_links.adopt(strays)
+        with self._lut_lock:
+            self._stray_luts = self._lut_links.find_strays()
+        errors = result.get("errors") or []
+        message = f"Shared {result.get('copied', 0)} LUT(s) with the team."
+        if errors:
+            message += f" {len(errors)} could not be copied -- see the log."
+            for err in errors:
+                log.warning("luts: %s", err)
+        self._notify_tray(message)
 
     def _start_keep_awake(self) -> None:
         """Stop the idle timer sleeping the machine mid-transfer.

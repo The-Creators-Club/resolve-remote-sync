@@ -155,8 +155,11 @@ def test_provision_creates_missing_folders(conn, fake, tmp_path):
     assert results["provision"] is True and results["config"] is True
 
     by_id = {f["id"]: f for f in fake.state["folders"]}
+    # The shared asset libraries are provisioned by the same cycle -- they
+    # are Syncthing folders, but not projects (see the shared-folder tests
+    # below).
     assert set(by_id) == {"2025-ff4-nuclear", "2026-creator-profiles-season-1",
-                          "2026-ff5-energy-transition"}
+                          "2026-ff5-energy-transition", provision.LUTS_FOLDER_ID}
     created = by_id["2026-ff5-energy-transition"]
     assert created["label"] == "2026/FF5/Energy Transition"
     assert created["path"] == "/data/Projects/2026/FF5/Energy Transition"

@@ -33,6 +33,7 @@ from .. import config as config_mod
 from ..selection import SelectionClient
 from .rclone_lane import clone_directory_tree
 from .repath import ProjectRepather, normalized_safe_rel
+from .shared_folders import SharedFolderManager
 from .syncthing_admin import STIGNORE_LINES, SyncthingAdmin, missing_ignore_lines
 
 log = logging.getLogger("ccsync.sync.sequencer")
@@ -142,6 +143,7 @@ class Sequencer:
         now: Any = time.monotonic,
         clone_tree_fn: Any = clone_directory_tree,
         repather: Optional[ProjectRepather] = None,
+        shared_folders: Optional[Any] = None,
     ) -> None:
         self.lane_a = lane_a
         self.lane_b = lane_b
@@ -149,6 +151,15 @@ class Sequencer:
         self.selection = selection
         self.cfg = cfg
         self.local_root = cfg.get("local_root", "")
+        # The fleet-wide asset libraries (the LUT library). Not part of the
+        # selection and not part of the rotation -- see sync/shared_folders.py
+        # -- so the sequencer's only job here is to call reconcile() often
+        # enough, INCLUDING on the no-selection path where nothing else runs.
+        self.shared_folders = (
+            shared_folders
+            if shared_folders is not None
+            else SharedFolderManager(admin, self.local_root)
+        )
         # EVERY numeric here goes through config.coerce_numeric/coerce_count.
         # A bare float(cfg.get(...)) raises on a hand-edited
         # `selection_poll_interval = "fast"`, and the Sequencer is built
@@ -452,6 +463,13 @@ class Sequencer:
                 self._park_paused()
                 continue
 
+            # BEFORE the selection check, deliberately: an editor with zero
+            # projects ticked still gets the shared libraries, and that is
+            # exactly the branch below that continues without doing anything
+            # else. Fault-isolated -- reconcile() never raises, but a broken
+            # library must not be able to stop project syncing either way.
+            self._reconcile_shared_folders()
+
             selection, source = self._selection_get()
             if not selection:
                 with self._lock:
@@ -482,6 +500,15 @@ class Sequencer:
             self._state = STATE_STOPPED
             self._current_slug = None
             self._queue_slugs = []
+
+    def _reconcile_shared_folders(self) -> None:
+        """Keep the fleet-wide asset libraries online. Never raises."""
+        if self.shared_folders is None:
+            return
+        try:
+            self.shared_folders.reconcile()
+        except Exception:
+            log.debug("sequencer: shared folder reconcile failed", exc_info=True)
 
     @staticmethod
     def _describe_no_selection(selection: Optional[list[dict]], source: str) -> str:

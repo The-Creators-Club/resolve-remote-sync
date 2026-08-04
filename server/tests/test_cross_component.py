@@ -134,3 +134,55 @@ def test_marker_filename_and_template_folders_agree():
 def test_no_builder_emits_duplicate_lines():
     for name, lines in ALL_BUILDERS.items():
         assert len(lines) == len(set(lines)), f"{name} emits a duplicate pattern"
+
+
+# -- shared asset folders (the LUT library) --------------------------------
+#
+# Same three-copy problem as the project .stignore above, and a worse failure
+# mode: the dashboard collector repairs the server side's copy every
+# provision cycle and the companion re-asserts the editor side's on every
+# pass, so a drift between them is not a wrong pattern here and there -- it
+# is the two ends rewriting the file at each other forever.
+
+ASSET_BUILDERS = {
+    "server": common.build_asset_stignore_lines(),
+    "dashboard": dash_provision.build_asset_stignore_lines(),
+    "companion": list(companion_admin.ASSET_STIGNORE_LINES),
+}
+
+
+def test_shared_asset_folder_identity_agrees_across_all_three_modules():
+    assert common.LUTS_FOLDER_ID == dash_provision.LUTS_FOLDER_ID == companion_admin.LUTS_FOLDER_ID
+    assert common.LUTS_REL == dash_provision.LUTS_REL == companion_admin.LUTS_REL
+    assert (common.SHARED_ASSET_FOLDERS
+            == dash_provision.SHARED_ASSET_FOLDERS
+            == companion_admin.SHARED_ASSET_FOLDERS)
+
+
+def test_all_three_asset_stignore_builders_agree_exactly():
+    server, dashboard, companion = (
+        ASSET_BUILDERS["server"], ASSET_BUILDERS["dashboard"], ASSET_BUILDERS["companion"],
+    )
+    assert server == dashboard == companion
+
+
+def test_the_asset_list_is_not_the_project_list():
+    """They are different lists on purpose: a shared asset folder has no
+    lane A or B under it, so it must not carry the Proxy patterns, and it
+    must carry the OS-junk ones that a project folder does not need."""
+    assert ASSET_BUILDERS["server"] != SERVER_LINES
+    assert not any("Proxy" in line for line in ASSET_BUILDERS["server"])
+    assert "(?i)**/.DS_Store" in ASSET_BUILDERS["server"]
+
+
+def test_the_asset_list_still_brakes_on_video():
+    """This folder auto-shares to the whole fleet with no tick to opt out
+    of, so a stray 40 GB .mov must not reach every machine."""
+    for name, lines in ASSET_BUILDERS.items():
+        for ext in common.VIDEO_EXTENSIONS:
+            assert f"(?i)*{ext}" in lines, f"{name} would fan out {ext} files"
+
+
+def test_no_asset_builder_emits_duplicate_lines():
+    for name, lines in ASSET_BUILDERS.items():
+        assert len(lines) == len(set(lines)), f"{name} emits a duplicate asset pattern"

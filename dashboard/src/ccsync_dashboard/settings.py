@@ -82,6 +82,11 @@ class Settings:
     # Path prefix where the SYNCTHING app (not this container) sees the same
     # tree; must match install_syncthing_app.py's --container-mount.
     syncthing_data_prefix: str = "/data/Projects"
+    # Same idea for the shared asset libraries (the LUT library), which live
+    # BESIDE Projects/ under Creators_Club rather than inside it -- so the
+    # default is the sibling of syncthing_data_prefix's default. Blank
+    # disables shared-folder provisioning without touching project folders.
+    syncthing_assets_prefix: str = "/data/Assets"
 
     # The NAS's TAILNET (100.x) address. When set, new Syncthing device
     # entries are created with tcp:// and quic:// addresses on it BEFORE
@@ -170,6 +175,7 @@ class Settings:
             packages_dir=env.get("DASH_PACKAGES_DIR", ""),
             projects_dir=env.get("DASH_PROJECTS_DIR", ""),
             syncthing_data_prefix=env.get("DASH_SYNCTHING_DATA_PREFIX", "/data/Projects"),
+            syncthing_assets_prefix=env.get("DASH_SYNCTHING_ASSETS_PREFIX", "/data/Assets"),
             syncthing_tailnet_ip=env.get("DASH_SYNCTHING_TAILNET_IP", "").strip(),
             syncthing_tailnet_only=env.get("DASH_SYNCTHING_TAILNET_ONLY", "") == "1",
             interval_provision=num("DASH_INTERVAL_PROVISION", 300.0),

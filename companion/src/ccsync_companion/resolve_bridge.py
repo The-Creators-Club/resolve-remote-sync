@@ -544,6 +544,38 @@ def replace_clip(media_pool_item, new_path: str) -> dict[str, Any]:
     return {"ok": True, "message": f"Relinked to {new_path}"}
 
 
+def refresh_lut_list() -> bool:
+    """Make a running Resolve re-read its LUT directory. Never raises.
+
+    Resolve caches the LUT list at project open, so a LUT that syncs in while
+    an editor is working is invisible to them until they restart Resolve or
+    hit Project Settings -> Color Management -> Update Lists. This is that
+    button (`Project.RefreshLUTList()`), called after the LUT library changes
+    on disk.
+
+    Returns False for every "could not" -- Resolve not running, no project
+    open, an older API without the method. All of them are routine: the LUT
+    is on disk either way, and Resolve picks it up at its next start.
+    """
+    with _API_LOCK:
+        try:
+            resolve = connect()
+            if resolve is None:
+                return False
+            project = resolve.GetProjectManager().GetCurrentProject()
+            if project is None:
+                log.debug("resolve: no project open -- skipping RefreshLUTList")
+                return False
+            refresh = getattr(project, "RefreshLUTList", None)
+            if refresh is None:
+                log.debug("resolve: this API build has no RefreshLUTList")
+                return False
+            return bool(refresh())
+        except Exception as exc:
+            log.debug("resolve: RefreshLUTList failed (%s)", exc)
+            return False
+
+
 def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
     """Point `media_pool_item`'s PROXY at `proxy_path`. Never raises.
 

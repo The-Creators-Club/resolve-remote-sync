@@ -92,6 +92,71 @@ def build_stignore_lines() -> list[str]:
     return lines
 
 
+# --------------------------------------------------------------------------
+# Shared asset folders -- intentional copy of server/common.py's block, same
+# reason as slugify/TEMPLATE_FOLDERS above (the container cannot import
+# server/). server/tests/test_cross_component.py asserts byte-parity of the
+# ids, rels and the .stignore list across server, dashboard and companion.
+# --------------------------------------------------------------------------
+
+LUTS_FOLDER_ID = "assets-luts"
+LUTS_REL = "Assets/Luts"
+
+SHARED_ASSET_FOLDERS = [
+    (LUTS_FOLDER_ID, LUTS_REL, "Assets/Luts (LUT library)"),
+]
+
+SHARED_ASSET_FOLDER_IDS = frozenset(fid for fid, _rel, _label in SHARED_ASSET_FOLDERS)
+
+ASSET_JUNK_IGNORE_LINES = [
+    "(?i)**/.DS_Store", "(?i).DS_Store",
+    "(?i)**/Thumbs.db", "(?i)Thumbs.db",
+    "(?i)**/desktop.ini", "(?i)desktop.ini",
+    "(?i)**/*.tmp", "(?i)*.tmp",
+    "(?i)**/*.ccsync-tmp", "(?i)*.ccsync-tmp",
+]
+
+
+def build_asset_stignore_lines() -> list[str]:
+    """.stignore for a shared asset folder -- OS junk, plus video as a
+    blast-radius brake (this folder is auto-shared with the whole fleet and
+    has no tick to opt out of). See server/common.build_asset_stignore_lines
+    for the full reasoning; keep the two byte-identical."""
+    lines = [f"(?i)*{ext}" for ext in VIDEO_EXTENSIONS]
+    lines.extend(PARTIAL_IGNORE_LINES)
+    lines.extend(ASSET_JUNK_IGNORE_LINES)
+    return lines
+
+
+def build_shared_folder_config(
+    folder_id: str, label: str, path: str, device_ids: list[str]
+) -> dict:
+    """Folder config for a shared asset library.
+
+    Same tuning and versioning as a project folder (build_folder_config
+    below) -- it is the same Syncthing on the same link. The differences are
+    that the path is passed in whole rather than derived from the Projects
+    prefix, and the label is a fixed human string rather than the project's
+    rel path.
+    """
+    return {
+        "id": folder_id,
+        "label": label,
+        "path": path,
+        "type": "sendreceive",
+        "fsWatcherEnabled": True,
+        "ignorePerms": True,
+        "rescanIntervalS": 3600,
+        "maxConcurrentWrites": 32,
+        "pullerMaxPendingKiB": 65536,
+        "versioning": {
+            "type": "staggered",
+            "params": {"cleanInterval": "3600", "maxAge": "31536000"},
+        },
+        "devices": [{"deviceID": device_id, "introducedBy": ""} for device_id in device_ids],
+    }
+
+
 # The explicit project marker (added 2026-07-25). A directory IS a project
 # because it carries this file -- never because of its depth or name. The
 # slug inside is the project's IMMUTABLE identity: it travels with the

@@ -47,6 +47,36 @@ DEFAULT_BROLL_ARCHIVE_ROOT = DEFAULT_CC_ROOT + "/Assets/B-roll Archive"
 DEFAULT_DATASET_OWNER = "broll"
 EDITORS_GROUP = "editors"
 
+# --------------------------------------------------------------------------
+# Shared asset folders (added 2026-08-05)
+# --------------------------------------------------------------------------
+#
+# Everything else in this system is PER PROJECT: a directory carrying a
+# .ccsync-project marker gets a Syncthing folder, and an editor ticking it on
+# the dashboard is what shares that folder with them. A shared asset folder is
+# the other shape -- one fleet-wide library, outside Projects/, that every
+# editor gets automatically and nobody ticks.
+#
+# The LUT library is the first one. It is small (tens of MB), it is useless to
+# have on only some machines, and unlike a project there is no per-editor
+# reason to want it absent -- so the tick model would be pure friction. It is
+# deliberately NOT a project: it has no marker, it never appears in the
+# dashboard project list, and the collector's project discovery never sees it
+# (that walks Projects/ only).
+SHARED_ASSETS_REL = "Assets"
+LUTS_FOLDER_ID = "assets-luts"
+LUTS_REL = "Assets/Luts"
+DEFAULT_LUTS_ROOT = DEFAULT_CC_ROOT + "/" + LUTS_REL
+
+# (folder id, rel path under Creators_Club, human label). One entry per shared
+# asset folder; the dashboard collector provisions and shares every one of
+# them, and the companion accepts every one of them. Adding a second library
+# (title templates, sound FX, Fusion macros) is a one-line change here plus
+# the same line in dashboard/provision.py's copy.
+SHARED_ASSET_FOLDERS = [
+    (LUTS_FOLDER_ID, LUTS_REL, "Assets/Luts (LUT library)"),
+]
+
 # Project template subfolders, relative to <projects_root>/<year>/<series>/<project>/
 # Per SPEC.md canonical layout (Z:\Cablewrap\Projects\2025\FF4\Nuclear) with Audio
 # split into Music / Voiceover subfolders. Proxy/ subfolders are NOT pre-created;
@@ -121,6 +151,49 @@ def build_stignore_lines() -> list[str]:
     lines.append("(?i)Proxy")
     lines.append("(?i)**/Proxy")
     lines.append("(?i)**/Proxy/**")
+    return lines
+
+
+# Junk that every OS scatters through a browsed directory tree. The LUT
+# library is opened in Explorer/Finder constantly (that is how a LUT gets
+# added), so without these every editor's thumbnail cache and folder-view
+# settings would fan out to the whole fleet and conflict-copy against each
+# other. Same three-form convention as the patterns above: the extension
+# forms match by extension, the bare/`**` forms match by name.
+ASSET_JUNK_IGNORE_LINES = [
+    "(?i)**/.DS_Store", "(?i).DS_Store",
+    "(?i)**/Thumbs.db", "(?i)Thumbs.db",
+    "(?i)**/desktop.ini", "(?i)desktop.ini",
+    "(?i)**/*.tmp", "(?i)*.tmp",
+    "(?i)**/*.ccsync-tmp", "(?i)*.ccsync-tmp",
+]
+
+
+def build_asset_stignore_lines() -> list[str]:
+    """The .stignore for a SHARED ASSET folder (the LUT library) -- a
+    different list from build_stignore_lines() above, and deliberately so.
+
+    A project folder ignores video because lanes A and B carry it instead.
+    A shared asset folder has no lane A or B: whatever this list ignores
+    simply never syncs, anywhere, silently. So it ignores only two things:
+
+      * OS junk (see ASSET_JUNK_IGNORE_LINES) -- pure noise, and the reason
+        every editor would otherwise conflict-copy .DS_Store files at each
+        other.
+      * video, as a BLAST-RADIUS BRAKE. This folder is sendreceive and
+        auto-shared with every editor, with no tick to opt out of, so a
+        40 GB .mov dropped in it by accident would land on every machine in
+        the fleet. Nothing that belongs in a LUT library is a video file --
+        a pack's sample clip is the only realistic case, and it is worth
+        losing to keep the brake. This is documented in EDITOR_SETUP.md so
+        it is not a silent surprise.
+
+    rclone's .partial pattern is included for symmetry only: no rclone lane
+    ever writes here.
+    """
+    lines = [f"(?i)*{ext}" for ext in VIDEO_EXTENSIONS]
+    lines.extend(PARTIAL_IGNORE_LINES)
+    lines.extend(ASSET_JUNK_IGNORE_LINES)
     return lines
 
 

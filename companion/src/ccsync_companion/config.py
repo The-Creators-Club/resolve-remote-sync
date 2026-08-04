@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 log = logging.getLogger("ccsync.config")
 
-VERSION = "0.4.23"
+VERSION = "0.5.0"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -200,6 +200,29 @@ DEFAULTS: dict[str, Any] = {
     # stale path beats SPEC.md:40's adjacent-Proxy auto-link -- so the clip
     # goes Media Offline next to a perfectly good proxy. See proxy_relink.py.
     "proxy_relink_enabled": True,
+    # False = leave Resolve's LUT directory alone. On by default: syncing the
+    # shared LUT library to <local_root>/Assets/Luts accomplishes nothing on
+    # its own, because Resolve reads LUTs from its own fixed directory and
+    # from nowhere else. The companion turns that directory into a link to
+    # the library (merging anything only this machine had into it first, and
+    # keeping the original renamed aside). See luts.py.
+    "lut_sync_enabled": True,
+    # Where Resolve's OWN LUT directory is -- the one "Open LUT Folder"
+    # drops a LUT into, and so where strays collect. Blank = the platform
+    # default (%PROGRAMDATA%\Blackmagic Design\DaVinci Resolve\Support\LUT on
+    # Windows, /Library/Application Support/... on macOS). Only needed for a
+    # non-standard Resolve install.
+    "resolve_lut_dir": "",
+    # The exact string written into Resolve's LUT Locations list. Blank =
+    # the canonical P:\Assets\Luts on Windows (identical on every editor's
+    # machine, which is what keeps a LUT reference portable) and the real
+    # local path on macOS, which has no P:.
+    "lut_location_override": "",
+    # How often the LUT link is re-checked, seconds. Not once-at-startup: a
+    # Resolve UPGRADE deletes the link and writes a fresh factory LUT
+    # directory in its place, silently detaching that machine from the shared
+    # library until someone noticed. Steady state is one lstat.
+    "lut_check_interval": 900,
     # False = shut down silently even mid-upload. On by default: Windows'
     # own "this app is preventing you from shutting down" screen carries the
     # warning, and the editor keeps a "Shut down anyway" button. Nothing is
@@ -461,6 +484,20 @@ lane_b_enabled = true
 # was never linked. Only ever repoints -- never copies, moves or deletes.
 # Set false to leave every proxy attachment exactly as the project stores it.
 proxy_relink_enabled = true
+
+# The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
+# asset, but Resolve only reads the LUT directories it has been told about, so
+# the companion adds the library to Resolve's own supported list (Preferences >
+# System > General > LUT Locations). Nothing on disk is moved, renamed or
+# linked, and Resolve's factory LUTs are untouched. Only writable while Resolve
+# is QUIT -- it rewrites its own preferences on exit.
+lut_sync_enabled = true
+# Resolve's OWN LUT folder, where the tray looks for LUTs this machine has and
+# the library does not. Blank = the standard location for this platform.
+resolve_lut_dir = ""
+# Blank = the canonical P:\\Assets\\Luts on Windows, the real local path on Mac.
+lut_location_override = ""
+lut_check_interval = 900
 
 # Warn on the Windows shutdown/restart/log-off screen while a sync is still
 # in flight, naming how much is left. The editor always keeps a "Shut down

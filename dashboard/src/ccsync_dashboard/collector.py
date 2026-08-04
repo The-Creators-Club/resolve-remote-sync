@@ -340,10 +340,84 @@ class Collector:
             except Exception as exc:
                 log.error("provision failed for %s (%s): %s", slug, ", ".join(rels), exc)
                 failures.append(f"{slug}: {exc}")
+        # -- 5. shared asset libraries -------------------------------------
+        # Deliberately after the project loop and outside its per-slug fault
+        # isolation's failure list, but on the same cycle: a broken LUT
+        # library must not stop projects provisioning, and vice versa.
+        try:
+            self._ensure_shared_folders(folders_by_id)
+        except Exception as exc:
+            log.error("shared asset folder provisioning failed: %s", exc)
+            failures.append(f"shared-assets: {exc}")
+
         if failures:
             raise RuntimeError(
                 f"{len(failures)} folder(s) failed to provision: " + "; ".join(failures)
             )
+
+    def _ensure_shared_folders(self, folders_by_id: dict) -> None:
+        """Create/repair the fleet-wide asset libraries (the LUT library).
+
+        These are NOT projects: no marker, no tick, no entry in the dashboard
+        project list, and they live beside Projects/ rather than inside it --
+        so none of the marker scan, retarget or _creatable logic above
+        applies to them. What they share with projects is everything below
+        the identity layer: the same folder tuning, the same staggered
+        versioning, and an unconditionally-repaired .stignore.
+
+        The .stignore is the ASSET list (provision.build_asset_stignore_lines),
+        never the project list. Repairing one of these with the project list
+        would ignore nothing that matters here and would churn the file every
+        cycle against the companion, which writes the asset list -- so the id
+        check in _ensure_ignores is load-bearing, not cosmetic.
+
+        Sharing is handled by _run_enforce, which gives these folders every
+        mapped editor device unconditionally (there is no tick to consult).
+        """
+        prefix = (self.settings.syncthing_assets_prefix or "").rstrip("/")
+        if not prefix:
+            return
+        for folder_id, rel, label in provision.SHARED_ASSET_FOLDERS:
+            # rel is "Assets/<name>"; the prefix already points AT Assets.
+            leaf = rel.split("/", 1)[1] if "/" in rel else rel
+            path = f"{prefix}/{leaf}"
+            existing = folders_by_id.get(folder_id)
+            if existing is None:
+                # Created unshared, exactly like a project folder: the enforce
+                # cycle below adds the server's own device and every mapped
+                # editor. Creating it with a device list here would race
+                # enforce and, on a first cycle where myID is not known yet,
+                # write an empty device id into the config.
+                self.client.add_folder(
+                    provision.build_shared_folder_config(folder_id, label, path, [])
+                )
+                self.client.set_ignores(folder_id, provision.build_asset_stignore_lines())
+                log.info(
+                    "auto-provisioned shared asset folder %s at %s -- it will be shared "
+                    "with every editor on the next enforce cycle", folder_id, path)
+                continue
+            if str(existing.get("path", "")).rstrip("/") != path:
+                # Never silently retarget a live folder: unlike a project
+                # move (which has a marker travelling with the directory to
+                # prove intent) a path mismatch here means someone changed
+                # DASH_SYNCTHING_ASSETS_PREFIX or edited the folder by hand,
+                # and repointing would make Syncthing call every file at the
+                # old path deleted and propagate that to the whole fleet.
+                log.error(
+                    "shared asset folder %s is at %r, not the configured %r -- leaving it "
+                    "alone. Fix the folder in the Syncthing GUI or set "
+                    "DASH_SYNCTHING_ASSETS_PREFIX to match.",
+                    folder_id, existing.get("path"), path)
+                continue
+            self._ensure_ignores(folder_id)
+            drift = folder_tuning_drift(existing)
+            if drift:
+                repaired = dict(existing)
+                repaired.update(drift)
+                self.client.put_folder(folder_id, repaired)
+                log.warning(
+                    "REPAIRED WAN puller tuning on shared asset folder %s: %s",
+                    folder_id, ", ".join(f"{k}={v}" for k, v in sorted(drift.items())))
 
     def _provision_slug(
         self, conn, slug: str, rels: list[str], folders_by_id: dict, projects_dir: Path,
@@ -485,8 +559,18 @@ class Collector:
         sendreceive, so an ignore-less folder indexes every .braw/.mov and
         every Proxy/ dir, re-downloads them to every ticked editor, AND
         propagates an editor-side delete back to the NAS. Verification is
-        therefore unconditional, every cycle."""
-        want = provision.build_stignore_lines()
+        therefore unconditional, every cycle.
+
+        A shared asset folder gets the ASSET list instead. Both this and the
+        companion write their folder's .stignore repeatedly (here every
+        provision cycle, there every startup), so getting this wrong does not
+        merely apply the wrong patterns -- it makes the two ends fight over
+        the file forever, rewriting it every cycle."""
+        want = (
+            provision.build_asset_stignore_lines()
+            if slug in provision.SHARED_ASSET_FOLDER_IDS
+            else provision.build_stignore_lines()
+        )
         try:
             current = self.client.get_ignores(slug)
         except SyncthingError as exc:
@@ -592,6 +676,14 @@ class Collector:
         self._folder_devices = {}
         for folder in cfg.get("folders", []):
             slug = folder["id"]
+            if slug in provision.SHARED_ASSET_FOLDER_IDS:
+                # A shared asset library is a Syncthing folder but NOT a
+                # project: no row, so it never shows up in the project list,
+                # the tick UI, the per-project pages or the inventory walk
+                # (which scans Projects/ and would find nothing for it).
+                # Deliberately also kept out of `seen` below -- adding it
+                # there would be harmless, but only by accident.
+                continue
             self._project_ids[slug] = db.upsert_project(
                 conn, slug, folder.get("label") or slug, folder.get("path", ""), now
             )
@@ -642,6 +734,13 @@ class Collector:
             now = self.now_fn()
             seeded = 0
             for folder in sorted(folders, key=lambda f: f.get("label") or f["id"]):
+                if folder["id"] in provision.SHARED_ASSET_FOLDER_IDS:
+                    # Seeding a tick for a shared asset library would put a
+                    # non-project slug into every editor's selection list --
+                    # visible in the tick UI and handed to their sequencer as
+                    # a project to sync. These folders are shared
+                    # unconditionally below; they never need a row.
+                    continue
                 for dev in folder.get("devices", []):
                     editor = shape_map.get(dev["deviceID"])
                     if editor and db.add_selection(conn, editor, folder["id"], "seed", now):
@@ -703,8 +802,18 @@ class Collector:
             actual = {d["deviceID"] for d in folder.get("devices", [])}
             desired = {my_id}
             desired |= {d for d in actual if d in id_to_editor and id_to_editor[d] is None}
-            for editor in selections.get(slug, []):
-                desired |= editor_devices.get(editor, set())
+            if slug in provision.SHARED_ASSET_FOLDER_IDS:
+                # A shared asset library has no tick to consult: every editor
+                # the dashboard knows about gets it, always. Reading
+                # `selections` for one of these would find no rows and unshare
+                # it from the entire fleet on the first cycle after it is
+                # created -- the B16 failure shape, arrived at by a different
+                # route.
+                for devices in editor_devices.values():
+                    desired |= devices
+            else:
+                for editor in selections.get(slug, []):
+                    desired |= editor_devices.get(editor, set())
             # devices outside the config snapshot entirely (shouldn't happen) stay put
             desired |= actual - set(id_to_editor) - {my_id}
             if desired == actual:

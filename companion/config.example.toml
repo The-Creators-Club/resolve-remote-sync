@@ -226,6 +226,26 @@ project_roots_ttl = 300
 # repoints -- never copies, moves or deletes.
 proxy_relink_enabled = true
 
+# The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
+# asset, but Resolve only reads the LUT directories it has been told about --
+# so the companion adds the library to Resolve's own supported list
+# (Preferences > System > General > LUT Locations). Nothing on disk is moved,
+# renamed or linked, and Resolve's factory LUTs are untouched. The preference
+# can only be written while Resolve is QUIT (it rewrites its own preferences
+# on exit), so a first run with Resolve open takes effect once it is closed.
+lut_sync_enabled = true
+# Resolve's OWN LUT folder -- where "Open LUT Folder" drops a LUT, and so
+# where the tray finds LUTs that are on this machine only and offers to share
+# them. Blank = the standard location for this platform.
+resolve_lut_dir = ""
+# The exact string written into the LUT Locations list. Blank = the canonical
+# P:\Assets\Luts on Windows -- identical on every editor's machine, which is
+# what keeps an applied LUT resolvable everywhere -- and the real local path
+# on macOS, which has no P: drive.
+lut_location_override = ""
+# How often the LUT Locations entry and the stray-LUT scan are re-checked.
+lut_check_interval = 900
+
 # Warn on the Windows shutdown/restart/log-off screen while a sync is still
 # in flight, naming how much is left, so nobody switches off mid-upload
 # without knowing. The editor always keeps a "Shut down anyway" button --

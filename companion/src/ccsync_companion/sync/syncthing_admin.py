@@ -72,6 +72,56 @@ STIGNORE_LINES: list[str] = (
     + ["(?i)Proxy", "(?i)**/Proxy", "(?i)**/Proxy/**"]
 )
 
+# --------------------------------------------------------------------------
+# Shared asset folders (added 2026-08-05)
+# --------------------------------------------------------------------------
+#
+# One fleet-wide library, outside Projects/, that every editor gets without
+# ticking anything -- see server/common.py's block for the full rationale.
+# The LUT library is the first. Keep these three constants byte-identical to
+# server/common.py and dashboard/provision.py (server/tests/
+# test_cross_component.py asserts it).
+LUTS_FOLDER_ID = "assets-luts"
+LUTS_REL = "Assets/Luts"
+
+SHARED_ASSET_FOLDERS = [
+    (LUTS_FOLDER_ID, LUTS_REL, "Assets/Luts (LUT library)"),
+]
+
+SHARED_ASSET_FOLDER_IDS = frozenset(fid for fid, _rel, _label in SHARED_ASSET_FOLDERS)
+
+ASSET_JUNK_IGNORE_LINES = [
+    "(?i)**/.DS_Store", "(?i).DS_Store",
+    "(?i)**/Thumbs.db", "(?i)Thumbs.db",
+    "(?i)**/desktop.ini", "(?i)desktop.ini",
+    "(?i)**/*.tmp", "(?i)*.tmp",
+    "(?i)**/*.ccsync-tmp", "(?i)*.ccsync-tmp",
+]
+
+# The .stignore for a shared asset folder. NOT STIGNORE_LINES: there is no
+# lane A or B under this folder, so anything ignored here simply never syncs.
+# OS junk (which would otherwise conflict-copy between editors) plus video as
+# a blast-radius brake -- this folder reaches every machine in the fleet and
+# has no tick to opt out of. See server/common.build_asset_stignore_lines.
+ASSET_STIGNORE_LINES: list[str] = (
+    [f"(?i)*{ext}" for ext in _VIDEO_EXTS]
+    + PARTIAL_IGNORE_LINES
+    + ASSET_JUNK_IGNORE_LINES
+)
+
+
+def missing_asset_ignore_lines(fetched: Any) -> list[str]:
+    """missing_ignore_lines() for a shared asset folder. Same fail-closed
+    shape handling: an unrecognised body (notably `{"ignore": null}`, which
+    is what a folder with no .stignore at all reports) counts every line as
+    missing."""
+    lines = fetched.get("ignore") if isinstance(fetched, dict) else fetched
+    if not isinstance(lines, (list, tuple)):
+        return list(ASSET_STIGNORE_LINES)
+    present = {str(line).strip() for line in lines}
+    return [want for want in ASSET_STIGNORE_LINES if want not in present]
+
+
 # Editor-side folders had NO versioning at all: the safety net existed only
 # server-side (dashboard provision.py, server/setup_syncthing_folder.py), so
 # any propagated delete -- from a NAS-side mistake, another editor, or any
@@ -279,7 +329,12 @@ class SyncthingAdmin:
         return self._request("GET", "/rest/cluster/pending/folders")
 
     def accept_folder(
-        self, folder_id: str, label: str, local_path: str, offered_by_device_id: str
+        self,
+        folder_id: str,
+        label: str,
+        local_path: str,
+        offered_by_device_id: str,
+        ignore_lines: Optional[list[str]] = None,
     ) -> Any:
         """Accept a pending Syncthing folder offer with the video/Proxy
         ignores already in place before it can pull anything.
@@ -304,8 +359,14 @@ class SyncthingAdmin:
         ever offer it again, so the "it stays paused" promise has to survive
         past this call. It does, via ignores_confirmed(): the id is marked
         unconfirmed BEFORE the config write and only cleared by a set_ignores
-        that actually returned."""
+        that actually returned.
+
+        `ignore_lines` defaults to the project list; a shared asset folder
+        passes ASSET_STIGNORE_LINES instead. It is a parameter rather than a
+        lookup on folder_id so that the "no folder is ever created before its
+        ignores are decided" property stays visible at the call site."""
         self._ignores_unconfirmed.add(str(folder_id))
+        lines = list(STIGNORE_LINES if ignore_lines is None else ignore_lines)
         folder_config = {
             "id": folder_id,
             "label": label,
@@ -318,7 +379,7 @@ class SyncthingAdmin:
             "devices": [{"deviceID": offered_by_device_id, "introducedBy": ""}],
         }
         result = self._write_request("POST", "/rest/config/folders", folder_config)
-        self.set_ignores(folder_id, STIGNORE_LINES)
+        self.set_ignores(folder_id, lines)
         self.set_folder_paused(folder_id, False)
         return result
 

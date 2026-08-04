@@ -1050,6 +1050,10 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     _get("setup_name", lambda: (getattr(app, "setup_project_available", None) or (lambda: None))(), None)
     _get("upgrade_info", lambda: (getattr(app, "upgrade_available", None) or (lambda: None))(), None)
     _get("removable", lambda: (getattr(app, "removable_projects", None) or (lambda: []))(), [])
+    # LUTs sitting in Resolve's own LUT folder that the shared library does
+    # not have -- i.e. added the old way, on one machine only. Cached by the
+    # app (the scan walks a directory), so this is a cheap read.
+    _get("stray_luts", lambda: (getattr(app, "stray_lut_count", None) or (lambda: 0))(), 0)
     _get("p_swap_available", lambda: (getattr(app, "p_swap_available", None) or (lambda: False))(), False)
     _get("p_mode", lambda: (getattr(app, "p_mapping_mode", None) or (lambda: "none"))(), "none")
     snap["color"] = compute_overall_color(statuses, app)
@@ -1149,6 +1153,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     def on_consolidate_project(icon, item):
         _spawn(app, "Bring an existing project's media in", app.consolidate_project)
 
+    def on_share_luts(icon, item):
+        _spawn(app, "Share LUTs", app.share_stray_luts)
+
     def on_toggle_pause(icon, item):
         # _spawn, not _guarded: menu callbacks run ON the tray's message
         # loop (win32), and toggle_pause can hold sequencer/Syncthing config
@@ -1223,6 +1230,17 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         ), pystray.Menu.SEPARATOR]
         if upgrade_info else []
     )
+    # Present only while this machine holds LUTs the shared library doesn't.
+    # Same conditional-item pattern as the upgrade offer above: it appears
+    # when there is something to do and vanishes once there isn't.
+    stray_luts = int(snap.get("stray_luts") or 0)
+    lut_items = (
+        [pystray.MenuItem(
+            f"► {stray_luts} LUT{'s' if stray_luts != 1 else ''} only on this machine — "
+            f"share with the team", on_share_luts,
+        ), pystray.Menu.SEPARATOR]
+        if stray_luts else []
+    )
     # "nothing syncs until you do" is only TRUE when login is required. With
     # require_login=false the lanes are already running under editor_name, and
     # telling the editor otherwise sends them chasing a sign-in they don't
@@ -1278,6 +1296,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         ] if snap.get("p_swap_available") else []),
         *dashboard_items,
         *setup_items,
+        *lut_items,
         pystray.Menu.SEPARATOR,
         *upgrade_items,
         pystray.MenuItem("Copy diagnostics for your admin", on_copy_diagnostics),

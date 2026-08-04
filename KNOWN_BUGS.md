@@ -275,6 +275,25 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     with a sentence naming the problem, since stripping alone would turn a 422 into a
     misleading 401.
 
+    **MAC-8, critical — FIXED in installer 1.0.18:** the same class of defect took the
+    whole wizard down on macOS. `OnboardWizard._safe_after()` marshalled every background
+    result to the UI with `self.root.after(0, fn)` **called from the worker thread**. On
+    Windows/Tk 8.6 that works, which is why it shipped; on macOS with Tk 9 it raises
+    NOTHING and never runs the callback — verified on Tcl/Tk 9.0.3, 2026-08-04:
+
+        after() from worker: no exception raised
+        landed=[]          # 3 s later, the callback has still not run
+
+    So the `except Exception: pass` in `_safe_after` was not even reached — there was no
+    exception, just a silently discarded UI update, no log line anywhere. All **eleven**
+    call sites are affected, i.e. every background result the wizard produces: the
+    Tailscale check (where it is first visible — the status label sits on "checking…"
+    forever), sign-in, the bootstrap run, install failure, and both finish pages. The
+    published 1.0.17 wizard is unusable past page 3 on a Mac. Fixed by the same shape as
+    the companion's `ui_dispatch`: a `queue.Queue` drained by an `after()` timer that is
+    created and re-armed **on the main thread**, so only `queue.put()` ever crosses the
+    boundary. Verified against the real `OnboardWizard` driving the real page-3 worker.
+
 11. **Lane C has never run on macOS — the pairing is one-sided.** Everything the installer
     owns is in place on the first real Mac: the binary (`~/.local/ccsync/bin/syncthing`,
     installed by `macos_bootstrap.sh`), the LaunchAgent, the NAS device seeded into the

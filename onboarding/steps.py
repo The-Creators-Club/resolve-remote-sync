@@ -56,12 +56,17 @@ from ccsync_companion import identity as identity_mod
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
+# 1.0.18: the wizard's worker->UI handoff goes through a queue drained on
+# the main thread. `root.after()` from a worker thread is silently a no-op
+# on macOS/Tk 9 -- it raises nothing and never runs the callback -- so every
+# background result vanished and the wizard sat on "checking..." forever
+# (MAC-8). onboard.py is shared, so the Windows build changes too.
 # 1.0.17: the wizard itself runs on macOS (steps.py darwin branches +
 # build_onboard_macos.spec), and macos_bootstrap.sh speaks the wizard's
 # contract: CAPABILITY MISSING: markers + exit 3, RESOLVE-MAPPING-STATUS:
 # marker, and the existing-config rclone_path repair. The .sh and this file
 # must ship as a pair, same as the .ps1.
-INSTALLER_VERSION = "1.0.17"
+INSTALLER_VERSION = "1.0.18"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.

@@ -39,6 +39,7 @@ Flow (Back/Next through a single window, frames swapped in place):
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import webbrowser
 from pathlib import Path
@@ -53,6 +54,10 @@ logging.basicConfig(level=logging.INFO, format="[onboard] %(message)s")
 log = logging.getLogger("onboard")
 
 IS_MACOS = steps.IS_MACOS
+
+# How often the main thread drains the worker->UI queue. Small enough that a
+# status label never feels laggy, large enough not to spin (see _safe_after).
+UI_PUMP_MS = 50
 
 WINDOW_TITLE = "CCSYNC.APP: onboarding" if IS_MACOS else "CCSYNC.EXE: onboarding"
 WINDOW_SIZE = "660x560"
@@ -102,6 +107,12 @@ class OnboardWizard:
         self.root.geometry(WINDOW_SIZE)
         self.root.configure(bg=theme.BG)
         self.root.minsize(560, 480)
+
+        # Worker->UI handoff. Started here, before any page can spawn a
+        # thread, so no result can be queued against a pump that is not
+        # running yet (see _safe_after / _start_ui_pump).
+        self._ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
+        self._start_ui_pump()
 
         # -- accumulated state --------------------------------------------
         self.role_var = tk.StringVar(value="editor")
@@ -170,11 +181,48 @@ class OnboardWizard:
             return btn
         return None
 
+    def _start_ui_pump(self) -> None:
+        """Drain the worker->UI queue on the main thread, forever.
+
+        MUST be called from the thread that owns the Tk root, and it re-arms
+        itself from inside its own callback, so every `after()` in this
+        wizard is created on the main thread. See _safe_after for why that
+        is not a detail.
+        """
+        def _drain() -> None:
+            while True:
+                try:
+                    fn = self._ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    fn()
+                except Exception:
+                    log.exception("a wizard UI update failed")
+            try:
+                self.root.after(UI_PUMP_MS, _drain)
+            except Exception:
+                # The root is gone (window closed) -- nothing left to update.
+                pass
+
+        self.root.after(UI_PUMP_MS, _drain)
+
     def _safe_after(self, fn: Callable[[], None]) -> None:
-        try:
-            self.root.after(0, fn)
-        except Exception:
-            pass
+        """Run `fn` on the main thread. Safe from any thread.
+
+        This used to be `self.root.after(0, fn)` straight from the worker,
+        which is fine on Windows/Tk 8.6 and is why it shipped. On macOS with
+        Tk 9 it is WORSE than an error: `after()` from a non-main thread
+        raises nothing and the callback never runs (verified on Tcl/Tk 9.0.3,
+        2026-08-04). Every background result in this wizard arrives through
+        here -- the Tailscale check, sign-in, the bootstrap run, both finish
+        pages -- so on a Mac all eleven of them silently vanished and the
+        wizard sat on "checking..." forever with nothing in any log (MAC-8).
+
+        Only queue.put() crosses the thread boundary now; the Tk call that
+        runs `fn` is made by the pump, on the main thread.
+        """
+        self._ui_queue.put(fn)
 
     # -- page 1: welcome --------------------------------------------------
 

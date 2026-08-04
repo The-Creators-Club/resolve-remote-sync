@@ -32,6 +32,7 @@ from . import proxy_relink
 from . import resolve_bridge
 from . import root_guard as root_guard_mod
 from . import shutdown_guard as shutdown_guard_mod
+from . import stills as stills_mod
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
 from .fixer import IgnoreTracker, _dest_dir_is_contained
@@ -563,6 +564,7 @@ class CompanionApp:
         # to call before _start_lut_link() has run (the tray builds its menu
         # from the moment it starts).
         self._lut_links: Any = None
+        self._stills: Any = None
         self._lut_lock = threading.Lock()
         self._stray_luts: list[dict[str, Any]] = []
 
@@ -2771,15 +2773,22 @@ class CompanionApp:
         on a first run, copies files -- neither belongs on the startup path,
         and an editor whose link cannot be made simply keeps the LUTs they
         already have."""
+        local_root = config_mod.resolved_local_root(self.config)
         try:
-            self._lut_links = luts_mod.LutLinkManager(
-                self.config, config_mod.resolved_local_root(self.config)
-            )
+            self._lut_links = luts_mod.LutLinkManager(self.config, local_root)
         except Exception:
             log.exception("failed to build the LUT link manager")
+        try:
+            self._stills = stills_mod.StillsManager(self.config, local_root)
+        except Exception:
+            log.exception("failed to build the stills manager")
+        if self._lut_links is None and self._stills is None:
             return
-        if not self._lut_links.enabled:
-            log.info("LUT sync disabled by config (lut_sync_enabled=false)")
+        if not (
+            (self._lut_links is not None and self._lut_links.enabled)
+            or (self._stills is not None and self._stills.enabled)
+        ):
+            log.info("Resolve preference sync disabled by config (LUTs and stills both off)")
             return
         try:
             threading.Thread(
@@ -2794,9 +2803,18 @@ class CompanionApp:
             interval = 900
         while not self._stop_event.is_set():
             try:
-                self._lut_links.check()
+                if self._lut_links is not None:
+                    self._lut_links.check()
             except Exception:
                 log.debug("luts: periodic check failed", exc_info=True)
+            try:
+                # Same thread and the same "only while Resolve is quit"
+                # constraint, so the two reconciles land in the same window
+                # rather than racing each other for it.
+                if self._stills is not None:
+                    self._stills.check()
+            except Exception:
+                log.debug("stills: periodic check failed", exc_info=True)
             try:
                 # Cached for the tray: the scan walks Resolve's LUT folder,
                 # which must never happen on the tray's message loop.

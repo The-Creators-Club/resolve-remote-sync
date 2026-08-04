@@ -159,7 +159,7 @@ def test_provision_creates_missing_folders(conn, fake, tmp_path):
     # are Syncthing folders, but not projects (see the shared-folder tests
     # below).
     assert set(by_id) == {"2025-ff4-nuclear", "2026-creator-profiles-season-1",
-                          "2026-ff5-energy-transition", provision.LUTS_FOLDER_ID}
+                          "2026-ff5-energy-transition"} | provision.SHARED_ASSET_FOLDER_IDS
     created = by_id["2026-ff5-energy-transition"]
     assert created["label"] == "2026/FF5/Energy Transition"
     assert created["path"] == "/data/Projects/2026/FF5/Energy Transition"

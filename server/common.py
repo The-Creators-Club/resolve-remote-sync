@@ -68,6 +68,15 @@ LUTS_FOLDER_ID = "assets-luts"
 LUTS_REL = "Assets/Luts"
 DEFAULT_LUTS_ROOT = DEFAULT_CC_ROOT + "/" + LUTS_REL
 
+# The shared Resolve gallery (stills + PowerGrades). Resolve derives the
+# gallery directory from a media storage entry rather than naming it
+# directly, and machines sharing a project database are expected to agree --
+# hence the "stills location is not the same" complaint at launch when they
+# don't. Every machine points its gallery at this one directory.
+STILLS_FOLDER_ID = "assets-stills"
+STILLS_REL = "Assets/Stills"
+DEFAULT_STILLS_ROOT = DEFAULT_CC_ROOT + "/" + STILLS_REL
+
 # (folder id, rel path under Creators_Club, human label). One entry per shared
 # asset folder; the dashboard collector provisions and shares every one of
 # them, and the companion accepts every one of them. Adding a second library
@@ -75,6 +84,7 @@ DEFAULT_LUTS_ROOT = DEFAULT_CC_ROOT + "/" + LUTS_REL
 # the same line in dashboard/provision.py's copy.
 SHARED_ASSET_FOLDERS = [
     (LUTS_FOLDER_ID, LUTS_REL, "Assets/Luts (LUT library)"),
+    (STILLS_FOLDER_ID, STILLS_REL, "Assets/Stills (Resolve gallery)"),
 ]
 
 # Project template subfolders, relative to <projects_root>/<year>/<series>/<project>/

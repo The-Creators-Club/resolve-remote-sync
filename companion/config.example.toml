@@ -246,6 +246,17 @@ lut_location_override = ""
 # How often the LUT Locations entry and the stray-LUT scan are re-checked.
 lut_check_interval = 900
 
+# The shared Resolve gallery. Resolve derives the gallery directory from a
+# media storage entry -- by default each machine's own scratch disk, which is
+# different everywhere -- and machines sharing a project database are expected
+# to agree, so they get "the stills location is not the same" at launch. This
+# gives every machine a media storage entry for the synced <local_root>/Assets/
+# Stills (with a Mapped Mount on macOS, so the database still sees P:\) and
+# points the gallery at it. Media storage entry 1 is never touched: it is the
+# scratch disk and render caching points at it. Only writable while Resolve is
+# QUIT. Set false to leave the gallery exactly where it is.
+stills_sync_enabled = true
+
 # Warn on the Windows shutdown/restart/log-off screen while a sync is still
 # in flight, naming how much is left, so nobody switches off mid-upload
 # without knowing. The editor always keeps a "Shut down anyway" button --

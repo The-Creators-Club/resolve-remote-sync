@@ -65,8 +65,14 @@ class FakeAdmin:
         return [c[0] for c in self.calls]
 
 
+# Every test drives ONE folder, so the manager is scoped to the LUT library
+# rather than to the whole SHARED_ASSET_FOLDERS list: a second library must
+# not be able to change what these assertions mean.
+ONLY_LUTS = [(LUTS_FOLDER_ID, "Assets/Luts", "Assets/Luts (LUT library)")]
+
+
 def _manager(admin, tmp_path):
-    return shared_folders.SharedFolderManager(admin, tmp_path)
+    return shared_folders.SharedFolderManager(admin, tmp_path, folders=ONLY_LUTS)
 
 
 def test_healthy_folder_costs_no_config_writes(tmp_path):
@@ -155,7 +161,8 @@ def test_reconcile_never_raises(tmp_path):
             raise RuntimeError("syncthing is down")
 
     assert Broken().__class__  # sanity
-    result = shared_folders.SharedFolderManager(Broken(), tmp_path).reconcile()
+    result = shared_folders.SharedFolderManager(
+        Broken(), tmp_path, folders=ONLY_LUTS).reconcile()
     assert result[LUTS_FOLDER_ID] == "error"
 
 
@@ -166,7 +173,7 @@ def test_failures_log_once_per_streak(tmp_path, caplog):
         def get_folder(self, folder_id):
             raise RuntimeError("syncthing is down")
 
-    manager = shared_folders.SharedFolderManager(Broken(), tmp_path)
+    manager = shared_folders.SharedFolderManager(Broken(), tmp_path, folders=ONLY_LUTS)
     with caplog.at_level("WARNING"):
         manager.reconcile()
         manager.reconcile()

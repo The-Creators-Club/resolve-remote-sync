@@ -218,6 +218,12 @@ DEFAULTS: dict[str, Any] = {
     # machine, which is what keeps a LUT reference portable) and the real
     # local path on macOS, which has no P:.
     "lut_location_override": "",
+    # False = leave Resolve's gallery where it is. On by default: Resolve
+    # derives the gallery directory from a media storage entry, which is a
+    # different disk on every machine, and machines sharing a project
+    # database are expected to agree -- that disagreement is the "stills
+    # location is not the same" complaint at launch. See stills.py.
+    "stills_sync_enabled": True,
     # How often the LUT link is re-checked, seconds. Not once-at-startup: a
     # Resolve UPGRADE deletes the link and writes a fresh factory LUT
     # directory in its place, silently detaching that machine from the shared
@@ -498,6 +504,12 @@ resolve_lut_dir = ""
 # Blank = the canonical P:\\Assets\\Luts on Windows, the real local path on Mac.
 lut_location_override = ""
 lut_check_interval = 900
+
+# Point Resolve's gallery (stills + PowerGrades) at the shared, synced folder
+# so every machine agrees on where stills live -- the disagreement is what
+# Resolve complains about at launch when machines share a project database.
+# Also only writable while Resolve is QUIT.
+stills_sync_enabled = true
 
 # Warn on the Windows shutdown/restart/log-off screen while a sync is still
 # in flight, naming how much is left. The editor always keeps a "Shut down

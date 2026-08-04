@@ -101,9 +101,12 @@ def build_stignore_lines() -> list[str]:
 
 LUTS_FOLDER_ID = "assets-luts"
 LUTS_REL = "Assets/Luts"
+STILLS_FOLDER_ID = "assets-stills"
+STILLS_REL = "Assets/Stills"
 
 SHARED_ASSET_FOLDERS = [
     (LUTS_FOLDER_ID, LUTS_REL, "Assets/Luts (LUT library)"),
+    (STILLS_FOLDER_ID, STILLS_REL, "Assets/Stills (Resolve gallery)"),
 ]
 
 SHARED_ASSET_FOLDER_IDS = frozenset(fid for fid, _rel, _label in SHARED_ASSET_FOLDERS)

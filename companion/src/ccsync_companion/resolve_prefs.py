@@ -72,7 +72,20 @@ GALLERY_FS_KEY = "System.Gallery.DtMgr.FileSys"
 GALLERY_FOLDER_KEY = "System.Gallery.Folder"
 MEDIA_ROOT_KEY = "Site.1.FS.{n}.Root"
 MEDIA_MAPPED_KEY = "Site.1.FS.{n}.MappedRoot"
+MEDIA_TYPE_KEY = "Site.1.FS.{n}.Type"
+MEDIA_DIO_KEY = "Site.1.FS.{n}.DIO"
 MEDIA_COUNT_KEY = "Site.1.FS.Count"
+
+# .config.data's form of the same media storage list.
+DATA_FS_COUNT_KEY = "IoFsNum"
+DATA_MOUNT_KEY = "IoFsMount_{n}"
+DATA_MAPPED_KEY = "IoFsMappedMount_{n}"
+DATA_DIO_KEY = "IoFsDirectIO_{n}"
+
+# Resolve appends its own filesystem entry -- /Volumes on macOS, the
+# ResolveVirtual pseudo-mount on Windows -- and expects it LAST. Ours goes in
+# front of it. Same constant, same reason, as the installer's mapping helper.
+TRAILING_ROOTS = ("/Volumes", "ResolveVirtual")
 
 
 class PrefsError(Exception):
@@ -390,6 +403,80 @@ class ResolvePrefs:
             "path": _join(root, folder) if root else "",
             "mapped_path": _join(mapped, folder, windows=True) if mapped else "",
         }
+
+    def ensure_media_storage(
+        self, root: str, mapped_root: str = "", backup_suffix: str = ""
+    ) -> tuple[str, int]:
+        """Make sure a media storage entry for `root` exists; return
+        (status, index).
+
+        Appended IN FRONT of Resolve's own trailing entry (`/Volumes` on
+        macOS, `ResolveVirtual` on Windows), which Resolve expects last --
+        the same rule installer/macos_bootstrap.sh's mapping helper follows.
+        Never touches entry 1: that is the scratch disk, and RenderCaching
+        points at it by index.
+
+        Both files, and the .config.data list is renumbered to match. Note
+        that .config.data legitimately holds FEWER entries than config.dat
+        (Resolve's auto-added trailing entry is absent from the GUI form),
+        so the two counts are not expected to agree -- only the entries they
+        share are.
+        """
+        existing = next(
+            (e for e in self.media_storage() if _normcase(e["root"]) == _normcase(root)), None
+        )
+        if existing is not None:
+            return ALREADY, existing["index"]
+        if self.data is None:
+            return FORMAT_UNRECOGNISED, 0
+        if resolve_is_running():
+            return RESOLVE_RUNNING, 0
+
+        entries = self.media_storage()
+        if not entries:
+            return FORMAT_UNRECOGNISED, 0
+        position = len(entries)
+        last_root = (entries[-1]["root"] or "").strip()
+        if last_root in TRAILING_ROOTS or any(
+            last_root.startswith(r + "/") for r in TRAILING_ROOTS
+        ):
+            position = len(entries) - 1
+        new_index = position + 1
+
+        # config.dat: shift every entry at or after the insertion point up
+        # one, then write the new one into the gap.
+        for n in range(len(entries), position, -1):
+            for key_fmt in (MEDIA_ROOT_KEY, MEDIA_MAPPED_KEY, MEDIA_TYPE_KEY, MEDIA_DIO_KEY):
+                value = self.dat.get(key_fmt.format(n=n))
+                if value is not None:
+                    self.dat.set(key_fmt.format(n=n + 1), value)
+        self.dat.set(MEDIA_TYPE_KEY.format(n=new_index), "IOFileSys")
+        self.dat.set(MEDIA_ROOT_KEY.format(n=new_index), root)
+        self.dat.set(MEDIA_MAPPED_KEY.format(n=new_index), mapped_root)
+        self.dat.set(MEDIA_DIO_KEY.format(n=new_index), "1")
+        self.dat.set(MEDIA_COUNT_KEY, str(len(entries) + 1))
+
+        # .config.data: the GUI form. Its own numbering, its own count.
+        data_count = self.data.get_int(DATA_FS_COUNT_KEY, 0)
+        data_position = data_count
+        for n in range(1, data_count + 1):
+            mount = (self.data.get(DATA_MOUNT_KEY.format(n=n)) or "").strip()
+            if mount in TRAILING_ROOTS:
+                data_position = n - 1
+                break
+        data_index = data_position + 1
+        for n in range(data_count, data_position, -1):
+            for key_fmt in (DATA_MOUNT_KEY, DATA_MAPPED_KEY, DATA_DIO_KEY):
+                value = self.data.get(key_fmt.format(n=n))
+                if value is not None:
+                    self.data.set(key_fmt.format(n=n + 1), value)
+        self.data.set(DATA_MOUNT_KEY.format(n=data_index), root)
+        self.data.set(DATA_MAPPED_KEY.format(n=data_index), mapped_root)
+        self.data.set(DATA_DIO_KEY.format(n=data_index), "1")
+        self.data.set(DATA_FS_COUNT_KEY, str(data_count + 1))
+
+        self._save_both(backup_suffix)
+        return OK, new_index
 
     def set_gallery_filesys(self, index: int, folder: str = ".gallery",
                             backup_suffix: str = "") -> str:

@@ -96,6 +96,32 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
 
 ## Remaining / follow-ups
 
+0. **MAC-12 (open, 2026-08-05): the companion hangs at startup with lane A's file
+   watcher blocked in `open()` on the external SSD.** On Leso's Mac the companion now
+   stops dead immediately after the `lane_a_video_up: managed mode` log line — no
+   timeline watcher, no tray, no sequencer. `sample` shows the watchdog thread in
+   `watchdog_add_watch → FSEventStreamCreate → watch_path → open()`, blocked in the
+   kernel for 100% of samples **while holding the GIL**, which is why every other thread
+   (main included) sits in `take_gil` and the process looks alive but does nothing.
+
+   **Not a regression from 0.5.0**: 0.4.23, rebuilt from its own commit and ad-hoc
+   re-signed, hangs at exactly the same point. It is the FSEvents watch on
+   `/Volumes/SAMDISK/Creators_Club` (exFAT, `ifree 0`); the same binary starts fully
+   (watcher + tray + UI dispatch) against a `/tmp` root on the internal APFS disk.
+   It began after the companion was stopped and restarted several times in one session
+   — most likely a wedged FSEvents stream on that volume, which needs the SSD
+   remounted or the Mac rebooted. **Needs someone at the machine.**
+
+   Two things this exposed that are worth fixing regardless:
+   - a blocking `open()` in the watchdog can freeze the entire companion, because it
+     holds the GIL. Lane A's observer start deserves a watchdog-of-the-watchdog, or at
+     minimum to run somewhere its blocking cannot take the tray and the sign-in UI with
+     it.
+   - replacing the binary by hand (`cp`) invalidates its ad-hoc signature and launchd
+     then refuses to spawn it with `OS_REASON_CODESIGNING` — silently, with nothing in
+     the companion log. Any hand-install must `codesign --force --sign -` afterwards;
+     the self-upgrade path already does the right thing and should be preferred.
+
 1. **Bench Syncthing v1/v2 — RESOLVED 2026-08-03:** the runner auto-detects the major
    version (cached probe) and uses the right CLI shape for 1.x and 2.x; unsupported
    versions produce a skipped row, never a fake measurement; v2 instances are pinned to

@@ -331,7 +331,7 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     head of both `build_filter_rules_up()` and `build_filter_rules_down()`. Worth pairing
     with a sweep for `._*` already uploaded, since the tree predates the fix.
 
-13. **MAC-9, critical: the installer emptied rclone.conf on macOS — FIXED in 1.0.18.**
+13. **MAC-9, critical: the installer emptied rclone.conf on macOS — FIXED in 1.0.19.**
     `macos_bootstrap.sh`'s "the stanza disagrees with the values you passed" branch —
     i.e. **re-running the installer**, the normal upgrade path — rewrote the remote by
     passing the seven-line stanza through `awk -v stanza=...`. macOS ships BWK awk, which

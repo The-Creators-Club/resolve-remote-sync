@@ -117,6 +117,12 @@ param(
 
     [string]$CompanionExePath = "$env:LOCALAPPDATA\ccsync\bin\ccsync-companion.exe",
     [string]$CompanionExeSource = "",
+    # How long to wait for an open DaVinci Resolve to be quit before setting
+    # its LUT/stills preferences. Resolve overwrites both preference files
+    # when it exits, so an edit made while it is running is thrown away --
+    # waiting is the only way to set them during an install. 0 skips the
+    # wait entirely (the companion applies them later either way).
+    [int]$ResolvePrefsWaitSeconds = 180,
 
     # Sync dashboard (tailnet address is right for remote editors). The token
     # comes from the admin; without it reports/selection are rejected.
@@ -1673,6 +1679,36 @@ else {
     }
 
     # Launch it now too -- autostart only takes effect at the NEXT logon;
+    # --- Resolve preferences: LUT library + shared gallery -----------------
+    # Done BEFORE the companion is launched, and by the companion exe itself
+    # (--setup-resolve-prefs), so there is ONE implementation of "edit
+    # Resolve's two preference files correctly" rather than a second one in
+    # PowerShell and a third in bash. It exits non-zero when it could not
+    # apply them, which is deliberately not fatal here: the running companion
+    # re-checks on its own schedule, so the worst case is that these arrive
+    # the next time Resolve is closed.
+    #
+    # Resolve rewrites both preference files from memory when it exits, so an
+    # edit made while it is running is silently discarded -- hence the wait
+    # rather than a best-effort write. The exe prints the "please quit
+    # Resolve" line itself and continues the moment it sees Resolve go.
+    if ($DryRun) {
+        Write-Step "[dry-run] would run: $CompanionExePath --setup-resolve-prefs"
+    }
+    elseif (Test-Path -LiteralPath $CompanionExePath) {
+        Write-Step "pointing Resolve at the shared LUT library and stills folder..."
+        try {
+            & $CompanionExePath --setup-resolve-prefs --wait-for-resolve $ResolvePrefsWaitSeconds 2>&1 |
+                ForEach-Object { Write-Host "    $_" }
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warn2 "Resolve's LUT/stills preferences were not set now -- the companion will apply them the next time Resolve is closed"
+            }
+        }
+        catch {
+            Write-Warn2 "could not set Resolve's LUT/stills preferences: $($_.Exception.Message) -- the companion retries on its own"
+        }
+    }
+
     # an editor shouldn't have to log off/on (or hunt down the exe
     # themselves) just to get the tray icon up right after install.
     $companionProcName = [System.IO.Path]::GetFileNameWithoutExtension($CompanionExePath)

@@ -30,6 +30,7 @@ from . import paths as paths_mod
 from . import popup
 from . import proxy_relink
 from . import resolve_bridge
+from . import resolve_prefs as resolve_prefs_mod
 from . import root_guard as root_guard_mod
 from . import shutdown_guard as shutdown_guard_mod
 from . import stills as stills_mod
@@ -3227,7 +3228,90 @@ class CompanionApp:
                     pass
 
 
+def setup_resolve_prefs_cli(argv: Optional[list[str]] = None) -> int:
+    """`ccsync-companion --setup-resolve-prefs [--wait-for-resolve N]`.
+
+    Point Resolve at the shared LUT library and the shared gallery, from the
+    installers, using the SAME code the running companion uses -- rather
+    than a second implementation in PowerShell and a third in bash, each
+    with its own idea of how to edit a preference file that Resolve
+    overwrites on exit.
+
+    Resolve must be quit. With --wait-for-resolve, an open Resolve is
+    reported and waited on rather than failed on, so the installer can ask
+    the editor to quit it and carry straight on when they do.
+
+    Exit codes: 0 = everything applied or already correct, 1 = nothing was
+    applied. Deliberately NOT fatal to an install either way: the companion
+    retries both on its own schedule, so the worst case is that these
+    settings arrive the next time Resolve is closed rather than now.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="ccsync-companion --setup-resolve-prefs")
+    parser.add_argument("--setup-resolve-prefs", action="store_true")
+    parser.add_argument(
+        "--wait-for-resolve", type=float, default=0.0, metavar="SECONDS",
+        help="wait up to SECONDS for a running Resolve to be quit (0 = do not wait)",
+    )
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+
+    cfg = config_mod.load_config()
+    try:
+        setup_logging(cfg)
+    except Exception:
+        _fallback_logging(cfg)
+    local_root = config_mod.resolved_local_root(cfg)
+
+    deadline = time.monotonic() + max(0.0, args.wait_for_resolve)
+    announced = False
+    while resolve_prefs_mod.resolve_is_running():
+        if not announced:
+            announced = True
+            print(
+                "DaVinci Resolve is running. It rewrites its own preferences when it "
+                "exits, so anything set now would be thrown away.\n"
+                "  --> Please quit DaVinci Resolve. This will continue automatically.",
+                flush=True,
+            )
+        if time.monotonic() >= deadline:
+            if announced:
+                print("Still running -- skipping. The companion will apply these settings "
+                      "the next time Resolve is closed.", flush=True)
+            return 1
+        time.sleep(3)
+    if announced:
+        print("Resolve is closed -- continuing.", flush=True)
+
+    applied = 0
+    for label, manager in (
+        ("LUT library", luts_mod.LutLinkManager(cfg, local_root)),
+        ("stills/gallery", stills_mod.StillsManager(cfg, local_root)),
+    ):
+        try:
+            result = manager.check()
+        except Exception as exc:
+            print(f"  {label}: failed ({exc})", flush=True)
+            continue
+        status = str(result.get("status"))
+        if result.get("changed"):
+            applied += 1
+            print(f"  {label}: set", flush=True)
+        elif status in (resolve_prefs_mod.ALREADY, "already-present"):
+            applied += 1
+            print(f"  {label}: already correct", flush=True)
+        else:
+            print(f"  {label}: not set ({result.get('message') or status})", flush=True)
+    return 0 if applied else 1
+
+
 def run() -> None:
+    # The installers call the exe with this flag to set Resolve's LUT and
+    # gallery preferences at install time. Checked before anything else --
+    # it must not acquire the single-instance lock or start a tray.
+    if "--setup-resolve-prefs" in sys.argv[1:]:
+        sys.exit(setup_resolve_prefs_cli())
+
     cfg = config_mod.load_config()
     # Logging (and a first validate_config pass) must exist BEFORE
     # CompanionApp() is constructed -- a hand-edited bad value (e.g.

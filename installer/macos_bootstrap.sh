@@ -290,6 +290,8 @@ sha256_of() {
 # (config.dat + .config.data) while Resolve is quit. Defined up here because
 # --resolve-mapping-only runs it and exits before anything else happens.
 RESOLVE_MAPPING_STATUS="unset"
+# How long to wait for an open Resolve to be quit before writing preferences.
+RESOLVE_PREFS_WAIT_SECONDS="${RESOLVE_PREFS_WAIT_SECONDS:-180}"
 
 # The helper's source lives in ONE place: the quoted heredoc below, between
 # the sentinel comment lines. Not one character of it is expanded by the
@@ -1147,6 +1149,69 @@ resolve_mapping_manual_instructions() {
     echo "        (see docs/EDITOR_SETUP.md step 6)"
 }
 
+# Every Resolve preference this installer sets lands in config.dat +
+# .config.data, and Resolve REWRITES BOTH FROM MEMORY WHEN IT EXITS -- so an
+# edit made while it is running is silently thrown away. Waiting for the
+# editor to quit it is therefore the only way to set anything during an
+# install; the alternative is to appear to succeed and change nothing.
+#
+# Returns 0 when Resolve is not running (immediately, or after the editor
+# quit it), 1 when it is still running at the deadline. Never fatal: every
+# caller degrades to "the companion will apply this later".
+wait_for_resolve_quit() {
+    local waited=0 limit="${1:-$RESOLVE_PREFS_WAIT_SECONDS}" announced=0
+    while pgrep -x "DaVinci Resolve" >/dev/null 2>&1; do
+        if [ "$announced" = 0 ]; then
+            announced=1
+            echo ""
+            echo "  DaVinci Resolve is running. It rewrites its own preferences when it"
+            echo "  quits, so anything set now would be thrown away."
+            echo ""
+            echo "    --> Please quit DaVinci Resolve. This will continue automatically."
+            echo ""
+        fi
+        if [ "$waited" -ge "$limit" ]; then
+            return 1
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+    if [ "$announced" = 1 ]; then
+        step "Resolve is closed -- continuing."
+    fi
+    return 0
+}
+
+# Point Resolve at the shared LUT library and the shared gallery.
+#
+# Runs the COMPANION BINARY rather than reimplementing the preference edit in
+# shell: the companion already does exactly this on a schedule, so there is
+# one implementation of "edit Resolve's two preference files correctly"
+# instead of a second one here and a third in windows_bootstrap.ps1.
+run_resolve_prefs() {
+    if [ "$SKIP_RESOLVE_MAPPING" = 1 ]; then
+        skip "Resolve LUT/stills preferences (--skip-resolve-mapping)"
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        dry "would run: $COMPANION_PATH --setup-resolve-prefs (LUT library + shared stills gallery)"
+        return 0
+    fi
+    if [ ! -x "$COMPANION_PATH" ]; then
+        warn "the companion is not installed at $COMPANION_PATH -- Resolve's LUT/stills preferences were not set. The companion sets them itself once it runs."
+        return 0
+    fi
+    step "pointing Resolve at the shared LUT library and stills folder..."
+    if ! wait_for_resolve_quit; then
+        warn "Resolve is still running -- its LUT/stills preferences were NOT set now. The companion applies them the next time Resolve is closed."
+        return 0
+    fi
+    if ! "$COMPANION_PATH" --setup-resolve-prefs --wait-for-resolve 0 2>&1 | sed "s/^/    /"; then
+        warn "Resolve's LUT/stills preferences were not fully set -- the companion retries on its own schedule."
+    fi
+    return 0
+}
+
 run_resolve_mapping() {
     if [ "$SKIP_RESOLVE_MAPPING" = 1 ]; then
         RESOLVE_MAPPING_STATUS="skipped"
@@ -1154,6 +1219,10 @@ run_resolve_mapping() {
         return 0
     fi
     step "configuring Resolve's Mapped Mount ($CANONICAL_PREFIX -> $CC_ROOT)..."
+    # Ask for the quit BEFORE doing any work, so the editor is prompted once
+    # for all the preference edits rather than hitting the "Resolve is
+    # running" warning per step.
+    wait_for_resolve_quit || true
     if [ ! -d "$CC_ROOT" ]; then
         warn "the local root $CC_ROOT does not exist (yet) -- the mapping will still be written, but Resolve cannot resolve $CANONICAL_PREFIX paths until it does."
     fi
@@ -2171,6 +2240,13 @@ run_resolve_mapping
 # Machine-readable echo of RESOLVE_MAPPING_STATUS for the wizard (see the
 # contract comment at the top); the human-facing wording is in the summary.
 echo "[ccsync] RESOLVE-MAPPING-STATUS: $RESOLVE_MAPPING_STATUS"
+
+# ----------------------------------------------------------------------
+# 6d. Resolve's LUT library + shared stills gallery
+# ----------------------------------------------------------------------
+# Straight after the Mapped Mount, and in the same "Resolve must be quit"
+# window the step above already asked for.
+run_resolve_prefs
 
 # ----------------------------------------------------------------------
 # 7. Print Syncthing device ID

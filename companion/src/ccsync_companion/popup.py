@@ -541,6 +541,12 @@ class PopupDialog:
     tray.py uses for pystray.
     """
 
+    # Class-level defaults for the completion handoff, so a dialog built
+    # without __init__ (the widget-free one the tests drive) still answers
+    # "nothing pending" instead of raising out of a button callback.
+    _pending_results: Optional[list[dict[str, Any]]] = None
+    _finished: bool = False
+
     def __init__(
         self,
         rows: list[dict[str, Any]],
@@ -580,6 +586,14 @@ class PopupDialog:
         # destinations).
         self._batch_rows: list[dict[str, Any]] = []
         self._failed_rows: list[dict[str, Any]] = []
+        # The worker's FINAL handoff, published the same way progress is (a
+        # plain assignment under the lock, no Tk) and picked up by the timer
+        # tick on the Tk thread. `_safe_after` is still tried first because it
+        # is instant, but it must not be the only route: it is the single
+        # cross-thread Tk call in this dialog, and when it fails the window is
+        # left permanently unclosable -- see _fix_done/_deliver_results (MAC-11).
+        self._pending_results: Optional[list[dict[str, Any]]] = None
+        self._finished = False
 
         self.root = tk.Tk()
         try:
@@ -835,10 +849,20 @@ class PopupDialog:
         whole project, or a consolidate could then start its own copy/relink
         pass over the same clips (AUDIT_2 CORE-M1). The window closes itself
         once the worker has actually stopped."""
+        # If the worker HAS stopped and its result is still sitting unread,
+        # this X is not a cancel -- there is nothing left to cancel. Finish
+        # now (which may destroy the window) rather than bouncing the click
+        # off a batch that ended minutes ago (MAC-11).
+        self._deliver_results()
         if self._fixing:
             self._on_cancel_all()
             return
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            # _deliver_results may have destroyed it a moment ago; destroying
+            # a dead window raises and there is nothing left to do about it.
+            log.debug("popup: destroy on close request failed", exc_info=True)
 
     def _on_retry_failed(self) -> None:
         """Re-run only the rows that failed. Same destinations, same rows --
@@ -887,13 +911,22 @@ class PopupDialog:
                 self._progress = info
 
         def _worker():
-            results = perform_fix_all(
-                rows, selections, self.local_root,
-                state_fn=_publish, should_stop=lambda: self._stop_requested,
-                control=self._control,
-                canonical_prefix=self.canonical_prefix,
-            )
-            self._safe_after(lambda: self._fix_done(results))
+            results: list[dict[str, Any]] = []
+            try:
+                results = perform_fix_all(
+                    rows, selections, self.local_root,
+                    state_fn=_publish, should_stop=lambda: self._stop_requested,
+                    control=self._control,
+                    canonical_prefix=self.canonical_prefix,
+                )
+            finally:
+                # PUBLISH FIRST, marshal second. The assignment is plain
+                # Python and cannot fail; root.after() is a Tk call from a
+                # non-Tk thread and can. Whichever arrives first wins --
+                # _deliver_results runs the finisher exactly once.
+                with self._progress_lock:
+                    self._pending_results = list(results)
+                self._safe_after(self._deliver_results)
 
         threading.Thread(target=_worker, name="ccsync-fixall", daemon=True).start()
         self._schedule_tick()
@@ -960,6 +993,9 @@ class PopupDialog:
                 self._render_progress(info)
         except Exception:
             log.exception("progress tick failed")
+        # The worker's completion, picked up ON THIS THREAD -- the tick is the
+        # only handoff that needs no cross-thread Tk call at all (MAC-11).
+        self._deliver_results()
         if self._fixing:
             self._schedule_tick()
 
@@ -981,6 +1017,32 @@ class PopupDialog:
                                        batch_done, batch_total))
         self._file_bar["value"] = int(1000 * file_done / file_total) if file_total else 0
         self._batch_bar["value"] = int(1000 * batch_done / batch_total) if batch_total else 0
+
+    def _deliver_results(self) -> None:
+        """Run the finisher once, on the Tk thread, whoever got here first.
+
+        Reached two ways on purpose: `_safe_after` from the worker (instant),
+        and the timer tick (250 ms later, same thread as everything else). The
+        second exists because the first is the ONE cross-thread Tk call in this
+        dialog, and its failure used to be swallowed whole -- leaving a window
+        whose FIX ALL and IGNORE buttons are disabled by _run_fix, whose STOP/
+        SKIP/CANCEL only set flags a finished worker will never read, and whose
+        X is turned into "cancel all" by _on_close_request while `_fixing` is
+        still True. Nothing on screen could close it, the work having already
+        succeeded, and the log said nothing (MAC-11, hit live 2026-08-05).
+        """
+        with self._progress_lock:
+            if self._finished or self._pending_results is None:
+                return
+            results, self._pending_results = self._pending_results, None
+            self._finished = True
+        try:
+            self._fix_done(results)
+        except Exception:
+            # The finisher itself failed. The window must still not become a
+            # dead modal: drop `_fixing` so the X works, and say so.
+            log.exception("fix all: could not finish cleanly -- the window is closable")
+            self._fixing = False
 
     def _fix_done(self, results: list[dict[str, Any]]) -> None:
         self._fixing = False
@@ -1055,16 +1117,33 @@ class PopupDialog:
                 log.info("fix all: %s", head)
         else:
             self.status_label.config(text="")
+            # on_done in a try: it is the app's callback (ignore-tracker
+            # bookkeeping, lock release, a manifest nudge), and an exception in
+            # it must not cost the user a window that can no longer be closed.
+            # The destroy is what ends run_dialog()'s `tkwait window`.
             if self.on_done is not None:
-                self.on_done(results)
+                try:
+                    self.on_done(results)
+                except Exception:
+                    log.exception("fix all: the on_done callback failed")
             self.root.destroy()
 
     def _safe_after(self, fn: Callable[[], None]) -> None:
-        """Schedule fn on the tk thread; ignore if the window is already gone."""
+        """Schedule fn on the tk thread; ignore if the window is already gone.
+
+        Called from the worker thread, so this is a Tk call from a non-Tk
+        thread: legal only while the interpreter is threaded and someone is
+        pumping, and it raises "main thread is not in main loop" when it is
+        not. Still best-effort -- the timer tick delivers the same result a
+        quarter-second later either way -- but it is logged now, because a
+        silent failure here was invisible for the whole life of the macOS
+        build (MAC-11).
+        """
         try:
             self.root.after(0, fn)
         except Exception:
-            pass
+            log.debug("could not marshal %r to the Tk thread -- the timer tick will "
+                      "pick it up", getattr(fn, "__name__", fn), exc_info=True)
 
     def _on_ignore(self) -> None:
         perform_ignore_all(self.rows, self.ignore_tracker)

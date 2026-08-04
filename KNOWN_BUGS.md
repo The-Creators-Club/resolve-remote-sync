@@ -397,6 +397,80 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     granting once. Either sign the companion with a stable identity, or have the tray
     surface "macOS is blocking access to the sync volume" when a post-upgrade read fails.
 
+17. **MAC-10, critical: the Resolve bridge never connected on macOS — FIXED in the
+    working tree, needs a release.** `resolve_bridge._default_modules_dir()` returned
+    `/Library/Application Support/Blackmagic Design/DaVinci Resolve/Scripting/Modules`.
+    The real path has a `Developer/` component — `.../DaVinci Resolve/Developer/Scripting/
+    Modules` — exactly like the Windows branch three lines above it, which gets it right
+    (`Support\Developer\Scripting\Modules`). The short path exists on no machine, so
+    `import DaVinciResolveScript` failed, `connect()` returned None, and **every** Resolve
+    feature was dead on darwin: no out-of-tree popup, no BAD_PREFIX mapping warnings, no
+    relink, no project name on the dashboard.
+
+    It was invisible because the whole chain logs at DEBUG: `connect()` logs the import
+    failure at debug, and `watcher.poll_once` logs `"DaVinci Resolve is not running"` at
+    debug (`watcher.py:135`). At the shipped `log_level = "INFO"` the log looks perfectly
+    healthy — v0.4.22 ran for hours on the first real Mac with an out-of-tree PSD sitting
+    on the timeline and not one line in `companion.log` ever mentioned Resolve. Found
+    2026-08-05 only by probing the scripting API by hand.
+
+    Two follow-ups worth doing, because the path fix alone leaves the same trap armed:
+    the "Resolve is not running" poll result should be logged at INFO **once** on the
+    transition (it is a user-visible capability going away, not a debug detail), and the
+    tray/diagnostics should say whether the bridge has ever connected this session.
+
+    Workaround for an already-installed build, no rebuild needed —
+    `_ensure_env_and_syspath()` honours a preset `RESOLVE_SCRIPT_API`, so adding
+    `EnvironmentVariables` to `~/Library/LaunchAgents/com.creatorsclub.ccsync.companion.plist`
+    and reloading the agent fixes it in place. Confirmed live: the popup fired 2 s after
+    the restart, and the frozen build reached fusionscript fine without a bundled
+    libpython, so `build.spec`'s deliberate no-pin on darwin is vindicated.
+
+18. **MAC-11, critical: a SUCCESSFUL fix-all left an unclosable window that wedged the
+    whole companion — FIXED in the working tree, needs a release.** Hit live 2026-08-05,
+    on the first fix-all ever run on a Mac (the one MAC-10 above made reachable). The copy
+    completed, `ReplaceClip` relinked the timeline, Syncthing carried the file to the NAS
+    — and the popup stayed on screen forever, ignoring every click.
+
+    `PopupDialog._safe_after` (`popup.py`) was the **one cross-thread Tk call** in the
+    dialog: the fix-all worker ends with `self.root.after(0, lambda: self._fix_done(...))`,
+    and its `except Exception: pass` swallowed the failure whole. Progress had worked
+    throughout because the worker only ever *published to a dict* that a `root.after(250)`
+    tick read on the Tk thread — the correct pattern, used everywhere except the final
+    handoff. With `_fix_done` never running, nothing on screen could dismiss the window:
+    FIX ALL and IGNORE are disabled by `_run_fix`, STOP/SKIP/CANCEL only set flags a
+    finished worker will never read again, and `_on_close_request` turns the X into
+    "cancel all" while `_fixing` is still True.
+
+    It is worse than one dead window, because of how dialogs run on darwin. `run_dialog`
+    uses `tkwait window` (correctly — a nested `mainloop()` never returns, MAC-6), and the
+    popup is opened from inside `MainThreadDispatcher._pump`'s timer callback. A popup
+    that never destroys is therefore a **`tkwait` the pump is parked inside**: it never
+    re-arms, so every later dialog request queues forever (proven in the log:
+    `UI dispatch: stopped with 1 window request(s) waiting`), and `serve()`'s mainloop
+    cannot return, so **SIGTERM cannot finish a shutdown**. The companion logged
+    `SIGTERM received`, stopped the watcher and the lanes, and then sat there alive with
+    the window up — and because the singleton guard still saw its pid, every relaunch
+    exited with `another ccsync-companion is already running`. It took `kill -9`.
+
+    Fixed by removing the dependency on that one call, not by making it more reliable:
+    the worker publishes its results to the same lock-protected dict progress goes
+    through and *then* tries `_safe_after`; `_deliver_results()` runs the finisher exactly
+    once, whichever route arrives first, and the 250 ms tick — already on the Tk thread,
+    needing no cross-thread call at all — is the route that cannot fail. Plus: `on_done`
+    runs in a `try` (an exception in the app's callback must not cost a dismissable
+    window), the X finishes a batch that has already ended instead of "cancelling" it, and
+    a failed marshal is logged. Four regression tests in `tests/test_popup.py`,
+    mutation-verified — deleting the tick delivery fails 2 of the 4 while the other 2
+    still pass. Suite: **1590 passed, 18 skipped**.
+
+    **Follow-up, not done:** shutdown still has no way to break a nested `tkwait`. Any
+    future dialog that fails to destroy itself wedges the process exactly the same way,
+    with `kill -9` the only exit. `ui_dispatch.stop()` should destroy the dialog root it
+    is parked in (it knows the hidden root; it does not track the dialog's), or the
+    shutdown path should hard-exit after a grace period rather than trusting `serve()` to
+    return.
+
 Session-2 macOS findings in full — MAC-6 through MAC-9, what is now proven on real
 hardware, and the outstanding list these items come from — are written up in
 `docs/macos-first-run-2026-08-05.md`.

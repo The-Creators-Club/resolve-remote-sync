@@ -70,7 +70,18 @@ def _default_modules_dir() -> Optional[str]:
             "Modules",
         )
     if system == "Darwin":
-        return "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Scripting/Modules"
+        # "Developer/Scripting/Modules", NOT "Scripting/Modules" -- the macOS
+        # installer puts DaVinciResolveScript.py under Developer/ exactly like
+        # the Windows branch above does, and the shorter path exists on no
+        # machine. Getting it wrong is SILENT: the import fails, connect()
+        # returns None at debug level, and the watcher reports "Resolve is not
+        # running" on every poll forever -- so no out-of-tree popup, no mapping
+        # warnings, no project name on the dashboard, with an INFO log that
+        # looks perfectly healthy (MAC-?, found 2026-08-05).
+        return (
+            "/Library/Application Support/Blackmagic Design/DaVinci Resolve/"
+            "Developer/Scripting/Modules"
+        )
     return None
 
 

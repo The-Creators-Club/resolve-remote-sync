@@ -1302,6 +1302,73 @@ def test_the_x_button_still_closes_a_dialog_that_is_not_copying():
     assert not dialog._control.cancel_all_requested()
 
 
+def test_the_timer_tick_finishes_a_batch_whose_marshal_to_the_tk_thread_failed():
+    """MAC-11: the worker's `root.after(0, ...)` is the one cross-thread Tk
+    call in this dialog, and on macOS it can fail (and used to fail SILENTLY).
+    The tick runs on the Tk thread and needs no such call, so the window still
+    closes itself once the worker has published its result."""
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._fixing = True
+    dialog._pending_results = [{"file_path": "a.mov", "ok": True}]
+
+    dialog._tick()
+
+    assert dialog._fixing is False
+    assert dialog.root.destroyed is True, (
+        "a completed FIX ALL whose after() never ran left an unclosable window: "
+        "every button is disabled by _run_fix and the X means cancel-all while "
+        "_fixing is True"
+    )
+
+
+def test_results_are_delivered_exactly_once_whichever_path_gets_there_first():
+    """Both routes fire in the normal case -- after() then the tick 250 ms
+    later. on_done must not run twice: it releases the popup lock and does the
+    app's bookkeeping."""
+    dialog = _bare_dialog([_row("a.mov")])
+    calls = []
+    dialog.on_done = calls.append
+    dialog._fixing = True
+    dialog._pending_results = [{"file_path": "a.mov", "ok": True}]
+
+    dialog._deliver_results()
+    dialog._deliver_results()
+    dialog._tick()
+
+    assert len(calls) == 1
+
+
+def test_the_x_button_closes_a_window_whose_worker_has_already_finished():
+    """There is nothing left to cancel: the batch ended. Bouncing the click
+    off _on_cancel_all is what made the window feel dead (MAC-11)."""
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._fixing = True
+    dialog._pending_results = [{"file_path": "a.mov", "ok": True}]
+
+    dialog._on_close_request()
+
+    assert dialog.root.destroyed is True
+    assert not dialog._control.cancel_all_requested()
+
+
+def test_a_raising_on_done_still_closes_the_window():
+    """The copy and the relink have already happened by then; an exception in
+    the app's callback must not cost the editor a modal it cannot dismiss."""
+    dialog = _bare_dialog([_row("a.mov")])
+
+    def boom(_results):
+        raise RuntimeError("bookkeeping blew up")
+
+    dialog.on_done = boom
+    dialog._fixing = True
+    dialog._pending_results = [{"file_path": "a.mov", "ok": True}]
+
+    dialog._deliver_results()
+
+    assert dialog.root.destroyed is True
+    assert dialog._fixing is False
+
+
 def test_the_three_buttons_set_exactly_one_meaning_each():
     dialog = _bare_dialog([_row("a.mov")])
 

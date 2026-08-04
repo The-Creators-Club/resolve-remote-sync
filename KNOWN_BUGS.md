@@ -237,5 +237,77 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
      `mainloop()` unchanged everywhere else). `root.quit()` is NOT an alternative:
      _tkinter's quit flag is process-global and would break `serve()` out of its own loop.
 
-   Checklist sections A7–H remain unrun and the external-SSD drills (E) are still blocked
-   on choosing a drive and filesystem.
+   The drive-and-filesystem question that blocked the external-SSD drills (E) is now
+   ANSWERED, but not the way the deployment is tested: the Mac's sync root is a 2 TB
+   **exFAT** volume (`/Volumes/SAMDISK`, uuid `A8424FB3-…`), chosen because it already
+   holds 1.1 TB of the editor's work and reformatting to APFS has nowhere to park that.
+   `local_root = /Volumes/SAMDISK/Creators_Club`, the root guard recorded the volume on
+   its first present sighting, and Resolve maps `P:\` to it (helper `verify` exits 0).
+   So drills E run on exFAT: no POSIX ownership or permissions, case-insensitive names,
+   and macOS writing `._` AppleDouble sidecars into the tree — which lanes A and B both
+   carry today (see item 12). Sections A7–H otherwise remain unrun, and lane C has never
+   run at all (see item 11).
+
+9. **The macOS wizard build will break on PyInstaller 7.** `onboarding/build_onboard_macos.spec`
+   builds a `.app` bundle in **onefile** mode, and PyInstaller 6.21 now warns:
+   *"Onefile mode in combination with macOS .app bundles (windowed mode) don't make sense
+   … and clashes with macOS's security. Please migrate to onedir mode. This will become an
+   error in v7.0."* It builds and runs today — 1.0.17 was built, published and verified
+   end-to-end on 2026-08-04 (downloaded from `[ INSTALLER ]`, unzipped, `codesign --verify
+   --deep --strict` passes). But the next PyInstaller major turns this into a hard failure,
+   and the only machine that can build this artifact is a Mac, so it would surface as a
+   broken release on the one path with no fallback. Migrate the spec to onedir before any
+   v7 upgrade; the zip shape the dashboard serves does not change (a onedir `.app` is still
+   a directory tree inside the same zip).
+
+10. **The publish scripts cannot survive a password containing control characters.**
+    `tools/release_macos.sh:92` and `tools/build_onboard_macos.sh:241` share
+    `json_escape()`, which escapes backslashes and double quotes only, and the login body
+    is assembled with `printf`. A password carrying any byte < 0x20 therefore produces
+    invalid JSON, and the dashboard answers `422 json_invalid / "Invalid control character
+    at"` — which reads as "wrong password" and is not. Hit live on 2026-08-04: the reported
+    offset is the *byte position* of the offending character (verified against the live
+    endpoint: a control char first/middle/last in the value reports 31/35/37 for
+    `{"username":"alex","password":"…"}`), so offset 31 means the FIRST byte of the
+    password. The usual source is a bracketed paste — zsh wraps pasted text in
+    `ESC[200~ … ESC[201~` and `read -r -s` captures the escapes. Typing the password works;
+    the scripts should strip the paste wrappers and reject any remaining non-printable byte
+    with a sentence naming the problem, since stripping alone would turn a 422 into a
+    misleading 401.
+
+11. **Lane C has never run on macOS — the pairing is one-sided.** Everything the installer
+    owns is in place on the first real Mac: the binary (`~/.local/ccsync/bin/syncthing`,
+    installed by `macos_bootstrap.sh`), the LaunchAgent, the NAS device seeded into the
+    local config, and the API key auto-discovered from the managed `config.xml` (so a blank
+    `syncthing_api_key` is correct, not a misconfiguration). What is missing is server-side:
+    the NAS's Syncthing has never added this Mac's device, so the connection sits
+    `NOT connected`, `pending/folders` is `{}`, and no folder has ever been offered for the
+    sequencer to accept. Not a network problem — the NAS answers on
+    `truenas.tail26290e.ts.net:22000` in 5 ms. Nothing in the installer or the wizard can
+    fix this from the editor side; someone with TrueNAS Syncthing access has to share the
+    folders with the device. Until then the macOS validation covers lanes A and B only, and
+    the `.stfolder`-marker behaviour the root guard and lane B's mass-delete defence both
+    depend on is untested on this platform.
+
+12. **Both rclone lanes sync macOS AppleDouble sidecars (`._*`) — VERIFIED 2026-08-04.**
+    On any filesystem without native extended-attribute support — exFAT, FAT32, SMB, i.e.
+    exactly the external SSDs this deployment is built around — macOS stores resource forks
+    and xattrs in sidecar files named `._<original>`. The lane filters do not exclude them,
+    and because the sidecar keeps the original's extension, lane A's `+ *.mov` (and every
+    other `+ *<ext>`) matches it. Confirmed against the real rule builders and the real
+    rclone binary, not by reading the rules:
+
+        $ rclone ls --filter-from <build_filter_rules_up()>   ./ftest
+              0 ._A001.mov          <-- uploaded to the NAS
+              0 A001.mov
+        $ rclone ls --filter-from <build_filter_rules_down()> ./ftest
+              0 Proxy/._p.mov       <-- pulled down to every editor
+              0 Proxy/p.mov
+
+    So a Mac editor on an exFAT drive publishes a junk 4 KB `._clip.mov` beside every real
+    clip, into a shared tree that Windows editors also see, and lane B redistributes the
+    proxy-side ones. `.DS_Store` is already safe — it matches no `+ *<ext>` rule and dies on
+    the trailing `- **`. Fix is one rule per lane, placed FIRST because rclone filter
+    matching is first-match-wins (a later `+ *.mov` would otherwise win): `- ._*` at the
+    head of both `build_filter_rules_up()` and `build_filter_rules_down()`. Worth pairing
+    with a sweep for `._*` already uploaded, since the tree predates the fix.

@@ -494,3 +494,66 @@ def test_a_stopped_dispatcher_never_builds_another_root():
     dispatcher.serve()  # must simply return
     assert len(roots) == 1
     assert roots[0].mainloop_running is False
+
+
+# ===========================================================================
+# run_dialog: how a dialog's own root is waited on (MAC-6)
+# ===========================================================================
+
+
+class FakeDialogRoot:
+    """A dialog root that records which loop was used to wait on it."""
+
+    def __init__(self, exists: bool = True) -> None:
+        self.exists = exists
+        self.calls: list[str] = []
+
+    def winfo_exists(self) -> bool:
+        return self.exists
+
+    def mainloop(self) -> None:
+        self.calls.append("mainloop")
+
+    def wait_window(self, window) -> None:
+        assert window is self
+        self.calls.append("wait_window")
+
+
+def test_run_dialog_uses_mainloop_off_darwin(monkeypatch):
+    """Windows must keep the loop it has run for a year -- there is no other
+    main window on the thread, so mainloop() returns on destroy."""
+    monkeypatch.setattr(ui_dispatch, "_active", None)
+    root = FakeDialogRoot()
+    ui_dispatch.run_dialog(root)
+    assert root.calls == ["mainloop"]
+
+
+def test_run_dialog_waits_on_the_window_when_a_dispatcher_owns_the_thread(monkeypatch):
+    """macOS: the dispatcher's hidden root keeps Tk_GetNumMainWindows() above
+    zero forever, so a nested mainloop() would never return -- the caller
+    would hold app._popup_active_lock for the rest of the session and every
+    later dialog would be refused with "Another CCSync window is already
+    open". tkwait window returns on destroy instead."""
+    with serving(register=True, monkeypatch=monkeypatch):
+        root = FakeDialogRoot()
+        ui_dispatch.run_dialog(root)
+    assert root.calls == ["wait_window"]
+
+
+def test_run_dialog_returns_at_once_when_the_window_is_already_gone(monkeypatch):
+    """tkwait on a destroyed window raises; a dialog that closed early is
+    simply finished."""
+    with serving(register=True, monkeypatch=monkeypatch):
+        root = FakeDialogRoot(exists=False)
+        ui_dispatch.run_dialog(root)
+    assert root.calls == []
+
+
+def test_a_stopped_dispatcher_still_sends_dialogs_to_mainloop(monkeypatch):
+    """Once the dispatcher has stopped there is no hidden root left holding
+    the window count up, so mainloop() is correct again."""
+    with serving(register=True, monkeypatch=monkeypatch) as (dispatcher, _root, _ident):
+        dispatcher.stop()
+        root = FakeDialogRoot()
+        ui_dispatch.run_dialog(root)
+    assert root.calls == ["mainloop"]

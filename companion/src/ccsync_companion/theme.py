@@ -75,13 +75,18 @@ def mono(size: int = 10, bold: bool = False) -> tuple:
     return (family, size, "bold") if bold else (family, size)
 
 
-def style_combobox(ttk_module) -> str:
+def style_combobox(ttk_module, master=None) -> str:
     """Register and return a dark ttk Combobox style name ("CC.TCombobox").
 
     Uses the 'clam' theme as the base — the only built-in theme whose
     Combobox honours fieldbackground on all platforms.
+
+    Pass the window's own root as `master`: a ttk style lives in ONE Tcl
+    interpreter, and on macOS the default root is ui_dispatch's hidden one,
+    so a masterless Style() would paint the hidden window's theme and leave
+    this dialog's combobox in default grey.
     """
-    style = ttk_module.Style()
+    style = ttk_module.Style(master)
     style.theme_use("clam")
     style.configure(
         "CC.TCombobox",
@@ -104,7 +109,7 @@ def style_combobox(ttk_module) -> str:
     return "CC.TCombobox"
 
 
-def style_progressbar(ttk_module) -> str:
+def style_progressbar(ttk_module, master=None) -> str:
     """Register and return a dark determinate ttk Progressbar style name.
 
     Same 'clam' base as style_combobox for the same reason -- it is the only
@@ -112,8 +117,10 @@ def style_progressbar(ttk_module) -> str:
     the fixer's per-file and overall bars (AUDIT_2 UX-9), which exist because
     a multi-GB copy over SMB previously showed no motion at all for twenty
     minutes and was indistinguishable from a hang.
+
+    Takes `master` for the same interpreter reason as style_combobox.
     """
-    style = ttk_module.Style()
+    style = ttk_module.Style(master)
     style.theme_use("clam")
     style.configure(
         "CC.Horizontal.TProgressbar",

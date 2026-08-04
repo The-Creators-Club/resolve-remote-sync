@@ -198,3 +198,44 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
    Treat macOS as **builds-and-tests-clean, runtime-unvalidated** until the supervised
    first-session checklist in `installer/MACOS_FIRST_RUN.md` has been walked end to end;
    `installer/README.md` → "Next steps for macOS" has the ordered plan.
+
+   **UPDATE 2026-08-04 (later still) — the companion has now RUN on a Mac**, 0.4.21 on a
+   16" MBP (macOS 15.7.4, arm64). It starts, keeps its lanes gated behind sign-in, and
+   shuts down gracefully. Three defects, all of them invisible to the test suite because
+   all three are properties of the *second* Tk interpreter that `ui_dispatch` introduces
+   on darwin and none has a runtime symptom a unit test can see:
+
+   - **MAC-7, major: the tray icon was never drawn, and the log said `tray icon started`.**
+     pystray reports success once the `NSStatusItem` exists. On a full menu bar macOS
+     gives the item a frame in the menu bar row and then does not render it. Measured:
+     screen 1728x1117, notch spanning x 771..956, four items created at once landed on
+     x = 812, 774, 736, 698 — every one of them invisible, including the one that cleared
+     the notch entirely. **Anything left of the notch's right edge is not drawn.** Ruled
+     out by experiment, each a live probe on the hardware: it is not a pystray/Tk run-loop
+     conflict (identical placement with no Tk in the process, and Tk's own windows draw
+     fine), not the activation policy (`setActivationPolicy_(1)` returns True and reads
+     back Accessory), not packaging (a real `.app` bundle with `LSUIElement` and a working
+     `CFBundleIdentifier` places identically), and not icon width. The fix is diagnostic,
+     not corrective — nothing app-side can conjure menu bar space: `tray.classify_status_item_placement()`
+     compares the item's frame against `NSScreen.auxiliaryTop{Left,Right}Area` three
+     seconds after `run_detached()` and logs a warning plus a toast when the icon landed
+     where macOS will not draw it. Editors on notched MacBooks WILL hit this.
+   - **MAC-6, critical: a filled-in sign-in form failed with "username and password are
+     both required".** A masterless `tk.StringVar()` binds to `tkinter._default_root`,
+     which on darwin is `ui_dispatch`'s hidden root — a different interpreter from the
+     dialog. The `Entry` wrote into the dialog's interpreter and `.get()` read the hidden
+     one's empty variable. Same defect in the fixer's destination comboboxes, where it
+     would have filed media at the tree root. Fixed by `master=`; `tests/test_tk_interpreter_hygiene.py`
+     is an AST guard so it cannot come back.
+   - **MAC-6, critical: the dialog opened exactly once per session.** Tk's loop runs
+     `while Tk_GetNumMainWindows() > 0` and that count is **per thread, not per
+     interpreter**, so the hidden root keeps a dialog's nested `mainloop()` spinning after
+     the dialog is destroyed. The caller never returned, `app._popup_active_lock` was
+     never released, and every later dialog was refused with "Another CCSync window is
+     already open" — the same wedged main thread also made the process ignore SIGTERM and
+     need a `kill -9`. Fixed with `ui_dispatch.run_dialog()` (`tkwait window` on darwin,
+     `mainloop()` unchanged everywhere else). `root.quit()` is NOT an alternative:
+     _tkinter's quit flag is process-global and would break `serve()` out of its own loop.
+
+   Checklist sections A7–H remain unrun and the external-SSD drills (E) are still blocked
+   on choosing a drive and filesystem.

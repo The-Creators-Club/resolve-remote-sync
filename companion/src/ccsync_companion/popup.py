@@ -607,7 +607,7 @@ class PopupDialog:
         self.root.configure(bg=theme.BG, padx=18, pady=14)
         self.root.grid_columnconfigure(0, weight=1)
 
-        combo_style = theme.style_combobox(ttk)
+        combo_style = theme.style_combobox(ttk, self.root)
         # dropdown list (a separate Listbox popdown) has to be themed globally
         self.root.option_add("*TCombobox*Listbox.background", theme.FIELD)
         self.root.option_add("*TCombobox*Listbox.foreground", theme.TEXT)
@@ -696,7 +696,7 @@ class PopupDialog:
         # is indistinguishable from a hang and is what makes people
         # force-quit (and per CORE-H5 a force-quit mid-copy strands a
         # multi-GB partial).
-        bar_style = theme.style_progressbar(ttk)
+        bar_style = theme.style_progressbar(ttk, self.root)
         self._progress_frame = tk.Frame(self.root, bg=theme.BG)
         self._progress_frame.grid(row=r, column=0, columnspan=2, sticky="we")
         self._progress_frame.grid_columnconfigure(0, weight=1)
@@ -788,7 +788,10 @@ class PopupDialog:
                 row=rr, column=0, columnspan=2, sticky="w")
             rr += 1
             _label(rows_frame, "  dest:", fg=theme.RED_DIM).grid(row=rr, column=0, sticky="w")
-            var = tk.StringVar(value=row["suggested_dest"])
+            # master=self.root: a masterless var binds to ui_dispatch's hidden
+            # root on macOS, so every combobox would read back empty and the
+            # fixer would file media at the tree root (see _build_sign_in_dialog).
+            var = tk.StringVar(master=self.root, value=row["suggested_dest"])
             combo = ttk.Combobox(rows_frame, textvariable=var, values=_dest_options_for(row),
                                  width=52, style=combo_style, font=theme.mono(9))
             combo.grid(row=rr, column=1, sticky="w", pady=(0, 8))
@@ -1070,7 +1073,7 @@ class PopupDialog:
         self.root.destroy()
 
     def show(self) -> None:
-        self.root.mainloop()
+        ui_dispatch.run_dialog(self.root)
 
 
 class ProgressWindow:
@@ -1171,7 +1174,7 @@ class ProgressWindow:
                 theme.apply_window_icon(tk, root)
                 root.attributes("-topmost", True)
                 root.configure(bg=theme.BG, padx=18, pady=14)
-                bar_style = theme.style_progressbar(ttk)
+                bar_style = theme.style_progressbar(ttk, root)
 
                 tk.Label(root, text=f"► {self.title}", bg=theme.BG, fg=theme.RED,
                          font=theme.mono(12, bold=True), anchor="w",
@@ -1220,7 +1223,7 @@ class ProgressWindow:
                 # the worker has actually stopped.
                 root.protocol("WM_DELETE_WINDOW", self._on_cancel_all)
                 root.after(250, self._tick)
-                root.mainloop()
+                ui_dispatch.run_dialog(root)
             finally:
                 try:
                     root.destroy()
@@ -1349,7 +1352,7 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
         theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
         theme.neon_button(tk, btn_bar, ok_label, _ok, primary=True).pack(side="left")
         root.protocol("WM_DELETE_WINDOW", _cancel)
-        root.mainloop()
+        ui_dispatch.run_dialog(root)
 
     # tk.Tk() itself can raise/wedge when other Tk roots have run on sibling
     # threads in this process (Tcl is thread-touchy) -- treat ANY dialog

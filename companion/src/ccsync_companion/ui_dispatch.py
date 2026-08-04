@@ -14,10 +14,21 @@ there `dispatch(fn)` marshals `fn` to the main thread and BLOCKS the caller
 until it has run, handing back its return value or re-raising its exception.
 The main thread is held by `MainThreadDispatcher.serve()`, which owns one
 hidden `tk.Tk()` root and pumps the queue from a `root.after()` timer while
-`root.mainloop()` runs. A dispatched `fn` is free to build its OWN `tk.Tk()`
-root and run its own nested `mainloop()` -- that is what every dialog in this
-package does, and it is legal precisely because it all now happens on one
-thread.
+`root.mainloop()` runs. A dispatched `fn` builds its OWN `tk.Tk()` root, which
+is legal precisely because it all now happens on one thread -- but it must end
+that root with `run_dialog(root)`, NOT with a nested `root.mainloop()`.
+
+WHY NOT A NESTED mainloop(): Tk's loop runs `while Tk_GetNumMainWindows() > 0`,
+and that count is per THREAD, not per interpreter. The hidden root above is a
+main window on this thread and never closes, so a dialog's nested mainloop()
+does not return when the dialog is destroyed -- it spins forever. The caller
+stays blocked, `app._popup_active_lock` is never released, and every later
+dialog dies on "Another CCSync window is already open" (MAC-6: the sign-in
+window opened once, then the tray refused to open it again for the rest of the
+session). `run_dialog()` uses `tkwait window` there instead, which returns on
+destroy and leaves the outer mainloop untouched. Note that `root.quit()` is NOT
+the fix: _tkinter's quit flag is process-global, so it would break the
+dispatcher's own mainloop out of serve() and start a shutdown.
 
 WHAT IS AND IS NOT PROVEN (read this before trusting it on a Mac):
   - the marshaling and lifecycle logic below is covered by tests that drive
@@ -369,6 +380,28 @@ def dispatch(fn: Callable[[], Any]) -> Any:
     if dispatcher is None:
         return fn()
     return dispatcher.dispatch(fn)
+
+
+def run_dialog(root: Any) -> None:
+    """Run `root`'s event loop until the window is destroyed, then return.
+
+    The last line of every dialog in this package. On Windows/Linux it is
+    `root.mainloop()` -- byte-identical to what shipped for a year, because
+    there is no other main window on the thread to keep the loop alive. On
+    macOS the dispatcher's hidden root IS such a window, so mainloop() would
+    never return (see the module docstring); `tkwait window` is used instead.
+    """
+    if not uses_main_thread():
+        root.mainloop()
+        return
+    try:
+        if not root.winfo_exists():
+            # Destroyed before we got here -- the dialog is already finished,
+            # and `tkwait window` on a dead window would raise.
+            return
+    except Exception:
+        return
+    root.wait_window(root)
 
 
 def stop() -> None:

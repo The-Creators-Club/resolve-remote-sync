@@ -1012,3 +1012,60 @@ def test_the_icon_runs_on_a_thread_on_windows_and_detached_on_macos(monkeypatch)
         assert events == [("run_detached", threading.current_thread().name)]
     finally:
         tray_mod.pystray.Icon = real_icon
+
+
+# ===========================================================================
+# MAC-7: is the icon macOS just accepted actually being drawn?
+# ===========================================================================
+#
+# The numbers below are measured, not invented: a 16" MacBook Pro, menu bar
+# full, NSScreen.frame 1728x1117, auxiliaryTopLeftArea ending at x=771 and
+# auxiliaryTopRightArea starting at x=956. Four status items created at once
+# landed on x = 812, 774, 736, 698 and NONE of them was rendered.
+
+from ccsync_companion.tray import (  # noqa: E402
+    PLACEMENT_NOTCH,
+    PLACEMENT_OFF_MENU_BAR,
+    PLACEMENT_VISIBLE,
+    classify_status_item_placement,
+)
+
+SCREEN_H = 1117.0
+NOTCH = (771.0, 956.0)
+MENU_BAR_Y = 1080.0
+
+
+def _frame(x, y=MENU_BAR_Y, w=38.0, h=37.0):
+    return (x, y, w, h)
+
+
+def test_an_item_in_the_drawn_menu_bar_is_visible():
+    assert classify_status_item_placement(
+        _frame(1010.0), SCREEN_H, NOTCH) == PLACEMENT_VISIBLE
+
+
+def test_an_item_under_the_notch_is_reported_hidden():
+    assert classify_status_item_placement(
+        _frame(812.0), SCREEN_H, NOTCH) == PLACEMENT_NOTCH
+
+
+def test_an_item_left_of_the_notch_is_hidden_too():
+    """The counter-intuitive one. Clearing the notch is not enough: the item
+    measured at x=698 was entirely left of it and still never drawn."""
+    assert classify_status_item_placement(
+        _frame(698.0), SCREEN_H, NOTCH) == PLACEMENT_NOTCH
+
+
+def test_an_item_macos_never_placed_is_reported_off_the_menu_bar():
+    """An item still being laid out (or refused outright) reports y=-37."""
+    assert classify_status_item_placement(
+        _frame(0.0, y=-37.0), SCREEN_H, NOTCH) == PLACEMENT_OFF_MENU_BAR
+
+
+def test_a_notchless_mac_only_fails_items_off_the_menu_bar():
+    """No notch API, no notch verdict -- an external display or an older Mac
+    must not have every icon declared invisible."""
+    assert classify_status_item_placement(
+        _frame(700.0), SCREEN_H, None) == PLACEMENT_VISIBLE
+    assert classify_status_item_placement(
+        _frame(0.0, y=-37.0), SCREEN_H, None) == PLACEMENT_OFF_MENU_BAR

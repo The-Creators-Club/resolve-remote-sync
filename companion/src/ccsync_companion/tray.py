@@ -380,6 +380,130 @@ def _identity_status_label(app: "CompanionApp") -> str:
     return "NOT SIGNED IN"
 
 
+# -- "the icon started, but is anyone seeing it?" (macOS) --------------------
+#
+# MAC-7. pystray reports success as soon as the NSStatusItem exists, and on a
+# full menu bar that is a lie: macOS hands the item a frame in the menu bar
+# row and then never draws it, because the space it was given is the notch (or
+# the dead zone left of it). Measured on a 16" MBP, menu bar full, screen
+# 1728x1117 with the notch spanning x 771..956 -- four items placed at once
+# landed on x = 812, 774, 736 and 698, and not one was rendered. The log said
+# "tray icon started", the editor saw nothing, and there was no other symptom.
+#
+# So the companion checks where its own icon actually landed and says so.
+
+PLACEMENT_VISIBLE = "visible"
+PLACEMENT_NOTCH = "hidden-notch"
+PLACEMENT_OFF_MENU_BAR = "hidden-off-menu-bar"
+
+# A status item that macOS has not placed in the menu bar row at all sits well
+# below it (an unplaced item reports y = -37 on a 1117pt screen).
+MENU_BAR_BAND = 2.0
+
+
+def classify_status_item_placement(
+    frame: tuple[float, float, float, float],
+    screen_height: float,
+    notch: Optional[tuple[float, float]] = None,
+    menu_bar_height: float = 37.0,
+) -> str:
+    """Is this status item frame one the editor can actually see?
+
+    `frame` is (x, y, width, height) in AppKit screen coordinates (origin
+    bottom-left), `notch` is (left_x, right_x) or None on a notchless Mac.
+
+    Anything at or right of the notch's right edge is in the drawn part of the
+    menu bar. Anything to the LEFT of it is not -- including items that clear
+    the notch entirely, which is the counter-intuitive part and the reason
+    this is a named function with tests rather than an inline `if`.
+    """
+    _x, y, _w, _h = frame
+    if y < screen_height - (MENU_BAR_BAND * menu_bar_height):
+        return PLACEMENT_OFF_MENU_BAR
+    if notch is not None and _x < notch[1]:
+        return PLACEMENT_NOTCH
+    return PLACEMENT_VISIBLE
+
+
+def _darwin_menu_bar_geometry(icon) -> Optional[tuple]:
+    """(frame, screen_height, notch) for `icon`'s status item, or None.
+
+    Read-only AppKit access; the caller runs it on the main thread.
+    """
+    try:
+        import AppKit
+
+        item = getattr(icon, "_status_item", None)
+        window = item.button().window() if item is not None else None
+        if window is None:
+            return None
+        rect = window.frame()
+        frame = (float(rect.origin.x), float(rect.origin.y),
+                 float(rect.size.width), float(rect.size.height))
+        screen = AppKit.NSScreen.mainScreen()
+        screen_height = float(screen.frame().size.height)
+        notch = None
+        try:
+            # macOS 12+, and only on a notched display: the two areas flanking
+            # the camera housing. The gap between them IS the notch.
+            left = screen.auxiliaryTopLeftArea()
+            right = screen.auxiliaryTopRightArea()
+            if left is not None and right is not None:
+                notch = (float(left.origin.x + left.size.width),
+                         float(right.origin.x))
+        except Exception:
+            notch = None
+        return frame, screen_height, notch
+    except Exception:
+        log.debug("could not read the tray icon's placement", exc_info=True)
+        return None
+
+
+def _report_icon_placement(app: "CompanionApp", icon) -> None:
+    """Log (and toast) if the icon macOS just accepted is not being drawn."""
+    geometry = _darwin_menu_bar_geometry(icon)
+    if geometry is None:
+        return
+    frame, screen_height, notch = geometry
+    placement = classify_status_item_placement(frame, screen_height, notch)
+    if placement == PLACEMENT_VISIBLE:
+        log.debug("tray icon placed at x=%.0f y=%.0f -- on the drawn menu bar",
+                  frame[0], frame[1])
+        return
+    log.warning(
+        "TRAY ICON IS NOT VISIBLE: macOS put it at x=%.0f y=%.0f (%s%s), which it "
+        "does not draw. The menu bar is full. Free a slot -- System Settings -> "
+        "Control Center, set something to 'Don't Show in Menu Bar', or quit a menu "
+        "bar app -- then restart CCSync. Everything else is running normally; only "
+        "the icon and its menu are unreachable.",
+        frame[0], frame[1], placement,
+        "" if notch is None else ", display notch spans x %.0f..%.0f" % notch,
+    )
+    _notify(app, "CCSync is running, but the menu bar is full so its icon can't be "
+                 "shown. Free a menu bar slot and restart CCSync.")
+
+
+def _schedule_icon_placement_check(app: "CompanionApp", icon, delay: float = 3.0) -> None:
+    """Check once, a few seconds in.
+
+    The frame is not final the instant run_detached() returns -- an item reads
+    as (0, -37) for the first ~200 ms while macOS is still placing it, so an
+    immediate check would report every icon as broken. AppKit is read on the
+    main thread through ui_dispatch, like every other AppKit touch here.
+    """
+    def _check() -> None:
+        try:
+            ui_dispatch.dispatch(lambda: _report_icon_placement(app, icon))
+        except Exception:
+            # Shutdown beat us to it, or there is no dispatcher. A diagnostic
+            # must never be the thing that takes the companion down.
+            log.debug("tray icon placement check did not run", exc_info=True)
+
+    timer = threading.Timer(delay, _check)
+    timer.daemon = True
+    timer.start()
+
+
 def _notify(app: "CompanionApp", msg: str) -> None:
     try:
         app._notify_tray(msg, "ccsync-companion")
@@ -449,7 +573,13 @@ def _build_sign_in_dialog(app: "CompanionApp") -> None:
 
     tk.Label(form, text="username:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
         row=0, column=0, sticky="w", pady=(0, 6))
-    username_var = tk.StringVar()
+    # master=root, NOT the default root. A Tk variable binds to the
+    # interpreter of its master, and on macOS the default root is
+    # ui_dispatch's hidden one -- a DIFFERENT interpreter from this dialog.
+    # Masterless, the Entry wrote "alex" into this root's PY_VAR0 while
+    # .get() read the hidden root's empty PY_VAR0, so a filled-in form
+    # failed with "username and password are both required" (MAC-6).
+    username_var = tk.StringVar(master=root)
     username_entry = tk.Entry(form, textvariable=username_var, font=theme.mono(10), width=28,
                                bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
                                relief="flat", highlightthickness=1,
@@ -458,7 +588,7 @@ def _build_sign_in_dialog(app: "CompanionApp") -> None:
 
     tk.Label(form, text="password:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
         row=1, column=0, sticky="w")
-    password_var = tk.StringVar()
+    password_var = tk.StringVar(master=root)
     password_entry = tk.Entry(form, textvariable=password_var, font=theme.mono(10), width=28,
                                show="*", bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
                                relief="flat", highlightthickness=1,
@@ -498,7 +628,7 @@ def _build_sign_in_dialog(app: "CompanionApp") -> None:
     root.bind("<Return>", lambda _e: _submit())
     root.protocol("WM_DELETE_WINDOW", _cancel)
     username_entry.focus_set()
-    root.mainloop()
+    ui_dispatch.run_dialog(root)
 
 
 def _on_sign_out(app: "CompanionApp") -> None:
@@ -614,7 +744,7 @@ def _build_update_dialog(app: "CompanionApp", info: dict) -> bool:
         theme.neon_button(tk, btn_bar, ok_label, _go, primary=True).pack(side="left")
         root.bind("<Return>", lambda _e: _go())
         root.protocol("WM_DELETE_WINDOW", _cancel)
-        root.mainloop()
+        ui_dispatch.run_dialog(root)
     except Exception as exc:
         log.warning("update dialog failed (%s) -- NOT applying the update", exc)
         _notify(app, "Couldn't open the update window, so nothing was changed. "
@@ -778,7 +908,7 @@ def _build_credentials_dialog(app: "CompanionApp") -> Optional[tuple[str, str]]:
 
     tk.Label(form, text="username:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
         row=0, column=0, sticky="w", pady=(0, 6))
-    username_var = tk.StringVar()
+    username_var = tk.StringVar(master=root)   # see _build_sign_in_dialog
     try:
         username_var.set(app.editor_identity() or "")
     except Exception:
@@ -791,7 +921,7 @@ def _build_credentials_dialog(app: "CompanionApp") -> Optional[tuple[str, str]]:
 
     tk.Label(form, text="password:", bg=theme.BG, fg=theme.TEXT, font=theme.mono(10)).grid(
         row=1, column=0, sticky="w")
-    password_var = tk.StringVar()
+    password_var = tk.StringVar(master=root)   # see _build_sign_in_dialog
     password_entry = tk.Entry(form, textvariable=password_var, font=theme.mono(10), width=28,
                                show="*", bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
                                relief="flat", highlightthickness=1,
@@ -821,7 +951,7 @@ def _build_credentials_dialog(app: "CompanionApp") -> Optional[tuple[str, str]]:
     root.bind("<Return>", lambda _e: _submit())
     root.protocol("WM_DELETE_WINDOW", _cancel)
     (password_entry if username_var.get() else username_entry).focus_set()
-    root.mainloop()
+    ui_dispatch.run_dialog(root)
     return result[0]
 
 
@@ -1258,6 +1388,9 @@ def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.I
         # is the first-Mac-run spike: if the two runloops refuse to coexist,
         # nothing here silently papers over it.
         icon.run_detached()
+        # ...and if they DO coexist but the menu bar has no room, say that too
+        # rather than logging "tray icon started" over an invisible icon.
+        _schedule_icon_placement_check(app, icon)
     else:
         icon_thread = threading.Thread(target=icon.run, daemon=True)
         icon_thread.start()

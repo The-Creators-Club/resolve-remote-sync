@@ -505,6 +505,19 @@ In order. Each one is blocked by the one above it.
    not been hand-primed. The current Mac has a half-finished bootstrap on it
    (rclone, syncthing, a seeded `config.toml`, an unloaded Syncthing
    LaunchAgent) — either wipe that first or the drill proves nothing.
+   The onboarding gap (option A of `docs/macos-onboarding-handoff.md` §2) is
+   now **code-complete**: the wizard runs on macOS (installer 1.0.17 —
+   `onboarding/steps.py` darwin branches, `build_onboard_macos.spec`,
+   `tools/build_onboard_macos.sh`, and `macos_bootstrap.sh` speaking the
+   wizard's CAPABILITY/exit-3/RESOLVE-MAPPING-STATUS contract). Build it on
+   the Mac after A8 and prefer it as the vehicle for the C drill — it
+   exercises the same bootstrap underneath, plus the two gates the Terminal
+   route lacks. Publishing it (`--publish --make-current`) fills the
+   `macos`/`onboard` slot with the zipped .app, which is what a Mac's
+   `[ INSTALLER ]` click then downloads by default — Windows ships no longer
+   push `macos_bootstrap.sh` into that slot (they warn when it goes stale).
+   It has **never been built or double-clicked**; treat the first run as
+   supervised.
 4. **B2 — what path spelling does Resolve on macOS actually return?**
    Answer it from the live bridge: canonical `P:\…` strings, or Mapped-Mount
    resolved `/Volumes/…` paths? The MAC-3 fix is safe either way (`plat_for`

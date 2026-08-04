@@ -848,12 +848,14 @@ async def partial_admin_approve_device(request: Request):
 # --------------------------------------------------------- installer download
 
 # The [ INSTALLER ] header link. Serves the CURRENT kind='onboard' package
-# (onboard.exe on Windows, the bootstrap script on macOS) -- the full
-# clean-install/repair package, NOT the bare companion exe. Session-gated by
-# app.py's login_gate like every other page: a new editor signs in here with
-# the same TrueNAS credentials the wizard itself will ask for. Downloading to
-# the local disk is the supported path -- running onboard.exe off the NAS
-# share locks the file for everyone and is refused by the wizard itself.
+# (onboard.exe on Windows; on macOS the zipped onboarding wizard since
+# installer 1.0.17, or the Terminal bootstrap script on older rows) -- the
+# full clean-install/repair package, NOT the bare companion exe.
+# Session-gated by app.py's login_gate like every other page: a new editor
+# signs in here with the same TrueNAS credentials the wizard itself will ask
+# for. Downloading to the local disk is the supported path -- running
+# onboard.exe off the NAS share locks the file for everyone and is refused
+# by the wizard itself.
 
 def _detect_platform(user_agent: str) -> str:
     ua = user_agent.lower()
@@ -881,9 +883,14 @@ def page_download_platform(
     settings = request.app.state.settings
     row = db.get_current_package(conn, platform, kind="onboard")
     if row is None:
+        if platform == "macos":
+            hint = ("on the Mac:\n"
+                    "  ./tools/build_onboard_macos.sh --publish --make-current")
+        else:
+            hint = ("from the base rig:\n"
+                    "  .\\installer\\build_editor_package.ps1 -Publish -MakeCurrent")
         return PlainTextResponse(
-            f"no {platform} installer is published yet. Publish one from the base rig:\n"
-            "  .\\installer\\build_editor_package.ps1 -Publish -MakeCurrent",
+            f"no {platform} installer is published yet. Publish one {hint}",
             status_code=404,
         )
     path = settings.packages_path() / row["platform"] / row["filename"]

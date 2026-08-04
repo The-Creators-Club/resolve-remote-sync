@@ -136,7 +136,8 @@ $PyprojectVersion = Get-Capture -Path (Join-Path $CompanionDir "pyproject.toml")
 $BootstrapVersion = Get-Capture -Path (Join-Path $RepoRoot "installer\windows_bootstrap.ps1") -Pattern '^\$InstallerVersion\s*=\s*"([^"]+)"'
 $OnboardVersion = Get-Capture -Path (Join-Path $RepoRoot "onboarding\steps.py") -Pattern '^INSTALLER_VERSION\s*=\s*"([^"]+)"'
 # One installer number, three copies -- the third is the macOS bootstrap that
-# ships in the same editor package and is published to the macos onboard slot.
+# ships in the same editor package (the macos onboard slot itself carries the
+# zipped wizard since 1.0.17, published from the Mac at this same number).
 $MacBootstrapVersion = Get-Capture -Path (Join-Path $RepoRoot "installer\macos_bootstrap.sh") -Pattern '^INSTALLER_VERSION="([^"]+)"'
 $DashRepoVersion = Get-Capture -Path (Join-Path $RepoRoot "dashboard\src\ccsync_dashboard\__init__.py") -Pattern '^VERSION\s*=\s*"([^"]+)"'
 

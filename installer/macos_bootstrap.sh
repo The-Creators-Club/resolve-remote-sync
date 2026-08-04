@@ -37,9 +37,20 @@
 #   ./macos_bootstrap.sh --tailnet-host truenas.tailnet.ts.net --editor-name jsmith [--dry-run]
 #   ./macos_bootstrap.sh --resolve-mapping-only [--local-root /Volumes/Rig/Creators_Club]
 #
+# CONTRACT WITH THE ONBOARDING WIZARD (onboarding/steps.py, since 1.0.17).
+# The wizard branches on three machine-readable things this script emits;
+# they must move together with steps.py:
+#   - "[ccsync] WARNING: CAPABILITY MISSING: <msg>" lines (capability_miss
+#     below) for the hard misses: no rclone, no Syncthing, no device ID.
+#   - exit code 3, and ONLY from the capability summary at the very bottom:
+#     "ran to the end, but this Mac is missing a capability". Every other
+#     non-zero exit means the install stopped part-way (INST-5 / B7).
+#   - "[ccsync] RESOLVE-MAPPING-STATUS: <status>" after the Mapped Mount
+#     step, so the wizard can surface "quit Resolve and re-run" on its
+#     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.16"
+INSTALLER_VERSION="1.0.17"
 
 DRY_RUN=0
 TAILNET_HOST=""
@@ -119,6 +130,22 @@ step() { echo "[ccsync] $1"; }
 skip() { echo "[ccsync] SKIP: $1"; }
 warn() { echo "[ccsync] WARNING: $1" >&2; }
 dry()  { echo "[ccsync] [dry-run] $1"; }
+
+# Hard-capability misses (rclone absent, Syncthing absent, no device ID).
+# Each one means this Mac can never sync something it is supposed to sync,
+# so unlike every other warning they must NOT end in exit 0 -- the wizard
+# (and a human reading the tail of the output) would take that as a green
+# DONE for a machine that will never sync (INST-5). Mirrors
+# windows_bootstrap.ps1's Add-CapabilityMiss, marker text and all --
+# onboarding/steps.py parses the "CAPABILITY MISSING:" prefix.
+CAPABILITY_MISS_COUNT=0
+CAPABILITY_MISSES=""
+capability_miss() {
+    CAPABILITY_MISS_COUNT=$((CAPABILITY_MISS_COUNT + 1))
+    CAPABILITY_MISSES="${CAPABILITY_MISSES}$1
+"
+    echo "[ccsync] WARNING: CAPABILITY MISSING: $1" >&2
+}
 
 # Unix usernames are case-sensitive; a case mismatch produces a
 # working-looking rclone.conf that fails later with a generic SSH auth error
@@ -1130,6 +1157,7 @@ run_resolve_mapping() {
 
 if [ "$RESOLVE_MAPPING_ONLY" = 1 ]; then
     run_resolve_mapping
+    echo "[ccsync] RESOLVE-MAPPING-STATUS: $RESOLVE_MAPPING_STATUS"
     echo ""
     if [ "$RESOLVE_MAPPING_STATUS" = "ok" ] || [ "$RESOLVE_MAPPING_STATUS" = "dry-run" ]; then
         step "done -- nothing else was touched (--resolve-mapping-only)."
@@ -1235,7 +1263,7 @@ if [ -z "$RCLONE_BIN" ]; then
     if [ -n "$RCLONE_BIN" ]; then
         step "rclone resolved to: $RCLONE_BIN"
     elif [ "$DRY_RUN" != 1 ]; then
-        warn "rclone is NOT installed. Lanes A and B -- every video upload and every proxy download -- cannot run on this Mac. Install rclone (brew install rclone, or https://rclone.org/downloads/) and re-run this script."
+        capability_miss "rclone is NOT installed. Lanes A and B -- every video upload and every proxy download -- cannot run on this Mac. Install rclone (brew install rclone, or https://rclone.org/downloads/) and re-run this script."
     fi
 fi
 
@@ -1334,6 +1362,9 @@ else
 fi
 if [ "$DRY_RUN" = 1 ] && [ -z "$SYNCTHING_BIN" ]; then
     SYNCTHING_BIN="$BIN_DIR/syncthing"
+fi
+if [ "$DRY_RUN" != 1 ] && [ -z "$SYNCTHING_BIN" ]; then
+    capability_miss "Syncthing is NOT installed. Lane C -- audio, After Effects projects, graphics, subtitles, .drp project files and docs -- will never sync on this Mac. Install Syncthing (brew install syncthing, or https://syncthing.net/downloads/) and re-run this script."
 fi
 
 # Generate the config/keys before the daemon is launched, so the device ID
@@ -1974,11 +2005,44 @@ if [ -f "$CCSYNC_CONFIG_PATH" ]; then
         chmod 700 "$CCSYNC_CONFIG_DIR" 2>/dev/null || true
         chmod 600 "$CCSYNC_CONFIG_PATH" 2>/dev/null || true
     fi
+    # Repair a bare or dead rclone_path when rclone's real location is known.
+    # This branch is the NORMAL one in the wizard flow -- onboarding writes
+    # config.toml (from the companion's defaults, rclone_path = "rclone")
+    # BEFORE running this script, so the seeding below never fires there --
+    # and launchd's PATH (/usr/bin:/bin:/usr/sbin:/sbin) can never resolve a
+    # bare name: lanes A and B would report "rclone not found on PATH"
+    # forever (INST-7). Only rewrites when the current value is relative or
+    # points at nothing; an admin's working absolute path is never touched.
+    if [ -n "$RCLONE_BIN" ] && [ "$DRY_RUN" != 1 ]; then
+        CURRENT_RCLONE_PATH="$(sed -n 's/^[[:space:]]*rclone_path[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$CCSYNC_CONFIG_PATH" | head -n 1)"
+        NEEDS_RCLONE_REPAIR=0
+        case "$CURRENT_RCLONE_PATH" in
+            "$RCLONE_BIN") ;;                                    # already right
+            /*) [ -x "$CURRENT_RCLONE_PATH" ] || NEEDS_RCLONE_REPAIR=1 ;;
+            *)  NEEDS_RCLONE_REPAIR=1 ;;                         # blank or relative
+        esac
+        if [ "$NEEDS_RCLONE_REPAIR" = 1 ]; then
+            RCONF_TMP="$(mktemp "${CCSYNC_CONFIG_PATH}.ccsync.XXXXXX")"
+            if grep -q '^[[:space:]]*rclone_path[[:space:]]*=' "$CCSYNC_CONFIG_PATH"; then
+                awk -v rp="$RCLONE_BIN" '
+                    !done && /^[[:space:]]*rclone_path[[:space:]]*=/ { printf "rclone_path = \"%s\"\n", rp; done=1; next }
+                    { print }
+                ' "$CCSYNC_CONFIG_PATH" > "$RCONF_TMP"
+            else
+                cat "$CCSYNC_CONFIG_PATH" > "$RCONF_TMP"
+                printf '\n# -- set by macos_bootstrap.sh --\nrclone_path = "%s"\n' "$RCLONE_BIN" >> "$RCONF_TMP"
+            fi
+            chmod 600 "$RCONF_TMP"
+            mv "$RCONF_TMP" "$CCSYNC_CONFIG_PATH"
+            step "repaired rclone_path in $CCSYNC_CONFIG_PATH: '${CURRENT_RCLONE_PATH:-<absent>}' -> '$RCLONE_BIN' (a bare name never resolves under launchd's PATH)"
+        fi
+    fi
     step "  confirm these values match, the companion will not fix them for you:"
     echo "      editor_name = \"$EDITOR_NAME\""
     echo "      local_root  = \"$CC_ROOT\""
     echo "      remote      = \"$REMOTE_NAME\""
     echo "      remote_root = \"$REMOTE_ROOT\""
+    echo "      rclone_path = \"${RCLONE_BIN:-rclone}\""
 elif [ "$DRY_RUN" = 1 ]; then
     dry "would write seeded companion config to $CCSYNC_CONFIG_PATH"
 else
@@ -2054,6 +2118,9 @@ fi
 # 6c. Resolve's Mapped Mount preference
 # ----------------------------------------------------------------------
 run_resolve_mapping
+# Machine-readable echo of RESOLVE_MAPPING_STATUS for the wizard (see the
+# contract comment at the top); the human-facing wording is in the summary.
+echo "[ccsync] RESOLVE-MAPPING-STATUS: $RESOLVE_MAPPING_STATUS"
 
 # ----------------------------------------------------------------------
 # 7. Print Syncthing device ID
@@ -2129,7 +2196,7 @@ else
     echo " Bootstrap complete (installer $INSTALLER_VERSION)."
     echo ""
     if [ -z "$DEVICE_ID" ]; then
-        warn "could not determine the Syncthing device ID automatically."
+        capability_miss "the Syncthing device ID could NOT be determined. The admin cannot approve this Mac without it, so lane C (audio, AE, graphics, subtitles, .drp project files, docs) will never sync. Get it from the Syncthing web UI at http://127.0.0.1:8384 under Actions > Show ID and send it to the admin."
         echo " Get it from the Syncthing web UI (http://127.0.0.1:8384)"
         echo " under Actions > Show ID, and send that to the admin."
     else
@@ -2179,4 +2246,29 @@ else
         echo ""
         exit 1
     fi
+
+    # Capability summary -- the ONLY exit 3 in this script, and the only
+    # non-zero exit that means "ran to the end". Everything above warns and
+    # carries on (correct: a half-installed Mac beats an aborted one), but
+    # exiting 0 with a hard miss on the books is how a machine that can never
+    # sync gets reported as set up (INST-5). Mirrors windows_bootstrap.ps1's
+    # section 11; onboarding/steps.py keys on this exact exit code.
+    if [ "$CAPABILITY_MISS_COUNT" -gt 0 ]; then
+        echo ""
+        warn "=================================================================="
+        warn "THIS MAC IS NOT READY TO SYNC -- $CAPABILITY_MISS_COUNT required piece(s) are missing:"
+        MISS_INDEX=0
+        while IFS= read -r miss; do
+            [ -z "$miss" ] && continue
+            MISS_INDEX=$((MISS_INDEX + 1))
+            echo "[ccsync]   $MISS_INDEX. $miss" >&2
+        done <<CAPS
+$CAPABILITY_MISSES
+CAPS
+        warn "Everything else installed fine. Fix the above and re-run this script -- it is safe to re-run."
+        warn "Do NOT tell the admin you are set up yet."
+        warn "=================================================================="
+        exit 3
+    fi
 fi
+exit 0

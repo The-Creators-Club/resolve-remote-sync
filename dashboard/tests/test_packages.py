@@ -495,9 +495,16 @@ def test_onboard_kind_versions_and_currency_are_separate(env):
     assert dbmod.get_current_package(conn, "windows")["version"] == "1.0.0"
     assert dbmod.get_current_package(conn, "windows", kind="onboard")["version"] == "1.0.1"
 
-    # macOS onboard packages are scripts, not exes.
-    assert publish_onboard(client, "1.0.0", platform="macos").status_code == 200
+    # macOS onboard packages are named by CONTENT: the zipped wizard gets
+    # .zip, anything else (the Terminal bootstrap script, and every
+    # pre-1.0.17 row) gets .sh -- a zip served as .sh, or a script served
+    # as .zip, breaks a Mac editor's very first contact with the system.
+    assert publish_onboard(client, "1.0.0", platform="macos",
+                           body=b"#!/usr/bin/env bash\necho hi\n").status_code == 200
     assert dbmod.get_package(conn, "macos", "1.0.0", kind="onboard")["filename"] == "ccsync-onboard-1.0.0.sh"
+    assert publish_onboard(client, "1.0.1", platform="macos",
+                           body=b"PK\x03\x04zipzipzip").status_code == 200
+    assert dbmod.get_package(conn, "macos", "1.0.1", kind="onboard")["filename"] == "ccsync-onboard-1.0.1.zip"
 
 
 def test_upgrade_never_offers_the_onboard_package(env):
@@ -539,8 +546,30 @@ def test_installer_download_route(env):
     resp = client.get("/download", follow_redirects=False, headers={
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
     assert resp.headers["location"] == "/download/macos"
-    assert client.get("/download/macos").status_code == 404
+    resp = client.get("/download/macos")
+    assert resp.status_code == 404
+    # ...and the 404's hint names the Mac-side build, not the Windows one.
+    assert "build_onboard_macos.sh" in resp.text
     assert client.get("/download/amiga").status_code == 404
+
+
+def test_installer_download_serves_the_mac_wizard_zip(env):
+    """A Mac's [ INSTALLER ] click downloads the zipped onboarding wizard
+    (since installer 1.0.17) under its .zip name -- what lands in the
+    editor's Downloads folder must unzip to CCSync Onboarding.app, not open
+    as a mystery .sh."""
+    client, _conn, _settings = env
+    wizard_zip = b"PK\x03\x04" + b"wizard-bytes"
+    publish_onboard(as_user(client, "alex"), "1.0.17", body=wizard_zip,
+                    make_current=1, platform="macos")
+    clear_user(client)
+
+    as_user(client, "leso")
+    resp = client.get("/download/macos")
+    assert resp.status_code == 200
+    assert resp.content == wizard_zip
+    assert "ccsync-onboard-1.0.17.zip" in resp.headers["content-disposition"]
+    assert resp.headers["X-CCSync-Version"] == "1.0.17"
 
 
 # -- version="current": discovery for a fresh bootstrap ----------------

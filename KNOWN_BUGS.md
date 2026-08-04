@@ -177,6 +177,24 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
    pyobjc, the Resolve preference *write*, `caffeinate`, the external-SSD root guard and
    the self-upgrade swap remain written-from-documentation. Checklist sections A7–H are
    unrun, and the external-SSD drills (E) are blocked on choosing a drive and filesystem.
+
+   **UPDATE 2026-08-04 (later) — the onboarding wizard now runs on macOS, code-complete
+   (installer 1.0.17).** Option A of `docs/macos-onboarding-handoff.md` §2: `steps.py`
+   grew fully-tested darwin branches (bash bootstrap invocation, LaunchAgent clean
+   slate, posix local-root validation with a /Volumes ghost-mount pre-check),
+   `onboard.py` asks the same EDITOR/BASE question on both platforms (commercial
+   deployments can run a Mac base rig: companion + LaunchAgent autostart, NAS mount
+   untouched, default tree `/Volumes/TheCreatorsPool/Creators_Club`), and
+   `macos_bootstrap.sh` speaks the wizard contract (`CAPABILITY MISSING:` + exit 3,
+   `RESOLVE-MAPPING-STATUS:`, and an existing-config `rclone_path` repair that the
+   wizard flow depends on — it pre-creates `config.toml`, so the bootstrap's own
+   seeding never runs there). `build_onboard_macos.spec` + `tools/build_onboard_macos.sh
+   [--publish --make-current]` produce and publish `CCSync Onboarding.app`;
+   **the zipped wizard is now what a Mac's [ INSTALLER ] click downloads** (dashboard
+   0.3.7 names macos onboard uploads by content — zip → `.zip`, script → `.sh` — and
+   Windows ships no longer push `macos_bootstrap.sh` into that slot; they only warn on
+   staleness). The .app has **never been built or double-clicked** (needs the Mac,
+   after A8). 76 new onboarding tests + 2 dashboard tests, all green on Windows.
    Treat macOS as **builds-and-tests-clean, runtime-unvalidated** until the supervised
    first-session checklist in `installer/MACOS_FIRST_RUN.md` has been walked end to end;
    `installer/README.md` → "Next steps for macOS" has the ordered plan.

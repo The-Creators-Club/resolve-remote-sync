@@ -1,7 +1,8 @@
-"""onboard.py -- Windows onboarding wizard GUI (tkinter).
+"""onboard.py -- onboarding wizard GUI (tkinter), Windows AND macOS.
 
-Builds to onboard.exe via build_onboard.spec (PyInstaller). Deliberately
-thin: page layout, tkinter widgets, and wiring only -- every real decision
+Builds to onboard.exe via build_onboard.spec, and to CCSync Onboarding.app
+via build_onboard_macos.spec (PyInstaller, on a Mac). Deliberately thin:
+page layout, tkinter widgets, and wiring only -- every real decision
 (HTTP calls, subprocess invocations, parsing, file writes) lives in
 steps.py, which is unit tested without a display (see tests/test_steps.py).
 This module itself has no automated tests, per the same "GUI can't sensibly
@@ -10,20 +11,27 @@ be unit tested" reasoning the companion's own popup.py documents.
 Flow (Back/Next through a single window, frames swapped in place):
 
     1. Welcome   -- what this does + installer/bundled-companion versions.
-    2. Role      -- EDITOR (remote) or BASE rig; sets the dashboard-URL
-                    default (tailnet vs LAN) and which pages follow.
+    2. Role      -- EDITOR (remote) or BASE rig, both platforms; sets the
+                    dashboard-URL default (tailnet vs LAN) and which pages
+                    follow. Today's studio base rig is Windows, but the
+                    commercial deployments this is built for can run a Mac
+                    as the base rig, so the question is asked everywhere.
     3. Tailscale -- EDITOR ONLY: must be installed + joined before the
                     dashboard (on the tailnet) is reachable. "Check
-                    connection" gates Next.
+                    connection" gates Next. (winget install on Windows,
+                    download page on macOS.)
     4. Sign in   -- TrueNAS username/password; verify_account() is the
                     install gate. Failure does NOT advance.
     5. Install   -- clean-slate removal of every previous-version trace
-                    (steps.build_cleanup_plan/execute_cleanup), config +
-                    identity written FIRST, then:
-                      editor: run_bootstrap() (P: torn down + remounted,
-                              tools installed, companion -> BinDir)
-                      base:   install_companion() + autostart + launch;
-                              drive mappings deliberately untouched.
+                    (steps.build_cleanup_plan/execute_cleanup, or their
+                    _macos twins), config + identity written FIRST, then:
+                      editor: run_bootstrap() (Windows: P: torn down +
+                              remounted, tools installed, companion ->
+                              BinDir; macOS: macos_bootstrap.sh -- tools,
+                              LaunchAgents, Resolve Mapped Mount)
+                      base:   install_companion() + autostart (HKCU Run
+                              value on Windows, LaunchAgent on macOS) +
+                              launch; drive mappings / NAS mounts untouched.
     6. Finish    -- editor: Syncthing device ID + SSH public key w/ Copy
                     buttons; base: success + dashboard link.
 """
@@ -44,8 +52,14 @@ from ccsync_companion import theme
 logging.basicConfig(level=logging.INFO, format="[onboard] %(message)s")
 log = logging.getLogger("onboard")
 
-WINDOW_TITLE = "CCSYNC.EXE: onboarding"
+IS_MACOS = steps.IS_MACOS
+
+WINDOW_TITLE = "CCSYNC.APP: onboarding" if IS_MACOS else "CCSYNC.EXE: onboarding"
 WINDOW_SIZE = "660x560"
+TAILSCALE_DOWNLOAD_URL = ("https://tailscale.com/download/mac" if IS_MACOS
+                          else "https://tailscale.com/download/windows")
+# Example path shown next to the local-root field; role-independent on macOS.
+LOCAL_ROOT_EXAMPLE = "/Volumes/YourSSD/Creators_Club" if IS_MACOS else r"D:\Creators_Club"
 
 
 def _label(parent, text, **kw):
@@ -94,7 +108,7 @@ class OnboardWizard:
         self.dashboard_url_var = tk.StringVar(value=steps.DEFAULT_DASHBOARD_URL)
         self.username_var = tk.StringVar()
         self.password_var = tk.StringVar()
-        self.local_root_var = tk.StringVar(value=steps.DEFAULT_LOCAL_ROOT)
+        self.local_root_var = tk.StringVar(value=steps.default_local_root())
         self.status_var = tk.StringVar(value="")
 
         self.verified_username: Optional[str] = None
@@ -167,14 +181,28 @@ class OnboardWizard:
     def show_welcome(self) -> None:
         frame = self._new_page()
         _heading(frame, "WELCOME")
-        _label(frame, "This installer sets up (or refreshes) this machine for Creators\n"
-                       "Club editing: it removes every trace of older CCSync versions,\n"
-                       "remounts the project drive, installs the current companion app\n"
-                       "(which updates itself from the dashboard from now on), and\n"
-                       "signs it in.\n\n"
-                       "You'll need the TrueNAS username and password your admin set\n"
-                       "up for you -- nothing else. Safe to re-run any time.",
-               wraplength=560).pack(anchor="w", pady=(0, 14))
+        if IS_MACOS:
+            welcome_text = (
+                "This installer sets up (or refreshes) this Mac for Creators\n"
+                "Club editing: it removes every trace of older CCSync versions,\n"
+                "installs the sync tools and the current companion app (which\n"
+                "updates itself from the dashboard from now on), signs it in,\n"
+                "and points DaVinci Resolve's P:\\ mapping at your local copy\n"
+                "of the project tree.\n\n"
+                "You'll need the TrueNAS username and password your admin set\n"
+                "up for you -- nothing else. Safe to re-run any time."
+            )
+        else:
+            welcome_text = (
+                "This installer sets up (or refreshes) this machine for Creators\n"
+                "Club editing: it removes every trace of older CCSync versions,\n"
+                "remounts the project drive, installs the current companion app\n"
+                "(which updates itself from the dashboard from now on), and\n"
+                "signs it in.\n\n"
+                "You'll need the TrueNAS username and password your admin set\n"
+                "up for you -- nothing else. Safe to re-run any time."
+            )
+        _label(frame, welcome_text, wraplength=560).pack(anchor="w", pady=(0, 14))
 
         try:
             from ccsync_companion import config as _cfg_mod
@@ -209,13 +237,22 @@ class OnboardWizard:
             _label(row, subtitle, fg=theme.MUTED, font=theme.mono(9),
                    wraplength=540).pack(anchor="w", padx=(24, 0))
 
-        _radio(frame, "REMOTE EDITOR", "editor",
-               "You edit from elsewhere. Installs Tailscale, the sync tools,\n"
-               "and maps the P: project drive (re-created fresh).")
-        _radio(frame, "BASE RIG (the studio machine)", "base",
-               "This machine sits on the studio LAN and works directly off the\n"
-               "NAS. Installs only the companion app -- no sync tools, and your\n"
-               "P:/T: drive mappings are NOT touched.")
+        if IS_MACOS:
+            _radio(frame, "REMOTE EDITOR", "editor",
+                   "You edit from elsewhere. Installs the sync tools and points\n"
+                   "Resolve's P:\\ mapping at your local copy of the project tree.")
+            _radio(frame, "BASE RIG (the studio machine)", "base",
+                   "This machine sits on the studio LAN and works directly off the\n"
+                   "NAS share mounted under /Volumes. Installs only the companion\n"
+                   "app -- no sync tools, and your NAS mounts are NOT touched.")
+        else:
+            _radio(frame, "REMOTE EDITOR", "editor",
+                   "You edit from elsewhere. Installs Tailscale, the sync tools,\n"
+                   "and maps the P: project drive (re-created fresh).")
+            _radio(frame, "BASE RIG (the studio machine)", "base",
+                   "This machine sits on the studio LAN and works directly off the\n"
+                   "NAS. Installs only the companion app -- no sync tools, and your\n"
+                   "P:/T: drive mappings are NOT touched.")
 
         adv = tk.Frame(frame, bg=theme.BG)
         adv.pack(anchor="w", pady=(8, 8))
@@ -234,10 +271,12 @@ class OnboardWizard:
         if self.dashboard_url_var.get().strip() in url_defaults:
             self.dashboard_url_var.set(
                 steps.DEFAULT_BASE_DASHBOARD_URL if role == "base" else steps.DEFAULT_DASHBOARD_URL)
-        root_defaults = {steps.DEFAULT_LOCAL_ROOT, steps.DEFAULT_BASE_LOCAL_ROOT}
+        root_defaults = {steps.DEFAULT_LOCAL_ROOT, steps.DEFAULT_BASE_LOCAL_ROOT,
+                         steps.default_local_root(), steps.default_base_local_root()}
         if self.local_root_var.get().strip() in root_defaults:
             self.local_root_var.set(
-                steps.DEFAULT_BASE_LOCAL_ROOT if role == "base" else steps.DEFAULT_LOCAL_ROOT)
+                steps.default_base_local_root() if role == "base"
+                else steps.default_local_root())
 
     def _on_role_next(self) -> None:
         self._on_role_changed()  # ensure defaults match the final choice
@@ -264,10 +303,14 @@ class OnboardWizard:
 
         btn_row = tk.Frame(frame, bg=theme.BG)
         btn_row.pack(anchor="w", pady=(0, 14))
-        theme.neon_button(tk, btn_row, "INSTALL TAILSCALE (winget)",
-                           self._on_install_tailscale, primary=False).pack(side="left", padx=(0, 12))
+        if not IS_MACOS:
+            # winget is Windows-only; on macOS the download page (a signed
+            # .pkg, or the App Store build) is the supported route -- the
+            # fleet's Macs do not have Homebrew.
+            theme.neon_button(tk, btn_row, "INSTALL TAILSCALE (winget)",
+                               self._on_install_tailscale, primary=False).pack(side="left", padx=(0, 12))
         theme.neon_button(tk, btn_row, "OPEN DOWNLOAD PAGE",
-                           lambda: webbrowser.open("https://tailscale.com/download/windows"),
+                           lambda: webbrowser.open(TAILSCALE_DOWNLOAD_URL),
                            primary=False).pack(side="left")
 
         self.conn_status_lbl = _label(frame, "", fg=theme.MUTED)
@@ -313,8 +356,9 @@ class OnboardWizard:
                         text="tailscale is up, but the dashboard isn't reachable yet -- wait a few seconds and retry",
                         fg=theme.AMBER)
                 else:
+                    icon_word = "menu-bar" if IS_MACOS else "tray"
                     self.conn_status_lbl.config(
-                        text="tailscale isn't joined yet -- open the Tailscale tray icon and sign in",
+                        text=f"tailscale isn't joined yet -- open the Tailscale {icon_word} icon and sign in",
                         fg=theme.RED)
 
             self._safe_after(_ui)
@@ -398,10 +442,20 @@ class OnboardWizard:
         frame = self._new_page()
         role = self._effective_role()
         _heading(frame, f"STEP 4: INSTALL  (signed in as {self.verified_username})")
-        if role == "base":
+        if role == "base" and IS_MACOS:
+            _label(frame, "This removes every trace of older CCSync versions, installs\n"
+                           "the current companion app, and signs it in. Your NAS mounts\n"
+                           "are NOT touched. Safe to re-run.",
+                   wraplength=560).pack(anchor="w", pady=(0, 10))
+        elif role == "base":
             _label(frame, "This removes every trace of older CCSync versions, installs\n"
                            "the current companion app, and signs it in. Your P:/T: drive\n"
                            "mappings are NOT touched. Safe to re-run.",
+                   wraplength=560).pack(anchor="w", pady=(0, 10))
+        elif IS_MACOS:
+            _label(frame, "This removes every trace of older CCSync versions, installs\n"
+                           "rclone/Syncthing (if needed) and the companion app, and points\n"
+                           "Resolve's P:\\ mapping at your sync folder. Safe to re-run.",
                    wraplength=560).pack(anchor="w", pady=(0, 10))
         else:
             _label(frame, "This removes every trace of older CCSync versions, remounts\n"
@@ -421,9 +475,19 @@ class OnboardWizard:
         _label(form, "project tree root:" if role == "base" else "local sync folder:").grid(
             row=0, column=0, sticky="w")
         _entry(form, self.local_root_var, width=34).grid(row=0, column=1, sticky="w", padx=(10, 0))
-        if role == "base":
+        if role == "base" and IS_MACOS:
+            _label(frame, "The Creators_Club folder on the NAS share this machine edits\n"
+                           f"from (e.g. {steps.default_base_local_root()}) --\n"
+                           "mount the share first if it isn't under /Volumes yet.",
+                   fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
+        elif role == "base":
             _label(frame, "The Creators_Club folder on the NAS mapping this machine edits\n"
                            "from (default T:\\Creators_Club).",
+                   fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
+        elif IS_MACOS:
+            _label(frame, "Best on an external SSD, plugged in right now:\n"
+                           f"{LOCAL_ROOT_EXAMPLE}. A folder in your home works too,\n"
+                           "but proxies + anything you add land here -- leave room.",
                    fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
         else:
             _label(frame, "Point this at a drive with room to spare (proxies + anything you\n"
@@ -522,8 +586,12 @@ class OnboardWizard:
         """Shared clean-slate phase: enumerate + remove every trace of
         previous installs. Warnings are logged, never fatal."""
         self._append_log("removing traces of previous CCSync versions…")
-        plan = steps.build_cleanup_plan(role, self.local_root_var.get().strip() or None)
-        warnings = steps.execute_cleanup(plan, self._append_log)
+        if IS_MACOS:
+            plan = steps.build_cleanup_plan_macos()
+            warnings = steps.execute_cleanup_macos(plan, self._append_log)
+        else:
+            plan = steps.build_cleanup_plan(role, self.local_root_var.get().strip() or None)
+            warnings = steps.execute_cleanup(plan, self._append_log)
         for warning in warnings:
             self._append_log(f"WARNING: {warning}")
         self._append_log("clean slate done.")
@@ -625,6 +693,12 @@ class OnboardWizard:
             # on the exit code, which is the signal that tells them apart.
             capability_problems = steps.bootstrap_capability_warnings(output)
             self.install_warnings.extend(capability_problems)
+            # macOS only in practice (the marker never appears in the .ps1's
+            # output): "quit Resolve and re-run" and friends belong on the
+            # Finish page, not buried mid-log.
+            mapping_problem = steps.resolve_mapping_warning(output)
+            if mapping_problem:
+                self.install_warnings.append(mapping_problem)
             if steps.bootstrap_hard_failure(exit_code, capability_problems):
                 self._append_log(
                     f"bootstrap exited with code {exit_code} -- it stopped part-way "
@@ -675,15 +749,30 @@ class OnboardWizard:
             self._append_log("installing companion app…")
             exe = steps.install_companion(src=companion_src)
             self._append_log(f"companion installed: {exe}")
-            steps.register_companion_autostart(exe)
-            self._append_log("autostart registered.")
-            if steps.launch_companion(exe):
-                self._append_log("companion launched and running (check your tray).")
+            if IS_MACOS:
+                # Autostart AND launch are one act on macOS: the LaunchAgent
+                # has RunAtLoad, so loading it starts the companion -- the
+                # same plist shape macos_bootstrap.sh writes for editors.
+                plist = steps.write_companion_launch_agent(exe)
+                self._append_log(f"autostart LaunchAgent written: {plist}")
+                if steps.load_launch_agent(plist):
+                    self._append_log("companion LaunchAgent loaded (check your menu bar).")
+                else:
+                    self._append_log(
+                        "WARNING: could not load the LaunchAgent -- the companion "
+                        "will start at your next login, or load it now with: "
+                        f"launchctl bootstrap gui/$(id -u) \"{plist}\""
+                    )
             else:
-                self._append_log(
-                    "WARNING: companion did not stay running -- start it by hand "
-                    f"({exe}) and check ~/.ccsync/companion.log."
-                )
+                steps.register_companion_autostart(exe)
+                self._append_log("autostart registered.")
+                if steps.launch_companion(exe):
+                    self._append_log("companion launched and running (check your tray).")
+                else:
+                    self._append_log(
+                        "WARNING: companion did not stay running -- start it by hand "
+                        f"({exe}) and check ~/.ccsync/companion.log."
+                    )
             self._safe_after(self.show_finish_base)
         except Exception as exc:
             log.exception("base install worker failed")
@@ -731,7 +820,9 @@ class OnboardWizard:
         pub_display = self.pub_key or "(no SSH public key found -- check ~/.ssh/ccsync_ed25519.pub)"
         self._labeled_copy_field(frame, "SSH public key:", pub_display)
 
-        _label(frame, "One more step: right-click the tray icon → \"Sign in…\" is already\n"
+        icon_hint = ("the CCSync menu-bar icon's \"Sign in…\"" if IS_MACOS
+                     else "right-click the tray icon → \"Sign in…\"")
+        _label(frame, f"One more step: {icon_hint} is already\n"
                        "done for you, but nothing downloads until your admin approves the\n"
                        "two values above.", fg=theme.MUTED, font=theme.mono(9),
                wraplength=560).pack(anchor="w", pady=(6, 0))
@@ -743,12 +834,13 @@ class OnboardWizard:
     def show_finish_base(self) -> None:
         frame = self._new_page()
         _heading(frame, "DONE: BASE RIG READY")
+        icon_word = "menu bar" if IS_MACOS else "tray"
         _label(frame, "The companion app is installed, signed in as\n"
                        f"{self.verified_username}, and will start automatically at login.\n\n"
                        "No sync lanes run on this machine (it works directly off the\n"
-                       "NAS); the tray still watches your Resolve timeline for media\n"
-                       "outside the project tree, and future companion updates arrive\n"
-                       "as a one-click prompt in the tray.",
+                       f"NAS); the {icon_word} still watches your Resolve timeline for\n"
+                       "media outside the project tree, and future companion updates\n"
+                       f"arrive as a one-click prompt in the {icon_word}.",
                wraplength=560).pack(anchor="w", pady=(0, 16))
 
         _label(frame, f"dashboard: {self.dashboard_url_var.get().strip()}",

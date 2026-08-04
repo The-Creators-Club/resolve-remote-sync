@@ -1638,18 +1638,33 @@ def api_admin_approve_device(
 
 _PACKAGE_PLATFORMS = {"windows", "macos"}
 # 'companion' rows feed the fleet's self-upgrade channel (_upgrade_info);
-# 'onboard' rows are the full clean-install package (onboard.exe on Windows,
-# the bootstrap script on macOS) served by the UI's [ INSTALLER ] download.
+# 'onboard' rows are the full clean-install package served by the UI's
+# [ INSTALLER ] download: onboard.exe on Windows, and on macOS the zipped
+# onboarding wizard (CCSync Onboarding.app, since installer 1.0.17) -- with
+# the Terminal bootstrap script as the historical/hand-publish alternative.
 _PACKAGE_KINDS = {"companion", "onboard"}
 _PACKAGE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _PACKAGE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _package_filename(kind: str, platform: str, version: str) -> str:
+def _package_filename(kind: str, platform: str, version: str, head: bytes = b"") -> str:
     """Server-chosen filename -- never taken from the upload, so the packages
-    dir can only ever contain these two shapes."""
+    dir can only ever contain these shapes.
+
+    The macos onboard slot is the one place the extension follows the
+    payload (`head` = the upload's first bytes): since installer 1.0.17 the
+    package is the ZIPPED WIZARD .app (tools/build_onboard_macos.sh), but
+    the Terminal bootstrap script remains a legitimate hand-publish, and a
+    zip served as .sh -- or a script served as .zip -- breaks a Mac editor's
+    very first contact with the system. Zip magic is unambiguous (PK);
+    everything else is treated as the script, which matches every pre-1.0.17
+    row. Callers without the body yet (the .part staging name) just get the
+    .sh shape -- only the final rename/DB row needs the real answer."""
     if kind == "onboard":
-        return f"ccsync-onboard-{version}" + (".exe" if platform == "windows" else ".sh")
+        if platform == "windows":
+            return f"ccsync-onboard-{version}.exe"
+        ext = ".zip" if head[:2] == b"PK" else ".sh"
+        return f"ccsync-onboard-{version}{ext}"
     return f"ccsync-companion-{version}" + (".exe" if platform == "windows" else "")
 
 
@@ -1787,7 +1802,8 @@ async def api_publish_package(
         raise HTTPException(status_code=422, detail="sha256 query param must be 64 hex chars")
     if db.get_package(conn, platform, version, kind) is not None:
         bump = (
-            "bump INSTALLER_VERSION in installer/windows_bootstrap.ps1 and onboarding/steps.py"
+            "bump INSTALLER_VERSION in installer/windows_bootstrap.ps1, "
+            "installer/macos_bootstrap.sh and onboarding/steps.py"
             if kind == "onboard"
             else "bump VERSION in companion/src/ccsync_companion/config.py"
         )
@@ -1804,6 +1820,7 @@ async def api_publish_package(
     digest = hashlib.sha256()
     size = 0
     too_big = False
+    head = b""
     try:
         with part.open("wb") as fh:
             async for chunk in request.stream():
@@ -1813,6 +1830,8 @@ async def api_publish_package(
                     break
                 await run_in_threadpool(fh.write, chunk)
                 digest.update(chunk)
+                if not head:
+                    head = bytes(chunk[:4])
     except Exception:
         part.unlink(missing_ok=True)
         raise
@@ -1828,6 +1847,10 @@ async def api_publish_package(
             status_code=400,
             detail="sha256 mismatch (or empty body) -- upload corrupted, nothing was published",
         )
+    # The staging name above was chosen before any bytes arrived; the real
+    # extension (macos onboard: wizard zip vs bootstrap script) needs the
+    # payload's head -- see _package_filename.
+    filename = _package_filename(kind, platform, version, head=head)
     await run_in_threadpool(os.replace, part, dest_dir / filename)
 
     db.insert_companion_package(

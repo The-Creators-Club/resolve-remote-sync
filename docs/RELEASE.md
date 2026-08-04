@@ -256,12 +256,18 @@ the `X-CCSync-SHA256` response header.
 ### What the lag looks like, and why it is expected
 
 A Windows ship (`build_editor_package.ps1 -Publish -MakeCurrent`) publishes
-the Windows companion, `onboard.exe`, **and** `macos_bootstrap.sh` as the
-`macos` `kind=onboard` package. It cannot publish the macOS companion. So
+the Windows companion and `onboard.exe`. It cannot publish either macOS
+artifact: the companion binary comes from `tools/release_macos.sh --publish`
+on the Mac, and (since installer 1.0.17) the `macos` `kind=onboard` package
+is the **zipped onboarding wizard** from `tools/build_onboard_macos.sh
+--publish` on the Mac too — the pre-1.0.17 behavior of pushing
+`macos_bootstrap.sh` into that slot from Windows is retired (the script
+still ships inside the editor package and inside the wizard bundle). So
 between the Windows ship and the next Mac build session:
 
 - the dashboard's `[ PUBLISHED PACKAGES ]` box shows the current `macos`
-  `companion` at an older version than the current `windows` one;
+  `companion` (and possibly the `macos` installer) at an older version than
+  the current `windows` ones;
 - Mac editors keep running the build they have and are **not** offered an
   update — "out of date" is always computed against the current package for
   *that machine's own platform*, so a Mac shows `[ OUT OF DATE ]` only once

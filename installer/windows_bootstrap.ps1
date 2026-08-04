@@ -156,10 +156,15 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.15: the fleet token moved off this script's command line into
 # CCSYNC_DASHBOARD_TOKEN in its environment (see the block just above), which
 # is a contract between this script and steps.py; they must ship as a pair.
+# 1.0.17: the onboarding wizard runs on macOS too (onboarding/steps.py darwin
+# branches); macos_bootstrap.sh gained the wizard contract (CAPABILITY
+# MISSING: markers, exit 3 summary, RESOLVE-MAPPING-STATUS marker, and the
+# existing-config rclone_path repair). Nothing changed in this file; the
+# number is shared, so it moves when either platform's installer does.
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.16"
+$InstallerVersion = "1.0.17"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see

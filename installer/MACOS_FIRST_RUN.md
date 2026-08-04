@@ -288,6 +288,18 @@ before anyone designs UI on top of assumptions.
 Do this as the *editor* would, on the real SSD, with the companion from A8
 coming down the wire.
 
+> **Since 1.0.17 there is a second, preferred vehicle for this drill: the
+> onboarding wizard** (`tools/build_onboard_macos.sh` →
+> `onboarding/dist/CCSync Onboarding.app`; see
+> `onboarding/README.md`). It runs this same bootstrap underneath (with the
+> bundled companion via `--companion-file`, so no `DASHBOARD_TOKEN` on the
+> command line) and adds the tailnet connection check and the
+> `/api/v1/verify` credential gate in front. First: build it (needs A8's
+> binary), double-click it once supervised — Gatekeeper, Tk 9.0, and the
+> whole flow are unvalidated — then run C2–C7 through it. C1's `--dry-run`
+> and the failure-shape notes below still apply verbatim, since the wizard's
+> install log is the bootstrap's own output.
+
 - [ ] **C1. Dry run first.**
 
   ```bash

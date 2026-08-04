@@ -115,24 +115,43 @@ def test_adding_an_existing_entry_is_a_no_op(tmp_path, resolve_quit):
 
 # -- the manager -----------------------------------------------------------
 
-def _manager(tmp_path, directory, make_dir=True):
+def _manager(tmp_path, directory, make_dir=True, windows=True):
+    """`windows` is always explicit: the two platforms want DIFFERENT media
+    storage entries, so a manager that asked the host would only ever test
+    one of them -- and would fail on the other, which is how this was
+    caught (running the suite on the Mac before publishing)."""
     if make_dir:
         (tmp_path / "root" / "Assets" / "Stills").mkdir(parents=True)
     return stills.StillsManager(
         {"canonical_prefix": "P:\\"},
         tmp_path / "root",
         prefs_factory=lambda: rp.ResolvePrefs(directory),
+        windows=windows,
     )
 
 
 def test_points_the_gallery_at_the_shared_folder(tmp_path, resolve_quit):
     directory = _prefs_dir(tmp_path, WINDOWS_CONFIG_DAT, WINDOWS_CONFIG_DATA)
-    result = _manager(tmp_path, directory).check()
+    result = _manager(tmp_path, directory, windows=True).check()
 
     assert result["changed"] is True
     gallery = rp.ResolvePrefs(directory).gallery_location()
     assert gallery["root"] == "P:\\Assets\\Stills"
     assert gallery["path"] == "P:\\Assets\\Stills\\.gallery"
+
+
+def test_on_a_mac_the_gallery_entry_carries_the_canonical_mapping(tmp_path, resolve_quit):
+    """The local path is what the Mac opens; the MappedRoot is what the
+    shared project database sees, and so what has to match Windows."""
+    directory = _prefs_dir(tmp_path, MAC_CONFIG_DAT, MAC_CONFIG_DATA)
+    result = _manager(tmp_path, directory, windows=False).check()
+
+    assert result["changed"] is True
+    gallery = rp.ResolvePrefs(directory).gallery_location()
+    assert gallery["root"] == str(tmp_path / "root" / "Assets" / "Stills")
+    assert gallery["mapped_root"] == "P:\\Assets\\Stills"
+    # What the database compares between machines.
+    assert gallery["mapped_path"] == "P:\\Assets\\Stills\\.gallery"
 
 
 def test_waits_until_the_shared_folder_has_synced(tmp_path, resolve_quit):

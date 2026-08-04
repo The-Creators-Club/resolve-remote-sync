@@ -84,10 +84,17 @@ class StillsManager:
         cfg: dict[str, Any],
         local_root: Path | str,
         prefs_factory=None,
+        windows: Optional[bool] = None,
     ) -> None:
         self.cfg = cfg or {}
         self.local_root = Path(local_root).expanduser()
         self._prefs_factory = prefs_factory or resolve_prefs.ResolvePrefs
+        # A parameter rather than a bare os.name check, for the same reason
+        # luts.library_location_string takes one: the two platforms want
+        # DIFFERENT entries (Windows the canonical path with no mapping,
+        # macOS the real path plus a MappedRoot), and that difference is
+        # exactly what a single-platform test run cannot see.
+        self._windows = windows
         self._warned: set[str] = set()
 
     @property
@@ -113,7 +120,7 @@ class StillsManager:
                 "no-library", False,
                 f"the shared stills folder {target} has not synced to this machine yet")
 
-        root, mapped_root = desired_entry(self.cfg, self.local_root)
+        root, mapped_root = desired_entry(self.cfg, self.local_root, self._windows)
         try:
             prefs = self._prefs_factory()
         except resolve_prefs.PrefsError as exc:

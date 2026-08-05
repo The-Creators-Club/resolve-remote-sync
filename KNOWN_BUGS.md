@@ -497,6 +497,76 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     shutdown path should hard-exit after a grace period rather than trusting `serve()` to
     return.
 
+19. **Resolve's own script server can die at launch, and the companion called that
+    "DaVinci Resolve is not running" — message FIXED in the working tree, the Resolve-side
+    failure is not ours to fix.** Hit live on the base rig 2026-08-05, Resolve Studio
+    21.0.1.0011, with Resolve open on screen the whole time.
+
+    Resolve starts its Fusion script server as a child process at launch and the scripting
+    API talks to *that*, not to `Resolve.exe`. On this launch it failed three times and
+    gave up (`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\logs\davinci_resolve.log`):
+
+    ```
+    22:44:59 | Fusion | Started script server: 36660
+               Failed to connect to script server, retrying
+               Started script server: 32936
+               Failed to connect to script server, retrying
+               Started script server: 38896
+               Failed to connect to script server
+       141.265 [40792] Incoming connection
+       141.265 [40792] RemoteApp::Connect (…) - ioctlsocket(block) err 1
+       141.265 [40792] Incoming connection
+       141.265 [40792] RemoteApp::Connect (…) - ioctlsocket(block) err 1
+       141.375 [40792] Script Server Terminated: done: 1, err: 0
+    ```
+
+    **Resolve never retries.** Probes 15 minutes later produced no new lines at all, so the
+    API was dead for that process's entire lifetime. Only a restart of Resolve brings it
+    back — confirmed the same night: relaunched 23:10:57, `Script server connection
+    succeeded`, bridge live again.
+
+    Every cheap liveness check says everything is fine while this is happening, which is
+    what makes it so expensive to diagnose. `Resolve.exe` is running, `Started listener
+    socket at port 15000` is in the log, and 15000/20321/49152 all accept TCP. What fails
+    is one layer up: from plain Python 3.12 with the stock env, `scriptapp("Resolve")` and
+    `scriptapp("Fusion")` both return `None`. Preferences were correct throughout
+    (`System.Scripting.Mode = 1` in both `config.dat` and `.config.data`, "External
+    scripting using: Local" on screen).
+
+    Likely trigger — two clients hitting the server inside its startup window (the two
+    `Incoming connection` lines a millisecond apart); this rig runs the companion and a
+    Resolve MCP server, both of which connect unprompted. It is marginal rather than
+    deterministic: the 2026-08-04 16:37 launch and the successful 23:10 restart each
+    needed one retry before succeeding. Staggering clients behind a fully-loaded Resolve
+    makes it less likely; nothing in this repo can make it impossible.
+
+    **Our half, fixed.** `connect()` returning `None` has four causes needing four
+    different actions — Resolve not running (start it), bad scripting env (admin), failed
+    import (admin), dead script server (restart Resolve) — and `resolve_bridge` reported
+    all four as `"DaVinci Resolve is not running"`. That message named the one action that
+    could not help, and cost an hour of debugging aimed at the companion while Resolve sat
+    open. `resolve_prefs.resolve_is_running()` already existed to tell the cases apart; it
+    just was not wired in. Now: the locked helpers return a `_NOT_CONNECTED` sentinel and
+    `_explain_disconnection()` swaps in `NOT_RUNNING_MESSAGE` or `NO_SCRIPTING_MESSAGE`
+    ("…is running but isn't accepting scripting connections. Quit Resolve and reopen it.")
+    **outside `_API_LOCK`** — the probe shells out to `tasklist`/`pgrep`, and doing that
+    under the bridge lock would park the watcher, the tray and any fix-all behind a
+    subprocess on every failed poll, i.e. every 3 s with Resolve shut. A 30 s TTL cache
+    keeps a closed Resolve at two spawns a minute instead of twenty. The probe's
+    fail-closed bias is inherited deliberately: an inconclusive check reports the
+    "running" wording, because "quit and reopen Resolve" still works for someone whose
+    Resolve is shut, while "it is not running" is a dead end for someone looking straight
+    at it. Seven regression tests in `tests/test_resolve_bridge.py`, mutation-verified —
+    reverting the distinction fails 6, moving the probe back inside the lock fails the
+    cross-thread lock test. Suite: **1666 passed**.
+
+    **Follow-ups, not done.** Both were already asked for in item 17 and this incident is
+    the second time they would have paid: the poll result should be logged at INFO **once**
+    on the transition (`watcher.py:135` is still DEBUG, so a companion whose bridge is dead
+    still looks healthy at the shipped `log_level = "INFO"` until someone clicks Scan), and
+    the tray/diagnostics should say whether the bridge has connected this session. With
+    those two, this would have been a glance at the log rather than an evening.
+
 Session-2 macOS findings in full — MAC-6 through MAC-9, what is now proven on real
 hardware, and the outstanding list these items come from — are written up in
 `docs/macos-first-run-2026-08-05.md`.

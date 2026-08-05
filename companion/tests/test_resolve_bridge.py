@@ -5,10 +5,27 @@ requirements)."""
 from __future__ import annotations
 
 import logging
+import threading
 
 import pytest
 
-from ccsync_companion import resolve_bridge
+from ccsync_companion import resolve_bridge, resolve_prefs
+
+
+@pytest.fixture
+def resolve_process(monkeypatch):
+    """Pin whether a Resolve process exists, and clear the probe cache.
+
+    Without this, every disconnection test reads the machine it runs on --
+    green or red depending on whether the developer happened to have Resolve
+    open. Returns a setter so each test states its own world.
+    """
+    def _set(present: bool) -> None:
+        monkeypatch.setattr(resolve_bridge, "_probe_cache", None)
+        monkeypatch.setattr(resolve_prefs, "resolve_is_running", lambda: present)
+
+    yield _set
+    resolve_bridge._probe_cache = None
 
 
 class FakeMediaPoolItem:
@@ -121,11 +138,12 @@ class FakeResolve:
         return self._pm
 
 
-def test_get_timeline_items_no_resolve(monkeypatch):
+def test_get_timeline_items_no_resolve(monkeypatch, resolve_process):
+    resolve_process(False)
     monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
     result = resolve_bridge.get_timeline_items()
     assert result["ok"] is False
-    assert "not running" in result["message"]
+    assert result["message"] == resolve_bridge.NOT_RUNNING_MESSAGE
     assert result["items"] == []
 
 
@@ -200,11 +218,12 @@ def test_get_timeline_items_covers_video_and_audio_tracks(monkeypatch):
     assert track_types == {"video", "audio"}
 
 
-def test_get_media_pool_items_no_resolve(monkeypatch):
+def test_get_media_pool_items_no_resolve(monkeypatch, resolve_process):
+    resolve_process(False)
     monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
     result = resolve_bridge.get_media_pool_items()
     assert result["ok"] is False
-    assert "not running" in result["message"]
+    assert result["message"] == resolve_bridge.NOT_RUNNING_MESSAGE
     assert result["items"] == []
     assert result["project_name"] == ""
 
@@ -496,3 +515,129 @@ def test_clip_path_flavor_log_is_darwin_only(monkeypatch, caplog):
 
     assert [r for r in caplog.records if "clip path" in r.getMessage()] == []
     assert resolve_bridge._darwin_path_flavor_logged is False
+
+
+# -- connect() failed: which of the four reasons? --------------------------
+#
+# Live 2026-08-05, base rig: Resolve open on screen, its Fusion script server
+# dead since launch ("Failed to connect to script server" x3 in
+# davinci_resolve.log, never retried), and the companion reporting "DaVinci
+# Resolve is not running" -- which sent an hour of debugging at the companion
+# instead of at Resolve. The fix Resolve needed was a restart; the message
+# named the one action that would not have helped.
+
+
+@pytest.mark.parametrize(
+    "entry_point", ["get_timeline_items", "get_media_pool_items"]
+)
+def test_a_running_resolve_that_wont_connect_says_so(
+    monkeypatch, resolve_process, entry_point
+):
+    resolve_process(True)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+
+    result = getattr(resolve_bridge, entry_point)()
+
+    assert result["ok"] is False
+    assert result["message"] == resolve_bridge.NO_SCRIPTING_MESSAGE
+    # The actionable half: the user is told to restart the app, not to start it.
+    assert "Quit Resolve and reopen it" in result["message"]
+    assert result["message"] != resolve_bridge.NOT_RUNNING_MESSAGE
+
+
+@pytest.mark.parametrize(
+    "entry_point", ["get_timeline_items", "get_media_pool_items"]
+)
+def test_the_sentinel_never_reaches_a_caller(monkeypatch, resolve_process, entry_point):
+    """_NOT_CONNECTED is an internal marker. It goes in the tray and the log if
+    a public entry point ever forgets to translate it."""
+    resolve_process(True)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+
+    result = getattr(resolve_bridge, entry_point)()
+
+    assert resolve_bridge._NOT_CONNECTED not in result["message"]
+
+
+def test_the_process_probe_runs_with_the_api_lock_released(monkeypatch, resolve_process):
+    """The reason the sentinel exists at all.
+
+    The probe shells out (tasklist/pgrep, up to a 20 s timeout). Doing that
+    under _API_LOCK would park the watcher, the tray and any fix-all behind a
+    subprocess -- on every failed poll, i.e. every 3 s with Resolve shut.
+    _API_LOCK is reentrant, so this has to be checked from another thread:
+    from the calling thread it would re-acquire happily and prove nothing.
+    """
+    lock_was_free: list[bool] = []
+
+    def probe_from_a_watching_thread():
+        def attempt():
+            acquired = resolve_bridge._API_LOCK.acquire(timeout=2.0)
+            lock_was_free.append(acquired)
+            if acquired:
+                resolve_bridge._API_LOCK.release()
+
+        watcher = threading.Thread(target=attempt)
+        watcher.start()
+        watcher.join(5.0)
+        return True
+
+    monkeypatch.setattr(resolve_bridge, "_probe_cache", None)
+    monkeypatch.setattr(resolve_prefs, "resolve_is_running", probe_from_a_watching_thread)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+
+    resolve_bridge.get_timeline_items()
+
+    assert lock_was_free == [True]
+
+
+def test_the_probe_is_cached_between_polls(monkeypatch, resolve_process):
+    """A closed Resolve means a failed poll every 3 s. Each one must not cost
+    a process spawn."""
+    calls: list[int] = []
+
+    def counting_probe():
+        calls.append(1)
+        return False
+
+    monkeypatch.setattr(resolve_bridge, "_probe_cache", None)
+    monkeypatch.setattr(resolve_prefs, "resolve_is_running", counting_probe)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+
+    for _ in range(10):
+        resolve_bridge.get_timeline_items()
+
+    assert len(calls) == 1
+
+
+def test_an_expired_cache_is_probed_again(monkeypatch, resolve_process):
+    """Stale in the direction that matters: Resolve was running, the user quit
+    it, and the message must stop telling them to restart it."""
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+    resolve_process(True)
+    assert resolve_bridge.describe_disconnection() == resolve_bridge.NO_SCRIPTING_MESSAGE
+
+    # Age the cache past its TTL without sleeping through it.
+    stamped_at, present = resolve_bridge._probe_cache
+    monkeypatch.setattr(
+        resolve_bridge,
+        "_probe_cache",
+        (stamped_at - resolve_bridge._PROBE_TTL_SECONDS - 1.0, present),
+    )
+    monkeypatch.setattr(resolve_prefs, "resolve_is_running", lambda: False)
+
+    assert resolve_bridge.describe_disconnection() == resolve_bridge.NOT_RUNNING_MESSAGE
+
+
+def test_an_inconclusive_probe_reports_the_running_case(monkeypatch, resolve_process):
+    """resolve_is_running fails closed (True when it cannot tell) and this
+    inherits that bias deliberately: "quit and reopen Resolve" still works for
+    someone whose Resolve is shut, while "it is not running" is a dead end for
+    someone looking straight at it."""
+    def cannot_tell():
+        raise RuntimeError("tasklist unavailable")
+
+    monkeypatch.setattr(resolve_bridge, "_probe_cache", None)
+    monkeypatch.setattr(resolve_prefs, "resolve_is_running", cannot_tell)
+
+    assert resolve_bridge.describe_disconnection() == resolve_bridge.NO_SCRIPTING_MESSAGE

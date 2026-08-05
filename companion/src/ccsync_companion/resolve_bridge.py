@@ -22,9 +22,10 @@ import os
 import platform
 import sys
 import threading
+import time
 from typing import Any, Optional
 
-from . import canon, ui_state
+from . import canon, resolve_prefs, ui_state
 
 log = logging.getLogger("ccsync.resolve")
 
@@ -198,7 +199,10 @@ def connect():
             log.debug("resolve: scriptapp('Resolve') raised (%s)", exc)
             return None
         if app is None:
-            log.debug("resolve: scriptapp('Resolve') returned None -- Resolve is not running")
+            # NOT the same as "Resolve is not running" -- it also returns None
+            # for a running Resolve whose script server never came up. See
+            # describe_disconnection() below.
+            log.debug("resolve: scriptapp('Resolve') returned None -- no connection")
         return app
 
 
@@ -208,6 +212,78 @@ def try_connect() -> bool:
         return connect() is not None
     except Exception:
         return False
+
+
+# -- why the bridge has no connection --------------------------------------
+#
+# connect() returning None has four causes and they need different actions
+# from the user: Resolve isn't running (start it), the scripting environment
+# is wrong (an admin fixes it), the import failed (same), or Resolve IS
+# running and its script server is dead (quit and reopen it). Reporting all
+# four as "DaVinci Resolve is not running" sent this rig looking for a
+# companion bug for an hour on 2026-08-05 while Resolve sat open on screen --
+# its Fusion script server had failed three start attempts at launch
+# ("Failed to connect to script server" in davinci_resolve.log) and Resolve
+# never retries, so the API was dead for that process's whole lifetime.
+#
+# The message the locked helpers put in their result. Replaced with real text
+# by _explain_disconnection OUTSIDE _API_LOCK: the probe shells out, and a
+# subprocess must never run with the bridge lock held (every other thread --
+# watcher, tray, fix-all -- would block behind it).
+_NOT_CONNECTED = "\x00ccsync:not-connected"
+
+NOT_RUNNING_MESSAGE = "DaVinci Resolve is not running"
+NO_SCRIPTING_MESSAGE = (
+    "DaVinci Resolve is running but isn't accepting scripting connections. "
+    "Quit Resolve and reopen it."
+)
+
+# A process probe costs a spawn (tasklist/pgrep) and the watcher asks on every
+# failed poll -- every 3 s with Resolve closed. Cached so that costs two spawns
+# a minute rather than twenty.
+_PROBE_TTL_SECONDS = 30.0
+_PROBE_LOCK = threading.Lock()
+_probe_cache: Optional[tuple[float, bool]] = None
+
+
+def _resolve_process_present() -> bool:
+    """Is there a Resolve process at all? TTL-cached. Never raises.
+
+    resolve_prefs.resolve_is_running() fails CLOSED -- an inconclusive check
+    reports True. That bias is right here too: "quit and reopen Resolve" is
+    survivable advice for someone whose Resolve is actually shut (they reopen
+    it either way), while telling someone staring at an open Resolve that it
+    "is not running" is the exact dead end this whole helper exists to end.
+    """
+    global _probe_cache
+    with _PROBE_LOCK:
+        cached = _probe_cache
+        if cached is not None and (time.monotonic() - cached[0]) < _PROBE_TTL_SECONDS:
+            return cached[1]
+    try:
+        present = resolve_prefs.resolve_is_running()
+    except Exception:  # pragma: no cover -- resolve_is_running never raises
+        present = True
+    with _PROBE_LOCK:
+        _probe_cache = (time.monotonic(), present)
+    return present
+
+
+def describe_disconnection() -> str:
+    """User-facing reason the scripting bridge has no connection.
+
+    Call only when connect() has already returned None -- this does not
+    itself test the connection.
+    """
+    return NO_SCRIPTING_MESSAGE if _resolve_process_present() else NOT_RUNNING_MESSAGE
+
+
+def _explain_disconnection(result: dict[str, Any]) -> dict[str, Any]:
+    """Swap the _NOT_CONNECTED sentinel for the real reason. Must be called
+    with _API_LOCK released."""
+    if result.get("message") == _NOT_CONNECTED:
+        result["message"] = describe_disconnection()
+    return result
 
 
 def _norm_path(p: str) -> str:
@@ -278,13 +354,14 @@ def get_timeline_items() -> dict[str, Any]:
     # poll here froze the hover highlight for a second-plus (2026-07-26).
     ui_state.wait_while_menu_open()
     with _API_LOCK:
-        return _get_timeline_items_locked()
+        result = _get_timeline_items_locked()
+    return _explain_disconnection(result)
 
 
 def _get_timeline_items_locked() -> dict[str, Any]:
     resolve = connect()
     if resolve is None:
-        return {"ok": False, "message": "DaVinci Resolve is not running", "items": [], "project_name": ""}
+        return {"ok": False, "message": _NOT_CONNECTED, "items": [], "project_name": ""}
 
     try:
         project_manager = resolve.GetProjectManager()
@@ -474,13 +551,14 @@ def get_media_pool_items() -> dict[str, Any]:
     """
     ui_state.wait_while_menu_open()  # same GIL courtesy as get_timeline_items
     with _API_LOCK:
-        return _get_media_pool_items_locked()
+        result = _get_media_pool_items_locked()
+    return _explain_disconnection(result)
 
 
 def _get_media_pool_items_locked() -> dict[str, Any]:
     resolve = connect()
     if resolve is None:
-        return {"ok": False, "message": "DaVinci Resolve is not running", "items": [], "project_name": ""}
+        return {"ok": False, "message": _NOT_CONNECTED, "items": [], "project_name": ""}
 
     try:
         project_manager = resolve.GetProjectManager()

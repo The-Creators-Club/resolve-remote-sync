@@ -1,0 +1,84 @@
+# CC Sync — Creators Club fleet sync + b-roll platform
+
+Multi-machine video workflow for a DaVinci Resolve editing fleet: a TrueNAS
+server holds the canonical project tree, remote editors sync slices of it, and
+a set of companion apps keep Resolve, the filesystem, and the fleet dashboard
+honest. `SPEC.md` is the architecture document; `KNOWN_BUGS.md` is the live
+defect ledger (numbered entries, per-platform prefixes); `UPGRADE_PATH.md` is
+the planned lane-B→Syncthing migration.
+
+## Components
+
+| Dir | What it is | Runs where |
+|---|---|---|
+| `companion/` | `ccsync_companion` — editor tray app: sync lanes (A rclone-up, B rclone-down, C Syncthing), Resolve watcher/fixer/popup, LUT link, upgrade channel client, and the b-roll "Send to Resolve" loopback server (`broll_server.py`, 127.0.0.1:8899) | every editor machine + base rig, frozen via PyInstaller |
+| `dashboard/` | `ccsync_dashboard` — FastAPI fleet dashboard (sync status, transfers, provisioning, admin) | TrueNAS container; deployed by `server/install_dashboard_app.py` |
+| `server/` | NAS-side install/setup scripts (dashboard app, Syncthing folders, editor accounts, tree) | run from the base rig against the NAS over SSH |
+| `installer/` | per-OS editor bootstrap (drive mapping, companion install, Resolve prefs) | editor machines |
+| `onboarding/` | first-run wizard | editor machines |
+| `bench/` | `ccbench` sync-engine benchmark harness | ad hoc |
+| `broll/` | the b-roll platform, folded in from the standalone `broll-platform` repo 2026-08-10 (pre-fold git history stays there): `web/` search UI + API, `indexer/` Claude-based clip indexing pipeline, `eval/` search eval | web: mounted in-process at `/broll` by the dashboard (see below); indexer: base rig |
+| `docs/` | operational docs (SERVER, EDITOR_SETUP, GOTCHAS, bug-hunt notes) | — |
+
+`broll/companion/` no longer exists: the standalone BRoll Companion was
+absorbed into `ccsync_companion/broll_server.py` (2026-08-10). It must not
+run alongside the tray app — it would hold port 8899.
+
+## How the pieces join
+
+- The dashboard mounts `broll/web`'s FastAPI app at `/broll`
+  (`dashboard/src/ccsync_dashboard/broll.py`) — in-process, behind the
+  dashboard's login, with its own fail-closed ingest-token gate. A broken or
+  absent b-roll checkout must NEVER stop the dashboard from booting.
+  Deployment ships `broll/web` to the NAS (`install_dashboard_app.py`,
+  `BROLL_WEB_SRC` overrides); a bare dev checkout works too (mount_broll
+  falls back to the in-repo path).
+- The b-roll web UI's "Send to Resolve" button calls the companion's loopback
+  server on 127.0.0.1:8899. Frontend URLs are document-relative on purpose —
+  `broll/web/tests/test_mounted_prefix.py` pins this; never introduce a
+  root-relative `/api|/media|/static` URL in `broll/web/static/`.
+- Companion builds reach editors through the dashboard's upgrade channel
+  (publish with `-Publish -MakeCurrent`). macOS bundles must be built ON a
+  Mac (`tools/release_macos.sh`); they cannot be cross-built from Windows.
+- The editor tree root is the P: drive, **deliberately hardcoded** (a
+  configurable drive letter is explicitly deferred). The b-roll archive is
+  `P:\Assets\B-roll Archive`, shared by SMB browsing, the search UI's media,
+  and Resolve timelines alike.
+
+## Running tests
+
+Per-component venvs; run pytest from the component dir so `python -m pytest`
+puts the in-repo package first on sys.path:
+
+```powershell
+cd companion;   .venv\Scripts\python.exe -m pytest tests -q
+cd dashboard;   .venv\Scripts\python.exe -m pytest tests -q
+cd bench;       .venv\Scripts\python.exe -m pytest tests -q
+cd server;      ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # no venv of its own
+cd onboarding;  python -m pytest tests -q                                  # system python
+cd broll\indexer; python -m pytest tests -q                                # system python
+cd broll\web;   E:\Projects\broll-platform\web\.venv\Scripts\python.exe -m pytest tests -q
+powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMapParser.ps1
+```
+
+`broll/web` still borrows the old standalone repo's venv (the in-repo copy
+has none yet); the dashboard venv also has its deps and can substitute.
+
+## Conventions that matter here
+
+- **Comments explain constraints, history, and failure modes** — never what
+  the next line does. Most non-obvious decisions cite a date or a bug id;
+  keep doing that.
+- Never gut the live thing: deploys stage-verify-swap; optional features
+  (like the /broll mount) fail absent, not fatal; "the dashboard is what
+  tells everyone whether their footage is syncing" outranks any feature.
+- `.gitattributes` forces `eol=lf` on shell scripts — anything the NAS
+  container or a Mac executes. A CRLF `run.sh` once took the dashboard down.
+- Verify companion/tray fixes against the **deployed** build
+  (`%LOCALAPPDATA%\ccsync\bin`), not just the repo: the running tray won't
+  reflect source changes until a build is published.
+- Windows pytest here can spawn real Tk dialogs if fixtures are bypassed —
+  follow the existing conftest patterns when touching popup/tray tests.
+- Version lives in `companion/src/ccsync_companion/config.py` (`VERSION`);
+  the upgrade channel's version-difference rule makes republishing an older
+  build a first-class rollback.

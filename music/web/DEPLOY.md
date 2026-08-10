@@ -135,7 +135,7 @@ shared archive the container fills in itself and music's is not.
 | startup check for `broll_src/"app"/"main.py"`, hard-fails when `DASH_BROLL_ENABLED=1` | checks `music_src/"musicweb"/"main.py"` and **warns and skips** — there is no flag asserting the operator wanted it |
 | step 2b `install_tree(root, "broll-web", …, staging_slug="ccsync-brollweb-upload")` | step 2c `install_tree(root, "music-web", …, excludes=MUSIC_EXCLUDE_DIRS, staging_slug="ccsync-musicweb-upload")` |
 | — | step 2d, the data artefacts: `install_tree` for `music-encoder`/`music-proxies`, and `install_music_db` for the index |
-| — | step 2e, static ffmpeg/ffprobe into `<root>/ffmpeg` |
+| — | step 2e, static ffmpeg/ffprobe into `<root>/ffmpeg` (fetched **here** and pushed over the LAN by default — see below) |
 | `mkdir`/`chown root:root`/`chmod 755` on `<root>/broll-web` | the same on `music-web`, `music-encoder`, `music-proxies`, `ffmpeg`; `music-data` is `3000:3000` mode `770` instead, like `<root>/data`, because it is the one music path the container writes |
 | the archive root prepared `broll:editors 2770` setgid | `…/Creators_Club/Assets/Music` prepared exactly the same way, mounted `rw` |
 | `run.sh`: `export PYTHONPATH=/app/src:/broll-app` | `export PYTHONPATH=/app/src:/broll-app:/music-app`, plus `export PATH="/opt/ffmpeg:$PATH"` |
@@ -183,13 +183,44 @@ cannot `apt-get install ffmpeg` for itself, and `run.sh` runs too late and too u
 to help. (`broll/web/Dockerfile` exists but builds the *standalone* b-roll service; the
 dashboard never uses it.)
 
-So the installer provisions it, with the root SSH access it already has: it downloads a
+So the installer provisions it, with the root SSH access it already has: it obtains a
 **pinned, checksummed** static build (`MUSIC_FFMPEG_URL` / `MUSIC_FFMPEG_SHA256`), unpacks
 it, **runs `-version` on the candidate before moving it into place**, and installs it to
 `<host-root>/ffmpeg`, which compose mounts read-only at `/opt/ffmpeg`. It is idempotent
 (already-installed binaries are left alone), non-fatal (a fleet dashboard must not fail to
-deploy because a download host was unreachable) and skippable with `--no-ffmpeg`. It needs
-`curl` and `tar -J` on the NAS.
+deploy because a download host was unreachable) and skippable with `--no-ffmpeg`.
+
+**The download happens *here*, not on the NAS** (`--ffmpeg-fetch local`, the default). This
+is the one step that has actually failed a deploy: the NAS pulls `johnvansickle.com` at
+~28 kB/s, so 42 MB needs ~25 minutes against `run_ssh`'s 600 s timeout — and because step 2e
+runs *before* any tree ships, the whole deploy died having landed nothing (2026-08-10; the
+dashboard stayed up on the old version throughout, which is the design working, but a fresh
+host could not be provisioned at all). Fetching on the workstation and pushing over gigabit
+LAN moves the slow, flaky half onto the machine that is fastest at it and leaves the NAS a
+few seconds of SFTP and `tar`:
+
+    --ffmpeg-fetch local     (default) fetch here, verify the pin, SFTP it over
+    --ffmpeg-fetch remote    the NAS curls it -- for a workstation with no route out
+    MUSIC_FFMPEG_FETCH=…     same values, for a non-interactive deploy
+    MUSIC_FFMPEG_FILE=…      a tarball you already have; still checked against the pin
+    MUSIC_FFMPEG_CACHE=…     where fetched tarballs are kept, default <repo>/.cache/ffmpeg
+
+The local path probes the host **first** (`[ -x ffmpeg ] && [ -x ffprobe ]`), so a routine
+redeploy of a provisioned host neither downloads nor pushes anything; the cache means a
+*second* host does not re-download either. A tarball that fails the pin is deleted rather
+than cached — one truncated transfer would otherwise poison every later deploy with an error
+that reads like tampering. What ships to the NAS carries a digest either way: the pinned
+hash, or, if `MUSIC_FFMPEG_URL` was overridden without one, the digest of the file actually
+fetched. That cannot vouch for the download's provenance (nothing can, at that point) but it
+does prove the NAS received what this machine holds, which is the failure a 42 MB SFTP adds.
+`remote` needs `curl` and `tar -J` on the NAS; `local` needs only `tar -J` and `sha256sum`.
+
+> The verification is an explicit `if ! … sha256sum -c -`, not a bare pipeline under
+> `set -e`. A pipeline's exit status is its **last** command, so `check | filter` reports the
+> filter's success — that is how `ffmpeg -version | head -1` printing `Killed` (SIGPIPE, on
+> binaries that turned out fine) sailed past a hand-run `set -e` install script on
+> 2026-08-10 and nearly shipped an unverified binary past the gate built to catch exactly
+> that.
 
 `FFMPEG`/`FFPROBE` are deliberately **not** set in the container environment even though
 `_tool()` reads them first: those are absolute paths taken on trust, so pointing them at a

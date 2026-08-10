@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .tools/
+# Fetched-once binaries the installer pushes to the NAS (the static ffmpeg
+# tarball, 42 MB). MUSIC_FFMPEG_CACHE moves it elsewhere.
+.cache/
 dist/
 build/
 *.spec.bak

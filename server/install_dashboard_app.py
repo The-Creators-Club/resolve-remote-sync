@@ -73,6 +73,10 @@ Steps (each idempotent, one line printed per action):
      .ogg -- and answers 503 without them. THERE IS NO IMAGE BUILD in this
      deployment (compose runs a stock pinned python:3.12.7-slim) and the
      container is unprivileged, so this is the only place it can come from.
+     The 42 MB tarball is fetched HERE and pushed over the LAN (--ffmpeg-fetch
+     local, the default), because the NAS pulls that host at ~28 kB/s and the
+     download alone outlived the SSH timeout; --ffmpeg-fetch remote is the old
+     "let the NAS curl it" path, for a workstation with no route out.
      Non-fatal and idempotent; --no-ffmpeg skips it.
   3. If the app is not yet installed: POST /api/v2.0/app with
        {"custom_app": true, "app_name": "ccsync-dashboard",
@@ -112,7 +116,13 @@ MUSIC_WEB_SRC (the music web/ tree to ship, default music/web in this repo),
 MUSIC_DATA_SRC (the music data/ dir, default <MUSIC_WEB_SRC>/data),
 MUSIC_DATA_PUSH (same values as --music-data; default "auto"),
 MUSIC_FFMPEG_URL / MUSIC_FFMPEG_SHA256 (the static ffmpeg build to install;
-pinned defaults, and an empty URL skips the step like --no-ffmpeg).
+pinned defaults, and an empty URL skips the step like --no-ffmpeg),
+MUSIC_FFMPEG_FETCH (same values as --ffmpeg-fetch: "local", the default, fetches
+the tarball on this machine and pushes it over the LAN; "remote" makes the NAS
+download it), MUSIC_FFMPEG_FILE (a tarball already on this machine -- skips the
+download entirely, and is still checked against the pinned hash),
+MUSIC_FFMPEG_CACHE (where locally-fetched tarballs are kept between deploys,
+default <repo>/.cache/ffmpeg).
 
 Compose-level settings are baked in at CREATE time: after changing any of
 them, re-run with --recreate, otherwise the running app keeps the old ones.
@@ -126,11 +136,15 @@ and server/accept_device.py, not a replacement -- the CLI scripts remain
 the tools of record and work with or without the dashboard deployed.
 """
 import argparse
+import hashlib
 import os
 import posixpath
 import re
+import shutil
 import sys
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from common import (
@@ -236,6 +250,30 @@ DEFAULT_FFMPEG_URL = ("https://johnvansickle.com/ffmpeg/releases/"
 # ffmpeg-release-amd64-static.tar.xz is a rolling pointer whose bytes change
 # under a pinned hash. Bump both together.
 DEFAULT_FFMPEG_SHA256 = "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67"
+
+# WHICH MACHINE DOES THE DOWNLOADING. "local" (the default) fetches the tarball
+# here and pushes it to the NAS over the LAN; "remote" has the NAS curl it.
+#
+# It used to be remote-only, and that stranded the first deploy of this app: the
+# NAS pulls johnvansickle.com at ~28 kB/s (42 MB ~= 25 minutes), run_ssh's
+# timeout is 600s, and the step runs BEFORE any tree ships -- so a fresh host got
+# a failed deploy out of a download this workstation does in seconds. Fetching
+# here and pushing over gigabit LAN moves the slow, flaky half onto the machine
+# that is fastest at it and can retry it cheaply, and turns the NAS's share of
+# the work into a few seconds of SFTP + tar. "remote" is kept for the case this
+# shape cannot serve: a workstation with no route out to the internet.
+FFMPEG_FETCH_MODES = ("local", "remote")
+DEFAULT_FFMPEG_FETCH = "local"
+# Locally-fetched tarballs live here between deploys, so re-provisioning a host
+# (or provisioning a second one) does not re-download 42 MB. Gitignored.
+DEFAULT_FFMPEG_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "ffmpeg"
+# The local download's own timeout. Generous -- it is a 42 MB file from a host
+# that is occasionally slow for everyone -- but not unbounded, because a hung
+# socket here would stall a deploy exactly like the remote curl used to.
+FFMPEG_FETCH_TIMEOUT = 300
+# The name the tarball is staged under on the NAS. Fixed, not derived from the
+# URL: it lands in a fresh mktemp dir that nothing else writes to.
+FFMPEG_STAGED_NAME = "ffmpeg.tar.xz"
 
 # The music library on the NAS: the SHARE ITSELF, beside Projects/ and the
 # b-roll archive under Creators_Club, which is what makes it P:\Assets\Music on
@@ -785,6 +823,290 @@ def build_ffmpeg_install_script(target_dir: str, url: str, sha256: str) -> str:
     )
 
 
+def build_ffmpeg_unpack_script(target_dir: str, tarball: str, staging: str,
+                               sha256: str) -> str:
+    """Install ffmpeg + ffprobe on the NAS from a tarball ALREADY STAGED there.
+
+    The same script as build_ffmpeg_install_script minus its first line: the
+    download. Everything that made that one safe still applies -- checksum
+    before unpacking, execute the candidate before it goes live, replace only by
+    `mv`, delete nothing -- and the checksum matters just as much here, because
+    it is now verifying the SFTP transfer rather than the internet.
+
+    The digest is not optional in practice: the caller always has one, either
+    the pinned hash or the digest of the file it just fetched. An empty one is
+    tolerated so an operator who overrode the URL with no hash still gets an
+    install, and the transfer is then covered by nothing -- which is said out
+    loud where the override happens.
+    """
+    d = shell_quote(target_dir)
+    tb = shell_quote(tarball)
+    # `printf | sha256sum -c` and NOT a bare pipeline under `set -e`: an explicit
+    # `if !` says what failed. A pipeline's exit status is its LAST command, so
+    # anything of the form `check | filter` silently reports the filter's
+    # success -- that is how an unverified ffmpeg nearly shipped here on
+    # 2026-08-10 (`ffmpeg -version | head -1` printed "Killed" and exited 0).
+    verify = (
+        f"if ! printf '%s  %s\\n' {shell_quote(sha256)} {tb} | sha256sum -c - "
+        f">/dev/null 2>&1; then "
+        f'echo "the staged tarball does not match the digest that was sent -- '
+        f'the transfer was corrupted; nothing installed" >&2; exit 7; fi; '
+    ) if sha256 else ""
+    return (
+        f"set -e; "
+        f"if [ -x {d}/ffmpeg ] && [ -x {d}/ffprobe ]; then "
+        f'echo "ffmpeg already provisioned at {target_dir}"; exit 0; fi; '
+        # Before mkdir, before mktemp: a transfer that arrived wrong leaves no
+        # trace of itself on the host at all.
+        f"{verify}"
+        f"mkdir -p {d}; "
+        f"t=$(mktemp -d /tmp/ccsync-ffmpeg.XXXXXX); "
+        f'trap "rm -rf $t" EXIT; '
+        f'tar -xJf {tb} -C "$t"; '
+        f'b=$(find "$t" -type f -name ffmpeg | head -n 1); '
+        f'p=$(find "$t" -type f -name ffprobe | head -n 1); '
+        f'if [ -z "$b" ] || [ -z "$p" ]; then '
+        f'echo "the archive holds no ffmpeg/ffprobe" >&2; exit 1; fi; '
+        f'install -o root -g root -m 755 "$b" {d}/ffmpeg.new; '
+        f'install -o root -g root -m 755 "$p" {d}/ffprobe.new; '
+        # Same reason as the download path: an archive for another architecture
+        # must not become the ffmpeg the app finds on PATH.
+        f"if ! {d}/ffmpeg.new -version >/dev/null 2>&1 || "
+        f"! {d}/ffprobe.new -version >/dev/null 2>&1; then "
+        f'echo "the downloaded ffmpeg/ffprobe does not run on this host" >&2; '
+        f"rm -f {d}/ffmpeg.new {d}/ffprobe.new; exit 1; fi; "
+        f"mv {d}/ffmpeg.new {d}/ffmpeg; mv {d}/ffprobe.new {d}/ffprobe; "
+        f"chmod 755 {d}; "
+        f"rm -rf {shell_quote(staging)}; "
+        f'echo "ffmpeg provisioned: {target_dir}"'
+    )
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ffmpeg_cache_path(url: str) -> Path:
+    """Where a locally-fetched tarball is kept between deploys.
+
+    Namespaced by a digest of the URL, because every static-ffmpeg mirror names
+    its tarball the same thing and a cache hit on somebody else's bytes is the
+    one failure a cache must not have.
+    """
+    raw = os.environ.get("MUSIC_FFMPEG_CACHE", "").strip()
+    cache = Path(raw) if raw else DEFAULT_FFMPEG_CACHE_DIR
+    name = posixpath.basename(urllib.parse.urlparse(url).path) or FFMPEG_STAGED_NAME
+    return cache / f"{hashlib.sha256(url.encode()).hexdigest()[:12]}-{name}"
+
+
+def fetch_ffmpeg_tarball(url: str, sha256: str) -> tuple[Path | None, str]:
+    """Get the tarball onto THIS machine. Returns (path, error).
+
+    Three sources, in order: MUSIC_FFMPEG_FILE (one the operator already has),
+    the local cache, then the network. A pinned hash is checked at every one of
+    them -- including the cache, whose whole risk is serving bytes that were
+    right once.
+
+    A download that fails the pin is DELETED rather than cached: keeping it
+    would make every later deploy fail the same way for a reason that reads like
+    tampering, long after the truncated transfer that caused it.
+    """
+    override = os.environ.get("MUSIC_FFMPEG_FILE", "").strip()
+    if override:
+        path = Path(override)
+        if not path.is_file():
+            return None, f"MUSIC_FFMPEG_FILE={override} is not a file"
+        if sha256:
+            digest = sha256_file(path)
+            if digest != sha256:
+                return None, (f"{path} does not match the pinned sha256 "
+                              f"(got {digest})")
+        print(f"using the ffmpeg tarball at {path} "
+              f"({human_bytes(path.stat().st_size)})")
+        return path, ""
+
+    cached = ffmpeg_cache_path(url)
+    if cached.is_file():
+        if not sha256 or sha256_file(cached) == sha256:
+            print(f"using the cached ffmpeg tarball at {cached} "
+                  f"({human_bytes(cached.stat().st_size)})")
+            return cached, ""
+        print(f"NOTE: the cached tarball at {cached} no longer matches the "
+              f"pinned sha256 -- re-downloading", file=sys.stderr)
+
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    part = cached.with_name(cached.name + ".part")
+    print(f"fetching {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=FFMPEG_FETCH_TIMEOUT) as resp:
+            with part.open("wb") as out:
+                shutil.copyfileobj(resp, out, 1 << 20)
+    except Exception as exc:       # urllib raises URLError, socket.timeout, OSError...
+        part.unlink(missing_ok=True)
+        return None, f"{type(exc).__name__}: {exc}"
+    if sha256:
+        digest = sha256_file(part)
+        if digest != sha256:
+            part.unlink(missing_ok=True)
+            return None, (f"the download does not match the pinned sha256 "
+                          f"(got {digest}) -- nothing was sent to the NAS")
+    part.replace(cached)
+    print(f"fetched {human_bytes(cached.stat().st_size)} to {cached}")
+    return cached, ""
+
+
+def ffmpeg_present(root: str, dry_run: bool) -> bool:
+    """Does the NAS already have both binaries?
+
+    The remote scripts are idempotent on their own, so this exists for the LOCAL
+    fetch path: without it, a routine redeploy of an already-provisioned host
+    would download and push 42 MB to be told "already provisioned". A failed or
+    unreadable probe counts as absent -- re-provisioning is idempotent and
+    cheap, and skipping the step wrongly is how /music's ingest ends up 503.
+    """
+    if dry_run:
+        run_ssh("true  # [dry-run] would check whether ffmpeg is already on the host",
+                dry_run=True)
+        return False
+    d = shell_quote(f"{root}/ffmpeg")
+    rc, out, _err = run_ssh(f'if [ -x {d}/ffmpeg ] && [ -x {d}/ffprobe ]; '
+                            f'then echo yes; else echo no; fi')
+    return rc == 0 and out.strip().splitlines()[-1:] == ["yes"]
+
+
+def install_ffmpeg_over_lan(root: str, tarball: Path | None, sha256: str,
+                            dry_run: bool) -> tuple[bool, str]:
+    """Push a local ffmpeg tarball to the NAS and unpack it. (ok, error).
+
+    Same staged-then-verified-then-swapped shape as every other thing this
+    script ships: SFTP into a fresh mktemp dir, prove the staged bytes are the
+    bytes that were sent, and only then let root touch anything.
+    """
+    target_dir = f"{root}/ffmpeg"
+    staging = make_staging_dir(dry_run, "ccsync-ffmpeg-upload")
+    staged = posixpath.join(staging, FFMPEG_STAGED_NAME)
+    if dry_run:
+        print(f"[dry-run] would SFTP the ffmpeg tarball to {staged} on the NAS "
+              f"and unpack it into {target_dir}")
+    else:
+        expected_bytes = tarball.stat().st_size
+        host, user, pw = truenas_conn_params()
+        client = ssh_client(host, user, pw)
+        try:
+            sftp = client.open_sftp()
+            sftp.put(str(tarball), staged)
+            sftp.close()
+        finally:
+            client.close()
+        rc, out, err = run_ssh(f"wc -c < {shell_quote(staged)}")
+        staged_bytes = int(out.strip()) if rc == 0 and out.strip().isdigit() else -1
+        if staged_bytes != expected_bytes:
+            return False, (f"the staged tarball does not match what was sent "
+                           f"({staged_bytes} bytes on the NAS vs {expected_bytes} "
+                           f"locally; staging left at {staging}): "
+                           f"{err.strip()[:200]}")
+        print(f"pushed {human_bytes(staged_bytes)} to staging {staging}")
+
+    script = build_ffmpeg_unpack_script(target_dir, staged, staging, sha256)
+    rc, out, err = run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(script),
+                           dry_run=dry_run, timeout=300)
+    if rc != 0:
+        return False, err.strip()[:300] or f"the unpack exited {rc}"
+    if not dry_run:
+        print(out.strip().splitlines()[-1] if out.strip()
+              else f"ffmpeg provisioned: {target_dir}")
+    return True, ""
+
+
+def provision_ffmpeg(root: str, fetch: str, dry_run: bool) -> None:
+    """Step 2e. NON-FATAL throughout: the only thing that needs ffmpeg is
+    /music's queued ingest, which answers 503 with a readable message when it is
+    absent, and a fleet dashboard must not fail to deploy because a download
+    host was unreachable. Every failure below prints a NOTE and returns.
+    """
+    target_dir = f"{root}/ffmpeg"
+    url = os.environ.get("MUSIC_FFMPEG_URL", DEFAULT_FFMPEG_URL).strip()
+    sha = os.environ.get("MUSIC_FFMPEG_SHA256", DEFAULT_FFMPEG_SHA256).strip()
+    local_file = os.environ.get("MUSIC_FFMPEG_FILE", "").strip()
+
+    if not url and not (fetch == "local" and local_file):
+        print("NOTE: MUSIC_FFMPEG_URL is empty -- skipping ffmpeg. /music's "
+              "queued ingest will answer 503 until ffmpeg and ffprobe are on "
+              f"PATH in the container (mount {target_dir} at /opt/ffmpeg).",
+              file=sys.stderr)
+        return
+    if url and url != DEFAULT_FFMPEG_URL and sha == DEFAULT_FFMPEG_SHA256:
+        # The pinned hash belongs to the pinned URL. Silently checking it
+        # against somebody else's mirror would fail confusingly; not checking it
+        # at all is the honest behaviour, said out loud.
+        print("NOTE: MUSIC_FFMPEG_URL was overridden without "
+              "MUSIC_FFMPEG_SHA256 -- the download will NOT be checksummed.",
+              file=sys.stderr)
+        sha = ""
+
+    # Before the 42 MB moves anywhere. The remote scripts check this too; doing
+    # it here is what stops a redeploy from fetching a tarball it cannot use.
+    if ffmpeg_present(root, dry_run):
+        print(f"ffmpeg already provisioned at {target_dir}")
+        return
+
+    if fetch == "remote":
+        rc, out, err = run_ssh(
+            'echo "$SUDO_PW" | sudo -S sh -c '
+            + shell_quote(build_ffmpeg_install_script(target_dir, url, sha)),
+            dry_run=dry_run,
+            timeout=600,
+        )
+        if dry_run:
+            print(f"[dry-run] would have the NAS download {url} and provision "
+                  f"static ffmpeg/ffprobe into {target_dir}")
+        elif rc == 0:
+            print(out.strip().splitlines()[-1] if out.strip()
+                  else f"ffmpeg provisioned: {target_dir}")
+        else:
+            print(f"NOTE: ffmpeg was NOT provisioned ({err.strip()[:200]}). "
+                  f"Everything else deploys; /music's queued ingest will answer "
+                  f"503 until ffmpeg and ffprobe exist in {target_dir}.\n"
+                  f"  The NAS is slow to reach some download hosts (johnvansickle "
+                  f"at ~28 kB/s = ~25 min for this file, past run_ssh's 600s "
+                  f"timeout). --ffmpeg-fetch local fetches it here instead.",
+                  file=sys.stderr)
+        return
+
+    tarball, err = (None, "")
+    if dry_run:
+        print(f"[dry-run] would fetch {url} to {ffmpeg_cache_path(url)} and push "
+              f"it to the NAS over the LAN")
+    else:
+        tarball, err = fetch_ffmpeg_tarball(url, sha)
+        if tarball is None:
+            print(f"NOTE: ffmpeg was NOT provisioned -- the tarball could not be "
+                  f"fetched here ({err}). Everything else deploys; /music's "
+                  f"queued ingest will answer 503 until ffmpeg and ffprobe exist "
+                  f"in {target_dir}.\n"
+                  f"  Retry, or point MUSIC_FFMPEG_FILE at a downloaded tarball, "
+                  f"or use --ffmpeg-fetch remote to have the NAS download it "
+                  f"(slow: it pulls that host at ~28 kB/s).", file=sys.stderr)
+            return
+        # With no pinned hash there is still one worth sending: the digest of the
+        # file actually fetched. It cannot speak for the download's provenance
+        # (nothing can, once the URL was overridden) but it does prove the NAS
+        # received what this machine holds, which is the half of the problem
+        # that a 42 MB SFTP introduces.
+        if not sha:
+            sha = sha256_file(tarball)
+
+    ok_, err = install_ffmpeg_over_lan(root, tarball, sha, dry_run)
+    if not ok_:
+        print(f"NOTE: ffmpeg was NOT provisioned ({err}). Everything else "
+              f"deploys; /music's queued ingest will answer 503 until ffmpeg "
+              f"and ffprobe exist in {target_dir}.", file=sys.stderr)
+
+
 def weak_ingest_token(token: str) -> str | None:
     """None if `token` may guard the b-roll ingest write path, else the reason.
 
@@ -1057,6 +1379,15 @@ def main():
                     help="skip provisioning static ffmpeg/ffprobe onto the host. "
                          "Only /music's queued ingest uses them, and it answers 503 "
                          "with a readable message when they are missing.")
+    ap.add_argument("--ffmpeg-fetch", choices=FFMPEG_FETCH_MODES,
+                    default=os.environ.get("MUSIC_FFMPEG_FETCH",
+                                           DEFAULT_FFMPEG_FETCH).strip()
+                            or DEFAULT_FFMPEG_FETCH,
+                    help="which machine downloads the 42 MB ffmpeg tarball: "
+                         "'local' (default) fetches it here, checksums it and "
+                         "pushes it over the LAN; 'remote' has the NAS curl it, "
+                         "which is what the first deploy of this app timed out "
+                         "on (the NAS pulls that host at ~28 kB/s).")
     ap.add_argument("--recreate", action="store_true",
                     help="delete and re-create the app so compose changes (env vars, "
                          "mounts, ports) take effect; host app/ and data/ dirs survive")
@@ -1326,46 +1657,11 @@ def main():
         print(f"music library root ready: {DEFAULT_MUSIC_LIBRARY_ROOT} "
               f"(broll:editors 2770, same as Projects/)")
 
-    # ffmpeg/ffprobe for /music's queued ingest. NON-FATAL by design: the only
-    # thing that needs them is /api/ingest, which answers 503 with a readable
-    # message when they are absent, and a fleet dashboard must not fail to
-    # deploy because johnvansickle.com was unreachable.
+    # ffmpeg/ffprobe for /music's queued ingest. NON-FATAL by design, and by
+    # default fetched HERE and pushed over the LAN rather than downloaded by the
+    # NAS -- see provision_ffmpeg.
     if ship_music and not args.no_ffmpeg:
-        ffmpeg_url = os.environ.get("MUSIC_FFMPEG_URL", DEFAULT_FFMPEG_URL).strip()
-        ffmpeg_sha = os.environ.get("MUSIC_FFMPEG_SHA256",
-                                    DEFAULT_FFMPEG_SHA256).strip()
-        if not ffmpeg_url:
-            print("NOTE: MUSIC_FFMPEG_URL is empty -- skipping ffmpeg. /music's "
-                  "queued ingest will answer 503 until ffmpeg and ffprobe are on "
-                  f"PATH in the container (mount {root}/ffmpeg at /opt/ffmpeg).",
-                  file=sys.stderr)
-        else:
-            if ffmpeg_url != DEFAULT_FFMPEG_URL and ffmpeg_sha == DEFAULT_FFMPEG_SHA256:
-                # The pinned hash belongs to the pinned URL. Silently checking
-                # it against somebody else's mirror would fail confusingly; not
-                # checking it at all is the honest behaviour, said out loud.
-                print("NOTE: MUSIC_FFMPEG_URL was overridden without "
-                      "MUSIC_FFMPEG_SHA256 -- the download will NOT be "
-                      "checksummed.", file=sys.stderr)
-                ffmpeg_sha = ""
-            rc, out, err = run_ssh(
-                'echo "$SUDO_PW" | sudo -S sh -c '
-                + shell_quote(build_ffmpeg_install_script(
-                    f"{root}/ffmpeg", ffmpeg_url, ffmpeg_sha)),
-                dry_run=args.dry_run,
-                timeout=600,
-            )
-            if args.dry_run:
-                print(f"[dry-run] would provision static ffmpeg/ffprobe into "
-                      f"{root}/ffmpeg from {ffmpeg_url}")
-            elif rc == 0:
-                print(out.strip().splitlines()[-1] if out.strip()
-                      else f"ffmpeg provisioned: {root}/ffmpeg")
-            else:
-                print(f"NOTE: ffmpeg was NOT provisioned ({err.strip()[:200]}). "
-                      f"Everything else deploys; /music's queued ingest will "
-                      f"answer 503 until ffmpeg and ffprobe exist in "
-                      f"{root}/ffmpeg.", file=sys.stderr)
+        provision_ffmpeg(root, args.ffmpeg_fetch, args.dry_run)
 
     # A pre-C-2 deployment has an editor-writable venv sitting inside data/.
     # Move it aside (never delete: no-deletion rule) so run.sh rebuilds a

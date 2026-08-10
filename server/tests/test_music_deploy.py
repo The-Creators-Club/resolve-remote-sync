@@ -15,6 +15,8 @@ Run with:
     cd E:\\Projects\\resolve-remote-sync\\server
     python -m pytest tests -q
 """
+import hashlib
+import io
 import os
 import re
 import shutil
@@ -377,10 +379,19 @@ def test_db_ownership_is_the_container_not_root():
 # ffmpeg -- provisioned, because nothing here builds an image
 # --------------------------------------------------------------------------
 
-def test_ffmpeg_script_is_idempotent_pinned_and_self_checking():
-    script = ida.build_ffmpeg_install_script(
+@pytest.mark.parametrize("script", [
+    ida.build_ffmpeg_install_script(
         "/mnt/tank/apps/ccsync-dashboard/ffmpeg",
-        ida.DEFAULT_FFMPEG_URL, ida.DEFAULT_FFMPEG_SHA256)
+        ida.DEFAULT_FFMPEG_URL, ida.DEFAULT_FFMPEG_SHA256),
+    ida.build_ffmpeg_unpack_script(
+        "/mnt/tank/apps/ccsync-dashboard/ffmpeg", "/tmp/s/ffmpeg.tar.xz",
+        "/tmp/s", ida.DEFAULT_FFMPEG_SHA256),
+], ids=["remote-download", "lan-push"])
+def test_ffmpeg_script_is_idempotent_pinned_and_self_checking(script):
+    """Both provisioning paths -- the NAS downloading it and this machine
+    pushing it over the LAN -- get the same guarantees. The checksum is not
+    decoration in either: remotely it is the internet being verified, locally it
+    is a 42 MB SFTP."""
     # already installed -> does nothing (a redeploy must not re-download 42 MB)
     assert "already provisioned" in script and "exit 0" in script
     # checksum before unpacking
@@ -390,6 +401,34 @@ def test_ffmpeg_script_is_idempotent_pinned_and_self_checking():
     assert "-version" in script
     assert script.index("-version") < script.index("mv ")
     assert "does not run on this host" in script
+
+
+@needs_bash
+def test_a_corrupted_transfer_installs_nothing(tmp_path):
+    """The failure the LAN push introduces that the download did not: SFTP wrote
+    something other than what was sent. A bare `printf | sha256sum -c` under
+    `set -e` would report the pipeline's LAST command, so this asserts on the
+    explicit `if !` and its exit code."""
+    staging, target = tmp_path / "staging", tmp_path / "ffmpeg"
+    staging.mkdir()
+    (staging / "ffmpeg.tar.xz").write_bytes(b"half a tarball")
+    script = ida.build_ffmpeg_unpack_script(
+        str(target), str(staging / "ffmpeg.tar.xz"), str(staging),
+        ida.DEFAULT_FFMPEG_SHA256)
+    proc = run_remote_script(script, tmp_path)
+
+    assert proc.returncode == 7
+    assert "transfer was corrupted" in proc.stderr
+    assert not target.exists()
+
+
+def test_the_lan_push_cleans_up_its_staging():
+    """42 MB per deploy, in /tmp on a NAS. install_tree's staging is removed by
+    its swap script for the same reason."""
+    script = ida.build_ffmpeg_unpack_script("/r/ffmpeg", "/tmp/s/ffmpeg.tar.xz",
+                                            "/tmp/s", "d" * 64)
+    assert "rm -rf '/tmp/s'" in script
+    assert script.index("rm -rf '/tmp/s'") > script.index("mv '/r/ffmpeg'/ffmpeg.new")
 
 
 def test_the_pinned_ffmpeg_url_is_versioned_not_rolling():
@@ -408,17 +447,142 @@ def test_an_overridden_url_drops_the_pinned_hash(monkeypatch, capsys):
     and it is said out loud."""
     cmds: list = []
     monkeypatch.setenv("MUSIC_FFMPEG_URL", "https://mirror.invalid/ffmpeg.tar.xz")
-    transcript = _dry_run(monkeypatch, capsys, cmds)
+    transcript = _dry_run(monkeypatch, capsys, cmds, extra_argv=["--ffmpeg-fetch",
+                                                                "remote"])
     assert "will NOT be checksummed" in transcript
     ffmpeg_cmd = next(c for c in cmds if "mirror.invalid" in c)
     assert ida.DEFAULT_FFMPEG_SHA256 not in ffmpeg_cmd
     assert "sha256sum" not in ffmpeg_cmd
 
 
+def test_the_default_is_to_fetch_here_and_push_over_the_lan(monkeypatch, capsys):
+    """The first deploy of this app died here: the step runs BEFORE any tree
+    ships, the NAS pulls johnvansickle at ~28 kB/s, and 42 MB does not fit in
+    run_ssh's 600s timeout. Nothing had landed -- but nothing could land."""
+    cmds: list = []
+    transcript = _dry_run(monkeypatch, capsys, cmds)
+    assert "push it to the NAS over the LAN" in transcript
+    assert not any(ida.DEFAULT_FFMPEG_URL in c for c in cmds), (
+        "the NAS must not be the one downloading it by default")
+    unpack = next(c for c in cmds if "tar -xJf" in c)
+    assert "ccsync-ffmpeg-upload" in unpack and "curl" not in unpack
+
+
+def test_an_already_provisioned_host_is_not_re_fetched(monkeypatch, capsys):
+    """The remote scripts are idempotent on their own, which was enough when the
+    NAS did the downloading. It is not enough now: without this probe a routine
+    redeploy fetches and pushes 42 MB to be told "already provisioned"."""
+    monkeypatch.setattr(ida, "run_ssh", lambda *a, **k: (0, "yes\n", ""))
+    calls: list = []
+    monkeypatch.setattr(ida, "fetch_ffmpeg_tarball",
+                        lambda *a: calls.append(a) or (None, "should not run"))
+    ida.provision_ffmpeg("/mnt/tank/apps/ccsync-dashboard", "local", dry_run=False)
+
+    assert calls == []
+    assert "already provisioned" in capsys.readouterr().out
+
+
 def test_no_ffmpeg_skips_the_step_entirely(monkeypatch, capsys):
     cmds: list = []
     _dry_run(monkeypatch, capsys, cmds, extra_argv=["--no-ffmpeg"])
     assert not any("ffmpeg.tar.xz" in c for c in cmds)
+
+
+# -- the local fetch. Offline: the network is stubbed or asserted unused. -----
+
+class _FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _no_network(monkeypatch):
+    def refuse(*a, **k):
+        raise AssertionError("the network was used")
+    monkeypatch.setattr(ida.urllib.request, "urlopen", refuse)
+
+
+def test_a_supplied_tarball_is_still_checked_against_the_pin(monkeypatch, tmp_path):
+    """MUSIC_FFMPEG_FILE is the escape hatch for a host that cannot download --
+    not an escape hatch from the checksum."""
+    _no_network(monkeypatch)
+    tarball = tmp_path / "ffmpeg.tar.xz"
+    tarball.write_bytes(b"not the pinned build")
+    monkeypatch.setenv("MUSIC_FFMPEG_FILE", str(tarball))
+
+    path, err = ida.fetch_ffmpeg_tarball(ida.DEFAULT_FFMPEG_URL,
+                                         ida.DEFAULT_FFMPEG_SHA256)
+    assert path is None and "does not match the pinned sha256" in err
+
+    path, err = ida.fetch_ffmpeg_tarball(ida.DEFAULT_FFMPEG_URL,
+                                         ida.sha256_file(tarball))
+    assert path == tarball and err == ""
+
+
+def test_the_cache_saves_the_second_deploy_a_download(monkeypatch, tmp_path):
+    _no_network(monkeypatch)
+    monkeypatch.setenv("MUSIC_FFMPEG_CACHE", str(tmp_path))
+    cached = ida.ffmpeg_cache_path(ida.DEFAULT_FFMPEG_URL)
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"pretend tarball")
+
+    path, err = ida.fetch_ffmpeg_tarball(ida.DEFAULT_FFMPEG_URL,
+                                         ida.sha256_file(cached))
+    assert path == cached and err == ""
+
+
+def test_a_cached_tarball_that_fails_the_pin_is_re_downloaded(monkeypatch, tmp_path):
+    """A cache whose only job is to skip a download must never be the reason a
+    wrong build gets installed."""
+    monkeypatch.setenv("MUSIC_FFMPEG_CACHE", str(tmp_path))
+    cached = ida.ffmpeg_cache_path(ida.DEFAULT_FFMPEG_URL)
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"stale bytes from an older pin")
+    good = b"the real tarball"
+    monkeypatch.setattr(ida.urllib.request, "urlopen",
+                        lambda *a, **k: _FakeResponse(good))
+
+    path, err = ida.fetch_ffmpeg_tarball(ida.DEFAULT_FFMPEG_URL,
+                                         hashlib.sha256(good).hexdigest())
+    assert err == "" and path.read_bytes() == good
+
+
+def test_a_download_that_fails_the_pin_is_not_left_in_the_cache(monkeypatch, tmp_path):
+    """Otherwise one truncated transfer poisons every later deploy, with an
+    error that reads like tampering."""
+    monkeypatch.setenv("MUSIC_FFMPEG_CACHE", str(tmp_path))
+    monkeypatch.setattr(ida.urllib.request, "urlopen",
+                        lambda *a, **k: _FakeResponse(b"half a tarball"))
+
+    path, err = ida.fetch_ffmpeg_tarball(ida.DEFAULT_FFMPEG_URL,
+                                         ida.DEFAULT_FFMPEG_SHA256)
+    assert path is None and "does not match the pinned sha256" in err
+    assert list(tmp_path.rglob("*.part")) == []
+    assert not ida.ffmpeg_cache_path(ida.DEFAULT_FFMPEG_URL).exists()
+
+
+def test_two_urls_never_share_a_cache_entry(tmp_path, monkeypatch):
+    """Every static-ffmpeg mirror names its tarball the same thing."""
+    monkeypatch.setenv("MUSIC_FFMPEG_CACHE", str(tmp_path))
+    a = ida.ffmpeg_cache_path("https://a.invalid/ffmpeg-amd64-static.tar.xz")
+    b = ida.ffmpeg_cache_path("https://b.invalid/ffmpeg-amd64-static.tar.xz")
+    assert a != b
+    assert a.name.endswith("ffmpeg-amd64-static.tar.xz")
+
+
+def test_a_failed_local_fetch_is_a_note_not_a_failed_deploy(monkeypatch, capsys):
+    """The whole point of the step being non-fatal: /music's ingest answers 503
+    with a readable message, and the other 19 files still ship."""
+    monkeypatch.setattr(ida, "run_ssh", lambda *a, **k: (0, "no\n", ""))
+    monkeypatch.setattr(ida, "fetch_ffmpeg_tarball",
+                        lambda *a: (None, "URLError: unreachable"))
+    ida.provision_ffmpeg("/mnt/tank/apps/ccsync-dashboard", "local", dry_run=False)
+
+    err = capsys.readouterr().err
+    assert "ffmpeg was NOT provisioned" in err and "URLError" in err
+    assert "MUSIC_FFMPEG_FILE" in err and "--ffmpeg-fetch remote" in err
 
 
 # --------------------------------------------------------------------------

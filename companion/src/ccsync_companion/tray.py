@@ -13,6 +13,7 @@ Install with: pip install ccsync-companion[tray]
 from __future__ import annotations
 
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -36,8 +37,12 @@ log = logging.getLogger("ccsync.tray")
 
 from . import theme
 
-COLOR_GREEN = theme.RGB_GREEN
-COLOR_ORANGE = theme.RGB_AMBER
+# Deliberately DARKER than theme.RGB_GREEN / RGB_AMBER: the neon palette is
+# tuned for near-black UI panels, but since the borderless mark (2026-08-10)
+# the icon sits straight on the taskbar, and Windows' light-grey taskbar
+# washed the neon green and amber out. Red is already dark enough to keep.
+COLOR_GREEN = (24, 190, 98)
+COLOR_ORANGE = (216, 140, 18)
 COLOR_RED = theme.RGB_RED
 
 
@@ -101,6 +106,23 @@ def compute_overall_color(
     if any(s.state == STATE_SYNCING for s in statuses):
         return "orange"
     return "green"
+
+
+def should_pulse(color_name: str, statuses: list[LaneStatus]) -> bool:
+    """Does the mark BREATHE at this color, or sit still?
+
+    A pulse means exactly two things and nothing else: work is happening
+    (amber + a lane mid-transfer) or something is broken (red). Every other
+    amber -- paused, signed out, drive unplugged, sync disabled, not set up --
+    is STEADY amber, because those are states the editor is already in and
+    often chose, and an icon that breathes at them all day is the kind of
+    motion people learn to stop seeing. Green NEVER pulses: it is the one
+    color that must mean "signed in, unpaused, configured and caught up" and
+    nothing about it is in progress (AUDIT_2 UX-1, unchanged by this).
+    """
+    if color_name == "red":
+        return True
+    return color_name == "orange" and any(s.state == STATE_SYNCING for s in statuses)
 
 
 def _color_rgb(color_name: str) -> tuple[int, int, int]:
@@ -476,31 +498,148 @@ class _MenuSwapGuard:
             log.debug("atomic menu swap unavailable", exc_info=True)
 
 
-# One rendered image per color -- regenerating the identical 64x64 PIL image
-# (and the win32 HICON pystray derives from it) every refresh tick was pure
-# GDI churn.
+# One rendered image per (color, brightness level) -- regenerating the
+# identical 64x64 PIL image (and the win32 HICON pystray derives from it)
+# every refresh tick was pure GDI churn, and the pulse below would repeat that
+# eight times every three seconds forever. Every frame of every color is
+# rendered at most once per process.
 _ICON_IMAGE_CACHE: dict = {}
 
+# The tray mark, white-on-transparent so it can be tinted per status. Shipped
+# by build.spec's datas; assets/icon.png and icon.ico are the same mark for
+# window/exe use and are NOT interchangeable with this one (they are already
+# colored and pre-composed).
+MARK_ASSET = "cc_mark_white.png"
 
-def _icon_image_cached(color_name: str):
-    image = _ICON_IMAGE_CACHE.get(color_name)
+# The mark fills the canvas. No tile, no border (2026-08-10, by request): the
+# icon IS the mark, silhouette constant, color carrying the status. The mark's
+# own canvas is square with the wide logo centered, so it never touches the
+# top/bottom edges anyway.
+MARK_BOX = 64
+MARK_OFFSET = (64 - MARK_BOX) // 2
+
+# The pulse: one breath every ~3 s in 8 steps. Slow and shallow on purpose --
+# this sits in a taskbar all day, and anything faster reads as an alarm.
+PULSE_PERIOD = 3.0
+PULSE_STEPS = 8
+PULSE_FLOOR = 0.45      # dimmest frame; with no backing tile the mark sits
+                        # straight on the taskbar, so it must never dim to
+                        # where it reads as gone rather than breathing
+
+
+def _pulse_levels(steps: int = PULSE_STEPS, floor: float = PULSE_FLOOR) -> tuple:
+    """Mark brightness for each frame of one breath.
+
+    A cosine, not a sawtooth: the turn at each end has to be soft or the
+    animation snaps from bright to dim and reads as a flicker. Rounded because
+    these are cache keys (see _icon_image_cached) -- equal frames must hash
+    equal.
+    """
+    return tuple(
+        round(floor + (1.0 - floor) * (0.5 - 0.5 * math.cos(2 * math.pi * i / steps)), 3)
+        for i in range(steps)
+    )
+
+
+PULSE_LEVELS = _pulse_levels()
+
+
+def _mark_asset_path():
+    """Where cc_mark_white.png lives in this build, or None. Its own function
+    so a test can point it somewhere else (and so the fallback below is
+    reachable)."""
+    return theme.asset_path(MARK_ASSET)
+
+
+# Decoded + downscaled once per source path: a 512x512 PNG through LANCZOS is
+# milliseconds, but it would otherwise be paid once per pulse frame per color.
+_MARK_MASK_CACHE: dict = {}
+
+
+def _mark_alpha_mask(size: int = MARK_BOX):
+    """The mark's alpha channel at `size`x`size`, or None if this build has no
+    such asset.
+
+    None is a supported answer, not an error: _make_icon_image falls back to
+    the old chevrons. An old frozen build (published before the asset was in
+    datas) and a stripped checkout both land here, and the tray coming up
+    matters more than what is drawn in it.
+    """
+    path = _mark_asset_path()
+    key = (str(path) if path is not None else None, size)
+    if key in _MARK_MASK_CACHE:
+        return _MARK_MASK_CACHE[key]
+    mask = None
+    if path is not None:
+        try:
+            with Image.open(path) as src:
+                mask = (src.convert("RGBA")
+                           .resize((size, size), Image.LANCZOS)
+                           .getchannel("A"))
+        except Exception:
+            log.warning("tray mark asset unreadable at %s -- falling back to the "
+                        "chevron glyph", path, exc_info=True)
+            mask = None
+    _MARK_MASK_CACHE[key] = mask
+    return mask
+
+
+def _icon_image_cached(color_name: str, level: float = 1.0):
+    key = (color_name, round(float(level), 3))
+    image = _ICON_IMAGE_CACHE.get(key)
     if image is None:
-        image = _make_icon_image(color_name)
-        _ICON_IMAGE_CACHE[color_name] = image
+        # setdefault, not a plain store: the refresh loop and the pulse ticker
+        # both reach for a color's frames the first time it appears, and two
+        # threads rendering it at once would leave one of them holding an
+        # image the cache does not contain -- i.e. an icon.icon that never
+        # compares identical to the cached frame again, and a second render on
+        # every subsequent miss. Whoever stores first wins and both callers
+        # return THAT object (the loser's image is simply dropped).
+        image = _ICON_IMAGE_CACHE.setdefault(key, _make_icon_image(key[0], key[1]))
     return image
 
 
-def _make_icon_image(color_name: str):
-    """Terminal-style tile: near-black rounded square, neon-red border, and a
-    status-colored sync glyph (two chevrons) with a soft glow."""
-    c = _color_rgb(color_name)
+def _pulse_frames(color_name: str) -> tuple:
+    """One whole breath for `color_name`, every frame already cached."""
+    return tuple(_icon_image_cached(color_name, level) for level in PULSE_LEVELS)
+
+
+def _dim(rgb: tuple, level: float) -> tuple:
+    """`rgb` scaled toward black. level is clamped to (0..1]."""
+    scale = max(0.0, min(1.0, float(level)))
+    return tuple(max(0, min(255, int(round(channel * scale)))) for channel in rgb)
+
+
+def _make_icon_image(color_name: str, level: float = 1.0):
+    """The Creators Club mark alone, tinted the status color, on transparency.
+
+    No tile and no border (2026-08-10, by request): the icon IS the mark, the
+    silhouette stays constant, and only its color/brightness carries status.
+    `level` dims the tint; the alpha channel never changes, so a breathing
+    icon reads as the same shape getting quieter, not a shape flickering in
+    and out.
+
+    Falls back to the bare chevron glyph when the mark asset is missing; see
+    _mark_alpha_mask.
+    """
+    c = _dim(_color_rgb(color_name), level)
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
 
-    # tile + neon border
-    draw.rounded_rectangle((3, 3, 61, 61), radius=12, fill=(*theme.RGB_BG, 255),
-                           outline=(*theme.RGB_RED, 255), width=3)
+    mask = _mark_alpha_mask()
+    if mask is None:
+        _draw_chevrons(ImageDraw.Draw(img), c)
+        return img
+    # Tint by pasting a solid color THROUGH the mark's own alpha: the asset is
+    # white-on-transparent precisely so this works at any color without
+    # touching its anti-aliased edges.
+    img.paste(Image.new("RGBA", mask.size, (*c, 255)),
+              (MARK_OFFSET, MARK_OFFSET), mask)
+    return img
 
+
+def _draw_chevrons(draw, c: tuple) -> None:
+    """The original status glyph (▲ upload over ▼ download, with a soft glow),
+    kept as the no-asset fallback."""
     up = [(20, 27), (32, 13), (44, 27)]     # ▲ upload chevron
     down = [(20, 37), (32, 51), (44, 37)]   # ▼ download chevron
 
@@ -509,7 +648,6 @@ def _make_icon_image(color_name: str):
         draw.line(pts, fill=(*c, 70), width=11, joint="curve")
     for pts in (up, down):
         draw.line(pts, fill=(*c, 255), width=5, joint="curve")
-    return img
 
 
 def human_bytes(n: Optional[int]) -> str:
@@ -1410,6 +1548,7 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     _get("p_swap_available", lambda: (getattr(app, "p_swap_available", None) or (lambda: False))(), False)
     _get("p_mode", lambda: (getattr(app, "p_mapping_mode", None) or (lambda: "none"))(), "none")
     snap["color"] = compute_overall_color(statuses, app)
+    _get("pulse", lambda: should_pulse(snap["color"], statuses), False)
     return snap
 
 
@@ -1677,7 +1816,11 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     )
 
 
-def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.Icon":
+def start_tray(
+    app: "CompanionApp",
+    refresh_interval: float = 2.0,
+    pulse_interval: float = PULSE_PERIOD / PULSE_STEPS,
+) -> "pystray.Icon":
     """Start the tray icon on a background thread. Returns the Icon (call
     .stop() to remove it).
 
@@ -1691,7 +1834,11 @@ def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.I
         the user had open (freeze) and then resolve the clicked index
         against the NEW callback list (wrong action). Rebuilding only on
         real state changes makes that window rare and keeps an open menu
-        stable under the cursor."""
+        stable under the cursor.
+
+    Pulse (2026-08-10): a second, faster thread breathes the mark while the
+    snapshot says so (syncing, or broken -- see should_pulse). The two loops
+    share one tuple and never both own the icon; see _pulse_loop."""
 
     first = _tray_snapshot(app)
     icon = pystray.Icon(
@@ -1706,9 +1853,14 @@ def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.I
     last_fingerprint = _menu_fingerprint(first)
     last_color = first["color"]
     last_title = _tooltip_text(first)
+    # The ONLY thing the two loops share: a (color, pulsing) tuple, rebound
+    # whole by the refresh loop and read whole by the pulse loop. Rebinding one
+    # name is atomic under the GIL, so the reader can never see a color from
+    # one tick with the pulse flag from another, and no lock is needed for it.
+    pulse_state = (first["color"], bool(first.get("pulse")))
 
     def _refresh_loop() -> None:
-        nonlocal last_fingerprint, last_color, last_title
+        nonlocal last_fingerprint, last_color, last_title, pulse_state
         while not getattr(icon, "_ccsync_stop", False):
             try:
                 # While the menu is open, touch NOTHING -- re-check on a
@@ -1721,7 +1873,16 @@ def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.I
                     # Opened while we were gathering -- drop this tick.
                     time.sleep(0.25)
                     continue
-                if snap["color"] != last_color:
+                pulsing = bool(snap.get("pulse"))
+                pulse_state = (snap["color"], pulsing)
+                if pulsing:
+                    # The pulse loop owns icon.icon while it runs, so this one
+                    # keeps its hands off. last_color is cleared rather than
+                    # remembered: the moment the pulse stops, the comparison
+                    # below trips and restores the full-brightness frame over
+                    # whatever brightness the animation was left on.
+                    last_color = None
+                elif snap["color"] != last_color:
                     icon.icon = _icon_image_cached(snap["color"])
                     last_color = snap["color"]
                 title = _tooltip_text(snap)
@@ -1736,10 +1897,54 @@ def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.I
                 log.exception("tray refresh failed")
             time.sleep(refresh_interval)
 
+    def _pulse_loop() -> None:
+        """Breathe the mark, from pre-rendered frames, one thread for the lot.
+
+        Quiescent by construction: while the state stays steady this assigns
+        NOTHING (one frame on the falling edge, then not another until the
+        next pulse) -- the refresh loop's color-change assignment is the only
+        writer then, and the two never fight over icon.icon.
+
+        Everything else here is _refresh_loop's rules: never touch the icon
+        while the menu is open (a NIM_MODIFY under an open menu forces a
+        redraw beneath the cursor -- the 2026-07-26 hover hangs), and stop
+        when icon.stop() sets _ccsync_stop.
+        """
+        frames: tuple = ()
+        frames_color = None
+        step = 0
+        while not getattr(icon, "_ccsync_stop", False):
+            try:
+                color, pulsing = pulse_state
+                if not pulsing:
+                    if step:
+                        # ONE assignment on the falling edge, then silence.
+                        # The refresh loop restores the steady frame too, but
+                        # it can lose a hair-thin race with this thread's last
+                        # frame (it publishes the new state, then assigns;
+                        # we may already have read the old state and be about
+                        # to paint). Whoever writes last writes the same
+                        # cached full-brightness image, so the icon cannot be
+                        # left stuck on a dim frame.
+                        icon.icon = _icon_image_cached(color)
+                        step = 0
+                elif not guard.is_open():
+                    if color != frames_color:
+                        frames = _pulse_frames(color)
+                        frames_color = color
+                    if frames:
+                        icon.icon = frames[step % len(frames)]
+                        step += 1
+            except Exception:
+                log.exception("tray pulse failed")
+            time.sleep(pulse_interval)
+
     refresh_thread = threading.Thread(target=_refresh_loop, daemon=True)
     refresh_thread.start()
+    pulse_thread = threading.Thread(target=_pulse_loop, daemon=True)
+    pulse_thread.start()
 
-    # `_ccsync_stop` was read by the loop above and ASSIGNED NOWHERE in the
+    # `_ccsync_stop` was read by the loops above and ASSIGNED NOWHERE in the
     # repo, so the 5 s refresh thread outlived icon.stop() and kept calling
     # app.lane_statuses() and assigning icon.menu on a dead icon through the
     # entire shutdown/self-upgrade window (AUDIT_2 §2-low). Wrap stop() so it

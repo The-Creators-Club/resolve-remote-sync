@@ -39,7 +39,8 @@ a { color: inherit; text-decoration: none; }
   text-shadow: 0 0 12px rgba(255, 33, 64, 0.55);
 }
 .brand:hover { color: var(--red-hot); }
-.brand .dim { color: var(--red-dim); }
+/* Also the nav's group separators, which borrow the brand's "//" idiom. */
+.topbar .dim { color: var(--red-dim); }
 .stamp { margin-left: auto; color: var(--muted); font-size: 12px; }
 .banner {
   color: var(--bg);
@@ -272,6 +273,13 @@ tr.current-row { background: var(--field); }
 }
 .proj-name { display: flex; align-items: baseline; gap: 0.5rem; overflow: hidden; flex: 1; }
 .nav-link { margin-left: 1rem; }
+/* Announced-but-not-built nav entries: same shape as a link, none of the
+   affordances, so a click is never invited. */
+.nav-disabled, .nav-disabled:hover {
+  color: var(--muted);
+  cursor: default;
+  text-shadow: none;
+}
 
 /* ---------------- progress bars ---------------- */
 /* Replaces the glyph bars ([██████░░░░]): sub-pixel-accurate, no font

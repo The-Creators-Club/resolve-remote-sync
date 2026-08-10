@@ -83,9 +83,16 @@ a = Analysis(
     [entry_point],
     pathex=["src"],
     binaries=extra_binaries,
-    # The Creators Club logo: theme.apply_window_icon() reads it back out of
-    # sys._MEIPASS at this exact relative path for every popup window.
-    datas=[("src/ccsync_companion/assets/icon.png", "ccsync_companion/assets")],
+    # The Creators Club logo: theme.asset_path() reads these back out of
+    # sys._MEIPASS at this exact relative path -- icon.png for every popup
+    # window, cc_mark_white.png for the tray icon's tinted/pulsing mark
+    # (2026-08-10). Listed file by file rather than collecting the directory:
+    # icon.ico is already handed to EXE(icon=...) and has no business in the
+    # bundle twice, and a glob would ship whatever anyone drops in assets/.
+    datas=[
+        ("src/ccsync_companion/assets/icon.png", "ccsync_companion/assets"),
+        ("src/ccsync_companion/assets/cc_mark_white.png", "ccsync_companion/assets"),
+    ],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

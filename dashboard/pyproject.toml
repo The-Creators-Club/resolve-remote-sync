@@ -8,7 +8,7 @@ name = "ccsync-dashboard"
 # check_deploy_drift.ps1 read only __init__.py, so this drifted three releases
 # behind unnoticed. test_hardening.test_dashboard_version_does_not_drift is
 # the guard.
-version = "0.3.7"
+version = "0.3.8"
 description = "Creators Club Sync fleet dashboard: per-project, per-editor sync status served off the NAS"
 requires-python = ">=3.12"
 dependencies = [
@@ -34,6 +34,26 @@ dependencies = [
 broll = [
     "numpy>=1.26",
     "rapidfuzz>=3.0",
+]
+
+# Runtime deps of the music web app (music/web), mounted in-process at /music
+# on the same terms as b-roll above. `numpy` is shared with that group and is
+# not repeated here.
+#
+# `torch` is deliberately absent, and that is the whole shape of this app: the
+# container never embeds audio, only query text, so the heavy half stays on the
+# base rig and the DB arrives precomputed.
+#
+# python-multipart is NOT optional. FastAPI raises at *import* time for the
+# UploadFile parameter on /api/ingest, so without it the dashboard reports the
+# music tree as "absent" -- indistinguishable from never having shipped it.
+music = [
+    "python-multipart>=0.0.9",
+    # Runs the exported CLAP text-tower artefact that /music/api/search embeds
+    # queries with. Without it the app falls back to the full CLAP model, which
+    # needs torch -- so search 500s instead of degrading. 54 MB unpacked
+    # against torch's 675 MB, which is the whole reason the artefact exists.
+    "onnxruntime>=1.17",
 ]
 
 dev = [

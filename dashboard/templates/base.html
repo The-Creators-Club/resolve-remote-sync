@@ -4,7 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}CC SYNC{% endblock %}</title>
-  <link rel="icon" type="image/png" href="/static/favicon.png">
+  {# The real Creators Club mark (2026-08-10), not the old generated PNG. SVG
+     with a PNG fallback for anything that won't take an SVG favicon. #}
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="alternate icon" type="image/png" href="/static/favicon.png">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js" defer></script>
   <script>
@@ -42,16 +45,29 @@
 <body>
   <header class="topbar">
     <a class="brand" href="/">CREATORS CLUB <span class="dim">//</span> SYNC STATUS</a>
+    {# The sync dashboard's own pages come first; everything after a "//" is a
+       separate platform or a download, not a page of this app. Each separator
+       lives with the item it precedes so an absent item takes its "//" with
+       it and never leaves a dangling one. #}
     <a class="btn nav-link" href="/transfers">[ TRANSFERS ]</a>
-    {% if broll_mounted %}
-    {# Trailing slash matters: the b-roll SPA uses document-relative URLs, so at
-       /broll (no slash) they would resolve against the dashboard root. #}
-    <a class="btn nav-link" href="/broll/">[ B-ROLL ]</a>
-    {% endif %}
-    <a class="btn nav-link" href="/download" title="download the latest CC Sync installer for this computer">[ INSTALLER ]</a>
     {% if session_is_admin %}
       <a class="btn nav-link" href="/admin/users">[ USERS ]</a>
     {% endif %}
+    {% if broll_mounted %}
+      <span class="dim">//</span>
+      {# Trailing slash matters: the b-roll SPA uses document-relative URLs, so at
+         /broll (no slash) they would resolve against the dashboard root. #}
+      <a class="btn nav-link" href="/broll/">[ B-ROLL ]</a>
+    {% endif %}
+    {% if music_mounted %}
+      <span class="dim">//</span>
+      {# Trailing slash for the same reason as /broll/: the music SPA resolves
+         its URLs against the document. Shown only when the mount fully took --
+         an absent or degraded music tree gets no link, same rule as b-roll. #}
+      <a class="btn nav-link" href="/music/">[ MUSIC ]</a>
+    {% endif %}
+    <span class="dim">//</span>
+    <a class="btn nav-link" href="/download" title="download the latest CC Sync installer for this computer">[ INSTALLER ]</a>
     {% if view and not view.syncthing_reachable %}
       <span class="banner">▲ SYNCTHING UNREACHABLE: data may be stale</span>
     {% endif %}

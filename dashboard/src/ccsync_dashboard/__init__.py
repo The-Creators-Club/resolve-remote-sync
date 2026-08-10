@@ -1,3 +1,3 @@
 """Creators Club Sync fleet dashboard."""
 
-VERSION = "0.3.7"
+VERSION = "0.3.8"

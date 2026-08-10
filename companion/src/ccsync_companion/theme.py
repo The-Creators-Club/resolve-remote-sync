@@ -30,22 +30,33 @@ RGB_AMBER = (255, 176, 46)
 RULE = "─" * 72  # terminal divider line
 
 
-def icon_path():
-    """Path to the Creators Club logo PNG bundled with the package, or None.
+def asset_path(name: str):
+    """Path to a file in assets/, or None if this build hasn't got it.
 
     Works both from source (assets/ next to this file) and from a frozen
-    onefile build (extracted under sys._MEIPASS -- see build.spec's datas)."""
+    onefile build (extracted under sys._MEIPASS -- see build.spec's datas,
+    which lists each shipped file explicitly).
+
+    None rather than a raise, and every caller must treat it that way: an
+    asset is decoration, and a frozen build published BEFORE a given file was
+    added to datas will not have it (2026-08-10, when the tray icon started
+    reading cc_mark_white.png)."""
     from pathlib import Path
 
     candidates = []
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        candidates.append(Path(meipass) / "ccsync_companion" / "assets" / "icon.png")
-    candidates.append(Path(__file__).resolve().parent / "assets" / "icon.png")
+        candidates.append(Path(meipass) / "ccsync_companion" / "assets" / name)
+    candidates.append(Path(__file__).resolve().parent / "assets" / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     return None
+
+
+def icon_path():
+    """Path to the Creators Club logo PNG bundled with the package, or None."""
+    return asset_path("icon.png")
 
 
 def apply_window_icon(tk_module, root) -> None:

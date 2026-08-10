@@ -1600,3 +1600,262 @@ def test_the_popup_wrapper_hands_win32_the_clamped_anchor(monkeypatch):
     seen.clear()
     assert _win32.win32.TrackPopupMenuEx() == 3
     assert seen == [()]
+
+
+# ===========================================================================
+# 2026-08-10: the Creators Club mark, and what a pulse is allowed to mean
+# ===========================================================================
+#
+# The icon used to draw two chevrons in the status color. It now draws the CC
+# mark alone, tinted, on transparency -- and it BREATHES, but only for the two
+# states worth interrupting someone for: work in flight (amber + a syncing
+# lane) and something broken (red). Every other amber -- paused, signed out,
+# drive unplugged, sync disabled, not set up -- is steady, and green never
+# moves at all.
+
+
+def _syncing3():
+    return [_status("lane_a_video_up", "syncing"), _status("lane_b_proxy_down", "idle"),
+            _status("lane_c_syncthing", "idle")]
+
+
+def test_red_pulses_and_so_does_amber_with_a_lane_in_flight():
+    from ccsync_companion.tray import should_pulse
+
+    assert should_pulse("red", _idle3()) is True
+    assert should_pulse("red", _syncing3()) is True
+    assert should_pulse("orange", _syncing3()) is True
+
+
+def test_a_state_the_editor_is_simply_in_does_not_pulse():
+    """Paused, signed out, drive out, sync disabled: all amber, none of them
+    "work is happening or something is broken", so none of them moves."""
+    from ccsync_companion.tray import should_pulse
+
+    assert should_pulse("orange", _idle3()) is False
+    assert should_pulse("orange", []) is False
+
+
+def test_green_never_pulses():
+    """Green already carries the strictest promise in the product (AUDIT_2
+    UX-1). A breathing green would read as "…working on it", which is the one
+    thing it must never say."""
+    from ccsync_companion.tray import should_pulse
+
+    assert should_pulse("green", _idle3()) is False
+    assert should_pulse("green", _syncing3()) is False
+
+
+def test_the_snapshot_carries_the_pulse_flag_for_each_state():
+    """The truth table as the tray actually computes it -- through the app,
+    not by handing should_pulse() a color by hand."""
+    from ccsync_companion.tray import _tray_snapshot
+
+    def snap_for(app):
+        snap = _tray_snapshot(app)
+        return snap["color"], snap["pulse"]
+
+    signed_in = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    assert snap_for(signed_in) == ("green", False)
+
+    syncing = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    syncing.lane_statuses = _syncing3
+    assert snap_for(syncing) == ("orange", True)
+
+    paused = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    paused.paused = True
+    assert snap_for(paused) == ("orange", False)
+
+    signed_out = _FakeApp({"dashboard_url": ""})
+    assert snap_for(signed_out) == ("orange", False)
+
+    drive_out = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    drive_out._root_absent = True
+    assert snap_for(drive_out) == ("orange", False)
+
+    disabled = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    disabled._sync_enabled = False
+    assert snap_for(disabled) == ("orange", False)
+
+    broken = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    broken.lane_statuses = lambda: [_status("lane_a_video_up", "error")]
+    assert snap_for(broken) == ("red", True)
+
+    misconfigured = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    misconfigured.config_problems = ["remote_root is blank -- ..."]
+    assert snap_for(misconfigured) == ("red", True)
+
+
+def test_every_pulse_frame_is_rendered_at_most_once():
+    """The cache is not an optimisation here, it is the design: without it a
+    breath would rebuild eight 64x64 images -- and eight win32 HICONs -- every
+    three seconds for as long as the companion runs."""
+    from ccsync_companion.tray import PULSE_LEVELS, _icon_image_cached, _pulse_frames
+
+    dim = _icon_image_cached("orange", 0.35)
+    assert _icon_image_cached("orange", 0.35) is dim          # same object again
+    assert _icon_image_cached("orange") is not dim            # ...but not the steady one
+    assert _icon_image_cached("red", 0.35) is not dim         # ...nor another color's
+
+    frames = _pulse_frames("red")
+    assert len(frames) == len(PULSE_LEVELS)
+    # A second cycle must allocate nothing: identical objects, in order.
+    assert all(a is b for a, b in zip(frames, _pulse_frames("red")))
+
+
+def test_two_threads_reaching_for_a_new_frame_get_the_same_one():
+    """The refresh loop and the pulse ticker both grab a color's frames the
+    first time it appears. Without setdefault one of them walks away with an
+    image the cache does not hold -- so its icon never compares identical to
+    the cached frame again, and every later miss renders twice."""
+    import threading
+
+    from ccsync_companion.tray import _ICON_IMAGE_CACHE, _icon_image_cached
+
+    _ICON_IMAGE_CACHE.pop(("red", 0.675), None)   # force a miss on both threads
+    got: list = []
+    ready = threading.Barrier(4)
+
+    def _grab():
+        ready.wait()
+        got.append(_icon_image_cached("red", 0.675))
+
+    threads = [threading.Thread(target=_grab) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    ready.wait()
+    for thread in threads:
+        thread.join(5.0)
+
+    assert len(got) == 3
+    assert all(image is got[0] for image in got)
+    assert _ICON_IMAGE_CACHE[("red", 0.675)] is got[0]
+
+
+def test_a_dimmer_level_dims_the_tint_and_never_the_silhouette():
+    from ccsync_companion.tray import _make_icon_image
+
+    bright = _make_icon_image("orange")
+    dim = _make_icon_image("orange", 0.45)
+
+    assert bright.getchannel("G").getextrema()[1] > dim.getchannel("G").getextrema()[1]
+    # There is no tile and no border (2026-08-10): the alpha channel IS the
+    # mark, and it must not move during a breath -- a pulsing icon reads as
+    # the same shape getting quieter, never as a shape flickering in and out.
+    assert bright.getchannel("A").tobytes() == dim.getchannel("A").tobytes()
+
+
+def test_the_mark_is_what_gets_drawn_when_the_asset_is_there(monkeypatch):
+    """Proof the compositing actually happens, rather than the chevron path
+    quietly still running."""
+    from ccsync_companion import theme
+    from ccsync_companion import tray as tray_mod
+
+    assert theme.asset_path(tray_mod.MARK_ASSET) is not None
+    with_mark = tray_mod._make_icon_image("green")
+    assert with_mark.size == (64, 64)
+
+    monkeypatch.setattr(tray_mod, "_mark_asset_path", lambda: None)
+    assert with_mark.tobytes() != tray_mod._make_icon_image("green").tobytes()
+
+
+def test_a_missing_mark_asset_falls_back_to_the_chevrons(tmp_path, monkeypatch):
+    """An old frozen build (published before cc_mark_white.png was in
+    build.spec's datas) and a stripped checkout both land here. The icon is
+    decoration; the tray has to come up either way."""
+    from ccsync_companion import tray as tray_mod
+
+    monkeypatch.setattr(tray_mod, "_mark_asset_path", lambda: None)
+    no_asset = tray_mod._make_icon_image("green")
+    assert no_asset.size == (64, 64)
+
+    # ...and the same when a path IS reported but there is no file on it.
+    monkeypatch.setattr(tray_mod, "_mark_asset_path", lambda: tmp_path / "gone.png")
+    unreadable = tray_mod._make_icon_image("green")
+    assert unreadable.tobytes() == no_asset.tobytes()
+
+    # the pulse still works, it just breathes the chevrons
+    assert (no_asset.getchannel("G").getextrema()[1]
+            > tray_mod._make_icon_image("green", 0.35).getchannel("G").getextrema()[1])
+
+
+def test_the_frozen_build_ships_the_mark():
+    """theme.asset_path() reads assets out of sys._MEIPASS at a path
+    build.spec's datas has to produce. Nothing at runtime can tell you it
+    doesn't -- a frozen build missing the file just reverts to chevrons, which
+    is exactly why that fallback is silent."""
+    from pathlib import Path
+
+    spec = (Path(__file__).resolve().parent.parent / "build.spec").read_text(
+        encoding="utf-8")
+    assert "src/ccsync_companion/assets/cc_mark_white.png" in spec
+    assert "src/ccsync_companion/assets/icon.png" in spec
+    assert '"ccsync_companion/assets"' in spec
+
+
+def test_asset_path_answers_none_instead_of_raising():
+    from ccsync_companion import theme
+
+    assert theme.asset_path("icon.png") == theme.icon_path()
+    assert theme.asset_path("no-such-asset.png") is None
+
+
+def test_the_pulse_animates_only_while_the_snapshot_says_so():
+    """The two loops in start_tray must not fight over icon.icon: the pulse
+    owns it while breathing, the refresh loop owns it when steady, and a
+    steady icon costs zero assignments (this sits in a taskbar all day)."""
+    import time
+
+    import ccsync_companion.tray as tray_mod
+
+    class _FakeIcon:
+        def __init__(self, *a, **k):
+            object.__setattr__(self, "assignments", [])
+            self.icon = a[1] if len(a) > 1 else None
+            self.title = a[2] if len(a) > 2 else ""
+            self.menu = k.get("menu")
+
+        def __setattr__(self, name, value):
+            if name == "icon":
+                self.assignments.append(value)
+            object.__setattr__(self, name, value)
+
+        def stop(self):
+            pass
+
+        def run(self):
+            pass
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app.lane_statuses = _syncing3
+
+    real_icon = tray_mod.pystray.Icon
+    try:
+        tray_mod.pystray.Icon = _FakeIcon
+        icon = tray_mod.start_tray(app, refresh_interval=0.01, pulse_interval=0.01)
+        try:
+            deadline = time.monotonic() + 5.0
+            while (len({id(i) for i in icon.assignments}) < 3
+                   and time.monotonic() < deadline):
+                time.sleep(0.01)
+            assert len({id(i) for i in icon.assignments}) >= 3, "the mark never moved"
+
+            # Everything it painted is a cached frame of the amber breath.
+            amber = {id(f) for f in tray_mod._pulse_frames("orange")}
+            assert {id(i) for i in icon.assignments[1:]} <= amber
+
+            # Caught up: steady green, and then nothing at all.
+            app.lane_statuses = lambda: [_status("lane_a_video_up", "idle")]
+            steady = tray_mod._icon_image_cached("green")
+            deadline = time.monotonic() + 5.0
+            while icon.icon is not steady and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert icon.icon is steady
+            time.sleep(0.1)                      # let the falling edge settle
+            quiet = len(icon.assignments)
+            time.sleep(0.2)                      # ~20 pulse ticks
+            assert len(icon.assignments) == quiet
+        finally:
+            icon.stop()
+    finally:
+        tray_mod.pystray.Icon = real_icon

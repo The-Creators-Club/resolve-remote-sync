@@ -371,20 +371,47 @@ def build_shoot_clause(shoot: str | None) -> tuple[str, list[Any]]:
     return " AND v.share = ? AND v.rel_path LIKE ? ESCAPE '\\'", [share, f"{like}%"]
 
 
-def build_collection_clause(collection: str | None) -> tuple[str, list[Any]]:
+def creators_shares(conn: sqlite3.Connection | None = None) -> set[str]:
+    """Every share holding our own footage.
+
+    Two sources, unioned. BROLL_CREATORS_SHARES stays as the deploy-time
+    override, but the authoritative signal is the share_roots table the indexer
+    pushes: a source='proxies' share IS our own shot footage by definition
+    (that is what the flag means — see indexer ShareConfig.source). Deriving it
+    here is what keeps a newly indexed shoot share (ff4, ff3) from silently
+    filing under Downloads until someone remembers to edit an env var on the
+    NAS — which is exactly what happened to the FF4 shoot footage (2026-08-10).
+
+    A pre-v6 DB has no share_roots table; fall back to the env list alone.
+    """
+    shares = set(config.get_creators_shares())
+    if conn is not None:
+        try:
+            rows = conn.execute(
+                "SELECT share FROM share_roots WHERE source = 'proxies'"
+            ).fetchall()
+            shares.update(r["share"] for r in rows)
+        except sqlite3.OperationalError:
+            pass
+    return shares
+
+
+def build_collection_clause(
+    collection: str | None, conn: sqlite3.Connection | None = None
+) -> tuple[str, list[Any]]:
     """Restrict to one of the two browse roots, by share membership.
 
-    'creators_club' is the configured share list; 'downloads' is its complement,
-    expressed as NOT IN rather than an enumerated list so a share added to the
-    archive but not yet to the config still appears somewhere (as a download)
-    instead of vanishing from both roots.
+    'creators_club' is the derived share set (see creators_shares); 'downloads'
+    is its complement, expressed as NOT IN rather than an enumerated list so a
+    share added to the archive but not yet known still appears somewhere (as a
+    download) instead of vanishing from both roots.
 
-    An empty creators list makes 'creators_club' match nothing and 'downloads'
+    An empty creators set makes 'creators_club' match nothing and 'downloads'
     match everything, which is the correct unconfigured behaviour.
     """
     if collection not in (config.COLLECTION_DOWNLOADS, config.COLLECTION_CREATORS):
         return "", []
-    creators = sorted(config.get_creators_shares())
+    creators = sorted(creators_shares(conn))
     if not creators:
         return (" AND 1=0", []) if collection == config.COLLECTION_CREATORS else ("", [])
     placeholders = ", ".join("?" for _ in creators)
@@ -861,14 +888,19 @@ def _browse(
     category/flag filters) with no scoring, most recently added first.
 
     Excludes rows that exist in the table but are not archive footage: the
-    editor proxy folders (status 'skipped') and confirmed byte-duplicates of
-    another row. Neither is ever indexed, so neither has a proxy, poster or
-    sprite -- browsing them produced a grid that was mostly broken thumbnails
-    (2,254 of 4,482 rows on the real archive) and a total that overstated the
-    library by 2x. Search never surfaced them anyway: with no segments and no
-    transcript they cannot match, so this only aligns browse with what search
-    could already see."""
-    where = ("v.status != 'skipped' AND v.duplicate_of IS NULL"
+    editor proxy folders (status 'skipped'), the camera originals of a proxies
+    share (status 'excluded' -- recorded for the conform manifest, never
+    indexed, never copied), and confirmed byte-duplicates of another row. None
+    of these is ever indexed, so none has a proxy, poster or sprite -- browsing
+    them produced a grid that was mostly broken thumbnails (2,254 of 4,482 rows
+    on the real archive) and a total that overstated the library by 2x.
+    'excluded' joined the list 2026-08-10: the FF4 shoot's camera .MP4s sat as
+    ghost no-preview cards beside their own indexed proxies. Search never
+    surfaced any of these anyway: with no segments and no transcript they
+    cannot match, so this only aligns browse with what search could already
+    see."""
+    where = ("v.status != 'skipped' AND v.status != 'excluded' "
+             "AND v.duplicate_of IS NULL"
              + cat_clause + flags_clause)
     base_params = [*cat_params, *flags_params]
 
@@ -982,7 +1014,7 @@ def search_videos(
     # are ` AND v.…` fragments appended at the same point in every one of the
     # dozen-odd query builders below, so merging them here keeps the parameter
     # order correct everywhere without touching any of those signatures.
-    coll_clause, coll_params = build_collection_clause(collection)
+    coll_clause, coll_params = build_collection_clause(collection, conn)
     shoot_clause, shoot_params = build_shoot_clause(shoot)
     cat_clause += coll_clause + shoot_clause
     cat_params = [*cat_params, *coll_params, *shoot_params]

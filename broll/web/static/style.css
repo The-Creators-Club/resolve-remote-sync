@@ -328,6 +328,10 @@ button { cursor: pointer; }
   opacity: 0;
 }
 .card-thumb:hover .sprite-overlay { opacity: 1; }
+/* A search result parks its sprite on the frame that matched and leaves it
+   showing (see positionSprite in app.js): the poster is frame 0, which in
+   long-form footage is a slate more often than it is the shot. */
+.card-thumb .sprite-overlay.sprite-static { opacity: 1; }
 
 /* No poster on disk (probe/proxy failed on a corrupt source). */
 .card-thumb.thumb-missing {
@@ -359,59 +363,11 @@ button { cursor: pointer; }
   padding: 0 4px;
 }
 
-.card-body { padding: 7px 8px 9px; }
-
-.card-filename {
-  font-size: 11.5px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-bottom: 2px;
-}
-
-.card-category {
-  font-size: 10.5px;
-  color: var(--red);
-  margin-bottom: 6px;
-}
-
-.card-hits {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-/* Same shape as the dashboard's .chip: field fill, red-dim hairline. */
-.hit-chip {
-  font-family: var(--mono);
-  font-size: 10px;
-  background: var(--field);
-  border: 1px solid var(--red-dim);
-  color: var(--muted);
-  padding: 1px 5px;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.hit-chip:hover { border-color: var(--red); color: var(--text); }
-.hit-chip mark {
-  background: none;
-  color: var(--red-hot);
-  font-weight: bold;
-}
-.hit-chip-tag {
-  text-transform: uppercase;
-  font-size: 8.5px;
-  color: var(--muted);
-  letter-spacing: 0.06em;
-}
-/* Transcript-sourced hits (spoken word, not seen) get the green channel used
-   everywhere else for the spoken-word index, see .transcript-list. */
-.hit-chip-transcript { border-left: 2px solid var(--green); }
-.hit-chip-transcript .hit-chip-tag { color: var(--green); }
+/* The filename/category/hit-chip block that used to sit under each thumb is
+   gone (2026-08-10, by request): b-roll is chosen by eye, and a card of text
+   under every frame pulled the eye off the frames. The filename and category
+   survive as the card's hover tooltip; the hits survive as the click target
+   (best hit) and the yellow bands on the detail seekbar. */
 
 .pager {
   display: flex;
@@ -473,6 +429,8 @@ button { cursor: pointer; }
   border: 1px solid var(--red-dim);
   margin-top: 8px;
   cursor: pointer;
+  /* The bar is a drag surface: without this a touch scrub scrolls the page. */
+  touch-action: none;
 }
 .seekbar-range {
   position: absolute;
@@ -484,6 +442,19 @@ button { cursor: pointer; }
 .seekbar-markers {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
+  /* Belt and braces against a marker laid out from a duration that turns out
+     to be short. The playhead is deliberately NOT in here: it overhangs the bar
+     by 2px top and bottom, which this would clip. */
+  overflow: hidden;
+}
+/* Where the search hits are, in the theme's yellow. Bands, not ticks: a hit has
+   a length, and its length is how much of the clip is worth watching. */
+.seekbar-hit {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: rgba(255, 176, 46, 0.30);
+  border-left: 1px solid var(--amber);
+  border-right: 1px solid var(--amber);
 }
 .seekbar-marker {
   position: absolute;

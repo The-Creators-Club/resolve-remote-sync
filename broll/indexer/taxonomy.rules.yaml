@@ -185,6 +185,21 @@ categories:
     description: "Pets, domestic and companion animals."
     match: [pet, pets, dog, dogs, cat, cats, animal*, rabbit*]
 
+  # --- people ---------------------------------------------------------------
+  #
+  # NO `match:` KEY, DELIBERATELY. score_categories() skips a pattern-less
+  # category, so this one can never be won by theme scoring -- it is assigned
+  # ONLY by the path prior in taxonomy.py (INTERVIEWEE_SLUG), from the clip
+  # sitting inside an interviewee's own folder on one of our own shoot shares.
+  #
+  # That is the entire point. Give it `match: [interview*]` and every downloaded
+  # news package that mentions an interview lands here, which is what
+  # general/interviews in the fallback tier is for. A clip belongs here because
+  # of WHERE IT WAS SHOT, a fact the themes cannot know and the path does.
+  - slug: people/interviewee-broll
+    label: "Interviewee B-roll"
+    description: "B-roll shot in and around an interviewee's own world — cutaways from our own shoots' interviewee folders."
+
   # --- security -------------------------------------------------------------
   - slug: security/military                 # 151
     label: "Military & Defence"

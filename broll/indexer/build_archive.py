@@ -3,15 +3,25 @@
     python build_archive.py --config config.queue.yaml --dest "P:/Assets/B-roll Archive"
     python build_archive.py --config config.queue.yaml --dest ... --apply
 
-Copies each clip's PROXY -- not its source -- into a browsable tree:
+Copies each clip's media into a browsable tree, plus the two stills the search
+UI previews it with:
 
     <dest>/Downloads/<category>/<original name>.mp4
     <dest>/Creators_Club/<share>/<shoot dirs>/<original name>.mp4
+    <dest>/posters/<video id>.jpg
+    <dest>/sprites/<video id>.jpg
 
 Proxies, because that is what an editor can actually play and sync: sources are
 scattered across five drives, are up to 20x the size, and are frequently codecs
 no browser and no remote link can handle. The proxy is H.264, ~27 MB, and is
 already the thing the search UI previews.
+
+Posters and sprites because the deployed site's DATA_ROOT *is* this archive
+root: it serves `media/poster/{id}.jpg` from `<DATA_ROOT>/posters` and
+`media/sprite/{id}.jpg` from `<DATA_ROOT>/sprites`. Until 2026-08-10 this
+script shipped media only and the two JPEG folders were copied by hand, so
+every clip whose pair was missed showed a "no preview" placeholder on a site
+that had indexed it perfectly.
 
 Original filenames, not `{video_id}.mp4`, because the path ends up in an
 editor's timeline and in their media pool. `4127.mp4` tells them nothing.
@@ -85,6 +95,37 @@ def safe_name(name: str, cap: int = MAX_STEM) -> str:
 # The original slot stays empty by design: sources live on the archive drives
 # and never come to the NAS.
 PROXY_DIR = "Proxy"
+
+# The stills are addressed by ID, never browsed by name -- the exact opposite of
+# the media above, which ends up in an editor's timeline. So they keep the
+# indexer's own data_root layout (`posters/{video_id}.jpg`, `sprites/...`),
+# because that layout IS the web app's contract: on the NAS the archive root and
+# the site's DATA_ROOT are the same directory, and routes_media.py looks them up
+# there by id. Putting them beside the clip would be tidier and completely
+# invisible to the thing that has to read them.
+POSTER_DIR = "posters"
+SPRITE_DIR = "sprites"
+STILL_DIRS = (POSTER_DIR, SPRITE_DIR)
+
+
+def still_pairs(video: dict, data_root: Path, dest_root: Path
+                ) -> tuple[list[tuple[Path, Path]], list[str]]:
+    """This clip's (poster, sprite) copy jobs, and which of the two are absent.
+
+    A missing still is a COUNTED SKIP, never an abort. They are produced by the
+    pipeline's stage_proxy, so a clip whose ffmpeg run failed on a broken stream
+    -- or one indexed before that stage existed -- has no pair on disk and never
+    will until it is re-run. Its media is still worth shipping, and refusing to
+    build a 60 GB archive over a 40 KB thumbnail would be the wrong trade.
+    """
+    found, missing = [], []
+    for kind in STILL_DIRS:
+        src = data_root / kind / f"{video['id']}.jpg"
+        if src.is_file():
+            found.append((src, dest_root / kind / f"{video['id']}.jpg"))
+        else:
+            missing.append(kind)
+    return found, missing
 
 
 def creator_shares(cfg) -> set[str]:
@@ -210,12 +251,22 @@ def dedupe(path: Path, taken: set[str]) -> Path:
 
 
 def eligible(db_path: str) -> list[dict]:
+    """Everything whose local stages are done: indexed, organised, or proxied.
+
+    'proxied' joined 2026-08-10 (shipping ff3 ahead of its overnight claude
+    run): the archive serves exactly what the proxy stage produced -- the
+    proxy, the poster, the sprite -- and none of that changes when the model
+    later describes the clip. An editor browsing their own shoot should not
+    wait days for a model queue to see footage that is already playable.
+    Media placement is additive and idempotent, so a clip shipped at
+    'proxied' is simply already in place when it reaches 'indexed'.
+    """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
             "SELECT id, share, rel_path, category, status, original_path FROM videos "
-            "WHERE status IN ('indexed', ?) AND duplicate_of IS NULL ORDER BY id",
+            "WHERE status IN ('indexed', 'proxied', ?) AND duplicate_of IS NULL ORDER BY id",
             (ORGANISED,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -260,6 +311,8 @@ def main() -> int:
 
     plan, missing = [], []
     taken: set[str] = set()
+    stills_planned = {kind: 0 for kind in STILL_DIRS}
+    no_still = {kind: 0 for kind in STILL_DIRS}
     for v in videos:
         # The TOP slot: the best media we have for this clip. For a download
         # that is the actual original; for our own shoots it is the shoot's
@@ -279,9 +332,27 @@ def main() -> int:
             plan.append((v, preview, dedupe(
                 dest_root / dest_rel(v, creators, ".mp4", as_preview=True), taken)))
 
+        # The STILLS: poster and sprite, by id, in flat top-level folders. Not
+        # run through dedupe() -- `{video_id}.jpg` cannot collide, and passing
+        # them through would only pollute the names the media contends for.
+        stills, gaps = still_pairs(v, cfg.data_root, dest_root)
+        plan.extend((v, s, d) for s, d in stills)
+        for kind in STILL_DIRS:
+            if kind in gaps:
+                no_still[kind] += 1
+            else:
+                stills_planned[kind] += 1
+
     total = sum(s.stat().st_size for _v, s, _d in plan)
     print(f"eligible videos : {len(videos)}")
     print(f"files to place  : {len(plan)}  ({total / 1024**3:.1f} GB)")
+    print(f"  media         : {len(plan) - sum(stills_planned.values())}")
+    for kind in STILL_DIRS:
+        # A gap here is not fatal, but it IS the "no preview" placeholder on the
+        # live site, so it gets its own line rather than a silent shortfall.
+        gap = (f"   ({no_still[kind]} clip(s) have none -- 'no preview' on the site)"
+               if no_still[kind] else "")
+        print(f"  {kind:<14}: {stills_planned[kind]}{gap}")
     if missing:
         print(f"NO proxy yet    : {len(missing)}  (not yet through the local stages)")
 
@@ -294,10 +365,10 @@ def main() -> int:
         # Only the preview (the file inside a Proxy/ dir) is the clip's
         # archive_path -- that is what the web app serves. The original
         # placed beside it is addressed by convention, not by column.
-        write_paths(cfg.db.path, [
-            (v["id"], d.relative_to(dest_root).as_posix())
-            for v, _s, d in plan if d.parent.name == PROXY_DIR])
-        print(f"recorded {len(plan)} archive path(s) in the database")
+        recorded = [(v["id"], d.relative_to(dest_root).as_posix())
+                    for v, _s, d in plan if d.parent.name == PROXY_DIR]
+        write_paths(cfg.db.path, recorded)
+        print(f"recorded {len(recorded)} archive path(s) in the database")
 
     todo = [(v, s, d) for v, s, d in plan
             if not d.exists() or d.stat().st_size != s.stat().st_size]

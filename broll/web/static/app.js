@@ -43,6 +43,9 @@ const state = {
   total: 0,
   lastResults: [],
   detail: null, // {video, segments, transcript, themes, quality_flags}
+  detailHits: [], // search hits carried into the detail view (yellow seekbar bands)
+  detailSeekTo: null, // seconds the detail view was opened at (kept in the URL)
+  gridScrollY: 0, // scroll position to restore when leaving the detail view
   inPoint: null, // seconds
   outPoint: null, // seconds
   shuttleDir: 0, // -1, 0, +1
@@ -176,7 +179,82 @@ function init() {
   loadCategories();
   loadFolderTree();
   wireFolderClear();
-  runSearch();
+  wireHistory();
+  // applyHistoryState runs the initial search itself (and re-opens a detail
+  // view if the URL carries one), so the page is deep-linkable and reloads
+  // land where they were.
+  applyHistoryState();
+}
+
+/* ---------------------------------------------------------------------- */
+/* History: the back button walks logical pages, not out to the dashboard  */
+/* ---------------------------------------------------------------------- */
+
+/* Navigation state lives in the URL hash (never the path: mounted at /broll/
+ * the SPA must not invent server-side routes). Folder clicks, pagination and
+ * opening a clip PUSH an entry; typing in the search box REPLACES, so Back
+ * never crawls through half-typed queries. popstate re-applies whatever the
+ * entry describes. */
+
+let applyingHistory = false;
+
+function currentHash() {
+  const p = new URLSearchParams();
+  if (state.q) p.set("q", state.q);
+  if (state.category) p.set("cat", state.category);
+  if (state.collection) p.set("coll", state.collection);
+  if (state.offset) p.set("off", String(state.offset));
+  if (state.detail) {
+    p.set("v", String(state.detail.video.id));
+    if (state.detailSeekTo != null) p.set("t", state.detailSeekTo.toFixed(2));
+  }
+  return "#" + p.toString();
+}
+
+function syncHistory(push) {
+  if (applyingHistory) return; // popstate is re-applying, don't re-record it
+  const hash = currentHash();
+  if (push) history.pushState({ broll: true }, "", hash);
+  else history.replaceState(history.state || { broll: true }, "", hash);
+}
+
+function wireHistory() {
+  window.addEventListener("popstate", () => {
+    applyHistoryState();
+  });
+}
+
+async function applyHistoryState() {
+  applyingHistory = true;
+  try {
+    const p = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    state.q = p.get("q") || "";
+    state.category = p.get("cat") || "";
+    state.collection = p.get("coll") || "";
+    state.offset = parseInt(p.get("off") || "0", 10) || 0;
+    $("#q-input").value = state.q;
+    const select = $("#category-select");
+    if (select) select.value = state.collection === "creators_club" ? "" : state.category;
+    renderFolderTree();
+
+    const vid = parseInt(p.get("v") || "", 10);
+    let leftDetail = false;
+    if (vid) {
+      // Hits are not serialized, so a restored detail view has no yellow
+      // bands -- they belong to the search interaction, not the clip.
+      await openDetail(vid, p.has("t") ? parseFloat(p.get("t")) : null, null);
+    } else if (state.detail) {
+      closeDetail();
+      leftDetail = true;
+    }
+    await runSearch();
+    // closeDetail already restored the scroll, but re-running the search empties
+    // the grid for an instant and the browser clamps the scroll to the height of
+    // an empty page. So put it back once the cards exist again.
+    if (leftDetail) window.scrollTo(0, state.gridScrollY || 0);
+  } finally {
+    applyingHistory = false;
+  }
 }
 
 function wireFolderClear() {
@@ -247,6 +325,9 @@ function wireHeader() {
   const debounced = debounce(() => {
     state.q = qInput.value;
     state.offset = 0;
+    // REPLACE, not push: Back must jump out of the search, not crawl back
+    // through every debounced prefix of what was typed.
+    syncHistory(false);
     runSearch();
   }, 250);
   qInput.addEventListener("input", debounced);
@@ -257,15 +338,18 @@ function wireHeader() {
     // Two controls onto one piece of state: the tree must not keep highlighting
     // a folder the dropdown has just navigated away from.
     renderFolderTree();
+    syncHistory(true);
     runSearch();
   });
 
   $("#pager-prev").addEventListener("click", () => {
     state.offset = Math.max(0, state.offset - state.limit);
+    syncHistory(true);
     runSearch();
   });
   $("#pager-next").addEventListener("click", () => {
     state.offset = state.offset + state.limit;
+    syncHistory(true);
     runSearch();
   });
 }
@@ -316,7 +400,7 @@ function renderFolderTree() {
     const rootEl = el("div", { className: "tree-root" });
     const rootBtn = el("button", { className: "tree-node tree-node-root", type: "button" });
     rootBtn.innerHTML =
-      `<span class="tree-name">${root.label}</span>` +
+      `<span class="tree-name">${escapeHtml(root.label)}</span>` +
       `<span class="tree-count">${root.total}</span>`;
     if (state.collection === root.collection && !state.category) {
       rootBtn.classList.add("active");
@@ -325,52 +409,92 @@ function renderFolderTree() {
     rootEl.appendChild(rootBtn);
 
     for (const group of root.groups) {
-      const groupWrap = el("div", { className: "tree-group" });
-      const sep = group.slug && root.collection === "creators_club" ? "::" : "/";
-      const open = state.category && state.category.split(sep)[0] === group.slug
-        && state.collection === root.collection;
-
-      const groupBtn = el("button", { className: "tree-node tree-node-group", type: "button" });
-      // A leaf-less group (Uncategorised) gets no caret — there is nothing to
-      // expand, and a caret that does nothing when clicked reads as broken.
-      const caret = group.children.length ? (open ? "▾" : "▸") : "";
-      groupBtn.innerHTML =
-        `<span class="tree-caret">${caret}</span>` +
-        `<span class="tree-name">${group.label}</span>` +
-        `<span class="tree-count">${group.count}</span>`;
-      if (state.collection === root.collection && state.category === group.slug) {
-        groupBtn.classList.add("active");
-      }
-      groupBtn.addEventListener("click", () => selectFolder(root.collection, group.slug));
-      groupWrap.appendChild(groupBtn);
-
-      const kids = el("div", { className: `tree-children${open ? "" : " hidden"}` });
-      for (const child of group.children) {
-        const btn = el("button", { className: "tree-node tree-node-leaf", type: "button" });
-        btn.innerHTML =
-          `<span class="tree-name">${child.label}</span>` +
-          `<span class="tree-count">${child.count}</span>`;
-        btn.title = child.slug;
-        if (state.collection === root.collection && state.category === child.slug) {
-          btn.classList.add("active");
-        }
-        btn.addEventListener("click", () => selectFolder(root.collection, child.slug));
-        kids.appendChild(btn);
-      }
-      groupWrap.appendChild(kids);
-      rootEl.appendChild(groupWrap);
+      rootEl.appendChild(renderTreeNode(root.collection, group, 0));
     }
     body.appendChild(rootEl);
   }
 }
 
+/* One folder row plus its subtree, recursively.
+ *
+ * Creators_Club nests as deep as the shoot did (share :: event / day / camera),
+ * so a fixed root>group>leaf renderer could only ever show the first two
+ * levels — everything below was unreachable by clicking (2026-08-10). Downloads
+ * is the same shape, two levels deep, and its leaves may arrive with no
+ * "children" key at all, hence the `|| []`. */
+function renderTreeNode(collection, node, depth) {
+  const children = node.children || [];
+  const wrap = el("div", { className: depth === 0 ? "tree-group" : "tree-subtree" });
+  const open = state.collection === collection && isAncestorCategory(node.slug, state.category);
+
+  const btn = el("button", {
+    className: `tree-node ${depth === 0 ? "tree-node-group" : "tree-node-leaf"}`,
+    type: "button",
+  });
+  // A leaf-less node (Uncategorised, a camera folder) gets no caret — there is
+  // nothing to expand, and a caret that does nothing when clicked reads as
+  // broken. The span stays either way so labels line up down the rail.
+  const caret = children.length ? (open ? "▾" : "▸") : "";
+  btn.innerHTML =
+    `<span class="tree-caret">${caret}</span>` +
+    `<span class="tree-name">${escapeHtml(node.label)}</span>` +
+    `<span class="tree-count">${node.count}</span>`;
+  btn.title = node.slug;
+  // Depth is unbounded, so the indent is computed rather than one CSS class per
+  // level. Depth 0 keeps the stylesheet's own padding.
+  if (depth > 0) btn.style.paddingLeft = `${26 + (depth - 1) * 14}px`;
+  if (state.collection === collection && state.category === node.slug) {
+    btn.classList.add("active");
+  }
+  btn.addEventListener("click", () => selectFolder(collection, node.slug));
+  wrap.appendChild(btn);
+
+  if (children.length) {
+    const kids = el("div", { className: `tree-children${open ? "" : " hidden"}` });
+    for (const child of children) {
+      kids.appendChild(renderTreeNode(collection, child, depth + 1));
+    }
+    wrap.appendChild(kids);
+  }
+  return wrap;
+}
+
+/** Is `slug` the selection itself, or on the path down to it? (Which is what
+ * decides whether a node shows its children.) A bare startsWith is not enough:
+ * "Whisky" must not count as an ancestor of "Whisky Bar", so the remainder has
+ * to begin at a real separator — "::" under a share, " / " between shoot path
+ * components, "/" between subject slugs. */
+function isAncestorCategory(slug, category) {
+  if (!slug || !category) return false;
+  if (category === slug) return true;
+  if (!category.startsWith(slug)) return false;
+  const rest = category.slice(slug.length);
+  return rest.startsWith("::") || rest.startsWith(" / ") || rest.startsWith("/");
+}
+
+/** One level up from a folder slug, "" at the top of either root. Shoot slugs
+ * are "share::Event / Day 1 / A-cam" — the share joins with "::" and the path
+ * under it with " / "; subject slugs nest with plain "/". */
+function parentFolder(category) {
+  if (!category) return "";
+  const cut = category.indexOf("::");
+  if (cut !== -1) {
+    const share = category.slice(0, cut);
+    const path = category.slice(cut + 2);
+    const lastSep = path.lastIndexOf(" / ");
+    return lastSep === -1 ? share : `${share}::${path.slice(0, lastSep)}`;
+  }
+  const lastSlash = category.lastIndexOf("/");
+  return lastSlash === -1 ? "" : category.slice(0, lastSlash);
+}
+
 function selectFolder(collection, category) {
   // Clicking the folder you are already in backs out to its parent, so the
-  // tree doubles as its own breadcrumb and there is no dead click.
+  // tree doubles as its own breadcrumb and there is no dead click. Exactly one
+  // level: jumping straight back to the share from four levels down threw away
+  // the descent the editor had just made.
   if (state.collection === collection && state.category === category) {
-    // Back out one level. Subject slugs nest with "/", shoot slugs with "::".
-    const sep = category.includes("::") ? "::" : "/";
-    category = category.includes(sep) ? category.split(sep)[0] : "";
+    category = parentFolder(category);
     if (!category && !state.category) collection = "";
   }
   state.collection = collection;
@@ -379,6 +503,7 @@ function selectFolder(collection, category) {
   const select = $("#category-select");
   if (select) select.value = category;
   renderFolderTree();
+  syncHistory(true);
   runSearch();
 }
 
@@ -487,55 +612,60 @@ function buildCard(row) {
 
   wireSpriteScrub(thumb, spriteOverlay, video);
 
-  const body = el("div", { className: "card-body" });
-  body.appendChild(el("div", { className: "card-filename", text: basename(video.rel_path) }));
-  body.appendChild(
-    el("div", { className: "card-category", text: video.category || video.category_hint || "—" })
-  );
-
-  const chips = el("div", { className: "card-hits" });
-  for (const hit of hits.slice(0, 4)) {
-    const isTranscript = hit.source === "transcript";
-    const chip = el("div", {
-      className: `hit-chip${isTranscript ? " hit-chip-transcript" : ""}`,
+  // A result's thumbnail shows the frame that MATCHED rather than the poster
+  // (frame 0): in a long-form archive the poster is usually a slate or a wall,
+  // and every card in a search then looks the same. The overlay stays visible
+  // (.sprite-static) and hover-scrub still works on top of it, snapping back to
+  // the hit frame on the way out. If the sprite sheet 404s the overlay simply
+  // paints nothing and the poster/placeholder underneath shows through.
+  if (hits.length && video.duration_s) {
+    spriteOverlay.classList.add("sprite-static");
+    positionSprite(spriteOverlay, video, hits[0].t_start);
+    thumb.addEventListener("mouseleave", () => {
+      positionSprite(spriteOverlay, video, hits[0].t_start);
     });
-    const tag = isTranscript ? "said" : "seen";
-    chip.innerHTML = `<span class="hit-chip-tag">${tag}</span> ${timecode(hit.t_start, video.fps || 24)} ${renderHighlighted(hit.snippet)}`;
-    chip.title = hit.description;
-    chip.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openDetail(video.id, hit.t_start);
-    });
-    chips.appendChild(chip);
   }
-  body.appendChild(chips);
 
+  // Thumbnails ONLY -- no filename, category or hit chips under the image
+  // (2026-08-10, by request): b-roll is chosen by eye, and a card of text under
+  // every frame pulled the eye away from the one thing that matters. What the
+  // text carried survives elsewhere: the filename/category as a hover tooltip,
+  // the best hit as the card's click target, and every hit as a yellow band on
+  // the detail seekbar.
+  card.title = `${basename(video.rel_path)} — ${video.category || video.category_hint || "uncategorised"}`;
   card.appendChild(thumb);
-  card.appendChild(body);
   // Open at the moment that matched, not at 0:00. The whole point of a hit is
   // that the archive is long-form: the match is often minutes in, and landing
   // at the head of a 13-minute clip means hunting for what search already
   // found. hits[0] is the best-ranked hit (search returns them ordered), and
   // the chips above seek the same way. Browse mode has no hits -> null -> 0:00.
   const seekTo = hits.length ? hits[0].t_start : null;
-  card.addEventListener("click", () => openDetail(video.id, seekTo));
+  card.addEventListener("click", () => openDetail(video.id, seekTo, hits));
   return card;
 }
 
-function wireSpriteScrub(thumb, overlay, video) {
+/** Park the sprite overlay on the sheet cell holding `seconds`. The sheet is a
+ * fixed grid: SPRITE_COLUMNS across, one cell per SPRITE_SECONDS_PER_FRAME. */
+function positionSprite(overlay, video, seconds) {
   const duration = video.duration_s || 0;
   const frameCount = Math.max(1, Math.ceil(duration / SPRITE_SECONDS_PER_FRAME));
   const cellHeight = video.width && video.height
     ? Math.round(SPRITE_CELL_WIDTH * (video.height / video.width))
     : 135;
+  const frame = Math.min(
+    frameCount - 1,
+    Math.max(0, Math.floor(seconds / SPRITE_SECONDS_PER_FRAME))
+  );
+  const col = frame % SPRITE_COLUMNS;
+  const row = Math.floor(frame / SPRITE_COLUMNS);
+  overlay.style.backgroundPosition = `-${col * SPRITE_CELL_WIDTH}px -${row * cellHeight}px`;
+}
 
+function wireSpriteScrub(thumb, overlay, video) {
   thumb.addEventListener("mousemove", (e) => {
     const rect = thumb.getBoundingClientRect();
     const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    const frame = Math.min(frameCount - 1, Math.floor(frac * frameCount));
-    const col = frame % SPRITE_COLUMNS;
-    const row = Math.floor(frame / SPRITE_COLUMNS);
-    overlay.style.backgroundPosition = `-${col * SPRITE_CELL_WIDTH}px -${row * cellHeight}px`;
+    positionSprite(overlay, video, frac * (video.duration_s || 0));
   });
 }
 
@@ -544,25 +674,127 @@ function wireSpriteScrub(thumb, overlay, video) {
 /* ---------------------------------------------------------------------- */
 
 function wireDetailView() {
-  $("#detail-back").addEventListener("click", closeDetail);
-
-  const seekbar = $("#seekbar");
-  seekbar.addEventListener("click", (e) => {
-    const video = $("#player");
-    if (!state.detail || !video.duration) return;
-    const rect = seekbar.getBoundingClientRect();
-    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    video.currentTime = frac * video.duration;
+  $("#detail-back").addEventListener("click", () => {
+    // The detail view is a history entry of its own, so the in-page button and
+    // the browser's Back button must do the same thing — otherwise leaving by
+    // one of them leaves a stale entry the other then walks back into.
+    if (history.state && history.state.broll) {
+      history.back();
+    } else {
+      closeDetail();
+      syncHistory(true);
+    }
   });
 
   const player = $("#player");
   player.addEventListener("timeupdate", updatePlayhead);
   player.addEventListener("loadedmetadata", updatePlayhead);
+  // The probed duration_s is sometimes short, which put markers past the right
+  // edge of the bar; the real duration only exists once metadata is in, so the
+  // markers are laid out again here.
+  player.addEventListener("loadedmetadata", renderSeekMarkers);
+  wireSeekQueue(player);
+  wireSeekbarScrub(player);
   wireDragScrub(player);
 
   $("#send-resolve-btn").addEventListener("click", sendToResolve);
 
   document.addEventListener("keydown", onKeydown);
+}
+
+/* One seek in flight at a time.
+ *
+ * A drag fires pointermove far faster than the decoder can service seeks, and
+ * assigning currentTime on every one makes the picture crawl seconds behind the
+ * pointer as the element works through a backlog. Coalescing to "the most
+ * recently requested time" instead keeps the scrub live: an intermediate target
+ * the user has already dragged past is worthless. */
+const seekQueue = { busy: false, pending: null };
+
+function wireSeekQueue(player) {
+  player.addEventListener("seeked", () => {
+    if (seekQueue.pending != null) {
+      const next = seekQueue.pending;
+      seekQueue.pending = null;
+      player.currentTime = next; // still busy: this is the next seek, not idle
+      return;
+    }
+    seekQueue.busy = false;
+  });
+  // A new clip: whatever was in flight belongs to the old one.
+  player.addEventListener("emptied", () => {
+    seekQueue.busy = false;
+    seekQueue.pending = null;
+  });
+}
+
+function requestSeek(player, t) {
+  const duration = player.duration || (state.detail && state.detail.video.duration_s) || 0;
+  const target = Math.min(duration, Math.max(0, t));
+  // Paint from the REQUESTED time, not the element's: the playhead and timecode
+  // have to track the pointer even while the decoder is still catching up.
+  showSeekTarget(target, duration);
+  if (seekQueue.busy) {
+    seekQueue.pending = target;
+    return;
+  }
+  // Already there. Assigning anyway is a no-op that some browsers never answer
+  // with "seeked", which would leave the queue busy forever and kill scrubbing
+  // for the rest of the clip.
+  if (target === player.currentTime) return;
+  seekQueue.busy = true;
+  player.currentTime = target;
+}
+
+function showSeekTarget(t, duration) {
+  if (!state.detail) return;
+  if (duration > 0) {
+    $("#seekbar-playhead").style.left = `${Math.min(100, (t / duration) * 100)}%`;
+  }
+  $("#tc-current").textContent = timecode(t, state.detail.video.fps || 24);
+}
+
+/* Press-and-drag on the seekbar.
+ *
+ * ABSOLUTE, unlike the relative drag on the picture below: the bar IS the
+ * timeline, so pressing at a point means "go there" and holding scrubs from
+ * there. It replaced a plain click listener, which meant scrubbing along the
+ * bar took a row of separate clicks. */
+function wireSeekbarScrub(player) {
+  const seekbar = $("#seekbar");
+  let dragging = false;
+  let wasPlaying = false;
+
+  const seekToPointer = (e) => {
+    const rect = seekbar.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / (rect.width || 1)));
+    requestSeek(player, frac * player.duration);
+  };
+
+  seekbar.addEventListener("pointerdown", (e) => {
+    if (!state.detail || !player.duration || e.button !== 0) return;
+    e.preventDefault();
+    dragging = true;
+    wasPlaying = !player.paused;
+    seekbar.setPointerCapture(e.pointerId); // keep scrubbing outside the bar
+    // A held shuttle rate would fight the drag for control of currentTime.
+    resetShuttle();
+    player.pause();
+    seekToPointer(e);
+  });
+
+  seekbar.addEventListener("pointermove", (e) => {
+    if (dragging) seekToPointer(e);
+  });
+
+  const end = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    if (seekbar.hasPointerCapture?.(e.pointerId)) seekbar.releasePointerCapture(e.pointerId);
+    if (wasPlaying) player.play().catch(() => {});
+  };
+  seekbar.addEventListener("pointerup", end);
+  seekbar.addEventListener("pointercancel", end);
 }
 
 // How far the pointer must travel before a press counts as a scrub rather than
@@ -603,8 +835,7 @@ function wireDragScrub(player) {
     const dx = e.clientX - drag.x;
     if (!drag.moved && Math.abs(dx) < SCRUB_THRESHOLD_PX) return;
     drag.moved = true;
-    const t = drag.startTime + (dx / drag.width) * player.duration;
-    player.currentTime = Math.min(player.duration, Math.max(0, t));
+    requestSeek(player, drag.startTime + (dx / drag.width) * player.duration);
   });
 
   const end = (e) => {
@@ -626,7 +857,7 @@ function wireDragScrub(player) {
   player.addEventListener("pointercancel", end);
 }
 
-async function openDetail(videoId, seekToSeconds) {
+async function openDetail(videoId, seekToSeconds, hits) {
   let data;
   try {
     data = await fetchJson(`api/videos/${videoId}`);
@@ -635,12 +866,23 @@ async function openDetail(videoId, seekToSeconds) {
     return;
   }
   state.detail = data;
+  // The hits that brought the editor here, carried in so the seekbar can show
+  // WHERE the match was. They belong to the search, not the clip, which is why
+  // they are passed rather than fetched.
+  state.detailHits = hits || [];
+  state.detailSeekTo = seekToSeconds;
+  state.gridScrollY = window.scrollY;
   state.inPoint = null;
   state.outPoint = null;
   resetShuttle();
+  syncHistory(true);
 
-  $("#grid-view").classList.add("hidden");
+  // The WHOLE browse layout goes, not just the grid: the folder rail is a
+  // full-height sticky column, so leaving it mounted kept a 210px gutter beside
+  // the player and left the page scrolled halfway down the results.
+  $("#browse-layout").classList.add("hidden");
   $("#detail-view").classList.remove("hidden");
+  window.scrollTo(0, 0);
 
   const player = $("#player");
   player.src = `media/proxy/${videoId}.mp4`;
@@ -650,7 +892,7 @@ async function openDetail(videoId, seekToSeconds) {
   renderVideoMeta(data);
   renderSegmentList(data);
   renderTranscriptList(data);
-  renderSeekMarkers(data);
+  renderSeekMarkers();
   renderInOutRange();
   $("#tc-in").textContent = "--:--:--:--";
   $("#tc-out").textContent = "--:--:--:--";
@@ -673,9 +915,14 @@ function closeDetail() {
   player.removeAttribute("src");
   player.load();
   state.detail = null;
+  state.detailHits = [];
+  state.detailSeekTo = null;
   resetShuttle();
   $("#detail-view").classList.add("hidden");
-  $("#grid-view").classList.remove("hidden");
+  $("#browse-layout").classList.remove("hidden");
+  // Back to the row of results the clip was opened from, not to the top of a
+  // freshly re-shown grid.
+  window.scrollTo(0, state.gridScrollY || 0);
 }
 
 function renderVideoMeta(data) {
@@ -769,15 +1016,38 @@ function renderTranscriptList(data) {
   }
 }
 
-function renderSeekMarkers(data) {
-  const { video, segments } = data;
+/* Two layers on one bar: amber bands for the search hits that brought the
+ * editor to this clip (so the matched moments are visible before a frame
+ * plays), then the green ticks for the model's visual segment boundaries.
+ *
+ * Duration comes from the loaded media FIRST. The probed duration_s is
+ * sometimes short (VFR sources, truncated recordings) and dividing by it drove
+ * markers off the right-hand end of the bar — the cause of the stray green
+ * ticks past the edge. Reads state rather than taking the payload so the
+ * loadedmetadata re-render has something to re-render from. */
+function renderSeekMarkers() {
   const markersEl = $("#seekbar-markers");
   markersEl.innerHTML = "";
-  const duration = video.duration_s || 0;
+  if (!state.detail) return;
+  const { video, segments } = state.detail;
+  const duration = $("#player").duration || video.duration_s || 0;
   if (!duration) return;
+
+  for (const hit of state.detailHits || []) {
+    if (hit.t_start == null || hit.t_start > duration) continue;
+    const end = Math.min(hit.t_end != null ? hit.t_end : hit.t_start + 1, duration);
+    const band = el("div", { className: "seekbar-hit" });
+    band.style.left = `${(hit.t_start / duration) * 100}%`;
+    // A floor on the width: a one-second hit in a thirteen-minute clip is
+    // otherwise a band too thin to see, let alone aim at.
+    band.style.width = `${Math.max(0.5, ((end - hit.t_start) / duration) * 100)}%`;
+    markersEl.appendChild(band);
+  }
+
   for (const seg of segments) {
+    if (seg.t_start > duration) continue;
     const marker = el("div", { className: "seekbar-marker" });
-    marker.style.left = `${(seg.t_start / duration) * 100}%`;
+    marker.style.left = `${Math.min(100, (seg.t_start / duration) * 100)}%`;
     markersEl.appendChild(marker);
   }
 }
@@ -787,14 +1057,19 @@ function updatePlayhead() {
   if (!state.detail) return;
   const duration = player.duration || state.detail.video.duration_s || 0;
   if (duration > 0) {
-    $("#seekbar-playhead").style.left = `${(player.currentTime / duration) * 100}%`;
+    $("#seekbar-playhead").style.left =
+      `${Math.min(100, (player.currentTime / duration) * 100)}%`;
   }
   $("#tc-current").textContent = timecode(player.currentTime, state.detail.video.fps || 24);
 }
 
 function renderInOutRange() {
   const rangeEl = $("#seekbar-range");
-  const duration = state.detail ? state.detail.video.duration_s || 0 : 0;
+  // Same duration fallback as the markers and the playhead: all three have to
+  // agree or the in/out shading drifts against the ticks it brackets.
+  const duration = state.detail
+    ? $("#player").duration || state.detail.video.duration_s || 0
+    : 0;
   if (state.inPoint == null || state.outPoint == null || !duration) {
     rangeEl.style.display = "none";
     return;

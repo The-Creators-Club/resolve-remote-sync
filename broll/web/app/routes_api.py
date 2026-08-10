@@ -9,7 +9,7 @@ from app import config
 from app.db import get_db
 # Import the name, not the module: the route function below is itself called
 # `search` and would shadow a module import.
-from app.search import UNCATEGORISED, search_videos
+from app.search import UNCATEGORISED, creators_shares, search_videos
 
 router = APIRouter(prefix="/api")
 
@@ -103,13 +103,25 @@ def get_shares() -> list[dict]:
     return config.parse_shares()
 
 
+# How deep the Creators_Club tree mirrors a share's real folders. Three levels
+# below the share is what the deepest meaningful structure actually is
+# (`Whisky/Interviews/黃培峻 Huang Pei-jun`); anything past that is camera-roll
+# noise that would split a folder across branches for no benefit.
+SHOOT_TREE_DEPTH = 3
+
+
 def _shoot_tree(conn: sqlite3.Connection, creators: list[str]) -> list[dict]:
     """Creators_Club, organised by shoot rather than subject.
 
-    Group = share (the shoot), leaf = the first meaningful directory under it.
-    A `Proxy` path component is folded away: on a source="proxies" share every
-    single clip sits in one, so it carries no information and would just add a
-    level of noise to every branch. `Day 1/Fx3/Proxy/x.mov` -> `Day 1 / Fx3`.
+    Group = share (the shoot); under it the share's OWN folder tree, mirrored
+    as nested children (to SHOOT_TREE_DEPTH) so a clip lives in the sidebar
+    where it lives on disk: `ff4/Whisky/Interviews/<person>/Proxy/x.mov` shows
+    as ff4 > Whisky > Interviews > <person>. A `Proxy` path component is folded
+    away: on a source="proxies" share every single clip sits in one, so it
+    carries no information and would just add a level of noise to every branch.
+
+    A node's slug is `share::A / B / C` — the exact shape build_shoot_clause
+    parses, at any depth.
     """
     if not creators:
         return []
@@ -120,22 +132,38 @@ def _shoot_tree(conn: sqlite3.Connection, creators: list[str]) -> list[dict]:
         creators,
     ).fetchall()
 
-    shoots: dict[str, dict[str, int]] = {}
+    # share -> nested {name: {"count": n, "children": {...}}}
+    shoots: dict[str, dict] = {}
+    totals: dict[str, int] = {}
     for r in rows:
         parts = [p for p in r["rel_path"].split("/")[:-1] if p.lower() != "proxy"]
-        # Two levels is what a shoot actually has (day, then camera). Deeper
-        # nesting would split a camera roll across branches for no benefit.
-        leaf = " / ".join(parts[:2]) if parts else "(root)"
-        shoots.setdefault(r["share"], {})
-        shoots[r["share"]][leaf] = shoots[r["share"]].get(leaf, 0) + 1
+        parts = parts[:SHOOT_TREE_DEPTH]
+        totals[r["share"]] = totals.get(r["share"], 0) + 1
+        node = shoots.setdefault(r["share"], {})
+        for name in parts:
+            entry = node.setdefault(name, {"count": 0, "children": {}})
+            entry["count"] += 1
+            node = entry["children"]
+
+    def to_children(share: str, node: dict, prefix: list[str]) -> list[dict]:
+        out = []
+        # Alphabetical, not by count: this side mirrors a folder tree, and
+        # `Day 1, Day 2` in shooting order is how an editor scans it.
+        for name in sorted(node):
+            path = [*prefix, name]
+            out.append({
+                "slug": f"{share}::{' / '.join(path)}",
+                "label": name,
+                "count": node[name]["count"],
+                "children": to_children(share, node[name]["children"], path),
+            })
+        return out
 
     out = []
     for share in sorted(shoots):
-        children = [{"slug": f"{share}::{leaf}", "label": leaf, "count": n}
-                    for leaf, n in sorted(shoots[share].items())]
         out.append({
-            "slug": share, "label": share, "count": sum(shoots[share].values()),
-            "children": children,
+            "slug": share, "label": share, "count": totals[share],
+            "children": to_children(share, shoots[share], []),
         })
     return sorted(out, key=lambda g: -g["count"])
 
@@ -154,7 +182,9 @@ def get_tree(conn: sqlite3.Connection = Depends(get_db)) -> list[dict]:
     shown as zero: an editor scanning for footage should not have to read past
     empty shelves.
     """
-    creators = sorted(config.get_creators_shares())
+    # Derived, not just configured: env list plus every share the indexer has
+    # pushed as source='proxies' — see search.creators_shares.
+    creators = sorted(creators_shares(conn))
     labels = {r["slug"]: r["label"] for r in
               conn.execute("SELECT slug, label FROM categories").fetchall()}
 

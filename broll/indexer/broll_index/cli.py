@@ -110,7 +110,8 @@ def cmd_taxonomy_assign(args: argparse.Namespace) -> int:
     verb = "would assign" if args.dry_run else "assigned"
     print(f"taxonomy assign: {verb} {r['assigned']} of {r['videos_considered']} "
           f"video(s) across {r['categories']} categories "
-          f"({r.get('by_fallback', 0)} via the fallback tier); "
+          f"({r.get('by_fallback', 0)} via the fallback tier, "
+          f"{r.get('by_path', 0)} by the interviewee path prior); "
           f"{r.get('kept', 0)} left where they already were; "
           f"{r['unmatched']} matched no rule")
     width = max((len(s) for s in r["per_category"]), default=10)

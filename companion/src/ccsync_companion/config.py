@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 log = logging.getLogger("ccsync.config")
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -355,7 +355,15 @@ DEFAULTS: dict[str, Any] = {
 # clips won't reach remote editors until fixed into the project directory.
 MODE_PROFILES: dict[str, dict[str, Any]] = {
     "editor": {},
-    "base": {"sync_enabled": False},
+    # lane_b_enabled=False is not redundant with sync_enabled=False, even
+    # though no lane starts on a base rig either way: proxy_generation_enabled
+    # derives itself from lane_b_enabled ALONE, and the shipped default for
+    # that key is True. Without this line the base rig -- the one machine the
+    # generator exists for, whose local_root IS the NAS tree -- derives
+    # generation OFF, queues every missing proxy, encodes none of them, and
+    # toasts "Ask your admin to generate proxies for them" at the admin.
+    # Observed on the base rig 2026-08-10 with 1046 clips queued.
+    "base": {"sync_enabled": False, "lane_b_enabled": False},
 }
 
 DEFAULT_TOML_TEXT = """\
@@ -539,7 +547,12 @@ project_roots_ttl = 300
 
 # Set false on the base rig (direct LAN access to the NAS): it reads proxies
 # straight off the share, so lane B's local proxy mirror is pure waste.
-lane_b_enabled = true
+# COMMENTED OUT on purpose (S-7): mode = "base" supplies false through
+# MODE_PROFILES, and a value written live into every first-run file would
+# override the profile and make it dead -- which is how the base rig ended up
+# deriving proxy generation OFF (2026-08-10). The default is true; uncomment
+# only to pin it against the profile.
+# lane_b_enabled = true
 
 # Repoint a clip's PROXY at the copy in the tree when the project's stored
 # proxy path is stale (built on another machine, e.g. a temp transfer drive) or
@@ -1106,6 +1119,13 @@ def proxy_generation_enabled(cfg: dict[str, Any]) -> bool:
     Editors can still force it on -- proxies for projects lane B never touches
     do survive -- and the NOTIFIER is unconditional either way: knowing a clip
     is invisible to the fleet is useful on every machine.
+
+    The base rig gets `lane_b_enabled = False` from MODE_PROFILES rather than
+    from this function noticing `sync_enabled` is off. Deliberate: "sync is
+    off" is NOT the same claim as "lane B will never sweep this tree". An
+    editor who disables sync for a week, generates proxies while away, then
+    re-enables it hands the next lane-B pass a tree full of files the NAS has
+    never seen -- which is precisely the sweep this derivation exists to dodge.
 
     Never raises: a hand-edited non-boolean falls back to the derivation.
     """

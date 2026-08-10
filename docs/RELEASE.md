@@ -59,15 +59,19 @@ The countermeasures are:
 | Companion version (dup) | `companion/pyproject.toml` → `version` | Must equal the above. `tools/release.ps1` and `build_editor_package.ps1 -Publish` both refuse on drift. |
 | Installer version | `installer/windows_bootstrap.ps1` → `$InstallerVersion` | Separate number; the bootstrap script's own version. |
 | Installer version (dup) | `onboarding/steps.py` → `INSTALLER_VERSION` | Must equal the above (`onboard.exe` bundles the bootstrap script). Parity is enforced by `tools/release.ps1`. |
+| Installer version (dup) | `onboarding/build_onboard_macos.spec` → `CFBundleShortVersionString` | **Fourth** copy of the same number — the macOS wizard bundle's Info.plist. Not enforced by the release scripts (they predate it); `onboarding/tests/test_macos_steps.py::TestInstallerVersionParity::test_all_four_agree` is what catches it, which is why "bump the installer" means **four** files, not three. |
 | Installer version (dup) | `installer/macos_bootstrap.sh` → `INSTALLER_VERSION` | Third copy of the **same** number — the macOS bootstrap ships as the `macos` `kind=onboard` package and is versioned by it. Parity is now **three-way**: enforced by `tools/release.ps1` and `build_editor_package.ps1 -Publish` (which refuses to publish either onboard package on drift), reported by `tools/check_deploy_drift.ps1`, and warned about by `tools/release_macos.sh` (which publishes none of the three, so it reports rather than fails). |
 | macOS companion build | `tools/release_macos.sh` | Carries **no** version of its own: it reads `config.py`/`pyproject.toml` for the companion version and all three installer constants for the parity report. Runs only on a Mac (`--dry-run` degrades to inspection mode elsewhere). |
 | Dashboard VERSION | `dashboard/src/ccsync_dashboard/__init__.py` → `VERSION` | Ships separately (Docker). Served by `GET /api/v1/health`. Bump it when you deploy dashboard changes, otherwise the live/repo comparison can never detect a stale container. |
 
 Bumping the companion means editing **two** files (`config.py` and
 `pyproject.toml`) to the same value. Bumping the *installer* means editing
-**three** (`windows_bootstrap.ps1`, `onboarding/steps.py`,
-`macos_bootstrap.sh`). The build refuses to start otherwise and lists every
-mismatch it found.
+**four** (`windows_bootstrap.ps1`, `onboarding/steps.py`, `macos_bootstrap.sh`,
+and `onboarding/build_onboard_macos.spec`'s `CFBundleShortVersionString`). The
+build refuses to start on the first three and lists every mismatch it found;
+the fourth is caught only by `onboarding`'s suite, so run that too — or let
+`tools\ship.cmd` do it (2026-08-10: a 1.0.19 → 1.0.20 bump missed the .spec
+and only the test noticed).
 
 Version numbers must look like `1.2.3` — the dashboard rejects anything else
 (`_PACKAGE_VERSION_RE`), so no `0.4.5-dev` or `0.4.5rc1` in `config.py`.

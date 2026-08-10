@@ -753,7 +753,12 @@ def test_one_toast_per_episode_naming_the_biggest_gap(tmp_path):
     gen.scan_once()
     assert gen._maybe_notify() is not None
     assert len(sent) == 1
-    assert "Nuclear" in sent[0][0] and "14 clips" in sent[0][0]
+    # Both numbers, each labelled: Nuclear's own 12 and the machine's 14. This
+    # line used to assert "14 clips" beside the project name, i.e. the machine
+    # total presented as the project's -- the reading that sent someone hunting
+    # for 1046 clips in a project holding 438 (2026-08-10).
+    assert "12 clips in Nuclear" in sent[0][0]
+    assert "14 on this machine" in sent[0][0]
     # Same unchanged gap, next scan cycle: silence.
     gen.scan_once()
     assert gen._maybe_notify() is None
@@ -826,6 +831,27 @@ def test_the_toast_says_what_will_actually_happen(tmp_path):
     braw = {**proxy_scan._empty_totals(), "missing": 4, "needs_resolve": 4, "braw": 4}
     gen._ffmpeg_ok = True
     assert "Blackmagic Proxy Generator" in gen._notify_text("2026/A/One", braw)
+
+
+def test_the_toast_never_reports_the_machine_total_under_one_project_name(tmp_path):
+    """It read "1046 clips in Energy Transition have no proxy" when the 1046
+    was seven projects and Energy Transition held 438 -- so the reader goes
+    hunting for a thousand clips in a project that has 438 (base rig,
+    2026-08-10). Both numbers appear, each labelled."""
+    totals = {**proxy_scan._empty_totals(), "missing": 1046, "own": 1046}
+    gen = _make_gen(tmp_path)
+    gen._ffmpeg_ok = True
+
+    text = gen._notify_text("2026/FF5/Energy Transition", totals, 438)
+    assert "438 clips in Energy Transition" in text
+    assert "1046 on this machine" in text
+
+    # One project holding the whole gap says the number once, not twice.
+    single = gen._notify_text("2026/A/One", {**totals, "missing": 5}, 5)
+    assert "5 clips in One" in single and "on this machine" not in single
+
+    # And an unknown project still names the total rather than nothing.
+    assert "1046" in gen._notify_text("", totals, 0)
 
 
 def test_notification_can_be_switched_off(tmp_path):

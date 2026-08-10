@@ -759,10 +759,18 @@ class ProxyGenerator:
                 best_rel, best_gap = rel, gap
         return best_rel, best_gap
 
-    def _notify_text(self, rel: str, totals: dict[str, Any]) -> str:
+    def _notify_text(self, rel: str, totals: dict[str, Any],
+                     project_missing: int = 0) -> str:
         """The toast. Names ONE project (the biggest gap) and how many clips
         the whole machine is missing, because "12 clips have no proxy" with no
         location is a sentence nobody can act on.
+
+        Those are two DIFFERENT numbers and the sentence has to say so. It
+        used to read "1046 clips in Energy Transition have no proxy" when the
+        1046 was seven projects and Energy Transition was 438 of them -- which
+        sends the reader looking for a thousand clips in a project that does
+        not have them (base rig, 2026-08-10). The project's own count leads,
+        the machine total follows, and when they are equal it says it once.
 
         The four variants exist because the right next action is different in
         each: we are about to fix it / we cannot fix it here / we cannot fix
@@ -770,14 +778,22 @@ class ProxyGenerator:
         """
         missing = int(totals.get("missing", 0))
         needs_resolve = int(totals.get("needs_resolve", 0))
-        clips = "clip" if missing == 1 else "clips"
-        where = f" in {rel.split('/')[-1]}" if rel else ""
-        head = (
-            f"{missing} {clips}{where} have no proxy, so nobody else in the team can "
-            f"see them."
-        ) if missing != 1 else (
-            f"1 clip{where} has no proxy, so nobody else in the team can see it."
-        )
+        here = int(project_missing or 0)
+        name = rel.split("/")[-1] if rel else ""
+        if name and 0 < here < missing:
+            head = (
+                f"{here} {'clip' if here == 1 else 'clips'} in {name} "
+                f"({missing} on this machine) have no proxy, so nobody else in "
+                f"the team can see them."
+            )
+        else:
+            where = f" in {name}" if name else ""
+            head = (
+                f"{missing} clips{where} have no proxy, so nobody else in the team "
+                f"can see them."
+            ) if missing != 1 else (
+                f"1 clip{where} has no proxy, so nobody else in the team can see it."
+            )
         if missing and missing == needs_resolve:
             # ffmpeg cannot decode BRAW/R3D/CRM at any quality -- saying "I'll
             # make them" here would be a promise this machine cannot keep.
@@ -815,8 +831,8 @@ class ProxyGenerator:
             # line each if anyone ever adds one.
             self._notified_episode = True
             return None
-        rel, _gap = self._biggest_gap_project()
-        text = self._notify_text(rel, totals)
+        rel, gap = self._biggest_gap_project()
+        text = self._notify_text(rel, totals, int(gap.get("missing", 0)))
         try:
             self._notify(text, "ccsync-companion")
         except Exception:

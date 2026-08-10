@@ -693,6 +693,36 @@ def test_proxy_gen_enabled_derives_from_lane_b_when_absent():
     assert config_mod.proxy_generation_enabled({}) is False
 
 
+def test_mode_base_derives_generation_ON():
+    """The regression that made the whole generator inert where it matters.
+
+    `mode = "base"` used to bring only sync_enabled=False, so lane_b_enabled
+    kept its packaged default of True and the derivation turned generation
+    OFF on the one machine whose local_root IS the NAS tree. Seen live on the
+    base rig 2026-08-10: 1046 clips scanned, 1040 queued, none encoded, and a
+    toast telling the admin to ask their admin.
+
+    Asserted through MODE_PROFILES rather than through a hand-built dict, so
+    it fails if the profile is ever trimmed back.
+    """
+    profile = config_mod.MODE_PROFILES["base"]
+    assert profile["lane_b_enabled"] is False
+    assert profile["sync_enabled"] is False
+    assert config_mod.proxy_generation_enabled(dict(profile)) is True
+    # ...and an editor is still off, which is the half that must not regress.
+    assert config_mod.proxy_generation_enabled(
+        dict(config_mod.MODE_PROFILES["editor"])) is False
+
+
+def test_sync_enabled_alone_does_not_turn_generation_on():
+    """Deliberately NOT derived from sync_enabled: "sync is off" is not the
+    same claim as "lane B will never sweep this tree". An editor who disables
+    sync for a week, generates while away and re-enables it hands the next
+    lane-B pass a tree of files the NAS has never seen."""
+    assert config_mod.proxy_generation_enabled(
+        {"sync_enabled": False, "lane_b_enabled": True}) is False
+
+
 @pytest.mark.parametrize("lane_b", [True, False])
 def test_explicit_proxy_gen_enabled_beats_the_derivation(lane_b):
     for explicit in (True, False):

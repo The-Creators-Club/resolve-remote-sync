@@ -211,9 +211,26 @@ if (-not $SkipTests) {
         # out loud, because "no tests ran" must never look like "tests passed".
         Write-Step "NOTE: no dashboard venv at $serverPy -- server tests SKIPPED, not passed"
     }
+
+    # onboarding/ guards the OTHER artifact step 2 publishes -- onboard.exe --
+    # and holds the ONLY check on the fourth copy of the installer version
+    # (build_onboard_macos.spec's CFBundleShortVersionString). release.ps1 and
+    # build_editor_package.ps1 both check the other three and predate that one,
+    # so a 1.0.19 -> 1.0.20 bump that missed the .spec would publish an
+    # onboard.exe whose bundle disagrees with itself; only this suite noticed
+    # on 2026-08-10. System python, no venv, ~0.3s.
+    Write-Step "--- step 0b: onboarding tests (they guard onboard.exe) ---"
+    Push-Location (Join-Path $RepoRoot "onboarding")
+    & python -m pytest tests -q
+    $obRc = $LASTEXITCODE
+    Pop-Location
+    if ($obRc -ne 0) {
+        Write-Fail "onboarding tests exited $obRc -- nothing has been deployed or published"
+        exit 1
+    }
 }
 else {
-    Write-Step "server tests skipped (-SkipTests)"
+    Write-Step "server + onboarding tests skipped (-SkipTests)"
 }
 
 # --- 1. dashboard -----------------------------------------------------------

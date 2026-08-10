@@ -788,6 +788,52 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     `TrackPopupMenuEx` call. It would close the last microsecond of the race and open a
     worse one — a rebuild thread parked for as long as the editor leaves the menu open.
 
+21. **The tray menu opens behind an auto-hide taskbar, covering Quit — FIXED in the
+    working tree 2026-08-10, ships as companion v0.5.1.** Reported on the base rig
+    (Windows 11, taskbar set to auto-hide) against v0.5.0: item 20 made the right-click
+    menu appear instantly, and the thing that appears has its bottom edge — the Quit
+    item — under the taskbar.
+
+    **Item 20 did not cause this; it revealed it.** pystray anchors the popup at the raw
+    `GetCursorPos` point with `TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD`
+    (`pystray/_win32.py:215`), i.e. "put the menu's bottom-right corner exactly HERE" —
+    and HERE is inside the taskbar band, because that is where the tray icon the editor
+    just clicked lives. What normally rescues that is Windows itself: `TrackPopupMenuEx`
+    keeps the menu inside the monitor's **work area**, and a docked always-visible
+    taskbar is subtracted from the work area, so the menu is nudged clear of it. An
+    auto-hide bar is not: it reserves one pixel, the work area is effectively the whole
+    screen, no constraint is violated, and the topmost bar — raised, because the pointer
+    is on it — draws over the last item. Timing changed nothing about positioning rules;
+    pre-fix the same geometry came out of the same flags, on the fraction of right-clicks
+    that opened at all, seconds late and mid-GIL-blackout, which is why nobody filed it.
+
+    Fixed in `tray.py` by extending the same `TrackPopupMenuEx` wrapper item 20 installed
+    (`_MenuOpenGuard.tracked`): `_with_clamped_anchor` rewrites the positional
+    `(hmenu, flags, x, y, …)` before delegating, `_taskbar_geometry` reads the bar via
+    `SHAppBarMessage(ABM_GETTASKBARPOS)` — which reports the SHOWN rectangle even while an
+    auto-hide bar is hidden, i.e. exactly the region the menu must clear — and the pure
+    `_clamp_menu_anchor(x, y, flags, rect, edge)` does the arithmetic: an anchor inside the
+    rect moves to the bar's inner edge (bottom → `rect.top`, top → `rect.bottom`,
+    left → `rect.right`, right → `rect.left`), an anchor outside it is untouched, and the
+    alignment is **rewritten, not or-ed on**. That last part is the non-obvious one:
+    `TPM_LEFTALIGN` and `TPM_TOPALIGN` are `0`, so they exist only as the absence of the
+    other bits on their axis — for a top or left taskbar, pystray's `RIGHT|BOTTOM` has to
+    be cleared or the menu is moved off the bar and then drawn straight back over it.
+    Everything else in the flags word (`TPM_RETURNCMD` above all, which is how pystray
+    learns which item was clicked) is preserved.
+
+    Fail-open throughout, deliberately: no geometry, a shell that will not answer, a
+    non-Windows platform or a pystray that stops passing coordinates positionally, and the
+    original arguments go through unchanged. A menu one taskbar-height too low beats the
+    bug this file just spent item 20 climbing out of — a menu that does not open.
+
+    Six tests in `test_tray.py` (all four docked edges as a table, inside vs outside the
+    rect, flag composition, the OR-cannot-express-LEFT/TOP case, a raising and a
+    None-returning geometry lookup, and one end-to-end through the installed wrapper with
+    a fake `win32` asserting user32 is handed the clamped anchor). Suite: **1902 passed**.
+    Version bumped to **0.5.1** in `config.py` + `pyproject.toml` — 0.5.0 is already
+    published as CURRENT and the publish path refuses a same-version republish.
+
 Session-2 macOS findings in full — MAC-6 through MAC-9, what is now proven on real
 hardware, and the outstanding list these items come from — are written up in
 `docs/macos-first-run-2026-08-05.md`.

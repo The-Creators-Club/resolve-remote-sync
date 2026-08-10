@@ -145,6 +145,11 @@ class _MenuOpenGuard:
             flag = self._open
 
             def tracked(*args, **kwargs):
+                # ...and while we are the only thing standing between pystray
+                # and user32, fix where the menu lands (see
+                # _with_clamped_anchor). Positioning is adjusted BEFORE the
+                # flag is set: nothing about it can block the open.
+                args = _with_clamped_anchor(args)
                 flag.set()
                 try:
                     result = original(*args, **kwargs)
@@ -202,6 +207,163 @@ def _after_popup_menu(args: tuple, result) -> None:
             _win32.win32.PostMessage(hwnd, 0x0000, 0, 0)  # WM_NULL
     except Exception:
         log.debug("post-menu WM_NULL failed", exc_info=True)
+
+
+# -- the menu that opens BEHIND an auto-hide taskbar ------------------------
+#
+# Item 21, reported on the base rig against v0.5.0 (Windows 11, taskbar set to
+# auto-hide): the menu opens instantly now, and its bottom edge -- the Quit
+# item -- sits under the taskbar.
+#
+# pystray anchors it at the raw cursor position from GetCursorPos with
+# TPM_RIGHTALIGN | TPM_BOTTOMALIGN (pystray/_win32.py:215), i.e. "put the
+# menu's bottom-right corner exactly HERE". Here is wherever the pointer was
+# when it right-clicked the tray icon, which is inside the taskbar band, so
+# the menu's bottom lands mid-taskbar by construction. Windows normally
+# rescues that: TrackPopupMenuEx keeps the menu inside the monitor's WORK
+# AREA, and with a docked, always-visible taskbar the work area stops at the
+# taskbar's inner edge, so the menu is nudged clear of it. An auto-hide bar is
+# excluded from the work area (it reserves one pixel, not its height), so the
+# work area is the whole screen, nothing is violated, and the currently-raised
+# topmost taskbar draws over the last item or two.
+#
+# v0.5.0 did not cause this -- it exposed it. Item 20's menu opened seconds
+# late, mid-GIL-blackout, or not at all; where the thing you finally got landed
+# was nobody's top complaint. Timing changes nothing about positioning rules:
+# the same TPM flags at the same cursor point produced the same geometry
+# before, on the fraction of right-clicks that opened at all.
+#
+# So: if the anchor point is inside the taskbar, move it to the taskbar's inner
+# edge and align the menu so it grows AWAY from the bar. Everything here is
+# best-effort -- a positioning nicety must never be the reason a menu fails to
+# open, which is the bug this file just spent item 20 climbing out of.
+
+# From pystray._util.win32 (repeated, not imported: this module must stay
+# importable on macOS, where there is no win32 shim to import them from).
+_TPM_LEFTALIGN = 0x0000
+_TPM_CENTERALIGN = 0x0004
+_TPM_RIGHTALIGN = 0x0008
+_TPM_TOPALIGN = 0x0000
+_TPM_VCENTERALIGN = 0x0010
+_TPM_BOTTOMALIGN = 0x0020
+# LEFT/TOP are zero, so an alignment is SET by clearing the other bits on its
+# axis -- an OR alone cannot express them, and cannot undo pystray's
+# RIGHT|BOTTOM either (which is exactly wrong for a top or left taskbar).
+_TPM_HALIGN_MASK = _TPM_CENTERALIGN | _TPM_RIGHTALIGN
+_TPM_VALIGN_MASK = _TPM_VCENTERALIGN | _TPM_BOTTOMALIGN
+
+_ABM_GETTASKBARPOS = 0x00000005
+_ABE_LEFT = 0
+_ABE_TOP = 1
+_ABE_RIGHT = 2
+_ABE_BOTTOM = 3
+
+
+def _clamp_menu_anchor(x: int, y: int, flags: int, taskbar_rect, taskbar_edge: int):
+    """(x, y, flags) moved out of `taskbar_rect`, or unchanged.
+
+    `taskbar_rect` is (left, top, right, bottom) in screen pixels and
+    `taskbar_edge` one of the ABE_* constants. An anchor OUTSIDE the rect is
+    returned untouched: it is only the click that lands on the bar itself
+    (i.e. every tray right-click) that needs help, and a second monitor's
+    cursor position must not be dragged to the primary taskbar's edge.
+
+    The alignment flag is rewritten, not or-ed on. pystray passes
+    RIGHT|BOTTOM, which is right for a bottom or right taskbar and precisely
+    backwards for a top or left one -- there the menu would grow back into
+    the bar it was just moved out of.
+
+    Pure and total: no ctypes, no logging, and it never raises.
+    """
+    try:
+        left, top, right, bottom = (int(v) for v in taskbar_rect)
+        x, y, flags = int(x), int(y), int(flags)
+        edge = int(taskbar_edge)
+    except Exception:
+        return x, y, flags
+    if not (left <= x <= right and top <= y <= bottom):
+        return x, y, flags
+    if edge == _ABE_BOTTOM:
+        return x, top, (flags & ~_TPM_VALIGN_MASK) | _TPM_BOTTOMALIGN
+    if edge == _ABE_TOP:
+        return x, bottom, (flags & ~_TPM_VALIGN_MASK) | _TPM_TOPALIGN
+    if edge == _ABE_LEFT:
+        return right, y, (flags & ~_TPM_HALIGN_MASK) | _TPM_LEFTALIGN
+    if edge == _ABE_RIGHT:
+        return left, y, (flags & ~_TPM_HALIGN_MASK) | _TPM_RIGHTALIGN
+    return x, y, flags   # an edge we don't know is an edge we don't touch
+
+
+def _taskbar_geometry():
+    """((left, top, right, bottom), edge) for the primary taskbar, or None.
+
+    SHAppBarMessage(ABM_GETTASKBARPOS) reports the bar's SHOWN rectangle even
+    while an auto-hide bar is hidden off-screen, which is the whole point:
+    that rectangle is the region the raised bar will cover, and the region the
+    menu has to clear.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _APPBARDATA(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("hWnd", wintypes.HWND),
+                ("uCallbackMessage", wintypes.UINT),
+                ("uEdge", wintypes.UINT),
+                ("rc", wintypes.RECT),
+                ("lParam", wintypes.LPARAM),
+            ]
+
+        data = _APPBARDATA()
+        data.cbSize = ctypes.sizeof(_APPBARDATA)
+        if not ctypes.windll.shell32.SHAppBarMessage(  # type: ignore[attr-defined]
+            _ABM_GETTASKBARPOS, ctypes.byref(data)
+        ):
+            return None
+        rect = (int(data.rc.left), int(data.rc.top),
+                int(data.rc.right), int(data.rc.bottom))
+        return rect, int(data.uEdge)
+    except Exception:
+        log.debug("taskbar geometry unavailable", exc_info=True)
+        return None
+
+
+def _anchor_clear_of_taskbar(x: int, y: int, flags: int):
+    """_clamp_menu_anchor against the live taskbar; the originals on any
+    failure -- no geometry, a shell that will not answer, a pystray we no
+    longer recognise. The menu opens where it opened before, which is the
+    version of this bug we can live with."""
+    try:
+        geometry = _taskbar_geometry()
+        if geometry is None:
+            return x, y, flags
+        rect, edge = geometry
+        return _clamp_menu_anchor(x, y, flags, rect, edge)
+    except Exception:
+        log.debug("taskbar anchor adjustment skipped", exc_info=True)
+        return x, y, flags
+
+
+def _with_clamped_anchor(args: tuple) -> tuple:
+    """pystray calls TrackPopupMenuEx(hmenu, flags, x, y, hwnd, None) with
+    every argument positional (pystray/_win32.py:215). Any other shape --
+    a test calling it bare, a pystray that has moved to keywords -- is passed
+    through untouched rather than guessed at."""
+    try:
+        if len(args) < 4:
+            return args
+        flags, x, y = args[1], args[2], args[3]
+        new_x, new_y, new_flags = _anchor_clear_of_taskbar(x, y, flags)
+        if (new_x, new_y, new_flags) == (x, y, flags):
+            return args
+        return (args[0], new_flags, new_x, new_y) + tuple(args[4:])
+    except Exception:
+        log.debug("menu anchor left as pystray asked for it", exc_info=True)
+        return args
 
 
 # -- the menu swap: build new, swap, THEN destroy old -----------------------

@@ -243,7 +243,7 @@ Everything lands dark; nothing changes behavior until the gate opens.
 - Same two-variant builder; `--proxy-via-lane-c` flag on the script. Keep
   byte-parity with the dashboard builder for both variants.
 
-**Companion (target version 0.5.0):**
+**Companion (target version 0.6.0 — 0.5.x got used by the 2026-08-10 companion unification + tray fixes before this plan started):**
 
 - `syncthing_admin.py`: `STIGNORE_LINES` → the new list (the companion is
   per-machine, not per-project — it flips all its folders at once; the skew
@@ -267,7 +267,7 @@ Everything lands dark; nothing changes behavior until the gate opens.
 semantics; GOTCHAS entries (trash/share-delete, fullwidth names) annotated.
 
 Exit: all tests green; dashboard deployed with the env var **unset** (no
-behavior change anywhere); companion 0.5.0 built but not yet published.
+behavior change anywhere); companion 0.6.0 built but not yet published.
 
 ## Phase 2 — pilot: one project, one editor
 
@@ -283,7 +283,7 @@ laptop). The base rig is not eligible (no sync lanes).
 2. **Pattern semantics check** (server-side, before any editor): root-level
    `Proxy/test.mov` + nested `B-roll/Proxy/test.mov` indexed; a sibling
    `.braw` not; a fake growing `.<name>.tmp` inside Proxy not.
-3. **Editor flip:** install companion 0.5.0 on the pilot machine only (direct
+3. **Editor flip:** install companion 0.6.0 on the pilot machine only (direct
    install, not the upgrade channel — that would flip the fleet).
 4. **Checkpoints, in order:**
    - Reconcile: after the local rescan, folder needBytes ≈ 0 — **no
@@ -309,7 +309,7 @@ laptop). The base rig is not eligible (no sync lanes).
 
 Rollback (any point): remove the slug from the env var (collector restores
 old patterns within a cycle; server stops offering proxies), reinstall
-companion 0.4.x on the pilot machine (its per-turn re-assert restores the old
+the pre-plan companion (0.5.x) on the pilot machine (its per-turn re-assert restores the old
 editor-side patterns). Lane B was never off, so proxy delivery never stopped.
 
 Exit: checkpoint results + before/after speed table appended to this file.
@@ -319,8 +319,8 @@ Exit: checkpoint results + before/after speed table appended to this file.
 1. **Server side in batches:** add project slugs to
    `CCSYNC_PROXY_LANE_C_SLUGS` in groups sized by the Phase 2 rescan
    measurements (suggest 2–3 projects, then larger). All editors are still on
-   0.4.x → skew row 2 → no visible change for them yet.
-2. **Publish companion 0.5.0** via the upgrade channel
+   the pre-plan 0.5.x → skew row 2 → no visible change for them yet.
+2. **Publish companion 0.6.0** via the upgrade channel
    (`build_editor_package.ps1 -Publish -MakeCurrent`). Editors upgrade via
    the tray one-click as usual; each machine flips to lane C proxies as it
    upgrades. Expect the one-turn paused-folder latch per project on first
@@ -330,15 +330,15 @@ Exit: checkpoint results + before/after speed table appended to this file.
    NAS load, `.stversions` growth, and lane B run logs — which should now
    report zero work every pass.
 
-Rollback: per-project (env var) and per-editor (republish 0.4.x as CURRENT —
+Rollback: per-project (env var) and per-editor (republish the pre-plan 0.5.x as CURRENT —
 the upgrade channel's version-difference rule makes rollback a first-class
 operation) independently. No step in this phase is destructive.
 
 ## Phase 4 — retire lane B + cleanup
 
-Only after the fleet has soaked on 0.5.0:
+Only after the fleet has soaked on 0.6.0:
 
-- **Companion 0.5.x/0.6.0:** sequencer stops invoking lane B (remove the call
+- **Companion 0.6.x/0.7.0:** sequencer stops invoking lane B (remove the call
   site in `_run_lanes_a_and_b`; lane A's concurrent-thread scaffolding
   simplifies). Do **not** rely on flipping the `lane_b_enabled` default:
   every existing install has a literal `lane_b_enabled = true` written in its
@@ -383,7 +383,7 @@ Only after the fleet has soaked on 0.5.0:
 | Re-download storm on editor flip (hash reconcile fails) | 2 | needBytes tripwire immediately after rescan; pause folder + rollback; lane B still running so delivery never stops |
 | NAS overload hashing the proxy corpus | 2–3 | per-slug gate = batch throttle; measure in pilot first |
 | Editor deletes proxies to free space → fleet-wide delete | 3+ | versioning both sides + BPG regen; EDITOR_SETUP doc line; monitor server `.stversions` |
-| lane B trashes `.stversions` during overlap | 2–3 | `.stversions` excludes ship in 0.5.0 with the stignore change |
+| lane B trashes `.stversions` during overlap | 2–3 | `.stversions` excludes ship in 0.6.0 with the stignore change |
 | Phantom "sending to server" from ignored offers | 2 | explicit pilot checkpoint; skew is otherwise harmless |
 | Old companion re-asserts old patterns forever | 3 | by design — that machine simply keeps lane B until it upgrades; fleet strip flags `[ OUT OF DATE ]` |
 | Rollback needed after Phase 4 (lane B call site gone) | 4 | upgrade channel makes republishing an older companion a one-command rollback; server gate can resurrect old patterns per-project until Phase 4's builder cleanup lands — sequence Phase 4 last for exactly this reason |

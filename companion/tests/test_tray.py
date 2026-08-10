@@ -1467,3 +1467,136 @@ def test_pystray_records_reach_the_companion_log(tmp_path):
         handler.flush()
 
     assert "An error occurred in the main loop" in log_path.read_text(encoding="utf-8")
+
+
+# -- item 21: the menu that opened behind an auto-hide taskbar --------------
+#
+# Geometry below is the base rig's: 1920x1080, a 48 px taskbar, and a cursor
+# at y=1058 -- inside the bar, where every tray right-click lands.
+
+_TASKBAR_BOTTOM = (0, 1032, 1920, 1080)
+_TASKBAR_TOP = (0, 0, 1920, 48)
+_TASKBAR_LEFT = (0, 0, 62, 1080)
+_TASKBAR_RIGHT = (1858, 0, 1920, 1080)
+
+# What pystray actually passes (pystray/_win32.py:215).
+_PYSTRAY_FLAGS = 0x0008 | 0x0020 | 0x0100      # RIGHTALIGN|BOTTOMALIGN|RETURNCMD
+
+
+def test_an_anchor_inside_the_taskbar_moves_to_its_inner_edge():
+    """Table over all four docked positions. The anchor must end up on the
+    edge of the bar that faces the desktop, with the alignment that grows the
+    menu away from it."""
+    from ccsync_companion import tray as tray_mod
+
+    cases = [
+        # edge, rect, cursor, expected (x, y), expected alignment bits
+        (3, _TASKBAR_BOTTOM, (1700, 1058), (1700, 1032), 0x0008 | 0x0020),  # bottom
+        (1, _TASKBAR_TOP, (1700, 22), (1700, 48), 0x0008 | 0x0000),         # top
+        (0, _TASKBAR_LEFT, (30, 900), (62, 900), 0x0000 | 0x0020),          # left
+        (2, _TASKBAR_RIGHT, (1890, 900), (1858, 900), 0x0008 | 0x0020),     # right
+    ]
+    for edge, rect, (cx, cy), expected_xy, expected_align in cases:
+        x, y, flags = tray_mod._clamp_menu_anchor(cx, cy, _PYSTRAY_FLAGS, rect, edge)
+        assert (x, y) == expected_xy, edge
+        # only the alignment bits move; RETURNCMD (and anything else the
+        # backend asked for) survives
+        assert flags & 0x0100, edge
+        assert flags & (0x0004 | 0x0008 | 0x0010 | 0x0020) == expected_align, edge
+
+
+def test_a_top_or_left_taskbar_clears_pystrays_right_bottom_alignment():
+    """The bit that an OR cannot express: LEFTALIGN and TOPALIGN are 0, so
+    they only exist as the ABSENCE of the others. Left as pystray sent them,
+    the menu would be moved off the bar and then drawn straight back over
+    it."""
+    from ccsync_companion import tray as tray_mod
+
+    _x, _y, flags = tray_mod._clamp_menu_anchor(
+        1700, 22, _PYSTRAY_FLAGS, _TASKBAR_TOP, 1)
+    assert not flags & 0x0020                      # BOTTOMALIGN gone
+    assert not flags & 0x0010                      # and no VCENTER left behind
+
+    _x, _y, flags = tray_mod._clamp_menu_anchor(
+        30, 900, _PYSTRAY_FLAGS, _TASKBAR_LEFT, 0)
+    assert not flags & 0x0008                      # RIGHTALIGN gone
+    assert not flags & 0x0004
+    assert flags & 0x0020                          # ...and the other axis intact
+
+
+def test_an_anchor_outside_the_taskbar_is_left_alone():
+    """A click on a second monitor, or anywhere on the desktop: the primary
+    taskbar's rect is none of its business."""
+    from ccsync_companion import tray as tray_mod
+
+    for point in [(1700, 500), (0, 0), (-1200, 400), (1700, 1031), (1921, 1058)]:
+        assert tray_mod._clamp_menu_anchor(
+            point[0], point[1], _PYSTRAY_FLAGS, _TASKBAR_BOTTOM, 3
+        ) == (point[0], point[1], _PYSTRAY_FLAGS)
+
+
+def test_an_unknown_taskbar_edge_or_junk_rect_changes_nothing():
+    from ccsync_companion import tray as tray_mod
+
+    assert tray_mod._clamp_menu_anchor(
+        1700, 1058, _PYSTRAY_FLAGS, _TASKBAR_BOTTOM, 99
+    ) == (1700, 1058, _PYSTRAY_FLAGS)
+    for rect in [None, (), ("x", "y", "z", "w"), (1, 2, 3)]:
+        assert tray_mod._clamp_menu_anchor(
+            1700, 1058, _PYSTRAY_FLAGS, rect, 3
+        ) == (1700, 1058, _PYSTRAY_FLAGS)
+
+
+def test_a_failed_geometry_lookup_leaves_the_anchor_untouched(monkeypatch):
+    """The whole point of item 20 was a menu that would not open. A
+    positioning nicety must never become a new way to do that."""
+    from ccsync_companion import tray as tray_mod
+
+    def boom():
+        raise OSError("SHAppBarMessage exploded")
+
+    monkeypatch.setattr(tray_mod, "_taskbar_geometry", boom)
+    assert tray_mod._anchor_clear_of_taskbar(1700, 1058, _PYSTRAY_FLAGS) == (
+        1700, 1058, _PYSTRAY_FLAGS)
+
+    # ...and the same when the shell simply has no answer (no taskbar, or
+    # SHAppBarMessage returned 0).
+    monkeypatch.setattr(tray_mod, "_taskbar_geometry", lambda: None)
+    assert tray_mod._anchor_clear_of_taskbar(1700, 1058, _PYSTRAY_FLAGS) == (
+        1700, 1058, _PYSTRAY_FLAGS)
+
+
+def test_the_popup_wrapper_hands_win32_the_clamped_anchor(monkeypatch):
+    """End to end through the installed wrapper: pystray asks for the raw
+    cursor position inside the taskbar, user32 is handed the inner edge."""
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("pystray win32 backend only")
+    from pystray import _win32
+
+    from ccsync_companion import tray as tray_mod
+
+    seen = []
+    monkeypatch.setattr(tray_mod, "_taskbar_geometry",
+                        lambda: (_TASKBAR_BOTTOM, 3))
+    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx",
+                        lambda *a: (seen.append(a), 3)[1], raising=True)
+    monkeypatch.setattr(_win32.win32, "PostMessage", lambda *a: None, raising=True)
+    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
+    tray_mod._MenuOpenGuard().install()
+
+    assert _win32.win32.TrackPopupMenuEx(
+        77, _PYSTRAY_FLAGS, 1700, 1058, 4242, None) == 3
+    (hmenu, flags, x, y, hwnd, reserved), = seen
+    assert (hmenu, hwnd, reserved) == (77, 4242, None)   # everything else intact
+    assert (x, y) == (1700, 1032)
+    assert flags & 0x0100 and flags & 0x0020
+
+    # A call that carries no coordinates at all (the bare-call tests above,
+    # and anything that stops passing them positionally) must still work.
+    seen.clear()
+    assert _win32.win32.TrackPopupMenuEx() == 3
+    assert seen == [()]

@@ -72,7 +72,8 @@ has none yet); the dashboard venv also has its deps and can substitute.
 ```powershell
 tools\release.ps1                                            # Windows companion: parity + tests + PyInstaller + manifest
 installer\build_editor_package.ps1 -RebuildExe -RebuildOnboard   # editor package (add -Publish -MakeCurrent to ship it)
-tools\ship.ps1                                               # the whole cycle: dashboard deploy + publish + local upgrade + drift check
+tools\ship.cmd                                               # the whole cycle: dashboard deploy + publish + local upgrade + drift check
+                                                             # (.cmd, not .ps1 -- execution policy blocks the direct .ps1 invocation)
 ./tools/release_macos.sh [--publish --make-current]          # ON THE MAC only; the macOS channel goes stale silently otherwise
 ```
 
@@ -85,7 +86,11 @@ tools\ship.ps1                                               # the whole cycle: 
   (like the /broll mount) fail absent, not fatal; "the dashboard is what
   tells everyone whether their footage is syncing" outranks any feature.
 - `.gitattributes` forces `eol=lf` on shell scripts — anything the NAS
-  container or a Mac executes. A CRLF `run.sh` once took the dashboard down.
+  container or a Mac executes. A CRLF `run.sh` once took the dashboard down,
+  and a working copy checked out BEFORE a rule was added stays CRLF until
+  re-checked-out (`rm` + `git checkout --`; verify with `git ls-files --eol`).
+  Do not trust MSYS grep to find a CR — it strips them before matching;
+  byte-scan instead (2026-08-10).
 - Verify companion/tray fixes against the **deployed** build
   (`%LOCALAPPDATA%\ccsync\bin`), not just the repo: the running tray won't
   reflect source changes until a build is published.

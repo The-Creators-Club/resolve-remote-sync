@@ -8,6 +8,11 @@
     Wraps the whole release cycle that was previously four hand-typed
     commands plus environment-variable setup:
 
+      0. GATES      secrets present, working tree clean (a +dirty build must
+         not reach the fleet -- docs/RELEASE.md), this companion version not
+         already published, and the server/ suite green. release.ps1 in step
+         2 runs the companion and dashboard suites but NOT server/ -- which
+         is the code step 1 executes against the live NAS.
       1. DASHBOARD  python server\install_dashboard_app.py  (code-only
          deploy; compose-level changes still need --recreate by hand),
          then confirms /api/v1/health reports the repo's dashboard VERSION.
@@ -33,6 +38,15 @@
 .PARAMETER SkipLocalUpgrade
     Do steps 1-2 but leave this machine's companion alone.
 
+.PARAMETER SkipTests
+    Skip the server/ suite in step 0. release.ps1's own -SkipTests is
+    separate and is not implied by this.
+
+.PARAMETER AllowDirty
+    Publish from a dirty working tree. The build is stamped +dirty and
+    nobody can reproduce what the fleet is running; use it for a deliberate
+    hotfix, not out of habit.
+
 .EXAMPLE
     .\tools\ship.cmd
 .EXAMPLE
@@ -41,7 +55,9 @@
 [CmdletBinding()]
 param(
     [switch]$DashboardOnly,
-    [switch]$SkipLocalUpgrade
+    [switch]$SkipLocalUpgrade,
+    [switch]$SkipTests,
+    [switch]$AllowDirty
 )
 
 # "Continue", not "Stop": the deploy script prints an SSH host-key WARNING to
@@ -85,6 +101,26 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
+# --- working tree clean? (only matters if we are going to publish) ----------
+# release.ps1 stamps a dirty build "<version>+dirty" and warns -- but it warns
+# in step 2, after step 1 has already deployed, and it does not stop. Nobody can
+# reproduce what the fleet is running from a +dirty build, so the decision
+# belongs HERE, before anything moves. Caught for real on 2026-08-10: an
+# unstaged deletion left over from another session's work would have ridden
+# into a fleet publish as "0.6.0+dirty".
+if (-not $DashboardOnly) {
+    $dirty = @(& git status --porcelain 2>$null | Where-Object { $_ -and $_.Trim() })
+    if ($dirty.Count -gt 0 -and -not $AllowDirty) {
+        Write-Fail "working tree is dirty -- a +dirty build must not reach the fleet (docs\RELEASE.md)"
+        foreach ($line in $dirty) { Write-Host "        $line" }
+        Write-Step "commit or stash the above, or re-run with -AllowDirty for a deliberate hotfix"
+        exit 1
+    }
+    if ($dirty.Count -gt 0) {
+        Write-Host "[ship] WARNING: publishing from a DIRTY tree (-AllowDirty) -- the build will be stamped +dirty" -ForegroundColor Yellow
+    }
+}
+
 # --- repo versions (for the verify steps) ----------------------------------
 $DashVersion = (Select-String -Path "dashboard\src\ccsync_dashboard\__init__.py" -Pattern 'VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
 $CompanionVersion = (Select-String -Path "companion\src\ccsync_companion\config.py" -Pattern '^VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
@@ -106,6 +142,37 @@ if (-not $DashboardOnly) {
         Write-Step "(and, if onboard.exe's contents changed, `$InstallerVersion in installer\windows_bootstrap.ps1 + onboarding\steps.py), then re-run"
         exit 1
     }
+}
+
+# --- 0. the suite that guards what step 1 is about to do --------------------
+# release.ps1 (step 2) runs the companion and dashboard suites, so those are
+# covered -- but it does not run server/, and server/ is the code step 1
+# EXECUTES against the live NAS. That gap is not theoretical: the 2026-08-10
+# music deploy died inside install_dashboard_app.py's ffmpeg step, and the
+# tests that would now catch its failure modes are in server/tests. It borrows
+# the dashboard's venv (no venv of its own) -- see CLAUDE.md's test table.
+if (-not $SkipTests) {
+    Write-Host ""
+    Write-Step "--- step 0: server tests (they guard the deploy script step 1 runs) ---"
+    $serverPy = Join-Path $RepoRoot "dashboard\.venv\Scripts\python.exe"
+    if (Test-Path $serverPy) {
+        Push-Location (Join-Path $RepoRoot "server")
+        & $serverPy -m pytest tests -q
+        $testRc = $LASTEXITCODE
+        Pop-Location
+        if ($testRc -ne 0) {
+            Write-Fail "server tests exited $testRc -- nothing has been deployed or published"
+            exit 1
+        }
+    }
+    else {
+        # Not fatal: a machine without the dashboard venv can still ship. Said
+        # out loud, because "no tests ran" must never look like "tests passed".
+        Write-Step "NOTE: no dashboard venv at $serverPy -- server tests SKIPPED, not passed"
+    }
+}
+else {
+    Write-Step "server tests skipped (-SkipTests)"
 }
 
 # --- 1. dashboard -----------------------------------------------------------
@@ -178,11 +245,11 @@ if ($macVersion) {
         Write-Step "macos companion channel is at v$macVersion -- level with this repo"
     }
     else {
-        Write-Host "[ship] WARNING: macos companion channel at v$macVersion (repo v$CompanionVersion) -- run tools/release_macos.sh on the Mac" -ForegroundColor Yellow
+        Write-Host "[ship] WARNING: macos companion channel at v$macVersion (repo v$CompanionVersion) -- ON THE MAC: git pull && ./tools/release_macos.sh --publish --make-current  (and ./tools/build_onboard_macos.sh --publish for the wizard)" -ForegroundColor Yellow
     }
 }
 elseif ($macHeaderText -match '\s404\s') {
-    Write-Step "NOTE: no macos companion package published yet -- Mac editors have nothing to install (tools/release_macos.sh on the Mac)"
+    Write-Step "NOTE: no macos companion package published yet -- Mac editors have nothing to install. ON THE MAC: git pull && ./tools/release_macos.sh --publish --make-current"
 }
 else {
     Write-Step "NOTE: could not read the macos companion channel -- not checked (this is advisory only)"

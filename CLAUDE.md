@@ -95,13 +95,45 @@ has none yet); the dashboard venv also has its deps and can substitute.
 
 ## Building & shipping (existing commands — don't invent wrappers)
 
+**There is one command. It is `tools\ship.cmd`.** Everything below it is what
+that command already runs; reach for the individual scripts only to redo one
+part, never to assemble a release by hand.
+
+```powershell
+tools\ship.cmd            # THE ship: gates -> dashboard deploy -> companion + onboard.exe build
+                          # -> publish + make current -> upgrade this machine -> drift check.
+                          # Prompts ONCE for your dashboard admin password (build_editor_package.ps1
+                          # Read-Host, no env-var path) -- so it needs a real interactive terminal.
+                          # (.cmd, not .ps1 -- execution policy blocks the direct .ps1 invocation)
+```
+
+It refuses to start, before anything moves, on: a missing `TRUENAS_PW` /
+`DASH_REPORT_TOKEN` / `DASH_SESSION_SECRET` / `SYNCTHING_API_KEY`, a **dirty
+working tree** (a `+dirty` build must not reach the fleet — `-AllowDirty` for a
+deliberate hotfix), a companion version **already published** (bump `VERSION` in
+`config.py` *and* `pyproject.toml`), or a failing **`server/` suite** — the one
+suite `release.ps1` does not run, guarding the deploy script step 1 executes
+(`-SkipTests` to skip). Flags: `-DashboardOnly`, `-SkipLocalUpgrade`.
+
 ```powershell
 tools\release.ps1                                            # Windows companion: parity + tests + PyInstaller + manifest
 installer\build_editor_package.ps1 -RebuildExe -RebuildOnboard   # editor package (add -Publish -MakeCurrent to ship it)
-tools\ship.cmd                                               # the whole cycle: dashboard deploy + publish + local upgrade + drift check
-                                                             # (.cmd, not .ps1 -- execution policy blocks the direct .ps1 invocation)
-./tools/release_macos.sh [--publish --make-current]          # ON THE MAC only; the macOS channel goes stale silently otherwise
+installer\windows_upgrade.ps1 -CompanionExe <path>           # install a build on THIS machine
+tools\check_deploy_drift.ps1 [-AdminUser alex]               # read-only doctor: repo vs built vs installed vs live
+tools\run_all_tests.ps1                                      # all 8 suites (ship only gates on server/)
 ```
+
+**The Mac half cannot run from Windows** — PyInstaller does not cross-compile,
+so `ship` publishes neither macOS artifact and prints an advisory instead. Both
+of these run **on a Mac**, and until they do, Mac editors stay on their old build:
+
+```bash
+git pull && ./tools/release_macos.sh --publish --make-current   # macOS companion
+./tools/build_onboard_macos.sh --publish                        # macOS wizard (installer ≥ 1.0.17)
+```
+
+Full runbook, including what each version number means and how to roll back:
+`docs/RELEASE.md`.
 
 ## Conventions that matter here
 

@@ -76,6 +76,12 @@ Version numbers must look like `1.2.3` — the dashboard rejects anything else
 
 ## The release run
 
+**Steps 1–7 below are what `.\tools\ship.cmd` runs for you** — it is the command
+to reach for, and it stops before touching anything on a dirty tree, an
+already-published version, or a failing `server/` suite. Read the steps to
+understand what it did, or to redo one of them by hand; do not assemble a
+release out of them.
+
 ### 1. Bump
 
 Edit `VERSION` in `companion/src/ccsync_companion/config.py` **and** `version`
@@ -380,6 +386,9 @@ has four fallbacks rather than one.
 ## Quick reference
 
 ```powershell
+.\tools\ship.cmd                                # ALL OF THE ABOVE, in order, gated
+.\tools\ship.cmd -DashboardOnly                 # stop after the dashboard deploy
+.\tools\ship.cmd -AllowDirty                    # publish from a dirty tree (deliberate hotfix)
 .\tools\check_deploy_drift.ps1                  # what is actually running, anywhere
 .\tools\release.ps1                             # parity + tests + build + manifest
 .\tools\release.ps1 -DryRun                     # show the pipeline, change nothing

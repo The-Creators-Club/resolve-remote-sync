@@ -245,6 +245,14 @@ DEFAULTS: dict[str, Any] = {
     # sitting in front of. On for a machine that leaves UNATTENDED renders
     # going, which idleness cannot see (it looks exactly like being away).
     "proxy_gen_skip_while_resolve_running": False,
+    # Hand the BRAW/R3D/CRM gap to the Blackmagic Proxy Generator once the
+    # ffmpeg queue is empty (see bpg.py). Tri-state like proxy_gen_enabled:
+    # None derives "wherever this machine generates proxies AND has BPG
+    # installed", which is the base rig and nowhere else.
+    "bpg_enabled": None,
+    # "" = find it at Resolve's install path. BPG is not a separate binary;
+    # this is Resolve.exe, launched with -pg.
+    "bpg_path": "",
     # False = leave Resolve's LUT directory alone. On by default: syncing the
     # shared LUT library to <local_root>/Assets/Luts accomplishes nothing on
     # its own, because Resolve reads LUTs from its own fixed directory and
@@ -622,6 +630,16 @@ proxy_gen_min_age_seconds = 120
 # gate already covers a Resolve you are sitting in front of. Turn it on if you
 # leave UNATTENDED renders going, which idleness cannot see.
 # proxy_gen_skip_while_resolve_running = false
+
+# Let the Blackmagic Proxy Generator make the proxies ffmpeg cannot: BRAW, R3D
+# and CRM are counted and reported but never queued here, because ffmpeg cannot
+# decode them at any quality. BPG is started only once the ffmpeg queue is
+# EMPTY (one GPU, one encoder at a time) and only while you are away, and is
+# never stopped by us -- it is left to finish whatever it began.
+# Commented out because the default is derived, exactly like proxy_gen_enabled:
+# on wherever this machine already generates proxies and BPG is installed.
+# bpg_enabled = true
+# bpg_path = 'C:\\Program Files\\Blackmagic Design\\DaVinci Resolve\\Resolve.exe'
 
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about, so

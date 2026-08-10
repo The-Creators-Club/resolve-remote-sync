@@ -280,6 +280,7 @@ class ProxyGenerator:
         available_fn: Optional[Callable[[str], tuple]] = None,
         encoders_fn: Optional[Callable[[str], Any]] = None,
         resolve_running_fn: Optional[Callable[[], bool]] = None,
+        bpg_launcher: Any = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -301,6 +302,9 @@ class ProxyGenerator:
         self._available_fn = available_fn or ffmpeg_tools.ffmpeg_available
         self._encoders_fn = encoders_fn or ffmpeg_tools.detect_encoders
         self._resolve_running_fn = resolve_running_fn
+        # Started only once the ffmpeg queue is empty -- see bpg.py. None on a
+        # machine with no proxy generator, which is most of the fleet.
+        self._bpg = bpg_launcher
         # monotonic for every INTERVAL (a clock the user can drag backwards
         # must not make an encode look 3 hours old), wall clock only for the
         # persisted notification cooldown, which has to survive a restart and
@@ -669,7 +673,30 @@ class ProxyGenerator:
         self._publish_state(state)
         if state == STATE_RUNNING:
             state = self._drain_queue()
+        # AFTER the drain, and only from a state that means the ffmpeg queue is
+        # empty: BPG is the same GPU, so the two must never encode at once.
+        # _drain_queue returns the state it finished in, so a pass that just
+        # emptied the queue lands here in the same tick rather than a scan later.
+        self._maybe_launch_bpg(state)
         return state
+
+    def _maybe_launch_bpg(self, state: str) -> None:
+        """Hand the clips ffmpeg cannot decode to the Blackmagic Proxy
+        Generator, once there is nothing else encoding. Never raises: this is
+        a convenience on top of a report that was already correct without it."""
+        if self._bpg is None:
+            return
+        with self._lock:
+            queue_empty = not self._queue
+            needs_resolve = int(self._totals.get("needs_resolve", 0))
+        try:
+            self._bpg.maybe_launch(
+                queue_empty=queue_empty and state != STATE_RUNNING,
+                needs_resolve=needs_resolve,
+                user_away=self._user_is_away(),
+            )
+        except Exception:
+            log.exception("proxy gen: the BPG launcher raised")
 
     def _scan_due(self) -> bool:
         with self._lock:

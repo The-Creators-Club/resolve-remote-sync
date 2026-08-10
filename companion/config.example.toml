@@ -292,6 +292,29 @@ proxy_gen_min_age_seconds = 120
 # render looks exactly like being away from the machine).
 # proxy_gen_skip_while_resolve_running = false
 
+# BRAW / R3D / CRM -- the clips ffmpeg cannot decode at any quality. They are
+# counted and reported but never queued for ffmpeg, because promising a proxy
+# this machine cannot make is worse than reporting the gap. The Blackmagic
+# Proxy Generator can make them, so the companion starts it -- but only once
+# the ffmpeg queue is EMPTY (BPG is DaVinci Resolve with -pg, i.e. the same
+# GPU; two encoders at once is the thing this sequencing exists to avoid) and
+# only while you are away. It is never stopped by us: our own ffmpeg encodes
+# are safe to kill because they write <stem>.mp4.partial and are renamed into
+# place only when complete, and BPG's write behaviour is its own -- so a
+# started BPG is left to finish what it began.
+#
+# BPG takes no file list; it watches the folders in its own settings
+# (%APPDATA%\Blackmagic Design\Blackmagic Proxy Generator), which the
+# companion deliberately does NOT edit -- that config is yours, and silently
+# narrowing it would change what a manual launch does later.
+#
+# Default is derived, like proxy_gen_enabled: on wherever this machine already
+# generates proxies AND has Resolve installed, which is the base rig.
+# bpg_enabled = true
+# Where Resolve lives, if it is not at the standard install path. BPG is not a
+# separate binary -- this exe is launched with -pg.
+# bpg_path = 'C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe'
+
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about --
 # so the companion adds the library to Resolve's own supported list

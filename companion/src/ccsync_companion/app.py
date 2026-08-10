@@ -31,6 +31,7 @@ from . import luts as luts_mod
 from . import music_worker
 from . import paths as paths_mod
 from . import popup
+from . import bpg as bpg_mod
 from . import proxy_gen as proxy_gen_mod
 from . import proxy_relink
 from . import resolve_bridge
@@ -647,6 +648,14 @@ class CompanionApp:
                 notify=self._notify_tray,
                 idle_probe=idle_mod.make_idle_probe(True),
                 resolve_running_fn=resolve_prefs_mod.resolve_is_running,
+                # BRAW/R3D/CRM: ffmpeg cannot decode them, so the generator
+                # counts them and hands them to BPG once its own queue is
+                # empty. None on a machine without Resolve installed.
+                bpg_launcher=bpg_mod.BpgLauncher(
+                    cfg,
+                    generation_enabled=config_mod.proxy_generation_enabled(cfg),
+                    clock=time.monotonic,
+                ),
             )
         except Exception:
             log.exception("failed to build the proxy generator")

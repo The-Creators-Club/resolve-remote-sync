@@ -147,6 +147,11 @@ def test_default_toml_text_documents_every_default_key():
         "proxy_gen_enabled", "proxy_gen_max_height", "proxy_gen_bitrate",
         "proxy_gen_max_failures", "proxy_notify_cooldown_seconds",
         "proxy_gen_skip_while_resolve_running",
+        # Same class again, and bpg_enabled for the same reason as
+        # proxy_gen_enabled specifically: its default is None ("derive it"),
+        # TOML has no null, and an explicit value in every first-run file
+        # would kill the derivation.
+        "bpg_enabled", "bpg_path",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -187,6 +192,10 @@ EXAMPLE_COMMENTED_OUT = {
     "proxy_gen_enabled", "proxy_gen_max_height", "proxy_gen_bitrate",
     "proxy_gen_max_failures", "proxy_notify_cooldown_seconds",
     "proxy_gen_skip_while_resolve_running",
+    # The BPG hand-off, same reasoning: bpg_enabled derives from
+    # proxy_generation_enabled AND whether Resolve is installed, and bpg_path
+    # is empty by default because the answer is "look where Resolve installs".
+    "bpg_enabled", "bpg_path",
 }
 
 

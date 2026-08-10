@@ -371,6 +371,35 @@ def build_shoot_clause(shoot: str | None) -> tuple[str, list[Any]]:
     return " AND v.share = ? AND v.rel_path LIKE ? ESCAPE '\\'", [share, f"{like}%"]
 
 
+def build_path_clause(path: str | None) -> tuple[str, list[Any]]:
+    """Select one folder of one share: `<share>` or `<share>::<rel/prefix>`.
+
+    Deliberately NOT build_shoot_clause, which joins its parts with `%` and so
+    matches any rel_path merely CONTAINING them in order. That looseness is
+    fine for the two-level shoot browser it was written for and wrong for
+    clicking a folder crumb: "Erosion/Interviewees" must mean that folder, at
+    that depth, not every path where those words happen to appear in sequence.
+
+    The prefix is matched as an exact directory boundary -- `prefix/%` -- so
+    clicking `B-roll` cannot also drag in a sibling called `B-roll Archive`.
+    Depth is whatever the caller sends: the crumb UI builds one of these per
+    component, so every level of the path is selectable.
+    """
+    if not path:
+        return "", []
+    share, _, prefix = path.partition("::")
+    if not share:
+        return "", []
+    prefix = prefix.strip("/")
+    if not prefix:
+        return " AND v.share = ?", [share]
+    escaped = prefix.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
+    return (
+        " AND v.share = ? AND v.rel_path LIKE ? ESCAPE '\\'",
+        [share, f"{escaped}/%"],
+    )
+
+
 def creators_shares(conn: sqlite3.Connection | None = None) -> set[str]:
     """Every share holding our own footage.
 
@@ -959,6 +988,7 @@ def search_videos(
     sources: str = "all",
     collection: str | None = None,
     shoot: str | None = None,
+    path: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Run the search and return (page_of_results, total_video_count).
 
@@ -1016,8 +1046,9 @@ def search_videos(
     # order correct everywhere without touching any of those signatures.
     coll_clause, coll_params = build_collection_clause(collection, conn)
     shoot_clause, shoot_params = build_shoot_clause(shoot)
-    cat_clause += coll_clause + shoot_clause
-    cat_params = [*cat_params, *coll_params, *shoot_params]
+    path_clause, path_params = build_path_clause(path)
+    cat_clause += coll_clause + shoot_clause + path_clause
+    cat_params = [*cat_params, *coll_params, *shoot_params, *path_params]
     flags_clause, flags_params = build_flags_exclude_clause(flags)
 
     raw_terms = _extract_terms(q)

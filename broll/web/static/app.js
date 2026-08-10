@@ -40,6 +40,11 @@ const state = {
   q: "",
   category: "",
   collection: "", // "" | "downloads" | "creators_club" -- the folder-tree root
+  // `<share>::<rel/prefix>` from a clicked path crumb in the detail panel.
+  // Independent of `category`/`collection`, which are the folder TREE's own
+  // pair: the tree browses creators_club shoots by slug and downloads by
+  // subject, so neither can express "this folder of this downloads share".
+  path: "",
   tree: [],
   hiddenFlags: new Set(),
   mode: "hybrid", // "hybrid" | "keyword" | "semantic"
@@ -210,6 +215,7 @@ function currentHash() {
   if (state.q) p.set("q", state.q);
   if (state.category) p.set("cat", state.category);
   if (state.collection) p.set("coll", state.collection);
+  if (state.path) p.set("path", state.path);
   if (state.offset) p.set("off", String(state.offset));
   if (state.detail) {
     p.set("v", String(state.detail.video.id));
@@ -238,6 +244,7 @@ async function applyHistoryState() {
     state.q = p.get("q") || "";
     state.category = p.get("cat") || "";
     state.collection = p.get("coll") || "";
+    state.path = p.get("path") || "";
     state.offset = parseInt(p.get("off") || "0", 10) || 0;
     $("#q-input").value = state.q;
     const select = $("#category-select");
@@ -529,6 +536,7 @@ async function runSearch() {
     params.set("category", state.category);
   }
   if (state.collection) params.set("collection", state.collection);
+  if (state.path) params.set("path", state.path);
   if (state.hiddenFlags.size) params.set("flags", [...state.hiddenFlags].join(","));
   params.set("mode", state.mode);
   params.set("sources", state.sources);
@@ -563,9 +571,7 @@ function renderPager() {
 function renderGrid(results) {
   const grid = $("#results-grid");
   grid.innerHTML = "";
-  $("#results-meta").textContent = state.q
-    ? `search: "${state.q}"`
-    : "browsing all videos";
+  renderResultsMeta();
 
   // Semantic-only rows ("match": "semantic" -- surfaced only by the vector
   // side, never a keyword result -- see app/search.py's module docstring)
@@ -955,22 +961,140 @@ function closeDetail() {
   window.scrollTo(0, state.gridScrollY || 0);
 }
 
+/** A piece of metadata you can click to search by it. Kept to <button> rather
+ * than <a href>: every one of these is an in-page state change, and an anchor
+ * would need its own href kept in step with currentHash() for no gain. */
+function metaLink(text, onClick, extraClass) {
+  const node = el("button", {
+    className: `meta-link${extraClass ? " " + extraClass : ""}`,
+    text,
+    attrs: { type: "button" },
+  });
+  node.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick();
+  });
+  return node;
+}
+
+/** Leave the detail view and run `mutate`'s search. PUSHes, so Back returns to
+ * the clip you clicked out of rather than to whatever preceded it. */
+function jumpToSearch(mutate) {
+  closeDetail();
+  state.offset = 0;
+  mutate();
+  const select = $("#category-select");
+  if (select) select.value = state.collection === "creators_club" ? "" : state.category;
+  renderFolderTree();
+  syncHistory(true);
+  runSearch();
+}
+
 function renderVideoMeta(data) {
   const { video, themes, quality_flags } = data;
   const meta = $("#video-meta");
   meta.innerHTML = "";
   meta.appendChild(el("div", { className: "title", text: basename(video.rel_path) }));
-  meta.appendChild(
-    el("div", {
-      text: `${video.share}/${video.rel_path} — ${formatDuration(video.duration_s)} @ ${video.fps || "?"}fps`,
+
+  // The path, one clickable crumb per level. The share is a crumb too (the
+  // whole share is a folder), and the filename is NOT -- it is the clip you
+  // are already looking at. Every intermediate directory is selectable, so
+  // ff4 / Erosion / Interviewees / Lin Tsung-yi / B-roll is five destinations,
+  // not one.
+  const parts = video.rel_path.split("/");
+  const dirs = parts.slice(0, -1);
+  const pathLine = el("div", { className: "meta-path" });
+  pathLine.appendChild(
+    metaLink(video.share, () =>
+      jumpToSearch(() => {
+        state.path = `${video.share}::`;
+        state.q = "";
+        $("#q-input").value = "";
+      })
+    )
+  );
+  dirs.forEach((name, i) => {
+    pathLine.appendChild(el("span", { className: "meta-sep", text: "/" }));
+    const prefix = dirs.slice(0, i + 1).join("/");
+    pathLine.appendChild(
+      metaLink(name, () =>
+        jumpToSearch(() => {
+          state.path = `${video.share}::${prefix}`;
+          state.q = "";
+          $("#q-input").value = "";
+        })
+      )
+    );
+  });
+  pathLine.appendChild(el("span", { className: "meta-sep", text: "/" }));
+  pathLine.appendChild(el("span", { text: basename(video.rel_path) }));
+  pathLine.appendChild(
+    el("span", {
+      text: ` — ${formatDuration(video.duration_s)} @ ${video.fps || "?"}fps`,
     })
   );
-  meta.appendChild(el("div", { text: `category: ${video.category || video.category_hint || "—"}` }));
+  meta.appendChild(pathLine);
+
+  const category = video.category || video.category_hint || "";
+  const catLine = el("div", { text: "category: " });
+  if (category) {
+    catLine.appendChild(
+      metaLink(category, () =>
+        jumpToSearch(() => {
+          state.path = "";
+          state.collection = "";
+          state.category = category;
+        })
+      )
+    );
+  } else {
+    catLine.appendChild(el("span", { text: "—" }));
+  }
+  meta.appendChild(catLine);
+
   if (themes && themes.length) {
-    meta.appendChild(el("div", { text: `themes: ${themes.join(", ")}` }));
+    // A theme is not a filter the API has -- it is a phrase the model wrote
+    // about the footage -- so clicking one searches FOR it rather than
+    // filtering BY it. Quoted, because a two-word theme searched loose
+    // ("wind farm") is a different question from the theme itself.
+    const themeLine = el("div", { text: "themes: " });
+    themes.forEach((theme, i) => {
+      if (i) themeLine.appendChild(el("span", { text: ", " }));
+      themeLine.appendChild(
+        metaLink(theme, () =>
+          jumpToSearch(() => {
+            state.path = "";
+            state.q = `"${theme}"`;
+            $("#q-input").value = `"${theme}"`;
+          })
+        )
+      );
+    });
+    meta.appendChild(themeLine);
   }
   if (quality_flags && quality_flags.length) {
     meta.appendChild(el("div", { text: `flags: ${quality_flags.join(", ")}`, className: "muted" }));
+  }
+}
+
+/** The line above the grid. It has to name the folder filter as well as the
+ * query: a path crumb click can leave the grid showing a subset with an empty
+ * search box, and "browsing all videos" over 40 results of 5000 is a lie. */
+function renderResultsMeta() {
+  const node = $("#results-meta");
+  node.innerHTML = "";
+  const bits = [];
+  if (state.q) bits.push(`search: "${state.q}"`);
+  if (state.path) {
+    const [share, prefix] = state.path.split("::");
+    bits.push(`folder: ${prefix ? `${share}/${prefix}` : share}`);
+  }
+  node.appendChild(el("span", { text: bits.length ? bits.join("  ·  ") : "browsing all videos" }));
+  if (state.path) {
+    node.appendChild(
+      metaLink("clear folder", () => jumpToSearch(() => { state.path = ""; }), "meta-clear")
+    );
   }
 }
 

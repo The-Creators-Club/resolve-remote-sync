@@ -26,6 +26,7 @@ def search(
     sources: str = Query(default="all"),
     collection: str | None = None,
     shoot: str | None = None,
+    path: str | None = None,
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     results, total = search_videos(
@@ -40,6 +41,7 @@ def search(
         sources=sources,
         collection=collection,
         shoot=shoot,
+        path=path,
     )
     return {"results": results, "total": total}
 

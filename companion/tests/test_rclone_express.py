@@ -479,6 +479,23 @@ def test_path_filter_predicate_matches_the_lane_a_rule_list():
     assert path_matches_lane_a_filter("Projects/Proxynotreal.mov")
 
 
+def test_path_filter_predicate_refuses_macos_appledouble_sidecars():
+    """Express is lane A's OTHER door, and this predicate is the whole filter
+    on it (build_express_command can pass no --filter-from at all). A `._`
+    sidecar has a video extension and no Proxy component, so without an
+    explicit check a Mac's watchdog event uploads the exact file the periodic
+    pass now refuses -- KNOWN_BUGS 12, which is about both, not just the
+    rule list."""
+    assert not path_matches_lane_a_filter("Projects/A/._clip.mov")
+    assert not path_matches_lane_a_filter("Projects\\A\\._clip.mov")
+    assert not path_matches_lane_a_filter("._clip.mov")
+    # Only the BASENAME decides -- a directory that happens to start with `._`
+    # is somebody's real folder, and the file inside it is a real original.
+    assert path_matches_lane_a_filter("Projects/._weird_dir/clip.mov")
+    # ...and a leading dot alone is not an AppleDouble sidecar.
+    assert path_matches_lane_a_filter("Projects/A/.hidden.mov")
+
+
 def test_express_is_lane_a_only(tmp_path):
     lane_b = _make_lane(tmp_path, direction=DIRECTION_DOWN)
     assert lane_b._express_enabled is False
@@ -922,7 +939,12 @@ def test_periodic_filter_excludes_paths_express_is_uploading(tmp_path):
         lane._express_inflight |= {"Projects/2026/P/B-roll/a.mov"}
 
     rules = _filter_rules(lane, subpath="Projects/2026/P")
-    assert rules[0] == "- /B-roll/a.mov"
+    # rules[0] is the AppleDouble exclude (KNOWN_BUGS 12); what matters here
+    # is that the in-flight exclude still beats every `+ *<ext>` include.
+    assert rules[1] == "- /B-roll/a.mov"
+    assert rules.index("- /B-roll/a.mov") < min(
+        i for i, rule in enumerate(rules) if rule.startswith("+ ")
+    )
     assert rules[-1] == "- **"
 
 

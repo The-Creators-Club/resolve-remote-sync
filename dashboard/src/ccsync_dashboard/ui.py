@@ -6,7 +6,7 @@ import datetime as dt
 import sqlite3
 from pathlib import Path
 
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -107,15 +107,31 @@ def _queue_editor(request: Request) -> str | None:
     return user
 
 
+def _as_qs(request: Request, editor: str | None) -> str:
+    """'&as=<editor>' when the viewer is ticking for somebody else, else ''.
+
+    Every self-refreshing fragment that carries selection state has to thread
+    this through: the sidebar polls /partials/sidebar every 30s, and a refresh
+    that dropped ?as= re-rendered the checkboxes against the ADMIN'S OWN ticks
+    while the admin believed they were still looking at the other editor's --
+    so the next click silently ticked the project onto the admin's machine."""
+    user = auth.get_session_user(request)
+    if editor and user and editor.lower() != user.lower():
+        return "&as=" + quote(editor, safe="")
+    return ""
+
+
 @router.get("/")
 def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     settings = request.app.state.settings
     queue_editor = _queue_editor(request)
     context = {
-        "view": build_projects_view(conn),
+        # _sidebar_context, not a bare view: the every-30s /partials/sidebar
+        # refresh has always rendered the checkboxes, so building this page's
+        # first paint without them made the sidebar sprout controls 30s in.
+        **_sidebar_context(request, conn, None),
         "fleet": build_editors_view(conn),
         "queue": build_queue_view(conn, queue_editor) if queue_editor else None,
-        "current_slug": None,
     }
     if queue_editor:
         context.update(_roots_context(
@@ -582,15 +598,23 @@ def partial_toggle(
     _nudge_collector(request)
     # Return the partial the control lives in.
     view_kind = request.query_params.get("view")
+    # Re-render for `editor` (the POST path), not for whoever _queue_editor
+    # would infer: an admin ticking for someone else must get that editor's
+    # checkboxes back, not their own.
     if view_kind == "sidebar" or "sidebar" in (request.headers.get("hx-target") or ""):
         current = request.query_params.get("slug_page")
-        return _render(request, "partials/sidebar.html", _sidebar_context(request, conn, current))
+        return _render(request, "partials/sidebar.html",
+                       _sidebar_context(request, conn, current, editor=editor))
     if view_kind == "project":
-        view = build_project_view(conn, request.query_params.get("slug_page", slug))
+        page_slug = request.query_params.get("slug_page", slug)
+        view = build_project_view(conn, page_slug)
         if view is None:
             raise HTTPException(status_code=404)
-        return _render(request, "partials/project_detail.html", {"project": view,
-                                                                "selected_by": db.fetch_all_selections(conn)})
+        return _render(request, "partials/project_detail.html",
+                       {"project": view,
+                        "selected_by": db.fetch_all_selections(conn),
+                        "tick_editor": editor,
+                        "as_qs": _as_qs(request, editor)})
     return _render(request, "partials/my_queue.html", {
         "queue": build_queue_view(conn, editor),
     })
@@ -602,27 +626,62 @@ def page_project(slug: str, request: Request, conn: sqlite3.Connection = Depends
     if view is None:
         raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
     scope = auth.scope_for(request)
+    tick_editor = _queue_editor(request)
     return _render(request, "project.html", {
         **_sidebar_context(request, conn, slug),
         "project": view,
         "presence": build_presence_view(conn, slug, editor=scope.editor),
         "selected_by": db.fetch_all_selections(conn),
         "scope_admin": scope.admin,
+        "tick_editor": tick_editor,
     })
 
 
-def _sidebar_context(request: Request, conn, current: str | None) -> dict:
+def _sidebar_context(request: Request, conn, current: str | None,
+                     editor: str | None = None) -> dict:
     """Sidebar data incl. the checkbox state for the viewer's own selection
-    (or the ?as=<editor> focus for admins)."""
-    toggle_editor = _queue_editor(request)   # session user, or ?as for admins
+    (or the ?as=<editor> focus for admins).
+
+    `editor` pins the target explicitly; toggle re-renders pass the editor
+    from the POST path so the fragment that comes back can never disagree
+    with the row that was just ticked."""
+    toggle_editor = editor or _queue_editor(request)   # session user, or ?as for admins
     selected = set()
     if toggle_editor:
         selected = {s["slug"] for s in db.fetch_selections(conn, toggle_editor)}
     return {
+        **_switcher_context(request, conn, current, toggle_editor),
         "view": build_projects_view(conn),
         "current_slug": current or None,
         "selected_slugs": selected,
         "toggle_editor": toggle_editor,
+    }
+
+
+def _switcher_context(request: Request, conn, current: str | None,
+                      target: str | None) -> dict:
+    """The admin-only 'ticking for <editor>' control, plus the ?as= fragment
+    every self-refreshing partial on the page has to carry.
+
+    Lives apart from _sidebar_context because the fleet page has no sidebar
+    checkboxes -- there the switcher retargets the SYNC QUEUE panel instead,
+    which is that page's ticking UI."""
+    settings = request.app.state.settings
+    user = auth.get_session_user(request)
+    others: list[str] = []
+    if auth.is_admin(settings, user):
+        others = sorted(
+            n for n in db.known_editor_usernames(conn) if n != (user or "").lower()
+        )
+    return {
+        # `switch_action` is the PAGE the form returns to -- never
+        # request.url.path, which is /partials/sidebar when this context is
+        # built for the 30s refresh.
+        "switch_editors": others,
+        "switch_action": f"/project/{current}" if current else "/",
+        "acting_as": target if target and user
+                     and target.lower() != user.lower() else None,
+        "as_qs": _as_qs(request, target),
     }
 
 
@@ -672,9 +731,12 @@ def partial_project(slug: str, request: Request, conn: sqlite3.Connection = Depe
     view = build_project_view(conn, slug)
     if view is None:
         raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
+    tick_editor = _queue_editor(request)
     return _render(request, "partials/project_detail.html", {
         "project": view,
         "selected_by": db.fetch_all_selections(conn),
+        "tick_editor": tick_editor,
+        "as_qs": _as_qs(request, tick_editor),
     })
 
 

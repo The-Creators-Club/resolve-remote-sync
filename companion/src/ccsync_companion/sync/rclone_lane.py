@@ -32,7 +32,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .base import (
     STATE_ERROR,
@@ -85,6 +85,28 @@ TRASH_EXCLUDE_RULE = f"- /{TRASH_DIR_NAME}/**"
 # depth, the same way `+ *.mov` does in build_filter_rules_up. Case is
 # handled by --ignore-case on the transfer commands.
 IN_PROGRESS_EXCLUDE_RULES = ["- *.tmp", "- *.lock", "- *.partial"]
+
+# macOS AppleDouble sidecars. On any filesystem WITHOUT native extended-
+# attribute support -- exFAT, FAT32, SMB, i.e. exactly the external SSDs this
+# deployment is built around -- macOS stores resource forks and xattrs in a
+# sidecar file named `._<original>`, which KEEPS the original's extension. So
+# `._A001.mov` matches lane A's `+ *.mov`, and a proxy-side `._p.mov` matches
+# lane B's `+ **/Proxy/**`: a Mac editor published a junk sidecar beside every
+# real clip into the shared tree, and lane B redistributed the proxy ones to
+# everybody (KNOWN_BUGS 12, verified against the real binary 2026-08-04).
+#
+# FIRST in both rule lists, because rclone filter matching is first-match-wins
+# and a later `+ *.mov` would otherwise win. One rule covers every depth: like
+# IN_PROGRESS_EXCLUDE_RULES above it carries no `/`, so it matches the
+# BASENAME anywhere in the tree -- measured against the bundled 1.74.4, this
+# rule alone drops `._A001.mov`, `Proxy/._p.mov` and `Sub/Proxy/._n.mov`, so
+# no companion `- **/._*` form is needed (unlike the `/Proxy/` rules, where
+# the trailing `/**` anchors the pattern to a path and `**/` cannot match
+# zero components).
+#
+# `.DS_Store` needs no rule: it matches no `+ *<ext>` and dies on the
+# trailing `- **`.
+APPLEDOUBLE_EXCLUDE_RULE = "- ._*"
 
 # Blast-radius bound on lane B's sync (AUDIT_2 §4.2 safety row). Measured:
 # rclone stops deleting once the cap is hit and exits non-zero, and under
@@ -341,8 +363,14 @@ def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list
     RcloneLane._express_inflight for why. They go FIRST because rclone filter
     matching is first-match-wins, so a later `+ *.mov` would otherwise win and
     the file would be uploaded twice concurrently.
+
+    APPLEDOUBLE_EXCLUDE_RULE goes first of all, for the same first-match-wins
+    reason -- `._A001.mov` ends in `.mov` and would otherwise be uploaded (see
+    the constant). Ordering it against the express excludes is free: both are
+    `-` rules, so whichever matches first reaches the same verdict.
     """
-    rules = [f"- /{escape_filter_pattern(rel)}" for rel in (exclude_paths or [])]
+    rules = [APPLEDOUBLE_EXCLUDE_RULE]
+    rules += [f"- /{escape_filter_pattern(rel)}" for rel in (exclude_paths or [])]
     rules += ["- **/Proxy/**", "- /Proxy/**"]
     rules += [f"+ *{ext}" for ext in VIDEO_EXTS]
     rules.append("- **")
@@ -360,8 +388,13 @@ def build_filter_rules_down() -> list[str]:
     IN_PROGRESS_EXCLUDE_RULES come next, and before the `+ **/Proxy/**`
     include for the same first-match-wins reason: they are what stops the
     lane pulling a proxy Resolve is still writing (see the constant).
+
+    APPLEDOUBLE_EXCLUDE_RULE is ahead of both. It has no ordering quarrel with
+    them (all three are `-` rules), but it MUST beat `+ **/Proxy/**`, which
+    matches every byte under a Proxy dir -- `._p.mov` included.
     """
     return [
+        APPLEDOUBLE_EXCLUDE_RULE,
         TRASH_EXCLUDE_RULE,
         *IN_PROGRESS_EXCLUDE_RULES,
         "+ /Proxy/",
@@ -489,6 +522,183 @@ def rclone_available(rclone_path: str, use_cache: bool = True) -> tuple[bool, st
     return True, resolved
 
 
+# -- the watchdog's own watchdog (MAC-12) ---------------------------------
+#
+# 2026-08-05, on the first editor Mac: the companion stopped dead one line
+# after `lane_a_video_up: managed mode`. `sample` put the watchdog thread in
+# `watchdog_add_watch -> FSEventStreamCreate -> watch_path -> open()`,
+# blocked in the kernel for 100% of samples WHILE HOLDING THE GIL, on an
+# external exFAT SSD whose FSEvents stream had wedged. Every other thread --
+# tray, sign-in, main -- sat in take_gil, so the process was alive and did
+# absolutely nothing until it was killed and the volume remounted.
+#
+# Nothing in-process can make that call safe: it is C code that takes the GIL
+# and then blocks in the kernel, so "start the observer on another thread"
+# moves the freeze, it does not avoid it. The one place an open() can hang
+# without taking us with it is ANOTHER PROCESS. So before a root is handed to
+# the observer, a short-lived subprocess opens and lists it; if that process
+# cannot answer within a few seconds, the filesystem is not answering opens
+# and the observer is not started. Lane A then uploads on the sequencer's
+# schedule alone, and the tray, the sign-in and every other lane stay alive
+# -- which is the entire difference from what happened on the Mac.
+#
+# Cross-platform on purpose. The FSEvents wedge is darwin's, but an SMB share
+# whose server has gone, or a `subst` drive over one, is the same shape on
+# Windows -- where the observer's first act is a CreateFileW on the root.
+# The cost is one process per observer START (never per event), i.e. once at
+# sign-in and once per retry.
+WATCH_PROBE_TIMEOUT_SECONDS = 5.0
+# First retry after a blocked probe, then doubling to the cap. A drive that
+# is wedged stays wedged until someone unplugs it or reboots, so probing it
+# every minute forever is just noise in the log.
+WATCH_PROBE_RETRY_SECONDS = 60.0
+WATCH_PROBE_MAX_RETRY_SECONDS = 900.0
+
+# The probe answered in time -- whatever it answered. A root that does not
+# exist, or that hands back EPERM promptly, is NOT this check's business:
+# observer.schedule() fails cleanly on those and the root guard owns the
+# story. The only thing being asked here is "does this filesystem answer?".
+WATCH_PROBE_OK = "ok"
+# It did not answer, so an open() on it can block forever.
+WATCH_PROBE_BLOCKED = "blocked"
+# We could not run a probe at all. Fails OPEN (see _watch_root_answers):
+# refusing to watch the tree because our own probe is missing would be a
+# self-inflicted outage.
+WATCH_PROBE_UNAVAILABLE = "unavailable"
+
+# Deliberately NOT an import of this package: the probe must start in
+# milliseconds and must not run one line of the companion's import side
+# effects. The open() is the exact call FSEvents blocked in; on Windows a
+# directory cannot be os.open()ed, and the listdir is the equivalent (it is
+# what ReadDirectoryChangesW's setup needs the handle for).
+_WATCH_PROBE_SNIPPET = "\n".join((
+    "import os, sys",
+    "p = sys.argv[1]",
+    "os.stat(p)",
+    "os.listdir(p)",
+    "if os.name == 'posix':",
+    "    os.close(os.open(p, os.O_RDONLY))",
+))
+
+
+def watch_probe_command(
+    root: str,
+    executable: Optional[str] = None,
+    frozen: Optional[bool] = None,
+    is_windows: Optional[bool] = None,
+) -> list[str]:
+    """The argv of a process that opens `root` and then exits.
+
+    In a frozen build `sys.executable` is the COMPANION, so `-c` there would
+    start a second companion rather than a probe -- hence the base-system
+    fallbacks, which are also the cheapest thing available on each platform.
+    """
+    exe = executable or sys.executable
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else bool(frozen)
+    windows = (os.name == "nt") if is_windows is None else bool(is_windows)
+    if not is_frozen:
+        return [exe, "-c", _WATCH_PROBE_SNIPPET, str(root)]
+    if windows:
+        # Each piece its OWN argv element: `cmd /c "one long string"` is the
+        # classic subprocess trap on Windows, because list2cmdline escapes an
+        # embedded quote as \" and cmd.exe does not read \" that way -- the
+        # probe would then fail instantly on a path with a space and never
+        # touch the filesystem at all. `dir /b` exits 1 on an empty directory
+        # and that is fine: the exit code is not what is being asked.
+        comspec = os.environ.get("COMSPEC") or "cmd.exe"
+        return [comspec, "/c", "dir", "/a", "/b", str(root)]
+    return ["/bin/ls", "-a1", str(root)]
+
+
+def _end_probe(proc: Any) -> None:
+    """Kill a probe that never answered, without waiting on it forever.
+
+    A process blocked in an uninterruptible kernel wait cannot be killed at
+    all, and `subprocess.run(timeout=)` would sit in its post-kill
+    communicate() -- which is the exact hang this whole mechanism exists to
+    avoid, just moved into the check.
+    """
+    try:
+        proc.kill()
+    except Exception:
+        log.debug("watch probe: could not kill the probe process", exc_info=True)
+    try:
+        proc.wait(timeout=1)
+    except Exception:
+        log.warning(
+            "watch probe: the probe process is stuck in the kernel and could not be "
+            "killed -- leaving it to the OS. That is another sign the volume is gone."
+        )
+
+
+def probe_watch_root(
+    root: str,
+    timeout: float = WATCH_PROBE_TIMEOUT_SECONDS,
+    popen_factory: Optional[Callable[..., Any]] = None,
+    command_fn: Callable[[str], list[str]] = watch_probe_command,
+) -> tuple[str, str]:
+    """Does `root`'s filesystem answer an open()? Returns (status, detail).
+
+    Never raises, never blocks longer than `timeout` plus the kill, and never
+    touches the path in THIS process -- which is the whole point.
+    """
+    try:
+        cmd = command_fn(root)
+    except Exception as exc:
+        return WATCH_PROBE_UNAVAILABLE, f"could not build a probe command: {exc}"
+    factory = popen_factory or subprocess.Popen
+    try:
+        proc = factory(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_win_creationflags(),
+        )
+    except Exception as exc:
+        return WATCH_PROBE_UNAVAILABLE, f"could not start a probe: {exc}"
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _end_probe(proc)
+        return WATCH_PROBE_BLOCKED, f"no answer within {timeout:.0f}s"
+    except Exception as exc:
+        _end_probe(proc)
+        return WATCH_PROBE_UNAVAILABLE, f"the probe itself failed: {exc}"
+    return WATCH_PROBE_OK, f"exit {code}"
+
+
+# How many characters of rclone's stderr any single log line carries.
+STDERR_LOG_CHARS = 300
+
+
+def _stderr_for_log(stderr: Optional[str], limit: int = STDERR_LOG_CHARS) -> str:
+    """The most informative `limit` characters of an rclone stderr stream.
+
+    Two rules, both paid for live (KNOWN_BUGS 14, 2026-08-05):
+
+    1. Drop NOTICE lines. Against any SFTP remote rclone opens with a host-key
+       notice ~260 characters long, and `--stats-log-level NOTICE` adds a
+       stats block on top -- neither says anything about why a run failed.
+    2. Keep the TAIL, not the head. rclone puts the reason it died at the END
+       of the stream; the head is banner noise.
+
+    Taking the head of an unfiltered stream did both wrong at once, and an SSH
+    auth failure that had stopped lanes A and B entirely reached the log as
+    `CRITICAL: Failed to create file system for` and nothing else -- no
+    remote, no reason. Finding it took a hand-run of the same command, which
+    is exactly what the log line exists to avoid.
+    """
+    text = "\n".join(
+        line for line in (stderr or "").splitlines() if "NOTICE:" not in line
+    ).strip()
+    if not text:
+        # Nothing but notices: show them rather than logging a failure with no
+        # text at all -- "it broke, no idea why" is the state we came from.
+        text = (stderr or "").strip()
+    return text[-limit:]
+
+
 def _join_remote_path(remote_root: str, subpath: str) -> str:
     """Join a remote root and a posix-style subpath with exactly one '/'
     between them, regardless of leading/trailing slashes on either side."""
@@ -512,7 +722,7 @@ def _run_lsf(cmd: list[str], timeout: float) -> Optional[str]:
     )
     if proc.returncode != 0:
         log.warning(
-            "rclone lsf exited %d: %s", proc.returncode, (proc.stderr or "").strip()[:300]
+            "rclone lsf exited %d: %s", proc.returncode, _stderr_for_log(proc.stderr)
         )
         return None
     return proc.stdout
@@ -836,15 +1046,23 @@ def path_matches_lane_a_filter(path: str) -> bool:
     The express run CANNOT pass the filter file to rclone (see
     build_express_command), so this predicate is the only thing standing
     between a watchdog event and the upload. It must stay equivalent to the
-    rule list: a video extension, and no `Proxy` component at any depth --
-    both case-insensitively, which is what --ignore-case buys the real run.
+    rule list: a video extension, no `Proxy` component at any depth, and no
+    AppleDouble sidecar (APPLEDOUBLE_EXCLUDE_RULE) -- all case-insensitively,
+    which is what --ignore-case buys the real run.
     test_rclone_filters.py proves the equivalence against the real binary.
+
+    The sidecar check is here and not only in build_filter_rules_up because
+    express is lane A's OTHER door: `._A001.mov` ends in `.mov` and sits in no
+    Proxy dir, so without it a Mac's watchdog event would upload the very file
+    the periodic pass now refuses (KNOWN_BUGS 12).
     """
     if not path:
         return False
     if os.path.splitext(path)[1].lower() not in VIDEO_EXTS:
         return False
     parts = [seg for chunk in str(path).split("/") for seg in chunk.split("\\")]
+    if parts and parts[-1].startswith("._"):
+        return False
     return not any(seg.lower() == "proxy" for seg in parts)
 
 
@@ -1293,6 +1511,8 @@ class RcloneLane(LaneAdapter):
         known_rels_fn: Optional[Callable[[], list[str]]] = None,
         cfg: Optional[dict] = None,
         on_trash: Optional[Callable[[str], None]] = None,
+        on_watch_blocked: Optional[Callable[[str], None]] = None,
+        watch_probe_fn: Optional[Callable[[str], tuple[str, str]]] = None,
     ) -> None:
         assert direction in (DIRECTION_UP, DIRECTION_DOWN)
         self.direction = direction
@@ -1311,6 +1531,14 @@ class RcloneLane(LaneAdapter):
         # moved something into it -- see _notify_trash. Same injectable
         # callback shape as on_change.
         self.on_trash = on_trash
+        # Called with one sentence for the editor when lane A's file watcher
+        # could not be started because the sync drive stopped answering
+        # (MAC-12), and again when it comes back. Same shape again.
+        self.on_watch_blocked = on_watch_blocked
+        # The pre-flight that keeps a blocking open() out of THIS process --
+        # see probe_watch_root. Injectable so the tests can drive success,
+        # failure and a wedged volume without one.
+        self._watch_probe = watch_probe_fn or probe_watch_root
         # Selected-project rels (any depth) for the watchdog's project
         # attribution -- see _project_rel_for_path. None = legacy heuristic.
         self.known_rels_fn = known_rels_fn
@@ -1371,6 +1599,13 @@ class RcloneLane(LaneAdapter):
         self._proc_lock = threading.Lock()
         self._observer = None  # watchdog Observer, lane A only
         self._debounce_timer: Optional[threading.Timer] = None
+        # Watcher pre-flight state (MAC-12): the re-check timer, how long the
+        # next wait is, and whether the editor has already been told. The
+        # latch is what keeps a wedged drive to ONE toast rather than one per
+        # retry for as long as it stays wedged.
+        self._watch_retry_timer: Optional[threading.Timer] = None
+        self._watch_retry_delay = WATCH_PROBE_RETRY_SECONDS
+        self._watch_blocked_announced = False
         self._lock = threading.Lock()
         # Serializes rclone runs: the periodic loop and a debounced watchdog
         # fire must never run two rclone processes on the same lane at once.
@@ -1647,8 +1882,17 @@ class RcloneLane(LaneAdapter):
             self._observer = None
         with self._lock:
             timer, self._debounce_timer = self._debounce_timer, None
+            # The MAC-12 re-check timer goes the same way: a lane that was
+            # never allowed to start its watcher must not wake up a minute
+            # after shutdown and start one.
+            watch_retry, self._watch_retry_timer = self._watch_retry_timer, None
         if timer is not None:
             timer.cancel()
+        if watch_retry is not None:
+            watch_retry.cancel()
+        # A fresh generation gets a fresh backoff: this lane may be stopping
+        # precisely because the editor is about to replug the drive.
+        self._watch_retry_delay = WATCH_PROBE_RETRY_SECONDS
 
     def _express_stop(self) -> None:
         """Disarm the express path and end an in-flight express rclone.
@@ -1965,7 +2209,7 @@ class RcloneLane(LaneAdapter):
                 self._status.state = STATE_ERROR
                 self._status.last_error = (
                     _most_informative_error(result.errors)
-                    or stderr_text.strip()[-300:]
+                    or _stderr_for_log(stderr_text)
                     or f"rclone exited {returncode}"
                 )
             else:
@@ -2299,6 +2543,10 @@ class RcloneLane(LaneAdapter):
             )
             return
 
+        # BEFORE anything touches local_root from this process (MAC-12).
+        if not self._watch_root_answers():
+            return
+
         lane = self
 
         class _Handler(FileSystemEventHandler):
@@ -2362,6 +2610,109 @@ class RcloneLane(LaneAdapter):
             self._observer = observer
         except Exception as exc:
             log.warning("%s: failed to start watchdog observer: %s", self.name, exc)
+            return
+        self._note_watchdog_started()
+
+    # -- the watchdog's own watchdog (MAC-12) ------------------------------
+
+    def _watch_root_answers(self) -> bool:
+        """Can a SEPARATE process open and list local_root, promptly?
+
+        The reasoning is in the module comment above probe_watch_root: the
+        observer's first act on this root is an open() from C code holding
+        the GIL, and against a filesystem that has stopped answering it
+        freezes the ENTIRE companion -- tray, sign-in, main thread and all.
+        A subprocess is the only place that open is allowed to hang.
+
+        False means "do not start the observer"; a re-check has already been
+        scheduled and the editor has already been told.
+        """
+        try:
+            status, detail = self._watch_probe(self.local_root)
+        except Exception as exc:
+            # A broken probe must never cost the lane its watcher.
+            log.debug("%s: watch pre-flight raised (%s) -- starting the watcher anyway",
+                      self.name, exc)
+            return True
+        if status == WATCH_PROBE_UNAVAILABLE:
+            log.debug(
+                "%s: could not pre-flight %s (%s) -- starting the watcher anyway",
+                self.name, self.local_root, detail,
+            )
+            return True
+        if status != WATCH_PROBE_BLOCKED:
+            return True
+
+        delay = self._watch_retry_delay
+        log.error(
+            "%s: the sync drive's filesystem is not answering -- a separate test "
+            "process could not open %s (%s). NOT starting the file watcher: it opens "
+            "that path from C code holding the GIL, and a blocked open there freezes "
+            "the whole companion, tray and sign-in included (MAC-12). Disconnect and "
+            "reconnect the drive, or restart the computer. Uploads still run on the "
+            "sequencer's schedule; this is re-checked in %.0fs.",
+            self.name, self.local_root, detail, delay,
+        )
+        if not self._watch_blocked_announced:
+            self._watch_blocked_announced = True
+            self._announce_watch_state(
+                "The sync drive isn't responding, so CCSync can't watch it for new "
+                "files. Disconnect and reconnect the drive, or restart the computer. "
+                "Everything else is still running."
+            )
+        self._schedule_watch_retry(delay)
+        return False
+
+    def _note_watchdog_started(self) -> None:
+        """The observer is up. If the drive had stopped answering, say so --
+        a remount fixes this without a restart and the editor should hear
+        that it took, not be left wondering."""
+        self._watch_retry_delay = WATCH_PROBE_RETRY_SECONDS
+        if not self._watch_blocked_announced:
+            return
+        self._watch_blocked_announced = False
+        log.info("%s: the sync drive is answering again -- the file watcher is back",
+                 self.name)
+        self._announce_watch_state("The sync drive is responding again — CCSync is watching it for "
+                  "new files.")
+
+    def _announce_watch_state(self, message: str) -> None:
+        callback = self.on_watch_blocked
+        if callback is None:
+            return
+        try:
+            callback(message)
+        except Exception:
+            log.exception("%s: could not surface the watcher's state", self.name)
+
+    def _schedule_watch_retry(self, delay: float) -> None:
+        with self._lock:
+            # Under _lock, which stop() also takes to disarm this timer --
+            # same reasoning as _schedule_debounced_run: without it a retry
+            # armed just after stop() cancelled the old one would start an
+            # observer on a stopped lane a minute later.
+            if self._stop_event.is_set():
+                return
+            if self._watch_retry_timer is not None:
+                self._watch_retry_timer.cancel()
+            timer = threading.Timer(delay, self._retry_watchdog)
+            timer.daemon = True
+            self._watch_retry_timer = timer
+            timer.start()
+        self._watch_retry_delay = min(delay * 2, WATCH_PROBE_MAX_RETRY_SECONDS)
+
+    def _retry_watchdog(self) -> None:
+        with self._lock:
+            self._watch_retry_timer = None
+        # cancel() only helps before the deadline, so the stop check is
+        # repeated here (exactly as _debounced_fire does).
+        if self._stop_event.is_set() or self._observer is not None:
+            return
+        log.info("%s: re-checking whether the sync drive is answering", self.name)
+        try:
+            self._start_watchdog()
+        except Exception:
+            log.exception("%s: could not retry the file watcher", self.name)
 
     def _schedule_debounced_run(self) -> None:
         with self._lock:
@@ -2740,7 +3091,7 @@ class RcloneLane(LaneAdapter):
 
         result = parse_json_log(stderr_text)
         if returncode != 0:
-            tail = result.errors[-1] if result.errors else stderr_text.strip()[-300:]
+            tail = result.errors[-1] if result.errors else _stderr_for_log(stderr_text)
             # Deliberately NOT STATE_ERROR: express is a bonus path and the
             # periodic pass is still the authority on this lane's health.
             # Painting the lane red from here would make a transient express

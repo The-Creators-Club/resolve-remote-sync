@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from ccsync_companion.sync.rclone_lane import (
+    APPLEDOUBLE_EXCLUDE_RULE,
     LANE_B_MIN_AGE_SECONDS,
     ExpressListError,
     RcloneTuning,
@@ -54,7 +55,10 @@ def _clear_probe_cache():
 
 def test_filter_rules_up_excludes_proxy_first():
     rules = build_filter_rules_up()
-    assert rules[0] == "- **/Proxy/**"
+    # The AppleDouble exclude is ahead of it now (see the sidecar tests
+    # below); the Proxy excludes still precede every `+ *<ext>` include.
+    assert rules[0] == APPLEDOUBLE_EXCLUDE_RULE
+    assert rules[1] == "- **/Proxy/**"
     assert rules[-1] == "- **"
 
 
@@ -82,6 +86,7 @@ def test_filter_rules_down_allows_proxy_dir_and_contents_then_excludes_rest():
     # `.<name>.tmp` / `.<name>.lock` render sidecars get pulled down (and
     # re-pulled every pass, since the .tmp changes between them).
     assert rules == [
+        "- ._*",
         "- /.ccsync-trash/**",
         "- *.tmp", "- *.lock", "- *.partial",
         "+ /Proxy/", "+ /Proxy/**",
@@ -95,6 +100,39 @@ def test_filter_rules_up_excludes_root_level_proxy():
     rules = build_filter_rules_up()
     assert "- /Proxy/**" in rules
     assert rules.index("- /Proxy/**") < rules.index("- **")
+
+
+def test_both_lanes_exclude_appledouble_sidecars_before_anything_else():
+    """KNOWN_BUGS 12: `._A001.mov` keeps the original's extension, so lane A's
+    `+ *.mov` matched it and lane B's `+ **/Proxy/**` matched the proxy-side
+    one. Both rule lists must refuse it, and the rule must be FIRST -- rclone
+    is first-match-wins, so an include placed above it wins and the sidecar
+    ships."""
+    for rules in (build_filter_rules_up(), build_filter_rules_down()):
+        assert rules[0] == APPLEDOUBLE_EXCLUDE_RULE == "- ._*"
+        # No `+` rule may precede it. (Redundant with index 0 today; this is
+        # what actually has to hold if the head of either list ever grows.)
+        includes = [i for i, rule in enumerate(rules) if rule.startswith("+ ")]
+        assert min(includes) > rules.index(APPLEDOUBLE_EXCLUDE_RULE)
+
+
+def test_appledouble_exclude_stays_first_when_express_paths_are_excluded():
+    """The express in-flight excludes used to own the head of lane A's list.
+    They are still ahead of every include; the sidecar rule is ahead of them.
+    (Order between two `-` rules is free -- both verdicts are "skip" -- so
+    this pins the documented shape, not a behavioural difference.)"""
+    rules = build_filter_rules_up(["B-roll/a.mov"])
+    assert rules[0] == APPLEDOUBLE_EXCLUDE_RULE
+    assert rules[1] == "- /B-roll/a.mov"
+
+
+def test_appledouble_rule_carries_no_slash_so_it_matches_at_any_depth():
+    """A pattern with no `/` matches the BASENAME anywhere in the tree (the
+    same property IN_PROGRESS_EXCLUDE_RULES relies on), which is why one rule
+    replaces both a root-level and a `**/` form. Proven against the real
+    binary in test_*_appledouble_* below; asserted here so the shape cannot
+    quietly change into an anchored pattern."""
+    assert "/" not in APPLEDOUBLE_EXCLUDE_RULE
 
 
 def test_write_filter_file_writes_one_rule_per_line(tmp_path):
@@ -576,6 +614,87 @@ def test_run_lsf_uses_utf8_replace_decoding_and_no_console_window(monkeypatch):
         assert captured["creationflags"] == 0
 
 
+# -- what an rclone failure looks like in the log (KNOWN_BUGS 14) ----------
+
+# Verbatim shape, captured from the bundled rclone 1.74.4 by pointing it at an
+# SFTP host that refuses the key. The NOTICE is unconditional on every SFTP
+# remote and ~260 characters once the remote's real name is in it -- so the
+# old `stderr[:300]` spent almost its whole budget on the one line that says
+# nothing, and cut the CRITICAL off before its reason. Live cost 2026-08-05:
+# lanes A and B were both stopped and the log said only "Failed to create file
+# system for".
+_SFTP_NOTICE = (
+    "2026/08/05 12:00:00 NOTICE: creators_club_sftp{a1B2c}: No host key "
+    "validation is being performed. Set known_hosts_file to enable it. "
+    "See: https://rclone.org/sftp/#host-key-validation"
+)
+_SFTP_CRITICAL = (
+    '2026/08/05 12:00:11 CRITICAL: Failed to create file system for '
+    '"creators_club_sftp:/mnt/pool/Creators_Club/Projects": NewFs: couldn\'t '
+    "connect SSH: ssh: handshake failed: ssh: unable to authenticate, "
+    "attempted methods [none publickey], no supported methods remain"
+)
+
+
+def test_stderr_for_log_keeps_the_real_error_not_the_host_key_notice():
+    from ccsync_companion.sync.rclone_lane import _stderr_for_log
+
+    logged = _stderr_for_log(f"{_SFTP_NOTICE}\n{_SFTP_CRITICAL}\n")
+
+    # The reason, not just the headline -- both halves of the sentence.
+    assert "unable to authenticate" in logged
+    assert "creators_club_sftp:/mnt/pool/Creators_Club/Projects" in logged
+    assert "No host key validation" not in logged
+    # The regression this replaces: the head of the raw stream is the notice.
+    assert "unable to authenticate" not in f"{_SFTP_NOTICE}\n{_SFTP_CRITICAL}"[:300]
+
+
+def test_stderr_for_log_takes_the_tail_when_the_error_is_long():
+    from ccsync_companion.sync.rclone_lane import _stderr_for_log
+
+    logged = _stderr_for_log("x" * 500 + "the actual reason")
+
+    assert len(logged) == 300
+    assert logged.endswith("the actual reason")
+
+
+def test_stderr_for_log_falls_back_to_the_notices_rather_than_logging_nothing():
+    """A stream that is ALL notices must not log an empty string -- "the run
+    failed, no text" is the state this fix exists to end."""
+    from ccsync_companion.sync.rclone_lane import _stderr_for_log
+
+    logged = _stderr_for_log(_SFTP_NOTICE)
+
+    assert "No host key validation" in logged
+
+
+def test_stderr_for_log_handles_empty_and_none():
+    from ccsync_companion.sync.rclone_lane import _stderr_for_log
+
+    assert _stderr_for_log(None) == ""
+    assert _stderr_for_log("") == ""
+    assert _stderr_for_log("   \n  ") == ""
+
+
+def test_run_lsf_logs_the_real_error_when_rclone_exits_nonzero(monkeypatch, caplog):
+    """End of the wire: the log line at the lsf call site, which is where the
+    truncation was found."""
+    from ccsync_companion.sync import rclone_lane as rl
+
+    proc = _FakeCompletedProcess(1)
+    proc.stderr = f"{_SFTP_NOTICE}\n{_SFTP_CRITICAL}\n"
+    monkeypatch.setattr(rl.subprocess, "run", lambda cmd, **kwargs: proc)
+
+    with caplog.at_level("WARNING", logger="ccsync"):
+        assert rl._run_lsf(["rclone", "lsf", "remote:"], timeout=5.0) is None
+
+    text = caplog.text
+    assert "unable to authenticate" in text, (
+        "rclone's real error did not reach the log"
+    )
+    assert "No host key validation" not in text
+
+
 # -- integration: real rclone against local fixture dirs -------------------
 
 
@@ -832,6 +951,71 @@ def test_lane_b_never_pulls_resolves_in_progress_proxy_sidecars(rclone_binary, t
 
     landed = sorted(p.name for p in (dst / "Sub" / "Proxy").iterdir())
     assert landed == ["finished.mov"], f"lane B pulled in-progress sidecars: {landed}"
+
+
+def test_lane_a_never_uploads_a_macos_appledouble_sidecar(rclone_binary, tmp_path):
+    """KNOWN_BUGS 12, against the real binary rather than the rule list.
+
+    On exFAT/FAT32/SMB -- every external SSD this deployment runs on -- macOS
+    writes `._<original>` beside each file to hold the xattrs the filesystem
+    cannot. The sidecar KEEPS the extension, so `+ *.mov` matched it and a Mac
+    editor published a junk file beside every clip into the shared tree.
+    Sidecars at the root and at depth, since one no-slash rule covers both.
+    """
+    src = tmp_path / "local"
+    dst = tmp_path / "nas"
+    (src / "B-roll").mkdir(parents=True)
+    (src / "A001.mov").write_text("camera original")
+    (src / "._A001.mov").write_text("resource fork junk")
+    (src / "B-roll" / "b.mov").write_text("nested original")
+    (src / "B-roll" / "._b.mov").write_text("nested resource fork junk")
+    # Lane A carries --min-age (LANE_A_MIN_AGE) -- backdate or the run is a
+    # no-op and the assertion below passes vacuously.
+    old = time.time() - 3600
+    for path in src.rglob("*"):
+        if path.is_file():
+            os.utime(path, (old, old))
+
+    filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    cmd = build_up_command(rclone_binary, str(src), None, str(dst), filter_file)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    landed = sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*") if p.is_file())
+    assert landed == ["A001.mov", "B-roll/b.mov"], (
+        f"lane A uploaded AppleDouble sidecars: {landed}"
+    )
+
+
+def test_lane_b_never_downloads_a_macos_appledouble_sidecar(rclone_binary, tmp_path):
+    """The other direction, and the worse one: lane B's include is
+    `**/Proxy/**` -- every byte under the directory -- so a sidecar the NAS
+    already holds was redistributed to EVERY editor, Windows ones included."""
+    src = tmp_path / "nas"
+    dst = tmp_path / "local"
+    proxy = src / "Sub" / "Proxy"
+    proxy.mkdir(parents=True)
+    dst.mkdir()
+    (proxy / "p.mov").write_text("a real proxy")
+    (proxy / "._p.mov").write_text("resource fork junk")
+    # Root-level Proxy/ too: it is matched by a different include rule.
+    (src / "Proxy").mkdir()
+    (src / "Proxy" / "root.mov").write_text("a real root proxy")
+    (src / "Proxy" / "._root.mov").write_text("resource fork junk")
+    _age_past_the_lane_b_gate(src)
+
+    filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
+    cmd = build_down_command(rclone_binary, str(dst), None, str(src), filter_file)
+    cmd[2] = str(src)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+    landed = sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*") if p.is_file())
+    assert landed == ["Proxy/root.mov", "Sub/Proxy/p.mov"], (
+        f"lane B downloaded AppleDouble sidecars: {landed}"
+    )
 
 
 def test_lane_b_second_pass_does_not_re_delete_the_trash(rclone_binary, tmp_path):
@@ -1423,8 +1607,11 @@ def test_exclude_rules_come_first_and_the_terminator_survives():
     """First-match-wins: an exclude after `+ *.mov` would never fire, and
     validate_filter_file still demands `- **` last."""
     rules = build_filter_rules_up(["B-roll/a.mov", "Interviews/b.braw"])
-    assert rules[0] == "- /B-roll/a.mov"
-    assert rules[1] == "- /Interviews/b.braw"
+    # rules[0] is the AppleDouble exclude (KNOWN_BUGS 12) -- also an exclude,
+    # so the property under test is unchanged: both express paths are ahead
+    # of every include, in order.
+    assert rules[1] == "- /B-roll/a.mov"
+    assert rules[2] == "- /Interviews/b.braw"
     assert rules.index("- /B-roll/a.mov") < rules.index("+ *.mov")
     assert rules[-1] == "- **"
 

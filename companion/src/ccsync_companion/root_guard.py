@@ -49,6 +49,7 @@ the darwin behaviour is testable from any host.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -415,6 +416,99 @@ def probe_root(
     except Exception:
         log.exception("root guard: probe failed -- reporting unknown")
         return ROOT_UNKNOWN
+
+
+# --- macOS is blocking us, as opposed to the drive being out ---------------
+#
+# Item 16. The companion is ad-hoc signed (`TeamIdentifier=not set`), so its
+# Full Disk Access identity is a hash of the binary and EVERY self-upgrade
+# presents to TCC as a different program needing a fresh grant. On a Mac
+# whose sync root is an external volume -- the deployment this port exists
+# for -- losing that grant makes the tree unreadable with no error anywhere
+# naming the cause: the directory is right there, the drive is mounted, and
+# every read comes back EPERM.
+#
+# That is NOT the drive being unplugged, which probe_root already answers as
+# `absent`, and telling the editor to check the cable is the same dead end
+# MAC-10's "DaVinci Resolve is not running" was. Until the companion can be
+# signed with a stable identity, naming it is the fallback the bug asks for.
+
+_DENIED_ERRNOS = (errno.EACCES, errno.EPERM)
+
+
+def _read_is_denied(path: str, listdir: Callable[[str], Any]) -> bool:
+    """Did reading `path` come back "not permitted", SPECIFICALLY?
+
+    Only EACCES/EPERM count. A path that does not exist, a stale mount, a
+    listdir that raised something exotic -- none of those is macOS refusing
+    us, and claiming otherwise would put a Full Disk Access instruction in
+    front of an editor whose drive is simply in their bag.
+    """
+    try:
+        listdir(path)
+    except PermissionError:
+        return True
+    except OSError as exc:
+        return getattr(exc, "errno", None) in _DENIED_ERRNOS
+    except Exception:
+        log.debug("root guard: could not read %s", path, exc_info=True)
+        return False
+    return False
+
+
+def access_is_blocked(
+    local_root: Any,
+    is_darwin: Optional[bool] = None,
+    listdir_fn: Optional[Callable[[str], Any]] = None,
+    ismount_fn: Optional[Callable[[str], bool]] = None,
+) -> bool:
+    """Is macOS refusing us the sync root while the volume is right there?
+
+    True only for the narrow, actionable case: darwin, plus a read of the
+    root (or of the volume it sits on) failing with EACCES/EPERM, plus that
+    volume still being mounted. Everything else -- Windows, a drive that is
+    genuinely out, a path that never existed, a probe that broke -- is
+    somebody else's story and returns False.
+
+    Never raises, and on Windows it returns before touching the disk. One
+    listdir per call, so callers must keep it off hot paths (app.py runs it
+    once, on a timer, after a self-upgrade).
+    """
+    try:
+        root = str(local_root or "").strip()
+        darwin = sys.platform == "darwin" if is_darwin is None else bool(is_darwin)
+        if not root or not darwin:
+            return False
+        listdir = listdir_fn if listdir_fn is not None else os.listdir
+        mount_point = mount_point_for(root)
+
+        denied = _read_is_denied(root, listdir)
+        if not denied and mount_point is not None and not _same_path(mount_point, root):
+            # TCC can refuse the volume as a whole while the root inside it
+            # merely reports ENOENT -- an unreadable parent hides its children.
+            denied = _read_is_denied(mount_point, listdir)
+        if not denied:
+            return False
+
+        if mount_point is None:
+            # An internal-disk root (~/Creators_Club): there is no volume to
+            # confirm, and "permission denied" there means the same thing --
+            # TCC also covers Desktop/Documents/Downloads.
+            return True
+
+        ismount = ismount_fn if ismount_fn is not None else os.path.ismount
+        try:
+            if not ismount(mount_point):
+                # The drive is out, or this is the ghost directory. probe_root
+                # owns that story and says the right thing about it.
+                return False
+        except Exception:
+            log.debug("root guard: ismount(%s) failed", mount_point, exc_info=True)
+            return False
+        return True
+    except Exception:
+        log.debug("root guard: could not tell whether access is blocked", exc_info=True)
+        return False
 
 
 def refresh_volume_record(

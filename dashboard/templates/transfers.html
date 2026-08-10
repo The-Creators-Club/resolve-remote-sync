@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}CC SYNC: TRANSFERS{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+  <aside class="sidebar" hx-get="/partials/sidebar?current={{ as_qs }}"
+         hx-trigger="every 30s" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main" hx-get="/partials/transfers" hx-trigger="load, every 2s" hx-swap="innerHTML">

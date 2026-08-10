@@ -68,20 +68,30 @@ class FakeRoot:
         with self._lock:
             self._pending.append((time.monotonic() + (ms / 1000.0), callback))
 
+    def run_pending(self) -> bool:
+        """Run every callback that is now due; True if any ran.
+
+        Split out of mainloop() because `tkwait window` runs the SAME timer
+        queue while it waits -- Tcl's notifier is per thread, not per
+        interpreter -- and that is precisely the property stop() relies on to
+        break a stuck dialog out. WedgedDialogRoot below calls this.
+        """
+        now = time.monotonic()
+        due = []
+        with self._lock:
+            keep = []
+            for when, callback in self._pending:
+                (due if when <= now else keep).append((when, callback))
+            self._pending = keep
+        for _when, callback in due:
+            callback()
+        return bool(due)
+
     def mainloop(self) -> None:
         self.mainloop_running = True
         try:
             while not self._quit.is_set():
-                now = time.monotonic()
-                due = []
-                with self._lock:
-                    keep = []
-                    for when, callback in self._pending:
-                        (due if when <= now else keep).append((when, callback))
-                    self._pending = keep
-                for _when, callback in due:
-                    callback()
-                if not due:
+                if not self.run_pending():
                     time.sleep(0.001)
         finally:
             self.mainloop_running = False
@@ -557,3 +567,217 @@ def test_a_stopped_dispatcher_still_sends_dialogs_to_mainloop(monkeypatch):
         root = FakeDialogRoot()
         ui_dispatch.run_dialog(root)
     assert root.calls == ["mainloop"]
+
+
+# ===========================================================================
+# stop() breaks a nested tkwait (MAC-11's follow-up)
+#
+# A dialog that never destroys itself parks the pump INSIDE `tkwait window`:
+# the pump timer never re-arms, every later dialog request queues forever,
+# and serve()'s mainloop cannot return -- so SIGTERM ran the whole shutdown
+# and then sat there with the window on screen, and it took `kill -9`
+# (2026-08-05, live). The window below is that window.
+# ===========================================================================
+
+
+class WedgedDialogRoot:
+    """A dialog root that NEVER closes itself -- only a destroy ends it.
+
+    Its wait_window() models `tkwait window` honestly: it keeps running the
+    hidden root's due timer callbacks (Tcl's notifier is per thread, not per
+    interpreter) and returns only once this window has been destroyed. So a
+    test that never destroys it really does park the pump, exactly like the
+    fix-all popup did.
+    """
+
+    def __init__(self, hidden: FakeRoot, name: str = "CCSync — FIX ALL") -> None:
+        self._hidden = hidden
+        self._name = name
+        self.destroyed = threading.Event()
+        self.parked = threading.Event()
+        # Run once inside the tkwait, before this window starts waiting --
+        # how a dialog opens a second dialog on the same thread.
+        self.on_parked = None
+
+    def title(self) -> str:
+        return self._name
+
+    def winfo_exists(self) -> bool:
+        return not self.destroyed.is_set()
+
+    def mainloop(self) -> None:  # pragma: no cover -- darwin path never calls it
+        raise AssertionError("a nested mainloop() is the MAC-6 bug")
+
+    def wait_window(self, window) -> None:
+        assert window is self
+        self.parked.set()
+        if self.on_parked is not None:
+            self.on_parked()
+        while not self.destroyed.is_set():
+            if not self._hidden.run_pending():
+                time.sleep(0.001)
+
+    def destroy(self) -> None:
+        self.destroyed.set()
+
+
+def _park_a_dialog(dispatcher, root, name="CCSync — FIX ALL"):
+    """Open a wedged dialog through dispatch(), the way a real one arrives
+    (the pump runs it inside its own timer callback). Returns the window and
+    the caller's thread."""
+    window = WedgedDialogRoot(root, name)
+    thread, out = _dispatch_on_thread(
+        dispatcher, lambda: ui_dispatch.run_dialog(window), name="dialog-caller")
+    assert window.parked.wait(5.0), "the dialog never reached tkwait"
+    return window, thread, out
+
+
+def test_the_window_being_waited_on_is_tracked_while_it_is_open(monkeypatch):
+    with serving(register=True, monkeypatch=monkeypatch) as (dispatcher, root, _ident):
+        window, thread, _out = _park_a_dialog(dispatcher, root)
+        assert dispatcher.open_dialogs == [window]
+        window.destroy()
+        thread.join(5.0)
+        assert dispatcher.open_dialogs == [], (
+            "a dialog that closed normally must not still look stuck")
+
+
+def test_stop_destroys_the_window_the_pump_is_parked_in(monkeypatch, caplog):
+    """The whole point: SIGTERM must be able to end a dialog that cannot end
+    itself, so serve() returns and the process exits without `kill -9`."""
+    import logging
+
+    root = FakeRoot()
+    dispatcher = ui_dispatch.MainThreadDispatcher(tk_factory=lambda: root, poll_ms=1)
+    monkeypatch.setattr(ui_dispatch, "_active", dispatcher)
+    served = threading.Event()
+
+    def _main_thread() -> None:
+        dispatcher.start()
+        dispatcher.serve()
+        served.set()
+
+    main_thread = threading.Thread(target=_main_thread, name="fake-main-thread", daemon=True)
+    main_thread.start()
+    window, caller, _out = _park_a_dialog(dispatcher, root)
+    assert not served.is_set(), "serve() cannot return while a dialog is parked"
+
+    with caplog.at_level(logging.ERROR, logger="ccsync.ui"):
+        dispatcher.stop()
+
+    # stop() hands the destroy to the UI thread rather than reaching into Tk
+    # from here -- the parked tkwait runs it on its next turn round the loop.
+    assert window.destroyed.wait(5.0), "the stuck window was never destroyed"
+    caller.join(5.0)
+    assert not caller.is_alive(), "run_dialog() never came back out of tkwait"
+    assert served.wait(5.0), "serve() still could not return -- this is the kill -9 case"
+    main_thread.join(5.0)
+    assert root.destroyed
+    # ...and it says which window it had to close, by name.
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("FIX ALL" in m and "still open" in m for m in messages), messages
+
+
+def test_a_normal_shutdown_with_no_window_open_logs_nothing_alarming(monkeypatch, caplog):
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="ccsync.ui"):
+        with serving(register=True, monkeypatch=monkeypatch) as (dispatcher, _root, _i):
+            dispatcher.dispatch(lambda: "a dialog that closed properly")
+    assert [r.getMessage() for r in caplog.records] == []
+
+
+def test_nested_dialogs_are_all_closed_innermost_first(monkeypatch):
+    """A dialog may open another one (a confirm inside a tray action runs
+    reentrantly on the same thread). The outer tkwait cannot return until the
+    inner one has, so the inner window must be destroyed too."""
+    with serving(register=True, monkeypatch=monkeypatch) as (dispatcher, root, _ident):
+        outer = WedgedDialogRoot(root, "CCSync — outer")
+        inner = WedgedDialogRoot(root, "CCSync — inner")
+        outer.on_parked = lambda: ui_dispatch.run_dialog(inner)
+
+        thread, _out = _dispatch_on_thread(
+            dispatcher, lambda: ui_dispatch.run_dialog(outer), name="nested")
+        assert inner.parked.wait(5.0)
+        assert dispatcher.open_dialogs == [outer, inner]
+
+        dispatcher.stop()
+        thread.join(5.0)
+        assert inner.destroyed.wait(5.0) and outer.destroyed.wait(5.0)
+        assert not thread.is_alive(), "the outer dialog never came back out"
+
+
+def test_stop_from_the_ui_thread_itself_destroys_the_window_directly(monkeypatch):
+    """The pump calls stop() on itself when it cannot re-arm. Nothing is
+    parked below it then, so the destroy needs no round trip."""
+    root = FakeRoot()
+    dispatcher = ui_dispatch.MainThreadDispatcher(tk_factory=lambda: root, poll_ms=1)
+    dispatcher.start()  # this thread is the owner
+    window = WedgedDialogRoot(root, "CCSync — sign in")
+    assert dispatcher.note_dialog(window) is True
+
+    def _no_threads(*_args, **_kwargs):
+        raise AssertionError("the owner thread must not marshal to itself")
+
+    monkeypatch.setattr(ui_dispatch.threading, "Thread", _no_threads)
+    dispatcher.stop()
+    assert window.destroyed.is_set()
+
+
+def test_a_main_thread_that_never_answers_does_not_hang_stop(monkeypatch, caplog):
+    """The bound that makes this safe to call from a signal handler: if the
+    UI thread is in no event loop we can reach, stop() gives up and says so
+    (app.py's hard-exit backstop is what covers the rest)."""
+    import logging
+
+    class _DeafRoot(FakeRoot):
+        def after(self, ms, callback):
+            threading.Event().wait()  # never returns, like a blocked marshal
+
+    root = _DeafRoot()
+    dispatcher = ui_dispatch.MainThreadDispatcher(tk_factory=lambda: root, poll_ms=1)
+    dispatcher.start()
+    dispatcher._owner_ident = -1  # pretend the UI thread is somebody else
+    window = WedgedDialogRoot(root, "CCSync — FIX ALL")
+    dispatcher.note_dialog(window)
+    monkeypatch.setattr(ui_dispatch, "DIALOG_BREAK_TIMEOUT_SECONDS", 0.05)
+
+    started = time.monotonic()
+    with caplog.at_level(logging.ERROR, logger="ccsync.ui"):
+        dispatcher.stop()
+    assert time.monotonic() - started < 3.0, "stop() blocked on the UI thread"
+    assert any("would not even accept" in r.getMessage() for r in caplog.records)
+
+
+def test_a_dialog_opening_into_a_shutdown_is_closed_not_waited_on(monkeypatch, caplog):
+    """The race stop() cannot otherwise see: the window was built between
+    uses_main_thread() and note_dialog(). Parking in tkwait there would be a
+    wedge with nobody left to break it."""
+    import logging
+
+    with serving(register=True, monkeypatch=monkeypatch) as (dispatcher, root, _ident):
+        window = WedgedDialogRoot(root, "CCSync — sign in")
+        real_uses = ui_dispatch.uses_main_thread
+
+        def _uses_main_thread():
+            answer = real_uses()
+            dispatcher.stop()  # stop() lands in the gap
+            return answer
+
+        monkeypatch.setattr(ui_dispatch, "uses_main_thread", _uses_main_thread)
+        with caplog.at_level(logging.WARNING, logger="ccsync.ui"):
+            ui_dispatch.run_dialog(window)
+    assert window.destroyed.is_set()
+    assert not window.parked.is_set(), "it parked in tkwait during a shutdown"
+    assert any("closing it" in r.getMessage() for r in caplog.records)
+
+
+def test_serving_reports_whether_the_mainloop_is_up(monkeypatch):
+    """app.py's shutdown backstop keys on this to tell "the UI thread is
+    wedged" from "the UI thread has already gone"."""
+    root = FakeRoot()
+    dispatcher = ui_dispatch.MainThreadDispatcher(tk_factory=lambda: root, poll_ms=1)
+    assert dispatcher.serving is False
+    with serving() as (live, _root, _ident):
+        assert live.serving is True
+    assert live.serving is False

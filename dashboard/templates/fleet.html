@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}CC SYNC: FLEET{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+  {# as_qs keeps an admin's ?as=<editor> focus across the 30s refresh; without
+     it the checkboxes silently revert to the admin's own ticks. #}
+  <aside class="sidebar" hx-get="/partials/sidebar?current={{ as_qs }}"
+         hx-trigger="every 30s" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">

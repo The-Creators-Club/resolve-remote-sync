@@ -1,11 +1,24 @@
 """Tests for the all-in-one installer's clean-slate, config-merge, and
 base-mode install helpers (steps.py additions, 2026-07) -- same
 injected-fake style as test_steps.py: nothing here touches the registry,
-scheduled tasks, real processes, or any path outside tmp_path."""
+scheduled tasks, real processes, or any path outside tmp_path.
+
+These cover the WINDOWS clean slate (build_cleanup_plan / execute_cleanup);
+the darwin twins (build_cleanup_plan_macos / execute_cleanup_macos, the
+LaunchAgent teardown) live in test_macos_steps.py and pass their own seams,
+so they run on every host and are deliberately left alone here. Almost
+everything below is pure enough to run on a Mac unchanged; the three cases
+that are not carry a skipif, because they hand Windows drive paths to
+steps.py helpers that resolve them with the HOST's os.path (Path.parent,
+os.path.abspath) -- on posix `C:\\x\\y` is one relative filename with no
+parent, so the assertion is not merely wrong there, it is meaningless."""
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
+
+import pytest
 
 import steps
 
@@ -70,6 +83,16 @@ class TestBuildCleanupPlan:
         plan = self._plan(role="editor", local_root=r"D:\CC", existing=[exe])
         assert exe in plan.exe_paths
 
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="the HKCU Run value is a registry-shaped Windows path and "
+               "_exe_dir_from_run_value takes Path(value).parent -- on posix "
+               r"'F:\Creators_Club\ccsync-companion.exe' is a single relative "
+               "filename whose parent is '.', so there is no directory to "
+               "scan. No platform= seam reaches this; build_cleanup_plan is "
+               "the Windows-only planner (build_cleanup_plan_macos is the "
+               "darwin one, and a Mac has no Run values at all).",
+    )
     def test_run_value_dir_is_scanned(self):
         stray = Path(r"F:\Creators_Club") / "ccsync-companion.exe"
         plan = self._plan(run_value=r'"F:\Creators_Club\ccsync-companion.exe"',
@@ -112,6 +135,19 @@ class TestBuildCleanupPlan:
 # -- managed-only Syncthing kill (INST-20) ------------------------------------
 
 
+_WINDOWS_CONTAINMENT_ONLY = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="_path_under_any decides 'is this exe under a directory we manage' "
+           "with the HOST's os.path.abspath/normcase. A Windows managed dir "
+           r"('C:\Users\x\AppData\Local\ccsync') and a Windows exe path under "
+           "it are two unrelated relative names on posix, so nothing is ever "
+           "'ours' there. steps.py exposes no platform= seam for this (both "
+           "execute_cleanup and execute_cleanup_macos share the helper); the "
+           "macOS side of the same INST-20 rule is covered by "
+           "TestExecuteCleanupMac in test_macos_steps.py with posix paths.",
+)
+
+
 class TestSyncthingScoping:
     def _run(self, processes):
         plan = steps.CleanupPlan(
@@ -133,6 +169,7 @@ class TestSyncthingScoping:
         )
         return warnings, killed, logs
 
+    @_WINDOWS_CONTAINMENT_ONLY
     def test_kills_our_syncthing(self):
         warnings, killed, logs = self._run(
             [("4242", r"C:\Users\x\AppData\Local\ccsync\bin\syncthing.exe")])
@@ -147,6 +184,7 @@ class TestSyncthingScoping:
         assert any("not ours" in w for w in warnings)
         assert any("Program Files" in w for w in warnings)
 
+    @_WINDOWS_CONTAINMENT_ONLY
     def test_mixed_kills_only_ours(self):
         warnings, killed, _logs = self._run([
             ("1", r"C:\Users\x\AppData\Local\ccsync\bin\syncthing.exe"),

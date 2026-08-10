@@ -712,6 +712,104 @@ class TestInstallerVersionParity:
         assert spec_version == steps.INSTALLER_VERSION
 
 
+# -- the .app is a ONEDIR build (KNOWN_BUGS item 9) ----------------------------
+#
+# PyInstaller 6.21 only warns that a onefile .app "will become an error in
+# v7.0"; the spec can only be built on a Mac, so a silent revert to onefile
+# would be discovered as a broken release on the one path that has no
+# fallback. These are AST guards, not regexes, so a reverted spec fails here
+# on any host -- the same reasoning as companion/tests/
+# test_tk_interpreter_hygiene.py.
+
+SPEC_PATH = REPO_ROOT / "onboarding" / "build_onboard_macos.spec"
+
+
+def _spec_tree():
+    import ast
+
+    return ast.parse(SPEC_PATH.read_text(encoding="utf-8"))
+
+
+def _spec_calls(func_name):
+    import ast
+
+    return [node for node in ast.walk(_spec_tree())
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == func_name]
+
+
+def _kwargs(call):
+    return {kw.arg: kw.value for kw in call.keywords}
+
+
+def _attr_args(call):
+    """Positional args of the shape `a.binaries` / `a.datas`, as strings."""
+    import ast
+
+    return [f"{arg.value.id}.{arg.attr}" for arg in call.args
+            if isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)]
+
+
+class TestMacBundleIsOnedir:
+    def test_exe_excludes_binaries(self):
+        import ast
+
+        calls = _spec_calls("EXE")
+        assert len(calls) == 1
+        exclude = _kwargs(calls[0]).get("exclude_binaries")
+        assert isinstance(exclude, ast.Constant) and exclude.value is True, \
+            "EXE(exclude_binaries=True) is what makes this a onedir build"
+
+    def test_exe_is_not_handed_the_collected_files(self):
+        # Passing a.binaries/a.datas to EXE is how a spec accidentally goes
+        # back to onefile; in onedir they belong to COLLECT.
+        assert _attr_args(_spec_calls("EXE")[0]) == ["a.scripts"]
+
+    def test_exe_has_no_runtime_tmpdir(self):
+        # Onefile-only setting: there is no extraction directory any more.
+        assert "runtime_tmpdir" not in _kwargs(_spec_calls("EXE")[0])
+
+    def test_collect_gathers_binaries_and_datas(self):
+        calls = _spec_calls("COLLECT")
+        assert len(calls) == 1, "onedir needs exactly one COLLECT step"
+        assert _attr_args(calls[0]) == ["a.binaries", "a.datas"]
+
+    def test_bundle_wraps_the_collect_not_the_exe(self):
+        # BUNDLE(exe) with a onefile EXE is exactly what PyInstaller 6.21
+        # deprecates and 7.0 rejects.
+        import ast
+
+        tree = _spec_tree()
+        collect_target = None
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                    and getattr(node.value.func, "id", None) == "COLLECT"):
+                collect_target = node.targets[0].id
+        assert collect_target is not None
+
+        bundles = _spec_calls("BUNDLE")
+        assert len(bundles) == 1
+        first = bundles[0].args[0]
+        assert isinstance(first, ast.Name) and first.id == collect_target
+
+    def test_bundle_keeps_its_identity(self):
+        import ast
+
+        kwargs = _kwargs(_spec_calls("BUNDLE")[0])
+        assert kwargs["name"].value == "CCSync Onboarding.app"
+        assert kwargs["bundle_identifier"].value == "com.creatorsclub.ccsync.onboard"
+        plist = {k.value: v for k, v in zip(kwargs["info_plist"].keys, kwargs["info_plist"].values)}
+        assert "CFBundleShortVersionString" in plist
+        assert isinstance(plist["NSHighResolutionCapable"], ast.Constant)
+
+    def test_build_script_verifies_the_nested_signatures(self):
+        # onedir puts real nested code (the bundled companion, every dylib)
+        # inside the bundle; `codesign -dv` alone would not notice a broken
+        # one, and the editor's Gatekeeper would.
+        build_sh = (REPO_ROOT / "tools" / "build_onboard_macos.sh").read_text(encoding="utf-8")
+        assert build_sh.count("--verify --all-architectures --deep --strict") >= 2, \
+            "verify the built bundle AND the zip that actually ships"
+
+
 # -- onboard.py's GUI-layer decisions, pinned via source (same pattern as
 # test_steps.py's _onboard_method_source) -------------------------------------
 

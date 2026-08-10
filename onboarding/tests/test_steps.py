@@ -2,12 +2,23 @@
 logic behind the onboard.py wizard. No tkinter, no real network calls, no
 winget/tailscale/powershell processes: everything network- or process-shaped
 is injected as a fake. See onboarding/tests/conftest.py for how `steps` and
-`ccsync_companion` get onto sys.path."""
+`ccsync_companion` get onto sys.path.
+
+This file covers the WINDOWS branches (test_macos_steps.py covers darwin's).
+Anything that asserts a Windows shape -- PowerShell argv, a drive letter, a
+UNC path, a .exe name -- pins `platform="win32"` through steps.py's seam so
+it runs and passes on every host, exactly as the darwin file pins
+`platform="darwin"`. The one test that cannot be pinned (it reaches past the
+seam for a build artifact only a Windows dev tree has) carries a skipif
+naming exactly what is Windows-only about it. Nothing
+here may pass VACUOUSLY on a Mac -- 91% silently green is the defect this
+convention exists to prevent."""
 
 from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import urllib.error
 from pathlib import Path
 
@@ -395,7 +406,7 @@ def test_run_bootstrap_uses_noprofile_noninteractive(tmp_path):
         return _FakeResult(returncode=0, stdout="")
 
     steps.run_bootstrap(editor_name="j", dashboard_token="t", tailnet_host="h",
-                        run=fake_run, script_path=script)
+                        run=fake_run, script_path=script, platform="win32")
     assert "-NoProfile" in captured["cmd"]
     assert "-NonInteractive" in captured["cmd"]
     # ...and before -File, so PowerShell parses them as its own switches.
@@ -578,9 +589,18 @@ def test_onboard_base_worker_preflights_the_companion_exe():
 
 
 class TestValidateLocalRoot:
+    """The Windows half of validate_local_root -- drive letters, UNC paths,
+    `subst`-hostile quotes. `platform="win32"` is pinned through the seam so
+    every case below runs on a Mac too; without it validate_local_root
+    dispatches to _validate_local_root_macos, which rejects `C:\\...` for
+    having no leading slash and every "rejects X for reason Y" assertion
+    passes or fails for the wrong reason. TestValidateLocalRootMac in
+    test_macos_steps.py is the mirror image."""
+
     def _ok(self, value, role="editor", drives=("C", "D")):
         return steps.validate_local_root(
-            value, role, drive_exists=lambda letter: letter in drives)
+            value, role, drive_exists=lambda letter: letter in drives,
+            platform="win32")
 
     def test_accepts_a_normal_path(self):
         assert self._ok(r"C:\Creators_Club") is None
@@ -641,7 +661,8 @@ class TestValidateLocalRoot:
             raise OSError("probe blew up")
 
         assert steps.validate_local_root(r"C:\Creators_Club", "editor",
-                                          drive_exists=exploding) is None
+                                          drive_exists=exploding,
+                                          platform="win32") is None
 
 
 # -- read_pubkey ------------------------------------------------------
@@ -662,7 +683,10 @@ def test_read_pubkey_missing_file_returns_empty_string(tmp_path):
 
 def test_find_bootstrap_script_dev_tree_fallback():
     # onboarding/../installer/windows_bootstrap.ps1 should exist in this repo.
-    found = steps.find_bootstrap_script()
+    # Both scripts are checked in, so pinning the platform makes this the
+    # exact twin of test_find_bootstrap_script_darwin_dev_tree_fallback and it
+    # passes on either host.
+    found = steps.find_bootstrap_script(platform="win32")
     assert found.name == "windows_bootstrap.ps1"
     assert found.exists()
 
@@ -697,6 +721,7 @@ def test_run_bootstrap_builds_expected_powershell_command(tmp_path):
         dashboard_url="http://100.71.216.3:8480",
         run=fake_run,
         script_path=script,
+        platform="win32",
     )
 
     assert exit_code == 0
@@ -729,7 +754,7 @@ def test_run_bootstrap_keeps_the_fleet_token_off_the_command_line(tmp_path):
 
     steps.run_bootstrap(
         editor_name="jsmith", dashboard_token="5f0c7dd7ab03435090",
-        tailnet_host="h", run=fake_run, script_path=script,
+        tailnet_host="h", run=fake_run, script_path=script, platform="win32",
     )
     assert not any("5f0c7dd7ab03435090" in str(part) for part in captured["cmd"])
     # ...and the rest of the parent environment is still handed down, so the
@@ -754,6 +779,7 @@ def test_run_bootstrap_omits_local_root_when_not_given(tmp_path):
         tailnet_host="100.71.216.3",
         run=fake_run,
         script_path=script,
+        platform="win32",
     )
     assert "-LocalRoot" not in captured["cmd"]
 
@@ -776,6 +802,7 @@ def test_run_bootstrap_passes_companion_exe_source_when_given(tmp_path):
         companion_exe_source=companion,
         run=fake_run,
         script_path=script,
+        platform="win32",
     )
     assert "-CompanionExeSource" in captured["cmd"] and str(companion) in captured["cmd"]
 
@@ -791,7 +818,7 @@ def test_run_bootstrap_omits_companion_exe_source_when_not_given(tmp_path):
 
     steps.run_bootstrap(
         editor_name="jsmith", dashboard_token="x", tailnet_host="100.71.216.3",
-        run=fake_run, script_path=script,
+        run=fake_run, script_path=script, platform="win32",
     )
     assert "-CompanionExeSource" not in captured["cmd"]
 
@@ -912,6 +939,16 @@ def test_find_companion_exe_explicit(tmp_path):
     assert steps.find_companion_exe(exe) == exe
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="the dev-tree fallback resolves to companion/dist/, whose contents "
+           "are host-built: only a Windows dev box has ccsync-companion.exe "
+           "there (a Mac's dist/ holds the extensionless darwin binary, and "
+           "only after tools/release_macos.sh has run). Pinning platform= "
+           "would just assert a file that cannot exist on the other host -- "
+           "the darwin side is covered by test_find_companion_exe_darwin_* "
+           "in test_macos_steps.py, which uses tmp_path instead.",
+)
 def test_find_companion_exe_falls_back_to_dev_dist():
     # In the dev tree the built companion exe lives at companion/dist/;
     # find_companion_exe should locate it when no explicit path is given.
@@ -925,7 +962,8 @@ def test_install_companion_copies_into_bin(tmp_path):
     dest_dir = tmp_path / "bin"
     calls = []
     dest = steps.install_companion(dest_dir=dest_dir, src=src,
-                                   copy=lambda s, d: calls.append((s, d)) or d)
+                                   copy=lambda s, d: calls.append((s, d)) or d,
+                                   platform="win32")
     assert dest == dest_dir / "ccsync-companion.exe"
     assert dest_dir.is_dir()               # created
     assert calls and calls[0][0] == src    # copied from the bundled source

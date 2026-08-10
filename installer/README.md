@@ -517,7 +517,17 @@ In order. Each one is blocked by the one above it.
    `[ INSTALLER ]` click then downloads by default — Windows ships no longer
    push `macos_bootstrap.sh` into that slot (they warn when it goes stale).
    It has **never been built or double-clicked**; treat the first run as
-   supervised.
+   supervised. **Extra reason to watch that build (2026-08-05):**
+   `build_onboard_macos.spec` moved from onefile to **onedir**
+   (`EXE(exclude_binaries=True)` → `COLLECT` → `BUNDLE`), because a onefile
+   `.app` is deprecated in PyInstaller 6.21 and a hard error in 7.0
+   (`KNOWN_BUGS.md` item 9). The change was made on Windows and verified only
+   against PyInstaller's own bundle-assembly source; the zip the dashboard
+   serves is unchanged in shape, and `sys._MEIPASS` still resolves the
+   bootstrap script, the bundled companion and the window icon — but no Mac
+   has built it. First Mac build: run `tools/build_onboard_macos.sh` (it now
+   also runs `codesign --verify --deep --strict` on the bundle and on the
+   unzipped copy), then unzip and double-click before `--publish`.
 4. **B2 — what path spelling does Resolve on macOS actually return?**
    Answer it from the live bridge: canonical `P:\…` strings, or Mapped-Mount
    resolved `/Volumes/…` paths? The MAC-3 fix is safe either way (`plat_for`

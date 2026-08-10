@@ -491,3 +491,115 @@ def test_the_module_logs_under_the_ccsync_logger():
     emitted under "ccsync_companion.root_guard" is swallowed silently in the
     windowed build (see shutdown_guard.py's note)."""
     assert rg.log.name == "ccsync.root_guard"
+
+
+# -- item 16: macOS is blocking us, as opposed to the drive being out -------
+#
+# The companion is ad-hoc signed, so its Full Disk Access identity is a hash
+# of the binary and every self-upgrade presents as a different program
+# needing a fresh grant. On a Mac whose root is an external volume the tree
+# then becomes unreadable with NO error naming the cause -- the drive is
+# plugged in, the folder is right there, and every read comes back EPERM.
+# Exercised from Windows through the same injected seams as everything above.
+
+
+def _denied(*paths):
+    """A listdir that refuses `paths` the way macOS does and answers the rest."""
+    def _listdir(path):
+        if str(path) in paths:
+            raise PermissionError(13, "Operation not permitted")
+        return []
+    return _listdir
+
+
+def _blocked(**overrides):
+    kwargs = dict(
+        local_root=ROOT,
+        is_darwin=True,
+        listdir_fn=_denied(ROOT),
+        ismount_fn=lambda p: True,
+    )
+    kwargs.update(overrides)
+    return rg.access_is_blocked(**kwargs)
+
+
+def test_a_denied_root_on_a_mounted_volume_is_macos_blocking_us():
+    assert _blocked() is True
+
+
+def test_a_denied_volume_counts_even_when_the_root_reports_missing():
+    """An unreadable parent hides its children: the root inside it can come
+    back ENOENT while the volume itself is the thing being refused."""
+    def _listdir(path):
+        if path == MOUNT:
+            raise PermissionError(1, "Operation not permitted")
+        raise FileNotFoundError(2, "No such file or directory")
+
+    assert _blocked(listdir_fn=_listdir) is True
+
+
+def test_an_unplugged_drive_is_not_a_permissions_problem():
+    """probe_root already calls this `absent` and says the right thing about
+    it. Telling the editor to re-grant Full Disk Access instead would send
+    them into System Settings over a drive that is in their bag."""
+    def _listdir(path):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    assert _blocked(listdir_fn=_listdir) is False
+
+
+def test_a_denied_read_on_an_UNMOUNTED_volume_is_not_reported():
+    """The ghost-directory case: something at /Volumes/T7 on the boot disk
+    that we cannot read. The drive is still out, and that is the story."""
+    assert _blocked(ismount_fn=lambda p: False) is False
+
+
+def test_a_readable_tree_is_not_blocked():
+    assert _blocked(listdir_fn=lambda p: ["Projects"]) is False
+
+
+def test_windows_never_reports_a_block():
+    """No-op off darwin, and it must not even touch the disk to say so."""
+    def _never(path):
+        raise AssertionError("the disk was read on a non-darwin host")
+
+    assert rg.access_is_blocked(ROOT, is_darwin=False, listdir_fn=_never) is False
+
+
+def test_a_blank_local_root_is_not_a_block():
+    assert rg.access_is_blocked("", is_darwin=True, listdir_fn=_denied("")) is False
+
+
+def test_an_internal_disk_root_still_reports_a_denied_read():
+    """There is no volume to confirm for ~/Creators_Club, and TCC covers
+    Desktop/Documents/Downloads too."""
+    root = "/Users/leso/Creators_Club"
+    assert rg.access_is_blocked(
+        root, is_darwin=True, listdir_fn=_denied(root)) is True
+
+
+def test_a_denied_read_reported_as_a_bare_oserror_still_counts():
+    """Not every filesystem raises the PermissionError subclass; some hand
+    back an OSError carrying EACCES/EPERM."""
+    import errno
+
+    def _listdir(path):
+        exc = OSError("nope")
+        exc.errno = errno.EACCES
+        raise exc
+
+    assert _blocked(listdir_fn=_listdir) is True
+
+
+def test_an_exotic_failure_is_not_called_a_permissions_problem():
+    def _listdir(path):
+        raise RuntimeError("something else entirely")
+
+    assert _blocked(listdir_fn=_listdir) is False
+
+
+def test_a_raising_ismount_never_escapes():
+    def _boom(path):
+        raise RuntimeError("no")
+
+    assert _blocked(ismount_fn=_boom) is False

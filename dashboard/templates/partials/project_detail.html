@@ -14,14 +14,16 @@
 {% set pickers = selected_by.get(project.slug, []) if selected_by is defined else [] %}
 <div class="mono-sm">SELECTED BY:
   {% for e in pickers %}<span class="who">{{ e }}</span>{{ ", " if not loop.last }}{% else %}<span class="muted">nobody (not syncing to any editor)</span>{% endfor %}
-  {% if session_user %}
+  {% set tick_for = tick_editor if tick_editor is defined and tick_editor else session_user %}
+  {% if tick_for %}
     {# Target ONLY this fragment's own wrapper: swapping "closest main" used to
        replace <main>'s children wholesale, destroying project.html's every-10s
        polling div AND the entire MEDIA PRESENCE panel (page frozen and bins
        gone until a manual reload). #}
-    <button class="btn" hx-post="/partials/selection/{{ session_user }}/{{ project.slug }}/toggle?view=project&slug_page={{ project.slug }}"
+    <button class="btn {{ 'acting' if tick_for != session_user }}"
+            hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
             hx-target="#project-detail" hx-swap="innerHTML">
-      [ {{ "UNTICK" if session_user in pickers else "TICK" }} FOR ME ]</button>
+      [ {{ "UNTICK" if tick_for in pickers else "TICK" }} FOR {{ "ME" if tick_for == session_user else tick_for | upper }} ]</button>
   {% endif %}
 </div>
 <div class="rule">{{ "─" * 100 }}</div>

@@ -1649,6 +1649,24 @@ def test_lane_b_trash_callback_is_wired_to_a_tray_toast(tmp_path):
     assert "moved" in msg.lower() and "deleted" in msg.lower()
 
 
+def test_lane_a_watch_state_callback_is_wired_to_a_tray_toast(tmp_path):
+    """MAC-12: lane A refusing to start its file watcher because the sync
+    drive stopped answering is a capability the editor loses. It must reach
+    the tray, not only the log."""
+    app = _make_app(tmp_path)
+    tray = _FakeTray()
+    app._tray_icon = tray
+
+    assert app._lane_a.on_watch_blocked is not None
+    assert app._lane_b.on_watch_blocked is None, "lane B has no watchdog to speak for"
+    app._lane_a.on_watch_blocked("The sync drive isn't responding, so CCSync can't "
+                                 "watch it for new files.")
+
+    assert tray.notifications
+    msg, _title = tray.notifications[0]
+    assert "isn't responding" in msg
+
+
 def test_selection_client_gets_the_identity_token_getter(tmp_path):
     """The dashboard's selection endpoint requires X-CCSync-Identity, so the
     companion's SelectionClient must be wired to the same IdentityManager the
@@ -2978,3 +2996,305 @@ def test_run_on_the_main_thread_ui_platform_serves_instead_of_polling(tmp_path, 
     assert order[:4] == ["ui start", "app start", "tray", "serve"]
     assert order[-1] == "dispatcher stop"
     assert dispatcher.served == [app._stop_event]
+
+
+# --- item 16: a self-upgrade that lost macOS's Full Disk Access grant -------
+#
+# The companion is ad-hoc signed, so every upgrade presents to TCC as a
+# different program. On a Mac whose root is an external volume the tree then
+# stops being readable with nothing anywhere naming the cause -- the drive is
+# plugged in and the folder is right there. Exercised from Windows through
+# root_guard's injected seams; nothing here reads a real /Volumes.
+
+
+def test_a_blocked_volume_after_an_upgrade_is_named_in_the_tray(tmp_path, monkeypatch):
+    from ccsync_companion import root_guard as root_guard_mod
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    monkeypatch.setattr(root_guard_mod, "access_is_blocked", lambda root: True)
+
+    app._check_macos_volume_access()
+
+    assert app._macos_access_blocked is True
+    toasts = [m for m, _t in app._tray_icon.notifications]
+    assert len(toasts) == 1
+    assert "macOS is blocking access to the sync volume" in toasts[0]
+    # ...and the one action that fixes it, spelled out.
+    assert "Full Disk Access" in toasts[0]
+    assert "System Settings" in toasts[0]
+
+
+def test_a_readable_volume_says_nothing(tmp_path, monkeypatch):
+    """Windows, and every healthy Mac: this must be silent, not reassuring."""
+    from ccsync_companion import root_guard as root_guard_mod
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    monkeypatch.setattr(root_guard_mod, "access_is_blocked", lambda root: False)
+
+    app._check_macos_volume_access()
+
+    assert app._macos_access_blocked is False
+    assert app._tray_icon.notifications == []
+
+
+def test_the_access_check_never_raises(tmp_path, monkeypatch):
+    """It runs on a timer thread moments after startup -- an escape there is
+    an invisible dead thread."""
+    from ccsync_companion import root_guard as root_guard_mod
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+
+    def _boom(root):
+        raise RuntimeError("diskutil ate itself")
+
+    monkeypatch.setattr(root_guard_mod, "access_is_blocked", _boom)
+    app._check_macos_volume_access()  # must not raise
+    assert app._macos_access_blocked is False
+
+
+def test_diagnostics_name_the_blocked_volume(tmp_path):
+    app = _make_app(tmp_path)
+    assert "macOS is BLOCKING" not in app.build_diagnostics()
+
+    app._macos_access_blocked = True
+    line = next(l for l in app.build_diagnostics().splitlines()
+                if l.startswith("sync drive:"))
+    assert "macOS is BLOCKING access" in line
+    assert "Full Disk Access" in line
+
+
+def test_the_check_only_runs_after_an_upgrade(tmp_path, monkeypatch):
+    """A grant is only ever lost by the binary changing, and a listdir on the
+    sync root is not something to do on every start."""
+    import ccsync_companion.app as app_mod
+
+    calls: list[str] = []
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(app, "_check_macos_volume_access", lambda: calls.append("checked"))
+    monkeypatch.setattr(app, "start", lambda: None)
+    monkeypatch.setattr(app, "shutdown", lambda: None)
+    monkeypatch.setattr(app_mod.upgrade_mod, "cleanup_old_exe", lambda *a, **k: False)
+
+    def _timer(delay, fn):
+        fn()
+        return _NullTimer()
+
+    monkeypatch.setattr(app_mod.threading, "Timer", _timer)
+    monkeypatch.setattr(app_mod, "_set_darwin_activation_policy", lambda: None)
+    monkeypatch.setattr("ccsync_companion.tray.start_tray", lambda _a: _FakeTray())
+    app._stop_event.set()
+
+    monkeypatch.setattr(app_mod.upgrade_mod, "note_version_start", lambda _d: False)
+    app.run()
+    assert calls == []
+
+    monkeypatch.setattr(app_mod.upgrade_mod, "note_version_start", lambda _d: True)
+    app._stop_event.set()
+    app.run()
+    assert calls == ["checked"]
+
+
+class _NullTimer:
+    daemon = False
+
+    def start(self):
+        pass
+
+
+# --- items 17 + 19: has the Resolve bridge connected this session? ---------
+
+
+def test_diagnostics_answer_whether_the_bridge_ever_connected(tmp_path):
+    """The question both incidents turned on, which the bundle an admin was
+    sent could not answer."""
+    app = _make_app(tmp_path)
+
+    line = next(l for l in app.build_diagnostics().splitlines()
+                if l.startswith("resolve bridge:"))
+    assert "never polled this session" in line
+
+    resolve_bridge.note_connection(False, resolve_bridge.NOT_RUNNING_MESSAGE)
+    line = next(l for l in app.build_diagnostics().splitlines()
+                if l.startswith("resolve bridge:"))
+    assert "NOT CONNECTED" in line
+    assert resolve_bridge.NOT_RUNNING_MESSAGE in line
+    assert "has connected this session: NO" in line
+
+    resolve_bridge.note_connection(True)
+    resolve_bridge.note_connection(False, resolve_bridge.NO_SCRIPTING_MESSAGE)
+    line = next(l for l in app.build_diagnostics().splitlines()
+                if l.startswith("resolve bridge:"))
+    assert "has connected this session: yes" in line
+    assert "Quit Resolve and reopen it" in line
+
+
+def test_the_bridge_state_read_is_cached_not_a_probe(tmp_path, monkeypatch):
+    """The tray calls this from its render path; a fusionscript call holds
+    the GIL for its full native duration."""
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: pytest.fail("the tray probed Resolve"))
+    assert app.resolve_bridge_state() == {
+        "connected": None, "ever_connected": False, "reason": ""}
+
+
+def test_a_broken_bridge_state_read_degrades_to_unknown(tmp_path, monkeypatch):
+    app = _make_app(tmp_path)
+
+    def _boom():
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(resolve_bridge, "session_state", _boom)
+    assert app.resolve_bridge_state()["connected"] is None
+
+
+# --- item 18's follow-up: shutdown must be able to end, dialog or no dialog -
+#
+# ui_dispatch.stop() destroying the window the UI thread is parked in is the
+# fix (tests/test_ui_dispatch.py). This is the backstop under it: if serve()
+# STILL has not returned a grace period after everything else stopped, the
+# process ends itself rather than living on holding the single-instance slot
+# so that every relaunch exits with "another ccsync-companion is already
+# running" -- which is exactly what a `kill -9` was needed for on 2026-08-05.
+
+
+class _FakeServingDispatcher:
+    def __init__(self, serving=True, dialogs=()):
+        self.serving = serving
+        self.open_dialogs = list(dialogs)
+        self.stopped_calls = 0
+
+    def stop(self):
+        self.stopped_calls += 1
+
+
+class _RecordingTimer:
+    """threading.Timer that records instead of waiting."""
+
+    armed: list = []
+
+    def __init__(self, delay, fn):
+        self.delay = delay
+        self.fn = fn
+        self.daemon = False
+
+    def start(self):
+        type(self).armed.append(self)
+
+
+def _fake_timer(monkeypatch):
+    import ccsync_companion.app as app_mod
+
+    _RecordingTimer.armed = []
+    monkeypatch.setattr(app_mod.threading, "Timer", _RecordingTimer)
+    return _RecordingTimer.armed
+
+
+def test_shutdown_arms_a_hard_exit_while_the_ui_thread_is_still_serving(
+        tmp_path, monkeypatch):
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    dispatcher = _FakeServingDispatcher()
+    monkeypatch.setattr(ui_dispatch, "_active", dispatcher)
+    monkeypatch.setattr(ui_dispatch, "stop", dispatcher.stop)
+    armed = _fake_timer(monkeypatch)
+
+    app.shutdown()
+
+    import ccsync_companion.app as app_mod
+
+    assert dispatcher.stopped_calls == 1
+    backstops = [t for t in armed if t.fn == app._hard_exit_if_ui_wedged]
+    assert len(backstops) == 1
+    assert backstops[0].delay == app_mod.UI_SHUTDOWN_GRACE_SECONDS
+    assert backstops[0].daemon is True, "a live timer would delay a clean exit"
+
+
+def test_windows_shutdown_arms_no_backstop_at_all(tmp_path, monkeypatch):
+    """There is no dispatcher off darwin, and run()'s wait loop always ends
+    on its own -- an os._exit timer there would be all risk and no benefit."""
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(ui_dispatch, "_active", None)
+    armed = _fake_timer(monkeypatch)
+
+    app.shutdown()
+
+    assert [t for t in armed if t.fn == app._hard_exit_if_ui_wedged] == []
+
+
+def test_no_backstop_when_the_mainloop_has_already_returned(tmp_path, monkeypatch):
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    dispatcher = _FakeServingDispatcher(serving=False)
+    monkeypatch.setattr(ui_dispatch, "_active", dispatcher)
+    monkeypatch.setattr(ui_dispatch, "stop", dispatcher.stop)
+    armed = _fake_timer(monkeypatch)
+
+    app.shutdown()
+
+    assert [t for t in armed if t.fn == app._hard_exit_if_ui_wedged] == []
+
+
+def test_the_backstop_exits_hard_and_names_the_window_that_would_not_close(
+        tmp_path, monkeypatch, caplog):
+    import ccsync_companion.app as app_mod
+    from ccsync_companion import ui_dispatch
+
+    class _Window:
+        def title(self):
+            return "CCSync — FIX ALL"
+
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(ui_dispatch, "_active",
+                        _FakeServingDispatcher(dialogs=[_Window()]))
+    exits: list[int] = []
+    monkeypatch.setattr(app_mod, "_hard_exit", exits.append)
+
+    with caplog.at_level(logging.ERROR, logger="ccsync.app"):
+        app._hard_exit_if_ui_wedged()
+
+    assert exits == [1]
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "FIX ALL" in message
+    assert "Nothing is left to flush" in message
+
+
+def test_the_backstop_stands_down_if_serve_returned_in_the_meantime(
+        tmp_path, monkeypatch):
+    """The normal case by a mile: the window closed, serve() came back, and
+    run()'s finally is already tidying up. Exiting hard there would cut off a
+    tray stop and, on a self-upgrade, the successor's handover."""
+    import ccsync_companion.app as app_mod
+    from ccsync_companion import ui_dispatch
+
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(ui_dispatch, "_active", _FakeServingDispatcher(serving=False))
+    exits: list[int] = []
+    monkeypatch.setattr(app_mod, "_hard_exit", exits.append)
+
+    app._hard_exit_if_ui_wedged()
+
+    assert exits == []
+
+
+def test_arming_the_backstop_never_raises_out_of_shutdown(tmp_path, monkeypatch):
+    import ccsync_companion.app as app_mod
+    from ccsync_companion import ui_dispatch
+
+    class _Broken:
+        @property
+        def serving(self):
+            raise RuntimeError("no")
+
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(ui_dispatch, "_active", _Broken())
+    monkeypatch.setattr(app_mod, "_hard_exit", lambda code: pytest.fail("exited"))
+
+    app.shutdown()  # must not raise -- this runs inside a SIGTERM handler

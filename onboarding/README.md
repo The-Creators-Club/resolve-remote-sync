@@ -135,11 +135,27 @@ build without it):
 
 That script checks installer-version parity, verifies the companion binary
 against its `ccsync-release.json`, runs PyInstaller with
-`build_onboard_macos.spec`, confirms the ad-hoc signature, and produces
-`dist/CCSync Onboarding.app` plus a `ditto`-zipped
-`dist/ccsync-onboard-macos-<version>.zip`. **NOT YET RUN ON A REAL MAC** —
-same standing caveat as everything macOS in this repo; the first build and
-first double-click are checklist items, not assumptions.
+`build_onboard_macos.spec`, confirms the signature (`codesign -dv`, then
+`--verify --deep --strict` on the bundle *and* on the unzipped copy), and
+produces `dist/CCSync Onboarding.app` plus a `ditto`-zipped
+`dist/ccsync-onboard-macos-<version>.zip`.
+
+**ONEDIR since 2026-08-05 — the first Mac build after that change has not
+happened yet.** The spec used to build the `.app` in onefile mode, which
+PyInstaller 6.21 warns about and 7.0 rejects outright (KNOWN_BUGS item 9);
+it is now `EXE(exclude_binaries=True)` → `COLLECT` → `BUNDLE`. Nothing
+downstream changes — the shipped artifact is still the same `.app` inside the
+same `ditto` zip, and `sys._MEIPASS` still holds `macos_bootstrap.sh`, the
+companion binary and `ccsync_companion/assets/icon.png` (it now points at
+`<app>/Contents/Frameworks`, with data files cross-linked in from
+`Contents/Resources`) — but it has only been verified by reading PyInstaller
+6.21's bundle-assembly code on Windows. Watch the build, and re-walk the
+wizard step of `installer/MACOS_FIRST_RUN.md` (§C) before publishing.
+Also true of everything else macOS here: the first build and first
+double-click are checklist items, not assumptions.
+
+Side effect of onedir: `dist/ccsync-onboard/` now exists as a plain build
+directory next to the `.app`. It is not shipped and nothing reads it.
 
 Gatekeeper: the bundle is ad-hoc signed (mandatory on Apple silicon — an
 unsigned arm64 binary is killed on launch). If the zip reaches the editor

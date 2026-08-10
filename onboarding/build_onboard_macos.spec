@@ -1,5 +1,53 @@
 # PyInstaller spec for the macOS onboarding wizard -- "CCSync Onboarding.app".
 #
+# ######################################################################
+# # ONEDIR SINCE 2026-08-05 -- THE FIRST MAC BUILD MUST BE WATCHED.    #
+# ######################################################################
+#
+# This spec was ONEFILE through installer 1.0.19 (the only .app that has ever
+# been built and handed out). It is now ONEDIR -- EXE(exclude_binaries=True)
+# -> COLLECT -> BUNDLE -- because PyInstaller 6.21 already logs
+#
+#     "Onefile mode in combination with macOS .app bundles (windowed mode)
+#      don't make sense ... Please migrate to onedir mode. This will become
+#      an error in v7.0."
+#
+# and the only machine that can build this artifact is a Mac, so a v7 upgrade
+# would surface as a broken release on the one path with no fallback
+# (KNOWN_BUGS.md item 9). The migration was written ON WINDOWS and has NEVER
+# BEEN BUILT: run tools/build_onboard_macos.sh on the Mac and walk the wizard
+# step of installer/MACOS_FIRST_RUN.md (section C) -- build, `codesign --verify
+# --deep --strict`, unzip, double-click -- BEFORE publishing it to editors.
+#
+# What onedir changes, and what it deliberately does not:
+#
+#   * The artifact is still dist/CCSync Onboarding.app, still zipped by
+#     `ditto -c -k --keepParent`. That is Apple's own way to zip a bundle and
+#     it preserves symlinks -- which matters now, because a onedir .app is
+#     full of the cross-links BUNDLE creates between Contents/Frameworks and
+#     Contents/Resources. The zip the dashboard serves keeps its shape, so
+#     nothing downstream (publish, [ INSTALLER ], unzip, open) changes.
+#
+#   * dist/ccsync-onboard is no longer a bare distributable binary. In onedir
+#     the EXE is built into build/ (WORKPATH) and COLLECT writes a plain
+#     dist/ccsync-onboard/ DIRECTORY next to the .app. Nobody ships that
+#     directory; tools/build_onboard_macos.sh only ever touches the .app.
+#
+#   * sys._MEIPASS still exists and still holds the bundled files, so
+#     steps.find_bootstrap_script() / find_companion_exe() and
+#     theme.apply_window_icon() resolve exactly as before -- but it now points
+#     at <app>/Contents/Frameworks instead of an unpacked temp dir. BUNDLE
+#     puts data files in Contents/Resources and cross-links them into
+#     Contents/Frameworks (top-level entries are linked file by file), so
+#     _MEIPASS/macos_bootstrap.sh and
+#     _MEIPASS/ccsync_companion/assets/icon.png both resolve through symlinks.
+#     The companion binary is Mach-O, so Analysis's binary-vs-data
+#     reclassification moves it out of `datas` into `binaries` (that already
+#     happens today, in onefile) and BUNDLE puts it straight into
+#     Contents/Frameworks -- where, unlike a onefile extraction, it keeps its
+#     0755 bit. steps.install_companion() chmods it anyway; the old "loses its
+#     executable bit inside datas" caveat is simply no longer true.
+#
 # The darwin twin of build_onboard.spec. Build ON A MAC (PyInstaller does not
 # cross-compile), from onboarding/, with a python that has pyinstaller and
 # can import the companion package (companion/.venv after
@@ -10,23 +58,22 @@
 # or via tools/build_onboard_macos.sh, which also verifies the signature and
 # zips the .app. Output:
 #
-#     dist/ccsync-onboard            -- the bare windowed onefile binary
-#     dist/CCSync Onboarding.app     -- the double-clickable bundle around it
+#     build/build_onboard_macos/ccsync-onboard  -- the windowed bootloader exe
+#     dist/ccsync-onboard/                      -- the onedir build (not shipped)
+#     dist/CCSync Onboarding.app                -- the bundle that IS shipped
 #
-# macos_bootstrap.sh and the macOS companion binary are packed inside and
-# extracted to sys._MEIPASS at launch, which steps.find_bootstrap_script() /
-# find_companion_exe() already look in. The companion binary loses its
-# executable bit inside `datas` -- deliberate non-issue: macos_bootstrap.sh
-# chmod +x's its staged copy before moving it into place.
-#
-# Gatekeeper: PyInstaller ad-hoc signs the binary AND the .app
-# (codesign_identity=None below means `codesign -s -`, not "unsigned" --
-# mandatory on Apple silicon, same as companion/build.spec). An ad-hoc
-# signed app that arrives with the com.apple.quarantine xattr (browser
-# download, AirDrop) is still blocked by Gatekeeper on first open; macOS 15
-# requires System Settings > Privacy & Security > "Open Anyway" once. A
-# curl download or a USB copy carries no quarantine and opens directly.
-# NOT YET RUN ON A REAL MAC -- validate before handing to an editor.
+# Gatekeeper: PyInstaller ad-hoc signs every collected binary AND the .app
+# itself, the latter with `codesign --deep` (codesign_identity=None below
+# means `codesign -s -`, not "unsigned" -- mandatory on Apple silicon, same as
+# companion/build.spec). In onedir this matters more than it did in onefile:
+# the bundled companion binary is now a real nested Mach-O inside
+# Contents/Frameworks rather than a byte range inside one exe, which is
+# exactly the layout --deep expects (and the reason Apple wants onedir here).
+# An ad-hoc signed app that arrives with the com.apple.quarantine xattr
+# (browser download, AirDrop) is still blocked by Gatekeeper on first open;
+# macOS 15 requires System Settings > Privacy & Security > "Open Anyway"
+# once. A curl download or a USB copy carries no quarantine and opens
+# directly.
 
 import sys
 from pathlib import Path
@@ -104,25 +151,30 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# ONEDIR (see the header): exclude_binaries=True means the EXE is just the
+# bootloader + the PYZ, and a.binaries / a.datas are collected alongside it by
+# COLLECT instead of being packed inside. Passing them here as well would
+# quietly rebuild a onefile app -- PyInstaller ignores them for the archive
+# and hands them to COLLECT via PKG.dependencies, but the intent would be
+# wrong. runtime_tmpdir is gone with the same logic: it only ever meant
+# anything for a onefile extraction, and there is no longer one.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="ccsync-onboard",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     # upx=False for the same reason as every other spec in this repo: a
-    # packed, unsigned onefile binary is the classic AV/Gatekeeper
-    # false-positive shape, and this is an editor's FIRST contact.
+    # packed, unsigned binary is the classic AV/Gatekeeper false-positive
+    # shape, and this is an editor's FIRST contact.
     upx=False,
-    runtime_tmpdir=None,
     console=False,  # GUI app -- no Terminal window
     # Ad-hoc signature (see the header comment); an unsigned arm64 binary is
-    # killed by the kernel on launch.
+    # killed by the kernel on launch. COLLECT and BUNDLE inherit this (and
+    # console/target_arch/entitlements) from the EXE, so it is set once.
     codesign_identity=None,
     entitlements_file=None,
     # No .icns in this repo (same note as companion/build.spec); the window
@@ -130,8 +182,21 @@ exe = EXE(
     icon=None,
 )
 
-app = BUNDLE(
+coll = COLLECT(
     exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="ccsync-onboard",
+)
+
+app = BUNDLE(
+    # BUNDLE takes the COLLECT, not the EXE: handing it a non-exclude_binaries
+    # EXE is what triggers PyInstaller 6.21's onefile-.app deprecation warning
+    # and becomes a hard error in v7.0.
+    coll,
     name="CCSync Onboarding.app",
     icon=None,
     bundle_identifier="com.creatorsclub.ccsync.onboard",

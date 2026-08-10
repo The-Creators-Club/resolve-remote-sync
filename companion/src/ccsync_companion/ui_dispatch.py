@@ -40,6 +40,19 @@ WHAT IS AND IS NOT PROVEN (read this before trusting it on a Mac):
     first-Mac-run spike. If they do not, the fallback is osascript dialogs --
     a separate piece of work, not something this module hides.
 
+SHUTDOWN CAN BREAK A NESTED tkwait (MAC-11's follow-up). `tkwait window` is
+only as good as the window's own promise to destroy itself. A dialog that
+never does parks the pump INSIDE the tkwait: the pump timer never re-arms,
+every later dialog request queues forever, `serve()`'s mainloop cannot
+return, and SIGTERM cannot finish a shutdown -- the live 2026-08-05 incident
+took `kill -9`. So `run_dialog()` records the window it is about to park in
+and `stop()` destroys it, which is what ends the tkwait. The destroy is
+scheduled through the HIDDEN root's `after()` on purpose: Tcl's timer queue
+is per THREAD, not per interpreter, and `tkwait` spins in Tk_DoOneEvent,
+which services that queue -- so a timer armed on the hidden root fires even
+though the pump's own timer chain is parked. (It cannot be run on the calling
+thread: only the UI thread may touch Tk-Aqua.)
+
 Serialization of dialogs is NOT this module's job: `app._popup_active_lock`
 still decides that only one CCSync window is open at a time, and it is taken
 by the CALLER, outside dispatch(). This is a transport, not a lock.
@@ -64,6 +77,14 @@ MODE_MAIN_THREAD = "main-thread"
 # enough that a dialog request never feels laggy, large enough not to spin.
 DEFAULT_POLL_MS = 50
 
+# How long stop() waits for the UI thread to ACCEPT the request to destroy a
+# stuck dialog. A cross-thread Tk call is marshaled to the interpreter's own
+# thread and blocks the caller until that thread services it -- which a
+# parked `tkwait` does, promptly. This bound only matters when the main
+# thread is somewhere Tk cannot reach at all, and there shutdown must carry
+# on regardless (app.py's hard-exit backstop is what covers that case).
+DIALOG_BREAK_TIMEOUT_SECONDS = 5.0
+
 
 class UIDispatchStopped(RuntimeError):
     """dispatch() was called after the dispatcher stopped, or a queued call
@@ -81,6 +102,31 @@ def platform_mode(platform: Optional[str] = None) -> str:
     """The mode this platform needs. The seam tests use to exercise the
     darwin path from Windows -- production calls it with no argument."""
     return MODE_MAIN_THREAD if (platform or sys.platform) == "darwin" else MODE_INLINE
+
+
+def window_label(window: Any) -> str:
+    """Something an admin can recognise in the log for a stuck window.
+
+    Its title if it has one (every dialog in this package sets one), its
+    class otherwise. Never raises -- this is only ever called to build a
+    message about something that has already gone wrong.
+    """
+    try:
+        title = window.title()
+        if title:
+            return f"{str(title)[:80]!r}"
+    except Exception:
+        pass
+    return type(window).__name__
+
+
+def _destroy_quietly(window: Any, label: str) -> None:
+    try:
+        window.destroy()
+    except Exception:
+        # Already gone, or a Tcl interpreter torn down under us. Either way
+        # the tkwait it was holding is over, which is all we wanted.
+        log.debug("UI dispatch: destroy of %s failed", label, exc_info=True)
 
 
 class _Job:
@@ -147,12 +193,29 @@ class MainThreadDispatcher:
         self._stop_requested = False
         self._stopped = False
         self._stop_event: Optional[threading.Event] = None
+        # The dialog root(s) run_dialog() is currently parked in, innermost
+        # last (a dialog may open another one -- reentrant dispatch runs it
+        # inline on this same thread). Only ever non-empty on darwin.
+        self._dialogs: list[Any] = []
 
     # -- lifecycle ------------------------------------------------------
 
     @property
     def stopped(self) -> bool:
         return self._stopped
+
+    @property
+    def serving(self) -> bool:
+        """True while the mainloop is running on the serving thread. False
+        the moment it returns -- app.py's shutdown backstop asks this to tell
+        "the UI thread is wedged" from "the UI thread has already gone"."""
+        return self._serving
+
+    @property
+    def open_dialogs(self) -> list[Any]:
+        """The dialog windows currently being waited on, outermost first."""
+        with self._lock:
+            return list(self._dialogs)
 
     @property
     def root(self) -> Any:
@@ -229,6 +292,11 @@ class MainThreadDispatcher:
             self._queue.clear()
             serving = self._serving
         self._cancel(pending)
+        # BEFORE _destroy_root(): the hidden root is how the destroy reaches
+        # the UI thread, and a dialog left open on a thread whose pump is
+        # parked inside it is the whole reason this method can be reached
+        # while a window is still up.
+        self._break_open_dialogs()
         if not serving:
             # Nobody is going to run serve()'s finally for us.
             self._destroy_root()
@@ -239,6 +307,7 @@ class MainThreadDispatcher:
             pending = list(self._queue)
             self._queue.clear()
         self._cancel(pending)
+        self._break_open_dialogs()
         self._destroy_root()
 
     def _cancel(self, pending: list[_Job]) -> None:
@@ -265,6 +334,89 @@ class MainThreadDispatcher:
             root.destroy()
         except Exception:
             log.debug("UI dispatch: hidden root destroy() failed", exc_info=True)
+
+    # -- breaking a nested tkwait (MAC-11's follow-up) -------------------
+
+    def note_dialog(self, window: Any) -> bool:
+        """Register the window run_dialog() is about to park in.
+
+        False means the dispatcher has already stopped, i.e. stop() has been
+        past the point where it would have broken this window out. The caller
+        must NOT enter `tkwait` then -- it would be a wedge with nobody left
+        to end it.
+        """
+        with self._lock:
+            if self._stopped:
+                return False
+            self._dialogs.append(window)
+            return True
+
+    def forget_dialog(self, window: Any) -> None:
+        """The window closed on its own (the normal path). Innermost match
+        first, so nested dialogs unwind in the order they were opened."""
+        with self._lock:
+            for index in range(len(self._dialogs) - 1, -1, -1):
+                if self._dialogs[index] is window:
+                    del self._dialogs[index]
+                    return
+
+    def _break_open_dialogs(self) -> None:
+        """Destroy whatever run_dialog() is still parked in, so the UI thread
+        can leave its `tkwait` and serve()'s mainloop can return.
+
+        This is the difference between a SIGTERM that finishes and one that
+        needs `kill -9`: on 2026-08-05 a fix-all popup that never destroyed
+        itself left the pump inside `tkwait window`, so the shutdown ran to
+        completion, logged, and then sat there with the window on screen
+        (MAC-11). Innermost dialog first -- the outer one's tkwait cannot
+        return until the inner one has.
+        """
+        with self._lock:
+            dialogs = list(self._dialogs)
+            self._dialogs.clear()
+            root = self._root
+        for window in reversed(dialogs):
+            label = window_label(window)
+            log.error(
+                "UI dispatch: shutting down with the window %s still open -- closing "
+                "it from here. A dialog that never destroys itself parks the main "
+                "thread inside `tkwait` for good, and the process then needs killing "
+                "(MAC-11).", label,
+            )
+            self._schedule_destroy(root, window, label)
+
+    def _schedule_destroy(self, root: Any, window: Any, label: str) -> None:
+        if root is None or threading.get_ident() == self._owner_ident:
+            # Either there is no hidden root left to schedule on, or WE are
+            # the UI thread -- in which case nothing is parked in a tkwait
+            # below us and destroying it right here is the whole job.
+            self._destroy_window(window, label)
+            return
+        # A Tk call from another thread is marshaled to the interpreter's own
+        # thread and BLOCKS until that thread services it. A parked `tkwait`
+        # does exactly that (Tcl's timer queue is per thread, and tkwait
+        # spins in Tk_DoOneEvent) -- but a main thread that is in no event
+        # loop at all would never answer, and shutdown cannot hang there.
+        def _ask() -> None:
+            try:
+                root.after(0, lambda: self._destroy_window(window, label))
+            except Exception:
+                log.debug("UI dispatch: could not schedule the destroy of %s", label,
+                          exc_info=True)
+
+        thread = threading.Thread(target=_ask, name="ccsync-ui-break", daemon=True)
+        thread.start()
+        thread.join(timeout=DIALOG_BREAK_TIMEOUT_SECONDS)
+        if thread.is_alive():
+            log.error(
+                "UI dispatch: the main thread would not even accept a request to "
+                "close %s within %.0fs -- it is not running an event loop we can "
+                "reach, so this process cannot end itself tidily.",
+                label, DIALOG_BREAK_TIMEOUT_SECONDS,
+            )
+
+    def _destroy_window(self, window: Any, label: str) -> None:
+        _destroy_quietly(window, label)
 
     # -- the pump (runs on the serving thread) --------------------------
 
@@ -390,6 +542,9 @@ def run_dialog(root: Any) -> None:
     there is no other main window on the thread to keep the loop alive. On
     macOS the dispatcher's hidden root IS such a window, so mainloop() would
     never return (see the module docstring); `tkwait window` is used instead.
+
+    The window is registered with the dispatcher for as long as we are parked
+    in it, so shutdown can destroy it if it never destroys itself (MAC-11).
     """
     if not uses_main_thread():
         root.mainloop()
@@ -401,11 +556,32 @@ def run_dialog(root: Any) -> None:
             return
     except Exception:
         return
-    root.wait_window(root)
+    dispatcher = _active
+    if dispatcher is None:
+        root.mainloop()
+        return
+    if not dispatcher.note_dialog(root):
+        # stop() landed between uses_main_thread() above and here: it has
+        # already swept the open windows, so parking in `tkwait` now would
+        # be a wedge with nobody left to break it. Close instead -- a dialog
+        # requested into a shutdown takes its caller's safe default, exactly
+        # as UIDispatchStopped does.
+        label = window_label(root)
+        log.warning("UI dispatch: %s opened as the dispatcher stopped -- closing it "
+                    "rather than waiting on it", label)
+        _destroy_quietly(root, label)
+        return
+    try:
+        root.wait_window(root)
+    finally:
+        dispatcher.forget_dialog(root)
 
 
 def stop() -> None:
     """Stop main-thread dispatch. No-op when there is none (win32).
+
+    Also destroys any dialog the UI thread is still parked in, which is what
+    lets a `tkwait` end and `serve()` return -- see _break_open_dialogs.
 
     The stopped dispatcher stays registered on purpose: a dialog requested
     after this point must fail fast with UIDispatchStopped, NOT quietly fall

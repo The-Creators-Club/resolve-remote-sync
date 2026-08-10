@@ -8,7 +8,7 @@
     {% if toggle_editor %}
     <input type="checkbox" class="proj-check" title="sync this project to {{ toggle_editor }}"
            {{ 'checked' if p.slug in selected_slugs }}
-           hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}"
+           hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}{{ as_qs }}"
            hx-target="closest .projects" hx-swap="outerHTML">
     {% endif %}
     <a class="proj-name" href="/project/{{ p.slug }}" title="{{ p.label }}">
@@ -34,6 +34,7 @@
   {% endfor %}
 {% endmacro %}
 <nav class="projects">
+  {% include "partials/editor_switcher.html" %}
   <div class="side-head">[ PROJECTS ]</div>
   <div class="project-tree">
     {% if view.tree is defined %}

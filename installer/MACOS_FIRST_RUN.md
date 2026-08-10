@@ -299,6 +299,20 @@ coming down the wire.
 > whole flow are unvalidated — then run C2–C7 through it. C1's `--dry-run`
 > and the failure-shape notes below still apply verbatim, since the wizard's
 > install log is the bootstrap's own output.
+>
+> **Watch that build closely: the spec became ONEDIR on 2026-08-05** (onefile
+> `.app` bundles are deprecated in PyInstaller 6.21 and rejected by 7.0 —
+> `KNOWN_BUGS.md` item 9). The migration was written on Windows and has never
+> been built. **Success:** PyInstaller prints no `DEPRECATION` line about
+> onefile/`.app`, `dist/CCSync Onboarding.app` appears (alongside a new,
+> unshipped `dist/ccsync-onboard/` directory), and the script's two
+> `codesign --verify --deep --strict` checks — the bundle, then the unzipped
+> copy — both pass. **Failing looks like:** the app opening and dying
+> immediately (`Contents/Frameworks` not found → `sys._MEIPASS` wrong), or
+> the wizard reaching page 3 and reporting that `macos_bootstrap.sh` or the
+> companion binary cannot be found — those live in `Contents/Resources` and
+> `Contents/Frameworks` now, reached through cross-link symlinks, so record
+> `ls -l "CCSync Onboarding.app/Contents/Frameworks"` if it happens.
 
 - [ ] **C1. Dry run first.**
 

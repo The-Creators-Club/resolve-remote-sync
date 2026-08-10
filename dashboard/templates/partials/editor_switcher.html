@@ -1,0 +1,26 @@
+{# Admin-only: point the project checkboxes at another editor's queue.
+
+   This is a plain GET form to the page itself (?as=<editor>), which is the
+   same mechanism the queue panel and scope_for() already read -- the select
+   just makes it reachable without hand-typing the URL. Non-admins never see
+   it, and can_manage() rejects the toggle server-side regardless. #}
+{% if session_is_admin and switch_editors %}
+<div class="editor-switch">
+  <div class="side-head">[ TICKING FOR ]</div>
+  <form method="get" action="{{ switch_action }}">
+    <select name="as" onchange="this.form.submit()" aria-label="tick projects for">
+      <option value="">{{ session_user }} — me</option>
+      {% for e in switch_editors %}
+        <option value="{{ e }}" {{ 'selected' if acting_as == e }}>{{ e }}</option>
+      {% endfor %}
+    </select>
+    {# The dashboard ships no JS beyond htmx; keep it working without onchange. #}
+    <noscript><button class="btn" type="submit">[ GO ]</button></noscript>
+  </form>
+  {% if acting_as %}
+    <div class="acting-warn" title="checkboxes below tick projects onto {{ acting_as }}'s machine, not yours">
+      ▲ acting as <span class="who">{{ acting_as }}</span>
+    </div>
+  {% endif %}
+</div>
+{% endif %}

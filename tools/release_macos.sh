@@ -86,10 +86,103 @@ fail() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-# Minimal JSON string escaping, same as macos_bootstrap.sh's: a password (or
-# a git describe from a strangely named branch) must not be able to break out
-# of the string it is written into.
-json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+# ---CCSYNC-PASSWORD-HYGIENE-BEGIN---
+# Everything between these two sentinels is COPY-SHARED, byte for byte, with
+# the other macOS publish script (tools/release_macos.sh <-> tools/
+# build_onboard_macos.sh). companion/tests/test_publish_password_hygiene.py
+# greps the two copies against each other the way server/tests/
+# test_cross_component.py does with the .stignore builders, so a change made
+# to one copy fails the suite until it is made to both. (A third, simpler
+# json_escape lives in installer/macos_bootstrap.sh for its own manifest; it
+# is not part of this pair.)
+#
+# KNOWN_BUGS item 10, hit live 2026-08-04: json_escape() escaped backslash and
+# double quote only, so a password carrying any byte < 0x20 produced INVALID
+# JSON and the dashboard answered 422 json_invalid / "Invalid control
+# character at 31" -- which reads as "wrong password" and is not. The usual
+# source is a bracketed paste: zsh wraps pasted text in ESC[200~ ... ESC[201~
+# and `read -r -s` captures the escapes along with the password.
+
+# JSON string escaping, byte by byte: a password (or a git describe from a
+# strangely named branch) must not be able to break out of the string it is
+# written into, and no byte it contains may make the JSON invalid.
+#
+# od+awk rather than sed because a value may contain bytes that are not valid
+# UTF-8, and BSD sed answers those with "RE error: illegal byte sequence"
+# (macOS ships BSD sed and BWK awk -- MAC-9 is what assuming GNU tools costs
+# here). LC_ALL=C keeps awk's %c a byte rather than a re-encoded character, so
+# a UTF-8 password passes through as the bytes it arrived as. The escape
+# characters themselves are built with sprintf("%c") so that no awk gets the
+# chance to interpret a backslash in a printf format string.
+json_escape() {
+    printf '%s' "$1" | LC_ALL=C od -v -A n -t u1 | LC_ALL=C awk '
+        BEGIN { bs = sprintf("%c", 92); dq = sprintf("%c", 34) }
+        {
+            for (i = 1; i <= NF; i++) {
+                b = $i + 0
+                if      (b == 92) printf "%s%s", bs, bs
+                else if (b == 34) printf "%s%s", bs, dq
+                else if (b == 10) printf "%sn", bs
+                else if (b == 13) printf "%sr", bs
+                else if (b ==  9) printf "%st", bs
+                else if (b ==  8) printf "%sb", bs
+                else if (b == 12) printf "%sf", bs
+                else if (b < 32 || b == 127) printf "%su%04x", bs, b
+                else printf "%c", b
+            }
+        }'
+}
+
+# Strip the wrappers a terminal puts around pasted text: bracketed paste is
+# ESC[200~ before and ESC[201~ after. They are removed wherever they appear,
+# not only at the ends, because pasting into a partly-typed line puts them in
+# the middle.
+strip_bracketed_paste() {
+    local esc
+    esc="$(printf '\033')"
+    printf '%s' "$1" | LC_ALL=C sed -e "s/${esc}\[200~//g" -e "s/${esc}\[201~//g"
+}
+
+# Refuse a value that still carries a byte no keyboard produces. Stripping the
+# paste wrappers is not enough on its own: a control byte that is NOT part of
+# a wrapper would then travel as a valid JSON escape and come back 401
+# "invalid credentials", which is a worse lie than the 422 it replaced. The
+# position is 1-based and counted in bytes of the value itself.
+reject_non_printable() {
+    local label="$1" value="$2" found
+    found="$(printf '%s' "$value" | LC_ALL=C od -v -A n -t u1 | LC_ALL=C awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                n++
+                b = $i + 0
+                if (b < 32 || b == 127) { printf "byte 0x%02x at position %d", b, n; exit }
+            }
+        }')"
+    [ -z "$found" ] || fail "the $label contains a non-printable character ($found) -- retype it rather than pasting.
+         A terminal wraps pasted text in invisible control bytes; the bracketed-paste
+         pair (ESC[200~ ... ESC[201~) has already been stripped, so this byte is
+         something else. Sent as-is it would build invalid JSON and the dashboard
+         would answer 422 json_invalid, which reads as a wrong password and is not."
+}
+
+# Prompt for the dashboard password on stderr. -s: never echoed. The password
+# goes to curl on STDIN, never in argv and never in an environment variable.
+# The username rides in the same JSON object, so it is checked too. Sets
+# DASH_PASSWORD.
+read_dashboard_password() {
+    reject_non_printable "username" "$ADMIN_USER"
+    printf 'dashboard password for %s@%s: ' "$ADMIN_USER" "$DASHBOARD_URL" >&2
+    read -r -s DASH_PASSWORD
+    echo "" >&2
+    DASH_PASSWORD="$(strip_bracketed_paste "$DASH_PASSWORD")"
+    if [ -z "$DASH_PASSWORD" ]; then
+        fail "no password was entered -- NOT publishing.
+         (If you pasted one, the terminal may have delivered nothing but the
+         paste wrapper, which is stripped: type it instead.)"
+    fi
+    reject_non_printable "password" "$DASH_PASSWORD"
+}
+# ---CCSYNC-PASSWORD-HYGIENE-END---
 
 # First capture group of the first matching line, or "" when absent -- the
 # bash twin of release.ps1's Get-Capture.
@@ -504,11 +597,10 @@ else
 fi
 
 # --- log in -----------------------------------------------------------
-printf 'dashboard password for %s@%s: ' "$ADMIN_USER" "$DASHBOARD_URL" >&2
-# -s: never echoed. The password goes to curl on STDIN, never in argv and
-# never in an environment variable.
-read -r -s DASH_PASSWORD
-echo "" >&2
+# Prompts, strips the terminal's bracketed-paste wrappers, and refuses a
+# password still carrying a control byte (KNOWN_BUGS item 10). Sets
+# DASH_PASSWORD.
+read_dashboard_password
 
 LOGIN_CODE="$(printf '{"username":"%s","password":"%s"}' \
         "$(json_escape "$ADMIN_USER")" "$(json_escape "$DASH_PASSWORD")" \

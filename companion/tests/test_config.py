@@ -139,6 +139,14 @@ def test_default_toml_text_documents_every_default_key():
         # numbers are measured defaults -- pinning them in every first-run file
         # is how a later re-tune reaches nobody.
         "keep_awake_stale_seconds", "keep_awake_max_hold_seconds",
+        # The proxy generator's tuning, same class again -- plus
+        # proxy_gen_enabled, which CANNOT be written live at all: its default
+        # is None ("derive it from lane_b_enabled"), TOML has no null, and an
+        # explicit value in every first-run file would kill the derivation the
+        # same way an explicit sync_enabled kills mode="base".
+        "proxy_gen_enabled", "proxy_gen_max_height", "proxy_gen_bitrate",
+        "proxy_gen_max_failures", "proxy_notify_cooldown_seconds",
+        "proxy_gen_skip_while_resolve_running",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -167,9 +175,18 @@ def test_default_toml_text_documents_every_default_key():
 #     the field (editors run a prebuilt exe), but the shipped values are the
 #     measured defaults, and an explicit copy in every config.toml is how a
 #     later re-tune reaches nobody.
+#   * proxy_gen_enabled -- tri-state: its default is None, meaning "derive it
+#     from lane_b_enabled" (see config.proxy_generation_enabled), and TOML has
+#     no way to write None. A copied-in explicit value kills the derivation,
+#     which on an editor means generating proxies lane B then sweeps into
+#     .ccsync-trash. The generator's other knobs are commented for the same
+#     reason as the keep_awake pair above.
 EXAMPLE_COMMENTED_OUT = {
     "sync_enabled", "lane_b_enabled", "server_p_unc",
     "keep_awake_stale_seconds", "keep_awake_max_hold_seconds",
+    "proxy_gen_enabled", "proxy_gen_max_height", "proxy_gen_bitrate",
+    "proxy_gen_max_failures", "proxy_notify_cooldown_seconds",
+    "proxy_gen_skip_while_resolve_running",
 }
 
 
@@ -644,6 +661,141 @@ def test_coerce_count_accepts_zero_and_falls_back_on_garbage(caplog):
         assert config_mod.coerce_count({"k": -1}, "k", 10) == 10
         assert config_mod.coerce_count({"k": None}, "k", 10) == 10
     assert len(caplog.records) == 3
+
+
+# -- missing-proxy notifier + ffmpeg proxy generator ------------------------
+
+
+def test_proxy_keys_have_expected_defaults():
+    assert config_mod.DEFAULTS["proxy_notify_enabled"] is True
+    # None, not False: "derive it from lane_b_enabled" (proxy_generation_enabled).
+    assert config_mod.DEFAULTS["proxy_gen_enabled"] is None
+    assert config_mod.DEFAULTS["ffmpeg_path"] == "ffmpeg"
+    assert config_mod.DEFAULTS["proxy_scan_interval"] == 900
+    assert config_mod.DEFAULTS["proxy_gen_idle_seconds"] == 300
+    assert config_mod.DEFAULTS["proxy_gen_min_age_seconds"] == 120
+    assert config_mod.DEFAULTS["proxy_gen_max_height"] == 1080
+    assert config_mod.DEFAULTS["proxy_gen_bitrate"] == "7M"
+    assert config_mod.DEFAULTS["proxy_gen_max_failures"] == 3
+    assert config_mod.DEFAULTS["proxy_notify_cooldown_seconds"] == 86400
+    assert config_mod.DEFAULTS["proxy_gen_skip_while_resolve_running"] is False
+
+
+def test_proxy_gen_enabled_derives_from_lane_b_when_absent():
+    """The whole point of the tri-state. Lane B is `rclone sync` -- the one
+    verb that deletes local files -- so a proxy generated on a machine lane B
+    serves gets swept into .ccsync-trash on the next pass. Generation is on
+    only where the result survives and reaches the fleet: the base rig, which
+    is exactly the machine that runs lane_b_enabled=false."""
+    assert config_mod.proxy_generation_enabled({"lane_b_enabled": True}) is False
+    assert config_mod.proxy_generation_enabled({"lane_b_enabled": False}) is True
+    # Absent entirely = the packaged lane_b_enabled default (true) = editor.
+    assert config_mod.proxy_generation_enabled({}) is False
+
+
+@pytest.mark.parametrize("lane_b", [True, False])
+def test_explicit_proxy_gen_enabled_beats_the_derivation(lane_b):
+    for explicit in (True, False):
+        cfg = {"lane_b_enabled": lane_b, "proxy_gen_enabled": explicit}
+        assert config_mod.proxy_generation_enabled(cfg) is explicit
+
+
+@pytest.mark.parametrize("bad", ["yes", "false", 1, [], 0.0])
+def test_a_garbage_proxy_gen_enabled_falls_back_to_the_derivation(bad, caplog):
+    """bool("false") is True, so a hand-edited string cannot be coerced
+    honestly -- and guessing wrong in the "on" direction is the direction that
+    throws away encodes. Log it and derive."""
+    with caplog.at_level(logging.ERROR, logger="ccsync.config"):
+        assert config_mod.proxy_generation_enabled(
+            {"lane_b_enabled": False, "proxy_gen_enabled": bad}) is True
+        assert config_mod.proxy_generation_enabled(
+            {"lane_b_enabled": True, "proxy_gen_enabled": bad}) is False
+    assert len(caplog.records) == 2
+
+
+def test_load_config_carries_the_proxy_keys(tmp_path):
+    path = tmp_path / "config.toml"
+    cfg = config_mod.load_config(path)
+    assert cfg["proxy_notify_enabled"] is True
+    assert cfg["proxy_gen_enabled"] is None
+    assert cfg["ffmpeg_path"] == "ffmpeg"
+    assert cfg["proxy_scan_interval"] == 900
+    # A first-run file on an editor (lane_b_enabled = true in the template)
+    # must not switch generation on by itself.
+    assert config_mod.proxy_generation_enabled(cfg) is False
+
+
+@pytest.mark.parametrize("value", ["7M", "700k", "2.5M", "300K", "8000000"])
+def test_coerce_bitrate_accepts_ffmpeg_bitrates(value):
+    assert config_mod.coerce_bitrate({"proxy_gen_bitrate": value},
+                                     "proxy_gen_bitrate", "7M") == value
+
+
+@pytest.mark.parametrize("bad", ["fast", "", "7 Mbps", "M7", None, [7], True, -1])
+def test_coerce_bitrate_falls_back_and_logs_on_garbage(bad, caplog):
+    """ffmpeg offers no protection here: a bogus -b:v either kills the spawn
+    (one failed encode per clip, forever) or is read as something else --
+    "fast" parses as 0 bits/s, i.e. an unwatchable proxy rather than an
+    error."""
+    with caplog.at_level(logging.ERROR, logger="ccsync.config"):
+        assert config_mod.coerce_bitrate({"proxy_gen_bitrate": bad},
+                                         "proxy_gen_bitrate", "7M") == "7M"
+    assert len(caplog.records) == 1
+
+
+def test_coerce_bitrate_missing_key_is_silent(caplog):
+    with caplog.at_level(logging.ERROR, logger="ccsync.config"):
+        assert config_mod.coerce_bitrate({}, "proxy_gen_bitrate", "7M") == "7M"
+    assert caplog.records == []
+
+
+def test_missing_ffmpeg_warns_but_never_stops_syncing(tmp_path):
+    """A machine with no ffmpeg syncs perfectly well and merely cannot make
+    its own proxies -- the notifier still tells it which clips the fleet
+    cannot see. An error here would stop every lane (DEL-3)."""
+    cfg = _good_cfg(tmp_path, lane_b_enabled=False,
+                    ffmpeg_path=str(tmp_path / "nowhere" / "ffmpeg"))
+    errors, warnings = config_mod.validate_config(cfg)
+    assert errors == []
+    assert any("ffmpeg not found" in w for w in warnings)
+
+
+def test_blank_ffmpeg_path_warns_when_generation_is_on(tmp_path):
+    errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, lane_b_enabled=False, ffmpeg_path=""))
+    assert errors == []
+    assert any("ffmpeg_path is blank" in w for w in warnings)
+
+
+def test_missing_ffmpeg_is_silent_when_generation_is_off(tmp_path):
+    """An editor is never warned about a binary this machine was never going
+    to run: lane_b_enabled=true derives generation off."""
+    _errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, lane_b_enabled=True,
+                  ffmpeg_path=str(tmp_path / "nowhere" / "ffmpeg")))
+    assert not any("ffmpeg" in w for w in warnings)
+
+    _errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, lane_b_enabled=False, proxy_gen_enabled=False,
+                  ffmpeg_path=str(tmp_path / "nowhere" / "ffmpeg")))
+    assert not any("ffmpeg" in w for w in warnings)
+
+
+def test_a_resolvable_ffmpeg_is_silent(tmp_path):
+    binary = tmp_path / "ffmpeg.exe"
+    binary.write_text("not really ffmpeg", encoding="utf-8")
+    errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, lane_b_enabled=False, ffmpeg_path=str(binary)))
+    assert errors == []
+    assert warnings == []
+
+
+def test_an_editor_forcing_generation_on_still_gets_the_ffmpeg_warning(tmp_path):
+    errors, warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, lane_b_enabled=True, proxy_gen_enabled=True,
+                  ffmpeg_path=str(tmp_path / "nowhere" / "ffmpeg")))
+    assert errors == []
+    assert any("ffmpeg not found" in w for w in warnings)
 
 
 def test_selection_ttl_keys_are_documented_and_validated(tmp_path):

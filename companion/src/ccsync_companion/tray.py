@@ -1545,6 +1545,12 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # not have -- i.e. added the old way, on one machine only. Cached by the
     # app (the scan walks a directory), so this is a cheap read.
     _get("stray_luts", lambda: (getattr(app, "stray_lut_count", None) or (lambda: 0))(), 0)
+    # Originals with no proxy beside them -- i.e. footage lane B can never
+    # carry to anybody else (proxy_gen.py). Cached by the generator's own
+    # thread, so this is a lock-guarded read of a dict and never a tree walk;
+    # {} is the right default for a companion whose generator is absent,
+    # because every consumer below treats it as "nothing to say".
+    _get("proxy_gap", lambda: (getattr(app, "proxy_gap", None) or (lambda: {}))() or {}, {})
     _get("p_swap_available", lambda: (getattr(app, "p_swap_available", None) or (lambda: False))(), False)
     _get("p_mode", lambda: (getattr(app, "p_mapping_mode", None) or (lambda: "none"))(), "none")
     snap["color"] = compute_overall_color(statuses, app)
@@ -1589,13 +1595,70 @@ def _menu_fingerprint(snap: dict) -> tuple:
         snap["dashboard_url"], snap["color"],
         tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
         snap.get("p_swap_available"), snap.get("p_mode"),
+        _proxy_fingerprint(snap.get("proxy_gap")),
     )
+
+
+def _proxy_fingerprint(gap: Optional[dict]) -> tuple:
+    """The parts of the proxy gap that change which LINES the menu has.
+
+    `left` is deliberately NOT in here. It ticks down once per finished clip
+    -- potentially every few seconds on a fast machine -- and every change
+    would rebuild the menu, which on the win32 backend DestroyMenu()s a menu
+    the user may have open (freeze) and re-resolves their click against the
+    new callback list (wrong action). The live number goes in the TOOLTIP,
+    which is a plain NIM_MODIFY and safe at any time -- the same split
+    _progress_bucket() makes for transfer progress.
+    """
+    if not isinstance(gap, dict):
+        return ()
+    return (
+        int(gap.get("missing") or 0),
+        int(gap.get("braw") or 0),
+        bool(gap.get("encoding")),
+        bool(gap.get("can_generate")),
+    )
+
+
+# Windows truncates a tray tooltip at ~127 characters, so the proxy suffix
+# is only added while the whole string stays comfortably under that: a
+# half-eaten "· 12 need pro" reads like a bug, and this line is the LEAST
+# important thing the tooltip can say.
+TOOLTIP_LIMIT = 120
+
+
+def _with_proxy_suffix(text: str, snap: dict) -> str:
+    """Append "· 12 need proxies" when there is room and nothing louder.
+
+    The tooltip is where the LIVE count lives (the menu deliberately doesn't
+    rebuild per clip -- see _proxy_fingerprint), so this is the one place an
+    editor watches the number go down. `left` while encoding, `missing`
+    otherwise: mid-run "12 need proxies" would be counting work already done.
+    """
+    gap = snap.get("proxy_gap")
+    if not isinstance(gap, dict):
+        return text
+    if gap.get("encoding"):
+        count = int(gap.get("left") or 0)
+        suffix = f" · making {count} proxy file(s)" if count else " · making proxies"
+    else:
+        count = int(gap.get("missing") or 0)
+        if count <= 0:
+            return text
+        suffix = f" · {count} need proxies" if count != 1 else " · 1 needs a proxy"
+    combined = text + suffix
+    return combined if len(combined) <= TOOLTIP_LIMIT else text
 
 
 def _tooltip_text(snap: dict) -> str:
     """The hover tooltip: the LIVE numbers, updated every refresh (a title
     update is a plain Shell_NotifyIcon NIM_MODIFY -- unlike a menu rebuild
-    it can never disturb an open menu). Windows truncates at ~127 chars."""
+    it can never disturb an open menu). Windows truncates at ~127 chars.
+
+    The proxy-gap suffix is added ONLY to the two calm endings (syncing, up
+    to date): everything above them -- not set up, drive gone, not signed in,
+    paused, a lane in PROBLEM -- is a state where nothing syncs at all, and
+    appending "12 need proxies" to it would bury the sentence that matters."""
     if snap["problems"]:
         return "CCSync: NOT SET UP (nothing syncs)"
     if snap.get("root_absent"):
@@ -1616,8 +1679,8 @@ def _tooltip_text(snap: dict) -> str:
                 parts.append(f"{human_bytes(int(status.speed_bps))}/s")
             if status.eta_seconds:
                 parts.append(f"{human_duration(status.eta_seconds)} left")
-            return " · ".join(parts)[:127]
-    return "CCSync: up to date"
+            return _with_proxy_suffix(" · ".join(parts), snap)[:127]
+    return _with_proxy_suffix("CCSync: up to date", snap)
 
 
 def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Menu":
@@ -1648,6 +1711,16 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
 
     def on_share_luts(icon, item):
         _spawn(app, "Share LUTs", app.share_stray_luts)
+
+    def on_make_proxies(icon, item):
+        # _spawn like every other action: this one forces a full tree scan on
+        # the generator's thread, and the tray must not wait for it.
+        _spawn(app, "Make proxies now",
+               getattr(app, "generate_proxies_now", None) or (lambda: None))
+
+    def on_stop_proxies(icon, item):
+        _spawn(app, "Stop making proxies",
+               getattr(app, "stop_proxy_generation", None) or (lambda: None))
 
     def on_toggle_pause(icon, item):
         # _spawn, not _guarded: menu callbacks run ON the tray's message
@@ -1734,6 +1807,49 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         ), pystray.Menu.SEPARATOR]
         if stray_luts else []
     )
+    # Missing proxies (proxy_gen.py). ADVISORY lines only -- no icon color,
+    # no pulse (tray.py:78-85's stance): an original with no proxy is not a
+    # fault, it is footage the rest of the fleet cannot see yet, and the
+    # sentence has to say that rather than name a file format.
+    proxy_gap = snap.get("proxy_gap") or {}
+    proxy_missing = int(proxy_gap.get("missing") or 0)
+    proxy_braw = int(proxy_gap.get("braw") or 0)
+    proxy_encoding = bool(proxy_gap.get("encoding"))
+    proxy_left = int(proxy_gap.get("left") or 0)
+    proxy_lines: list[str] = []
+    if proxy_encoding:
+        # "stops when you're back" is the whole promise of the feature, and
+        # it is the answer to the question this line provokes ("is that why
+        # my machine is busy?"). The count is a bucketed rebuild, not a live
+        # ticker -- see _proxy_fingerprint.
+        proxy_lines.append(f"Making proxies… {proxy_left} left (stops when you're back)")
+    elif proxy_missing:
+        proxy_lines.append(
+            f"{proxy_missing} clips have no proxy — other editors can't see them"
+            if proxy_missing != 1 else
+            "1 clip has no proxy — other editors can't see it"
+        )
+    if proxy_braw:
+        # Named by format because it is the one gap the editor must act on
+        # themselves: no ffmpeg build can decode BRAW, so this machine will
+        # never fill it however long it sits idle.
+        proxy_lines.append(
+            f"{proxy_braw} BRAW clips need the Blackmagic Proxy Generator"
+            if proxy_braw != 1 else
+            "1 BRAW clip needs the Blackmagic Proxy Generator"
+        )
+    proxy_items = [pystray.MenuItem(line, None, enabled=False) for line in proxy_lines]
+    # The two ACTIONS live under Advanced: "make them now" costs a full tree
+    # walk plus hours of encoding, and neither is something to hit by accident
+    # on the way to Pause (the same reasoning that moved Consolidate/Scan).
+    proxy_actions = []
+    if proxy_encoding:
+        proxy_actions.append(pystray.MenuItem("Stop making proxies", on_stop_proxies))
+    elif proxy_missing and proxy_gap.get("can_generate"):
+        proxy_actions.append(pystray.MenuItem(
+            "Make the missing proxies now (don't wait until I'm away)", on_make_proxies,
+        ))
+
     # "nothing syncs until you do" is only TRUE when login is required. With
     # require_login=false the lanes are already running under editor_name, and
     # telling the editor otherwise sends them chasing a sign-in they don't
@@ -1791,6 +1907,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         *dashboard_items,
         *setup_items,
         *lut_items,
+        *proxy_items,
         pystray.Menu.SEPARATOR,
         *upgrade_items,
         pystray.MenuItem("Copy diagnostics for your admin", on_copy_diagnostics),
@@ -1801,6 +1918,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
                 "Bring an existing project's media into the synced folder…",
                 on_consolidate_project,
             ),
+            *proxy_actions,
             *([pystray.Menu.SEPARATOR] if snap.get("removable") else []),
             *[
                 pystray.MenuItem(

@@ -59,6 +59,14 @@ GetEditorNameFn = Callable[[], Optional[str]]
 # "X-CCSync-Token" dashboard_token header. None when not signed in --
 # omitted entirely (no header) rather than sent empty.
 GetIdentityTokenFn = Callable[[], Optional[str]]
+# Missing-proxy coverage (app.CompanionApp.proxy_coverage -> proxy_gen.py).
+# Which of this machine's originals have no proxy beside them, i.e. which of
+# them lane B can never carry to anybody else. A cached, zero-I/O read, so
+# unlike local_manifest/media_tree this rides EVERY tick (light ones too) --
+# it is a handful of integers, and "nobody else can see this footage" is
+# exactly the kind of thing an admin should not have to wait a heavy cycle
+# to learn.
+GetProxyCoverageFn = Callable[[], dict[str, Any]]
 # Upgrade-channel addition: called with the PARSED report response after
 # every successful post (the dashboard piggybacks its `upgrade`
 # advertisement on the report reply -- see upgrade.py). Exceptions are
@@ -133,6 +141,7 @@ class DashboardReporter:
         on_report_response: Optional[OnReportResponseFn] = None,
         get_transport_health: Optional[Callable[[], dict[str, Any]]] = None,
         get_completions: Optional[Callable[[], list]] = None,
+        get_proxy_coverage: Optional[GetProxyCoverageFn] = None,
     ) -> None:
         self._get_statuses = get_statuses
         self.cfg = cfg
@@ -164,6 +173,11 @@ class DashboardReporter:
         # public relay pool at 1-5 MB/s. Same for orphaned .partial uploads,
         # which lane A never deletes and nothing ever reported.
         self._get_transport_health = get_transport_health
+        # Optional like every getter here: a companion whose proxy generator
+        # failed to construct still reports everything else, with the section
+        # simply absent (the dashboard ignores unknown keys and cannot miss
+        # one it never knew about -- api.py:2187, extra="ignore").
+        self._get_proxy_coverage = get_proxy_coverage
 
         self.dashboard_url = str(cfg.get("dashboard_url", "")).strip()
         self.dashboard_token = str(cfg.get("dashboard_token", "")).strip()
@@ -282,6 +296,22 @@ class DashboardReporter:
                 payload["transport_health"] = self._get_transport_health()
             except Exception:
                 log.exception("get_transport_health() failed")
+        if self._get_proxy_coverage is not None:
+            try:
+                coverage = self._get_proxy_coverage()
+            except Exception:
+                log.exception("get_proxy_coverage() failed")
+                coverage = None
+            # An EMPTY dict is omitted, not sent: that is what a companion
+            # with no generator returns, and a section of nothing on the wire
+            # would be indistinguishable from "this machine has no gaps".
+            if coverage:
+                projects = coverage.get("projects")
+                if isinstance(projects, dict) and len(projects) > MAX_REPORT_PROJECTS:
+                    coverage = {**coverage, "projects": dict(
+                        list(projects.items())[:MAX_REPORT_PROJECTS]
+                    )}
+                payload["proxy_coverage"] = coverage
         if not light:
             if self._get_local_manifest is not None:
                 try:
@@ -306,9 +336,12 @@ class DashboardReporter:
           1. per-file manifest lists  -- the rollup counts/bytes stay exact,
              which is what the fleet grid actually renders;
           2. media_tree clip lists    -- trimmed to a bounded head;
-          3. project keys             -- the manifest's own priority order
+          3. the proxy-coverage per-project map -- the SCALARS survive, which
+             is the part that answers "can anyone else see this editor's
+             footage"; which project the gap is in is a detail;
+          4. project keys             -- the manifest's own priority order
              already put ticked/recent projects first;
-          4. the heavy sections entirely -- a LIGHT report that arrives beats
+          5. the heavy sections entirely -- a LIGHT report that arrives beats
              a HEAVY one that 413s and takes lane status with it.
 
         Never raises: a payload that cannot be measured is passed through
@@ -360,6 +393,19 @@ class DashboardReporter:
                 size = payload_size(payload)
                 if size <= budget:
                     return payload
+
+        coverage = payload.get("proxy_coverage")
+        if isinstance(coverage, dict) and coverage.get("projects"):
+            # A COPY, like the manifest step above: coverage() hands back a
+            # fresh dict per call today, but stripping a section in place is
+            # the shape that blanked the live manifest cache once already.
+            payload["proxy_coverage"] = {**coverage, "projects": {}, "truncated": True}
+            log.warning(
+                "report payload still %.1f MB: dropped the per-project proxy gap map; "
+                "the totals are unaffected", size / 1e6)
+            size = payload_size(payload)
+            if size <= budget:
+                return payload
 
         if isinstance(manifest, dict) and len(manifest) > 1:
             keep = max(1, len(manifest) // 2)

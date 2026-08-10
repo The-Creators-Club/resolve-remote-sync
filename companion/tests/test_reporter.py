@@ -1068,3 +1068,112 @@ def test_shedding_never_mutates_the_manifest_cache():
     after = {rel: len(e["originals"]) for rel, e in cache._cache.items()}
     assert after == before
     assert all(e["truncated"] is False for e in cache._cache.values())
+
+
+# -- proxy coverage: which of this machine's originals nobody else can see --
+
+
+def _coverage(**overrides):
+    coverage = {
+        "state": "user-active", "enabled": True, "missing": 12, "braw": 4,
+        "needs_resolve": 4, "own": 6, "preview": 2, "left": 8, "generated": 3,
+        "failed": 1, "ffmpeg": True, "nvenc": True,
+        "scanned_at": "2026-08-10T12:00:00+00:00",
+        "projects": {"2026/FF5/Nuclear": {"missing": 12, "braw": 4}},
+    }
+    coverage.update(overrides)
+    return coverage
+
+
+def _reporter_with_coverage(coverage, calls):
+    from ccsync_companion.sync.base import LaneStatus
+
+    def fake_post(url, data, headers, timeout):
+        calls.append(data)
+        return {}
+
+    return DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")],
+        _cfg(), http_post=fake_post,
+        get_proxy_coverage=(coverage if callable(coverage) else (lambda: coverage)),
+    )
+
+
+def test_the_proxy_section_rides_every_tick_including_light_ones():
+    """Unlike local_manifest/media_tree this is a handful of integers off a
+    cached read -- and "nobody else can see this editor's footage" is not
+    something an admin should wait a heavy cycle to learn."""
+    calls = []
+    reporter = _reporter_with_coverage(_coverage(), calls)
+    reporter.post_once(light=True)
+    reporter.post_once(light=False)
+
+    assert len(calls) == 2
+    for sent in calls:
+        section = sent["proxy_coverage"]
+        assert section["missing"] == 12 and section["braw"] == 4
+        assert section["state"] == "user-active"
+        assert section["ffmpeg"] is True and section["nvenc"] is True
+        assert section["scanned_at"] == "2026-08-10T12:00:00+00:00"
+        assert section["projects"]["2026/FF5/Nuclear"]["missing"] == 12
+
+
+def test_no_getter_means_no_section_at_all():
+    """The dashboard ignores unknown keys (extra="ignore"), so shipping this
+    ahead of any server-side UI is safe -- but a companion whose generator
+    failed to construct must send nothing rather than a section of zeroes."""
+    calls = []
+    _reporter_with(calls=calls).post_once(light=True)
+    assert "proxy_coverage" not in calls[0]
+
+    calls.clear()
+    _reporter_with_coverage({}, calls).post_once(light=True)
+    assert "proxy_coverage" not in calls[0]
+
+
+def test_a_coverage_getter_that_raises_costs_only_its_own_section():
+    calls = []
+
+    def _boom():
+        raise RuntimeError("the generator is on fire")
+
+    _reporter_with_coverage(_boom, calls).post_once(light=True)
+    assert "proxy_coverage" not in calls[0]
+    assert calls[0]["lanes"], "the rest of the report still went"
+
+
+def test_the_per_project_map_is_capped_at_the_dashboards_ceiling():
+    calls = []
+    projects = {f"2026/FF5/P{i:03d}": {"missing": 1} for i in range(200)}
+    _reporter_with_coverage(_coverage(projects=projects), calls).post_once(light=True)
+    sent = calls[0]["proxy_coverage"]
+    assert len(sent["projects"]) == reporter_mod.MAX_REPORT_PROJECTS
+    assert sent["missing"] == 12, "the totals are never capped"
+
+
+def test_fit_payload_sheds_the_proxy_project_map_and_keeps_the_scalars(caplog):
+    """The part that answers "can anyone else see this editor's footage" is
+    the totals; WHICH project the gap is in is a detail worth losing to make
+    the report fit."""
+    reporter = _reporter_with()
+    payload = {
+        "editor_name": "alex", "lanes": [{"name": "lane_a_video_up"}],
+        "proxy_coverage": _coverage(projects={
+            f"2026/FF5/P{i:03d}": {"missing": i} for i in range(64)}),
+        "local_manifest": {"only": {"n_originals": 1, "originals": None, "proxies": None}},
+    }
+    with caplog.at_level(logging.WARNING, logger="ccsync.reporter"):
+        fitted = reporter._fit_payload(dict(payload), budget=900)
+
+    assert fitted["proxy_coverage"]["projects"] == {}
+    assert fitted["proxy_coverage"]["missing"] == 12
+    assert fitted["proxy_coverage"]["truncated"] is True
+    assert fitted["lanes"] == [{"name": "lane_a_video_up"}]
+    assert "per-project proxy gap map" in " ".join(r.getMessage() for r in caplog.records)
+
+
+def test_a_payload_that_fits_keeps_the_whole_proxy_map():
+    reporter = _reporter_with()
+    payload = {"lanes": [], "proxy_coverage": _coverage()}
+    fitted = reporter._fit_payload(dict(payload), budget=1_000_000)
+    assert fitted["proxy_coverage"]["projects"]["2026/FF5/Nuclear"]["missing"] == 12

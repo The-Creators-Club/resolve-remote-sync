@@ -226,6 +226,72 @@ project_roots_ttl = 300
 # repoints -- never copies, moves or deletes.
 proxy_relink_enabled = true
 
+# Say when clips in your projects have no proxy. Lane B is the only path that
+# carries video DOWN to the other machines, and it only carries Proxy folders
+# -- so an original with no Proxy/<name>.mov or .mp4 beside it is invisible to
+# every editor but you, and nothing used to say so. Reporting only; no file is
+# read, written or moved by this. Independent of the generator below: a
+# machine with no ffmpeg still tells you which clips the fleet cannot see.
+proxy_notify_enabled = true
+
+# Make the missing proxies here, with ffmpeg, while you are away from the
+# machine. THREE-STATE, and COMMENTED OUT ON PURPOSE: with no value it is
+# derived from lane_b_enabled -- on where lane B is off (the base rig, whose
+# local_root IS the NAS tree, so a proxy made there fans out to everyone), off
+# where lane B is on (every editor). That is not a taste call. Lane B is
+# `rclone sync`, the one verb that DELETES local files: a proxy generated on
+# an editor's machine for a project that syncs exists nowhere on the NAS, so
+# the next lane-B pass files it into .ccsync-trash and the encode was for
+# nothing. Uncomment to generate anyway -- proxies for projects lane B never
+# touches do survive -- or set false to be sure a machine never encodes.
+# proxy_gen_enabled = true
+
+# The ffmpeg binary. Nothing installs it for you and the companion does not
+# ship it (it would double the size of every upgrade), so a machine without
+# ffmpeg simply stays notifier-only and generates nothing. That is a config
+# WARNING, never an error: it does not stop syncing. Give an absolute path if
+# ffmpeg is installed off PATH.
+ffmpeg_path = "ffmpeg"
+
+# How often (seconds) the tree is walked looking for originals with no proxy.
+# This is a SECOND full walk on top of the media manifest's, hence a quarter
+# hour rather than anything eager -- the tray's "make them now" forces one.
+proxy_scan_interval = 900
+
+# How long (seconds) the keyboard and mouse must have been still before
+# encoding starts. It stops the instant you come back, mid-clip, and leaves no
+# part-file behind. ONLY encoding waits for this -- the scan and the notice
+# never do. A machine that cannot tell whether you are idle encodes nothing at
+# all: a missing proxy beats ffmpeg running under your hands.
+proxy_gen_idle_seconds = 300
+
+# Skip a file whose mtime is newer than this (seconds) -- it is still being
+# copied off a card or written by a render. Same settle window, for the same
+# reason, as lane_b_min_age_seconds above.
+proxy_gen_min_age_seconds = 120
+
+# The rest of the generator's knobs. The values shown ARE the defaults and are
+# commented out for the same reason as the transport tuning above: an explicit
+# value copied into a real config pins it, so a later re-tune reaches nobody.
+# Height ceiling, never an upscale -- a 720p original stays 720p.
+# proxy_gen_max_height = 1080
+# Bitrate for the HEVC 10-bit proxies, chosen to match the Resolve-generated
+# proxies the fleet already carries. Anything that isn't a number optionally
+# followed by K or M is logged and ignored.
+# proxy_gen_bitrate = "7M"
+# Attempts on one file before it is left alone for the rest of the session.
+# Never remembered across restarts -- a blacklist on disk would turn a
+# transient GPU failure into a permanent one.
+# proxy_gen_max_failures = 3
+# How long (seconds) before the same "clips have no proxy" notice may appear
+# again. A day, so a restart doesn't re-nag about a gap you already know about.
+# proxy_notify_cooldown_seconds = 86400
+# Stand down completely while Resolve is running. Off by default: the idle
+# gate already covers a Resolve you are sitting in front of. Turn it on if you
+# leave UNATTENDED renders going, which idleness cannot see (an unattended
+# render looks exactly like being away from the machine).
+# proxy_gen_skip_while_resolve_running = false
+
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about --
 # so the companion adds the library to Resolve's own supported list

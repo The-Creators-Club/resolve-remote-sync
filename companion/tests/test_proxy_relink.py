@@ -42,6 +42,21 @@ def plan(items, exists):
     )
 
 
+# -- the convention has one home ----------------------------------------------
+
+
+def test_proxy_scan_imports_the_convention_rather_than_redeclaring_it():
+    """Two copies of "an adjacent Proxy/ dir, same stem, .mov or .mp4" would
+    drift, and the failure is silent both ways: proxy_scan queueing an encode
+    for a clip proxy_relink can already attach, or reporting a gap that isn't
+    one. `is`, not `==`: a re-declared tuple with the same contents is
+    exactly the drift this guards against (2026-08-10)."""
+    from ccsync_companion import proxy_scan
+
+    assert proxy_scan.PROXY_EXTENSIONS is proxy_relink.PROXY_EXTENSIONS
+    assert proxy_scan.PROXY_DIR_NAME is proxy_relink.PROXY_DIR_NAME
+
+
 # -- proxy_is_working ---------------------------------------------------------
 
 

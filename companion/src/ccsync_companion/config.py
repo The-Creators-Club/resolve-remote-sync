@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import sys
 
 if sys.version_info >= (3, 11):
@@ -27,7 +28,7 @@ from typing import Any, Optional
 
 log = logging.getLogger("ccsync.config")
 
-VERSION = "0.5.5"
+VERSION = "0.6.0"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -200,6 +201,50 @@ DEFAULTS: dict[str, Any] = {
     # stale path beats SPEC.md:40's adjacent-Proxy auto-link -- so the clip
     # goes Media Offline next to a perfectly good proxy. See proxy_relink.py.
     "proxy_relink_enabled": True,
+    # -- missing-proxy notifier + ffmpeg proxy generator -------------------
+    # False = never mention proxy gaps. On by default, on every machine: lane
+    # B is the only path that carries video DOWN to the rest of the fleet and
+    # it only carries **/Proxy/**, so an original with no sibling
+    # <dir>/Proxy/<stem>.mov|.mp4 is invisible to everyone but the machine it
+    # sits on -- and until this existed, nothing told anyone. Telling costs
+    # nothing and never touches a byte.
+    "proxy_notify_enabled": True,
+    # TRI-STATE, and None is the interesting value: absent/None derives
+    # `not lane_b_enabled` (on where the result lands on the NAS, off where
+    # lane B would sweep it away), true/false is obeyed verbatim. See
+    # proxy_generation_enabled() for the whole reason.
+    "proxy_gen_enabled": None,
+    # Never bundled with the companion (80-120 MB on every upgrade) and never
+    # installed by it: absent just means notifier-only. Absolute path if
+    # ffmpeg lives off PATH.
+    "ffmpeg_path": "ffmpeg",
+    # A SECOND full tree walk on top of manifest.ManifestCache's, hence a lazy
+    # cadence; the tray's "make them now" forces one immediately.
+    "proxy_scan_interval": 900,
+    # Seconds away from keyboard/mouse before encoding may start. Encoding
+    # stops the instant the user returns -- the scan and the notification are
+    # not gated on this at all.
+    "proxy_gen_idle_seconds": 300,
+    # Settle window: a file still being copied off a card has a fresh mtime.
+    # Same idea and the same number as lane_b_min_age_seconds above.
+    "proxy_gen_min_age_seconds": 120,
+    # Ceiling, not a target -- a 720p original is never upscaled.
+    "proxy_gen_max_height": 1080,
+    # Matches the FF4-era Resolve-generated proxies the fleet already carries,
+    # so a generated proxy and an inherited one look the same in a timeline.
+    # Validated by coerce_bitrate(); garbage is logged and ignored.
+    "proxy_gen_bitrate": "7M",
+    # Attempts on one file before it is skipped for the rest of the session.
+    # Deliberately in-process only: a blacklist persisted to disk turns a
+    # transient GPU failure into a permanent one.
+    "proxy_gen_max_failures": 3,
+    # How long before the same "clips have no proxy" toast may appear again.
+    # A day, so restarts don't re-nag about a gap already decided about.
+    "proxy_notify_cooldown_seconds": 86400,
+    # Off by default: the idle gate already covers a Resolve the user is
+    # sitting in front of. On for a machine that leaves UNATTENDED renders
+    # going, which idleness cannot see (it looks exactly like being away).
+    "proxy_gen_skip_while_resolve_running": False,
     # False = leave Resolve's LUT directory alone. On by default: syncing the
     # shared LUT library to <local_root>/Assets/Luts accomplishes nothing on
     # its own, because Resolve reads LUTs from its own fixed directory and
@@ -501,6 +546,69 @@ lane_b_enabled = true
 # was never linked. Only ever repoints -- never copies, moves or deletes.
 # Set false to leave every proxy attachment exactly as the project stores it.
 proxy_relink_enabled = true
+
+# Say when clips in your projects have no proxy. Lane B is the only path that
+# carries video DOWN to the other machines, and it only carries Proxy folders
+# -- so an original with no Proxy/<name>.mov or .mp4 beside it is invisible to
+# every editor but you, and nothing used to say so. Reporting only; no file is
+# read, written or moved by this.
+proxy_notify_enabled = true
+
+# Make the missing proxies here, with ffmpeg, while you are away from the
+# machine. THREE-STATE, and left commented out on purpose: absent means
+# "decide from lane_b_enabled" -- on where lane B is off (the base rig, whose
+# local_root IS the NAS tree, so a proxy made there fans out to everyone), off
+# where lane B is on (every editor). That is not a taste call. Lane B is
+# `rclone sync`, the one verb that DELETES local files: a proxy generated here
+# for a project that syncs does not exist on the NAS, so the next lane-B pass
+# files it into .ccsync-trash and the encode was for nothing. Uncomment to
+# generate anyway -- proxies for projects lane B never touches do survive --
+# and note the notifier above runs either way.
+# proxy_gen_enabled = true
+
+# The ffmpeg binary. Nothing installs it for you and the companion does not
+# ship it (it would double the size of every upgrade), so a machine without
+# ffmpeg simply stays notifier-only and generates nothing. It never stops
+# syncing. Give an absolute path if ffmpeg is installed off PATH.
+ffmpeg_path = "ffmpeg"
+
+# How often (seconds) the tree is walked looking for originals with no proxy.
+# This is a SECOND full walk on top of the media manifest's, hence a quarter
+# hour rather than anything eager -- the tray's "make them now" forces one.
+proxy_scan_interval = 900
+
+# How long (seconds) the keyboard and mouse must have been still before
+# encoding starts. It stops the instant you come back, mid-clip, and leaves no
+# part-file behind. ONLY encoding waits for this -- the scan and the notice
+# never do. A machine that cannot tell whether you are idle encodes nothing at
+# all: a missing proxy beats ffmpeg running under your hands.
+proxy_gen_idle_seconds = 300
+
+# Skip a file whose mtime is newer than this (seconds) -- it is still being
+# copied off a card or written by a render. Same settle window, for the same
+# reason, as lane_b_min_age_seconds above.
+proxy_gen_min_age_seconds = 120
+
+# The rest of the generator's knobs. The values shown ARE the defaults and are
+# commented out for the same reason as the transport tuning above: an explicit
+# value in every first-run file pins it, so a later re-tune would reach nobody.
+# Height ceiling, never an upscale -- a 720p original stays 720p.
+# proxy_gen_max_height = 1080
+# Bitrate for the HEVC 10-bit proxies, chosen to match the Resolve-generated
+# proxies the fleet already carries. Anything that isn't a number optionally
+# followed by K or M is logged and ignored.
+# proxy_gen_bitrate = "7M"
+# Attempts on one file before it is left alone for the rest of the session.
+# Never remembered across restarts -- a blacklist on disk would turn a
+# transient GPU failure into a permanent one.
+# proxy_gen_max_failures = 3
+# How long (seconds) before the same "clips have no proxy" notice may appear
+# again. A day, so a restart doesn't re-nag about a gap you already know about.
+# proxy_notify_cooldown_seconds = 86400
+# Stand down completely while Resolve is running. Off by default: the idle
+# gate already covers a Resolve you are sitting in front of. Turn it on if you
+# leave UNATTENDED renders going, which idleness cannot see.
+# proxy_gen_skip_while_resolve_running = false
 
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about, so
@@ -844,6 +952,27 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
                 f"using the default ({DEFAULTS[key]})"
             )
 
+    # A WARNING, and it must never become an error. Errors stop every sync
+    # lane (DEL-3), and a machine with no ffmpeg is a machine that syncs
+    # perfectly well and merely cannot make its own proxies -- the notifier
+    # still tells it which clips are missing them. Only checked when
+    # generation is actually on, so an editor is never warned about a binary
+    # this machine was never going to run.
+    if proxy_generation_enabled(cfg):
+        ffmpeg_path = str(cfg.get("ffmpeg_path", DEFAULTS["ffmpeg_path"]) or "").strip()
+        if not ffmpeg_path:
+            warnings.append(
+                "ffmpeg_path is blank but proxy generation is on -- no proxies "
+                "will be generated on this machine; syncing is unaffected"
+            )
+        elif not _ffmpeg_resolves(ffmpeg_path):
+            warnings.append(
+                f"ffmpeg not found ({ffmpeg_path!r}) but proxy generation is on "
+                f"-- this machine will report missing proxies and generate none. "
+                f"Install ffmpeg (or set ffmpeg_path to it), or set "
+                f"proxy_gen_enabled = false. Syncing is unaffected either way."
+            )
+
     scheme = str(cfg.get("lane_c_pause_scheme", DEFAULTS["lane_c_pause_scheme"])).strip().lower()
     if scheme not in ("none", "rotate"):
         warnings.append(
@@ -956,6 +1085,85 @@ def coerce_count(cfg: dict[str, Any], key: str, default: Any) -> int:
             key, cfg.get(key), default,
         )
         return int(default)
+
+
+def proxy_generation_enabled(cfg: dict[str, Any]) -> bool:
+    """Whether THIS machine should encode the missing proxies itself.
+
+    Tri-state: an explicit `proxy_gen_enabled` (true or false) wins outright;
+    absent/None -- the shipped default -- derives `not lane_b_enabled`.
+
+    That derivation is not a preference, it is the lane-B sweep. Lane B is
+    `rclone sync`, the one verb in this system that DELETES local files, and a
+    proxy generated locally for a SYNCED project exists nowhere on the NAS --
+    so the next lane-B pass moves it into .ccsync-trash and the encode is
+    thrown away. The loop only closes through the machine whose local_root IS
+    the NAS tree (the base rig, which runs lane_b_enabled=false): editor
+    originals go up lane A, the base rig generates, and lane B fans the result
+    back out to the fleet. So generation defaults on exactly where the result
+    lands somewhere it survives and reaches everyone.
+
+    Editors can still force it on -- proxies for projects lane B never touches
+    do survive -- and the NOTIFIER is unconditional either way: knowing a clip
+    is invisible to the fleet is useful on every machine.
+
+    Never raises: a hand-edited non-boolean falls back to the derivation.
+    """
+    value = cfg.get("proxy_gen_enabled", DEFAULTS["proxy_gen_enabled"])
+    if isinstance(value, bool):
+        return value
+    if value is not None:
+        # bool("false") is True, so a string here cannot be coerced honestly.
+        log.error(
+            "config: proxy_gen_enabled=%r is not true/false -- deriving it "
+            "from lane_b_enabled instead", value,
+        )
+    return not bool(cfg.get("lane_b_enabled", DEFAULTS["lane_b_enabled"]))
+
+
+# ffmpeg's own -b:v grammar, narrowed to what this app writes: a number with
+# an optional K/M multiplier ("7M", "700k", "2.5M").
+_BITRATE_RE = re.compile(r"^\d+(\.\d+)?[KkMm]?$")
+
+
+def coerce_bitrate(cfg: dict[str, Any], key: str, default: Any) -> str:
+    """An ffmpeg -b:v value from config, with the packaged default as a
+    never-raise fallback.
+
+    ffmpeg gives no useful protection here: a bogus -b:v either kills the
+    spawn (one failed encode per clip, for as long as the value stays wrong)
+    or is parsed as something else entirely -- "fast" reads as 0 bits/s, which
+    encodes an unwatchable proxy rather than an error. Same contract as
+    coerce_numeric: garbage is LOGGED and the packaged default is used."""
+    value = cfg.get(key, default)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        # A bare number is bits per second, which is what ffmpeg reads it as.
+        return str(value)
+    if isinstance(value, str) and _BITRATE_RE.match(value.strip()):
+        return value.strip()
+    log.error(
+        "config: %s=%r is not an ffmpeg bitrate like \"7M\" or \"700k\" -- using %r",
+        key, value, default,
+    )
+    return str(default)
+
+
+def _ffmpeg_resolves(ffmpeg_path: str) -> bool:
+    """Cheap "is there a binary at all" check for validate_config().
+
+    Deliberately NOT a -version probe: this runs at startup before anything is
+    on screen, and the runnable check belongs to the generator (which caches
+    it). which() first because it is the one that knows about PATHEXT -- an
+    absolute "C:\\tools\\ffmpeg" is really ffmpeg.exe on disk."""
+    try:
+        candidate = str(Path(str(ffmpeg_path)).expanduser())
+        if shutil.which(candidate) is not None:
+            return True
+        return Path(candidate).exists()
+    except Exception:
+        # Unresolvable for some other reason -- say nothing rather than warn
+        # about an ffmpeg that may well be fine.
+        return True
 
 
 def resolved_log_path(cfg: dict[str, Any]) -> Path:

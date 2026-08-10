@@ -159,6 +159,17 @@ of what either of those produces. Restart the app after editing.
 | `broll_server_enabled` | `true` | Serve the b-roll web UI's "Send to Resolve" button (see the section above). `false` = don't listen at all. |
 | `broll_server_port` | `8899` | Port for that server. Pinned on the web page's side too, so changing it here alone just switches the feature off. |
 | `mode` | `"editor"` | Machine role. `"base"` = the central machine with direct NAS access: implies `sync_enabled = false` unless set explicitly. The out-of-tree popup stays ON in base mode — stray media outside the project directory on the NAS still needs fixing into the tree. |
+| `proxy_notify_enabled` | `true` | Tell the editor which of their originals have no `Proxy/` sibling — i.e. which footage lane B can never carry to anyone else. Costs nothing and touches no bytes; on by default on every machine. |
+| `proxy_gen_enabled` | *(derived)* | **Tri-state.** Absent = `not lane_b_enabled`: on where the result lands on the NAS (base rig), off where lane B would sweep a locally-made proxy into `.ccsync-trash`. `true`/`false` is obeyed verbatim; an editor who opts in keeps proxies for untracked projects and loses them for synced ones. |
+| `ffmpeg_path` | `"ffmpeg"` | The ffmpeg binary used to make proxies. **Nothing installs it and nothing bundles it** (80–120 MB on every upgrade) — absent simply means notifier-only, and syncing is unaffected. Absolute path if ffmpeg lives off PATH (same reason as `rclone_path`). |
+| `proxy_scan_interval` | `900` | Seconds between proxy-gap scans. Lazy on purpose: this is a SECOND full tree walk on top of the manifest cache's. The tray's "Make the missing proxies now" forces one immediately. |
+| `proxy_gen_idle_seconds` | `300` | Seconds away from keyboard/mouse before encoding may start. Encoding stops within ~2s of you coming back; the scan and the notification are not gated on this at all. |
+| `proxy_gen_min_age_seconds` | `120` | Settle window — a file still being copied off a card has a fresh mtime. Same idea and the same number as `lane_b_min_age_seconds`. |
+| `proxy_gen_max_height` | `1080` | Ceiling, not a target: a 720p original is never upscaled. Commented out in the template. |
+| `proxy_gen_bitrate` | `"7M"` | Own-footage proxy bitrate (maxrate/bufsize derive from it). Matches the FF4-era Resolve proxies already in the tree. Garbage is logged and ignored, never fatal. Commented out. |
+| `proxy_gen_max_failures` | `3` | Attempts on one file before it is skipped for the rest of the session. **In-process only** — a blacklist persisted to disk turns a transient GPU failure into a permanent one. Commented out. |
+| `proxy_notify_cooldown_seconds` | `86400` | How long before the same "clips have no proxy" toast may appear again. Persisted, so restarts don't re-nag. Commented out. |
+| `proxy_gen_skip_while_resolve_running` | `false` | Off by default: the idle gate already covers a Resolve you are sitting in front of. Turn on for a machine that leaves **unattended renders** going, which no input-based idle probe can see. Fails closed. Commented out. |
 
 With `dashboard_url` set, a fault-isolated reporter thread
 (`reporter.py`) POSTs the current status of all three lanes to the
@@ -235,6 +246,17 @@ rather than inventing an ambiguous single knob. `watch_debounce_seconds` and
 either, but both are needed to fulfil requirements stated elsewhere in the
 same section (the 10s debounce, and "verify the expected folder ID... is
 configured + shared") — see the inline comments in `config.py` next to each.
+
+The **missing-proxy notifier and ffmpeg proxy generator** (`proxy_scan.py`,
+`proxy_gen.py`, `ffmpeg_tools.py`, `idle.py`, 2026-08-10) are in no SPEC.md
+config bullet at all: SPEC.md assumes proxies already exist beside every
+original, and `docs/SERVER.md:193-196` has carried an "ffmpeg fallback
+generator" to-do since the start. They implement it, and the notifier half
+answers the question SPEC.md never asks — *which* originals have no proxy,
+i.e. which footage lane B (`**/Proxy/**` only) can never carry to anybody
+else. Nothing about the Proxy/ convention itself changes: generated files are
+`<dir>/Proxy/<stem>.mp4`, exactly what Resolve's adjacent-Proxy auto-link and
+`proxy_relink.py` already expect.
 
 SPEC.md's Lane A/B description mentions "`--sftp-*`/remote params from
 config" — this implementation instead relies on `rclone config`-managed

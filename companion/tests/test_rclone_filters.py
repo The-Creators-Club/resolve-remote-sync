@@ -1675,3 +1675,56 @@ def test_escaped_metacharacters_exclude_only_the_literal_file(rclone_binary, tmp
 
     assert not (dst / "[ab].mov").exists()  # excluded, literally
     assert (dst / "a.mov").exists()         # NOT caught by a stray class
+
+
+def test_a_proxy_being_encoded_crosses_no_lane_in_either_direction(rclone_binary, tmp_path):
+    """The write-discipline invariant the companion's proxy generator rests
+    on (proxy_gen.py, 2026-08-10), proven against the real binary rather than
+    the rule list.
+
+    The generator encodes to `Proxy/<stem>.mp4.partial` and os.replace()s it
+    into place, and the ONLY thing that makes that safe is that a half-made
+    proxy cannot leave the machine: lane A would publish a truncated file to
+    the NAS under a name lane B then fans out to every editor, and lane B
+    would pull one down onto an editor whose Resolve would happily attach it.
+    Both directions, because the two filters are built separately and only
+    lane B's `**/Proxy/**` include even reaches inside a Proxy dir.
+    """
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    proxy = src / "Sub" / "Proxy"
+    proxy.mkdir(parents=True)
+    dst.mkdir()
+    (proxy / "A001.mp4.partial").write_bytes(b"ftyp...mdat... (still encoding)")
+    (proxy / "A001.mov").write_bytes(b"a finished proxy")
+    (src / "Sub" / "A001.mp4").write_bytes(b"the original")
+    old = time.time() - (LANE_B_MIN_AGE_SECONDS * 2)
+    for path in src.rglob("*"):
+        if path.is_file():
+            os.utime(path, (old, old))
+
+    # UP (lane A: editor -> NAS). Its include is video outside Proxy/, so the
+    # original goes and nothing under Proxy/ does.
+    filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    cmd = build_up_command(rclone_binary, str(src), None, str(dst), filter_file)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    landed = sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*") if p.is_file())
+    assert landed == ["Sub/A001.mp4"], f"lane A carried a half-made proxy: {landed}"
+
+    # DOWN (lane B: NAS -> editor). Its include IS `**/Proxy/**` -- every byte
+    # under the directory -- so this is the direction that has to exclude it
+    # explicitly (IN_PROGRESS_EXCLUDE_RULES).
+    down = tmp_path / "down"
+    down.mkdir()
+    filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
+    cmd = build_down_command(rclone_binary, str(down), None, str(src), filter_file)
+    cmd[2] = str(src)
+    cmd[3] = str(down)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    landed = sorted(p.relative_to(down).as_posix() for p in down.rglob("*") if p.is_file())
+    assert landed == ["Sub/Proxy/A001.mov"], (
+        f"lane B pulled a proxy that was still being encoded: {landed}"
+    )

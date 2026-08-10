@@ -1859,3 +1859,231 @@ def test_the_pulse_animates_only_while_the_snapshot_says_so():
             icon.stop()
     finally:
         tray_mod.pystray.Icon = real_icon
+
+
+# -- missing proxies: advisory lines only (proxy_gen.py) --------------------
+#
+# NO new icon colour and NO pulse in any of these: an original with no proxy
+# is not a fault, it is footage the rest of the fleet cannot see yet
+# (tray.py:78-85's stance on what the mark is allowed to mean).
+
+
+def _proxy_app(missing=0, braw=0, left=0, encoding=False, can_generate=True):
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app.proxy_gap = lambda: {
+        "missing": missing, "braw": braw, "left": left, "encoding": encoding,
+        "can_generate": can_generate, "state": "running" if encoding else "user-active",
+    }
+    return app
+
+
+def test_the_menu_says_who_cannot_see_the_footage():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(missing=12)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "12 clips have no proxy — other editors can't see them" in labels
+
+
+def test_the_one_clip_wording_is_singular():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(missing=1)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "1 clip has no proxy — other editors can't see it" in labels
+
+
+def test_the_menu_says_when_it_is_making_them_and_that_it_stops():
+    """"stops when you're back" is the whole promise of the feature, and the
+    answer to the question the line provokes ("is that why my machine is
+    busy?")."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(missing=12, left=9, encoding=True)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "Making proxies… 9 left (stops when you're back)" in labels
+    # ...and it replaces the "have no proxy" line rather than stacking with it.
+    assert not any("have no proxy" in label for label in labels)
+
+
+def test_braw_is_named_because_only_the_editor_can_fix_it():
+    """No ffmpeg build decodes BRAW, so this machine will never fill that
+    gap however long it sits idle -- the line has to name the tool."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(missing=4, braw=4)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "4 BRAW clips need the Blackmagic Proxy Generator" in labels
+
+    app = _proxy_app(missing=1, braw=1)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "1 BRAW clip needs the Blackmagic Proxy Generator" in labels
+
+
+def test_no_proxy_lines_at_all_when_there_is_no_gap():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app()
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert not any("proxy" in label.lower() for label in labels)
+
+
+def test_the_actions_live_under_advanced():
+    """"Make them now" costs a full tree walk plus hours of encoding, and
+    neither action is one to hit on the way to Pause."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(missing=12)
+    menu = _build_menu(app, _tray_snapshot(app))
+    top = _menu_labels(menu)
+    everything = _all_menu_labels(menu)
+    label = "Make the missing proxies now (don't wait until I'm away)"
+    assert label in everything and label not in top
+
+    app = _proxy_app(missing=12, left=9, encoding=True)
+    everything = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "Stop making proxies" in everything
+    assert not any("Make the missing proxies now" in l for l in everything)
+
+
+def test_no_make_them_now_on_a_machine_that_cannot_generate():
+    """Notifier-only (an editor, or a machine with no ffmpeg): offering a
+    button that cannot work is worse than offering nothing."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(missing=12, can_generate=False)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert any("have no proxy" in l for l in labels)
+    assert not any("Make the missing proxies" in l for l in labels)
+
+
+def test_the_actions_are_spawned_off_the_message_loop(monkeypatch):
+    """Menu callbacks run ON the tray's message loop with the win32 backend,
+    and "make them now" forces a full tree scan -- the whole tray froze once
+    for exactly this reason (2026-07-26)."""
+    from ccsync_companion import tray as tray_mod
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(missing=12)
+    called: list[str] = []
+    app.generate_proxies_now = lambda: called.append("go")
+    spawned: list[str] = []
+    monkeypatch.setattr(tray_mod, "_spawn",
+                        lambda a, label, fn: spawned.append(label) or fn())
+
+    menu = _build_menu(app, _tray_snapshot(app))
+    for item in menu.items:
+        submenu = getattr(item, "submenu", None)
+        if submenu is None:
+            continue
+        for sub in submenu.items:
+            if "Make the missing proxies" in str(sub.text):
+                sub(None)
+    assert called == ["go"]
+    assert spawned == ["Make proxies now"]
+
+
+def test_the_fingerprint_moves_on_the_gap_but_never_on_the_live_count():
+    """`left` ticks down once per finished clip. A rebuild per tick would
+    DestroyMenu() a menu the user has open (freeze) and re-resolve their
+    click against the new callback list (wrong action) -- the live number
+    belongs in the tooltip, which is a plain NIM_MODIFY."""
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    encoding = _menu_fingerprint(_tray_snapshot(_proxy_app(missing=12, left=9, encoding=True)))
+    fewer_left = _menu_fingerprint(_tray_snapshot(_proxy_app(missing=12, left=3, encoding=True)))
+    assert encoding == fewer_left
+
+    assert _menu_fingerprint(_tray_snapshot(_proxy_app(missing=11, left=9, encoding=True))) != encoding
+    assert _menu_fingerprint(_tray_snapshot(_proxy_app(missing=12, braw=1, left=9, encoding=True))) != encoding
+    assert _menu_fingerprint(_tray_snapshot(_proxy_app(missing=12, left=9))) != encoding
+    assert _menu_fingerprint(_tray_snapshot(
+        _proxy_app(missing=12, left=9, encoding=True, can_generate=False))) != encoding
+
+
+def test_the_tooltip_carries_the_live_number():
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _proxy_app(missing=12)
+    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: up to date · 12 need proxies"
+
+    app = _proxy_app(missing=1)
+    assert "1 needs a proxy" in _tooltip_text(_tray_snapshot(app))
+
+    app = _proxy_app(missing=12, left=9, encoding=True)
+    assert "making 9 proxy file(s)" in _tooltip_text(_tray_snapshot(app))
+
+
+def test_the_tooltip_suffix_yields_to_everything_louder():
+    """Not set up / drive gone / not signed in / paused are states where
+    NOTHING syncs; burying that sentence under a proxy count would be the
+    tooltip's one job done backwards."""
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _proxy_app(missing=12)
+    app._root_absent = True
+    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: PAUSED — your drive is disconnected"
+
+    app = _proxy_app(missing=12)
+    app.paused = True
+    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: PAUSED"
+
+    app = _proxy_app(missing=12)
+    app.config_problems = ["remote is blank"]
+    assert "NOT SET UP" in _tooltip_text(_tray_snapshot(app))
+
+
+def test_the_tooltip_suffix_is_dropped_rather_than_truncated():
+    """Windows cuts a tooltip at ~127 chars, and a half-eaten
+    "· 12 need pro" reads like a bug. This line is the least important
+    thing the tooltip can say, so it is the first thing dropped."""
+    from ccsync_companion.tray import TOOLTIP_LIMIT, _tooltip_text, _tray_snapshot
+    from ccsync_companion.tray import _with_proxy_suffix
+
+    snap = {"proxy_gap": {"missing": 12}}
+    # The guard, exercised directly: today's longest rendered tooltip (a
+    # syncing lane with a 40-char project, a speed and an ETA) lands around
+    # 100 characters, so this is the promise that a future line cannot
+    # quietly break it.
+    crowded = "CCSync: syncing · " + ("x" * (TOOLTIP_LIMIT - 20))
+    assert _with_proxy_suffix(crowded, snap) == crowded
+
+    # ...and a real syncing tooltip does have room, and stays inside the cap.
+    app = _proxy_app(missing=12)
+    app.lane_statuses = lambda: [LaneStatus(
+        name="lane_a_video_up", state="syncing",
+        current_project="2026/CCT/Website Highlights",
+        speed_bps=12_500_000, eta_seconds=3600,
+    )]
+    tip = _tooltip_text(_tray_snapshot(app))
+    assert "12 need proxies" in tip
+    assert len(tip) <= TOOLTIP_LIMIT
+
+
+def test_a_proxy_getter_that_raises_degrades_to_no_lines():
+    """Every snapshot getter is wrapped: one failing must cost its own line,
+    never the whole menu (2026-07-26's right-click freeze)."""
+    from ccsync_companion.tray import _build_menu, _tooltip_text, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+
+    def _boom():
+        raise RuntimeError("the generator is on fire")
+
+    app.proxy_gap = _boom
+    snap = _tray_snapshot(app)
+    assert snap["proxy_gap"] == {}
+    assert _tooltip_text(snap) == "CCSync: up to date"
+    labels = _all_menu_labels(_build_menu(app, snap))
+    assert "Sync now" in labels
+
+
+def test_a_companion_with_no_generator_at_all_renders_normally():
+    """proxy_gap() returns {} when the generator failed to construct."""
+    from ccsync_companion.tray import _build_menu, _menu_fingerprint, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    snap = _tray_snapshot(app)
+    assert snap["proxy_gap"] == {}
+    assert _menu_fingerprint(snap)  # no exception, and no proxy contribution
+    assert "Sync now" in _all_menu_labels(_build_menu(app, snap))

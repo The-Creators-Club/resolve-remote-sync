@@ -571,3 +571,52 @@ The plist is rewritten (after a `launchctl bootout`) whenever it points at
 the wrong program or is missing either property. It runs the binary
 directly: there is no `.app` and no `open -a` indirection, so launchd
 supervises the real process.
+
+
+---
+
+## 11. Making proxies with ffmpeg
+
+Added 2026-08-10 with the companion proxy generator (`proxy_gen.py`). Both
+of these are cheap to get wrong and expensive to notice.
+
+### `GetLastInputInfo` is 32-bit, and so must the subtraction be
+
+The idle probe the generator gates on (`idle.py`) compares
+`GetLastInputInfo().dwTime` against `GetTickCount`. Both are **DWORDs
+sampled from the same 32-bit millisecond counter**, which rolls over every
+49.7 days. On the days either side of a rollover a plain `now - last` is
+either a negative number (harmless: reads as "not idle") or a ~49-day idle
+time (**not** harmless: it says nobody has touched the machine for seven
+weeks while somebody is typing on it, and the generator starts encoding
+under their hands). `_elapsed_ms` does the subtraction modulo 2^32, which
+is right on both sides.
+
+Two traps in the same place: do **not** "fix" this by reading
+`GetTickCount64` -- mixing a 64-bit now with a 32-bit last reintroduces the
+bug in a form that only appears after 49.7 days of uptime. And bind the
+ctypes prototypes explicitly (`restype = wintypes.DWORD`): ctypes defaults
+to `c_int`, which sign-extends anything past 0x7FFFFFFF into a negative
+number -- the same bug, 24.9 days in.
+
+Also worth knowing before trusting an idle number: it is **per session**
+(a second logged-in user, or an RDP session, keeps its own input timer), and
+it cannot see an unattended Resolve render -- that machine looks perfectly
+idle. `proxy_gen_skip_while_resolve_running = true` is the escape hatch;
+no input-based probe can answer it.
+
+### HEVC in MP4 needs `-tag:v hvc1`, or the proxy plays everywhere except Resolve
+
+ffmpeg tags HEVC-in-MP4 as `hev1` by default. QuickTime and DaVinci Resolve
+both refuse that tag; VLC plays it happily. So a proxy written without
+`-tag:v hvc1` looks perfect when you double-click it to check, and shows
+**Media Offline** in the one application it exists for. `own_proxy_cmd`
+always passes it.
+
+Its neighbour in the same argv is not decoration either: `-map_metadata 0`
+plus an explicit `-timecode` from ffprobe. Resolve's `LinkProxyMedia`
+refuses a proxy whose timecode does not match the original
+(`proxy_relink.py:35-37`), and an mp4 written without one starts at
+00:00:00:00 -- i.e. every generated proxy would be rejected, silently, by
+the relinker that is supposed to attach it. A source with no timecode gets
+no `-timecode` flag at all: writing a zero onto it is a mismatch of its own.

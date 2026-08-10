@@ -834,6 +834,43 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     Version bumped to **0.5.1** in `config.py` + `pyproject.toml` — 0.5.0 is already
     published as CURRENT and the publish path refuses a same-version republish.
 
+22. **Lane B can sweep an editor-generated proxy into `.ccsync-trash` (tracked risk,
+    2026-08-10, mitigated by default).** Lane B is `rclone sync` — the one verb in this
+    system that deletes local files — and it deletes anything under `**/Proxy/**` that
+    the NAS does not have. A proxy the companion generates locally for a **synced**
+    project is exactly that: the NAS has never seen it, so the next lane-B pass moves it
+    into `.ccsync-trash` (recoverable, per DEL-2, but gone from where Resolve looks).
+    The loop only closes through the base rig: editor originals go up lane A, the base
+    rig's `local_root` IS the NAS tree, and a proxy made there fans back out over lane B
+    to everybody.
+
+    Mitigated, not fixed: `proxy_gen_enabled` is **tri-state and derived** — absent means
+    `not lane_b_enabled`, so generation is ON where the result lands on the NAS and OFF
+    where lane B would sweep it. Editors still get the notifier, and an editor who sets
+    `proxy_gen_enabled = true` explicitly keeps proxies for projects lane B does not
+    manage and loses them for the ones it does (the generated config says so next to the
+    key). Revisit only if editor-side generation is ever wanted for synced projects: that
+    needs the generated file to reach the NAS, i.e. a lane A rule change (`+ **/Proxy/**`
+    upward), which is a far bigger decision than this feature.
+
+23. **The generated proxy's timecode / `LinkProxyMedia` attach is UNVERIFIED against a
+    real Resolve (ship-blocker for the editor rollout, 2026-08-10).** Resolve refuses a
+    proxy whose timecode does not match the original (`proxy_relink.py:35-37`), and an
+    mp4 written without `-timecode` starts at 00:00:00:00. `own_proxy_cmd` therefore
+    passes `-map_metadata 0` plus the ffprobe-read source timecode, and omits the flag
+    entirely when the source claims none — but **that is reasoning, not evidence**: no
+    generated proxy has yet been attached by a real Resolve. Until one has, the feature
+    stays base-rig-only by the derived default in item 22.
+
+    What has to be proven, on the base rig, before any editor rollout: (1) a generated
+    own-footage proxy probes as HEVC Main-10 with the `hvc1` tag and the source
+    timecode; (2) Resolve's adjacent-`Proxy/` auto-link picks it up on a clip with no
+    proxy attached; (3) `proxy_relink.py`'s `LinkProxyMedia` accepts it on a clip
+    carrying a stale absolute proxy path; (4) a preview-tier proxy is byte-flag-identical
+    to one the b-roll indexer's `build_proxy` produces. Failure of (1)–(3) means the
+    generator is making files nothing will attach — visible only as Media Offline beside
+    a perfectly good proxy, which is the exact failure `proxy_relink.py` exists for.
+
 Session-2 macOS findings in full — MAC-6 through MAC-9, what is now proven on real
 hardware, and the outstanding list these items come from — are written up in
 `docs/macos-first-run-2026-08-05.md`.

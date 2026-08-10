@@ -26,10 +26,12 @@ from typing import Any, Callable, Optional
 
 from . import broll_server as broll_server_mod
 from . import config as config_mod
+from . import idle as idle_mod
 from . import luts as luts_mod
 from . import music_worker
 from . import paths as paths_mod
 from . import popup
+from . import proxy_gen as proxy_gen_mod
 from . import proxy_relink
 from . import resolve_bridge
 from . import resolve_prefs as resolve_prefs_mod
@@ -624,6 +626,31 @@ class CompanionApp:
         self._lut_lock = threading.Lock()
         self._stray_luts: list[dict[str, Any]] = []
 
+        # Missing-proxy notifier + ffmpeg proxy generator (proxy_gen.py).
+        # Built here, like the LUT block above, so proxy_gap()/proxy_coverage()
+        # are safe to call from the moment the tray starts -- and behind its
+        # own try, because an advisory feature must never be the reason a
+        # companion fails to construct (the windowed exe vanishing with no
+        # tray and no log line is this file's oldest failure mode).
+        self.proxy_generator: Any = None
+        try:
+            self.proxy_generator = proxy_gen_mod.ProxyGenerator(
+                cfg,
+                self._state_dir,
+                root_present_fn=self.root_is_present,
+                paused_fn=self.is_paused,
+                # config_problems, the same DEL-3 gate the lanes use: a
+                # half-configured install must not be quietly encoding into a
+                # tree whose local_root is wrong.
+                blocked_fn=lambda: bool(self.config_problems),
+                get_selected_rels=self._selected_project_rels if self._managed else None,
+                notify=self._notify_tray,
+                idle_probe=idle_mod.make_idle_probe(True),
+                resolve_running_fn=resolve_prefs_mod.resolve_is_running,
+            )
+        except Exception:
+            log.exception("failed to build the proxy generator")
+
         # Self-upgrade channel (upgrade.py): availability is fed by the
         # reporter's response callback below and by sign_in()'s verify
         # response; the tray surfaces it ("Update now") and apply() swaps
@@ -673,6 +700,10 @@ class CompanionApp:
             on_report_response=self._on_report_response,
             get_transport_health=self.transport_health,
             get_completions=self._pop_lane_completions,
+            # Which of this machine's originals nobody else can see. A cached,
+            # zero-I/O read (proxy_gen.coverage()), so it rides every tick
+            # rather than only the heavy ones.
+            get_proxy_coverage=self.proxy_coverage,
         )
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
@@ -2894,6 +2925,16 @@ class CompanionApp:
             target=self.watcher.run, args=(self._stop_event,), name="ccsync-watcher", daemon=True
         )
         self._watcher_thread.start()
+        # OUTSIDE the lanes branch above, and behind its own try, for the same
+        # reason _start_lut_link() is: the base rig runs sync_enabled=false and
+        # is the machine that needs proxy generation MOST (its local_root IS
+        # the NAS tree, so a proxy made there fans out over lane B). An editor
+        # whose lanes are gated on sign-in still gets the notifier.
+        try:
+            if self.proxy_generator is not None:
+                self.proxy_generator.start()
+        except Exception:
+            log.exception("failed to start the proxy generator")
         self._start_shutdown_guard()
         self._start_keep_awake()
         self._start_lut_link()
@@ -2985,6 +3026,42 @@ class CompanionApp:
         thread above."""
         with self._lut_lock:
             return len(self._stray_luts)
+
+    # -- missing proxies (proxy_gen.py) ---------------------------------
+    # All four are NULL-SAFE: the generator is optional (its constructor is
+    # allowed to fail without taking the companion with it), and the tray
+    # calls these on its refresh thread where a None would be an AttributeError
+    # inside the snapshot -- which degrades the whole menu, not one line.
+    def proxy_gap(self) -> dict[str, Any]:
+        """What the tray renders about missing proxies. Cheap: a lock-guarded
+        read of the generator's cached scan, never a walk."""
+        if self.proxy_generator is None:
+            return {}
+        return self.proxy_generator.gap()
+
+    def proxy_coverage(self) -> dict[str, Any]:
+        """The reporter's section. Same cached read as proxy_gap()."""
+        if self.proxy_generator is None:
+            return {}
+        return self.proxy_generator.coverage()
+
+    def generate_proxies_now(self) -> None:
+        """Tray action: scan now and encode without waiting for idle."""
+        if self.proxy_generator is None:
+            self._notify_tray("Proxy generation is not set up on this machine.")
+            return
+        self.proxy_generator.request_run()
+        self._notify_tray(
+            "Making the missing proxies now — it stops on its own when they're done.",
+            "ccsync-companion",
+        )
+
+    def stop_proxy_generation(self) -> None:
+        """Tray action: stop encoding (the queue is rebuilt on the next scan)."""
+        if self.proxy_generator is None:
+            return
+        self.proxy_generator.cancel_run()
+        self._notify_tray("Stopped making proxies.", "ccsync-companion")
 
     def share_stray_luts(self) -> None:
         """Tray action: copy this machine's unshared LUTs into the library.
@@ -3094,7 +3171,22 @@ class CompanionApp:
         # "syncing" from a NEED COUNT, so a NAS that went away overnight kept
         # this machine awake and un-shutdownable indefinitely with nothing in
         # flight.
-        return self._pending_tracker.describe(statuses, self._lane_peer_states())
+        reason = self._pending_tracker.describe(statuses, self._lane_peer_states())
+        if reason is not None:
+            return reason
+        # A proxy encode in flight blocks the same two things a transfer does:
+        # the shutdown screen says why, and the keep-awake guard (which reads
+        # this same function, _start_keep_awake) holds the machine awake so it
+        # cannot idle-sleep mid-encode. Deliberate: the generator only runs
+        # while the user is away, i.e. exactly when the idle timer fires. The
+        # hold ends by itself when the queue drains. Cheap by contract --
+        # block_reason() is a lock-guarded read with no I/O.
+        try:
+            if self.proxy_generator is not None:
+                return self.proxy_generator.block_reason()
+        except Exception:
+            log.debug("proxy generator block_reason() failed", exc_info=True)
+        return None
 
     def _lane_peer_states(self) -> dict[str, Optional[bool]]:
         """{lane name: True/False/None} -- False ONLY where we positively know
@@ -3127,8 +3219,9 @@ class CompanionApp:
     def _sweep_stale_tmp_files(self) -> None:
         from . import fixer as fixer_mod
 
+        local_root = str(self.config.get("local_root", ""))
         try:
-            leftovers = fixer_mod.sweep_stale_tmp_files(str(self.config.get("local_root", "")))
+            leftovers = fixer_mod.sweep_stale_tmp_files(local_root)
         except Exception:
             log.exception("stale-tmp sweep failed")
             return
@@ -3137,6 +3230,23 @@ class CompanionApp:
                 f"Found {len(leftovers)} half-copied file(s) from an interrupted copy. "
                 "Nothing was deleted. Tray → Copy diagnostics for your admin.",
                 "ccsync-companion")
+        # Half-made proxies from an encode that was killed (power cut, kill -9,
+        # a publish that hit an SMB sharing violation). REPORTED, never
+        # deleted -- the same refusal as the .ccsync-tmp sweep above, and the
+        # same reasoning: nothing on the filesystem proves some other process
+        # isn't writing that file this second. They cost only disk: every lane
+        # filter in both directions excludes `*.partial`, and the next scan
+        # simply encodes the clip again.
+        try:
+            partials = proxy_gen_mod.sweep_stale_partials(local_root)
+        except Exception:
+            log.exception("stale proxy .partial sweep failed")
+            return
+        if partials:
+            log.warning(
+                "%d half-made proxy file(s) are left over from interrupted encodes "
+                "-- see the lines above; nothing was deleted", len(partials),
+            )
 
     def _identity_watch_loop(self) -> None:
         """Notice a token EXPIRING, not just a sign-out.
@@ -3202,6 +3312,15 @@ class CompanionApp:
                 power_guard.stop()
             except Exception:
                 log.exception("failed to stop the %s guard", label)
+        # Right behind the power guards, before the lanes: this is what kills
+        # a running ffmpeg child, and it is the one thing in this teardown
+        # that is still burning the machine's CPU while we work through the
+        # rest. Its thread is joined in the bounded loop below.
+        try:
+            if self.proxy_generator is not None:
+                self.proxy_generator.stop()
+        except Exception:
+            log.exception("failed to stop the proxy generator")
         self._stop_lanes()
         try:
             self.reporter.stop()
@@ -3232,6 +3351,14 @@ class CompanionApp:
                     log.warning("shutdown: %s did not stop within 5s", thread.name)
             except Exception:
                 log.exception("shutdown: failed to join %s", getattr(thread, "name", thread))
+        # Bounded too, and for the same reason: the generator's worker may be
+        # inside a kill+wait on an ffmpeg that is stuck in a kernel read on a
+        # disconnected share, and a self-upgrade must not wait for it.
+        try:
+            if self.proxy_generator is not None:
+                self.proxy_generator.join(timeout=5.0)
+        except Exception:
+            log.exception("shutdown: failed to join the proxy generator")
 
         # LAST, after every thread that can ask for a window has been told to
         # stop and joined: on macOS this is the main thread's Tk pump, so

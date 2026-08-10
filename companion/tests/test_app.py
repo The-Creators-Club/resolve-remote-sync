@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -3298,3 +3299,267 @@ def test_arming_the_backstop_never_raises_out_of_shutdown(tmp_path, monkeypatch)
     monkeypatch.setattr(app_mod, "_hard_exit", lambda code: pytest.fail("exited"))
 
     app.shutdown()  # must not raise -- this runs inside a SIGTERM handler
+
+
+# --- missing-proxy notifier + generator wiring (proxy_gen.py owns the policy)
+
+
+class _FakeGenerator:
+    """Records the lifecycle calls app.py is supposed to make, and answers
+    the four accessors. Never a real thread: this file is about the WIRING,
+    the state machine has its own suite (test_proxy_gen.py)."""
+
+    def __init__(self, reason=None):
+        self.started = 0
+        self.stopped = 0
+        self.joined: list[float] = []
+        self.requested = 0
+        self.cancelled = 0
+        self.reason = reason
+
+    def start(self):
+        self.started += 1
+
+    def stop(self):
+        self.stopped += 1
+
+    def join(self, timeout=5.0):
+        self.joined.append(timeout)
+
+    def gap(self):
+        return {"missing": 12, "braw": 4, "left": 3, "encoding": True,
+                "can_generate": True, "state": "running"}
+
+    def coverage(self):
+        return {"missing": 12, "state": "running", "projects": {}}
+
+    def block_reason(self):
+        return self.reason
+
+    def request_run(self):
+        self.requested += 1
+
+    def cancel_run(self):
+        self.cancelled += 1
+
+
+@pytest.fixture
+def _inert_resolve(monkeypatch):
+    """start() launches the timeline watcher, and on this developer box
+    connect() genuinely connects and enumerates whatever project is open --
+    holding the fusionscript GIL while it does. Same hazard as conftest's
+    real-Tk guard (test_broll_wiring.py carries the same fixture)."""
+    empty = {"ok": False, "message": "no Resolve in tests", "items": [], "project_name": ""}
+    monkeypatch.setattr(resolve_bridge, "get_timeline_items", lambda *a, **kw: dict(empty))
+    monkeypatch.setattr(resolve_bridge, "poll_timeline_items", lambda: dict(empty))
+    monkeypatch.setattr(resolve_bridge, "get_media_pool_items", lambda: dict(empty))
+    monkeypatch.setattr(resolve_bridge, "try_connect", lambda: False)
+
+
+def _quiet_app(tmp_path, **overrides) -> CompanionApp:
+    """An app whose every other subsystem is inert, so start()/shutdown()
+    can be called for real without a port, a dialog or a Resolve."""
+    overrides.setdefault("popup_enabled", False)
+    overrides.setdefault("require_login", False)
+    overrides.setdefault("broll_server_enabled", False)
+    overrides.setdefault("lut_sync_enabled", False)
+    overrides.setdefault("stills_sync_enabled", False)
+    overrides.setdefault("shutdown_warning_enabled", False)
+    overrides.setdefault("keep_awake_while_syncing", False)
+    overrides.setdefault("poll_interval", 0.2)
+    return _make_app(tmp_path, **overrides)
+
+
+def test_the_generator_is_built_with_the_apps_own_seams(tmp_path):
+    app = _make_app(tmp_path)
+    gen = app.proxy_generator
+    assert gen is not None
+    # The state dir, not the log dir: proxy_notify.json belongs beside
+    # project_prompts.json and the lanes' filter files.
+    assert gen.state_path.parent == app._state_dir
+    assert gen.local_root == app.config["local_root"]
+
+    # Every gate reads the app's LIVE state rather than a snapshot taken at
+    # construction -- pausing, unplugging the drive and breaking the config
+    # all have to reach a thread that started before any of them happened.
+    assert gen._is_paused() is False
+    app._paused = True
+    assert gen._is_paused() is True
+    app._root_absent = True
+    assert gen._root_present() is False
+    app.config_problems = ["remote is blank"]
+    assert gen._is_blocked() is True
+
+
+def test_a_generator_that_cannot_be_built_never_stops_the_companion(tmp_path, monkeypatch):
+    """An advisory feature must never be the reason a companion fails to
+    construct -- the windowed exe vanishing with no tray and no log line is
+    this file's oldest failure mode."""
+    from ccsync_companion import proxy_gen as proxy_gen_mod
+
+    def _boom(*a, **kw):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(proxy_gen_mod, "ProxyGenerator", _boom)
+    app = _make_app(tmp_path)
+    assert app.proxy_generator is None
+    # ...and every accessor stays safe.
+    assert app.proxy_gap() == {}
+    assert app.proxy_coverage() == {}
+    assert app._shutdown_block_reason() is None
+    app._tray_icon = _FakeTray()
+    app.generate_proxies_now()
+    app.stop_proxy_generation()
+    assert any("not set up" in msg for msg, _t in app._tray_icon.notifications)
+
+
+def test_start_runs_the_generator_even_with_the_lanes_off(tmp_path, _inert_resolve):
+    """The base rig runs sync_enabled=false and needs this MOST: its
+    local_root IS the NAS tree, so a proxy made there fans out over lane B.
+    Same reasoning as _start_lut_link being outside the lanes branch."""
+    app = _quiet_app(tmp_path, sync_enabled=False)
+    fake = _FakeGenerator()
+    app.proxy_generator = fake
+    app.start()
+    try:
+        assert fake.started == 1
+    finally:
+        app.shutdown()
+
+
+def test_start_runs_the_generator_even_when_the_config_stops_syncing(
+        tmp_path, _inert_resolve):
+    app = _quiet_app(tmp_path)
+    app.config_problems = ["remote is blank"]
+    fake = _FakeGenerator()
+    app.proxy_generator = fake
+    app.start()
+    try:
+        assert fake.started == 1
+    finally:
+        app.shutdown()
+
+
+def test_a_generator_that_will_not_start_costs_a_log_line_and_nothing_else(
+        tmp_path, _inert_resolve, caplog):
+    class _Broken(_FakeGenerator):
+        def start(self):
+            raise RuntimeError("boom")
+
+    app = _quiet_app(tmp_path)
+    app.proxy_generator = _Broken()
+    with caplog.at_level(logging.ERROR, logger="ccsync.app"):
+        app.start()
+    try:
+        assert app._watcher_thread is not None and app._watcher_thread.is_alive()
+        assert any("proxy generator" in r.getMessage() for r in caplog.records)
+    finally:
+        app.shutdown()
+
+
+def test_shutdown_stops_the_generator_early_and_joins_it_bounded(tmp_path, _inert_resolve):
+    """stop() is what kills the ffmpeg child, so it goes right behind the
+    power guards; the join is bounded because the worker may be inside a
+    kill+wait on a process stuck on a disconnected share."""
+    app = _quiet_app(tmp_path)
+    fake = _FakeGenerator()
+    app.proxy_generator = fake
+    app.start()
+    app.shutdown()
+    assert fake.stopped == 1
+    assert fake.joined and fake.joined[0] <= 5.0
+
+
+def test_a_generator_that_will_not_stop_never_blocks_shutdown(tmp_path, _inert_resolve):
+    class _Broken(_FakeGenerator):
+        def stop(self):
+            raise RuntimeError("boom")
+
+        def join(self, timeout=5.0):
+            raise RuntimeError("boom")
+
+    app = _quiet_app(tmp_path)
+    app.proxy_generator = _Broken()
+    app.start()
+    app.shutdown()  # must not raise
+    assert app._broll_server is None
+
+
+def test_an_encode_in_flight_holds_the_shutdown_screen_and_the_keep_awake(tmp_path):
+    """One function feeds both guards (_start_keep_awake reads it), so a
+    machine will not idle-sleep mid-encode -- which is exactly when it
+    otherwise would, since the generator only runs while the user is away."""
+    app = _make_app(tmp_path)
+    app.lanes = []
+    app.proxy_generator = _FakeGenerator(reason="still making video proxies (3 left)")
+    assert app._shutdown_block_reason() == "still making video proxies (3 left)"
+
+    app.proxy_generator = _FakeGenerator(reason=None)
+    assert app._shutdown_block_reason() is None
+
+
+def test_a_sync_in_flight_still_wins_the_shutdown_message(tmp_path):
+    """Moving bytes outranks making proxies: the sentence an editor needs at
+    the shutdown screen is the one about footage that has not arrived."""
+    app = _make_app(tmp_path)
+    app.lanes = [_busy_lane()]
+    app.proxy_generator = _FakeGenerator(reason="still making video proxies")
+    reason = app._shutdown_block_reason()
+    assert reason and "still syncing" in reason
+
+
+def test_a_generator_whose_block_reason_raises_never_blocks_shutdown(tmp_path):
+    class _Broken(_FakeGenerator):
+        def block_reason(self):
+            raise RuntimeError("boom")
+
+    app = _make_app(tmp_path)
+    app.lanes = []
+    app.proxy_generator = _Broken()
+    assert app._shutdown_block_reason() is None
+
+
+def test_the_generator_is_not_consulted_while_the_drive_is_out(tmp_path):
+    app = _make_app(tmp_path)
+    app.lanes = []
+    app._root_absent = True
+    app.proxy_generator = _FakeGenerator(reason="still making video proxies")
+    assert app._shutdown_block_reason() is None
+
+
+def test_the_tray_accessors_pass_the_generators_answers_through(tmp_path):
+    app = _make_app(tmp_path)
+    fake = _FakeGenerator()
+    app.proxy_generator = fake
+    assert app.proxy_gap()["missing"] == 12
+    assert app.proxy_coverage()["missing"] == 12
+
+    app._tray_icon = _FakeTray()
+    app.generate_proxies_now()
+    assert fake.requested == 1
+    app.stop_proxy_generation()
+    assert fake.cancelled == 1
+    assert len(app._tray_icon.notifications) == 2
+
+
+def test_the_stale_sweep_reports_half_made_proxies_without_deleting_them(
+        tmp_path, caplog):
+    """Same refusal as the .ccsync-tmp sweep: nothing on the filesystem
+    proves some other process isn't writing that file this second."""
+    root = Path(_make_local_root(tmp_path))
+    proxy_dir = root / "Projects" / "2026" / "FF5" / "Nuclear" / "Proxy"
+    proxy_dir.mkdir(parents=True)
+    stale = proxy_dir / "A001.mp4.partial"
+    stale.write_bytes(b"half an encode")
+    old = time.time() - (24 * 3600)
+    os.utime(stale, (old, old))
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    with caplog.at_level(logging.WARNING, logger="ccsync.proxy_gen"):
+        app._sweep_stale_tmp_files()
+
+    assert stale.is_file()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "A001.mp4.partial" in messages
+    assert "NOT deleted" in messages

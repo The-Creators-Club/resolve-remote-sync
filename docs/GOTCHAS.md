@@ -411,9 +411,35 @@ The lesson generalises: if a test's outcome can depend on whether a real
 process is running or a real file exists, it needs a guard, not a fix at the
 call site.
 
-Also: 11 tests require a POSIX shell and **skip** under PowerShell. A count
-of "97 passed, 12 skipped" on Windows and "108 passed, 1 skipped" under Git
-Bash are the same run.
+Also: tests marked `needs_bash` require a POSIX shell and **skip** under
+PowerShell. A count of "97 passed, 12 skipped" on Windows and "108 passed, 1
+skipped" under Git Bash are the same run.
+
+### The same suite, three different answers, depending on where you launched it
+
+`server/tests` executes the *generated remote scripts* under a stub `sudo` and
+`chown` (`run_remote_script`). Measured on 2026-08-10, same code, same
+interpreter, same machine:
+
+| launched from | result |
+|---|---|
+| Git Bash | `214 passed, 1 skipped` — the truth |
+| PowerShell, no `bash` on PATH | `197 passed, 18 skipped` — the shell-level half never ran |
+| PowerShell, `bash` on PATH | **`5 failed`, 210 passed** — false failures |
+
+The middle row is the ordinary skip. The last one is the trap: the harness
+prepends its stub directory using `os.pathsep`, which is `;` on Windows, and
+the bash that inherits that Windows-style `PATH` resolves `chown` to MSYS's
+real one instead of the stub — so three swap-script tests and two music-deploy
+tests die on `chown: invalid user: 'root:root'` and look like real regressions
+in code that is fine.
+
+Fix is where pytest runs, not what is on `PATH`: launch it *inside* the shell
+(`bash -lc "cd server && …/python.exe -m pytest tests -q"`). `tools\ship.ps1`
+does exactly that in step 0, pinning **Git's** `bash.exe` (derived from
+`git.exe`, `Git\cmd` → `Git\bin`) rather than whatever `bash` resolves to —
+on a machine with WSL that is `System32\bash.exe`, whose filesystem view makes
+every path in the command wrong.
 
 ---
 

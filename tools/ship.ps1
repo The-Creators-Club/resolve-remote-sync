@@ -69,6 +69,16 @@ $ErrorActionPreference = "Continue"
 function Write-Step { param([string]$m) Write-Host "[ship] $m" }
 function Write-Fail { param([string]$m) Write-Host "[ship] FAILED: $m" -ForegroundColor Red }
 
+# E:\Projects\x -> /e/Projects/x, for the one command below that runs inside Git
+# bash. MSYS's own drive mapping, not WSL's /mnt/e -- see step 0 for why this
+# script pins Git's bash rather than whatever `bash` resolves to.
+function ConvertTo-BashPath {
+    param([string]$Path)
+    $p = $Path -replace '\\', '/'
+    if ($p -match '^([A-Za-z]):(.*)$') { return "/" + $Matches[1].ToLower() + $Matches[2] }
+    return $p
+}
+
 # curl.exe is kept (it is the only thing here that reliably reports a bare HTTP
 # status without downloading the body), but the fleet token NEVER rides on its
 # command line: a native process's argv is readable by any unprivileged process
@@ -156,10 +166,41 @@ if (-not $SkipTests) {
     Write-Step "--- step 0: server tests (they guard the deploy script step 1 runs) ---"
     $serverPy = Join-Path $RepoRoot "dashboard\.venv\Scripts\python.exe"
     if (Test-Path $serverPy) {
-        Push-Location (Join-Path $RepoRoot "server")
-        & $serverPy -m pytest tests -q
-        $testRc = $LASTEXITCODE
-        Pop-Location
+        # WHERE pytest runs decides whether half this suite means anything. The
+        # 18 tests that EXECUTE the generated remote scripts (every swap script,
+        # the ffmpeg unpack, its checksum gate) are `needs_bash`, and they behave
+        # three different ways (measured 2026-08-10):
+        #   pytest from PowerShell, no bash      -> 18 SKIP, silently
+        #   pytest from PowerShell, bash on PATH -> 5 FALSE FAILURES: the harness
+        #       prepends its stub dir with os.pathsep (';'), and the bash that
+        #       inherits that Windows-style PATH resolves `chown` to MSYS's real
+        #       one instead of the stub -> "chown: invalid user: 'root:root'"
+        #   pytest INSIDE a bash login shell     -> 214 pass, 1 skip. Correct.
+        # So invoke it through bash when there is one. Git's own bash, derived
+        # from git.exe (Git\cmd\git.exe -> Git\bin\bash.exe), NOT whatever `bash`
+        # resolves to on PATH: on a machine with WSL that is System32\bash.exe,
+        # whose filesystem view makes every path here wrong.
+        $bashExe = ""
+        $gitCmd = (Get-Command git -ErrorAction SilentlyContinue).Source
+        if ($gitCmd) {
+            $candidate = Join-Path (Split-Path -Parent (Split-Path -Parent $gitCmd)) "bin\bash.exe"
+            if (Test-Path $candidate) { $bashExe = $candidate }
+        }
+        if ($bashExe) {
+            $bashServer = ConvertTo-BashPath (Join-Path $RepoRoot "server")
+            $bashPy = ConvertTo-BashPath $serverPy
+            & $bashExe -lc "cd '$bashServer' && '$bashPy' -m pytest tests -q"
+            $testRc = $LASTEXITCODE
+        }
+        else {
+            # Not fatal, but the gate is now the string-assertion half only, and
+            # that must not read as a full pass.
+            Write-Host "[ship] WARNING: no Git bash found -- the tests that EXECUTE the generated remote scripts will SKIP, not pass" -ForegroundColor Yellow
+            Push-Location (Join-Path $RepoRoot "server")
+            & $serverPy -m pytest tests -q
+            $testRc = $LASTEXITCODE
+            Pop-Location
+        }
         if ($testRc -ne 0) {
             Write-Fail "server tests exited $testRc -- nothing has been deployed or published"
             exit 1

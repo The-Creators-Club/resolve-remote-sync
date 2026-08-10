@@ -82,7 +82,7 @@ puts the in-repo package first on sys.path:
 cd companion;   .venv\Scripts\python.exe -m pytest tests -q
 cd dashboard;   .venv\Scripts\python.exe -m pytest tests -q
 cd bench;       .venv\Scripts\python.exe -m pytest tests -q
-cd server;      ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # no venv of its own
+cd server;      ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # no venv of its own; RUN IT FROM GIT BASH (see below)
 cd onboarding;  python -m pytest tests -q                                  # system python
 cd broll\indexer; python -m pytest tests -q                                # system python
 cd broll\web;   E:\Projects\broll-platform\web\.venv\Scripts\python.exe -m pytest tests -q
@@ -92,6 +92,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMa
 
 `broll/web` still borrows the old standalone repo's venv (the in-repo copy
 has none yet); the dashboard venv also has its deps and can substitute.
+
+**Run `server/`'s suite from Git Bash, not PowerShell.** 18 of its tests
+execute the generated remote scripts under a stub `sudo`/`chown`, and where
+pytest is launched from decides what they mean (measured 2026-08-10): from Git
+Bash, 214 pass; from PowerShell with no `bash`, those 18 **skip silently**;
+from PowerShell with `bash` on PATH, **5 fail falsely** — the harness prepends
+its stub dir using `os.pathsep` (`;`), and a bash inheriting that Windows-style
+PATH resolves `chown` to MSYS's real one (`chown: invalid user: 'root:root'`).
+`tools\ship.cmd` handles this itself by invoking pytest through Git's bash.
 
 ## Building & shipping (existing commands — don't invent wrappers)
 

@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 log = logging.getLogger("ccsync.config")
 
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

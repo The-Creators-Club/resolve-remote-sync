@@ -67,6 +67,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMa
 `broll/web` still borrows the old standalone repo's venv (the in-repo copy
 has none yet); the dashboard venv also has its deps and can substitute.
 
+## Building & shipping (existing commands — don't invent wrappers)
+
+```powershell
+tools\release.ps1                                            # Windows companion: parity + tests + PyInstaller + manifest
+installer\build_editor_package.ps1 -RebuildExe -RebuildOnboard   # editor package (add -Publish -MakeCurrent to ship it)
+tools\ship.ps1                                               # the whole cycle: dashboard deploy + publish + local upgrade + drift check
+./tools/release_macos.sh [--publish --make-current]          # ON THE MAC only; the macOS channel goes stale silently otherwise
+```
+
 ## Conventions that matter here
 
 - **Comments explain constraints, history, and failure modes** — never what

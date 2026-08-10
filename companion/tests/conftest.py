@@ -61,14 +61,19 @@ def _isolate_ccsync_home(tmp_path, monkeypatch):
     yield
 
     # Close any file handler a test attached, so the temp dir can be removed
-    # and no handle survives into the next test.
-    ccsync_log = logging.getLogger("ccsync")
-    for handler in list(ccsync_log.handlers):
-        ccsync_log.removeHandler(handler)
-        try:
-            handler.close()
-        except Exception:
-            pass
+    # and no handle survives into the next test. "pystray" as well as
+    # "ccsync": setup_logging() attaches the same handlers to both (the tray
+    # backend's own records had nowhere to go in the windowed build), and a
+    # handler left on that logger would keep writing into a deleted tmp dir
+    # for the rest of the session.
+    for logger_name in ("ccsync", "pystray"):
+        logger = logging.getLogger(logger_name)
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
 
 
 @pytest.fixture(autouse=True)
@@ -141,6 +146,31 @@ def _single_instance_slot_is_free(monkeypatch):
 
     monkeypatch.setattr(app_mod, "acquire_single_instance", lambda: True)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_resolve_bridge_session():
+    """Start every test with a bridge that has never connected.
+
+    resolve_bridge records "has the Resolve bridge connected THIS SESSION?"
+    in module state (the tray and Copy diagnostics read it -- items 17/19),
+    and a process is one session, so without this a test that enumerates a
+    fake Resolve leaves every later test's tray snapshot carrying a
+    `Resolve: connected` line it never asked for. Same class of hazard as
+    _single_instance_slot_is_free above: process-global, so no tmp_path or
+    HOME redirection can isolate it.
+
+    Same for the watcher's poll cache (the fingerprint-gated skip of the
+    per-clip walk): it is module state keyed on a fake timeline's shape, and
+    two tests building the same fake would otherwise share an answer.
+    """
+    from ccsync_companion import resolve_bridge
+
+    resolve_bridge.reset_session_state()
+    resolve_bridge.reset_timeline_cache()
+    yield
+    resolve_bridge.reset_session_state()
+    resolve_bridge.reset_timeline_cache()
 
 
 @pytest.fixture

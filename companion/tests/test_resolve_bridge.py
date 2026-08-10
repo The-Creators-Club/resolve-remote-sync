@@ -5,11 +5,39 @@ requirements)."""
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 
 import pytest
 
 from ccsync_companion import resolve_bridge, resolve_prefs
+
+
+@pytest.fixture(autouse=True)
+def _no_python_home_leak():
+    """GUARD. This file must not leave PYTHONHOME/PYTHON3HOME set.
+
+    `_pin_frozen_python3_home()` SETS both in this very process, and
+    `monkeypatch.delenv(name, raising=False)` on a variable that was not
+    there records nothing to undo -- so the value the production code then
+    writes leaks into every later test in the session. A leaked PYTHONHOME
+    pointing at a pytest tmp dir makes ANY child interpreter fail to start:
+    it broke the MAC-12 watch-probe's real-subprocess tests (2026-08-05) and
+    test_consolidate's only escapes it because `consolidate` sorts before
+    `resolve_bridge` -- with pytest-randomly ordering the files, it is a
+    live flake.
+
+    Autouse, so it tears down AFTER the test's own monkeypatch has undone
+    what it can.
+    """
+    saved = {name: os.environ.get(name) for name in ("PYTHONHOME", "PYTHON3HOME")}
+    yield
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 @pytest.fixture
@@ -641,3 +669,353 @@ def test_an_inconclusive_probe_reports_the_running_case(monkeypatch, resolve_pro
     monkeypatch.setattr(resolve_prefs, "resolve_is_running", cannot_tell)
 
     assert resolve_bridge.describe_disconnection() == resolve_bridge.NO_SCRIPTING_MESSAGE
+
+
+# -- has the bridge connected THIS SESSION? --------------------------------
+#
+# The follow-up items 17 and 19 both asked for. Neither incident was visible
+# anywhere: the tray showed three healthy lanes and the log at the shipped
+# INFO level showed nothing at all, so a bridge that had never once connected
+# (MAC-10) looked exactly like one talking to a happy Resolve.
+
+
+# Every test here starts from a bridge that has never connected --
+# conftest's autouse _fresh_resolve_bridge_session sees to that, because the
+# state is module-level and one process is one session.
+
+
+def _connected_resolve():
+    return FakeResolve(FakeProjectManager(FakeProject(FakeTimeline({}))))
+
+
+def test_the_session_starts_out_never_polled():
+    state = resolve_bridge.session_state()
+    assert state["connected"] is None      # NOT False: "not checked yet"
+    assert state["ever_connected"] is False
+    assert state["reason"] == ""
+
+
+def test_a_successful_enumeration_records_a_connection(monkeypatch):
+    monkeypatch.setattr(resolve_bridge, "connect", _connected_resolve)
+    resolve_bridge.get_timeline_items()
+    assert resolve_bridge.session_state() == {
+        "connected": True, "ever_connected": True, "reason": ""}
+
+
+def test_a_bridge_that_has_never_connected_says_so(
+    monkeypatch, resolve_process
+):
+    """MAC-10 exactly: the modules path was wrong, so the bridge never
+    connected once in a session that ran for hours."""
+    resolve_process(False)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+
+    resolve_bridge.get_timeline_items()
+
+    state = resolve_bridge.session_state()
+    assert state["connected"] is False
+    assert state["ever_connected"] is False
+    assert state["reason"] == resolve_bridge.NOT_RUNNING_MESSAGE
+
+
+def test_ever_connected_survives_resolve_going_away(
+    monkeypatch, resolve_process
+):
+    """Connected and then gone is Resolve being closed (or item 19's script
+    server dying); never connected at all is a broken install. The tray says
+    different things about them, so the flag is sticky by design."""
+    monkeypatch.setattr(resolve_bridge, "connect", _connected_resolve)
+    resolve_bridge.get_timeline_items()
+
+    resolve_process(True)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+    resolve_bridge.get_timeline_items()
+
+    state = resolve_bridge.session_state()
+    assert state["connected"] is False
+    assert state["ever_connected"] is True
+    assert state["reason"] == resolve_bridge.NO_SCRIPTING_MESSAGE
+
+
+def test_no_project_open_still_counts_as_connected(monkeypatch):
+    """"no project open in Resolve" comes from a bridge that DID connect --
+    Resolve is there, it just has nothing to show us."""
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(None)))
+    result = resolve_bridge.get_timeline_items()
+    assert result["ok"] is False
+    assert resolve_bridge.session_state()["connected"] is True
+
+
+def test_the_media_pool_walk_records_the_session_too(monkeypatch):
+    """Both public enumerators share the one chokepoint, so tray → Scan whole
+    project keeps the answer current even if the watcher never runs."""
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(None)))
+    resolve_bridge.get_media_pool_items()
+    assert resolve_bridge.session_state()["ever_connected"] is True
+
+
+@pytest.mark.parametrize("message", [
+    resolve_bridge.NOT_RUNNING_MESSAGE, resolve_bridge.NO_SCRIPTING_MESSAGE])
+def test_is_disconnection_message_matches_the_two_no_connection_reasons(message):
+    assert resolve_bridge.is_disconnection_message(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    "", None, "no project open in Resolve", "no timeline open in Resolve",
+    resolve_bridge._SCRIPTING_ERROR_MESSAGE])
+def test_is_disconnection_message_ignores_a_connected_bridges_complaints(message):
+    assert resolve_bridge.is_disconnection_message(message) is False
+
+
+# -- the sweep must not starve the tray's message pump ----------------------
+#
+# Item 20. Every fusionscript call holds the GIL for its full native duration
+# and the timeline sweep makes three or four PER CLIP, so a big project meant
+# a 1-3 s GIL blackout every 3 s -- and pystray's win32 pump is a Python
+# window procedure, which cannot process the WM_RBUTTONUP that opens the tray
+# menu without the GIL. Right-click did nothing, or opened seconds late.
+
+
+class _RecordingTime:
+    """Stands in for resolve_bridge's `time`, recording sleeps.
+
+    Patching the real `time.sleep` would do it for every other thread in the
+    process too, for the duration of the test; delegating everything else
+    keeps _resolve_process_present's monotonic() honest.
+    """
+
+    def __init__(self) -> None:
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _timeline_of(n: int):
+    mpis = [FakeMediaPoolItem(rf"C:\Creators_Club\{i:03d}.mov", name=f"{i:03d}")
+            for i in range(n)]
+    timeline = FakeTimeline(
+        {"video": {1: [FakeTimelineItem(m) for m in mpis]}, "audio": {}}
+    )
+    return timeline, mpis
+
+
+def test_the_timeline_sweep_yields_the_gil_every_k_clips(monkeypatch):
+    n = 60
+    timeline, _mpis = _timeline_of(n)
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(FakeProject(timeline))))
+    clock = _RecordingTime()
+    monkeypatch.setattr(resolve_bridge, "time", clock)
+
+    result = resolve_bridge.get_timeline_items()
+
+    # ...and the results are exactly what they were without the yields.
+    assert result["ok"] is True
+    assert [item["file_path"] for item in result["items"]] == [
+        rf"C:\Creators_Club\{i:03d}.mov" for i in range(n)
+    ]
+    assert len(clock.sleeps) >= n // resolve_bridge._SWEEP_YIELD_EVERY
+    assert set(clock.sleeps) == {resolve_bridge._SWEEP_YIELD_SECONDS}
+
+
+def test_the_media_pool_walk_yields_across_the_whole_tree(monkeypatch):
+    """One counter for the walk, not one per bin -- 24 clips in each of four
+    bins must still yield, and a project of 25 single-clip bins must not
+    sweep 25 clips without ever reaching the count."""
+    n_bins, per_bin = 4, 24
+    bins = [
+        FakeFolder(clips=[FakeMediaPoolItem(rf"C:\CC\{b}-{i}.mov") for i in range(per_bin)],
+                   name=f"bin{b}")
+        for b in range(n_bins)
+    ]
+    root = FakeFolder(clips=[], subfolders=bins)
+    project = FakeProject(media_pool=FakeMediaPool(root))
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(project)))
+    clock = _RecordingTime()
+    monkeypatch.setattr(resolve_bridge, "time", clock)
+
+    result = resolve_bridge.get_media_pool_items()
+
+    total = n_bins * per_bin
+    assert len(result["items"]) == total
+    assert len(clock.sleeps) >= total // resolve_bridge._SWEEP_YIELD_EVERY
+
+
+# -- every Resolve entry point defers to an open tray menu ------------------
+
+
+@pytest.mark.parametrize("name", [
+    "get_timeline_items", "get_media_pool_items", "perform_insert",
+    # The three that did not, before item 20: a LUT refresh or a fix-all's
+    # ReplaceClip landing while the menu was open froze it exactly the way a
+    # poll used to.
+    "replace_clip", "refresh_lut_list", "link_proxy_media",
+])
+def test_every_resolve_entry_point_defers_while_the_tray_menu_is_open(monkeypatch, name):
+    waits: list[int] = []
+    monkeypatch.setattr(resolve_bridge.ui_state, "wait_while_menu_open",
+                        lambda *a, **kw: waits.append(1))
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(None)))
+    mpi = FakeMediaPoolItem(r"C:\Creators_Club\clip.mov")
+    calls = {
+        "get_timeline_items": lambda: resolve_bridge.get_timeline_items(),
+        "get_media_pool_items": lambda: resolve_bridge.get_media_pool_items(),
+        "perform_insert": lambda: resolve_bridge.perform_insert(r"C:\a.mov", 0, 10),
+        "replace_clip": lambda: resolve_bridge.replace_clip(mpi, r"C:\new.mov"),
+        "refresh_lut_list": lambda: resolve_bridge.refresh_lut_list(),
+        "link_proxy_media": lambda: resolve_bridge.link_proxy_media(mpi, r"C:\p.mov"),
+    }
+
+    calls[name]()
+
+    assert waits == [1]
+
+
+# -- the poll cache: don't walk a timeline that hasn't changed --------------
+
+
+class CountingMediaPoolItem(FakeMediaPoolItem):
+    """Records GetClipProperty calls -- the per-clip fusionscript call the
+    poll cache exists to avoid -- and can be relinked in place."""
+
+    def __init__(self, file_path: str, name: str = "clip"):
+        super().__init__(file_path, name)
+        self.property_reads = 0
+
+    def GetClipProperty(self):
+        self.property_reads += 1
+        return {"File Path": self._file_path}
+
+    def relink(self, file_path: str) -> None:
+        self._file_path = file_path
+
+
+def _counting_timeline(*paths):
+    mpis = [CountingMediaPoolItem(p) for p in paths]
+    timeline = FakeTimeline(
+        {"video": {1: [FakeTimelineItem(m) for m in mpis]}, "audio": {}}
+    )
+    return timeline, mpis
+
+
+def _reads(mpis) -> int:
+    return sum(m.property_reads for m in mpis)
+
+
+def test_an_unchanged_timeline_is_not_walked_a_second_time(monkeypatch):
+    timeline, mpis = _counting_timeline(r"C:\CC\a.mov", r"C:\CC\b.mov")
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(FakeProject(timeline))))
+
+    first = resolve_bridge.poll_timeline_items()
+    after_first = _reads(mpis)
+    second = resolve_bridge.poll_timeline_items()
+
+    assert after_first == 2                 # the full walk
+    assert _reads(mpis) == after_first      # ...and not one per-clip call since
+    assert second["ok"] is True
+    assert second["items"] == first["items"]
+    assert second["project_name"] == first["project_name"]
+    # A fresh list: the watcher and the fixer own what they are handed.
+    assert second["items"] is not first["items"]
+
+
+def test_a_changed_clip_count_is_walked_immediately(monkeypatch):
+    timeline, mpis = _counting_timeline(r"C:\CC\a.mov")
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(FakeProject(timeline))))
+    resolve_bridge.poll_timeline_items()
+
+    added = CountingMediaPoolItem(r"C:\CC\b.mov")
+    timeline._tracks["video"][1].append(FakeTimelineItem(added))
+
+    result = resolve_bridge.poll_timeline_items()
+    assert [item["file_path"] for item in result["items"]] == [
+        r"C:\CC\a.mov", r"C:\CC\b.mov"]
+
+
+def test_an_in_place_relink_is_caught_by_the_safety_valve(monkeypatch):
+    """The reason the cache cannot be trusted indefinitely: a relink changes
+    no name and no count, and the watcher feeds the popup fixer."""
+    timeline, mpis = _counting_timeline(r"F:\dead\a.mov")
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(FakeProject(timeline))))
+    resolve_bridge.poll_timeline_items()          # the full walk
+    mpis[0].relink(r"P:\Projects\2026\a.mov")
+
+    cached = [
+        resolve_bridge.poll_timeline_items()["items"][0]["file_path"]
+        for _ in range(resolve_bridge._FULL_WALK_EVERY_POLLS - 1)
+    ]
+    assert set(cached) == {r"F:\dead\a.mov"}      # stale, by design
+
+    valve = resolve_bridge.poll_timeline_items()
+    assert valve["items"][0]["file_path"] == r"P:\Projects\2026\a.mov"
+
+
+def test_a_disconnection_is_never_masked_by_the_cache(monkeypatch, resolve_process):
+    timeline, _mpis = _counting_timeline(r"C:\CC\a.mov")
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(FakeProject(timeline))))
+    assert resolve_bridge.poll_timeline_items()["ok"] is True
+
+    resolve_process(True)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+
+    result = resolve_bridge.poll_timeline_items()
+    assert result["ok"] is False
+    assert result["message"] == resolve_bridge.NO_SCRIPTING_MESSAGE
+    assert result["items"] == []
+
+
+def test_a_closed_timeline_is_never_masked_by_the_cache(monkeypatch):
+    """Same rule one layer in: the fingerprint is gathered from the live
+    project, so "no timeline open" reaches the caller as itself."""
+    timeline, _mpis = _counting_timeline(r"C:\CC\a.mov")
+    project = FakeProject(timeline)
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(project)))
+    assert resolve_bridge.poll_timeline_items()["ok"] is True
+
+    project._timeline = None
+    result = resolve_bridge.poll_timeline_items()
+    assert result["ok"] is False
+    assert "no timeline" in result["message"]
+    assert result["items"] == []
+
+
+def test_the_scan_and_fixer_path_never_sees_the_cache(monkeypatch):
+    """app.scan_whole_project and the fixer act on what they are shown, so
+    the uncached entry point walks every time, however recently the watcher
+    polled."""
+    timeline, mpis = _counting_timeline(r"F:\dead\a.mov")
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(FakeProject(timeline))))
+    resolve_bridge.poll_timeline_items()
+    mpis[0].relink(r"P:\Projects\2026\a.mov")
+    before = _reads(mpis)
+
+    result = resolve_bridge.get_timeline_items()
+
+    assert result["items"][0]["file_path"] == r"P:\Projects\2026\a.mov"
+    assert _reads(mpis) == before + 1
+
+
+def test_poll_timeline_items_is_the_only_caller_that_arms_the_cache(monkeypatch):
+    seen: list[bool] = []
+    monkeypatch.setattr(resolve_bridge, "_get_timeline_items_locked",
+                        lambda allow_cached=False: seen.append(allow_cached) or
+                        {"ok": True, "message": "", "items": [], "project_name": ""})
+
+    resolve_bridge.poll_timeline_items()
+    resolve_bridge.get_timeline_items()
+
+    assert seen == [True, False]

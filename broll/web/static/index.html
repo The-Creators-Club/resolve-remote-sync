@@ -135,7 +135,9 @@
     <div id="shares-list" class="shares-list"></div>
     <p class="muted small">
       Mount paths (which local drive/volume each share resolves to) are configured
-      per-editor in the companion app's <code>~/.broll-companion.json</code>, not here.
+      per-editor in <code>~/.broll-companion.json</code> on your own machine, not here.
+      The <code>broll</code> share needs no entry: your CC Sync companion points it at
+      the B-roll Archive in your synced tree.
     </p>
 
     <h3>Companion app</h3>
@@ -145,10 +147,11 @@
       <button id="companion-recheck" class="text-btn">recheck</button>
     </div>
     <p class="muted small">
-      The companion app runs locally on <code>127.0.0.1:8899</code> and drives DaVinci
-      Resolve for "Send to Resolve". If it isn't running, ask your indexer/companion
-      maintainer for the installer (see the <code>companion/</code> component of this
-      repo).
+      "Send to Resolve" is built into the CC Sync companion &mdash; the tray app you
+      already run. It listens on <code>127.0.0.1:8899</code> and drives DaVinci Resolve
+      from there. If this says it isn't running, start the CC Sync companion (and if you
+      still have the old separate BRoll Companion in your tray, quit it: it's retired and
+      it holds this port).
     </p>
   </div>
 </div>

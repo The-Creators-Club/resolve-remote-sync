@@ -12,9 +12,14 @@ contracts in this file. **Do not change a contract without updating this file.**
 - `web/`       — FastAPI app + single-page frontend. Owns the SQLite database. Serves
   search API, proxy media (HTTP range), and ingest endpoints. Deployed later as a Docker
   container on a TrueNAS server (not live yet); for now runs locally.
-- `companion/` — Small local agent each editor runs. Listens on 127.0.0.1:8899, receives
-  insert requests from the web page's JS, translates canonical paths to local mount
-  paths, drives DaVinci Resolve Studio via its Python scripting API.
+- ~~`companion/`~~ — Small local agent each editor runs. Listens on 127.0.0.1:8899,
+  receives insert requests from the web page's JS, translates canonical paths to local
+  mount paths, drives DaVinci Resolve Studio via its Python scripting API. **No longer a
+  directory here.** It was absorbed into the CC Sync companion on 2026-08-10 — the fleet
+  was shipping two tray apps to every editor and the small one was the one nobody
+  upgraded. It now lives at `companion/src/ccsync_companion/broll_server.py` (with
+  `perform_insert` in that package's `resolve_bridge.py`, which was already a fork of
+  this one's). The contract below is unchanged and still authoritative.
 
 ## Path model (load-bearing)
 
@@ -127,6 +132,10 @@ Base: `/api`. JSON. No auth in v1 (Tailscale-only deployment).
 
 ## Companion API contract
 
+Still authoritative; implemented since 2026-08-10 by
+`companion/src/ccsync_companion/broll_server.py` (the CC Sync companion), not by a
+`companion/` directory in this component tree.
+
 `http://127.0.0.1:8899`, CORS: `Access-Control-Allow-Origin: *` (binds loopback only).
 
 - `GET  /status` → `{ok, resolve_connected, mounts: {share: local_root}, version}`
@@ -141,6 +150,10 @@ Base: `/api`. JSON. No auth in v1 (Tailscale-only deployment).
   (no mount, file missing, Resolve not running, no project open, no timeline).
 
 Config file: `~/.broll-companion.json` → `{"server_url": "...", "mounts": {"broll": "B:/"}}`.
+Unchanged by the move — editors already have this file. The `broll` share alone no longer
+needs an entry: the CC Sync companion knows where the tree is and defaults it to
+`<local_root>/Assets/B-roll Archive`; an explicit entry still wins. Other shares are not
+derivable and still need one line each.
 On macOS, auto-detect `/Volumes/<share>` and `-1`/`-2` collision suffixes at request time.
 
 ## Indexer CLI contract
@@ -195,8 +208,9 @@ haiku→claude-haiku-4-5-20251001, sonnet→claude-sonnet-5, fable→claude-fabl
 ## Conventions
 
 - Python 3.12, type hints, `pyproject.toml` per component, minimal deps
-  (indexer: xxhash, pyyaml, requests; web: fastapi, uvicorn; companion: stdlib http.server
-  or flask + the Resolve scripting module loaded from its standard install path).
+  (indexer: xxhash, pyyaml, requests; web: fastapi, uvicorn; the companion half, now in
+  `companion/`: stdlib http.server only — it ships in a PyInstaller bundle — plus the
+  Resolve scripting module loaded from its standard install path).
 - Frontend: single-page, no build step — one `index.html` + `app.js` + `style.css`,
   vanilla JS. Dark, dense, keyboard-driven (J/K/L transport, I/O to set in/out points,
   Enter to send to Resolve). Player uses the proxy; hit markers on the seek bar.

@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import broll_server as broll_server_mod
 from . import config as config_mod
 from . import luts as luts_mod
 from . import paths as paths_mod
@@ -75,6 +76,48 @@ def setup_logging(cfg: dict[str, Any]) -> None:
     for handler in handlers:
         handler.setFormatter(fmt)
         root.addHandler(handler)
+
+    # pystray logs under its own "pystray" root, which had no handler at all:
+    # in the windowed build sys.stderr is None, so logging's last-resort
+    # handler had nowhere to write either. Everything the tray backend says
+    # about itself -- "An error occurred in the main loop" included -- was
+    # therefore invisible on exactly the machines where the tray misbehaves.
+    pystray_log = logging.getLogger("pystray")
+    pystray_log.setLevel(level)
+    pystray_log.handlers.clear()
+    for handler in handlers:
+        pystray_log.addHandler(handler)
+
+
+# -- the shutdown backstop (MAC-11's follow-up) ---------------------------
+#
+# ui_dispatch.stop() now destroys the dialog the UI thread is parked in, and
+# that is the FIX. This is the answer to "and what if that doesn't work
+# either" -- a Tk interpreter too far gone to service a destroy, an AppKit
+# modal session nothing of ours owns. shutdown() has by then stopped every
+# lane, the reporter and the manifest cache and joined the Resolve-touching
+# threads, and the self-upgrade does its binary swap BEFORE it asks for a
+# shutdown, so there is nothing left to flush and nothing left to corrupt --
+# the only thing still owed is `serve()` returning. If it has not returned
+# within this grace, exiting hard beats the alternative, which is measured:
+# a process alive forever holding the single-instance slot, so every
+# relaunch exits with "another ccsync-companion is already running" and the
+# machine has no companion until someone finds a terminal (2026-08-05).
+UI_SHUTDOWN_GRACE_SECONDS = 10.0
+
+
+def _hard_exit(code: int) -> None:
+    """os._exit, via a seam the tests can hold. Flushes the log first: _exit
+    skips atexit and every handler's buffer, and the line explaining why the
+    process vanished is the whole point of the exercise."""
+    try:
+        for handler in list(logging.getLogger("ccsync").handlers):
+            try:
+                handler.flush()
+            except Exception:
+                pass
+    finally:
+        os._exit(code)
 
 
 # -- single-instance guard (AUDIT_2 CORE-M7) ------------------------------
@@ -483,6 +526,11 @@ class CompanionApp:
         # and the guard is free to re-fire (absent -> misplaced) within one.
         self._root_absent_announced = False
         self._root_misplaced_announced = False
+        # macOS took the tree away from us, rather than the editor unplugging
+        # it: the ad-hoc-signed companion loses its Full Disk Access grant on
+        # every self-upgrade (item 16). Checked once after an upgrade, read by
+        # diagnostics.
+        self._macos_access_blocked = False
         # The "local_root does not exist" problem demoted out of
         # config_problems, kept for diagnostics.
         self._root_demoted_problem: Optional[str] = None
@@ -559,6 +607,12 @@ class CompanionApp:
         self._media_tree_lock = threading.Lock()
         self._media_tree_stop_event = threading.Event()
         self._media_tree_thread: Optional[threading.Thread] = None
+
+        # The b-roll web UI's "Send to Resolve" loopback server
+        # (broll_server.py), absorbed from the standalone broll-companion.
+        # None whenever it is switched off or could not take its port --
+        # which must never be more than a missing convenience.
+        self._broll_server: Any = None
 
         # Shared LUT library (luts.py): the link manager plus the cached
         # stray scan the tray reads. Built here so stray_lut_count() is safe
@@ -696,6 +750,11 @@ class CompanionApp:
             # by RcloneTuning.from_cfg -- without this the lane silently
             # keeps its own defaults and none of those keys do anything.
             cfg=cfg,
+            # Lane A refusing to start its file watcher because the sync
+            # drive's filesystem has stopped answering opens (MAC-12) is a
+            # capability the editor loses, so it must reach the tray and not
+            # only the log.
+            on_watch_blocked=self._notify_watch_state,
         )
         lane_b = RcloneLane(
             direction=DIRECTION_DOWN,
@@ -872,6 +931,42 @@ class CompanionApp:
             self._notify_tray("Drive reconnected — sync resumed.", "ccsync-companion")
         except Exception:
             log.exception("root guard: could not resume after the drive came back")
+
+    def _check_macos_volume_access(self) -> None:
+        """Did this upgrade cost us macOS's permission to read the tree?
+
+        The companion is ad-hoc signed, so as far as TCC is concerned every
+        build is a different program and the Full Disk Access grant does not
+        survive a self-upgrade (item 16). On a Mac whose root is an external
+        volume the tree then simply stops being readable, and nothing in the
+        product names the cause -- the drive is plugged in, the folder is
+        right there, and every lane reports something that is not the truth.
+        Signing with a stable identity is the real fix; this is the fallback
+        the bug asks for until we can: say the sentence, name the setting.
+
+        Called once, off the startup path, on a timer thread -- one listdir,
+        only on darwin, only after an upgrade. A no-op everywhere else.
+        """
+        try:
+            if not root_guard_mod.access_is_blocked(
+                str(self.config.get("local_root", "") or "")
+            ):
+                return
+            self._macos_access_blocked = True
+            log.error(
+                "macOS is blocking access to %s. CCSync is ad-hoc signed, so this "
+                "update looks like a different program to macOS and its Full Disk "
+                "Access grant did not carry over -- re-grant it in System Settings -> "
+                "Privacy & Security -> Full Disk Access. Nothing has been deleted: "
+                "the tree is unreadable, not gone.",
+                self.config.get("local_root"),
+            )
+            self._notify_tray(
+                "macOS is blocking access to the sync volume after the update. "
+                "Re-grant CCSync Full Disk Access in System Settings → Privacy & "
+                "Security → Full Disk Access.", "ccsync-companion")
+        except Exception:
+            log.exception("could not check whether macOS is blocking the sync volume")
 
     def _warn_root_misplaced(self) -> None:
         """The one case the editor MUST act on: the drive is mounted, but at
@@ -1077,6 +1172,17 @@ class CompanionApp:
             f"out of there.",
             "ccsync-companion: files moved to .ccsync-trash",
         )
+
+    def _notify_watch_state(self, message: str) -> None:
+        """Lane A's file watcher went away (or came back) because of the sync
+        drive itself -- see RcloneLane._watch_root_answers (MAC-12).
+
+        A toast, not a dialog: nothing here is a decision the editor makes in
+        a window, and the one action that fixes it (replug the drive) is in
+        the message. The lane latches this so a wedged drive costs one toast,
+        not one per re-check.
+        """
+        self._notify_tray(message, "ccsync-companion")
 
     def _handle_mapping_warning(self, item: dict[str, Any]) -> None:
         path = item.get("file_path", "")
@@ -2430,12 +2536,16 @@ class CompanionApp:
             f"{self._root_state}"
             + (" (root-absent problem demoted from config: "
                f"{self._root_demoted_problem})" if self._root_demoted_problem else "")
+            + (" -- macOS is BLOCKING access to it (Full Disk Access lost in the "
+               "last update; re-grant it in System Settings)"
+               if self._macos_access_blocked else "")
         ))
         section("remote", lambda: f"{self.config.get('remote')}:{self.config.get('remote_root')}")
         section("dashboard_url", lambda: self.config.get("dashboard_url"))
         section("rclone available", lambda: _rclone_lane.rclone_available(
             str(self.config.get("rclone_path", "rclone"))))
         section("resolve project", lambda: getattr(self.watcher, "last_resolve_project", None))
+        section("resolve bridge", self._resolve_bridge_text)
 
         out.append("")
         out.append("-- config problems (these STOP syncing) --")
@@ -2489,6 +2599,31 @@ class CompanionApp:
         out.append(f"-- last 40 log lines ({self.log_path}) --")
         out.extend(f"  {line}" for line in self._diagnostic_log_tail(40))
         return "\n".join(out)
+
+    def resolve_bridge_state(self) -> dict[str, Any]:
+        """Cached "has the Resolve bridge connected this session, and is it up
+        now?" for the tray. A plain dict read -- nothing here talks to
+        Resolve, because the tray's render path may not hold the GIL through
+        a fusionscript call (see resolve_bridge.session_state)."""
+        try:
+            return resolve_bridge.session_state()
+        except Exception:
+            log.debug("resolve bridge session state unavailable", exc_info=True)
+            return {"connected": None, "ever_connected": False, "reason": ""}
+
+    def _resolve_bridge_text(self) -> str:
+        """The diagnostics line for the same question. Two incidents (MAC-10,
+        item 19) turned entirely on it and the bundle an admin was sent could
+        not answer it."""
+        state = self.resolve_bridge_state()
+        ever = "yes" if state.get("ever_connected") else "NO"
+        connected = state.get("connected")
+        if connected is None:
+            return f"never polled this session (has connected this session: {ever})"
+        if connected:
+            return f"connected (has connected this session: {ever})"
+        reason = str(state.get("reason") or "no reason recorded")
+        return f"NOT CONNECTED -- {reason} (has connected this session: {ever})"
 
     def _token_expiry_text(self) -> str:
         from .identity import parse_token
@@ -2762,6 +2897,22 @@ class CompanionApp:
         self._start_keep_awake()
         self._start_lut_link()
         self._start_root_guard()
+        self._start_broll_server()
+
+    def _start_broll_server(self) -> None:
+        """Serve the b-roll web UI's "Send to Resolve" button.
+
+        LAST in start(), and behind its own try: it is a convenience endpoint
+        for one button in a web page, and everything above it is what moves
+        the footage. broll_server.start() already swallows a failed bind
+        (a stale standalone broll-companion holding 8899 is the expected
+        cause and it says so in the log) -- this catch is for the rest.
+        """
+        try:
+            self._broll_server = broll_server_mod.start(self.config)
+        except Exception:
+            log.exception("failed to start the b-roll Send-to-Resolve server")
+            self._broll_server = None
 
     def _start_lut_link(self) -> None:
         """Keep Resolve's LUT directory pointed at the synced LUT library.
@@ -3061,6 +3212,12 @@ class CompanionApp:
             log.exception("failed to stop manifest cache")
         self._media_tree_stop_event.set()
         self._identity_stop_event.set()
+        # Releases port 8899 before the process goes: the self-upgrade
+        # relaunches within seconds, and a socket still held by the outgoing
+        # process is exactly the bind failure the new one would report as a
+        # stale standalone companion.
+        broll_server_mod.stop(self._broll_server)
+        self._broll_server = None
         # Join both Resolve-touching threads (bounded). A self-upgrade used
         # to exit the process while get_media_pool_items() was inside the
         # fusionscript C extension (AUDIT_2 §2-low). Bounded so a wedged
@@ -3086,6 +3243,46 @@ class CompanionApp:
             ui_dispatch.stop()
         except Exception:
             log.exception("shutdown: failed to stop the UI dispatcher")
+        self._arm_ui_shutdown_backstop()
+
+    def _arm_ui_shutdown_backstop(self) -> None:
+        """If the UI thread is STILL in serve() a grace period from now, end
+        the process rather than leaving it alive with nothing running.
+
+        Only ever arms on macOS (there is no dispatcher anywhere else), and
+        only while serve() is actually running -- everything else exits
+        through run()'s finally on its own. Daemon timer, so a normal exit
+        takes it with us and nothing is delayed by it.
+        """
+        try:
+            dispatcher = ui_dispatch.active()
+            # getattr, not attribute access: this is a last-resort exit, and
+            # a dispatcher shape it does not recognise must make it stand
+            # down quietly rather than raise inside a SIGTERM handler.
+            if dispatcher is None or not getattr(dispatcher, "serving", False):
+                return
+            timer = threading.Timer(UI_SHUTDOWN_GRACE_SECONDS, self._hard_exit_if_ui_wedged)
+            timer.daemon = True
+            timer.start()
+        except Exception:
+            log.exception("shutdown: could not arm the UI shutdown backstop")
+
+    def _hard_exit_if_ui_wedged(self) -> None:
+        dispatcher = ui_dispatch.active()
+        if dispatcher is None or not getattr(dispatcher, "serving", False):
+            # The mainloop returned -- run()'s finally is doing the rest.
+            return
+        windows = ", ".join(ui_dispatch.window_label(w)
+                            for w in getattr(dispatcher, "open_dialogs", [])) or "none"
+        log.error(
+            "shutdown: the UI thread is still inside its event loop %.0fs after "
+            "everything else stopped (windows still open: %s). Nothing is left to "
+            "flush -- lanes, reporter and manifest cache are all stopped -- so this "
+            "process is exiting hard rather than sitting here holding the "
+            "single-instance slot against the next launch.",
+            UI_SHUTDOWN_GRACE_SECONDS, windows,
+        )
+        _hard_exit(1)
 
     def run(self) -> None:
         try:
@@ -3196,6 +3393,14 @@ class CompanionApp:
                 ))
                 timer.daemon = True
                 timer.start()
+                # ...and on macOS, did the update cost us the Full Disk Access
+                # grant the tree needs? (item 16: ad-hoc signing means every
+                # build is a new program to TCC.) Same delay, same reason --
+                # the tray icon has only just started -- and off the startup
+                # thread because it reads the disk.
+                access_timer = threading.Timer(3.0, self._check_macos_volume_access)
+                access_timer.daemon = True
+                access_timer.start()
 
             # Only NOW is the rollback copy expendable: the new build has
             # constructed itself, validated config, started its lanes and put

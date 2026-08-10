@@ -8,11 +8,12 @@ We lazy-import DaVinciResolveScript and lazy-connect (scriptapp("Resolve"))
 on every call rather than caching a connection, since Resolve may not be
 running yet, may be restarted, etc.
 
-Forked near-verbatim from E:\\Projects\\broll-platform\\companion\\src\\broll_companion\\resolve_bridge.py
-(env bootstrap + never-raise connect + _norm_path) — see that module's
-docstring for the same rationale. Everything below `_norm_path` is new:
-timeline-item enumeration + ReplaceClip-based relinking for the watcher and
-fixer.
+Forked near-verbatim from the b-roll platform's standalone companion (env
+bootstrap + never-raise connect + _norm_path). That companion has since been
+absorbed into this one and retired (2026-08-10), so this file is now the only
+copy — its last unique function, perform_insert, is at the bottom. Everything
+between `_norm_path` and there is this app's own: timeline-item enumeration +
+ReplaceClip-based relinking for the watcher and fixer.
 """
 
 from __future__ import annotations
@@ -278,12 +279,91 @@ def describe_disconnection() -> str:
     return NO_SCRIPTING_MESSAGE if _resolve_process_present() else NOT_RUNNING_MESSAGE
 
 
+DISCONNECTION_MESSAGES = (NOT_RUNNING_MESSAGE, NO_SCRIPTING_MESSAGE)
+
+
+def is_disconnection_message(message: Any) -> bool:
+    """Does this result message mean "no connection at all"?
+
+    Every OTHER unhappy answer a public enumerator returns ("no project open
+    in Resolve", "no timeline open in Resolve", _SCRIPTING_ERROR_MESSAGE)
+    comes from a bridge that DID connect -- Resolve is there, it just has
+    nothing to show us. The watcher's transition logging and the tray's
+    session line both need that distinction and neither should have to know
+    which strings this module uses to draw it.
+    """
+    return str(message or "") in DISCONNECTION_MESSAGES
+
+
 def _explain_disconnection(result: dict[str, Any]) -> dict[str, Any]:
-    """Swap the _NOT_CONNECTED sentinel for the real reason. Must be called
-    with _API_LOCK released."""
+    """Swap the _NOT_CONNECTED sentinel for the real reason, and record what
+    the bridge's connection state turned out to be. Must be called with
+    _API_LOCK released."""
     if result.get("message") == _NOT_CONNECTED:
         result["message"] = describe_disconnection()
+        note_connection(False, result["message"])
+    else:
+        # Past connect(), whatever else went wrong: the bridge is up.
+        note_connection(True)
     return result
+
+
+# -- has the bridge connected THIS SESSION? ---------------------------------
+#
+# The second follow-up of items 17 and 19, and the reason both cost hours:
+# nothing anywhere said the bridge was dead. The tray showed three healthy
+# lanes, the log at the shipped INFO level showed nothing at all, and the
+# only way to find out was to probe the scripting API by hand.
+#
+# So the outcome of every enumeration is recorded here, at the one chokepoint
+# both public enumerators already share (_explain_disconnection above), and
+# the tray and Copy diagnostics READ it. Deliberately a cached fact and not a
+# probe: a fusionscript call holds the GIL for its full native duration, and
+# the tray render path is the last place that may pay for one.
+
+_SESSION_LOCK = threading.Lock()
+# None until something has actually asked Resolve -- "not connected" and "not
+# checked yet" are different sentences and only one of them is alarming.
+_session_connected: Optional[bool] = None
+_session_ever_connected = False
+_session_reason = ""
+
+
+def note_connection(connected: bool, reason: str = "") -> None:
+    """Record the bridge's connection state. Cheap, and never raises."""
+    global _session_connected, _session_ever_connected, _session_reason
+    with _SESSION_LOCK:
+        _session_connected = bool(connected)
+        _session_reason = "" if connected else str(reason or "")
+        if connected:
+            _session_ever_connected = True
+
+
+def session_state() -> dict[str, Any]:
+    """{"connected": True/False/None, "ever_connected": bool, "reason": str}.
+
+    `connected` is None before the first enumeration of the process.
+    `ever_connected` is the one an admin actually wants: a bridge that has
+    never once connected this session is a broken install (MAC-10's wrong
+    modules path), while one that connected and then went is Resolve being
+    closed, restarted, or its script server dying (item 19).
+    """
+    with _SESSION_LOCK:
+        return {
+            "connected": _session_connected,
+            "ever_connected": _session_ever_connected,
+            "reason": _session_reason,
+        }
+
+
+def reset_session_state() -> None:
+    """Forget everything recorded above -- for tests only; the companion has
+    exactly one session and never calls this."""
+    global _session_connected, _session_ever_connected, _session_reason
+    with _SESSION_LOCK:
+        _session_connected = None
+        _session_ever_connected = False
+        _session_reason = ""
 
 
 def _norm_path(p: str) -> str:
@@ -325,7 +405,50 @@ def _safe_project_name(project) -> str:
         return ""
 
 
-def get_timeline_items() -> dict[str, Any]:
+def _safe_attr_str(obj, method_name: str) -> str:
+    """`obj.<method_name>()` as a string, or "" for anything that goes wrong.
+
+    Used for the timeline identity below: GetUniqueId exists on current API
+    builds and not on older ones, and a missing method must cost a weaker
+    fingerprint, never an exception on the watcher's path.
+    """
+    method = getattr(obj, method_name, None)
+    if method is None:
+        return ""
+    try:
+        return str(method() or "")
+    except Exception:
+        return ""
+
+
+# -- handing the GIL back mid-sweep ----------------------------------------
+#
+# Every fusionscript call holds the GIL for its full native duration, and the
+# timeline sweep makes three or four of them PER CLIP. On a large project
+# that is a 1-3 s GIL blackout every poll_interval (3 s) -- and pystray's
+# win32 message pump is a Python window procedure, so it cannot process the
+# WM_RBUTTONUP that opens the tray menu until the sweep lets go. The menu
+# then opens seconds late, or (the click having been consumed elsewhere) not
+# at all. ui_state.wait_while_menu_open() cannot help here: it defers Resolve
+# calls while the menu is ALREADY open, so it protects the open menu's
+# highlight and not the click trying to open it.
+#
+# A real sleep -- not a no-op, not a lock release -- is what drops the GIL and
+# lets a runnable thread be scheduled, so the pump is never more than
+# _SWEEP_YIELD_EVERY clips away from a slot. The cost is bounded and tiny: at
+# 2 ms per 25 clips, a 1000-clip timeline pays 80 ms per sweep.
+_SWEEP_YIELD_EVERY = 25
+_SWEEP_YIELD_SECONDS = 0.002
+
+
+def _sweep_yield(counter: list[int]) -> None:
+    """Count one swept clip, and yield the GIL every _SWEEP_YIELD_EVERY."""
+    counter[0] += 1
+    if counter[0] % _SWEEP_YIELD_EVERY == 0:
+        time.sleep(_SWEEP_YIELD_SECONDS)
+
+
+def get_timeline_items(allow_cached: bool = False) -> dict[str, Any]:
     """Enumerate every video+audio timeline item on the current timeline.
 
     Returns {"ok": bool, "message": str, "items": [...], "project_name": str}.
@@ -347,6 +470,10 @@ def get_timeline_items() -> dict[str, Any]:
 
     Items with no media pool item (generators, titles, adjustment clips) or
     an empty "File Path" are skipped entirely — per SPEC.md's watcher spec.
+
+    `allow_cached` arms the poll cache described below; only the watcher's
+    poll_timeline_items() passes it. Every other caller (and the default)
+    gets a full walk of the live timeline.
     """
     # Defer while the tray menu is open: a fusionscript call holds the GIL
     # for its full native duration, and the open menu's highlight repaints
@@ -354,11 +481,111 @@ def get_timeline_items() -> dict[str, Any]:
     # poll here froze the hover highlight for a second-plus (2026-07-26).
     ui_state.wait_while_menu_open()
     with _API_LOCK:
-        result = _get_timeline_items_locked()
+        result = _get_timeline_items_locked(allow_cached=allow_cached)
     return _explain_disconnection(result)
 
 
-def _get_timeline_items_locked() -> dict[str, Any]:
+def poll_timeline_items() -> dict[str, Any]:
+    """get_timeline_items() with the poll cache armed — the WATCHER'S entry
+    point and nobody else's.
+
+    Kept as its own named function rather than a default: `allow_cached` must
+    never be reachable by accident from tray → Scan whole project or the
+    fixer, which act on what they are shown and must therefore always see the
+    live timeline.
+    """
+    return get_timeline_items(allow_cached=True)
+
+
+# -- the watcher's poll cache ----------------------------------------------
+#
+# The other half of the GIL-blackout fix above: most polls have nothing to
+# find. The editor is watching a cut back, not re-editing it, and three
+# seconds later the timeline is the same timeline with the same clips on it.
+# So the sweep first gathers a CHEAP fingerprint -- timeline name + unique id
+# + one GetItemListInTrack per track, a handful of calls rather than four per
+# clip -- and skips the per-clip walk entirely when it matches.
+#
+# SAFETY VALVE: a full walk at least every _FULL_WALK_EVERY_POLLS polls (~30 s
+# at the default 3 s interval). A relink (or any other in-place File Path
+# change) alters no name and no count, and the watcher feeds the popup fixer,
+# which must not go blind to it.
+#
+# State is written and read only under _API_LOCK, by the two functions below.
+_FULL_WALK_EVERY_POLLS = 10
+
+_timeline_cache_fingerprint: Optional[tuple] = None
+_timeline_cache_result: Optional[dict[str, Any]] = None
+_polls_since_full_walk = 0
+
+
+def reset_timeline_cache() -> None:
+    """Forget the last poll — for tests only; the companion polls one
+    timeline for its whole life and never calls this."""
+    global _timeline_cache_fingerprint, _timeline_cache_result, _polls_since_full_walk
+    with _API_LOCK:
+        _timeline_cache_fingerprint = None
+        _timeline_cache_result = None
+        _polls_since_full_walk = 0
+
+
+def _cached_timeline_result(fingerprint: tuple) -> Optional[dict[str, Any]]:
+    """The previous poll's answer if this poll is provably the same one, else
+    None meaning "walk it properly". Caller holds _API_LOCK."""
+    global _polls_since_full_walk
+    if _timeline_cache_result is None or fingerprint != _timeline_cache_fingerprint:
+        return None
+    if _polls_since_full_walk >= _FULL_WALK_EVERY_POLLS - 1:
+        return None  # safety valve: walk it anyway
+    _polls_since_full_walk += 1
+    # A fresh outer dict and list: the watcher and the fixer own what they are
+    # handed, and a caller appending to `items` must not edit the cache.
+    return {**_timeline_cache_result, "items": list(_timeline_cache_result["items"])}
+
+
+def _remember_timeline_result(fingerprint: tuple, result: dict[str, Any]) -> None:
+    """Caller holds _API_LOCK."""
+    global _timeline_cache_fingerprint, _timeline_cache_result, _polls_since_full_walk
+    _timeline_cache_fingerprint = fingerprint
+    _timeline_cache_result = {**result, "items": list(result.get("items") or [])}
+    _polls_since_full_walk = 0
+
+
+def _timeline_tracks(timeline) -> list[tuple[str, int, list]]:
+    """(track_type, track_index, items) for every track, in sweep order.
+
+    One GetItemListInTrack per track -- the calls the sweep would make
+    anyway, gathered once so the fingerprint below and the per-clip walk
+    share them.
+    """
+    tracks: list[tuple[str, int, list]] = []
+    for track_type in ("video", "audio"):
+        try:
+            track_count = timeline.GetTrackCount(track_type) or 0
+        except Exception:
+            track_count = 0
+        for track_index in range(1, track_count + 1):
+            try:
+                track_items = timeline.GetItemListInTrack(track_type, track_index) or []
+            except Exception:
+                track_items = []
+            tracks.append((track_type, track_index, track_items))
+    return tracks
+
+
+def _timeline_fingerprint(
+    project_name: str, timeline, tracks: list[tuple[str, int, list]]
+) -> tuple:
+    """What has to change before the per-clip walk is worth paying for."""
+    return (
+        project_name,
+        _safe_attr_str(timeline, "GetName"),
+        _safe_attr_str(timeline, "GetUniqueId"),
+        tuple((track_type, track_index, len(items)) for track_type, track_index, items in tracks),
+    )
+
+
+def _get_timeline_items_locked(allow_cached: bool = False) -> dict[str, Any]:
     resolve = connect()
     if resolve is None:
         return {"ok": False, "message": _NOT_CONNECTED, "items": [], "project_name": ""}
@@ -381,48 +608,49 @@ def _get_timeline_items_locked() -> dict[str, Any]:
         return {"ok": False, "message": "no timeline open in Resolve", "items": [], "project_name": project_name}
 
     items: list[dict[str, Any]] = []
+    swept = [0]
     try:
-        for track_type in ("video", "audio"):
-            try:
-                track_count = timeline.GetTrackCount(track_type) or 0
-            except Exception:
-                track_count = 0
-            for track_index in range(1, track_count + 1):
+        tracks = _timeline_tracks(timeline)
+        fingerprint = _timeline_fingerprint(project_name, timeline, tracks)
+        if allow_cached:
+            cached = _cached_timeline_result(fingerprint)
+            if cached is not None:
+                return cached
+        for track_type, track_index, track_items in tracks:
+            for item_index, timeline_item in enumerate(track_items):
+                _sweep_yield(swept)
                 try:
-                    track_items = timeline.GetItemListInTrack(track_type, track_index) or []
+                    media_pool_item = timeline_item.GetMediaPoolItem()
                 except Exception:
-                    track_items = []
-                for item_index, timeline_item in enumerate(track_items):
-                    try:
-                        media_pool_item = timeline_item.GetMediaPoolItem()
-                    except Exception:
-                        media_pool_item = None
-                    if media_pool_item is None:
-                        continue  # generator/title/adjustment clip — no source file
-                    try:
-                        props = media_pool_item.GetClipProperty() or {}
-                    except Exception:
-                        props = {}
-                    file_path = (props.get("File Path") or "").strip()
-                    if not file_path:
-                        continue
-                    items.append(
-                        {
-                            "file_path": file_path,
-                            "media_pool_item": media_pool_item,
-                            "clip_name": _safe_clip_name(media_pool_item),
-                            "track_type": track_type,
-                            "track_index": track_index,
-                            "item_index": item_index,
-                        }
-                    )
+                    media_pool_item = None
+                if media_pool_item is None:
+                    continue  # generator/title/adjustment clip — no source file
+                try:
+                    props = media_pool_item.GetClipProperty() or {}
+                except Exception:
+                    props = {}
+                file_path = (props.get("File Path") or "").strip()
+                if not file_path:
+                    continue
+                items.append(
+                    {
+                        "file_path": file_path,
+                        "media_pool_item": media_pool_item,
+                        "clip_name": _safe_clip_name(media_pool_item),
+                        "track_type": track_type,
+                        "track_index": track_index,
+                        "item_index": item_index,
+                    }
+                )
     except Exception as exc:
         log.warning("resolve: timeline enumeration failed: %s", exc, exc_info=True)
         return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE, "items": [],
                 "project_name": project_name}
 
     _log_darwin_clip_path_flavor(items)
-    return {"ok": True, "message": "", "items": items, "project_name": project_name}
+    result = {"ok": True, "message": "", "items": items, "project_name": project_name}
+    _remember_timeline_result(fingerprint, result)
+    return result
 
 
 # One-shot, first successful poll of the process only.
@@ -473,22 +701,30 @@ _MAX_MEDIA_POOL_DEPTH = 64
 
 
 def _walk_media_pool_folder(
-    folder, project_name: str, items: list[dict[str, Any]], depth: int = 0, bin_path: str = ""
+    folder, project_name: str, items: list[dict[str, Any]], depth: int = 0, bin_path: str = "",
+    swept: Optional[list[int]] = None,
 ) -> None:
     """Recurse the media pool, tagging every clip with its bin path.
 
     `bin_path` is the "/"-joined chain of folder names BELOW the root
     folder (the root itself is excluded) -- root-level clips get "", a
     clip one bin deep gets e.g. "Interviews", two deep "Master/Interviews".
+
+    `swept` is the shared clip counter behind _sweep_yield -- one per walk,
+    threaded through the recursion so the GIL is handed back every
+    _SWEEP_YIELD_EVERY clips across the whole tree, not per bin.
     """
     if depth > _MAX_MEDIA_POOL_DEPTH:
         return
+    if swept is None:
+        swept = [0]
 
     try:
         clips = folder.GetClipList() or []
     except Exception:
         clips = []
     for clip in clips:
+        _sweep_yield(swept)
         try:
             props = clip.GetClipProperty() or {}
         except Exception:
@@ -521,7 +757,9 @@ def _walk_media_pool_folder(
     for subfolder in subfolders:
         subfolder_name = _safe_folder_name(subfolder)
         child_bin_path = f"{bin_path}/{subfolder_name}" if bin_path else subfolder_name
-        _walk_media_pool_folder(subfolder, project_name, items, depth + 1, child_bin_path)
+        _walk_media_pool_folder(
+            subfolder, project_name, items, depth + 1, child_bin_path, swept
+        )
 
 
 def get_media_pool_items() -> dict[str, Any]:
@@ -604,6 +842,7 @@ def replace_clip(media_pool_item, new_path: str) -> dict[str, Any]:
     """
     if media_pool_item is None:
         return {"ok": False, "message": "no media pool item to relink"}
+    ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     with _API_LOCK:
         try:
             result = media_pool_item.ReplaceClip(new_path)
@@ -635,6 +874,7 @@ def refresh_lut_list() -> bool:
     open, an older API without the method. All of them are routine: the LUT
     is on disk either way, and Resolve picks it up at its next start.
     """
+    ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     with _API_LOCK:
         try:
             resolve = connect()
@@ -667,6 +907,7 @@ def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
         return {"ok": False, "message": "no media pool item to relink"}
     if not proxy_path:
         return {"ok": False, "message": "no proxy path given"}
+    ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     with _API_LOCK:
         try:
             result = media_pool_item.LinkProxyMedia(proxy_path)
@@ -679,3 +920,102 @@ def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
             "message": f"Resolve wouldn't accept {proxy_path} as this clip's proxy",
         }
     return {"ok": True, "message": f"Proxy relinked to {proxy_path}"}
+
+
+# -- b-roll "Send to Resolve" ----------------------------------------------
+#
+# Absorbed from the standalone b-roll companion when it was retired
+# (2026-08-10) -- the fork's upstream, and the only function this module did
+# not already carry. Driven by broll_server.py's POST /insert, i.e. by a
+# button in the b-roll web page, so its result dict is user-visible text.
+
+BROLL_BIN_NAME = "B-Roll"
+
+
+def _find_or_create_bin(media_pool, root_folder, name: str):
+    for sub in root_folder.GetSubFolderList() or []:
+        if sub.GetName() == name:
+            return sub
+    return media_pool.AddSubFolder(root_folder, name)
+
+
+def _find_existing_clip(bin_folder, local_path: str):
+    """The MediaPoolItem already holding `local_path`, or None.
+
+    Matched by FILE PATH, not by name: the archive routinely has the same
+    filename in two categories, and re-importing a clip the bin already has
+    would add a duplicate media pool item per insert.
+    """
+    target = _norm_path(local_path)
+    for clip in bin_folder.GetClipList() or []:
+        try:
+            props = clip.GetClipProperty() or {}
+        except Exception:
+            props = {}
+        if _norm_path(props.get("File Path", "")) == target:
+            return clip
+    return None
+
+
+def perform_insert(local_path: str, in_frame: int, out_frame: int) -> dict[str, Any]:
+    """Append `local_path`, trimmed in_frame..out_frame, to the current timeline.
+
+    The behaviour broll/SPEC.md's Companion API contract specifies: import
+    into the "B-Roll" bin (reusing the MediaPoolItem if it is already there)
+    then AppendToTimeline. Returns {"ok": bool, "message": str} -- the shape
+    the web UI renders straight into its toast. Never raises.
+    """
+    ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
+    with _API_LOCK:
+        result = _perform_insert_locked(local_path, in_frame, out_frame)
+    return _explain_disconnection(result)
+
+
+def _perform_insert_locked(local_path: str, in_frame: int, out_frame: int) -> dict[str, Any]:
+    resolve = connect()
+    if resolve is None:
+        return {"ok": False, "message": _NOT_CONNECTED}
+
+    try:
+        project_manager = resolve.GetProjectManager()
+        project = project_manager.GetCurrentProject() if project_manager else None
+    except Exception:
+        project = None
+    if project is None:
+        return {"ok": False, "message": "no project open in Resolve"}
+
+    try:
+        timeline = project.GetCurrentTimeline()
+    except Exception:
+        timeline = None
+    if timeline is None:
+        return {"ok": False, "message": "no timeline open — create one first"}
+
+    try:
+        media_pool = project.GetMediaPool()
+        root_folder = media_pool.GetRootFolder()
+        broll_bin = _find_or_create_bin(media_pool, root_folder, BROLL_BIN_NAME)
+
+        media_pool_item = _find_existing_clip(broll_bin, local_path)
+        if media_pool_item is None:
+            media_pool.SetCurrentFolder(broll_bin)
+            imported = media_pool.ImportMedia([local_path])
+            if not imported:
+                return {"ok": False, "message": f"failed to import media at {local_path}"}
+            media_pool_item = imported[0]
+
+        appended = media_pool.AppendToTimeline(
+            [{"mediaPoolItem": media_pool_item, "startFrame": in_frame, "endFrame": out_frame}]
+        )
+        if not appended:
+            return {"ok": False, "message": "failed to append clip to timeline"}
+
+        name = _safe_clip_name(media_pool_item)
+        n_frames = out_frame - in_frame
+        return {"ok": True, "message": f"Inserted {name} ({n_frames} frames)"}
+    except Exception as exc:
+        # The raw f"Resolve scripting error: {exc}" the b-roll companion
+        # returned went straight into the web UI's toast, where it named no
+        # action (AUDIT_2 UX-16, same finding as _SCRIPTING_ERROR_MESSAGE's).
+        log.warning("resolve: b-roll insert failed: %s", exc, exc_info=True)
+        return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}

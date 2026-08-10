@@ -56,6 +56,28 @@ implement "Architecture + Components §2" of that spec.
 `app.py` (`CompanionApp`) wires all of the above together and is what
 `ccsync-companion` (see `pyproject.toml`'s `[project.scripts]`) actually runs.
 
+## B-roll "Send to Resolve"
+
+`broll_server.py` — a loopback-only HTTP server on `127.0.0.1:8899` (`GET
+/status`, `POST /insert`) that the b-roll library's web UI calls to drop a
+trimmed clip into the open Resolve timeline's `B-Roll` bin. Started as a
+daemon thread by `CompanionApp.start()`; contract in `../broll/SPEC.md`
+("Companion API contract"), which is still the authoritative version of it.
+
+**This used to be a second tray app** — the standalone BRoll Companion
+(`broll/companion/`). It was absorbed here and retired on 2026-08-10: two
+tray apps meant two things to install, two to upgrade, and in practice the
+small one was upgraded by nobody. **Do not run it alongside this one.** It
+would hold port 8899, and this server would then log a warning naming that
+as the likely cause and carry on without the feature — a failed bind never
+stops, delays or degrades anything else the companion does.
+
+Share → local-folder mappings still live in `~/.broll-companion.json`
+(editors already have the file), with one addition: the `broll` share needs
+no entry at all, because this app knows the tree — it defaults to
+`<local_root>/Assets/B-roll Archive`. An explicit entry always wins, and
+other shares have no derivable root, so they still need one line each.
+
 ## Requirements
 
 - **DaVinci Resolve Studio**, with external scripting enabled:
@@ -134,6 +156,8 @@ of what either of those produces. Restart the app after editing.
 | `lane_b_enabled` | `true` | Set `false` on the base rig (direct LAN access to the NAS): proxies are read straight off the share, so the local proxy mirror is skipped in both managed and legacy modes. |
 | `sync_enabled` | `true` | Set `false` when the machine works entirely off the NAS share (base rig): no sync lanes run at all; timeline watcher, popup fixer and dashboard reporting still work, lanes report idle with a "disabled" detail. |
 | `popup_enabled` | `true` | Set `false` to suppress the media-outside-tree popup entirely (still logged). |
+| `broll_server_enabled` | `true` | Serve the b-roll web UI's "Send to Resolve" button (see the section above). `false` = don't listen at all. |
+| `broll_server_port` | `8899` | Port for that server. Pinned on the web page's side too, so changing it here alone just switches the feature off. |
 | `mode` | `"editor"` | Machine role. `"base"` = the central machine with direct NAS access: implies `sync_enabled = false` unless set explicitly. The out-of-tree popup stays ON in base mode — stray media outside the project directory on the NAS still needs fixing into the tree. |
 
 With `dashboard_url` set, a fault-isolated reporter thread
@@ -365,7 +389,13 @@ Windows/macOS box before shipping, same caveat as broll-platform's
   is no test exercising a live `Observer` end-to-end (would require real
   filesystem event delivery timing, which is flaky in CI); the debounce
   timer logic itself is straightforward enough that this was judged an
-  acceptable coverage gap versus a flaky test.
+  acceptable coverage gap versus a flaky test. Since MAC-12 the observer is
+  also **pre-flighted**: a short-lived subprocess opens and lists the root
+  first, and if it cannot answer within `WATCH_PROBE_TIMEOUT_SECONDS` the
+  observer is not started at all (ERROR + tray toast, re-checked on a
+  bounded backoff). Watchdog's first act on a root is an `open()` from C
+  code holding the GIL, and on a wedged volume that froze the entire
+  companion — tray, sign-in and main thread included.
 - **PyInstaller build unverified**, per SPEC.md's own installer milestone
   being separate work (`installer/`) — see Build section above.
 - **No macOS-specific manual testing was possible in this environment**

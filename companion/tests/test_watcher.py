@@ -3,6 +3,7 @@ get_timeline_items callable, never touching a real Resolve instance."""
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -11,6 +12,8 @@ import pytest
 
 from ccsync_companion import paths
 from ccsync_companion.fixer import IgnoreTracker
+from ccsync_companion.resolve_bridge import NO_SCRIPTING_MESSAGE as NO_SCRIPTING
+from ccsync_companion.resolve_bridge import NOT_RUNNING_MESSAGE as NOT_RUNNING
 from ccsync_companion.watcher import TimelineWatcher
 
 from conftest import make_timeline_item
@@ -603,3 +606,148 @@ def test_no_gate_means_the_old_behaviour():
     )
     assert watcher.poll_once()["ok"] is True
     assert calls == ["poll"]
+
+
+# -- the bridge coming and going, at INFO, once (items 17 + 19) -------------
+#
+# `watcher.py:135` logged every failed poll at DEBUG, i.e. nothing at all at
+# the shipped log_level = "INFO". Two multi-hour incidents ran under a log
+# that looked perfectly healthy: MAC-10 (the macOS modules path was wrong, so
+# every Resolve feature was silently dead for a whole session) and item 19
+# (Resolve's own script server died at launch and never retried).
+
+
+def _bridge_records(caplog):
+    return [r.message for r in caplog.records
+            if r.levelno == logging.INFO and "Resolve bridge" in r.message]
+
+
+def _watcher_over(tmp_path, results):
+    """A watcher whose bridge hands back `results`, one per poll."""
+    stream = iter(results)
+    return TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: next(stream),
+    )
+
+
+def _down(message):
+    return {"ok": False, "message": message, "items": [], "project_name": ""}
+
+
+def test_the_bridge_going_down_is_one_info_line_not_a_debug_one(tmp_path, caplog):
+    watcher = _watcher_over(tmp_path, [_ok_result(), _down(NOT_RUNNING), _down(NOT_RUNNING),
+                                       _down(NOT_RUNNING)])
+    with caplog.at_level(logging.INFO, logger="ccsync.watcher"):
+        for _ in range(4):
+            watcher.poll_once()
+
+    assert _bridge_records(caplog) == [
+        "Resolve bridge: connected to DaVinci Resolve",
+        f"Resolve bridge: {NOT_RUNNING}",
+    ]
+
+
+def test_a_fail_fail_success_fail_sequence_logs_one_line_per_transition(tmp_path, caplog):
+    watcher = _watcher_over(tmp_path, [_down(NOT_RUNNING), _down(NOT_RUNNING),
+                                       _ok_result(), _down(NOT_RUNNING)])
+    with caplog.at_level(logging.INFO, logger="ccsync.watcher"):
+        for _ in range(4):
+            watcher.poll_once()
+
+    assert _bridge_records(caplog) == [
+        f"Resolve bridge: {NOT_RUNNING}",
+        "Resolve bridge: connected to DaVinci Resolve",
+        f"Resolve bridge: {NOT_RUNNING}",
+    ]
+
+
+def test_a_change_of_reason_is_a_transition_of_its_own(tmp_path, caplog):
+    """"Resolve is not running" (start it) and "running but not accepting
+    scripting connections" (quit and reopen it) ask for different actions --
+    item 19's whole point. Staying quiet on the change would report the one
+    that no longer applies."""
+    watcher = _watcher_over(tmp_path, [_down(NOT_RUNNING), _down(NO_SCRIPTING),
+                                       _down(NO_SCRIPTING)])
+    with caplog.at_level(logging.INFO, logger="ccsync.watcher"):
+        for _ in range(3):
+            watcher.poll_once()
+
+    assert _bridge_records(caplog) == [
+        f"Resolve bridge: {NOT_RUNNING}",
+        f"Resolve bridge: {NO_SCRIPTING}",
+    ]
+
+
+def test_a_connected_bridge_with_nothing_open_is_not_a_disconnection(tmp_path, caplog):
+    """"no project open" / "no timeline open" come from a bridge that DID
+    connect. Announcing those as the bridge going down would put two INFO
+    lines in the log every time an editor closes a project."""
+    watcher = _watcher_over(tmp_path, [_down("no project open in Resolve"),
+                                       _down("no timeline open in Resolve"),
+                                       _ok_result()])
+    with caplog.at_level(logging.INFO, logger="ccsync.watcher"):
+        for _ in range(3):
+            watcher.poll_once()
+
+    assert _bridge_records(caplog) == ["Resolve bridge: connected to DaVinci Resolve"]
+
+
+def test_a_bridge_that_raises_is_announced_too(tmp_path, caplog):
+    """No answer at all is a disconnection like any other -- and the one
+    whose cause is least guessable from the rest of the log."""
+    def boom():
+        raise RuntimeError("fusionscript exploded")
+
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path), canonical_prefix="P:\\", get_timeline_items=boom)
+    with caplog.at_level(logging.INFO, logger="ccsync.watcher"):
+        watcher.poll_once()
+        watcher.poll_once()
+
+    assert _bridge_records(caplog) == [
+        "Resolve bridge: the Resolve bridge failed: fusionscript exploded"]
+
+
+def test_an_ignored_project_does_not_hide_the_bridge_state(tmp_path, caplog):
+    """Whether Resolve is reachable has nothing to do with which project
+    happens to be open -- the ignored-project early return must not swallow
+    the announcement."""
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(project_name="New Doc 3"),
+        ignored_projects=["New Doc"],
+    )
+    with caplog.at_level(logging.INFO, logger="ccsync.watcher"):
+        watcher.poll_once()
+
+    assert _bridge_records(caplog) == ["Resolve bridge: connected to DaVinci Resolve"]
+
+
+def test_the_drive_being_out_says_nothing_about_the_bridge(tmp_path, caplog):
+    """The root gate returns before Resolve is polled at all, so there is no
+    new information about the bridge to report."""
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(),
+        root_present_fn=lambda: False,
+    )
+    with caplog.at_level(logging.INFO, logger="ccsync.watcher"):
+        watcher.poll_once()
+
+    assert _bridge_records(caplog) == []
+
+
+def test_the_watcher_polls_through_the_cached_entry_point(tmp_path):
+    """Item 20. The fingerprint-gated skip of the per-clip walk is armed for
+    this loop and nothing else: tray → Scan whole project and the fixer act
+    on what they are shown, so they go through the uncached functions."""
+    from ccsync_companion import resolve_bridge
+
+    watcher = TimelineWatcher(local_root=str(tmp_path), canonical_prefix="P:\\")
+
+    assert watcher._get_timeline_items is resolve_bridge.poll_timeline_items
+    assert watcher._get_timeline_items is not resolve_bridge.get_timeline_items

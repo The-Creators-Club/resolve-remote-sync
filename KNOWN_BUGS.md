@@ -17,6 +17,17 @@ the MAC-6/7/9 regression tests); onboarding **197 passed, 18 failed** — the fa
 Windows-shaped tests running unguarded on darwin, see item 15. dashboard/server/bench
 unchanged and not re-run here (no fastapi/paramiko in the Mac venv).
 
+**Status 2026-08-06: a six-agent fix pass closed every open item fixable from the base
+rig** — items 9, 10, 12, 14 and 15, plus the code follow-ups inside items 0, 16, 17, 18
+and 19. All five suites green on Windows: companion **1796 passed**, onboarding **222
+passed**, dashboard **369 + 1 skip**, server **161 + 1 skip** (dashboard/.venv), bench
+**157 + 1 skip**. Still open and needing something other than this machine: MAC-12's
+wedged FSEvents stream (someone at Leso's Mac), item 1's Syncthing 1.x live-verify,
+item 16's stable code-signing identity, the `._*` sweep of the NAS tree (item 12
+residual), and the macOS runtime-validation checklist — including one watched Mac build
+of the now-onedir wizard (item 9) and a darwin run of the re-guarded onboarding suite
+(item 15).
+
 The original worklist (file:line, failure scenarios, fix hints) is archived verbatim at
 `docs/bug-hunt-2026-08.md`. Summary of what was done, then the follow-ups that remain.
 
@@ -122,6 +133,21 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
      the companion log. Any hand-install must `codesign --force --sign -` afterwards;
      the self-upgrade path already does the right thing and should be preferred.
 
+   **UPDATE 2026-08-06: the first bullet is FIXED in the working tree.**
+   `RcloneLane._start_watchdog()` now pre-flights the root with a short-lived
+   subprocess probe (`probe_watch_root()`, 5 s bound, kill-without-blocking — a
+   `subprocess.run(timeout=)` would sit in its post-kill `communicate()` against an
+   unkillable child, the very hang being avoided) before any `Observer()` exists. A
+   root whose filesystem does not answer opens gets **no watcher**: an ERROR naming
+   the condition ("disconnect and reconnect the drive, or restart the computer"), one
+   tray toast, and a 60 s → 900 s backoff retry that recovers on remount without a
+   restart — tray, sign-in and the sequencer's scheduled uploads all stay alive.
+   Frozen builds probe via `/bin/ls` / `cmd /c dir` (`sys.executable` is the companion
+   there); source runs use a minimal `-c` snippet. 21 tests in
+   `companion/tests/test_watch_probe.py`, including real-subprocess probes. The wedged
+   stream on Leso's SSD itself still **needs someone at the machine** (remount or
+   reboot); the second bullet stays a hand-install rule, not code.
+
 1. **Bench Syncthing v1/v2 — RESOLVED 2026-08-03:** the runner auto-detects the major
    version (cached probe) and uses the right CLI shape for 1.x and 2.x; unsupported
    versions produce a skipped row, never a fake measurement; v2 instances are pinned to
@@ -150,8 +176,9 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
 5. **Posture decisions (settled 2026-08-03):** (a) the CORE-M13 reversal is KEPT —
    consolidate holds `_popup_active_lock` through the long copy; holding a live Tk root
    with the lock released was the exact hazard the lock prevents, and losing batches now
-   queue and drain. (b) B9 liveness thresholds are being promoted to config keys
-   (defaults unchanged).
+   queue and drain. (b) B9 liveness thresholds were promoted to config keys
+   (`keep_awake_stale_seconds` / `keep_awake_max_hold_seconds`, defaults unchanged) —
+   done, in `config.py` and `config.example.toml`.
 6. **`INSTALLER_VERSION` — RESOLVED 2026-08-03:** bumped to 1.0.15 in both
    `steps.py` and `windows_bootstrap.ps1` (the token-over-environment contract);
    verified against `build_editor_package.ps1`'s drift-gate patterns, and the test
@@ -279,32 +306,78 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
    carry today (see item 12). Sections A7–H otherwise remain unrun, and lane C has never
    run at all (see item 11).
 
-9. **The macOS wizard build will break on PyInstaller 7.** `onboarding/build_onboard_macos.spec`
-   builds a `.app` bundle in **onefile** mode, and PyInstaller 6.21 now warns:
+9. **The macOS wizard build will break on PyInstaller 7 — MIGRATED IN THE WORKING TREE
+   2026-08-05, NEEDS ONE MAC BUILD TO BE BELIEVED.** `onboarding/build_onboard_macos.spec`
+   is now onedir: `EXE(exclude_binaries=True)` → `COLLECT` → `BUNDLE(coll, …)`, with the
+   `runtime_tmpdir` (onefile-only) dropped and every other setting kept — name, ad-hoc
+   `codesign_identity=None`, `console=False`, `bundle_identifier`, the whole `info_plist`
+   including the `CFBundleShortVersionString` the release scripts diff against
+   `INSTALLER_VERSION`. Dry-verified against PyInstaller 6.21's own bundle-assembly code
+   (`building/osx.py`) rather than a build, because the artifact can only be built on a
+   Mac: top-level `datas` land in `Contents/Resources` and are cross-linked into
+   `Contents/Frameworks`, which is where `sys._MEIPASS` points in an .app bundle
+   (`loader/pyimod02_importers.py:89`), so `steps.find_bootstrap_script()`,
+   `find_companion_exe()` and `theme.icon_path()` all still resolve — the last through a
+   *directory* cross-link. The bundled companion is Mach-O, so Analysis reclassifies it
+   from `datas` to `binaries` (it already did in onefile) and it lands directly in
+   `Contents/Frameworks`, keeping its 0755 bit. `tools/build_onboard_macos.sh` needed no
+   path change (`dist/CCSync Onboarding.app` is a directory either way and is all the
+   script touches); it gained `codesign --verify --all-architectures --deep --strict` on
+   the bundle *and* on the unzipped copy, because onedir is the first version of this
+   artifact with real nested code inside it and `codesign -dv` cannot see a broken nested
+   signature. Seven AST/source guards in `onboarding/tests/test_macos_steps.py`
+   (`TestMacBundleIsOnedir`), mutation-verified: reverting the spec to onefile fails 5 of
+   the 7 while the other 2 still pass. **What remains: build it on the Mac and watch it**
+   (`installer/MACOS_FIRST_RUN.md` §C's wizard note has the success/failure shapes).
+   Original entry, for the reasoning: the spec
+   built its `.app` bundle in **onefile** mode, and PyInstaller 6.21 warns:
    *"Onefile mode in combination with macOS .app bundles (windowed mode) don't make sense
    … and clashes with macOS's security. Please migrate to onedir mode. This will become an
    error in v7.0."* It builds and runs today — 1.0.17 was built, published and verified
    end-to-end on 2026-08-04 (downloaded from `[ INSTALLER ]`, unzipped, `codesign --verify
    --deep --strict` passes). But the next PyInstaller major turns this into a hard failure,
    and the only machine that can build this artifact is a Mac, so it would surface as a
-   broken release on the one path with no fallback. Migrate the spec to onedir before any
-   v7 upgrade; the zip shape the dashboard serves does not change (a onedir `.app` is still
-   a directory tree inside the same zip).
+   broken release on the one path with no fallback. The zip shape the dashboard serves does
+   not change (a onedir `.app` is still a directory tree inside the same zip), which is why
+   this could be done ahead of the v7 upgrade rather than under it.
 
-10. **The publish scripts cannot survive a password containing control characters.**
-    `tools/release_macos.sh:92` and `tools/build_onboard_macos.sh:241` share
-    `json_escape()`, which escapes backslashes and double quotes only, and the login body
-    is assembled with `printf`. A password carrying any byte < 0x20 therefore produces
-    invalid JSON, and the dashboard answers `422 json_invalid / "Invalid control character
+10. **The publish scripts cannot survive a password containing control characters —
+    FIXED in the working tree 2026-08-05, needs no release (they are dev-box tools).**
+    `tools/release_macos.sh:92` and `tools/build_onboard_macos.sh:241` shared
+    `json_escape()`, which escaped backslashes and double quotes only, and the login body
+    is assembled with `printf`. A password carrying any byte < 0x20 therefore produced
+    invalid JSON, and the dashboard answered `422 json_invalid / "Invalid control character
     at"` — which reads as "wrong password" and is not. Hit live on 2026-08-04: the reported
     offset is the *byte position* of the offending character (verified against the live
     endpoint: a control char first/middle/last in the value reports 31/35/37 for
     `{"username":"alex","password":"…"}`), so offset 31 means the FIRST byte of the
     password. The usual source is a bracketed paste — zsh wraps pasted text in
-    `ESC[200~ … ESC[201~` and `read -r -s` captures the escapes. Typing the password works;
-    the scripts should strip the paste wrappers and reject any remaining non-printable byte
-    with a sentence naming the problem, since stripping alone would turn a 422 into a
-    misleading 401.
+    `ESC[200~ … ESC[201~` and `read -r -s` captures the escapes. Typing the password works.
+
+    Fixed in three layers, because no one of them is enough. `strip_bracketed_paste()`
+    removes both wrappers wherever they appear; `reject_non_printable()` then refuses any
+    value (password *or* `--admin-user`) still carrying a byte < 0x20 or 0x7f, naming it —
+    *"the password contains a non-printable character (byte 0x1b at position 4) — retype it
+    rather than pasting"* — because stripping alone would turn the 422 into a misleading
+    401; and `json_escape()` now escapes the control range too (`\n`/`\r`/`\t`/`\b`/`\f`,
+    `\u00XX` for the rest), so every other value it writes (the release manifest's version,
+    arch and `git describe`) is valid JSON regardless. All three live between
+    `# ---CCSYNC-PASSWORD-HYGIENE-{BEGIN,END}---` sentinels and are **byte-identical in the
+    two scripts**, which `companion/tests/test_publish_password_hygiene.py` asserts the way
+    B19's cross-file test does. It escapes byte-wise through `od`+`awk` rather than `sed`,
+    with `LC_ALL=C`: a password may contain bytes that are not valid UTF-8, which BSD sed
+    answers with *"RE error: illegal byte sequence"*, and in a UTF-8 locale awk's `%c`
+    re-encodes each byte it is given (measured: `70 c3 9f 77` → `70 c3 83 c2 9f 77`) — the
+    same GNU-vs-BSD-vs-locale trap as MAC-9. 37 tests, run against the real scripts under
+    the local `od`/`awk`/`sed`, mutation-verified: restoring the two-rule `json_escape`
+    fails 12, removing the rejection fails the "leftover control byte" test, removing the
+    stripping fails the "a bracketed paste is accepted" ones, and editing one copy of the
+    block fails the drift test. Suite: **1760 passed**.
+
+    Not changed: `installer/macos_bootstrap.sh:278` still carries the old two-rule
+    `json_escape`. It escapes a volume UUID, a mount point and a local root into
+    `~/.ccsync/`'s mapping record — no password, no terminal paste — so it is a much
+    smaller target, but it is the third copy of a helper that has now been fixed twice.
 
     **MAC-8, critical — FIXED, shipped in installer 1.0.19:** the same class of defect took the
     whole wizard down on macOS. `OnboardWizard._safe_after()` marshalled every background
@@ -344,7 +417,8 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     the `.stfolder`-marker behaviour the root guard and lane B's mass-delete defence both
     depend on is untested on this platform.
 
-12. **Both rclone lanes sync macOS AppleDouble sidecars (`._*`) — VERIFIED 2026-08-04.**
+12. **Both rclone lanes sync macOS AppleDouble sidecars (`._*`) — VERIFIED 2026-08-04,
+    FIXED in the working tree 2026-08-06.**
     On any filesystem without native extended-attribute support — exFAT, FAT32, SMB, i.e.
     exactly the external SSDs this deployment is built around — macOS stores resource forks
     and xattrs in sidecar files named `._<original>`. The lane filters do not exclude them,
@@ -366,6 +440,20 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     matching is first-match-wins (a later `+ *.mov` would otherwise win): `- ._*` at the
     head of both `build_filter_rules_up()` and `build_filter_rules_down()`. Worth pairing
     with a sweep for `._*` already uploaded, since the tree predates the fix.
+
+    **FIXED:** `APPLEDOUBLE_EXCLUDE_RULE = "- ._*"` is emitted at index 0 of both
+    builders. Measured against the real binary rather than assumed: the single
+    no-slash rule drops `._A001.mov`, `Proxy/._p.mov` *and* `Sub/Proxy/._n.mov` — no
+    `**/` form needed (it is the `/`-anchored rules that need both forms) — and it
+    matches basenames only, so a directory *named* `._x/` still syncs, pinned by test
+    so the rule and the predicate cannot drift in opposite directions. The fix also
+    closed a third hole this entry did not know about: the express path passes **no
+    filter file at all** (rclone rejects `--filter-from` with `--files-from-raw`), so
+    `path_matches_lane_a_filter()` is the entire filter there and would have uploaded
+    the exact sidecar the periodic pass now refuses — it rejects `._` basenames too.
+    Real-rclone tests in both directions plus rule-order and predicate tests,
+    mutation-verified (reverting the rule fails 9). **Residual:** the NAS tree
+    predates the fix — a one-time sweep for already-uploaded `._*` is still owed.
 
 13. **MAC-9, critical: the installer emptied rclone.conf on macOS — FIXED in 1.0.19.**
     `macos_bootstrap.sh`'s "the stanza disagrees with the values you passed" branch —
@@ -396,7 +484,8 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     way this class of bug is visible at all. Side effect: the rewritten section moves to
     the end of the file (rclone is order-independent).
 
-14. **rclone's real error never reaches the log.** `sync/rclone_lane.py:515` logs
+14. **rclone's real error never reaches the log — FIXED in the working tree
+    2026-08-06.** `sync/rclone_lane.py:515` logged
     `(proc.stderr or "").strip()[:300]` — the **first** 300 characters. For any SFTP
     remote, rclone's host-key `NOTICE` is ~260 of them, so the actual failure is always
     truncated mid-sentence. Live cost, 2026-08-05: an SSH auth failure that had stopped
@@ -405,7 +494,17 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     command, which is exactly what the log line exists to avoid. Log the tail instead, or
     filter the NOTICE line out before truncating.
 
-15. **The onboarding suite is red on macOS: 18 failed, 197 passed.** All in
+    **FIXED:** both, via one `_stderr_for_log()` — drop `NOTICE:` lines, then keep the
+    tail (`STDERR_LOG_CHARS`), falling back to the raw text when the stream is nothing
+    *but* notices so a failure never logs an empty string. Applied at the `_run_lsf`
+    site and the two existing `[-300:]` sites so all three read the same. The lane runs
+    themselves use `--use-json-log` (notices are JSON records there, no `NOTICE:`
+    substring), so `_run_lsf` was the one plain-text caller — the one that produced the
+    live symptom. The regression test reproduces it: the `CRITICAL: Failed to create
+    file system for …` line now survives into the log, remote and reason included.
+
+15. **The onboarding suite is red on macOS: 18 failed, 197 passed — FIXED in the
+    working tree 2026-08-06, pending one darwin run to confirm.** All in
     `test_steps.py` / `test_cleanup_steps.py`, all Windows-shaped assertions (PowerShell
     argv, drive letters, UNC paths, `.exe` fallbacks, registry Run values) executed
     unguarded on darwin — the same class as MAC-2 for the companion suite. Pre-existing
@@ -413,6 +512,18 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     it means the suite cannot gate the platform the wizard now ships to. Either give the
     Windows-only tests a `platform=` seam like the rest of `steps.py` has, or skip them on
     darwin — silently passing on 91% is worse than an honest skip.
+
+    **FIXED, test by test:** 14 of the 18 now pin `platform="win32"` through the
+    existing seam, so they run and pass on every host; 4 are honest `skipif`s because
+    the code under test is genuinely Windows-only (registry Run values, host-built
+    `dist/` artifacts, host-`os.path` containment) — each with its darwin counterpart
+    already covered in `test_macos_steps.py`. Three further tests that were passing
+    *vacuously* on darwin (asserting `-LocalRoot` absent from an argv that was never
+    PowerShell's) were pinned too — the same silently-green disease this item names,
+    one line from where it was diagnosed. The posix-semantics predictions behind the
+    skips were verified empirically on Windows via `posixpath` and the darwin branches.
+    Windows: 222 passed. Expected darwin: **211 passed, 4 skipped** — confirm on the
+    next Mac session.
 
 16. **The companion's TCC grants do not survive a self-upgrade.** It is ad-hoc signed
     (`TeamIdentifier=not set`), so its Full Disk Access identity is a hash of the binary
@@ -422,6 +533,18 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     error that names the cause. `rclone` and `syncthing` are properly signed and need
     granting once. Either sign the companion with a stable identity, or have the tray
     surface "macOS is blocking access to the sync volume" when a post-upgrade read fails.
+
+    **UPDATE 2026-08-06: the tray fallback is in the working tree.**
+    `root_guard.access_is_blocked()` detects darwin + EACCES/EPERM reading the root (or
+    its volume — an unreadable parent hides its children) *while the volume is still
+    mounted*, which is what distinguishes a revoked grant from an unplugged SSD (that
+    stays root-absent, already handled). `app._check_macos_volume_access()` runs it
+    once, 3 s after the first start on a new build (`note_version_start()`), and
+    surfaces a toast naming Full Disk Access in System Settings, an ERROR log naming
+    the path and the ad-hoc-signing cause, and a diagnostics suffix. ENOENT, ghost
+    mounts, exotic errors and every non-darwin host return False without touching the
+    disk. Signing with a stable identity remains the real fix and is **still open**
+    (needs a Developer ID certificate — a purchase, not a patch).
 
 17. **MAC-10, critical: the Resolve bridge never connected on macOS — FIXED in the
     working tree, needs a release.** `resolve_bridge._default_modules_dir()` returned
@@ -444,6 +567,7 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     the "Resolve is not running" poll result should be logged at INFO **once** on the
     transition (it is a user-visible capability going away, not a debug detail), and the
     tray/diagnostics should say whether the bridge has ever connected this session.
+    **Both DONE in the working tree 2026-08-06 — details under item 19.**
 
     Workaround for an already-installed build, no rebuild needed —
     `_ensure_env_and_syspath()` honours a preset `RESOLVE_SCRIPT_API`, so adding
@@ -490,12 +614,24 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     mutation-verified — deleting the tick delivery fails 2 of the 4 while the other 2
     still pass. Suite: **1590 passed, 18 skipped**.
 
-    **Follow-up, not done:** shutdown still has no way to break a nested `tkwait`. Any
-    future dialog that fails to destroy itself wedges the process exactly the same way,
-    with `kill -9` the only exit. `ui_dispatch.stop()` should destroy the dialog root it
-    is parked in (it knows the hidden root; it does not track the dialog's), or the
-    shutdown path should hard-exit after a grace period rather than trusting `serve()` to
-    return.
+    **Follow-up — DONE in the working tree 2026-08-06, both mechanisms.**
+    `run_dialog()` now registers its window with the dispatcher (`note_dialog` /
+    `forget_dialog`, a stack, innermost-first) and `stop()` destroys whatever it is
+    parked in before tearing down the hidden root. The destroy is scheduled with
+    `after(0)` on the *hidden root*: Tcl's timer queue is per **thread**, not per
+    interpreter, and `tkwait window` spins in `Tk_DoOneEvent`, which services that
+    queue — so the timer fires while the pump's own chain is parked. Because a
+    cross-thread Tk call blocks the caller until the UI thread services it, the
+    marshal rides a throwaway daemon thread joined at 5 s — `stop()` runs inside a
+    SIGTERM handler and must not hang; and `note_dialog()` refuses once stopped,
+    closing the open-a-window-into-shutdown race. Backstop for the dialog that cannot
+    be reached at all (a dialog with no timer callbacks never even executes the signal
+    handler's bytecode): `shutdown()` arms a 10 s timer that re-checks and, only if the
+    mainloop is *still* serving after lanes/guards/reporter have all stopped and the
+    upgrade swap has already happened, logs ERROR naming the open windows, flushes the
+    log handlers and `os._exit(1)`s — inside the successor's 20 s predecessor-wait, so
+    an upgrade respawn is unaffected. 16 tests across `test_ui_dispatch.py` /
+    `test_app.py`, mutation-verified.
 
 19. **Resolve's own script server can die at launch, and the companion called that
     "DaVinci Resolve is not running" — message FIXED in the working tree, the Resolve-side
@@ -560,12 +696,97 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     reverting the distinction fails 6, moving the probe back inside the lock fails the
     cross-thread lock test. Suite: **1666 passed**.
 
-    **Follow-ups, not done.** Both were already asked for in item 17 and this incident is
-    the second time they would have paid: the poll result should be logged at INFO **once**
-    on the transition (`watcher.py:135` is still DEBUG, so a companion whose bridge is dead
-    still looks healthy at the shipped `log_level = "INFO"` until someone clicks Scan), and
-    the tray/diagnostics should say whether the bridge has connected this session. With
-    those two, this would have been a glance at the log rather than an evening.
+    **Follow-ups — DONE in the working tree 2026-08-06.** Both were asked for in item
+    17 and this incident was the second time they would have paid. The watcher now
+    logs the bridge state at INFO exactly **once per transition** (`Resolve bridge:
+    connected to DaVinci Resolve` / the distinguished disconnect message; a change of
+    *reason* — not-running → not-accepting — is its own transition; repeats stay
+    DEBUG). Only `NOT_RUNNING_MESSAGE`/`NO_SCRIPTING_MESSAGE` count as disconnection —
+    "no project open"/"no timeline open" mean the bridge answered, so closing a
+    project logs nothing. The tray gains a `Resolve:` status line (`connected` /
+    `not connected right now — …` / `NOT CONNECTED this session — …`) and diagnostics
+    a `resolve bridge:` line with has-connected-this-session, fed by a session record
+    at `_explain_disconnection()` — the chokepoint both enumerators share, so a tray
+    Scan keeps it current even when the watcher never runs. The tray reads a cached
+    dict; nothing on the render path ever probes fusionscript. With these, this
+    incident would have been a glance at the log rather than an evening. Tests across
+    `test_watcher.py` / `test_resolve_bridge.py` / `test_tray.py` / `test_app.py`
+    (+31), mutation-verified.
+
+20. **Right-clicking the tray icon often did nothing, or opened the menu seconds late
+    — FIXED in the working tree 2026-08-10.** Two independent causes, both on Windows,
+    both diagnosed from the code and reproduced in tests rather than from a live capture.
+
+    **Cause 1, dominant: GIL starvation by the timeline watcher.** Every fusionscript
+    call holds the GIL for its full native duration (the same property behind MAC-12's
+    hang), and `_get_timeline_items_locked` makes three or four PER CLIP, every
+    `poll_interval` (3 s). pystray's win32 message pump is a Python window procedure, so
+    it cannot process the `WM_RBUTTONUP` that opens the menu *at all* without the GIL: a
+    large project meant a 1–3 s blackout every 3 s, and a click landing inside one was
+    late or lost. `ui_state.wait_while_menu_open()` — added 2026-07-26 for the hover-
+    highlight freeze — cannot help here by construction: the flag is set inside the
+    wrapped `TrackPopupMenuEx`, i.e. only once the menu is *already* open, so it protects
+    every click except the one trying to open it.
+
+    Fixed on both axes. The sweeps (`_get_timeline_items_locked` and
+    `_walk_media_pool_folder`) now call `time.sleep(0.002)` every 25 clips — a real GIL
+    yield, so the pump is never more than 25 clips from a scheduling slot; a 1000-clip
+    timeline pays 80 ms per sweep. And most polls do not need the sweep at all: the poll
+    first gathers a cheap fingerprint (project name, timeline name + `GetUniqueId`, one
+    `GetItemListInTrack` per track) and returns the previous poll's items unchanged when
+    it matches. **Safety valve: a full walk at least every 10th poll (~30 s) regardless**
+    — an in-place relink changes no name and no count, and the watcher feeds the popup
+    fixer, which must not go blind to it. The cache is armed by `allow_cached=`, reachable
+    only through `poll_timeline_items()`, which only `TimelineWatcher` binds: tray → Scan
+    whole project, the fixer and the proxy relinker act on what they are shown and always
+    walk. A disconnection cannot be masked by it either — the fingerprint is gathered
+    from the live project, so `connect()` returning None, no project and no timeline all
+    reach the caller as themselves, ahead of any cache read. `replace_clip`,
+    `refresh_lut_list` and `link_proxy_media` were also the three public entry points
+    that never deferred to an open menu; they do now, like the other four.
+
+    **Cause 2: an unsafe cross-thread menu rebuild in pystray.** `_win32.Icon._update_menu`
+    (`pystray/_win32.py:99`) `DestroyMenu`s the old handle **first**, rebuilds ~30 items
+    plus a submenu, and publishes `self._menu_handle` last — so for the whole rebuild the
+    handle a concurrent right-click hands to `TrackPopupMenuEx` is already destroyed. It
+    returns 0 and shows nothing, silently: pystray declares the function with no
+    `restype` and no `errcheck`. Worse, it is driven from two threads that know nothing
+    of each other — our refresh loop on every `icon.menu = …`, and pystray's own
+    `_base.Icon.__call__` / `_base._handler` on the **pump** thread after every left-click
+    and every menu selection — so two interleaving rebuilds `DestroyMenu` one handle twice
+    and leak the other. At the 10 000-object USER quota `CreatePopupMenu` starts failing,
+    `_menu_handle` goes `None`, and right-click does nothing at all until the companion is
+    restarted. That is the cumulative "it gets worse the longer it runs" half of the
+    symptom.
+
+    Fixed by `tray._atomic_update_menu`, installed over the backend by `_MenuSwapGuard`
+    in the same shape as `_MenuOpenGuard` (install-once, win32-only, never-raise, stock
+    behaviour on any pystray whose internals have moved): one module lock, **build the
+    new menu first, publish it, destroy the old one last**, and skip the rebuild entirely
+    when `icon.menu` is the same object as at the last successful build — which is every
+    post-click `update_menu()`, since the refresh loop only assigns on a fingerprint
+    change. A raising or NULL-returning `_create_menu` logs and leaves the previous handle
+    intact and usable: a menu one refresh stale beats no menu. The residual race is a
+    right-click that read `_menu_handle` microseconds before a swap, instead of one
+    landing anywhere inside a whole rebuild.
+
+    **Cause 3: none of it was visible.** `setup_logging` attached the file handler to
+    `logging.getLogger("ccsync")` only, so everything pystray says about itself ("An error
+    occurred in the main loop") went nowhere — the windowed build has no stderr, so
+    logging's last resort had nowhere to write either. The `"pystray"` logger now gets the
+    same handlers and level, and the `TrackPopupMenuEx` wrapper captures the return value:
+    a falsy one logs `tray menu failed to open or was dismissed immediately` with
+    `GetLastError`. That fires on an ordinary Escape too, which is the honest trade — the
+    two are indistinguishable at that call, and a right-click that does nothing is the
+    most-reported tray symptom. The wrapper also posts `WM_NULL` to the owner window
+    afterwards, MSDN's `TrackPopupMenu` note that pystray omits.
+
+    24 tests across `test_resolve_bridge.py` / `test_watcher.py` / `test_tray.py`,
+    mutation-verified — restoring pystray's destroy-first ordering fails the two-thread
+    handle test with 300 violations while the rest still pass. Suite: **1896 passed**.
+    Not fixed, and deliberately: the swap lock is *not* taken across the blocking
+    `TrackPopupMenuEx` call. It would close the last microsecond of the race and open a
+    worse one — a rebuild thread parked for as long as the editor leaves the menu open.
 
 Session-2 macOS findings in full — MAC-6 through MAC-9, what is now proven on real
 hardware, and the outstanding list these items come from — are written up in

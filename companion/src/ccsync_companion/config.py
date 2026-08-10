@@ -269,6 +269,17 @@ DEFAULTS: dict[str, Any] = {
     # media legitimately lives outside/next to the tree, so the popup is
     # noise there). Out-of-tree clips are still logged.
     "popup_enabled": True,
+    # False = don't serve the b-roll web UI's "Send to Resolve" button. On by
+    # default: that button is what the b-roll library is FOR from an editor's
+    # seat, and it used to require a SECOND tray app (the standalone
+    # broll-companion, absorbed here and retired 2026-08-10) that nobody kept
+    # upgraded. Failing to take the port is never fatal to anything else --
+    # see broll_server.start().
+    "broll_server_enabled": True,
+    # The port the b-roll web page's JS calls. Pinned on the page's side too
+    # (broll/web/static/app.js's COMPANION_URL), so moving it here alone just
+    # switches the feature off.
+    "broll_server_port": 8899,
     # How long (seconds) a dismissed-without-acting out-of-tree clip is
     # snoozed before the passive watcher will pop it again (addition; see
     # app.py's _popup_snooze). Was previously read via cfg.get(..., 300)
@@ -549,6 +560,15 @@ popup_enabled = true
 # How long (seconds) a dismissed-without-acting out-of-tree clip is snoozed
 # before the passive watcher will pop it again.
 popup_snooze_seconds = 300
+
+# "Send to Resolve" in the b-roll web UI. This companion listens on
+# 127.0.0.1:8899 for that button; the standalone BRoll Companion that used to
+# do it is retired and must not be left running (it would hold the port).
+# Which share maps to which local folder still lives in
+# ~/.broll-companion.json -- except the "broll" share itself, which defaults
+# to <local_root>/Assets/B-roll Archive.
+broll_server_enabled = true
+broll_server_port = 8899
 
 # Machine role: "editor" (default -- full sync lanes) or "base" (the central
 # machine working directly off the NAS: implies sync_enabled false unless set

@@ -1,4 +1,11 @@
-"""Path translation tests: both OS styles, traversal rejection, mac probing."""
+"""Path translation for the b-roll insert endpoint: both OS styles, traversal
+rejection, macOS /Volumes probing.
+
+Ported verbatim (module path aside) from the retired standalone
+broll-companion's tests/test_paths.py — this is contract, not implementation
+detail: the traversal rejection is the only reason a loopback server with
+`Access-Control-Allow-Origin: *` can be handed a client-supplied path at all.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +13,7 @@ import os
 
 import pytest
 
-from broll_companion.paths import (
+from ccsync_companion.broll_server import (
     MountNotConfiguredError,
     PathTraversalError,
     probe_darwin_mount,
@@ -62,6 +69,12 @@ def test_traversal_rejected_even_with_dotdot_in_middle_of_valid_looking_path():
     mounts = {"broll": "/Volumes/broll"}
     with pytest.raises(PathTraversalError):
         translate_path("broll", "military/naval/../../../../etc/passwd", mounts, platform="darwin")
+
+
+def test_a_drive_letter_smuggled_in_as_a_segment_is_rejected():
+    mounts = {"broll": "Y:/broll"}
+    with pytest.raises(PathTraversalError):
+        translate_path("broll", "C:/Windows/System32/config/SAM", mounts, platform="win32")
 
 
 def test_empty_rel_path_rejected():

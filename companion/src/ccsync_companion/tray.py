@@ -3,7 +3,9 @@ app.
 
 Only imported inside a try/except ImportError in app.py's run loop, so the
 app still runs headless (console status logging only) if these aren't
-installed — same fallback pattern as broll-platform's companion/tray.py.
+installed — same fallback pattern as the b-roll companion's tray.py, which
+this app absorbed and retired on 2026-08-10 (its server now lives in
+broll_server.py; there is no second tray app any more).
 
 Install with: pip install ccsync-companion[tray]
 """
@@ -145,9 +147,11 @@ class _MenuOpenGuard:
             def tracked(*args, **kwargs):
                 flag.set()
                 try:
-                    return original(*args, **kwargs)
+                    result = original(*args, **kwargs)
                 finally:
                     flag.clear()
+                _after_popup_menu(args, result)
+                return result
 
             win.TrackPopupMenuEx = tracked
             win._ccsync_menu_open_flag = flag
@@ -156,6 +160,158 @@ class _MenuOpenGuard:
 
     def is_open(self) -> bool:
         return self._open.is_set()
+
+
+def _last_win32_error() -> int:
+    """GetLastError(), or 0 if it can't be read. Only meaningful straight
+    after a failed call."""
+    try:
+        import ctypes
+
+        return int(ctypes.GetLastError())  # type: ignore[attr-defined]
+    except Exception:
+        return 0
+
+
+def _after_popup_menu(args: tuple, result) -> None:
+    """What pystray does not do once TrackPopupMenuEx returns.
+
+    Two things, both invisible before this. pystray declares the function
+    with no restype and no errcheck, so a FAILED call -- the handle was
+    destroyed under it, or CreatePopupMenu hit the 10k USER-object quota --
+    is indistinguishable from the user pressing Escape, and both are
+    silence. A right-click that does nothing is the single most-reported
+    tray symptom, so it gets a log line even at the cost of one per
+    dismissal.
+
+    And MSDN's TrackPopupMenu note: post WM_NULL to the owner window
+    afterwards, or the menu can fail to dismiss on the following click.
+    Best-effort -- a diagnostic must never be the thing that breaks the pump.
+    """
+    if not result:
+        log.warning(
+            "tray menu failed to open or was dismissed immediately "
+            "(TrackPopupMenuEx returned %r, GetLastError=%d)",
+            result, _last_win32_error(),
+        )
+    try:
+        hwnd = args[4] if len(args) > 4 else None
+        if hwnd:
+            from pystray import _win32  # type: ignore[attr-defined]
+
+            _win32.win32.PostMessage(hwnd, 0x0000, 0, 0)  # WM_NULL
+    except Exception:
+        log.debug("post-menu WM_NULL failed", exc_info=True)
+
+
+# -- the menu swap: build new, swap, THEN destroy old -----------------------
+#
+# pystray's win32 _update_menu DestroyMenu()s the live handle FIRST, rebuilds
+# ~30 items plus a submenu, and only then publishes the new handle. For that
+# whole window `_menu_handle` names a destroyed HMENU, and a right-click
+# arriving inside it hands that to TrackPopupMenuEx, which returns 0 and
+# shows nothing (silently -- see _after_popup_menu above). Worse, it is
+# called from two threads that know nothing of each other: our refresh loop
+# on every `icon.menu = ...`, and pystray's own _base.Icon.__call__ /
+# _base._handler on the PUMP thread after every left-click and every menu
+# selection. Two of those interleaving DestroyMenu the same handle twice and
+# leak the other one's; at the 10 000-handle USER quota CreatePopupMenu
+# starts failing, `_menu_handle` goes None, and right-click does nothing at
+# all until the companion is restarted.
+#
+# So: one lock, build first, swap, destroy last, and never destroy anything
+# the icon is still pointing at. The residual race is a right-click that read
+# `_menu_handle` microseconds before a swap, instead of one landing anywhere
+# inside a whole rebuild.
+_MENU_SWAP_LOCK = threading.Lock()
+
+# Sentinel for "no menu has been built yet" -- None is a legitimate menu.
+_NO_MENU_BUILT = object()
+
+
+def _destroy_menu(handle) -> None:
+    """DestroyMenu, looked up at call time so a pystray without the win32
+    shim (or a test standing in for it) degrades to a no-op."""
+    try:
+        from pystray import _win32  # type: ignore[attr-defined]
+
+        _win32.win32.DestroyMenu(handle)
+    except Exception:
+        log.debug("DestroyMenu(%r) failed", handle, exc_info=True)
+
+
+def _atomic_update_menu(icon, stock=None) -> None:
+    """pystray's Icon._update_menu, reordered so the handle is always live.
+
+    Falls back to `stock` (the wrapped original) whenever the internals this
+    depends on aren't there -- same fail-open posture as _MenuOpenGuard.
+    """
+    create = getattr(icon, "_create_menu", None)
+    if create is None:
+        if stock is not None:
+            stock(icon)
+        return
+    with _MENU_SWAP_LOCK:
+        menu = getattr(icon, "menu", None)
+        previous = getattr(icon, "_ccsync_built_menu", _NO_MENU_BUILT)
+        if previous is menu and getattr(icon, "_menu_handle", None) is not None:
+            # pystray calls update_menu() after every left-click and every
+            # menu selection, with the menu object untouched, so it can
+            # re-render dynamic items. _build_menu renders a SNAPSHOT -- even
+            # the Pause checkmark closes over a captured bool -- so an
+            # identical menu object can only produce an identical menu, and
+            # rebuilding it is pure USER-object churn. Identity changes only
+            # when _refresh_loop's fingerprint really moved.
+            return
+        callbacks: list = []
+        try:
+            handle = create(menu, callbacks)
+        except Exception:
+            log.warning("tray menu rebuild failed -- keeping the menu already shown",
+                        exc_info=True)
+            return
+        if not handle and menu:
+            # CreatePopupMenu failed (the classic cause is the USER-object
+            # quota this reordering exists to stop leaking into). The old
+            # handle still works; a menu one refresh out of date beats none.
+            # A falsy `menu` is a different thing -- pystray's _create_menu
+            # returns None for one by contract -- and is published below.
+            log.warning("tray menu rebuild produced no handle -- keeping the previous menu")
+            return
+        old = getattr(icon, "_menu_handle", None)
+        icon._menu_handle = (handle, callbacks) if handle else None
+        icon._ccsync_built_menu = menu
+        if old:
+            _destroy_menu(old[0])
+
+
+class _MenuSwapGuard:
+    """Installs _atomic_update_menu over pystray's win32 backend.
+
+    Install-once, win32-only, never-raise -- the same shape and the same
+    reasoning as _MenuOpenGuard above. On any other backend, or a pystray
+    whose internals have moved, this is a no-op and the stock behavior
+    stands.
+    """
+
+    def install(self) -> None:
+        try:
+            if sys.platform != "win32":
+                return
+            from pystray import _win32  # type: ignore[attr-defined]
+
+            icon_cls = _win32.Icon
+            if getattr(icon_cls, "_ccsync_atomic_menu_swap", False):
+                return
+            stock = icon_cls._update_menu
+
+            def _update_menu(self) -> None:
+                _atomic_update_menu(self, stock)
+
+            icon_cls._update_menu = _update_menu
+            icon_cls._ccsync_atomic_menu_swap = True
+        except Exception:
+            log.debug("atomic menu swap unavailable", exc_info=True)
 
 
 # One rendered image per color -- regenerating the identical 64x64 PIL image
@@ -1006,6 +1162,33 @@ def _current_project_line(app: "CompanionApp") -> Optional[str]:
     return None
 
 
+def resolve_bridge_line(state: Optional[dict]) -> Optional[str]:
+    """One tray line for "is the Resolve bridge up, and has it EVER been?".
+
+    None before anything has asked Resolve (nothing truthful to say yet) and
+    None for a state dict we don't understand -- an unrecognised shape must
+    cost a missing line, never a wrong one.
+
+    The distinction that matters is `ever_connected`. A bridge that has never
+    connected in this whole session is a broken install -- MAC-10's wrong
+    modules path made every Resolve feature silently dead for hours -- while
+    one that connected and then went is just Resolve being closed or
+    restarted. The old tray said neither, which is why both incidents were
+    diagnosed by hand instead of by looking (items 17 and 19).
+    """
+    if not isinstance(state, dict):
+        return None
+    connected = state.get("connected")
+    if connected is None:
+        return None
+    if connected:
+        return "Resolve: connected"
+    reason = str(state.get("reason") or "no connection")
+    if state.get("ever_connected"):
+        return f"Resolve: not connected right now — {reason}"
+    return f"Resolve: NOT CONNECTED this session — {reason}"
+
+
 def _tray_snapshot(app: "CompanionApp") -> dict:
     """Everything the tray renders, gathered ONCE on the refresh thread.
 
@@ -1047,6 +1230,14 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     _get("dashboard_url", lambda: _dashboard_url(app), "")
     _get("sequencer_line", lambda: _sequencer_line(app), None)
     _get("current_project_line", lambda: _current_project_line(app), None)
+    # Cheap by construction: resolve_bridge records this on the way out of
+    # every enumeration, so the tray reads a cached bool. It must NEVER probe
+    # Resolve from here -- a fusionscript call holds the GIL for its full
+    # native duration and the render path is the one place that cannot pay
+    # for one (see resolve_bridge.session_state / ui_state.menu_open).
+    _get("resolve_line", lambda: resolve_bridge_line(
+        (getattr(app, "resolve_bridge_state", None) or resolve_bridge.session_state)()
+    ), None)
     _get("setup_name", lambda: (getattr(app, "setup_project_available", None) or (lambda: None))(), None)
     _get("upgrade_info", lambda: (getattr(app, "upgrade_available", None) or (lambda: None))(), None)
     _get("removable", lambda: (getattr(app, "removable_projects", None) or (lambda: []))(), [])
@@ -1092,6 +1283,7 @@ def _menu_fingerprint(snap: dict) -> tuple:
         lanes, snap["identity_label"], snap["signed_in"], snap["paused"],
         snap["problems"], snap.get("root_absent"),
         snap["sequencer_line"], snap["current_project_line"],
+        snap.get("resolve_line"),
         snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
         snap["dashboard_url"], snap["color"],
         tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
@@ -1264,7 +1456,8 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
 
     state_items = [
         pystray.MenuItem(line, None, enabled=False)
-        for line in (snap["sequencer_line"], snap["current_project_line"])
+        for line in (snap["sequencer_line"], snap["current_project_line"],
+                     snap.get("resolve_line"))
         if line
     ]
 
@@ -1347,6 +1540,7 @@ def start_tray(app: "CompanionApp", refresh_interval: float = 2.0) -> "pystray.I
     )
     guard = _MenuOpenGuard()
     guard.install()
+    _MenuSwapGuard().install()
     last_fingerprint = _menu_fingerprint(first)
     last_color = first["color"]
     last_title = _tooltip_text(first)

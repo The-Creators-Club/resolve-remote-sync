@@ -86,7 +86,12 @@ class TimelineWatcher:
         # does not exist). None = no gate, i.e. the behaviour before this.
         self._root_present_fn = root_present_fn
         self.ignore_tracker = ignore_tracker if ignore_tracker is not None else IgnoreTracker()
-        self._get_timeline_items = get_timeline_items or resolve_bridge.get_timeline_items
+        # poll_timeline_items, NOT get_timeline_items: the poll cache (skip
+        # the per-clip walk while the timeline's shape is unchanged, full walk
+        # every 10th poll regardless) is armed for this loop alone. tray →
+        # Scan whole project and the fixer act on what they are shown and go
+        # through the uncached entry points.
+        self._get_timeline_items = get_timeline_items or resolve_bridge.poll_timeline_items
         self._warned_mapping: set[str] = set()
         # Most recently seen Resolve project name (see resolve_bridge's
         # "project_name" key), tracked across polls so other components
@@ -94,6 +99,10 @@ class TimelineWatcher:
         # owning any Resolve-bridge concerns themselves. None when Resolve
         # is closed/unreachable or the bridge result didn't carry a name.
         self.last_resolve_project: Optional[str] = None
+        # Bridge connection state as of the last poll, for _note_bridge_state
+        # below. None = startup, i.e. the first poll always announces itself.
+        self._bridge_connected: Optional[bool] = None
+        self._bridge_reason: str = ""
 
     def poll_once(self) -> dict[str, Any]:
         """Run one poll cycle. Returns a small summary dict; never raises."""
@@ -108,8 +117,18 @@ class TimelineWatcher:
             result = self._get_timeline_items()
         except Exception as exc:  # belt and braces on top of resolve_bridge's own catch-all
             log.debug("get_timeline_items raised: %s", exc)
+            # No answer at all is a disconnection like any other -- and the
+            # one whose reason is least likely to be guessable from the log.
+            self._note_bridge_state(False, f"the Resolve bridge failed: {exc}")
             self.last_resolve_project = None
             return {"ok": False, "message": str(exc), "out_of_tree": 0, "mapping_warnings": 0}
+
+        # BEFORE the ignored-project early return below: whether Resolve is
+        # reachable has nothing to do with which project happens to be open.
+        message = str(result.get("message") or "")
+        self._note_bridge_state(
+            not resolve_bridge.is_disconnection_message(message), message
+        )
 
         project_name = result.get("project_name") or None
         if project_name is not None and config_mod.is_ignored_project(
@@ -217,6 +236,32 @@ class TimelineWatcher:
             "out_of_tree": len(new_out_of_tree),
             "mapping_warnings": new_mapping_warnings,
         }
+
+    def _note_bridge_state(self, connected: bool, reason: str = "") -> None:
+        """Say at INFO, ONCE, when the Resolve bridge comes or goes.
+
+        This line used to be `log.debug("timeline poll: %s", ...)` on every
+        failed poll, i.e. every 3 s, i.e. nothing at all at the shipped
+        `log_level = "INFO"`. It hid two separate multi-hour incidents: MAC-10
+        (the macOS modules path was wrong, so EVERY Resolve feature was dead
+        for a whole session while the log looked perfectly healthy) and item
+        19 (Resolve's own script server died at launch and never retried). A
+        user-visible capability going away is not a debug detail.
+
+        Once per TRANSITION, not once per poll: repeats stay at DEBUG (the
+        callers' own lines) so a machine with Resolve shut all week does not
+        write 28 000 identical INFO records. A change of REASON counts as a
+        transition of its own -- "not running" and "running but not accepting
+        scripting connections" ask the reader for different actions.
+        """
+        reason = "" if connected else str(reason or "")
+        if connected == self._bridge_connected and reason == self._bridge_reason:
+            return
+        self._bridge_connected, self._bridge_reason = connected, reason
+        if connected:
+            log.info("Resolve bridge: connected to DaVinci Resolve")
+        else:
+            log.info("Resolve bridge: %s", reason or "no connection")
 
     def _root_is_present(self) -> bool:
         """False only when the gate POSITIVELY says the tree is gone. A

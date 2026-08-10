@@ -323,6 +323,21 @@ popup_enabled = true
 # before the passive watcher will pop it again.
 popup_snooze_seconds = 300
 
+# "Send to Resolve" in the b-roll web UI (/broll on the dashboard). The
+# companion listens on 127.0.0.1:8899 for that button and drives Resolve's
+# media pool with it. The standalone BRoll Companion that used to do this is
+# retired: if one is still running on this machine, quit it and remove it
+# from startup -- it holds port 8899 and this server then can't start (it
+# says so in companion.log; nothing else is affected).
+#
+# Share -> local folder mappings still live in ~/.broll-companion.json, with
+# one exception: the "broll" share itself defaults to
+# <local_root>/Assets/B-roll Archive, so it needs no entry at all. The port
+# is pinned on the web page's side too, so changing it here only switches
+# the feature off.
+broll_server_enabled = true
+broll_server_port = 8899
+
 # Machine role: "editor" (default -- full sync lanes) or "base" (the central
 # machine working directly off the NAS: implies sync_enabled false unless set
 # explicitly above; the out-of-tree popup stays on so stray media still gets

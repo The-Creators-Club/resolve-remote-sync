@@ -1069,3 +1069,401 @@ def test_a_notchless_mac_only_fails_items_off_the_menu_bar():
         _frame(700.0), SCREEN_H, None) == PLACEMENT_VISIBLE
     assert classify_status_item_placement(
         _frame(0.0, y=-37.0), SCREEN_H, None) == PLACEMENT_OFF_MENU_BAR
+
+
+# ===========================================================================
+# Items 17 + 19: does the tray say whether the Resolve bridge has connected?
+# ===========================================================================
+#
+# Two multi-hour incidents ran with a dead bridge and a tray reporting three
+# healthy lanes: MAC-10 (the macOS modules path was wrong, so the bridge
+# never connected once in a session that ran all evening) and item 19
+# (Resolve's script server died at launch and never retried). Neither the
+# tray nor the diagnostics bundle could answer "has Resolve ever answered
+# us?", so both were diagnosed by hand.
+
+
+def _bridge(connected=None, ever=False, reason=""):
+    return {"connected": connected, "ever_connected": ever, "reason": reason}
+
+
+def test_nothing_is_claimed_before_the_bridge_has_been_asked():
+    """Silence, not "not connected": at startup nothing has polled Resolve
+    yet, and the two are different sentences."""
+    from ccsync_companion.tray import resolve_bridge_line
+
+    assert resolve_bridge_line(_bridge()) is None
+    assert resolve_bridge_line(None) is None
+    assert resolve_bridge_line("nonsense") is None
+
+
+def test_a_live_bridge_says_connected():
+    from ccsync_companion.tray import resolve_bridge_line
+
+    assert resolve_bridge_line(_bridge(True, ever=True)) == "Resolve: connected"
+
+
+def test_a_bridge_that_has_never_connected_is_worded_differently():
+    """The distinction that matters. Never connected at all is a broken
+    install (MAC-10); connected and then gone is Resolve being closed."""
+    from ccsync_companion.tray import resolve_bridge_line
+
+    from ccsync_companion.resolve_bridge import NOT_RUNNING_MESSAGE
+
+    never = resolve_bridge_line(_bridge(False, ever=False, reason=NOT_RUNNING_MESSAGE))
+    lost = resolve_bridge_line(_bridge(False, ever=True, reason=NOT_RUNNING_MESSAGE))
+
+    assert never.startswith("Resolve: NOT CONNECTED this session")
+    assert lost.startswith("Resolve: not connected right now")
+    assert never != lost
+    assert NOT_RUNNING_MESSAGE in never and NOT_RUNNING_MESSAGE in lost
+
+
+def test_the_line_carries_the_distinguished_reason():
+    """Item 19: "running but isn't accepting scripting connections" asks for
+    a different action from "is not running", and the tray must not flatten
+    the two back together."""
+    from ccsync_companion.resolve_bridge import NO_SCRIPTING_MESSAGE
+    from ccsync_companion.tray import resolve_bridge_line
+
+    line = resolve_bridge_line(_bridge(False, ever=True, reason=NO_SCRIPTING_MESSAGE))
+    assert "Quit Resolve and reopen it" in line
+
+
+class _BridgeApp(_FakeApp):
+    def __init__(self, state):
+        super().__init__({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+        self._bridge_state = state
+        self.probes = 0
+
+    def resolve_bridge_state(self):
+        self.probes += 1
+        return self._bridge_state
+
+
+def test_the_snapshot_reads_cached_state_and_the_menu_shows_it():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    from ccsync_companion.resolve_bridge import NOT_RUNNING_MESSAGE
+
+    app = _BridgeApp(_bridge(False, ever=False, reason=NOT_RUNNING_MESSAGE))
+    snap = _tray_snapshot(app)
+
+    assert snap["resolve_line"].startswith("Resolve: NOT CONNECTED this session")
+    labels = _all_menu_labels(_build_menu(app, snap))
+    assert any("NOT CONNECTED this session" in label for label in labels)
+    # Cached read only: a fusionscript call holds the GIL for its full native
+    # duration, and the render path may never pay for one.
+    assert app.probes == 1
+
+
+def test_the_fingerprint_moves_when_the_bridge_does():
+    """The menu is rebuilt only on fingerprint changes (pystray's win32
+    backend DestroyMenu()s a live menu on every icon.menu assignment), so a
+    line left out of it would stay stale forever."""
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    app = _BridgeApp(_bridge(True, ever=True))
+    fp_connected = _menu_fingerprint(_tray_snapshot(app))
+
+    app._bridge_state = _bridge(False, ever=True, reason="DaVinci Resolve is not running")
+    assert _menu_fingerprint(_tray_snapshot(app)) != fp_connected
+
+
+def test_a_broken_bridge_state_getter_costs_only_the_line():
+    from ccsync_companion.tray import _tray_snapshot
+
+    app = _BridgeApp(_bridge(True, ever=True))
+
+    def _boom():
+        raise RuntimeError("no")
+
+    app.resolve_bridge_state = _boom
+    assert _tray_snapshot(app)["resolve_line"] is None
+
+
+# -- item 20: the menu swap must never leave a destroyed handle behind ------
+#
+# pystray's win32 _update_menu DestroyMenu()s the live handle FIRST, rebuilds
+# ~30 items, and publishes the new handle last -- so for the whole rebuild
+# `_menu_handle` names a destroyed HMENU and a right-click arriving inside it
+# gets nothing. It is also called from two threads that know nothing of each
+# other (our refresh loop, and pystray's own post-click update_menu() on the
+# pump thread), which double-destroys one handle and leaks the other until
+# the 10 000-object USER quota kills menus outright.
+
+
+class _HandleRegistry:
+    """Stands in for CreatePopupMenu/DestroyMenu bookkeeping."""
+
+    def __init__(self):
+        import threading
+
+        self._lock = threading.Lock()
+        self.next_handle = 0
+        self.live = set()
+        self.destroyed = []
+        self.violations = []
+
+    def create(self):
+        with self._lock:
+            self.next_handle += 1
+            self.live.add(self.next_handle)
+            return self.next_handle
+
+    def destroy(self, handle, icon):
+        current = getattr(icon, "_menu_handle", None)
+        if current is not None and current[0] == handle:
+            # The handle a concurrent right-click would have picked up.
+            self.violations.append(handle)
+        with self._lock:
+            self.live.discard(handle)
+            self.destroyed.append(handle)
+
+
+class _FakeMenuIcon:
+    """A pystray win32 Icon reduced to what _atomic_update_menu touches."""
+
+    def __init__(self, registry):
+        self.menu = object()
+        self._menu_handle = None
+        self._registry = registry
+        self.creates = 0
+        self.raise_on_create = False
+        self.handle_on_create = None   # 0 fakes the exhausted USER-object quota
+
+    def _create_menu(self, menu, callbacks):
+        import time
+
+        if self.raise_on_create:
+            raise RuntimeError("CreatePopupMenu boom")
+        self.creates += 1
+        callbacks.append(lambda icon: None)
+        time.sleep(0)   # widen the interleaving window for the race below
+        if self.handle_on_create is not None:
+            return self.handle_on_create
+        return self._registry.create()
+
+
+def _fake_win32_menus(monkeypatch, icon, registry):
+    """Point pystray's DestroyMenu at the registry -- win32-only, like the
+    backend being patched."""
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("pystray win32 backend only")
+    from pystray import _win32
+
+    monkeypatch.setattr(_win32.win32, "DestroyMenu",
+                        lambda handle: registry.destroy(handle, icon), raising=True)
+    return _win32
+
+
+def test_the_menu_handle_never_names_a_destroyed_menu(monkeypatch):
+    import threading
+
+    from ccsync_companion import tray as tray_mod
+
+    registry = _HandleRegistry()
+    icon = _FakeMenuIcon(registry)
+    _fake_win32_menus(monkeypatch, icon, registry)
+
+    def churn():
+        for _ in range(150):
+            icon.menu = object()          # a genuinely different menu each time
+            tray_mod._atomic_update_menu(icon)
+
+    threads = [threading.Thread(target=churn) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert registry.violations == []
+    # Every menu ever created is destroyed except the one still on the icon:
+    # the counts balance, so nothing leaks toward the USER quota.
+    assert icon._menu_handle is not None
+    assert len(registry.destroyed) == icon.creates - 1
+    assert registry.live == {icon._menu_handle[0]}
+
+
+def test_an_unchanged_menu_object_is_not_rebuilt(monkeypatch):
+    """pystray calls update_menu() after every left-click and every menu
+    selection with the menu untouched -- and our refresh loop only assigns
+    icon.menu when the fingerprint really moved."""
+    from ccsync_companion import tray as tray_mod
+
+    registry = _HandleRegistry()
+    icon = _FakeMenuIcon(registry)
+    _fake_win32_menus(monkeypatch, icon, registry)
+
+    tray_mod._atomic_update_menu(icon)
+    first = icon._menu_handle
+    tray_mod._atomic_update_menu(icon)
+    tray_mod._atomic_update_menu(icon)
+
+    assert icon.creates == 1
+    assert icon._menu_handle is first
+    assert registry.destroyed == []
+
+    icon.menu = object()
+    tray_mod._atomic_update_menu(icon)
+    assert icon.creates == 2
+    assert registry.destroyed == [first[0]]
+
+
+def test_a_failed_rebuild_leaves_the_old_menu_usable(monkeypatch):
+    from ccsync_companion import tray as tray_mod
+
+    registry = _HandleRegistry()
+    icon = _FakeMenuIcon(registry)
+    _fake_win32_menus(monkeypatch, icon, registry)
+
+    tray_mod._atomic_update_menu(icon)
+    good = icon._menu_handle
+
+    icon.menu = object()
+    icon.raise_on_create = True
+    tray_mod._atomic_update_menu(icon)
+    assert icon._menu_handle is good
+    assert registry.destroyed == []
+    assert good[0] in registry.live
+
+    # ...and the same for the quota case: CreatePopupMenu returning NULL is
+    # how the leak used to end, with _menu_handle set to None and right-click
+    # dead until a restart.
+    icon.raise_on_create = False
+    icon.handle_on_create = 0
+    tray_mod._atomic_update_menu(icon)
+    assert icon._menu_handle is good
+    assert registry.destroyed == []
+
+    # An icon whose MENU is falsy is a different thing -- pystray's own
+    # _create_menu returns None for one by contract -- and must be published,
+    # not warned about forever.
+    icon.menu = None
+    tray_mod._atomic_update_menu(icon)
+    assert icon._menu_handle is None
+    assert registry.destroyed == [good[0]]
+
+
+def test_the_swap_falls_back_to_stock_pystray_when_the_internals_move():
+    """Same fail-open posture as _MenuOpenGuard.install: an unrecognised
+    pystray costs the fix, never the tray."""
+    from ccsync_companion import tray as tray_mod
+
+    class _Alien:
+        menu = None
+
+    called = []
+    tray_mod._atomic_update_menu(_Alien(), lambda icon: called.append(icon))
+    assert len(called) == 1
+
+
+def test_the_swap_guard_installs_once_over_the_win32_backend(monkeypatch):
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("pystray win32 backend only")
+    from pystray import _win32
+
+    from ccsync_companion import tray as tray_mod
+
+    stock = _win32.Icon._update_menu
+    monkeypatch.setattr(_win32.Icon, "_update_menu", stock, raising=True)
+    monkeypatch.setattr(_win32.Icon, "_ccsync_atomic_menu_swap", False, raising=False)
+
+    tray_mod._MenuSwapGuard().install()
+    wrapped = _win32.Icon._update_menu
+    assert wrapped is not stock
+
+    tray_mod._MenuSwapGuard().install()
+    assert _win32.Icon._update_menu is wrapped   # not double-wrapped
+
+    # ...and what got installed is the atomic one: build, publish, destroy.
+    registry = _HandleRegistry()
+    icon = _FakeMenuIcon(registry)
+    monkeypatch.setattr(_win32.win32, "DestroyMenu",
+                        lambda handle: registry.destroy(handle, icon), raising=True)
+    wrapped(icon)
+    assert icon._menu_handle is not None
+    assert registry.violations == []
+
+
+# -- item 20: a right-click that does nothing has to say so -----------------
+
+
+def test_a_failed_popup_call_is_logged(monkeypatch, caplog):
+    """TrackPopupMenuEx is declared with no restype and no errcheck, so a 0
+    return -- the handle was destroyed under it, or the USER quota is gone --
+    looked exactly like the user pressing Escape: silence."""
+    import logging
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("pystray win32 backend only")
+    from pystray import _win32
+
+    from ccsync_companion import tray as tray_mod
+
+    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx", lambda *a, **kw: 0, raising=True)
+    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
+    tray_mod._MenuOpenGuard().install()
+
+    with caplog.at_level(logging.WARNING, logger="ccsync.tray"):
+        assert _win32.win32.TrackPopupMenuEx() == 0
+
+    assert any("tray menu failed to open" in r.getMessage() for r in caplog.records)
+
+
+def test_a_chosen_menu_item_is_not_reported_as_a_failure(monkeypatch, caplog):
+    import logging
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("pystray win32 backend only")
+    from pystray import _win32
+
+    from ccsync_companion import tray as tray_mod
+
+    posted = []
+    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx", lambda *a, **kw: 3, raising=True)
+    monkeypatch.setattr(_win32.win32, "PostMessage",
+                        lambda *a: posted.append(a), raising=True)
+    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
+    tray_mod._MenuOpenGuard().install()
+
+    with caplog.at_level(logging.WARNING, logger="ccsync.tray"):
+        assert _win32.win32.TrackPopupMenuEx(1, 2, 3, 4, 4242, None) == 3
+
+    assert [r for r in caplog.records if "failed to open" in r.getMessage()] == []
+    # MSDN's TrackPopupMenu note, which pystray omits: post WM_NULL to the
+    # owner window afterwards, or the menu can refuse to dismiss on the next
+    # click.
+    assert posted == [(4242, 0x0000, 0, 0)]
+
+
+def test_pystray_records_reach_the_companion_log(tmp_path):
+    """The tray backend logs under "pystray", which had no handler at all --
+    and in the windowed build sys.stderr is None, so logging's last resort
+    had nowhere to write either."""
+    import logging
+
+    from ccsync_companion import app as app_mod
+
+    log_path = tmp_path / "companion.log"
+    app_mod.setup_logging({"log_path": str(log_path), "log_level": "INFO"})
+
+    logging.getLogger("pystray").warning("An error occurred in the main loop")
+    for handler in logging.getLogger("pystray").handlers:
+        handler.flush()
+
+    assert "An error occurred in the main loop" in log_path.read_text(encoding="utf-8")

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Music Tagger</title>
+<!-- Document-relative on purpose: mounted at /music/ a leading slash would
+     resolve against the dashboard's origin root. See tests/test_mounted_prefix.py. -->
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>Music Tagger</h1>
+    <span id="stats" class="muted"></span>
+    <span id="rstatus" class="rstatus" title="DaVinci Resolve connection">Resolve —</span>
+  </div>
+  <div class="searchbar">
+    <input id="q" type="search" autocomplete="off"
+           placeholder="Describe the vibe &mdash; tense driving synth pulse, warm nostalgic piano, hopeful build for a montage&hellip;">
+    <select id="pool" title="Match any single 10s moment, or the track's overall character">
+      <option value="max">any moment</option>
+      <option value="mean">whole track</option>
+    </select>
+    <button id="go">Search</button>
+    <button id="clear" class="ghost">Clear</button>
+  </div>
+  <div id="examples" class="examples"></div>
+</header>
+
+<main>
+  <aside id="filters">
+    <section>
+      <h2>Feel</h2>
+      <div id="axes"></div>
+    </section>
+    <section>
+      <h2>Tempo &amp; length</h2>
+      <div class="rangerow">
+        <label>BPM</label>
+        <input id="bpmMin" type="number" placeholder="min" min="0" max="300">
+        <input id="bpmMax" type="number" placeholder="max" min="0" max="300">
+      </div>
+      <div class="rangerow">
+        <label>Secs</label>
+        <input id="durMin" type="number" placeholder="min" min="0">
+        <input id="durMax" type="number" placeholder="max" min="0">
+      </div>
+      <button id="applyRange" class="ghost wide">Apply</button>
+    </section>
+    <div id="facets"></div>
+  </aside>
+
+  <section id="results">
+    <div id="resulthead" class="resulthead"></div>
+    <div id="list" class="list"></div>
+  </section>
+</main>
+
+<!-- drag-and-drop ingest -->
+<div id="drop" class="dropzone">
+  <div class="dropinner">
+    <div class="dropicon">&#8623;</div>
+    <strong>Drop audio to add it to the library</strong>
+    <span class="muted">It is copied to the library, analysed and indexed. .ogg is transcoded to mp3.</span>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+
+<audio id="audio" preload="none"></audio>
+<script src="app.js"></script>
+</body>
+</html>

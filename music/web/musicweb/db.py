@@ -1,0 +1,470 @@
+"""SQLite access. Embeddings are stored as raw float32 BLOBs.
+
+Shared by both halves: the indexer (base rig) writes this database and the web
+app reads it, so there is exactly one storage layer. `music_index` puts this
+tree on sys.path for that reason -- a drift between writer and reader would be
+silent.
+
+Schema handling follows broll/web/app/db.py: schema.sql is the source of truth
+and is safe to re-run (CREATE ... IF NOT EXISTS throughout), anything it cannot
+express -- an ALTER -- is a numbered file in migrations/ applied in order and
+tracked with PRAGMA user_version.
+
+It differs from broll's runner in one way, and the reason is worth keeping:
+this database predates user_version entirely. The live 376-track index sat at
+user_version=0 with no marker of any kind, so a recorded version cannot be
+trusted to describe what a database actually contains -- on 2026-08-10 a stray
+application of schema.sql stamped that index to 1 without adding the column
+version 1 is defined by. So each migration also carries a predicate saying
+whether its effect is already present, and THAT decides whether it runs.
+user_version is the fast, honest record; the predicate is the truth.
+
+It also holds the ingest queue and the two duplicate defences that guard it.
+Those are not "SQLite access" in the narrow sense, but ingest exists in two
+shapes -- the base rig analyses an upload inside the request
+(`music_index/ingest.py`), a host with no GPU can only park it
+(`musicweb/routes_ingest.py`) -- and the two must reject the same duplicates
+and land files under the same kind of name. This module is the only one both
+shapes can import: the queued half must work with no indexer on the tree at
+all, and the indexer half must not drag in fastapi. Only the ffmpeg shelling
+stays per-half, because tool discovery differs between the two hosts.
+"""
+import hashlib
+import os
+import re
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+
+from musicweb import config
+
+# Highest schema version this codebase knows how to run against. Bump it, add
+# the file to _MIGRATIONS, and give it a predicate.
+CURRENT_SCHEMA_VERSION = 2
+
+# "the version this migration produces" -> (filename, already-applied predicate).
+# The predicate must answer "is this migration's effect already in the
+# database?" without consulting user_version. Ordered by key.
+_MIGRATIONS = {
+    1: ('001_track_share.sql', lambda c: 'share' in _columns(c, 'tracks')),
+    2: ('002_ingest_queue.sql', lambda c: _table_exists(c, 'ingest_queue')),
+}
+
+
+def connect(path=None):
+    p = Path(path or config.DB_PATH)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(p, timeout=30)
+    con.row_factory = sqlite3.Row
+    con.execute('PRAGMA foreign_keys=ON')
+    return con
+
+
+def _columns(con, table):
+    return {r[1] for r in con.execute(f'PRAGMA table_info({table})')}
+
+
+def _table_exists(con, table):
+    return con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                       (table,)).fetchone() is not None
+
+
+def _apply_migration(con, filename):
+    """Apply one migration inside an explicit transaction.
+
+    These run against a database holding a real library, so a failure partway
+    through must not leave the schema half-migrated. executescript() does not
+    wrap the script for us (it commits anything pending first, then runs each
+    statement largely as its own unit), so the BEGIN/COMMIT is ours.
+    """
+    path = config.MIGRATIONS_DIR / filename
+    if not path.exists():
+        raise RuntimeError(
+            f'FATAL: migration {filename!r} not found at {path}. The web app '
+            'cannot migrate its database without it -- if deploying music/web '
+            'standalone, ship migrations/ with it.')
+    try:
+        con.executescript('BEGIN;\n' + path.read_text(encoding='utf-8') + '\nCOMMIT;\n')
+    except Exception:
+        con.rollback()
+        raise
+
+
+def ensure_schema(con):
+    """Bring an open connection's database up to CURRENT_SCHEMA_VERSION.
+
+    Idempotent: safe to call on every startup and on every connection, which is
+    exactly what con() does.
+
+    A brand-new database gets schema.sql in full -- it already carries every
+    migration's end state -- and is stamped current. An existing one walks
+    migrations/ in order, applying each whose effect is missing, and only then
+    is re-run through schema.sql, which is what picks up purely additive tables
+    (that is how peaks and debias landed on the live index).
+    """
+    schema_sql = config.SCHEMA_PATH.read_text(encoding='utf-8')
+
+    if not _table_exists(con, 'tracks'):
+        con.executescript(schema_sql)
+        con.execute(f'PRAGMA user_version = {CURRENT_SCHEMA_VERSION}')
+        con.commit()
+        return
+
+    version = con.execute('PRAGMA user_version').fetchone()[0]
+    if version > CURRENT_SCHEMA_VERSION:
+        raise RuntimeError(
+            f'FATAL: database at {config.DB_PATH} has user_version={version}, '
+            f'newer than this app supports (max {CURRENT_SCHEMA_VERSION}). '
+            'Upgrade the web app before pointing it at this database.')
+
+    for target in sorted(_MIGRATIONS):
+        name, already_applied = _MIGRATIONS[target]
+        if not already_applied(con):
+            _apply_migration(con, name)
+        if not already_applied(con):
+            raise RuntimeError(
+                f'FATAL: migration {name} ran but its effect is still absent '
+                'from the database -- refusing to record it as applied.')
+
+    con.executescript(schema_sql)
+    con.execute(f'PRAGMA user_version = {CURRENT_SCHEMA_VERSION}')
+    con.commit()
+
+
+def init(con):
+    """Historical name for ensure_schema; the indexer and tests call this."""
+    ensure_schema(con)
+
+
+_local = threading.local()
+_schema_ready = False
+
+
+def con():
+    """One SQLite connection per thread.
+
+    FastAPI dispatches sync endpoints across a threadpool, and a sqlite3
+    connection may only be used on the thread that created it -- sharing one
+    raises "SQLite objects created in a thread can only be used in that same
+    thread" as soon as two requests land on different workers. WAL mode makes
+    concurrent readers cheap, so per-thread connections cost nothing.
+    """
+    global _schema_ready
+    c = getattr(_local, 'con', None)
+    if c is None:
+        c = connect()
+        if not _schema_ready:
+            init(c)
+            _schema_ready = True
+        _local.con = c
+    return c
+
+
+def to_blob(vec):
+    return np.asarray(vec, dtype=np.float32).tobytes()
+
+
+def from_blob(blob, dim=None):
+    a = np.frombuffer(blob, dtype=np.float32)
+    return a.reshape(-1, dim) if dim and a.size != dim else a
+
+
+def get_meta(con, key, default=None):
+    r = con.execute('SELECT value FROM meta WHERE key=?', (key,)).fetchone()
+    return r['value'] if r else default
+
+
+def set_meta(con, key, value):
+    con.execute('INSERT INTO meta(key,value) VALUES(?,?) '
+                'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                (key, str(value)))
+
+
+def load_matrix(con):
+    """All track embeddings as (ids, NxD float32 matrix)."""
+    rows = con.execute(
+        'SELECT id, embedding FROM tracks WHERE embedding IS NOT NULL ORDER BY id'
+    ).fetchall()
+    if not rows:
+        return [], np.zeros((0, 0), dtype=np.float32)
+    ids = [r['id'] for r in rows]
+    mat = np.stack([np.frombuffer(r['embedding'], dtype=np.float32) for r in rows])
+    return ids, mat
+
+
+def load_window_matrix(con):
+    """All window embeddings as (track_ids, NxD matrix) for max-over-windows search."""
+    rows = con.execute(
+        'SELECT track_id, embedding FROM windows ORDER BY track_id, idx'
+    ).fetchall()
+    if not rows:
+        return np.zeros(0, dtype=np.int64), np.zeros((0, 0), dtype=np.float32)
+    tids = np.array([r['track_id'] for r in rows], dtype=np.int64)
+    mat = np.stack([np.frombuffer(r['embedding'], dtype=np.float32) for r in rows])
+    return tids, mat
+
+
+def load_debias(con):
+    """Source-bias axes as a (k, D) float32 matrix; empty if none stored."""
+    rows = con.execute('SELECT vec FROM debias ORDER BY idx').fetchall()
+    if not rows:
+        return np.zeros((0, 0), dtype=np.float32)
+    return np.stack([np.frombuffer(r['vec'], dtype=np.float32) for r in rows])
+
+
+def save_debias(con, dirs):
+    con.execute('DELETE FROM debias')
+    if dirs is not None and dirs.size:
+        con.executemany('INSERT INTO debias(idx,vec) VALUES(?,?)',
+                        [(i, to_blob(d)) for i, d in enumerate(dirs)])
+    con.commit()
+
+
+# ------------------------------------------------------------------ ingest
+# Everything below is shared by the inline (base rig) and queued (no GPU)
+# ingest paths -- see the module docstring for why it lives here.
+
+PENDING, DONE, FAILED = 'pending', 'done', 'failed'
+QUEUE_STATES = (PENDING, DONE, FAILED)
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def content_hash(path, chunk=1 << 20):
+    h = hashlib.blake2b(digest_size=16)
+    with open(path, 'rb') as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def safe_upload_name(name):
+    """A browser-supplied filename reduced to something safe to write.
+
+    Basename only, and every character Windows forbids in a name replaced --
+    including the separators, so nothing that arrives here can still be read as
+    a path. `unique_dest` re-validates through safe_join regardless.
+    """
+    name = os.path.basename(name or 'untitled')
+    name = ''.join('_' if c in '<>:"/\\|?*' else c for c in name).strip()
+    return name or 'untitled'
+
+
+def unique_dest(name, root=None):
+    """Collision-free path directly under the share root (the library is flat).
+
+    Joined through safe_join, not '/', so an upload filename that survived
+    safe_upload_name and still looks like a path ("..", "C:") cannot land the
+    file outside the library.
+    """
+    root = config.share_root() if root is None else root
+    stem, ext = os.path.splitext(name)
+    cand, i = name, 2
+    while config.safe_join(root, cand).exists():
+        cand = f'{stem} ({i}){ext}'
+        i += 1
+    return config.safe_join(root, cand)
+
+
+def norm_stem(name):
+    stem = os.path.splitext(os.path.basename(name))[0].lower()
+    stem = re.sub(r'^es[_ ]', '', stem)
+    stem = re.sub(r'[\(\[]\d+[\)\]]', ' ', stem)          # (2)
+    stem = re.sub(r'[^a-z0-9]+', '', stem)
+    return stem
+
+
+def find_reencode(con, name, duration, tol=2.0):
+    """A track already held that is the same recording as this file, or None.
+
+    Content hashing cannot see this: transcoding an .ogg to mp3 changes every
+    byte, so a re-encode of a track already held sails past the hash check.
+    Matching the normalised filename plus a near-identical duration catches it,
+    which matters because .ogg previews sitting beside their masters are
+    exactly what gets dragged in by accident.
+
+    Queued-but-not-yet-analysed uploads are checked too, or dropping the same
+    file twice in a row would queue it twice -- there is no `tracks` row to
+    match against until an indexer run has been past. Rows in state `failed`
+    are deliberately NOT matched: their file is still sitting in the library,
+    and re-dropping it is the obvious way an operator retries.
+    """
+    if not duration:
+        return None
+    key = norm_stem(name)
+    if not key:
+        return None
+    for r in con.execute(
+            'SELECT rel_path, filename, duration FROM tracks '
+            'WHERE duration BETWEEN ? AND ?', (duration - tol, duration + tol)):
+        if norm_stem(r['filename']) == key:
+            return r['rel_path']
+    if not _table_exists(con, 'ingest_queue'):
+        return None
+    for r in con.execute(
+            'SELECT rel_path, orig_name FROM ingest_queue '
+            'WHERE state IN (?,?) AND duration BETWEEN ? AND ?',
+            (PENDING, DONE, duration - tol, duration + tol)):
+        if norm_stem(r['orig_name']) == key or norm_stem(r['rel_path']) == key:
+            return r['rel_path']
+    return None
+
+
+def find_content_duplicate(con, path, digest=None):
+    """rel_path of a library file with byte-identical content, or None.
+
+    The base rig answers this by hashing every file under the share root
+    (`music_index.ingest.library_hashes`), which is fine over a local W:. The
+    NAS container cannot: that is a 9.5 GB read across the mount for every
+    dropped file. Identical content implies an identical byte count, so only
+    the rows whose `bytes` already match are opened -- the same answer, one or
+    two file reads instead of 376.
+
+    Files sitting in the library that no row knows about are therefore missed
+    here and caught by the base rig instead, on the run that indexes them.
+    """
+    path = Path(path)
+    size = path.stat().st_size
+    digest = digest or content_hash(path)
+    for r in con.execute('SELECT share, rel_path FROM tracks WHERE bytes=?', (size,)):
+        try:
+            other = config.resolve_path(r['share'] or config.SHARE, r['rel_path'])
+        except (config.PathTraversalError, config.UnknownShareError):
+            continue
+        try:
+            if other.is_file() and content_hash(other) == digest:
+                return r['rel_path']
+        except OSError:
+            continue
+    if not _table_exists(con, 'ingest_queue'):
+        return None
+    # an upload already queued has no tracks row yet, and its file is real
+    r = con.execute('SELECT rel_path FROM ingest_queue WHERE content_hash=? '
+                    'AND state IN (?,?)', (digest, PENDING, DONE)).fetchone()
+    return r['rel_path'] if r else None
+
+
+def queue_add(con, rel_path, orig_name, share=config.SHARE, bytes_=None,
+              duration=None, digest=None, transcoded=False):
+    """Record a landed upload as `pending`. -> the queue row id.
+
+    Upserts on rel_path so re-using a name whose previous row failed (the file
+    was removed by hand, the operator dropped it again) resets that row to
+    pending rather than raising on the UNIQUE.
+    """
+    con.execute("""
+        INSERT INTO ingest_queue(share,rel_path,orig_name,bytes,duration,
+                                 content_hash,transcoded,state,error,attempts,
+                                 track_id,queued_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,NULL,0,NULL,?,?)
+        ON CONFLICT(rel_path) DO UPDATE SET
+            share=excluded.share, orig_name=excluded.orig_name,
+            bytes=excluded.bytes, duration=excluded.duration,
+            content_hash=excluded.content_hash,
+            transcoded=excluded.transcoded,
+            state=excluded.state, error=NULL, attempts=0, track_id=NULL,
+            queued_at=excluded.queued_at, updated_at=excluded.updated_at
+    """, (share, rel_path, orig_name, bytes_, duration, digest,
+          1 if transcoded else 0, PENDING, _now(), _now()))
+    con.commit()
+    return con.execute('SELECT id FROM ingest_queue WHERE rel_path=?',
+                       (rel_path,)).fetchone()['id']
+
+
+def queue_pending(con, limit=0, include_failed=False):
+    """Rows for an indexer run to work through, oldest first.
+
+    `failed` is opt-in (`--retry-failed`): a file that cannot be analysed would
+    otherwise be re-attempted by every run forever and the reason never read.
+    """
+    states = (PENDING, FAILED) if include_failed else (PENDING,)
+    ph = ','.join('?' * len(states))
+    sql = (f'SELECT * FROM ingest_queue WHERE state IN ({ph}) ORDER BY id')
+    if limit:
+        sql += ' LIMIT %d' % int(limit)
+    return con.execute(sql, states).fetchall()
+
+
+def queue_mark_done(con, queue_id, track_id):
+    con.execute('UPDATE ingest_queue SET state=?, error=NULL, track_id=?, '
+                'attempts=attempts+1, updated_at=? WHERE id=?',
+                (DONE, track_id, _now(), queue_id))
+    con.commit()
+
+
+def queue_mark_failed(con, queue_id, error):
+    """Park a row with the reason. Nothing retries it without being asked to."""
+    con.execute('UPDATE ingest_queue SET state=?, error=?, attempts=attempts+1, '
+                'updated_at=? WHERE id=?', (FAILED, str(error)[:2000], _now(), queue_id))
+    con.commit()
+
+
+def queue_counts(con):
+    """{'pending': n, 'done': n, 'failed': n} -- every key present."""
+    out = {s: 0 for s in QUEUE_STATES}
+    if not _table_exists(con, 'ingest_queue'):
+        return out
+    for r in con.execute('SELECT state, COUNT(*) c FROM ingest_queue GROUP BY state'):
+        out[r['state']] = r['c']
+    return out
+
+
+def queue_rows(con, state=None, limit=50):
+    if not _table_exists(con, 'ingest_queue'):
+        return []
+    if state:
+        return con.execute('SELECT * FROM ingest_queue WHERE state=? '
+                           'ORDER BY id DESC LIMIT ?', (state, limit)).fetchall()
+    return con.execute('SELECT * FROM ingest_queue ORDER BY id DESC LIMIT ?',
+                       (limit,)).fetchall()
+
+
+def queue_reconcile(con):
+    """Close pending rows whose file has since been indexed by some other run.
+
+    A queued file lives in the library like any other, so a plain
+    `index_music.py` sweep picks it up by rglob and indexes it without ever
+    looking at this table -- leaving a row that says `pending` about a track
+    that is already searchable. Called at the top of a drain and at the end of
+    a full run. -> how many rows it closed.
+    """
+    if not _table_exists(con, 'ingest_queue'):
+        return 0
+    rows = con.execute(
+        'SELECT q.id, t.id tid FROM ingest_queue q JOIN tracks t '
+        'ON t.rel_path = q.rel_path AND t.embedding IS NOT NULL '
+        'WHERE q.state=?', (PENDING,)).fetchall()
+    for r in rows:
+        queue_mark_done(con, r['id'], r['tid'])
+    return len(rows)
+
+
+def percentile_ranks(values):
+    """Percentile rank in [0,100] of each value within the array.
+
+    Ties get the same rank. Used because raw CLAP similarities are poorly
+    calibrated in absolute terms but reliably ordered within a library.
+    """
+    v = np.asarray(values, dtype=np.float64)
+    n = v.size
+    if n == 0:
+        return np.zeros(0)
+    if n == 1:
+        return np.array([50.0])
+    order = v.argsort()
+    ranks = np.empty(n, dtype=np.float64)
+    ranks[order] = np.arange(n, dtype=np.float64)
+    # average ranks across ties so identical scores get identical percentiles
+    uniq, inv, counts = np.unique(v, return_inverse=True, return_counts=True)
+    sums = np.zeros(uniq.size)
+    np.add.at(sums, inv, ranks)
+    ranks = (sums / counts)[inv]
+    return ranks / (n - 1) * 100.0

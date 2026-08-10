@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional
 from . import broll_server as broll_server_mod
 from . import config as config_mod
 from . import luts as luts_mod
+from . import music_worker
 from . import paths as paths_mod
 from . import popup
 from . import proxy_relink
@@ -3516,6 +3517,16 @@ def run() -> None:
     # it must not acquire the single-instance lock or start a tray.
     if "--setup-resolve-prefs" in sys.argv[1:]:
         sys.exit(setup_resolve_prefs_cli())
+
+    # The music library's "Send to Resolve" buttons run their Resolve call in
+    # a killable CHILD process (music_server.call), because the scripting API
+    # blocks indefinitely when Resolve is modal or on the Project Manager
+    # window and that must never wedge the tray. In a frozen build there is no
+    # interpreter to hand a script to -- sys.executable IS this exe -- so the
+    # child is another copy of it, re-entered here. Same rule as the flag
+    # above: no single-instance lock, no config, no tray.
+    if music_worker.WORKER_FLAG in sys.argv[1:]:
+        sys.exit(music_worker.main(sys.argv[1:]))
 
     cfg = config_mod.load_config()
     # Logging (and a first validate_config pass) must exist BEFORE

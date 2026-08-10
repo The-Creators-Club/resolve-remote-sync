@@ -20,3 +20,21 @@ smbprotocol>=1.13
 # and cold-start decision to make deliberately, not to inherit by accident.
 numpy>=1.26
 rapidfuzz>=3.0
+
+# --- music UI (mounted at /music) ------------------------------------------
+# `numpy` above already covers the embedding maths; the music app carries no
+# torch, because the container never embeds audio -- only query text, and only
+# when someone searches.
+#
+# python-multipart is NOT optional: FastAPI raises at *import* time for the
+# `UploadFile` parameter on /api/ingest, not at request time. Without it the
+# dashboard's mount reports the music tree as "absent" -- indistinguishable
+# from never having shipped it -- instead of failing loudly.
+python-multipart>=0.0.9
+
+# Runs the exported CLAP text-tower artefact (music/web/data/text_encoder,
+# ~500 MB, ships alongside music.db). Query text is the ONLY thing this
+# container ever embeds; audio embeddings arrive precomputed from the base rig.
+# Without this the app falls back to the full CLAP model and search 500s,
+# because torch is deliberately absent.
+onnxruntime>=1.17

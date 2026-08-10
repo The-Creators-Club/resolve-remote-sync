@@ -6,6 +6,16 @@ Implements the "Companion API contract" section of broll/SPEC.md exactly:
 plus OPTIONS preflight handling and permissive CORS (loopback-only bind
 makes that safe -- see that spec).
 
+Since port step 8 (2026-08-10) it also carries the MUSIC library's
+"Send to Resolve" actions as a route group:
+  GET  /music/status
+  POST /music/send
+They are here, on this listener, rather than on one of their own precisely
+because this process already owns 8899 and a second server holding it breaks
+the tray app (CLAUDE.md). The music half's logic lives in music_server.py;
+only the dispatch below and the mount map in start() are shared, and the
+b-roll contract above is untouched by it.
+
 ABSORBED from the standalone b-roll companion (`broll/companion/`, package
 `broll_companion`), retired 2026-08-10. The fleet was shipping two tray apps
 to every editor whose only difference was this ~200-line server, and the
@@ -35,6 +45,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 from . import config as ccsync_config
+from . import music_server
 from . import resolve_bridge
 
 log = logging.getLogger("ccsync.broll")
@@ -95,6 +106,11 @@ This file has no comments (it's plain JSON), so here's what each field means:
       <local_root>/Assets/B-roll Archive from ~/.ccsync/config.toml. Any
       entry written here wins over that. Other shares have no derivable
       root, so they still need one line each.
+
+      The "music" share is read from this same table (the music library's
+      "Send to Resolve" buttons talk to the same companion, on the same
+      port) and needs no entry either: it defaults to
+      <local_root>/Assets/Music.
 
       On macOS, a share with no entry here is also probed for at
       /Volumes/<share>, /Volumes/<share>-1, /Volumes/<share>-2 (Finder's
@@ -377,17 +393,41 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _read_json_body(self) -> Any:
+        """The request body as parsed JSON, or None if it isn't JSON.
+
+        Only the /music routes use this; /insert keeps its own inline copy so
+        absorbing the music group changed nothing on the b-roll path.
+        """
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/status":
             mounts = self.server.companion_config.get("mounts", {})
             self._send_json(200, build_status_response(mounts))
+        elif path == "/music/status":
+            status, result = music_server.build_status_response()
+            self._send_json(status, result)
         else:
             self._send_json(404, {"ok": False, "message": f"not found: {path}"})
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path == "/insert":
+        if path == "/music/send":
+            body = self._read_json_body()
+            if body is None or not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "error": "invalid JSON body"})
+                return
+            mounts = self.server.companion_config.get(music_server.MOUNTS_KEY, {})
+            status, result = music_server.build_send_response(body, mounts)
+            self._send_json(status, result)
+        elif path == "/insert":
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b""
             try:
@@ -474,7 +514,13 @@ def start(ccsync_cfg: dict[str, Any]) -> Optional[BrollCompanionServer]:
 
     port = configured_port(ccsync_cfg)
     broll_cfg = load_config()
+    # Computed BEFORE "mounts" is overwritten: resolve_music_mounts reads the
+    # same hand-written table from the same file and adds its own default, so
+    # handing it the already-derived b-roll map would carry a "broll" entry
+    # into the music route group's namespace.
+    music_mounts = music_server.resolve_music_mounts(broll_cfg, ccsync_cfg)
     broll_cfg["mounts"] = resolve_mounts(broll_cfg, ccsync_cfg)
+    broll_cfg[music_server.MOUNTS_KEY] = music_mounts
 
     try:
         server = make_server(broll_cfg, HOST, port)
@@ -507,8 +553,9 @@ def start(ccsync_cfg: dict[str, Any]) -> Optional[BrollCompanionServer]:
         return None
 
     log.info(
-        "broll: Send-to-Resolve listening on http://%s:%d (mounts: %s)",
-        HOST, server.server_address[1], broll_cfg["mounts"],
+        "broll: Send-to-Resolve listening on http://%s:%d (mounts: %s; "
+        "/music/* mounts: %s)",
+        HOST, server.server_address[1], broll_cfg["mounts"], music_mounts,
     )
     return server
 

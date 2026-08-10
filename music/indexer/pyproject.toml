@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "music-indexer"
+version = "0.1.0"
+description = "Music platform indexer: decode, CLAP embed, DSP features, vocabulary tagging, ingest."
+requires-python = ">=3.12"
+# Base rig only -- this half needs the RTX 3080 and a local ffmpeg. torch here
+# is deliberate and is the reason it never runs in the NAS container.
+dependencies = [
+    "numpy>=1.26",
+    "torch>=2.6",
+    "transformers>=4.40",
+    "librosa>=0.11",
+    "pyloudnorm>=0.2",
+    "soundfile>=0.13",
+    # export_text_encoder.py only. onnx writes the graph; onnxruntime is here
+    # because the exporter refuses to ship an artefact it has not loaded the
+    # way the container will and compared to the full ClapModel. It is a
+    # 19 MB wheel and it is the ONLY new dependency the web half gains --
+    # see that script's docstring for the ONNX-vs-torch numbers.
+    "onnx>=1.16",
+    "onnxruntime>=1.17",
+]
+
+[tool.setuptools.packages.find]
+include = ["music_index*"]
+
+# The storage layer (musicweb.db) and schema.sql live in ../web and are shared:
+# this package writes the database the web app reads. music_index/__init__.py
+# puts ../web on sys.path for that reason -- see its docstring.

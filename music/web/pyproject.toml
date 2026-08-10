@@ -1,0 +1,46 @@
+[project]
+name = "music-web"
+version = "0.1.0"
+description = "Music search app -- FastAPI search API + audio streaming + SPA (see ../SPEC.md)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "numpy>=1.26",
+    "python-multipart>=0.0.9",
+    # Runs the text-encoder artefact (port step 5). Without it the artefact is
+    # ignored and text search silently falls back to the full CLAP model --
+    # which needs torch, which the container deliberately does not have, so
+    # search would 500 rather than degrade. 54 MB unpacked against torch's 675.
+    "onnxruntime>=1.17",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+# torch is NOT a dependency and must not become one. Text search runs on the
+# exported text-tower artefact through onnxruntime (Index.encoder), measured
+# identical to the full model: min cosine 0.9999999 over 49 queries, and 58 of
+# 59 full 378-track rankings bit-identical, the one difference a float-noise
+# swap at rank 342.
+#
+# ONNX was chosen over TorchScript on install size, not speed -- the artefacts
+# are the same 125M fp32 weights either way (~500 MB), but onnxruntime unpacks
+# to 54 MB against torch's 675 MB, before torch's own deps. It is also the
+# faster of the two per query (30 ms vs 40 ms), so nothing was traded for it.
+#
+# Index.clap is still lazy and still torch-only: /api/ingest embeds AUDIO on
+# the base rig, which the text artefact cannot do. Do not merge the two.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["musicweb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

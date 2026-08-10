@@ -18,6 +18,7 @@ the planned lane-B→Syncthing migration.
 | `onboarding/` | first-run wizard | editor machines |
 | `bench/` | `ccbench` sync-engine benchmark harness | ad hoc |
 | `broll/` | the b-roll platform, folded in from the standalone `broll-platform` repo 2026-08-10 (pre-fold git history stays there): `web/` search UI + API, `indexer/` Claude-based clip indexing pipeline, `eval/` search eval | web: mounted in-process at `/broll` by the dashboard (see below); indexer: base rig |
+| `music/` | the music tagger, folded in from the standalone `music-tagger` repo 2026-08-10 (pre-fold history stays there): `web/` CLAP search UI + API, `indexer/` CLAP embedding/tagging pipeline, `eval/` quality measurement | web: mounted in-process at `/music` by the dashboard; indexer: base rig (needs the GPU) |
 | `docs/` | operational docs (SERVER, EDITOR_SETUP, GOTCHAS, bug-hunt notes) | — |
 
 `broll/companion/` no longer exists: the standalone BRoll Companion was
@@ -37,6 +38,30 @@ run alongside the tray app — it would hold port 8899.
   server on 127.0.0.1:8899. Frontend URLs are document-relative on purpose —
   `broll/web/tests/test_mounted_prefix.py` pins this; never introduce a
   root-relative `/api|/media|/static` URL in `broll/web/static/`.
+- The dashboard mounts `music/web` at `/music` on the same contract as b-roll
+  (`dashboard/src/ccsync_dashboard/music.py`): in-process so the audio route's
+  Range/206 responses are not proxied, behind the dashboard login, tri-state
+  and best-effort so a broken music checkout can never stop the dashboard
+  booting. Its frontend URLs are document-relative for the same reason
+  b-roll's are — `music/web/tests/test_mounted_prefix.py` pins it, and the
+  bare `/music` → `/music/` redirect is load-bearing, not incidental.
+- The music UI's "send to Resolve" calls the companion's loopback on
+  127.0.0.1:8899 too — `POST /music/send` / `GET /music/status`, added to
+  `broll_server.py`'s handler rather than a second server, since a second
+  listener on 8899 breaks the tray app. The body is `{action, share,
+  rel_path}`, never a path: the page is served from the NAS, so only the
+  editor's own browser can reach their Resolve, and only their companion knows
+  the library is at `P:\Assets\Music` there. **Editors need a republished
+  companion before any of this exists for them** — the deployed build 404s on
+  `/music/*`.
+- **The music web package is `musicweb`, deliberately NOT `app`.** `broll/web`
+  is deployed by putting its tree on PYTHONPATH and importing it as top-level
+  `app`; a second package of that name would collide in `sys.modules` and one
+  would silently win.
+- Music indexing needs the GPU and stays on the base rig. The container only
+  ever embeds *query text* (measured 18 ms/query on CPU, and only the 125M-param
+  text tower of the 194M model) — audio embeddings, tags, axes, waveform peaks
+  and the source-bias axes are all precomputed into `music/web/data/music.db`.
 - Companion builds reach editors through the dashboard's upgrade channel
   (publish with `-Publish -MakeCurrent`). macOS bundles must be built ON a
   Mac (`tools/release_macos.sh`); they cannot be cross-built from Windows.
@@ -61,6 +86,7 @@ cd server;      ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # no 
 cd onboarding;  python -m pytest tests -q                                  # system python
 cd broll\indexer; python -m pytest tests -q                                # system python
 cd broll\web;   E:\Projects\broll-platform\web\.venv\Scripts\python.exe -m pytest tests -q
+cd music\web;   .venv\Scripts\python.exe -m pytest tests -q                # own venv, deliberately no torch
 powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMapParser.ps1
 ```
 

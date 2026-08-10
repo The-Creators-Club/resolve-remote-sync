@@ -43,6 +43,37 @@ Steps (each idempotent, one line printed per action):
      was folded in as broll/ on 2026-08-10); if it is missing this script
      FAILS rather than deploying a feature that cannot work. Set
      DASH_BROLL_ENABLED=0 to skip the b-roll UI entirely.
+  2c. Ship the music web/ tree into <host-root>/music-web by the same route
+     (mounted read-only at /music-app, on PYTHONPATH). Source is MUSIC_WEB_SRC,
+     default music/web in this repo. Unlike b-roll this is a WARN-AND-SKIP if
+     it is missing, not a refusal: there is no DASH_MUSIC_ENABLED asserting
+     that the operator wanted it -- shipping the tree IS the switch, and a host
+     without it reports the mount "absent" and hides the nav link.
+  2d. Ship the music DATA artefacts, which are not code and are ~1.4 GB:
+       music.db (~20 MB)         the index. WRITABLE: it lands in
+                                 <host-root>/music-data (3000:3000 770,
+                                 mounted rw at /music-data) because queued
+                                 ingest writes `pending` rows into it. Shipped
+                                 with its WAL sidecars moved aside, never
+                                 deleted, previous kept as music.db.old.<ts>.
+       text_encoder/ (~482 MB)   the exported CLAP text tower. WITHOUT IT
+                                 /music/api/search 500s -- the fallback is the
+                                 full CLAP model, which needs torch, which this
+                                 container deliberately does not have.
+       proxies/ (~906 MB)        128k preview mp3s. Without them /api/audio
+                                 still works and streams 60 MB wavs instead.
+     These do NOT ride along with every deploy: --music-data auto (the default)
+     ships only what the NAS does not already have, so the first install is the
+     1.4 GB one and a routine redeploy pushes nothing. --music-data all (or
+     db/encoder/proxies) forces a re-push -- that is how a re-index is
+     published. --music-data none skips them.
+  2e. Provision static ffmpeg + ffprobe into <host-root>/ffmpeg (mounted
+     read-only at /opt/ffmpeg, put on PATH by run.sh). /music's queued ingest
+     needs them -- ffprobe to prove an upload is audio, ffmpeg to transcode
+     .ogg -- and answers 503 without them. THERE IS NO IMAGE BUILD in this
+     deployment (compose runs a stock pinned python:3.12.7-slim) and the
+     container is unprivileged, so this is the only place it can come from.
+     Non-fatal and idempotent; --no-ffmpeg skips it.
   3. If the app is not yet installed: POST /api/v2.0/app with
        {"custom_app": true, "app_name": "ccsync-dashboard",
         "custom_compose_config": {...}}   (compose dict mirrors
@@ -76,7 +107,12 @@ TRUENAS_VERIFY_SSL (default "0" = trust the NAS's self-signed cert),
 DASH_BROLL_ENABLED (default "1"; "0" deploys without the b-roll UI),
 BROLL_INGEST_TOKEN (REQUIRED when DASH_BROLL_ENABLED=1 -- it guards a write
 path the indexer reaches with no session; `openssl rand -hex 24`),
-BROLL_WEB_SRC (the b-roll web/ tree to ship, default broll/web in this repo).
+BROLL_WEB_SRC (the b-roll web/ tree to ship, default broll/web in this repo),
+MUSIC_WEB_SRC (the music web/ tree to ship, default music/web in this repo),
+MUSIC_DATA_SRC (the music data/ dir, default <MUSIC_WEB_SRC>/data),
+MUSIC_DATA_PUSH (same values as --music-data; default "auto"),
+MUSIC_FFMPEG_URL / MUSIC_FFMPEG_SHA256 (the static ffmpeg build to install;
+pinned defaults, and an empty URL skips the step like --no-ffmpeg).
 
 Compose-level settings are baked in at CREATE time: after changing any of
 them, re-run with --recreate, otherwise the running app keeps the old ones.
@@ -98,7 +134,8 @@ import time
 from pathlib import Path
 
 from common import (
-    DEFAULT_BROLL_ARCHIVE_ROOT, DEFAULT_PROJECTS_ROOT, add_host_key_arg, ok,
+    DEFAULT_BROLL_ARCHIVE_ROOT, DEFAULT_CC_ROOT, DEFAULT_PROJECTS_ROOT,
+    add_host_key_arg, ok,
     require_env, run_ssh,
     set_host_key_pin, shell_quote, ssh_client, truenas_api,
     truenas_conn_params, wait_for_job,
@@ -121,6 +158,92 @@ DEFAULT_BROLL_WEB_DIR = Path(__file__).resolve().parents[1] / "broll" / "web"
 # Its tests/, git metadata and local venv have no business on the NAS -- the
 # container only ever imports app/ and serves static/.
 BROLL_EXCLUDE_DIRS = EXCLUDE_DIRS | {".git", ".github", "tests", "node_modules"}
+
+# --------------------------------------------------------------------------
+# The music app (music/web), mounted in-process at /music
+# --------------------------------------------------------------------------
+# Deployed exactly the way broll/web is: the CODE tree ships to
+# <host-root>/music-web, which the container mounts read-only at /music-app and
+# run.sh puts on PYTHONPATH. MUSIC_WEB_SRC overrides the source -- the same env
+# var dashboard/tests/test_music_mount.py honours.
+#
+# There is deliberately NO DASH_MUSIC_ENABLED to go with DASH_BROLL_ENABLED.
+# b-roll needs a flag because it has a credential (BROLL_INGEST_TOKEN) the
+# dashboard refuses to start without; music has none -- nothing under /music is
+# exempt from login_gate -- so SHIPPING THE TREE IS THE SWITCH, and a host that
+# never received it reports the mount "absent" and simply hides the nav link.
+# For the same reason a missing music tree is a WARNING here, not a refusal:
+# nothing in the operator's command line asserted they wanted it.
+DEFAULT_MUSIC_WEB_DIR = Path(__file__).resolve().parents[1] / "music" / "web"
+# data/ is excluded from the CODE push and shipped separately (see
+# MUSIC_DATA_COMPONENTS): it is ~1.4 GB whose update cadence has nothing to do
+# with the dashboard's. Everything else -- tests/, .git, .venv, __pycache__ --
+# is excluded for the same reasons broll/web excludes it (.venv was already in
+# EXCLUDE_DIRS; music/web has one and broll/web does not).
+MUSIC_EXCLUDE_DIRS = BROLL_EXCLUDE_DIRS | {"data"}
+# The three data artefacts, none of which is code and none of which the app can
+# be useful without. They are pushed INDEPENDENTLY of the code, because a
+# dashboard deploy is a frequent, small, boring thing and this is 1.4 GB over
+# paramiko's SFTP:
+#
+#   db       music.db, ~20 MB -- the entire index. Changes whenever the base
+#            rig re-indexes. WRITABLE in the container: queued ingest writes
+#            `pending` rows into it, so it lands in a data root owned by the
+#            container's uid, NOT in a read-only code mount.
+#   encoder  text_encoder/, ~482 MB -- the exported CLAP text tower. Without it
+#            musicweb.search falls back to the full CLAP model, which needs
+#            torch, which this container deliberately does not have, so
+#            /music/api/search would 500. Immutable; mounted read-only.
+#   proxies  proxies/, ~906 MB -- one 128k mp3 per track. Without them
+#            /api/audio still works and serves the 60 MB originals over
+#            Tailscale instead. Immutable HERE (they are generated on the base
+#            rig; the container only ever checks existence), so read-only too.
+MUSIC_DATA_COMPONENTS = ("db", "encoder", "proxies")
+# component -> (subdirectory of the data source, <host-root> target name)
+MUSIC_DATA_TREES = {
+    "encoder": ("text_encoder", "music-encoder"),
+    "proxies": ("proxies", "music-proxies"),
+}
+MUSIC_DB_FILENAME = "music.db"
+# music.db is in WAL mode (write/read version 2 in its header), so its -wal and
+# -shm siblings belong to THAT database file. Replacing the db and leaving a
+# stale -wal beside it is how a working index becomes a corrupt one.
+MUSIC_DB_SIDECARS = ("-wal", "-shm")
+# Default for --music-data. "auto" = ship each component only if it is not on
+# the NAS yet, which makes the first install a 1.4 GB one and every subsequent
+# dashboard deploy a small one. `--music-data all` is how a re-index is
+# published; `--music-data db` publishes just the index.
+MUSIC_DATA_PUSH_DEFAULT = "auto"
+
+# ffmpeg for the container. THERE IS NO IMAGE BUILD ANYWHERE IN THIS DEPLOYMENT
+# -- compose runs a pinned, stock python:3.12.7-slim and execs /app/deploy/run.sh
+# in it -- and the container runs as 3000:3001, so it cannot apt-get anything
+# either. The remaining provisioning surface is this script, which has root over
+# SSH: a static build is unpacked into <host-root>/ffmpeg, mounted read-only at
+# /opt/ffmpeg, and put on PATH by run.sh.
+#
+# Only /api/ingest's queued path needs it (ffprobe to prove an upload is audio,
+# ffmpeg to transcode .ogg), and musicweb answers 503 with a readable message
+# when it is missing -- so this step is NON-FATAL and skippable. Deliberately
+# NOT wired to the FFMPEG/FFPROBE env vars musicweb._tool() reads first: those
+# are absolute paths taken on trust, and pointing them at a mount that was
+# never provisioned turns a clean 503 into a FileNotFoundError mid-upload.
+# PATH is checked with shutil.which(), which tells the truth.
+DEFAULT_FFMPEG_URL = ("https://johnvansickle.com/ffmpeg/releases/"
+                      "ffmpeg-7.0.2-amd64-static.tar.xz")
+# sha256 of the tarball above, verified against the real download on 2026-08-10.
+# The URL is the VERSIONED one on purpose: johnvansickle's
+# ffmpeg-release-amd64-static.tar.xz is a rolling pointer whose bytes change
+# under a pinned hash. Bump both together.
+DEFAULT_FFMPEG_SHA256 = "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67"
+
+# The music library on the NAS: the SHARE ITSELF, beside Projects/ and the
+# b-roll archive under Creators_Club, which is what makes it P:\Assets\Music on
+# an editor's machine and W:\Creators_Club\Assets\Music on the base rig. Mounted
+# READ-WRITE because queued ingest moves the accepted upload into it -- same
+# posture as the b-roll archive, and for the same reason.
+DEFAULT_MUSIC_LIBRARY_ROOT = DEFAULT_CC_ROOT + "/Assets/Music"
+
 # Minimum ingest-token strength, mirroring
 # ccsync_dashboard.broll.check_ingest_token -- the dashboard refuses to START
 # with a weaker one, and finding that out from a crash-looping container is a
@@ -210,6 +333,24 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # app's own guard fell back to dev mode, where any
                     # logged-in editor could rewrite the archive index.
                     "BROLL_INGEST_TOKEN": broll_ingest_token,
+                    # music search UI, mounted in-process at /music. No
+                    # DASH_MUSIC_ENABLED and no token: shipping the tree is the
+                    # switch, and nothing under /music is exempt from
+                    # login_gate (see music/web/DEPLOY.md).
+                    #
+                    # Every one of these is MUSIC_-prefixed. musicweb still
+                    # honours bare DATA_ROOT/MUSIC_ROOT as fallbacks, but this
+                    # is one environment shared with the dashboard and with the
+                    # b-roll mount (which namespaces everything BROLL_*), and a
+                    # bare DATA_ROOT in it is a collision waiting to happen.
+                    #
+                    # MUSIC_DATA_ROOT is the one WRITABLE music path: music.db
+                    # and the ingest staging/ dir live there. The other two are
+                    # read-only artefacts shipped beside it.
+                    "MUSIC_DATA_ROOT": "/music-data",
+                    "MUSIC_SHARE_ROOT": "/music-share",
+                    "MUSIC_PROXIES_DIR": "/music-proxies",
+                    "MUSIC_TEXT_ENCODER_DIR": "/music-encoder",
                     # DASH_PACKAGES_DIR intentionally unset: defaults to a
                     # "packages" dir next to DASH_DB_PATH (/data/packages),
                     # which is already the persistent volume.
@@ -256,6 +397,32 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # under Creators_Club), not a private copy -- one set of
                     # media serves both the search UI and editors' timelines.
                     f"{DEFAULT_BROLL_ARCHIVE_ROOT}:/broll-data:rw",
+                    # music: code read-only (same posture as /app and
+                    # /broll-app), and its data split by what has to be
+                    # writable rather than by what happens to be big.
+                    f"{host_root}/music-web:/music-app:ro",
+                    # WRITABLE: music.db (queued ingest writes `pending` rows)
+                    # and the ingest staging/ dir. A read-only data root here
+                    # is the DEGRADED case the mount is built to report --
+                    # "unable to open database file" on every request.
+                    f"{host_root}/music-data:/music-data:rw",
+                    # Read-only artefacts, shipped separately from the code
+                    # because together they are ~1.4 GB: the exported CLAP text
+                    # tower (without it /music/api/search 500s, since the
+                    # fallback needs torch) and the 128k preview proxies
+                    # (without them /api/audio serves 60 MB wavs over Tailscale).
+                    f"{host_root}/music-encoder:/music-encoder:ro",
+                    f"{host_root}/music-proxies:/music-proxies:ro",
+                    # The music library itself, beside Projects/ and the b-roll
+                    # archive. rw: queued ingest moves the accepted upload into
+                    # the share.
+                    f"{DEFAULT_MUSIC_LIBRARY_ROOT}:/music-share:rw",
+                    # Static ffmpeg/ffprobe for /api/ingest. There is no image
+                    # build in this deployment and the container is unprivileged,
+                    # so the binaries are provisioned onto the host by this
+                    # script and mounted in; run.sh puts them on PATH. An empty
+                    # dir here is fine -- ingest answers 503 and says so.
+                    f"{host_root}/ffmpeg:/opt/ffmpeg:ro",
                 ],
                 "restart": "unless-stopped",
                 "healthcheck": healthcheck_config(port),
@@ -327,6 +494,295 @@ def broll_web_source() -> Path:
     BROLL_WEB_SRC points somewhere else."""
     raw = os.environ.get("BROLL_WEB_SRC", "").strip()
     return Path(raw) if raw else DEFAULT_BROLL_WEB_DIR
+
+
+def music_web_source() -> Path:
+    """The music web/ tree to ship -- music/web in this repo, unless
+    MUSIC_WEB_SRC points somewhere else."""
+    raw = os.environ.get("MUSIC_WEB_SRC", "").strip()
+    return Path(raw) if raw else DEFAULT_MUSIC_WEB_DIR
+
+
+def music_data_source() -> Path:
+    """The music data/ directory (music.db, text_encoder/, proxies/).
+
+    Follows MUSIC_WEB_SRC by default -- a checkout elsewhere brings its own
+    data with it -- and MUSIC_DATA_SRC overrides it on its own, for the case
+    where the artefacts were built or fetched separately from the code.
+    """
+    raw = os.environ.get("MUSIC_DATA_SRC", "").strip()
+    return Path(raw) if raw else music_web_source() / "data"
+
+
+def parse_music_data_push(raw: str) -> tuple[set[str], str]:
+    """--music-data -> (components to force-push, error).
+
+    "auto" returns an EMPTY set and no error: nothing is forced, and what
+    actually ships is decided per component by whether the NAS already has it
+    (see music_components_to_push). "none" is the same empty set with
+    force-only semantics, so the two are distinguished by the caller, not here.
+    """
+    value = (raw or "").strip().lower()
+    if value in ("auto", "none", ""):
+        return set(), ""
+    if value == "all":
+        return set(MUSIC_DATA_COMPONENTS), ""
+    wanted = {p.strip() for p in value.split(",") if p.strip()}
+    unknown = sorted(wanted - set(MUSIC_DATA_COMPONENTS))
+    if unknown:
+        return set(), (f"unknown --music-data component(s) {', '.join(unknown)}; "
+                       f"expected auto, none, all, or a comma-separated subset of "
+                       f"{', '.join(MUSIC_DATA_COMPONENTS)}")
+    return wanted, ""
+
+
+def music_component_paths(root: str) -> dict[str, str]:
+    """component -> the path on the NAS whose existence means "already there"."""
+    paths = {"db": f"{root}/music-data/{MUSIC_DB_FILENAME}"}
+    for name, (_sub, target) in MUSIC_DATA_TREES.items():
+        paths[name] = f"{root}/{target}"
+    return paths
+
+
+def music_components_present(root: str, dry_run: bool) -> dict[str, bool]:
+    """Which music data components the NAS already holds.
+
+    One SSH round trip printing "<component> yes|no" per line. A non-empty
+    DIRECTORY is what counts for the two trees, not merely an existing one:
+    install_dashboard_app creates them empty in step 1, and an empty
+    music-proxies is exactly the state "auto" has to treat as missing.
+
+    A dry run reports everything absent, so --dry-run shows the full first-run
+    plan (which is the one worth eyeballing -- it is the 1.4 GB one).
+    """
+    paths = music_component_paths(root)
+    if dry_run:
+        run_ssh("true  # [dry-run] would check which music data components exist",
+                dry_run=True)
+        return {name: False for name in paths}
+    probe = "; ".join(
+        f'if [ -e {shell_quote(path)} ] && '
+        f'[ -n "$(ls -A {shell_quote(path)} 2>/dev/null || echo x)" ]; '
+        f'then echo "{name} yes"; else echo "{name} no"; fi'
+        for name, path in paths.items()
+    )
+    rc, out, _err = run_ssh(probe)
+    present = {name: False for name in paths}
+    if rc != 0:
+        return present
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] in present:
+            present[parts[0]] = parts[1] == "yes"
+    return present
+
+
+def music_components_to_push(root: str, mode: str, forced: set[str],
+                             dry_run: bool) -> list[str]:
+    """The components this run will actually ship, in a stable order.
+
+    "none" ships nothing. An explicit list (or "all") ships exactly that, every
+    time -- that is how a re-index is published. "auto" ships only what the NAS
+    does not have, which is what keeps a routine dashboard deploy from pushing
+    1.4 GB it already pushed last week.
+    """
+    if mode == "none":
+        return []
+    if forced:
+        return [c for c in MUSIC_DATA_COMPONENTS if c in forced]
+    present = music_components_present(root, dry_run)
+    return [c for c in MUSIC_DATA_COMPONENTS if not present.get(c)]
+
+
+def music_data_sizes(source: Path) -> dict[str, tuple[int, int]]:
+    """component -> (file count, bytes) for whatever of it exists locally."""
+    sizes: dict[str, tuple[int, int]] = {}
+    db = source / MUSIC_DB_FILENAME
+    if db.is_file():
+        sizes["db"] = (1, db.stat().st_size)
+    for name, (sub, _target) in MUSIC_DATA_TREES.items():
+        if (source / sub).is_dir():
+            sizes[name] = local_manifest(source / sub, MUSIC_EXCLUDE_DIRS)
+    return sizes
+
+
+def human_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
+def build_db_swap_script(data_root: str, staging: str, target: str,
+                         old: str, expected_bytes: int) -> str:
+    """Install one shipped music.db, with install_tree's guarantees for a file.
+
+    Everything in install_tree that stops a half-transfer from becoming the
+    live thing applies here too -- verify the candidate, then swap it in with a
+    rename, then roll the rename back if it fails -- but a single file cannot
+    go through install_tree, for two reasons:
+
+      - it must be OWNED BY THE CONTAINER (3000:3000, 660). install_tree
+        chowns root:root and strips group write, which is right for code and
+        would make every queued ingest fail to write its `pending` row.
+      - music.db is in WAL MODE. Its -wal and -shm siblings belong to the
+        database file they sit beside, and leaving a stale -wal next to a
+        freshly replaced db is how a working index becomes a corrupt one. They
+        are moved aside with it, never deleted.
+    """
+    root_q = shell_quote(data_root)
+    db_q = shell_quote(target)
+    new_q = shell_quote(target + ".new")
+    old_q = shell_quote(old)
+    staging_q = shell_quote(staging)
+    staged_q = shell_quote(posixpath.join(staging, MUSIC_DB_FILENAME))
+    sidecars = " ".join(
+        f'if [ -e {shell_quote(target + s)} ]; then '
+        f'mv {shell_quote(target + s)} {shell_quote(old + s)}; fi;'
+        for s in MUSIC_DB_SIDECARS
+    )
+    return (
+        f"set -e; "
+        f"mkdir -p {root_q}; "
+        f"rm -f {new_q}; "
+        f"cp -a {staged_q} {new_q}; "
+        f"chown 3000:3000 {new_q}; "
+        f"chmod 660 {new_q}; "
+        f"b=$(wc -c < {new_q}); "
+        f'if [ "$b" -ne {expected_bytes} ]; then '
+        f'echo "candidate index incomplete: $b bytes, expected {expected_bytes} '
+        f'-- the installed index is untouched" >&2; exit 8; fi; '
+        # Only now is anything live touched, and only by renames.
+        f"if [ -e {db_q} ]; then mv {db_q} {old_q}; fi; "
+        f"{sidecars} "
+        f"mv {new_q} {db_q} || {{ if [ -e {old_q} ]; then mv {old_q} {db_q}; fi; "
+        f'echo "swap failed, previous index restored" >&2; exit 9; }}; '
+        f"rm -rf {staging_q}"
+    )
+
+
+def install_music_db(root: str, source: Path, dry_run: bool) -> bool:
+    """Ship music.db into <root>/music-data. True on success.
+
+    The index is ~20 MB and is the only music artefact the container writes, so
+    it goes to the writable data root rather than a read-only code mount. The
+    previous index is kept as music.db.old.<ts> -- never deleted, and never
+    pruned automatically: unlike code, a database that has been live has rows
+    in it that the copy replacing it may not.
+    """
+    db = source / MUSIC_DB_FILENAME
+    if not db.is_file():
+        print(f"FAILED: no {MUSIC_DB_FILENAME} at {db} -- nothing to install",
+              file=sys.stderr)
+        return False
+    # A -wal sitting beside the SOURCE means the base rig has committed writes
+    # that are not in the .db file yet, and a plain file copy leaves them
+    # behind. Not fatal (the copy is still a valid, if older, database) but the
+    # operator has to know before they conclude the index is up to date.
+    for sidecar in MUSIC_DB_SIDECARS:
+        extra = source / (MUSIC_DB_FILENAME + sidecar)
+        if extra.is_file() and extra.stat().st_size:
+            print(f"WARNING: {extra.name} is non-empty -- the base rig has "
+                  f"committed writes that are not in {MUSIC_DB_FILENAME} yet, "
+                  f"and only the .db file is shipped. Close the indexer (or run "
+                  f"`sqlite3 {db} 'PRAGMA wal_checkpoint(TRUNCATE)'`) and push "
+                  f"again if the index looks stale on the NAS.", file=sys.stderr)
+
+    expected_bytes = db.stat().st_size
+    staging = make_staging_dir(dry_run, "ccsync-musicdb-upload")
+    staged_db = posixpath.join(staging, MUSIC_DB_FILENAME)
+    if dry_run:
+        print(f"[dry-run] would SFTP {MUSIC_DB_FILENAME} "
+              f"({human_bytes(expected_bytes)}) from {db} to {staging} on the NAS")
+    else:
+        host, user, pw = truenas_conn_params()
+        client = ssh_client(host, user, pw)
+        try:
+            sftp = client.open_sftp()
+            sftp.put(str(db), staged_db)
+            sftp.close()
+        finally:
+            client.close()
+        rc, out, err = run_ssh(f"wc -c < {shell_quote(staged_db)}")
+        staged_bytes = int(out.strip()) if rc == 0 and out.strip().isdigit() else -1
+        if staged_bytes != expected_bytes:
+            print(f"FAILED: the staged index does not match what was sent "
+                  f"({staged_bytes} bytes on the NAS vs {expected_bytes} locally) "
+                  f"-- the installed index is untouched (staging left at "
+                  f"{staging} for inspection): {err.strip()[:200]}", file=sys.stderr)
+            return False
+        print(f"staged index verified: {staged_bytes} bytes")
+
+    data_root = f"{root}/music-data"
+    target = f"{data_root}/{MUSIC_DB_FILENAME}"
+    old = f"{target}.old.{time.strftime('%Y%m%d%H%M%S')}"
+    swap = build_db_swap_script(data_root, staging, target, old, expected_bytes)
+    rc, _out, err = run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(swap),
+                            dry_run=dry_run)
+    if rc != 0:
+        print(f"FAILED to install the music index into {target}: "
+              f"{err.strip()[:500]}\n"
+              f"  The previously installed index is still in place (it is only "
+              f"replaced by an atomic rename, and that rename rolls back).",
+              file=sys.stderr)
+        return False
+    print(f"installed music index: {target} ({human_bytes(expected_bytes)}; "
+          f"previous index kept at {old})")
+    return True
+
+
+def build_ffmpeg_install_script(target_dir: str, url: str, sha256: str) -> str:
+    """Provision static ffmpeg + ffprobe into `target_dir` on the NAS.
+
+    THIS IS NOT AN IMAGE BUILD, because this deployment has none: compose runs
+    a pinned, stock python:3.12.7-slim and execs /app/deploy/run.sh inside it.
+    The container is also unprivileged (3000:3001), so it cannot install
+    packages itself. What is left is this: a root-run step that puts a
+    self-contained static build on the host, which compose mounts read-only at
+    /opt/ffmpeg and run.sh prepends to PATH.
+
+    Shaped by what can go wrong:
+      - Idempotent. Already-installed binaries are left alone, so a routine
+        redeploy does not re-download 42 MB.
+      - The download is checksummed against a PINNED hash before anything is
+        unpacked, and the URL is a versioned one so the hash stays valid.
+      - The candidate is EXECUTED (`-version`) before it is moved into place:
+        an archive for the wrong architecture must not become the ffmpeg the
+        app finds on PATH.
+      - Nothing is deleted. A previous install is only ever overwritten by
+        `mv`, and only after the new one has run.
+    """
+    d = shell_quote(target_dir)
+    url_q = shell_quote(url)
+    verify = (f"printf '%s  %s\\n' {shell_quote(sha256)} \"$t/ffmpeg.tar.xz\" "
+              f"| sha256sum -c - >/dev/null; ") if sha256 else ""
+    return (
+        f"set -e; "
+        f"if [ -x {d}/ffmpeg ] && [ -x {d}/ffprobe ]; then "
+        f'echo "ffmpeg already provisioned at {target_dir}"; exit 0; fi; '
+        f"mkdir -p {d}; "
+        f"t=$(mktemp -d /tmp/ccsync-ffmpeg.XXXXXX); "
+        f'trap "rm -rf $t" EXIT; '
+        f'curl -fsSL --retry 3 -o "$t/ffmpeg.tar.xz" {url_q}; '
+        f"{verify}"
+        f'tar -xJf "$t/ffmpeg.tar.xz" -C "$t"; '
+        f'b=$(find "$t" -type f -name ffmpeg | head -n 1); '
+        f'p=$(find "$t" -type f -name ffprobe | head -n 1); '
+        f'if [ -z "$b" ] || [ -z "$p" ]; then '
+        f'echo "the archive holds no ffmpeg/ffprobe" >&2; exit 1; fi; '
+        f'install -o root -g root -m 755 "$b" {d}/ffmpeg.new; '
+        f'install -o root -g root -m 755 "$p" {d}/ffprobe.new; '
+        # Runs it here rather than discovering in production that the binary is
+        # for another architecture, or is not a binary at all.
+        f"if ! {d}/ffmpeg.new -version >/dev/null 2>&1 || "
+        f"! {d}/ffprobe.new -version >/dev/null 2>&1; then "
+        f'echo "the downloaded ffmpeg/ffprobe does not run on this host" >&2; '
+        f"rm -f {d}/ffmpeg.new {d}/ffprobe.new; exit 1; fi; "
+        f"mv {d}/ffmpeg.new {d}/ffmpeg; mv {d}/ffprobe.new {d}/ffprobe; "
+        f"chmod 755 {d}; "
+        f'echo "ffmpeg provisioned: {target_dir}"'
+    )
 
 
 def weak_ingest_token(token: str) -> str | None:
@@ -589,6 +1045,18 @@ def main():
     ap.add_argument("--image", default=os.environ.get("DASH_IMAGE", DEFAULT_IMAGE),
                     help=f"container base image, default {DEFAULT_IMAGE} (pinned on "
                          f"purpose; keep it in step with dashboard/deploy/compose.yaml)")
+    ap.add_argument("--music-data",
+                    default=os.environ.get("MUSIC_DATA_PUSH", MUSIC_DATA_PUSH_DEFAULT),
+                    help="which of the music DATA artefacts to ship: 'auto' (default; "
+                         "only the ones the NAS does not have yet), 'none', 'all', or a "
+                         "comma-separated subset of "
+                         f"{'/'.join(MUSIC_DATA_COMPONENTS)}. They total ~1.4 GB, so "
+                         "they are deliberately not part of every dashboard deploy; "
+                         "'all' is how you publish a re-index (or MUSIC_DATA_PUSH).")
+    ap.add_argument("--no-ffmpeg", action="store_true",
+                    help="skip provisioning static ffmpeg/ffprobe onto the host. "
+                         "Only /music's queued ingest uses them, and it answers 503 "
+                         "with a readable message when they are missing.")
     ap.add_argument("--recreate", action="store_true",
                     help="delete and re-create the app so compose changes (env vars, "
                          "mounts, ports) take effect; host app/ and data/ dirs survive")
@@ -649,6 +1117,29 @@ def main():
                 file=sys.stderr)
             if not args.dry_run:
                 return 1
+
+    # Music pre-flight. Deliberately a WARNING and a skip rather than a refusal,
+    # unlike b-roll's: DASH_BROLL_ENABLED=1 is an operator saying "I want this
+    # feature", so a missing tree contradicts them and is an error. Nothing on
+    # this command line asserts anything about music -- shipping the tree IS the
+    # switch -- so a checkout without it deploys a dashboard whose /music mount
+    # reports "absent" and whose nav link is simply not there, which is the
+    # documented, supported state.
+    music_src = music_web_source()
+    music_data_src = music_data_source()
+    ship_music = (music_src / "musicweb" / "main.py").is_file()
+    if not ship_music:
+        print(f"NOTE: no music app at {music_src} "
+              f"(looked for {music_src / 'musicweb' / 'main.py'}) -- deploying "
+              f"WITHOUT the /music UI; the dashboard will report the mount "
+              f"'absent' and hide the nav link. music/web is part of THIS repo, "
+              f"so a missing one means a partial checkout; MUSIC_WEB_SRC points "
+              f"at a web/ tree elsewhere.", file=sys.stderr)
+    music_data_mode = (args.music_data or "").strip().lower() or MUSIC_DATA_PUSH_DEFAULT
+    music_forced, music_data_err = parse_music_data_push(music_data_mode)
+    if music_data_err:
+        print(f"FAILED: {music_data_err}", file=sys.stderr)
+        return 1
 
     # Secrets, resolved in one place and AFTER every check that needs the real
     # value (the b-roll pre-flight above). --dry-run prints the entire compose
@@ -718,14 +1209,41 @@ def main():
             # ever mounted it. The b-roll DATA root is the shared archive,
             # prepared separately below.)
             f"chown root:root {shell_quote(root + '/broll-web')} && "
-            f"chmod 755 {shell_quote(root + '/broll-web')}"
+            f"chmod 755 {shell_quote(root + '/broll-web')} && "
+            # music CODE and the two read-only data artefacts: root-owned,
+            # world-readable, mounted :ro -- the /app posture, because none of
+            # the three is ever written by the container. Same for the ffmpeg
+            # binaries, which are executed by it and must not be replaceable
+            # from inside it.
+            f"mkdir -p {shell_quote(root + '/music-web')} "
+            f"{shell_quote(root + '/music-encoder')} "
+            f"{shell_quote(root + '/music-proxies')} "
+            f"{shell_quote(root + '/ffmpeg')} && "
+            f"chown root:root {shell_quote(root + '/music-web')} "
+            f"{shell_quote(root + '/music-encoder')} "
+            f"{shell_quote(root + '/music-proxies')} "
+            f"{shell_quote(root + '/ffmpeg')} && "
+            f"chmod 755 {shell_quote(root + '/music-web')} "
+            f"{shell_quote(root + '/music-encoder')} "
+            f"{shell_quote(root + '/music-proxies')} "
+            f"{shell_quote(root + '/ffmpeg')} && "
+            # music DATA root: the one music path the container writes
+            # (music.db + the ingest staging/ dir), so it gets data/'s posture
+            # -- 3000:3000 mode 770, group 3000 and NOT 3001/editors, for the
+            # same C-2 reason. Create-only: an existing one is left alone, and
+            # in particular the live music.db is never touched from here.
+            f"mkdir -p {shell_quote(root + '/music-data')} && "
+            f"chown 3000:3000 {shell_quote(root + '/music-data')} && "
+            f"chmod 770 {shell_quote(root + '/music-data')}"
         ),
         dry_run=args.dry_run,
     )
     if rc != 0:
         print(f"FAILED to create host dirs: {err}", file=sys.stderr)
         return 1
-    print(f"host dirs ready: {root}/app, {root}/venv, {root}/data, {root}/broll-web")
+    print(f"host dirs ready: {root}/app, {root}/venv, {root}/data, {root}/broll-web, "
+          f"{root}/music-web, {root}/music-data, {root}/music-encoder, "
+          f"{root}/music-proxies, {root}/ffmpeg")
 
     # The b-roll DATA root: the one the compose file actually bind-mounts at
     # /broll-data. It is NOT under <host-root> -- it is the shared archive
@@ -776,6 +1294,79 @@ def main():
         print(f"b-roll data root ready: {DEFAULT_BROLL_ARCHIVE_ROOT} "
               f"(broll:editors 2770, same as Projects/)")
 
+    # The music library: the same shape of thing as the b-roll archive, and
+    # prepared the same way. It is the SHARE ITSELF (P:\Assets\Music to an
+    # editor, W:\Creators_Club\Assets\Music to the base rig), not a private
+    # copy, and it is mounted READ-WRITE because queued ingest moves each
+    # accepted upload into it. broll:editors 2770 setgid, exactly like
+    # Projects/ and the b-roll archive -- emphatically not 770/group-3000,
+    # which would lock the editors who browse this library out of it.
+    #
+    # Left to Docker, an absent bind source is auto-created root:root 0755 and
+    # every ingest fails to write into it. Only the root itself is touched,
+    # non-recursively: the library is ~9.5 GB and its contents are none of this
+    # script's business. chmod is non-fatal for the same reason as above (ZFS
+    # aclmode=restricted refuses chmod outright, even for root).
+    if ship_music:
+        lib_q = shell_quote(DEFAULT_MUSIC_LIBRARY_ROOT)
+        rc, _, err = run_ssh(
+            'echo "$SUDO_PW" | sudo -S sh -c '
+            + shell_quote(
+                f"mkdir -p {lib_q} && chown 3000:3001 {lib_q} && "
+                f"{{ chmod 2770 {lib_q} || "
+                f'echo "NOTE: chmod blocked on this dataset (likely ZFS '
+                f'aclmode=restricted) -- ownership above still applied"; }}'
+            ),
+            dry_run=args.dry_run,
+        )
+        if rc != 0:
+            print(f"FAILED to prepare the music library root "
+                  f"{DEFAULT_MUSIC_LIBRARY_ROOT}: {err}", file=sys.stderr)
+            return 1
+        print(f"music library root ready: {DEFAULT_MUSIC_LIBRARY_ROOT} "
+              f"(broll:editors 2770, same as Projects/)")
+
+    # ffmpeg/ffprobe for /music's queued ingest. NON-FATAL by design: the only
+    # thing that needs them is /api/ingest, which answers 503 with a readable
+    # message when they are absent, and a fleet dashboard must not fail to
+    # deploy because johnvansickle.com was unreachable.
+    if ship_music and not args.no_ffmpeg:
+        ffmpeg_url = os.environ.get("MUSIC_FFMPEG_URL", DEFAULT_FFMPEG_URL).strip()
+        ffmpeg_sha = os.environ.get("MUSIC_FFMPEG_SHA256",
+                                    DEFAULT_FFMPEG_SHA256).strip()
+        if not ffmpeg_url:
+            print("NOTE: MUSIC_FFMPEG_URL is empty -- skipping ffmpeg. /music's "
+                  "queued ingest will answer 503 until ffmpeg and ffprobe are on "
+                  f"PATH in the container (mount {root}/ffmpeg at /opt/ffmpeg).",
+                  file=sys.stderr)
+        else:
+            if ffmpeg_url != DEFAULT_FFMPEG_URL and ffmpeg_sha == DEFAULT_FFMPEG_SHA256:
+                # The pinned hash belongs to the pinned URL. Silently checking
+                # it against somebody else's mirror would fail confusingly; not
+                # checking it at all is the honest behaviour, said out loud.
+                print("NOTE: MUSIC_FFMPEG_URL was overridden without "
+                      "MUSIC_FFMPEG_SHA256 -- the download will NOT be "
+                      "checksummed.", file=sys.stderr)
+                ffmpeg_sha = ""
+            rc, out, err = run_ssh(
+                'echo "$SUDO_PW" | sudo -S sh -c '
+                + shell_quote(build_ffmpeg_install_script(
+                    f"{root}/ffmpeg", ffmpeg_url, ffmpeg_sha)),
+                dry_run=args.dry_run,
+                timeout=600,
+            )
+            if args.dry_run:
+                print(f"[dry-run] would provision static ffmpeg/ffprobe into "
+                      f"{root}/ffmpeg from {ffmpeg_url}")
+            elif rc == 0:
+                print(out.strip().splitlines()[-1] if out.strip()
+                      else f"ffmpeg provisioned: {root}/ffmpeg")
+            else:
+                print(f"NOTE: ffmpeg was NOT provisioned ({err.strip()[:200]}). "
+                      f"Everything else deploys; /music's queued ingest will "
+                      f"answer 503 until ffmpeg and ffprobe exist in "
+                      f"{root}/ffmpeg.", file=sys.stderr)
+
     # A pre-C-2 deployment has an editor-writable venv sitting inside data/.
     # Move it aside (never delete: no-deletion rule) so run.sh rebuilds a
     # clean one at /venv and nothing keeps executing the old interpreter.
@@ -809,6 +1400,62 @@ def main():
                             excludes=BROLL_EXCLUDE_DIRS,
                             staging_slug="ccsync-brollweb-upload"):
             return 1
+
+    # Step 2c: ship the music web/ tree into music-web, the same staged-verify-
+    # swap route, for the same reason -- the container mounts it read-only at
+    # /music-app and imports musicweb.main off PYTHONPATH, so an empty dir there
+    # is a silently absent feature behind a green healthcheck. data/ is excluded
+    # (MUSIC_EXCLUDE_DIRS) and shipped by step 2d instead.
+    if ship_music:
+        if not install_tree(root, "music-web", music_src, args.dry_run,
+                            excludes=MUSIC_EXCLUDE_DIRS,
+                            staging_slug="ccsync-musicweb-upload"):
+            return 1
+
+    # Step 2d: the music DATA artefacts -- the index, the text-encoder model and
+    # the preview proxies. Unlike b-roll, whose data root is a shared archive
+    # the container writes into itself, none of this can be generated on the
+    # NAS: the index and the proxies come off the base rig, and the encoder is
+    # an exported artefact. They are also ~1.4 GB, so they do NOT ride along
+    # with every dashboard deploy: --music-data auto ships only what the NAS
+    # does not have, and --music-data all/db/encoder/proxies force a re-push.
+    if ship_music and music_data_mode != "none":
+        if not music_data_src.is_dir():
+            print(f"NOTE: no music data at {music_data_src} -- shipping the code "
+                  f"only. /music will mount and be EMPTY (and /music/api/search "
+                  f"will 500 without text_encoder/). Point MUSIC_DATA_SRC at the "
+                  f"base rig's music/web/data, or re-run once it exists.",
+                  file=sys.stderr)
+        else:
+            wanted = music_components_to_push(root, music_data_mode, music_forced,
+                                              args.dry_run)
+            sizes = music_data_sizes(music_data_src)
+            missing_locally = [c for c in wanted if c not in sizes]
+            if missing_locally:
+                print(f"NOTE: not shipping {', '.join(missing_locally)} -- absent "
+                      f"from {music_data_src}. (text_encoder/ is exported by "
+                      f"music/indexer/export_text_encoder.py and proxies/ are "
+                      f"generated on the base rig.)", file=sys.stderr)
+                wanted = [c for c in wanted if c in sizes]
+            if not wanted:
+                print(f"music data: nothing to ship (--music-data {music_data_mode})")
+            else:
+                total = sum(sizes[c][1] for c in wanted)
+                why = "forced" if music_forced else "not on the NAS yet"
+                breakdown = ", ".join(f"{c} {human_bytes(sizes[c][1])}"
+                                      for c in wanted)
+                print(f"music data to ship ({why}): {breakdown} "
+                      f"-- {human_bytes(total)} total")
+            for component in wanted:
+                if component == "db":
+                    if not install_music_db(root, music_data_src, args.dry_run):
+                        return 1
+                    continue
+                sub, target = MUSIC_DATA_TREES[component]
+                if not install_tree(root, target, music_data_src / sub, args.dry_run,
+                                    excludes=MUSIC_EXCLUDE_DIRS,
+                                    staging_slug=f"ccsync-music{component}-upload"):
+                    return 1
 
     # Step 3: create or redeploy the custom app.
     if args.recreate and app_installed(args.dry_run):

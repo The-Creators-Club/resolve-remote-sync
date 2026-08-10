@@ -516,10 +516,14 @@ def test_deploy_requirements_match_pyproject_dependencies():
     # matter -- something in requirements.txt and in neither list is
     # unaccounted-for, which is what this test exists to catch.
     declared = {_requirement_name(d): d.strip() for d in pyproject["project"]["dependencies"]}
-    declared.update({
-        _requirement_name(d): d.strip()
-        for d in pyproject["project"].get("optional-dependencies", {}).get("broll", [])
-    })
+    # Every group whose packages are imported by an app this container mounts
+    # in-process rather than by ccsync_dashboard itself. Add the group here
+    # when a new one is mounted, or its deps read as "unaccounted-for".
+    for group in ("broll", "music"):
+        declared.update({
+            _requirement_name(d): d.strip()
+            for d in pyproject["project"].get("optional-dependencies", {}).get(group, [])
+        })
     deployed = {
         _requirement_name(line): line.strip()
         for line in (DASHBOARD_ROOT / "deploy" / "requirements.txt").read_text(

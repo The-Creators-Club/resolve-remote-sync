@@ -92,6 +92,10 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # could not be prepared is mounted "degraded", answering every request with
     # a 500. A nav link to either is worse than no link.
     context.setdefault("broll_mounted", getattr(request.app.state, "broll_mounted", False))
+    # Identical rule for the music platform (music.MOUNTED only): a missing
+    # music tree is absent, an unopenable DATA_ROOT is degraded, and neither
+    # gets a nav link.
+    context.setdefault("music_mounted", getattr(request.app.state, "music_mounted", False))
     return templates.TemplateResponse(request=request, name=name, context=context)
 
 

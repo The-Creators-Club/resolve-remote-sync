@@ -30,6 +30,23 @@
 #     b-roll data root, which is the SMB-visible shared archive itself: owned
 #     broll:editors 2770 setgid, exactly like Projects/. NOT 770 group-3000 --
 #     that would lock the editors who browse it out of their own archive)
+#   /mnt/tank/apps/ccsync-dashboard/music-web  (this repo's music/web tree;
+#     root:root 755, mounted :ro. SHIPPED by the install script -- an empty
+#     dir here means /music is silently absent, exactly like broll-web)
+#   /mnt/tank/apps/ccsync-dashboard/music-data  (music.db + the ingest
+#     staging/ dir; owned 3000:3000 mode 770 -- the ONLY music path the
+#     container writes)
+#   /mnt/tank/apps/ccsync-dashboard/music-encoder,
+#   /mnt/tank/apps/ccsync-dashboard/music-proxies  (read-only artefacts,
+#     ~482 MB and ~906 MB; shipped on demand with --music-data, not on every
+#     deploy)
+#   /mnt/tank/apps/ccsync-dashboard/ffmpeg  (static ffmpeg + ffprobe, put
+#     there by the install script -- NOTHING BUILDS THIS IMAGE and the
+#     container is unprivileged, so it cannot install them itself)
+#   "/mnt/tank/TheCreatorsPool/Creators_Club/Assets/Music"  (the music library
+#     itself, P:\Assets\Music to an editor: broll:editors 2770 setgid like
+#     Projects/, mounted rw because queued ingest writes accepted uploads
+#     into it)
 services:
   dashboard:
     # Pinned: an unpinned python:3.12-slim silently changes underneath a
@@ -68,6 +85,26 @@ services:
       # session at all, so this is a credential -- generate it, do not leave
       # the literal below in place:  openssl rand -hex 24
       BROLL_INGEST_TOKEN: "REPLACE_ME"
+      # --- music search UI, mounted in-process at /music -------------------
+      # There is deliberately NO DASH_MUSIC_ENABLED and no ingest token here.
+      # b-roll needs both because /broll/api/ingest/* is a write path reached
+      # with no session; nothing under /music is exempt from login_gate, so
+      # the session IS the credential and SHIPPING THE TREE IS THE SWITCH --
+      # a host whose <host-root>/music-web is empty reports the mount "absent"
+      # and hides the nav link. See music/web/DEPLOY.md.
+      #
+      # All four are MUSIC_-prefixed. musicweb still honours bare
+      # DATA_ROOT/MUSIC_ROOT as fallbacks, but this environment is shared with
+      # the dashboard and the b-roll mount (which namespaces everything
+      # BROLL_*), and a bare DATA_ROOT in it is a collision waiting to happen.
+      #
+      # MUSIC_DATA_ROOT is the only WRITABLE one: music.db and the ingest
+      # staging/ dir live there. A read-only data root is the DEGRADED state
+      # the mount exists to report.
+      MUSIC_DATA_ROOT: "/music-data"
+      MUSIC_SHARE_ROOT: "/music-share"
+      MUSIC_PROXIES_DIR: "/music-proxies"
+      MUSIC_TEXT_ENCODER_DIR: "/music-encoder"
       # Published companion builds (upgrade channel). Optional: defaults to
       # a "packages" dir next to DASH_DB_PATH, i.e. /data/packages -- which
       # is already persistent. Only set this to move them elsewhere.
@@ -127,6 +164,42 @@ services:
       # Sits beside Projects/ under Creators_Club, which is what makes it
       # reachable as P:\Assets\B-roll Archive on an editor's machine.
       - "/mnt/tank/TheCreatorsPool/Creators_Club/Assets/B-roll Archive:/broll-data:rw"
+      # This repo's music/web tree (musicweb/, static/, schema.sql,
+      # migrations/), read-only, on PYTHONPATH via run.sh -- same posture as
+      # /app and /broll-app. Shipped there by install_dashboard_app.py
+      # (MUSIC_WEB_SRC overrides the source); if it is empty, /music is simply
+      # absent. NOTE the package inside is `musicweb`, not `app`: two top-level
+      # packages called `app` on one PYTHONPATH would collide.
+      - /mnt/tank/apps/ccsync-dashboard/music-web:/music-app:ro
+      # The one WRITABLE music path: music.db (queued ingest writes `pending`
+      # rows into it) and the ingest staging/ dir. Owned 3000:3000 mode 770,
+      # like /data and for the same C-2 reason -- group 3000, NOT editors.
+      - /mnt/tank/apps/ccsync-dashboard/music-data:/music-data:rw
+      # Read-only artefacts, shipped separately from the code because together
+      # they are ~1.4 GB and change on the base rig's schedule, not the
+      # dashboard's (install_dashboard_app.py --music-data):
+      #   music-encoder  the exported CLAP text tower, ~482 MB. WITHOUT IT
+      #                  /music/api/search 500s: the fallback is the full CLAP
+      #                  model, which needs torch, which this container
+      #                  deliberately does not have.
+      #   music-proxies  one 128k mp3 per track, ~906 MB. Without them
+      #                  /api/audio still works and streams the 60 MB
+      #                  originals over Tailscale instead.
+      - /mnt/tank/apps/ccsync-dashboard/music-encoder:/music-encoder:ro
+      - /mnt/tank/apps/ccsync-dashboard/music-proxies:/music-proxies:ro
+      # The music library itself -- P:\Assets\Music to an editor -- beside
+      # Projects/ and the b-roll archive under Creators_Club. rw: queued
+      # ingest moves each accepted upload into the share. Owned broll:editors
+      # 2770 setgid like Projects/, NOT 770 group-3000, which would lock the
+      # editors who browse this library out of it.
+      - "/mnt/tank/TheCreatorsPool/Creators_Club/Assets/Music:/music-share:rw"
+      # Static ffmpeg + ffprobe for /music's queued ingest (ffprobe proves an
+      # upload is audio, ffmpeg transcodes .ogg); run.sh prepends this to PATH.
+      # NOTHING BUILDS THIS IMAGE -- it is a stock pinned python:3.12.7-slim --
+      # and the container runs unprivileged, so the binaries are provisioned
+      # onto the host by install_dashboard_app.py and mounted in. An empty dir
+      # here is a supported state: ingest answers 503 and says why.
+      - /mnt/tank/apps/ccsync-dashboard/ffmpeg:/opt/ffmpeg:ro
     restart: unless-stopped
     # Without this, `restart: unless-stopped` only covers a process that
     # EXITS. A collector thread that died before entering its guarded loop

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
-from . import api, auth, broll, db, ui
+from . import api, auth, broll, db, music, ui
 from .collector import Collector
 from .settings import Settings
 
@@ -237,8 +237,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # /broll/api and /broll/media are fetched by JS and by <video>, which
             # cannot follow a 303 to an HTML login page -- the SPA would parse
             # the page as JSON and the player would fail opaquely. Answer them
-            # the same way the dashboard's own API does.
-            if path.startswith(("/api/", "/broll/api/", "/broll/media/")):
+            # the same way the dashboard's own API does. Same for /music/api,
+            # which carries both the music SPA's fetches and its <audio> src
+            # (musicweb serves audio from /api/audio/{id}, not a /media prefix).
+            if path.startswith(("/api/", "/broll/api/", "/broll/media/",
+                                "/music/api/")):
                 return JSONResponse({"detail": "login required"}, status_code=401)
             # Preserve the destination through login (e.g. the companion's
             # /project-setup deep link) -- ui.py's _safe_next re-validates it.
@@ -261,6 +264,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else broll.ABSENT
     )
     app.state.broll_mounted = app.state.broll_status == broll.MOUNTED
+
+    # Same contract for the music platform, and mounted the same way: after the
+    # routers, best-effort, tri-state, only advertised when it fully took. No
+    # flag and no token, unlike b-roll -- musicweb has no route that bypasses
+    # login_gate, so there is no credential to validate and nothing to refuse to
+    # start over; whether the music tree is shipped to the host IS the switch,
+    # and a host without it simply reports ABSENT. See music.py.
+    app.state.music_status = music.mount_music(app)
+    app.state.music_mounted = app.state.music_status == music.MOUNTED
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

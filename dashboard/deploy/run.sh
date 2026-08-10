@@ -82,11 +82,31 @@ umask 077
 # The package runs straight off the read-only mount; templates/ and static/
 # resolve relative to /app/src exactly as they did under the old editable
 # install (which left a path entry pointing at the same directory).
-# /broll-app is the repo's broll/web tree, mounted read-only. It is on the
-# path unconditionally: the mount is gated by DASH_BROLL_ENABLED, and
-# ccsync_dashboard.broll guards the import, so a path entry pointing at a
-# volume that is not mounted costs nothing.
-export PYTHONPATH=/app/src:/broll-app
+# /broll-app is the repo's broll/web tree and /music-app is its music/web
+# tree, both mounted read-only. Both are on the path unconditionally: the
+# mounts are gated (DASH_BROLL_ENABLED, and for music by whether the installer
+# shipped the tree at all) and ccsync_dashboard.broll / .music each guard the
+# import, so a path entry pointing at a volume that is not mounted costs
+# nothing. All three roots must be here -- an empty PYTHONPATH entry is how
+# /music came to report "absent" behind a green healthcheck.
+#
+# The two trees are top-level packages `app` (b-roll) and `musicweb` (music).
+# They are deliberately NOT both called `app`: two top-level packages of the
+# same name on one PYTHONPATH collide in sys.modules and one wins silently.
+export PYTHONPATH=/app/src:/broll-app:/music-app
+
+# Static ffmpeg/ffprobe, mounted read-only from the host at /opt/ffmpeg by
+# compose and put there by server/install_dashboard_app.py. This image is a
+# stock python:3.12.7-slim -- nothing builds it, and this container runs as
+# 3000:3001, so it cannot install a distro package for itself.
+#
+# PATH rather than the FFMPEG/FFPROBE env vars musicweb reads first: those are
+# absolute paths taken on trust, so pointing them at a mount that was never
+# provisioned turns /api/ingest's clean 503 ("ingest needs ffmpeg: not on PATH
+# here") into a FileNotFoundError partway through an upload. shutil.which()
+# tells the truth about an empty mount. Prepended, so an image that ever does
+# ship its own ffmpeg does not silently take precedence over the pinned build.
+export PATH="/opt/ffmpeg:$PATH"
 
 exec "$VENV/bin/python" -m uvicorn --factory ccsync_dashboard.app:create_app \
     --host 0.0.0.0 --port "${DASH_PORT:-8480}" --workers 1

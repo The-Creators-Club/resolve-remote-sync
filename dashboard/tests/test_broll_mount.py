@@ -332,16 +332,19 @@ def test_a_weak_token_does_not_stop_a_dashboard_that_is_not_serving_broll(tmp_pa
 
 # --- optional: the same thing against a real checkout ------------------------
 
-@pytest.mark.skipif(not os.environ.get("BROLL_WEB_SRC"),
-                    reason="set BROLL_WEB_SRC to a broll-platform web/ checkout")
 def test_a_real_checkout_still_satisfies_the_contract_the_fake_models(tmp_path, monkeypatch):
-    """Opt-in, and never the only coverage: everything above runs everywhere
-    against the fake, and this one proves the fake has not drifted from the
-    real app -- same module names, same `app.main.app`, same lifespan work.
-    Deliberately keyed on an env var rather than a path on one developer's
-    machine, which is how six of these tests came to skip silently on every
-    other computer."""
-    src = Path(os.environ["BROLL_WEB_SRC"]).resolve()
+    """Proves the fake has not drifted from the real app -- same module names,
+    same `app.main.app`, same lifespan work.
+
+    No longer opt-in: the b-roll platform was folded into this repo as broll/
+    on 2026-08-10, so the real web app is present wherever the repo is and this
+    check runs on every machine rather than on whoever remembered to set
+    BROLL_WEB_SRC (which still overrides, for a checkout kept elsewhere). The
+    fake stays the primary coverage all the same: the web app's own
+    dependencies need not be installed in the dashboard venv, and when they are
+    not this skips while everything above still runs."""
+    raw = os.environ.get("BROLL_WEB_SRC", "").strip()
+    src = (Path(raw) if raw else Path(__file__).resolve().parents[2] / "broll" / "web").resolve()
     if not (src / "app" / "main.py").is_file():
         pytest.skip(f"no app/main.py under {src}")
     monkeypatch.setenv("BROLL_DATA_ROOT", str(tmp_path / "brolldata"))

@@ -1,0 +1,23 @@
+# First real-archive test: FF2 E1 "High Stakes" research archive on the
+# Google Drive shared drive (I:). Scanned as its own share — it will be
+# rebased onto the `broll` NAS share later by content hash.
+shares:
+  ff2-e1-archive:
+    root: "I:/Shared drives/Cablewrap Creative/Projects/2024/FF2/FF2 E1 - High Stakes/Archive"
+    description: "FF2 E1 High Stakes — research archive"
+
+# Deliberately on a stable local disk, NOT on the source drive, so the index
+# and proxies outlive the consolidation onto the NAS.
+data_root: "E:/broll-data"
+
+db:
+  mode: sqlite
+  path: "E:/broll-data/broll.db"
+
+model: haiku
+taxonomy_model: sonnet
+
+sampling:
+  scene_threshold: 0.3
+  max_gap_s: 4.0
+  frames_per_call: 36

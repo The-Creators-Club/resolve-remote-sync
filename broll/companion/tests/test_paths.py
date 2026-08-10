@@ -1,0 +1,136 @@
+"""Path translation tests: both OS styles, traversal rejection, mac probing."""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from broll_companion.paths import (
+    MountNotConfiguredError,
+    PathTraversalError,
+    probe_darwin_mount,
+    translate_path,
+)
+
+
+def test_windows_style_join():
+    mounts = {"broll": "Y:/broll"}
+    result = translate_path(
+        "broll", "military/naval/clip_0021.mov", mounts, platform="win32"
+    )
+    assert result == "Y:\\broll\\military\\naval\\clip_0021.mov"
+
+
+def test_windows_style_join_with_backslash_root():
+    mounts = {"broll": "B:\\"}
+    result = translate_path("broll", "clip.mov", mounts, platform="win32")
+    assert result == "B:\\clip.mov"
+
+
+def test_mac_style_join_configured_mount():
+    mounts = {"broll": "/Volumes/broll"}
+    result = translate_path(
+        "broll", "military/naval/clip_0021.mov", mounts, platform="darwin"
+    )
+    assert result == "/Volumes/broll/military/naval/clip_0021.mov"
+
+
+def test_mac_style_join_trailing_slash_root():
+    mounts = {"broll": "/Volumes/broll/"}
+    result = translate_path("broll", "clip.mov", mounts, platform="darwin")
+    assert result == "/Volumes/broll/clip.mov"
+
+
+@pytest.mark.parametrize(
+    "rel_path",
+    [
+        "../etc/passwd",
+        "military/../../etc/passwd",
+        "military/../../../etc/passwd",
+        "..",
+        "a/b/..",
+    ],
+)
+def test_traversal_rejected(rel_path):
+    mounts = {"broll": "Y:/broll"}
+    with pytest.raises(PathTraversalError):
+        translate_path("broll", rel_path, mounts, platform="win32")
+
+
+def test_traversal_rejected_even_with_dotdot_in_middle_of_valid_looking_path():
+    mounts = {"broll": "/Volumes/broll"}
+    with pytest.raises(PathTraversalError):
+        translate_path("broll", "military/naval/../../../../etc/passwd", mounts, platform="darwin")
+
+
+def test_empty_rel_path_rejected():
+    mounts = {"broll": "Y:/broll"}
+    with pytest.raises(PathTraversalError):
+        translate_path("broll", "", mounts, platform="win32")
+
+
+def test_no_mount_configured_windows():
+    with pytest.raises(MountNotConfiguredError) as exc_info:
+        translate_path("broll", "clip.mov", {}, platform="win32")
+    assert "broll" in str(exc_info.value)
+
+
+def test_no_mount_configured_darwin_when_probe_fails():
+    with pytest.raises(MountNotConfiguredError):
+        translate_path("broll", "clip.mov", {}, platform="darwin", isdir=lambda p: False)
+
+
+def test_mac_probe_finds_base_candidate():
+    def fake_isdir(path):
+        return path == "/Volumes/broll"
+
+    result = translate_path("broll", "clip.mov", {}, platform="darwin", isdir=fake_isdir)
+    assert result == "/Volumes/broll/clip.mov"
+
+
+def test_mac_probe_finds_collision_suffix_candidate():
+    def fake_isdir(path):
+        return path == "/Volumes/broll-2"
+
+    result = translate_path("broll", "clip.mov", {}, platform="darwin", isdir=fake_isdir)
+    assert result == "/Volumes/broll-2/clip.mov"
+
+
+def test_mac_configured_mount_takes_precedence_over_probe():
+    # A configured mount should win even if a probe candidate also exists.
+    mounts = {"broll": "/Volumes/other-name"}
+    result = translate_path(
+        "broll", "clip.mov", mounts, platform="darwin", isdir=lambda p: True
+    )
+    assert result == "/Volumes/other-name/clip.mov"
+
+
+def test_mac_probe_with_monkeypatched_os_path_isdir(monkeypatch, tmp_path):
+    # Simulate Finder's "-1" collision suffix using monkeypatch on the real
+    # os.path.isdir (rather than the explicit isdir= injection), backed by a
+    # real tmp dir so the check reflects genuine filesystem semantics.
+    real_dir = tmp_path / "broll-1"
+    real_dir.mkdir()
+
+    def fake_isdir(path):
+        if path == "/Volumes/broll-1":
+            return real_dir.is_dir()
+        return False
+
+    monkeypatch.setattr(os.path, "isdir", fake_isdir)
+
+    result = translate_path("broll", "clip.mov", {}, platform="darwin")
+    assert result == "/Volumes/broll-1/clip.mov"
+
+
+def test_probe_darwin_mount_directly_no_match():
+    assert probe_darwin_mount("broll", isdir=lambda p: False) is None
+
+
+def test_probe_darwin_mount_directly_match_order():
+    # base candidate should be preferred over suffixed ones if both exist
+    def fake_isdir(path):
+        return path in ("/Volumes/broll", "/Volumes/broll-1")
+
+    assert probe_darwin_mount("broll", isdir=fake_isdir) == "/Volumes/broll"

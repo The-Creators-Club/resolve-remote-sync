@@ -82,7 +82,7 @@ umask 077
 # The package runs straight off the read-only mount; templates/ and static/
 # resolve relative to /app/src exactly as they did under the old editable
 # install (which left a path entry pointing at the same directory).
-# /broll-app is the b-roll repo's web/ tree, mounted read-only. It is on the
+# /broll-app is the repo's broll/web tree, mounted read-only. It is on the
 # path unconditionally: the mount is gated by DASH_BROLL_ENABLED, and
 # ccsync_dashboard.broll guards the import, so a path entry pointing at a
 # volume that is not mounted costs nothing.

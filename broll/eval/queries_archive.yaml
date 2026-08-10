@@ -1,0 +1,109 @@
+# Search-quality query set for the FULL archive (E:\broll-queue).
+#
+# Every expectation is grounded in transcript text actually present in the
+# corpus — not invented from folder names — so a miss means search failed
+# rather than the footage being absent. Sampled per share before writing.
+#
+# Run:  python eval/run_eval_api.py E:/broll-queue/broll.db --queries eval/queries_archive.yaml
+#
+# expect_any: substrings of rel_path; a result containing one counts as correct.
+# expect_none: must return nothing — these guard against slop, which is the
+#   failure mode that makes a search tool untrustworthy.
+
+queries:
+  # --- English, spoken content (works from transcripts alone) --------------
+  - q: surfing waves
+    expect_any: ["Surfing", "surf"]
+    tags: [en, transcript]
+  - q: legislature protest
+    expect_any: ["Sunflower", "FF2 E6", "legislat"]
+    tags: [en, transcript]
+    note: sunflower movement footage is English-narrated
+
+  # --- Chinese, spoken content -------------------------------------------
+  - q: 大麻
+    expect_any: ["FF2 E1", "ff2-e1"]
+    tags: [zh, transcript, short]
+    note: cannabis busts; 2-char term, needs search_norm
+  - q: 地下偶像
+    expect_any: ["Idol", "idols"]
+    tags: [zh, transcript]
+  - q: 棄養
+    expect_any: ["Pets", "pets"]
+    tags: [zh, transcript, short]
+    note: pet abandonment
+  - q: 洪仲丘
+    expect_any: ["Army", "army"]
+    tags: [zh, transcript, name]
+    note: the conscript death case the episode is about
+  - q: 同志伴侶
+    expect_any: ["LGBT", "lgbt"]
+    tags: [zh, transcript]
+  - q: 雲林
+    expect_any: ["Birthrate", "birth"]
+    tags: [zh, transcript, short]
+    note: Yunlin agriculture segment
+
+  # --- Traditional/Simplified must not matter -----------------------------
+  - q: 台灣
+    expect_any: [""]          # any result; the point is it returns something
+    tags: [zh, script]
+  - q: 台湾
+    expect_any: [""]
+    tags: [zh, script]
+  - q: 農業
+    expect_any: ["Birthrate", "birth"]
+    tags: [zh, script]
+  - q: 农业
+    expect_any: ["Birthrate", "birth"]
+    tags: [zh, script]
+
+  # --- Cross-lingual semantic: English query, Mandarin speech -------------
+  - q: elderly care
+    expect_any: ["老人", "Birthrate", "birth", "將心比心"]
+    tags: [crosslingual, semantic]
+  - q: pet adoption shelter
+    expect_any: ["Pets", "pets"]
+    tags: [crosslingual, semantic]
+  - q: military conscript death
+    expect_any: ["Army", "army"]
+    tags: [crosslingual, semantic]
+
+  # --- Typo tolerance -----------------------------------------------------
+  - q: surfin
+    expect_any: ["Surfing", "surf"]
+    tags: [fuzzy]
+  - q: legislatur
+    expect_any: ["Sunflower", "FF2 E6", "legislat"]
+    tags: [fuzzy]
+
+  # --- Visual-only: these should MISS before indexing and HIT after -------
+  # The clearest measure of what the overnight run adds.
+  - q: aerial drone shot of coastline
+    expect_any: [""]
+    tags: [visual, after_indexing]
+  - q: crowd holding banners
+    expect_any: [""]
+    tags: [visual, after_indexing]
+  - q: newsreader
+    expect_any: [""]
+    tags: [visual, after_indexing]
+    note: the canonical label — should appear across news-heavy shares
+
+  # --- Precision guards: genuinely absent from a Taiwan doc archive -------
+  - q: polar bear arctic ice
+    expect_none: true
+    tags: [guard]
+  - q: formula one racing pit stop
+    expect_none: true
+    tags: [guard]
+  - q: desert camel caravan
+    expect_none: true
+    tags: [guard]
+  - q: 字幕志愿者
+    expect_none: true
+    tags: [guard, hallucination]
+    note: whisper's silence artifact — must never be searchable
+  - q: 李宗盛
+    expect_none: true
+    tags: [guard, hallucination]

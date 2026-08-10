@@ -1,0 +1,127 @@
+# Search-quality query set for the FF2 E1 corpus.
+#
+# Written from what an editor would actually type when cutting this episode,
+# NOT from what the index happens to contain — a query set derived from the
+# index only proves the index matches itself.
+#
+# expect_any: substrings; a result whose rel_path contains one counts as correct.
+# expect_none: queries that should return nothing (guards against slop, where
+#   an over-eager index makes everything match everything).
+
+queries:
+  # --- plain visual searches, English -------------------------------------
+  - q: police officers
+    expect_any: ["歷史上的今天", "台南山區", "警匪"]
+    note: core subject of the news clips
+  - q: armored vehicle
+    expect_any: ["惡龍", "警匪激烈槍戰"]
+    note: armoured car appears in the shootout package
+  - q: bulletproof vest
+    expect_any: ["防彈衣"]
+    note: whole clip is a vest ballistic test
+  - q: motorcycle
+    expect_any: ["飆車", "強大警力"]
+  - q: press conference
+    expect_any: ["警匪", "檢調", "統促黨"]
+  - q: ambulance
+    expect_any: ["救護車", "早產兒"]
+  - q: traffic jam
+    expect_any: ["堵车", "堵車"]
+    note: the Xiamen dashcam material
+  - q: dashcam
+    expect_any: ["行车记录", "堵车"]
+  - q: airport
+    expect_any: ["机场", "廈門航空"]
+  - q: aircraft cabin
+    expect_any: ["廈門航空", "经济舱", "經濟艙"]
+  - q: night street
+    expect_any: ["飆車", "強大警力"]
+
+  # --- synonym / hypernym reach -------------------------------------------
+  # These are the ones that fail if the model only tagged the literal noun.
+  - q: patrol car
+    expect_any: ["歷史上的今天", "警"]
+    note: index should carry patrol car alongside police vehicle
+  - q: body armor
+    expect_any: ["防彈衣"]
+    note: synonym of bulletproof vest
+  - q: law enforcement
+    expect_any: ["歷史上的今天", "警匪", "台南"]
+  - q: congestion
+    expect_any: ["堵车", "堵車"]
+    note: hypernym reach for traffic jam
+
+  # --- on-screen text (v2 only; expected to MISS on the v1 baseline) -------
+  - q: 惡龍
+    expect_any: ["惡龍"]
+    tags: [onscreen, cjk, short]
+    note: 2 chars — below trigram minimum, must be reachable via objects entry
+  - q: 激烈槍
+    expect_any: ["警匪激烈槍戰", "惡龍"]
+    tags: [onscreen, cjk]
+    note: 3-char substring — trigram path
+  - q: 華視
+    expect_any: ["水上警察局", "警匪", "統促黨"]
+    tags: [onscreen, cjk, short]
+    note: |
+      Broadcaster ident burned into the chyron. Originally listed only the
+      shootout/prosecution clips — but the ident appears on the water-police
+      clip too, so the query was scored a miss while search was working
+      correctly. Fixed the expectation, not the index.
+  - q: Evil Dragon
+    expect_any: ["惡龍"]
+    tags: [onscreen, translated]
+    note: English gloss of the suspect's nickname
+  - q: 檢調
+    expect_any: ["檢調", "統促黨"]
+    tags: [onscreen, cjk, short]
+
+  # --- speech-only (v3 transcripts; MISS on any visual-only index) ---------
+  # None of these appear in any frame — they are spoken. This is the clearest
+  # measure of what local transcription adds.
+  - q: 侯友宜
+    expect_any: ["惡龍", "警匪激烈槍戰"]
+    tags: [transcript, cjk]
+    note: police chief, later New Taipei mayor — named in the audio only
+  - q: 張啟民
+    expect_any: ["惡龍", "警匪"]
+    tags: [transcript, cjk]
+    note: the suspect's actual name, never shown on screen
+  - q: 霹靂小組
+    expect_any: ["惡龍", "警匪", "台南"]
+    tags: [transcript, cjk]
+    note: SWAT unit
+  - q: 海峽兩岸
+    expect_any: ["2024_05_03"]
+    tags: [transcript, cjk]
+    note: the programme name, spoken in the opening line
+  - q: 民進黨
+    expect_any: ["2024_05_03"]
+    tags: [transcript, cjk]
+  - q: 防彈衣
+    expect_any: ["防彈衣"]
+    tags: [transcript, cjk]
+  - q: 改目的地
+    expect_any: ["China Eastern", "luckiest"]
+    tags: [transcript, cjk]
+    note: the passenger who changed flights and missed the crash
+
+  # --- hallucination guard (v3) -------------------------------------------
+  # Whisper invented these on silent dashcam audio. If they are searchable, the
+  # quality gate has failed and the index is lying about its contents.
+  - q: 李宗盛
+    expect_none: true
+    tags: [hallucination]
+    note: singer hallucinated onto the 38-min dashcam clip
+  - q: 字幕志愿者
+    expect_none: true
+    tags: [hallucination]
+
+  # --- precision guards ----------------------------------------------------
+  - q: underwater coral reef
+    expect_none: true
+    note: nothing in this corpus is underwater
+  - q: snow mountain skiing
+    expect_none: true
+  - q: wedding ceremony
+    expect_none: true

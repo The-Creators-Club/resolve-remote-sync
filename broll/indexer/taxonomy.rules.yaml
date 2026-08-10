@@ -1,0 +1,271 @@
+# Subject taxonomy for the b-roll archive.
+#
+# FOLDERS ARE SUBJECT ONLY — what the footage is ABOUT. Format (news, interview,
+# archival), place (urban, coast) and look (night, aerial) are deliberately NOT
+# folders: they describe what is likely visually inside a clip and belong on the
+# clip as descriptors, not in the tree. See `descriptors:` at the bottom.
+#
+# Sizing rule: every leaf has a real population (smallest is 37 videos). The raw
+# theme data has 8,899 distinct themes across 2,093 videos with 75% of them
+# appearing on exactly ONE video — folders built directly from themes would be
+# thousands of one-clip categories, which is what this exists to prevent.
+#
+# `match` patterns are matched against theme text with WORD BOUNDARIES. A
+# trailing `*` is a prefix match (`recycl*` -> recycling, recyclable). Plain
+# substring matching was tried first and was badly wrong: `cat` matched
+# "education" and "category" (inflating animals-pets from 37 to 314), `sport`
+# matched "transport".
+#
+# Counts in comments are indexed videos matching as of 2026-08-02 (2,093 indexed).
+
+categories:
+  # --- energy ---------------------------------------------------------------
+  - slug: energy/nuclear                    # 161
+    label: "Nuclear"
+    description: "Nuclear power, reactors, radioactive waste and the debate around them."
+    match: [nuclear, radioactiv*, reactor*]
+
+  - slug: energy/renewables                 # 70
+    label: "Renewables"
+    description: "Solar, wind and the transition to renewable generation."
+    match: [renewable*, solar, wind power, green energy, energy transition]
+
+  - slug: energy/power-grid                 # 74
+    label: "Power & Grid"
+    description: "Power stations, the electricity grid, energy policy and supply security."
+    match: [energy policy, power plant*, electricity, power grid, energy security]
+
+  # --- environment ----------------------------------------------------------
+  - slug: environment/waste-recycling       # 218
+    label: "Waste & Recycling"
+    description: "Rubbish collection, recycling, landfill, incineration and the circular economy."
+    match: [waste, recycl*, garbage, trash, landfill*, circular economy, incinerat*]
+
+  - slug: environment/pollution-climate     # 138
+    label: "Pollution & Climate"
+    description: "Air and water pollution, carbon emissions, climate change and sustainability."
+    match: [pollution, climate*, carbon, emission*, air quality, sustainab*]
+
+  - slug: environment/conservation          # 68
+    label: "Conservation & Wildlife"
+    description: "Habitat and species conservation, ecosystems and environmental protection."
+    match: [conservation, wildlife, ecosystem*, biodiversity, environmental protection]
+
+  - slug: environment/coast-erosion         # 48
+    label: "Coastal Erosion"
+    description: "Shoreline retreat, sea walls, land subsidence and coastal defence works."
+    match: [coastal erosion, erosion, sea wall*, shoreline, subsidence]
+
+  # --- economy --------------------------------------------------------------
+  - slug: economy/industry-manufacturing    # 243
+    label: "Industry & Manufacturing"
+    description: "Factories, production lines, heavy industry, semiconductors and supply chains."
+    match: [manufactur*, factory, factories, industrial, industry, semiconductor*, supply chain]
+
+  - slug: economy/labour-wages              # 192
+    label: "Work & Wages"
+    description: "Employment, working conditions, pay, unions and unemployment."
+    match: [wage*, labour*, labor, employment, worker*, job, jobs, workplace, unemploy*]
+
+  - slug: economy/retail-commerce           # 173
+    label: "Retail & Commerce"
+    description: "Shops, consumer spending and everyday commercial activity."
+    match: [retail, shop, shops, shopping, store*, commerce, consumer*, business]
+
+  - slug: economy/agriculture-fishing       # 118
+    label: "Agriculture & Fishing"
+    description: "Farming, crops, harvest, fisheries and aquaculture."
+    match: [agricultur*, farm, farms, farming, farmer*, aquacultur*, fishing, fisher*, crop*, harvest]
+
+  - slug: economy/cost-of-living            # 62
+    label: "Cost of Living & Housing"
+    description: "Inflation, housing and rent, affordability and poverty."
+    match: [cost of living, inflation, housing, real estate, rent, poverty, affordab*]
+
+  # --- society --------------------------------------------------------------
+  - slug: society/government-politics       # 416
+    label: "Government & Politics"
+    description: "Officials, legislature, elections and the making of public policy."
+    match: [government*, politic*, parliament*, legislat*, election*, policy, policies]
+
+  - slug: society/protest-activism          # 255
+    label: "Protest & Activism"
+    description: "Demonstrations, rallies, marches and campaigning groups."
+    match: [protest*, demonstrat*, activis*, rally, march, petition]
+
+  - slug: society/policing-crime            # 200
+    label: "Policing & Crime"
+    description: "Police operations, criminal investigations, courts and fraud."
+    match: [police, policing, crime, criminal*, law enforcement, investigation*, court, arrest*, fraud]
+
+  - slug: society/education                 # 174
+    label: "Education"
+    description: "Schools, universities, classrooms, students and teaching."
+    match: [education*, school*, student*, university, universities, classroom*, teacher*]
+
+  - slug: society/health-welfare            # 98
+    label: "Health & Welfare"
+    description: "Healthcare, hospitals, mental health, elderly care and demographic change."
+    match: [health*, medical, hospital*, mental health, elderly, welfare, birthrate, demograph*, aging, ageing]
+
+  - slug: society/transport-safety          # 91
+    label: "Transport & Road Safety"
+    description: "Traffic, pedestrians, scooters, road accidents and public transport."
+    match: [traffic, pedestrian*, road safety, scooter*, motorcycle*, transport*, railway, commut*]
+
+  - slug: society/indigenous                # 73
+    label: "Indigenous Affairs"
+    description: "Indigenous communities, tribal rights, land and hunting rights."
+    match: [indigenous, aboriginal, tribal, tribe*]
+
+  - slug: society/gender-lgbt               # 48
+    label: "Gender & LGBT"
+    description: "LGBT rights, gender equality and women's issues."
+    match: [lgbt*, gender, queer, same-sex, women, feminis*]
+
+  # --- culture --------------------------------------------------------------
+  - slug: culture/heritage-religion         # 257
+    label: "Heritage & Religion"
+    description: "Temples, rituals, ceremonies, traditional practice and cultural heritage."
+    match: [heritage, temple*, religio*, traditional, tradition, ritual*, ceremony, ceremonies, cultural]
+
+  - slug: culture/food-drink                # 164
+    label: "Food & Drink"
+    description: "Night markets, street food, restaurants, cooking, tea and whisky."
+    match: [food, night market*, street food, restaurant*, cooking, cuisine, dining, whisky, tea, beverage*]
+
+  - slug: culture/performance-music         # 99
+    label: "Performance & Music"
+    description: "Concerts, stage performance, idols, singers and dance."
+    match: [performance*, concert*, music*, stage, idol*, singer*, dance, dancing, variety show]
+
+  - slug: culture/digital-social            # 58
+    label: "Digital & Social Media"
+    description: "Social platforms, influencers, smartphones and online life."
+    match: [social media, tiktok, influencer*, internet, smartphone*, online]
+
+  # The three below were added after auditing the 189 clips that matched no rule
+  # in the first pass. Each is a real cluster in the archive that the original
+  # rules simply had no home for -- not a folder invented to mop up strays.
+  - slug: culture/animation-anime
+    label: "Animation & Anime"
+    description: "Anime and animation: history, production, studios, otaku culture."
+    match: [anime, animation, animated, manga, cartoon*, otaku, mecha, "astro boy"]
+
+  - slug: culture/media-broadcasting
+    label: "Media & Broadcasting"
+    description: "Television and film as a subject: channels, advertising, production."
+    match: [television, "tv commercial*", advertis*, commercials, broadcasting,
+            film industry, media industry, variety programme*]
+
+  - slug: economy/finance-markets
+    label: "Finance & Markets"
+    description: "Stock markets, banking, investment, currency and financial news."
+    match: [financial*, finance, stock market*, stocks, markets, banking, bank,
+            investment*, currency, exchange rate*, semiconductor stocks]
+
+  # --- leisure --------------------------------------------------------------
+  - slug: leisure/esports-gaming            # 126
+    label: "Esports & Gaming"
+    description: "Competitive gaming, tournaments, League of Legends and gaming culture."
+    match: [esport*, gaming, league of legends, tournament*, video game*, gamer*]
+
+  - slug: leisure/travel-tourism            # 123
+    label: "Travel & Tourism"
+    description: "Tourists, sightseeing, hotels and travel vlogging."
+    match: [travel*, tourism, tourist*, vlog*, sightseeing, hotel*]
+
+  - slug: leisure/sport-outdoor             # 99
+    label: "Sport & Outdoors"
+    description: "Surfing, water sports, hiking, cycling and athletics."
+    match: [surf, surfing, surfer*, water sport*, swimming, diving, hiking, cycling, athlet*, sport, sports]
+
+  - slug: leisure/animals-pets              # 37
+    label: "Animals & Pets"
+    description: "Pets, domestic and companion animals."
+    match: [pet, pets, dog, dogs, cat, cats, animal*, rabbit*]
+
+  # --- security -------------------------------------------------------------
+  - slug: security/military                 # 151
+    label: "Military & Defence"
+    description: "Armed forces, training, exercises, ceremonies and veterans."
+    match: [military, army, navy, naval, soldier*, defence, defense, war, troop*, veteran*]
+
+  - slug: security/emergency-disaster       # 107
+    label: "Emergency & Disaster"
+    description: "Earthquakes, typhoons, floods, rescue and emergency response."
+    match: [emergency, emergencies, disaster*, earthquake*, typhoon*, flood*, rescue, firefight*, ambulance]
+
+# Descriptors are NOT folders. They tell an editor what is likely visually inside
+# a clip, and are filters shown alongside the tree rather than positions in it.
+descriptors:
+  format:
+    news: [news broadcast, news report*, news segment*, broadcast*, news coverage, news]
+    interview: [interview*, talking head*, testimony]
+    press-conference: [press conference*, briefing*]
+    archival: [archival*, archive footage, historical footage, black and white]
+    documentary: [documentary]
+    vlog: [vlog*]
+  place:
+    urban: [urban, city, cities, street*, downtown, skyline]
+    coast-ocean: [coast*, ocean, sea, harbor, harbour, beach*, waterfront, pier]
+    indoor: [indoor*, office*, institutional, studio]
+    rural-village: [rural, village*, countryside, farmland]
+    mountain-forest: [mountain*, forest*, gorge, valley, taroko]
+  look:
+    night: [night, nighttime, nightlife, evening]
+    day: [daytime, daylight]
+    aerial: [aerial, drone, bird's eye]
+    black-and-white: [black and white, monochrome]
+
+# --- fallback tier ------------------------------------------------------------
+#
+# Applied ONLY to clips that matched nothing above. 163 clips describe purely
+# how they were shot -- "news broadcast", "daytime", "interior", "Taiwan" --
+# with no subject at all, so there is genuinely nothing to file them under.
+#
+# These are therefore NOT subjects, which is the rule everywhere else in this
+# file. They are an honest description of what the footage IS when nobody can
+# say what it is ABOUT, so that every clip has a home on disk and in the folder
+# browser instead of a `_uncategorised` pile nobody opens. A clip lands here
+# only when no real subject matched, so adding a better subject rule above
+# automatically pulls clips back out of this tier.
+fallback_categories:
+  - slug: general/news-broadcast
+    label: "News & Broadcast"
+    description: "Studio news, anchors, tickers and press conferences with no other subject."
+    match: [news broadcast, news report*, news segment*, broadcast*, news coverage,
+            news, press conference*, briefing*, anchor*, tv news, newsroom]
+
+  - slug: general/interviews
+    label: "Interviews & Talking Heads"
+    description: "Sit-down interviews and pieces to camera with no other subject."
+    match: [interview*, talking head*, testimony, conversation, discussion, panel]
+
+  - slug: general/archival
+    label: "Archival & Historical"
+    description: "Old or archival footage with no identified subject."
+    match: [archival*, archive footage, historical footage, black and white,
+            monochrome, vintage*, 1960s, 1970s, 1980s, 1990s, retro, nostalgia]
+
+  - slug: general/public-life
+    label: "Public Life & Crowds"
+    description: "Crowds, gatherings and people in public with no other subject."
+    match: [public gathering, crowd*, community gathering, public event*,
+            pedestrian*, commuter*, queue, audience]
+
+  - slug: general/places
+    label: "Places & Establishing Shots"
+    description: "Establishing and location footage: streets, interiors, landscape."
+    match: [taiwan, taipei, urban, city, cities, street*, interior, indoor*,
+            institutional*, office*, landscape, coastal landscape, waterfront,
+            building*, skyline, daytime, daylight, night, nighttime, aerial, scenery]
+
+# Absolute last resort: clips whose themes match nothing above, not even the
+# fallback tier. Nine of them on the current archive. They are still real
+# footage and still fully searchable — this exists so every clip has a folder
+# rather than being invisible to browsing.
+default_category:
+  slug: general/unsorted
+  label: "Unsorted"
+  description: "No usable description matched — review and re-run assign."

@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+node_modules/
+*.db
+*.db-wal
+*.db-shm
+data/
+dist/
+build/
+config.yaml
+.broll-companion.json

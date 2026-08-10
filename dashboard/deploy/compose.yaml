@@ -22,7 +22,7 @@
 #     persistent; owned 3000:3000, mode 770 -- group 3000, NOT 3001/editors:
 #     it used to be group-writable by every editor while run.sh exec'd a
 #     python interpreter out of it)
-#   /mnt/tank/apps/ccsync-dashboard/broll-web  (the broll-platform web/ tree;
+#   /mnt/tank/apps/ccsync-dashboard/broll-web  (this repo's broll/web tree;
 #     root:root 755, mounted :ro. The install script SHIPS this -- an empty
 #     dir here means /broll is silently absent, so do not create it by hand
 #     and expect the feature to work)
@@ -113,11 +113,11 @@ services:
       # (broll:editors) -- the same owner:group setup_tree.py chowns the
       # tree to, and setgid dirs keep the editors group on new folders.
       - /mnt/tank/TheCreatorsPool/Creators_Club/Projects:/projects:rw
-      # The b-roll repo's web/ tree (app/, static/, schema.sql, migrations/),
+      # This repo's broll/web tree (app/, static/, schema.sql, migrations/),
       # read-only, on PYTHONPATH via run.sh. Same posture as /app: code is
       # never writable by the process that runs it. Shipped there by
-      # install_dashboard_app.py from the broll-platform checkout
-      # (BROLL_WEB_SRC) -- if it is empty, /broll is simply absent.
+      # install_dashboard_app.py (BROLL_WEB_SRC overrides the source) -- if it
+      # is empty, /broll is simply absent.
       - /mnt/tank/apps/ccsync-dashboard/broll-web:/broll-app:ro
       # b-roll's DATA_ROOT is the SHARED ARCHIVE ITSELF, not a private copy:
       # broll.db, posters/, sprites/ and the Downloads/<category>/Proxy/ tree

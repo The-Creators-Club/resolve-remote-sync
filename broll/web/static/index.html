@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CC SYNC // B-ROLL</title>
+<!-- Document-relative on purpose: mounted at /broll/ a leading slash would
+     resolve against the dashboard's origin root. See tests/test_mounted_prefix.py. -->
+<link rel="icon" type="image/png" href="static/favicon.png">
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+
+<header id="app-header">
+  <div class="topbar">
+    <span class="brand">CREATORS CLUB <span class="dim">//</span> B-ROLL</span>
+    <!-- Root-relative on purpose, unlike every asset URL here: mounted under
+         /broll/ this is the way back out to the dashboard at the origin root.
+         Standalone (dev) it harmlessly reloads this page. -->
+    <a class="btn nav-link" href="/" title="back to the CC Sync dashboard (project sync status)">[ DASHBOARD ]</a>
+  </div>
+  <div class="rule">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</div>
+
+  <div class="header-controls">
+    <div class="search-bar">
+      <input id="q-input" type="text" placeholder='search segments&hellip; e.g. sailors pier "harbor exercise"' autocomplete="off">
+      <select id="category-select">
+        <option value="">All categories</option>
+      </select>
+    </div>
+
+    <div id="mode-toggles" class="mode-toggles" title="How to combine keyword and semantic (meaning-based) search">
+      <button type="button" class="mode-btn" data-mode="hybrid">Hybrid</button>
+      <button type="button" class="mode-btn" data-mode="keyword">Keyword</button>
+      <button type="button" class="mode-btn" data-mode="semantic">Semantic</button>
+    </div>
+
+    <div id="source-toggles" class="mode-toggles" title="Restrict search to what's on screen vs. what's said">
+      <button type="button" class="mode-btn" data-source="all">All</button>
+      <button type="button" class="mode-btn" data-source="visual" title="Visuals: what is seen on screen, including burned-in on-screen text">Visuals</button>
+      <button type="button" class="mode-btn" data-source="transcript" title="Transcript: what is said (spoken word)">Transcript</button>
+    </div>
+
+    <label id="fuzzy-toggle" class="fuzzy-toggle" title="Retry with prefix/typo-tolerant matching when a keyword search finds little">
+      <input id="fuzzy-checkbox" type="checkbox" checked>
+      fuzzy
+    </label>
+
+    <div id="flag-toggles" class="flag-toggles" title="Hide videos with these defect flags">
+      <span class="flag-toggles-label">hide flagged:</span>
+    </div>
+
+    <button id="settings-btn" class="icon-btn" title="Settings">&#9881;</button>
+  </div>
+</header>
+
+<div id="browse-layout">
+  <nav id="folder-tree" class="folder-tree" aria-label="Browse by subject">
+    <div class="folder-tree-head">
+      <span>Browse</span>
+      <button type="button" id="folder-clear" class="text-btn" title="Show everything">clear</button>
+    </div>
+    <div id="folder-tree-body"></div>
+  </nav>
+
+  <main id="grid-view">
+    <div id="results-meta" class="results-meta"></div>
+    <div id="results-grid" class="results-grid"></div>
+    <div id="pager" class="pager">
+      <button id="pager-prev" disabled>&larr; prev</button>
+      <span id="pager-status"></span>
+      <button id="pager-next" disabled>next &rarr;</button>
+    </div>
+  </main>
+</div>
+
+<section id="detail-view" class="hidden">
+  <button id="detail-back" class="text-btn">&larr; back to results</button>
+
+  <div class="detail-layout">
+    <div class="player-col">
+      <video id="player" preload="metadata"></video>
+
+      <div id="seekbar" class="seekbar">
+        <div id="seekbar-range" class="seekbar-range"></div>
+        <div id="seekbar-markers" class="seekbar-markers"></div>
+        <div id="seekbar-playhead" class="seekbar-playhead"></div>
+      </div>
+
+      <div class="transport">
+        <span class="tc-group">
+          <span class="tc-label">TC</span>
+          <span id="tc-current" class="tc mono">00:00:00:00</span>
+        </span>
+        <span class="tc-group">
+          <span class="tc-label">IN</span>
+          <span id="tc-in" class="tc mono">--:--:--:--</span>
+        </span>
+        <span class="tc-group">
+          <span class="tc-label">OUT</span>
+          <span id="tc-out" class="tc mono">--:--:--:--</span>
+        </span>
+        <span class="tc-group">
+          <span class="tc-label">RATE</span>
+          <span id="tc-rate" class="tc mono">1x</span>
+        </span>
+        <button id="send-resolve-btn" class="primary-btn">Send to Resolve &#9166;</button>
+      </div>
+
+      <div class="keyhelp">
+        <b>space/K</b> play&#47;pause &middot; <b>J/L</b> shuttle &middot;
+        <b>&larr;/&rarr;</b> &plusmn;1 frame &middot; <b>I/O</b> set in&#47;out &middot;
+        <b>Enter</b> send to Resolve
+      </div>
+    </div>
+
+    <div class="segments-col">
+      <div id="video-meta" class="video-meta"></div>
+      <h3 class="segments-col-heading">Visual segments</h3>
+      <div id="segment-list" class="segment-list"></div>
+      <div id="transcript-section" class="hidden">
+        <h3 class="segments-col-heading">Transcript</h3>
+        <div id="transcript-list" class="segment-list transcript-list"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div id="settings-panel" class="hidden">
+  <div class="settings-inner">
+    <button id="settings-close" class="text-btn">&times; close</button>
+    <h2>Settings</h2>
+
+    <h3>Shares</h3>
+    <div id="shares-list" class="shares-list"></div>
+    <p class="muted small">
+      Mount paths (which local drive/volume each share resolves to) are configured
+      per-editor in the companion app's <code>~/.broll-companion.json</code>, not here.
+    </p>
+
+    <h3>Companion app</h3>
+    <div class="companion-status">
+      <span id="companion-dot" class="status-dot status-unknown"></span>
+      <span id="companion-text">checking&hellip;</span>
+      <button id="companion-recheck" class="text-btn">recheck</button>
+    </div>
+    <p class="muted small">
+      The companion app runs locally on <code>127.0.0.1:8899</code> and drives DaVinci
+      Resolve for "Send to Resolve". If it isn't running, ask your indexer/companion
+      maintainer for the installer (see the <code>companion/</code> component of this
+      repo).
+    </p>
+  </div>
+</div>
+
+<div id="toast-container"></div>
+
+<script src="static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,765 @@
+/* Neon-red terminal theme — same palette and idioms as the fleet dashboard
+   (dashboard/static/style.css), which in turn lifts it from the companion's
+   theme.py (WRITE.EXE-style). Mounted at /broll the two UIs sit behind one
+   login and one origin, so they must not look like two different products.
+
+   House rules inherited from the dashboard:
+     - monospace everywhere, no sans stack
+     - square corners: NO border-radius, anywhere
+     - structural panels/cards/inputs are 1px solid var(--red-dim)
+     - subtle inner separators are #2a2a31 (--border)
+     - "current selection" reads as var(--field) bg + a 2px red left accent
+     - green is the good/secondary channel: here that is the spoken-word
+       (transcript) index, everywhere it appears. */
+:root {
+  --bg: #0a0a0d;
+  --panel: #101014;
+  --field: #16161c;
+  --red: #ff2140;
+  --red-hot: #ff5c73;
+  --red-dim: #7c1322;
+  --green: #2bff88;
+  --amber: #ffb02e;
+  --text: #e8e8ea;
+  --muted: #6f6f7a;
+
+  /* Aliases for the names this app's rules were written against, remapped
+     onto the dashboard palette so every old selector still means something.
+     --danger stays a distinct emphasis red (errors, dead companion) against
+     the dimmer red-dim used for ordinary structure. */
+  --accent: var(--red);
+  --accent-dim: var(--red-dim);
+  --good: var(--green);
+  --danger: var(--red);
+  --border: #2a2a31;
+  --panel-2: var(--field);
+
+  --mono: Consolas, Menlo, "DejaVu Sans Mono", monospace;
+  /* Kept only as an alias: there is no sans face in this theme any more. */
+  --sans: var(--mono);
+
+  /* Sticky header height — the browse rail parks directly underneath it. */
+  --header-h: 88px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  height: 100%;
+}
+
+a { color: inherit; text-decoration: none; }
+
+.hidden { display: none !important; }
+
+.mono { font-family: var(--mono); }
+
+button, input, select, textarea {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+button { cursor: pointer; }
+
+/* ---------- header ---------- */
+
+#app-header {
+  /* Two stacked rows: the dashboard topbar echo, then this app's controls. */
+  display: block;
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 1.5rem;
+  padding: 0.7rem 1.2rem 0.3rem;
+}
+
+.brand {
+  color: var(--red);
+  font-weight: bold;
+  letter-spacing: 0.08em;
+  font-size: 13px;
+  flex: 0 0 auto;
+  text-shadow: 0 0 12px rgba(255, 33, 64, 0.55);
+}
+.brand .dim { color: var(--red-dim); }
+
+/* Dashboard text-button idiom: "[ LABEL ]" in red, glowing on hover. */
+.btn {
+  background: none;
+  border: none;
+  color: var(--red);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  padding: 0;
+}
+.btn:hover { color: var(--red-hot); text-shadow: 0 0 10px rgba(255, 92, 115, 0.7); }
+.nav-link { flex: 0 0 auto; }
+
+.rule {
+  color: var(--red-dim);
+  overflow: hidden;
+  white-space: nowrap;
+  padding: 0 1.2rem;
+  user-select: none;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 8px 1.2rem 10px;
+}
+
+.search-bar {
+  display: flex;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#q-input {
+  flex: 1 1 auto;
+  min-width: 120px;
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 9px;
+}
+#q-input::placeholder { color: var(--muted); }
+#q-input:focus {
+  outline: none;
+  border-color: var(--red);
+}
+
+#category-select {
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 7px;
+  max-width: 220px;
+}
+#category-select:focus { outline: none; border-color: var(--red); }
+
+.mode-toggles {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0;
+  border: 1px solid var(--red-dim);
+}
+.mode-btn {
+  background: none;
+  border: none;
+  border-right: 1px solid var(--red-dim);
+  color: var(--red);
+  padding: 4px 10px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.mode-btn:last-child { border-right: none; }
+.mode-btn:hover {
+  color: var(--red-hot);
+  text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
+}
+/* Current selection, same idiom as the dashboard's .project-link.current:
+   field bg plus a 2px red left accent. Drawn as an inset shadow so the label
+   does not jog sideways when the selection moves. */
+.mode-btn.active {
+  background: var(--field);
+  color: var(--red-hot);
+  box-shadow: inset 2px 0 0 var(--red);
+}
+
+.fuzzy-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  border: 1px solid var(--red-dim);
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.fuzzy-toggle:hover { color: var(--text); border-color: var(--red); }
+.fuzzy-toggle input[type="checkbox"] { accent-color: var(--red); }
+
+.flag-toggles {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.flag-toggles-label { color: var(--muted); letter-spacing: 0.06em; }
+.flag-toggles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--red-dim);
+  padding: 2px 6px;
+  cursor: pointer;
+}
+.flag-toggles label:hover { color: var(--text); border-color: var(--red); }
+.flag-toggles input[type="checkbox"] { accent-color: var(--red); }
+
+.icon-btn {
+  background: none;
+  border: 1px solid var(--red-dim);
+  color: var(--red);
+  padding: 3px 8px;
+  font-size: 14px;
+  line-height: 1;
+}
+.icon-btn:hover {
+  border-color: var(--red);
+  color: var(--red-hot);
+  text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
+}
+
+.text-btn {
+  background: none;
+  border: none;
+  color: var(--red);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  padding: 4px 0;
+}
+.text-btn:hover { color: var(--red-hot); text-shadow: 0 0 10px rgba(255, 92, 115, 0.7); }
+
+/* Still the loudest control on the page, but in theme: red on field with a
+   full red border, rather than a filled orange slab. */
+.primary-btn {
+  background: var(--field);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font: inherit;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 0.06em;
+  padding: 5px 14px;
+}
+.primary-btn:hover {
+  color: var(--red-hot);
+  border-color: var(--red-hot);
+  text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
+}
+
+/* ---------- grid view ---------- */
+
+#grid-view { padding: 12px 14px 40px; }
+
+.results-meta {
+  color: var(--muted);
+  font-size: 11px;
+  margin: 4px 2px 10px;
+}
+
+.results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 240px);
+  gap: 14px;
+}
+
+/* Heading separating keyword results from semantic-only "Related" ones
+   (see app/search.py's module docstring on mode="hybrid") -- spans the full
+   grid width rather than occupying one card's column. */
+.results-related-heading {
+  grid-column: 1 / -1;
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border-top: 1px solid var(--red-dim);
+  padding-top: 10px;
+  margin-top: 2px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--red-dim);
+  overflow: hidden;
+  cursor: pointer;
+}
+.card:hover { border-color: var(--red); background: var(--field); }
+/* Semantic-only card ("match": "semantic" -- surfaced only by the vector
+   side, not a keyword hit): visually distinguished but not restyled --
+   dashed border only, same layout as a normal card. */
+.card-semantic { border-style: dashed; }
+
+.card-thumb {
+  position: relative;
+  width: 240px;
+  background: #000;
+  overflow: hidden;
+}
+.card-thumb img.poster,
+.card-thumb .sprite-overlay {
+  display: block;
+  width: 240px;
+  height: 100%;
+  object-fit: cover;
+}
+.card-thumb .sprite-overlay {
+  position: absolute;
+  top: 0; left: 0;
+  background-repeat: no-repeat;
+  opacity: 0;
+}
+.card-thumb:hover .sprite-overlay { opacity: 1; }
+
+/* No poster on disk (probe/proxy failed on a corrupt source). */
+.card-thumb.thumb-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 135px;
+  background: repeating-linear-gradient(
+    45deg, #0e0e12, #0e0e12 6px, #16161c 6px, #16161c 12px
+  );
+}
+.card-thumb.thumb-missing::after {
+  content: "no preview";
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+.card-thumb .duration-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  background: rgba(10, 10, 13, 0.85);
+  border: 1px solid var(--red-dim);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 0 4px;
+}
+
+.card-body { padding: 7px 8px 9px; }
+
+.card-filename {
+  font-size: 11.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+
+.card-category {
+  font-size: 10.5px;
+  color: var(--red);
+  margin-bottom: 6px;
+}
+
+.card-hits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* Same shape as the dashboard's .chip: field fill, red-dim hairline. */
+.hit-chip {
+  font-family: var(--mono);
+  font-size: 10px;
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--muted);
+  padding: 1px 5px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.hit-chip:hover { border-color: var(--red); color: var(--text); }
+.hit-chip mark {
+  background: none;
+  color: var(--red-hot);
+  font-weight: bold;
+}
+.hit-chip-tag {
+  text-transform: uppercase;
+  font-size: 8.5px;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+}
+/* Transcript-sourced hits (spoken word, not seen) get the green channel used
+   everywhere else for the spoken-word index, see .transcript-list. */
+.hit-chip-transcript { border-left: 2px solid var(--green); }
+.hit-chip-transcript .hit-chip-tag { color: var(--green); }
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 22px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.pager button {
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--red);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  padding: 4px 12px;
+}
+.pager button:hover:not(:disabled) {
+  border-color: var(--red);
+  color: var(--red-hot);
+  text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
+}
+.pager button:disabled { opacity: 0.3; cursor: default; color: var(--muted); }
+
+/* ---------- detail view ---------- */
+
+#detail-view { padding: 10px 14px 30px; }
+
+.detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  gap: 18px;
+  margin-top: 8px;
+}
+
+.player-col { min-width: 0; }
+
+#player {
+  width: 100%;
+  max-height: 62vh;
+  background: #000;
+  display: block;
+  cursor: grab;
+  border: 1px solid var(--red-dim);
+  /* The picture is a scrub surface: a drag must not start a native image/media
+     drag, and must not select surrounding text on the way past. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+#player.scrubbing { cursor: grabbing; }
+
+.seekbar {
+  position: relative;
+  height: 26px;
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  margin-top: 8px;
+  cursor: pointer;
+}
+.seekbar-range {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: rgba(255, 33, 64, 0.18);
+  border-left: 1px solid var(--red);
+  border-right: 1px solid var(--red);
+}
+.seekbar-markers {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+}
+.seekbar-marker {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 2px;
+  background: var(--green);
+  opacity: 0.85;
+}
+.seekbar-playhead {
+  position: absolute;
+  top: -2px; bottom: -2px;
+  width: 2px;
+  background: var(--text);
+  box-shadow: 0 0 6px rgba(232, 232, 234, 0.6);
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.tc-group { display: flex; align-items: center; gap: 5px; }
+.tc-label { color: var(--muted); font-size: 10px; letter-spacing: 0.1em; }
+.tc { font-size: 13px; color: var(--text); }
+
+.keyhelp {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.keyhelp b { color: var(--red); font-weight: bold; }
+
+.video-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+.video-meta .title { color: var(--text); font-size: 13px; margin-bottom: 4px; }
+
+.segment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.segment-item {
+  background: var(--panel);
+  border: 1px solid var(--red-dim);
+  padding: 7px 9px;
+  cursor: pointer;
+}
+.segment-item:hover { border-color: var(--red); background: var(--field); }
+.segment-item .seg-tc {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--red);
+  margin-bottom: 3px;
+}
+.segment-item .seg-desc { font-size: 12px; color: var(--text); }
+.segment-item .seg-onscreen {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-style: italic;
+}
+.segment-item .seg-onscreen-en {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+.segment-item mark { background: none; color: var(--red-hot); font-weight: bold; }
+
+.segments-col-heading {
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin: 14px 0 6px;
+  border-bottom: 1px dotted var(--border);
+  padding-bottom: 3px;
+}
+.segments-col-heading:first-of-type { margin-top: 0; }
+
+/* Transcript cues -- distinct from visual segments: a spoken-word index
+   (docs/indexing-findings.md), so the left accent uses --good/green (already
+   used for seekbar segment markers and "said" chips) rather than red. */
+.transcript-list .segment-item {
+  border-left: 2px solid var(--green);
+}
+.transcript-list .seg-tc { color: var(--green); }
+.transcript-list .seg-desc {
+  font-style: italic;
+  color: var(--text);
+}
+
+/* ---------- settings panel ---------- */
+
+#settings-panel {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: 360px;
+  background: var(--panel);
+  border-left: 1px solid var(--red-dim);
+  padding: 16px;
+  z-index: 50;
+  overflow-y: auto;
+}
+#settings-panel h2 {
+  font-size: 14px;
+  margin: 6px 0 14px;
+  color: var(--red);
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 12px rgba(255, 33, 64, 0.55);
+}
+#settings-panel h3 {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  margin: 18px 0 8px;
+  text-transform: uppercase;
+  border-bottom: 1px dotted var(--border);
+  padding-bottom: 3px;
+}
+#settings-panel code {
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--field);
+  padding: 0 3px;
+}
+
+.shares-list { display: flex; flex-direction: column; gap: 6px; }
+.share-row {
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  padding: 6px 9px;
+  font-size: 12px;
+}
+.share-row .share-name { color: var(--red); font-family: var(--mono); }
+.share-row .share-desc { color: var(--muted); }
+
+.companion-status { display: flex; align-items: center; gap: 8px; }
+/* Square, glowing pip — the dashboard's .dot idiom without a border-radius. */
+.status-dot {
+  width: 9px; height: 9px;
+  display: inline-block;
+  color: var(--muted);
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+.status-dot.status-ok { color: var(--green); }
+.status-dot.status-bad { color: var(--danger); }
+.status-dot.status-unknown { color: var(--muted); }
+
+.muted { color: var(--muted); }
+.small { font-size: 11px; line-height: 1.5; }
+
+/* ---------- toasts ---------- */
+
+#toast-container {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+}
+.toast {
+  background: var(--panel);
+  border: 1px solid var(--red-dim);
+  border-left: 3px solid var(--red-dim);
+  color: var(--text);
+  padding: 8px 14px;
+  font-size: 12.5px;
+}
+.toast.error { border-left-color: var(--danger); }
+.toast.success { border-left-color: var(--green); }
+.toast.warn { border-left-color: var(--amber); }
+
+/* --- folder tree ------------------------------------------------------- */
+
+#browse-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+}
+
+.folder-tree {
+  flex: 0 0 210px;
+  align-self: stretch;
+  min-height: calc(100vh - var(--header-h));
+  border-right: 1px solid var(--red-dim);
+  background: var(--panel);
+  padding: 8px 0 24px;
+  font-size: 12px;
+  /* The grid scrolls the page; the tree is a fixed rail so an editor never
+     loses the shelf they are browsing while paging through results. It parks
+     just under the sticky header rather than sliding beneath it. */
+  position: sticky;
+  top: var(--header-h);
+  max-height: calc(100vh - var(--header-h));
+  overflow-y: auto;
+}
+
+#browse-layout > #grid-view {
+  flex: 1 1 auto;
+  min-width: 0;   /* without this the grid refuses to shrink and overflows */
+}
+
+.folder-tree-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 2px 10px 8px;
+  color: var(--red);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 10px;
+}
+
+.tree-root { margin-bottom: 10px; }
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 10px;
+  background: none;
+  border: 0;
+  /* Reserved so the active row's red accent does not jog the label sideways. */
+  border-left: 2px solid transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.tree-node:hover { background: var(--field); color: var(--red-hot); }
+/* "Where I am", stated exactly as the dashboard states it in its project
+   sidebar (.project-link.current): field fill, 2px red left border. */
+.tree-node.active {
+  background: var(--field);
+  border-left-color: var(--red);
+  color: var(--red-hot);
+}
+.tree-node.active .tree-count { color: var(--red); }
+
+.tree-node-root {
+  color: var(--red);
+  font-weight: bold;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--red-dim);
+  padding-bottom: 5px;
+  margin-bottom: 3px;
+}
+.tree-node-group { color: var(--text); }
+.tree-node-leaf { padding-left: 26px; color: var(--muted); }
+
+.tree-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-count {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.tree-caret { flex: 0 0 9px; color: var(--red-dim); font-size: 9px; }
+.tree-children.hidden { display: none; }

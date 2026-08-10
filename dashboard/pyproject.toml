@@ -20,8 +20,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Runtime deps of the b-roll web app, which this container mounts in-process at
-# /broll when DASH_BROLL_ENABLED=1. Not dependencies of ccsync_dashboard itself
+# Runtime deps of the b-roll web app (broll/web in this repo), which this
+# container mounts in-process at /broll when DASH_BROLL_ENABLED=1.
+# Not dependencies of ccsync_dashboard itself
 # -- the package imports none of them -- but they must be installed in the
 # deployed venv or the mount fails at import. deploy/requirements.txt carries
 # them for that reason; test_deploy_requirements_match_pyproject_dependencies

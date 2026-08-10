@@ -1,0 +1,51 @@
+# Copy to config.yaml and edit. Paths use forward slashes even on Windows.
+
+shares:
+  broll:
+    root: "Y:/broll"
+    description: "Main b-roll share"
+
+data_root: "D:/broll-data"
+
+db:
+  # mode: "sqlite" for co-located dev mode (indexer writes broll.db directly), or
+  # "api" to talk to a remote web app via the /api/ingest/* endpoints.
+  mode: sqlite
+  path: "D:/broll-data/broll.db"   # used when mode == sqlite
+  url: "http://truenas.local:8000/api"  # used when mode == api
+  token: "changeme"                     # used when mode == api (X-Ingest-Token header)
+
+# Default model for `run`. One of: haiku | sonnet | fable
+model: sonnet
+
+# Model used for `taxonomy propose` (a "big model" clustering pass per SPEC).
+taxonomy_model: sonnet
+
+sampling:
+  scene_threshold: 0.3     # ffmpeg select='gt(scene,N)'
+  max_gap_s: 4.0           # fill scene-detected frames so no gap exceeds this
+  frames_per_call: 36      # ~4 contact sheets (9 frames each) per claude -p call
+
+# Local speech transcription (faster-whisper, runs on owned hardware — no model quota
+# cost, so it runs over everything). Additive enrichment: independent of the visual
+# pipeline's discovered -> probed -> proxied -> indexed status flow, never blocks or
+# errors a video. See docs/indexing-findings.md and broll_index/transcribe.py.
+whisper:
+  enabled: true
+  python: "C:/Users/alex/tools/whisper/.venv/Scripts/python.exe"  # faster-whisper venv
+  script: "C:/Users/alex/tools/whisper/transcribe.py"
+  model: "large-v3-turbo"
+  language: null           # null = autodetect; set e.g. "zh" to force a language
+  max_gap_s: 1.0           # join cues separated by less than this into one passage
+  max_duration_s: 30.0     # ...but cap a joined passage at this many seconds
+
+# Hybrid search enrichment: CJK keyword normalization (search_norm, jieba + OpenCC) is
+# always applied by the `embed` stage and has no separate toggle; this section only
+# controls the semantic-vector half (broll_index/embed.py, migrations/004_hybrid_search.sql,
+# docs/indexing-findings.md). Additive enrichment, same status-independent/never-blocks
+# behaviour as whisper above. A `model` change here re-embeds rather than silently mixing
+# vector spaces (see broll_index/pipeline.py's stage_embed).
+embedding:
+  enabled: true
+  model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 384-dim, multilingual
+  batch_size: 64

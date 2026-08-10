@@ -18,7 +18,7 @@ Steps (each idempotent, one line printed per action):
        <host-root>/data   -- SQLite DB + companion packages (NEVER touched on
                              re-run); 3000:3000 (broll:broll), mode 770 --
                              group 3000, NOT 3001/editors.
-       <host-root>/broll-web -- the broll-platform web/ tree (shipped in step
+       <host-root>/broll-web -- this repo's broll/web tree (shipped in step
                              2b); root:root 755, mounted :ro like app/.
      ...and, when the b-roll UI is enabled, the b-roll DATA root -- which is
      the shared archive itself, /mnt/tank/.../Assets/B-roll Archive -- as
@@ -34,14 +34,15 @@ Steps (each idempotent, one line printed per action):
      swap rolls back. The previous app.old.<ts> backups are pruned (most
      recent kept) only after a LATER install has succeeded.
      Excludes .venv, __pycache__, *.pyc.
-  2b. When DASH_BROLL_ENABLED=1 (the default): ship the broll-platform web/
-     tree into <host-root>/broll-web by exactly the same staged-verify-swap
+  2b. When DASH_BROLL_ENABLED=1 (the default): ship the b-roll web/ tree
+     into <host-root>/broll-web by exactly the same staged-verify-swap
      route. The container mounts that dir read-only at /broll-app and puts it
      on PYTHONPATH; without this step it is EMPTY, the import fails, and the
      b-roll UI is silently absent behind a green healthcheck. The source is
-     BROLL_WEB_SRC, defaulting to ../../broll-platform/web next to this repo;
-     if it is missing this script FAILS rather than deploying a feature that
-     cannot work. Set DASH_BROLL_ENABLED=0 to skip the b-roll UI entirely.
+     BROLL_WEB_SRC, defaulting to broll/web in this repo (the b-roll platform
+     was folded in as broll/ on 2026-08-10); if it is missing this script
+     FAILS rather than deploying a feature that cannot work. Set
+     DASH_BROLL_ENABLED=0 to skip the b-roll UI entirely.
   3. If the app is not yet installed: POST /api/v2.0/app with
        {"custom_app": true, "app_name": "ccsync-dashboard",
         "custom_compose_config": {...}}   (compose dict mirrors
@@ -75,8 +76,7 @@ TRUENAS_VERIFY_SSL (default "0" = trust the NAS's self-signed cert),
 DASH_BROLL_ENABLED (default "1"; "0" deploys without the b-roll UI),
 BROLL_INGEST_TOKEN (REQUIRED when DASH_BROLL_ENABLED=1 -- it guards a write
 path the indexer reaches with no session; `openssl rand -hex 24`),
-BROLL_WEB_SRC (the broll-platform web/ checkout to ship, default
-../../broll-platform/web relative to this repo).
+BROLL_WEB_SRC (the b-roll web/ tree to ship, default broll/web in this repo).
 
 Compose-level settings are baked in at CREATE time: after changing any of
 them, re-run with --recreate, otherwise the running app keeps the old ones.
@@ -113,10 +113,11 @@ HOST_ROOT_RE = re.compile(r"^/mnt/[^/]+/apps/ccsync-dashboard(/[^/]+)*$")
 DEFAULT_SYNCTHING_GUI_URL = "http://192.168.0.102:8384"
 EXCLUDE_DIRS = {".venv", "__pycache__", ".pytest_cache"}
 LOCAL_DASHBOARD_DIR = Path(__file__).resolve().parents[1] / "dashboard"
-# The b-roll app lives in its OWN repo; this script ships a checkout of it into
+# The b-roll app lives in this repo at broll/web (folded in from the standalone
+# broll-platform repo on 2026-08-10); this script ships that tree into
 # <host-root>/broll-web, which the container mounts read-only at /broll-app.
-# Default location: a sibling of this repo. Override with BROLL_WEB_SRC.
-DEFAULT_BROLL_WEB_DIR = Path(__file__).resolve().parents[2] / "broll-platform" / "web"
+# BROLL_WEB_SRC still overrides, for deploying a checkout from elsewhere.
+DEFAULT_BROLL_WEB_DIR = Path(__file__).resolve().parents[1] / "broll" / "web"
 # Its tests/, git metadata and local venv have no business on the NAS -- the
 # container only ever imports app/ and serves static/.
 BROLL_EXCLUDE_DIRS = EXCLUDE_DIRS | {".git", ".github", "tests", "node_modules"}
@@ -322,7 +323,8 @@ def resolve_compose_secrets(dry_run: bool, broll_ingest_token: str) -> dict:
 
 
 def broll_web_source() -> Path:
-    """The broll-platform web/ checkout to ship. BROLL_WEB_SRC overrides."""
+    """The b-roll web/ tree to ship -- broll/web in this repo, unless
+    BROLL_WEB_SRC points somewhere else."""
     raw = os.environ.get("BROLL_WEB_SRC", "").strip()
     return Path(raw) if raw else DEFAULT_BROLL_WEB_DIR
 
@@ -626,7 +628,9 @@ def main():
                 f"  The container mounts <host-root>/broll-web read-only at /broll-app "
                 f"and imports app.main from it; deploying without shipping that tree "
                 f"gives a dashboard whose /broll silently does not exist.\n"
-                f"  Point BROLL_WEB_SRC at the broll-platform web/ checkout, or set "
+                f"  broll/web is part of THIS repo, so a missing one means a "
+                f"broken or partial checkout -- fix the checkout, point "
+                f"BROLL_WEB_SRC at a web/ tree elsewhere, or set "
                 f"DASH_BROLL_ENABLED=0 to deploy without the b-roll UI.",
                 file=sys.stderr)
             if not args.dry_run:
@@ -796,7 +800,7 @@ def main():
     if not install_tree(root, "app", LOCAL_DASHBOARD_DIR, args.dry_run):
         return 1
 
-    # Step 2b: ship the b-roll app's own repo into broll-web. Without this the
+    # Step 2b: ship the b-roll web/ tree into broll-web. Without this the
     # directory the container mounts at /broll-app is EMPTY, `from app.main
     # import app` raises ModuleNotFoundError, the mount is skipped, and the
     # operator gets a green healthcheck with a missing feature.

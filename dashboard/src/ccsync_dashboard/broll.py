@@ -1,5 +1,11 @@
 """Serve the b-roll search UI from inside the dashboard, at /broll.
 
+The b-roll app lives in this repo at broll/web (folded in from the standalone
+broll-platform repo on 2026-08-10). Nothing about the deployment changed with
+it: install_dashboard_app.py still ships that tree to <host-root>/broll-web,
+the container still mounts it read-only at /broll-app, run.sh still puts it on
+PYTHONPATH, and it is still imported as top-level `app`.
+
 Editors get one URL and one login instead of a second service to find and sign
 in to. Both apps are FastAPI, so this is a real in-process mount rather than a
 proxy tier -- which matters more than it sounds: the b-roll media routes serve
@@ -28,6 +34,8 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import sys
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import FastAPI
@@ -167,6 +175,27 @@ async def _json_response(send: Callable, status: int, body: dict) -> None:
     await send({"type": "http.response.body", "body": payload})
 
 
+def _add_in_repo_broll_web() -> bool:
+    """Put this repo's broll/web on sys.path so `import app` can find it.
+
+    Dev convenience ONLY, for running the dashboard straight out of a checkout
+    where nothing has set PYTHONPATH. In the container this file lives under
+    /app/src/ccsync_dashboard/, so parents[3] is /, the candidate does not
+    exist, and this is inert -- the deployed import goes on coming off the
+    PYTHONPATH run.sh sets, which is why the entry is APPENDED: an explicitly
+    configured path must keep winning over a guess made from __file__.
+    """
+    candidate = Path(__file__).resolve().parents[3] / "broll" / "web"
+    if not (candidate / "app" / "main.py").is_file():
+        return False
+    entry = str(candidate)
+    if entry not in sys.path:
+        sys.path.append(entry)
+    log.info("importing the b-roll app from the in-repo checkout at %s "
+             "(nothing put it on PYTHONPATH)", entry)
+    return True
+
+
 def mount_broll(app: FastAPI, ingest_token: str) -> str:
     """Mount the b-roll app at /broll. Returns MOUNTED / ABSENT / DEGRADED.
 
@@ -186,10 +215,18 @@ def mount_broll(app: FastAPI, ingest_token: str) -> str:
         return ABSENT
     try:
         # The b-roll package is imported as top-level `app` -- a generic name it
-        # owns in its own repo. Safe here only because the container puts
-        # /broll-app on PYTHONPATH explicitly and nothing else exports `app`.
-        # Renaming it upstream to `broll_web` would be tidier; noted, not done.
-        from app.main import app as broll_app  # type: ignore[import-not-found]
+        # kept when broll/web was folded into this repo. Safe here only because
+        # the container puts /broll-app on PYTHONPATH explicitly and nothing
+        # else exports `app`. Renaming it to `broll_web` would be tidier;
+        # noted, not done.
+        try:
+            from app.main import app as broll_app  # type: ignore[import-not-found]
+        except ImportError:
+            # An `app` already in sys.modules is somebody's deliberate choice
+            # (the tests' fake, most of all) and its failure is theirs to own.
+            if "app" in sys.modules or not _add_in_repo_broll_web():
+                raise
+            from app.main import app as broll_app  # type: ignore[import-not-found]
     except Exception as e:  # noqa: BLE001 - see module docstring
         log.warning("b-roll UI not mounted (%s: %s); dashboard continues without it",
                     type(e).__name__, e)

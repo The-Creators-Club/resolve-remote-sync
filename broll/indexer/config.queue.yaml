@@ -1,0 +1,234 @@
+# Full archive queue (F:\Downloads\queue.txt), 25 unique paths across three drives.
+#
+# Each source folder is its own share so it can be indexed before the NAS exists;
+# `broll-index rebase --to-share broll --root <nas>` re-points everything by content
+# hash once the footage is consolidated. Share names are derived from the queue paths.
+#
+# data_root is on a local disk on purpose: the index and proxies must outlive the
+# source drives being consolidated.
+shares:
+  ff2-e2-school:   {root: "I:/Shared drives/Cablewrap Creative/Projects/2024/FF2/FF2 E2 - School of Life/Youtube Downloads"}
+  ff2-e3-idol:     {root: "I:/Shared drives/Cablewrap Creative/Projects/2024/FF2/FF2 E3 - Idol Fantasy/Youtube Downloads"}
+  ff2-e4-pets:     {root: "I:/Shared drives/Cablewrap Creative/Projects/2024/FF2/FF2 E4 - Pets/Downloads/Youtube Downloads"}
+  ff2-e6-sunflow:  {root: "I:/Shared drives/Cablewrap Creative/Projects/2024/FF2/FF2 E6 - Sunflowers/Youtube"}
+  ff2-e7-lgbt:     {root: "I:/Shared drives/Cablewrap Creative/Projects/2024/FF2/FF2 E7 - LGBT Rabbit/Youtube Downloads Episode 7"}
+  ff2-e8-army:     {root: "I:/Shared drives/Cablewrap Creative/Projects/2024/FF2/FF2 E8 - Army Mental Health/Youtube Downloads"}
+  ff2-e9-surfing:  {root: "I:/Shared drives/Cablewrap Creative/Projects/2024/FF2/FF2 E9 - Surfing/Youtube Downloads"}
+  ff2-e1-yt:       {root: "H:/FF2/FF2 E1 - High Stakes/Youtube Downloads"}
+  ff2-e24-birth:   {root: "H:/FF2/FF2 E2-4 - Birthrate/Youtube"}
+  ff2-e3-idols-ar: {root: "H:/FF2/FF2 E3 - Idols/Archive"}
+  ff3-e1-traffic:  {root: "I:/Shared drives/Cablewrap Creative/Projects/2025/FF3/FF3 E1 - Traffic/Youtube"}
+  ff3-e5-tea:      {root: "I:/Shared drives/Cablewrap Creative/Projects/2025/FF3/FF3 E5 - Reading the Tea Leaves/B-roll/Archive"}
+  ff3-hunt-news:   {root: "Z:/Cablewrap/Projects/2025/FF3/Hunting/old newsreels of indigenous"}
+  ff3-hunt-broll:  {root: "Z:/Cablewrap/Projects/2025/FF3/Hunting/B-roll"}
+  ff3-taroko:      {root: "Z:/Cablewrap/Projects/2025/FF3/Taroko/B-roll/Youtube"}
+  ff3-ai:          {root: "Z:/Cablewrap/Projects/2025/FF3/AI/B-roll/Youtube"}
+  ff3-death:       {root: "Z:/Cablewrap/Projects/2025/FF3/Death/B-roll"}
+  ff4-erosion:     {root: "Z:/Cablewrap/Projects/2025/FF4/Erosion/Youtube"}
+  ff4-foreign:     {root: "Z:/Cablewrap/Projects/2025/FF4/Foreign Faces/Youtube"}
+  ff4-garbage:     {root: "Z:/Cablewrap/Projects/2025/FF4/Garbage/youtube"}
+  ff4-lol:         {root: "Z:/Cablewrap/Projects/2025/FF4/LoL/Youtube"}
+  ff4-lowwages:    {root: "Z:/Cablewrap/Projects/2025/FF4/Low Wages/Youtube"}
+  ff4-nuclear:     {root: "Z:/Cablewrap/Projects/2025/FF4/Nuclear/Youtube"}
+  ff4-tiktok:      {root: "Z:/Cablewrap/Projects/2025/FF4/Tiktok/Youtube"}
+  ff4-whisky:      {root: "Z:/Cablewrap/Projects/2025/FF4/Whisky/YT"}
+
+  # Our own shot footage. Unlike every share above (YouTube downloads, where a
+  # Proxy/ folder is the editor's redundant second encode), here the Proxy/ .mov
+  # IS the archive copy: it is what gets copied to the server, while the camera
+  # original is 20x the bytes and stays on the shoot drive. 558 proxies at
+  # 17.6 GB against 558 originals at 403 GB.
+  #
+  # max_duration_s caps b-roll at 5 minutes: anything longer is an interview or a
+  # locked-off recording, not a cutaway. 4 of the 558 clips are over it — 0.7% of
+  # the files but 16% of the total runtime.
+  # Indexed like any other share. It was briefly index: false on the assumption
+  # that describing our own footage was expensive; measured, it is not. These
+  # clips average 8-15 s with 4-5 scene changes, so the whole shoot fits in ONE
+  # contact sheet per clip = one model call each, and the frames stage runs at
+  # 33x realtime (~2 min for all 554 across 4 workers).
+  #
+  # The long-tail cost that `max_sheets_per_video` exists to cap (9% of the
+  # YouTube archive consuming 36% of all calls) is a long-clip problem. This
+  # shoot is the opposite shape: hundreds of short cutaways.
+  mofa-disaster:
+    root: "Z:/Cablewrap/Projects/2025/MOFA/Disaster Prevention Event"
+    description: "MOFA Disaster Prevention Event — own footage, A74 + Fx3, 2 days"
+    source: proxies
+    max_duration_s: 300
+    # No usable speech: cutaways and atmosphere with incidental crew
+    # chatter, so transcribing produces cues that are noise in the index.
+    transcribe: false
+
+  # FF4's own shot footage — the b-roll from the season's shoots, which until now
+  # was never indexed at all (the eight ff4-* shares above are its YouTube
+  # downloads only). Same shape as mofa-disaster: the Proxy/ .mov is the archive
+  # copy, the camera original stays on the shoot drive.
+  #
+  # Rooted at the PROJECT, not at each shot-footage folder, and that is the whole
+  # reason `exclude` exists. build_archive files a proxies-share clip at
+  # `Creators_Club/<share>/<rel_path>`, so the share root is literally the top of
+  # what an editor sees in the sidebar. Root it here and the archive mirrors the
+  # project — `Creators_Club/ff4/Nuclear/Interviewees/李桂林 Lee Kui-lin/…` — with
+  # the subject folders an editor already navigates by. Root it at each B-roll
+  # folder instead and every subject becomes its own top-level share, which
+  # flattens exactly the structure that makes the tree legible.
+  #
+  # max_duration_s: 300 is what separates b-roll from the interviews it sits
+  # beside: these folders hold both, and the interview A-cam takes are the long
+  # ones. Enforced at probe, the cheapest possible place to drop a clip.
+  #
+  # Speech IS transcribed here, unlike mofa-disaster. That share is silent
+  # cutaways with crew chatter; this one includes referendum protests, a press
+  # conference and a whisky convention, where what is being said is part of what
+  # makes the shot findable. Whisper is local and free, so the only risk is index
+  # noise, and the quality gate already catches near-silence hallucination.
+  #
+  # This flag only governs INGEST of .srt files. Producing them is a deliberate
+  # batch_transcribe.py pass, and it must be run AFTER the local stages, never
+  # before: probe is what applies max_duration_s, so transcribing first means
+  # transcribing every multi-hour interview take on the way to discarding it.
+  # parallel_local now enforces that ordering (stage_transcribe ingest_only=True)
+  # rather than leaving it to whoever remembers.
+  ff4:
+    root: "Z:/Cablewrap/Projects/2025/FF4"
+    description: "FF4 own shot footage — b-roll from the season's shoots"
+    source: proxies
+    max_duration_s: 300
+    exclude:
+      # Downloads already indexed by the eight ff4-* shares above. Without these
+      # we would index each download's EDITOR PROXY as a second clip — same
+      # footage, different encode, so content hashing cannot catch the duplicate.
+      - "Erosion/Youtube"
+      - "Foreign Faces/Youtube"
+      - "Garbage/youtube"
+      - "LoL/Youtube"
+      - "Low Wages/Youtube"
+      - "Nuclear/Youtube"
+      - "Tiktok/Youtube"
+      - "Whisky/YT"
+      # Downloads belonging to no share yet. They need `source: originals`
+      # treatment (index the download, skip its proxy), which is the opposite of
+      # this share's rule — so they are a separate job, not a subtree of this one.
+      - "Spies/Youtube"
+      - "Nuclear/B-roll/Youtube"
+      - "Nuclear/B-roll/News"
+      - "Nuclear/B-roll/Other Downloads"
+      # Graphics and renders, not footage. The renders-in-place are conformed
+      # exports of downloads that are themselves indexed, and an AE comp
+      # described by the model returns a search hit an editor cannot cut with.
+      - "*/AE"
+      - "*/Renders"
+      - "*/Renders in Place"
+      - "*/Render in Place"
+      - "*/Lower Thirds"
+      - "FF4 Credits"
+      - "FF4 Lower Thirds"
+      - "FF4 Infographics"
+      # Material the project itself has marked dead.
+      - "*/Archive (do not use)"
+
+  # FF3's own shot footage. Same shape and same reasoning as `ff4` above — rooted
+  # at the PROJECT so the archive mirrors the folder tree an editor already
+  # navigates, with `exclude` carrying the download subtrees.
+  #
+  # Dry-run against the real tree before scanning: 5,696 video files (5.8 TB) in
+  # the project, of which the patterns below leave 2,242 proxies (242 GB) to
+  # index and 2,216 camera originals (5.2 TB) recorded-but-excluded. Every
+  # surviving directory is our own footage; the only own-footage folder with no
+  # Proxy/ beside it is `Taroko/Taroko/Interviews/Allen Chang` (2 files), which
+  # has nothing to index either way.
+  #
+  # max_duration_s: 300 does the same job here as on ff4 — the Interviewees
+  # folders hold the interview A-cam takes beside the cutaways. Measured off a
+  # 61-file bitrate sample (these proxies are a very consistent 0.83 MB/s):
+  # ~152 clips are over the cap, 6.8% of the files but 64% of the bytes.
+  #
+  # Speech IS transcribed, as on ff4: Computex show floor, park interviews and
+  # tea-farm visits are shoots where what is said is part of what makes a shot
+  # findable. The long interview takes never reach Whisper anyway — probe drops
+  # them first.
+  #
+  # A note for whoever reads the archive later: 174 of the 2,242 files under a
+  # Proxy/ folder are .MP4 rather than .mov (all in AI/wen_yi_ling,
+  # AI/fan_yao_zhong, AI/shalun and Traffic/…/yu_ba_ba). They are proxy-scale —
+  # 18 GB across 174 files — so they are proxies with an unusual extension, not
+  # camera originals filed in the wrong place. Nothing to fix.
+  ff3:
+    root: "Z:/Cablewrap/Projects/2025/FF3"
+    description: "FF3 own shot footage — b-roll from the season's shoots"
+    source: proxies
+    max_duration_s: 300
+    exclude:
+      # Downloads already indexed by the five ff3-* shares rooted inside this
+      # tree. Without these we would index each download's EDITOR PROXY as a
+      # second clip — same footage, different encode, invisible to content
+      # hashing. Two of these roots also hold footage of ours, already indexed
+      # as originals by that share: `Death/B-roll/Death Row/Fx3` (48 clips) and
+      # the one loose file at the top of `Hunting/B-roll`. Covered, so excluding
+      # the whole subtree loses nothing.
+      - "AI/B-roll/Youtube"
+      - "Death/B-roll"
+      - "Hunting/B-roll"
+      - "Hunting/old newsreels of indigenous"
+      - "Taroko/B-roll/Youtube"
+      # Downloads belonging to no Z: share. Same call as ff4's Spies/Youtube:
+      # they need `source: originals` treatment, which is the opposite of this
+      # share's rule, so they are a separate job rather than a subtree of this
+      # one. Note the lowercase `youtube` — patterns are case-sensitive on
+      # purpose, and this folder really is spelled differently from the others.
+      - "Taroko/B-roll/太魯閣"
+      - "Traffic/B-roll/youtube"
+      # A verbatim second copy of one subject folder: all 66 clips match the
+      # copy under Interviewees/Yu Chi-hsiang by name and size, and that one is
+      # the superset (77 proxies to 66). Content hashing would eventually catch
+      # these, but only after paying to index both.
+      - "Traffic/yu_ba_ba"
+      # Graphics and renders, not footage. `*/Renders` also catches
+      # `Taroko/Renders/Masters` (a 48 GB delivery master) and the AE render
+      # outputs; the top-level FF3 folders need naming in full because `*` there
+      # has no separator to match.
+      - "*/AE"
+      - "*/Renders"
+      - "Traffic/B-roll/Renders in place"
+      - "Admin"
+      - "FF3 Credits"
+      - "FF3 Lower Thirds"
+      - "FF3 Renders"
+      - "FF3 Subtitles"
+
+data_root: "E:/broll-queue"
+
+db:
+  mode: sqlite
+  path: "E:/broll-queue/broll.db"
+
+model: haiku
+taxonomy_model: sonnet
+use_subscription: true
+
+sampling:
+  scene_threshold: 0.3
+  max_gap_s: 4.0
+  # Larger window: per-call context overhead (~28k tokens) dwarfs a contact
+  # sheet (~1.8k), so packing more sheets per call is where the saving is.
+  frames_per_call: 108
+  # Enabled 2026-08-07 on measured evidence. The first 49 videos of that night's
+  # run were the queue's longest (43 tiktok averaging 6.6 min, 2 nuclear
+  # averaging 42.5 min) and spent 27% of the session's usage between them.
+  # Nine clips over 15 minutes still held HALF the remaining footage.
+  #
+  # At frames_per_call: 108 a call carries 12 sheets, so 24 caps any clip at
+  # exactly TWO calls — against the 17 that motivated cap_sheets. Subsampling is
+  # an even timecode stride keeping first and last, so a capped clip still spans
+  # its full duration, just more coarsely.
+  #
+  # Applied at the claude stage, so enabling it needs no re-run of the frames
+  # stage: clips already on disk are simply fed to the model more sparsely.
+  max_sheets_per_video: 24
+
+whisper:
+  enabled: true
+
+embedding:
+  enabled: true

@@ -18,7 +18,7 @@ Canonical layout = existing template `Z:\Cablewrap\Projects\2025\FF4\Nuclear` (`
 - Syncthing 2.1.2 available in TrueNAS stable app catalog (not installed).
 - SMB share `TheCreatorsPool → /mnt/tank/TheCreatorsPool` (only `Temp Transfer` in it; project tree is greenfield). Dataset owner `broll`, mode 770.
 - HiNet: inbound 80/443 blackholed, but high-port forwarding works (BitTorrent 51413 hit line rate) → Tailscale direct connections achievable (forward UDP 41641 if NAT traversal relays).
-- Reusable skeleton: `E:\Projects\broll-platform\companion\` — cross-platform Resolve scripting bridge (`src/broll_companion/resolve_bridge.py`: env bootstrap for Win/Mac, never-raise connect, `ReplaceClip`-style media pool ops), pystray tray (`tray.py`), config, tests, PyInstaller `build.spec`.
+- Reusable skeleton: the b-roll platform's `companion/` (a separate repo then; folded into this one as `broll/companion/` on 2026-08-10) — cross-platform Resolve scripting bridge (`src/broll_companion/resolve_bridge.py`: env bootstrap for Win/Mac, never-raise connect, `ReplaceClip`-style media pool ops), pystray tray (`tray.py`), config, tests, PyInstaller `build.spec`.
 - Editors: **Windows + macOS**. Popup should **move + relink automatically** (with Ignore option).
 
 ## Architecture

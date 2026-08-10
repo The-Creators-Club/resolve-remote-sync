@@ -19,6 +19,13 @@ const QUALITY_FLAGS = [
 const SPRITE_COLUMNS = 10;
 const SPRITE_SECONDS_PER_FRAME = 2;
 const SPRITE_CELL_WIDTH = 240;
+// Mirrors broll_index/ffmpeg_tools.py's SPRITE_MAX_CELLS. The generator caps a
+// sheet at this many cells and STRETCHES the interval to fit, because a 2 s
+// interval on a long clip wants an image too big to encode -- so the interval
+// is only 2 s for clips under SPRITE_MAX_CELLS * 2 s (8 minutes). Reading it as
+// a constant 2 s put every longer clip's frame off the bottom of its own sheet.
+// broll/web/tests/test_sprite_geometry.py keeps the two files in step.
+const SPRITE_MAX_CELLS = 240;
 
 const SHUTTLE_RATES = [1, 2, 4, 8];
 
@@ -644,17 +651,40 @@ function buildCard(row) {
   return card;
 }
 
-/** Park the sprite overlay on the sheet cell holding `seconds`. The sheet is a
- * fixed grid: SPRITE_COLUMNS across, one cell per SPRITE_SECONDS_PER_FRAME. */
+/** Seconds per sheet cell for `duration`, mirroring build_sprite exactly: 2 s
+ * until that would need more than SPRITE_MAX_CELLS cells, then duration/240.
+ *
+ * This is the whole bug behind "the thumbnail is not the frame that matched".
+ * A 50:41 documentary gets a 12.67 s interval, so the 46:20 hit lives in cell
+ * 219 -- but read at a flat 2 s it was called cell 1390, i.e. row 139 of a
+ * sheet 24 rows tall. The overlay landed far below the image, painted nothing,
+ * and the POSTER showed through instead: build_poster takes that at 10% in,
+ * which for this file is 5:04 -- the interview at the bookshelf. Everything
+ * over 8 minutes was showing its 10% frame and looking, plausibly, like a
+ * thumbnail that had simply picked a dull moment. */
+function spriteInterval(duration) {
+  if (duration && duration / SPRITE_SECONDS_PER_FRAME > SPRITE_MAX_CELLS) {
+    return duration / SPRITE_MAX_CELLS;
+  }
+  return SPRITE_SECONDS_PER_FRAME;
+}
+
+/** Park the sprite overlay on the sheet cell holding `seconds`. The sheet is
+ * SPRITE_COLUMNS across, one cell per spriteInterval(duration). */
 function positionSprite(overlay, video, seconds) {
   const duration = video.duration_s || 0;
-  const frameCount = Math.max(1, Math.ceil(duration / SPRITE_SECONDS_PER_FRAME));
+  const interval = spriteInterval(duration);
+  // Same count the generator tiles: floor(duration/interval) + 1, capped.
+  const frameCount = Math.min(
+    SPRITE_MAX_CELLS,
+    Math.max(1, Math.floor(duration / interval) + 1)
+  );
   const cellHeight = video.width && video.height
     ? Math.round(SPRITE_CELL_WIDTH * (video.height / video.width))
     : 135;
   const frame = Math.min(
     frameCount - 1,
-    Math.max(0, Math.floor(seconds / SPRITE_SECONDS_PER_FRAME))
+    Math.max(0, Math.floor(seconds / interval))
   );
   const col = frame % SPRITE_COLUMNS;
   const row = Math.floor(frame / SPRITE_COLUMNS);

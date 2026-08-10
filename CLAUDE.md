@@ -47,6 +47,9 @@ run alongside the tray app — it would hold port 8899.
 
 ## Running tests
 
+Everything at once: `powershell -File tools\run_all_tests.ps1` (runs all 8
+suites with the right interpreters, summary table at the end).
+
 Per-component venvs; run pytest from the component dir so `python -m pytest`
 puts the in-repo package first on sys.path:
 

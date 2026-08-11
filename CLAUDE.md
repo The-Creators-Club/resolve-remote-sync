@@ -4,8 +4,7 @@ Multi-machine video workflow for a DaVinci Resolve editing fleet: a TrueNAS
 server holds the canonical project tree, remote editors sync slices of it, and
 a set of companion apps keep Resolve, the filesystem, and the fleet dashboard
 honest. `SPEC.md` is the architecture document; `KNOWN_BUGS.md` is the live
-defect ledger (numbered entries, per-platform prefixes); `UPGRADE_PATH.md` is
-the planned lane-B→Syncthing migration.
+defect ledger (numbered entries, per-platform prefixes).
 
 ## Components
 

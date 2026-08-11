@@ -40,7 +40,11 @@ log = logging.getLogger("ccsync.config")
 # the editor's own file manager (Explorer/Finder), from a rel_path under the
 # Projects root that the NAS-served page can send without knowing where this
 # machine's tree is. Editors on an older build simply 404 on it.
-VERSION = "0.7.1"
+# 0.7.2: every companion window (popups, tray dialogs) wears the NEW Creators
+# Club mark in brand red instead of April's pre-composed icon.png -- the same
+# white-on-transparent asset the tray already tints per status, so the taskbar,
+# the title bar and the tray finally show one logo.
+VERSION = "0.7.2"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

@@ -55,23 +55,133 @@ def asset_path(name: str):
 
 
 def icon_path():
-    """Path to the Creators Club logo PNG bundled with the package, or None."""
+    """Path to the OLD pre-composed Creators Club logo PNG, or None.
+
+    Deliberately still points at assets/icon.png (April's already-coloured,
+    already-composed mark) rather than being repointed at the new white mark:
+    it names a *file on disk*, which is what a caller wanting to hand a path
+    to something outside Tk needs, and test_tray pins asset_path("icon.png")
+    == icon_path(). Since 2026-08-11 the window icon prefers the tinted new
+    mark and this is only its fallback -- see window_icon_png_b64."""
     return asset_path("icon.png")
 
 
+# The window icon is the SAME white-on-transparent mark the tray tints per
+# status (tray.MARK_ASSET), not the pre-composed icon.png -- one mark for the
+# taskbar, the title bar and the tray, differing only in colour (2026-08-11).
+WINDOW_ICON_ASSET = "cc_mark_white.png"
+
+# 128 px, not the asset's native 512: Windows scales an iconphoto down to
+# 16/32/48 (96 on a 200% display) and every root that gets one holds the
+# decoded bitmap for its lifetime, so 512 would be 1 MB per window for pixels
+# nobody ever sees.
+WINDOW_ICON_SIZE = 128
+
+
+def window_mark_path():
+    """Where the white mark lives in this build, or None. Its own function so
+    a test can point it elsewhere (and so the icon.png fallback below is
+    reachable)."""
+    return asset_path(WINDOW_ICON_ASSET)
+
+
+# Rendered at most once per (asset, colour, size) per process: apply_window_icon
+# runs for every popup and every tray window, and a LANCZOS downscale of a
+# 512x512 PNG per dialog is pure waste. Same precedent as tray._MARK_MASK_CACHE.
+_WINDOW_ICON_CACHE: dict = {}
+
+
+def window_icon_png_b64(color: tuple = RGB_RED, size: int = WINDOW_ICON_SIZE):
+    """The mark tinted `color`, as a base64 PNG string -- or None if this build
+    has no such asset (or Pillow cannot read it).
+
+    Base64 rather than a file because a tinted image has no file: Tk 8.6's
+    PhotoImage(data=...) takes a base64 PNG directly, which avoids both a temp
+    file and PIL.ImageTk (an import the frozen build has never shipped, so
+    build.spec has never been proven to carry it).
+
+    The tint is a solid colour wearing the mark's own alpha -- the asset is
+    white-on-transparent precisely so this works at any colour without touching
+    its anti-aliased edges (the same technique as tray._make_icon_image).
+    putalpha rather than paste-through-a-mask, though: paste blends the RGB
+    channels against the transparent canvas too, leaving the soft rim a dark
+    red that reads as a black halo once Windows composites the icon over a
+    light title bar. This way every pixel is the brand red and only the alpha
+    varies.
+
+    None is a supported answer, not an error: an old frozen build published
+    before cc_mark_white.png was in build.spec's datas lands here, and
+    apply_window_icon falls back to icon.png.
+    """
+    path = window_mark_path()
+    key = (str(path) if path is not None else None, tuple(color), int(size))
+    if key in _WINDOW_ICON_CACHE:
+        return _WINDOW_ICON_CACHE[key]
+
+    data = None
+    if path is not None:
+        try:
+            import base64
+            import io
+
+            from PIL import Image
+
+            with Image.open(path) as src:
+                mask = (src.convert("RGBA")
+                           .resize((size, size), Image.LANCZOS)
+                           .getchannel("A"))
+            image = Image.new("RGBA", (size, size), (*tuple(color), 255))
+            image.putalpha(mask)
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            data = base64.b64encode(buffer.getvalue()).decode("ascii")
+        except Exception:
+            # Pillow absent/broken or the file unreadable. Not a log call:
+            # theme is imported by headless paths that have no logger set up,
+            # and the caller already degrades to icon.png.
+            data = None
+    _WINDOW_ICON_CACHE[key] = data
+    return data
+
+
+def _window_icon_image(tk_module, root):
+    """The PhotoImage for this root's window icon, or None if this build has
+    nothing to show.
+
+    The fallback chain, in order: the new mark tinted brand red -> the old
+    pre-composed icon.png -> nothing. Both steps are conditional on the build
+    actually carrying the asset, and the base64 route degrades to the file
+    route on any Tk that cannot decode PNG data (Tk < 8.6).
+    """
+    data = window_icon_png_b64()
+    if data is not None:
+        try:
+            return tk_module.PhotoImage(data=data, master=root)
+        except Exception:
+            pass
+    path = icon_path()
+    if path is None:
+        return None
+    return tk_module.PhotoImage(file=str(path), master=root)
+
+
 def apply_window_icon(tk_module, root) -> None:
-    """Set the Creators Club logo as this window's title-bar/taskbar icon.
+    """Set the Creators Club mark, in brand red, as this window's
+    title-bar/taskbar icon.
 
     Best-effort and never raises: an icon is decoration, and none of the
     popups may die over it (headless test runs have no display at all). The
     PhotoImage is parked on the root so it outlives this call -- Tk drops an
     icon whose image gets garbage-collected, and each Tk root needs its own
-    image (a PhotoImage is bound to the interpreter that made it)."""
+    image (a PhotoImage is bound to the interpreter that made it).
+
+    RGB_RED, not the dashboard favicon's #CC0000: this is the one red the rest
+    of the companion's chrome is painted in, and a second spelling of "brand
+    red" in here is how palettes drift apart (2026-08-11)."""
     try:
-        path = icon_path()
-        if path is None:
+        image = _window_icon_image(tk_module, root)
+        if image is None:
             return
-        image = tk_module.PhotoImage(file=str(path), master=root)
         root._ccsync_icon_image = image
         root.iconphoto(True, image)
     except Exception:

@@ -41,6 +41,13 @@ a = Analysis(
         (str(COMPANION_EXE), "."),   # bundled so onboard.exe installs everything
         # Logo for the wizard window icon -- theme.apply_window_icon() reads
         # it from sys._MEIPASS/ccsync_companion/assets/icon.png.
+        # cc_mark_white.png is what theme.apply_window_icon() prefers now
+        # (tinted to the brand red at runtime); icon.png stays as its
+        # fallback. Without the mark the wizard silently degrades to the
+        # old April logo -- the first thing a new editor ever sees
+        # (2026-08-11).
+        (str(COMPANION_SRC / "ccsync_companion" / "assets" / "cc_mark_white.png"),
+         "ccsync_companion/assets"),
         (str(COMPANION_SRC / "ccsync_companion" / "assets" / "icon.png"),
          "ccsync_companion/assets"),
     ],

@@ -1,7 +1,9 @@
 """GET /api/search, /api/videos/{id}, /api/categories, /api/shares."""
 from __future__ import annotations
 
+import os
 import sqlite3
+from pathlib import PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -12,6 +14,52 @@ from app.db import get_db
 from app.search import BROWSE_PREDICATE, UNCATEGORISED, creators_shares, search_videos
 
 router = APIRouter(prefix="/api")
+
+# The share slug the companions derive a mount for without any hand-written
+# config: <local_root>/Assets/B-roll Archive. Everything the archive holds is
+# addressable under it on every machine.
+ARCHIVE_SHARE = "broll"
+
+
+def _insert_target(video: dict) -> tuple[str, str]:
+    """The (share, rel_path) "Send to Resolve" should reference for `video`.
+
+    The DB keys every clip by its INGEST share (ff3, ff4, mofa-disaster...),
+    and v1 sent that identity to the companion verbatim -- which only a
+    machine with a hand-written mount for that share could translate, and
+    translated it to the clip's PRE-archive location: the base rig resolved
+    share ff3 to Z:\\Cablewrap\\... and inserted from outside the tree, and
+    every other machine got "no mount configured for share 'ff3'"
+    (2026-08-12). An archived clip's canonical home is the archive, which is
+    mountable everywhere as the "broll" share (derived from local_root; the
+    companion can even fetch a missing clip from the NAS under it), so the
+    insert references the archive TOP-SLOT file -- the best media, sibling of
+    its Proxy/ preview (HANDOFF.md par.1: best media in the folder, preview in
+    Proxy/). The sibling is found by stem at request time because the DB
+    stores only the preview path; the 4 stem-diverged clips of archive task
+    #23 (no unique sibling) fall back to inserting the preview itself --
+    degraded but present on every machine, unlike the ingest-share path.
+    Un-archived clips keep the ingest identity, exactly as before.
+    """
+    rel = str(video.get("archive_path") or "")
+    if not rel:
+        return video["share"], video["rel_path"]
+    preview = PurePosixPath(rel)
+    if preview.parent.name == "Proxy":
+        top_dir = preview.parent.parent
+        top_dir_fs = config.get_data_root() / str(top_dir)
+        try:
+            entries = os.listdir(top_dir_fs)
+        except OSError:
+            entries = []
+        matches = [
+            e for e in entries
+            if os.path.splitext(e)[0] == preview.stem
+            and (top_dir_fs / e).is_file()
+        ]
+        if len(matches) == 1:
+            return ARCHIVE_SHARE, str(top_dir / matches[0])
+    return ARCHIVE_SHARE, rel
 
 
 @router.get("/search")
@@ -85,8 +133,11 @@ def get_video(video_id: int, conn: sqlite3.Connection = Depends(get_db)) -> dict
         ).fetchall()
     ]
 
+    video = dict(video_row)
+    video["insert_share"], video["insert_rel_path"] = _insert_target(video)
+
     return {
-        "video": dict(video_row),
+        "video": video,
         "segments": segments,
         "transcript": transcript,
         "themes": themes,

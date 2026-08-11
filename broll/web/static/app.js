@@ -1520,8 +1520,14 @@ async function sendToResolve() {
   }
 
   const payload = {
-    share: video.share,
-    rel_path: video.rel_path,
+    // insert_* is the clip's ARCHIVE identity (share "broll" + top-slot
+    // path), which every companion can mount and fetch; the bare
+    // share/rel_path is the ingest identity, which only machines with a
+    // hand-written mount for that share can translate (the base rig
+    // resolved ff3 to Z:\ and inserted from outside the tree, 2026-08-12).
+    // The fallback keeps un-archived clips inserting exactly as before.
+    share: video.insert_share || video.share,
+    rel_path: video.insert_rel_path || video.rel_path,
     in_frame: inFrame,
     out_frame: outFrame,
     fps: fps,

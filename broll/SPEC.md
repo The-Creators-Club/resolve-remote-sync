@@ -119,7 +119,14 @@ Base: `/api`. JSON. No auth in v1 (Tailscale-only deployment).
 - `GET  /api/search?q=<text>&category=<slug>&flags=<csv>&limit=<n>&offset=<n>`
   → `{results: [{video: {...}, score, hits: [{segment_id, t_start, t_end, description, snippet}]}], total}`
   FTS5 query over segments; results grouped by video, ordered by best rank.
-- `GET  /api/videos/{id}` → full video row + all segments + themes + flags.
+- `GET  /api/videos/{id}` → full video row + all segments + themes + flags. The video
+  additionally carries `insert_share`/`insert_rel_path` (added 2026-08-12): the identity
+  "Send to Resolve" must reference. For an archived clip that is the archive **top-slot**
+  file under the `broll` share (best media, sibling of its `Proxy/` preview, found by stem
+  at request time; no unique sibling → the preview itself) — NOT the ingest share, which
+  only machines with a hand-written mount can translate, and which resolved to the clip's
+  pre-archive location (the base rig inserted from `Z:\` and tripped the out-of-tree
+  fixer, 2026-08-12). Un-archived clips carry their ingest identity unchanged.
 - `GET  /api/categories` → approved taxonomy list.
 - `GET  /api/shares` → `[{share, description}]` (from config) — the settings UI uses this.
 - `GET  /media/proxy/{id}.mp4` — must support HTTP Range requests (seeking).

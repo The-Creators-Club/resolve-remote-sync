@@ -29,6 +29,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -103,7 +104,24 @@ def remux(preview: Path, tc: str) -> str | None:
         except OSError:
             pass
         return f"{preview}: remux dropped the timecode"
-    os.replace(tmp, preview)
+    # Retried once: the web app (or a browsing editor's range request) can
+    # hold an SMB read handle on exactly the preview being fixed, and Windows
+    # answers os.replace with a sharing violation. One locked file must cost
+    # that file, not the run -- the first --apply died here mid-pool
+    # (WinError 32, 2026-08-12); a re-run skips already-fixed files, so
+    # recording the failure and moving on converges.
+    for attempt in (1, 2):
+        try:
+            os.replace(tmp, preview)
+            return None
+        except OSError as exc:
+            if attempt == 2:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return f"{preview}: replace failed: {exc}"
+            time.sleep(2.0)
     return None
 
 

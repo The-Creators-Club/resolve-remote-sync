@@ -37,6 +37,8 @@ import sqlite3
 import threading
 from typing import Any
 
+from app.db import read_search_generation
+
 try:
     from rapidfuzz import fuzz, process
 except ImportError:  # pragma: no cover -- rapidfuzz is a pyproject
@@ -88,25 +90,33 @@ _MIN_TERM_LEN_FOR_PREFIX = 5
 class VocabularyCache:
     """Process-wide cache of the distinct word tokens present in the corpus's
     text columns (see _SEGMENT_VOCAB_COLUMNS/_TRANSCRIPT_VOCAB_COLUMNS).
-    Keyed by (db file path, segments+transcript row count, each table's highest
-    id) -- the same cheap-staleness trick as app.semantic.SemanticSearch's
-    matrix cache -- so it is rebuilt only when the underlying data actually
-    changes, not on every request. The high-water marks are there because a
-    re-index that replaces a clip's segments with the same NUMBER of rows leaves
-    the count untouched, and the vocabulary then keeps correcting typos towards
-    words that are no longer in the corpus (BROLL-17, 2026-08-11).
+    Keyed by (db file path, write generation, segments+transcript row count,
+    each table's highest id) -- the same cheap-staleness trick as
+    app.semantic.SemanticSearch's matrix cache -- so it is rebuilt only when the
+    underlying data actually changes, not on every request.
+
+    The count and high-water marks came first (BROLL-17, 2026-08-11): a re-index
+    that replaces a clip's segments with the same NUMBER of rows leaves the
+    count untouched, and the vocabulary then keeps correcting typos towards
+    words that are no longer in the corpus. They still miss the case where the
+    replacement lands back on the very same ids, which is what the generation
+    counter closes -- meta.search_generation, bumped in-transaction by every
+    write path that touches segments/transcript_segments (migration 010,
+    KNOWN_BUGS R2). That counter depends on those write paths remembering to
+    bump it, so each is pinned by a test and the older, data-derived components
+    stay in the key as belt and braces.
     """
 
     def __init__(self) -> None:
         self._vocab: list[str] | None = None
-        self._key: tuple[str, int, int, int] | None = None
+        self._key: tuple[str, int, int, int, int] | None = None
         self._lock = threading.Lock()
 
     def reset(self) -> None:
         self._vocab = None
         self._key = None
 
-    def _cache_key(self, conn: sqlite3.Connection) -> tuple[str, int, int, int]:
+    def _cache_key(self, conn: sqlite3.Connection) -> tuple[str, int, int, int, int]:
         db_row = conn.execute("PRAGMA database_list").fetchone()
         db_path = db_row[2] if db_row else ""
         count, max_seg, max_cue = conn.execute(
@@ -115,7 +125,7 @@ class VocabularyCache:
             "COALESCE((SELECT MAX(id) FROM segments), 0), "
             "COALESCE((SELECT MAX(id) FROM transcript_segments), 0)"
         ).fetchone()
-        return (db_path, count, max_seg, max_cue)
+        return (db_path, read_search_generation(conn), count, max_seg, max_cue)
 
     def get(self, conn: sqlite3.Connection) -> list[str]:
         key = self._cache_key(conn)

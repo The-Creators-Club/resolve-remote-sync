@@ -44,7 +44,7 @@ def test_cli_migrate_upgrades_v1_db(tmp_path, capsys):
 
     conn = sqlite3.connect(str(db_path))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     finally:
         conn.close()
 

@@ -236,6 +236,31 @@ def test_migration_is_idempotent_at_v4(tmp_path):
         conn.close()
 
 
+def test_migration_seeds_the_search_generation_counter(tmp_path):
+    """v10 (migrations/010_search_generation.sql): both the stepped chain and a
+    from-scratch schema.sql application must leave `meta.search_generation`
+    seeded. The counter is what lets the semantic/fuzzy caches see a re-index
+    that lands the same number of rows on the same rowids (KNOWN_BUGS R2); an
+    absent or unseeded row would silently put them back on
+    (count, MAX(rowid)) alone.
+    """
+    migrated = tmp_path / "migrated.db"
+    _build_v1_db(migrated)
+    ensure_schema(migrated)
+
+    scratch = tmp_path / "scratch.db"
+    ensure_schema(scratch)
+
+    for db_path in (migrated, scratch):
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute(
+                "SELECT value FROM meta WHERE key = 'search_generation'"
+            ).fetchone() == ("0",), db_path
+        finally:
+            conn.close()
+
+
 def test_ensure_schema_rejects_future_version(tmp_path):
     db_path = tmp_path / "broll.db"
     conn = sqlite3.connect(db_path)

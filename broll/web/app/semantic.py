@@ -35,6 +35,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+from app.db import read_search_generation
+
 try:
     import numpy as np
 except ImportError:  # pragma: no cover -- numpy is a hard dependency in
@@ -84,13 +86,14 @@ class SemanticSearch:
     """Process-wide cache: one embedding matrix for `model`, one lazily
     loaded encoder. Instances are meant to be long-lived (see
     get_semantic_search() below) -- reload is triggered only by a changed
-    (db file, row count) pair, never rebuilt per request.
+    (db file, write generation, row count, high-water mark) key, never rebuilt
+    per request.
     """
 
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
         self.model = model
         self._index: _ModelIndex | None = None
-        self._index_key: tuple[str, int, int] | None = None
+        self._index_key: tuple[str, int, int, int] | None = None
         self._encoder: Any | None = None
         self._lock = threading.Lock()
 
@@ -135,10 +138,13 @@ class SemanticSearch:
         cached matrix then serves the previous clip's vectors until some
         unrelated insert or delete happens to move the count (BROLL-17,
         2026-08-11). New rows take rowids above the old high-water mark, so this
-        catches the ordinary re-index. It does not catch the corner where the
-        replaced rows were themselves the highest in the table and exactly as
-        many came back; nothing cheap does, and the cost there is bounded by the
-        next real write.
+        catches the ordinary re-index.
+
+        Kept, but no longer load-bearing on its own: the one shape it misses --
+        the replaced rows were the highest in the table and exactly as many came
+        back, so SQLite hands the same rowids out again -- is what the
+        generation counter closes (see _ensure_index). These two stay in the key
+        as belt and braces for a write path that forgets to bump.
         """
         row = conn.execute(
             "SELECT MAX(rowid) FROM embeddings WHERE model = ?", (self.model,)
@@ -152,7 +158,18 @@ class SemanticSearch:
             self._index_key = None
             return None
 
-        key = (self._db_identity(conn), count, self._high_water_mark(conn))
+        # meta.search_generation, bumped in-transaction by every write path that
+        # touches `embeddings` (migration 010, KNOWN_BUGS R2). It is the only
+        # component here that sees a same-count, same-rowid replacement -- and
+        # it is only as good as those write paths' discipline, which is why
+        # there is a test per write path pinning the bump, and why the count and
+        # high-water mark stay alongside it rather than being replaced by it.
+        key = (
+            self._db_identity(conn),
+            read_search_generation(conn),
+            count,
+            self._high_water_mark(conn),
+        )
         if self._index is not None and self._index_key == key:
             return self._index
 

@@ -21,6 +21,7 @@ from pathlib import Path
 import yaml
 
 from broll_index import embed as embed_mod
+from broll_index.storage.sqlite_backend import bump_search_generation
 
 
 def main() -> int:
@@ -64,6 +65,10 @@ def main() -> int:
                 for i, r in enumerate(chunk)
             ],
         )
+        # Same transaction as the vectors it invalidates: an INSERT OR REPLACE
+        # can leave the row count and MAX(rowid) exactly where they were, which
+        # is all the web app's matrix cache would otherwise see (KNOWN_BUGS R2).
+        bump_search_generation(conn)
         conn.commit()
         done += len(chunk)
         el = time.time() - t0

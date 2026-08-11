@@ -24,6 +24,7 @@ from pathlib import Path
 import yaml
 
 from broll_index import normalize
+from broll_index.storage.sqlite_backend import bump_search_generation
 
 
 def main() -> int:
@@ -64,6 +65,10 @@ def main() -> int:
                 conn.executemany(
                     f"UPDATE {table} SET search_norm = ? WHERE id = ?", batch
                 )
+                # search_norm feeds the typo-correction vocabulary, and an
+                # UPDATE moves neither the row count nor the high-water mark
+                # that cache also keys on (KNOWN_BUGS R2).
+                bump_search_generation(conn)
                 conn.commit()
                 total += len(batch)
                 batch = []

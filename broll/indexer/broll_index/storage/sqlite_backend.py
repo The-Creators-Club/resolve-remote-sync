@@ -18,6 +18,32 @@ from .base import Storage
 # indexer/broll_index/storage/sqlite_backend.py -> parents[2] == indexer/ -> parents[3] == repo root.
 _DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parents[3] / "schema.sql"
 
+# The `meta` key the web app's search caches key on (migration 010). Upsert-and-
+# increment; the INSERT arm only fires on a DB whose seed row went missing.
+SEARCH_GENERATION_KEY = "search_generation"
+_BUMP_SEARCH_GENERATION_SQL = (
+    "INSERT INTO meta (key, value) VALUES (?, '1') "
+    "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT)"
+)
+
+
+def bump_search_generation(conn: sqlite3.Connection) -> None:
+    """Tell web/app/semantic.py's matrix cache and web/app/fuzzy.py's vocabulary
+    cache that what they hold is out of date. Must run in the SAME transaction
+    as the write it describes -- i.e. before the commit, not after.
+
+    Those caches key on (row count, MAX(rowid)) as well, which sees every
+    ordinary re-index but not one whose replacement rows land back on the very
+    same rowids: same count, same high-water mark, entirely different vectors
+    (KNOWN_BUGS R2, the BROLL-17 residual). This counter is the only thing that
+    sees that shape, so every path here that inserts/replaces/deletes
+    `embeddings` or the segments/transcript_segments rows the vocabulary is
+    built from calls it -- as does the web app's routes_ingest twin. Loud by
+    design: a DB that predates migration 010 raises here rather than quietly
+    leaving a reader on stale vectors (`broll-index migrate` is the fix).
+    """
+    conn.execute(_BUMP_SEARCH_GENERATION_SQL, (SEARCH_GENERATION_KEY,))
+
 
 class SqliteBackend(Storage):
     def __init__(self, db_path: str | Path, schema_path: str | Path | None = None):
@@ -102,6 +128,9 @@ class SqliteBackend(Storage):
         self.conn.execute("DELETE FROM themes WHERE video_id = ?", (video_id,))
         self.conn.execute("DELETE FROM quality_flags WHERE video_id = ?", (video_id,))
         self.conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+        # Segments leave the vocabulary, and the embeddings cascade off the
+        # videos row.
+        bump_search_generation(self.conn)
         self.conn.commit()
 
     def update_video(self, video_id: int, **fields: Any) -> None:
@@ -160,6 +189,7 @@ class SqliteBackend(Storage):
             "UPDATE videos SET category_hint = ?, status = 'indexed', indexed_at = ?, model = ? WHERE id = ?",
             (category_hint, datetime.now(timezone.utc).isoformat(), model, video_id),
         )
+        bump_search_generation(conn)
         conn.commit()
 
     def write_transcript(
@@ -176,6 +206,7 @@ class SqliteBackend(Storage):
             "UPDATE videos SET transcribed_at = ?, transcript_lang = ? WHERE id = ?",
             (datetime.now(timezone.utc).isoformat(), lang, video_id),
         )
+        bump_search_generation(conn)
         conn.commit()
 
     def get_transcript(self, video_id: int) -> list[TranscriptCue]:
@@ -206,6 +237,9 @@ class SqliteBackend(Storage):
         if table is None:
             raise ValueError(f"unknown search_norm source {source!r} (expected 'segment' or 'transcript')")
         self.conn.execute(f"UPDATE {table} SET search_norm = ? WHERE id = ?", (search_norm, source_id))
+        # search_norm is one of the columns the vocabulary is built from, and an
+        # UPDATE moves neither the row count nor the high-water mark.
+        bump_search_generation(self.conn)
         self.conn.commit()
 
     def get_embedding_models(self, video_id: int) -> dict[tuple[str, int], str]:
@@ -224,6 +258,9 @@ class SqliteBackend(Storage):
             "video_id = excluded.video_id, model = excluded.model, dim = excluded.dim, vec = excluded.vec",
             (source, source_id, video_id, model, dim, vec),
         )
+        # The DO UPDATE arm is the exact shape the cache keys cannot see: same
+        # row, same rowid, a different vector.
+        bump_search_generation(self.conn)
         self.conn.commit()
 
     def record_moved(self, video_id: int, new_rel_path: str) -> None:

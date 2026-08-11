@@ -31,7 +31,12 @@ Migration steps (PRAGMA user_version):
              semantic search). Column-for-column equivalent to what a fresh
              v0 -> v4 schema.sql application produces, so both paths land on
              an identical schema.
-    4 -> 4   no-op, already current
+    4 -> 9   duplicates, share roots, archive/original path, sprite geometry
+             -- one file each, see _MIGRATIONS below
+    9 -> 10  apply migrations/010_search_generation.sql (adds the `meta`
+             key/value table seeded with `search_generation`, the counter the
+             semantic/fuzzy caches key on -- see bump_search_generation below)
+    10 -> 10 no-op, already current
 
 A DB is stepped through every migration in this chain in one ensure_schema()
 call regardless of its starting version -- e.g. a real v1 production DB goes
@@ -48,7 +53,7 @@ from pathlib import Path
 from app import config
 
 # Highest schema version this codebase knows how to run against.
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 # Maps "user_version found" -> migration filename that advances it to the
 # next version. Resolved via find_migration_path() (repo-root-first, then
@@ -69,7 +74,58 @@ _MIGRATIONS: dict[int, str] = {
     6: "007_archive_path.sql",
     7: "008_original_path.sql",
     8: "009_sprite_geometry.sql",
+    9: "010_search_generation.sql",
 }
+
+# The `meta` key holding the search-cache generation counter (migration 010).
+SEARCH_GENERATION_KEY = "search_generation"
+
+# Upsert-and-increment. The ON CONFLICT arm is the normal path; the INSERT arm
+# only fires on a DB whose seed row went missing, and starts it at 1 rather than
+# leaving the caches with nothing to notice.
+_BUMP_SEARCH_GENERATION_SQL = (
+    "INSERT INTO meta (key, value) VALUES (?, '1') "
+    "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT)"
+)
+
+
+def bump_search_generation(conn: sqlite3.Connection) -> None:
+    """Mark the semantic/fuzzy caches stale. MUST be executed inside the same
+    transaction as the write that made them stale -- a bump that commits
+    separately can be seen by a reader that has not yet seen the rows (or,
+    worse, rolled back while the rows survived).
+
+    Every path that inserts/replaces/deletes `embeddings`, or the
+    segments/transcript_segments rows the fuzzy vocabulary is built from, calls
+    this: routes_ingest here, and the indexer's sqlite_backend twin. It is
+    deliberately loud (no try/except) -- a silently skipped bump is exactly the
+    staleness this exists to end (KNOWN_BUGS R2, the BROLL-17 residual).
+    """
+    conn.execute(_BUMP_SEARCH_GENERATION_SQL, (SEARCH_GENERATION_KEY,))
+
+
+def read_search_generation(conn: sqlite3.Connection) -> int:
+    """Current counter value, 0 if it cannot be read.
+
+    Read-side only, and deliberately the mirror image of the write side: this
+    is called from app.semantic/app.fuzzy on the query path, which must never
+    500 (see their module docstrings), so a DB predating migration 010 or a
+    non-integer value degrades to "generation 0" -- the count/high-water
+    components of those cache keys still work on their own, exactly as they did
+    before this counter existed.
+    """
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (SEARCH_GENERATION_KEY,)
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    if row is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
 
 
 def find_schema_path() -> Path:

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app import config
-from app.db import get_db
+from app.db import bump_search_generation, get_db
 from app.schemas import IndexIn, MovedIn, ShareRootIn, VideoIn
 
 router = APIRouter(prefix="/api/ingest")
@@ -162,6 +162,14 @@ def ingest_index(body: IndexIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                 """,
                 (body.category_hint, now, body.model, body.video_id),
             )
+
+            # Inside the same transaction as the replace, deliberately: this is
+            # the only thing that tells the semantic/fuzzy caches about a
+            # re-index that hands back exactly as many rows on exactly the same
+            # rowids (KNOWN_BUGS R2, the BROLL-17 residual -- both halves of
+            # their (count, MAX(rowid)) key are unchanged in that shape). The
+            # indexer's sqlite_backend.write_index_result twin does the same.
+            bump_search_generation(conn)
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=400, detail=f"invalid ingest data: {exc}") from exc
 

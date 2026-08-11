@@ -204,4 +204,18 @@ CREATE TABLE share_roots (
     updated_at  TEXT
 );
 
-PRAGMA user_version = 9;
+-- Generic key/value scratch; `search_generation` is its first key (see
+-- migrations/010). Every write path that touches `embeddings`, or the
+-- segments/transcript_segments rows the typo-correction vocabulary is built
+-- from, increments it in the same transaction as the write. app/semantic.py
+-- and app/fuzzy.py fold it into their cache keys: it is the only thing that
+-- can see a re-index landing the same NUMBER of rows on the same rowids
+-- (BROLL-17's residual, KNOWN_BUGS R2) -- the row count and high-water mark
+-- that key alongside it are both blind to that shape.
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT INTO meta (key, value) VALUES ('search_generation', '0');
+
+PRAGMA user_version = 10;

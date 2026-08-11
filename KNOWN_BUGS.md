@@ -23,48 +23,64 @@ This file is the ledger of what is STILL open.
 
 ## Open — residuals from the 2026-08-11 fix pass
 
-### R1 — the TrueNAS password still rides `net use`'s argv (SYNC-4 residual)
-The log/toast/clipboard redaction shipped, but the credential is still passed
-positionally on the command line, visible to any process on the box that can
-enumerate argv. Moving it to stdin conflicts with the deliberate
-`stdin=subprocess.DEVNULL` (the error-1223 prompt-hang fix), so this is a
-design change: probably `cmdkey` first, then a credential-less `net use`.
-Low urgency — editor-owned machines — but real.
+### R1 — the TrueNAS password rode `net use`'s argv — FIXED 2026-08-11 (afternoon)
+`drive_swap.py` now maps P: via in-process `WNetAddConnection2W` (credentials
+in call arguments, no argv, no console prompt to hang — the error-1223
+constraint dissolves rather than being worked around) and persists via
+`CredWriteW`. The 30 s ceiling survives on a daemon thread. Live-verified on
+the base rig with a scratch target: the stored entry is byte-identical in
+shape to what `cmdkey /add` wrote (`Domain:target=<host>`), so Explorer and
+uncredentialed connects find it as before. Deliberate behaviour change:
+error 1219 (session-credential conflict) no longer classifies as an auth
+failure — the old localized-text match tripped it incidentally and looped a
+login prompt into the same error. Still owed at ship time: one real
+credentialed swap from an editor machine to confirm which error code the NAS
+actually returns for "needs credentials" (5/86/1223/1326 are mapped), and
+frozen-build DLL resolution per the verify-against-deployed rule.
 
-### R2 — a same-size re-index can still serve stale semantic vectors (BROLL-17 residual)
-The caches now key on `(count, MAX(rowid))`, which catches every observed
-re-index shape except one: a replacement whose rows were already the table's
-highest ids AND arrive in exactly the same number — SQLite reassigns the same
-rowids and no cheap key can tell. `PRAGMA data_version` is unusable across
-per-request connections. Documented at the cache sites; revisit only if a
-same-count re-index is ever a real workflow.
+### R2 — same-size re-index could serve stale semantic vectors — FIXED 2026-08-11 (afternoon)
+Broll schema v10 adds a `meta` search-generation counter bumped in the same
+transaction as every embeddings/search_norm/transcript write (web ingest AND
+the indexer's sqlite backend), folded into the semantic and fuzzy cache keys
+(count/high-water stay as belt and braces). Negative control ran: with the
+generation neutered, exactly the two residual tests fail. The live
+`E:\broll-queue\broll.db` is migrated to v10; the NAS copy migrates itself
+on the next dashboard deploy's boot (same story as 009).
 
-### R3 — 428 b-roll rows remain on the legacy sprite fallback
-After the same-day regeneration (7,118 sheets rebuilt with recorded
-geometry): 390 rows have no local proxy to rebuild from and 38 are
-error/degenerate rows (sub-second, audio-only, broken proxies) that have
-never had a sheet. All keep the pre-fix browser behaviour exactly. The 390
-become exact if their proxies ever return; `sprite_cell_h IS NULL` is the
-work-list query (`broll/indexer/regen_sprites.py` is the sweep, idempotent).
+### R3 — 428 b-roll rows remain on the legacy sprite fallback — AUDITED, nothing to do
+Audited 2026-08-11 afternoon: all 390 proxy-less rows are `skipped` rows
+(the over-length duration cap — 156 ff3, 230 ff4, 4 mofa-disaster) that were
+never proxied, never sprited, and never surface a scrub UI; none has ever had
+a sheet on disk. The 38 with proxies are error/degenerate rows (sub-second,
+audio-only, broken). No rebuild pass is warranted. `sprite_cell_h IS NULL`
+stays the work-list query if any of them ever become real
+(`broll/indexer/regen_sprites.py` is the sweep, idempotent).
 
-### R4 — two OPS fixes are unverified against the live NAS
-Both fail safe, but neither has run against the real box yet:
-- OPS-2's prune guard greps `/proc/*/mountinfo` for a backup dir's basename
-  before `rm -rf`; the path-string-after-rename behaviour is assumed.
-- OPS-8's `<host-root>/staging` creation + `chown <TRUENAS_USER>` has not
-  been exercised (falls back to `/tmp` non-fatally).
-Watch both on the next `ship.cmd` deploy.
+### R4 — two OPS fixes unverified against the live NAS — VERIFIED 2026-08-11
+Checked over SSH against the real box, no deploy involved:
+- OPS-2 prune guard: the container's bind source appears in mountinfo as the
+  ZFS-dataset-relative path (`/apps/ccsync-dashboard/app`, not
+  `/mnt/tank/...`) — and the guard greps the BASENAME, which that line
+  contains, so it works. Proven both ways as root on the live host: the
+  running container's mount is visible to a `/proc/*/mountinfo` sweep (1
+  process), and the existing unmounted `app.old.20260811090814`'s basename
+  matches nothing (correctly prunable).
+- OPS-8 staging: `mkdir + chown truenas_admin + chmod 700` of
+  `<host-root>/staging` succeeds on this dataset (no aclmode=restricted
+  refusal), and the unprivileged SSH user can write there. Cleaned up after.
 
-### R5 — delete-protection pre-flight: confirm the `ignoreDelete` PATCH round-trips
-Implemented everywhere (creation sites, companion per-turn retrofit, shared
-folders, and the dashboard collector's drift repair for pre-existing NAS
-folders). Still owed, per the doc's own pre-flight: after the first
-post-upgrade turn, `GET /rest/config/folders/<id>` on the base rig and one
-editor and confirm the flag stuck — a Syncthing that silently dropped the key
-would leave the fleet believing it is protected when it is not. Also still
-open, deliberately untouched: the staggered-versioning `maxAge` disagreement
-(companion 30 d vs server/dashboard 365 d — whichever wrote last wins; pick
-one and reconcile).
+### R5 — delete-protection pre-flight — VERIFIED AND ROLLED OUT NAS-SIDE 2026-08-11
+The partial `PATCH {"ignoreDelete": true}` round-trips on the deployed NAS
+Syncthing (GET confirms the flag, staggered versioning untouched), and it was
+then applied to **all 9 NAS folders** (7 projects + both asset libraries) —
+so the critical direction, an editor's slip deleting the NAS's authoritative
+copy, is closed as of today with no code deployed. The collector's drift
+repair keeps it asserted once the new dashboard ships. Still pending: editor
+machines get their own flag from the companion's per-turn retrofit at the
+fleet republish (verify one editor's folder then, per the doc); the base
+rig runs no local Syncthing (nothing to flag there). Still open,
+deliberately untouched: the staggered-versioning `maxAge` disagreement
+(companion 30 d vs server/dashboard 365 d — pick one and reconcile).
 
 ### R6 — BROLL-16 overrode a documented decision — review it
 `is_excluded_dir` is now case-insensitive. The old test pinned
@@ -72,6 +88,20 @@ case-SENSITIVITY as deliberate ("the NAS holds `youtube` and `Youtube` as
 distinct folders"), but every configured share root today is a
 case-insensitive Windows drive letter, so the premise no longer holds. If a
 NAS-rooted (case-sensitive) share is ever configured, this flips back.
+
+### R8 — the base rig's companion is still 0.6.1 — OPS-4 observed in the wild
+Discovered 2026-08-11 while starting the Energy Transition proxy run:
+`%LOCALAPPDATA%\ccsync\bin\ccsync-release.json` says **0.6.1** (built
+2026-08-10), though the 4075b3c ship published 0.6.3 as CURRENT — i.e. the
+exact OPS-4 failure (windows_upgrade fails, exits 0, relaunches the old exe,
+ship prints complete). Consequences live on this machine right now: the
+broken proxy muxer (its generator failure-capped all 1,046 gap clips
+overnight and its queue reads 0), no `/music/send`/`/music/status`, none of
+today's fixes. The Energy Transition proxies were therefore generated by a
+one-off driver over the repo's fixed `encode_once` path (identical
+artifacts; the companion's next scan simply sees them as covered). The next
+`ship.cmd` — with the OPS-4 hard stop now in place — replaces this build and
+clears the poisoned caps by restart; verify with `check_deploy_drift.ps1`.
 
 ### R7 — ytdl behavioural-JS tests need node
 `ytdl/web/tests/test_static_app.py` runs the real `app.js` in a `node:vm`

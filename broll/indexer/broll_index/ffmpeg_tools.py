@@ -94,6 +94,33 @@ def read_timecode(path: str | Path) -> str | None:
     return None
 
 
+# The only rates drop-frame timecode exists at. 23.976 is fractional too but
+# has no DF variant; integer rates never drop.
+NTSC_DF_RATES = (29.97, 59.94)
+
+
+def dropframe_normalized(tc: str | None, fps: float | None) -> str | None:
+    """The timecode string as Resolve will count it against an NTSC source.
+
+    Sony bodies store the start TC in an rtmd data stream whose tag prints
+    with COLONS even when the camera counts drop-frame -- and at 59.94 the
+    non-drop reading of "03:40:27:12" is a different absolute frame than the
+    drop reading, so a proxy carrying the tag verbatim fails the same
+    LinkProxyMedia validation R10 exists for (proven live 2026-08-12: colon
+    form refused, semicolon form accepted, byte-identical otherwise; the
+    matching clip property in Resolve reads "Drop frame: 1"). A genuinely
+    non-drop NTSC source would get a wrong (semicolon) form here and its
+    link would be refused -- which is the status quo for it, never a wrong
+    pairing: Resolve validates every attach.
+    """
+    if not tc or ";" in tc or fps is None:
+        return tc
+    if not any(abs(fps - rate) < 0.01 for rate in NTSC_DF_RATES):
+        return tc
+    head, sep, frames = tc.rpartition(":")
+    return f"{head};{frames}" if sep else tc
+
+
 def probe_video(path: str | Path) -> dict:
     """Return {duration_s, fps, width, height, codec, shot_date} for a source file."""
     info = run_ffprobe(path)
@@ -205,8 +232,14 @@ def build_proxy(
     # Carried into the proxy so Resolve will accept it as the clip's proxy:
     # LinkProxyMedia validates the pairing, and a timecode-less proxy is
     # refused against a source that has one (R10). ffmpeg drops timecode on
-    # encode unless told otherwise.
+    # encode unless told otherwise. DF-normalized because the raw tag lies
+    # about drop-frame on Sony bodies -- see dropframe_normalized.
     timecode = read_timecode(src)
+    if timecode:
+        try:
+            timecode = dropframe_normalized(timecode, probe_video(src).get("fps"))
+        except Exception:
+            pass
     timecode_flags = ["-timecode", timecode] if timecode else []
 
     def _encode(nvenc: bool) -> None:

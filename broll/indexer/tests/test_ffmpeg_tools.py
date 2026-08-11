@@ -153,6 +153,23 @@ def test_build_proxy_carries_the_sources_timecode(tmp_path):
     assert ffmpeg_tools.read_timecode(dest) == src_tc
 
 
+def test_dropframe_normalization():
+    """Sony rtmd tags print colon (non-drop) forms for drop-frame material;
+    at NTSC rates the colon reading is a different absolute frame and Resolve
+    refuses the pairing (measured live 2026-08-12: colon refused, semicolon
+    accepted, same bytes otherwise)."""
+    f = ffmpeg_tools.dropframe_normalized
+    assert f("03:40:27:12", 59.94) == "03:40:27;12"
+    assert f("03:40:27:12", 29.97) == "03:40:27;12"
+    # Already drop-form, integer rates, 23.976 (no DF variant), and unknown
+    # fps all pass through untouched.
+    assert f("03:40:27;12", 59.94) == "03:40:27;12"
+    assert f("03:40:27:12", 25.0) == "03:40:27:12"
+    assert f("03:40:27:12", 23.976) == "03:40:27:12"
+    assert f("03:40:27:12", None) == "03:40:27:12"
+    assert f(None, 59.94) is None
+
+
 def test_a_source_without_timecode_still_proxies(tiny_clip, tmp_path):
     assert ffmpeg_tools.read_timecode(tiny_clip) is None
     dest = tmp_path / "proxy_notc.mp4"

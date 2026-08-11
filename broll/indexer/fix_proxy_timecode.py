@@ -70,16 +70,29 @@ def source_for(preview: Path) -> Path | None:
 
 
 def plan(preview: Path) -> tuple[str, str | None]:
-    """(verdict, source_tc): verdict in {fix, has-tc, no-source, source-no-tc}."""
-    if ffmpeg_tools.read_timecode(preview):
-        return "has-tc", None
+    """(verdict, wanted_tc): verdict in {fix, ok, no-source, source-no-tc}.
+
+    "Has a timecode" is not the bar -- "carries the timecode Resolve will
+    count for the source" is. Sony rtmd tags print colon (non-drop) forms
+    for drop-frame material, and at 59.94 that is a different absolute frame,
+    refused exactly like a missing timecode (measured live 2026-08-12), so
+    every preview is compared against the DF-normalized source value and
+    re-remuxed on any mismatch.
+    """
     src = source_for(preview)
     if src is None:
         return "no-source", None
-    tc = ffmpeg_tools.read_timecode(src)
-    if not tc:
+    src_tc = ffmpeg_tools.read_timecode(src)
+    if not src_tc:
         return "source-no-tc", None
-    return "fix", tc
+    try:
+        fps = ffmpeg_tools.probe_video(src).get("fps")
+    except Exception:
+        fps = None
+    wanted = ffmpeg_tools.dropframe_normalized(src_tc, fps)
+    if ffmpeg_tools.read_timecode(preview) == wanted:
+        return "ok", None
+    return "fix", wanted
 
 
 def remux(preview: Path, tc: str) -> str | None:
@@ -139,7 +152,7 @@ def main() -> int:
     print(f"{len(previews)} previews on disk; probing with {WORKERS} workers…")
 
     todo: list[tuple[Path, str]] = []
-    tallies = {"has-tc": 0, "no-source": 0, "source-no-tc": 0}
+    tallies = {"ok": 0, "no-source": 0, "source-no-tc": 0}
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         for preview, (verdict, tc) in zip(previews, pool.map(plan, previews)):
             if verdict == "fix":

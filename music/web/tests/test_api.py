@@ -44,6 +44,9 @@ def test_tracks_filters(client):
 
 
 def test_ui_is_served(client):
-    assert '<title>Music Tagger</title>' in client.get('/').text
+    # Retitled from "Music Tagger" when the UI joined the dashboard theme
+    # (2026-08-10): one product, one naming scheme (cf. CC SYNC // B-ROLL).
+    assert '<title>CC SYNC // MUSIC</title>' in client.get('/').text
     assert client.get('/app.js').headers['content-type'].startswith('application/javascript')
     assert client.get('/style.css').headers['content-type'].startswith('text/css')
+    assert client.get('/favicon.svg').headers['content-type'].startswith('image/svg')

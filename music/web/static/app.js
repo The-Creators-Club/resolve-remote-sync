@@ -102,7 +102,9 @@ function drawWave(canvas, peaks, progress) {
     const a = Math.floor(i * per), b = Math.max(a + 1, Math.floor((i + 1) * per));
     for (let j = a; j < b && j < peaks.length; j++) if (peaks[j] > v) v = peaks[j];
     const bh = Math.max(1.5, (v / 255) * (h - 4));
-    ctx.fillStyle = i <= played ? '#e0483d' : '#3a434f';
+    // Theme colors, hardcoded because canvas cannot read CSS vars cheaply:
+    // played = --red, unplayed = --border (style.css).
+    ctx.fillStyle = i <= played ? '#ff2140' : '#2a2a31';
     ctx.fillRect(i * step, mid - bh / 2, BAR, bh);
   }
 }
@@ -502,8 +504,31 @@ async function ingest(files) {
   }
 }
 
+// ---------------------------------------------------------------- topbar
+// The static header in index.html is a fallback for the standalone dev loop.
+// Mounted at /music/ this document-relative fetch resolves to the dashboard's
+// /partials/topbar, and the real header -- session, admin links, the whole nav
+// -- replaces the fallback, making this a page of the dashboard rather than an
+// imitation of one. Standalone the same fetch resolves inside THIS app, 404s,
+// and the fallback stays. Never made root-relative: see
+// tests/test_mounted_prefix.py.
+async function loadDashboardTopbar() {
+  try {
+    const r = await fetch('../partials/topbar?current=music');
+    // redirected = an expired session answered with the login PAGE; injecting
+    // that into the header would be worse than keeping the fallback.
+    if (!r.ok || r.redirected) return;
+    const html = await r.text();
+    if (!html.includes('data-dash-topbar')) return;
+    document.getElementById('dash-topbar').innerHTML = html;
+  } catch {
+    /* dashboard unreachable -- the fallback header stands */
+  }
+}
+
 // ---------------------------------------------------------------- init
 async function init() {
+  loadDashboardTopbar();
   const s = await api('api/stats');
   $('#stats').textContent =
     `${s.tracks} tracks · ${s.hours}h · ${s.gb} GB · ${s.model || 'unindexed'}`;

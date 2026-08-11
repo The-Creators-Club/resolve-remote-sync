@@ -1,153 +1,566 @@
-:root{
-  --bg:#0e1013; --panel:#161a20; --panel2:#1c222a; --line:#262d37;
-  --fg:#e6e9ee; --dim:#8b95a5; --accent:#e0483d; --accent2:#4a9df0;
-  --good:#49b36b; --radius:8px;
+/* Neon-red terminal theme — same palette and idioms as the fleet dashboard
+   (dashboard/static/style.css) and the b-roll UI (broll/web/static/style.css),
+   which lift it from the companion's theme.py (WRITE.EXE-style). Mounted at
+   /music the three UIs sit behind one login and one origin, so they must not
+   look like different products.
+
+   House rules inherited from the dashboard:
+     - monospace everywhere, no sans stack
+     - square corners: NO border-radius, anywhere
+     - structural panels/cards/inputs are 1px solid var(--red-dim)
+     - subtle inner separators are #2a2a31 (--border)
+     - "current selection" reads as var(--field) bg + a 2px red left accent
+     - green is the good/secondary channel: here that is the match score and
+       a connected Resolve. */
+:root {
+  --bg: #0a0a0d;
+  --panel: #101014;
+  --field: #16161c;
+  --red: #ff2140;
+  --red-hot: #ff5c73;
+  --red-dim: #7c1322;
+  --green: #2bff88;
+  --amber: #ffb02e;
+  --text: #e8e8ea;
+  --muted: #6f6f7a;
+  --border: #2a2a31;
+
+  --mono: Consolas, Menlo, "DejaVu Sans Mono", monospace;
+
+  /* Sticky header height — the filter rail parks directly underneath it.
+     Four rows: topbar, rule, controls, example prompts. */
+  --header-h: 134px;
 }
-*{box-sizing:border-box}
-html,body{margin:0;padding:0}
-body{
-  background:var(--bg); color:var(--fg);
-  font:14px/1.45 "Segoe UI",system-ui,-apple-system,sans-serif;
-  display:flex; flex-direction:column; min-height:100vh;
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  height: 100%;
 }
-h1,h2{margin:0}
-button{font:inherit;cursor:pointer;border-radius:6px;border:1px solid var(--line);
-  background:var(--accent);color:#fff;padding:7px 14px}
-button:hover{filter:brightness(1.12)}
-button.ghost{background:var(--panel2);color:var(--fg)}
-button.wide{width:100%;margin-top:8px}
-input[type=search],input[type=number]{
-  background:var(--panel2);border:1px solid var(--line);color:var(--fg);
-  border-radius:6px;padding:8px 10px;font:inherit}
-input:focus{outline:2px solid var(--accent2);outline-offset:-1px}
-.muted{color:var(--dim);font-size:12px}
-.hidden{display:none !important}
+
+a { color: inherit; text-decoration: none; }
+
+.hidden { display: none !important; }
+.muted { color: var(--muted); }
+
+button, input, select {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+button { cursor: pointer; }
 
 /* ---------- header ---------- */
-header{position:sticky;top:0;z-index:20;background:var(--panel);
-  border-bottom:1px solid var(--line);padding:12px 18px}
-.brand{display:flex;align-items:baseline;gap:12px}
-.brand h1{font-size:16px;letter-spacing:.3px}
-.searchbar{display:flex;gap:8px;margin-top:10px}
-.searchbar input{flex:1}
-.searchbar select{background:var(--panel2);border:1px solid var(--line);
-  color:var(--fg);border-radius:6px;padding:8px 8px;font:inherit}
-.examples{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.examples button{background:transparent;border:1px dashed var(--line);
-  color:var(--dim);font-size:12px;padding:3px 9px}
-.examples button:hover{color:var(--fg);border-color:var(--accent2)}
 
-/* ---------- layout ---------- */
-main{display:flex;flex:1;align-items:flex-start;gap:0;min-height:0}
-aside{width:270px;flex:none;padding:14px;border-right:1px solid var(--line);
-  position:sticky;top:118px;max-height:calc(100vh - 118px);overflow-y:auto}
-aside section{margin-bottom:18px}
-aside h2{font-size:11px;text-transform:uppercase;letter-spacing:.9px;
-  color:var(--dim);margin-bottom:8px}
-#results{flex:1;padding:14px 18px 120px;min-width:0}
-.resulthead{margin-bottom:10px;display:flex;align-items:center;gap:10px;
-  flex-wrap:wrap;min-height:24px}
+#app-header {
+  /* Stacked rows: the dashboard topbar (echo or injected), then this app's
+     controls and example prompts. */
+  display: block;
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 1.5rem;
+  padding: 0.7rem 1.2rem 0.3rem;
+}
+
+.brand {
+  color: var(--red);
+  font-weight: bold;
+  letter-spacing: 0.08em;
+  font-size: 13px;
+  flex: 0 0 auto;
+  text-shadow: 0 0 12px rgba(255, 33, 64, 0.55);
+}
+.brand .dim { color: var(--red-dim); }
+a.brand:hover { color: var(--red-hot); }
+
+/* Dashboard text-button idiom: "[ LABEL ]" in red, glowing on hover. */
+.btn {
+  background: none;
+  border: none;
+  color: var(--red);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  padding: 0;
+}
+.btn:hover { color: var(--red-hot); text-shadow: 0 0 10px rgba(255, 92, 115, 0.7); }
+.nav-link { flex: 0 0 auto; margin-left: 1rem; }
+
+/* Dashboard-topbar vocabulary for the markup app.js swaps in from
+   /partials/topbar (loadDashboardTopbar). Mirrors dashboard/static/style.css
+   so the injected header renders exactly as it does on the dashboard's own
+   pages. */
+.stamp { margin-left: auto; color: var(--muted); font-size: 12px; }
+.session { display: flex; gap: 0.6rem; align-items: baseline; }
+.inline-form { display: inline; }
+.banner {
+  color: var(--bg);
+  background: var(--amber);
+  padding: 0 0.6rem;
+  font-weight: bold;
+}
+/* "The page you are on" nav entry: the house current-selection idiom (field
+   fill, 2px red left accent) shrunk to an inline topbar item. */
+.nav-link.nav-current {
+  background: var(--field);
+  box-shadow: inset 2px 0 0 var(--red);
+  color: var(--red-hot);
+  padding: 0 0.45rem 0 0.55rem;
+}
+
+.rule {
+  color: var(--red-dim);
+  overflow: hidden;
+  white-space: nowrap;
+  padding: 0 1.2rem;
+  user-select: none;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 8px 1.2rem 6px;
+}
+
+.search-bar {
+  display: flex;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#q {
+  flex: 1 1 auto;
+  min-width: 120px;
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 9px;
+}
+#q::placeholder { color: var(--muted); }
+#q:focus { outline: none; border-color: var(--red); }
+
+#pool {
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 7px;
+}
+#pool:focus { outline: none; border-color: var(--red); }
+
+/* Still the loudest control in the header, in theme: red on field with a full
+   red border rather than a filled slab. */
+.primary-btn {
+  background: var(--field);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font: inherit;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 0.06em;
+  padding: 5px 14px;
+}
+.primary-btn:hover {
+  color: var(--red-hot);
+  border-color: var(--red-hot);
+  text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
+}
+
+.text-btn {
+  background: none;
+  border: none;
+  color: var(--red);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  padding: 4px 0;
+}
+.text-btn:hover { color: var(--red-hot); text-shadow: 0 0 10px rgba(255, 92, 115, 0.7); }
+
+.stats { font-size: 11px; }
+
+/* Resolve connection pip: square chip, green when connected (the good
+   channel), red when the companion cannot see Resolve. */
+.rstatus {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--red-dim);
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.rstatus.on { color: var(--green); border-color: var(--green); }
+.rstatus.off { color: var(--red); border-color: var(--red-dim); }
+
+/* Example prompts: quiet dashed affordances until approached. */
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 1.2rem 10px;
+}
+.examples:empty { display: none; }
+.examples button {
+  background: none;
+  border: 1px dashed var(--red-dim);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 9px;
+}
+.examples button:hover { color: var(--red-hot); border-color: var(--red); }
+
+/* ---------- layout: filter rail + results ---------- */
+
+#browse-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+}
+
+.filter-rail {
+  flex: 0 0 250px;
+  align-self: stretch;
+  min-height: calc(100vh - var(--header-h));
+  border-right: 1px solid var(--red-dim);
+  background: var(--panel);
+  padding: 10px 12px 24px;
+  font-size: 12px;
+  /* The list scrolls the page; the rail is fixed so an editor never loses the
+     filters while scrolling results. It parks just under the sticky header
+     rather than sliding beneath it. */
+  position: sticky;
+  top: var(--header-h);
+  max-height: calc(100vh - var(--header-h));
+  overflow-y: auto;
+}
+
+.filter-rail section, .facet { margin-bottom: 18px; }
+.filter-rail h2 {
+  font-size: 10px;
+  font-weight: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--red);
+  margin: 0 0 8px;
+  border-bottom: 1px dotted var(--border);
+  padding-bottom: 3px;
+}
+
+#results {
+  flex: 1 1 auto;
+  min-width: 0;   /* without this the list refuses to shrink and overflows */
+  padding: 12px 14px 120px;
+}
+
+.resulthead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--text);
+  font-size: 12px;
+  margin: 2px 2px 10px;
+  min-height: 20px;
+}
+.resulthead .muted { font-size: 11px; }
 
 /* ---------- facets ---------- */
-.facet{margin-bottom:16px}
-.chips{display:flex;flex-wrap:wrap;gap:5px}
-.chip{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
-  padding:3px 9px;border-radius:99px;font-size:12px;cursor:pointer;
-  display:inline-flex;gap:5px;align-items:center}
-.chip:hover{border-color:var(--accent2)}
-.chip .n{color:var(--dim);font-size:11px}
-.chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
-.chip.on .n{color:#ffd9d5}
+
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip {
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--text);
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 5px;
+  align-items: baseline;
+}
+.chip:hover { border-color: var(--red); color: var(--red-hot); }
+.chip .n { color: var(--muted); font-size: 10px; }
+/* Selected facet: the current-selection idiom. */
+.chip.on {
+  border-color: var(--red);
+  box-shadow: inset 2px 0 0 var(--red);
+  color: var(--red-hot);
+}
+.chip.on .n { color: var(--red); }
 
 /* ---------- axis sliders ---------- */
-.axis{margin-bottom:12px}
-.axis .lab{display:flex;justify-content:space-between;font-size:12px;
-  color:var(--dim);margin-bottom:3px}
-.axis input[type=range]{width:100%;accent-color:var(--accent2)}
-.axis .val{color:var(--fg)}
 
-.rangerow{display:flex;align-items:center;gap:6px;margin-bottom:6px}
-.rangerow label{width:38px;font-size:12px;color:var(--dim)}
-.rangerow input{width:100%;min-width:0}
+.axis { margin-bottom: 12px; }
+.axis .lab {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.axis .val { color: var(--text); flex: 0 0 auto; }
+.axis input[type=range] { width: 100%; accent-color: var(--red); }
+
+.rangerow { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.rangerow label { width: 38px; font-size: 11px; color: var(--muted); }
+.rangerow input {
+  width: 100%;
+  min-width: 0;
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.rangerow input:focus { outline: none; border-color: var(--red); }
+.rangerow input::placeholder { color: var(--muted); }
+
+.apply-btn {
+  width: 100%;
+  margin-top: 4px;
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--red);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 4px 0;
+}
+.apply-btn:hover {
+  border-color: var(--red);
+  color: var(--red-hot);
+  text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
+}
 
 /* ---------- track list ---------- */
-.list{display:flex;flex-direction:column;gap:6px}
-.track{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  padding:10px 12px;display:grid;grid-template-columns:38px 1fr auto;gap:10px;
-  align-items:center}
-.track:hover{border-color:#39424f}
-.track.playing{border-color:var(--accent)}
-.play{width:34px;height:34px;border-radius:50%;padding:0;display:grid;
-  place-items:center;font-size:13px;background:var(--panel2);border:1px solid var(--line)}
-.track.playing .play{background:var(--accent);border-color:var(--accent)}
-.tname{font-weight:600;word-break:break-word;margin-bottom:3px}
-.tmeta{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.pill{font-size:11px;color:var(--dim);background:var(--panel2);
-  border:1px solid var(--line);border-radius:4px;padding:1px 6px}
-.pill.g{color:#ffd9a8}.pill.m{color:#bfe0ff}.pill.i{color:#c9f0d3}
-.pill.u{color:#e3ccff}
-.pill.click{cursor:pointer}
-.pill.click:hover{border-color:var(--accent2);color:var(--fg)}
-.tright{text-align:right;display:flex;flex-direction:column;gap:5px;align-items:flex-end}
-.match{font-variant-numeric:tabular-nums;font-weight:700;color:var(--good)}
-.rowbtns{display:flex;gap:5px}
-.rowbtns button{padding:3px 8px;font-size:11px;background:var(--panel2);color:var(--dim)}
-.rowbtns button:hover{color:var(--fg)}
-.empty{color:var(--dim);padding:30px;text-align:center}
+
+.list { display: flex; flex-direction: column; gap: 6px; }
+
+.track {
+  background: var(--panel);
+  border: 1px solid var(--red-dim);
+  padding: 8px 12px;
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+.track:hover { border-color: var(--red); background: var(--field); }
+/* The open (playing) track: current-selection idiom, like everywhere else. */
+.track.playing {
+  background: var(--field);
+  border-color: var(--red);
+  box-shadow: inset 2px 0 0 var(--red);
+}
+
+.play {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--red);
+}
+.play:hover { border-color: var(--red); color: var(--red-hot); }
+.track.playing .play { border-color: var(--red); color: var(--red-hot); }
+
+.tname { font-weight: bold; word-break: break-word; margin-bottom: 3px; }
+.tmeta { display: flex; flex-wrap: wrap; gap: 5px; align-items: baseline; }
+
+/* Tag chips: same square chip as the dashboard, tinted per category. */
+.pill {
+  font-size: 10.5px;
+  color: var(--muted);
+  background: var(--field);
+  border: 1px solid var(--border);
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.pill.g { color: var(--amber); }
+.pill.m { color: var(--red-hot); }
+.pill.i { color: var(--green); }
+.pill.u { color: var(--text); }
+.pill.click { cursor: pointer; }
+.pill.click:hover { border-color: var(--red); }
+
+.tright {
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  align-items: flex-end;
+}
+/* Match score: green, the good channel. */
+.match {
+  font-variant-numeric: tabular-nums;
+  font-weight: bold;
+  color: var(--green);
+}
+.rowbtns { display: flex; gap: 5px; }
+.rowbtns button {
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--red);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.rowbtns button:hover {
+  border-color: var(--red);
+  color: var(--red-hot);
+  text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
+}
+
+.empty { color: var(--muted); padding: 30px; text-align: center; }
 
 /* ---------- inline waveform player ---------- */
 /* The pane lives directly after its track card and animates open. Height is
    animated on a wrapper with overflow:hidden -- `height:auto` is not
-   animatable, and the content height here is fixed anyway. */
-.pane{overflow:hidden;height:0;opacity:0;
-  transition:height .26s cubic-bezier(.22,.7,.3,1), opacity .2s ease;
-  border-radius:var(--radius);margin-top:-2px}
-.pane.open{height:126px;opacity:1}
-.paneinner{background:var(--panel2);border:1px solid var(--accent);
-  border-top:0;border-radius:0 0 var(--radius) var(--radius);padding:10px 12px}
-.wavewrap{position:relative;height:64px;cursor:pointer}
-canvas.wave{display:block;width:100%;height:64px}
-.paneb{display:flex;align-items:center;gap:10px;margin-top:8px}
-.pbtn{width:30px;height:30px;border-radius:50%;padding:0;display:grid;
-  place-items:center;font-size:12px;background:var(--accent);border:0;flex:none}
-.ptime{font-variant-numeric:tabular-nums;font-size:12px;color:var(--dim);
-  min-width:84px}
-.pacts{display:flex;gap:5px;flex-wrap:wrap;margin-left:auto;align-items:center}
-.pacts button{padding:4px 9px;font-size:11px;background:var(--panel);
-  color:var(--fg);border:1px solid var(--line)}
-.pacts button.rs{border-color:#3d5a7a;color:#bfe0ff}
-.pacts button.rs:hover{background:#20364d}
-.pacts button:disabled{opacity:.5;cursor:default}
-.rmsg{font-size:11px;color:var(--dim);max-width:100%;flex-basis:100%;
-  margin-top:2px}
-.rmsg.err{color:#ff9d94}
-.rmsg.ok{color:var(--good)}
-
-/* ---------- resolve status ---------- */
-.rstatus{font-size:11px;color:var(--dim);border:1px solid var(--line);
-  border-radius:99px;padding:2px 9px}
-.rstatus.on{color:var(--good);border-color:#2c5c3d}
-.rstatus.off{color:#ff9d94;border-color:#5c2c2c}
+   animatable, and the content height here is fixed anyway (wave + transport
+   + one status line). */
+.pane {
+  overflow: hidden;
+  height: 0;
+  opacity: 0;
+  transition: height .26s cubic-bezier(.22,.7,.3,1), opacity .2s ease;
+  margin-top: -1px;
+}
+.pane.open { height: 150px; opacity: 1; }
+.paneinner {
+  background: var(--field);
+  border: 1px solid var(--red);
+  border-top: 0;
+  padding: 10px 12px;
+}
+.wavewrap { position: relative; height: 64px; cursor: pointer; }
+canvas.wave { display: block; width: 100%; height: 64px; }
+.paneb { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.pbtn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  background: var(--field);
+  border: 1px solid var(--red);
+  color: var(--red);
+  flex: none;
+}
+.pbtn:hover { color: var(--red-hot); border-color: var(--red-hot); }
+.ptime {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 84px;
+}
+.pacts {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-left: auto;
+  align-items: center;
+}
+.pacts button {
+  background: var(--panel);
+  border: 1px solid var(--red-dim);
+  color: var(--red);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 9px;
+}
+.pacts button:hover {
+  border-color: var(--red);
+  color: var(--red-hot);
+  text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
+}
+/* The three "send to Resolve" actions: the loudest controls in the pane, so
+   they take the primary-btn idiom (full red border, bold). */
+.pacts button.rs { border-color: var(--red); font-weight: bold; }
+.pacts button:disabled {
+  opacity: .5;
+  cursor: default;
+  text-shadow: none;
+}
+.rmsg { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.rmsg.err { color: var(--red); }
+.rmsg.ok { color: var(--green); }
 
 /* ---------- drag & drop ---------- */
-.dropzone{position:fixed;inset:0;z-index:60;display:none;
-  background:rgba(14,16,19,.86);backdrop-filter:blur(3px);
-  align-items:center;justify-content:center}
-.dropzone.on{display:flex}
-.dropinner{border:2px dashed var(--accent);border-radius:14px;
-  padding:44px 60px;text-align:center;display:flex;flex-direction:column;
-  gap:8px;align-items:center;background:var(--panel)}
-.dropicon{font-size:40px;color:var(--accent);line-height:1}
-.toast{position:fixed;right:18px;bottom:18px;z-index:70;max-width:420px;
-  background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
-  border-radius:var(--radius);padding:11px 14px;font-size:12px;
-  box-shadow:0 8px 28px rgba(0,0,0,.5)}
-.toast .row{margin:2px 0}
-.toast .bad{color:#ff9d94}
-.toast .good{color:var(--good)}
 
-@media (max-width:900px){
-  main{flex-direction:column}
-  aside{width:100%;position:static;max-height:none;border-right:0;
-    border-bottom:1px solid var(--line)}
+.dropzone {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: none;
+  background: rgba(10, 10, 13, .86);
+  align-items: center;
+  justify-content: center;
+}
+.dropzone.on { display: flex; }
+.dropinner {
+  border: 2px dashed var(--red);
+  background: var(--panel);
+  padding: 44px 60px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+.dropicon { font-size: 40px; color: var(--red); line-height: 1; }
+
+/* ---------- toast ---------- */
+
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 70;
+  max-width: 420px;
+  background: var(--panel);
+  border: 1px solid var(--red-dim);
+  border-left: 3px solid var(--red-dim);
+  padding: 10px 14px;
+  font-size: 12px;
+}
+.toast .row { margin: 2px 0; }
+.toast .bad { color: var(--red); }
+.toast .good { color: var(--green); }
+
+@media (max-width: 900px) {
+  #browse-layout { flex-direction: column; }
+  .filter-rail {
+    flex: 1 1 auto;
+    width: 100%;
+    position: static;
+    min-height: 0;
+    max-height: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--red-dim);
+  }
 }

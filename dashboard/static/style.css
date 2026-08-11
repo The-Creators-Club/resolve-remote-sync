@@ -273,6 +273,15 @@ tr.current-row { background: var(--field); }
 }
 .proj-name { display: flex; align-items: baseline; gap: 0.5rem; overflow: hidden; flex: 1; }
 .nav-link { margin-left: 1rem; }
+/* "The page you are on", in the topbar the SPAs inject (/partials/topbar
+   ?current=...): the house current-selection idiom -- field fill, 2px red
+   left accent -- shrunk to fit an inline nav entry. */
+.nav-link.nav-current {
+  background: var(--field);
+  box-shadow: inset 2px 0 0 var(--red);
+  color: var(--red-hot);
+  padding: 0 0.45rem 0 0.55rem;
+}
 /* Announced-but-not-built nav entries: same shape as a link, none of the
    affordances, so a click is never invited. */
 .nav-disabled, .nav-disabled:hover {

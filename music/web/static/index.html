@@ -3,34 +3,47 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Music Tagger</title>
+<title>CC SYNC // MUSIC</title>
 <!-- Document-relative on purpose: mounted at /music/ a leading slash would
      resolve against the dashboard's origin root. See tests/test_mounted_prefix.py. -->
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<header>
-  <div class="brand">
-    <h1>Music Tagger</h1>
-    <span id="stats" class="muted"></span>
-    <span id="rstatus" class="rstatus" title="DaVinci Resolve connection">Resolve —</span>
+<header id="app-header">
+  <!-- Fallback header for the standalone dev loop only. Mounted under the
+       dashboard, app.js fetches the REAL dashboard topbar from
+       ../partials/topbar and swaps it in here, so this page carries the same
+       header and nav as every other dashboard page. -->
+  <div class="topbar" id="dash-topbar">
+    <span class="brand">CREATORS CLUB <span class="dim">//</span> MUSIC</span>
+    <!-- Root-relative on purpose, unlike every asset URL here: mounted under
+         /music/ this is the way back out to the dashboard at the origin root.
+         Standalone (dev) it harmlessly reloads this page. -->
+    <a class="btn nav-link" href="/" title="back to the CC Sync dashboard (project sync status)">[ DASHBOARD ]</a>
   </div>
-  <div class="searchbar">
-    <input id="q" type="search" autocomplete="off"
-           placeholder="Describe the vibe &mdash; tense driving synth pulse, warm nostalgic piano, hopeful build for a montage&hellip;">
-    <select id="pool" title="Match any single 10s moment, or the track's overall character">
-      <option value="max">any moment</option>
-      <option value="mean">whole track</option>
-    </select>
-    <button id="go">Search</button>
-    <button id="clear" class="ghost">Clear</button>
+  <div class="rule">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</div>
+
+  <div class="header-controls">
+    <div class="search-bar">
+      <input id="q" type="search" autocomplete="off"
+             placeholder="describe the vibe&hellip; tense driving synth pulse, warm nostalgic piano, hopeful build for a montage">
+      <select id="pool" title="Match any single 10s moment, or the track's overall character">
+        <option value="max">any moment</option>
+        <option value="mean">whole track</option>
+      </select>
+    </div>
+    <button id="go" class="primary-btn">SEARCH</button>
+    <button id="clear" class="text-btn">clear</button>
+    <span id="rstatus" class="rstatus" title="DaVinci Resolve connection">Resolve —</span>
+    <span id="stats" class="stats muted"></span>
   </div>
   <div id="examples" class="examples"></div>
 </header>
 
-<main>
-  <aside id="filters">
+<div id="browse-layout">
+  <aside id="filters" class="filter-rail">
     <section>
       <h2>Feel</h2>
       <div id="axes"></div>
@@ -47,16 +60,16 @@
         <input id="durMin" type="number" placeholder="min" min="0">
         <input id="durMax" type="number" placeholder="max" min="0">
       </div>
-      <button id="applyRange" class="ghost wide">Apply</button>
+      <button id="applyRange" class="apply-btn">apply</button>
     </section>
     <div id="facets"></div>
   </aside>
 
-  <section id="results">
+  <main id="results">
     <div id="resulthead" class="resulthead"></div>
     <div id="list" class="list"></div>
-  </section>
-</main>
+  </main>
+</div>
 
 <!-- drag-and-drop ingest -->
 <div id="drop" class="dropzone">

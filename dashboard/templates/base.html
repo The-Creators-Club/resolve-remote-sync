@@ -44,42 +44,10 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/">CREATORS CLUB <span class="dim">//</span> SYNC STATUS</a>
-    {# The sync dashboard's own pages come first; everything after a "//" is a
-       separate platform or a download, not a page of this app. Each separator
-       lives with the item it precedes so an absent item takes its "//" with
-       it and never leaves a dangling one. #}
-    <a class="btn nav-link" href="/transfers">[ TRANSFERS ]</a>
-    {% if session_is_admin %}
-      <a class="btn nav-link" href="/admin/users">[ USERS ]</a>
-    {% endif %}
-    {% if broll_mounted %}
-      <span class="dim">//</span>
-      {# Trailing slash matters: the b-roll SPA uses document-relative URLs, so at
-         /broll (no slash) they would resolve against the dashboard root. #}
-      <a class="btn nav-link" href="/broll/">[ B-ROLL ]</a>
-    {% endif %}
-    {% if music_mounted %}
-      <span class="dim">//</span>
-      {# Trailing slash for the same reason as /broll/: the music SPA resolves
-         its URLs against the document. Shown only when the mount fully took --
-         an absent or degraded music tree gets no link, same rule as b-roll. #}
-      <a class="btn nav-link" href="/music/">[ MUSIC ]</a>
-    {% endif %}
-    <span class="dim">//</span>
-    <a class="btn nav-link" href="/download" title="download the latest CC Sync installer for this computer">[ INSTALLER ]</a>
-    {% if view and not view.syncthing_reachable %}
-      <span class="banner">▲ SYNCTHING UNREACHABLE: data may be stale</span>
-    {% endif %}
-    <span class="stamp">updated {{ view.generated_at | ago if view else "" }}</span>
-    <span class="session">
-      {% if session_user %}
-        <span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>
-        <form method="post" action="/logout" class="inline-form"><button class="btn" type="submit">[ LOGOUT ]</button></form>
-      {% else %}
-        <a class="btn" href="/login">[ LOGIN ]</a>
-      {% endif %}
-    </span>
+    {# The topbar lives in its own partial because the mounted SPAs (/broll,
+       /music) fetch it from /partials/topbar and swap it in over their static
+       fallback headers -- every page shows the one real header. #}
+    {% include "partials/topbar.html" %}
   </header>
   <div class="rule">{{ "─" * 120 }}</div>
   <div class="layout">

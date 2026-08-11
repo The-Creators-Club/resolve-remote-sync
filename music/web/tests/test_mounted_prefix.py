@@ -95,6 +95,11 @@ def test_the_urls_the_index_asks_for_resolve_under_the_prefix(mounted_client):
     refs = re.findall(r"""(?:src|href)=["']([^"']+)["']""", page.text)
     assert refs, 'index.html shipped no asset references'
     for ref in refs:
+        if ref == '/':
+            # The [ DASHBOARD ] fallback back-link: root-relative ON PURPOSE,
+            # exactly like broll's -- mounted, it is the way out to the
+            # dashboard at the origin root, not an asset of this app.
+            continue
         resolved = urljoin(str(page.url), ref)
         r = mounted_client.get(resolved)
         assert r.status_code == 200, f'{ref} -> {resolved} -> {r.status_code}'

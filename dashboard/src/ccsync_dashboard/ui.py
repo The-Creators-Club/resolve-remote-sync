@@ -238,6 +238,19 @@ def page_logout():
     return response
 
 
+@router.get("/partials/topbar")
+def partial_topbar(request: Request, current: str = ""):
+    """The shared header, fetched by the mounted SPAs (/broll, /music) so their
+    pages carry the dashboard's real topbar -- session, admin links, nav --
+    instead of a hand-copied imitation that drifts. `current` names the nav
+    entry for the page doing the fetching; anything unrecognized simply
+    highlights nothing. No view is passed, so the staleness stamp and the
+    Syncthing banner stay off -- this render answers 'who am I and where can I
+    go', not 'is the fleet healthy'."""
+    return _render(request, "partials/topbar.html",
+                   {"nav_current": current.strip().lower()})
+
+
 @router.get("/partials/queue")
 def partial_queue(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     editor = _queue_editor(request)

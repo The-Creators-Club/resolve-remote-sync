@@ -107,7 +107,30 @@ button { cursor: pointer; }
   padding: 0;
 }
 .btn:hover { color: var(--red-hot); text-shadow: 0 0 10px rgba(255, 92, 115, 0.7); }
-.nav-link { flex: 0 0 auto; }
+.nav-link { flex: 0 0 auto; margin-left: 1rem; }
+
+/* The rest of the dashboard-topbar vocabulary, for the markup app.js swaps in
+   from /partials/topbar (loadDashboardTopbar). Mirrors dashboard/static/
+   style.css so the injected header renders exactly as it does on the
+   dashboard's own pages. */
+a.brand:hover { color: var(--red-hot); }
+.stamp { margin-left: auto; color: var(--muted); font-size: 12px; }
+.session { display: flex; gap: 0.6rem; align-items: baseline; }
+.inline-form { display: inline; }
+.banner {
+  color: var(--bg);
+  background: var(--amber);
+  padding: 0 0.6rem;
+  font-weight: bold;
+}
+/* "The page you are on" nav entry: the house current-selection idiom (field
+   fill, 2px red left accent) shrunk to an inline topbar item. */
+.nav-link.nav-current {
+  background: var(--field);
+  box-shadow: inset 2px 0 0 var(--red);
+  color: var(--red-hot);
+  padding: 0 0.45rem 0 0.55rem;
+}
 
 .rule {
   color: var(--red-dim);

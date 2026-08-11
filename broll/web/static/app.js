@@ -182,6 +182,7 @@ function debounce(fn, ms) {
 document.addEventListener("DOMContentLoaded", init);
 
 function init() {
+  loadDashboardTopbar();
   buildFlagToggles();
   wireHeader();
   wireModeAndFuzzyToggles();
@@ -196,6 +197,31 @@ function init() {
   // view if the URL carries one), so the page is deep-linkable and reloads
   // land where they were.
   applyHistoryState();
+}
+
+/* ---------------------------------------------------------------------- */
+/* Dashboard topbar                                                        */
+/* ---------------------------------------------------------------------- */
+
+/* The static header in index.html is a fallback for the standalone dev loop.
+ * Mounted at /broll/ this document-relative fetch resolves to the dashboard's
+ * /partials/topbar, and the real header -- session, admin links, the whole nav
+ * -- replaces the fallback, making this a page of the dashboard rather than an
+ * imitation of one. Standalone the same fetch resolves inside THIS app, 404s,
+ * and the fallback stays. Never made root-relative: see
+ * tests/test_mounted_prefix.py. */
+async function loadDashboardTopbar() {
+  try {
+    const res = await fetch("../partials/topbar?current=broll");
+    // redirected = an expired session answered with the login PAGE; injecting
+    // that into the header would be worse than keeping the fallback.
+    if (!res.ok || res.redirected) return;
+    const html = await res.text();
+    if (!html.includes("data-dash-topbar")) return;
+    document.getElementById("dash-topbar").innerHTML = html;
+  } catch {
+    /* dashboard unreachable -- the fallback header stands */
+  }
 }
 
 /* ---------------------------------------------------------------------- */

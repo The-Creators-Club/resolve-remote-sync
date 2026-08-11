@@ -50,6 +50,14 @@ def css():
                     media_type='text/css')
 
 
+@app.get('/favicon.svg')
+def favicon():
+    # The Creators Club mark, same file as broll/web's -- the tab icon is part
+    # of looking like one product (2026-08-10 restyle).
+    return Response((config.STATIC_DIR / 'favicon.svg').read_bytes(),
+                    media_type='image/svg+xml')
+
+
 if __name__ == '__main__':
     import uvicorn
     print(f'  http://{config.HOST}:{config.PORT}')

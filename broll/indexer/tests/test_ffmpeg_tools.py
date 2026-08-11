@@ -107,6 +107,28 @@ def test_build_proxy_downscales_a_large_source(tmp_path):
     assert dest.stat().st_size < big.stat().st_size
 
 
+def test_build_proxy_forces_8bit_from_a_10bit_source(tmp_path):
+    """A 10-bit source (every FX3/FX30 shoot) must not produce a 10-bit
+    proxy: without the -pix_fmt pin libx264 inherited the source format and
+    emitted H.264 High 10, which browsers render as a black rectangle --
+    every Creators_Club preview was unwatchable while its poster looked
+    fine (found 2026-08-11)."""
+    ten_bit = tmp_path / "tenbit.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc=size=640x360:duration=1:rate=10",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p10le", str(ten_bit)],
+        check=True,
+    )
+    dest = tmp_path / "proxy_8bit.mp4"
+    ffmpeg_tools.build_proxy(ten_bit, dest, use_nvenc=False)
+
+    info = ffmpeg_tools.run_ffprobe(dest)
+    video = next(s for s in info["streams"] if s["codec_type"] == "video")
+    assert video["pix_fmt"] == "yuv420p"
+    assert video.get("profile") != "High 10"
+
+
 def test_build_sprite_and_poster(tiny_clip, tmp_path):
     sprite = tmp_path / "sprite.jpg"
     poster = tmp_path / "poster.jpg"

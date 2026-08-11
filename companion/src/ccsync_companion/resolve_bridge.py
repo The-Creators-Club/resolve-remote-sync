@@ -931,7 +931,11 @@ def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
 # not already carry. Driven by broll_server.py's POST /insert, i.e. by a
 # button in the b-roll web page, so its result dict is user-visible text.
 
-BROLL_BIN_NAME = "B-Roll"
+# Media-pool bin path the archive clips land in. A SUB-bin, not a flat
+# "B-Roll" (2026-08-11, admin request): the parent stays the editors'
+# working b-roll bin, and clips arriving from the archive keep to their own
+# shelf under it instead of mixing into hand-imported material.
+BROLL_BIN_PATH = ("B-Roll", "Archive")
 
 # The video track a b-roll clip is appended to. EXPLICIT because
 # AppendToTimeline without a trackIndex obeys the timeline's destination-track
@@ -1022,9 +1026,10 @@ def perform_insert(local_path: str, in_frame: int, out_frame: int) -> dict[str, 
     """Append `local_path`, trimmed in_frame..out_frame, to the current timeline.
 
     The behaviour broll/SPEC.md's Companion API contract specifies: import
-    into the "B-Roll" bin (reusing the MediaPoolItem if it is already there)
-    then AppendToTimeline. Returns {"ok": bool, "message": str} -- the shape
-    the web UI renders straight into its toast. Never raises.
+    into the "B-Roll/Archive" bin (reusing the MediaPoolItem if it is
+    already there) then AppendToTimeline. Returns {"ok": bool, "message":
+    str} -- the shape the web UI renders straight into its toast. Never
+    raises.
     """
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     with _API_LOCK:
@@ -1055,7 +1060,9 @@ def _perform_insert_locked(local_path: str, in_frame: int, out_frame: int) -> di
     try:
         media_pool = project.GetMediaPool()
         root_folder = media_pool.GetRootFolder()
-        broll_bin = _find_or_create_bin(media_pool, root_folder, BROLL_BIN_NAME)
+        broll_bin = root_folder
+        for name in BROLL_BIN_PATH:
+            broll_bin = _find_or_create_bin(media_pool, broll_bin, name)
 
         media_pool_item = _find_existing_clip(broll_bin, local_path)
         if media_pool_item is None:

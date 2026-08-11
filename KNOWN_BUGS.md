@@ -110,6 +110,28 @@ source-level assertions still run). Dev machines and any future CI should
 have node so those don't skip silently — `run_all_tests.ps1` will show the
 skips.
 
+### R9 — many browser previews are 10-bit H.264 — pipeline FIXED, archive sweep DECLINED
+Reported by a remote editor 2026-08-11 (evening): poster fine, clicked-into
+player black, on Creators_Club clips. Cause: the indexer's `build_proxy`
+never pinned a pixel format, so libx264 inherited the source's — and every
+FX3/FX30 shoot is 10-bit, so those previews came out H.264 High 10 /
+yuv420p10le, which browsers draw as a black rectangle (sampled 12 across 4
+creators shares: 10 were 10-bit; Downloads are YouTube-sourced 8-bit and all
+fine). Encoder now pins `-pix_fmt yuv420p`
+(`broll/indexer/broll_index/ffmpeg_tools.py`, regression test cuts a proxy
+from a 10-bit source and asserts 8-bit out). Dry-run measured the archive:
+7,110 previews, **3,467 browser-hostile** — and not only under
+Creators_Club/; plenty of 10-bit FX3 shots were filed under
+Downloads/<category>/ by the archive build. **Admin declined the re-encode
+sweep 2026-08-12** ("okay on Chrome"): playback relies on the browser
+falling back to software decode, which current Chrome does. If a black
+player comes back on some machine/browser, the prepared fix is
+`broll/indexer/fix_10bit_proxies.py --apply` on the base rig (dry-run by
+default; re-encodes from the adjacent top-slot original, atomic replace, DB
+untouched, archive is under no sync lane so nothing fans out). NOT the
+companion's proxy generator: its 10-bit HEVC editing proxies are for
+Resolve, deliberate, untouched.
+
 ---
 
 ## Carryover — unchanged from before the 2026-08-11 hunt

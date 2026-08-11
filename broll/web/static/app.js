@@ -1488,8 +1488,21 @@ function resetShuttle() {
 /* Send to Resolve                                                        */
 /* ---------------------------------------------------------------------- */
 
+/* One send in flight at a time: while a clip is still syncing down from the
+ * NAS this loop re-POSTs the same /insert body every 1.5s (the companion
+ * joins the running download and answers with progress), and both the click
+ * handler and the Enter shortcut land here. */
+let sendInFlight = false;
+
+function syncProgressLabel(progress) {
+  if (progress && typeof progress.percent === "number") {
+    return `SYNCING ${progress.percent}%`;
+  }
+  return "SYNCING…";
+}
+
 async function sendToResolve() {
-  if (!state.detail) return;
+  if (!state.detail || sendInFlight) return;
   const { video } = state.detail;
   const fps = video.fps || 24;
 
@@ -1515,32 +1528,58 @@ async function sendToResolve() {
     mode: "append",
   };
 
-  let res;
+  const btn = $("#send-resolve-btn");
+  const originalLabel = btn ? btn.innerHTML : null;
+  sendInFlight = true;
+  if (btn) btn.disabled = true;
+  let announcedSync = false;
   try {
-    res = await fetch(`${COMPANION_URL}/insert`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  } catch (e) {
-    toast("Companion app not running — download it from Settings", "error");
-    return;
-  }
+    for (;;) {
+      let res;
+      try {
+        res = await fetch(`${COMPANION_URL}/insert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        toast("Companion app not running — download it from Settings", "error");
+        return;
+      }
 
-  let body = null;
-  try {
-    body = await res.json();
-  } catch (e) {
-    body = null;
-  }
+      let body = null;
+      try {
+        body = await res.json();
+      } catch (e) {
+        body = null;
+      }
 
-  if (!res.ok || !body || body.ok === false) {
-    const message = (body && body.message) || `Companion returned HTTP ${res.status}`;
-    toast(message, "error");
-    return;
-  }
+      if (res.ok && body && body.state === "downloading") {
+        if (!announcedSync) {
+          announcedSync = true;
+          toast("Clip isn't on this machine yet — syncing it down, then inserting.", "");
+        }
+        if (btn) btn.textContent = syncProgressLabel(body.progress);
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
 
-  toast(body.message || "Sent to Resolve.", "success");
+      if (!res.ok || !body || body.ok === false) {
+        const message = (body && body.message) || `Companion returned HTTP ${res.status}`;
+        toast(message, "error");
+        return;
+      }
+
+      toast(body.message || "Sent to Resolve.", "success");
+      return;
+    }
+  } finally {
+    sendInFlight = false;
+    if (btn) {
+      btn.disabled = false;
+      if (originalLabel != null) btn.innerHTML = originalLabel;
+    }
+  }
 }
 
 /* ---------------------------------------------------------------------- */

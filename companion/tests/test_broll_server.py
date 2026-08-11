@@ -300,12 +300,16 @@ class FakeBinFolder:
     def __init__(self, name: str):
         self._name = name
         self.clips: list = []
+        self.subfolders: list = []
 
     def GetName(self):
         return self._name
 
     def GetClipList(self):
         return self.clips
+
+    def GetSubFolderList(self):
+        return self.subfolders
 
 
 class FakeRootFolder:
@@ -459,7 +463,9 @@ def test_perform_insert_no_timeline_open(monkeypatch):
     assert result == {"ok": False, "message": "no timeline open — create one first"}
 
 
-def test_perform_insert_creates_broll_bin_when_missing(monkeypatch):
+def test_perform_insert_creates_the_archive_sub_bin_when_missing(monkeypatch):
+    """Clips land in B-Roll/Archive -- their own shelf under the editors'
+    working b-roll bin, not mixed into hand-imported material."""
     resolve, _media_pool, root = _make_stack()
     monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
 
@@ -469,18 +475,34 @@ def test_perform_insert_creates_broll_bin_when_missing(monkeypatch):
     assert result["ok"] is True
     assert len(root.subfolders) == 1
     assert root.subfolders[0].GetName() == "B-Roll"
+    assert [f.GetName() for f in root.subfolders[0].subfolders] == ["Archive"]
 
 
-def test_perform_insert_reuses_existing_bin_across_calls(monkeypatch):
+def test_perform_insert_reuses_existing_bins_across_calls(monkeypatch):
     resolve, _media_pool, root = _make_stack()
     monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
 
     resolve_bridge.perform_insert("Y:/broll/clip1.mov", 0, 10)
     resolve_bridge.perform_insert("Y:/broll/clip2.mov", 0, 10)
 
-    # Only one "B-Roll" bin should ever be created.
+    # Only one "B-Roll" bin and one "Archive" under it, ever.
     assert len(root.subfolders) == 1
     assert root.subfolders[0].GetName() == "B-Roll"
+    assert [f.GetName() for f in root.subfolders[0].subfolders] == ["Archive"]
+
+
+def test_perform_insert_reuses_an_existing_broll_bin_without_duplicating_it(monkeypatch):
+    """A project that already has the flat B-Roll bin (every project made
+    before the sub-bin change) gains only the Archive shelf inside it."""
+    resolve, _media_pool, root = _make_stack()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+    root.subfolders.append(FakeBinFolder("B-Roll"))
+
+    result = resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 10)
+
+    assert result["ok"] is True
+    assert len(root.subfolders) == 1
+    assert [f.GetName() for f in root.subfolders[0].subfolders] == ["Archive"]
 
 
 def test_perform_insert_imports_when_not_already_in_bin(monkeypatch):
@@ -497,10 +519,12 @@ def test_perform_insert_reuses_existing_mediapoolitem_by_file_path(monkeypatch):
     resolve, media_pool, root = _make_stack()
     monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
 
-    # Pre-populate the B-Roll bin with an already-imported clip.
+    # Pre-populate the B-Roll/Archive bin with an already-imported clip.
     existing_bin = FakeBinFolder("B-Roll")
+    archive_bin = FakeBinFolder("Archive")
     existing_item = FakeMediaPoolItem("clip.mov", "Y:/broll/clip.mov")
-    existing_bin.clips.append(existing_item)
+    archive_bin.clips.append(existing_item)
+    existing_bin.subfolders.append(archive_bin)
     root.subfolders.append(existing_bin)
 
     result = resolve_bridge.perform_insert("Y:/broll/clip.mov", 100, 150)
@@ -1139,3 +1163,192 @@ def test_a_worker_failure_still_reaches_the_toast_as_a_message(tmp_path):
     )
     assert status == 200 and body["ok"] is False
     assert body["message"] == "could not start the worker"
+
+
+# ---------------------------------------------------------------------------
+# POST /insert: a missing clip is synced down from the NAS (2026-08-11)
+# ---------------------------------------------------------------------------
+
+
+def _editor_cfg(tmp_path):
+    """A remote editor's config: tree at tmp_path, working rclone remote."""
+    return {
+        "local_root": str(tmp_path),
+        "mode": "editor",
+        "remote": "creators_club_sftp",
+        "remote_root": "/mnt/tank/creators_club",
+        "rclone_path": "rclone",
+    }
+
+
+def _insert_body(rel="military/naval/clip.mov"):
+    return {"share": "broll", "rel_path": rel, "in_frame": 0, "out_frame": 10,
+            "mode": "append"}
+
+
+def test_a_missing_clip_starts_a_download_and_reports_progress(tmp_path):
+    cfg = _editor_cfg(tmp_path)
+    mounts = broll_server.resolve_mounts({}, cfg)
+    calls = []
+
+    def fetcher(ccsync_cfg, rel_path, dest):
+        calls.append((ccsync_cfg, rel_path, dest))
+        return {"state": "downloading", "progress": {"percent": 12, "bytes": 12,
+                                                     "total_bytes": 100}}
+
+    status, body = broll_server.build_insert_response(
+        _insert_body(), mounts, ccsync_cfg=cfg, fetcher=fetcher)
+
+    assert status == 200
+    assert body["ok"] is False
+    assert body["state"] == "downloading"
+    assert "12%" in body["message"]
+    assert body["progress"]["percent"] == 12
+    assert calls[0][1] == "military/naval/clip.mov"
+    assert calls[0][2] == str(
+        tmp_path / "Assets" / "B-roll Archive" / "military" / "naval" / "clip.mov")
+
+
+def test_the_fetch_gets_the_validated_rel_not_the_raw_client_string(tmp_path):
+    """Backslashes and empty components are normalized before the rel is
+    joined into an rclone remote spec."""
+    cfg = _editor_cfg(tmp_path)
+    mounts = broll_server.resolve_mounts({}, cfg)
+    calls = []
+
+    def fetcher(ccsync_cfg, rel_path, dest):
+        calls.append(rel_path)
+        return {"state": "downloading", "progress": {}}
+
+    broll_server.build_insert_response(
+        _insert_body(rel="military\\naval//clip.mov"), mounts,
+        ccsync_cfg=cfg, fetcher=fetcher)
+
+    assert calls == ["military/naval/clip.mov"]
+
+
+def test_a_failed_download_reaches_the_toast_with_its_cause(tmp_path):
+    cfg = _editor_cfg(tmp_path)
+    mounts = broll_server.resolve_mounts({}, cfg)
+
+    status, body = broll_server.build_insert_response(
+        _insert_body(), mounts, ccsync_cfg=cfg,
+        fetcher=lambda *a, **kw: {"state": "failed", "message": "sftp: permission denied"})
+
+    assert status == 200
+    assert body["ok"] is False
+    assert "state" not in body
+    assert "couldn't sync the clip from the NAS" in body["message"]
+    assert "sftp: permission denied" in body["message"]
+
+
+def test_a_finished_download_falls_through_to_the_insert(tmp_path, monkeypatch):
+    cfg = _editor_cfg(tmp_path)
+    mounts = broll_server.resolve_mounts({}, cfg)
+    dest = tmp_path / "Assets" / "B-roll Archive" / "military" / "naval" / "clip.mov"
+
+    def fetcher(ccsync_cfg, rel_path, dest_path):
+        # The job's last act before reporting done is landing the file.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake")
+        return {"state": "done"}
+
+    captured = {}
+    monkeypatch.setattr(
+        broll_server.resolve_bridge, "perform_insert",
+        lambda path, in_frame, out_frame: (
+            captured.setdefault("path", path),
+            {"ok": True, "message": "Inserted clip.mov (10 frames)"})[-1],
+    )
+
+    status, body = broll_server.build_insert_response(
+        _insert_body(), mounts, ccsync_cfg=cfg, fetcher=fetcher)
+
+    assert status == 200
+    assert body == {"ok": True, "message": "Inserted clip.mov (10 frames)"}
+    assert captured["path"] == str(dest)
+
+
+def test_no_ccsync_cfg_keeps_the_old_not_found_message(tmp_path):
+    """The pre-fetch contract, pinned: without the companion's own config
+    there is no remote to fetch from, and the old message must come back
+    rather than a downloading state nothing will ever finish."""
+    mounts = {"broll": str(tmp_path).replace("\\", "/")}
+
+    def fetcher(*a, **kw):
+        raise AssertionError("must not fetch without a ccsync config")
+
+    status, body = broll_server.build_insert_response(
+        _insert_body(rel="clip.mov"), mounts, ccsync_cfg=None, fetcher=fetcher)
+
+    assert status == 200
+    assert "is the share mounted?" in body["message"]
+
+
+def test_a_base_rig_does_not_fetch_from_itself(tmp_path):
+    """The base rig's local_root IS the NAS share: a file missing there is
+    missing at the source, and rclone copying the NAS onto the NAS's own
+    SMB mapping helps nobody."""
+    cfg = dict(_editor_cfg(tmp_path), mode="base")
+    mounts = broll_server.resolve_mounts({}, cfg)
+
+    def fetcher(*a, **kw):
+        raise AssertionError("a base rig must not fetch")
+
+    status, body = broll_server.build_insert_response(
+        _insert_body(), mounts, ccsync_cfg=cfg, fetcher=fetcher)
+
+    assert "is the share mounted?" in body["message"]
+
+
+def test_a_hand_overridden_mount_is_not_downloaded_into(tmp_path):
+    """An explicit ~/.broll-companion.json entry means the editor pointed the
+    share somewhere deliberate (an SMB mount, a mirror drive). rclone writing
+    into it behind their back is not our call."""
+    cfg = _editor_cfg(tmp_path)
+    mounts = {"broll": "Y:/some/smb/mount"}
+
+    def fetcher(*a, **kw):
+        raise AssertionError("an overridden mount must not be fetched into")
+
+    status, body = broll_server.build_insert_response(
+        _insert_body(), mounts, ccsync_cfg=cfg, fetcher=fetcher)
+
+    assert "is the share mounted?" in body["message"]
+
+
+def test_other_shares_are_never_fetched(tmp_path):
+    """Only "broll" has a derivable NAS-side location; a missing file on any
+    other share keeps the old message."""
+    cfg = _editor_cfg(tmp_path)
+    mounts = {"archive_2019": str(tmp_path / "nowhere").replace("\\", "/")}
+
+    def fetcher(*a, **kw):
+        raise AssertionError("only the broll share may fetch")
+
+    status, body = broll_server.build_insert_response(
+        {"share": "archive_2019", "rel_path": "clip.mov", "in_frame": 0,
+         "out_frame": 10, "mode": "append"},
+        mounts, ccsync_cfg=cfg, fetcher=fetcher)
+
+    assert "is the share mounted?" in body["message"]
+
+
+def test_the_downloading_state_travels_over_http(live_server, tmp_path, monkeypatch):
+    srv, client = live_server
+    cfg = _editor_cfg(tmp_path)
+    srv.ccsync_cfg = cfg
+    srv.companion_config["mounts"] = broll_server.resolve_mounts({}, cfg)
+    monkeypatch.setattr(
+        broll_server.broll_fetch, "poll_fetch",
+        lambda ccsync_cfg, rel_path, dest: {
+            "state": "downloading", "progress": {"percent": 40}},
+    )
+
+    status, _headers, body = client.post_json("/insert", _insert_body())
+
+    data = json.loads(body)
+    assert status == 200
+    assert data["ok"] is False
+    assert data["state"] == "downloading"
+    assert data["progress"]["percent"] == 40

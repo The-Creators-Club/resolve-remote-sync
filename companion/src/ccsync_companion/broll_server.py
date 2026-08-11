@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
+from . import broll_fetch
 from . import config as ccsync_config
 from . import music_server
 from . import music_worker
@@ -125,6 +126,12 @@ This file has no comments (it's plain JSON), so here's what each field means:
       <local_root>/Assets/B-roll Archive from ~/.ccsync/config.toml. Any
       entry written here wins over that. Other shares have no derivable
       root, so they still need one line each.
+
+      With the default in effect, a clip that isn't on this machine yet is
+      fetched from the NAS automatically when "Send to Resolve" asks for it
+      (over the same rclone remote the sync lanes use). Writing an explicit
+      "broll" entry here switches that off: an explicit mount is somewhere
+      you chose, and nothing will download into it behind your back.
 
       The "music" share is read from this same table (the music library's
       "Send to Resolve" buttons talk to the same companion, on the same
@@ -406,14 +413,52 @@ def build_status_response(mounts: dict, caller: Optional[Callable[..., dict]] = 
     }
 
 
+def _fetchable_from_nas(
+    share: str, rel_path: str, mounts: dict, ccsync_cfg: Optional[dict]
+) -> bool:
+    """Is this missing file one the companion should pull down itself?
+
+    Only the "broll" share, only when its effective mount is the DERIVED
+    default under local_root (a hand-written ~/.broll-companion.json entry
+    means the editor pointed the share somewhere deliberate -- an SMB mount,
+    a mirror drive -- and rclone writing into it behind their back is not
+    our call), and never on a base rig, whose local_root IS the NAS share:
+    a file missing there is missing at the source, and `rclone copyto` from
+    the NAS onto the NAS's own SMB mapping helps nobody.
+    """
+    if not ccsync_cfg or share != BROLL_SHARE:
+        return False
+    if str(ccsync_cfg.get("mode", "editor")).strip().lower() == "base":
+        return False
+    derived = default_broll_mount(ccsync_cfg)
+    root = (mounts or {}).get(BROLL_SHARE)
+    if not derived or not isinstance(root, str):
+        return False
+    return os.path.normcase(os.path.normpath(root)) == os.path.normcase(
+        os.path.normpath(derived)
+    )
+
+
 def build_insert_response(
-    body: dict, mounts: dict, caller: Optional[Callable[..., dict]] = None
+    body: dict, mounts: dict, caller: Optional[Callable[..., dict]] = None,
+    ccsync_cfg: Optional[dict] = None,
+    fetcher: Optional[Callable[..., dict]] = None,
 ) -> tuple[int, dict]:
     """POST /insert logic. Returns (http_status, json_body).
 
     Path traversal is the one failure that gets a non-200 HTTP status (400);
     every other expected failure path returns 200 with {"ok": false, ...} so
     the web UI can show the message inline.
+
+    A missing file is no longer always terminal (2026-08-11): when the share
+    is the archive at its derived place in the tree and this machine has a
+    working rclone remote, the companion starts pulling that one clip down
+    from the NAS and answers {"ok": false, "state": "downloading",
+    "progress": {...}}. The web UI re-POSTs the same body every ~1.5 s to
+    read progress; the poll that finds the file in place falls through to
+    the ordinary insert. `ccsync_cfg` is None only when the caller predates
+    the feature (tests pinning the old contract) -- the live handler always
+    passes it. `fetcher` is broll_fetch.poll_fetch's test seam.
     """
     share = body.get("share")
     rel_path = body.get("rel_path")
@@ -439,10 +484,42 @@ def build_insert_response(
 
     local_path = Path(local_path_str)
     if not local_path.is_file():
-        return 200, {
-            "ok": False,
-            "message": f"file not found at {local_path} — is the share mounted?",
-        }
+        if not _fetchable_from_nas(share, rel_path, mounts, ccsync_cfg):
+            return 200, {
+                "ok": False,
+                "message": f"file not found at {local_path} — is the share mounted?",
+            }
+        # The validated components, re-joined with forward slashes: the
+        # remote side of the copy must never see the raw client string that
+        # translate_path only just finished vetting.
+        clean_rel = "/".join(_split_components(rel_path))
+        fetch = (fetcher if fetcher is not None else broll_fetch.poll_fetch)(
+            ccsync_cfg, clean_rel, str(local_path)
+        )
+        state = fetch.get("state")
+        if state == broll_fetch.STATE_DOWNLOADING:
+            progress = fetch.get("progress") or {}
+            percent = progress.get("percent")
+            message = (
+                f"syncing the clip to this machine — {percent}%"
+                if isinstance(percent, int)
+                else "syncing the clip to this machine…"
+            )
+            return 200, {"ok": False, "state": "downloading",
+                         "message": message, "progress": progress}
+        if state != broll_fetch.STATE_DONE:
+            return 200, {
+                "ok": False,
+                "message": "couldn't sync the clip from the NAS: "
+                           f"{fetch.get('message') or 'the download failed'}",
+            }
+        if not local_path.is_file():
+            # "done" is only ever reported after an isfile() check inside
+            # the job, so reaching here means the file vanished in between.
+            return 200, {
+                "ok": False,
+                "message": f"file not found at {local_path} — is the share mounted?",
+            }
 
     # In a CHILD, with a timeout, for the reason build_status_response spells
     # out (MED-3, 2026-08-11). The worker calls the same
@@ -609,7 +686,9 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "message": "invalid JSON body"})
                 return
             mounts = self.server.companion_config.get("mounts", {})
-            status, result = build_insert_response(body, mounts)
+            status, result = build_insert_response(
+                body, mounts, ccsync_cfg=getattr(self.server, "ccsync_cfg", None)
+            )
             self._send_json(status, result)
         else:
             self._send_json(404, {"ok": False, "message": f"not found: {path}"})
@@ -633,16 +712,22 @@ class BrollCompanionServer(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
     daemon_threads = True
 
-    def __init__(self, server_address, handler_cls, companion_config: dict):
+    def __init__(self, server_address, handler_cls, companion_config: dict,
+                 ccsync_cfg: Optional[dict] = None):
         super().__init__(server_address, handler_cls)
         self.companion_config = companion_config
+        # The companion's own config.toml dict, for the on-demand archive
+        # fetch (remote/remote_root/rclone_path/tuning). None in tests that
+        # pin the pre-fetch contract; the fetch simply stays off then.
+        self.ccsync_cfg = ccsync_cfg
 
 
 def make_server(
-    cfg: dict, host: str = HOST, port: int = PORT
+    cfg: dict, host: str = HOST, port: int = PORT,
+    ccsync_cfg: Optional[dict] = None,
 ) -> BrollCompanionServer:
     """Bind a loopback-only server. Raises OSError if the port is taken."""
-    return BrollCompanionServer((host, port), BrollRequestHandler, cfg)
+    return BrollCompanionServer((host, port), BrollRequestHandler, cfg, ccsync_cfg)
 
 
 # -- startup ----------------------------------------------------------------
@@ -698,7 +783,7 @@ def start(ccsync_cfg: dict[str, Any]) -> Optional[BrollCompanionServer]:
     broll_cfg[ytdl_server.MOUNTS_KEY] = ytdl_mounts
 
     try:
-        server = make_server(broll_cfg, HOST, port)
+        server = make_server(broll_cfg, HOST, port, ccsync_cfg=ccsync_cfg)
     except OSError as exc:
         log.warning(
             "broll: could not listen on %s:%d (%s) -- \"Send to Resolve\" in the "
@@ -738,6 +823,14 @@ def start(ccsync_cfg: dict[str, Any]) -> Optional[BrollCompanionServer]:
 
 def stop(server: Optional[BrollCompanionServer]) -> None:
     """Shut the server down and release the port. Never raises."""
+    # Downloads first: they are children of this feature, and an rclone
+    # still writing into the archive after the tray exits is an orphan
+    # nothing supervises. Killing mid-transfer is safe -- rclone writes a
+    # .partial and the next poll retries from scratch.
+    try:
+        broll_fetch.stop_all()
+    except Exception:
+        log.debug("broll: stopping fetch jobs failed", exc_info=True)
     if server is None:
         return
     try:

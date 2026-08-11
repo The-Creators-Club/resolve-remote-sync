@@ -144,10 +144,20 @@ Still authoritative; implemented since 2026-08-10 by
   frames** (web UI converts player seconds → frames using the video's fps from the DB),
   `mode` is `"append"` (v1; `"playhead"` reserved).
   Behaviour: translate path via mounts config → verify file exists → connect to Resolve →
-  import into bin `B-Roll` (reuse existing MediaPoolItem if already imported, matched by
-  file path) → `AppendToTimeline([{mediaPoolItem, startFrame: in_frame, endFrame: out_frame}])`
+  import into bin `B-Roll/Archive` (reuse existing MediaPoolItem if already imported, matched
+  by file path) → `AppendToTimeline([{mediaPoolItem, startFrame: in_frame, endFrame: out_frame}])`
   on the current timeline. → `{ok, message}` with useful error text on every failure path
   (no mount, file missing, Resolve not running, no project open, no timeline).
+  **Missing-file behaviour (added 2026-08-11):** when the share is `broll` at its *derived*
+  mount (no hand-written entry, not a base rig) and the companion has a working rclone
+  remote, a missing file is pulled from the NAS (`<remote_root>/Assets/B-roll Archive/<rel>`
+  → `<local_root>/Assets/B-roll Archive/<rel>`, single-file `rclone copyto`) instead of
+  failing. While the download runs, `/insert` answers
+  `{ok: false, state: "downloading", message, progress: {bytes, total_bytes, speed_bps,
+  eta_seconds, percent}}`; the web UI re-POSTs the same body every ~1.5 s (the companion
+  joins the running job, keyed by destination path — re-clicks never start a second rclone),
+  and the poll that finds the file in place performs the ordinary insert. Terminal download
+  failures come back as plain `{ok: false, message}` and the next POST retries from scratch.
 
 Config file: `~/.broll-companion.json` → `{"server_url": "...", "mounts": {"broll": "B:/"}}`.
 Unchanged by the move — editors already have this file. The `broll` share alone no longer

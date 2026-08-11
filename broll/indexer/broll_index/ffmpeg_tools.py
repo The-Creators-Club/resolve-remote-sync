@@ -193,6 +193,13 @@ def build_proxy(
             # filter (MED-12, 2026-08-11).
             "-vf", f"scale=-2:'trunc(min({height},ih)/2)*2'",
             *video_codec,
+            # 8-bit 4:2:0, ALWAYS: these proxies exist to play in a browser,
+            # and without the pin libx264 inherits the source's pixel format.
+            # Our own shoots are 10-bit (FX3/FX30 XAVC), which came out as
+            # H.264 High 10 / yuv420p10le -- posters fine, playback a black
+            # rectangle on the editors' machines (found 2026-08-11: every
+            # Creators_Club preview from a 10-bit source was unwatchable).
+            "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", PROXY_AUDIO_BITRATE,
             "-movflags", "+faststart",
             str(dest),

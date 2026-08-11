@@ -276,6 +276,75 @@ def test_ensure_versioning_accepts_a_prefetched_folder_config():
     assert calls == []
 
 
+# -- delete protection (2026-08-11, docs/delete-protection-ignoredelete.md) --
+#
+# Versioning makes a propagated delete RECOVERABLE for 30 days; ignoreDelete
+# prevents it. A folder carrying the flag does not apply a delete another
+# device made, so an editor's accidental single-file delete only ever removes
+# the file on the machine that made it.
+
+
+def test_accept_folder_creates_the_folder_with_ignore_delete():
+    admin, calls = _admin()
+    admin.accept_folder(
+        "abcd-nuclear", label="2026/FF5/Nuclear",
+        local_path="/local/Projects/2026/FF5/Nuclear", offered_by_device_id="DEVICE-1",
+    )
+    assert calls[0]["body"]["ignoreDelete"] is True
+
+
+def test_ensure_ignore_delete_patches_a_folder_that_lacks_it():
+    calls = []
+
+    def fake_http_request(method, url, api_key, body, timeout):
+        calls.append({"method": method, "url": url, "body": body})
+        if method == "GET":
+            return {"id": "abcd-nuclear", "path": "/local/x"}  # accepted before the flag
+        return {}
+
+    admin = SyncthingAdmin(
+        syncthing_url="http://127.0.0.1:8384", api_key="k", http_request=fake_http_request
+    )
+    assert admin.ensure_ignore_delete("abcd-nuclear") is True
+    assert calls[-1]["method"] == "PATCH"
+    assert calls[-1]["url"] == "http://127.0.0.1:8384/rest/config/folders/abcd-nuclear"
+    # A partial PATCH, exactly like ensure_versioning's: Syncthing merges it,
+    # so nothing else in the folder config is disturbed.
+    assert calls[-1]["body"] == {"ignoreDelete": True}
+
+
+@pytest.mark.parametrize("existing", [False, None, "true", 1])
+def test_ensure_ignore_delete_patches_anything_that_is_not_true(existing):
+    """Only a literal `true` counts as protected -- a folder someone set to
+    false by hand for a one-off prune is exactly what the per-turn retrofit
+    is supposed to put back (see the runbook in the doc)."""
+    admin, calls = _admin()
+    assert admin.ensure_ignore_delete("abcd", folder={"ignoreDelete": existing}) is True
+    assert calls[-1]["body"] == {"ignoreDelete": True}
+
+
+def test_ensure_ignore_delete_is_a_noop_when_already_set():
+    """Steady state must cost one GET and zero config commits: every config
+    write restarts and rescans the folder."""
+    calls = []
+
+    def fake_http_request(method, url, api_key, body, timeout):
+        calls.append(method)
+        return {"id": "abcd-nuclear", "ignoreDelete": True}
+
+    admin = SyncthingAdmin(
+        syncthing_url="http://127.0.0.1:8384", api_key="k", http_request=fake_http_request
+    )
+    assert admin.ensure_ignore_delete("abcd-nuclear") is False
+    assert calls == ["GET"]
+
+
+def test_ensure_ignore_delete_accepts_a_prefetched_folder_config():
+    admin, calls = _admin()
+    assert admin.ensure_ignore_delete("abcd", folder={"ignoreDelete": True}) is False
+    assert calls == []
+
+
 # -- timeouts (AUDIT_2 L-11) ------------------------------------------------
 
 

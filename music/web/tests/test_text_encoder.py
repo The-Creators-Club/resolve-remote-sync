@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -263,6 +264,39 @@ def test_the_artefact_path_never_imports_torch():
     r = subprocess.run([sys.executable, '-c', src], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert 'OK' in r.stdout
+
+
+def test_the_lock_guards_the_tokenizer_and_not_the_session():
+    """MUSIC-6 (2026-08-11): the lock was around the wrong half.
+
+    `InferenceSession.run` is thread-safe; the tokenizer's BPE cache is not.
+    Guarding the session serialised every query behind a 30 ms forward pass
+    AND left the unsafe cache unprotected -- benign under the GIL, wrong under
+    a free-threaded build. No artefact and no onnxruntime here: the encoder is
+    built without __init__ and given the two collaborators it locks around.
+    """
+    enc = te.OnnxTextEncoder.__new__(te.OnnxTextEncoder)
+    enc.dim, enc.max_length = 4, 32
+    enc._lock = threading.Lock()
+    held = {}
+
+    class FakeTokenizer:
+        def encode_batch(self, texts, max_length=None):
+            held['encode_batch'] = enc._lock.locked()
+            n = len(texts)
+            return (np.zeros((n, 3), dtype=np.int64), np.ones((n, 3), dtype=np.int64))
+
+    class FakeSession:
+        def run(self, names, feed):
+            held['session.run'] = enc._lock.locked()
+            return [np.ones((feed['input_ids'].shape[0], 4), dtype=np.float32)]
+
+    enc.tokenizer, enc.session = FakeTokenizer(), FakeSession()
+
+    out = enc.embed_text(['tense driving synth pulse'])
+    assert out.shape == (1, 4)
+    assert held['encode_batch'] is True, 'the BPE cache is the part that is unsafe'
+    assert held['session.run'] is False, 'the thread-safe half must not serialise'
 
 
 # --------------------------------------------------------------- search rewire

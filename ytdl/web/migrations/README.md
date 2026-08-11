@@ -20,6 +20,10 @@ stamp inside `schema.sql` marked a live index as migrated without adding the
 column, and a version-driven runner would then have skipped the migration
 forever. `schema.sql` here stamps nothing; `ensure_schema()` owns the version.
 
-There are no migrations yet — this database was created at v1. The runner is
-here so the first one is a two-line change instead of a design decision made
-under pressure.
+This database was created at v1. Since then (2026-08-11 bug hunt):
+
+- `002_downloads_term_dir.sql` — v2, the ledger's real on-disk folder (YTDL-31).
+- `003_one_active_job_per_editor.sql` — v3, the partial unique index behind
+  create_job's 409 (YTDL-25). It retires pre-existing duplicate active jobs
+  BEFORE creating the index, because a `CREATE UNIQUE INDEX` that raises on a
+  live database would take every `/ytdl` request down with it.

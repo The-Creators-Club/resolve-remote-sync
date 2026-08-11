@@ -622,8 +622,16 @@ class Sequencer:
         getter = getattr(self.admin, "get_ignores", None)
         if getter is None:  # an admin double that predates the getter
             return
-        for item in selection:
+        for index, item in enumerate(selection):
             if self._stop_event.is_set():
+                # SYNC-8 (2026-08-11): verification costs one GET per folder
+                # at up to the read timeout each, so a quit/sign-out/config
+                # reload lands inside it routinely -- and BOTH sweeps that
+                # follow (_startup_unpause's and stop()'s) run over the WHOLE
+                # selection, releasing folders this loop never reached. Not
+                # yet verified IS unconfirmed; the next turn's re-assert
+                # clears it.
+                self._latch_unverified(selection[index:])
                 return
             if not _item_is_valid(item):
                 continue
@@ -656,6 +664,23 @@ class Sequencer:
             with self._lock:
                 self._ignores_unconfirmed.add(slug)
 
+    def _latch_unverified(self, items: list[dict]) -> None:
+        """Latch every still-unverified folder as unconfirmed (SYNC-8).
+
+        Only the items _item_is_valid accepts: _unpause_all skips the rest
+        outright (SYNC-2), so latching them would be bookkeeping nothing
+        reads. A folder that is not configured locally at all latches too --
+        its unpause 404s just as harmlessly as its GET would have."""
+        slugs = {str(item.get("slug")) for item in items if _item_is_valid(item)}
+        if not slugs:
+            return
+        log.warning(
+            "sequencer: stopped during the startup ignores verification -- %d folder(s) "
+            "stay paused until a re-assert confirms their ignores", len(slugs),
+        )
+        with self._lock:
+            self._ignores_unconfirmed |= slugs
+
     def _park_paused(self) -> None:
         with self._lock:
             self._state = STATE_PAUSED
@@ -687,13 +712,25 @@ class Sequencer:
                 rel_to_slug[rel] = slug
             if slug:
                 slug_to_item[slug] = item
+        # SYNC-2 (2026-08-11): the ignores latch is pruned against every slug
+        # the selection MENTIONS, not just the usable ones. A project that
+        # goes invalid without leaving the selection (archived -> rel_path
+        # NULL) used to have its latch erased while the folder itself stayed
+        # in Syncthing, unfiltered.
+        slugged = {
+            str(item.get("slug"))
+            for item in selection
+            if isinstance(item.get("slug"), str) and item.get("slug").strip()
+        }
         with self._lock:
             self._rel_to_slug = rel_to_slug
             self._slug_to_item = slug_to_item
             self._last_selection = list(selection)
-        self._prune_bookkeeping(set(slug_to_item))
+        self._prune_bookkeeping(set(slug_to_item), slugged)
 
-    def _prune_bookkeeping(self, live_slugs: set[str]) -> None:
+    def _prune_bookkeeping(
+        self, live_slugs: set[str], selection_slugs: Optional[set[str]] = None
+    ) -> None:
         """Drop per-slug bookkeeping for projects that are no longer
         selected. These dicts/sets are keyed by slug and were append-only, so
         every project an editor ever ticked stayed in memory for the life of
@@ -707,9 +744,19 @@ class Sequencer:
         is scoped to it rather than to the selection, so dropping an
         unselected slug would strand that folder paused forever. It drains
         itself instead -- on a successful unpause, and on a 404 (see
-        _set_paused)."""
+        _set_paused).
+
+        `selection_slugs` is every slug the selection MENTIONS, valid or not
+        (SYNC-2): the ignores latch is pruned against that wider set, because
+        a project that goes invalid in place -- archived, so the dashboard's
+        LEFT JOIN ships it with rel_path NULL -- still has a real, possibly
+        unfiltered folder in Syncthing. It leaves the latch only when it
+        leaves the selection entirely, which is the case the pruning was
+        written for."""
         with self._lock:
-            self._ignores_unconfirmed &= live_slugs
+            self._ignores_unconfirmed &= (
+                live_slugs if selection_slugs is None else selection_slugs
+            )
             for ages in (self._clone_ages, self._orphan_ages):
                 for slug in [s for s in ages if s not in live_slugs]:
                     ages.pop(slug, None)
@@ -734,9 +781,21 @@ class Sequencer:
 
     def _unpause_all(self, selection: list[dict]) -> None:
         for item in selection:
-            slug = item.get("slug")
-            if not slug:
+            # SYNC-2 (2026-08-11): this swept by RAW slug while
+            # _verify_startup_ignores skips invalid items -- so the one folder
+            # class nothing ever verified was also the one class released
+            # unconditionally. The dashboard ships such rows routinely
+            # (fetch_selections is a LEFT JOIN, so an archived project arrives
+            # as {"slug": ..., "rel_path": None, "active": False}). Skip means
+            # stay paused: an unverified `sendreceive` folder going online is
+            # the L-3 outcome, and a de-selected project has nothing to sync.
+            if not _item_is_valid(item):
+                log.debug(
+                    "sequencer: not releasing %r -- it is not a usable selection item",
+                    item.get("slug"),
+                )
                 continue
+            slug = item.get("slug")
             if self._ignores_unconfirmed_for(slug):
                 # Deliberately excluded from every leak-recovery sweep: this
                 # folder has no .stignore, so unpausing it means lane C
@@ -1196,9 +1255,10 @@ class Sequencer:
         failure would put a WARNING per project per pass in the log for every
         folder the editor has not been offered yet (AUDIT_2 L-11).
 
-        Versioning is reported separately: a folder without versioning is a
-        DEL-6 risk, not a lane-direction violation, and blocking the unpause
-        on it would stop lane C entirely for a folder whose ignores are fine.
+        Versioning and ignoreDelete are reported separately: a folder without
+        either is a delete-safety risk, not a lane-direction violation, and
+        blocking the unpause on one would stop lane C entirely for a folder
+        whose ignores are fine.
         """
         try:
             self.admin.set_ignores(slug, STIGNORE_LINES)
@@ -1214,6 +1274,15 @@ class Sequencer:
             if _is_not_found(exc):
                 return True
             log.exception("sequencer: could not ensure versioning for %s", slug)
+        # delete-protection (2026-08-11, docs/delete-protection-ignoredelete.md):
+        # the retrofit path for folders accepted by an older companion or by
+        # hand. One PATCH on the first turn after the upgrade, silence after.
+        try:
+            self.admin.ensure_ignore_delete(slug)
+        except Exception as exc:
+            if _is_not_found(exc):
+                return True
+            log.exception("sequencer: could not ensure ignoreDelete for %s", slug)
         return True
 
     def _verify_current_folder_unpaused(self, slug: str) -> None:

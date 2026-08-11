@@ -394,6 +394,103 @@ def test_a_legal_report_still_round_trips_through_the_gate(report_client):
     assert resp.status_code == 200 and resp.json()["ok"] is True
 
 
+def test_a_session_gated_write_path_has_a_body_ceiling_too(tmp_path):
+    """DASH-3: the gate covered exactly /api/v1/report and the packages PUT, so
+    every htmx POST /partials/... and every pydantic-bodied /api/v1 route read
+    an unbounded body into the single-worker container. A logged-in editor
+    could OOM the fleet's only sync-status view by posting a multi-GB body to a
+    selection toggle -- MAX_REPORT_BODY_BYTES's outcome through an open door."""
+    from ccsync_dashboard.app import MAX_DEFAULT_BODY_BYTES
+
+    settings = Settings(db_path=str(tmp_path / "gate.db"), session_secret=SECRET)
+    with TestClient(create_app(settings)) as client:
+        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
+        counter = {"pulled": 0}
+        # chunked (no Content-Length), the shape that made B15's cap bypassable
+        resp = client.post(
+            "/partials/selection/jsmith/2025-ff4-nuclear/toggle",
+            content=_chunks(6, 1024 * 1024, counter),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert resp.status_code == 413
+        assert str(MAX_DEFAULT_BODY_BYTES) in resp.json()["detail"]
+        # ...and the cheap declared-length refusal comes first
+        resp = client.post("/partials/project-roots", content=b"x" * 16,
+                           headers={"Content-Length": str(MAX_DEFAULT_BODY_BYTES + 1)})
+        assert resp.status_code == 413
+
+
+def test_a_normal_partial_post_still_round_trips_through_the_gate(tmp_path):
+    """The default ceiling buffers and REPLAYS the body; a real form post must
+    be entirely unaffected by it (the /login form goes through the same path)."""
+    settings = Settings(db_path=str(tmp_path / "gate2.db"), session_secret=SECRET)
+    app = create_app(settings)
+    app.state.credential_verifier = lambda s, u, p: u == "jsmith" and p == "pw"
+    with TestClient(app) as client:
+        resp = client.post("/login", data={"username": "jsmith", "password": "pw"},
+                           follow_redirects=False)
+        assert resp.status_code == 303, resp.text
+
+
+def test_a_form_with_absurdly_many_fields_is_refused(tmp_path):
+    """DASH-3's other half: ui._form parsed with no max_num_fields, so a body
+    inside the byte ceiling could still be a million `a=1&` pairs for parse_qs
+    to build dict entries for. page_login_submit has always capped this."""
+    settings = Settings(db_path=str(tmp_path / "fields.db"), session_secret=SECRET,
+                        admin_users=frozenset({"alex"}))
+    with TestClient(create_app(settings)) as client:
+        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+        body = "&".join(f"f{i}=1" for i in range(500))
+        resp = client.post("/partials/project-roots", content=body,
+                           headers={"Content-Type": "application/x-www-form-urlencoded"})
+        assert resp.status_code == 400
+
+
+def test_the_music_upload_route_is_not_buffered_by_the_gate():
+    """musicweb's drag-and-drop ingest is a multipart audio upload Starlette
+    spools past the middleware; buffering it here would make the memory ceiling
+    the very thing it was added to remove (same reasoning as the packages PUT
+    below)."""
+    from ccsync_dashboard import app as appmod
+
+    carved = {(prefix, method) for prefix, method, _ in appmod._BODY_LIMIT_PREFIXES}
+    assert ("/music/api/ingest", "POST") in carved
+
+
+def test_the_interactive_api_docs_are_not_published(tmp_path):
+    """DASH-4: both mounts 404 their /docs, /redoc and /openapi.json
+    (broll.BLOCKED_PATHS, music.BLOCKED_PATHS) while the parent app served its
+    own to every logged-in editor -- the full route inventory and every admin
+    request schema. Authz still held at each route, so disclosure not bypass."""
+    settings = Settings(db_path=str(tmp_path / "docs.db"), session_secret=SECRET,
+                        admin_users=frozenset({"alex"}))
+    with TestClient(create_app(settings)) as client:
+        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+        for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+            assert client.get(path).status_code == 404, path
+
+
+def test_a_non_ascii_token_header_is_a_401_not_a_500(tmp_path):
+    """DASH-5: Starlette decodes headers latin-1 and hmac.compare_digest raises
+    TypeError on any character above U+007F, so a junk X-CCSync-Token turned an
+    unauthenticated request into a traceback and log spam."""
+    from ccsync_dashboard.api import token_ok
+
+    assert token_ok("sekrit", "sekrét") is False
+    assert token_ok("sekrét", "sekrét") is True
+
+    settings = Settings(db_path=str(tmp_path / "latin1.db"), session_secret=SECRET,
+                        report_token="sekrit")
+    with TestClient(create_app(settings)) as client:
+        resp = client.post("/api/v1/report", json=base_payload(),
+                           headers={"X-CCSync-Token": "sekrét".encode("latin-1")})
+        assert resp.status_code == 401
+        # the same header on an open route must not 500 either
+        assert client.get("/api/v1/health",
+                          headers={"X-CCSync-Token": "ÿ".encode("latin-1")}
+                          ).status_code == 200
+
+
 def test_the_package_route_is_not_buffered_by_the_gate():
     """api_publish_package streams its 200 MB body to disk and counts bytes as
     it goes; buffering it in the middleware would make the memory ceiling the

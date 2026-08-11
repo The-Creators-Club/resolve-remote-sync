@@ -6,6 +6,7 @@
     python index_music.py --limit 20      # try a handful first
     python index_music.py --queue         # analyse what the web app queued
     python index_music.py --queue-status  # what is waiting, and what failed
+    python index_music.py --db <path>     # work on another copy of the index
 
 Resumable: interrupt it and re-run; completed tracks are skipped by hash.
 
@@ -13,6 +14,11 @@ Resumable: interrupt it and re-run; completed tracks are skipped by hash.
 drag-and-drop upload, lands the file in the share and writes a `pending` row,
 and this drains it. It is the same analysis a full sweep does, just driven off
 the queue instead of a directory walk, so the two never disagree.
+
+Those `pending` rows are written into the NAS's copy of the index, not this
+one, so a drain that means anything is `--db <a copy pulled down from the NAS>`
+followed by pushing it back: `music/web/DEPLOY.md`, "Draining the NAS ingest
+queue".
 """
 import argparse
 import collections
@@ -330,13 +336,28 @@ def main():
     ap.add_argument('--retry-failed', action='store_true',
                     help='with --queue: re-attempt rows parked as failed')
     ap.add_argument('--root', default=str(config.share_root()))
+    # The queue is written on the NAS and drained here, and the two halves had
+    # no way to meet until this existed (MUSIC-3, 2026-08-11): --queue always
+    # opened config.DB_PATH, the base rig's in-repo index, so an editor's
+    # queued cue sat `pending` on the NAS forever. Point this at a copy pulled
+    # down from the NAS, drain it, push it back -- web/DEPLOY.md, "Draining the
+    # NAS ingest queue", has the loop and the hazards.
+    ap.add_argument('--db', default='',
+                    help='SQLite index to work on (default: %s)' % config.DB_PATH)
     args = ap.parse_args()
 
     root = Path(args.root)
     if not root.exists():
         sys.exit(f'music root not found: {root}')
 
-    con = db.connect()
+    db_path = Path(args.db) if args.db else Path(config.DB_PATH)
+    # connect() would happily CREATE one, and an empty database answers
+    # --queue with "nothing to analyse" -- indistinguishable from a drained
+    # queue, which is the one thing this flag must not be able to look like.
+    if args.db and not db_path.is_file():
+        sys.exit(f'--db: no database at {db_path}')
+
+    con = db.connect(db_path)
     db.init(con)
 
     if args.queue_status:
@@ -373,7 +394,7 @@ def main():
         print(f'\nqueue: {done} indexed, {failed} failed')
         print_queue(con)
         n = con.execute('SELECT COUNT(*) c FROM tracks').fetchone()['c']
-        print(f'DB: {n} tracks -> {config.DB_PATH}')
+        print(f'DB: {n} tracks -> {db_path}')
         # a non-zero exit is what makes a scheduled drain visible as a failure
         sys.exit(1 if failed else 0)
 
@@ -421,7 +442,7 @@ def main():
 
     n = con.execute('SELECT COUNT(*) c FROM tracks').fetchone()['c']
     w = con.execute('SELECT COUNT(*) c FROM windows').fetchone()['c']
-    print(f'\nDB: {n} tracks, {w} windows -> {config.DB_PATH}')
+    print(f'\nDB: {n} tracks, {w} windows -> {db_path}')
 
 
 if __name__ == '__main__':

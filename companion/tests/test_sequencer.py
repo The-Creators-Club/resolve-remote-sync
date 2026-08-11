@@ -64,6 +64,10 @@ class FakeAdmin:
         self.status_calls = []
         self.ignore_calls = []
         self.versioning_calls = []
+        self.ignore_delete_calls = []
+        # Slugs whose ensure_ignore_delete PATCH fails (a config write that
+        # exceeds config_write_timeout, same as ignore_raises).
+        self.ignore_delete_raises = set()
         self.completion_calls = []
         # slug -> needBytes the SERVER still needs from us (AUDIT_2 P5)
         self.completion_need_bytes = {}
@@ -142,6 +146,14 @@ class FakeAdmin:
 
     def ensure_versioning(self, folder_id, folder=None):
         self.versioning_calls.append(folder_id)
+        return True
+
+    def ensure_ignore_delete(self, folder_id, folder=None):
+        """delete-protection (2026-08-11): the per-turn retrofit that stops a
+        folder applying a delete another device made."""
+        self.ignore_delete_calls.append(folder_id)
+        if folder_id in self.ignore_delete_raises:
+            raise RuntimeError("config write timed out")
         return True
 
     def get_config(self):
@@ -802,6 +814,49 @@ def test_a_failed_ignores_reassert_never_unpauses_the_folder():
     assert lane_a.calls
 
 
+# -- delete protection (2026-08-11, docs/delete-protection-ignoredelete.md) --
+#
+# The per-turn retrofit that lands ignoreDelete on folders accepted by an
+# older companion or by hand: one PATCH on the first turn after the upgrade,
+# silence after. Advisory, exactly like versioning -- a missing ignoreDelete
+# is a delete-safety gap, not a lane-direction violation, so blocking the
+# unpause on it would stop lane C for a folder whose ignores are fine.
+
+
+def test_reassert_folder_policy_ensures_ignore_delete():
+    selection = FakeSelectionClient(selection=[])
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    assert seq._reassert_folder_policy("s-a") is True
+    assert admin.ignore_delete_calls == ["s-a"]
+
+
+def test_a_failing_ignore_delete_does_not_block_the_unpause():
+    selection = FakeSelectionClient(selection=[])
+    admin = FakeAdmin()
+    admin.ignore_delete_raises.add("s-a")
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    assert seq._reassert_folder_policy("s-a") is True
+    assert admin.ignore_calls == [("s-a", list(STIGNORE_LINES))]
+
+
+def test_ignore_delete_404_is_not_configured_here_not_a_failure():
+    """A 404 means the editor has not been offered that folder at all -- there
+    is nothing to protect and nothing to run unfiltered."""
+    selection = FakeSelectionClient(selection=[])
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    def not_here(folder_id, folder=None):
+        raise urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
+
+    admin.ensure_ignore_delete = not_here
+
+    assert seq._reassert_folder_policy("s-a") is True
+
+
 def test_pending_folders_failure_is_fail_closed():
     """B14: "can't tell whether this folder needs accepting" used to return
     True, releasing a folder a previous turn had deliberately latched paused
@@ -1179,6 +1234,103 @@ def test_a_folder_removed_from_syncthing_stops_being_tracked_as_paused():
     seq._release_paused_folders()
 
     assert seq._paused_by_us == set()
+
+
+# -- SYNC-2: the sweeps must not release what the verification skipped ------
+#
+# _verify_startup_ignores skips items _item_is_valid rejects, but _unpause_all
+# swept by RAW slug -- so the one folder class nothing ever checked was also
+# the one released unconditionally. The dashboard ships such rows routinely:
+# fetch_selections is a LEFT JOIN, so an archived project arrives as
+# {"slug": ..., "rel_path": None, "active": False} -- a real, possibly
+# unfiltered Syncthing folder with an unusable selection row.
+
+
+def _archived(slug):
+    """What the dashboard's LEFT JOIN emits for a project record that is
+    gone: a live slug with no rel_path."""
+    return {"slug": slug, "rel_path": None, "position": 0, "active": False}
+
+
+def test_unpause_all_never_releases_an_item_it_cannot_validate():
+    selection = FakeSelectionClient(selection=[])
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq._unpause_all([_archived("s-archived"), _item("s-a", "2026/FF5/Alpha", 1)])
+
+    assert ("s-a", False) in admin.pause_calls
+    assert ("s-archived", False) not in admin.pause_calls, admin.pause_calls
+
+
+def test_an_archived_project_keeps_its_ignores_latch():
+    """The full SYNC-2 sequence: a folder is correctly latched paused after a
+    set_ignores timeout, an admin then archives the project, and the latch --
+    pruned against the VALID slugs only -- was erased, so the next sweep
+    released an unfiltered sendreceive folder (the L-3 outcome)."""
+    selection = FakeSelectionClient(selection=[])
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._ignores_unconfirmed = {"s-a"}
+
+    seq._update_known_selection([_archived("s-a")])
+    assert seq._ignores_unconfirmed == {"s-a"}
+
+    seq._unpause_all([_archived("s-a")])
+    assert admin.pause_calls == []
+
+    # ...and it still drains when the project leaves the selection entirely,
+    # which is what the pruning was written for.
+    seq._update_known_selection([])
+    assert seq._ignores_unconfirmed == set()
+
+
+# -- SYNC-8: a stop inside the startup verification ------------------------
+
+
+def test_a_stop_during_startup_verification_latches_the_folders_it_never_reached():
+    """Verification is one GET per folder at up to the read timeout each, so
+    a quit/sign-out/config-reload lands inside it routinely -- and both sweeps
+    that follow run over the WHOLE selection. Folders 2..N were never checked,
+    so they must not be released."""
+    items = [
+        _item("s-a", "2026/FF5/Alpha", 0),
+        _item("s-b", "2026/FF5/Bravo", 1),
+        _item("s-c", "2026/FF5/Charlie", 2),
+    ]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    def stop_after_the_first(folder_id):
+        admin.get_ignores_calls.append(folder_id)
+        seq._stop_event.set()   # the quit arrives mid-verification
+        return {"ignore": list(STIGNORE_LINES), "expanded": []}
+
+    admin.get_ignores = stop_after_the_first
+
+    seq._verify_startup_ignores(items)
+
+    assert admin.get_ignores_calls == ["s-a"]
+    assert seq._ignores_unconfirmed == {"s-b", "s-c"}
+
+    seq._unpause_all(items)
+    assert ("s-b", False) not in admin.pause_calls
+    assert ("s-c", False) not in admin.pause_calls
+
+
+def test_a_stop_before_the_verification_starts_latches_everything():
+    items = [_item("s-a", "2026/FF5/Alpha", 0), _item("s-b", "2026/FF5/Bravo", 1)]
+    selection = FakeSelectionClient(selection=items, cached=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._stop_event.set()
+
+    seq._verify_startup_ignores(items)
+
+    assert admin.get_ignores_calls == []
+    assert seq._ignores_unconfirmed == {"s-a", "s-b"}
 
 
 # -- expected_folder_slugs (AUDIT_2 L-6/UX-3 wiring) ------------------------

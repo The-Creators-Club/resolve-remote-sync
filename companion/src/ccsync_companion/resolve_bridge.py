@@ -933,6 +933,65 @@ def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
 
 BROLL_BIN_NAME = "B-Roll"
 
+# The video track a b-roll clip is appended to. EXPLICIT because
+# AppendToTimeline without a trackIndex obeys the timeline's destination-track
+# buttons: with the video destination toggled off (normal while an editor is
+# working on audio) it places NOTHING and reports no error, so "Send to
+# Resolve" said `Inserted A001 (240 frames)` over an unchanged timeline
+# (MED-4, 2026-08-11; music_worker.py:35-40 is where that landmine is written
+# down). `mediaType` is deliberately NOT sent with it, unlike music_worker's
+# audio-only place(): it would restrict the append to one stream, and a b-roll
+# clip arriving without its nat sound is the same silent wrongness in the
+# other direction.
+BROLL_TRACK_INDEX = 1
+
+# What an editor is told when Resolve accepted the append and the timeline did
+# not change. Names the cause, because the cause is a button they can see.
+NOTHING_PLACED_MESSAGE = (
+    "Resolve reported no error but nothing landed on the timeline — check the "
+    "destination track buttons (V1/A1) at the left of the timeline; with the "
+    "video destination off, an append is silently dropped."
+)
+
+
+def _video_track_count(timeline, track_index: int) -> Optional[int]:
+    """How many items are on that video track, or None if it cannot be read.
+
+    None is "cannot tell", and every caller treats that as "believe the API" --
+    the check below must never turn a successful insert into a failure message
+    just because a Resolve version answered this differently.
+    """
+    try:
+        items = timeline.GetItemListInTrack("video", track_index)
+    except Exception:
+        return None
+    try:
+        return len(items) if items is not None else None
+    except TypeError:
+        return None
+
+
+def _placement_landed(timeline, track_index: int, before: Optional[int], appended: Any) -> bool:
+    """Did the append actually put something on the timeline?
+
+    Two independent checks because neither is sufficient alone: a returned
+    item is not proof of placement (music_worker.py:42) and GetStart() is what
+    tells them apart, and a track whose item count did not grow means nothing
+    landed even when the API handed back an object.
+    """
+    item = appended[0] if isinstance(appended, (list, tuple)) and appended else None
+    if item is not None:
+        try:
+            start = item.GetStart()
+        except Exception:
+            start = None
+        if start is None:
+            return False
+    after = _video_track_count(timeline, track_index)
+    if before is None or after is None:
+        return True
+    return after > before
+
 
 def _find_or_create_bin(media_pool, root_folder, name: str):
     for sub in root_folder.GetSubFolderList() or []:
@@ -1006,11 +1065,17 @@ def _perform_insert_locked(local_path: str, in_frame: int, out_frame: int) -> di
                 return {"ok": False, "message": f"failed to import media at {local_path}"}
             media_pool_item = imported[0]
 
+        before = _video_track_count(timeline, BROLL_TRACK_INDEX)
         appended = media_pool.AppendToTimeline(
-            [{"mediaPoolItem": media_pool_item, "startFrame": in_frame, "endFrame": out_frame}]
+            [{"mediaPoolItem": media_pool_item,
+              "startFrame": in_frame,
+              "endFrame": out_frame,
+              "trackIndex": BROLL_TRACK_INDEX}]
         )
         if not appended:
             return {"ok": False, "message": "failed to append clip to timeline"}
+        if not _placement_landed(timeline, BROLL_TRACK_INDEX, before, appended):
+            return {"ok": False, "message": NOTHING_PLACED_MESSAGE}
 
         name = _safe_clip_name(media_pool_item)
         n_frames = out_frame - in_frame

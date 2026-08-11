@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 # [vendor] yt_dlp is imported inside the functions below, not here -- see
@@ -59,7 +60,14 @@ def format_selector(quality: str, prefer_avc: bool = True) -> str:
 
     With `prefer_avc`, AVC video + AAC audio are tried first so the merged file
     needs no re-encode at all. YouTube only serves AVC up to 1080p, so anything
-    above that falls through to VP9/AV1 and gets converted afterwards.
+    above that asks for the best stream there is and gets converted afterwards.
+
+    YTDL-4 (2026-08-11): the AVC alternatives are prepended ONLY at <=1080p.
+    yt-dlp takes the first *satisfiable* alternative, and
+    `[height<=2160][vcodec^=avc1]` is satisfied by the 1080p AVC stream nearly
+    every video has -- so 1440p/2160p/best used to download 1080p, report
+    success, and never reach ensure_edit_ready at all. Silent quality loss with
+    no error anywhere.
     """
     if quality == "audio":
         return "bestaudio[acodec^=mp4a]/bestaudio/best" if prefer_avc else "bestaudio/best"
@@ -67,7 +75,7 @@ def format_selector(quality: str, prefer_avc: bool = True) -> str:
     h = QUALITY_HEIGHTS.get(quality)
     hf = f"[height<={h}]" if h else ""
     generic = f"bestvideo{hf}+bestaudio/best{hf}"
-    if not prefer_avc:
+    if not prefer_avc or h is None or h > 1080:
         return generic
     return (f"bestvideo{hf}[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
             f"bestvideo{hf}[vcodec^=avc1]+bestaudio/{generic}")
@@ -168,15 +176,51 @@ def _tool(name: str, ffmpeg_location: str | None) -> str:
 
 
 def probe_streams(filepath: str, ffmpeg_location: str | None = None) -> dict:
-    """ffprobe a file into a dict (empty on any failure)."""
+    """ffprobe a file into a dict.
+
+    YTDL-22 (2026-08-11): a failure comes back as `{"_probe_error": why}`, not
+    as `{}`. An empty dict is indistinguishable from "this file has no video
+    stream", which ensure_edit_ready reads as "audio-only, nothing to fix" -- so
+    a container whose /opt/ffmpeg has no ffprobe delivered every VP9/Opus
+    download unconverted and silent, the exact Media-Offline-in-Resolve outcome
+    this module exists to prevent.
+    """
     cmd = [_tool("ffprobe", ffmpeg_location), "-v", "error",
            "-print_format", "json", "-show_streams", filepath]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True,
                              encoding="utf-8", errors="replace", **_NO_WINDOW)
+    except Exception as exc:  # noqa: BLE001
+        return {"_probe_error": f"{type(exc).__name__}: {exc}"}
+    if out.returncode != 0:
+        return {"_probe_error": (out.stderr or "").strip()[-300:] or
+                f"ffprobe exited {out.returncode}"}
+    try:
         return json.loads(out.stdout or "{}")
-    except Exception:  # noqa: BLE001
-        return {}
+    except ValueError as exc:
+        return {"_probe_error": f"unparseable ffprobe output: {exc}"}
+
+
+def _same_rate(a, b, tol: float = 0.01) -> bool:
+    """Are ffprobe's two frame-rate fields the same rate?
+
+    YTDL-23 (2026-08-11): compared as numbers, not as the raw strings ffprobe
+    prints. `24000/1001` vs `24/1` and `30000/1001` vs `2997/100` are the same
+    rate written differently; string-comparing them read as VFR and triggered a
+    full libx264 re-encode -- generation loss plus minutes of container CPU on a
+    file that was already fine. An unreadable or absent rate counts as "same":
+    the cost of a missed VFR fix is smaller than the cost of re-encoding
+    everything that fails to parse.
+    """
+    try:
+        fa, fb = Fraction(str(a)), Fraction(str(b))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return True
+    if fa == fb:
+        return True
+    if fa <= 0 or fb <= 0:
+        return True
+    return abs(float(fa) - float(fb)) <= tol * max(float(fa), float(fb))
 
 
 def _color_args(v: dict) -> list[str]:
@@ -212,41 +256,48 @@ def ensure_edit_ready(filepath: str, edit_codec: str = "h264",
     if edit_codec not in ("h264", "dnxhr") or not filepath or not os.path.exists(filepath):
         return filepath
 
-    streams = probe_streams(filepath, ffmpeg_location).get("streams") or []
+    probe = probe_streams(filepath, ffmpeg_location)
+    # YTDL-22 (2026-08-11): "ffprobe could not answer" is not "there is no video
+    # stream". Convert on suspicion instead of shipping a possibly-VP9 file, and
+    # treat a failure of that conversion as non-fatal below -- we never learned
+    # that it was needed.
+    probe_failed = bool(probe.get("_probe_error"))
+    streams = probe.get("streams") or []
     video = next((s for s in streams if s.get("codec_type") == "video"), None)
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
-    if video is None:
+    if video is None and not probe_failed:
         return filepath  # audio-only download; nothing to fix
 
-    vcodec = video.get("codec_name")
+    vcodec = video.get("codec_name") if video else None
     acodec = audio.get("codec_name") if audio else None
-    # A non-integer average frame rate means VFR timestamps, which Resolve also
+    # A varying average frame rate means VFR timestamps, which Resolve also
     # dislikes — re-encoding to CFR fixes it while we're here.
-    vfr = video.get("avg_frame_rate") != video.get("r_frame_rate")
+    vfr = bool(video) and not _same_rate(video.get("avg_frame_rate"),
+                                         video.get("r_frame_rate"))
 
     stem = str(Path(filepath).with_suffix(""))
     if edit_codec == "h264":
-        need_v = vcodec not in EDIT_SAFE_VCODECS or vfr
-        need_a = audio is not None and acodec not in EDIT_SAFE_ACODECS
+        need_v = probe_failed or vcodec not in EDIT_SAFE_VCODECS or vfr
+        need_a = probe_failed or (audio is not None and acodec not in EDIT_SAFE_ACODECS)
         if not need_v and not need_a:
             return filepath
         out_ext = ".mp4"
         vargs = (["-c:v", "libx264", "-preset", "medium", "-crf", "18",
                   "-profile:v", "high", "-pix_fmt", "yuv420p", "-fps_mode", "cfr"]
-                 + _color_args(video)) if need_v else ["-c:v", "copy"]
+                 + _color_args(video or {})) if need_v else ["-c:v", "copy"]
         aargs = ["-c:a", "aac", "-b:a", "320k"] if need_a else ["-c:a", "copy"]
         muxargs = ["-movflags", "+use_metadata_tags+faststart"]
         label = "H.264"
     else:
         out_ext = ".mov"
         vargs = (["-c:v", "dnxhd", "-profile:v", "dnxhr_hq", "-pix_fmt", "yuv422p",
-                  "-fps_mode", "cfr"] + _color_args(video))
+                  "-fps_mode", "cfr"] + _color_args(video or {}))
         aargs = ["-c:a", "pcm_s16le"]
         muxargs = ["-movflags", "+use_metadata_tags"]
         label = "DNxHR HQ"
 
     if on_status:
-        on_status(f"converting to {label} (was {vcodec}"
+        on_status(f"converting to {label} (was {vcodec or 'unprobeable'}"
                   + (f"/{acodec}" if acodec else "") + ")")
 
     tmp = f"{stem}.editready{out_ext}"
@@ -263,6 +314,15 @@ def ensure_edit_ready(filepath: str, edit_codec: str = "h264",
             os.remove(tmp)
         except OSError:
             pass
+        if probe_failed:
+            # YTDL-22 (2026-08-11): this conversion was a guess (ffprobe never
+            # said the file needed one, and an audio-only download makes
+            # `-map 0:v:0` fail outright). Losing the video over a guess is
+            # worse than delivering it as downloaded.
+            if on_status:
+                on_status("could not probe the codecs and the safety conversion "
+                          "failed; kept as downloaded")
+            return filepath
         raise RuntimeError("Edit-ready conversion failed: "
                            + (res.stderr or "").strip()[-500:])
 
@@ -321,6 +381,42 @@ def _write_sidecar(info: dict, filepath: str) -> str:
     return sidecar
 
 
+# Extensions the post-merge guess below will try, when yt-dlp told us nothing.
+_GUESS_EXTS = (".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".mov", ".opus", ".aac")
+
+
+def _final_filepath(ydl, info: dict) -> str | None:
+    """Where the download actually landed, or None if it did not.
+
+    YTDL-15 (2026-08-11): `requested_downloads[0]['filepath']` is what yt-dlp
+    records AFTER merging and post-processing; prepare_filename only predicts a
+    name, and its five-extension guess list quietly returned a path that does
+    not exist (or None) for anything else. The worker then recorded the video as
+    downloaded and wrote a ledger row pointing at nothing -- a row that flags
+    the clip "already in the fleet" forever and is fixable only by hand-editing
+    ytdl.db. **None means the video failed**; a path always exists on disk.
+    """
+    for d in (info.get("requested_downloads") or []):
+        p = d.get("filepath") or d.get("_filename")
+        if p and os.path.exists(p):
+            return p
+
+    try:
+        guess = ydl.prepare_filename(info)
+    except Exception:  # noqa: BLE001
+        return None
+    if not guess:
+        return None
+    if os.path.exists(guess):
+        return guess
+    # After a merge/convert the extension differs from the predicted one.
+    stem = str(Path(guess).with_suffix(""))
+    for ext in _GUESS_EXTS:
+        if os.path.exists(stem + ext):
+            return stem + ext
+    return None
+
+
 def download(url: str, outdir: str, quality: str = "best",
              container: str = "mp4", progress_hook=None,
              ffmpeg_location: str | None = None,
@@ -344,19 +440,7 @@ def download(url: str, outdir: str, quality: str = "best",
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        # For a single video, resolve the final output path.
-        filepath = None
-        try:
-            filepath = ydl.prepare_filename(info)
-            # after merge/convert the ext may differ; find actual file
-            if not os.path.exists(filepath):
-                stem = str(Path(filepath).with_suffix(""))
-                for ext in (".mp4", ".mkv", ".webm", ".m4a", ".mp3"):
-                    if os.path.exists(stem + ext):
-                        filepath = stem + ext
-                        break
-        except Exception:
-            pass
+        filepath = _final_filepath(ydl, info)
 
     if filepath and quality != "audio":
         filepath = ensure_edit_ready(filepath, edit_codec, ffmpeg_location, on_status)

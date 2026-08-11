@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ccsync_dashboard import auth
+from ccsync_dashboard import db as dbmod
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
@@ -16,6 +17,14 @@ SECRET = "test-secret"
 def as_user(client, user):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, user))
     return client
+
+
+def known_editors(client) -> set[str]:
+    conn = dbmod.connect(client.app.state.settings.db_path)
+    try:
+        return {r[0] for r in conn.execute("SELECT editor_username FROM known_editors")}
+    finally:
+        conn.close()
 
 
 @pytest.fixture
@@ -370,7 +379,9 @@ def test_partial_set_password_end_to_end(env):
 
 def test_partial_approve_device_end_to_end(env):
     client, _truenas, syncthing = env
-    new_id = "NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1"
+    # A real device ID is base32 minus 0/1/8/9 -- the partial shape-checks it
+    # the same way the JSON API twin does (DASH-1).
+    new_id = "NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX"
     syncthing.state["pending_devices"] = {new_id: {"name": "", "address": "100.9.9.9:22000"}}
     as_user(client, "alex")
     resp = client.post("/partials/admin/users/approve",
@@ -378,6 +389,65 @@ def test_partial_approve_device_end_to_end(env):
     assert resp.status_code == 200
     added = next(d for d in syncthing.state["devices"] if d["deviceID"] == new_id)
     assert added["name"] == "newbie"
+    # An admin naming the device is the strongest evidence 'newbie' is a real
+    # editor account; without the row enforce reads the device as UNMAPPED and
+    # shares it nothing (B16 / DASH-2).
+    assert "newbie" in known_editors(client)
+
+
+def test_partial_approve_shape_checks_the_device_id(env):
+    """DASH-1: the partial is the only approve path a human uses, and it passed
+    the pasted ID straight through -- a truncated paste came back as a generic
+    Syncthing 502, and a well-formed-but-lowercased one created a device that
+    can never connect."""
+    client, _truenas, syncthing = env
+    as_user(client, "alex")
+    before = list(syncthing.state["devices"])
+
+    resp = client.post("/partials/admin/users/approve",
+                       data={"device_id": "NEWDEVX-NEWDEVX", "username": "newbie"})
+    assert resp.status_code == 200
+    assert "is not a Syncthing device ID" in resp.text
+    assert syncthing.state["devices"] == before          # nothing reached Syncthing
+    assert "newbie" not in known_editors(client)
+
+    # ...and a lowercased-but-valid paste is uppercased rather than refused,
+    # exactly as normalize_device_id does for the JSON API.
+    lower = "newdevx-newdevx-newdevx-newdevx-newdevx-newdevx-newdevx-newdevx"
+    resp = client.post("/partials/admin/users/approve",
+                       data={"device_id": lower, "username": "newbie"})
+    assert resp.status_code == 200
+    added = next(d for d in syncthing.state["devices"] if d["deviceID"] == lower.upper())
+    assert added["name"] == "newbie"
+
+
+def test_partial_create_user_records_the_known_editor(env):
+    """DASH-2: the api.py twin has recorded the account since the B16 fix; the
+    htmx partial the Users page actually posts to did not, so an editor created
+    through the UI got no known_editors row and enforce never shared them
+    anything."""
+    client, truenas, _syncthing = env
+    as_user(client, "alex")
+    # (the live collector seeds its own known editors off the fake Syncthing
+    # config in the background, so only 'newbie' is asserted on here)
+    assert "newbie" not in known_editors(client)
+    resp = client.post("/partials/admin/users/create", data={
+        "username": "newbie",
+        "ssh_pubkey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA newbie@laptop",
+    })
+    assert resp.status_code == 200
+    assert any(u["username"] == "newbie" for u in truenas.state["users"])
+    assert "newbie" in known_editors(client)
+
+
+def test_partial_create_user_records_nothing_when_truenas_refuses(env):
+    client, _truenas, _syncthing = env
+    as_user(client, "alex")
+    resp = client.post("/partials/admin/users/create", data={
+        "username": "newbie", "ssh_pubkey": "not a key at all",
+    })
+    assert resp.status_code == 200
+    assert "newbie" not in known_editors(client)
 
 
 def test_truenas_not_configured_is_read_only(tmp_path, syncthing):

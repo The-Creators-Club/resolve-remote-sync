@@ -72,10 +72,20 @@ def token_ok(configured: str, presented: str) -> bool:
     `==` on a secret leaks its length and its matching prefix through timing.
     The dashboard is LAN/tailnet-only, so this was never the day's biggest
     problem -- but every token check in this codebase goes through here now so
-    the next one can't be written the naive way."""
+    the next one can't be written the naive way.
+
+    Compared as BYTES: Starlette decodes header values latin-1, and
+    hmac.compare_digest raises TypeError on a str containing any character
+    above U+007F -- so a junk `X-CCSync-Token` with one non-ASCII byte turned
+    an unauthenticated request into a 500 and a traceback instead of a 401
+    (KNOWN_BUGS DASH-5, 2026-08-11)."""
     if not configured or not presented:
         return False
-    return hmac.compare_digest(str(configured), str(presented))
+    try:
+        return hmac.compare_digest(str(configured).encode("utf-8", "surrogateescape"),
+                                   str(presented).encode("utf-8", "surrogateescape"))
+    except (TypeError, ValueError, UnicodeError):
+        return False
 
 
 def get_conn(request: Request) -> Iterator[sqlite3.Connection]:

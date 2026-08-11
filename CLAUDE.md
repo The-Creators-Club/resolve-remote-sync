@@ -137,7 +137,7 @@ of these run **on a Mac**, and until they do, Mac editors stay on their old buil
 
 ```bash
 git pull && ./tools/release_macos.sh --publish --make-current   # macOS companion
-./tools/build_onboard_macos.sh --publish                        # macOS wizard (installer ≥ 1.0.17)
+./tools/build_onboard_macos.sh --publish --make-current         # macOS wizard (installer ≥ 1.0.17)
 ```
 
 Full runbook, including what each version number means and how to roll back:

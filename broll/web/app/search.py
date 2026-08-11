@@ -351,24 +351,50 @@ def build_category_clause(category: str | None) -> tuple[str, list[Any]]:
     return " AND (v.category = ? OR v.category LIKE ? || '/%')", [category, category]
 
 
+def _like_escape(text: str) -> str:
+    """Escape a literal for a LIKE pattern using ESCAPE '\\'.
+
+    `_` matters as much as `%` here: it is a single-character wildcard and this
+    archive's folder names are full of underscores, so an unescaped one silently
+    widens the match.
+    """
+    return text.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
+
+
 def build_shoot_clause(shoot: str | None) -> tuple[str, list[Any]]:
     """Select a Creators_Club shoot folder: `<share>` or `<share>::<Day / Cam>`.
 
     Own footage is browsed by where it was shot, not by subject, because it is
-    deliberately not model-indexed and has no subject to browse by. The path
-    prefix is matched with LIKE rather than reconstructed, since the `Proxy`
-    component folded out of the label still sits in the stored rel_path.
+    deliberately not model-indexed and has no subject to browse by.
+
+    Matched on DIRECTORY BOUNDARIES, like build_path_clause below. It used to
+    join the components with `%`, i.e. "any rel_path containing these in order",
+    which is not what the sidebar counted: _shoot_tree counts by exact rel_path
+    components, so a node could promise N and a click return more (BROLL-9,
+    2026-08-11) -- and `Day 1` also dragged in `Day 10`.
+
+    The one thing a plain prefix cannot express is the `Proxy` component
+    _shoot_tree folds out of the label, which may sit anywhere in the stored
+    rel_path. So the prefix is offered with `Proxy/` reinserted at each position
+    it could have been folded from -- exact, and still no assumption about where
+    it sat. A trailing `Proxy/` (the usual shape, `Day 1/Fx3/Proxy/x.mov`) needs
+    no alternative: it already falls inside the prefix's own wildcard.
     """
     if not shoot:
         return "", []
     share, _, leaf = shoot.partition("::")
     if not leaf:
         return " AND v.share = ?", [share]
-    # `Day 1 / Fx3` -> rel_path starting `Day 1/Fx3/`, with an optional `Proxy/`
-    # anywhere after it. LIKE with the parts in order is enough and avoids
-    # assuming where the folded component sat.
-    like = "%".join(p.replace("%", r"\%") for p in leaf.split(" / "))
-    return " AND v.share = ? AND v.rel_path LIKE ? ESCAPE '\\'", [share, f"{like}%"]
+    parts = [_like_escape(p) for p in leaf.split(" / ") if p]
+    if not parts:
+        return " AND v.share = ?", [share]
+    prefixes = ["/".join(parts)]
+    prefixes += ["/".join([*parts[:i], "Proxy", *parts[i:]]) for i in range(len(parts))]
+    ors = " OR ".join("v.rel_path LIKE ? ESCAPE '\\'" for _ in prefixes)
+    return (
+        f" AND v.share = ? AND ({ors})",
+        [share, *[f"{p}/%" for p in prefixes]],
+    )
 
 
 def build_path_clause(path: str | None) -> tuple[str, list[Any]]:
@@ -393,7 +419,7 @@ def build_path_clause(path: str | None) -> tuple[str, list[Any]]:
     prefix = prefix.strip("/")
     if not prefix:
         return " AND v.share = ?", [share]
-    escaped = prefix.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
+    escaped = _like_escape(prefix)
     return (
         " AND v.share = ? AND v.rel_path LIKE ? ESCAPE '\\'",
         [share, f"{escaped}/%"],
@@ -904,6 +930,17 @@ def _fill_semantic_meta(
             )
 
 
+# Which rows browsing can reach at all, as a bare `v.`-qualified SQL fragment.
+# Named rather than inlined because /api/tree has to count the SAME rows for a
+# folder's badge: a root that promised `status='indexed'` only and then returned
+# everything browsable read N and delivered N + the discovered/probed/proxied/
+# error rows (BROLL-10, 2026-08-11). A count that disagrees with the click is
+# worse than no count -- see get_tree's own docstring.
+BROWSE_PREDICATE = (
+    "v.status != 'skipped' AND v.status != 'excluded' AND v.duplicate_of IS NULL"
+)
+
+
 def _browse(
     conn: sqlite3.Connection,
     cat_clause: str,
@@ -928,9 +965,7 @@ def _browse(
     surfaced any of these anyway: with no segments and no transcript they
     cannot match, so this only aligns browse with what search could already
     see."""
-    where = ("v.status != 'skipped' AND v.status != 'excluded' "
-             "AND v.duplicate_of IS NULL"
-             + cat_clause + flags_clause)
+    where = BROWSE_PREDICATE + cat_clause + flags_clause
     base_params = [*cat_params, *flags_params]
 
     count_sql = f"SELECT COUNT(*) FROM videos v WHERE {where}"

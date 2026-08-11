@@ -502,3 +502,75 @@ def test_a_real_checkout_still_satisfies_the_contract_the_fake_models(tmp_path,
         as_user(c)
         assert c.get("/ytdl/").status_code == 200
         assert c.get("/ytdl/docs").status_code == 404
+
+
+def test_the_bare_prefix_redirects_into_the_mount(tmp_path, ytdl_env):
+    """`/ytdl` (no trailing slash) -> `/ytdl/` is LOAD-BEARING, the same way
+    `/music`'s is: Starlette only serves the mount from the slashed form, and
+    the bare form is what anyone types by hand. Pinned on ytdl/web's side only
+    under a plain mount with neither gate (docs/youtube_dlp_bugs.md YTDL-43,
+    2026-08-11); this is the authenticated, both-gates-in-place pin."""
+    app = _app(tmp_path)
+    with TestClient(app) as c:
+        as_user(c)
+        r = c.get("/ytdl", follow_redirects=False)
+        assert r.status_code in (307, 308), r.status_code
+        assert r.headers["location"].endswith("/ytdl/")
+        # ...and following it really lands in the sub-app
+        assert "YOUTUBE DOWNLOADER" in c.get("/ytdl").text
+
+
+def test_ytdlwebs_project_query_runs_against_the_real_dashboard_schema(tmp_path):
+    """ytdl/web/tests/conftest.py hand-copies the projects/selections DDL
+    ("copied rather than imported"), so a dashboard column rename would keep
+    every ytdl test green while production degraded to "no project list"
+    (docs/youtube_dlp_bugs.md YTDL-44, 2026-08-11). This side owns the schema,
+    so this side proves the ytdl query still runs against it -- no ytdlweb
+    import needed beyond the query module, which is dependency-free.
+    """
+    src = Path(__file__).resolve().parents[2] / "ytdl" / "web"
+    if not (src / "ytdlweb" / "projects.py").is_file():
+        pytest.skip(f"no ytdl checkout beside this one at {src}")
+    sys.path.insert(0, str(src))
+    for name in [n for n in sys.modules if n == "ytdlweb" or n.startswith("ytdlweb.")]:
+        del sys.modules[name]
+    try:
+        from ytdlweb import projects as ytdl_projects
+    finally:
+        sys.path.remove(str(src))
+
+    from ccsync_dashboard import db
+
+    conn = db.connect(tmp_path / "dashboard.db")
+    try:
+        db.migrate(conn)
+        db.upsert_project(conn, "s-alpha", "2026/FF5/Alpha", "/data/Projects/Alpha", "t0")
+        db.upsert_project(conn, "s-old", "2025/Retired", "/data/Projects/Retired", "t0")
+        conn.execute("UPDATE projects SET active=0 WHERE slug='s-old'")
+        db.add_selection(conn, "jsmith", "s-alpha", "jsmith", "t0")
+        db.add_selection(conn, "jsmith", "s-old", "jsmith", "t0")
+        conn.commit()
+        rows = conn.execute(ytdl_projects._SQL, ("jsmith",)).fetchall()
+        # the retired project is dropped by the query's active=1 join
+        assert [(r[0], r[1]) for r in rows] == [("s-alpha", "2026/FF5/Alpha")]
+    finally:
+        conn.close()
+
+
+def test_the_identity_header_round_trips_a_latin1_name_and_withholds_a_cjk_one(
+        tmp_path, ytdl_env):
+    """The gate encodes the identity header latin-1 BECAUSE Starlette decodes
+    headers latin-1: UTF-8 turned `josé` into `josÃ©` on arrival, so that
+    editor's ticked projects matched nothing (docs/youtube_dlp_bugs.md
+    YTDL-29, 2026-08-11). A name beyond U+00FF has no lossless encoding and a
+    lossy one could collide two editors, so the gate withholds the header
+    entirely and the sub-app sees an anonymous request (the real ytdlweb
+    answers 401 to that; this suite's fake just echoes what arrived, so "no
+    header" is the assertable contract here) -- broken loudly for one person,
+    never quietly wrong."""
+    app = _app(tmp_path)
+    with TestClient(app) as c:
+        as_user(c, "josé")
+        assert c.get("/ytdl/api/me").json() == {"user": "josé"}
+        as_user(c, "小明")
+        assert c.get("/ytdl/api/me").json() == {"user": None}

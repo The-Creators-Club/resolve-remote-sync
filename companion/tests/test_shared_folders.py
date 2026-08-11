@@ -54,6 +54,12 @@ class FakeAdmin:
         self.calls.append(("ensure_versioning", folder_id))
         return False
 
+    def ensure_ignore_delete(self, folder_id, folder=None):
+        """Same no-write-when-already-set shape as the real one, so a healthy
+        folder still reconciles to "ok" (delete-protection, 2026-08-11)."""
+        self.calls.append(("ensure_ignore_delete", folder_id))
+        return (folder or {}).get("ignoreDelete") is not True
+
     def pending_folders(self):
         return self.pending
 
@@ -81,12 +87,13 @@ def test_healthy_folder_costs_no_config_writes(tmp_path):
     admin = FakeAdmin(
         folder={"id": LUTS_FOLDER_ID, "paused": False,
                 "path": shared_folders.local_path_for(tmp_path, "Assets/Luts"),
-                "versioning": {"type": "staggered"}},
+                "versioning": {"type": "staggered"}, "ignoreDelete": True},
         ignores=list(ASSET_STIGNORE_LINES),
     )
     result = _manager(admin, tmp_path).reconcile()
     assert result[LUTS_FOLDER_ID] == "ok"
-    assert [c for c in admin.names() if c != "ensure_versioning"] == []
+    assert [c for c in admin.names()
+            if c not in ("ensure_versioning", "ensure_ignore_delete")] == []
 
 
 def test_accepts_the_servers_offer(tmp_path):
@@ -153,6 +160,37 @@ def test_a_folder_pointed_elsewhere_is_re_pointed(tmp_path):
     assert _manager(admin, tmp_path).reconcile()[LUTS_FOLDER_ID] == "repaired"
     want = shared_folders.local_path_for(tmp_path, "Assets/Luts")
     assert ("set_path", LUTS_FOLDER_ID, want) in admin.calls
+
+
+def test_a_folder_without_ignore_delete_gets_it(tmp_path):
+    """delete-protection (2026-08-11, docs/delete-protection-ignoredelete.md):
+    this library auto-shares to the whole fleet with no tick to opt out of, so
+    one editor deleting a LUT must not take it off the NAS and off every other
+    machine. Retrofit, reusing the config already fetched."""
+    admin = FakeAdmin(
+        folder={"id": LUTS_FOLDER_ID, "paused": False,
+                "path": shared_folders.local_path_for(tmp_path, "Assets/Luts"),
+                "versioning": {"type": "staggered"}},   # accepted before the flag existed
+        ignores=list(ASSET_STIGNORE_LINES),
+    )
+    assert _manager(admin, tmp_path).reconcile()[LUTS_FOLDER_ID] == "repaired"
+    assert ("ensure_ignore_delete", LUTS_FOLDER_ID) in admin.calls
+
+
+def test_a_failing_ignore_delete_never_stops_the_reconcile(tmp_path):
+    """Delete protection is a policy retrofit, not a lane-direction rule: a
+    folder whose PATCH fails must still be released, ignores permitting."""
+    class Failing(FakeAdmin):
+        def ensure_ignore_delete(self, folder_id, folder=None):
+            raise RuntimeError("config write timed out")
+
+    admin = Failing(
+        folder={"id": LUTS_FOLDER_ID, "paused": True,
+                "path": shared_folders.local_path_for(tmp_path, "Assets/Luts")},
+        ignores=list(ASSET_STIGNORE_LINES),
+    )
+    assert _manager(admin, tmp_path).reconcile()[LUTS_FOLDER_ID] == "repaired"
+    assert ("set_paused", LUTS_FOLDER_ID, False) in admin.calls
 
 
 def test_reconcile_never_raises(tmp_path):

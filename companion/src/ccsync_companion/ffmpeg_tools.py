@@ -511,6 +511,13 @@ def own_proxy_cmd(
     cmd = [
         ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error", "-nostats",
         "-i", str(src),
+        # ffmpeg's DEFAULT stream selection takes exactly one video and one
+        # audio stream, and camera originals in this tree routinely carry two
+        # or more (Sony/Canon MXF dual pairs, dual-system, .mts): without this
+        # the editor cuts on a proxy whose scratch/lav track simply is not
+        # there, and it reappears only on the original (MED-1, 2026-08-11).
+        # `0:a?` rather than `0:a` because a silent original must still encode.
+        "-map", "0:v:0", "-map", "0:a?",
         # Carry the source's metadata (creation time, camera tags, reel name)
         # into the proxy: Resolve reads several of them when matching a proxy
         # to its original, and losing them costs nothing to avoid.
@@ -521,7 +528,11 @@ def own_proxy_cmd(
     cmd += [
         # Never upscale: a 720p source should stay 720p rather than being
         # inflated to the proxy height, which costs bytes and adds nothing.
-        "-vf", f"scale=-2:'min({max_height},ih)'",
+        # trunc(.../2)*2 because -2 only guarantees the WIDTH is even: an
+        # odd-height source (RGB/4:4:4 screen capture, ffv1/utvideo) passed its
+        # height straight through and died at encoder init, which the failure
+        # cap then made permanent (MED-12, 2026-08-11).
+        "-vf", f"scale=-2:'trunc(min({max_height},ih)/2)*2'",
         *video_codec,
         # QuickTime and Resolve refuse HEVC-in-mp4 tagged with the default
         # `hev1`; `hvc1` is the tag both accept. Without it the file plays in
@@ -587,7 +598,13 @@ def preview_proxy_cmd(
         "-i", str(src),
         # Never upscale: a 360p source should stay 360p rather than being
         # inflated to the proxy height, which costs bytes and adds nothing.
-        "-vf", f"scale=-2:'min({height},ih)'",
+        # The even-height trunc is the ONE thing in this argv that is not
+        # byte-identical to the b-roll indexer's build_proxy: -2 guards the
+        # width only, and an odd-height source fails at encoder init (MED-12,
+        # 2026-08-11). The indexer needs the same edit for parity; until it
+        # gets one the two differ on odd-height sources ONLY, where the
+        # indexer's version does not encode at all.
+        "-vf", f"scale=-2:'trunc(min({height},ih)/2)*2'",
         *video_codec,
         "-c:a", "aac", "-b:a", PROXY_AUDIO_BITRATE,
         "-movflags", "+faststart",

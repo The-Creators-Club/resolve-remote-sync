@@ -156,9 +156,53 @@ PREDECESSOR_WAIT_SECONDS = 20.0
 PREDECESSOR_POLL_SECONDS = 0.25
 
 
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_ACCESS_DENIED = 5
+_STILL_ACTIVE = 259
+
+
+def _pid_is_alive_win32(pid: int) -> bool:
+    """SYNC-9 (2026-08-11): os.kill(pid, 0) is NOT a liveness probe on
+    Windows. CPython's posixmodule maps any signal other than
+    CTRL_C/CTRL_BREAK_EVENT to TerminateProcess(handle, sig) -- so it would
+    KILL the pid it was asked about (with exit code 0), and for a pid that is
+    already gone OpenProcess fails and the OSError arm below reads "alive".
+    Wrong in both directions. A frozen build reaches this only through the
+    CreateMutexW-unavailable fallback, which is why it went unnoticed."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # Access denied means it exists and belongs to someone else -- the
+        # same answer the posix PermissionError arm gives.
+        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True  # can't tell -- assume alive, i.e. fail safe
+        # A process that genuinely exited with 259 reads as alive; the cost is
+        # one 20 s predecessor wait, versus killing a live companion.
+        return code.value == _STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        try:
+            return _pid_is_alive_win32(pid)
+        except Exception:
+            log.debug("single-instance: could not probe pid %s", pid, exc_info=True)
+            return True  # can't tell -- assume alive, i.e. fail safe
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1585,6 +1629,20 @@ class CompanionApp:
                 "CCSync isn't fully set up on this machine yet, so nothing can be copied in. "
                 "Tray → Copy diagnostics for your admin.", "ccsync-companion")
             return
+        if self._root_absent or self._local_root_is_broken():
+            # SYNC-6 (2026-08-11): the fourth gate, missing here while both
+            # sibling copy-and-relink entry points had it (scan_whole_project).
+            # _root_absent is invisible to a config_problems check --
+            # _demote_removable_root_problem strips it at startup -- so with an
+            # external SSD unplugged fixer.fix_clip (which refuses only a BLANK
+            # local_root) would mkdir the tree onto the boot volume, copy the
+            # originals there and relink Resolve to canonical P:\... paths that
+            # lane A then correctly refuses to upload.
+            log.warning("consolidate refused: the sync drive is disconnected or misconfigured")
+            self._notify_tray(
+                "Your Creators Club drive is disconnected, so CCSync can't copy media in. "
+                "Plug it back in and try again.", "ccsync-companion")
+            return
         if not self._consolidate_lock.acquire(blocking=False):
             self._notify_tray("Already copying a project's media in. Let it finish.",
                               "ccsync-companion")
@@ -1759,6 +1817,10 @@ class CompanionApp:
                 f"{skipped_part}, {len(failures)} failed. "
                 f"Tray → Copy diagnostics for your admin.",
                 "ccsync-companion")
+            # SYNC-12 (2026-08-11): this branch fell through to the
+            # "Copy & upload finished" toast below, so the editor read the
+            # failure report and then, a beat later, an unqualified success.
+            return
         elif window.should_stop():
             done = len(results) - len(skipped)
             # Same tolerance as `control` above: an older window double has
@@ -2198,6 +2260,17 @@ class CompanionApp:
             return False, "not in managed mode"
         if self.effective_mode() == "base":
             return False, "refusing on the base rig: its tree IS the server tree"
+        if self._root_absent:
+            # SYNC-13 (2026-08-11): with the drive merely unplugged the steps
+            # below all "succeed" -- untick, unshare, then target.exists() is
+            # False and the editor is told the folder was already gone. The
+            # multi-GB copy is still on the SSD, now unticked and unshared so
+            # nothing will ever reclaim it, while they believe the space is
+            # back.
+            return False, (
+                "your Creators Club drive is disconnected, so nothing was removed. "
+                "Plug it back in and try again."
+            )
         rel = next((p["rel"] for p in self.removable_projects() if p["slug"] == slug), None)
         if rel is None:
             return False, "that project is not selected on this machine"
@@ -2298,6 +2371,16 @@ class CompanionApp:
         mode. Extracted from start() so on_signed_in() can (re)run it once a
         require_login gate clears, without repeating the reporter/manifest/
         watcher startup that only ever needs to happen once."""
+        if self._paused:
+            # SYNC-3 (2026-08-11): sign-in must not override the tray's Pause.
+            # on_signed_in() gated on _lanes_started and the login gate only,
+            # so signing in with "Pause syncing" ticked resumed the full
+            # rotation AND express uploads while the checkbox still rendered
+            # checked. Every other restart entry point already refuses
+            # (_root_resume_lanes at the top); this makes the refusal belong
+            # to _start_lanes() itself so no future caller can miss it.
+            log.info("sync lanes/sequencer NOT started: syncing is paused from the tray")
+            return
         if self.config_problems:
             # validate_config()'s "errors that STOP syncing" used to stop
             # nothing: they were logged and then start() ran anyway. A typo'd
@@ -2391,6 +2474,17 @@ class CompanionApp:
                 self._lane_a.stop()
             except Exception:
                 log.exception("failed to stop lane %s", getattr(self._lane_a, "name", self._lane_a))
+            # SYNC-1 (2026-08-11): lane B was never stopped in managed mode --
+            # and RcloneLane.stop() is the ONLY path to _kill_running_process().
+            # sequencer.stop() joins its worker with timeout=10 and returns
+            # while it may still be inside lane_b.run_once(); on Windows the
+            # rclone child outlives the parent, so a self-upgrade left the old
+            # delete-authorised `rclone sync` racing the new process's lane B
+            # over one destination (AUDIT_2 L-12/C-7).
+            try:
+                self._lane_b.stop()
+            except Exception:
+                log.exception("failed to stop lane %s", getattr(self._lane_b, "name", self._lane_b))
         else:
             for lane in self.lanes:
                 try:
@@ -3148,18 +3242,35 @@ class CompanionApp:
         preview = "\n".join(f"  • {s['name']}" for s in strays[:12])
         if len(strays) > 12:
             preview += f"\n  … and {len(strays) - 12} more"
-        confirmed = popup.confirm_dialog(
-            "Share these LUTs with the team?",
-            f"{len(strays)} LUT(s) on this machine ({total_mb:.1f} MB) are not in the shared "
-            f"library.\n\nCopying them to {library} puts them on every editor's machine. "
-            f"Your own copies stay where they are.\n\n{preview}",
-            ok_label="SHARE",
-        )
-        if not confirmed:
+        # SYNC-5 (2026-08-11): this was the ONE confirm_dialog site in the
+        # companion that built a Tk root without the lock -- the sibling-root
+        # condition that wedges the Tcl interpreter when a watcher out-of-tree
+        # popup is already up (AUDIT_2 CORE-M3/H8). The adopt() is inside it
+        # too: without the lock apply_upgrade's `_popup_active_lock.locked()`
+        # guard saw nothing, so a self-upgrade could request_shutdown()
+        # mid-copy and leave a truncated LUT under a final name -- which lane
+        # A then publishes fleet-wide.
+        if not self._popup_active_lock.acquire(blocking=False):
+            log.info("share LUTs: another CCSync window is open -- not opening a second")
+            self._notify_tray(
+                "Another CCSync window is open. Close it and try sharing again.",
+                "ccsync-companion")
             return
-        result = self._lut_links.adopt(strays)
-        with self._lut_lock:
-            self._stray_luts = self._lut_links.find_strays()
+        try:
+            confirmed = popup.confirm_dialog(
+                "Share these LUTs with the team?",
+                f"{len(strays)} LUT(s) on this machine ({total_mb:.1f} MB) are not in the shared "
+                f"library.\n\nCopying them to {library} puts them on every editor's machine. "
+                f"Your own copies stay where they are.\n\n{preview}",
+                ok_label="SHARE",
+            )
+            if not confirmed:
+                return
+            result = self._lut_links.adopt(strays)
+            with self._lut_lock:
+                self._stray_luts = self._lut_links.find_strays()
+        finally:
+            self._popup_active_lock.release()
         errors = result.get("errors") or []
         message = f"Shared {result.get('copied', 0)} LUT(s) with the team."
         if errors:

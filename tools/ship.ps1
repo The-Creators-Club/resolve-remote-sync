@@ -10,18 +10,27 @@
 
       0. GATES      secrets present, working tree clean (a +dirty build must
          not reach the fleet -- docs/RELEASE.md), this companion version not
-         already published, and the server/ suite green. release.ps1 in step
-         2 runs the companion and dashboard suites but NOT server/ -- which
-         is the code step 1 executes against the live NAS.
+         already published, and the server/ + onboarding/ suites green.
+         server/ is the code step 1 executes against the live NAS; the
+         companion and dashboard suites run in step 2a, inside release.ps1.
       1. DASHBOARD  python server\install_dashboard_app.py  (code-only
          deploy; compose-level changes still need --recreate by hand),
-         then confirms /api/v1/health reports the repo's dashboard VERSION.
-      2. PUBLISH    installer\build_editor_package.ps1 -RebuildExe
-         -RebuildOnboard -Publish -MakeCurrent  (prompts once for your
-         dashboard admin password), then an ADVISORY check of the macOS
-         companion channel -- that binary can only be built on a Mac
-         (tools/release_macos.sh), so it goes stale silently otherwise.
-         Warning only; it never gates the local upgrade.
+         then POLLS /api/v1/health until it reports the repo's dashboard
+         VERSION (a cold restart can take longer than one check).
+      2. PUBLISH    tools\release.ps1 first -- version parity, the editable
+         install (without which build.spec's import probe silently drops the
+         tray), the COMPANION AND DASHBOARD SUITES, PyInstaller, and the
+         provenance manifest -- and only then
+         installer\build_editor_package.ps1 -RebuildOnboard -Publish
+         -MakeCurrent to package and publish that exact artifact (prompts
+         once for your dashboard admin password). Deliberately WITHOUT
+         -RebuildExe: it would rebuild the exe untested and restamp the
+         manifest tests_run=false, which is how ship published a companion
+         to the whole fleet with the companion suite never executed (OPS-1).
+         Then an ADVISORY check of the macOS companion channel -- that binary
+         can only be built on a Mac (tools/release_macos.sh), so it goes
+         stale silently otherwise. Warning only; it never gates the local
+         upgrade.
       3. LOCAL      installer\windows_upgrade.ps1 with the exe just built,
          then tools\check_deploy_drift.ps1.
 
@@ -39,8 +48,11 @@
     Do steps 1-2 but leave this machine's companion alone.
 
 .PARAMETER SkipTests
-    Skip the server/ suite in step 0. release.ps1's own -SkipTests is
-    separate and is not implied by this.
+    Skip the server/ + onboarding/ suites in step 0. release.ps1's own
+    -SkipTests is separate and is deliberately NOT implied by this: step 2a
+    runs the companion and dashboard suites either way, because publishing an
+    untested companion as CURRENT to the whole fleet is the failure this
+    script exists to prevent (OPS-1).
 
 .PARAMETER AllowDirty
     Publish from a dirty working tree. The build is stamped +dirty and
@@ -155,9 +167,13 @@ if (-not $DashboardOnly) {
 }
 
 # --- 0. the suite that guards what step 1 is about to do --------------------
-# release.ps1 (step 2) runs the companion and dashboard suites, so those are
-# covered -- but it does not run server/, and server/ is the code step 1
-# EXECUTES against the live NAS. That gap is not theoretical: the 2026-08-10
+# Step 2a runs release.ps1, which runs the companion and dashboard suites, so
+# those are covered -- but it does not run server/, and server/ is the code
+# step 1 EXECUTES against the live NAS. (Until 2026-08-11 this comment was
+# wrong in a way that mattered: step 2 went straight to
+# build_editor_package.ps1 -RebuildExe, which runs PyInstaller and NO tests, so
+# ship published a companion as CURRENT with the companion suite never
+# executed -- OPS-1.) That gap is not theoretical: the 2026-08-10
 # music deploy died inside install_dashboard_app.py's ffmpeg step, and the
 # tests that would now catch its failure modes are in server/tests. It borrows
 # the dashboard's venv (no venv of its own) -- see CLAUDE.md's test table.
@@ -180,11 +196,19 @@ if (-not $SkipTests) {
         # from git.exe (Git\cmd\git.exe -> Git\bin\bash.exe), NOT whatever `bash`
         # resolves to on PATH: on a machine with WSL that is System32\bash.exe,
         # whose filesystem view makes every path here wrong.
+        # Two candidates, because WHERE git.exe resolves from depends on who
+        # started this shell: Git\cmd\git.exe from a normal window, but
+        # Git\mingw64\bin\git.exe when PowerShell was launched from a Git Bash
+        # (measured 2026-08-11). Only the first was tried, so in the second
+        # case the 18 tests silently went back to SKIPping.
         $bashExe = ""
         $gitCmd = (Get-Command git -ErrorAction SilentlyContinue).Source
         if ($gitCmd) {
-            $candidate = Join-Path (Split-Path -Parent (Split-Path -Parent $gitCmd)) "bin\bash.exe"
-            if (Test-Path $candidate) { $bashExe = $candidate }
+            $gitBase = Split-Path -Parent (Split-Path -Parent $gitCmd)
+            foreach ($candidate in @((Join-Path $gitBase "bin\bash.exe"),
+                                     (Join-Path (Split-Path -Parent $gitBase) "bin\bash.exe"))) {
+                if ($candidate -and (Test-Path $candidate)) { $bashExe = $candidate; break }
+            }
         }
         if ($bashExe) {
             $bashServer = ConvertTo-BashPath (Join-Path $RepoRoot "server")
@@ -241,19 +265,36 @@ if ($LASTEXITCODE -ne 0) {
     Write-Fail "install_dashboard_app.py exited $LASTEXITCODE -- stopping"
     exit 1
 }
-Start-Sleep -Seconds 8
+# POLL, don't peek (OPS-10). This was a fixed 8 s sleep plus a single check,
+# and the container legitimately takes longer than that to answer: the venv
+# revalidation in run.sh, a cold pool, a container that had to pull. Compose
+# allows a 120 s start_period for exactly this reason -- so a one-shot read at
+# 8 s turned a good deploy into "investigate before continuing" and aborted
+# before the companion was ever published. First good answer wins; the ceiling
+# is only reached when something is actually wrong.
+$deadline = (Get-Date).AddSeconds(90)
 $live = ""
-try {
-    $health = Invoke-CurlWithToken -Uri "http://192.168.0.102:8480/api/v1/health" `
-        -Token $env:DASH_REPORT_TOKEN | ConvertFrom-Json
-    $live = "$($health.version)"
+$reported = $false
+while ($true) {
+    Start-Sleep -Seconds 3
+    try {
+        $health = Invoke-CurlWithToken -Uri "http://192.168.0.102:8480/api/v1/health" `
+            -Token $env:DASH_REPORT_TOKEN | ConvertFrom-Json
+        $live = "$($health.version)"
+    }
+    catch { $live = "" }
+    if ($live -eq $DashVersion) { break }
+    if ((Get-Date) -ge $deadline) { break }
+    if (-not $reported) {
+        Write-Step "waiting for the dashboard to come back up (up to 90s)..."
+        $reported = $true
+    }
 }
-catch {}
 if ($live -eq $DashVersion) {
     Write-Step "dashboard is LIVE at v$live"
 }
 else {
-    Write-Fail "dashboard /health says '$live', repo says '$DashVersion' -- investigate before continuing"
+    Write-Fail "dashboard /health says '$live', repo says '$DashVersion' after 90s -- investigate before continuing"
     exit 1
 }
 if ($DashboardOnly) {
@@ -261,17 +302,42 @@ if ($DashboardOnly) {
     exit 0
 }
 
-# --- 2. publish companion + installer --------------------------------------
+# --- 2a. build the companion THROUGH release.ps1 ----------------------------
+# OPS-1 (2026-08-11): this step used to be build_editor_package.ps1
+# -RebuildExe, which runs PyInstaller and NOTHING ELSE -- so THE ship command
+# built and published a companion to the whole fleet as CURRENT with the
+# companion suite never executed, and stamped the manifest tests_run=false to
+# say so. release.ps1 is the tested-build path: version parity across the five
+# copies of the two version numbers, `pip install -e .[dev,tray]` (without the
+# tray extra, build.spec's import probe silently drops pystray and the editor
+# gets a companion with no tray icon), the companion AND dashboard suites with
+# CCSYNC_REQUIRE_RCLONE=1, PyInstaller, and the provenance manifest that
+# windows_upgrade.ps1 and check_deploy_drift.ps1 read afterwards.
 Write-Host ""
-Write-Step "--- step 2: build + publish (password prompt is your DASHBOARD login) ---"
+Write-Step "--- step 2a: build companion (release.ps1: parity, editable install, companion + dashboard suites, PyInstaller, manifest) ---"
+$releaseArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\release.ps1")
+if ($AllowDirty) { $releaseArgs += "-AllowDirty" }
+& powershell @releaseArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Fail "release.ps1 exited $LASTEXITCODE -- nothing has been published; the dashboard deploy in step 1 stands"
+    exit 1
+}
+
+# --- 2b. package + publish the artifact release.ps1 just built --------------
+# NO -RebuildExe: the exe (and its manifest) came out of step 2a, and
+# rebuilding here would replace a tested build with an untested one and restamp
+# the manifest tests_run=false. -RebuildOnboard still runs, and must run AFTER
+# the companion build, because onboard.exe bundles the companion exe.
+Write-Host ""
+Write-Step "--- step 2b: package + publish (password prompt is your DASHBOARD login) ---"
 & powershell -NoProfile -ExecutionPolicy Bypass -File "installer\build_editor_package.ps1" `
-    -RebuildExe -RebuildOnboard -Publish -MakeCurrent
+    -RebuildOnboard -Publish -MakeCurrent
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "build_editor_package.ps1 exited $LASTEXITCODE -- stopping before the local upgrade"
     exit 1
 }
 
-# --- 2b. is the macOS companion channel keeping up? (advisory) --------------
+# --- 2c. is the macOS companion channel keeping up? (advisory) --------------
 # Nothing in this script can build it -- PyInstaller does not cross-compile, so
 # the Mac binary comes from tools/release_macos.sh run on the Mac. Without this
 # line the macOS channel goes stale in silence while every Windows ship reports
@@ -303,7 +369,10 @@ if ($macVersion) {
         Write-Step "macos companion channel is at v$macVersion -- level with this repo"
     }
     else {
-        Write-Host "[ship] WARNING: macos companion channel at v$macVersion (repo v$CompanionVersion) -- ON THE MAC: git pull && ./tools/release_macos.sh --publish --make-current  (and ./tools/build_onboard_macos.sh --publish for the wizard)" -ForegroundColor Yellow
+        # --make-current on BOTH (OPS-9): --publish alone uploads the build
+        # STAGED (MC=0), so Mac editors keep downloading the old zip and
+        # whoever ran it has no reason to think otherwise.
+        Write-Host "[ship] WARNING: macos companion channel at v$macVersion (repo v$CompanionVersion) -- ON THE MAC: git pull && ./tools/release_macos.sh --publish --make-current  (and ./tools/build_onboard_macos.sh --publish --make-current for the wizard)" -ForegroundColor Yellow
     }
 }
 elseif ($macHeaderText -match '\s404\s') {
@@ -324,7 +393,13 @@ Write-Step "--- step 3: upgrade this machine ---"
 & powershell -NoProfile -ExecutionPolicy Bypass -File "installer\windows_upgrade.ps1" `
     -CompanionExe "companion\dist\ccsync-companion.exe"
 if ($LASTEXITCODE -ne 0) {
-    Write-Fail "windows_upgrade.ps1 exited $LASTEXITCODE"
+    # A HARD STOP, and the message has to say what state the fleet is in
+    # (OPS-4): v$CompanionVersion is already published and CURRENT, so the
+    # editors take it while THIS machine is still running the previous build --
+    # the "verified against a build nobody was running" state the drift check
+    # exists to prevent.
+    Write-Fail "windows_upgrade.ps1 exited $LASTEXITCODE -- v$CompanionVersion is PUBLISHED and CURRENT for the fleet but is NOT installed here"
+    Write-Step "close whatever holds the exe (AV scan, Explorer preview) and re-run: installer\windows_upgrade.ps1 -CompanionExe companion\dist\ccsync-companion.exe"
     exit 1
 }
 & powershell -NoProfile -ExecutionPolicy Bypass -File "tools\check_deploy_drift.ps1"

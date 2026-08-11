@@ -1260,6 +1260,10 @@ def build_down_command(
 # the tray "Fatal error received - not attempting retries" with the real
 # reason buried in a log too long to read (2026-07-26).
 _FATAL_NOTICE = "fatal error received"
+# rclone's own level names for "this run is in trouble" (SYNC-11).
+_ERROR_LEVELS = ("error", "critical", "fatal")
+# The per-file line --backup-dir writes instead of a delete.
+_BACKUP_MOVE = "into backup dir"
 
 
 def _most_informative_error(errors: list) -> str:
@@ -1323,15 +1327,33 @@ class RcloneRunTally:
     def feed_record(self, record: dict) -> None:
         level = record.get("level", "")
         msg = record.get("msg", "")
-        if level == "error":
+        if level in _ERROR_LEVELS:
+            # SYNC-11 (2026-08-11): only level == "error" was recorded, so the
+            # `Failed to create file system for ...` shape -- which rclone logs
+            # at CRITICAL before exiting -- left `errors` empty. That blinded
+            # both _most_informative_error (which then returned "") and
+            # _is_max_delete_abort, whose whole job is reading these lines.
             self.error_count += 1
             self._errors.append(msg)
+        elif isinstance(record.get("stats"), dict):
+            # SYNC-10 (2026-08-11): a --stats tick's msg is the WHOLE run
+            # summary, and it carries "Deleted: N (files)" from the first
+            # deletion onwards -- so every tick was counted as one more
+            # transferred AND one more deleted file. A lane B pass that
+            # trashed 12 proxies over ten minutes reported ~300 deletions to
+            # the dashboard. Stats records describe the run, never a file.
+            return
         elif "Copied" in msg or "Moved" in msg or "Deleted" in msg:
             # Per-file records ("clip.mov: Copied (new)") only — the run-
             # summary stats line ("Transferred: 0 B / ...") must not count
             # as a file, which is why "Transferred" is NOT matched here.
             self.transferred += 1
-            if "Deleted" in msg:
+            if "Deleted" in msg or _BACKUP_MOVE in msg:
+                # --backup-dir does not delete, it moves aside ("clip.mov:
+                # Moved into backup dir") -- but from the destination's point
+                # of view the file is gone, and counting it as a completion
+                # put it in the dashboard's transfer HISTORY as if it had just
+                # arrived (SYNC-10).
                 self.deleted += 1
             else:
                 # "object" is the file path relative to the transfer root

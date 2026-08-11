@@ -44,8 +44,10 @@ import os
 import platform
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 log = logging.getLogger("ccsync.bpg")
 
@@ -60,6 +62,24 @@ WINDOWS_RESOLVE_EXE = r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resol
 # licence, a dialog, an install that has moved -- a tick-rate relaunch would
 # spawn Resolve every 15 seconds for as long as the gap exists.
 RELAUNCH_COOLDOWN_SECONDS = 1800
+
+# The CIM probe is a PowerShell spawn, and the gate asks on every 15 s tick for
+# as long as a BRAW gap exists: the launcher's cheap short-circuit only covers
+# a BPG *we* started, so an editor who opened it from the Start menu paid a
+# PowerShell per tick (MED-9, 2026-08-11). TTL-cached on
+# resolve_bridge._PROBE_TTL_SECONDS' precedent. Longer than that one because
+# the answer only decides whether to start a SECOND generator, and the
+# 30-minute relaunch cooldown is the real backstop against a launch storm.
+_PROBE_TTL_SECONDS = 60.0
+_PROBE_LOCK = threading.Lock()
+_probe_cache: Optional[tuple[float, Optional[list[str]]]] = None
+
+
+def _reset_probe_cache() -> None:
+    """Forget the cached process list. For tests, and for a launch we just made."""
+    global _probe_cache
+    with _PROBE_LOCK:
+        _probe_cache = None
 
 
 def find_bpg_command(configured: str = "") -> Optional[list[str]]:
@@ -87,8 +107,13 @@ def _cim_command_lines() -> Optional[list[str]]:
     is Resolve focusing a window it already has open, and the cost of a wrong
     "already running" is the BRAW gap never closing.
     """
+    global _probe_cache
     if platform.system() != "Windows":
         return None
+    with _PROBE_LOCK:
+        cached = _probe_cache
+        if cached is not None and (time.monotonic() - cached[0]) < _PROBE_TTL_SECONDS:
+            return cached[1]
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -99,10 +124,18 @@ def _cim_command_lines() -> Optional[list[str]]:
         )
     except Exception:
         log.debug("bpg: could not read Resolve command lines", exc_info=True)
-        return None
-    if out.returncode != 0:
-        return None
-    return [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
+        lines = None
+    else:
+        lines = (
+            None if out.returncode != 0
+            else [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
+        )
+    # A failed read is cached too: it means the same as an empty one to every
+    # caller, and re-spawning PowerShell every 15 s to be told nothing again is
+    # the cost this cache exists to remove.
+    with _PROBE_LOCK:
+        _probe_cache = (time.monotonic(), lines)
+    return lines
 
 
 def is_bpg_running(command_lines_fn: Callable[[], Optional[list[str]]] = _cim_command_lines) -> bool:
@@ -159,10 +192,14 @@ class BpgLauncher:
         return self._child is not None and self._child.poll() is None
 
     def maybe_launch(self, *, queue_empty: bool, needs_resolve: int,
-                     user_away: bool) -> Optional[str]:
+                     user_away: Union[bool, Callable[[], bool]]) -> Optional[str]:
         """Start BPG if this is the moment. Returns a reason when it did not.
 
-        Order matters only for what gets logged; every condition is required.
+        Order is not only what gets logged any more: every condition below is
+        required, and the two EXPENSIVE ones (the caller's idle probe, which
+        forks ioreg on macOS, and our own PowerShell process probe) are asked
+        last, after the cheap ones have already ruled the tick out (MED-8/MED-9,
+        2026-08-11). `user_away` accepts a callable for exactly that reason.
         """
         if not self.enabled:
             return "disabled"
@@ -173,14 +210,21 @@ class BpgLauncher:
         if not queue_empty:
             # The whole point of the sequencing: two encoders on one GPU.
             return "ffmpeg still has clips queued"
-        if not user_away:
+        if not (user_away() if callable(user_away) else user_away):
             return "user is at the keyboard"
-        if self._child_alive() or self._running_fn():
+        if self._child_alive():
+            # Free: a poll() on a handle we hold. Kept ahead of the cooldown so
+            # a running BPG of ours is still reported as one.
             return "already running"
         now = self._clock()
+        # The COOLDOWN before the process probe, not after: inside it the
+        # probe's answer cannot change the outcome, and the probe is a
+        # PowerShell spawn (MED-9).
         if (self._last_launch_at is not None
                 and (now - self._last_launch_at) < RELAUNCH_COOLDOWN_SECONDS):
             return "launched too recently"
+        if self._running_fn():
+            return "already running"
         try:
             self._child = self._spawn(self.command)
         except Exception:
@@ -190,6 +234,9 @@ class BpgLauncher:
             self._last_launch_at = now      # don't retry in a tight loop
             return "launch failed"
         self._last_launch_at = now
+        # A BPG we just started must not be masked by a process list read
+        # before it existed -- the cache is a cost saver, not a state.
+        _reset_probe_cache()
         log.info(
             "bpg: started the Blackmagic Proxy Generator for %d clip(s) ffmpeg "
             "cannot decode -- it watches its own folder list and is never "

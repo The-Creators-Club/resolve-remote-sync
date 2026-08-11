@@ -244,7 +244,10 @@ def test_process_video_runs_embed_after_claude(tmp_path, sqlite_storage_v4, monk
         calls.append("proxy"), storage.update_video(video["id"], status="proxied")
     ))
     monkeypatch.setattr(pipeline, "stage_frames", lambda cfg, storage, video, src_path: calls.append("frames"))
-    monkeypatch.setattr(pipeline, "stage_transcribe", lambda cfg, storage, video, src_path: calls.append("transcribe"))
+    monkeypatch.setattr(
+        pipeline, "stage_transcribe",
+        lambda cfg, storage, video, src_path, ingest_only=False: calls.append("transcribe"),
+    )
     monkeypatch.setattr(pipeline, "stage_claude", fake_claude)
     monkeypatch.setattr(pipeline, "stage_embed", fake_embed)
 

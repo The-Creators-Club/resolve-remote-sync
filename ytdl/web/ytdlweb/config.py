@@ -154,6 +154,15 @@ def safe_join(root, *parts):
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _TERM_BYTE_CAP = 80
 
+# The MS-DOS device names Windows still reserves. A folder called `con` is
+# created happily on the NAS (POSIX) and then gives every Windows editor a
+# permanent per-item sync error on that project (YTDL-28, 2026-08-11) -- the
+# reservation applies to the stem, before any dot, and is case-insensitive.
+_RESERVED_NAMES = frozenset(
+    {'CON', 'PRN', 'AUX', 'NUL'}
+    | {f'COM{i}' for i in range(1, 10)}
+    | {f'LPT{i}' for i in range(1, 10)})
+
 
 def safe_term_dirname(term, fallback='search'):
     """A search term reduced to a directory name that survives NAS -> SMB.
@@ -162,8 +171,11 @@ def safe_term_dirname(term, fallback='search'):
       - traversal: no separators, no '..', no drive letters (safe_join
         re-validates, but a term that reached it as '../..' would 500 rather
         than just being filed oddly);
-      - Windows: <>:"/\\|?* are illegal in a name, and a trailing dot or space
-        makes a directory Explorer cannot delete;
+      - Windows: <>:"/\\|?* are illegal in a name, a trailing dot or space
+        makes a directory Explorer cannot delete, and a reserved DEVICE name
+        (CON, NUL, COM1...) is refused outright -- the NAS creates it happily
+        and every Windows editor then carries a per-item sync error for that
+        project until someone renames it there (YTDL-28, 2026-08-11);
       - length: NFS and SMB cap a NAME at 255 BYTES, and Chinese is 3 bytes a
         character, so the cap is counted in bytes and cut on a character
         boundary. 80 leaves room for the file names inside.
@@ -177,4 +189,11 @@ def safe_term_dirname(term, fallback='search'):
     enc = s.encode('utf-8')
     if len(enc) > _TERM_BYTE_CAP:
         s = enc[:_TERM_BYTE_CAP].decode('utf-8', errors='ignore').strip().strip('. ')
-    return s or fallback
+    if not s:
+        return fallback
+    # The reservation is on the stem before the first dot ('nul.txt' is as
+    # reserved as 'nul'), so the suffix goes there and not on the end.
+    stem = s.split('.', 1)[0]
+    if stem.upper() in _RESERVED_NAMES:
+        s = stem + '_' + s[len(stem):]
+    return s

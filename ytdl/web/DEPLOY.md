@@ -16,8 +16,12 @@ everyone whether their footage is syncing.
 
 ```powershell
 cd ytdl\web
-.venv\Scripts\python.exe -m uvicorn ytdlweb.main:app --port 8791
+..\..\dashboard\.venv\Scripts\python.exe -m uvicorn ytdlweb.main:app --port 8791
 ```
+
+`ytdl/web` has **no venv of its own** — the dashboard's has everything this app
+imports (FastAPI, uvicorn, yt-dlp), and it is the interpreter the deployed
+mount runs under, so it is the one to develop and test against.
 
 ```powershell
 $env:YTDL_DEV_USER   = "alex"                          # stands in for the gate header
@@ -161,7 +165,7 @@ Run the suite from `ytdl/web` so `python -m pytest` puts the in-repo package
 first on sys.path:
 
 ```powershell
-cd ytdl\web; .venv\Scripts\python.exe -m pytest tests -q
+cd ytdl\web; ..\..\dashboard\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
 It needs neither `yt-dlp` nor the `claude` CLI: both are reached through seams

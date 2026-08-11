@@ -134,6 +134,17 @@ class SharedFolderManager:
         except Exception:
             log.debug("shared folder %s: ensure_versioning failed", folder_id, exc_info=True)
 
+        # delete-protection (2026-08-11, docs/delete-protection-ignoredelete.md):
+        # this library reaches every machine in the fleet with no tick to opt
+        # out of, so one editor deleting a LUT they did not recognise would
+        # otherwise take it off the NAS and off everyone else. Reuses the
+        # config fetched above, so steady state stays at zero config writes.
+        try:
+            if self.admin.ensure_ignore_delete(folder_id, folder):
+                outcome = "repaired"
+        except Exception:
+            log.debug("shared folder %s: ensure_ignore_delete failed", folder_id, exc_info=True)
+
         ignores_ok = self._ensure_ignores(folder_id)
         if ignores_ok == "repaired":
             outcome = "repaired"

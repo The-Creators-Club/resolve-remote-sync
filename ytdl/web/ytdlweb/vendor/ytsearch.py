@@ -15,7 +15,9 @@ What deliberately did NOT change:
     deploy ships (DEPLOY.md). Without it high-quality formats simply fail.
   - existing_ids()'s `[id]` filename regex. It is what catches clips that were
     hand-copied or downloaded before the ledger existed, so it is the half of
-    the dedupe that does not trust the database.
+    the dedupe that does not trust the database. (Tightened 2026-08-11 for
+    YTDL-2/YTDL-27 -- it now matches only a finished clip's name, not a `.part`
+    and not the first bracketed token in a title.)
 
 Cookies come from a FILE (`YTDL_COOKIES_FILE` -> yt-dlp's `cookiefile`), never
 `cookiesfrombrowser`: there is no browser and no profile for uid 3000 in the
@@ -57,7 +59,21 @@ PERIOD_SP = {
     "year":  "EgIIBQ%3D%3D",
 }
 
-_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{11})\]")
+# YTDL-27 (2026-08-11): anchored to the END of the stem, because the outtmpl
+# puts `[id]` last and a title may carry a bracketed 11-char token of its own
+# ("Song [OFFICIAL_MV] [dQw4w9WgXcQ]" used to register OFFICIAL_MV and lose the
+# real id, so the clip stayed invisible to the disk scan and was re-downloaded).
+_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{11})\]$")
+
+# YTDL-2 (2026-08-11): final extensions that mean "not a clip yet". yt-dlp's
+# in-flight `.part`/`.part-FragN`/`.ytdl` and ensure_edit_ready's `.editready`
+# carry the same `[id]` a finished download does, so an interrupted download
+# used to count as "the fleet already has it": the re-check after a container
+# restart marked the video duplicate, the resume never happened, and the sweep
+# deleted the fragment 24 hours later. `.failed` is worker.py's own marker for
+# output it disowned (YTDL-3).
+_ARTIFACT_EXT_RE = re.compile(r"^\.(part|part-Frag\d+|ytdl|editready|f\d+|temp|failed)$",
+                              re.IGNORECASE)
 
 
 def parse_duration(s: str) -> int:
@@ -87,13 +103,18 @@ def existing_id_locations(outdir) -> dict[str, str]:
     files no database knows about -- pre-ledger downloads, and clips an editor
     copied in by hand. That is the point: it is the dedupe half that does not
     trust the ledger.
+
+    Only a FINISHED clip counts: the id has to sit immediately before the final
+    extension, and that extension must not be an in-flight artifact's. Anything
+    looser answers "the fleet has it" for a file that is a fragment, a
+    half-converted intermediate, or a sidecar (YTDL-2, YTDL-27).
     """
     found: dict[str, str] = {}
     root = Path(outdir)
     if not root.is_dir():
         return found
     for p in root.rglob("*"):
-        if p.is_file():
+        if p.is_file() and not _ARTIFACT_EXT_RE.match(p.suffix):
             m = _ID_RE.search(p.stem)
             if m:
                 found.setdefault(m.group(1), p.parent.name)

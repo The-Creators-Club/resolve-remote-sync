@@ -22,12 +22,41 @@ from pathlib import Path
 
 import pytest
 
-from ccsync_companion import broll_server, config as config_mod, resolve_bridge, resolve_prefs
+from ccsync_companion import (
+    broll_server, config as config_mod, music_server, music_worker, resolve_bridge,
+    resolve_prefs,
+)
 
 
 # ---------------------------------------------------------------------------
 # Live-server plumbing
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def worker_in_process(monkeypatch):
+    """No test in this file may SPAWN a Resolve worker.
+
+    MED-3 (2026-08-11) moved /status and /insert into a killable child, so the
+    seam a test patches (`resolve_bridge.try_connect`, `perform_insert`) is no
+    longer in the process the request runs in -- and the real child talks to
+    whatever Resolve this developer has open (measured while writing this fix:
+    it reached a live project and tried to import into it). Dispatching the
+    action through music_worker.run_request keeps every layer under test
+    except the process boundary, which test_music_server.py owns, and makes
+    the patched bridge seams effective again. AUTOUSE: the same class of guard
+    as conftest's real-Tk one. Returns the call log.
+    """
+    calls: list = []
+
+    def _in_process_call(action, timeout=None, **kw):
+        calls.append((action, dict(kw, timeout=timeout)))
+        request = dict(kw)
+        request["action"] = action
+        return music_worker.run_request(request)
+
+    monkeypatch.setattr(music_server, "call", _in_process_call)
+    return calls
 
 
 class BrollClient:
@@ -62,6 +91,21 @@ class BrollClient:
         headers = dict(resp.getheaders())
         conn.close()
         return resp.status, headers, body
+
+    def post_raw(self, path: str, payload: bytes, content_length=None):
+        """POST bytes with a Content-Length the caller chooses -- including a
+        length that has nothing to do with the body."""
+        conn = self._connect()
+        length = len(payload) if content_length is None else content_length
+        conn.putrequest("POST", path, skip_accept_encoding=True)
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(length))
+        conn.endheaders()
+        conn.send(payload)
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        return resp.status, body
 
     def options(self, path: str):
         conn = self._connect()
@@ -478,10 +522,35 @@ def test_perform_insert_append_payload_shape(monkeypatch):
     payload = media_pool.append_calls[0]
     assert isinstance(payload, list) and len(payload) == 1
     item = payload[0]
-    assert set(item.keys()) == {"mediaPoolItem", "startFrame", "endFrame"}
+    assert set(item.keys()) == {"mediaPoolItem", "startFrame", "endFrame", "trackIndex"}
     assert item["startFrame"] == 24
     assert item["endFrame"] == 74
     assert isinstance(item["mediaPoolItem"], FakeMediaPoolItem)
+
+
+def test_the_append_names_its_destination_track(monkeypatch):
+    """MED-4: without an explicit trackIndex the append obeys the timeline's
+    destination-track buttons -- video destination off places NOTHING and
+    reports no error, which this button then showed as success."""
+    resolve, media_pool, _root = _make_stack()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 10)
+
+    assert media_pool.append_calls[0][0]["trackIndex"] == resolve_bridge.BROLL_TRACK_INDEX
+
+
+def test_the_append_does_not_pin_a_mediatype(monkeypatch):
+    """The other half of that landmine, deliberately NOT copied from
+    music_worker's audio-only place(): a mediaType would restrict the append to
+    one stream, and a b-roll clip arriving without its nat sound is the same
+    silent wrongness in the other direction."""
+    resolve, media_pool, _root = _make_stack()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 10)
+
+    assert "mediaType" not in media_pool.append_calls[0][0]
 
 
 def test_perform_insert_success_message_shape(monkeypatch):
@@ -492,6 +561,91 @@ def test_perform_insert_success_message_shape(monkeypatch):
 
     assert result["ok"] is True
     assert result["message"] == "Inserted clip.mov (50 frames)"
+
+
+class FakeTimelineItem:
+    def __init__(self, start):
+        self._start = start
+
+    def GetStart(self):
+        return self._start
+
+
+class FakeTracksTimeline:
+    """A timeline that can be asked what is on a track, which the placement
+    verification reads. The plain FakeTimeline above cannot, and that is
+    deliberate too: "cannot tell" must never turn a good insert into a
+    failure message."""
+
+    def __init__(self):
+        self.video1: list = []
+
+    def GetItemListInTrack(self, kind, index):
+        return list(self.video1) if kind == "video" and index == 1 else []
+
+
+def _stack_with_tracks(*, places: bool, returned_start=86400):
+    root = FakeRootFolder()
+    media_pool = FakeMediaPool(root)
+    timeline = FakeTracksTimeline()
+
+    def _append(clips):
+        media_pool.append_calls.append(clips)
+        item = FakeTimelineItem(returned_start)
+        if places:
+            timeline.video1.append(item)
+        return [item]
+
+    media_pool.AppendToTimeline = _append
+    project = FakeProject(media_pool, timeline)
+    return FakeResolve(FakeProjectManager(project)), media_pool, timeline
+
+
+def test_an_append_that_placed_nothing_is_not_reported_as_success(monkeypatch):
+    """MED-4, the failure this cost an editor: with the video destination
+    toggled off (normal during audio work) AppendToTimeline returns an item,
+    reports no error and places nothing -- and the toast said
+    "Inserted A001 (240 frames)" over an unchanged timeline."""
+    resolve, _media_pool, timeline = _stack_with_tracks(places=False)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 240)
+
+    assert result["ok"] is False
+    assert "nothing landed on the timeline" in result["message"]
+    assert timeline.video1 == []
+
+
+def test_an_item_that_reports_no_start_frame_is_not_placement(monkeypatch):
+    """The other half of the same rule (music_worker.py:42): a returned item
+    is not proof, GetStart() is."""
+    resolve, _media_pool, _timeline = _stack_with_tracks(
+        places=False, returned_start=None)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 240)
+
+    assert result["ok"] is False
+    assert result["message"] == resolve_bridge.NOTHING_PLACED_MESSAGE
+
+
+def test_a_clip_that_did_land_is_reported_as_success(monkeypatch):
+    resolve, _media_pool, timeline = _stack_with_tracks(places=True)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 240)
+
+    assert result == {"ok": True, "message": "Inserted clip.mov (240 frames)"}
+    assert len(timeline.video1) == 1
+
+
+def test_a_timeline_that_cannot_be_read_still_trusts_the_api(monkeypatch):
+    """A Resolve version that answers GetItemListInTrack differently must not
+    turn every successful insert into "nothing landed"."""
+    resolve, _media_pool, _root = _make_stack()   # FakeTimeline: no track reads
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    assert resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 10)["ok"] is True
 
 
 def test_perform_insert_append_failure_reported(monkeypatch):
@@ -778,3 +932,210 @@ def test_a_malformed_json_body_is_400_not_a_traceback(live_server):
     conn.close()
     assert resp.status == 400
     assert json.loads(body)["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# A request nobody meant to send: types, Content-Length, and the dispatch guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [123, ["clip.mov"], {"name": "clip.mov"}, None, True])
+def test_a_non_string_rel_path_is_400_not_a_dead_request(bad):
+    """MED-5: translate_path assumed strings, so an AttributeError/TypeError
+    escaped to socketserver.handle_error -- which writes to a sys.stderr that
+    is None in the windowed build. No response, no log line, a browser tab
+    waiting for its own timeout."""
+    status, body = broll_server.build_insert_response(
+        {"share": "broll", "rel_path": bad, "in_frame": 0, "out_frame": 10,
+         "mode": "append"},
+        {"broll": "Y:/broll"},
+    )
+    assert status == 400
+    assert body["ok"] is False
+    assert "rel_path" in body["message"]
+
+
+@pytest.mark.parametrize("bad", [123, ["broll"], {"share": "broll"}, None])
+def test_a_non_string_share_is_400_too(bad):
+    """A dict share was the worst of them: mounts.get() raises TypeError on an
+    unhashable key before any of the path rules run."""
+    status, body = broll_server.build_insert_response(
+        {"share": bad, "rel_path": "clip.mov", "in_frame": 0, "out_frame": 10,
+         "mode": "append"},
+        {"broll": "Y:/broll"},
+    )
+    assert status == 400
+    assert body["ok"] is False
+
+
+def test_a_mount_that_is_not_a_path_is_reported_not_crashed_on():
+    """A hand-edited ~/.broll-companion.json can put anything in there."""
+    status, body = broll_server.build_insert_response(
+        {"share": "broll", "rel_path": "clip.mov", "in_frame": 0, "out_frame": 10,
+         "mode": "append"},
+        {"broll": ["Y:/broll"]},
+    )
+    assert status == 200
+    assert body["ok"] is False
+    assert "not a path" in body["message"]
+
+
+def test_a_non_string_rel_path_over_http_gets_an_answer(live_server):
+    _srv, client = live_server
+    status, _headers, body = client.post_json(
+        "/insert",
+        {"share": "broll", "rel_path": ["clip.mov"], "in_frame": 0, "out_frame": 10,
+         "mode": "append"},
+    )
+    assert status == 400
+    assert json.loads(body)["ok"] is False
+
+
+@pytest.mark.parametrize("payload", [b'"just a string"', b"[1, 2, 3]", b"null"])
+def test_a_json_body_that_is_not_an_object_is_400(live_server, payload):
+    """`body.get` on a list is the same class of crash as the above."""
+    _srv, client = live_server
+    status, body = client.post_raw("/insert", payload)
+    assert status == 400
+    assert json.loads(body)["ok"] is False
+
+
+def test_a_non_numeric_content_length_is_400(live_server):
+    """MED-10: int(header) was unguarded, so "abc" crashed the handler.
+
+    Header only, no body bytes: the handler answers WITHOUT reading, and
+    bytes left unread in the receive buffer make the close an RST, which the
+    client sees as a connection abort instead of the answer (Windows, seen
+    while writing this)."""
+    _srv, client = live_server
+    status, body = client.post_raw("/insert", b"", content_length="abc")
+    assert status == 400
+    assert "Content-Length" in json.loads(body)["message"]
+
+
+def test_an_oversized_body_is_refused_without_reading_it(live_server):
+    """The other half of MED-10: an invented Content-Length parked a daemon
+    thread in an unbounded buffered read -- which is exactly this request,
+    a length nobody intends to send. CORS here is "*" plus private-network,
+    so any page in the editor's browser can post to it."""
+    _srv, client = live_server
+    status, body = client.post_raw(
+        "/insert", b"", content_length=broll_server.MAX_BODY_BYTES + 1)
+    assert status == 413
+    assert json.loads(body)["ok"] is False
+
+
+def test_the_cap_is_a_few_hundred_kb_not_a_few_bytes():
+    """Big enough that no legitimate body can reach it, small enough that the
+    read is bounded."""
+    assert 64 * 1024 <= broll_server.MAX_BODY_BYTES <= 1024 * 1024
+
+
+def test_the_music_route_is_capped_on_the_same_terms(live_server):
+    _srv, client = live_server
+    status, body = client.post_raw(
+        "/music/send", b"", content_length=broll_server.MAX_BODY_BYTES + 1)
+    assert status == 413
+    # ...in that route group's error shape, not the b-roll one.
+    assert "error" in json.loads(body)
+
+
+def test_a_handler_that_raises_answers_500_and_logs(live_server, monkeypatch, caplog):
+    """The dispatch guard. socketserver's own handler prints the traceback to
+    sys.stderr, which is None in the windowed build."""
+    _srv, client = live_server
+
+    def _boom(*a, **kw):
+        raise RuntimeError("something nobody anticipated")
+
+    monkeypatch.setattr(broll_server, "build_insert_response", _boom)
+
+    with caplog.at_level("ERROR", logger="ccsync.broll"):
+        status, _headers, body = client.post_json(
+            "/insert",
+            {"share": "broll", "rel_path": "clip.mov", "in_frame": 0,
+             "out_frame": 10, "mode": "append"},
+        )
+
+    assert status == 500
+    assert json.loads(body)["ok"] is False
+    assert any("failed" in r.getMessage() for r in caplog.records)
+
+
+def test_a_get_that_raises_is_guarded_too(live_server, monkeypatch, caplog):
+    def _boom(*a, **kw):
+        raise RuntimeError("nope")
+
+    _srv, client = live_server
+    monkeypatch.setattr(broll_server, "build_status_response", _boom)
+    with caplog.at_level("ERROR", logger="ccsync.broll"):
+        status, _headers, _body = client.get("/status")
+    assert status == 500
+
+
+# ---------------------------------------------------------------------------
+# The Resolve half runs in a child (MED-3)
+# ---------------------------------------------------------------------------
+
+
+def test_status_asks_the_worker_not_the_api_on_this_thread(worker_in_process):
+    """MED-3: try_connect() ran scriptapp() in-process under _API_LOCK, on the
+    8899 request thread. Against a modal Resolve that blocks indefinitely, and
+    the watcher, the fixer, FIX ALL and every tray read queue behind it."""
+    broll_server.build_status_response({})
+    assert [action for action, _kw in worker_in_process] == [
+        music_worker.BROLL_STATUS_ACTION]
+
+
+def test_the_status_probe_is_not_given_the_full_music_timeout(worker_in_process):
+    """A settings-panel dot is not worth 90 seconds of "checking...", while an
+    ImportMedia off a cold share genuinely is."""
+    broll_server.build_status_response({})
+    assert worker_in_process[0][1]["timeout"] == broll_server.STATUS_TIMEOUT
+    assert broll_server.STATUS_TIMEOUT < music_server.TIMEOUT
+
+
+def test_a_worker_that_never_answers_reports_resolve_as_absent():
+    """A timeout arrives as the worker's own failure shape; the panel says
+    "Resolve: no" rather than hanging."""
+    result = broll_server.build_status_response(
+        {}, caller=lambda action, **kw: {"ok": False, "error": "Resolve did not respond"})
+    assert result["ok"] is True
+    assert result["resolve_connected"] is False
+
+
+def test_the_insert_goes_through_the_worker_with_the_translated_path(
+        tmp_path, worker_in_process, monkeypatch):
+    clip = tmp_path / "clip.mov"
+    clip.write_bytes(b"fake")
+    monkeypatch.setattr(
+        broll_server.resolve_bridge, "perform_insert",
+        lambda path, in_frame, out_frame: {"ok": True, "message": "Inserted clip.mov"},
+    )
+
+    status, body = broll_server.build_insert_response(
+        {"share": "broll", "rel_path": "clip.mov", "in_frame": 5, "out_frame": 15,
+         "mode": "append"},
+        {"broll": str(tmp_path).replace("\\", "/")},
+    )
+
+    assert status == 200 and body["ok"] is True
+    action, kw = worker_in_process[-1]
+    assert action == music_worker.BROLL_INSERT_ACTION
+    assert os.path.basename(kw["path"]) == "clip.mov"
+    assert (kw["in_frame"], kw["out_frame"]) == (5, 15)
+
+
+def test_a_worker_failure_still_reaches_the_toast_as_a_message(tmp_path):
+    """The worker's own failures are {"ok": false, "error": ...}; the b-roll
+    web UI's toast reads "message"."""
+    clip = tmp_path / "clip.mov"
+    clip.write_bytes(b"fake")
+    status, body = broll_server.build_insert_response(
+        {"share": "broll", "rel_path": "clip.mov", "in_frame": 0, "out_frame": 10,
+         "mode": "append"},
+        {"broll": str(tmp_path).replace("\\", "/")},
+        caller=lambda action, **kw: {"ok": False, "error": "could not start the worker"},
+    )
+    assert status == 200 and body["ok"] is False
+    assert body["message"] == "could not start the worker"

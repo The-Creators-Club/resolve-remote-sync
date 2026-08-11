@@ -108,6 +108,11 @@ WM_ENDSESSION = 0x0016
 _WINDOW_CLASS = "CCSyncShutdownGuard"
 _WINDOW_TITLE = "CCSync"
 
+# stop()'s two bounds (SYNC-15): how long it waits for a window that may
+# still be coming up, then for the pump thread to notice the WM_CLOSE.
+STOP_READY_WAIT_SECONDS = 2.0
+STOP_JOIN_SECONDS = 3.0
+
 # SetThreadExecutionState flags. ES_CONTINUOUS makes the request stick until
 # withdrawn (without it the call only resets the idle timer once, which is
 # the subtly-broken version of this feature); ES_SYSTEM_REQUIRED is the
@@ -301,6 +306,11 @@ def _progress_fingerprint(status: Any) -> tuple:
     )
 
 
+def _lane_key(status: Any) -> str:
+    """The name PendingTracker files a lane's samples under."""
+    return str(getattr(status, "name", "") or "")
+
+
 def _positive_or(value: Any, fallback: float, label: str) -> float:
     """A positive float, or `fallback` with a line saying why. Never raises."""
     try:
@@ -347,18 +357,20 @@ class PendingTracker:
         self._lock = threading.Lock()
         # lane name -> (fingerprint, monotonic time it last CHANGED)
         self._seen: dict[str, tuple[tuple, float]] = {}
-        self._holding_since: Optional[float] = None
+        # lane name -> monotonic time it started holding (SYNC-16: per lane,
+        # not one clock for the whole tracker)
+        self._holding_since: dict[str, float] = {}
         self._stale_logged: set = set()
-        self._ceiling_logged = False
+        self._ceiling_logged: set = set()
 
     def reset(self) -> None:
         """Forget every sample (used by tests and anything that restarts the
         lanes -- a fresh start deserves a fresh grace period)."""
         with self._lock:
             self._seen.clear()
-            self._holding_since = None
+            self._holding_since.clear()
             self._stale_logged = set()
-            self._ceiling_logged = False
+            self._ceiling_logged = set()
 
     def describe(
         self,
@@ -443,22 +455,34 @@ class PendingTracker:
             self._stale_logged.discard(name)
 
     def _apply_ceiling(self, alive: list, now: float) -> Optional[str]:
-        if not alive:
-            self._holding_since = None
-            self._ceiling_logged = False
-            return None
-        if self._holding_since is None:
-            self._holding_since = now
-        elif (now - self._holding_since) >= self._max_hold_seconds:
-            if not self._ceiling_logged:
-                self._ceiling_logged = True
+        # SYNC-16 (2026-08-11): the hold clock is PER LANE. It used to be one
+        # clock for the tracker, so a lane that churns for eight hours without
+        # settling (lane C's need count ticking over a huge library, rclone
+        # wedged in retries) stood the whole guard down -- and a genuine 200 GB
+        # lane A ingest that started an hour later got no keep-awake at all and
+        # the machine idle-slept mid-upload.
+        live_names = {_lane_key(status) for status in alive}
+        for name in [n for n in self._holding_since if n not in live_names]:
+            self._holding_since.pop(name, None)
+            self._ceiling_logged.discard(name)
+        holding = []
+        for status in alive:
+            name = _lane_key(status)
+            since = self._holding_since.setdefault(name, now)
+            if (now - since) < self._max_hold_seconds:
+                holding.append(status)
+                continue
+            if name not in self._ceiling_logged:
+                self._ceiling_logged.add(name)
                 log.warning(
-                    "a lane has been busy for %.1f hours without settling -- standing "
-                    "down: no more shutdown warnings or keep-awake until it does",
-                    (now - self._holding_since) / 3600.0,
+                    "%s has been busy for %.1f hours without settling -- standing "
+                    "down for it: no more shutdown warnings or keep-awake on its "
+                    "account until it does",
+                    name or "a lane", (now - since) / 3600.0,
                 )
+        if not holding:
             return None
-        return _render_pending(alive)
+        return _render_pending(holding)
 
     def _log_once(self, key: str, message: str, *args: Any) -> None:
         if key in self._stale_logged:
@@ -595,8 +619,17 @@ class _WindowsShutdownGuard(ShutdownGuard):
             log.warning("shutdown guard: window did not come up within 5s")
 
     def stop(self) -> None:
-        hwnd, self._hwnd = self._hwnd, None
-        thread, self._thread = self._thread, None
+        hwnd = self._hwnd
+        thread = self._thread
+        if thread is not None and thread.is_alive() and not hwnd:
+            # SYNC-15 (2026-08-11): the window may simply not be up YET --
+            # start()'s 5 s _ready.wait is a bound, not a guarantee. This used
+            # to clear both references regardless while posting WM_CLOSE only
+            # `if hwnd`, so the pump thread and the window it went on to create
+            # were orphaned for the life of the process and the next start()
+            # built a SECOND pump on top of them.
+            self._ready.wait(STOP_READY_WAIT_SECONDS)
+            hwnd = self._hwnd
         if hwnd:
             try:
                 import ctypes
@@ -614,7 +647,17 @@ class _WindowsShutdownGuard(ShutdownGuard):
             except Exception:
                 log.exception("shutdown guard: could not post WM_CLOSE")
         if thread is not None and thread.is_alive():
-            thread.join(timeout=3.0)
+            thread.join(timeout=STOP_JOIN_SECONDS)
+            if thread.is_alive():
+                # Keep the references (SYNC-15): the pump still owns its
+                # window, so start()'s is_alive() check must keep seeing it
+                # rather than spawning a rival, and a later stop() still has
+                # an hwnd to post WM_CLOSE to.
+                log.warning("shutdown guard: its thread did not exit within 3s -- "
+                            "keeping it rather than starting a second pump")
+                return
+        self._hwnd = None
+        self._thread = None
 
     @property
     def active(self) -> bool:
@@ -946,7 +989,17 @@ class _DarwinShutdownGuard(ShutdownGuard):
         # process (pystray installs nothing for it, but a future caller
         # might). Chaining keeps us additive rather than in the way.
         previous = self._previous_sigterm
-        if callable(previous) and previous is not self.handle_sigterm:
+        # SYNC-7 (2026-08-11): this was `previous is not self.handle_sigterm`,
+        # which never fired -- attribute access builds a NEW bound method every
+        # time, so the identity test was always True. _restore_signal_handler
+        # deliberately leaves our handler installed when it cannot restore, so
+        # a later start() captures it as _previous_sigterm and the next SIGTERM
+        # recursed to the recursion limit, one logged traceback per frame.
+        # Compared by __func__/__self__ rather than == so a foreign handler's
+        # own __eq__ can never run inside a signal handler.
+        is_self = (getattr(previous, "__func__", None) is type(self).handle_sigterm
+                   and getattr(previous, "__self__", None) is self)
+        if callable(previous) and not is_self:
             try:
                 previous(signum, frame)
             except Exception:

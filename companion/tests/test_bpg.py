@@ -8,6 +8,16 @@ import pytest
 from ccsync_companion import bpg
 
 
+@pytest.fixture(autouse=True)
+def _clean_probe_cache():
+    """The CIM probe's cache is process-global (MED-9), so one test's answer
+    must not become the next one's -- the same rule the ffmpeg_tools and
+    resolve_bridge caches are reset under."""
+    bpg._reset_probe_cache()
+    yield
+    bpg._reset_probe_cache()
+
+
 class FakeChild:
     def __init__(self, alive=True):
         self._alive = alive
@@ -155,6 +165,108 @@ def test_an_unreadable_process_list_does_not_block_a_launch(unknown):
     """Reported as "not running": a wrong launch costs a focused window, a
     wrong "already running" costs the BRAW gap never closing."""
     assert bpg.is_bpg_running(lambda: unknown) is False
+
+
+# -- what the gate is allowed to COST (MED-8/MED-9, 2026-08-11) ---------------
+
+def test_the_idle_probe_may_be_a_callable_and_is_asked_last():
+    """Every Mac editor forked ioreg every 15 s for this value, on a platform
+    where BPG does not exist -- the caller evaluated it eagerly and the
+    launcher discards it on its first line. A callable is asked only once the
+    cheap conditions have passed."""
+    asked = {"n": 0}
+
+    def _away():
+        asked["n"] += 1
+        return True
+
+    launcher, spawned = make_launcher()
+    assert launcher.maybe_launch(queue_empty=True, needs_resolve=0,
+                                 user_away=_away) == "nothing needs BPG"
+    assert asked["n"] == 0
+
+    assert launcher.maybe_launch(queue_empty=True, needs_resolve=6,
+                                 user_away=_away) is None
+    assert asked["n"] == 1
+    assert spawned == [["Resolve.exe", "-pg"]]
+
+
+def test_the_process_probe_is_not_run_inside_the_cooldown():
+    """It is a PowerShell spawn, and inside the cooldown its answer cannot
+    change the outcome."""
+    probes = {"n": 0}
+
+    def _running():
+        probes["n"] += 1
+        return False
+
+    launcher = bpg.BpgLauncher(
+        {}, generation_enabled=True, clock=lambda: 1000.0,
+        spawn=lambda cmd: FakeChild(alive=False), running_fn=_running,
+        command=["Resolve.exe", "-pg"],
+    )
+    assert launcher.maybe_launch(**READY) is None
+    assert probes["n"] == 1
+    assert launcher.maybe_launch(**READY) == "launched too recently"
+    assert probes["n"] == 1
+
+
+def test_the_command_line_read_is_ttl_cached(monkeypatch):
+    """The gate asks on every 15 s tick for as long as a BRAW gap exists, and
+    the launcher's cheap short-circuit only covers a BPG we started
+    ourselves -- an editor who opened it from the Start menu paid a
+    PowerShell per tick."""
+    runs = {"n": 0}
+
+    class _Out:
+        returncode = 0
+        stdout = "Resolve.exe -pg\n"
+
+    monkeypatch.setattr(bpg.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(bpg.subprocess, "run",
+                        lambda *a, **kw: (runs.__setitem__("n", runs["n"] + 1), _Out())[1])
+
+    assert bpg._cim_command_lines() == ["Resolve.exe -pg"]
+    assert bpg._cim_command_lines() == ["Resolve.exe -pg"]
+    assert runs["n"] == 1
+
+    bpg._reset_probe_cache()
+    assert bpg._cim_command_lines() == ["Resolve.exe -pg"]
+    assert runs["n"] == 2
+
+
+def test_a_failed_read_is_cached_too(monkeypatch):
+    """"Cannot tell" means the same as "not running" to every caller, so
+    re-spawning PowerShell to be told nothing again is pure cost."""
+    runs = {"n": 0}
+
+    def _boom(*a, **kw):
+        runs["n"] += 1
+        raise OSError("powershell is not on PATH")
+
+    monkeypatch.setattr(bpg.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(bpg.subprocess, "run", _boom)
+
+    assert bpg._cim_command_lines() is None
+    assert bpg._cim_command_lines() is None
+    assert runs["n"] == 1
+
+
+def test_a_launch_forgets_the_cached_process_list(monkeypatch):
+    """The cache is a cost saver, not a state: a BPG we just started must not
+    be masked by a read taken before it existed."""
+    monkeypatch.setattr(bpg.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        bpg.subprocess, "run",
+        lambda *a, **kw: type("O", (), {"returncode": 0, "stdout": ""})(),
+    )
+    assert bpg._cim_command_lines() == []
+    assert bpg._probe_cache is not None
+
+    launcher, spawned = make_launcher()
+    assert launcher.maybe_launch(**READY) is None
+    assert spawned
+    assert bpg._probe_cache is None
 
 
 def test_a_configured_path_that_does_not_exist_is_no_command(tmp_path):

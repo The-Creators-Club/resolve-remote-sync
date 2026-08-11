@@ -31,6 +31,10 @@ KINDS = ("provision", "config", "enforce", "inventory", "connections", "completi
 REMOTENEED_PERPAGE = 200
 REMOTENEED_MAX_PAGES = 3
 BACKOFF_BASE = 15.0
+# How long the loop waits before retrying its own db.connect+db.migrate. Short:
+# the case this exists for is the app's startup migration holding the write lock
+# for a moment (DASH-8), not an outage.
+DB_OPEN_RETRY_SECONDS = 5.0
 
 # Retention is the ONE cycle that must run even in a Syncthing-less
 # deployment (settings.py fully supports one: reports + login work without
@@ -55,7 +59,15 @@ STFOLDER = ".stfolder"
 # truth); this list is only which of its keys are repairable drift. Deliberately
 # NOT the whole folder object: `devices` is the enforce cycle's, `path`/`label`
 # are the retarget branch's, and `versioning` must never be silently rewritten.
-FOLDER_TUNING_KEYS = ("maxConcurrentWrites", "pullerMaxPendingKiB")
+#
+# `ignoreDelete` (delete-protection, 2026-08-11,
+# docs/delete-protection-ignoredelete.md) is repairable drift too: the
+# companion's per-turn ensure_ignore_delete reaches only each editor's OWN
+# Syncthing, so this pass is the one path that retrofits the flag onto the
+# NAS's pre-existing folders -- the authoritative copies the policy exists to
+# protect. Re-asserting it each cycle is the doc's "temporarily lift the flag"
+# runbook working as designed, not churn: the flag only PATCHes when it drifted.
+FOLDER_TUNING_KEYS = ("maxConcurrentWrites", "pullerMaxPendingKiB", "ignoreDelete")
 
 
 def folder_tuning_drift(folder: dict) -> dict:
@@ -143,12 +155,26 @@ class Collector:
         }[kind]
 
     def _loop(self) -> None:
-        conn = db.connect(self.settings.db_path)
-        db.migrate(conn)
+        conn = None
         next_due = {k: 0.0 for k in KINDS}
         backoff = {k: 0.0 for k in KINDS}
         try:
             while not self._stop.is_set():
+                if conn is None:
+                    # INSIDE the try, and retried: connect+migrate used to sit
+                    # above it, so a "database is locked" against the app's own
+                    # startup migration killed this thread outright and leaked
+                    # the connection. Nothing restarts it, so db.prune -- which
+                    # is reachable only from here -- never ran again for the
+                    # life of the process (KNOWN_BUGS DASH-8, 2026-08-11).
+                    try:
+                        conn = db.connect(self.settings.db_path)
+                        db.migrate(conn)
+                    except Exception:
+                        log.exception("collector could not open %s; retrying in %.0fs",
+                                      self.settings.db_path, DB_OPEN_RETRY_SECONDS)
+                        self._stop.wait(DB_OPEN_RETRY_SECONDS)
+                        continue
                 try:
                     due = [k for k in KINDS if time.monotonic() >= next_due[k]]
                     if due:
@@ -185,7 +211,8 @@ class Collector:
                     if kind in next_due:
                         next_due[kind] = 0.0
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     # ------------------------------------------------------------ cycles
 
@@ -416,7 +443,7 @@ class Collector:
                 repaired.update(drift)
                 self.client.put_folder(folder_id, repaired)
                 log.warning(
-                    "REPAIRED WAN puller tuning on shared asset folder %s: %s",
+                    "REPAIRED folder settings on shared asset folder %s: %s",
                     folder_id, ", ".join(f"{k}={v}" for k, v in sorted(drift.items())))
 
     def _provision_slug(
@@ -498,8 +525,9 @@ class Collector:
             existing.update(drift)
             self.client.put_folder(slug, existing)
             log.warning(
-                "REPAIRED WAN puller tuning on folder %s: %s -- this project was pulling "
-                "at Syncthing's defaults over the WAN, with nothing logged",
+                "REPAIRED folder settings on folder %s: %s -- this folder was running "
+                "on Syncthing's defaults (WAN puller tuning, delete protection), "
+                "with nothing logged",
                 slug,
                 ", ".join(f"{k}={v}" for k, v in sorted(drift.items())))
 
@@ -653,6 +681,14 @@ class Collector:
             # value rather than adopting "" (see the empty-myID finding).
             log.error("syncthing reported an empty myID -- keeping the last known server device id")
             my_id = self._my_id
+        if not my_id:
+            # ...and on the FIRST cycle there is no last known value to keep,
+            # so every device -- the NAS included -- was upserted is_server=0
+            # and the server showed up as a phantom editor row until a later
+            # good cycle. _run_enforce has always skipped the pass here; this
+            # one only said it did (KNOWN_BUGS DASH-7, 2026-08-11).
+            log.error("skipping config: syncthing reported an empty myID and none is known yet")
+            return
         self._my_id = my_id
         now = self.now_fn()
         # One query per cycle, not one per device: the device -> editor mapping
@@ -809,8 +845,11 @@ class Collector:
                 # it from the entire fleet on the first cycle after it is
                 # created -- the B16 failure shape, arrived at by a different
                 # route.
-                for devices in editor_devices.values():
-                    desired |= devices
+                # NOT `devices`: that is the pass-wide device list, and
+                # rebinding it here to a set of ids was harmless only because
+                # nothing read it afterwards (KNOWN_BUGS DASH-6, 2026-08-11).
+                for editor_device_ids in editor_devices.values():
+                    desired |= editor_device_ids
             else:
                 for editor in selections.get(slug, []):
                     desired |= editor_devices.get(editor, set())

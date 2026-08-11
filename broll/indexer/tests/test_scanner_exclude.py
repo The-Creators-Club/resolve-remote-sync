@@ -92,12 +92,25 @@ def test_do_scan_honours_exclude(tmp_path, schema_path):
     }
 
 
-def test_is_excluded_dir_is_case_sensitive():
-    """Deliberate: the NAS holds `youtube` and `Youtube` as distinct folders, and
-    a case-insensitive pattern for one would silently swallow the other."""
+def test_is_excluded_dir_is_case_insensitive():
+    """Reversed 2026-08-11 (BROLL-16). This used to pin case-SENSITIVITY on the
+    grounds that `youtube` and `Youtube` are distinct folders — true of a
+    case-sensitive filesystem, and true of no share this indexer has: every root
+    in config.queue.yaml is a Windows drive letter (H:, I:, Z:), where the two
+    names are one folder and `Erosion/youtube` vs `Erosion/Youtube` is a
+    difference in how the path was typed, not in what it points at. The pairs
+    that differ in case there (`Garbage/youtube` beside `Erosion/Youtube`) are
+    separate share roots, not a pair inside one tree, so nothing can be
+    swallowed by matching insensitively — while matching sensitively means a
+    case-only rename (which Windows performs in place) silently un-excludes the
+    subtree and re-indexes it as a second copy of itself."""
     assert is_excluded_dir("Nuclear/Youtube", ["Nuclear/Youtube"]) is True
-    assert is_excluded_dir("Nuclear/youtube", ["Nuclear/Youtube"]) is False
+    assert is_excluded_dir("Nuclear/youtube", ["Nuclear/Youtube"]) is True
+    assert is_excluded_dir("Nuclear/YouTube", ["Nuclear/Youtube"]) is True
+    assert is_excluded_dir("NUCLEAR/Youtube", ["Nuclear/Youtube"]) is True
+    # Still a folder match, not a substring one: only the case fold is relaxed.
     assert is_excluded_dir("Nuclear/B-roll", ["Nuclear/Youtube"]) is False
+    assert is_excluded_dir("Nuclear/Youtube Downloads", ["Nuclear/Youtube"]) is False
 
 
 def test_config_parses_exclude_and_strips_slashes():

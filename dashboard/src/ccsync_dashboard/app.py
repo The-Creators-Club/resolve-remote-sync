@@ -43,6 +43,10 @@ MAX_REPORT_BODY_BYTES = 8 * 1024 * 1024
 # api_publish_package also counts the bytes it actually receives, because
 # Content-Length is advisory for a chunked request.
 MAX_PACKAGE_BODY_BYTES = 200 * 1024 * 1024
+# The music UI's drag-and-drop ingest: a batch of cues an editor dropped on the
+# page. Generous because a lossless drop is legitimately large, and it is a
+# declared-length refusal only -- the bytes themselves are never buffered here.
+MAX_UPLOAD_BODY_BYTES = 512 * 1024 * 1024
 # Routes whose body is BUFFERED IN MEMORY downstream (FastAPI reads the whole
 # thing before the route function runs), so the gate counts the bytes itself
 # and stops at the ceiling. Content-Length is advisory: a chunked request
@@ -56,7 +60,22 @@ _BODY_LIMITS = {"/api/v1/report": ("POST", MAX_REPORT_BODY_BYTES)}
 # prevent.
 _BODY_LIMIT_PREFIXES = (
     ("/api/v1/admin/packages/", "PUT", MAX_PACKAGE_BODY_BYTES),
+    # musicweb's drag-and-drop ingest is a multipart audio upload that Starlette
+    # spools past this middleware; buffering it here would turn a dropped album
+    # into that many bytes of resident memory. Declaration check only, exactly
+    # like the packages route above (DASH-3, 2026-08-11).
+    ("/music/api/ingest", "POST", MAX_UPLOAD_BODY_BYTES),
 )
+# Everything else that writes: htmx form posts and small JSON documents. The
+# gate used to cover exactly the two entries above, so every POST /partials/...
+# and every pydantic-bodied /api/v1 route read an unbounded body into the
+# single-worker container BEFORE any length check -- any editor with a valid
+# session could OOM the fleet's sync-status view by posting a multi-GB body to
+# a selection toggle (KNOWN_BUGS DASH-3, 2026-08-11). The largest legitimate
+# body in this class is a b-roll /api/ingest/index document (a long clip's
+# segments + transcript), well under a megabyte.
+MAX_DEFAULT_BODY_BYTES = 4 * 1024 * 1024
+_BODY_LIMIT_METHODS = ("POST", "PUT", "PATCH")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -101,7 +120,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if collector is not None:
                 collector.stop()
 
-    app = FastAPI(title="Creators Club Sync Dashboard", lifespan=lifespan)
+    # No interactive docs, matching both mounts (broll.BLOCKED_PATHS /
+    # music.BLOCKED_PATHS 404 theirs). FastAPI's defaults published the whole
+    # route inventory and every admin request schema to any logged-in editor --
+    # authz still held at each route, so disclosure rather than bypass, but the
+    # dashboard publishes no API explorer (KNOWN_BUGS DASH-4, 2026-08-11).
+    app = FastAPI(title="Creators Club Sync Dashboard", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
 
     def _too_large(limit: int) -> JSONResponse:
@@ -195,7 +220,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if request.method == method and request.url.path.startswith(prefix):
                 if _declared_too_large(request, value):
                     return _too_large(value)
-                break
+                # Carved out of the default ceiling below ON PURPOSE: these
+                # bodies are streamed/spooled downstream, so buffering them
+                # here would BE the memory problem this middleware prevents.
+                return await call_next(request)
+        if request.method in _BODY_LIMIT_METHODS:
+            if _declared_too_large(request, MAX_DEFAULT_BODY_BYTES):
+                return _too_large(MAX_DEFAULT_BODY_BYTES)
+            if await _buffer_body(request, MAX_DEFAULT_BODY_BYTES):
+                return _too_large(MAX_DEFAULT_BODY_BYTES)
         return await call_next(request)
 
     def _broll_ingest_token_ok(request) -> bool:

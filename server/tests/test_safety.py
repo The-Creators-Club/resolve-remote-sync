@@ -506,6 +506,45 @@ def test_syncthing_folder_create_carries_the_wan_puller_tuning(no_ssh, capsys):
     assert folder["pullerMaxPendingKiB"] == 65536
 
 
+def test_syncthing_folder_create_and_force_carry_ignore_delete(no_ssh):
+    """delete-protection (2026-08-11, docs/delete-protection-ignoredelete.md):
+    the NAS copy is the authority and must never apply a delete an editor
+    made. Asserted on the --force PUT too: that replaces the whole folder
+    object, so a reconfigure would otherwise silently drop the protection --
+    the same way it once dropped the WAN puller tuning (B19)."""
+    monkeypatch = no_ssh
+    sent = {}
+
+    def fake_api(method, gui_url, path, api_key, **kwargs):
+        sent.setdefault(method, []).append((path, kwargs.get("json_body")))
+        return _Resp(200, {})
+
+    monkeypatch.setattr(setup_syncthing_folder, "find_folder", lambda *a, **k: None)
+    monkeypatch.setattr(setup_syncthing_folder, "find_folder_by_path", lambda *a, **k: None)
+    monkeypatch.setattr(setup_syncthing_folder, "syncthing_api", fake_api)
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", "2026/CCT/Season 1",
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k",
+        "--no-marker-read",
+    ])
+    assert setup_syncthing_folder.main() == 0
+    _path, created = sent["POST"][0]
+    assert created["ignoreDelete"] is True
+
+    monkeypatch.setattr(
+        setup_syncthing_folder, "find_folder",
+        lambda *a, **k: {"id": "2026-cct-season-1", "path": "/data/Projects/2026/CCT/Season 1",
+                         "devices": [{"deviceID": "AAA", "introducedBy": ""}]})
+    monkeypatch.setattr(sys, "argv", [
+        "setup_syncthing_folder.py", "--project-rel-path", "2026/CCT/Season 1",
+        "--gui-url", "http://example.invalid:8384", "--api-key", "k", "--force",
+        "--slug", "2026-cct-season-1",
+    ])
+    assert setup_syncthing_folder.main() == 0
+    _put_path, forced = sent["PUT"][0]
+    assert forced["ignoreDelete"] is True
+
+
 def test_syncthing_folder_tuning_matches_the_dashboard_collector():
     """The canonical values live in the dashboard's provision.build_folder_config
     (AUDIT_2 P6/§4.2). Two copies with no cross-check is how they drift."""

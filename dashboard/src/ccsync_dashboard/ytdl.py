@@ -113,7 +113,15 @@ class YtdlGate:
                    if k.lower() != IDENTITY_HEADER]
         username = auth.read_session_cookie(self._secret, _session_cookie(headers))
         if username:
-            headers.append((IDENTITY_HEADER, username.encode("utf-8")))
+            encoded = _header_value(username)
+            if encoded is None:
+                # Fail closed: no header at all, so the sub-app answers its own
+                # 401 rather than authorising a name that is not this editor's.
+                log.warning("ytdl identity header not minted for %r: the name "
+                            "cannot survive a latin-1 header round trip",
+                            username)
+            else:
+                headers.append((IDENTITY_HEADER, encoded))
         new_scope = dict(scope)
         new_scope["headers"] = headers
         return new_scope
@@ -125,6 +133,24 @@ class YtdlGate:
                 return
             scope = self._identified_scope(scope)
         await self.app(scope, receive, send)
+
+
+def _header_value(username: str) -> bytes | None:
+    """The identity header's bytes, or None if this name cannot be carried.
+
+    LATIN-1, not UTF-8 (YTDL-29, 2026-08-11). Starlette decodes header bytes as
+    latin-1, so a UTF-8-encoded `josé` reached the sub-app as `josÃ©` --
+    deterministically, so that editor's ticked projects matched nothing and
+    /ytdl was unusable for them. Encoding the way the reader decodes covers
+    every name up to U+00FF; beyond that (a CJK username) there is no lossless
+    answer and a lossy one could collide two editors into one identity, so the
+    header is withheld and the sub-app 401s -- broken, but loudly and for one
+    person, rather than quietly authorising the wrong name.
+    """
+    try:
+        return username.encode("latin-1")
+    except UnicodeEncodeError:
+        return None
 
 
 def _session_cookie(headers: list[tuple[bytes, bytes]]) -> str | None:

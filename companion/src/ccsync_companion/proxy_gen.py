@@ -118,6 +118,21 @@ STATE_USER_ACTIVE = "user-active"
 STATE_RESOLVE_OPEN = "resolve-open"
 STATE_RUNNING = "running"
 
+# The only gate answers a BPG launch is defensible from (MED-7, 2026-08-11).
+# BPG *is* Resolve, and this module never stops what it starts, so "the ffmpeg
+# queue happens to be empty" is not enough: PAUSED means the editor pressed
+# stop, MISCONFIGURED means the config is broken, DRIVE_ABSENT means the tree
+# BPG watches is not even mounted, and RUNNING means ffmpeg is on the same GPU.
+# DISABLED is in: bpg_enabled is a tri-state of its own, and an explicit true
+# on a machine that does not run ffmpeg proxies is a config, not an accident.
+BPG_LAUNCH_STATES = frozenset({
+    STATE_DISABLED,
+    STATE_NO_FFMPEG,
+    STATE_NOTHING_TO_DO,
+    STATE_USER_ACTIVE,
+    STATE_RESOLVE_OPEN,
+})
+
 # encode_once() outcomes -- returned rather than logged-and-swallowed so the
 # state machine is assertable in a test.
 RESULT_EMPTY = "empty"
@@ -585,9 +600,20 @@ class ProxyGenerator:
         with self._lock:
             self._forced = True
             self._last_scan_at = None  # force a fresh scan on the next tick
+            # The cap goes with it: scan_once() filters capped clips OUT of
+            # the queue, so after a mass failure (the 0.6.1 muxer night capped
+            # all 1040 clips on this rig) the one user-facing retry there is
+            # would have scanned, found everything capped, and done precisely
+            # nothing (MED-6, 2026-08-11). Asking for a run IS the "try it
+            # again" this memory exists to be overridable by.
+            capped = len(self._failures)
+            self._failures = {}
         self._cancel.clear()
         self._wake.set()
-        log.info("proxy gen: run requested from the tray -- scanning now")
+        log.info(
+            "proxy gen: run requested from the tray -- scanning now%s",
+            f" (and forgetting {capped} earlier failure(s))" if capped else "",
+        )
 
     def cancel_run(self) -> None:
         """"Stop making proxies". Kills the encode in flight (leaving no
@@ -684,16 +710,31 @@ class ProxyGenerator:
         """Hand the clips ffmpeg cannot decode to the Blackmagic Proxy
         Generator, once there is nothing else encoding. Never raises: this is
         a convenience on top of a report that was already correct without it."""
-        if self._bpg is None:
+        # `not enabled` FIRST and before anything else is computed: this runs
+        # on every 15 s tick on every machine in the fleet, and BPG is
+        # Windows-only -- a Mac editor was forking an idle probe ~5,700 times
+        # a day for a value the launcher discards on its first line (MED-8,
+        # 2026-08-11).
+        if self._bpg is None or not getattr(self._bpg, "enabled", False):
+            return
+        if state not in BPG_LAUNCH_STATES:
+            # The gate said something other than "there is nothing for ffmpeg
+            # to do": paused, misconfigured or drive-absent all used to fall
+            # through to a launch, so a PAUSED base rig still started
+            # Resolve.exe -pg -- which nothing in this module ever stops
+            # (MED-7, 2026-08-11).
             return
         with self._lock:
             queue_empty = not self._queue
             needs_resolve = int(self._totals.get("needs_resolve", 0))
         try:
             self._bpg.maybe_launch(
-                queue_empty=queue_empty and state != STATE_RUNNING,
+                queue_empty=queue_empty,
                 needs_resolve=needs_resolve,
-                user_away=self._user_is_away(),
+                # A CALLABLE, not a value: the launcher asks only once every
+                # other condition has passed, which on a machine with no BRAW
+                # gap is never (MED-8).
+                user_away=self._user_is_away,
             )
         except Exception:
             log.exception("proxy gen: the BPG launcher raised")
@@ -982,10 +1023,20 @@ class ProxyGenerator:
         except Exception:
             log.debug("proxy gen: stderr reader would not join", exc_info=True)
         result["returncode"] = proc.poll()
-        result["stderr"] = "\n".join(lines)
+        # SNAPSHOT, inside a try: that join can time out (a _kill that failed
+        # to reap the child leaves the reader appending), and iterating a deque
+        # another thread is mutating raises "deque mutated during iteration" --
+        # out of the one function whose contract is that it never raises
+        # (MED-13, 2026-08-11).
+        try:
+            result["stderr"] = "\n".join(list(lines))
+        except RuntimeError:
+            log.debug("proxy gen: stderr was still being written -- dropping it")
+            result["stderr"] = ""
         return result
 
-    def _verify(self, partial: str, source_duration: Optional[float], forced: bool) -> Optional[str]:
+    def _verify(self, partial: str, source_duration: Optional[float], forced: bool,
+                ceiling: float = STUCK_FLOOR_SECONDS) -> Optional[str]:
         """None if the encoded file is good, else why it isn't.
 
         Container metadata can look perfect while the bitstream is damaged --
@@ -998,7 +1049,12 @@ class ProxyGenerator:
         decode = self._encode_fn(
             ffmpeg_tools.verify_decodes_cmd(self.ffmpeg_path, partial),
             lambda: self._interrupt_reason(forced),
-            STUCK_FLOOR_SECONDS,
+            # The ENCODE's ceiling, not the bare floor: a multi-hour source
+            # encoded fine and then blew the flat 30 minutes decoding its own
+            # ~20 GB HEVC back off a share, so the work was thrown away and
+            # three passes later the clip was capped forever, with the log
+            # blaming the file (MED-2, 2026-08-11).
+            ceiling,
         )
         if decode.get("interrupted"):
             return decode.get("interrupted")
@@ -1215,7 +1271,7 @@ class ProxyGenerator:
                 tail = "\n".join((outcome.get("stderr") or "").splitlines()[-5:])
                 failure = f"ffmpeg exited {outcome.get('returncode')}: {tail[:500]}"
             else:
-                failure = self._verify(partial, info.get("duration_s"), forced)
+                failure = self._verify(partial, info.get("duration_s"), forced, ceiling)
                 if failure and self._interrupt_reason(forced):
                     # The verification was cut short by the user coming back,
                     # not by a bad file: same handling as an interrupted encode.

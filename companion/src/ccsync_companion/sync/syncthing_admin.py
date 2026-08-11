@@ -327,6 +327,25 @@ class SyncthingAdmin:
         )
         return True
 
+    def ensure_ignore_delete(self, folder_id: str, folder: Optional[dict] = None) -> bool:
+        """PATCH ignoreDelete=true onto a folder that lacks it.
+
+        Deletes are near-always mistakes in an asset/audio tree; a folder
+        with ignoreDelete does not apply a delete another device made, so an
+        editor's accidental single-file delete never removes the NAS or
+        another editor's copy. Returns True when a PATCH was issued. Pass
+        `folder` to reuse a config the caller already fetched. See
+        docs/delete-protection-ignoredelete.md for the fleet-wide policy this
+        assumes (real deletes need an explicit prune).
+        """
+        if folder is None:
+            folder = self.get_folder(folder_id) or {}
+        if (folder or {}).get("ignoreDelete") is True:
+            return False
+        log.info("syncthing: folder %s had no ignoreDelete -- adding it", folder_id)
+        self._write_request("PATCH", self._folder_path(folder_id), {"ignoreDelete": True})
+        return True
+
     # -- pending/accept -----------------------------------------------------
     def pending_folders(self) -> Any:
         return self._request("GET", "/rest/cluster/pending/folders")
@@ -379,6 +398,16 @@ class SyncthingAdmin:
             "fsWatcherEnabled": True,
             "ignorePerms": False,
             "versioning": dict(FOLDER_VERSIONING),
+            # delete-protection (2026-08-11, docs/delete-protection-ignoredelete.md):
+            # this device never APPLIES a delete another device made, so one
+            # editor's accidental single-file delete cannot remove the NAS's
+            # or another editor's copy. Set at creation for the same reason
+            # versioning is -- a folder that pulls and then receives a delete
+            # before the first ensure_ignore_delete() turn is already
+            # unprotected. Kept byte-identical to server/
+            # setup_syncthing_folder.py and dashboard/provision.py's two
+            # builders (server/tests/test_cross_component.py asserts it).
+            "ignoreDelete": True,
             "devices": [{"deviceID": offered_by_device_id, "introducedBy": ""}],
         }
         result = self._write_request("POST", "/rest/config/folders", folder_config)

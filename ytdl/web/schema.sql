@@ -105,7 +105,11 @@ CREATE TABLE IF NOT EXISTS downloads (
     channel       TEXT,
     project_slug  TEXT NOT NULL,
     project_label TEXT NOT NULL,
-    term          TEXT NOT NULL,
+    term          TEXT NOT NULL,             -- what the editor typed, verbatim
+    -- The FOLDER the clip is actually in, safe_term_dirname(term). Both are
+    -- kept because the ALREADY IN badge has to name a path an editor can open
+    -- over SMB, and `term` frequently is not one (YTDL-31, 2026-08-11).
+    term_dir      TEXT,
     rel_path      TEXT NOT NULL,             -- 'Youtube/<term_dir>/<filename>' under the project
     job_id        INTEGER,
     downloaded_by TEXT,
@@ -119,3 +123,13 @@ CREATE INDEX IF NOT EXISTS idx_terms_job     ON job_terms(job_id, id);
 CREATE INDEX IF NOT EXISTS idx_videos_job    ON job_videos(job_id, id);
 CREATE INDEX IF NOT EXISTS idx_videos_state  ON job_videos(job_id, dl_state);
 CREATE INDEX IF NOT EXISTS idx_jvt_term      ON job_video_terms(job_id, term_id);
+
+-- One non-terminal job per editor, in the database rather than only in the
+-- handler: create_job's check is read-then-insert and a double-clicked SEARCH
+-- fits between the two (YTDL-25, 2026-08-11). routes_api turns the
+-- IntegrityError into the same 409 the read check gives. On an existing
+-- database this arrives via migrations/003, which retires the duplicate active
+-- jobs an unguarded create_job may already have written -- without that, this
+-- statement raises and ensure_schema takes /ytdl down.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active ON jobs(created_by)
+    WHERE phase NOT IN ('done', 'failed', 'cancelled');

@@ -33,6 +33,17 @@ CREATE TABLE videos (
                                              -- resolved per share (see migrations/008)
     original_size_bytes INTEGER,
     original_verified_at TEXT,              -- when that path was last seen to exist
+    -- The hover-scrub sheet's REAL geometry, as build_sprite measured it off the
+    -- sheet it had just written (see migrations/009). NULL = sprited before these
+    -- columns existed, and the browser falls back to its old source-derived
+    -- heuristics for that row. Recorded, never re-derived: the sheet is tiled
+    -- from the PROXY through an even-rounding scale, and the interval depends on
+    -- whether SPRITE_MAX_CELLS existed when it was built.
+    sprite_cell_w INTEGER,
+    sprite_cell_h INTEGER,
+    sprite_cols INTEGER,
+    sprite_cells INTEGER,
+    sprite_interval_s REAL,
     UNIQUE (share, rel_path)
 );
 
@@ -193,4 +204,4 @@ CREATE TABLE share_roots (
     updated_at  TEXT
 );
 
-PRAGMA user_version = 8;
+PRAGMA user_version = 9;

@@ -92,13 +92,54 @@ def test_own_proxy_always_tags_hvc1(nvenc):
 def test_own_proxy_never_upscales(nvenc):
     cmd = ft.own_proxy_cmd("ffmpeg", "in.mov", "out.mp4", nvenc=nvenc)
 
-    assert _after(cmd, "-vf") == "scale=-2:'min(1080,ih)'"
+    assert _after(cmd, "-vf") == "scale=-2:'trunc(min(1080,ih)/2)*2'"
 
 
 def test_own_proxy_honours_a_custom_height():
     cmd = ft.own_proxy_cmd("ffmpeg", "in.mov", "out.mp4", nvenc=True, max_height=720)
 
-    assert _after(cmd, "-vf") == "scale=-2:'min(720,ih)'"
+    assert _after(cmd, "-vf") == "scale=-2:'trunc(min(720,ih)/2)*2'"
+
+
+@pytest.mark.parametrize("height", [1080, 720, 540])
+def test_the_scale_filter_rounds_the_height_down_to_even(height):
+    """MED-12: `-2` guards the WIDTH only. An odd-height source (RGB/4:4:4
+    screen capture, ffv1/utvideo) passed its height straight through and died
+    at encoder init with EINVAL -- before a single frame -- which three passes
+    later turned into a permanent cap on the clip. Verified against real
+    ffmpeg 2026-08-11: 640x481 ffv1 fails with the old filter, encodes to
+    638x480 with this one."""
+    own = ft.own_proxy_cmd("ffmpeg", "in.mov", "out.mp4", nvenc=False,
+                           max_height=height)
+    preview = ft.preview_proxy_cmd("ffmpeg", "in.mp4", "out.mp4", nvenc=False,
+                                   height=height)
+
+    for cmd in (own, preview):
+        assert _after(cmd, "-vf") == f"scale=-2:'trunc(min({height},ih)/2)*2'"
+
+
+@pytest.mark.parametrize("nvenc", [True, False])
+def test_own_proxy_keeps_every_audio_track(nvenc):
+    """MED-1: with no -map, ffmpeg's default selection takes exactly ONE audio
+    stream, and camera originals here routinely carry two or more (Sony/Canon
+    MXF dual pairs, dual-system, .mts). The editor then cuts on a proxy whose
+    scratch/lav track does not exist and only reappears on the original."""
+    cmd = ft.own_proxy_cmd("ffmpeg", "in.mov", "out.mp4", nvenc=nvenc)
+
+    assert _sub(cmd, ["-map", "0:v:0"])
+    # '?' -- optional: a silent original must still encode.
+    assert _sub(cmd, ["-map", "0:a?"])
+    # As INPUT-ordered output options: after -i, before the destination.
+    assert cmd.index("-i") < cmd.index("-map") < len(cmd) - 1
+
+
+def test_the_preview_tier_keeps_the_indexers_default_stream_selection():
+    """Deliberately NOT given MED-1's -map flags: this tier's output is meant
+    to be interchangeable with one the b-roll indexer produced, and its inputs
+    are YouTube downloads with one audio track."""
+    cmd = ft.preview_proxy_cmd("ffmpeg", "in.mp4", "out.mp4", nvenc=True)
+
+    assert "-map" not in cmd
 
 
 def test_own_proxy_carries_the_source_timecode_when_there_is_one():
@@ -199,14 +240,14 @@ def test_own_proxy_stringifies_path_objects():
 # indexer writes to `<name>.mp4`, the generator to `<name>.mp4.partial`, and
 # ffmpeg cannot choose a muxer from ".partial" (2026-08-11).
 BROLL_NVENC_TAIL = [
-    "-vf", "scale=-2:'min(540,ih)'",
+    "-vf", "scale=-2:'trunc(min(540,ih)/2)*2'",
     "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "34",
     "-c:a", "aac", "-b:a", "96k",
     "-movflags", "+faststart",
     "-f", "mp4",
 ]
 BROLL_CPU_TAIL = [
-    "-vf", "scale=-2:'min(540,ih)'",
+    "-vf", "scale=-2:'trunc(min(540,ih)/2)*2'",
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
     "-c:a", "aac", "-b:a", "96k",
     "-movflags", "+faststart",
@@ -255,7 +296,7 @@ def test_preview_proxy_quality_overrides_reach_the_argv():
     nv = ft.preview_proxy_cmd("ffmpeg", "a", "b", nvenc=True, height=360, cq=28)
     cpu = ft.preview_proxy_cmd("ffmpeg", "a", "b", nvenc=False, height=360, crf=22)
 
-    assert _after(nv, "-vf") == "scale=-2:'min(360,ih)'"
+    assert _after(nv, "-vf") == "scale=-2:'trunc(min(360,ih)/2)*2'"
     assert _sub(nv, ["-cq", "28"])
     assert _sub(cpu, ["-crf", "22"])
 

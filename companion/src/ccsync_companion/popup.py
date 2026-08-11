@@ -887,6 +887,17 @@ class PopupDialog:
             return
         self._fixing = True
         self._stop_requested = False
+        # _deliver_results' exactly-once latch is PER BATCH, not per dialog
+        # (UI-1, 2026-08-11). Left set from the previous batch, both delivery
+        # routes no-op on the next one: _fix_done never runs, `_fixing` stays
+        # True forever, every button is disabled or ignored, the X routes back
+        # into _on_cancel_all -- and app._popup_active_lock, held across
+        # show_popup, is never released, so every later dialog in the session
+        # dies on "Another CCSync window is already open". RETRY FAILED (and
+        # FIX ALL after a stopped batch) is exactly that second batch.
+        with self._progress_lock:
+            self._finished = False
+            self._pending_results = None
         self._control.reset()
         self._batch_rows = rows
         self._rate = RateEstimator()
@@ -1377,10 +1388,21 @@ class ProgressWindow:
         except Exception:
             log.exception("progress window tick failed")
         if self._done.is_set():
+            # DESTROY, never quit (UI-2, 2026-08-11). This window is shown
+            # under ui_dispatch.run_dialog, which on darwin parks in `tkwait
+            # window`; _tkinter's quit flag is process-global and
+            # Tk_WaitWindow never consults it, so quit() left the finished
+            # window on screen with the dispatcher's pump parked inside the
+            # tkwait -- every later dialog queued forever, serve()'s mainloop
+            # could not return and SIGTERM could not finish (MAC-11's shape).
+            # The `finally: root.destroy()` in _show is only reached AFTER
+            # run_dialog returns, so it never ran. destroy() ends both
+            # tkwait (darwin) and mainloop (win32); _show's finally destroying
+            # a dead root again is already guarded.
             try:
-                root.quit()
+                root.destroy()
             except Exception:
-                pass
+                log.debug("progress window: destroy on completion failed", exc_info=True)
             return
         try:
             root.after(250, self._tick)

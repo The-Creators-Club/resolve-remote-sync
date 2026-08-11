@@ -212,3 +212,21 @@ def test_detect_nvenc_available_returns_bool():
     # detection call itself doesn't crash and returns a bool, and is cached.
     result = ffmpeg_tools.detect_nvenc_available()
     assert isinstance(result, bool)
+
+def test_build_proxy_survives_an_odd_height_non_420_source(tmp_path):
+    """An odd-height RGB/4:4:4 source (screen captures, ffv1) fails at encoder
+    init unless the scale filter guards HEIGHT to even as well as width — the
+    width's `-2` already does, the height's bare `min(H,ih)` did not
+    (MED-12, 2026-08-11; measured: 640x481 + `min(1080,ih)` → ffmpeg exit -22,
+    nothing written). The same trunc(...)/2)*2 filter is hand-copied into the
+    companion's preview_proxy_cmd argv-literal tests — change one, change both."""
+    odd = tmp_path / "odd.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc=size=640x481:duration=1:rate=10",
+         "-c:v", "ffv1", "-pix_fmt", "yuv444p", str(odd)],
+        check=True,
+    )
+    dest = tmp_path / "proxy_odd.mp4"
+    ffmpeg_tools.build_proxy(odd, dest, use_nvenc=False, height=1080)
+    assert ffmpeg_tools.probe_video(dest)["height"] == 480

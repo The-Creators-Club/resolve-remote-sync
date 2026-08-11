@@ -59,8 +59,16 @@ def is_excluded_dir(rel_dir: str, patterns: Sequence[str]) -> bool:
     folder *kinds* ("the AE comps", "the download folders") that recur at
     varying depths, and enumerating every depth would be a list that silently
     goes stale as the project tree grows.
+
+    Case-INSENSITIVE (BROLL-16, 2026-08-11): the shares live on NTFS and SMB,
+    where `Erosion/YouTube` and `Erosion/Youtube` are the same folder. Matched
+    case-sensitively, renaming one letter silently un-excluded a whole subtree
+    and re-indexed it as a second copy of itself. Both sides are lowercased
+    rather than using fnmatch.fnmatch, whose case-folding depends on the
+    platform running the scan and not on the filesystem being scanned.
     """
-    return any(fnmatch.fnmatchcase(rel_dir, p) for p in patterns)
+    lowered = rel_dir.lower()
+    return any(fnmatch.fnmatchcase(lowered, p.lower()) for p in patterns)
 
 
 def scan_share(root: str | Path, data_root: str | Path | None = None,

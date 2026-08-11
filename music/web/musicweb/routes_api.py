@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from musicweb import config, db
 from musicweb.db import con
-from musicweb.search import index
+from musicweb.search import index, refresh
 
 router = APIRouter()
 
@@ -166,5 +166,5 @@ def similar(track_id: int, k: int = 20):
 @router.post('/api/reload')
 def reload_index():
     """Pick up a fresh index without restarting the server."""
-    index().reload(con())
+    refresh(con())
     return stats()

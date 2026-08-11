@@ -233,10 +233,27 @@ def test_folder_tuning_drift_reports_missing_and_wrong_values():
     # entirely, so Syncthing falls back to maxConcurrentWrites=2.
     forced = {k: v for k, v in good.items() if k not in FOLDER_TUNING_KEYS}
     assert folder_tuning_drift(forced) == {
-        "maxConcurrentWrites": 32, "pullerMaxPendingKiB": 65536}
+        "maxConcurrentWrites": 32, "pullerMaxPendingKiB": 65536,
+        "ignoreDelete": True}
     # a hand-edited wrong value counts too, and only the drifted key is named
     assert folder_tuning_drift({**good, "maxConcurrentWrites": 2}) == {
         "maxConcurrentWrites": 32}
+
+
+def test_a_pre_existing_nas_folder_gets_the_delete_protection_retrofit():
+    """The companion's per-turn ensure_ignore_delete reaches only the editor's
+    own Syncthing; this drift pass is the one path that retrofits
+    `ignoreDelete` onto folders that already exist on the NAS
+    (delete-protection, 2026-08-11, docs/delete-protection-ignoredelete.md)."""
+    from ccsync_dashboard.collector import folder_tuning_drift
+
+    good = provision.build_folder_config("s", "2026/FF5/Alpha", "/data/Projects", [])
+    legacy = {k: v for k, v in good.items() if k != "ignoreDelete"}
+    assert folder_tuning_drift(legacy) == {"ignoreDelete": True}
+    # an admin's deliberate lift (the runbook's "temporarily") reads as drift
+    # too -- the next cycle re-asserts it, which is the documented self-correction
+    assert folder_tuning_drift({**good, "ignoreDelete": False}) == {
+        "ignoreDelete": True}
 
 
 def test_only_the_tuning_keys_are_ever_repaired():
@@ -250,4 +267,5 @@ def test_only_the_tuning_keys_are_ever_repaired():
     mangled = {**good, "devices": [], "versioning": {}, "type": "sendonly",
                "path": "/somewhere/else", "label": "wrong"}
     assert folder_tuning_drift(mangled) == {}
-    assert set(FOLDER_TUNING_KEYS) == {"maxConcurrentWrites", "pullerMaxPendingKiB"}
+    assert set(FOLDER_TUNING_KEYS) == {
+        "maxConcurrentWrites", "pullerMaxPendingKiB", "ignoreDelete"}

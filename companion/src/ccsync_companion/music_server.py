@@ -126,9 +126,13 @@ def local_path_for(share: str, rel_path: str, mounts: dict) -> str:
             f"rel_path must be relative, got {rel_path!r}"
         )
 
-    local = broll_server.translate_path(share, rel_path, mounts)
+    # The ROOT comes back with the path: it may have come from the /Volumes
+    # probe rather than the mounts table, and reading `mounts[share]` again
+    # here skipped this check entirely for a Mac editor with /Volumes/music
+    # mounted and no config entry -- the documented case, and the one where a
+    # symlink out of the volume was then followed (MED-11, 2026-08-11).
+    root, local = broll_server.translate_path_with_root(share, rel_path, mounts)
 
-    root = (mounts or {}).get(share)
     if root:
         try:
             Path(local).resolve(strict=False).relative_to(

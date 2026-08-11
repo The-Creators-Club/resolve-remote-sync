@@ -149,15 +149,44 @@ def test_generate_terms_returns_en_and_zh_with_glosses(run):
     assert 'english_gloss' in run.calls[0]['cmd'][2]
 
 
-def test_a_chinese_term_without_a_gloss_is_refused(run):
-    """REQ 5 rests on the gloss, and a missing one is exactly what a retry
-    fixes -- so it is validated rather than trusted."""
+def test_a_missing_gloss_asks_once_more_before_anything_is_dropped(run, monkeypatch):
+    """REQ 5 rests on the gloss, and a missing one is what a retry fixes --
+    ask_json's own retry covers unparseable output only, so this is where the
+    promise is kept (YTDL-20)."""
+    replies = [
+        json.dumps({'terms': [{'q': '藻礁 三接', 'lang': 'zh'}]}),
+        json.dumps({'terms': [{'q': '藻礁 三接', 'lang': 'zh',
+                               'english_gloss': 'algal reef third terminal'}]}),
+    ]
+
+    def _seq(cmd, **kw):
+        run.calls.append({'cmd': cmd, 'env': kw.get('env') or {}, 'cwd': kw.get('cwd')})
+        return FakeProc(envelope(replies.pop(0)))
+
+    monkeypatch.setattr(claude_cli.subprocess, 'run', _seq)
+    out = claude_cli.generate_terms('x')
+    assert [t['english_gloss'] for t in out] == ['algal reef third terminal']
+    assert len(run.calls) == 2
+
+
+def test_one_glossless_query_does_not_lose_the_whole_search(run):
+    """YTDL-20: 19 good terms plus one missing gloss used to fail the job at
+    `generating_terms` and lose the lot."""
+    run.outcome = FakeProc(envelope(json.dumps({'terms': [
+        {'q': 'algal reef taiwan', 'lang': 'en'},
+        {'q': '藻礁 三接', 'lang': 'zh'},
+    ]})))
+    out = claude_cli.generate_terms('x')
+    assert [t['q'] for t in out] == ['algal reef taiwan']
+    assert len(run.calls) == 2                 # asked again first, then dropped
+
+
+def test_a_reply_of_nothing_but_glossless_queries_is_still_an_error(run):
     run.outcome = FakeProc(envelope(json.dumps({'terms': [
         {'q': '藻礁 三接', 'lang': 'zh'}]})))
     with pytest.raises(claude_cli.ClaudeError) as e:
         claude_cli.generate_terms('x')
     assert e.value.prefix == claude_cli.ERR_OUTPUT
-    assert 'english_gloss' in str(e.value)
 
 
 def test_duplicate_and_malformed_terms_are_dropped(run):
@@ -209,6 +238,19 @@ def test_a_video_the_model_never_mentioned_is_simply_absent(run):
     assert set(out) == {'vid00000000'}
 
 
+def test_a_null_keep_list_degrades_instead_of_failing_the_job(run):
+    """YTDL-13: {"keep": null} is what "I kept nothing" comes back as, and the
+    TypeError it used to raise escaped the caller's ClaudeError-only except --
+    killing a twenty-minute job at `filtering` where the design says degrade."""
+    run.outcome = FakeProc(envelope(
+        '{"keep": null, "drop": [{"i": 0, "why": "gaming stream"}]}'))
+    out = claude_cli.filter_relevance('topic', _videos(2))
+    assert out == {'vid00000000': (False, 'gaming stream')}
+
+    run.outcome = FakeProc(envelope('{"keep": 3, "drop": null}'))
+    assert claude_cli.filter_relevance('topic', _videos(2)) == {}
+
+
 def test_out_of_range_indices_are_ignored(run):
     run.outcome = FakeProc(envelope('{"keep": [0, 99, "x"], "drop": [{"i": -1}]}'))
     out = claude_cli.filter_relevance('topic', _videos(2))
@@ -232,6 +274,20 @@ def test_health_is_not_re_probed_inside_the_interval(run):
     n = len(run.calls)
     claude_cli.refresh_health()
     assert len(run.calls) == n, 'a wedged claude must not become one subprocess per call'
+
+
+def test_a_working_call_writes_the_cache_back_to_ok(run):
+    """YTDL-5: the cache could only degrade. One transient timeout showed red
+    on every editor's page until the container was restarted -- including after
+    an admin had verified the login by hand, so the documented ops procedure
+    appeared not to work."""
+    claude_cli.note_failure(claude_cli.ClaudeError(claude_cli.ERR_TIMEOUT, 'blip'))
+    assert claude_cli.health()['claude'] == 'timeout'
+
+    run.outcome = FakeProc(envelope('{"terms": [1]}'))
+    claude_cli.ask_json('x')                   # the path the worker actually uses
+    assert claude_cli.health()['claude'] == 'ok'
+    assert claude_cli.health()['detail'] == ''
 
 
 def test_note_failure_updates_the_cache_without_running_anything(run):

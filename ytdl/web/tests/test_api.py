@@ -91,6 +91,18 @@ def test_health_is_served_from_the_cache_not_a_probe(client, monkeypatch):
     assert calls == []
 
 
+def test_health_reports_a_missing_js_runtime(client, monkeypatch):
+    """YTDL-24: without deno/node every video fails with "Requested format is
+    not available", which reads as YouTube flakiness -- while health said
+    all-ok and nothing anywhere named the real cause."""
+    from ytdlweb import routes_api
+    monkeypatch.setattr(routes_api.shutil, 'which', lambda name: None)
+    assert client.get('/api/health').json()['js_runtime'] == 'missing'
+    monkeypatch.setattr(routes_api.shutil, 'which',
+                        lambda name: '/opt/deno/deno' if name == 'deno' else None)
+    assert client.get('/api/health').json()['js_runtime'] == 'ok'
+
+
 def test_creating_a_job_validates_the_project_server_side(client):
     """The picker in the browser is a convenience; this is the check. Without
     it an editor could drop 40 videos into a project they do not sync."""
@@ -117,6 +129,41 @@ def test_a_second_job_is_refused_while_one_is_running(client):
     second = client.post('/api/jobs', json={'term': 'b', 'project_slug': PROJECTS[0][0]})
     assert second.status_code == 409
     assert second.json()['detail']['job_id'] == first.json()['job_id']
+
+
+def test_a_double_click_cannot_create_two_active_jobs(client, con, monkeypatch):
+    """YTDL-25: the one-job check is read-then-insert, and a double-clicked
+    SEARCH lands between the two -- the second job then orphans the first,
+    which is the one active_job hands to every later 409."""
+    from ytdlweb import db as dbmod
+
+    real, seen = dbmod.active_job, []
+
+    def blind(c, user):
+        # the first two calls are the read checks, which see nothing (the race);
+        # anything after that is the recovery path and gets the truth
+        seen.append(user)
+        return None if len(seen) <= 2 else real(c, user)
+
+    monkeypatch.setattr(dbmod, 'active_job', blind)
+    first = client.post('/api/jobs', json={'term': 'a', 'project_slug': PROJECTS[0][0]})
+    second = client.post('/api/jobs', json={'term': 'b', 'project_slug': PROJECTS[0][0]})
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()['detail']['job_id'] == first.json()['job_id']
+    assert len(db.recent_jobs(con, USER)) == 1
+
+
+def test_an_enormous_topic_is_refused_rather_than_handed_to_claude(client):
+    """YTDL-7: the term is one argv element of `claude -p`, and Linux caps a
+    single argument at 128 KiB -- the OSError came back classified as "the
+    claude CLI is not installed" and pinned that banner on everyone."""
+    r = client.post('/api/jobs', json={'term': 'x' * 401,
+                                       'project_slug': PROJECTS[0][0]})
+    assert r.status_code == 400
+    assert '400 characters' in r.json()['detail']
+    assert client.post('/api/jobs', json={'term': 'x' * 400,
+                                          'project_slug': PROJECTS[0][0]}).status_code == 200
 
 
 def test_bad_period_and_quality_are_refused(client):
@@ -215,10 +262,77 @@ def test_download_with_nothing_selected_is_a_400(client, con, job):
     assert client.post(f'/api/jobs/{job["id"]}/download').status_code == 400
 
 
+def test_a_failed_download_is_retryable_without_a_whole_new_search(client, con, job):
+    """YTDL-16: the download phase ends `done` even with per-video failures, so
+    without this the only retry was another Claude spend and another twenty
+    minutes of yt-dlp."""
+    for vid in ('vid00000001', 'vid00000002'):
+        db.add_video(con, job['id'], vid, 'u')
+    db.set_video(con, job['id'], 'vid00000001', dl_state='done')
+    db.set_video(con, job['id'], 'vid00000002', dl_state='failed',
+                 dl_error='yt-dlp said no')
+    db.set_phase(con, job['id'], 'done')
+
+    r = client.post(f'/api/jobs/{job["id"]}/download')
+    assert r.status_code == 200 and r.json()['queued'] == 1
+    assert db.get_job(con, job['id'])['phase'] == 'downloading'
+    assert [v['video_id'] for v in db.pending_videos(con, job['id'])] == ['vid00000002']
+
+
+def test_a_finished_job_with_nothing_left_to_fetch_is_still_a_400(client, con, job):
+    db.add_video(con, job['id'], 'vid00000001', 'u')
+    db.set_video(con, job['id'], 'vid00000001', dl_state='done')
+    db.set_phase(con, job['id'], 'done')
+    assert client.post(f'/api/jobs/{job["id"]}/download').status_code == 400
+
+
+def test_download_re_validates_the_destination_project(client, con, job, monkeypatch):
+    """YTDL-30: a manifest can sit at review for a week -- long enough for the
+    project to be unticked, after which nobody syncs the tree these clips would
+    land in."""
+    from ytdlweb import projects
+    db.add_video(con, job['id'], 'vid00000001', 'u')
+    db.set_phase(con, job['id'], 'ready_for_review')
+    monkeypatch.setattr(projects, 'resolve_project', lambda user, slug: None)
+    r = client.post(f'/api/jobs/{job["id"]}/download')
+    assert r.status_code == 409
+    assert 'no longer a project you sync' in r.json()['detail']['detail']
+    assert db.get_job(con, job['id'])['phase'] == 'ready_for_review'
+
+
 def test_cancel_sets_the_flag_rather_than_killing_anything(client, con, job):
     db.set_phase(con, job['id'], 'searching')
     assert client.post(f'/api/jobs/{job["id"]}/cancel').json()['ok'] is True
     assert db.is_cancelled(con, job['id']) is True
+
+
+def test_cancelling_a_manifest_ends_the_job_and_unblocks_the_editor(client, con, job):
+    """YTDL-1: the flag is only read inside run_job, which the worker never
+    enters for ready_for_review -- so this cancel used to change nothing while
+    answering {ok:true}, and every later search 409'd forever."""
+    db.set_phase(con, job['id'], 'ready_for_review')
+    r = client.post(f'/api/jobs/{job["id"]}/cancel')
+    assert r.json() == {'ok': True, 'phase': 'cancelled'}
+    assert db.get_job(con, job['id'])['phase'] == 'cancelled'
+    assert db.active_job(con, USER) is None
+    assert client.post('/api/jobs', json={'term': 'a fresh start',
+                                          'project_slug': PROJECTS[0][0]}).status_code == 200
+
+
+def test_cancelling_a_queued_job_ends_it_too(client, con, job):
+    """Nothing has claimed it, so there is no phase to ask to stop."""
+    assert client.post(f'/api/jobs/{job["id"]}/cancel').json()['phase'] == 'cancelled'
+    assert db.get_job(con, job['id'])['phase'] == 'cancelled'
+
+
+def test_download_clears_a_cancel_the_worker_never_honoured(client, con, job):
+    """The side defect of YTDL-1: a leftover flag insta-cancels the run the
+    editor is asking for."""
+    db.add_video(con, job['id'], 'vid00000001', 'u')
+    db.set_phase(con, job['id'], 'ready_for_review')
+    db.request_cancel(con, job['id'])
+    assert client.post(f'/api/jobs/{job["id"]}/download').status_code == 200
+    assert db.is_cancelled(con, job['id']) is False
 
 
 def test_recent_jobs_are_the_callers_own(client, con, job):

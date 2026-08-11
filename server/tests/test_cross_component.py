@@ -186,3 +186,61 @@ def test_the_asset_list_still_brakes_on_video():
 def test_no_asset_builder_emits_duplicate_lines():
     for name, lines in ASSET_BUILDERS.items():
         assert len(lines) == len(set(lines)), f"{name} emits a duplicate asset pattern"
+
+
+# -- delete protection (2026-08-11, docs/delete-protection-ignoredelete.md) --
+#
+# `ignoreDelete: true` now lives in FOUR hand-kept copies of a folder config:
+# the companion's accept_folder, server/setup_syncthing_folder.py, and the
+# dashboard's two builders. The flag protects the device it is set ON against
+# deletes made elsewhere, so it only protects the fleet if EVERY side sets it
+# -- a copy that drifts leaves that machine applying deletes while everyone
+# believes the tree is protected. Same drift hazard as the .stignore builders
+# above, with a quieter failure.
+
+
+def _companion_accept_folder_config() -> dict:
+    """The body companion accept_folder POSTs to /rest/config/folders. Built
+    inside the method, so it is captured through a stub http_request rather
+    than read off a constant."""
+    sent = []
+
+    def fake_http_request(method, url, api_key, body, timeout):
+        sent.append((method, url, body))
+        return {}
+
+    admin = companion_admin.SyncthingAdmin(
+        syncthing_url="http://127.0.0.1:8384", api_key="k", http_request=fake_http_request
+    )
+    admin.accept_folder(
+        "abcd-nuclear", label="2026/FF5/Nuclear",
+        local_path="/local/Projects/2026/FF5/Nuclear", offered_by_device_id="DEVICE-1",
+    )
+    return next(body for method, url, body in sent
+                if method == "POST" and url.endswith("/rest/config/folders"))
+
+
+def test_every_folder_builder_sets_ignore_delete():
+    builders = {
+        "companion/sync/syncthing_admin.accept_folder": _companion_accept_folder_config(),
+        "dashboard/provision.build_folder_config": dash_provision.build_folder_config(
+            "abcd-nuclear", "2026/FF5/Nuclear", "/data/Projects", ["DEVICE-1"]),
+        "dashboard/provision.build_shared_folder_config":
+            dash_provision.build_shared_folder_config(
+                dash_provision.LUTS_FOLDER_ID, "Assets/Luts (LUT library)",
+                "/data/Assets/Luts", ["DEVICE-1"]),
+    }
+    for name, config in builders.items():
+        assert config.get("ignoreDelete") is True, (
+            f"{name} does not set ignoreDelete: that machine applies deletes the rest "
+            f"of the fleet ignores (docs/delete-protection-ignoredelete.md)")
+
+
+def test_the_server_folder_config_sets_ignore_delete():
+    """setup_syncthing_folder builds its folder object inline in main(), so
+    this is a source check -- the same shape as test_safety.py's
+    tuning-matches-the-collector test, which guards the neighbouring keys."""
+    source = (REPO_ROOT / "server" / "setup_syncthing_folder.py").read_text(encoding="utf-8")
+    assert '"ignoreDelete": True' in source, (
+        "server/setup_syncthing_folder.py stopped provisioning ignoreDelete on the NAS "
+        "side -- the authoritative copy would then apply an editor's delete")

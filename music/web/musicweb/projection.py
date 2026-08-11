@@ -22,8 +22,15 @@ def l2norm(a):
 def apply(vecs, dirs):
     """Project the source axes out and re-normalise.
 
-    Applied to audio embeddings AND to text queries, so both live in the same
-    subspace -- projecting only one side would silently distort every score.
+    INDEX-SIDE AND SIMILARITY-ONLY: the only caller is `search.Index`, building
+    the matrix /api/similar scores against. Text queries are NOT projected, and
+    neither is the matrix text search scores against. That asymmetry is
+    deliberate and measured (MUSIC-13, 2026-08-11 -- this docstring used to
+    claim the opposite): erasing the source axes takes similarity from 53.7% to
+    40.5% ES-seed->ES neighbours, but takes TEXT retrieval from 40% to 20%
+    top-10, because those axes carry content text queries lean on and text sits
+    on the far side of CLAP's modality gap. Applying this to queries "for
+    symmetry" halves text search.
     """
     if dirs is None or dirs.size == 0 or vecs is None or vecs.size == 0:
         return vecs

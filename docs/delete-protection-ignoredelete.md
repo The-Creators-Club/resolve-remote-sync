@@ -1,8 +1,14 @@
 # Delete protection for lane C — `ignoreDelete` on project + asset folders
 
-**Status: proposed patch, not yet implemented (2026-08-11).** Design agreed;
-this is the implementation plan and the operational consequences to sign off on
-before it lands.
+**Status: IMPLEMENTED (2026-08-11, same day).** All five sites below landed,
+plus one the plan missed: `ignoreDelete` joined the dashboard collector's
+repairable folder drift (`collector.FOLDER_TUNING_KEYS`), because the
+companion's per-turn retrofit only reaches the editor's OWN Syncthing — the
+collector pass is what retrofits the flag onto folders that already exist on
+the NAS, the copies this design most wants to protect. Still owed before
+trusting it: the pre-flight round-trip check below (KNOWN_BUGS R5), and a
+decision on the incidental `maxAge` disagreement. The text below is the
+original plan.
 
 ## The gap this closes
 

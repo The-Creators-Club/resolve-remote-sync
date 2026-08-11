@@ -287,6 +287,28 @@ def test_the_indexer_can_ingest_with_the_right_token(tmp_path, broll_env):
         assert bad.status_code in (401, 303)
 
 
+def test_a_non_ascii_ingest_token_is_refused_not_a_500(tmp_path, broll_env):
+    """DASH-5: Starlette decodes headers latin-1 and hmac.compare_digest raises
+    TypeError on any character above U+007F, so the gate answered a junk
+    X-Ingest-Token with a traceback instead of a 401. Compared as raw header
+    bytes now."""
+    junk = {"X-Ingest-Token": "tökén".encode("latin-1")}
+    app = _broll_app(tmp_path)
+    with TestClient(app) as c:
+        # no session: login_gate's own token check (api.token_ok) refuses first
+        r = c.post("/broll/api/ingest/shares", json=[{"share": "s", "root": "Z:/x"}],
+                   headers=junk, follow_redirects=False)
+        assert r.status_code == 401, r.text
+
+        # with a session the request reaches BrollGate itself, which is the
+        # compare_digest that raised
+        as_user(c)
+        r = c.post("/broll/api/ingest/shares", json=[{"share": "s", "root": "Z:/x"}],
+                   headers=junk, follow_redirects=False)
+        assert r.status_code == 401, r.text
+        assert "X-Ingest-Token" in r.json()["detail"]
+
+
 def test_a_session_alone_can_never_reach_ingest(tmp_path, broll_env, monkeypatch):
     """The verified hole: with no BROLL_INGEST_TOKEN in the environment the
     b-roll app's own guard flips to dev mode, so every logged-in editor -- or

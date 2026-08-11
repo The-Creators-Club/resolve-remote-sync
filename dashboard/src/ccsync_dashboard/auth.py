@@ -204,7 +204,14 @@ def _read_token(secret: str, token: str | None, purpose: str, now: float | None 
     if version != _TOKEN_VERSION or tok_purpose != purpose:
         return None
     payload = f"{version}.{tok_purpose}.{user_b64}.{expires_s}"
-    if not hmac.compare_digest(signature, _sign(secret, payload)):
+    try:
+        if not hmac.compare_digest(signature, _sign(secret, payload)):
+            return None
+    except TypeError:
+        # compare_digest refuses non-ASCII str, and a cookie is attacker-shaped
+        # input decoded latin-1 -- one accented byte in ccsync_session used to
+        # 500 with a traceback, pre-auth, on every gated path (DASH-5 twin,
+        # YTDL-32, 2026-08-11). A garbage token is a 401, never a crash.
         return None
     try:
         if int(expires_s) < (time.time() if now is None else now):

@@ -794,6 +794,30 @@ def test_menu_offers_grade_swap_and_label_flips():
     assert not any("Grade" in l for l in labels)
 
 
+def test_the_fingerprint_moves_when_the_stray_lut_count_does():
+    """UI-3: the count was gathered and rendered but left OUT of the
+    fingerprint, and the refresh loop only reassigns icon.menu when the
+    fingerprint changes. An editor drops a LUT into Resolve's own folder on
+    an otherwise-idle machine, nothing else moves, and the entire shared-LUT
+    onboarding item stays unreachable -- and once share_stray_luts takes the
+    count back to 0 the stale item lingers."""
+    from ccsync_companion.tray import _build_menu, _menu_fingerprint, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""})
+    app.stray_lut_count = lambda: 0
+    fp_none = _menu_fingerprint(_tray_snapshot(app))
+
+    app.stray_lut_count = lambda: 3
+    snap = _tray_snapshot(app)
+    assert any("3 LUTs only on this machine" in l
+               for l in _all_menu_labels(_build_menu(app, snap)))
+    assert _menu_fingerprint(snap) != fp_none
+
+    # ...and back again, so the item cannot linger after they are shared.
+    app.stray_lut_count = lambda: 0
+    assert _menu_fingerprint(_tray_snapshot(app)) == fp_none
+
+
 # -- the sync drive is out (root_guard.py) ----------------------------------
 
 
@@ -1855,6 +1879,112 @@ def test_the_pulse_animates_only_while_the_snapshot_says_so():
             quiet = len(icon.assignments)
             time.sleep(0.2)                      # ~20 pulse ticks
             assert len(icon.assignments) == quiet
+        finally:
+            icon.stop()
+    finally:
+        tray_mod.pystray.Icon = real_icon
+
+
+def test_the_falling_edge_frame_waits_for_the_menu_to_close(monkeypatch):
+    """UI-4: the guard covers the pulsing branch AND the falling-edge restore.
+
+    A NIM_MODIFY under an open menu forces a redraw beneath the cursor (the
+    2026-07-26 hover hangs), so no tick of this loop may write while the menu
+    is up. The falling-edge write skipped the check, leaving a one-shot
+    window one pulse interval wide.
+
+    The guard here answers the two loops differently ON PURPOSE: that is the
+    live race, not a contrivance -- the refresh loop publishes the no-longer-
+    pulsing state, THEN the menu opens, THEN the pulse thread wakes up. The
+    refresh loop, which re-checks the guard itself, would otherwise freeze
+    `pulse_state` and the falling edge could never be reached at all.
+    """
+    import threading
+    import time
+
+    import ccsync_companion.tray as tray_mod
+
+    class _FakeIcon:
+        def __init__(self, *a, **k):
+            object.__setattr__(self, "assignments", [])
+            self.icon = a[1] if len(a) > 1 else None
+            self.title = a[2] if len(a) > 2 else ""
+            self.menu = k.get("menu")
+
+        def __setattr__(self, name, value):
+            if name == "icon":
+                self.assignments.append(value)
+            object.__setattr__(self, name, value)
+
+        def stop(self):
+            pass
+
+        def run(self):
+            pass
+
+    menu_open = threading.Event()
+    refresh_thread: list = [None]
+    main_thread = threading.current_thread()
+
+    class _FakeGuard:
+        def install(self):
+            pass
+
+        def is_open(self):
+            if threading.current_thread() is refresh_thread[0]:
+                return False
+            return menu_open.is_set()
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    statuses = [_syncing3()]
+
+    def _lane_statuses():
+        # _tray_snapshot's caller identifies itself here (start_tray takes the
+        # first snapshot on this thread).
+        if threading.current_thread() is not main_thread:
+            refresh_thread[0] = threading.current_thread()
+        return statuses[0]
+
+    app.lane_statuses = _lane_statuses
+
+    monkeypatch.setattr(tray_mod, "_MenuOpenGuard", _FakeGuard)
+    real_icon = tray_mod.pystray.Icon
+    try:
+        tray_mod.pystray.Icon = _FakeIcon
+        icon = tray_mod.start_tray(app, refresh_interval=0.01, pulse_interval=0.02)
+        try:
+            deadline = time.monotonic() + 5.0
+            while len(icon.assignments) < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert len(icon.assignments) >= 3, "the mark never breathed"
+
+            # The menu goes up while the pulse is still running: from here on
+            # the pulse thread must not touch the icon at all.
+            menu_open.set()
+            time.sleep(0.1)
+            base = len(icon.assignments)
+
+            # ...and NOW the state stops pulsing. The refresh loop restores
+            # the steady frame (exactly one write, its own); the pulse loop's
+            # falling-edge restore has to wait.
+            statuses[0] = [_status("lane_a_video_up", "idle")]
+            steady = tray_mod._icon_image_cached("green")
+            deadline = time.monotonic() + 5.0
+            while icon.icon is not steady and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert icon.icon is steady
+            time.sleep(0.2)                      # ~10 pulse ticks
+            assert len(icon.assignments) - base == 1, (
+                "the pulse loop wrote icon.icon under an open menu")
+
+            # The write is deferred, not dropped: the menu closes and the
+            # restoring frame lands on the next tick.
+            menu_open.clear()
+            deadline = time.monotonic() + 5.0
+            while len(icon.assignments) - base < 2 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert len(icon.assignments) - base == 2
+            assert icon.assignments[-1] is steady
         finally:
             icon.stop()
     finally:

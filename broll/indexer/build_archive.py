@@ -223,6 +223,34 @@ def archive_source(video: dict, cfg, share_roots: dict[str, str],
     return generated if generated.is_file() else None
 
 
+def preview_source(video: dict, top: Path | None, proxies_dir: Path) -> Path | None:
+    """The file that belongs in this clip's `Proxy/` folder, or None.
+
+    Normally the generated 540p H.264. Two cases used to fall through it and
+    leave the clip with nothing under `Proxy/` at all — which matters more than
+    the missing file suggests, because only a file there is recorded as the
+    row's `archive_path` (what the web app plays) and only `**/Proxy/**` is what
+    lane B syncs to editors:
+
+      * the generated proxy IS the top slot (a Downloads share whose
+        `original_path` has not been resolved yet, or whose originals drive is
+        unmounted). The old `preview != top` guard skipped the copy as
+        redundant; two copies of a ~27 MB proxy is the cheaper mistake
+        (BROLL-6, 2026-08-11);
+      * an audio-only clip has no generated proxy at all — stage_proxy never
+        runs, there being no video stream to encode — yet its speech is
+        transcribed and searchable, so search returns it and the player 404s.
+        Its source is a small audio file, so it stands in as its own preview
+        (BROLL-14, 2026-08-11).
+    """
+    generated = proxies_dir / f"{video['id']}.mp4"
+    if generated.is_file():
+        return generated
+    if top is not None and video.get("status") == "skipped":
+        return top
+    return None
+
+
 def dedupe(path: Path, taken: set[str]) -> Path:
     """Resolve two clips wanting the same filename, deterministically.
 
@@ -250,7 +278,7 @@ def dedupe(path: Path, taken: set[str]) -> Path:
         n += 1
 
 
-def eligible(db_path: str) -> list[dict]:
+def eligible(db_path: str, creators: set[str] | None = None) -> list[dict]:
     """Everything whose local stages are done: indexed, organised, or proxied.
 
     'proxied' joined 2026-08-10 (shipping ff3 ahead of its overnight claude
@@ -260,16 +288,46 @@ def eligible(db_path: str) -> list[dict]:
     wait days for a model queue to see footage that is already playable.
     Media placement is additive and idempotent, so a clip shipped at
     'proxied' is simply already in place when it reaches 'indexed'.
+
+    That idempotence is only true where the destination does not depend on
+    something the model is about to change. For a Creators_Club share it never
+    does (the path is the shoot's own folders); for a Downloads share it is
+    `videos.category`, which is NULL at 'proxied' and set at 'indexed' -- so
+    such a clip is filed under _uncategorised, then filed AGAIN under its real
+    subject on the next build, with the first copy stranded (nothing here ever
+    deletes) and dedupe's name claims shifted underneath everyone (BROLL-7,
+    2026-08-11). Those rows wait for the model pass instead. `creators` is what
+    tells the two apart; passing None keeps every eligible row, for callers with
+    no config to hand.
+
+    Audio-only clips are 'skipped' but belong here (BROLL-14, 2026-08-11):
+    stage_probe parks them there because there is nothing to SEE, while their
+    speech is transcribed and fully searchable -- so search returns them and,
+    unless their media is shipped, the player 404s on the clip search just
+    found. They are told apart from the scanner's own 'skipped' rows (editor
+    proxy folders -- 2,100 files, 660 GB, deliberately excluded) by having been
+    probed at all: a duration but no video codec.
     """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT id, share, rel_path, category, status, original_path FROM videos "
-            "WHERE status IN ('indexed', 'proxied', ?) AND duplicate_of IS NULL ORDER BY id",
+            "SELECT id, share, rel_path, category, status, codec, duration_s, "
+            "original_path FROM videos "
+            "WHERE (status IN ('indexed', 'proxied', ?) "
+            "       OR (status = 'skipped' AND codec IS NULL "
+            "           AND duration_s IS NOT NULL)) "
+            "AND duplicate_of IS NULL ORDER BY id",
             (ORGANISED,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        videos = [dict(r) for r in rows]
+        if creators is None:
+            return videos
+        return [
+            v for v in videos
+            if not (v["status"] == "proxied" and v["category"] is None
+                    and v["share"] not in creators)
+        ]
     finally:
         conn.close()
 
@@ -303,7 +361,7 @@ def main() -> int:
     proxies = cfg.data_root / "proxies"
     creators = creator_shares(cfg)
 
-    videos = eligible(cfg.db.path)
+    videos = eligible(cfg.db.path, creators)
     if args.limit:
         videos = videos[: args.limit]
 
@@ -326,11 +384,14 @@ def main() -> int:
         else:
             missing.append(v)
 
-        # The PREVIEW: always the generated 540p H.264, always in Proxy/.
-        preview = proxies / f"{v['id']}.mp4"
-        if preview.is_file() and preview != top:
+        # The PREVIEW: what goes in Proxy/, which is what the site plays and
+        # what lane B syncs. See preview_source for the two cases that used to
+        # leave a clip with nothing there.
+        preview = preview_source(v, top, proxies)
+        if preview is not None:
             plan.append((v, preview, dedupe(
-                dest_root / dest_rel(v, creators, ".mp4", as_preview=True), taken)))
+                dest_root / dest_rel(v, creators, preview.suffix.lower(),
+                                     as_preview=True), taken)))
 
         # The STILLS: poster and sprite, by id, in flat top-level folders. Not
         # run through dedupe() -- `{video_id}.jpg` cannot collide, and passing

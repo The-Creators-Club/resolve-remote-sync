@@ -126,6 +126,13 @@ class SqliteBackend(Storage):
         model: str,
     ) -> None:
         conn = self.conn
+        # The segments' embeddings go with the segments (BROLL-13, 2026-08-11):
+        # `embeddings.source_id` has no foreign key onto segments, so re-indexing
+        # a video otherwise leaves vectors behind for rows that no longer exist.
+        # They keep scoring in semantic search, resolve to nothing, and eat the
+        # per-query semantic-only budget. Same fix as the web app's /api/ingest/
+        # index twin; transcript embeddings are untouched (different owner).
+        conn.execute("DELETE FROM embeddings WHERE source = 'segment' AND video_id = ?", (video_id,))
         conn.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
         conn.execute("DELETE FROM themes WHERE video_id = ?", (video_id,))
         conn.execute("DELETE FROM quality_flags WHERE video_id = ?", (video_id,))

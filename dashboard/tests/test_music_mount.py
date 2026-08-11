@@ -243,6 +243,22 @@ def test_the_ui_is_served_under_the_prefix(tmp_path, music_env):
         assert "/login" in r.headers["location"]
 
 
+def test_the_bare_prefix_redirects_into_the_mount(tmp_path, music_env):
+    """`/music` (no trailing slash) -> `/music/` is LOAD-BEARING, not
+    incidental: it is the URL the topbar link and everything anyone types by
+    hand use, and Starlette only serves the mount from the slashed form. It was
+    pinned by music/web's own suite and by nothing on this side (KNOWN_BUGS
+    DASH-9, 2026-08-11)."""
+    app = _app(tmp_path)
+    with TestClient(app) as c:
+        as_user(c)
+        r = c.get("/music", follow_redirects=False)
+        assert r.status_code in (307, 308), r.status_code
+        assert r.headers["location"].endswith("/music/")
+        # ...and following it really lands in the sub-app
+        assert "MUSIC SEARCH" in c.get("/music").text
+
+
 def test_a_signed_in_editor_renders_a_page_through_the_mount(tmp_path, music_env):
     """That the request really reaches the sub-app, not just login_gate: a
     303 or 401 on an unmounted path looks identical from outside."""

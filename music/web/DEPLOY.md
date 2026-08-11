@@ -173,6 +173,67 @@ replaced database is how a working index becomes a corrupt one. The installer al
 the *source* has a non-empty `-wal`, because a plain file copy leaves those transactions
 behind.
 
+<a id="draining-the-nas-ingest-queue"></a>
+
+#### Draining the NAS ingest queue
+
+The container has no GPU, so a drag-and-drop upload only gets embedded, tagged and made
+searchable when a base rig runs `index_music.py --queue` — and the `pending` row is in the
+**NAS's** `music.db`, not the base rig's. Until 2026-08-11 there was no way for the two to
+meet (MUSIC-3): `--queue` opened `config.DB_PATH` unconditionally, so on the base rig it
+drained the in-repo index, printed "nothing to analyse", and the next `--music-data db`
+push overwrote the NAS copy and discarded the row. `--db <path>` closes the loop. It is a
+**pull, drain, push** — there is no merge, so the copy you push back must be the newest
+index in existence when you push it.
+
+```powershell
+# 0. is anything waiting?  /music (the ingest panel) or, on the NAS:
+#    the mount is 3000:3000 mode 770, so every read of it needs sudo
+ssh truenas_admin@192.168.0.102 `
+  "sudo ls -l /mnt/tank/apps/ccsync-dashboard/music-data"
+
+# 1. pull it down -- music.db AND its -wal/-shm. The index is in WAL mode and a
+#    file copy that leaves the -wal behind loses the transactions in it; a -wal
+#    that arrives beside a DIFFERENT database is how a working index becomes a
+#    corrupt one. Take the copy when nobody is mid-upload: this is a file copy,
+#    not a snapshot.
+ssh truenas_admin@192.168.0.102 `
+  "sudo cp -a /mnt/tank/apps/ccsync-dashboard/music-data/music.db* /tmp/ && sudo chown truenas_admin /tmp/music.db*"
+scp truenas_admin@192.168.0.102:/tmp/music.db* .\nas-index\
+
+# 2. drain it HERE, where the GPU and the library (W:) are. The uploads
+#    themselves are already in the share, so nothing but the index moves.
+cd music\indexer
+python index_music.py --queue --db ..\..\nas-index\music.db      # --retry-failed to re-attempt parked rows
+python index_music.py --queue-status --db ..\..\nas-index\music.db
+
+# 3. that drained copy is now the truth: it has everything the base rig's index
+#    had, plus the queued tracks. Make it the base rig's copy too, or the next
+#    routine `--music-data db` will push a stale index back over it. A clean
+#    close checkpoints and removes the -wal, so there should be none to carry --
+#    but the DESTINATION's stale sidecars must go either way.
+Remove-Item ..\web\data\music.db-wal, ..\web\data\music.db-shm -ErrorAction SilentlyContinue
+Copy-Item ..\..\nas-index\music.db ..\web\data\music.db -Force
+
+# 4. push just the index back (never `all` -- that is a 1.4 GB re-upload)
+cd ..\..\server
+python install_dashboard_app.py --music-data db
+```
+
+Two hazards worth naming, because neither is detectable after the fact:
+
+- **The window between step 1 and step 4 is a lost-write window.** Anything an editor
+  queues while you hold the copy lands in the NAS `music.db` and is overwritten by the push.
+  Re-check `/music`'s queue immediately before step 4; if it grew, go back to step 1.
+- **A `--music-data db` push from a base rig that never drained** discards pending rows the
+  same way. That is why `db` is opt-in and why the installer keeps `music.db.old.<ts>`
+  forever — it is the only copy of the row you just lost.
+
+`--db` is not queue-specific: any subcommand takes it, so `--peaks`, `--retag` and
+`--queue-status` can all be pointed at a pulled-down copy. A path that does not exist is
+refused rather than created, because an empty database answers `--queue` with "nothing to
+analyse" — indistinguishable from a queue that was already drained.
+
 #### ffmpeg: there is no image to build
 
 `/api/ingest`'s queued path needs `ffprobe` (to prove an upload is audio) and `ffmpeg` (to
@@ -254,7 +315,8 @@ about an empty mount.
 - `/api/ingest` — **port step 7 landed**, so this no longer needs the b-roll token
   treatment on the NAS: with no importable indexer the container takes the *queued* path
   (validate → de-duplicate → transcode → land in the share → write a `pending` row), and a
-  base-rig `index_music.py --queue` does the embedding. It is still a write path on the
+  base-rig `index_music.py --queue --db <a copy pulled off the NAS>` does the embedding
+  ([Draining the NAS ingest queue](#draining-the-nas-ingest-queue)). It is still a write path on the
   fleet's origin, and it is still guarded by nothing but the dashboard session — which is
   the deliberate choice argued above, not an oversight.
 - `/api/resolve*` and `/api/reveal` — **port step 8 landed**: they live in

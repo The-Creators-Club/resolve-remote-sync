@@ -19,7 +19,26 @@ import threading
 import pytest
 
 from ccsync_companion import app as app_mod
-from ccsync_companion import broll_server, resolve_bridge
+from ccsync_companion import broll_server, music_server, music_worker, resolve_bridge
+
+
+@pytest.fixture(autouse=True)
+def worker_in_process(monkeypatch):
+    """No test here may SPAWN the Resolve worker.
+
+    Since MED-3 (2026-08-11) /status and /insert run their Resolve half in a
+    child process, which ignores the `resolve_bridge` seams these tests patch
+    and reaches the real Resolve on a developer box (measured while writing
+    that fix -- it got as far as importing into a live project). Running the
+    worker's dispatch in-process keeps the whole chain under test except the
+    process boundary, which test_music_server.py owns.
+    """
+    def _in_process_call(action, timeout=None, **kw):
+        request = dict(kw)
+        request["action"] = action
+        return music_worker.run_request(request)
+
+    monkeypatch.setattr(music_server, "call", _in_process_call)
 
 
 def _free_port() -> int:

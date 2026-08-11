@@ -1595,6 +1595,13 @@ def _menu_fingerprint(snap: dict) -> tuple:
         snap["dashboard_url"], snap["color"],
         tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
         snap.get("p_swap_available"), snap.get("p_mode"),
+        # The stray-LUT count decides whether the "N LUTs only on this
+        # machine" item exists at all, and on an otherwise-idle machine
+        # nothing else here moves when a LUT is dropped into Resolve's own
+        # folder -- so without this the whole shared-LUT onboarding item was
+        # unreachable until something unrelated changed, and lingered after
+        # share_stray_luts took the count back to 0 (UI-3, 2026-08-11).
+        int(snap.get("stray_luts") or 0),
         _proxy_fingerprint(snap.get("proxy_gap")),
     )
 
@@ -2034,7 +2041,16 @@ def start_tray(
         while not getattr(icon, "_ccsync_stop", False):
             try:
                 color, pulsing = pulse_state
-                if not pulsing:
+                # The guard covers BOTH writes. It used to sit on the pulsing
+                # branch only, so the falling-edge restore NIM_MODIFYed the
+                # icon under an open menu -- a ~375 ms one-shot window for the
+                # 2026-07-26 hover hang, contradicting this loop's own
+                # docstring (UI-4, 2026-08-11). Skipping the write leaves
+                # `step` set, so the restoring frame is simply painted on the
+                # first pass after the menu closes.
+                if guard.is_open():
+                    pass
+                elif not pulsing:
                     if step:
                         # ONE assignment on the falling edge, then silence.
                         # The refresh loop restores the steady frame too, but
@@ -2046,7 +2062,7 @@ def start_tray(
                         # left stuck on a dim frame.
                         icon.icon = _icon_image_cached(color)
                         step = 0
-                elif not guard.is_open():
+                else:
                     if color != frames_color:
                         frames = _pulse_frames(color)
                         frames_color = color

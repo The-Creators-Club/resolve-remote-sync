@@ -508,12 +508,13 @@ def test_a_host_with_the_indexer_still_ingests_inline(client, monkeypatch):
     class FakeIndex:
         clap = object()
 
-        def reload(self, con):
-            calls.append('reload')
-
     monkeypatch.setattr(routes_ingest, '_load_indexer',
                         lambda: (FakeIngest, FakeIndexMusic))
     monkeypatch.setattr(routes_ingest, 'index', lambda: FakeIndex())
+    # search.refresh, not index().reload: the live index is REPLACED rather
+    # than mutated in place (MUSIC-10, 2026-08-11).
+    monkeypatch.setattr(routes_ingest, 'refresh',
+                        lambda con: calls.append('refresh'))
 
     body = post(client, 'Inline Cue.wav').json()
 
@@ -523,5 +524,5 @@ def test_a_host_with_the_indexer_still_ingests_inline(client, monkeypatch):
     assert got['status'] == 'added'
     assert got['bpm'] == 128.0
     assert got['track']['id'] == 1              # hydrated from the tracks row
-    assert calls == ['hashes', 'ingest_one', 'retag', 'reload']
+    assert calls == ['hashes', 'ingest_one', 'retag', 'refresh']
     assert queue_rows() == []                   # nothing queued on this host

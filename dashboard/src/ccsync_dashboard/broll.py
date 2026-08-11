@@ -124,12 +124,16 @@ class BrollGate:
     def _token_ok(self, scope: dict) -> bool:
         if not self._token:
             return False
-        supplied = ""
+        # Compared as raw header BYTES, never as a decoded str:
+        # hmac.compare_digest raises TypeError on a str with any character
+        # above U+007F, so one non-ASCII byte in X-Ingest-Token answered a
+        # refusal with a 500 and a traceback (KNOWN_BUGS DASH-5, 2026-08-11).
+        supplied = b""
         for key, value in scope.get("headers", ()):
             if key == b"x-ingest-token":
-                supplied = value.decode("latin-1")
+                supplied = value
                 break
-        return hmac.compare_digest(self._token, supplied)
+        return hmac.compare_digest(self._token.encode("utf-8", "surrogateescape"), supplied)
 
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") == "http":

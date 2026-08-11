@@ -1465,3 +1465,115 @@ def test_the_darwin_guard_survives_a_start_stop_with_no_appkit():
         assert guard.active is False
     finally:
         guard.stop()
+
+
+# --- 2026-08-11 hunt: SYNC-7 / SYNC-15 / SYNC-16 ---------------------------
+
+
+def test_sigterm_never_chains_into_our_own_handler():
+    """SYNC-7. _restore_signal_handler deliberately leaves our handler
+    installed when it cannot restore (previous is None, or the restore raised
+    off the main thread), so the next start() captures OUR handler as
+    _previous_sigterm. The guard against chaining compared a bound method
+    with `is` -- and attribute access builds a new bound-method object every
+    time, so it never fired: SIGTERM then recursed handle_sigterm -> chain ->
+    handle_sigterm to the recursion limit, logging a traceback per frame."""
+    calls: list[str] = []
+    signals = _FakeSignals(previous=None)
+    guard, _notes, _ = _darwin_guard(
+        lambda: None, on_shutdown=lambda: calls.append("shutdown"), signals=signals)
+
+    guard.start()
+    # signal.signal() returned None for the previous handler, so putting it
+    # back would raise -- _restore_signal_handler leaves ours installed, and
+    # the next start() reads it back as "whoever had SIGTERM before us".
+    guard.stop()
+    guard.start()
+    assert guard._previous_sigterm is not None
+
+    signals.installed[-1][1](signal.SIGTERM, None)
+
+    assert calls == ["shutdown"], "the handler chained into itself"
+    guard.stop()
+
+
+def test_a_pump_that_will_not_die_is_not_replaced_by_a_second_one(monkeypatch):
+    """SYNC-15. stop() cleared _hwnd/_thread unconditionally but posted
+    WM_CLOSE only `if hwnd` -- so a stop() before the window came up (the 5 s
+    _ready.wait in start() is a bound, not a guarantee) left a permanent
+    ccsync-shutdown-guard thread and a live window, and the next start() built
+    a SECOND pump on top of them."""
+    from ccsync_companion import shutdown_guard
+
+    monkeypatch.setattr(shutdown_guard, "STOP_READY_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(shutdown_guard, "STOP_JOIN_SECONDS", 0.05)
+    guard = _WindowsShutdownGuard(lambda: None)
+    release = threading.Event()
+    thread = threading.Thread(target=lambda: release.wait(30.0), daemon=True)
+    guard._thread = thread
+    thread.start()
+    try:
+        guard.stop()
+        assert guard._thread is thread, "the live pump was forgotten"
+
+        built: list[str] = []
+        guard._pump = lambda: built.append("pump")
+        guard.start()
+        assert built == [], "a second pump was started over a live one"
+    finally:
+        release.set()
+        thread.join(timeout=5.0)
+
+
+def test_a_pump_that_exits_is_let_go_of(monkeypatch):
+    """...and the references must NOT be kept when the join succeeds, or a
+    guard could never be restarted after a clean stop."""
+    from ccsync_companion import shutdown_guard
+
+    monkeypatch.setattr(shutdown_guard, "STOP_READY_WAIT_SECONDS", 0.05)
+    guard = _WindowsShutdownGuard(lambda: None)
+    thread = threading.Thread(target=lambda: None, daemon=True)
+    guard._thread = thread
+    thread.start()
+    thread.join(timeout=5.0)
+
+    guard.stop()
+
+    assert guard._thread is None
+    assert guard.active is False
+
+
+def test_the_hold_ceiling_is_per_lane():
+    """SYNC-16. One clock for the whole tracker meant a lane that churns for
+    hours without settling (lane C's need count ticking over a huge library,
+    rclone wedged in retries) stood the guard down for every OTHER lane -- so
+    a genuine 200 GB lane A ingest starting later got no keep-awake and the
+    machine idle-slept mid-upload."""
+    tracker, clock = _tracker(stale_seconds=100.0, max_hold_seconds=600.0)
+    for tick in range(1, 15):
+        tracker.describe([LaneStatus(name="lane_c", state=STATE_SYNCING, queued=tick)])
+        clock.advance(60)
+    # lane C is past its own ceiling and no longer speaks for itself...
+    assert tracker.describe(
+        [LaneStatus(name="lane_c", state=STATE_SYNCING, queued=99)]) is None
+
+    # ...but lane A has only just started moving.
+    reason = tracker.describe([
+        LaneStatus(name="lane_c", state=STATE_SYNCING, queued=100),
+        LaneStatus(name="lane_a", state=STATE_SYNCING, bytes_done=1,
+                   bytes_total=200 * 1024**3),
+    ])
+    assert reason is not None
+    assert "left" in reason
+
+
+def test_a_lane_past_the_ceiling_does_not_re_arm_while_it_churns():
+    """The ceiling still has to bite: a per-lane clock must not restart just
+    because that lane's own numbers keep moving."""
+    tracker, clock = _tracker(stale_seconds=100.0, max_hold_seconds=600.0)
+    reason = "not run"
+    for tick in range(1, 15):
+        reason = tracker.describe(
+            [LaneStatus(name="lane_a", state=STATE_SYNCING, queued=tick)])
+        clock.advance(60)
+    assert reason is None

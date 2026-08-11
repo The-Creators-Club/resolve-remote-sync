@@ -90,7 +90,7 @@ class SemanticSearch:
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
         self.model = model
         self._index: _ModelIndex | None = None
-        self._index_key: tuple[str, int] | None = None
+        self._index_key: tuple[str, int, int] | None = None
         self._encoder: Any | None = None
         self._lock = threading.Lock()
 
@@ -127,6 +127,24 @@ class SemanticSearch:
 
     # ---- index (numpy matrix) cache ------------------------------------
 
+    def _high_water_mark(self, conn: sqlite3.Connection) -> int:
+        """MAX(rowid) over this model's embeddings, 0 when there are none.
+
+        Paired with the row count because a count alone is blind to a re-index
+        that replaces a clip's segments with the same NUMBER of rows -- the
+        cached matrix then serves the previous clip's vectors until some
+        unrelated insert or delete happens to move the count (BROLL-17,
+        2026-08-11). New rows take rowids above the old high-water mark, so this
+        catches the ordinary re-index. It does not catch the corner where the
+        replaced rows were themselves the highest in the table and exactly as
+        many came back; nothing cheap does, and the cost there is bounded by the
+        next real write.
+        """
+        row = conn.execute(
+            "SELECT MAX(rowid) FROM embeddings WHERE model = ?", (self.model,)
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
     def _ensure_index(self, conn: sqlite3.Connection) -> _ModelIndex | None:
         count = self._count_for_model(conn)
         if count == 0:
@@ -134,7 +152,7 @@ class SemanticSearch:
             self._index_key = None
             return None
 
-        key = (self._db_identity(conn), count)
+        key = (self._db_identity(conn), count, self._high_water_mark(conn))
         if self._index is not None and self._index_key == key:
             return self._index
 

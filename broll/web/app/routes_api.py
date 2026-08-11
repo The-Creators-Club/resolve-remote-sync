@@ -9,7 +9,7 @@ from app import config
 from app.db import get_db
 # Import the name, not the module: the route function below is itself called
 # `search` and would shadow a module import.
-from app.search import UNCATEGORISED, creators_shares, search_videos
+from app.search import BROWSE_PREDICATE, UNCATEGORISED, creators_shares, search_videos
 
 router = APIRouter(prefix="/api")
 
@@ -170,6 +170,26 @@ def _shoot_tree(conn: sqlite3.Connection, creators: list[str]) -> list[dict]:
     return sorted(out, key=lambda g: -g["count"])
 
 
+def _downloads_total(conn: sqlite3.Connection, creators: list[str]) -> int:
+    """How many clips clicking the Downloads root actually returns.
+
+    Deliberately NOT the sum of the category counts below it: those come from a
+    `status='indexed'` grouping (a clip has no category before the model pass),
+    while a click goes through search's browse path, which drops only
+    skipped/excluded/duplicates. The root advertised the smaller number and
+    delivered the bigger one (BROLL-10, 2026-08-11). The per-category counts are
+    left alone -- the extra rows have no category to be counted under, and
+    inflating a subject folder would be the same lie in the other direction.
+    """
+    sql = f"SELECT COUNT(*) FROM videos v WHERE {BROWSE_PREDICATE}"
+    params: list = []
+    if creators:
+        placeholders = ", ".join("?" for _ in creators)
+        sql += f" AND v.share NOT IN ({placeholders})"
+        params = list(creators)
+    return conn.execute(sql, params).fetchone()[0]
+
+
 @router.get("/tree")
 def get_tree(conn: sqlite3.Connection = Depends(get_db)) -> list[dict]:
     """The folder browser: two roots, each with its subject groups and leaves.
@@ -249,7 +269,8 @@ def get_tree(conn: sqlite3.Connection = Depends(get_db)) -> list[dict]:
             "collection": key,
             "label": config.COLLECTION_LABELS[key],
             "total": (sum(g["count"] for g in creators_tree)
-                      if key == config.COLLECTION_CREATORS else sum(counts.values())),
+                      if key == config.COLLECTION_CREATORS
+                      else _downloads_total(conn, creators)),
             "groups": ordered,
         })
     return out

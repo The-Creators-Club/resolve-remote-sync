@@ -399,3 +399,30 @@ def test_a_file_that_is_not_audio_fails_loudly(tmp_path):
     assert proxies.source_info(junk) == {}
     with pytest.raises(RuntimeError):
         proxies.build_track(43, junk, dest=tmp_path / '43.mp3')
+
+
+# ---------------------------------------------------- the generator's driver
+# make_proxies.py is a script, not a package; add_indexer_to_path() above is
+# what makes it importable, and it needs no torch (unlike index_music.py).
+
+def test_a_row_with_an_unknown_share_is_skipped_not_fatal(capsys):
+    """MUSIC-12 (2026-08-11): `items_for` caught only PathTraversalError, but
+    `resolve_path` raises UnknownShareError too -- a NULL or foreign `share`
+    (one row) killed the whole run before a single track was encoded.
+    `music_index.config` did not even re-export the class to catch it with."""
+    import make_proxies
+
+    assert make_proxies.config.UnknownShareError is config.UnknownShareError
+
+    rows = [{'id': 1, 'share': config.SHARE, 'rel_path': 'good.wav'},
+            {'id': 2, 'share': None, 'rel_path': 'null-share.wav'},
+            {'id': 3, 'share': 'someone-elses', 'rel_path': 'foreign.wav'},
+            {'id': 4, 'share': config.SHARE, 'rel_path': '../escape.wav'},
+            {'id': 5, 'share': config.SHARE, 'rel_path': 'also-good.wav'}]
+
+    items = make_proxies.items_for(rows)
+
+    assert [tid for tid, _ in items] == [1, 5]
+    out = capsys.readouterr().out
+    for name in ('null-share.wav', 'foreign.wav', 'escape.wav'):
+        assert name in out, f'{name} was skipped silently'

@@ -135,6 +135,26 @@ def test_stignore_excludes_rclones_orphaned_partials(tmp_path):
                    for g in globs if g.endswith(".partial"))
 
 
+def test_both_folder_builders_set_ignore_delete():
+    """delete-protection (2026-08-11, docs/delete-protection-ignoredelete.md):
+    the flag protects the device it is set ON against deletes made elsewhere,
+    so the NAS -- the authoritative copy -- must carry it on project folders
+    AND on the shared libraries, or one editor's accidental single-file delete
+    still empties the tree everyone else pulls from."""
+    project = provision.build_folder_config(
+        "2026-ff5-energy-transition", "2026/FF5/Energy Transition",
+        "/data/Projects", ["DEV-1"])
+    shared = provision.build_shared_folder_config(
+        provision.LUTS_FOLDER_ID, "Assets/Luts (LUT library)", "/data/Assets/Luts", ["DEV-1"])
+    assert project["ignoreDelete"] is True
+    assert shared["ignoreDelete"] is True
+    # Still a peer of the versioning net, not a replacement for it: versioning
+    # is the recovery floor for the deletes that ARE applied (the deleter's
+    # own copy) -- see the doc's tradeoff section.
+    assert project["versioning"]["type"] == "staggered"
+    assert shared["versioning"]["type"] == "staggered"
+
+
 @pytest.fixture
 def fake():
     server = FakeSyncthing().start()
@@ -166,6 +186,7 @@ def test_provision_creates_missing_folders(conn, fake, tmp_path):
     assert created["type"] == "sendreceive"
     assert created["ignorePerms"] is True
     assert created["versioning"]["type"] == "staggered"
+    assert created["ignoreDelete"] is True   # delete-protection (2026-08-11)
     # created UNSHARED: the selections table + enforce cycle drive sharing
     assert created["devices"] == []
 

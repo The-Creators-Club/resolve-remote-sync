@@ -1,6 +1,7 @@
 """Storage layer: percentile ranks, blob round-trips, thread-local connections."""
 import sqlite3
 import threading
+import time
 
 import numpy as np
 
@@ -43,6 +44,43 @@ def test_con_is_per_thread(seeded_db):
     t2.start(); t2.join()
     assert got['a'] is not got['b']
     assert db.con() is db.con()          # same thread reuses its own
+
+
+def test_only_one_thread_runs_the_migrations(seeded_db, monkeypatch):
+    """MUSIC-11 (2026-08-11): `_schema_ready` was an unlocked global, so two
+    threads whose first request landed together both ran the migrations. On the
+    request that upgrades a live database the loser got `duplicate column name`
+    and 500'd -- once, on the one deploy where it mattered."""
+    ran = []
+    real_init = db.init
+
+    def slow_init(c):
+        # widen the window the old code raced in: without the lock, seven other
+        # threads walk straight past the flag while this one is still working
+        ran.append(threading.current_thread().name)
+        time.sleep(0.05)
+        real_init(c)
+
+    monkeypatch.setattr(db, 'init', slow_init)
+    monkeypatch.setattr(db, '_schema_ready', False)
+
+    errors = []
+
+    def open_one():
+        try:
+            db.con().execute('SELECT COUNT(*) FROM tracks').fetchone()
+        except Exception as exc:                                # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_one) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert len(ran) == 1, f'migrations ran {len(ran)} times: {ran}'
+    assert db._schema_ready is True
 
 
 def test_load_matrix_shapes(seeded_db):

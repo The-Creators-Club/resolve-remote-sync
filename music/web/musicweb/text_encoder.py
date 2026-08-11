@@ -265,14 +265,17 @@ class OnnxTextEncoder:
             return np.zeros((0, self.dim), dtype=np.float32)
         out = []
         for i in range(0, len(texts), batch_size):
-            ids, mask = self.tokenizer.encode_batch(texts[i:i + batch_size],
-                                                    max_length=self.max_length)
             # InferenceSession.run is thread-safe, but the tokenizer's BPE cache
-            # is not, and FastAPI runs sync routes on a threadpool.
+            # is not, and FastAPI runs sync routes on a threadpool. The lock was
+            # around the wrong half until MUSIC-6 (2026-08-11): it guarded the
+            # 30 ms forward pass (needlessly serialising every query) and left
+            # encode_batch -- the unsafe part -- outside it.
             with self._lock:
-                feats = self.session.run(
-                    ['text_embeds'],
-                    {'input_ids': ids, 'attention_mask': mask})[0]
+                ids, mask = self.tokenizer.encode_batch(texts[i:i + batch_size],
+                                                        max_length=self.max_length)
+            feats = self.session.run(
+                ['text_embeds'],
+                {'input_ids': ids, 'attention_mask': mask})[0]
             out.append(np.asarray(feats, dtype=np.float32))
         return l2norm(np.concatenate(out, axis=0))
 

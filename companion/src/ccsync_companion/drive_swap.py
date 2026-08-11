@@ -113,6 +113,25 @@ def _error_tail(proc: "subprocess.CompletedProcess") -> str:
     return " ".join(text.split())[-200:]
 
 
+def _redacted(args: list[str], password: str = "") -> str:
+    """An argv safe to log. SYNC-4 (2026-08-11): the grade-swap hands the
+    editor's TrueNAS password to `net use` POSITIONALLY and to cmdkey as
+    `/pass:`, and both `TimeoutExpired.__str__` and a CalledProcessError
+    traceback embed the whole argv -- which app.swap_p_to_server logs at INFO,
+    shows as a tray balloon, and copy_diagnostics() sweeps to the clipboard.
+    An SMB connect to a sleeping tailnet host reaches the 30 s timeout
+    routinely, so this is the common path, not the exotic one."""
+    out = []
+    for arg in args:
+        text = str(arg)
+        if text.lower().startswith("/pass:"):
+            text = "/pass:***"
+        elif password and text == str(password):
+            text = "***"
+        out.append(text)
+    return " ".join(out)
+
+
 def is_auth_failure(message: str) -> bool:
     """True when a swap_to_server failure message means "the server wants
     credentials" -- the tray reacts by asking for the editor's server login
@@ -139,7 +158,11 @@ def swap_to_server(
     try:
         proc = run_fn(args)
     except Exception as exc:
-        return False, f"net use failed: {exc}"
+        # SYNC-4 (2026-08-11): the exception must NEVER be interpolated here --
+        # see _redacted(). The type alone is what the editor sees; the redacted
+        # argv goes to the log for diagnosis.
+        log.debug("net use raised %s: %s", type(exc).__name__, _redacted(args, password))
+        return False, f"net use failed: {type(exc).__name__}"
     if proc.returncode != 0:
         message = _error_tail(proc) or f"net use exited {proc.returncode}"
         return False, message
@@ -154,13 +177,15 @@ def persist_credentials(
     host = _unc_host(server_unc)
     if not (host and username):
         return
+    args = ["cmdkey", f"/add:{host}", f"/user:{username}", f"/pass:{password or ''}"]
     try:
-        proc = run_fn(["cmdkey", f"/add:{host}", f"/user:{username}",
-                       f"/pass:{password or ''}"])
+        proc = run_fn(args)
         if proc.returncode != 0:
             log.debug("cmdkey /add failed: %s", _error_tail(proc))
-    except Exception:
-        log.debug("cmdkey /add raised", exc_info=True)
+    except Exception as exc:
+        # SYNC-4 (2026-08-11): exc_info=True printed a traceback whose
+        # exception line carries this argv -- /pass:<the editor's password>.
+        log.debug("cmdkey /add raised %s: %s", type(exc).__name__, _redacted(args))
 
 
 def swap_to_local(local_root: str, run_fn: RunFn = _default_run) -> tuple[bool, str]:

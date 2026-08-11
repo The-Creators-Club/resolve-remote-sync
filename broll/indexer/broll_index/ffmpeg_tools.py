@@ -186,7 +186,12 @@ def build_proxy(
             "-i", str(src),
             # Never upscale: a 360p source should stay 360p rather than being
             # inflated to the proxy height, which costs bytes and adds nothing.
-            "-vf", f"scale=-2:'min({height},ih)'",
+            # The trunc(...)/2)*2 guards height to even, matching the width's
+            # `-2`: an odd-height non-4:2:0 source (RGB screen capture, ffv1)
+            # fails at encoder init otherwise. Parity with the companion's
+            # preview_proxy_cmd, whose argv-literal tests pin this exact
+            # filter (MED-12, 2026-08-11).
+            "-vf", f"scale=-2:'trunc(min({height},ih)/2)*2'",
             *video_codec,
             "-c:a", "aac", "-b:a", PROXY_AUDIO_BITRATE,
             "-movflags", "+faststart",
@@ -259,13 +264,46 @@ def build_proxy(
 SPRITE_MAX_CELLS = 240
 
 
+def probe_image_size(path: str | Path) -> tuple[int, int] | None:
+    """(width, height) of an image file, or None if it cannot be read.
+
+    Never raises: it exists to MEASURE an output that has already been written,
+    and a failed measurement must degrade to "geometry unknown" rather than
+    fail the clip that was otherwise sprited fine.
+    """
+    try:
+        info = run_ffprobe(path)
+        stream = next(
+            (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
+        )
+        width, height = stream.get("width"), stream.get("height")
+    except Exception:  # noqa: BLE001 - see docstring
+        return None
+    if not width or not height:
+        return None
+    return int(width), int(height)
+
+
 def build_sprite(src: str | Path, dest: str | Path, duration_s: float, columns: int = 10,
                   cell_width: int = 240, interval_s: float = 2.0,
-                  max_cells: int = SPRITE_MAX_CELLS) -> None:
+                  max_cells: int = SPRITE_MAX_CELLS) -> dict[str, float | int | None]:
     """Sprite sheet: 1 frame every `interval_s` seconds, tiled `columns` wide, cell_width px.
 
     `interval_s` is widened automatically when the clip is long enough that the
     requested interval would exceed `max_cells`.
+
+    Returns the sheet's geometry for the caller to STORE (BROLL-1/BROLL-2,
+    2026-08-11): the browser cannot re-derive it. The cell height is measured
+    off the sheet just written rather than computed, because `scale={w}:-2`
+    rounds to an even number and so does the 540p proxy step before it — on the
+    live archive 6,783 of 7,117 sheets were a pixel taller than the source
+    aspect ratio predicted, which is a ~17% overlay offset on a 24-row sheet.
+    The interval and cell count go with it because `max_cells` postdates part of
+    the archive, and a sheet built before it carries no marker saying so.
+
+    `sprite_cell_w`/`sprite_cell_h` are None when the sheet could not be
+    measured — an honest "unknown" the reader falls back on, never a guess
+    dressed up as a measurement.
     """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -285,6 +323,23 @@ def build_sprite(src: str | Path, dest: str | Path, duration_s: float, columns: 
         str(dest),
     ]
     subprocess.run(cmd, check=True)
+
+    geometry: dict[str, float | int | None] = {
+        "sprite_cols": columns,
+        "sprite_cells": n_frames,
+        "sprite_interval_s": interval_s,
+        "sprite_cell_w": None,
+        "sprite_cell_h": None,
+    }
+    # `tile` always emits the full columns x rows canvas (a short clip's unused
+    # cells are padded, not cropped), so dividing the sheet by the grid we asked
+    # for is exact and needs no model of ffmpeg's rounding.
+    size = probe_image_size(dest)
+    if size:
+        sheet_w, sheet_h = size
+        geometry["sprite_cell_w"] = sheet_w // columns
+        geometry["sprite_cell_h"] = sheet_h // rows
+    return geometry
 
 
 def build_poster(src: str | Path, dest: str | Path, duration_s: float, width: int = 640) -> None:

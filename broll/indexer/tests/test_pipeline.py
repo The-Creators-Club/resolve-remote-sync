@@ -38,7 +38,7 @@ def test_process_video_runs_stages_in_order_and_advances_status(tmp_path, sqlite
             video["id"], themes=[], quality_flags=[], category_hint=None, segments=[], model=model
         )
 
-    def fake_transcribe(cfg, storage, video, src_path):
+    def fake_transcribe(cfg, storage, video, src_path, ingest_only=False):
         # Never let a real subprocess boundary get exercised here — see
         # test_pipeline_transcribe.py for dedicated stage_transcribe coverage.
         calls.append("transcribe")

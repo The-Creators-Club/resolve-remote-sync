@@ -32,8 +32,11 @@ def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> d
             """
             INSERT INTO videos
                 (share, rel_path, hash, size_bytes, duration_s, fps, width,
-                 height, codec, shot_date, category, category_hint, in_inbox, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'discovered'))
+                 height, codec, shot_date, category, category_hint, in_inbox, status,
+                 sprite_cell_w, sprite_cell_h, sprite_cols, sprite_cells,
+                 sprite_interval_s)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'discovered'),
+                    ?, ?, ?, ?, ?)
             ON CONFLICT(share, rel_path) DO UPDATE SET
                 hash = excluded.hash,
                 size_bytes = excluded.size_bytes,
@@ -47,7 +50,16 @@ def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                 category_hint = COALESCE(excluded.category_hint, videos.category_hint),
                 in_inbox = excluded.in_inbox,
                 status = CASE WHEN excluded.status IS NOT NULL
-                              THEN excluded.status ELSE videos.status END
+                              THEN excluded.status ELSE videos.status END,
+                -- COALESCE, like category above: only the proxy stage sends
+                -- sprite geometry, and a later scan/probe upsert must not
+                -- blank it back to "unknown" (BROLL-1, 2026-08-11).
+                sprite_cell_w = COALESCE(excluded.sprite_cell_w, videos.sprite_cell_w),
+                sprite_cell_h = COALESCE(excluded.sprite_cell_h, videos.sprite_cell_h),
+                sprite_cols = COALESCE(excluded.sprite_cols, videos.sprite_cols),
+                sprite_cells = COALESCE(excluded.sprite_cells, videos.sprite_cells),
+                sprite_interval_s = COALESCE(excluded.sprite_interval_s,
+                                             videos.sprite_interval_s)
             """,
             (
                 body.share,
@@ -64,6 +76,11 @@ def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                 body.category_hint,
                 1 if body.in_inbox else 0,
                 body.status,
+                body.sprite_cell_w,
+                body.sprite_cell_h,
+                body.sprite_cols,
+                body.sprite_cells,
+                body.sprite_interval_s,
             ),
         )
     row = conn.execute(
@@ -85,6 +102,19 @@ def ingest_index(body: IndexIn, conn: sqlite3.Connection = Depends(get_db)) -> d
     try:
         with conn:
             # Atomic replace: delete then re-insert within one transaction.
+            # The segments' embeddings go with them (BROLL-13, 2026-08-11):
+            # `embeddings` cascades on video_id only, and its source_id points
+            # at segment rows with no foreign key at all, so a re-ingest left
+            # vectors for dead segments behind. Semantic search still scores
+            # them, search_videos then silently drops the unresolvable hits, and
+            # they spend the SEMANTIC_ONLY_MAX_VIDEOS budget -- so the clip's
+            # real content is unreachable until stage_embed runs again.
+            # Transcript embeddings are NOT touched: this endpoint does not own
+            # transcript_segments.
+            conn.execute(
+                "DELETE FROM embeddings WHERE source = 'segment' AND video_id = ?",
+                (body.video_id,),
+            )
             conn.execute("DELETE FROM segments WHERE video_id = ?", (body.video_id,))
             conn.execute("DELETE FROM themes WHERE video_id = ?", (body.video_id,))
             conn.execute(

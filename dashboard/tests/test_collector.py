@@ -5,12 +5,13 @@ import time
 
 import pytest
 
+from ccsync_dashboard import collector as collector_mod
 from ccsync_dashboard import db as dbmod
 from ccsync_dashboard.collector import Collector
 from ccsync_dashboard.settings import Settings
 from ccsync_dashboard.syncthing_client import SyncthingClient
 
-from fake_syncthing import EDITOR2_ID, EDITOR_ID, FakeSyncthing
+from fake_syncthing import EDITOR2_ID, EDITOR_ID, SERVER_ID, FakeSyncthing
 
 ALL = ["config", "connections", "completion", "remoteneed"]
 
@@ -329,6 +330,87 @@ def test_loop_survives_a_record_poll_run_exception(tmp_path, monkeypatch):
     # (proving the loop iteration's exception was caught and it kept
     # ticking) and stop() joined it cleanly.
     assert calls["n"] >= 5
+    assert not collector._thread.is_alive()
+
+
+def test_an_empty_my_id_on_the_first_cycle_skips_the_config_pass(conn, fake, collector):
+    """DASH-7: the comment said an empty myID keeps the last known server id,
+    but on the FIRST cycle there is no last known id -- so every device,
+    the NAS included, was upserted is_server=0 and the server showed up as a
+    phantom editor row until a later good cycle. _run_enforce has always
+    skipped the pass here."""
+    fake.state["my_id"] = ""
+    collector.run_cycle(conn, ["config"])
+    assert conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0] == 0
+
+    # a later good cycle hydrates normally, and the NAS is the server
+    fake.state["my_id"] = SERVER_ID
+    collector.run_cycle(conn, ["config"])
+    rows = dict(conn.execute("SELECT device_id, is_server FROM devices"))
+    assert rows[SERVER_ID] == 1
+    assert rows[EDITOR_ID] == 0
+
+    # ...and once one IS known, an empty myID falls back to it rather than
+    # skipping (the behaviour the original comment described)
+    fake.state["my_id"] = ""
+    collector.run_cycle(conn, ["config"])
+    assert dict(conn.execute("SELECT device_id, is_server FROM devices"))[SERVER_ID] == 1
+
+
+def test_enforce_does_not_shadow_its_device_list(conn, fake, collector):
+    """DASH-6: the shared-asset branch looped `for devices in
+    editor_devices.values()`, rebinding the pass-wide device list to a set of
+    ids. Harmless only because nothing read it after that point -- a footgun
+    the moment anything does, so the name is pinned here rather than by a
+    behaviour that cannot exist yet."""
+    import inspect
+
+    src = inspect.getsource(Collector._run_enforce)
+    assert "for devices in" not in src
+    assert "for editor_device_ids in editor_devices.values():" in src
+
+
+def test_a_locked_db_at_startup_does_not_kill_the_collector_thread(tmp_path, monkeypatch):
+    """DASH-8: db.connect+db.migrate sat OUTSIDE the loop's try/finally, so a
+    transient 'database is locked' against the app's own startup migration
+    killed the thread and leaked the connection. Nothing restarts it, so
+    db.prune -- reachable ONLY from the collector -- never ran again for the
+    life of the process, and eight tables grew unbounded on /data."""
+    db_path = tmp_path / "locked.db"
+    settings = Settings(db_path=str(db_path), interval_prune=0.01)   # no syncthing
+    collector = Collector(settings, client=SyncthingClient("", "", timeout=1))
+
+    calls = {"n": 0}
+    real_connect = dbmod.connect
+
+    def flaky_connect(path, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect(path, *a, **kw)
+
+    monkeypatch.setattr(collector_mod, "DB_OPEN_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(dbmod, "connect", flaky_connect)
+    collector.start()
+    try:
+        deadline = time.monotonic() + 10.0
+        rows = 0
+        while rows == 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+            if db_path.exists():
+                probe = real_connect(db_path)
+                try:
+                    rows = probe.execute(
+                        "SELECT COUNT(*) FROM poll_runs WHERE kind='prune'").fetchone()[0]
+                except sqlite3.OperationalError:
+                    rows = 0            # migrate hasn't created the table yet
+                finally:
+                    probe.close()
+    finally:
+        collector.stop()
+
+    assert calls["n"] >= 3, "the failed connects were never retried"
+    assert rows > 0, "retention never ran: the thread died on the locked database"
     assert not collector._thread.is_alive()
 
 

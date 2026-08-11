@@ -21,6 +21,47 @@ from musicweb.db import con
 router = APIRouter()
 
 
+# parse_range's "this request cannot be satisfied" answer, as distinct from
+# "there is no range to serve here" (None). Both are error-ish; only one is 416.
+UNSATISFIABLE = object()
+
+
+def parse_range(header, size):
+    """RFC 7233 single byte range -> (start, end) inclusive, None, UNSATISFIABLE.
+
+    None means "ignore the header and serve a plain 200". That covers no Range
+    at all, a unit this app does not speak, a multi-range request, and a
+    syntactically invalid one (an inverted `bytes=100-50`) -- RFC 7233 says an
+    invalid Range is ignored, not 416'd, and answering a 206 for a header the
+    server did not understand is worse than not supporting ranges at all. Both
+    of those were wrong before MUSIC-1 (2026-08-11).
+
+    `bytes=-N` is a SUFFIX range: the LAST N bytes. It used to be read as
+    `bytes=0-N`, so a client probing an mp3's ID3v1/Xing/LAME tail (or an m4a
+    `moov` atom) with `bytes=-128` got the FIRST 129 bytes labelled as the last
+    ones, and reported a wrong duration or refused to seek.
+    """
+    m = re.fullmatch(r'\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*', header or '')
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    if size == 0:
+        return UNSATISFIABLE
+    if not m.group(1):
+        n = int(m.group(2))
+        if n == 0:                       # "the last zero bytes" satisfies nothing
+            return UNSATISFIABLE
+        return max(0, size - n), size - 1
+    start = int(m.group(1))
+    if start >= size:
+        return UNSATISFIABLE
+    if not m.group(2):                   # open-ended: run to the end
+        return start, size - 1
+    end = int(m.group(2))
+    if end < start:                      # inverted: invalid, so ignored
+        return None
+    return start, min(end, size - 1)
+
+
 def track_path(row):
     """(share, rel_path) -> a real path, or a 4xx.
 
@@ -81,16 +122,21 @@ def audio_stream(track_id: int, request: Request, original: bool = False):
     # and "is the proxy being used at all" is the first question anyone
     # debugging Tailscale preview bandwidth asks.
     src_header = {'X-Audio-Source': kind}
-    rng = request.headers.get('range')
-    if not rng:
+    rng_header = request.headers.get('range')
+    if not rng_header:
         return FileResponse(path, media_type=mime, headers=src_header)
 
-    m = re.match(r'bytes=(\d*)-(\d*)', rng)
-    start = int(m.group(1)) if m and m.group(1) else 0
-    end = int(m.group(2)) if m and m.group(2) else size - 1
-    start, end = max(0, start), min(end, size - 1)
-    if start > end:
+    rng = parse_range(rng_header, size)
+    if rng is UNSATISFIABLE:
         return Response(status_code=416, headers={'Content-Range': f'bytes */{size}'})
+    if rng is None:
+        # A Range this app will not act on: whole entity, plain 200. Served by
+        # the streamer below rather than by FileResponse, because starlette
+        # (>= 0.37) parses Range inside FileResponse itself -- handing it the
+        # request would undo the decision to ignore the header.
+        start, end, status = 0, size - 1, 200
+    else:
+        (start, end), status = rng, 206
     length = end - start + 1
 
     def chunks(chunk=256 * 1024):
@@ -104,16 +150,15 @@ def audio_stream(track_id: int, request: Request, original: bool = False):
                 left -= len(data)
                 yield data
 
-    return StreamingResponse(chunks(), status_code=206, media_type=mime, headers={
+    headers = {'Accept-Ranges': 'bytes', 'Content-Length': str(length), **src_header}
+    if status == 206:
         # Every byte offset here is the SERVED file's, proxy or original. The
         # two have different sizes, so a client that started a range request
         # against one must not be answered from the other -- which is why
         # ?original is a request parameter and never a per-request fallback.
-        'Content-Range': f'bytes {start}-{end}/{size}',
-        'Accept-Ranges': 'bytes',
-        'Content-Length': str(length),
-        **src_header,
-    })
+        headers['Content-Range'] = f'bytes {start}-{end}/{size}'
+    return StreamingResponse(chunks(), status_code=status, media_type=mime,
+                             headers=headers)
 
 
 @router.get('/api/peaks/{track_id}')

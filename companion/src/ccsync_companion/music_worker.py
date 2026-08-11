@@ -384,8 +384,39 @@ def act_insert(req):
                     % (track, len(snapshot))}
 
 
+# ---------------------------------------------------------------- b-roll
+#
+# The b-roll "Send to Resolve" button lands here too (MED-3, 2026-08-11).
+# Not because it is music -- it is not -- but because this process IS the
+# answer to "the scripting API blocks forever when Resolve is modal", and the
+# b-roll half was making the same calls in-process on an 8899 request thread
+# while holding resolve_bridge._API_LOCK. The logic itself stays where it was
+# (resolve_bridge.perform_insert): this is a re-entry point, not a second copy.
+# They are NOT in music_server.ACTIONS, so /music/send cannot reach them.
+
+BROLL_STATUS_ACTION = "broll_status"
+BROLL_INSERT_ACTION = "broll_insert"
+
+
+def act_broll_status(_req):
+    return {"ok": True, "resolve_connected": resolve_bridge.try_connect()}
+
+
+def act_broll_insert(req):
+    """resolve_bridge.perform_insert, in a process the parent can kill.
+
+    Returns its dict verbatim -- {"ok", "message"} is what the b-roll web UI's
+    toast reads, and it never raises on its own.
+    """
+    return resolve_bridge.perform_insert(
+        req["path"], int(req["in_frame"]), int(req["out_frame"])
+    )
+
+
 ACTIONS = {"status": act_status, "bin": act_bin,
-           "under": act_under, "insert": act_insert}
+           "under": act_under, "insert": act_insert,
+           BROLL_STATUS_ACTION: act_broll_status,
+           BROLL_INSERT_ACTION: act_broll_insert}
 
 
 def run_request(req):

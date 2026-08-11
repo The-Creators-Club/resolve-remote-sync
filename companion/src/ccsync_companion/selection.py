@@ -353,12 +353,23 @@ class SelectionClient:
         if not fresh and self.enabled:
             # Refresh (base rigs never do it in the background; on editors
             # the sequencer's own polling normally keeps this warm).
+            stamp_before = self._last_response_at
             try:
                 self.fetch()
             except Exception:
                 pass
-            if self._last_response is not None:
+            if self._last_response is not None and self._last_response_at != stamp_before:
                 return self._parse_project_roots(self._last_response), "live"
+            if self._last_response is not None:
+                # SYNC-14 (2026-08-11): a FAILED refresh leaves _last_response
+                # untouched, and this arm returned that arbitrarily stale
+                # mapping tagged "live" -- so with the dashboard down the base
+                # rig filed media under a superseded root with full confidence,
+                # which is the CORE-H9 outcome by another door. The mapping is
+                # still the best answer available; the LABEL is what callers
+                # act on. A successful fetch is the only thing that moves
+                # _last_response_at, so it is the honest freshness test.
+                return self._parse_project_roots(self._last_response), "cache"
             cached = self._load_cached_response()
             if cached is not None:
                 return self._parse_project_roots(cached), "cache"

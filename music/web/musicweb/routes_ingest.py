@@ -42,7 +42,7 @@ from musicweb import config, db
 from musicweb.db import con
 from musicweb.routes_api import TRACK_COLS, hydrate
 from musicweb.routes_media import track_path
-from musicweb.search import index
+from musicweb.search import index, refresh
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -302,7 +302,7 @@ async def _ingest_inline(files, _ingest, index_music):
         # percentiles are library-relative, so every track is re-scored once a
         # new one lands -- seconds, straight from the stored embeddings
         index_music.retag(c, clap)
-        index().reload(c)
+        refresh(c)
         ids = [r['id'] for r in added]
         ph = ','.join('?' * len(ids))
         rows = {r['id']: r for r in hydrate(
@@ -351,7 +351,10 @@ def reveal(track_id: int):
         raise HTTPException(404, 'unknown track')
     path = track_path(r)
     if os.name == 'nt' and path.exists():
-        os.spawnl(os.P_NOWAIT, os.environ.get('COMSPEC', 'cmd.exe'),
-                  'cmd', '/c', 'explorer', f'/select,{path}')
+        # No cmd.exe (MUSIC-2, 2026-08-11): it re-parses shell metacharacters,
+        # and `safe_upload_name` strips `<>:"/\|?*` but not `&`, so a library
+        # file named `x&calc.mp3` turned a reveal click into local command
+        # execution. Popen hands explorer the argument with no shell in between.
+        subprocess.Popen(['explorer', f'/select,{path}'])
         return {'ok': True, 'path': str(path)}
     return {'ok': False, 'path': str(path)}

@@ -51,9 +51,18 @@ const HINTS = [
 const POLL_FAST = 1500;
 const POLL_SLOW = 5000;
 const BACKOFF_AFTER = 120000;   // 2 min of polling, then ease off
+// Health is a cached read on the server (routes_api never probes claude per
+// request), so re-asking is cheap -- but every open tab pays it, hence slow.
+// Without it an admin who fixes claude leaves every open tab red until each
+// editor reloads (YTDL-39, 2026-08-11).
+const HEALTH_INTERVAL = 120000;
+
+const WORKER_DEAD =
+  'the pipeline worker is not running: jobs will queue and never start.';
 
 const state = {
   jobId: null,
+  attachToken: 0,      // bumped by every attach/detach; see stale() below
   manifest: null,      // {videos, terms, counts}
   termFilter: null,    // job_terms.id, or null for "everything"
   showFiltered: false,
@@ -66,13 +75,19 @@ async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) {
     let detail = `${path} -> ${r.status}`;
+    let info = null;
     try {
       const j = await r.json();
       const d = j.detail;
+      // The structured detail, not just its message: the one-job-at-a-time 409
+      // carries the job_id of the job it is refusing to duplicate, and dropping
+      // it left the SPA unable to re-attach (YTDL-8, 2026-08-11).
+      if (d && typeof d === 'object') info = d;
       detail = (typeof d === 'string' ? d : (d && d.detail) || detail);
     } catch { /* not JSON; the status line is all we have */ }
     const e = new Error(detail);
     e.status = r.status;
+    e.info = info;
     throw e;
   }
   return r.json();
@@ -99,20 +114,47 @@ const fmtTotal = s => {
 
 const fmtDate = d => d ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : '';
 
-function toast(html, ms = 7000) {
+// Built with el()/textContent, never innerHTML: the text is server `detail`,
+// and one future detail quoting a YouTube title would otherwise be XSS from a
+// video someone else uploaded (YTDL-35, 2026-08-11).
+function toast(text, bad, ms = 7000) {
   const t = $('#toast');
-  t.innerHTML = html;
+  t.textContent = '';
+  t.appendChild(el('div', bad ? 'bad' : null, String(text)));
   t.classList.remove('hidden');
   clearTimeout(toast._t);
   if (ms) toast._t = setTimeout(() => t.classList.add('hidden'), ms);
 }
 
-function warn(text, bad) {
-  const w = $('#warn');
-  if (!text) { w.classList.add('hidden'); return; }
-  w.textContent = text;
-  w.classList.toggle('bad', !!bad);
-  w.classList.remove('hidden');
+// One banner line per CONCERN, all in #warn. They are independent and arrive
+// in any order: loadHealth's all-clear used to erase loadProjects' "no
+// projects ticked" ~100 ms after it appeared, leaving a disabled SEARCH button
+// with no stated reason (YTDL-37), and a failed job's red line used to survive
+// into the next, healthy job (YTDL-12). 2026-08-11.
+const banners = new Map();
+
+function setBanner(key, text, bad) {
+  // Both no-op paths matter: poll() re-asserts its slots every 1.5 s and must
+  // not rebuild the header on every tick.
+  const cur = banners.get(key);
+  if (text) {
+    if (cur && cur.text === text && cur.bad === !!bad) return;
+    banners.set(key, {text, bad: !!bad});
+  } else if (!banners.delete(key)) return;
+  const box = $('#warn');
+  box.textContent = '';
+  banners.forEach(b => box.appendChild(
+    el('div', 'warnline' + (b.bad ? ' bad' : ''), b.text)));
+}
+
+// The session expired mid-job: polling 401s every 5 s forever and the bar
+// freezes at whatever it last showed, which reads as a hung download of a job
+// that finished hours ago (YTDL-10, 2026-08-11).
+function sessionExpired() {
+  stopPolling();
+  setBanner('session', 'your dashboard session has expired — sign in to the '
+            + 'dashboard again and reload this page. The job itself keeps '
+            + 'running on the server.', true);
 }
 
 function hintFor(err) {
@@ -134,18 +176,28 @@ async function loadHealth() {
   pip.textContent = `claude ${h.claude}` + (h.yt_dlp === 'ok' ? '' : ' · yt-dlp missing');
   pip.className = 'rstatus ' + (claudeOk && h.yt_dlp === 'ok' ? 'on'
                                 : h.claude === 'unknown' ? '' : 'off');
+  // The health contract is ok|unauthenticated|missing|timeout|error|unknown.
+  // timeout/error used to fall through to the all-clear, so a wedged claude
+  // gave no pre-submit warning at all -- the one thing this banner exists for
+  // (YTDL-11, 2026-08-11).
   if (h.claude === 'unauthenticated') {
-    warn(HINTS[0][1], true);
+    setBanner('health', HINTS[0][1], true);
   } else if (h.claude === 'missing') {
-    warn(HINTS[1][1], true);
+    setBanner('health', HINTS[1][1], true);
+  } else if (h.claude === 'timeout') {
+    setBanner('health', HINTS[2][1]);              // amber: it may answer next time
+  } else if (h.claude === 'error') {
+    setBanner('health', 'Claude Code failed on the server'
+              + (h.claude_detail ? `: ${h.claude_detail}` : '')
+              + '. Searches will fail until it works — see ytdl/web/DEPLOY.md.', true);
   } else if (h.yt_dlp !== 'ok') {
-    warn('yt-dlp is not installed in this container — searching and downloading '
-         + 'will both fail. See ytdl/web/DEPLOY.md.', true);
-  } else if (!h.worker_alive) {
-    warn('the pipeline worker is not running: jobs will queue and never start.', true);
+    setBanner('health', 'yt-dlp is not installed in this container — searching '
+              + 'and downloading will both fail. See ytdl/web/DEPLOY.md.', true);
   } else {
-    warn(null);
+    setBanner('health', null);
   }
+  // Its own slot, because the poll response reports it too (YTDL-39).
+  setBanner('worker', h.worker_alive === false ? WORKER_DEAD : null, true);
 }
 
 // ---------------------------------------------------------------- projects
@@ -165,12 +217,14 @@ async function loadProjects() {
   if (!r.projects.length) {
     if (r.projects_available) {
       sel.appendChild(el('option', null, 'you are not syncing any project'));
-      warn('You have no projects ticked on the dashboard, so there is nowhere '
-           + 'to put downloads. Tick one on the dashboard first.');
+      setBanner('projects', 'You have no projects ticked on the dashboard, so '
+                + 'there is nowhere to put downloads. Tick one on the '
+                + 'dashboard first.');
     }
     $('#go').disabled = true;
     return;
   }
+  setBanner('projects', null);
   $('#go').disabled = false;
   r.projects.forEach(p => {
     const o = el('option', null, p.label);
@@ -191,37 +245,73 @@ function schedulePoll() {
   state.pollTimer = setTimeout(poll, elapsed > BACKOFF_AFTER ? POLL_SLOW : POLL_FAST);
 }
 
+// Every await in poll() can land after the editor has attached a DIFFERENT
+// job. A stale response used to re-render the old job over the new one's UI
+// and -- if it was a TERMINAL one -- stopPolling() the new job's loop dead,
+// freezing the page while the job ran to completion server-side (YTDL-9,
+// 2026-08-11). The token also covers attach(same id) after a detach.
+const stale = (id, token) => state.jobId !== id || state.attachToken !== token;
+
 async function attach(jobId) {
+  stopPolling();
+  state.attachToken++;
   state.jobId = jobId;
+  state.manifest = null;              // job A's videos must not render as B's
+  state.termFilter = null;
+  setBanner('job', null);
   state.pollStart = Date.now();
   location.hash = `job=${jobId}`;     // a refresh re-attaches to the same job
   await poll();
 }
 
 async function poll() {
-  if (!state.jobId) return;
+  const id = state.jobId;
+  const token = state.attachToken;
+  if (!id) return;
   let r;
   try {
-    r = await api(`api/jobs/${state.jobId}`);
+    r = await api(`api/jobs/${id}`);
   } catch (e) {
+    if (stale(id, token)) return;
     if (e.status === 404) { detach(); return; }
+    if (e.status === 401) { sessionExpired(); return; }
     schedulePoll();                    // a blip must not abandon a running job
     return;
   }
+  if (stale(id, token)) return;
   const job = r.job;
   if (job.phase === 'downloading') {
     // The per-video dl_state/dl_error live in the manifest and the in-flight
     // percentages in r.progress; the download list below needs both. The
     // manifest fetch is one SQLite read -- cheap enough per tick.
-    try { state.manifest = await api(`api/jobs/${state.jobId}/manifest`); }
+    let m = null;
+    try { m = await api(`api/jobs/${id}/manifest`); }
     catch { /* the bar still moves; the list catches up next tick */ }
+    if (stale(id, token)) return;
+    if (m) state.manifest = m;
   }
+  // The explanation for a bar stuck at "queued" is in every poll response and
+  // nothing read it (YTDL-39, 2026-08-11).
+  setBanner('worker', r.worker_alive === false && !job.terminal ? WORKER_DEAD : null, true);
   renderProgress(job, r);
 
   if (job.phase === 'ready_for_review' || job.phase === 'done'
       || job.phase === 'failed' || job.phase === 'cancelled') {
     stopPolling();
-    if (job.phase !== 'failed') await loadManifest();
+    if (job.phase !== 'failed') {
+      try {
+        await loadManifest(id);
+      } catch (e) {
+        if (stale(id, token)) return;
+        if (e.status === 401) { sessionExpired(); return; }
+        // Polling has already stopped here, so one blip at exactly this tick
+        // used to leave a full bar, no review grid and no way back but a
+        // manual refresh (YTDL-34, 2026-08-11).
+        schedulePoll();
+        return;
+      }
+      if (stale(id, token)) return;
+    }
     // Re-render the download list off the FINAL manifest, so the last rows
     // show done/failed (with the reason) rather than the last live tick.
     if (job.dl_total) renderProgress(job, r);
@@ -233,8 +323,10 @@ async function poll() {
 
 function detach() {
   stopPolling();
+  state.attachToken++;                // orphan any poll response still in flight
   state.jobId = null;
   state.manifest = null;
+  setBanner('job', null);
   location.hash = '';
   $('#progress').classList.add('hidden');
   $('#downloads').classList.add('hidden');
@@ -243,14 +335,21 @@ function detach() {
 
 // ---------------------------------------------------------------- progress
 function renderProgress(job, r) {
+  // A job that was cancelled (or failed) mid-download has the same thing to
+  // show as a finished one -- which clips landed and which did not. Without
+  // cancelled/failed here, a cancel at clip 17 of 41 replaced that list with a
+  // red 100% bar (YTDL-36, 2026-08-11).
   const downloading = job.phase === 'downloading'
-                      || (job.dl_total > 0 && job.phase === 'done');
+                      || (job.dl_total > 0 && (job.phase === 'done'
+                          || job.phase === 'cancelled' || job.phase === 'failed'));
   $('#progress').classList.toggle('hidden', downloading || job.phase === 'done');
   $('#downloads').classList.toggle('hidden', !downloading);
 
-  if (job.error) {
-    warn(hintFor(job.error), job.phase === 'failed');
-  }
+  // Cleared when the rendered job has no error: the banner belongs to the job
+  // on screen, and a failed job's red line used to sit above the next,
+  // healthy one all the way through review and download (YTDL-12).
+  setBanner('job', job.error ? hintFor(job.error) : null,
+            job.phase === 'failed');
 
   if (downloading) { renderDownloads(job, r); return; }
 
@@ -336,8 +435,9 @@ function renderDownloads(job, r) {
 }
 
 // ---------------------------------------------------------------- manifest
-async function loadManifest() {
-  const m = await api(`api/jobs/${state.jobId}/manifest`);
+async function loadManifest(jobId = state.jobId) {
+  const m = await api(`api/jobs/${jobId}/manifest`);
+  if (jobId !== state.jobId) return;   // a newer job owns the screen now
   state.manifest = m;
   $('#review').classList.remove('hidden');
   renderTerms();
@@ -347,9 +447,13 @@ async function loadManifest() {
 function renderTerms() {
   const box = $('#termchips');
   box.innerHTML = '';
+  // Counts are of what the grid will SHOW, not of every linked video: a chip
+  // reading "(7)" over an empty grid reads as "the search lost my videos"
+  // (YTDL-38, 2026-08-11). The full figure stays in the tooltip.
   const all = el('button', 'chip' + (state.termFilter === null ? ' on' : ''));
   all.appendChild(el('span', null, 'all terms'));
-  all.appendChild(el('span', 'n', String(state.manifest.videos.length)));
+  all.appendChild(el('span', 'n', String(visibleVideos(null).length)));
+  all.title = `${state.manifest.videos.length} found in total`;
   all.onclick = () => { state.termFilter = null; renderTerms(); renderGrid(); };
   box.appendChild(all);
 
@@ -362,8 +466,10 @@ function renderTerms() {
     if (t.lang === 'zh' && t.english_gloss) {
       c.appendChild(el('span', 'gloss', '— ' + t.english_gloss));
     }
-    c.appendChild(el('span', 'n', String(t.videos)));
-    c.title = t.source === 'user' ? 'what you typed' : `generated (${t.lang})`;
+    const shown = visibleVideos(t.id).length;
+    c.appendChild(el('span', 'n', String(shown)));
+    c.title = (t.source === 'user' ? 'what you typed' : `generated (${t.lang})`)
+      + (shown < t.videos ? ` · ${t.videos - shown} filtered out` : '');
     c.onclick = () => {
       state.termFilter = state.termFilter === t.id ? null : t.id;
       renderTerms(); renderGrid();
@@ -372,11 +478,11 @@ function renderTerms() {
   });
 }
 
-function visibleVideos() {
+function visibleVideos(termFilter = state.termFilter) {
   return state.manifest.videos.filter(v => {
     const filteredOut = !v.relevant || v.meta_error;
     if (filteredOut && !state.showFiltered) return false;
-    if (state.termFilter !== null && !(v.term_ids || []).includes(state.termFilter)) return false;
+    if (termFilter !== null && !(v.term_ids || []).includes(termFilter)) return false;
     return true;
   });
 }
@@ -392,7 +498,17 @@ function renderGrid() {
 
   const grid = $('#grid');
   grid.innerHTML = '';
-  visibleVideos().forEach(v => grid.appendChild(card(v)));
+  const vis = visibleVideos();
+  vis.forEach(v => grid.appendChild(card(v)));
+  if (!vis.length) {
+    // Never an empty grid with no explanation: the filter that is holding the
+    // videos back is the one thing the editor needs told (YTDL-38).
+    const held = m.videos.filter(v => state.termFilter === null
+      || (v.term_ids || []).includes(state.termFilter)).length;
+    grid.appendChild(el('div', 'gridempty', held
+      ? `all ${held} filtered out — [ SHOW FILTERED OUT ] to see them`
+      : 'nothing found for this term'));
+  }
 
   const sel = m.videos.filter(v => v.selected && !v.duplicate);
   const secs = sel.reduce((a, v) => a + (v.duration || 0), 0);
@@ -448,20 +564,58 @@ function card(v) {
   return n;
 }
 
-async function toggle(v, selected) {
-  try {
-    const r = await post(`api/jobs/${state.jobId}/videos/${v.video_id}/select`, {selected});
-    v.selected = r.selected ? 1 : 0;
-    state.manifest.counts = r.counts;
+// Per-video: the tail of the in-flight chain, and the sequence number of the
+// last click. Unserialised POSTs raced -- last RESPONSE won in the browser
+// while last REQUEST won in the database, so a quick check-then-uncheck could
+// leave server yes / UI no, and DOWNLOAD takes what the database says
+// (YTDL-33, 2026-08-11).
+const _selQueue = new Map();
+const _selSeq = new Map();
+
+function toggle(v, selected) {
+  // Optimistic, so the card follows the click immediately AND the next click
+  // sends the opposite of what was clicked rather than of what the server has
+  // last confirmed (a double-click used to send {selected:true} twice).
+  const was = v.selected;
+  v.selected = selected ? 1 : 0;
+  renderGrid();
+
+  const seq = (_selSeq.get(v.video_id) || 0) + 1;
+  _selSeq.set(v.video_id, seq);
+  const run = (_selQueue.get(v.video_id) || Promise.resolve()).then(async () => {
+    let r = null, err = null;
+    try {
+      r = await post(`api/jobs/${state.jobId}/videos/${v.video_id}/select`, {selected});
+    } catch (e) {
+      err = e;
+    }
+    // A later click on the same card, or another job on screen, owns the
+    // truth now -- this answer is history either way.
+    if (_selSeq.get(v.video_id) !== seq || !state.manifest) return;
+    if (err) {
+      v.selected = was;                // back to what the server still has
+      toast(err.message, true);
+    } else {
+      v.selected = r.selected ? 1 : 0;
+      state.manifest.counts = r.counts;
+    }
     renderGrid();
-  } catch (e) {
-    toast(`<div class="bad">${e.message}</div>`);
-  }
+  });
+  _selQueue.set(v.video_id, run);
+  return run;
 }
 
 async function bulk(selected) {
-  const r = await post(`api/jobs/${state.jobId}/select`,
-                       {selected, scope: state.showFiltered ? 'all' : 'relevant'});
+  let r;
+  try {
+    r = await post(`api/jobs/${state.jobId}/select`,
+                   {selected, scope: state.showFiltered ? 'all' : 'relevant'});
+  } catch (e) {
+    // Silent before: the grid simply did not change and the editor pressed
+    // DOWNLOAD on a selection the server never made (YTDL-34, 2026-08-11).
+    toast(e.message, true);
+    return;
+  }
   state.manifest.counts = r.counts;
   state.manifest.videos.forEach(v => {
     if (v.duplicate || v.meta_error) return;
@@ -473,21 +627,42 @@ async function bulk(selected) {
 
 // ---------------------------------------------------------------- actions
 async function runSearch() {
+  const go = $('#go');
+  // Disabled means either "no projects ticked" or "a POST is already in
+  // flight", and Enter in the search box reaches here without the button:
+  // a double-click created two active jobs, and the orphaned first one then
+  // 409'd every later search naming a job_id nothing was tracking
+  // (YTDL-25, 2026-08-11).
+  if (go.disabled) return;
   const term = $('#q').value.trim();
   if (!term) return;
   const slug = $('#project').value;
-  if (!slug) { toast('<div class="bad">pick a project first</div>'); return; }
-  detach();
+  if (!slug) { toast('pick a project first', true); return; }
+  go.disabled = true;
   try {
     const r = await post('api/jobs', {
       term, project_slug: slug,
       quality: $('#quality').value,
       period: $('#period').value || null,
     });
+    // Only now: the server decides whether a second job is allowed, and
+    // tearing the live view down first left the page showing nothing while
+    // the refused-against job kept running (YTDL-8, 2026-08-11).
+    detach();
     $('#progress').classList.remove('hidden');
     await attach(r.job_id);
   } catch (e) {
-    toast(`<div class="bad">${e.message}</div>`, 12000);
+    if (e.status === 409 && e.info && e.info.job_id) {
+      // The job the server refused to duplicate is exactly the one the editor
+      // has lost sight of -- including a forgotten manifest from last week.
+      toast(`${e.message} — showing it below`, false, 12000);
+      $('#progress').classList.remove('hidden');
+      await attach(e.info.job_id);
+    } else {
+      toast(e.message, true, 12000);
+    }
+  } finally {
+    go.disabled = false;
   }
 }
 
@@ -498,7 +673,7 @@ async function startDownload() {
     state.pollStart = Date.now();
     await poll();
   } catch (e) {
-    toast(`<div class="bad">${e.message}</div>`, 12000);
+    toast(e.message, true, 12000);
   }
 }
 
@@ -508,7 +683,7 @@ async function cancelJob() {
     await post(`api/jobs/${state.jobId}/cancel`);
     toast('cancelling — it stops after the video in flight');
   } catch (e) {
-    toast(`<div class="bad">${e.message}</div>`);
+    toast(e.message, true);
   }
 }
 
@@ -562,10 +737,18 @@ async function init() {
   $('#selall').onclick = () => bulk(true);
   $('#selnone').onclick = () => bulk(false);
   $('#download').onclick = startDownload;
-  $('#showfiltered').onclick = () => { state.showFiltered = !state.showFiltered; renderGrid(); };
+  // renderTerms too: the chip counts are counts of what the grid shows.
+  $('#showfiltered').onclick = () => {
+    state.showFiltered = !state.showFiltered;
+    renderTerms();
+    renderGrid();
+  };
 
   await loadProjects();
   loadHealth();
+  // Re-asked on a slow interval so an admin who fixes claude (or restarts the
+  // worker) does not have to walk the fleet asking for reloads (YTDL-39).
+  setInterval(loadHealth, HEALTH_INTERVAL);
   loadRecent();
 
   // A refresh mid-job re-attaches rather than losing it: the pipeline runs on

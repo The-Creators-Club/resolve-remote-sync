@@ -321,6 +321,7 @@ Write-Host ""
 Write-Host "=================================================================="
 if (-not $copySucceeded) {
     Write-Step "Upgrade INCOMPLETE: the new companion build could not be installed (see the WARNING above); the previous build was relaunched instead."
+    Write-Step "Exit code 1 -- an INCOMPLETE upgrade must not read as a success to whatever ran this."
 }
 else {
     $verSuffix = ""
@@ -334,3 +335,13 @@ if (-not $DashboardToken -and (Test-Path -LiteralPath $ConfigPath)) {
     if (-not $hasToken) { Write-Warn2 "dashboard_token is blank -- fleet reporting + project selection are off. Re-run with -DashboardToken <value> (ask the admin) to enable them." }
 }
 Write-Host "=================================================================="
+
+# SAY IT IN THE EXIT CODE (OPS-4, 2026-08-11). This script used to fall off the
+# end after all five copy attempts had failed -- implicit exit 0 -- and
+# tools\ship.ps1 gates only on $LASTEXITCODE, so ship printed "ship complete.
+# Editors' trays will offer v<X>" while this machine was still running the
+# PREVIOUS build: the "verified against a build nobody was running" state of
+# 2026-07-25, reached by way of a warning nobody's script could read. Same
+# exit-code-vs-warning root cause as B23. A dry run sets $copySucceeded true.
+if (-not $copySucceeded) { exit 1 }
+exit 0

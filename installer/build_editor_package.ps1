@@ -154,6 +154,10 @@ Write-Step "repo root: $RepoRoot"
 Write-Step "destination: $Destination"
 
 # --- optionally rebuild the companion exe ---------------------------------
+# PyInstaller's exit code, kept for the restamp and the publish below (OPS-7).
+# 0 also means "no rebuild was asked for", which is the state where dist\ and
+# its manifest describe each other correctly.
+$script:PyInstallerExit = 0
 if ($RebuildExe) {
     $venvPython = Join-Path $CompanionDir ".venv\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $venvPython)) {
@@ -175,8 +179,9 @@ if ($RebuildExe) {
         try {
             & $venvPython -m PyInstaller build.spec --noconfirm 2>&1 |
                 ForEach-Object { Write-Host "    $_" }
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warn2 "PyInstaller exited $LASTEXITCODE -- the exe may be stale or missing"
+            $script:PyInstallerExit = $LASTEXITCODE
+            if ($script:PyInstallerExit -ne 0) {
+                Write-Warn2 "PyInstaller exited $script:PyInstallerExit -- the exe may be stale or missing"
             }
             else {
                 Write-Step "exe rebuilt"
@@ -192,7 +197,16 @@ if ($RebuildExe) {
         # about provenance on every single ship. tests_run=false is honest:
         # this path does not run the suites -- tools\release.ps1 remains the
         # tested-build path and overwrites this stamp with tests_run=true.
-        if (Test-Path -LiteralPath $ExePath) {
+        #
+        # ONLY after a build that actually succeeded (OPS-7). A failed
+        # PyInstaller run leaves the PREVIOUS exe in dist\, and restamping the
+        # manifest with the new version relabelled that old exe as the new
+        # build -- taking the sha from the same stale file, so even the publish
+        # provenance cross-check agreed with it.
+        if ($script:PyInstallerExit -ne 0) {
+            Set-Failed "PyInstaller exited $script:PyInstallerExit -- dist\ still holds the PREVIOUS exe, and its manifest was left describing it (not restamped)"
+        }
+        elseif (Test-Path -LiteralPath $ExePath) {
             try {
                 $mVer = Select-String -Path (Join-Path $CompanionDir "src\ccsync_companion\config.py") -Pattern '^VERSION\s*=\s*"([^"]+)"'
                 $stampVersion = if ($mVer) { $mVer.Matches[0].Groups[1].Value } else { "unknown" }
@@ -455,6 +469,14 @@ if ($Publish) {
         exit 1
     }
 
+    if ($script:PyInstallerExit -ne 0) {
+        # OPS-7: the exe in dist\ is the PREVIOUS build. Publishing it under the
+        # new version number hands the fleet old bytes under a new name, and the
+        # upgrade channel refuses to reuse a version for different bytes later --
+        # so the mistake would be permanent without a version bump.
+        Write-Warn2 "PyInstaller failed earlier in this run ($script:PyInstallerExit) -- the exe in dist\ is the PREVIOUS build; NOT publishing"
+        exit 1
+    }
     if (-not (Test-Path -LiteralPath $ExePath)) {
         Write-Warn2 "no exe at $ExePath -- run with -RebuildExe; NOT publishing"
         exit 1

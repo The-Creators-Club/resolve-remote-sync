@@ -140,6 +140,7 @@ def init(con):
 
 
 _local = threading.local()
+_schema_lock = threading.Lock()
 _schema_ready = False
 
 
@@ -156,9 +157,16 @@ def con():
     c = getattr(_local, 'con', None)
     if c is None:
         c = connect()
-        if not _schema_ready:
-            init(c)
-            _schema_ready = True
+        # The check and the set are one critical section (MUSIC-11,
+        # 2026-08-11): _schema_ready was an unlocked global, so two threads
+        # arriving first both ran the migrations and, on the request that
+        # upgrades a live database, the loser 500'd with "duplicate column
+        # name". The lock is held across init() so the second thread waits for
+        # the first to finish rather than racing it.
+        with _schema_lock:
+            if not _schema_ready:
+                init(c)
+                _schema_ready = True
         _local.con = c
     return c
 

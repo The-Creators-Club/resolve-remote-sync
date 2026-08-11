@@ -46,12 +46,28 @@ from urllib.parse import urlparse
 
 from . import config as ccsync_config
 from . import music_server
+from . import music_worker
 from . import resolve_bridge
 
 log = logging.getLogger("ccsync.broll")
 
 HOST = "127.0.0.1"
 PORT = 8899
+
+# How long the /status probe waits for its child. Shorter than the music
+# actions' 90 s (music_server.TIMEOUT) on purpose: /status is a yes/no the
+# settings panel draws a dot from, and an editor staring at "checking..."
+# learns nothing from the extra minute. The insert keeps the full 90 s -- an
+# ImportMedia off a cold share is genuinely slow (MED-3, 2026-08-11).
+STATUS_TIMEOUT = 20
+
+# Nothing either route accepts is more than a few hundred bytes, and the
+# Content-Length was taken on trust: a non-numeric one crashed the handler and
+# an invented large one parked a daemon thread in an unbounded buffered read.
+# CORS here is "*" plus private-network, so any page in the editor's browser
+# can reach it (MED-10, 2026-08-11).
+MAX_BODY_BYTES = 256 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
 
 # Config file for the SHARE->MOUNT map, unchanged from the standalone
 # companion: editors already have this file, the b-roll settings panel names
@@ -213,7 +229,12 @@ class MountNotConfiguredError(Exception):
 
 
 class PathTraversalError(Exception):
-    """Raised when rel_path attempts to escape the mount root (any '..' part)."""
+    """Raised when rel_path attempts to escape the mount root (any '..' part).
+
+    Also the channel for a request that is malformed rather than escaping --
+    a non-string share/rel_path (MED-5) -- because both routes turn this one
+    exception into the 400 they answer a bad request with.
+    """
 
 
 def _split_components(rel_path: str) -> list[str]:
@@ -272,7 +293,42 @@ def translate_path(
     Raises MountNotConfiguredError or PathTraversalError; never silently
     returns a path outside the configured/probed root.
     """
+    return translate_path_with_root(share, rel_path, mounts, platform, isdir)[1]
+
+
+def translate_path_with_root(
+    share: str,
+    rel_path: str,
+    mounts: dict,
+    platform: Optional[str] = None,
+    isdir: Optional[Callable[[str], bool]] = None,
+) -> tuple[str, str]:
+    """translate_path, plus the ROOT it resolved the pair against.
+
+    Two callers need the root back, and neither can rediscover it: on macOS
+    it may have come from the /Volumes probe rather than the mounts table, so
+    music_server's final containment check -- the one thing that catches a
+    symlink out of the share -- was silently skipped for exactly the
+    documented "mounted but not configured" Mac case (MED-11, 2026-08-11).
+    """
     plat = platform if platform is not None else sys.platform
+
+    # Types first. Both fields come off a JSON body, so a page bug (or a
+    # hand-rolled request) can hand us a list, a dict or a number, and the
+    # string methods below raised AttributeError/TypeError straight out of
+    # the request thread: no response at all, and no log line either, because
+    # socketserver.handle_error writes to a sys.stderr that is None in the
+    # windowed build (MED-5, 2026-08-11). PathTraversalError because that is
+    # this module's 400 channel -- a malformed request, not a state an editor
+    # can act on.
+    if not isinstance(rel_path, str):
+        raise PathTraversalError(
+            f"rel_path must be a string, got {type(rel_path).__name__}"
+        )
+    if not isinstance(share, str):
+        raise PathTraversalError(
+            f"share must be a string, got {type(share).__name__}"
+        )
 
     if not rel_path or not rel_path.strip():
         raise PathTraversalError("empty rel_path")
@@ -282,23 +338,27 @@ def translate_path(
     if not parts:
         raise PathTraversalError("empty rel_path after normalization")
 
-    root = mounts.get(share)
+    root = (mounts or {}).get(share)
     if root is None and plat == "darwin":
         root = probe_darwin_mount(share, isdir=isdir)
     if root is None:
         raise MountNotConfiguredError(f"no mount configured for share '{share}'")
+    if not isinstance(root, str):
+        raise MountNotConfiguredError(
+            f"the mount configured for share '{share}' is not a path"
+        )
 
     if plat.startswith("win"):
         # Normalize the configured root's separators, then append components
         # with backslashes. Leaves drive letters ("Y:\...") intact.
         root_norm = root.replace("/", "\\").rstrip("\\")
-        return root_norm + "\\" + "\\".join(parts)
+        return root, root_norm + "\\" + "\\".join(parts)
 
     # macOS/posix: normalize to forward slashes, preserve a leading '/'.
     root_norm = root.replace("\\", "/").rstrip("/")
     if root_norm == "":
         root_norm = "/"
-    return root_norm + "/" + "/".join(parts)
+    return root, root_norm + "/" + "/".join(parts)
 
 
 # -- the two endpoints ------------------------------------------------------
@@ -308,22 +368,40 @@ def _json_bytes(obj: dict) -> bytes:
     return json.dumps(obj).encode("utf-8")
 
 
-def build_status_response(mounts: dict) -> dict:
+# "the body was refused and its 4xx is already on the wire", told apart from
+# both a valid body and an unparseable one (None).
+_REFUSED = object()
+
+
+def build_status_response(mounts: dict, caller: Optional[Callable[..., dict]] = None) -> dict:
     """GET /status body, per SPEC.md: {ok, resolve_connected, mounts, version}.
 
     `version` is this companion's version now that the standalone one is
     retired -- the b-roll settings panel only displays it, and the number an
     editor reads off it should be the number their tray app reports.
+
+    The Resolve half runs in the same killable child the /music routes use
+    (MED-3): scriptapp() blocks indefinitely against a Resolve that is modal,
+    busy, or on the Project Manager window, and this ran it in-process on a
+    request thread while holding resolve_bridge._API_LOCK -- so one click on a
+    settings panel could park the watcher, the fixer, FIX ALL and every tray
+    Resolve read behind it. A child that never answers is killed; the panel
+    then simply says Resolve: no.
     """
+    probe = (caller if caller is not None else music_server.call)(
+        music_worker.BROLL_STATUS_ACTION, timeout=STATUS_TIMEOUT,
+    )
     return {
         "ok": True,
-        "resolve_connected": resolve_bridge.try_connect(),
+        "resolve_connected": bool((probe or {}).get("resolve_connected")),
         "mounts": mounts,
         "version": ccsync_config.VERSION,
     }
 
 
-def build_insert_response(body: dict, mounts: dict) -> tuple[int, dict]:
+def build_insert_response(
+    body: dict, mounts: dict, caller: Optional[Callable[..., dict]] = None
+) -> tuple[int, dict]:
     """POST /insert logic. Returns (http_status, json_body).
 
     Path traversal is the one failure that gets a non-200 HTTP status (400);
@@ -359,7 +437,25 @@ def build_insert_response(body: dict, mounts: dict) -> tuple[int, dict]:
             "message": f"file not found at {local_path} — is the share mounted?",
         }
 
-    result = resolve_bridge.perform_insert(str(local_path), in_frame, out_frame)
+    # In a CHILD, with a timeout, for the reason build_status_response spells
+    # out (MED-3, 2026-08-11). The worker calls the same
+    # resolve_bridge.perform_insert this used to call in-process, so the
+    # result dict -- {"ok", "message"} -- is unchanged, and a Resolve that
+    # never answers now costs one killed child instead of a wedged daemon
+    # thread holding _API_LOCK.
+    run = caller if caller is not None else music_server.call
+    result = run(
+        music_worker.BROLL_INSERT_ACTION,
+        path=str(local_path), in_frame=in_frame, out_frame=out_frame,
+    )
+    if not isinstance(result, dict):
+        return 200, {"ok": False, "message": resolve_bridge._SCRIPTING_ERROR_MESSAGE}
+    if "message" not in result:
+        # The worker's own failure shape is {"ok": false, "error": ...} (a
+        # timeout, a child that would not start); the web UI's toast reads
+        # "message".
+        result = dict(result)
+        result["message"] = str(result.get("error") or "the Resolve worker failed")
     return 200, result
 
 
@@ -393,20 +489,77 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _read_json_body(self) -> Any:
-        """The request body as parsed JSON, or None if it isn't JSON.
+    def _read_body(self, key: str) -> Optional[bytes]:
+        """The request body as bytes, or None when it was refused.
 
-        Only the /music routes use this; /insert keeps its own inline copy so
-        absorbing the music group changed nothing on the b-roll path.
+        Refusing SENDS the 4xx itself (`key` is the route's error field --
+        "message" for b-roll, "error" for music) and returns None, so a caller
+        that gets None has nothing left to do.
         """
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
+        raw_length = self.headers.get("Content-Length")
+        try:
+            length = int(raw_length) if raw_length else 0
+        except (TypeError, ValueError):
+            self._send_json(400, {"ok": False, key: "invalid Content-Length"})
+            return None
+        if length < 0:
+            self._send_json(400, {"ok": False, key: "invalid Content-Length"})
+            return None
+        if length > MAX_BODY_BYTES:
+            self._send_json(
+                413, {"ok": False, key: f"body too large (max {MAX_BODY_BYTES} bytes)"}
+            )
+            return None
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, _READ_CHUNK_BYTES))
+            if not chunk:
+                # The client hung up mid-body. Whatever arrived is handed on
+                # and fails the JSON parse as any other truncated body does.
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _read_json_body(self, key: str = "error") -> Any:
+        """The request body as parsed JSON, None if it isn't JSON, and
+        _REFUSED when a 4xx has already gone out (see _read_body)."""
+        raw = self._read_body(key)
+        if raw is None:
+            return _REFUSED
         try:
             return json.loads(raw.decode("utf-8")) if raw else {}
         except (json.JSONDecodeError, UnicodeDecodeError):
             return None
 
+    def _guarded(self, dispatch: Callable[[], None]) -> None:
+        """Run one request's dispatch, never letting an exception escape.
+
+        socketserver's handle_error prints the traceback to sys.stderr, which
+        is None in the windowed build: an unexpected type in a JSON body used
+        to produce no response, no log line and a client left waiting until it
+        timed out (MED-5, 2026-08-11).
+        """
+        try:
+            dispatch()
+        except Exception:
+            log.exception("broll: %s %s failed", self.command, self.path)
+            try:
+                self._send_json(
+                    500, {"ok": False, "message": "the companion failed to handle "
+                                                  "that request -- see its log"},
+                )
+            except Exception:
+                log.debug("broll: could not send the 500 either", exc_info=True)
+
     def do_GET(self) -> None:
+        self._guarded(self._dispatch_get)
+
+    def do_POST(self) -> None:
+        self._guarded(self._dispatch_post)
+
+    def _dispatch_get(self) -> None:
         path = urlparse(self.path).path
         if path == "/status":
             mounts = self.server.companion_config.get("mounts", {})
@@ -417,10 +570,12 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"ok": False, "message": f"not found: {path}"})
 
-    def do_POST(self) -> None:
+    def _dispatch_post(self) -> None:
         path = urlparse(self.path).path
         if path == "/music/send":
-            body = self._read_json_body()
+            body = self._read_json_body("error")
+            if body is _REFUSED:
+                return
             if body is None or not isinstance(body, dict):
                 self._send_json(400, {"ok": False, "error": "invalid JSON body"})
                 return
@@ -428,11 +583,10 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             status, result = music_server.build_send_response(body, mounts)
             self._send_json(status, result)
         elif path == "/insert":
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length else b""
-            try:
-                body = json.loads(raw.decode("utf-8")) if raw else {}
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            body = self._read_json_body("message")
+            if body is _REFUSED:
+                return
+            if body is None or not isinstance(body, dict):
                 self._send_json(400, {"ok": False, "message": "invalid JSON body"})
                 return
             mounts = self.server.companion_config.get("mounts", {})

@@ -11,16 +11,24 @@ from musicweb.projection import l2norm
 
 
 class Index:
-    def __init__(self, con):
-        self.reload(con)
+    """Built once and never mutated afterwards.
 
-    def reload(self, con):
+    Picking up a changed library builds a NEW Index and swaps the module
+    reference (see `refresh`). It used to have a `reload()` that overwrote a
+    live shared object statement by statement, which is MUSIC-10 (2026-08-11):
+    a concurrent /api/similar could read the new `sim_mat` against the old
+    `pos` and answer with the neighbours of a different track.
+    """
+
+    def __init__(self, con):
         self.track_ids, self.track_mat = db.load_matrix(con)
         self.win_tids, self.win_mat = db.load_window_matrix(con)
-        # Project the source/codec axes out of both audio sides. The same
-        # projection is applied to text queries in text_search -- doing it to
-        # only one side would put query and documents in different subspaces
-        # and silently distort every score.
+        # Project the source/codec axes out of the audio side. This is an
+        # INDEX-SIDE, SIMILARITY-ONLY transform: text queries are deliberately
+        # NOT projected (see the measurement below and projection.apply's
+        # docstring), and text_search deliberately scores against the raw
+        # matrices. The asymmetry looks like a bug and is not -- "fixing" it
+        # halves text retrieval.
         self.dirs = db.load_debias(con)
         # Debias applies to SIMILARITY ONLY. Measured: erasing the source axes
         # takes ES-seed->ES neighbours from 53.7% to 40.5% (base 36%), but it
@@ -83,7 +91,11 @@ class Index:
 
         The UI exposes this as "any moment" vs "whole track".
         """
-        if self.win_mat.size == 0:
+        # Each pool reads a different matrix, so each guards its own (MUSIC-7,
+        # 2026-08-11): one shared `win_mat` guard made a database with track
+        # embeddings but no window rows answer EVERY whole-track search with an
+        # empty result the UI shows as a genuine miss.
+        if (self.track_mat if pool == 'mean' else self.win_mat).size == 0:
             return []
         q = l2norm(self.encoder.embed_text([query])[0])
 
@@ -144,3 +156,17 @@ def index():
         if _index is None:
             _index = Index(db.con())
         return _index
+
+
+def refresh(con):
+    """Pick up a changed library: build a new Index, then swap it in. -> it.
+
+    The build happens OUTSIDE the lock and the swap is a single rebind, so a
+    request holding the old index keeps a consistent one for its whole life and
+    the next request gets the new one whole (MUSIC-10, 2026-08-11).
+    """
+    global _index
+    fresh = Index(con)
+    with _index_lock:
+        _index = fresh
+    return fresh

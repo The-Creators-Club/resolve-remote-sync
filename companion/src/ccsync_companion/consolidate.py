@@ -460,7 +460,14 @@ def run_consolidation(
         outcome = dict(outcome)
         outcome["file_path"] = path
         results.append(outcome)
-        batch_done += size
+        if outcome.get("ok"):
+            batch_done += size
+        # else: nothing was copied that still exists -- fixer.fix_clip deletes
+        # both artifacts of a failed or abandoned attempt before it returns,
+        # so crediting `size` inflated the bar, the "X of Y done" text and
+        # RateEstimator's speed/ETA on exactly the runs (skips, failures) the
+        # editor watches hardest. popup.perform_fix_all was fixed this way and
+        # its twin here was missed (UI-5, 2026-08-11).
         if progress_fn is not None:
             try:
                 progress_fn(len(results), total, outcome)

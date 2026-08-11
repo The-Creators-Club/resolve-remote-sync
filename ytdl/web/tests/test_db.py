@@ -1,5 +1,6 @@
 """Storage layer: schema/migration runner, the phase machine's writes, and the
 two guards that live in SQL rather than in a handler."""
+import sqlite3
 import threading
 
 import pytest
@@ -27,6 +28,76 @@ def test_a_newer_database_is_refused(tmp_path):
     con.commit()
     with pytest.raises(RuntimeError, match='newer than this app supports'):
         db.ensure_schema(con)
+    con.close()
+
+
+# The two tables the v2/v3 migrations touch, exactly as schema.sql v1 created
+# them. Written out rather than derived from schema.sql: the point of the test
+# is a database that predates both migrations, and a copy that follows the
+# current file around would stop being one.
+_V1_DDL = """
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY, created_by TEXT NOT NULL, term TEXT NOT NULL,
+    term_dir TEXT NOT NULL, project_slug TEXT NOT NULL,
+    project_label TEXT NOT NULL, quality TEXT NOT NULL DEFAULT '1080p',
+    period TEXT, max_per_term INTEGER NOT NULL DEFAULT 15,
+    phase TEXT NOT NULL DEFAULT 'queued', error TEXT,
+    terms_total INTEGER DEFAULT 0, terms_done INTEGER DEFAULT 0,
+    candidates INTEGER DEFAULT 0, enrich_total INTEGER DEFAULT 0,
+    enrich_done INTEGER DEFAULT 0, dl_total INTEGER DEFAULT 0,
+    dl_done INTEGER DEFAULT 0, dl_failed INTEGER DEFAULT 0,
+    cancel_requested INTEGER DEFAULT 0, created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL);
+CREATE TABLE downloads (
+    video_id TEXT PRIMARY KEY, title TEXT, channel TEXT,
+    project_slug TEXT NOT NULL, project_label TEXT NOT NULL, term TEXT NOT NULL,
+    rel_path TEXT NOT NULL, job_id INTEGER, downloaded_by TEXT,
+    downloaded_at TEXT NOT NULL);
+"""
+
+
+def test_a_v1_database_is_migrated_and_its_duplicate_active_jobs_retired(tmp_path):
+    """The migration runner, on the database shape the fleet actually has.
+
+    The index (YTDL-25) is the dangerous half: a live ytdl.db may already hold
+    the duplicate active jobs an unguarded create_job wrote, and a CREATE
+    UNIQUE INDEX that raises there takes every /ytdl request down. The
+    migration retires the orphans first -- the NEWEST job is the one the
+    editor's page is attached to, so that is the one that survives.
+    """
+    con = db.connect(tmp_path / 'v1.db')
+    con.executescript(_V1_DDL)
+    for phase in ('ready_for_review', 'queued'):
+        con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                    "project_label,phase,created_at,updated_at) "
+                    "VALUES(?,'reef','reef','s','2026/FF5/Energy',?,'x','x')",
+                    (USER, phase))
+    con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                "project_label,phase,created_at,updated_at) "
+                "VALUES(?,'wind','wind','s','2025/FF4/Nuclear','done','x','x')",
+                (OTHER_USER,))
+    con.execute("INSERT INTO downloads(video_id,title,channel,project_slug,"
+                "project_label,term,rel_path,downloaded_at) VALUES('vid00000001',"
+                "'t','c','s','2026/FF5/Energy','reef','Youtube/reef/x.mp4','x')")
+    con.execute('PRAGMA user_version = 1')
+    con.commit()
+
+    db.ensure_schema(con)
+
+    assert con.execute('PRAGMA user_version').fetchone()[0] == db.CURRENT_SCHEMA_VERSION
+    assert 'term_dir' in db._columns(con, 'downloads')
+    assert db._index_exists(con, 'idx_jobs_one_active')
+    rows = con.execute('SELECT id, phase, error FROM jobs WHERE created_by=? '
+                       'ORDER BY id', (USER,)).fetchall()
+    assert [r['phase'] for r in rows] == ['cancelled', 'queued']
+    assert 'YTDL-25' in rows[0]['error']
+    # ...and the index now refuses what the migration just cleaned up
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                    "project_label,phase,created_at,updated_at) "
+                    "VALUES(?,'more','more','s','2026/FF5/Energy','queued','x','x')",
+                    (USER,))
+    con.rollback()
     con.close()
 
 
@@ -130,8 +201,10 @@ def test_reset_stale_jobs_restarts_mid_pipeline_and_resumes_downloads(con, job):
     db.add_video(con, job['id'], 'vid00000001', 'u')
     db.set_phase(con, job['id'], 'searching')
 
+    # ANOTHER editor's job: one active job per editor is a unique index now
+    # (YTDL-25), so the two halves of boot recovery cannot both be alex's.
     slug, label, _ = PROJECTS[1]
-    other = db.create_job(con, USER, 'wind', 'wind', slug, label)
+    other = db.create_job(con, OTHER_USER, 'wind', 'wind', slug, label)
     db.add_video(con, other, 'vid00000002', 'u')
     db.set_video(con, other, 'vid00000002', dl_state='downloading')
     db.add_video(con, other, 'vid00000003', 'u')
@@ -153,6 +226,90 @@ def test_ready_for_review_is_left_alone_by_boot_recovery(con, job):
     assert db.get_job(con, job['id'])['phase'] == 'ready_for_review'
 
 
+def test_one_active_job_per_editor_is_enforced_by_the_database(con, job):
+    """YTDL-25: the handler's check is read-then-insert, so the guarantee has
+    to live where the race cannot get at it. Terminal jobs are exempt -- an
+    editor's history is any number of rows."""
+    slug, label, _ = PROJECTS[1]
+    with pytest.raises(sqlite3.IntegrityError):
+        db.create_job(con, USER, 'second', 'second', slug, label)
+    db.set_phase(con, job['id'], 'cancelled')
+    again = db.create_job(con, USER, 'second', 'second', slug, label)
+    assert db.active_job(con, USER)['id'] == again
+
+
+def test_cancel_now_only_fires_when_no_phase_is_in_flight(con, job):
+    """YTDL-1. `queued` and `ready_for_review` have no worker inside them, so
+    they go terminal here; anything else must be left to the flag, because the
+    worker owns the yt-dlp call it is in the middle of."""
+    db.set_phase(con, job['id'], 'ready_for_review')
+    assert db.cancel_now(con, job['id']) is True
+    assert db.get_job(con, job['id'])['phase'] == 'cancelled'
+    assert db.active_job(con, USER) is None
+
+    slug, label, _ = PROJECTS[1]
+    mid = db.create_job(con, USER, 'wind', 'wind', slug, label)
+    db.set_phase(con, mid, 'downloading')
+    assert db.cancel_now(con, mid) is False
+    assert db.get_job(con, mid)['phase'] == 'downloading'
+
+
+def test_clear_cancel_forgets_an_unhonoured_request(con, job):
+    db.request_cancel(con, job['id'])
+    db.clear_cancel(con, job['id'])
+    assert db.is_cancelled(con, job['id']) is False
+
+
+def test_mark_pending_is_idempotent(con, job):
+    """YTDL-18: start_download writes rows, counters and phase as three
+    transactions; a container death between the first and the last used to
+    leave rows already `pending` that this no longer matched, and every later
+    DOWNLOAD press 400'd."""
+    db.add_video(con, job['id'], 'vid00000001', 'u')
+    assert db.mark_pending(con, job['id']) == 1
+    assert db.mark_pending(con, job['id']) == 1
+
+
+def test_select_none_deselects_what_the_filter_hid(con, job):
+    """YTDL-26: app.js sends scope='relevant' whenever "show filtered" is off,
+    so a hand-selected filtered-out video survived NONE behind a hidden card --
+    and mark_pending, which has no relevance predicate, downloaded it."""
+    db.add_video(con, job['id'], 'vid00000001', 'u')
+    db.add_video(con, job['id'], 'vid00000002', 'u')
+    db.set_video(con, job['id'], 'vid00000002', relevant=0, selected=1)
+
+    db.bulk_select(con, job['id'], False, 'relevant')
+    assert db.get_video(con, job['id'], 'vid00000002')['selected'] == 0
+    assert db.mark_pending(con, job['id']) == 0
+
+    # selecting still respects it: NONE means all, ALL does not.
+    db.bulk_select(con, job['id'], True, 'relevant')
+    assert db.get_video(con, job['id'], 'vid00000002')['selected'] == 0
+    assert db.get_video(con, job['id'], 'vid00000001')['selected'] == 1
+
+
+def test_the_ledger_badge_names_the_folder_that_exists_on_disk(con, job):
+    """YTDL-31: the term is what the editor typed; the folder is
+    safe_term_dirname(it). The badge is an instruction to go and look."""
+    term = 'reef: the "third" LNG terminal'
+    term_dir = config.safe_term_dirname(term)
+    assert term_dir != term
+    db.ledger_add(con, 'vid00000001', 't', 'c', PROJECTS[0][0], PROJECTS[0][1],
+                  term, f'Youtube/{term_dir}/Channel - t [vid00000001].mp4')
+    assert db.ledger_map(con)['vid00000001'] == f'{PROJECTS[0][1]}/{term_dir}'
+
+
+def test_a_ledger_row_written_before_term_dir_existed_still_reads(con, job):
+    """NULL term_dir is every row the migration found: fall back to the raw
+    term, exactly as the badge did before."""
+    con.execute("INSERT INTO downloads(video_id,title,channel,project_slug,"
+                "project_label,term,rel_path,downloaded_at) "
+                "VALUES('vid00000002','t','c',?,?,'reef','Youtube/reef/x.mp4','x')",
+                (PROJECTS[0][0], PROJECTS[0][1]))
+    con.commit()
+    assert db.ledger_map(con)['vid00000002'] == f'{PROJECTS[0][1]}/reef'
+
+
 def test_only_whitelisted_columns_can_be_written(con, job):
     with pytest.raises(ValueError):
         db.set_job(con, job['id'], created_by='someone else')
@@ -166,6 +323,18 @@ def test_safe_term_dirname_strips_what_smb_cannot_take():
     assert config.safe_term_dirname('trailing dot.') == 'trailing dot'
     assert config.safe_term_dirname('   ') == 'search'
     assert config.safe_term_dirname('..') == 'search'
+
+
+def test_safe_term_dirname_defuses_windows_device_names():
+    """YTDL-28: the NAS creates `con/` happily, and every Windows editor then
+    carries a per-item sync error on that project until it is renamed there."""
+    for reserved in ('con', 'CON', 'Nul', 'com1', 'LPT9', 'aux'):
+        assert config.safe_term_dirname(reserved) == reserved + '_'
+    # the reservation is on the stem, before any dot
+    assert config.safe_term_dirname('nul.txt') == 'nul_.txt'
+    # ...and only on the whole stem: these are ordinary names
+    for ok in ('console', 'com10', 'my con', 'conx'):
+        assert config.safe_term_dirname(ok) == ok
 
 
 def test_safe_term_dirname_caps_at_80_utf8_bytes():

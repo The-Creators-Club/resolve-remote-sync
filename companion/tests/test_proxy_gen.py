@@ -702,6 +702,64 @@ def test_three_failures_take_a_clip_out_of_the_queue(tmp_path):
     assert gen._queue == []
 
 
+def test_the_verification_decode_gets_the_encodes_ceiling(tmp_path):
+    """MED-2: it used to be a flat 30 minutes while the encode's scaled with
+    the source. A multi-hour clip encoded fine and then blew that ceiling
+    decoding its own ~20 GB HEVC back off the share -- the partial discarded,
+    the whole encode thrown away, and three passes later the clip capped for
+    good with the log blaming the file."""
+    src = _original(tmp_path)
+    seen: list[tuple[bool, float]] = []
+
+    class _Recording(_FakeFfmpeg):
+        def __call__(self, cmd, should_stop, ceiling):
+            seen.append((self._is_verify(cmd), ceiling))
+            return super().__call__(cmd, should_stop, ceiling)
+
+    gen = _make_gen(tmp_path, encode_fn=_Recording(), probe_fn=_probe(duration=7200.0))
+    assert gen.encode_once(_clip(src)) == proxy_gen.RESULT_DONE
+
+    expected = 7200.0 * proxy_gen.STUCK_DURATION_FACTOR
+    assert seen == [(False, expected), (True, expected)]
+
+
+def test_a_short_clips_verification_still_gets_the_floor(tmp_path):
+    src = _original(tmp_path)
+    seen: list[tuple[bool, float]] = []
+
+    class _Recording(_FakeFfmpeg):
+        def __call__(self, cmd, should_stop, ceiling):
+            seen.append((self._is_verify(cmd), ceiling))
+            return super().__call__(cmd, should_stop, ceiling)
+
+    gen = _make_gen(tmp_path, encode_fn=_Recording(), probe_fn=_probe(duration=30.0))
+    assert gen.encode_once(_clip(src)) == proxy_gen.RESULT_DONE
+    assert seen == [(False, proxy_gen.STUCK_FLOOR_SECONDS),
+                    (True, proxy_gen.STUCK_FLOOR_SECONDS)]
+
+
+def test_make_them_now_forgets_the_failure_cap(tmp_path):
+    """MED-6: scan_once filters capped clips OUT of the queue, so after the
+    0.6.1 muxer night capped every clip on this rig, the one user-facing retry
+    there is -- "Make the missing proxies now" -- scanned, found everything
+    capped, and did nothing at all."""
+    src = _original(tmp_path)
+    ffmpeg = _FakeFfmpeg()
+    ffmpeg.encode_returncode = 1
+    gen = _make_gen(tmp_path, encode_fn=ffmpeg)
+    clip = _clip(src)
+    for _ in range(3):
+        gen.encode_once(dict(clip))
+    assert gen._is_capped(clip) is True
+
+    gen.request_run()
+
+    assert gen._is_capped(clip) is False
+    gen._scan_fn = lambda *a, **k: _scan_result([dict(clip)])
+    gen.scan_once()
+    assert [c["path"] for c in gen._queue] == [str(src)]
+
+
 def test_a_changed_file_gets_a_fresh_three_attempts(tmp_path):
     """The usual cause of three failures in a row is a truncated download.
     The editor re-downloads it -- a new (mtime, size) is a different file."""
@@ -990,6 +1048,119 @@ def test_a_tick_that_raises_never_kills_the_thread(tmp_path):
     assert ticks["count"] == 1
 
 
+# -- the BPG hand-off ----------------------------------------------------------
+
+
+class _RecordingBpg:
+    """A BpgLauncher-shaped object that records what it was asked."""
+
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        self.calls: list[dict] = []
+
+    def maybe_launch(self, *, queue_empty, needs_resolve, user_away):
+        self.calls.append({"queue_empty": queue_empty,
+                           "needs_resolve": needs_resolve,
+                           "user_away": user_away})
+        return None
+
+
+class _CountingIdle:
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.asked = 0
+
+    def seconds_idle(self):
+        self.asked += 1
+        return self.seconds
+
+
+@pytest.mark.parametrize("state", [
+    proxy_gen.STATE_PAUSED,
+    proxy_gen.STATE_MISCONFIGURED,
+    proxy_gen.STATE_DRIVE_ABSENT,
+    proxy_gen.STATE_RUNNING,
+])
+def test_bpg_is_not_launched_from_a_state_that_forbids_it(tmp_path, state):
+    """MED-7: the gate was only "the ffmpeg queue is empty", so a PAUSED base
+    rig still spawned Resolve.exe -pg -- and nothing in this module ever stops
+    it. Paused means the editor pressed stop; misconfigured and drive-absent
+    mean there is nothing sane to watch."""
+    launcher = _RecordingBpg()
+    gen = _make_gen(tmp_path, bpg_launcher=launcher)
+    gen._totals["needs_resolve"] = 6
+
+    gen._maybe_launch_bpg(state)
+
+    assert launcher.calls == []
+
+
+def test_a_paused_machine_does_not_launch_bpg_through_a_whole_tick(tmp_path):
+    """The same rule where it actually bites: a real tick on a paused rig."""
+    launcher = _RecordingBpg()
+    gen = _make_gen(tmp_path, bpg_launcher=launcher, paused_fn=lambda: True)
+    gen._totals["needs_resolve"] = 6
+
+    assert gen.tick() == proxy_gen.STATE_PAUSED
+    assert launcher.calls == []
+
+
+def test_bpg_is_launched_once_there_is_nothing_for_ffmpeg_to_do(tmp_path):
+    launcher = _RecordingBpg()
+    gen = _make_gen(tmp_path, bpg_launcher=launcher)
+    gen._totals["needs_resolve"] = 6
+
+    gen._maybe_launch_bpg(proxy_gen.STATE_NOTHING_TO_DO)
+
+    assert len(launcher.calls) == 1
+    assert launcher.calls[0]["queue_empty"] is True
+    assert launcher.calls[0]["needs_resolve"] == 6
+
+
+def test_the_idle_probe_is_handed_over_uncalled(tmp_path):
+    """MED-8: `user_away=self._user_is_away()` was evaluated eagerly on every
+    15 s tick on every machine, and BPG discards it on its first line -- every
+    Mac editor forked ioreg ~5,700 times a day for it."""
+    launcher = _RecordingBpg()
+    idle = _CountingIdle(9999)
+    gen = _make_gen(tmp_path, bpg_launcher=launcher, idle_probe=idle)
+    gen._totals["needs_resolve"] = 6
+
+    gen._maybe_launch_bpg(proxy_gen.STATE_NOTHING_TO_DO)
+
+    assert callable(launcher.calls[0]["user_away"])
+    assert idle.asked == 0
+    # ...and it still answers correctly when the launcher does ask.
+    assert launcher.calls[0]["user_away"]() is True
+    assert idle.asked == 1
+
+
+def test_a_disabled_launcher_costs_nothing_at_all(tmp_path):
+    """The early return that never fired: self._bpg is never None in the app,
+    so a Mac (where BPG does not exist) paid the whole gate every tick."""
+    launcher = _RecordingBpg(enabled=False)
+    idle = _CountingIdle(9999)
+    gen = _make_gen(tmp_path, bpg_launcher=launcher, idle_probe=idle)
+    gen._totals["needs_resolve"] = 6
+
+    gen._maybe_launch_bpg(proxy_gen.STATE_NOTHING_TO_DO)
+
+    assert launcher.calls == []
+    assert idle.asked == 0
+
+
+def test_a_launcher_that_raises_is_still_not_fatal(tmp_path):
+    class _Boom:
+        enabled = True
+
+        def maybe_launch(self, **kw):
+            raise RuntimeError("Resolve is not installed after all")
+
+    gen = _make_gen(tmp_path, bpg_launcher=_Boom())
+    gen._totals["needs_resolve"] = 6
+    gen._maybe_launch_bpg(proxy_gen.STATE_NOTHING_TO_DO)  # must not raise
+
+
 def test_start_is_a_no_op_when_both_halves_are_off(tmp_path):
     gen = _make_gen(
         tmp_path, _cfg(tmp_path, proxy_gen_enabled=False, proxy_notify_enabled=False))
@@ -1159,6 +1330,33 @@ def test_the_runner_kills_a_child_past_the_ceiling(tmp_path, monkeypatch):
     result = gen._run_ffmpeg(["ffmpeg"], lambda: None, 1800.0)
     assert result["timed_out"] is True
     assert proc.killed == 1
+
+
+def test_stderr_still_being_written_does_not_break_the_never_raise_contract(
+        tmp_path, monkeypatch):
+    """MED-13: reader.join(timeout=5) can time out -- a _kill that failed to
+    reap the child leaves the reader appending -- and joining a deque another
+    thread is mutating raises "deque mutated during iteration", out of the one
+    function whose whole contract is that it never raises."""
+    class _MutatingDeque(list):
+        def __iter__(self):
+            raise RuntimeError("deque mutated during iteration")
+
+    class _FakeCollections:
+        @staticmethod
+        def deque(maxlen=None):
+            return _MutatingDeque()
+
+    proc = _FakeProc([None, 0], stderr_lines=["a warning\n"])
+    monkeypatch.setattr(proxy_gen, "_default_popen", lambda cmd: proc)
+    monkeypatch.setattr(proxy_gen, "collections", _FakeCollections)
+    gen = _make_gen(tmp_path)
+    gen._stop_event = _NoWait()
+
+    result = gen._run_ffmpeg(["ffmpeg"], lambda: None, 999.0)
+
+    assert result["returncode"] == 0
+    assert result["stderr"] == ""
 
 
 def test_a_spawn_that_fails_is_a_failure_not_a_crash(tmp_path, monkeypatch):

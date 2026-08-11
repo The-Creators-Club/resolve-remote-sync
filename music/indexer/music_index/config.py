@@ -12,9 +12,12 @@ constant is bound once at import, the function reads the live mapping.
 """
 import os
 
+# UnknownShareError is re-exported for the same reason PathTraversalError is:
+# resolve_path raises either one, and a caller that catches only the first
+# dies on a row with a NULL or foreign `share` (MUSIC-12, 2026-08-11).
 from musicweb.config import (  # noqa: F401
     DATA_ROOT, DB_PATH, MUSIC_ROOT, SHARE, PathTraversalError,
-    resolve_path, safe_join, share_root,
+    UnknownShareError, resolve_path, safe_join, share_root,
 )
 
 FFMPEG = os.environ.get('FFMPEG', r'C:\Users\alex\tools\ffmpeg\bin\ffmpeg.exe')

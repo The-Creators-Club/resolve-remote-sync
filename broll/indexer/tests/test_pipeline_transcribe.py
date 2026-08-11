@@ -201,7 +201,7 @@ def test_process_video_transcribe_failure_does_not_error_video_or_block_claude(t
     monkeypatch.setattr(pipeline, "stage_proxy", lambda *a, **k: (calls.append("proxy"), a[1].update_video(a[2]["id"], status="proxied")))
     monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: calls.append("frames"))
 
-    def failing_transcribe(cfg, storage, video, src_path):
+    def failing_transcribe(cfg, storage, video, src_path, ingest_only=False):
         calls.append("transcribe")
         raise RuntimeError("whisper blew up")
 

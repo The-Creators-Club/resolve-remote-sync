@@ -48,7 +48,7 @@ from pathlib import Path
 from app import config
 
 # Highest schema version this codebase knows how to run against.
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 # Maps "user_version found" -> migration filename that advances it to the
 # next version. Resolved via find_migration_path() (repo-root-first, then
@@ -68,6 +68,7 @@ _MIGRATIONS: dict[int, str] = {
     5: "006_share_roots.sql",
     6: "007_archive_path.sql",
     7: "008_original_path.sql",
+    8: "009_sprite_geometry.sql",
 }
 
 

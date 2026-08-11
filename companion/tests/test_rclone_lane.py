@@ -1227,3 +1227,90 @@ def test_the_lane_runs_again_the_moment_the_root_comes_back(tmp_path):
     root.mkdir(parents=True)
     lane.run_once()
     assert len(calls) == 1
+
+
+# ===========================================================================
+# 2026-08-11 hunt: what the run tally counts (SYNC-10 / SYNC-11)
+# ===========================================================================
+
+
+# rclone's periodic --stats record: the msg is the WHOLE run summary, and it
+# grows a "Deleted:" line from the first deletion onwards.
+_STATS_TICK = {
+    "level": "info",
+    "msg": ("\nTransferred:   \t  100 MiB / 200 MiB, 50%, 10 MiB/s, ETA 10s\n"
+            "Checks:              120 / 120, 100%\n"
+            "Deleted:              12 (files), 0 (dirs)\n"
+            "Transferred:           5 / 10, 50%\n"
+            "Elapsed time:      10m0s\n"),
+    "stats": {"bytes": 104857600, "totalBytes": 209715200, "deletes": 12},
+}
+
+
+def test_stats_ticks_are_not_counted_as_transferred_or_deleted_files():
+    """SYNC-10: `"Deleted" in msg` is true on EVERY stats tick once anything
+    has been deleted, so a lane B pass that trashed 12 proxies over ten
+    minutes reported ~300 deletions to the dashboard -- one per tick, each
+    also counted as a transfer."""
+    from ccsync_companion.sync.rclone_lane import RcloneRunTally
+
+    tally = RcloneRunTally()
+    for _ in range(30):
+        tally.feed_record(dict(_STATS_TICK))
+    tally.feed_record({"level": "info", "msg": "old.mov: Deleted", "object": "old.mov"})
+
+    result = tally.result()
+    assert (result.transferred, result.deleted) == (1, 1)
+    assert result.completed_files == []
+
+
+def test_a_backup_dir_move_is_a_deletion_not_a_completion():
+    """--backup-dir does not delete, it moves aside -- but from the
+    destination's point of view the file is gone, and "Moved" put it in the
+    dashboard's transfer HISTORY as if it had just arrived (SYNC-10)."""
+    from ccsync_companion.sync.rclone_lane import RcloneRunTally
+
+    tally = RcloneRunTally()
+    tally.feed_record({"level": "info", "msg": "Proxy/old.mov: Moved into backup dir",
+                       "object": "Proxy/old.mov"})
+    tally.feed_record({"level": "info", "msg": "Copied (new)", "object": "Proxy/new.mov"})
+
+    result = tally.result()
+    assert result.deleted == 1
+    assert result.completed_files == ["Proxy/new.mov"]
+
+
+def test_critical_records_reach_the_error_list():
+    """SYNC-11: only level == "error" was recorded, so the `Failed to create
+    file system for ...` shape -- logged at CRITICAL before rclone exits --
+    left `errors` empty. _most_informative_error([]) then returned "" and
+    _is_max_delete_abort went blind."""
+    from ccsync_companion.sync.rclone_lane import (
+        RcloneRunTally, _is_max_delete_abort, _most_informative_error,
+    )
+
+    tally = RcloneRunTally()
+    tally.feed_record({"level": "critical",
+                       "msg": "Failed to create file system for \"nas:CC\": "
+                              "couldn't connect SSH: dial tcp: i/o timeout"})
+    tally.feed_record({"level": "fatal",
+                       "msg": "--max-delete threshold reached, aborting"})
+
+    result = tally.result()
+    assert result.error_count == 2
+    assert result.ok is False
+    assert "Failed to create file system" in _most_informative_error(result.errors)
+    assert _is_max_delete_abort(result.errors) is True
+
+
+def test_a_critical_line_survives_the_whole_text_parser_too():
+    """parse_json_log is the same rules by another door (the express run and
+    the legacy injected-subprocess_run path both use it)."""
+    from ccsync_companion.sync.rclone_lane import parse_json_log
+
+    text = (
+        '{"level":"info","msg":"rclone starting"}\n'
+        '{"level":"critical","msg":"Failed to create file system for \\"nas:CC\\""}\n'
+    )
+    result = parse_json_log(text)
+    assert result.errors and "Failed to create file system" in result.errors[0]

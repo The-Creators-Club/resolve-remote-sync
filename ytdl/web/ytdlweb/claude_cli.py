@@ -159,6 +159,12 @@ def _invoke(prompt, timeout=None):
     # A logged-out CLI can answer 0 with prose telling you to log in.
     if _AUTH_RE.search(text) and '{' not in text:
         raise ClaudeError(ERR_AUTH, _auth_detail(text))
+    # A call that worked IS the probe, and it is the only thing that ever
+    # writes `ok` back: without it one transient timeout showed red on every
+    # editor's page until the container was restarted, including after an admin
+    # had followed DEPLOY.md and verified the login by hand (YTDL-5,
+    # 2026-08-11).
+    _note_ok()
     return text
 
 
@@ -228,14 +234,42 @@ def generate_terms(topic, timeout=None):
 
     The gloss requirement is validated here rather than trusted, because the
     manifest's whole readability for a non-Chinese-reading editor (REQ 5) rests
-    on it and a missing gloss is exactly the kind of thing a retry fixes.
+    on it.
+
+    ONE missing gloss is not worth the job. ask_json's retry only covers
+    unparseable output, so the promised "a retry fixes this" never happened and
+    19 good terms plus one glossless Chinese query lost the whole search
+    (YTDL-20, 2026-08-11). The whole reply is now asked for a second time --
+    and if that one is short a gloss too, those queries are dropped and the
+    rest of the search goes ahead.
     """
-    data = ask_json(_TERM_PROMPT.format(topic=topic), timeout)
+    prompt = _TERM_PROMPT.format(topic=topic)
+    out, missing = _usable_terms(ask_json(prompt, timeout))
+    if missing:
+        log.warning('claude returned %d query(ies) without english_gloss (%s); '
+                    'asking once more', len(missing), ', '.join(missing)[:120])
+        out, missing = _usable_terms(ask_json(prompt, timeout))
+        if missing:
+            log.warning('still no english_gloss for %s -- dropping those and '
+                        'keeping the %d usable queries',
+                        ', '.join(missing)[:120], len(out))
+    if not out:
+        raise ClaudeError(ERR_OUTPUT, 'the reply contained no usable queries')
+    return out
+
+
+def _usable_terms(data):
+    """-> ([{'q','lang','english_gloss'}], [glossless zh queries]).
+
+    The glossless ones are reported rather than returned: a Chinese query with
+    no translation is unreadable in the manifest, so it is only ever kept after
+    a second reply has failed to supply one.
+    """
     raw = data.get('terms')
     if not isinstance(raw, list) or not raw:
         raise ClaudeError(ERR_OUTPUT, f'no "terms" array in the reply: {str(data)[:200]}')
 
-    out, seen = [], set()
+    out, seen, missing = [], set(), []
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -244,18 +278,15 @@ def generate_terms(topic, timeout=None):
         if not q or lang not in ('en', 'zh'):
             continue
         gloss = str(item.get('english_gloss') or item.get('gloss') or '').strip()
-        if lang == 'zh' and not gloss:
-            raise ClaudeError(ERR_OUTPUT,
-                              f'the Chinese query {q!r} came back without the '
-                              'required english_gloss')
         key = q.casefold()
         if key in seen:
             continue
         seen.add(key)
+        if lang == 'zh' and not gloss:
+            missing.append(q)
+            continue
         out.append({'q': q, 'lang': lang, 'english_gloss': gloss or None})
-    if not out:
-        raise ClaudeError(ERR_OUTPUT, 'the reply contained no usable queries')
-    return out
+    return out, missing
 
 
 # --------------------------------------------------------- call #2: relevance
@@ -305,10 +336,15 @@ def filter_relevance(topic, videos, batch=RELEVANCE_BATCH, timeout=None):
         data = ask_json(_RELEVANCE_PROMPT.format(
             topic=topic, n=len(chunk), listing=listing, last=len(chunk) - 1), timeout)
 
-        keep = {int(i) for i in data.get('keep', []) if _is_index(i, len(chunk))}
+        # `or []` and the list check on BOTH: a reply that kept nothing comes
+        # back as {"keep": null, ...} often enough, and the TypeError that used
+        # to raise escaped the caller's ClaudeError-only except -- failing a
+        # twenty-minute job at `filtering` where the design says degrade to an
+        # unfiltered manifest with a banner (YTDL-13, 2026-08-11).
+        keep = {int(i) for i in _as_list(data.get('keep')) if _is_index(i, len(chunk))}
         for i in keep:
             verdicts[chunk[i]['id']] = (True, '')
-        for item in data.get('drop', []) or []:
+        for item in _as_list(data.get('drop')):
             if isinstance(item, dict):
                 i, why = item.get('i'), str(item.get('why') or '')[:80]
             else:
@@ -316,6 +352,12 @@ def filter_relevance(topic, videos, batch=RELEVANCE_BATCH, timeout=None):
             if _is_index(i, len(chunk)) and int(i) not in keep:
                 verdicts[chunk[int(i)]['id']] = (False, why)
     return verdicts
+
+
+def _as_list(value):
+    """A JSON field that should have been an array, as one. Anything else --
+    null, a number, an object -- reads as "the model said nothing here"."""
+    return value if isinstance(value, (list, tuple)) else []
 
 
 def _is_index(i, n):
@@ -336,15 +378,17 @@ def _mmss(sec):
 # The SPA warns about a logged-out claude BEFORE an editor submits a job, which
 # means something has to answer "is claude usable" on page load. That must not
 # be a subprocess per request: `claude -p "ok"` is a second or two and every
-# open tab would pay it. So the answer is cached, refreshed by the worker (at
-# start, and whenever a call fails), and served from memory.
+# open tab would pay it. So the answer is cached, refreshed by the worker at
+# start, and written by every live call as it happens -- _note_ok() on success
+# and note_failure() on a classified failure. The cache MUST be able to recover
+# on its own (YTDL-5): the only other way back to green is a container restart,
+# which takes the fleet status page down with it.
 
 _health = {'claude': 'unknown', 'checked_at': None, 'detail': ''}
 _health_lock = threading.Lock()
 
-# Don't re-probe more often than this. The worker calls refresh() on every
-# failure, and a wedged claude that fails 40 videos in a row must not turn into
-# 40 subprocesses.
+# Don't re-probe more often than this. A wedged claude that fails 40 videos in
+# a row must not turn into 40 subprocesses.
 _MIN_PROBE_INTERVAL = 60.0
 
 
@@ -380,6 +424,12 @@ def refresh_health(force=False):
     with _health_lock:
         _health.update({'claude': state, 'checked_at': time.time(), 'detail': detail})
         return dict(_health)
+
+
+def _note_ok():
+    """Record that a live call just worked. Called from _invoke, any thread."""
+    with _health_lock:
+        _health.update({'claude': 'ok', 'checked_at': time.time(), 'detail': ''})
 
 
 def note_failure(exc):

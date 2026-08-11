@@ -156,6 +156,12 @@ def build_shared_folder_config(
             "type": "staggered",
             "params": {"cleanInterval": "3600", "maxAge": "31536000"},
         },
+        # delete-protection (2026-08-11, docs/delete-protection-ignoredelete.md):
+        # the library auto-shares to the whole fleet with no tick to opt out
+        # of, so one editor deleting a LUT must not take it off the NAS and
+        # off every other machine. Same flag on every side; the companion
+        # retrofits folders that predate it.
+        "ignoreDelete": True,
         "devices": [{"deviceID": device_id, "introducedBy": ""} for device_id in device_ids],
     }
 
@@ -315,5 +321,12 @@ def build_folder_config(
             "type": "staggered",
             "params": {"cleanInterval": "3600", "maxAge": "31536000"},
         },
+        # delete-protection (2026-08-11, docs/delete-protection-ignoredelete.md):
+        # the NAS copy is the authority and never applies a delete an editor
+        # made, so an accidental single-file delete only removes the file on
+        # the machine that made it. Kept byte-identical to
+        # server/setup_syncthing_folder.py and the companion's accept_folder
+        # (server/tests/test_cross_component.py asserts it).
+        "ignoreDelete": True,
         "devices": [{"deviceID": device_id, "introducedBy": ""} for device_id in device_ids],
     }

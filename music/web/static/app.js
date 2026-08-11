@@ -38,6 +38,11 @@ const state = {
   playing: null,      // track id whose pane is open
   tracks: [],
   peaks: new Map(),   // id -> Uint8Array
+  // Monotonic request token. Search, similar and filter all render into the
+  // same list and their responses do not come back in the order they were
+  // sent -- a slow search landing after the filter that replaced it used to
+  // overwrite it (MUSIC-9, 2026-08-11). Only the newest issued query renders.
+  seq: 0,
 };
 
 const audio = () => $('#audio');
@@ -60,9 +65,14 @@ async function api(path, opts) {
   return r.json();
 }
 
-function toast(html, ms = 6000) {
+// Takes a NODE, not markup (MUSIC-15, 2026-08-11): what goes in here is
+// server-supplied -- indexer rel_paths, raw ffmpeg stderr, filenames that
+// safe_upload_name does not filter for HTML -- and it used to be assigned to
+// innerHTML. Build content with el()/textContent.
+function toast(node, ms = 6000) {
   const t = $('#toast');
-  t.innerHTML = html;
+  t.textContent = '';
+  t.appendChild(node);
   t.classList.remove('hidden');
   clearTimeout(toast._t);
   if (ms) toast._t = setTimeout(() => t.classList.add('hidden'), ms);
@@ -72,6 +82,10 @@ function toast(html, ms = 6000) {
 async function loadPeaks(id) {
   if (state.peaks.has(id)) return state.peaks.get(id);
   const r = await fetch(`api/peaks/${id}`);
+  // A 404/500 body is JSON, and drawing it as a waveform then CACHING it left
+  // the track with permanent garbage peaks until a reload (MUSIC-4,
+  // 2026-08-11). Nothing but a real answer is remembered.
+  if (!r.ok) return new Uint8Array(0);
   const buf = new Uint8Array(await r.arrayBuffer());
   state.peaks.set(id, buf);
   return buf;
@@ -94,7 +108,11 @@ function drawWave(canvas, peaks, progress) {
   const bars = Math.max(1, Math.floor(w / step));
   const per = peaks.length / bars;
   const mid = h / 2;
-  const played = Math.floor(bars * (progress || 0));
+  // Bars strictly BEFORE the playhead are played, and the count is rounded, not
+  // floored (MUSIC-14, 2026-08-11): `i <= floor(...)` painted bar 0 red at
+  // progress 0 -- every "→ Resolve" open showed a track as already playing --
+  // and never filled the last bar at progress 1.
+  const played = Math.round(bars * (progress || 0));
 
   for (let i = 0; i < bars; i++) {
     // peak of the source bucket, so transients survive the downsample
@@ -104,7 +122,7 @@ function drawWave(canvas, peaks, progress) {
     const bh = Math.max(1.5, (v / 255) * (h - 4));
     // Theme colors, hardcoded because canvas cannot read CSS vars cheaply:
     // played = --red, unplayed = --border (style.css).
-    ctx.fillStyle = i <= played ? '#ff2140' : '#2a2a31';
+    ctx.fillStyle = i < played ? '#ff2140' : '#2a2a31';
     ctx.fillRect(i * step, mid - bh / 2, BAR, bh);
   }
 }
@@ -170,7 +188,12 @@ async function openPane(row, t, autoplay) {
   a.src = `api/audio/${t.id}`;
   if (autoplay) a.play().catch(() => {});
 
-  const peaks = await loadPeaks(t.id).catch(() => new Uint8Array(0));
+  // Everything up to the peaks fetch is synchronous ON PURPOSE (MUSIC-8,
+  // 2026-08-11). The pane is already on screen and animating by here, and the
+  // handlers used to be assigned after `await loadPeaks` -- so pause and seek
+  // were dead for the length of that round-trip, seconds over Tailscale when
+  // /api/peaks has to rebuild a waveform with ffmpeg.
+  let peaks = new Uint8Array(0);
   const dur = () => a.duration || t.duration || 1;
   const paint = () => drawWave(canvas, peaks, a.currentTime / dur());
   paint();
@@ -192,6 +215,10 @@ async function openPane(row, t, autoplay) {
   };
   _onResize = () => { if (state.playing === t.id) paint(); };
   window.addEventListener('resize', _onResize);
+
+  peaks = await loadPeaks(t.id).catch(() => new Uint8Array(0));
+  if (state.playing !== t.id) return;        // pane closed while we waited
+  paint();
 }
 
 function togglePlay(row, t) {
@@ -311,8 +338,13 @@ function trackRow(t, showMatch) {
 }
 
 function render(tracks, headline, showMatch) {
+  // #audio lives OUTSIDE #list and has no controls, so wiping the list while a
+  // preview played left it running with nothing to stop it (MUSIC-5,
+  // 2026-08-11) -- closePane() also clears state.playing and the row markers.
+  closePane();
+  const a = audio();
+  if (a) a.pause();
   state.tracks = tracks;
-  state.playing = null;
   const head = $('#resulthead');
   head.textContent = '';
   head.appendChild(el('span', null, headline));
@@ -341,12 +373,19 @@ function filterParams() {
   return p;
 }
 
+// Every query goes out with a token and renders only if it is still the newest
+// one issued (MUSIC-9, 2026-08-11). A text search costs a CLAP embed and a
+// filter is a plain SELECT, so typing a query and then clicking a facet
+// reliably raced -- the search's results landed last and replaced the filter
+// the user was looking at, with the wrong headline over them.
 async function loadTracks() {
   const bits = [];
   if (state.facet) bits.push(`${state.facet.category}: ${state.facet.label}`);
   if (state.axis) bits.push(`${state.axis.axis} ≥ ${state.axis.min}`);
   if (state.bpm.min || state.bpm.max) bits.push(`${state.bpm.min || 0}–${state.bpm.max || '∞'} bpm`);
+  const seq = ++state.seq;
   const {tracks} = await api('api/tracks?' + filterParams().toString());
+  if (seq !== state.seq) return;
   render(tracks, bits.length ? bits.join('  ·  ') : 'All tracks', false);
 }
 
@@ -355,17 +394,21 @@ async function runSearch(q) {
   $('#q').value = q;
   render([], 'Searching…', false);
   const pool = $('#pool').value;
+  const seq = ++state.seq;
   const {tracks} = await api('api/search', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({query: q, k: 60, pool}),
   });
+  if (seq !== state.seq) return;
   render(tracks, `“${q}” · ${pool === 'mean' ? 'whole track' : 'any moment'}`, true);
 }
 
 async function showSimilar(t) {
   render([], 'Finding similar…', false);
+  const seq = ++state.seq;
   const {tracks} = await api(`api/similar/${t.id}?k=25`);
+  if (seq !== state.seq) return;
   render(tracks, `Similar to ${t.filename}`, true);
 }
 
@@ -462,33 +505,44 @@ function wireDropzone() {
 // even "added", would be a lie that sends the editor searching for a cue that
 // is not indexed yet.
 async function ingest(files) {
-  toast(`<div class="row">Uploading ${files.length} file${files.length === 1 ? '' : 's'}…</div>
-         <div class="muted">checking for duplicates — this can take a few seconds each</div>`, 0);
+  const uploading = document.createDocumentFragment();
+  uploading.appendChild(el('div', 'row',
+    `Uploading ${files.length} file${files.length === 1 ? '' : 's'}…`));
+  uploading.appendChild(el('div', 'muted',
+    'checking for duplicates — this can take a few seconds each'));
+  toast(uploading, 0);
   const fd = new FormData();
   files.forEach(f => fd.append('files', f, f.name));
   try {
     const r = await api('api/ingest', {method: 'POST', body: fd});
-    const rows = r.results.map(x => {
-      const tc = x.transcoded ? ' (transcoded to mp3)' : '';
-      if (x.status === 'queued')
-        return `<div class="row">◷ ${x.name}${tc} — ${fmtDur(x.duration)},
-                queued for indexing</div>`;
-      if (x.ok)
-        return `<div class="row good">✓ ${x.name}${tc}
-                — ${fmtDur(x.duration)}${x.bpm ? ', ' + Math.round(x.bpm) + ' bpm' : ''}</div>`;
-      return `<div class="row bad">✕ ${x.name} — ${x.error}</div>`;
-    }).join('');
+    const out = document.createDocumentFragment();
     const n = r.results.length;
     // The mode, not the count: "Queued 0/2" is the right thing to say when a
     // queueing host rejected both files as duplicates.
-    const head = r.mode === 'queued'
-      ? `<div class="row"><strong>Queued ${r.queued}/${n}</strong></div>` + (r.queued
-          ? `<div class="muted">nothing was analysed — this host has no GPU. They are in
-             the library and will not be searchable until the base rig indexes
-             them${r.pending > r.queued ? ` (${r.pending} waiting in all)` : ''}.</div>`
-          : '')
-      : `<div class="row"><strong>Added ${r.added}/${n}</strong></div>`;
-    toast(head + rows, 9000);
+    const head = el('div', 'row');
+    head.appendChild(el('strong', null, r.mode === 'queued'
+      ? `Queued ${r.queued}/${n}` : `Added ${r.added}/${n}`));
+    out.appendChild(head);
+    if (r.mode === 'queued' && r.queued) {
+      out.appendChild(el('div', 'muted',
+        'nothing was analysed — this host has no GPU. They are in the library and '
+        + 'will not be searchable until the base rig indexes them'
+        + (r.pending > r.queued ? ` (${r.pending} waiting in all)` : '') + '.'));
+    }
+    r.results.forEach(x => {
+      const tc = x.transcoded ? ' (transcoded to mp3)' : '';
+      if (x.status === 'queued')
+        out.appendChild(el('div', 'row',
+          `◷ ${x.name}${tc} — ${fmtDur(x.duration)}, queued for indexing`));
+      else if (x.ok)
+        out.appendChild(el('div', 'row good', `✓ ${x.name}${tc} — ${fmtDur(x.duration)}`
+          + (x.bpm ? ', ' + Math.round(x.bpm) + ' bpm' : '')));
+      else
+        // x.name and x.error carry indexer rel_paths and raw ffmpeg stderr,
+        // neither of them filtered for HTML by safe_upload_name (MUSIC-15).
+        out.appendChild(el('div', 'row bad', `✕ ${x.name} — ${x.error}`));
+    });
+    toast(out, 9000);
     if (r.added) {
       FACETS = await api('api/facets');
       paintFacets();
@@ -496,11 +550,14 @@ async function ingest(files) {
       $('#stats').textContent =
         `${s.tracks} tracks · ${s.hours}h · ${s.gb} GB · ${s.model || 'unindexed'}`;
       const added = r.results.filter(x => x.ok && x.track).map(x => x.track);
+      // ++seq: this render is the newest answer, so a query still in flight
+      // must not land on top of it (MUSIC-9).
+      ++state.seq;
       if (added.length) render(added, `Just added`, false);
       else await loadTracks();
     }
   } catch (e) {
-    toast(`<div class="row bad">Ingest failed: ${e.message}</div>`, 9000);
+    toast(el('div', 'row bad', `Ingest failed: ${e.message}`), 9000);
   }
 }
 

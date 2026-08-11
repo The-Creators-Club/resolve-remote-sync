@@ -100,8 +100,17 @@ def no_real_worker(monkeypatch):
     """
     calls: list = []
 
-    def _fake_call(action, **kw):
+    def _fake_call(action, timeout=None, **kw):
         calls.append((action, kw))
+        if action.startswith("broll_"):
+            # The b-roll routes on this same listener went through the child
+            # too in MED-3 (2026-08-11); they are answered here by the
+            # worker's own dispatch, in-process, so the resolve_bridge seams
+            # those tests patch still apply. The music actions stay faked --
+            # their argv/timeout contract is tested separately below.
+            request = dict(kw)
+            request["action"] = action
+            return music_worker.run_request(request)
         return {"ok": True, "note": f"fake {action}", "clip": "x.wav"}
 
     monkeypatch.setattr(music_server, "call", _fake_call)
@@ -711,3 +720,91 @@ def test_the_readme_snippet_documents_the_music_share(tmp_path):
     text = readme_path.read_text(encoding="utf-8")
     assert "music" in text.lower()
     assert "Assets/Music" in text
+
+
+# ---------------------------------------------------------------------------
+# The containment check needs a root even when nobody configured one (MED-11)
+# ---------------------------------------------------------------------------
+
+
+def _link_or_skip(root, outside):
+    """Make root/link point at `outside`, or skip. Windows refuses symlinks to
+    an unelevated process without Developer Mode, but a directory JUNCTION
+    needs no privilege and redirects identically."""
+    try:
+        (root / "link").symlink_to(outside, target_is_directory=True)
+        return
+    except (OSError, NotImplementedError):
+        pass
+    made = subprocess.run(
+        [os.environ.get("COMSPEC") or "cmd.exe", "/c", "mklink", "/J",
+         str(root / "link"), str(outside)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if made.returncode != 0 or not (root / "link").exists():
+        pytest.skip("this host can make neither a symlink nor a junction")
+
+
+def test_the_root_comes_back_with_the_path():
+    """translate_path's own answer is unchanged; the pair is what the
+    containment check needs, and rediscovering it from `mounts` is exactly
+    what did not work."""
+    mounts = {"music": "P:/Assets/Music"}
+    root, local = broll_server.translate_path_with_root(
+        "music", "a/b.wav", mounts, platform="win32")
+    assert root == "P:/Assets/Music"
+    assert local == broll_server.translate_path(
+        "music", "a/b.wav", mounts, platform="win32")
+
+
+def test_a_probed_volumes_mount_is_containment_checked_too(tmp_path, monkeypatch):
+    """MED-11: the guard ran only `if root:` and read `mounts.get(share)`,
+    which is None for a mount that came from the /Volumes probe -- the
+    documented Mac case (volume mounted, no config entry). Component
+    validation alone does not see a symlink out of the volume."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.wav").write_bytes(b"x")
+    root = tmp_path / "volume"
+    root.mkdir()
+    _link_or_skip(root, outside)
+
+    monkeypatch.setattr(broll_server.sys, "platform", "darwin")
+    monkeypatch.setattr(broll_server, "probe_darwin_mount",
+                        lambda share, isdir=None: str(root))
+
+    # NO entry for "music" in mounts: the root can only come from the probe.
+    with pytest.raises(broll_server.PathTraversalError):
+        music_server.local_path_for("music", "link/secret.wav", {})
+
+
+def test_a_probed_mount_still_serves_what_is_inside_it(tmp_path, monkeypatch):
+    """...and the check does not turn the probe into a refusal."""
+    monkeypatch.setattr(broll_server.sys, "platform", "darwin")
+    monkeypatch.setattr(broll_server, "probe_darwin_mount",
+                        lambda share, isdir=None: str(tmp_path))
+
+    got = music_server.local_path_for("music", "Ambient/cue.wav", {})
+    assert Path(got) == tmp_path / "Ambient" / "cue.wav"
+
+
+@pytest.mark.parametrize("bad", [123, ["cue.wav"], {"n": "cue.wav"}, None])
+def test_a_non_string_rel_path_is_a_400_on_the_music_route_too(bad):
+    """MED-5, the same request-thread crash on the other route group."""
+    status, body = music_server.build_send_response(
+        {"action": "bin", "share": "music", "rel_path": bad},
+        {"music": "P:/Assets/Music"},
+        caller=lambda action, **kw: {"ok": True},
+    )
+    assert status == 400
+    assert body["ok"] is False
+
+
+def test_a_non_string_share_is_a_400_on_the_music_route_too():
+    status, body = music_server.build_send_response(
+        {"action": "bin", "share": {"music": 1}, "rel_path": "cue.wav"},
+        {"music": "P:/Assets/Music"},
+        caller=lambda action, **kw: {"ok": True},
+    )
+    assert status == 400
+    assert body["ok"] is False

@@ -210,6 +210,9 @@ select:focus { outline: none; border-color: var(--red); }
 
 /* The ops instruction line: never a toast, because the thing it says (an admin
    must run the one-time claude login) is not dismissible by the reader. */
+/* Its lines are the banners; the box itself draws nothing, so an app with
+   nothing to say takes no space. */
+.warns:empty { display: none; }
 .warnline {
   margin: 0 1.2rem 8px;
   padding: 4px 10px;
@@ -365,6 +368,15 @@ h2 {
 }
 .card.filtered { border-style: dashed; opacity: 0.7; }
 .card .why { color: var(--amber); font-size: 10px; margin-top: 3px; }
+
+/* The all-filtered-out state. Spans the grid so it reads as a sentence, not
+   as a card-shaped hole. */
+.gridempty {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 10px 2px;
+}
 
 .gridfoot { font-size: 11px; margin: 10px 2px; }
 

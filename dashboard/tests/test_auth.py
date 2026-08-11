@@ -463,3 +463,15 @@ def test_login_accepts_normal_sized_body(client):
     resp = client.post("/login", data={"username": "jsmith", "password": "pw1", "next": "/"},
                        follow_redirects=False)
     assert resp.status_code == 303
+
+
+def test_a_non_ascii_cookie_byte_is_a_no_session_not_a_500():
+    """Starlette hands cookies over latin-1-decoded, so a byte >= 0x80 in the
+    signature segment reached hmac.compare_digest as non-ASCII text and raised
+    TypeError -- a 500 with a traceback, pre-auth, on every gated path
+    (docs/youtube_dlp_bugs.md YTDL-32, the DASH-5 twin; 2026-08-11)."""
+    cookie = auth.make_session_cookie(SECRET, "jsmith", now=1000.0)
+    head, _, _sig = cookie.rpartition(".")
+    assert auth.read_session_cookie(SECRET, head + ".sïg", now=1000.0) is None
+    # and a good cookie still reads
+    assert auth.read_session_cookie(SECRET, cookie, now=1000.0) == "jsmith"

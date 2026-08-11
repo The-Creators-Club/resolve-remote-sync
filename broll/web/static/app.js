@@ -374,6 +374,10 @@ function wireHeader() {
 
   $("#category-select").addEventListener("change", (e) => {
     state.category = e.target.value;
+    // Same reason as selectFolder's (BROLL-3): the dropdown is the third way
+    // into the same "where am I browsing" state, and leaving a crumb's path
+    // filter ANDed underneath it is a reachable zero-result dead end.
+    state.path = "";
     state.offset = 0;
     // Two controls onto one piece of state: the tree must not keep highlighting
     // a folder the dropdown has just navigated away from.
@@ -539,6 +543,14 @@ function selectFolder(collection, category) {
   }
   state.collection = collection;
   state.category = category;
+  // The crumb-derived path filter is ANDed with this one, and only
+  // renderResultsMeta's own "clear folder" link ever reset it -- so navigating
+  // the tree after clicking a detail-panel crumb produced a mutually exclusive
+  // pair (collection=downloads AND path=ff4::Erosion), zero results, and a
+  // "clear" button in the tree that could not escape it (BROLL-3, 2026-08-11).
+  // Picking a folder in the tree IS choosing where to browse; it replaces the
+  // previous choice rather than intersecting with it.
+  state.path = "";
   state.offset = 0;
   const select = $("#category-select");
   if (select) select.value = category;
@@ -551,7 +563,17 @@ function selectFolder(collection, category) {
 /* Search / grid                                                          */
 /* ---------------------------------------------------------------------- */
 
+/* Every runSearch takes the next token and only the newest one is allowed to
+ * paint. Semantic mode costs a query embedding plus a brute-force scan, so a
+ * folder click landing while an earlier text search is still in flight used to
+ * be overwritten by that older response -- unfiltered results in the grid with
+ * the folder highlighted in the sidebar, and no way to tell (BROLL-8,
+ * 2026-08-11). A token rather than AbortController: a superseded response is
+ * merely uninteresting, not worth tearing the connection down for. */
+let searchToken = 0;
+
 async function runSearch() {
+  const token = ++searchToken;
   const params = new URLSearchParams();
   if (state.q) params.set("q", state.q);
   // Creators_Club folders are shoot paths, not subject slugs — own footage is
@@ -574,9 +596,11 @@ async function runSearch() {
   try {
     data = await fetchJson(`api/search?${params.toString()}`);
   } catch (e) {
+    if (token !== searchToken) return;
     toast(`Search failed: ${e.message}`, "error");
     return;
   }
+  if (token !== searchToken) return; // a newer search is already authoritative
 
   state.total = data.total;
   state.lastResults = data.results;
@@ -621,9 +645,10 @@ function buildCard(row) {
   const card = el("div", { className: `card${isSemanticOnly ? " card-semantic" : ""}` });
 
   const thumb = el("div", { className: "card-thumb" });
-  thumb.style.height = video.width && video.height
-    ? `${Math.round(SPRITE_CELL_WIDTH * (video.height / video.width))}px`
-    : "135px";
+  // One sheet cell tall, from the same geometry positionSprite offsets by --
+  // a card sized off the SOURCE aspect ratio while the overlay is offset by
+  // the sheet's own cell height shows a sliver of the next row (BROLL-1).
+  thumb.style.height = `${spriteGeometry(video).cellHeight}px`;
 
   const poster = el("img", { className: "poster" });
   poster.src = `media/poster/${video.id}.jpg`;
@@ -701,26 +726,61 @@ function spriteInterval(duration) {
   return SPRITE_SECONDS_PER_FRAME;
 }
 
-/** Park the sprite overlay on the sheet cell holding `seconds`. The sheet is
- * SPRITE_COLUMNS across, one cell per spriteInterval(duration). */
-function positionSprite(overlay, video, seconds) {
+/** The sheet's grid: what the generator RECORDED for this clip, or the old
+ * guesswork for a sheet built before it recorded anything.
+ *
+ * The guesswork was wrong twice over, both measured on the live archive
+ * (2026-08-11):
+ *
+ *   * cell height was re-derived from videos.width/height -- the SOURCE. The
+ *     sheet is tiled from the 540p proxy through `scale=240:-2`, and both scale
+ *     steps round to an even number, so 6,783 of 7,117 sheets were a pixel
+ *     taller than this arithmetic said. With no CSS background-size to absorb
+ *     it, a 24-row sheet lands ~17% off and shows a splice of two rows
+ *     (BROLL-1);
+ *   * the SPRITE_MAX_CELLS cap was applied unconditionally, including to the 95
+ *     sheets built at a flat 2 s before the cap existed -- so a hit at 30:00 in
+ *     a 58:47 clip painted the frame at 4:04 (BROLL-2).
+ *
+ * Neither is recoverable from the sheet, so build_sprite now measures its own
+ * output into videos.sprite_*. A row without it keeps the old behaviour exactly
+ * -- nothing gets worse for an unregenerated sheet -- and becomes exact the
+ * moment an operator re-runs build_sprite for that clip. */
+function spriteGeometry(video) {
   const duration = video.duration_s || 0;
+  if (video.sprite_cell_w && video.sprite_cell_h && video.sprite_cells) {
+    return {
+      cellWidth: video.sprite_cell_w,
+      cellHeight: video.sprite_cell_h,
+      columns: video.sprite_cols || SPRITE_COLUMNS,
+      cells: video.sprite_cells,
+      interval: video.sprite_interval_s || spriteInterval(duration),
+    };
+  }
   const interval = spriteInterval(duration);
-  // Same count the generator tiles: floor(duration/interval) + 1, capped.
-  const frameCount = Math.min(
-    SPRITE_MAX_CELLS,
-    Math.max(1, Math.floor(duration / interval) + 1)
-  );
-  const cellHeight = video.width && video.height
-    ? Math.round(SPRITE_CELL_WIDTH * (video.height / video.width))
-    : 135;
+  return {
+    cellWidth: SPRITE_CELL_WIDTH,
+    cellHeight: video.width && video.height
+      ? Math.round(SPRITE_CELL_WIDTH * (video.height / video.width))
+      : 135,
+    columns: SPRITE_COLUMNS,
+    // Same count the generator tiles: floor(duration/interval) + 1, capped.
+    cells: Math.min(SPRITE_MAX_CELLS, Math.max(1, Math.floor(duration / interval) + 1)),
+    interval,
+  };
+}
+
+/** Park the sprite overlay on the sheet cell holding `seconds`, using that
+ * sheet's own grid (see spriteGeometry). */
+function positionSprite(overlay, video, seconds) {
+  const geo = spriteGeometry(video);
   const frame = Math.min(
-    frameCount - 1,
-    Math.max(0, Math.floor(seconds / interval))
+    geo.cells - 1,
+    Math.max(0, Math.floor(seconds / geo.interval))
   );
-  const col = frame % SPRITE_COLUMNS;
-  const row = Math.floor(frame / SPRITE_COLUMNS);
-  overlay.style.backgroundPosition = `-${col * SPRITE_CELL_WIDTH}px -${row * cellHeight}px`;
+  const col = frame % geo.columns;
+  const row = Math.floor(frame / geo.columns);
+  overlay.style.backgroundPosition = `-${col * geo.cellWidth}px -${row * geo.cellHeight}px`;
 }
 
 function wireSpriteScrub(thumb, overlay, video) {
@@ -1071,6 +1131,12 @@ function renderVideoMeta(data) {
           state.path = "";
           state.collection = "";
           state.category = category;
+          // Clear the query like the path and theme closures above do
+          // (BROLL-12, 2026-08-11): "show me this category" carrying the
+          // previous search term silently intersects the two and shows a
+          // near-empty grid with nothing on screen saying why.
+          state.q = "";
+          $("#q-input").value = "";
         })
       )
     );
@@ -1104,14 +1170,45 @@ function renderVideoMeta(data) {
   }
 }
 
+/** The label the folder tree shows for a slug, or the slug itself if the tree
+ * has not loaded (or the slug came from a category crumb the tree omits --
+ * folders with no videos in a root are not rendered). */
+function treeLabel(slug) {
+  const walk = (nodes) => {
+    for (const n of nodes) {
+      if (n.slug === slug) return n.label;
+      const hit = walk(n.children || []);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  for (const root of state.tree) {
+    const hit = walk(root.groups || []);
+    if (hit) return hit;
+  }
+  return slug;
+}
+
 /** The line above the grid. It has to name the folder filter as well as the
  * query: a path crumb click can leave the grid showing a subset with an empty
- * search box, and "browsing all videos" over 40 results of 5000 is a lie. */
+ * search box, and "browsing all videos" over 40 results of 5000 is a lie.
+ *
+ * `category`/`collection` belong here for the same reason `path` does
+ * (BROLL-11, 2026-08-11): clicking a category crumb in the detail panel
+ * filters the grid, activates no tree node (the crumb's slug need not be a
+ * rendered folder) and used to leave the line reading "browsing all videos". */
 function renderResultsMeta() {
   const node = $("#results-meta");
   node.innerHTML = "";
   const bits = [];
   if (state.q) bits.push(`search: "${state.q}"`);
+  if (state.collection || state.category) {
+    const root = state.tree.find((r) => r.collection === state.collection);
+    const names = [];
+    if (state.collection) names.push(root ? root.label : state.collection);
+    if (state.category) names.push(treeLabel(state.category));
+    bits.push(`folder: ${names.join(" / ")}`);
+  }
   if (state.path) {
     const [share, prefix] = state.path.split("::");
     bits.push(`folder: ${prefix ? `${share}/${prefix}` : share}`);

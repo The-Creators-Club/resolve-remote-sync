@@ -35,6 +35,15 @@ class VideoIn(BaseModel):
     category_hint: str | None = None
     in_inbox: bool = False
     status: str | None = None
+    # The sprite sheet's real geometry, measured by the indexer's build_sprite
+    # and forwarded here by HttpBackend.update_video (BROLL-1/BROLL-2,
+    # 2026-08-11). Absent on every other ingest call, and COALESCEd on the
+    # upsert, so a later plain scan cannot wipe what the proxy stage recorded.
+    sprite_cell_w: int | None = None
+    sprite_cell_h: int | None = None
+    sprite_cols: int | None = None
+    sprite_cells: int | None = None
+    sprite_interval_s: float | None = None
 
 
 class SegmentIn(BaseModel):

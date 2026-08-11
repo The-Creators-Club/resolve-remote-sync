@@ -50,6 +50,38 @@ IDLE_WAIT = 5.0
 STALE_AFTER = 24 * 3600
 
 
+class BotCheckError(RuntimeError):
+    """YouTube is bot-checking this IP. Nothing here can retry its way out."""
+
+
+# YTDL-21 (2026-08-11): the phrase yt-dlp surfaces when the NAS's datacentre IP
+# is challenged. Both apostrophes, because yt-dlp passes YouTube's own text
+# through and it has arrived either way -- the curly one as an escape so this
+# file stays pure ASCII. Deliberately NOT the bare "sign in to confirm":
+# "Sign in to confirm your age" is one dead video, not a challenged IP, and
+# failing a whole job over an age-gated clip would be worse than the bug.
+_BOT_CHECK_MARKERS = ("confirm you're not a bot",
+                      "confirm you\u2019re not a bot")
+
+BOT_CHECK_NOTE = (
+    'YouTube is asking this server to sign in to confirm it is not a bot, so '
+    'nothing can be searched or downloaded from it right now. An admin has to '
+    'export a cookies.txt from a signed-in browser and point YTDL_COOKIES_FILE '
+    'at it (ytdl/web/DEPLOY.md, "cookies.txt escape hatch").')
+
+
+def _bot_checked(text):
+    """Is this yt-dlp message a bot check?
+
+    Treated as fatal to the PHASE rather than to the video: an IP that is being
+    challenged is challenged for every video, so the alternative is burning the
+    full retry budget forty times over and ending `done` with forty opaque
+    per-row errors that name no fix.
+    """
+    low = str(text or '').lower()
+    return any(m in low for m in _BOT_CHECK_MARKERS)
+
+
 def ensure_started():
     """Start the worker if it is not already running. -> did we end up with one.
 
@@ -105,9 +137,7 @@ def _clear_progress(job_id, video_id=None):
 
 # ------------------------------------------------------------------- loop
 
-def _run():
-    """The thread body. Never returns; never lets an exception out."""
-    c = db.con()
+def _boot_recovery(c):
     try:
         restarted, resumed = db.reset_stale_jobs(c)
         if restarted or resumed:
@@ -116,6 +146,9 @@ def _run():
     except Exception:  # noqa: BLE001 - a broken sweep must not cost us the worker
         log.exception('boot recovery failed; continuing')
 
+
+def _run():
+    """The thread body. Never returns; never lets an exception out."""
     # One probe at start so the SPA can warn about a logged-out claude before
     # anyone submits a job. On the worker thread on purpose: it costs a second
     # or two and must never be paid on a request.
@@ -124,12 +157,26 @@ def _run():
     except Exception:  # noqa: BLE001
         log.exception('claude health probe failed')
 
+    # YTDL-19 (2026-08-11): the connection is acquired INSIDE the loop and
+    # re-acquired after a failure. It used to be opened before the try, so a
+    # database locked at boot (or a data root not yet writable after a NAS
+    # remount) killed this thread for the life of the container -- ensure_started
+    # runs only at mount, nothing ever restarts it, and the only symptom is
+    # `worker_alive:false` in a poll response nothing reads.
+    c = None
+    booted = False
     while True:
         worked = False
         try:
+            if c is None:
+                c = db.con()
+            if not booted:
+                _boot_recovery(c)
+                booted = True
             worked = _tick(c)
         except Exception:  # noqa: BLE001
             log.exception('worker tick failed')
+            c = None
         if not worked:
             _nudge.wait(IDLE_WAIT)
             _nudge.clear()
@@ -179,6 +226,13 @@ def run_job(c, job_id):
             return
         try:
             handler(c, job)
+        except BotCheckError as exc:
+            # Carries its own ops instruction; the generic handler below would
+            # bury it behind a type name.
+            log.warning('job %s: bot-checked in phase %s', job_id, job['phase'])
+            _clear_progress(job_id)
+            db.set_phase(c, job_id, 'failed', str(exc)[:500])
+            return
         except claude_cli.ClaudeError as exc:
             # Already classified and already carrying its prefix; the SPA turns
             # that into the right ops instruction.
@@ -257,6 +311,8 @@ def _phase_search(c, job):
         try:
             entries = ytsearch.search(term['term'], job['max_per_term'], job['period'])
         except Exception as exc:  # noqa: BLE001
+            if _bot_checked(exc):
+                raise BotCheckError(BOT_CHECK_NOTE) from exc
             log.warning('job %s: search failed for %r (%s)', job_id, term['term'], exc)
             entries = []
 
@@ -318,6 +374,10 @@ def _phase_enrich(c, job):
         chunk = entries[start:start + CHUNK]
         results = ytsearch.enrich(chunk, jobs=ENRICH_JOBS, progress=_seen)
         for r in results:
+            if _bot_checked(r.get('error')):
+                # Not a dead video: the whole IP is challenged, and every
+                # remaining entry would fail the same way.
+                raise BotCheckError(BOT_CHECK_NOTE)
             if r.get('error'):
                 # Unavailable/private/geo-blocked. Kept as a row so the editor
                 # can see the search found something they cannot have, rather
@@ -467,8 +527,22 @@ def ensure_outdir(outdir):
     return outdir
 
 
+# YTDL-17 (2026-08-11): matched as a SUFFIX, and `.editready` is deliberately
+# not here. `'.part' in p.name` also matched any title containing ".part", and
+# `.editready` matched `<stem>.editready.mp4` -- which is not a leftover but
+# _swap_in's fallback DELIVERABLE, ledgered under exactly that name: sweeping it
+# left the ledger blocking a re-fetch fleet-wide and any Resolve project
+# referencing it Media Offline.
+_SWEEPABLE = ('.part', '.ytdl', '.temp')
+
+
+def _sweepable(name):
+    suffix = Path(name).suffix
+    return suffix in _SWEEPABLE or suffix.startswith('.part-Frag')
+
+
 def _sweep_stale(outdir):
-    """Remove day-old .part / .editready leftovers in a folder we own.
+    """Remove day-old yt-dlp fragments in a folder we own.
 
     Only in the term folder this job writes to, and only by age: a .part from
     THIS run is yt-dlp's resume state and deleting it costs the download.
@@ -478,7 +552,7 @@ def _sweep_stale(outdir):
         for p in Path(outdir).glob('*'):
             if not p.is_file():
                 continue
-            if '.part' not in p.name and '.editready' not in p.name:
+            if not _sweepable(p.name):
                 continue
             try:
                 if p.stat().st_mtime < cutoff:
@@ -487,6 +561,46 @@ def _sweep_stale(outdir):
                 continue
     except OSError as exc:  # noqa: BLE001
         log.warning('could not sweep %s (%s)', outdir, exc)
+
+
+# What _disown_output renames a leftover to. Not deleted: a half-converted VP9
+# original is still footage somebody may want, and the disk cost is visible.
+DISOWNED_SUFFIX = '.failed'
+
+
+def _id_bearing_files(outdir, vid):
+    """{name} of everything in outdir whose name carries `[vid]`.
+
+    Matched by substring rather than by glob: a video id may contain any of
+    `[]-_`, and one bad escape here silently matches nothing.
+    """
+    try:
+        return {p.name for p in Path(outdir).iterdir()
+                if p.is_file() and f'[{vid}]' in p.name}
+    except OSError:
+        return set()
+
+
+def _disown_output(outdir, vid, before):
+    """Rename whatever this failed attempt left behind so dedupe ignores it.
+
+    YTDL-3 (2026-08-11): a download that got as far as a real file and then died
+    in ensure_edit_ready (ffmpeg error, full disk) left `... [id].mp4` in the
+    term folder -- 0600, unledgered, undecodable by Resolve, and carrying the
+    `[id]` the disk scan reads. Every later search marked the video "already in
+    the fleet" and pointed the editor at a file they cannot even open over SMB,
+    with no route back through the UI. Only files that were NOT there before
+    this attempt are touched, and yt-dlp's resume state is left alone.
+    """
+    for name in _id_bearing_files(outdir, vid) - set(before):
+        p = Path(outdir) / name
+        if _sweepable(name):
+            continue  # yt-dlp's own resume state; the next attempt wants it
+        try:
+            p.rename(p.with_name(name + DISOWNED_SUFFIX))
+        except OSError as exc:  # noqa: BLE001
+            log.warning('could not disown %s (%s); it may block re-downloading '
+                        '%s until it is removed by hand', p, exc, vid)
 
 
 def _phase_download(c, job):
@@ -516,7 +630,9 @@ def _phase_download(c, job):
         held = db.ledger_get(c, vid)
         where = None
         if held is not None:
-            where = f"{held['project_label']}/{held['term']}"
+            # The FOLDER, like db.ledger_map's badge -- the two halves of the
+            # same "ALREADY IN" string must not disagree (YTDL-31, 2026-08-11).
+            where = f"{held['project_label']}/{held['term_dir'] or held['term']}"
         elif vid in ytsearch.existing_ids(outdir):
             where = f"{job['project_label']}/{job['term_dir']}"
         if where:
@@ -547,6 +663,7 @@ def _phase_download(c, job):
             cur['status'] = msg
             _set_progress(_job, _vid, cur)
 
+        before = _id_bearing_files(outdir, vid)
         try:
             res = downloader.download(
                 v['url'], str(outdir), quality=job['quality'],
@@ -556,21 +673,36 @@ def _phase_download(c, job):
                 on_status=status)
         except Exception as exc:  # noqa: BLE001 - one dead video, not one dead job
             log.warning('job %s: download failed for %s (%s)', job_id, vid, exc)
+            _disown_output(outdir, vid, before)
             db.set_video(c, job_id, vid, dl_state='failed', dl_error=str(exc)[:500])
+            db.bump(c, job_id, 'dl_failed')
+            _clear_progress(job_id, vid)
+            if _bot_checked(exc):
+                raise BotCheckError(BOT_CHECK_NOTE) from exc
+            continue
+
+        filepath = res.get('filepath')
+        if not filepath:
+            # YTDL-15 (2026-08-11): no filepath means the download did not land,
+            # whatever else the summary says. Recording it `done` wrote a ledger
+            # row with an EMPTY rel_path -- a permanent "the fleet already has
+            # this" pointing at nothing, and the ledger never cascades, so only
+            # hand-editing ytdl.db could undo it.
+            log.warning('job %s: download for %s returned no file', job_id, vid)
+            _disown_output(outdir, vid, before)
+            db.set_video(c, job_id, vid, dl_state='failed',
+                         dl_error='the downloader reported no output file')
             db.bump(c, job_id, 'dl_failed')
             _clear_progress(job_id, vid)
             continue
 
-        filepath = res.get('filepath')
-        if filepath:
-            _chmod(filepath, 0o664)
-            # The sidecar is what the Resolve credits script reads; a 0600 one
-            # is as invisible to the editor as an unreadable video.
-            sidecar = res.get('sidecar')
-            if sidecar:
-                _chmod(sidecar, 0o664)
-        rel = ('Youtube/' + job['term_dir'] + '/' + os.path.basename(filepath)
-               if filepath else '')
+        _chmod(filepath, 0o664)
+        # The sidecar is what the Resolve credits script reads; a 0600 one
+        # is as invisible to the editor as an unreadable video.
+        sidecar = res.get('sidecar')
+        if sidecar:
+            _chmod(sidecar, 0o664)
+        rel = 'Youtube/' + job['term_dir'] + '/' + os.path.basename(filepath)
 
         db.set_video(c, job_id, vid, dl_state='done', filepath=filepath,
                      thumbnail=res.get('thumbnail') or v['thumbnail'])

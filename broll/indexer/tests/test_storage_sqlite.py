@@ -209,6 +209,35 @@ def test_write_index_result_replaces_existing_segments(sqlite_storage):
     assert sqlite_storage.all_themes() == ["b"]
 
 
+def test_write_index_result_takes_the_segments_embeddings_with_them(sqlite_storage_v4):
+    """BROLL-13 (2026-08-11). `embeddings` cascades on video_id, and its
+    source_id points at segment rows with no foreign key at all -- so a re-index
+    left vectors behind for segments that no longer exist. They keep scoring in
+    semantic search, resolve to nothing, and spend the per-query semantic-only
+    budget, which makes the clip's real content unreachable until stage_embed
+    runs again. Transcript embeddings belong to a different owner and stay."""
+    vid = sqlite_storage_v4.upsert_video("broll", "clip.mov", status="proxied")
+    seg = {"t_start": 0.0, "t_end": 1.0, "description": "d", "objects": [],
+           "setting": "", "motion": ""}
+    sqlite_storage_v4.write_index_result(
+        vid, themes=[], quality_flags=[], category_hint=None, segments=[seg], model="m"
+    )
+    seg_id = sqlite_storage_v4.get_segments(vid)[0]["id"]
+    sqlite_storage_v4.upsert_embedding("segment", seg_id, vid, "e5", 2, b"\x00" * 8)
+    sqlite_storage_v4.upsert_embedding("transcript", 9001, vid, "e5", 2, b"\x00" * 8)
+
+    sqlite_storage_v4.write_index_result(
+        vid, themes=[], quality_flags=[], category_hint=None, segments=[seg], model="m"
+    )
+
+    live = {s["id"] for s in sqlite_storage_v4.get_segments(vid)}
+    rows = sqlite_storage_v4.conn.execute(
+        "SELECT source, source_id FROM embeddings WHERE video_id = ?", (vid,)
+    ).fetchall()
+    assert ("transcript", 9001) in [(r["source"], r["source_id"]) for r in rows]
+    assert not [r for r in rows if r["source"] == "segment" and r["source_id"] not in live]
+
+
 def test_segments_fts_indexes_description(sqlite_storage):
     vid = sqlite_storage.upsert_video("broll", "clip.mov", status="proxied")
     sqlite_storage.write_index_result(

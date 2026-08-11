@@ -88,29 +88,34 @@ _MIN_TERM_LEN_FOR_PREFIX = 5
 class VocabularyCache:
     """Process-wide cache of the distinct word tokens present in the corpus's
     text columns (see _SEGMENT_VOCAB_COLUMNS/_TRANSCRIPT_VOCAB_COLUMNS).
-    Keyed by (db file path, segments+transcript row count) -- the same
-    cheap-staleness trick as app.semantic.SemanticSearch's matrix cache --
-    so it is rebuilt only when the underlying data actually changes, not on
-    every request.
+    Keyed by (db file path, segments+transcript row count, each table's highest
+    id) -- the same cheap-staleness trick as app.semantic.SemanticSearch's
+    matrix cache -- so it is rebuilt only when the underlying data actually
+    changes, not on every request. The high-water marks are there because a
+    re-index that replaces a clip's segments with the same NUMBER of rows leaves
+    the count untouched, and the vocabulary then keeps correcting typos towards
+    words that are no longer in the corpus (BROLL-17, 2026-08-11).
     """
 
     def __init__(self) -> None:
         self._vocab: list[str] | None = None
-        self._key: tuple[str, int] | None = None
+        self._key: tuple[str, int, int, int] | None = None
         self._lock = threading.Lock()
 
     def reset(self) -> None:
         self._vocab = None
         self._key = None
 
-    def _cache_key(self, conn: sqlite3.Connection) -> tuple[str, int]:
+    def _cache_key(self, conn: sqlite3.Connection) -> tuple[str, int, int, int]:
         db_row = conn.execute("PRAGMA database_list").fetchone()
         db_path = db_row[2] if db_row else ""
-        count = conn.execute(
+        count, max_seg, max_cue = conn.execute(
             "SELECT (SELECT COUNT(*) FROM segments) "
-            "+ (SELECT COUNT(*) FROM transcript_segments)"
-        ).fetchone()[0]
-        return (db_path, count)
+            "+ (SELECT COUNT(*) FROM transcript_segments), "
+            "COALESCE((SELECT MAX(id) FROM segments), 0), "
+            "COALESCE((SELECT MAX(id) FROM transcript_segments), 0)"
+        ).fetchone()
+        return (db_path, count, max_seg, max_cue)
 
     def get(self, conn: sqlite3.Connection) -> list[str]:
         key = self._cache_key(conn)

@@ -28,6 +28,11 @@ Steps (each idempotent, one line printed per action):
        <host-root>/claude-home -- where the one-time `claude /login` keeps its
                              OAuth credentials; 3000:3000 mode 700, because
                              that is a live credential.
+       <host-root>/staging -- where the 1.4 GB music artefacts are staged, on
+                             the same pool as their target instead of in a
+                             possibly RAM-backed /tmp (OPS-8); owned by
+                             TRUENAS_USER, mode 700. Optional: /tmp is still
+                             the fallback, and the small code trees use it.
      ...and, when the b-roll UI is enabled, the b-roll DATA root -- which is
      the shared archive itself, /mnt/tank/.../Assets/B-roll Archive -- as
      broll:editors 2770 (setgid), the same posture setup_tree.py gives
@@ -40,7 +45,10 @@ Steps (each idempotent, one line printed per action):
          mv app app.old.<ts> && mv app.new app
      Any failure before the swap leaves the live app/ untouched; a failed
      swap rolls back. The previous app.old.<ts> backups are pruned (most
-     recent kept) only after a LATER install has succeeded.
+     recent kept, and never one a container still has bind-mounted) only
+     after a LATER install has succeeded, and a failure in any step AFTER
+     the swap restarts the container first -- otherwise it keeps serving the
+     inode that is now app.old.<ts>, which the next run would prune (OPS-2).
      Excludes .venv, __pycache__, *.pyc.
   2b. When DASH_BROLL_ENABLED=1 (the default): ship the b-roll web/ tree
      into <host-root>/broll-web by exactly the same staged-verify-swap
@@ -192,6 +200,17 @@ DEFAULT_HOST_ROOT = "/mnt/tank/apps/ccsync-dashboard"
 HOST_ROOT_RE = re.compile(r"^/mnt/[^/]+/apps/ccsync-dashboard(/[^/]+)*$")
 DEFAULT_SYNCTHING_GUI_URL = "http://192.168.0.102:8384"
 EXCLUDE_DIRS = {".venv", "__pycache__", ".pytest_cache"}
+# How long a tree-sized remote step may run before run_ssh gives up on the
+# channel (OPS-3). The floor covers the small code trees; the rate covers the
+# 1.4 GB music artefacts, whose cp -a + chown -R + verify re-read say nothing
+# until they are done. See tree_ssh_timeout.
+MIN_TREE_SSH_TIMEOUT = 300
+TREE_BYTES_PER_SECOND = 5 * 1024 * 1024
+# Staging dirs this script creates on the NAS (make_staging_dir), and how old
+# one has to be before it can only be the debris of a failed earlier run
+# (prune_orphaned_staging -- OPS-8).
+STAGING_GLOB = "ccsync-*-upload.*"
+STAGING_ORPHAN_MINUTES = 120
 LOCAL_DASHBOARD_DIR = Path(__file__).resolve().parents[1] / "dashboard"
 # The b-roll app lives in this repo at broll/web (folded in from the standalone
 # broll-platform repo on 2026-08-10); this script ships that tree into
@@ -319,10 +338,12 @@ DEFAULT_MUSIC_LIBRARY_ROOT = DEFAULT_CC_ROOT + "/Assets/Music"
 # operator wanted the feature. Shipping the tree IS the switch, and a host that
 # never received it reports the mount "absent" and hides the nav link.
 DEFAULT_YTDL_WEB_DIR = Path(__file__).resolve().parents[1] / "ytdl" / "web"
-# Same exclusions as broll/web: tests/, git metadata and a local venv have no
-# business on the NAS. Unlike music/web there is no data/ to leave behind --
-# ytdl's database is created in the container's own writable /ytdl-data.
-YTDL_EXCLUDE_DIRS = BROLL_EXCLUDE_DIRS
+# Same exclusions as broll/web, PLUS data/ like music/web: in the container
+# ytdl's database lives in its own writable /ytdl-data, but an env-less dev
+# run defaults YTDL_DATA_ROOT to ytdl/web/data (ytdlweb.config), so a dev
+# ytdl.db -- and any videos it downloaded -- would ride the next routine ship
+# onto the NAS's read-only mount (YTDL-40, 2026-08-11).
+YTDL_EXCLUDE_DIRS = BROLL_EXCLUDE_DIRS | {"data"}
 
 # The two binaries the ytdl app shells out to, provisioned onto the host the
 # same way ffmpeg is and for the same reason: NOTHING BUILDS THIS IMAGE (compose
@@ -701,6 +722,16 @@ def music_components_present(root: str, dry_run: bool) -> dict[str, bool]:
 
     A dry run reports everything absent, so --dry-run shows the full first-run
     plan (which is the one worth eyeballing -- it is the 1.4 GB one).
+
+    OPS-5 (2026-08-11): this probe used to run UNPRIVILEGED, unlike every other
+    filesystem action in this script. `db` lives inside music-data, which is
+    3000:3000 mode 770 and which TRUENAS_USER cannot traverse, so `[ -e ... ]`
+    was false every time and routine `ship.cmd` (--music-data auto) re-uploaded
+    the index on every deploy -- swapping the base rig's copy over the live one
+    and discarding any container-written `pending` ingest rows. The `|| echo x`
+    that used to paper over an unreadable directory went with it: an unreadable
+    path must count as ABSENT (re-push, which is safe) rather than as present
+    (skip a push that was needed).
     """
     paths = music_component_paths(root)
     if dry_run:
@@ -709,11 +740,11 @@ def music_components_present(root: str, dry_run: bool) -> dict[str, bool]:
         return {name: False for name in paths}
     probe = "; ".join(
         f'if [ -e {shell_quote(path)} ] && '
-        f'[ -n "$(ls -A {shell_quote(path)} 2>/dev/null || echo x)" ]; '
+        f'[ -n "$(ls -A {shell_quote(path)} 2>/dev/null)" ]; '
         f'then echo "{name} yes"; else echo "{name} no"; fi'
         for name, path in paths.items()
     )
-    rc, out, _err = run_ssh(probe)
+    rc, out, _err = run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(probe))
     present = {name: False for name in paths}
     if rc != 0:
         return present
@@ -809,7 +840,8 @@ def build_db_swap_script(data_root: str, staging: str, target: str,
     )
 
 
-def install_music_db(root: str, source: Path, dry_run: bool) -> bool:
+def install_music_db(root: str, source: Path, dry_run: bool,
+                     staging_parent: str = "/tmp") -> bool:
     """Ship music.db into <root>/music-data. True on success.
 
     The index is ~20 MB and is the only music artefact the container writes, so
@@ -837,7 +869,8 @@ def install_music_db(root: str, source: Path, dry_run: bool) -> bool:
                   f"again if the index looks stale on the NAS.", file=sys.stderr)
 
     expected_bytes = db.stat().st_size
-    staging = make_staging_dir(dry_run, "ccsync-musicdb-upload")
+    timeout = tree_ssh_timeout(expected_bytes)  # OPS-3, same reasoning as install_tree
+    staging = make_staging_dir(dry_run, "ccsync-musicdb-upload", staging_parent)
     staged_db = posixpath.join(staging, MUSIC_DB_FILENAME)
     if dry_run:
         print(f"[dry-run] would SFTP {MUSIC_DB_FILENAME} "
@@ -851,7 +884,8 @@ def install_music_db(root: str, source: Path, dry_run: bool) -> bool:
             sftp.close()
         finally:
             client.close()
-        rc, out, err = run_ssh(f"wc -c < {shell_quote(staged_db)}")
+        rc, out, err = run_ssh_guarded(f"wc -c < {shell_quote(staged_db)}",
+                                       False, timeout)
         staged_bytes = int(out.strip()) if rc == 0 and out.strip().isdigit() else -1
         if staged_bytes != expected_bytes:
             print(f"FAILED: the staged index does not match what was sent "
@@ -865,8 +899,8 @@ def install_music_db(root: str, source: Path, dry_run: bool) -> bool:
     target = f"{data_root}/{MUSIC_DB_FILENAME}"
     old = f"{target}.old.{time.strftime('%Y%m%d%H%M%S')}"
     swap = build_db_swap_script(data_root, staging, target, old, expected_bytes)
-    rc, _out, err = run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(swap),
-                            dry_run=dry_run)
+    rc, _out, err = run_ssh_guarded('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(swap),
+                                    dry_run, timeout)
     if rc != 0:
         print(f"FAILED to install the music index into {target}: "
               f"{err.strip()[:500]}\n"
@@ -1512,19 +1546,87 @@ def iter_local_files(base: Path = LOCAL_DASHBOARD_DIR, excludes: set = EXCLUDE_D
             yield path, rel.as_posix()
 
 
-def make_staging_dir(dry_run: bool, slug: str = "ccsync-dashboard-upload") -> str:
-    """Fresh unpredictable staging dir on the NAS (mode 700, owned by the SSH
-    user). A fixed /tmp path could be pre-created world-writable or symlinked
-    by any local account and later cp -a'd into /app as root (AUDIT SEC-11).
+def tree_ssh_timeout(total_bytes: int) -> int:
+    """Channel timeout for a remote step whose runtime scales with tree size.
+
+    OPS-3 (2026-08-11): install_tree was written for the ~1 MB dashboard tree
+    and took run_ssh's 120 s default. Steps 2c/2d then pushed 906 MB of proxies
+    and 482 MB of encoder through the same code: the verify re-reads the whole
+    tree (`find -exec cat + | wc -c`), the swap `cp -a`s it and `chown -R`s it,
+    and none of that prints anything until it is finished -- and paramiko's
+    channel timeout is an INACTIVITY timeout, so silence for 120 s is a
+    socket.timeout on a step that was working. The ffmpeg paths in this same
+    file already pass 300/600 for a 42 MB job.
+
+    The rate is deliberately pessimistic (5 MB/s, three full passes): this is a
+    ceiling that only matters when something is genuinely wedged, and being
+    generous costs nothing on a healthy run.
     """
+    return int(MIN_TREE_SSH_TIMEOUT + (total_bytes / TREE_BYTES_PER_SECOND) * 3)
+
+
+def run_ssh_guarded(cmd: str, dry_run: bool, timeout: int):
+    """run_ssh, but a dropped transport is an ERROR RESULT, not a traceback.
+
+    OPS-3 (2026-08-11): a socket.timeout out of the swap step used to escape
+    main() as an unhandled exception, so the container was never restarted and
+    the deploy stopped between `mv app app.old.<ts>` and step 3 -- which is
+    also the precondition for OPS-2. Every transport failure means the same
+    thing to every caller here ("assume it did not finish; the live tree is
+    only ever replaced by a rename, so it is still there"), so they all get the
+    same answer as a non-zero rc.
+    """
+    try:
+        return run_ssh(cmd, dry_run=dry_run, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - any transport failure is the same answer
+        return 255, "", (f"the SSH channel dropped after {timeout}s "
+                         f"({type(exc).__name__}: {exc})")
+
+
+def make_staging_dir(dry_run: bool, slug: str = "ccsync-dashboard-upload",
+                     parent: str = "/tmp") -> str:
+    """Fresh unpredictable staging dir on the NAS (mode 700, owned by the SSH
+    user). A fixed path could be pre-created world-writable or symlinked
+    by any local account and later cp -a'd into /app as root (AUDIT SEC-11).
+
+    `parent` is /tmp for the small code trees and <host-root>/staging for the
+    1.4 GB music artefacts (OPS-8): /tmp on the NAS may be RAM-backed, and the
+    staging dir is deliberately LEFT BEHIND on failure so the operator can
+    inspect it.
+    """
+    parent = parent.rstrip("/") or "/tmp"
     if dry_run:
-        return f"/tmp/{slug}.dryrun"
-    rc, out, err = run_ssh(f"mktemp -d /tmp/{slug}.XXXXXX")
+        return f"{parent}/{slug}.dryrun"
+    rc, out, err = run_ssh(f"mktemp -d {shell_quote(parent + '/' + slug + '.XXXXXX')}")
     staging = out.strip().splitlines()[-1].strip() if out.strip() else ""
-    if rc != 0 or not staging.startswith(f"/tmp/{slug}."):
+    if rc != 0 or not staging.startswith(f"{parent}/{slug}."):
         print(f"FAILED to create staging dir: {err or out}", file=sys.stderr)
         sys.exit(1)
     return staging
+
+
+def prune_orphaned_staging(dry_run: bool) -> None:
+    """Reclaim the NAS's /tmp from staging dirs a FAILED earlier run left.
+
+    OPS-8 (2026-08-11): a failed push leaves its staging behind on purpose (the
+    operator has to be able to inspect it), and a DETERMINISTIC failure -- an
+    OPS-3 timeout, say -- repeats that every run, at ~1.4 GB a go for the music
+    artefacts. /tmp on that host may be RAM-backed, so the third attempt can
+    ENOSPC services with nothing to do with this deploy. Anything older than two
+    hours cannot belong to this run; the dirs are mode 700 owned by the SSH
+    user, so no sudo is involved. Entirely non-fatal -- this is housekeeping,
+    not a deploy step.
+    """
+    cmd = (f"find /tmp -maxdepth 1 -name {shell_quote(STAGING_GLOB)} "
+           f"-mmin +{STAGING_ORPHAN_MINUTES} -print -exec rm -rf {{}} + 2>/dev/null")
+    rc, out, _err = run_ssh(cmd, dry_run=dry_run)
+    if dry_run:
+        return
+    removed = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if rc == 0 and removed:
+        print(f"reclaimed {len(removed)} orphaned staging dir(s) from the NAS's "
+              f"/tmp (left by an earlier FAILED run): {', '.join(removed[:4])}"
+              + (" ..." if len(removed) > 4 else ""))
 
 
 def local_manifest(base: Path = LOCAL_DASHBOARD_DIR,
@@ -1622,9 +1724,41 @@ def build_swap_script(root: str, staging: str, new_dir: str, old_dir: str,
     )
 
 
+def build_prune_script(target: str, mountinfo_glob: str = "/proc/*/mountinfo") -> str:
+    """Delete every <target>.old.* backup except the most recent one.
+
+    Two things shape this:
+      - `IFS= read -r` (and, before it, `xargs -d '\\n'`): the shell's default
+        splitting breaks on any whitespace, so a space anywhere in the root
+        (HOST_ROOT_RE permits one) would hand `rm -rf` path fragments.
+      - OPS-2 (2026-08-11): the container bind-mounts <target> and keeps
+        serving the INODE it mounted, so after a swap the LIVE code is the
+        previous run's <target>.old.<ts>. A deploy that failed after the swap
+        (and so never restarted the container) leaves it that way, and this
+        prune would then rm -rf the directory the live dashboard is reading its
+        templates and static files out of. A still-mounted dir shows up by name
+        in some process's mountinfo, so skip those. The immediate restart in
+        main() is the primary fix; this is the belt to its braces, and it fails
+        SAFE in both directions -- no /proc, or no match, prunes exactly as
+        before.
+    """
+    t_q = shell_quote(target)
+    return (
+        f"ls -1d {t_q}.old.* 2>/dev/null | sort | head -n -1 | "
+        f"while IFS= read -r d; do "
+        f'b=$(basename "$d"); '
+        f'if grep -qsF -- "$b" {mountinfo_glob}; then '
+        f'echo "keeping $d -- still bind-mounted by a running container" >&2; '
+        f"continue; fi; "
+        f'rm -rf "$d"; '
+        f"done"
+    )
+
+
 def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
                  excludes: set = EXCLUDE_DIRS,
-                 staging_slug: str = "ccsync-dashboard-upload") -> bool:
+                 staging_slug: str = "ccsync-dashboard-upload",
+                 staging_parent: str = "/tmp") -> bool:
     """Ship `source` into <root>/<target_name>. True on success.
 
     Upload to a fresh staging dir, verify the staged copy is COMPLETE, build
@@ -1652,7 +1786,7 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
     emptiness made /broll disappear without a single error.
     """
     target = f"{root}/{target_name}"
-    staging = make_staging_dir(dry_run, staging_slug)
+    staging = make_staging_dir(dry_run, staging_slug, staging_parent)
     expected = upload_tree(staging, dry_run, source, excludes)
     expected_count, expected_bytes = local_manifest(source, excludes)
     if expected_count == 0:
@@ -1661,9 +1795,13 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
         return False
     new_dir_raw = f"{target}.new"
     old_dir_raw = f"{target}.old.{time.strftime('%Y%m%d%H%M%S')}"
+    # Every remote step below re-reads or copies the whole tree, so its ceiling
+    # has to scale with the tree (OPS-3): 120 s is right for the 1 MB dashboard
+    # and wrong for 906 MB of proxies.
+    timeout = tree_ssh_timeout(expected_bytes)
 
     # Verify the staged upload before anything on the NAS is moved.
-    rc, out, err = run_ssh(count_and_size_cmd(staging), dry_run=dry_run)
+    rc, out, err = run_ssh_guarded(count_and_size_cmd(staging), dry_run, timeout)
     if not dry_run:
         nums = [ln.strip() for ln in out.strip().splitlines() if ln.strip().isdigit()]
         staged_count = int(nums[0]) if rc == 0 and len(nums) >= 2 else -1
@@ -1672,7 +1810,8 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
             print(f"FAILED: staged tree does not match what was sent "
                   f"({staged_count} files/{staged_bytes} bytes on the NAS vs "
                   f"{expected_count}/{expected_bytes} locally) -- {target} is "
-                  f"untouched (staging left at {staging} for inspection)",
+                  f"untouched (staging left at {staging} for inspection)"
+                  + (f": {err.strip()[:200]}" if err.strip() else ""),
                   file=sys.stderr)
             return False
         print(f"staged tree verified: {staged_count} files, {staged_bytes} bytes")
@@ -1683,9 +1822,9 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
 
     swap = build_swap_script(root, staging, new_dir_raw, old_dir_raw,
                              expected_count, expected_bytes, target_dir=target)
-    rc, _, err = run_ssh(
+    rc, _, err = run_ssh_guarded(
         'echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(swap),
-        dry_run=dry_run,
+        dry_run, timeout,
     )
     if rc != 0:
         print(f"FAILED to install code into {target}: {err.strip()[:500]}\n"
@@ -1699,16 +1838,55 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
 
     # Prune earlier backups now that THIS install has succeeded -- always
     # keeping the most recent one, i.e. the copy of the code we just
-    # replaced. Non-fatal: a failure here changes nothing about the deploy.
-    # -d '\n': xargs default splitting breaks on any whitespace, so a space
-    # anywhere in the root (HOST_ROOT_RE permits one) would hand rm -rf path
-    # fragments and silently stop pruning forever.
-    prune = (
-        f"ls -1d {shell_quote(target)}.old.* 2>/dev/null | sort | head -n -1 "
-        f"| xargs -r -d '\\n' rm -rf"
-    )
-    run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(prune), dry_run=dry_run)
+    # replaced, and never one a container is still reading (build_prune_script).
+    # Non-fatal: a failure here changes nothing about the deploy.
+    run_ssh_guarded('echo "$SUDO_PW" | sudo -S sh -c '
+                    + shell_quote(build_prune_script(target)), dry_run, timeout)
     return True
+
+
+def restart_dashboard_container(dry_run: bool) -> tuple[bool, str]:
+    """`docker restart` the dashboard container. Returns (ok, stderr).
+
+    /app/redeploy was observed NOT restarting the container on TrueNAS 25.10
+    (2026-07-24: a stale process kept serving old in-memory code), so the
+    restart is done directly. Compose name convention: ix-<app_name>-<service>-1.
+    """
+    container = f"ix-{APP_NAME}-dashboard-1"
+    rc, _out, err = run_ssh(
+        f'echo "$SUDO_PW" | sudo -S docker restart {shell_quote(container)}',
+        dry_run=dry_run,
+    )
+    return (dry_run or rc == 0), err
+
+
+def fail_after_app_swap(dry_run: bool) -> int:
+    """Return 1 -- but restart the container onto the new code first.
+
+    OPS-2 (2026-08-11): once `mv app app.old.<ts> && mv app.new app` has run,
+    the container is serving an INODE that is now app.old.<ts> (a bind mount
+    follows the directory it was given, not the name). Every step after the
+    swap -- b-roll, music code, the 1.4 GB music data, ytdl -- used to `return
+    1` straight out of main(), leaving it that way; the NEXT deploy's prune
+    then keeps only the newest backup and `rm -rf`s the very directory the live
+    dashboard was reading its templates and static files out of, so the fleet
+    dashboard 500s on every page two runs later. The app tree that was just
+    installed is complete and verified -- it is the later, less-proven steps
+    that failed -- so restarting onto it is both safe and the thing that ends
+    the exposure.
+    """
+    ok_restart, err = restart_dashboard_container(dry_run)
+    if ok_restart:
+        print("restarted the container onto the freshly installed code before "
+              "failing -- it was still serving the previous code directory, "
+              "which the next deploy would prune (OPS-2).")
+    else:
+        print(f"NOTE: could not restart the container after the app swap "
+              f"({err.strip()[:200]}) -- harmless if the app is not installed "
+              f"yet; otherwise restart {APP_NAME!r} from the TrueNAS UI before "
+              f"the next deploy, because it is still serving the PREVIOUS code "
+              f"directory.", file=sys.stderr)
+    return 1
 
 
 def app_installed(dry_run: bool) -> bool:
@@ -2001,6 +2179,36 @@ def main():
           f"{root}/music-proxies, {root}/ffmpeg, {root}/ytdl-web, {root}/ytdl-data, "
           f"{root}/claude-home, {root}/claude-bin, {root}/deno")
 
+    # Debris from a previous FAILED run, before this one adds its own (OPS-8).
+    prune_orphaned_staging(args.dry_run)
+
+    # Where the 1.4 GB music artefacts are staged (OPS-8). /tmp on the NAS may
+    # be RAM-backed and holds the whole component until the swap `cp -a`s it
+    # into place; <host-root>/staging is on the same pool as the target, so the
+    # push costs the pool what it is about to cost it anyway. Owned by the SSH
+    # user at 700 because mktemp runs unprivileged (AUDIT SEC-11 still applies).
+    # ENTIRELY OPTIONAL: this is its own non-fatal call rather than another
+    # `&&` in the chain above, and /tmp remains the fallback -- a deploy must
+    # not fail over where it puts a temporary directory.
+    music_staging_parent = "/tmp"
+    if ship_music and music_data_mode != "none":
+        staging_root = f"{root}/staging"
+        rc_stage, _, stage_err = run_ssh(
+            'echo "$SUDO_PW" | sudo -S sh -c '
+            + shell_quote(
+                f"mkdir -p {shell_quote(staging_root)} && "
+                f"chown {shell_quote(truenas_user)} {shell_quote(staging_root)} && "
+                f"chmod 700 {shell_quote(staging_root)}"
+            ),
+            dry_run=args.dry_run,
+        )
+        if args.dry_run or rc_stage == 0:
+            music_staging_parent = staging_root
+        else:
+            print(f"NOTE: could not prepare {staging_root} "
+                  f"({stage_err.strip()[:200]}) -- staging the music data in "
+                  f"/tmp instead", file=sys.stderr)
+
     # The b-roll DATA root: the one the compose file actually bind-mounts at
     # /broll-data. It is NOT under <host-root> -- it is the shared archive
     # itself, beside Projects/ under Creators_Club, which is what makes it
@@ -2129,7 +2337,7 @@ def main():
         if not install_tree(root, "broll-web", broll_src, args.dry_run,
                             excludes=BROLL_EXCLUDE_DIRS,
                             staging_slug="ccsync-brollweb-upload"):
-            return 1
+            return fail_after_app_swap(args.dry_run)
 
     # Step 2c: ship the music web/ tree into music-web, the same staged-verify-
     # swap route, for the same reason -- the container mounts it read-only at
@@ -2140,7 +2348,7 @@ def main():
         if not install_tree(root, "music-web", music_src, args.dry_run,
                             excludes=MUSIC_EXCLUDE_DIRS,
                             staging_slug="ccsync-musicweb-upload"):
-            return 1
+            return fail_after_app_swap(args.dry_run)
 
     # Step 2d: the music DATA artefacts -- the index, the text-encoder model and
     # the preview proxies. Unlike b-roll, whose data root is a shared archive
@@ -2178,14 +2386,16 @@ def main():
                       f"-- {human_bytes(total)} total")
             for component in wanted:
                 if component == "db":
-                    if not install_music_db(root, music_data_src, args.dry_run):
-                        return 1
+                    if not install_music_db(root, music_data_src, args.dry_run,
+                                            staging_parent=music_staging_parent):
+                        return fail_after_app_swap(args.dry_run)
                     continue
                 sub, target = MUSIC_DATA_TREES[component]
                 if not install_tree(root, target, music_data_src / sub, args.dry_run,
                                     excludes=MUSIC_EXCLUDE_DIRS,
-                                    staging_slug=f"ccsync-music{component}-upload"):
-                    return 1
+                                    staging_slug=f"ccsync-music{component}-upload",
+                                    staging_parent=music_staging_parent):
+                    return fail_after_app_swap(args.dry_run)
 
     # Step 2f: ship the ytdl web/ tree into ytdl-web, the same staged-verify-
     # swap route as broll-web and music-web -- the container mounts it
@@ -2197,7 +2407,7 @@ def main():
         if not install_tree(root, "ytdl-web", ytdl_src, args.dry_run,
                             excludes=YTDL_EXCLUDE_DIRS,
                             staging_slug="ccsync-ytdlweb-upload"):
-            return 1
+            return fail_after_app_swap(args.dry_run)
 
     # Step 3: create or redeploy the custom app.
     if args.recreate and app_installed(args.dry_run):
@@ -2222,16 +2432,9 @@ def main():
             print(f"deleted app for re-create: {APP_NAME}")
 
     if app_installed(args.dry_run):
-        # /app/redeploy was observed NOT restarting the container on 25.10
-        # (2026-07-24: stale process kept serving old in-memory code), so
-        # restart the container directly. Compose name convention:
-        # ix-<app_name>-<service>-1.
         container = f"ix-{APP_NAME}-dashboard-1"
-        rc, out, err = run_ssh(
-            f'echo "$SUDO_PW" | sudo -S docker restart {shell_quote(container)}',
-            dry_run=args.dry_run,
-        )
-        if args.dry_run or rc == 0:
+        restarted, err = restart_dashboard_container(args.dry_run)
+        if restarted:
             print(f"restarted container: {container}")
             print("NOTE: only the CODE was updated. Compose-level changes -- bind "
                   "addresses (--bind-lan/--bind-tailnet), image tag, healthcheck, env "

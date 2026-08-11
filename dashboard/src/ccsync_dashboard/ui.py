@@ -17,6 +17,7 @@ from . import auth, db, provision
 from .api import (
     build_admin_users_view, build_editors_view, build_packages_view, build_presence_view,
     build_project_view, build_projects_view, build_queue_view, build_transfers_view, get_conn,
+    normalize_device_id,
 )
 from .syncthing_client import SyncthingClient, SyncthingError
 from .truenas_client import TrueNASClient, TrueNASError, is_valid_username, looks_like_ssh_pubkey
@@ -295,7 +296,7 @@ async def partial_set_project_root(
     if user is None or not auth.is_admin(settings, user):
         raise HTTPException(status_code=403 if user else 401,
                             detail="admins only: destination roots are fixed once set")
-    form = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
+    form = await _form(request)          # field-capped like every other partial (DASH-3)
     name = form.get("resolve_project", "").strip()
     slug = form.get("root", "").strip() or None
     # A rel path picked in the folder browser (any folder under Projects/,
@@ -789,7 +790,16 @@ def _require_admin_page(request: Request) -> str:
 
 
 async def _form(request: Request) -> dict[str, str]:
-    return {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
+    """Parse an htmx form body. The BYTE ceiling is app.py's body_size_gate
+    (every write path, not just the two it used to cover -- DASH-3); the field
+    ceiling is here, because 1 MB of `a=1&a=1&...` is a cheap way to spend the
+    single worker's CPU inside parse_qs. page_login_submit has capped its
+    fields since it was written; these routes never did (2026-08-11)."""
+    try:
+        parsed = parse_qs((await request.body()).decode(), max_num_fields=MAX_FORM_FIELDS)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="malformed form body")
+    return {k: v[0] for k, v in parsed.items()}
 
 
 @router.get("/admin/users")
@@ -823,7 +833,9 @@ def _create_or_update_editor_sync(
 
 
 @router.post("/partials/admin/users/create")
-async def partial_admin_create_user(request: Request):
+async def partial_admin_create_user(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
     _require_admin_page(request)
     settings = request.app.state.settings
     form = await _form(request)
@@ -852,6 +864,14 @@ async def partial_admin_create_user(request: Request):
             result = await run_in_threadpool(
                 _create_or_update_editor_sync, truenas, username, ssh_pubkey, full_name, password
             )
+            # The account provably exists now -- record it so a device named
+            # after it is treated as an editor rather than as an unmapped
+            # machine (B16). The JSON API twin has done this since the B16 fix;
+            # THIS is the route the Users page posts to, and it did not, so an
+            # editor created through the UI got no known_editors row and
+            # enforce shared them nothing (KNOWN_BUGS DASH-2, 2026-08-11).
+            db.record_known_editor(conn, username, "admin")
+            conn.commit()
             if result["warnings"]:
                 error = f"{username}: created with warnings ({'; '.join(result['warnings'])})"
         except TrueNASError as exc:
@@ -900,7 +920,9 @@ async def partial_admin_set_password(request: Request):
 
 
 @router.post("/partials/admin/users/approve")
-async def partial_admin_approve_device(request: Request):
+async def partial_admin_approve_device(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
     _require_admin_page(request)
     settings = request.app.state.settings
     form = await _form(request)
@@ -913,11 +935,23 @@ async def partial_admin_approve_device(request: Request):
     elif not is_valid_username(username):
         error = "username must be a valid TrueNAS-style username"
     else:
-        syncthing = SyncthingClient.from_settings(settings)
         try:
+            # Shape-check + uppercase BEFORE Syncthing sees it, as the JSON API
+            # twin has since _DEVICE_ID_RE was added. This partial -- the only
+            # approve path a human uses -- skipped it, so a truncated or
+            # lowercased paste came back as a generic 502, or created a device
+            # that can never connect (KNOWN_BUGS DASH-1, 2026-08-11).
+            device_id = normalize_device_id(device_id)
+            syncthing = SyncthingClient.from_settings(settings)
             # See the ui.py blocking-handlers finding: blocking Syncthing
             # REST call off the event loop.
             await run_in_threadpool(syncthing.approve_device, device_id, username)
+            # An admin naming the device is the strongest evidence the username
+            # is a real editor account (B16 / DASH-2).
+            db.record_known_editor(conn, username, "admin")
+            conn.commit()
+        except ValueError as exc:
+            error = str(exc)
         except SyncthingError as exc:
             error = str(exc)
 

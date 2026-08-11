@@ -48,7 +48,11 @@
     <button id="go" class="primary-btn">SEARCH</button>
     <span id="health" class="rstatus" title="server-side Claude Code + yt-dlp"></span>
   </div>
-  <div id="warn" class="warnline hidden"></div>
+  <!-- A CONTAINER, not a banner: app.js puts one .warnline in here per
+       concern (claude health, the worker, your ticked projects, the running
+       job). One shared element meant whichever concern spoke last erased the
+       others -- see YTDL-11/12/37, 2026-08-11. -->
+  <div id="warn" class="warns"></div>
 </header>
 
 <main id="main">

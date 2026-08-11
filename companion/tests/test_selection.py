@@ -542,3 +542,66 @@ def test_a_401_falls_back_to_the_cache_exactly_like_any_other_failure(tmp_path, 
         selection, source = client.get()
 
     assert selection == _SAMPLE and source == "cache"
+
+
+# -- SYNC-14: a stale mapping must never be labelled "live" -----------------
+
+
+def _roots_response(rel="2026/FF5/Nuclear"):
+    return {"selection": _SAMPLE,
+            "project_roots": [{"resolve_project": "Nuclear", "rel_path": rel}]}
+
+
+def test_a_failed_refresh_labels_the_mapping_cache_not_live(tmp_path):
+    """SYNC-14. A failed fetch() leaves _last_response untouched, and the
+    next line returned it tagged "live" -- so with the dashboard down the
+    base rig filed media under a superseded root with full confidence, which
+    is the CORE-H9 outcome by another door."""
+    state = {"up": True}
+
+    def fake_get(url, headers, timeout):
+        if not state["up"]:
+            raise OSError("dashboard unreachable")
+        return _roots_response()
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    mapping, source = client.project_roots_result()
+    assert source == "live"
+
+    state["up"] = False
+    client._last_response_at -= client.project_roots_ttl + 1   # the TTL runs out
+
+    mapping, source = client.project_roots_result()
+
+    assert source == "cache"
+    assert mapping == {"nuclear": "Projects/2026/FF5/Nuclear"}
+
+
+def test_a_successful_refresh_is_still_live(tmp_path):
+    """The other half: an expired TTL that refreshes cleanly must not be
+    demoted -- "cache" would be just as much of a lie."""
+    served = {"rel": "2026/FF5/Nuclear"}
+
+    def fake_get(url, headers, timeout):
+        return _roots_response(served["rel"])
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    client.project_roots_result()
+
+    served["rel"] = "2026/FF5/Nuclear Reissue"
+    client._last_response_at -= client.project_roots_ttl + 1
+
+    mapping, source = client.project_roots_result()
+
+    assert source == "live"
+    assert mapping == {"nuclear": "Projects/2026/FF5/Nuclear Reissue"}
+
+
+def test_nothing_known_and_nothing_cached_is_still_unreachable(tmp_path):
+    def fake_get(url, headers, timeout):
+        raise OSError("dashboard unreachable")
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
+    mapping, source = client.project_roots_result()
+
+    assert (mapping, source) == ({}, "unreachable")

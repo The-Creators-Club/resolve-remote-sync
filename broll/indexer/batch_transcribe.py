@@ -6,9 +6,17 @@ loading. This loads the model once and streams through the queue, writing the
 same `DATA_ROOT/transcripts/{video_id}/{stem}.srt` files the stage already
 reuses — so the pipeline then ingests them without re-transcribing anything.
 
-Run it before (or alongside) the pipeline's local stages:
+Run it ALONGSIDE the pipeline's local stages, not ahead of them:
 
     python batch_transcribe.py --config config.queue.yaml
+
+"Before" was the original instruction and it was wrong (BROLL-15, 2026-08-11).
+The queue below skips `status='skipped'`, which is a verdict `probe` reaches —
+run against a freshly scanned share, every row is still 'discovered' and nothing
+has been discarded yet, so the multi-hour takes that max_duration_s is about to
+throw away get transcribed in full on the way to being thrown away. Rows still
+at 'discovered' are therefore excluded here as well: a clip is worth an hour of
+GPU once probe has said it is worth keeping.
 """
 
 from __future__ import annotations
@@ -65,6 +73,21 @@ def _has_audio_stream(src: Path) -> bool:
     return bool(r.stdout.strip())
 
 
+# The queue, as a module constant so it can be exercised against a fixture DB
+# rather than only by running a GPU job (tests/test_batch_transcribe_queue.py).
+#
+# 'discovered' is excluded alongside 'skipped' (BROLL-15, 2026-08-11): both
+# 'skipped' verdicts are ones `probe` reaches, so on a freshly scanned share the
+# filter matched everything and the multi-hour takes max_duration_s was about to
+# discard got a full Whisper pass on the way out. See the module docstring.
+TODO_SQL = (
+    "SELECT id, share, rel_path, duration_s FROM videos "
+    "WHERE status NOT IN ('skipped', 'discovered') "
+    "AND duplicate_of IS NULL AND transcribed_at IS NULL "
+    "ORDER BY duration_s"
+)
+
+
 def _ts(seconds: float) -> str:
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -87,11 +110,7 @@ def main() -> int:
 
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    videos = conn.execute(
-        "SELECT id, share, rel_path, duration_s FROM videos "
-        "WHERE status != 'skipped' AND duplicate_of IS NULL AND transcribed_at IS NULL "
-        "ORDER BY duration_s"
-    ).fetchall()
+    videos = conn.execute(TODO_SQL).fetchall()
     conn.close()
 
     todo = []

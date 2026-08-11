@@ -69,6 +69,61 @@ def test_the_browser_widens_the_interval_like_the_generator_does():
     )
 
 
+def test_the_browser_prefers_the_geometry_the_generator_recorded():
+    """The constants above are a MODEL of the generator; the row is the
+    generator's own answer (BROLL-1/BROLL-2, 2026-08-11). Where the two
+    disagree -- which was 95.3% of live sheets, because `scale=240:-2` rounds to
+    even and the source aspect ratio does not -- the row wins.
+
+    These are text assertions because the frontend has no test runner here (the
+    same posture as tests/test_mounted_prefix.py); the arithmetic they guard is
+    pinned on the generator's side, in the indexer's
+    test_sprite_geometry_recorded.py."""
+    js = APP_JS.read_text(encoding="utf-8")
+    body = js[js.index("function spriteGeometry"):]
+    body = body[:body.index("\n}\n")]
+    for column in ("sprite_cell_w", "sprite_cell_h", "sprite_cells",
+                   "sprite_cols", "sprite_interval_s"):
+        assert column in body, f"spriteGeometry ignores videos.{column}"
+    # The recorded branch must come FIRST -- a fallback that runs anyway is not
+    # a fallback.
+    assert body.index("video.sprite_cell_w") < body.index("video.height")
+
+
+def test_the_source_derived_cell_height_survives_only_as_the_fallback():
+    """Legacy rows carry no geometry and must keep behaving exactly as they did
+    -- nothing gets worse for a sheet nobody has regenerated. So the old
+    arithmetic stays, reachable only when the row is silent."""
+    js = APP_JS.read_text(encoding="utf-8")
+    body = js[js.index("function spriteGeometry"):]
+    body = body[:body.index("\n}\n")]
+    assert "SPRITE_CELL_WIDTH * (video.height / video.width)" in body
+    assert "135" in body  # the no-dimensions-at-all default, unchanged
+
+
+def test_positionsprite_reads_the_grid_rather_than_rebuilding_it():
+    """Every constant it used to apply by hand now comes from spriteGeometry, so
+    there is one place a legacy row is distinguished from a recorded one."""
+    js = APP_JS.read_text(encoding="utf-8")
+    body = js[js.index("function positionSprite"):]
+    body = body[:body.index("\n}")]
+    for constant in ("SPRITE_MAX_CELLS", "SPRITE_COLUMNS", "SPRITE_CELL_WIDTH",
+                     "video.height", "video.width"):
+        assert constant not in body, (
+            f"positionSprite re-derives {constant} instead of taking the sheet's "
+            "own geometry"
+        )
+
+
+def test_the_card_is_sized_by_the_same_geometry_as_the_overlay():
+    """A card sized off the source aspect ratio while the overlay is offset by
+    the sheet's real cell height shows a sliver of the next row."""
+    js = APP_JS.read_text(encoding="utf-8")
+    body = js[js.index("function buildCard"):]
+    body = body[:body.index("\n}")]
+    assert "spriteGeometry(video).cellHeight" in body
+
+
 @pytest.mark.parametrize("duration_s,expected_interval", [
     (60.0, 2.0),        # a minute: under the cap, unchanged
     (480.0, 2.0),       # exactly 240 cells: still the shipped interval

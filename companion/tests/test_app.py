@@ -1727,6 +1727,8 @@ def _remove_stub(tmp_path, untick_ok=True, mode="editor"):
 
     class _Stub:
         _managed = True
+        # The drive is present here; SYNC-13's refusal has its own test below.
+        _root_absent = False
         config = {"local_root": str(root)}
 
         def effective_mode(self):
@@ -3660,3 +3662,257 @@ def test_the_stale_sweep_reports_half_made_proxies_without_deleting_them(
     messages = " ".join(r.getMessage() for r in caplog.records)
     assert "A001.mp4.partial" in messages
     assert "NOT deleted" in messages
+
+
+# ===========================================================================
+# 2026-08-11 hunt: the companion sync-core findings (SYNC-1/3/5/6/9/12/13)
+# ===========================================================================
+
+
+def test_stop_lanes_managed_mode_stops_lane_b_too(tmp_path):
+    """SYNC-1. RcloneLane.stop() is the ONLY path to _kill_running_process(),
+    and sequencer.stop() joins its worker with timeout=10 -- so it returns
+    while lane B may still be inside run_once(). On Windows the rclone child
+    outlives the parent, so a self-upgrade left the OLD delete-authorised
+    `rclone sync` racing the new process's lane B over one destination."""
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    assert app._managed is True
+
+    stopped: list[str] = []
+    app._lane_a.stop = lambda: stopped.append("lane_a")
+    app._lane_b.stop = lambda: stopped.append("lane_b")
+    app._lane_c.stop = lambda: stopped.append("lane_c")
+
+    app._stop_lanes()
+
+    assert "lane_b" in stopped
+
+
+def test_a_lane_b_that_will_not_stop_does_not_strand_the_teardown(tmp_path, caplog):
+    """Same discipline as every other lane in here: one that throws costs a
+    log line, not the rest of the shutdown."""
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+
+    def _boom():
+        raise RuntimeError("boom")
+
+    app._lane_b.stop = _boom
+    stopped: list[str] = []
+    app._lane_a.stop = lambda: stopped.append("lane_a")
+
+    with caplog.at_level(logging.ERROR, logger="ccsync.app"):
+        app._stop_lanes()
+
+    assert stopped == ["lane_a"]
+    assert any("failed to stop lane" in r.getMessage() for r in caplog.records)
+
+
+def test_signing_in_does_not_override_the_trays_pause(tmp_path):
+    """SYNC-3. require_login=true (the default) with "Pause syncing" ticked:
+    on_signed_in() gated on _lanes_started and the login gate only, so the
+    full rotation and express uploads resumed while the checkbox still
+    rendered checked."""
+    app = _make_app(tmp_path, dashboard_url="", sync_enabled=True, lane_b_enabled=True)
+
+    class _SignedIn:
+        role = None
+        username = "alex"
+        token = "t"
+        last_upgrade_info = None
+
+        def valid(self):
+            return True
+
+    app.identity = _SignedIn()
+    started, _stopped = _instrument_lanes(app)
+    app._paused = True
+
+    app.on_signed_in()
+
+    assert started == []
+    assert app._lanes_started is False
+    assert app.is_paused() is True
+
+
+def test_resume_still_starts_the_lanes_after_the_pause_gate(tmp_path):
+    """The other half of SYNC-3: the gate lives in _start_lanes(), which is
+    also resume's own door -- toggle_pause clears _paused first, so the
+    resume click must still work."""
+    app = _make_app(tmp_path, dashboard_url="", sync_enabled=True,
+                    lane_b_enabled=True, require_login=False)
+    started, _stopped = _instrument_lanes(app)
+
+    app.toggle_pause()   # pause
+    started.clear()
+    app.toggle_pause()   # resume
+
+    assert "lane_a_video_up" in started
+
+
+def test_sharing_luts_refuses_while_another_window_is_open(tmp_path, monkeypatch):
+    """SYNC-5. The only confirm_dialog site in the companion that built a Tk
+    root without _popup_active_lock -- the sibling-root condition that wedges
+    the Tcl interpreter (CORE-M3/H8), and invisible to apply_upgrade's
+    locked() check so a self-upgrade could exit mid-adopt()."""
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+
+    class _Links:
+        def library(self):
+            return tmp_path
+
+        def adopt(self, strays):
+            raise AssertionError("adopt() ran with another window open")
+
+    app._lut_links = _Links()
+    app._stray_luts = [{"name": "Kodak.cube", "size": 10}]
+    dialogs: list[str] = []
+    monkeypatch.setattr(popup, "confirm_dialog",
+                        lambda *a, **k: dialogs.append("shown") or True)
+
+    app._popup_active_lock.acquire()
+    try:
+        app.share_stray_luts()
+    finally:
+        app._popup_active_lock.release()
+
+    assert dialogs == []
+    assert any("window is open" in msg for msg, _t in app._tray_icon.notifications)
+
+
+def test_sharing_luts_holds_the_popup_lock_across_the_copy(tmp_path, monkeypatch):
+    """The lock must cover adopt() too, not just the dialog: apply_upgrade
+    reads locked() to decide whether it may swap the exe and shut down."""
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    held: list[bool] = []
+
+    class _Links:
+        def library(self):
+            return tmp_path
+
+        def adopt(self, strays):
+            held.append(app._popup_active_lock.locked())
+            return {"copied": len(strays), "errors": []}
+
+        def find_strays(self):
+            return []
+
+    app._lut_links = _Links()
+    app._stray_luts = [{"name": "Kodak.cube", "size": 10}]
+    monkeypatch.setattr(popup, "confirm_dialog",
+                        lambda *a, **k: held.append(app._popup_active_lock.locked()) or True)
+
+    app.share_stray_luts()
+
+    assert held == [True, True]
+    assert app._popup_active_lock.locked() is False
+    assert any("Shared 1 LUT" in msg for msg, _t in app._tray_icon.notifications)
+
+
+def test_consolidate_refuses_while_the_drive_is_disconnected(tmp_path, monkeypatch):
+    """SYNC-6. _root_absent is invisible to a config_problems check
+    (_demote_removable_root_problem strips it at startup), and fixer.fix_clip
+    refuses only a BLANK local_root -- so with the SSD unplugged this copied
+    the originals onto the boot volume and relinked Resolve to canonical
+    paths lane A then correctly refused to upload."""
+    called: list[int] = []
+    monkeypatch.setattr(resolve_bridge, "get_media_pool_items",
+                        lambda: called.append(1) or _mp_result())
+    app = _make_app(tmp_path, sync_enabled=True)
+    app._tray_icon = _FakeTray()
+    app._root_absent = True
+
+    app.consolidate_project()
+
+    assert called == []
+    assert any("disconnected" in msg for msg, _t in app._tray_icon.notifications)
+
+
+def test_consolidate_stops_at_the_failure_report(tmp_path, monkeypatch):
+    """SYNC-12: the failures branch had no return, so the editor read
+    "1 failed -- copy diagnostics" and then, a beat later, an unqualified
+    "Copy & upload finished"."""
+    from ccsync_companion import consolidate
+
+    other = tmp_path / "other"
+    other.mkdir()
+    stray = other / "A001.braw"
+    stray.write_bytes(b"x" * 10)
+
+    app = _make_app(tmp_path, sync_enabled=True, popup_enabled=False,
+                    active_project="Projects/2026/X/Y")
+    app._tray_icon = _FakeTray()
+    monkeypatch.setattr(resolve_bridge, "get_media_pool_items",
+                        lambda: _mp_result(_item(str(stray))))
+    monkeypatch.setattr(consolidate, "reconcile_with_nas",
+                        lambda *a, **k: {"ok": True, "uploads": {"count": 1, "bytes": 10},
+                                         "downloads": {"count": 0, "bytes": 0}})
+    monkeypatch.setattr("ccsync_companion.popup.confirm_dialog", lambda *a, **k: True)
+    monkeypatch.setattr(popup, "ProgressWindow", _FakeProgressWindow)
+    monkeypatch.setattr(consolidate, "run_consolidation",
+                        lambda ops, lr, **kw: [{"ok": False, "message": "denied",
+                                                "file_path": o["file_path"]} for o in ops])
+    app._lane_a.run_once = lambda subpath=None: None
+    app._lane_b.run_once = lambda subpath=None: None
+
+    app.consolidate_project()
+
+    messages = [msg for msg, _t in app._tray_icon.notifications]
+    assert any("failed" in msg for msg in messages)
+    assert not any("Copy & upload finished" in msg for msg in messages)
+
+
+def test_removing_a_project_refuses_while_the_drive_is_out(tmp_path):
+    """SYNC-13: with the drive merely unplugged every step "succeeded" --
+    untick, unshare, then the folder read as already gone. The multi-GB copy
+    was still on the SSD, now unticked and unshared so nothing would ever
+    reclaim it, while the editor believed the space was back."""
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    unticked: list[str] = []
+    app.selection_client.untick = lambda slug: unticked.append(slug) or (True, "ok")
+    app._root_absent = True
+
+    ok, message = app.remove_project_from_machine("ff5-nuclear")
+
+    assert ok is False
+    assert unticked == []
+    assert "disconnected" in message
+
+
+def test_pid_liveness_never_terminates_the_process_it_asks_about(monkeypatch):
+    """SYNC-9: os.kill(pid, 0) on Windows is TerminateProcess(handle, 0) --
+    it KILLS the pid, and raises for one that is already gone (which the
+    OSError arm then read as "alive")."""
+    from ccsync_companion import app as app_mod
+
+    killed: list[tuple] = []
+    monkeypatch.setattr(app_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(app_mod.sys, "platform", "win32")
+    monkeypatch.setattr(app_mod, "_pid_is_alive_win32", lambda pid: False)
+
+    assert app_mod._pid_is_alive(4321) is False
+    assert killed == [], "os.kill must never be reached on win32"
+
+
+def test_pid_liveness_falls_back_to_alive_when_it_cannot_tell(monkeypatch):
+    """Fail safe, exactly as the posix OSError arm does: an unknown answer
+    must never let a second companion take a live instance's slot."""
+    from ccsync_companion import app as app_mod
+
+    def _boom(pid):
+        raise OSError("no ctypes here")
+
+    monkeypatch.setattr(app_mod.sys, "platform", "win32")
+    monkeypatch.setattr(app_mod, "_pid_is_alive_win32", _boom)
+    assert app_mod._pid_is_alive(4321) is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the win32 probe itself")
+def test_the_win32_pid_probe_agrees_with_reality():
+    from ccsync_companion import app as app_mod
+
+    assert app_mod._pid_is_alive(os.getpid()) is True
+    # A pid that cannot exist here: Windows pids are multiples of 4 and this
+    # one is deliberately absurd.
+    assert app_mod._pid_is_alive(0x7FFFFFF1) is False

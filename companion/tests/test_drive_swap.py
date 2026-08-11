@@ -3,6 +3,7 @@ command sequences, with a scripted run_fn (no real net use / subst)."""
 
 from __future__ import annotations
 
+import logging
 import subprocess
 
 from ccsync_companion import drive_swap
@@ -142,3 +143,66 @@ def test_derive_server_unc_from_existing_config():
     assert f("http://host:1", "") == ""
     assert f("http://host:1", "relative/path") == ""
     assert f("http://host:1", "/mnt/tank") == ""
+
+
+# -- SYNC-4: the editor's TrueNAS password must never leave this module -----
+
+_SECRET = "hunter2-CreatorsClub"
+
+
+def test_a_timed_out_net_use_never_reports_the_password(caplog):
+    """SYNC-4. `net use` takes the password POSITIONALLY, and
+    TimeoutExpired.__str__ embeds the whole argv -- app.swap_p_to_server logs
+    the returned message at INFO, shows it as a tray balloon and
+    copy_diagnostics() sweeps the log tail to the clipboard. An SMB connect to
+    a sleeping tailnet host reaches the 30 s timeout routinely."""
+    def timing_out(args):
+        if "/persistent:no" in args:
+            raise subprocess.TimeoutExpired(cmd=list(args), timeout=30)
+        return _proc(0, "")
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
+        ok, msg = drive_swap.swap_to_server(
+            "\\\\nas\\Pool\\Creators_Club", timing_out,
+            username="alex", password=_SECRET,
+        )
+
+    assert not ok
+    assert _SECRET not in msg
+    assert "TimeoutExpired" in msg
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert _SECRET not in logged
+    # ...but the argv is still there to diagnose with.
+    assert "/user:alex" in logged and "***" in logged
+
+
+def test_a_failed_cmdkey_never_reports_the_password(caplog):
+    """The same exposure through the other door: `cmdkey /pass:<password>`
+    under log.debug(..., exc_info=True), whose exception line is the argv."""
+    def timing_out(args):
+        raise subprocess.TimeoutExpired(cmd=list(args), timeout=30)
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
+        drive_swap.persist_credentials(
+            "\\\\nas\\Pool\\Creators_Club", "alex", _SECRET, timing_out)
+
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert _SECRET not in logged
+    assert "/pass:***" in logged
+
+
+def test_the_redactor_masks_both_shapes_the_password_arrives_in():
+    r = drive_swap._redacted
+    assert r(["cmdkey", "/add:nas", "/user:alex", f"/pass:{_SECRET}"]) == \
+        "cmdkey /add:nas /user:alex /pass:***"
+    assert r(["net", "use", "P:", "\\\\nas\\X", "/user:alex", _SECRET], _SECRET) == \
+        "net use P: \\\\nas\\X /user:alex ***"
+    # No password given (the uncredentialed swap) -- nothing to mask.
+    assert r(["net", "use", "P:", "\\\\nas\\X", "/persistent:no"]) == \
+        "net use P: \\\\nas\\X /persistent:no"
+
+
+def test_a_credentialed_timeout_is_not_mistaken_for_an_auth_failure():
+    """is_auth_failure() drives the tray's ask-for-your-login retry. The
+    redacted message must not accidentally read as one."""
+    assert not drive_swap.is_auth_failure("net use failed: TimeoutExpired")

@@ -436,6 +436,34 @@ def test_run_consolidation_publishes_the_new_counts():
     assert final["batch_bytes_total"] == 3000  # existing keys untouched
 
 
+def test_the_batch_bar_never_counts_bytes_that_were_not_copied():
+    """UI-5: the twin of popup.perform_fix_all's fixed loop, missed when that
+    one was fixed. `batch_done += size` ran for EVERY op, and fixer.fix_clip
+    deletes both artifacts of a failed or abandoned attempt before it returns
+    -- so the bar, the "X of Y done" text and RateEstimator's speed/ETA were
+    credited with bytes that are not on disk, on exactly the runs (skips,
+    failures) the editor watches hardest."""
+    from ccsync_companion import popup
+
+    control = popup.BatchControl()
+
+    def fake_fix(path, dest, root, mpis, on_bytes=None, should_abort=None):
+        if path.endswith("f0.mov"):
+            return {"ok": True, "message": "ok", "copied_to": dest}
+        if path.endswith("f1.mov"):
+            return {"ok": False, "message": "disk full"}
+        control.request_skip_current()
+        return {"ok": False, "aborted": True, "copied_to": None,
+                "leftover_paths": [], "message": "Skipped by you"}
+
+    seen = []
+    consolidate.run_consolidation(_ops(3), "L", fix_clip_fn=fake_fix,
+                                  state_fn=seen.append, control=control)
+    assert seen[-1]["batch_bytes_total"] == 3000
+    assert seen[-1]["batch_bytes_done"] == 1000
+    assert seen[-1]["fixed"] == 1 and seen[-1]["failed"] == 1 and seen[-1]["skipped"] == 1
+
+
 def test_run_consolidation_without_a_control_is_unchanged():
     """The existing app.py/test callers pass no control and must be
     byte-for-byte unaffected -- including doubles that predate on_bytes."""

@@ -24,10 +24,36 @@ from ytdlweb.main import app as ytdl_app
 
 STATIC = Path(__file__).resolve().parent.parent / 'static'
 
-# A quoted (or url()-wrapped) leading slash onto one of this app's own paths.
-# `/api/...` is the API; `/app.js` and `/style.css` are the two assets served
-# beside the index.
-ROOT_RELATIVE = re.compile(r"""["'`(]/(?:api|media|static)/|["'`(]/(?:app\.js|style\.css)""")
+# Every asset the app serves to a browser. Scanned as files AND as served
+# bytes, so neither a bad commit nor a future generated asset gets through.
+ASSETS = ('app.js', 'index.html', 'style.css', 'favicon.svg')
+
+# DENY BY DEFAULT: any quoted or url()-wrapped leading slash, whatever it
+# points at. The old pattern listed the roots it knew about
+# (`/api|/media|/static`, `/app.js`, `/style.css`), which is a list that cannot
+# keep up with the app: a CSS `url(/bg.png)`, a `fetch('/partials/topbar')` and
+# a bare `'/api'` with no trailing slash all shipped green and 404'd under the
+# mount (YTDL-42, 2026-08-11). Prose is not matched, because a quote or `(`
+# has to sit IMMEDIATELY before the slash -- no whitespace tolerance, or a
+# string ending a line and a `//` comment starting the next one match as a pair.
+_ABSOLUTE = re.compile(r"""["'`(](/[^"'`)\s>]*)""")
+
+# The ONE deliberate absolute URL here: the [ DASHBOARD ] back-link. Mounted,
+# it is the way OUT of this app to the dashboard at the origin root -- the
+# opposite of the bug -- so it is allowlisted by its exact value, not by a
+# pattern that would also pass `/api`.
+ALLOWED_ABSOLUTE = {'/'}
+
+
+def root_relative_offenders(text, label=''):
+    """Every escape-to-the-origin in `text`, as 'label:line url' strings."""
+    out = []
+    for m in _ABSOLUTE.finditer(text):
+        url = m.group(1)
+        if url in ALLOWED_ABSOLUTE:
+            continue
+        out.append(f'{label}:{text.count(chr(10), 0, m.start()) + 1} {url}')
+    return out
 
 
 @pytest.fixture()
@@ -109,35 +135,48 @@ def test_no_shipped_asset_uses_a_root_relative_app_url():
     """The bug this file exists for. A leading slash resolves against the
     ORIGIN, so under /ytdl these hit the dashboard instead of this app."""
     offenders = []
-    for name in ('app.js', 'index.html', 'style.css'):
-        text = (STATIC / name).read_text(encoding='utf-8')
-        for m in ROOT_RELATIVE.finditer(text):
-            line = text.count('\n', 0, m.start()) + 1
-            offenders.append(f'{name}:{line} {m.group(0)}')
+    for name in ASSETS:
+        offenders += root_relative_offenders(
+            (STATIC / name).read_text(encoding='utf-8'), name)
     assert not offenders, (
         'root-relative app URLs break the /ytdl mount: ' + '; '.join(offenders))
 
 
 def test_nothing_served_to_the_browser_contains_a_root_relative_app_url(mounted_client):
     """Same rule, enforced on the bytes that actually leave the server -- so a
-    future templated or generated asset cannot slip past the file scan."""
+    future templated or generated asset cannot slip past the file scan. The
+    STYLESHEET is in here on purpose: `url(/…)` in a CSS body is invisible to
+    any check that only reads src/href out of HTML (YTDL-42)."""
     offenders = []
-    for path in ('/ytdl/', '/ytdl/app.js', '/ytdl/style.css'):
-        body = mounted_client.get(path).text
-        for m in ROOT_RELATIVE.finditer(body):
-            offenders.append(f'{path} {m.group(0)}')
+    for path in ('/ytdl/', '/ytdl/app.js', '/ytdl/style.css', '/ytdl/favicon.svg'):
+        offenders += root_relative_offenders(mounted_client.get(path).text, path)
     assert not offenders, (
         'served asset reaches back to the origin root: ' + '; '.join(offenders))
 
 
-def test_the_guard_would_catch_a_reintroduced_api_literal():
-    """Proves the check above is not vacuous: it must fail on the exact edit
-    someone is likely to make (`fetch('/api/jobs')`)."""
-    assert ROOT_RELATIVE.search("""const s = await api('/api/jobs');""")
-    assert ROOT_RELATIVE.search('<script src="/app.js"></script>')
-    assert ROOT_RELATIVE.search('<link rel="stylesheet" href="/style.css">')
-    assert not ROOT_RELATIVE.search("""const s = await api('api/jobs');""")
-    assert not ROOT_RELATIVE.search('<script src="app.js"></script>')
+def test_the_guard_catches_every_shape_of_escape_not_just_the_listed_roots():
+    """Proves the check above is not vacuous -- on the edit someone is likely
+    to make (`fetch('/api/jobs')`) AND on the three shapes the previous
+    pattern's allowlist of roots let through (YTDL-42, 2026-08-11)."""
+    for bad in ("""const s = await api('/api/jobs');""",
+                '<script src="/app.js"></script>',
+                '<link rel="stylesheet" href="/style.css">',
+                """await fetch('/partials/topbar?current=ytdl');""",  # unlisted root
+                """const s = await api('/api');""",                   # no trailing slash
+                '.card { background: url(/static/bg.png); }',         # a CSS body
+                '.card { background: url("/bg.png"); }',
+                '<img src="/thumbs/x.jpg">'):
+        assert root_relative_offenders(bad), bad
+
+    for good in ("""const s = await api('api/jobs');""",
+                 '<script src="app.js"></script>',
+                 """await fetch('../partials/topbar?current=ytdl');""",
+                 """img.src = `https://i.ytimg.com/vi/${id}/mqdefault.jpg`;""",
+                 '.card { background: url(bg.png); }',
+                 '.gridempty { grid-column: 1 / -1; }',
+                 'const m = /job=(\\d+)/.exec(location.hash);',
+                 '<a class="btn nav-link" href="/">[ DASHBOARD ]</a>'):
+        assert not root_relative_offenders(good), good
 
 
 def test_the_topbar_fetch_is_relative_and_asks_for_this_page():

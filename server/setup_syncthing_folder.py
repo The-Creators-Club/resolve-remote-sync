@@ -31,6 +31,8 @@ GUI URL + API key come from -- Syncthing app config, or its config.xml):
        - versioning: staggered (server-side deletion safety net, per SPEC
          "Flaws" #2 -- lane C keeps versioned trash even though renames
          propagate)
+       - ignoreDelete: true (the NAS copy is the authority and never applies
+         a delete an editor made -- docs/delete-protection-ignoredelete.md)
   4. POST /rest/db/ignores?folder=<id> with the .stignore content: one
      case-insensitive line per video extension, plus **/Proxy -- videos and
      proxies never travel through Syncthing (lanes A/B, rclone, handle
@@ -444,6 +446,13 @@ def main():
                     "maxAge": "31536000",
                 },
             },
+            # delete-protection (2026-08-11, docs/delete-protection-ignoredelete.md):
+            # this is the AUTHORITATIVE copy, so it must never apply a delete
+            # an editor made -- an accidental single-file delete then only
+            # removes that editor's own copy. Like the puller tuning above,
+            # a --force PUT replaces the whole folder object, so it MUST be
+            # here or a reconfigure silently drops the protection.
+            "ignoreDelete": True,
             # editors are added later, per-device, via accept_device.py; on a
             # --force reconfigure, preserve the existing device shares rather
             # than wiping them back to [].

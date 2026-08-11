@@ -41,7 +41,10 @@ def items_for(rows, root=None):
         try:
             path = (config.safe_join(root, r['rel_path']) if root
                     else config.resolve_path(r['share'], r['rel_path']))
-        except config.PathTraversalError as exc:
+        # Both of resolve_path's refusals, not just the traversal one: an
+        # UnknownShareError (a NULL or foreign `share`) used to escape and kill
+        # the whole run before a single track was encoded (MUSIC-12, 2026-08-11).
+        except (config.PathTraversalError, config.UnknownShareError) as exc:
             print(f'  SKIP {r["rel_path"]}: {exc}')
             continue
         out.append((r['id'], path))

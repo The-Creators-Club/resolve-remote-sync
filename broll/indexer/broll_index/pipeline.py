@@ -73,6 +73,24 @@ STAGE_PREREQ_STATUS = {"probe": "discovered", "proxy": "probed", "frames": "prox
 ORGANISED_STATUS = "organised"
 
 
+def skipped_for_length(video: dict[str, Any]) -> bool:
+    """True for a clip stage_probe parked at 'skipped' for the duration cap.
+
+    Told apart from the OTHER reason it parks one there structurally, not by
+    re-reading the error prose: probe records a `codec` only when there is a
+    video stream, so 'skipped' with a codec is the over-length clip and
+    'skipped' without one is the audio-only clip — whose speech is still worth
+    transcribing (see stage_probe). A row the scanner marked 'skipped' (an
+    editor proxy folder) was never probed at all and has neither, which is why
+    duration_s is checked too rather than just the absent codec.
+    """
+    return (
+        video.get("status") == "skipped"
+        and bool(video.get("codec"))
+        and video.get("duration_s") is not None
+    )
+
+
 def reopen_if_now_indexable(cfg: Config, storage: Storage, video: dict[str, Any]) -> dict[str, Any]:
     """Put an `organised` clip back in the queue if its share is indexable again.
 
@@ -156,10 +174,16 @@ def stage_proxy(cfg: Config, storage: Storage, video: dict[str, Any], src_path: 
     # poster), so nothing visible is lost. One network read per file instead of
     # three. Falls back to the original if the proxy is somehow missing.
     derived_src = proxy_path if proxy_path.is_file() and proxy_path.stat().st_size else src_path
-    ffmpeg_tools.build_sprite(derived_src, sprites_dir / f"{video['id']}.jpg", duration_s=duration_s)
+    geometry = ffmpeg_tools.build_sprite(
+        derived_src, sprites_dir / f"{video['id']}.jpg", duration_s=duration_s
+    )
     ffmpeg_tools.build_poster(derived_src, posters_dir / f"{video['id']}.jpg", duration_s=duration_s)
 
-    storage.update_video(video["id"], status="proxied")
+    # Store the sheet's real geometry alongside the status (BROLL-1/BROLL-2,
+    # 2026-08-11). The browser used to re-derive it from the SOURCE dimensions
+    # and a flat model of this function's rules; both were wrong for most of the
+    # archive, and neither is recoverable from the sheet after the fact.
+    storage.update_video(video["id"], status="proxied", **geometry)
 
 
 def _frames_source(cfg: Config, video: dict[str, Any], src_path: Path) -> Path:
@@ -500,6 +524,20 @@ def _process_video(
             sc = cfg.shares.get(current["share"])
             if sc is not None and not getattr(sc, "transcribe", True):
                 continue
+            # `transcribe` has no STAGE_PREREQ_STATUS entry, so it runs whatever
+            # the row's status is — including the 'skipped' stage_probe set two
+            # stages ago for a clip over max_duration_s. That is the exact waste
+            # the cap exists to avoid: a 3-hour A-cam take probed, discarded, and
+            # then transcribed end to end anyway (BROLL-4, 2026-08-11;
+            # parallel_local.py was fixed for this, the serial path was not).
+            # Audio-only 'skipped' clips still transcribe — their speech is the
+            # only index they will ever have.
+            if skipped_for_length(current):
+                logger.info(
+                    "transcribe: video %s skipped (over the duration cap — %s)",
+                    current["id"], current.get("error"),
+                )
+                continue
 
         if stage in ("frames", "claude"):
             share_cfg = cfg.shares.get(current["share"])
@@ -507,11 +545,22 @@ def _process_video(
             # unknown or stubbed share config must fall through to the normal
             # indexed path rather than silently skipping the paid stage.
             if share_cfg is not None and not getattr(share_cfg, "index", True):
-                storage.update_video(current["id"], status=ORGANISED_STATUS)
-                logger.info("share %s is index:false — video %s organised after the "
-                            "proxy; no contact sheets, no model call",
-                            current["share"], current["id"])
-                return
+                if current["status"] != ORGANISED_STATUS:
+                    storage.update_video(current["id"], status=ORGANISED_STATUS)
+                    logger.info("share %s is index:false — video %s organised after the "
+                                "proxy; no contact sheets, no model call",
+                                current["share"], current["id"])
+                    refreshed = storage.get_video(current["id"])
+                    if refreshed is not None:
+                        current = refreshed
+                # `continue`, not `return` (BROLL-5, 2026-08-11): returning here
+                # abandoned the loop at `frames`, which sits BEFORE `transcribe`
+                # in STAGE_ORDER — so `index: false` silently implied
+                # `transcribe: false` however the share was configured, and
+                # `embed` never ran either. The remaining status-gated stages
+                # decline on their own now that the row reads 'organised'
+                # (claude wants 'proxied'), which is what makes this safe.
+                continue
 
         if stage == "embed":
             # No src_path needed (embed only reads/writes already-stored segments and
@@ -542,7 +591,13 @@ def _process_video(
             elif stage == "frames":
                 stage_frames(cfg, storage, current, src_path)
             elif stage == "transcribe":
-                stage_transcribe(cfg, storage, current, src_path)
+                # ingest_only: use an .srt batch_transcribe.py already wrote, or
+                # do nothing. Without it this stage quietly runs Whisper itself
+                # on any share that has never been through the batch job — six
+                # saturated CPU workers ahead of every other stage, measured on
+                # FF4 (BROLL-4, 2026-08-11). parallel_local.py has passed this
+                # since that measurement; the serial path had not.
+                stage_transcribe(cfg, storage, current, src_path, ingest_only=True)
             elif stage == "claude":
                 stage_claude(cfg, storage, current, model, invoke=invoke)
         except Exception as e:  # noqa: BLE001 - a stage failure must never crash the queue

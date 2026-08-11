@@ -1201,6 +1201,58 @@ def test_progress_window_controls_never_raise_without_a_window(monkeypatch):
     assert window.should_stop() and window.cancelled()
 
 
+class _TickRoot:
+    """The three calls ProgressWindow._tick can make on its root."""
+
+    def __init__(self):
+        self.destroyed = False
+        self.quits = 0
+        self.after_calls = 0
+
+    def destroy(self):
+        self.destroyed = True
+
+    def quit(self):
+        self.quits += 1
+
+    def after(self, ms, fn):
+        self.after_calls += 1
+
+
+def test_the_progress_window_ends_itself_with_destroy_not_quit():
+    """UI-2: this window is shown under ui_dispatch.run_dialog, which on
+    darwin parks in `tkwait window`. _tkinter's quit flag is process-global
+    and Tk_WaitWindow never consults it, so quit() left the finished window
+    on screen with the dispatcher's pump parked in the tkwait: every later
+    dialog queued forever, serve()'s mainloop could not return, SIGTERM could
+    not finish (MAC-11 took kill -9). _show's `finally: root.destroy()` is
+    only reached AFTER run_dialog returns, so it never ran."""
+    from ccsync_companion import popup
+
+    window = popup.ProgressWindow("COPYING")
+    window.root = _TickRoot()
+    window._done.set()
+
+    window._tick()
+
+    assert window.root.destroyed is True
+    assert window.root.quits == 0, (
+        "root.quit() does not end run_dialog's tkwait on macOS")
+    assert window.root.after_calls == 0, "a finished tick must not re-arm"
+
+
+def test_the_progress_window_keeps_ticking_until_the_worker_is_done():
+    from ccsync_companion import popup
+
+    window = popup.ProgressWindow("COPYING")
+    window.root = _TickRoot()
+
+    window._tick()
+
+    assert window.root.destroyed is False
+    assert window.root.after_calls == 1
+
+
 # ===========================================================================
 # PopupDialog's Tk-side wiring, with fake widgets (conftest forbids a real
 # Tk window, and this logic is exactly what a live-only test never covers)
@@ -1336,6 +1388,74 @@ def test_results_are_delivered_exactly_once_whichever_path_gets_there_first():
     dialog._tick()
 
     assert len(calls) == 1
+
+
+def test_retry_failed_gets_its_own_batch_delivered(monkeypatch):
+    """UI-1: the exactly-once latch is per BATCH, not per dialog.
+
+    Every other case in this file drives ONE batch, which is exactly how this
+    shipped. `_finished`, latched by the first delivery (MAC-11), was never
+    reset, so RETRY FAILED's worker published a result both delivery routes
+    then refused to read: _fix_done never ran, `_fixing` stayed True, FIX ALL
+    and IGNORE stayed disabled, STOP/SKIP/CANCEL only set flags a finished
+    worker never reads, and the X routed back into _on_cancel_all -- an
+    unclosable window holding app._popup_active_lock (taken across
+    show_popup) for the rest of the session.
+    """
+    import threading
+    import types
+
+    from ccsync_companion import popup
+
+    rows = [_row("a.mov"), _row("b.mov")]
+    dialog = _bare_dialog(rows)
+    dialog._vars = []
+    dialog.canonical_prefix = ""
+
+    # The worker runs inline so both batches are deterministic. The fake root
+    # has no after(), so _safe_after and the 250 ms tick are both no-ops here
+    # and delivery is driven by hand -- the same call the tick would make.
+    class _InlineThread:
+        def __init__(self, target, name=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(popup, "threading",
+                        types.SimpleNamespace(Thread=_InlineThread,
+                                              Lock=threading.Lock))
+
+    batches = []
+    outcomes = {"a.mov": {"ok": True, "message": "ok"},
+                "b.mov": {"ok": False, "message": "still downloading from the cloud"}}
+
+    def fake_perform(batch_rows, selections, local_root, **kw):
+        batches.append([r["file_path"] for r in batch_rows])
+        return [dict(outcomes[r["file_path"]], file_path=r["file_path"])
+                for r in batch_rows]
+
+    monkeypatch.setattr(popup, "perform_fix_all", fake_perform)
+
+    dialog._on_fix_all()
+    dialog._deliver_results()
+
+    assert dialog._fixing is False
+    assert dialog._failed_rows == [rows[1]]
+    assert dialog.root.destroyed is False, "a batch with a failure stays open to retry"
+
+    # ...the cloud file finished downloading, which is the documented reason
+    # RETRY FAILED exists.
+    outcomes["b.mov"] = {"ok": True, "message": "ok"}
+    dialog._on_retry_failed()
+    dialog._deliver_results()
+
+    assert batches == [["a.mov", "b.mov"], ["b.mov"]]
+    assert dialog._fixing is False, (
+        "the second batch was never delivered: no button and no X can close "
+        "this window, and app._popup_active_lock is held for the session")
+    assert dialog._failed_rows == []
+    assert dialog.root.destroyed is True
 
 
 def test_the_x_button_closes_a_window_whose_worker_has_already_finished():

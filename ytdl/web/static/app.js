@@ -115,6 +115,10 @@ const state = {
   termFilter: null,    // job_terms.id, or null for "everything"
   showFiltered: false,
   shots: new Set(),    // ticked shot-type keys; init() fills it
+  collapsed: new Set(),// folded-away panel ids; initPanels() fills it
+  phase: null,         // the last phase this page SAW for the attached job:
+                       // "newly reached ready_for_review" is a transition, not
+                       // a state (see forceExpandReview)
   pollTimer: null,
   pollStart: 0,
   historyOffset: 0,    // how many ledger rows are already on screen
@@ -163,6 +167,10 @@ const fmtTotal = s => {
 };
 
 const fmtDate = d => d ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : '';
+
+// For the panel-header summaries, which are read at a glance: "1 clips" reads
+// as a bug in the count rather than as a count of one.
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 // A stored (forward-slash) relative path as an editor reads it. split/join
 // rather than a replace with a regex literal: a slash-escaping pattern puts a
@@ -450,6 +458,93 @@ function capSummary(n) {
   return CANDIDATE_CAPS.includes(Number(n)) ? `up to ${Number(n)} candidates` : '';
 }
 
+// ------------------------------------------------------ collapsible panels
+// "there should be a way to collapse the search results that are open"
+// (owner, 2026-08-11). A real search lands ~74 cards in the review grid, and
+// everything stacked under it -- Recent searches, the download history -- is
+// then off the bottom of the screen. So every bulky panel collapses, and its
+// HEADER keeps the count: a collapsed panel still says "74 clips · 61
+// selected" or "3/7 downloaded", because collapsing hides bulk, not meaning.
+//
+// `body` is the one element that disappears; anything that must survive a
+// collapse (the phase, the counters, the summary spans) lives in the header
+// beside the toggle. Each toggle is a real <button id="<id>toggle"> in the
+// markup -- keyboard-reachable and announced -- not a div with an onclick.
+const PANELS = [
+  {id: 'review', title: 'REVIEW', body: 'reviewbody'},
+  {id: 'downloads', title: 'DOWNLOADS', body: 'dllist'},
+  {id: 'recent', title: 'RECENT SEARCHES', body: 'recentlist'},
+  {id: 'history', title: 'DOWNLOAD HISTORY', body: 'historybody'},
+];
+// One key holding the collapsed ids, remembered exactly as the shot ticks and
+// the candidate cap are (SHOTS_KEY / CAP_KEY): an editor who folds the history
+// away has folded it away, not folded it away until they next open the page.
+const COLLAPSE_KEY = 'ytdl.collapsed';
+
+function loadCollapsed() {
+  // localStorage throws outright in some privacy modes, and a page that cannot
+  // remember which panels were folded must still show all of them.
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(COLLAPSE_KEY)); }
+  catch { /* unreadable, absent or not JSON: everything starts open */ }
+  if (!Array.isArray(saved)) return [];
+  // Validated against THIS build's panels, in table order: an id a later build
+  // renamed would otherwise sit in the set forever, hiding nothing and coming
+  // back on every save.
+  return PANELS.filter(p => saved.includes(p.id)).map(p => p.id);
+}
+
+function saveCollapsed() {
+  try {
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify(
+      PANELS.filter(p => state.collapsed.has(p.id)).map(p => p.id)));
+  } catch { /* it still applies to this visit, just not the next */ }
+}
+
+// The caret, the announced state and the body, all from the one Set -- so the
+// markup's own [-] is never more than the pre-JS fallback.
+function applyPanel(p) {
+  const on = state.collapsed.has(p.id);
+  $('#' + p.body).classList.toggle('hidden', on);
+  const btn = $('#' + p.id + 'toggle');
+  btn.textContent = (on ? '[+] ' : '[-] ') + p.title;
+  btn.setAttribute('aria-expanded', on ? 'false' : 'true');
+}
+
+function togglePanel(id) {
+  const p = PANELS.find(x => x.id === id);
+  if (!p) return;
+  if (!state.collapsed.delete(id)) state.collapsed.add(id);
+  saveCollapsed();
+  applyPanel(p);
+}
+
+// The one exception to "a collapse is the editor's". A job that has just
+// ARRIVED at ready_for_review has clips waiting to be picked, and a review
+// panel folded away an hour ago would make the new search look like it did
+// nothing -- which is exactly the "nothing is visible for review" this page
+// caused once already (2026-08-11). The stored state goes with it, so the
+// panel does not silently re-collapse on the next visit.
+//
+// Deliberately driven by the phase TRANSITION and not by the phase (poll()
+// keeps `state.phase`): attaching to a job that was already at
+// ready_for_review -- a deep link, a 409 re-attach, a reload -- has not newly
+// reached anything, so a collapse the editor made after this stays made.
+function forceExpandReview() {
+  if (!state.collapsed.has('review')) return;
+  state.collapsed.delete('review');
+  saveCollapsed();
+  applyPanel(PANELS.find(p => p.id === 'review'));
+}
+
+function initPanels() {
+  state.collapsed = new Set(loadCollapsed());
+  PANELS.forEach(p => {
+    $('#' + p.id + 'toggle').onclick = () => togglePanel(p.id);
+    applyPanel(p);
+  });
+}
+
 // ---------------------------------------------------------------- polling
 function stopPolling() {
   if (state.pollTimer) clearTimeout(state.pollTimer);
@@ -475,6 +570,7 @@ async function attach(jobId) {
   state.jobId = jobId;
   state.manifest = null;              // job A's videos must not render as B's
   state.termFilter = null;
+  state.phase = null;                 // job B's phases are not job A's
   setBanner('job', null);
   state.pollStart = Date.now();
   location.hash = `job=${jobId}`;     // a refresh re-attaches to the same job
@@ -497,6 +593,15 @@ async function poll() {
   }
   if (stale(id, token)) return;
   const job = r.job;
+  // A job that has just ARRIVED at review must be shown even if the panel was
+  // folded away -- and only on the arrival, so a collapse made afterwards
+  // stands (see forceExpandReview). Read before anything awaits again, since
+  // the manifest fetch below is where a second tick could overtake it.
+  const seen = state.phase;
+  state.phase = job.phase;
+  if (job.phase === 'ready_for_review' && seen && seen !== 'ready_for_review') {
+    forceExpandReview();
+  }
   if (job.phase === 'downloading') {
     // The per-video dl_state/dl_error live in the manifest and the in-flight
     // percentages in r.progress; the download list below needs both. The
@@ -549,6 +654,7 @@ function detach() {
   state.attachToken++;                // orphan any poll response still in flight
   state.jobId = null;
   state.manifest = null;
+  state.phase = null;
   setBanner('job', null);
   location.hash = '';
   $('#progress').classList.add('hidden');
@@ -780,6 +886,11 @@ function renderGrid() {
   // destination is the Projects pool that ops watches.
   $('#gridfoot').textContent =
     `${sel.length} selected · ${fmtTotal(secs)} of footage · into ${m.job.project_label}\\Youtube\\${m.job.term_dir}`;
+  // The same two numbers in the panel HEADER, which survives a collapse: what
+  // is in there and how much of it is picked is the whole reason to unfold it
+  // again (2026-08-11).
+  $('#reviewsum').textContent =
+    `${plural(vis.length, 'clip', 'clips')} · ${sel.length} selected`;
   $('#download').textContent = `DOWNLOAD ${sel.length}`;
   $('#download').disabled = !sel.length || m.job.phase !== 'ready_for_review';
 }
@@ -1002,6 +1113,10 @@ async function loadRecent() {
   } catch { return; }
   const box = $('#recentlist');
   box.innerHTML = '';
+  // In the header, so a folded-away panel still says whether there is anything
+  // in it.
+  $('#recentsum').textContent =
+    r.jobs.length ? plural(r.jobs.length, 'search', 'searches') : 'nothing yet';
   if (!r.jobs.length) { box.textContent = 'nothing yet'; return; }
   r.jobs.forEach(j => {
     const row = el('div', 'recentrow');
@@ -1047,6 +1162,9 @@ async function loadHistory(more) {
   // the search above it.
   const items = (r && r.downloads) || [];
   if (!more) { box.innerHTML = ''; state.historyOffset = 0; }
+  // The ledger's own size, in the panel HEADER rather than in the list: it is
+  // the one number that has to survive this panel being folded away.
+  $('#historysum').textContent = r.total ? plural(r.total, 'clip', 'clips') : 'nothing yet';
   if (!items.length && !state.historyOffset) {
     box.textContent = 'nothing downloaded yet';
     $('#historymore').classList.add('hidden');
@@ -1190,6 +1308,9 @@ async function init() {
   state.shots = new Set(loadShots());
   renderShots();
   renderCaps();
+  // Also before anything is awaited: a panel this editor folded away must not
+  // flash open for the length of a fetch on every visit.
+  initPanels();
   $('#go').onclick = runSearch;
   $('#q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
   $('#golinks').onclick = runUrls;

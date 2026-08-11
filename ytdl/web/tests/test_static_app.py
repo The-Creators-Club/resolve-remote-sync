@@ -63,8 +63,13 @@ class N {
   constructor(tag) {
     this.tagName = tag; this.children = []; this.className = '';
     this._text = ''; this.style = {}; this.disabled = false; this.value = '';
-    this.onclick = null; this._listeners = {};
+    this.onclick = null; this._listeners = {}; this.attrs = {};
   }
+  // Only the collapsible panel headers use these (aria-expanded), and they are
+  // half of what makes a header a CONTROL rather than a div: a scenario has to
+  // be able to read what a screen reader would be told.
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   get classList() {
     const self = this;
     const parts = () => self.className.split(' ').filter(Boolean);
@@ -1134,6 +1139,199 @@ scenarios['a_missing_active_route_falls_back_to_the_hash'] = async () => {
   return {job_id: h.app.state.jobId, hash: h.ctx.location.hash};
 };
 
+// ---- the collapsible panels ---------------------------------------------
+// "there should be a way to collapse the search results that are open"
+// (owner, 2026-08-11). A real search lands ~74 cards in the review grid and
+// everything stacked under it -- Recent searches, the download history -- is
+// off the bottom of the screen. Every bulky panel folds to its HEADER, and the
+// header keeps the count: folding must hide bulk, not meaning.
+
+const PANEL_BODY = {review: 'reviewbody', downloads: 'dllist',
+                    recent: 'recentlist', history: 'historybody'};
+
+const panelState = h => {
+  const out = {};
+  for (const id of Object.keys(PANEL_BODY)) {
+    out[id] = {folded: h.get(PANEL_BODY[id]).hidden,
+               label: h.get(id + 'toggle').textContent,
+               aria: h.get(id + 'toggle').getAttribute('aria-expanded')};
+  }
+  return out;
+};
+
+// A page with something in every panel: one ready_for_review job of three
+// clips, a recent list, and a ledger page out of a 7-clip history.
+const REVIEW_JOB = JOB({id: 81, phase: 'ready_for_review'});
+const REVIEW_MANIFEST = MANIFEST({
+  job: REVIEW_JOB,
+  videos: [VIDEO('AAAAAAAAAA1', {selected: 1}), VIDEO('AAAAAAAAAA2', {selected: 1}),
+           VIDEO('AAAAAAAAAA3')],
+  terms: [{id: 1, term: 'reef', lang: 'en', english_gloss: null, source: 'user',
+           hits: 3, videos: 3}],
+  counts: {relevant: 3, duplicates: 0, irrelevant: 0},
+});
+
+const fullPage = (seed, hash) => boot(async (method, url) => {
+  if (url.startsWith('api/jobs?')) {
+    return {json: {jobs: [{id: 81, kind: 'search', term: 'reef',
+                           project_label: '2026/FF5/Energy',
+                           phase: 'ready_for_review', shot_types: [],
+                           created_at: '2026-08-11T09:00:00'}]}};
+  }
+  if (url.startsWith('api/downloads')) {
+    return {json: {downloads: [DL('BBBBBBBBBB1'), DL('BBBBBBBBBB2')], total: 7,
+                   limit: 24, offset: 0, has_more: false}};
+  }
+  const b = baseline(method, url); if (b) return b;
+  if (url === 'api/jobs/81') return {json: POLLRES(REVIEW_JOB)};
+  if (url.startsWith('api/jobs/81/manifest')) return {json: REVIEW_MANIFEST};
+  return {json: {}};
+}, seed, hash);
+
+scenarios['every_stacked_panel_folds_to_its_header'] = async () => {
+  const h = await fullPage();
+  await h.app.attach(81);
+  await flush();
+  const open = panelState(h);
+  const filled = {review: h.get('reviewsum').textContent,
+                  recent: h.get('recentsum').textContent,
+                  history: h.get('historysum').textContent,
+                  cards: h.get('grid').byClass('card').length,
+                  rows: h.get('recentlist').byClass('recentrow').length,
+                  ledger: h.get('historylist').byClass('histrow').length};
+  Object.keys(PANEL_BODY).forEach(id => h.get(id + 'toggle').onclick());
+  const folded = panelState(h);
+  const summaries = {review: h.get('reviewsum').textContent,
+                     recent: h.get('recentsum').textContent,
+                     history: h.get('historysum').textContent};
+  h.get('reviewtoggle').onclick();          // and open again
+  return {open, filled, folded, summaries, stored: h.store['ytdl.collapsed'],
+          reopened: panelState(h).review,
+          // folding the BODY must not undo loadManifest's un-hiding of the
+          // section itself -- the header is the thing left to click
+          review_section_hidden: h.get('review').hidden};
+};
+
+// The downloads panel folds its LIST only: the phase, the counter, [ CANCEL ]
+// and the bar are the job talking, and a job in flight must not go quiet
+// because its list of rows was put away.
+scenarios['a_folded_download_list_still_shows_the_job'] = async () => {
+  const vids = [VIDEO('CCCCCCCCCC1', {dl_state: 'done', selected: 1}),
+                VIDEO('CCCCCCCCCC2', {dl_state: 'downloading', selected: 1})];
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/82') {
+      return {json: POLLRES(JOB({id: 82, phase: 'downloading', dl_total: 7, dl_done: 3}),
+                            {progress: {CCCCCCCCCC2: {percent: 50, speed: '2.0MiB/s',
+                                                      status: 'downloading'}}})};
+    }
+    if (url.startsWith('api/jobs/82/manifest')) return {json: MANIFEST({videos: vids})};
+    return {json: {}};
+  });
+  await h.app.attach(82);
+  await flush();
+  const rows = h.get('dllist').byClass('dlrow').length;
+  h.get('downloadstoggle').onclick();
+  const folded = {list: h.get('dllist').hidden,
+                  panel: h.get('downloads').hidden,
+                  phase: h.get('dlphase').textContent,
+                  ticker: h.get('dlticker').textContent,
+                  cancel_hidden: h.get('cancel2').hidden,
+                  width: h.get('dlfill').style.width,
+                  label: h.get('downloadstoggle').textContent};
+  await h.timers.fire();                    // a live tick must not unfold it
+  return {rows, folded, after_a_tick: h.get('dllist').hidden,
+          ticker_after: h.get('dlticker').textContent};
+};
+
+scenarios['folded_panels_come_back_from_localstorage'] = async () => {
+  const h = await fullPage({'ytdl.collapsed': JSON.stringify(['recent', 'history'])});
+  const start = panelState(h);
+  h.get('recenttoggle').onclick();          // open one
+  h.get('reviewtoggle').onclick();          // fold another
+  return {start, stored: h.store['ytdl.collapsed'], after: panelState(h)};
+};
+
+// A key this build no longer has (or junk, or the wrong shape) must not fold
+// nothing forever, and must not stop the page: the same contract loadShots()
+// and loadCap() have.
+scenarios['a_stale_collapsed_key_is_ignored'] = async () => {
+  const h = await fullPage({'ytdl.collapsed': JSON.stringify(['klingon', 'history'])});
+  const unknown = panelState(h);
+  h.get('recenttoggle').onclick();          // the rewrite drops what it never knew
+  const junk = await fullPage({'ytdl.collapsed': 'not json at all'});
+  const shaped = await fullPage({'ytdl.collapsed': JSON.stringify({review: true})});
+  return {unknown, rewritten: h.store['ytdl.collapsed'],
+          junk: panelState(junk), shaped: panelState(shaped),
+          junk_cards: junk.get('historylist').byClass('histrow').length};
+};
+
+// The one behavioural exception: a job that has just ARRIVED at review unfolds
+// the panel and clears its stored fold, or an editor who folded the grid runs a
+// new search and sees nothing happen -- the "nothing is visible for review"
+// confusion this page already caused once (2026-08-11).
+scenarios['a_job_arriving_at_review_unfolds_the_panel'] = async () => {
+  let polls = 0;
+  const job = JOB({id: 83, phase: 'ready_for_review'});
+  const manifest = MANIFEST({
+    job, videos: [VIDEO('DDDDDDDDDD1', {selected: 1})],
+    terms: [{id: 1, term: 'reef', lang: 'en', english_gloss: null, source: 'user',
+             hits: 1, videos: 1}],
+    counts: {relevant: 1, duplicates: 0, irrelevant: 0},
+  });
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/83') {
+      polls++;
+      return {json: POLLRES(polls === 1 ? JOB({id: 83, phase: 'searching'}) : job)};
+    }
+    if (url.startsWith('api/jobs/83/manifest')) return {json: manifest};
+    return {json: {}};
+  }, {'ytdl.collapsed': JSON.stringify(['review', 'recent'])});
+  const before = panelState(h);
+  await h.app.attach(83);                   // tick 1: still searching
+  await flush();
+  const searching = h.get('reviewbody').hidden;
+  await h.timers.fire();                    // tick 2: ready for review
+  const arrived = {folded: h.get('reviewbody').hidden,
+                   stored: h.store['ytdl.collapsed'],
+                   label: h.get('reviewtoggle').textContent,
+                   aria: h.get('reviewtoggle').getAttribute('aria-expanded'),
+                   sum: h.get('reviewsum').textContent,
+                   cards: h.get('grid').byClass('card').length,
+                   // only the review panel: the others are the editor's
+                   recent_folded: h.get('recentlist').hidden};
+  // ...and a fold made AFTER the arrival sticks. Seeing the SAME phase again is
+  // not a new arrival, so even a re-poll leaves it folded.
+  h.get('reviewtoggle').onclick();
+  const manual = {folded: h.get('reviewbody').hidden,
+                  stored: h.store['ytdl.collapsed']};
+  await h.app.poll();
+  await flush();
+  return {before, searching, arrived, manual, polls,
+          after_another_poll: h.get('reviewbody').hidden,
+          stored_at_the_end: h.store['ytdl.collapsed']};
+};
+
+// The other half of "newly reaches": a job that was ALREADY at review when the
+// page attached to it -- a deep link, a 409 re-attach, a reload -- has not
+// arrived anywhere, so the editor's fold stands. The grid is still BUILT
+// underneath it, so opening it is one click and no fetch.
+scenarios['attaching_to_an_old_review_respects_the_fold'] = async () => {
+  const h = await fullPage({'ytdl.collapsed': JSON.stringify(['review'])});
+  await h.app.attach(81);
+  await flush();
+  const folded = {body: h.get('reviewbody').hidden,
+                  section: h.get('review').hidden,
+                  stored: h.store['ytdl.collapsed'],
+                  sum: h.get('reviewsum').textContent,
+                  label: h.get('reviewtoggle').textContent,
+                  cards: h.get('grid').byClass('card').length};
+  h.get('reviewtoggle').onclick();
+  return {folded, after_unfold: h.get('reviewbody').hidden,
+          stored_after: h.store['ytdl.collapsed']};
+};
+
 // ---- run them -----------------------------------------------------------
 (async () => {
   const out = {};
@@ -1592,6 +1790,147 @@ def test_a_server_without_the_active_route_still_honours_the_hash(spa):
     assert r['job_id'] == 4, r
 
 
+# ------------------------------------------------------ the collapsible panels
+# "there should be a way to collapse the search results that are open" (owner,
+# 2026-08-11). ~74 review cards own the page and push Recent searches and the
+# download history off the bottom of it.
+
+PANELS = ('review', 'downloads', 'recent', 'history')
+
+
+def test_every_stacked_panel_folds_away_and_comes_back(spa):
+    r = spa['every_stacked_panel_folds_to_its_header']
+    # everything open to begin with, and every header says so both ways
+    for pid in PANELS:
+        assert r['open'][pid]['folded'] is False, (pid, r['open'])
+        assert r['open'][pid]['label'].startswith('[-] '), r['open'][pid]
+        assert r['open'][pid]['aria'] == 'true', r['open'][pid]
+    # ...with something in each of them to fold
+    assert r['filled']['cards'] == 3 and r['filled']['rows'] == 1, r['filled']
+    assert r['filled']['ledger'] == 2, r['filled']
+
+    for pid in PANELS:
+        assert r['folded'][pid]['folded'] is True, (pid, r['folded'])
+        assert r['folded'][pid]['label'].startswith('[+] '), r['folded'][pid]
+        assert r['folded'][pid]['aria'] == 'false', r['folded'][pid]
+    # the title stays in the header: a folded panel still names itself
+    assert r['folded']['review']['label'] == '[+] REVIEW', r['folded']['review']
+    assert r['folded']['history']['label'] == '[+] DOWNLOAD HISTORY', r['folded']
+
+    assert r['reopened']['folded'] is False, r['reopened']
+    assert r['reopened']['aria'] == 'true', r['reopened']
+    # and the section is only ever the header + the body, never re-hidden whole
+    assert r['review_section_hidden'] is False, r
+
+
+def test_a_folded_panel_still_says_what_is_in_it(spa):
+    """The point of the whole feature: folding hides bulk, not meaning. A
+    header that reads "[+] REVIEW" and nothing else is a search result the
+    editor has to unfold to find out they already looked at."""
+    r = spa['every_stacked_panel_folds_to_its_header']
+    assert r['filled']['review'] == '3 clips · 2 selected', r['filled']
+    assert r['filled']['recent'] == '1 search', r['filled']
+    assert r['filled']['history'] == '7 clips', r['filled']
+    # ...and every one of them survives the fold unchanged
+    assert r['summaries'] == {'review': '3 clips · 2 selected',
+                              'recent': '1 search',
+                              'history': '7 clips'}, r['summaries']
+
+
+def test_a_folded_download_list_still_reports_the_running_job(spa):
+    """The downloads panel folds its LIST only. The phase, the counter, the bar
+    and [ CANCEL ] are the job talking -- a download in flight must not go
+    quiet because its rows were put away."""
+    r = spa['a_folded_download_list_still_shows_the_job']
+    assert r['rows'] == 2, r
+    f = r['folded']
+    assert f['list'] is True and f['panel'] is False, f
+    assert f['phase'] == 'downloading', f
+    assert f['ticker'].startswith('3/7 downloaded'), f
+    assert f['cancel_hidden'] is False, 'no way to cancel a folded download'
+    assert f['width'] == '50%', f          # (3 done + 0.5 in flight) of 7
+    assert f['label'] == '[+] DOWNLOADS', f
+    # the next poll tick re-renders the list; it must not unfold it
+    assert r['after_a_tick'] is True, 'a poll tick reopened the folded list'
+    assert r['ticker_after'].startswith('3/7 downloaded'), r
+
+
+def test_the_folds_are_remembered_between_visits(spa):
+    """Exactly as the shot ticks and the candidate cap are: one key holding the
+    ids that are folded."""
+    r = spa['folded_panels_come_back_from_localstorage']
+    assert r['start']['recent']['folded'] is True, r['start']
+    assert r['start']['history']['folded'] is True, r['start']
+    assert r['start']['review']['folded'] is False, r['start']
+    assert r['start']['recent']['label'] == '[+] RECENT SEARCHES', r['start']
+    # written back in table order, whatever order they were clicked in
+    assert json.loads(r['stored']) == ['review', 'history'], r['stored']
+    assert r['after']['recent']['folded'] is False, r['after']
+    assert r['after']['review']['folded'] is True, r['after']
+
+
+def test_a_stale_or_junk_collapsed_key_is_ignored(spa):
+    """localStorage throws outright in some privacy modes and outlives every
+    build: an id this one no longer has must be dropped, not kept folding
+    nothing."""
+    r = spa['a_stale_collapsed_key_is_ignored']
+    assert r['unknown']['history']['folded'] is True, r['unknown']
+    assert r['unknown']['review']['folded'] is False, r['unknown']
+    # 'klingon' is gone from the rewrite rather than carried forever
+    assert json.loads(r['rewritten']) == ['recent', 'history'], r['rewritten']
+    # junk and the wrong shape both mean "everything open", and neither costs
+    # the page: the history behind it still loaded
+    for pid in PANELS:
+        assert r['junk'][pid]['folded'] is False, (pid, r['junk'])
+        assert r['shaped'][pid]['folded'] is False, (pid, r['shaped'])
+    assert r['junk_cards'] == 2, r['junk_cards']
+
+
+def test_a_job_arriving_at_review_opens_a_folded_review_panel(spa):
+    """The one behavioural exception. Otherwise an editor folds the grid, runs
+    a new search, and watches nothing happen -- which is exactly the "nothing
+    is visible for review" this page caused once already (2026-08-11)."""
+    r = spa['a_job_arriving_at_review_unfolds_the_panel']
+    assert r['before']['review']['folded'] is True, r['before']
+    assert r['searching'] is True, 'unfolded before there was anything to review'
+    assert r['polls'] >= 2, r['polls']
+    a = r['arrived']
+    assert a['folded'] is False, 'the review arrived into a folded panel'
+    assert a['aria'] == 'true' and a['label'] == '[-] REVIEW', a
+    assert a['cards'] == 1 and a['sum'] == '1 clip · 1 selected', a
+    # the stored fold goes with it, or the panel re-folds itself next visit
+    assert json.loads(a['stored']) == ['recent'], a['stored']
+    # and only the review panel: the others are the editor's
+    assert a['recent_folded'] is True, a
+
+
+def test_a_fold_made_after_the_review_arrived_sticks(spa):
+    """The force-open is driven by the phase TRANSITION, not by the phase, so
+    a re-render (or a re-poll) of the same ready_for_review job cannot keep
+    re-opening a panel the editor has just put away."""
+    r = spa['a_job_arriving_at_review_unfolds_the_panel']
+    assert r['manual']['folded'] is True, r['manual']
+    assert json.loads(r['manual']['stored']) == ['review', 'recent'], r['manual']
+    assert r['after_another_poll'] is True, 'a re-poll reopened the folded grid'
+    assert json.loads(r['stored_at_the_end']) == ['review', 'recent'], r
+
+
+def test_attaching_to_a_job_already_at_review_leaves_the_fold_alone(spa):
+    """"Newly reaches" is the rule: a deep link, a 409 re-attach or a reload of
+    a job that was already waiting has not arrived anywhere. The grid is built
+    under the fold either way, so opening it is one click and no fetch."""
+    r = spa['attaching_to_an_old_review_respects_the_fold']
+    f = r['folded']
+    assert f['body'] is True, 'a reload undid the editor\'s fold'
+    assert f['section'] is False, 'the header went with the grid'
+    assert json.loads(f['stored']) == ['review'], f['stored']
+    assert f['sum'] == '3 clips · 2 selected', f    # still says what is in there
+    assert f['label'] == '[+] REVIEW', f
+    assert f['cards'] == 3, 'the grid was not built under the fold'
+    assert r['after_unfold'] is False, r
+    assert json.loads(r['stored_after']) == [], r['stored_after']
+
+
 # --------------------------------------------------- source-level assertions
 # These run with or without node: they are the cheap backstop for the shapes
 # the harness proves, so a rewrite that reintroduces one is caught even on a
@@ -1863,6 +2202,84 @@ def test_the_page_prefers_the_active_job_over_the_hash_in_source():
     assert '(active && active.id) || (m ? Number(m[1]) : null)' in body, body
     # an old server without the route must not stop the hash working
     assert 'catch' in body, body
+
+
+def test_every_panel_header_is_a_real_button_not_a_div_with_an_onclick():
+    """Keyboard-reachable and announced, for free: a <button> takes tab focus
+    and fires on space/enter with no key handling of this app's own, and
+    aria-expanded/aria-controls tell a screen reader what the click does."""
+    html = _html()
+    for pid, title in (('review', 'REVIEW'), ('downloads', 'DOWNLOADS'),
+                       ('recent', 'RECENT SEARCHES'),
+                       ('history', 'DOWNLOAD HISTORY')):
+        m = re.search(r'<button id="%stoggle"[^>]*>\[-\] %s</button>' % (pid, title),
+                      html, re.S)
+        assert m, f'{pid}: no <button> header'
+        tag = m.group(0)
+        assert 'type="button"' in tag, tag       # inside no form, but never a submit
+        assert 'class="ptoggle"' in tag, tag
+        assert 'aria-expanded="true"' in tag, tag
+        body = re.search(r'aria-controls="([^"]+)"', tag)
+        assert body, tag
+        # the thing it claims to control has to exist
+        assert f'id="{body.group(1)}"' in html, body.group(1)
+    # ...and nothing else in the page pretends to be a control
+    assert 'panelhead" onclick' not in html and '<div class="ptoggle"' not in html
+
+
+def test_the_folded_panels_are_remembered_exactly_like_every_other_choice():
+    """Same shape as SHOTS_KEY/CAP_KEY: one key, guarded both directions,
+    validated against THIS build's list on the way in and on the way out."""
+    js = _js()
+    assert "const COLLAPSE_KEY = 'ytdl.collapsed'" in js
+    body = js[js.index('function loadCollapsed()'):js.index('function applyPanel(')]
+    assert body.count('try {') >= 2 and body.count('catch') >= 2, body
+    assert 'Array.isArray(saved)' in body, body
+    # an id this build does not have is dropped, in both directions
+    assert body.count('PANELS.filter(') == 2, body
+
+
+def test_the_panel_header_carries_the_caret_and_the_announced_state():
+    js = _js()
+    body = js[js.index('function applyPanel('):js.index('function togglePanel(')]
+    assert "'[+] '" in body and "'[-] '" in body, body
+    assert "setAttribute('aria-expanded'" in body, body
+    assert 'classList.toggle(' in body, body
+
+
+def test_the_review_panel_is_forced_open_only_when_a_job_ARRIVES_at_review():
+    """The transition, not the phase: a re-render of the same job must not keep
+    re-opening a panel the editor folded, and a job that was already waiting
+    when the page attached has not newly reached anything."""
+    js = _js()
+    body = js[js.index('async function poll()'):js.index('function detach()')]
+    assert 'forceExpandReview()' in body, body
+    assert "seen && seen !== 'ready_for_review'" in body, body
+    # the phase this page last SAW is per attachment, or job B would inherit A's
+    attached = js[js.index('async function attach('):js.index('async function poll()')]
+    assert 'state.phase = null' in attached, attached
+    detached = js[js.index('function detach()'):js.index('function renderProgress(')]
+    assert 'state.phase = null' in detached, detached
+    # the stored fold is cleared with it, or the panel re-folds next visit
+    force = js[js.index('function forceExpandReview()'):js.index('function initPanels()')]
+    assert 'saveCollapsed()' in force and "state.collapsed.delete('review')" in force
+
+
+def test_a_folded_panel_header_still_carries_the_count():
+    """The summary spans live in the HEADER, outside the body that disappears
+    -- that is the whole difference between folding bulk away and hiding the
+    answer."""
+    js, html = _js(), _html()
+    for sid, body in (('reviewsum', 'reviewbody'), ('recentsum', 'recentlist'),
+                      ('historysum', 'historybody')):
+        assert f'id="{sid}"' in html, sid
+        assert html.index(f'id="{sid}"') < html.index(f'id="{body}"'), sid
+        assert f"$('#{sid}')" in js, sid
+    # the downloads panel's summary is the phase and counter it already had
+    start = html.index('<div class="prow panelhead">')
+    head = html[start:html.index('<div class="bar">', start)]
+    assert 'id="dlphase"' in head and 'id="dlticker"' in head, head
+    assert 'id="cancel2"' in head, head
 
 
 def test_localstorage_is_never_allowed_to_break_the_page():

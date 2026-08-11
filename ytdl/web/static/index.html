@@ -105,33 +105,53 @@
   </section>
 
   <!-- the manifest: terms searched (REQ 5) + the review grid (REQ 4) -->
+  <!-- Every stacked panel below collapses to its header (owner, 2026-08-11:
+       "there should be a way to collapse the search results that are open").
+       This one is why: a real search lands ~74 cards in the grid, and
+       everything under it -- Recent searches, the download history -- goes off
+       the bottom of the screen. The header is a real <button> so it is
+       keyboard-reachable, it carries [-]/[+] rather than an icon font, and it
+       keeps the COUNT: collapsed still reads "74 clips · 61 selected", because
+       collapsing must hide bulk and not meaning. app.js owns the state
+       (PANELS/COLLAPSE_KEY); the markup below is the pre-JS fallback. -->
   <section id="review" class="hidden">
-    <div class="panel">
-      <h2>Terms searched</h2>
-      <div id="termchips" class="chips"></div>
-      <div class="muted termhint">Chinese terms show a literal English gloss. Click a term to show only what it found.</div>
-      <!-- Which boxes were ticked when this search was submitted. A manifest
-           can sit here for a week, and "why is there no interview in this"
-           has to be answerable from the page. -->
-      <div id="jobshots" class="muted termhint"></div>
+    <div class="panelhead">
+      <button id="reviewtoggle" class="ptoggle" type="button"
+              aria-expanded="true" aria-controls="reviewbody">[-] REVIEW</button>
+      <span id="reviewsum" class="psum muted"></span>
     </div>
+    <div id="reviewbody">
+      <div class="panel">
+        <h2>Terms searched</h2>
+        <div id="termchips" class="chips"></div>
+        <div class="muted termhint">Chinese terms show a literal English gloss. Click a term to show only what it found.</div>
+        <!-- Which boxes were ticked when this search was submitted. A manifest
+             can sit here for a week, and "why is there no interview in this"
+             has to be answerable from the page. -->
+        <div id="jobshots" class="muted termhint"></div>
+      </div>
 
-    <div class="resulthead">
-      <span id="counts"></span>
-      <button id="showfiltered" class="text-btn hidden">[ SHOW FILTERED OUT ]</button>
-      <span class="grow"></span>
-      <button id="selall" class="text-btn">[ SELECT ALL ]</button>
-      <button id="selnone" class="text-btn">[ SELECT NONE ]</button>
-      <button id="download" class="primary-btn">DOWNLOAD</button>
+      <div class="resulthead">
+        <span id="counts"></span>
+        <button id="showfiltered" class="text-btn hidden">[ SHOW FILTERED OUT ]</button>
+        <span class="grow"></span>
+        <button id="selall" class="text-btn">[ SELECT ALL ]</button>
+        <button id="selnone" class="text-btn">[ SELECT NONE ]</button>
+        <button id="download" class="primary-btn">DOWNLOAD</button>
+      </div>
+
+      <div id="grid" class="grid"></div>
+      <div id="gridfoot" class="gridfoot muted"></div>
     </div>
-
-    <div id="grid" class="grid"></div>
-    <div id="gridfoot" class="gridfoot muted"></div>
   </section>
 
   <!-- downloads in flight -->
+  <!-- Only the LIST collapses here: the phase, the counter and [ CANCEL ] are
+       the job talking, and the bar under them is two pixels of it. -->
   <section id="downloads" class="panel hidden">
-    <div class="prow">
+    <div class="prow panelhead">
+      <button id="downloadstoggle" class="ptoggle" type="button"
+              aria-expanded="true" aria-controls="dllist">[-] DOWNLOADS</button>
       <span id="dlphase" class="phase"></span>
       <span id="dlticker" class="muted"></span>
       <button id="cancel2" class="text-btn">[ CANCEL ]</button>
@@ -141,7 +161,11 @@
   </section>
 
   <section id="recent" class="panel">
-    <h2>Recent searches</h2>
+    <div class="panelhead">
+      <button id="recenttoggle" class="ptoggle" type="button"
+              aria-expanded="true" aria-controls="recentlist">[-] RECENT SEARCHES</button>
+      <span id="recentsum" class="psum muted"></span>
+    </div>
     <div id="recentlist" class="recentlist muted"></div>
   </section>
 
@@ -152,11 +176,19 @@
        loopback server; a browser cannot open a local folder from an http page,
        and the page (served from the NAS) must not know where P: is. -->
   <section id="history" class="panel">
-    <h2>Download history</h2>
-    <div id="historylist" class="historylist muted"></div>
-    <div class="historyfoot">
-      <button id="historymore" class="text-btn hidden">[ OLDER ]</button>
-      <span id="historynote" class="muted"></span>
+    <div class="panelhead">
+      <button id="historytoggle" class="ptoggle" type="button"
+              aria-expanded="true" aria-controls="historybody">[-] DOWNLOAD HISTORY</button>
+      <!-- The ledger's own size, in the header: collapsed, this panel still
+           says how many clips the fleet has. -->
+      <span id="historysum" class="psum muted"></span>
+    </div>
+    <div id="historybody">
+      <div id="historylist" class="historylist muted"></div>
+      <div class="historyfoot">
+        <button id="historymore" class="text-btn hidden">[ OLDER ]</button>
+        <span id="historynote" class="muted"></span>
+      </div>
     </div>
   </section>
 

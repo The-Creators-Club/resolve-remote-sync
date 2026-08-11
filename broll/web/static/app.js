@@ -1347,6 +1347,20 @@ function renderInOutRange() {
   const duration = state.detail
     ? $("#player").duration || state.detail.video.duration_s || 0
     : 0;
+
+  // Each flag drops the moment ITS key lands — the shaded range still needs
+  // both ends, but "did my I register?" must be answerable immediately.
+  const place = (el, seconds) => {
+    if (seconds == null || !duration) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "block";
+    el.style.left = `${Math.min(100, (seconds / duration) * 100)}%`;
+  };
+  place($("#seekbar-in"), state.inPoint);
+  place($("#seekbar-out"), state.outPoint);
+
   if (state.inPoint == null || state.outPoint == null || !duration) {
     rangeEl.style.display = "none";
     return;

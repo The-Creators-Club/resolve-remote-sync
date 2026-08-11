@@ -486,6 +486,36 @@ a.brand:hover { color: var(--red-hot); }
   background: var(--green);
   opacity: 0.85;
 }
+/* In/out flags. Each drops the moment its key (I/O) is pressed, and sits
+   ABOVE the white playhead: the point is set AT the playhead, so at the one
+   moment the editor is looking for confirmation the two lines coincide --
+   layered underneath, the red line was invisible exactly then (2026-08-12).
+   The little top flag points into the selected range (in -> right,
+   out -> left), the NLE convention. */
+.seekbar-inout {
+  position: absolute;
+  top: -3px; bottom: -3px;
+  width: 3px;
+  margin-left: -1px;
+  background: var(--red);
+  z-index: 3;
+  display: none;
+  pointer-events: none;
+}
+.seekbar-in::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 3px;
+  border-top: 7px solid var(--red);
+  border-right: 7px solid transparent;
+}
+.seekbar-out::after {
+  content: "";
+  position: absolute;
+  top: 0; right: 3px;
+  border-top: 7px solid var(--red);
+  border-left: 7px solid transparent;
+}
 .seekbar-playhead {
   position: absolute;
   top: -2px; bottom: -2px;

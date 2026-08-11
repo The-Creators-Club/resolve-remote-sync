@@ -31,8 +31,10 @@ log = logging.getLogger("ccsync.config")
 # 0.7.0: the 2026-08-11 fix pass -- all 82 KNOWN_BUGS findings (both popup
 # wedges, lane B stopped in managed mode, credentials off argv via
 # WNetAddConnection2W, own-proxy audio -map, 8899 hardening, BPG gating) plus
-# the ignoreDelete delete-protection retrofit and the /music/send endpoints
-# reaching editors for the first time. See docs/bug-hunt-2026-08-11.md.
+# the ignoreDelete delete-protection retrofit, the /music/send endpoints
+# reaching editors for the first time, and the parallel proxy generator
+# (maxed-out while idle, demoted to one worker while Resolve runs;
+# `proxy_gen_workers` overrides). See docs/bug-hunt-2026-08-11.md.
 VERSION = "0.7.0"
 
 CONFIG_DIR = Path.home() / ".ccsync"

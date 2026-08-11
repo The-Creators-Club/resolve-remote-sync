@@ -33,6 +33,17 @@ block_reason() are lock-guarded reads of cached dicts and do NO I/O -- the
 tray snapshot calls them on its refresh thread, and a getter that touched the
 filesystem there is how the right-click freeze of 2026-07-26 happened.
 
+The drain itself is PARALLEL as of 2026-08-11 (owner-approved policy: "maxed
+out while the machine is idle, demote when Resolve is using the machine").
+Rule 1 above is what makes that safe -- an unforced encode only ever runs on a
+machine nobody is sitting at, so there is no one for four ffmpegs to slow
+down -- and the one case that does deserve protection, an UNATTENDED RESOLVE
+RENDER, is handled by demoting to a single encode for as long as Resolve is
+running. N short-lived worker threads drain the same lock-guarded queue for
+the length of one drain and are joined before it returns; encode_once() is
+still the single-clip unit, unchanged, and still drivable one clip at a time
+with no threads at all.
+
 Every collaborator that touches the world -- the filesystem scan, ffmpeg,
 the idle probe, the clock -- arrives as a constructor parameter, so the whole
 state machine is testable with no ffmpeg, no timers and no real tree.
@@ -92,6 +103,32 @@ VERIFY_DURATION_RATIO = 0.97
 # complain once per frame would otherwise be a memory leak with a progress
 # bar; the LAST lines are the ones that say why it failed.
 STDERR_KEEP_LINES = 200
+
+# How many clips are encoded AT ONCE, when the config does not say (2026-08-11,
+# owner-approved "maxed out when idle, demote for renders"). Consumer NVENC
+# allows 5+ concurrent sessions on current drivers, so 4 leaves one for anything
+# else that wants the GPU; CPU-only stops at 2 because libx264/x265 already
+# multithread across every core and more processes only thrash the cache. The
+# cap exists because `proxy_gen_workers = 64` is a hand-edited config away and
+# this feature must never be the reason a machine falls over.
+DEFAULT_WORKERS_NVENC = 4
+DEFAULT_WORKERS_CPU = 2
+MIN_WORKERS = 1
+MAX_WORKERS = 8
+
+# How long a worker with no slot waits before asking again. Only reached while
+# DEMOTED (Resolve is up), so this is the granularity at which a render
+# finishing widens the drain back out -- not something an idle machine pays.
+SLOT_WAIT_SECONDS = 1.0
+
+# The demotion probe is resolve_prefs.resolve_is_running: a `tasklist` spawn on
+# Windows. Asked between clip pickups, and by every waiting worker once a
+# second, so it is TTL-cached on bpg._PROBE_TTL_SECONDS' precedent (MED-9,
+# 2026-08-11) -- an encode lasts minutes, so a 60 s stale answer costs at most
+# one clip encoded at the wrong width. The `skip_while_resolve` gate deliberately
+# does NOT go through this cache: it is asked once per 15 s tick and its answer
+# stops the drain entirely.
+RESOLVE_PROBE_TTL_SECONDS = 60.0
 
 # POSIX nice value for the encoder. The Windows half is
 # BELOW_NORMAL_PRIORITY_CLASS at spawn time; POSIX gets os.setpriority AFTER
@@ -344,6 +381,9 @@ class ProxyGenerator:
             cfg, "proxy_notify_cooldown_seconds", 86400
         )
         self.skip_while_resolve = bool(cfg.get("proxy_gen_skip_while_resolve_running", False))
+        # None means "derive it per drain" -- the NVENC answer is only known
+        # after the first scan has probed ffmpeg, so this cannot be decided here.
+        self.workers = self._configured_workers(cfg)
 
         # -- state, ALL of it guarded by _lock. gap()/coverage() are called
         # from the tray's refresh thread while this thread rewrites them.
@@ -352,7 +392,20 @@ class ProxyGenerator:
         self._projects: dict[str, dict[str, Any]] = {}
         self._totals: dict[str, Any] = proxy_scan._empty_totals()
         self._state = STATE_NOTHING_TO_DO
-        self._current: Optional[str] = None
+        # {thread ident: path} -- ONE ENTRY PER ENCODE IN FLIGHT since the drain
+        # went parallel (2026-08-11). Keyed by thread rather than by worker
+        # index so a direct encode_once() call (a test, a one-off driver) is
+        # registered exactly like a worker's; insertion order is start order,
+        # which is what makes _current deterministic.
+        self._encoding: dict[int, str] = {}
+        # Encode slots taken by the drain's workers. Held from before the clip
+        # is popped to after the encode returns, so it covers the window
+        # _encoding does not (the probe, the still-needed re-check) -- which is
+        # the window a BPG launch must not slip through.
+        self._active = 0
+        # (asked_at, answer) for the demotion probe. See RESOLVE_PROBE_TTL.
+        self._resolve_probe: Optional[tuple[float, bool]] = None
+        self._announced_width: Optional[int] = None
         self._generated = 0
         self._failed = 0
         self._scanned_at: Optional[str] = None
@@ -369,6 +422,10 @@ class ProxyGenerator:
         # Set by cancel_run(): kills the encode in flight and empties the
         # queue for this cycle. NOT a disable -- the next scan refills it.
         self._cancel = threading.Event()
+        # Set by the FIRST worker whose encode is interrupted: one worker's
+        # "you're back at the keyboard" is every worker's, and nobody may pick
+        # up another clip for the rest of this drain.
+        self._drain_over = threading.Event()
         self._forced = False
         self._thread: Optional[threading.Thread] = None
         self._last_scan_at: Optional[float] = None
@@ -380,6 +437,91 @@ class ProxyGenerator:
         # drive comes back (root_guard's _root_absent_announced precedent).
         self._notified_episode = False
         self._last_notified_at = self._load_notify_state()
+
+    # -- how wide the drain runs -------------------------------------------
+    @staticmethod
+    def _configured_workers(cfg: dict[str, Any]) -> Optional[int]:
+        """`proxy_gen_workers` as 1..MAX_WORKERS, or None to derive it.
+
+        Absent/None is the shipped state and means "derive": most machines
+        should not have to know what an NVENC session is. A hand-edited
+        garbage value goes the same way rather than taking construction down
+        (coerce_numeric's whole reason for existing) -- it has already logged
+        the error by then, and inventing a width from `"four"` would be worse
+        than the derived one.
+        """
+        raw = cfg.get("proxy_gen_workers")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        value = int(config_mod.coerce_numeric(cfg, "proxy_gen_workers", 0))
+        if value <= 0:
+            return None
+        return max(MIN_WORKERS, min(MAX_WORKERS, value))
+
+    def _worker_width(self) -> int:
+        """How many clips this drain may encode at once, before demotion."""
+        with self._lock:
+            nvenc = self._nvenc
+        if self.workers is not None:
+            width, why = self.workers, "proxy_gen_workers"
+        else:
+            width = DEFAULT_WORKERS_NVENC if nvenc else DEFAULT_WORKERS_CPU
+            why = "NVENC" if nvenc else "CPU"
+        width = max(MIN_WORKERS, min(MAX_WORKERS, int(width)))
+        if width != self._announced_width:
+            # Once per CHANGE, not per drain: a drain happens every 15 s tick
+            # for as long as there is a queue, and this line is a fact about
+            # the machine, not an event.
+            log.info("proxy gen: encoding %d clip(s) at a time (%s)", width, why)
+            self._announced_width = width
+        return width
+
+    def _resolve_running_cached(self) -> bool:
+        """The DEMOTION probe: is Resolve up right now (TTL-cached)?
+
+        Separate from _resolve_running() because the callers are different
+        shapes: the gate asks once a tick and wants the freshest answer, this
+        one is asked between every clip pickup and by every waiting worker
+        once a second, and the real probe spawns a process (MED-9's family).
+        """
+        if self._resolve_running_fn is None:
+            return False
+        now = self._clock()
+        with self._lock:
+            cached = self._resolve_probe
+        if cached is not None and (now - cached[0]) < RESOLVE_PROBE_TTL_SECONDS:
+            return cached[1]
+        # OUTSIDE the lock: this spawns tasklist, and gap() takes the same lock
+        # on the tray's refresh thread.
+        value = self._resolve_running()
+        with self._lock:
+            self._resolve_probe = (now, value)
+        return value
+
+    # -- what is encoding right now ----------------------------------------
+    def _mark_encoding(self, path: str) -> None:
+        with self._lock:
+            self._encoding[threading.get_ident()] = path
+
+    def _clear_encoding(self) -> None:
+        with self._lock:
+            self._encoding.pop(threading.get_ident(), None)
+
+    @property
+    def _current(self) -> Optional[str]:
+        """The one-path view of a drain that now runs several encodes.
+
+        Kept because every consumer written before 2026-08-11 asked "which
+        clip is being encoded" and got a path or None; this answers with the
+        OLDEST encode in flight, so a machine encoding one clip -- the only
+        case that answer was ever unambiguous in -- behaves exactly as before.
+        Read-only: gap()/block_reason() read `_encoding` directly, under the
+        lock they are already holding.
+        """
+        with self._lock:
+            for path in self._encoding.values():
+                return path
+        return None
 
     # -- persisted notification cooldown ---------------------------------
     def _load_notify_state(self) -> float:
@@ -530,12 +672,22 @@ class ProxyGenerator:
         block, probe, or walk anything.
         """
         with self._lock:
+            in_flight = list(self._encoding.values())
             return {
                 "missing": int(self._totals.get("missing", 0)),
                 "braw": int(self._totals.get("braw", 0)),
                 "needs_resolve": int(self._totals.get("needs_resolve", 0)),
-                "left": len(self._queue),
-                "encoding": self._current is not None,
+                # In-flight clips are already OFF the queue, so with a parallel
+                # drain "left" without them would count down to 0 while four
+                # encodes were still running -- and this number is what the
+                # tray tooltip and menu line show the editor (2026-08-11).
+                "left": len(self._queue) + len(in_flight),
+                # Still a BOOL: the tray renders it as one and _menu_fingerprint
+                # hashes it, so the LINES of the menu must not change every time
+                # a different clip starts. The detail is in the two keys below.
+                "encoding": bool(in_flight),
+                "encoding_now": in_flight,
+                "encoding_count": len(in_flight),
                 "can_generate": bool(self.generation_enabled and self._ffmpeg_ok),
                 "state": self._state,
                 "generated": self._generated,
@@ -586,12 +738,14 @@ class ProxyGenerator:
         when the idle timer would otherwise fire.
         """
         with self._lock:
-            if self._current is None:
+            running = len(self._encoding)
+            if not running:
                 return None
-            left = len(self._queue)
+            left = len(self._queue) + running
+        at_once = f", {running} at once" if running > 1 else ""
         return (
             f"still making video proxies so the rest of the team can see this "
-            f"footage ({left} clip(s) left)"
+            f"footage ({left} clip(s) left{at_once})"
         )
 
     # -- tray actions ------------------------------------------------------
@@ -725,7 +879,13 @@ class ProxyGenerator:
             # (MED-7, 2026-08-11).
             return
         with self._lock:
-            queue_empty = not self._queue
+            # "Empty" has to mean EMPTY AND IDLE now the drain is parallel
+            # (2026-08-11): the last four clips are off the queue while they
+            # encode, and BPG taking the GPU while they finish is the exact
+            # contention the sequencing exists to prevent. _drain_queue joins
+            # its workers before returning, so this is a belt on top of braces
+            # -- and the one that holds for a direct caller.
+            queue_empty = not self._queue and not self._encoding and self._active <= 0
             needs_resolve = int(self._totals.get("needs_resolve", 0))
         try:
             self._bpg.maybe_launch(
@@ -1212,13 +1372,11 @@ class ProxyGenerator:
         except (TypeError, ValueError):
             ceiling = STUCK_FLOOR_SECONDS
 
-        with self._lock:
-            self._current = path
+        self._mark_encoding(path)
         try:
             return self._encode_clip(clip, info, partial, ceiling, forced)
         finally:
-            with self._lock:
-                self._current = None
+            self._clear_encoding()
 
     def _encode_clip(self, clip: dict[str, Any], info: dict[str, Any], partial: str,
                      ceiling: float, forced: bool) -> str:
@@ -1306,8 +1464,69 @@ class ProxyGenerator:
         return RESULT_FAILED
 
     def _requeue_front(self, clip: dict[str, Any]) -> None:
+        # Several workers can requeue in the same second now (the user comes
+        # back and every unforced encode aborts at once). Front-insertion order
+        # is completion order, so the last clip to abort ends up first -- all of
+        # them are back at the head of a queue that is about to be re-gated, and
+        # picking a different order between four equally-newest clips would buy
+        # nothing (2026-08-11).
         with self._lock:
             self._queue.insert(0, clip)
+
+    def _claim_slot(self, width: int) -> bool:
+        """Take one of this drain's encode slots, or say no.
+
+        DEMOTION lives here (2026-08-11, owner-approved): while Resolve is
+        running the drain acts as ONE worker, because an unattended render
+        wants the same NVENC/NVDEC sessions four proxies would take. Re-asked
+        between clip pickups, never mid-encode -- a clip already being encoded
+        runs to its end or is killed by the idle gate, not by a demotion.
+        Note this applies to a FORCED run too, on the same reasoning that makes
+        `proxy_gen_skip_while_resolve_running` apply to one: the button says
+        "don't wait until I'm away", not "take the GPU off the render".
+        """
+        allowed = 1 if (width > 1 and self._resolve_running_cached()) else width
+        with self._lock:
+            if self._active >= allowed:
+                return False
+            self._active += 1
+            return True
+
+    def _release_slot(self) -> None:
+        with self._lock:
+            self._active = max(0, self._active - 1)
+
+    def _drain_worker(self, width: int, outcome: dict[str, Any]) -> None:
+        """One worker: pick up a clip, encode it, re-gate, repeat.
+
+        The body of what used to be the whole serial drain, with the two
+        parallel-only rules on top: a slot has to be claimed before each
+        pickup (that is where demotion bites), and an interruption ends the
+        drain for EVERY worker rather than only for the one that noticed.
+        """
+        while not (self._stop_event.is_set() or self._drain_over.is_set()):
+            if not self._claim_slot(width):
+                # Demoted, or momentarily full. Waiting rather than exiting:
+                # Resolve closing mid-drain must widen us back out without
+                # having to wait for the next tick.
+                if self._stop_event.wait(SLOT_WAIT_SECONDS):
+                    return
+                continue
+            try:
+                result = self.encode_once()
+            finally:
+                self._release_slot()
+            if result == RESULT_EMPTY:
+                outcome["state"] = STATE_NOTHING_TO_DO
+                return
+            if result == RESULT_INTERRUPTED:
+                self._drain_over.set()
+                return
+            state = self._gate()
+            self._publish_state(state)
+            if state != STATE_RUNNING:
+                outcome["state"] = state
+                return
 
     def _drain_queue(self) -> str:
         """Encode until the gate stops saying RUNNING or the queue empties.
@@ -1315,19 +1534,40 @@ class ProxyGenerator:
         Re-gates between every clip rather than draining the whole queue in
         one go: the gate is where "the user came back", "the drive went away"
         and "the editor paused" are noticed, and a 200-clip queue takes days.
+
+        N workers do that at once (2026-08-11) -- see _worker_width and
+        _claim_slot for how many and why. THIS thread is worker 0, so a drain
+        one clip wide spawns nothing at all, and every helper is joined before
+        the state is returned: the caller's next move is _maybe_launch_bpg,
+        and "the ffmpeg queue is empty" must not mean "four of them are
+        finishing up".
         """
-        state = STATE_RUNNING
-        while not self._stop_event.is_set():
-            result = self.encode_once()
-            if result == RESULT_EMPTY:
-                state = STATE_NOTHING_TO_DO
-                break
-            if result == RESULT_INTERRUPTED:
-                break
-            state = self._gate()
-            self._publish_state(state)
-            if state != STATE_RUNNING:
-                break
+        width = self._worker_width()
+        outcome: dict[str, Any] = {"state": STATE_RUNNING}
+        self._drain_over.clear()
+        helpers = [
+            threading.Thread(
+                target=self._drain_worker, args=(width, outcome),
+                name=f"ccsync-proxy-gen-{index}", daemon=True,
+            )
+            for index in range(1, width)
+        ]
+        for helper in helpers:
+            helper.start()
+        try:
+            self._drain_worker(width, outcome)
+        finally:
+            for helper in helpers:
+                # UNBOUNDED, deliberately: the only thing that keeps a worker
+                # is an ffmpeg that will not die, which held the serial drain
+                # just as hard. Returning while one still encodes would hand a
+                # "queue empty" to BPG and let two encoders onto one GPU.
+                helper.join()
+        # An interruption is not a gate answer: the serial drain broke out
+        # still calling itself RUNNING and left the next tick to re-gate, and
+        # that is deliberately preserved -- it is the answer that stops
+        # _maybe_launch_bpg dead.
+        state = STATE_RUNNING if self._drain_over.is_set() else outcome["state"]
         if self._cancel.is_set():
             # "Stop making proxies": drop the rest of this cycle's queue. The
             # next scheduled scan puts it all back, which is what makes this a

@@ -15,6 +15,7 @@ back mid-encode must leave nothing behind.
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import pytest
@@ -983,10 +984,15 @@ def test_fully_covered_projects_are_not_reported(tmp_path):
 def test_block_reason_is_none_unless_something_is_encoding(tmp_path):
     gen = _make_gen(tmp_path)
     assert gen.block_reason() is None
-    gen._current = "A001.mp4"
+    gen._mark_encoding("A001.mp4")          # what encode_once() does per clip
     gen._queue = [{"path": "b.mp4"}]
     reason = gen.block_reason()
     assert reason and "proxies" in reason
+    # The clip in flight counts as left to do: it is off the queue but not
+    # finished, and this sentence is what holds a shutdown back.
+    assert "2 clip(s) left" in reason
+    gen._clear_encoding()
+    assert gen.block_reason() is None
 
 
 def test_the_gap_shrinks_as_the_queue_drains(tmp_path):
@@ -1046,6 +1052,264 @@ def test_a_tick_that_raises_never_kills_the_thread(tmp_path):
     gen.tick = _boom  # the loop's own try/except is what is under test
     gen._loop()       # returns rather than propagating
     assert ticks["count"] == 1
+
+
+# -- the parallel drain --------------------------------------------------------
+#
+# 2026-08-11, owner-approved: "maxed out while the machine is idle, demote when
+# Resolve is using the machine". The idle gate above is what makes the first
+# half safe -- an unforced encode only ever runs on a machine nobody is sitting
+# at -- and these are the tests for the second half and for the width itself.
+
+
+class _BlockingFfmpeg(_FakeFfmpeg):
+    """A fake encoder that PARKS in the encode until the test lets it go.
+
+    The only way to ask "were two clips being encoded at the same time?" of a
+    drain that finishes in microseconds. `expect` encodes park before all_in is
+    set; `peak` is the most that were ever inside at once, which is the number
+    the demotion rule is about. Verification decodes pass straight through --
+    they run after the encode, and blocking them would deadlock the release.
+    """
+
+    def __init__(self, expect=2, timeout=10.0):
+        super().__init__()
+        self.expect = expect
+        self.timeout = timeout
+        self.release = threading.Event()
+        self.all_in = threading.Event()
+        self._guard = threading.Lock()
+        self.in_flight = 0
+        self.peak = 0
+
+    def __call__(self, cmd, should_stop, ceiling):
+        if self._is_verify(cmd):
+            return super().__call__(cmd, should_stop, ceiling)
+        with self._guard:
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+            if self.in_flight >= self.expect:
+                self.all_in.set()
+        try:
+            self.release.wait(self.timeout)
+        finally:
+            with self._guard:
+                self.in_flight -= 1
+        # AFTER the release, so a test that makes the user come back while the
+        # encodes are parked gets the interrupt answer the real runner's 2 s
+        # poll would have given it.
+        return super().__call__(cmd, should_stop, ceiling)
+
+
+def _drain_in_background(gen):
+    thread = threading.Thread(target=gen._drain_queue, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_the_default_width_is_two_on_a_cpu_and_four_with_nvenc(tmp_path):
+    """Derived, not configured: most machines should not have to know what an
+    NVENC session is. libx264 already multithreads, so CPU-only stops at 2."""
+    gen = _make_gen(tmp_path)
+    assert gen._worker_width() == proxy_gen.DEFAULT_WORKERS_CPU == 2
+
+    gen = _make_gen(
+        tmp_path, encoders_fn=lambda path: frozenset({"hevc_nvenc", "libx265"}))
+    gen.scan_once()          # where _nvenc is answered
+    assert gen._worker_width() == proxy_gen.DEFAULT_WORKERS_NVENC == 4
+
+
+def test_the_worker_knob_overrides_the_default_in_either_direction(tmp_path):
+    nvenc = {"encoders_fn": lambda path: frozenset({"hevc_nvenc", "libx265"})}
+
+    gen = _make_gen(tmp_path, _cfg(tmp_path, proxy_gen_workers=6))
+    assert gen._worker_width() == 6
+
+    # Down as well as up: one worker is the old serial drain, on purpose.
+    gen = _make_gen(tmp_path, _cfg(tmp_path, proxy_gen_workers=1), **nvenc)
+    gen.scan_once()
+    assert gen._worker_width() == 1
+
+    gen = _make_gen(tmp_path, _cfg(tmp_path, proxy_gen_workers=64))
+    assert gen._worker_width() == proxy_gen.MAX_WORKERS == 8
+
+
+@pytest.mark.parametrize("value", [None, "", 0, -3, "banana"])
+def test_a_missing_or_nonsense_worker_count_derives_the_default(tmp_path, value):
+    """coerce_numeric's contract: construction never raises on a hand-edited
+    value, and a width invented from `"banana"` would be worse than the
+    derived one."""
+    gen = _make_gen(tmp_path, _cfg(tmp_path, proxy_gen_workers=value))
+    assert gen.workers is None
+    assert gen._worker_width() == proxy_gen.DEFAULT_WORKERS_CPU
+
+
+def test_a_drain_encodes_several_clips_at_once(tmp_path):
+    """The whole point: two clips in flight together on an idle machine."""
+    first, second = _original(tmp_path, "A001.mp4"), _original(tmp_path, "A002.mp4")
+    ffmpeg = _BlockingFfmpeg(expect=2)
+    gen = _make_gen(tmp_path, encode_fn=ffmpeg)
+    gen._queue = [_clip(first), _clip(second)]
+
+    thread = _drain_in_background(gen)
+    assert ffmpeg.all_in.wait(10), "the second clip never started while the first ran"
+    assert ffmpeg.peak == 2
+    assert len(gen.gap()["encoding_now"]) == 2
+    ffmpeg.release.set()
+    thread.join(timeout=30)
+
+    assert not thread.is_alive()
+    assert (first.parent / "Proxy" / "A001.mp4").is_file()
+    assert (second.parent / "Proxy" / "A002.mp4").is_file()
+
+
+def test_resolve_running_demotes_the_drain_to_one_encode(tmp_path):
+    """An UNATTENDED RENDER is the one thing serialism ever protected, and it
+    is invisible to the idle probe. Four proxies would take the same NVENC
+    sessions, so while Resolve is up the drain acts as one worker."""
+    clips = [_original(tmp_path, name) for name in ("A001.mp4", "A002.mp4", "A003.mp4")]
+    ffmpeg = _BlockingFfmpeg(expect=1, timeout=2.0)
+    gen = _make_gen(
+        tmp_path, encode_fn=ffmpeg, resolve_running_fn=lambda: True,
+        encoders_fn=lambda path: frozenset({"hevc_nvenc", "libx265"}),
+    )
+    gen.scan_once()
+    assert gen._worker_width() == 4          # it is NOT the width that shrinks
+    gen._queue = [_clip(path) for path in clips]
+
+    thread = _drain_in_background(gen)
+    assert ffmpeg.all_in.wait(10)
+    assert gen.gap()["encoding_count"] == 1
+    ffmpeg.release.set()
+    thread.join(timeout=60)
+
+    assert not thread.is_alive()
+    assert ffmpeg.peak == 1, "Resolve was rendering and four ffmpegs joined it"
+    assert all((path.parent / "Proxy" / path.name).is_file() for path in clips)
+
+
+def test_a_demotion_probe_that_cannot_answer_demotes(tmp_path):
+    """Same fail-closed reading as the gate's: a check that cannot answer must
+    not be taken as "the GPU is free"."""
+    def _boom():
+        raise RuntimeError("tasklist is unavailable")
+
+    gen = _make_gen(tmp_path, resolve_running_fn=_boom)
+    assert gen._resolve_running_cached() is True
+    # ...and it is asked once per TTL, not once per pickup: the real probe is a
+    # process spawn and every waiting worker asks (MED-9's family).
+    asked = {"count": 0}
+
+    def _count():
+        asked["count"] += 1
+        return True
+
+    gen = _make_gen(tmp_path, resolve_running_fn=_count)
+    for _ in range(5):
+        assert gen._resolve_running_cached() is True
+    assert asked["count"] == 1
+
+
+def test_skip_while_resolve_running_still_skips_the_drain_entirely(tmp_path):
+    """Demotion is the DEFAULT behaviour; the opt-in knob is unchanged and
+    takes precedence -- it stops the drain before a worker exists."""
+    src = _original(tmp_path)
+    ffmpeg = _BlockingFfmpeg(expect=1, timeout=1.0)
+    gen = _make_gen(
+        tmp_path, _cfg(tmp_path, proxy_gen_skip_while_resolve_running=True),
+        encode_fn=ffmpeg, resolve_running_fn=lambda: True,
+        scan_fn=lambda *a, **k: _scan_result([_clip(src)]),
+    )
+    assert gen.tick() == proxy_gen.STATE_RESOLVE_OPEN
+    assert ffmpeg.calls == []
+    assert not (src.parent / "Proxy").exists()
+
+
+def test_a_forced_run_drains_at_the_full_width(tmp_path):
+    """"Make the missing proxies now" is asking for exactly that: the away
+    gate is skipped AND the machine is used at full width."""
+    first, second = _original(tmp_path, "A001.mp4"), _original(tmp_path, "A002.mp4")
+    ffmpeg = _BlockingFfmpeg(expect=2)
+    gen = _make_gen(tmp_path, encode_fn=ffmpeg, idle_probe=_Idle(0))  # user is here
+    gen._queue = [_clip(first), _clip(second)]
+    gen.request_run()
+
+    thread = _drain_in_background(gen)
+    assert ffmpeg.all_in.wait(10)
+    assert ffmpeg.peak == 2
+    ffmpeg.release.set()
+    thread.join(timeout=30)
+
+    assert not thread.is_alive()
+    assert (first.parent / "Proxy" / "A001.mp4").is_file()
+    assert (second.parent / "Proxy" / "A002.mp4").is_file()
+
+
+def test_the_user_coming_back_stops_every_worker_and_requeues_them_all(tmp_path):
+    """The central promise, unchanged per encode and now applied to all of
+    them at once: nothing left behind, and every aborted clip back at the
+    FRONT (their order among themselves is completion order, which between
+    equally-newest clips buys nothing to make deterministic)."""
+    first, second = _original(tmp_path, "A001.mp4"), _original(tmp_path, "A002.mp4")
+    later = {"path": "later.mp4", "kind": "own", "size": 1, "mtime": 1.0}
+    idle = _Idle(9999)
+    ffmpeg = _BlockingFfmpeg(expect=2)
+    gen = _make_gen(tmp_path, encode_fn=ffmpeg, idle_probe=idle)
+    gen._queue = [_clip(first), _clip(second), later]
+
+    thread = _drain_in_background(gen)
+    assert ffmpeg.all_in.wait(10)
+    idle.seconds = 3          # the mouse moved, with two encodes in flight
+    ffmpeg.release.set()
+    thread.join(timeout=30)
+
+    assert not thread.is_alive()
+    for path in (first, second):
+        assert not (path.parent / "Proxy" / f"{path.name}.partial").exists()
+        assert not (path.parent / "Proxy" / path.name).exists()
+    assert len(gen._queue) == 3
+    assert {clip["path"] for clip in gen._queue[:2]} == {str(first), str(second)}
+    assert gen._queue[2] is later
+    assert gen.gap()["encoding"] is False
+
+
+def test_the_gap_says_how_many_clips_are_in_flight(tmp_path):
+    """`encoding` stays a BOOL -- the tray renders it as one and hashes it into
+    _menu_fingerprint (UI-3), so the menu must not rebuild every time a
+    different clip starts. The detail lives in the two keys beside it, and
+    `_current` still answers with a single path for anything older."""
+    gen = _make_gen(tmp_path)
+    gen._queue = [{"path": "c.mp4"}]
+    assert gen.gap()["encoding"] is False
+    assert gen.gap()["encoding_now"] == [] and gen.gap()["encoding_count"] == 0
+    assert gen._current is None
+
+    gen._mark_encoding("a.mp4")
+    assert gen.gap()["encoding"] is True
+    assert gen.gap()["encoding_count"] == 1
+    assert gen._current == "a.mp4"
+    # Two in flight are two clips still to come, on top of the one queued.
+    assert gen.gap()["left"] == 2
+
+    done = threading.Event()
+
+    def _second_worker():
+        gen._mark_encoding("b.mp4")
+        done.set()
+
+    thread = threading.Thread(target=_second_worker)
+    thread.start()
+    thread.join(timeout=5)
+    assert done.is_set()
+
+    assert gen.gap()["encoding"] is True
+    assert gen.gap()["encoding_count"] == 2
+    assert set(gen.gap()["encoding_now"]) == {"a.mp4", "b.mp4"}
+    assert gen.gap()["left"] == 3
+    # The oldest encode in flight: the one-path view is only ever unambiguous
+    # with one worker, and that case must read exactly as it did before.
+    assert gen._current == "a.mp4"
+    assert "2 at once" in (gen.block_reason() or "")
 
 
 # -- the BPG hand-off ----------------------------------------------------------
@@ -1115,6 +1379,32 @@ def test_bpg_is_launched_once_there_is_nothing_for_ffmpeg_to_do(tmp_path):
     assert len(launcher.calls) == 1
     assert launcher.calls[0]["queue_empty"] is True
     assert launcher.calls[0]["needs_resolve"] == 6
+
+
+def test_bpg_is_not_launched_while_a_worker_is_still_encoding(tmp_path):
+    """"The ffmpeg queue is empty" stopped meaning "ffmpeg is idle" the day the
+    drain went parallel (2026-08-11): the last clips come OFF the queue while
+    they encode, and BPG taking the GPU while four of them finish is the exact
+    contention the sequencing exists to prevent."""
+    launcher = _RecordingBpg()
+    src = _original(tmp_path)
+    ffmpeg = _BlockingFfmpeg(expect=1)
+    gen = _make_gen(tmp_path, bpg_launcher=launcher, encode_fn=ffmpeg)
+    gen._totals["needs_resolve"] = 6
+    gen._queue = [_clip(src)]
+
+    thread = _drain_in_background(gen)
+    assert ffmpeg.all_in.wait(10)
+    assert gen._queue == []                      # the queue IS empty...
+    gen._maybe_launch_bpg(proxy_gen.STATE_NOTHING_TO_DO)
+    assert launcher.calls[-1]["queue_empty"] is False, "...but a clip is encoding"
+
+    ffmpeg.release.set()
+    thread.join(timeout=30)
+    assert not thread.is_alive()
+
+    gen._maybe_launch_bpg(proxy_gen.STATE_NOTHING_TO_DO)
+    assert launcher.calls[-1]["queue_empty"] is True
 
 
 def test_the_idle_probe_is_handed_over_uncalled(tmp_path):

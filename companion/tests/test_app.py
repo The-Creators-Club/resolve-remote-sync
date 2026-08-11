@@ -2760,6 +2760,175 @@ def test_the_replaces_pid_variable_is_popped_even_when_unused(monkeypatch, tmp_p
     assert app_mod._REPLACES_PID_ENV not in os.environ
 
 
+def test_the_lock_file_accepts_a_pre_popped_replaces_pid(monkeypatch, tmp_path):
+    """acquire_single_instance() pops the variable BEFORE trying the mutex;
+    when the mutex guard is broken and it falls back here, the value arrives
+    as a parameter. A second pop would read nothing and silently lose the
+    predecessor wait exactly when the primary guard is down."""
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path / "cc")
+    (tmp_path / "cc").mkdir(parents=True)
+    (tmp_path / "cc" / app_mod._SINGLE_INSTANCE_LOCKFILE).write_text(
+        "4242", encoding="utf-8")
+    assert app_mod._REPLACES_PID_ENV not in os.environ  # already popped
+
+    alive = {"value": True}
+
+    def _sleep(seconds):
+        alive["value"] = False
+
+    assert app_mod._acquire_lock_file(
+        alive_fn=lambda pid: alive["value"], sleep_fn=_sleep, replaces_pid=4242,
+    ) is True
+
+
+# --- R11: the win32 mutex twin of the predecessor wait ----------------------
+
+
+class _FakeMutex:
+    """The named kernel object, faithfully enough to catch the handle leak
+    that would break the wait: the object EXISTS while any handle to it is
+    open (the predecessor's or one of ours), and CreateMutexW on an existing
+    object hands back a new handle plus ERROR_ALREADY_EXISTS. If the guard
+    forgets to close a probe handle, the mutex can never die and every retry
+    reads ALREADY_EXISTS forever -- exactly the bug these tests pin."""
+
+    def __init__(self, predecessor_holds=True):
+        self.predecessor_holds = predecessor_holds
+        self.open_handles: set = set()
+        self._next = 1
+
+    def create(self):
+        from ccsync_companion import app as app_mod
+
+        existed = self.predecessor_holds or bool(self.open_handles)
+        handle = self._next
+        self._next += 1
+        self.open_handles.add(handle)
+        return handle, (app_mod._ERROR_ALREADY_EXISTS if existed else 0)
+
+    def close(self, handle):
+        self.open_handles.remove(handle)
+
+    def predecessor_exits(self):
+        self.predecessor_holds = False
+
+
+def test_the_mutex_guard_waits_for_the_predecessor_it_replaces(monkeypatch):
+    """R11 (2026-08-12): the win32 branch returned False the moment
+    CreateMutexW said ERROR_ALREADY_EXISTS -- but the self-upgrade's child
+    reaches the guard while the predecessor is still tearing down its lanes
+    and holding the mutex. The child exited, the predecessor finished
+    exiting, and the machine was left with NO companion until the next
+    logon."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_single_instance_token", None)
+    mutex = _FakeMutex(predecessor_holds=True)
+    alive = {"value": True}
+
+    def _sleep(seconds):
+        mutex.predecessor_exits()
+        alive["value"] = False
+
+    assert app_mod._acquire_mutex_win32(
+        mutex.create, mutex.close, replaces_pid=4242,
+        alive_fn=lambda pid: alive["value"], sleep_fn=_sleep,
+    ) is True
+    # exactly one handle stays open: the slot we now hold
+    assert mutex.open_handles == {app_mod._single_instance_token}
+
+
+def test_the_mutex_wait_wins_even_when_the_liveness_probe_lies(monkeypatch):
+    """Why the wait retries CreateMutexW instead of reusing
+    _wait_for_predecessor's liveness-only loop: _pid_is_alive_win32 can read
+    a DEAD process as alive (exit code 259, plus both fail-safe arms). Keyed
+    on liveness alone the guard would sit out the full timeout and refuse --
+    the retry takes the slot the moment the mutex is actually free."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_single_instance_token", None)
+    mutex = _FakeMutex(predecessor_holds=True)
+
+    def _sleep(seconds):
+        mutex.predecessor_exits()  # ...but the probe keeps saying "alive"
+
+    assert app_mod._acquire_mutex_win32(
+        mutex.create, mutex.close, replaces_pid=4242,
+        alive_fn=lambda pid: True, sleep_fn=_sleep,
+    ) is True
+    assert mutex.open_handles == {app_mod._single_instance_token}
+
+
+def test_a_wedged_mutex_predecessor_falls_through_to_already_running(monkeypatch):
+    """Bounded on purpose, same as the lock file: a predecessor that is
+    wedged rather than shutting down IS a live second instance."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_single_instance_token", None)
+    mutex = _FakeMutex(predecessor_holds=True)
+    clock = {"now": 0.0}
+
+    def _tick(seconds):
+        clock["now"] += seconds
+
+    assert app_mod._acquire_mutex_win32(
+        mutex.create, mutex.close, replaces_pid=4242,
+        alive_fn=lambda pid: True, clock=lambda: clock["now"], sleep_fn=_tick,
+    ) is False
+    assert mutex.open_handles == set(), "a probe handle leaked"
+    assert app_mod._single_instance_token is None
+
+
+def test_a_held_mutex_with_no_replaces_pid_is_refused_immediately(monkeypatch):
+    """A plain double-start is not an upgrade hand-off: no wait, exactly the
+    old behaviour."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_single_instance_token", None)
+    mutex = _FakeMutex(predecessor_holds=True)
+    slept: list = []
+
+    assert app_mod._acquire_mutex_win32(
+        mutex.create, mutex.close, replaces_pid=None,
+        alive_fn=lambda pid: True, sleep_fn=slept.append,
+    ) is False
+    assert slept == []
+    assert mutex.open_handles == set(), "a probe handle leaked"
+
+
+def test_a_mutex_outliving_its_dead_predecessor_is_someone_elses(monkeypatch):
+    """The predecessor was already gone before the retry, yet the mutex
+    survived it -- so the holder is a different companion, and waiting out
+    the full timeout would only delay the honest answer."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_single_instance_token", None)
+    mutex = _FakeMutex(predecessor_holds=True)  # held, but not by pid 4242
+    slept: list = []
+
+    assert app_mod._acquire_mutex_win32(
+        mutex.create, mutex.close, replaces_pid=4242,
+        alive_fn=lambda pid: False, sleep_fn=slept.append,
+    ) is False
+    assert len(slept) == 1, "it should conclude after a single confirming retry"
+    assert mutex.open_handles == set(), "a probe handle leaked"
+
+
+def test_a_failed_mutex_creation_never_blocks_a_start(monkeypatch):
+    """The guard failing is not the same as the slot being taken."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_single_instance_token", None)
+
+    assert app_mod._acquire_mutex_win32(
+        lambda: (0, 0), lambda handle: None, replaces_pid=None,
+        alive_fn=lambda pid: True,
+    ) is True
+
+
 # --- macOS: the already-running alert + the activation policy --------------
 
 

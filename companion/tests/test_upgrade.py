@@ -269,6 +269,80 @@ def test_apply_spawn_failure_rolls_back(frozen_exe):
     assert shutdowns == []
 
 
+def test_apply_rolls_back_when_the_child_dies_in_the_grace_window(frozen_exe):
+    """R11 belt-and-braces: the child's single-instance guard waits out our
+    mutex, so an exit this early is a startup failure, not a lost hand-off
+    race. Standing down anyway is how a one-click update left an editor's
+    machine with no companion at all (nothing retries -- the Run-key
+    autostart is logon-only)."""
+    body = b"new-exe-bytes"
+    shutdowns = []
+
+    class _DeadChild:
+        @staticmethod
+        def poll():
+            return 1
+
+    mgr = UpgradeManager(
+        _cfg(),
+        http_open=_fake_open(body),
+        spawn_fn=lambda exe: _DeadChild(),
+        request_shutdown=lambda: shutdowns.append(True),
+    )
+    mgr.note_report_response({"upgrade": _info(body=body)})
+    assert mgr.apply() is False
+    # the original build is back in place and still running; no shutdown
+    assert frozen_exe.read_bytes() == b"old-exe-bytes"
+    assert shutdowns == []
+
+
+def test_apply_stands_down_once_the_child_outlives_the_grace_window(frozen_exe):
+    body = b"new-exe-bytes"
+    shutdowns, polls = [], []
+
+    class _LiveChild:
+        @staticmethod
+        def poll():
+            polls.append(True)
+            return None
+
+    clock = {"now": 0.0}
+
+    def _tick(seconds):
+        clock["now"] += seconds
+
+    mgr = UpgradeManager(
+        _cfg(),
+        http_open=_fake_open(body),
+        spawn_fn=lambda exe: _LiveChild(),
+        request_shutdown=lambda: shutdowns.append(True),
+        clock_fn=lambda: clock["now"],
+        sleep_fn=_tick,
+    )
+    mgr.note_report_response({"upgrade": _info(body=body)})
+    assert mgr.apply() is True
+    assert frozen_exe.read_bytes() == body
+    assert shutdowns == [True]
+    assert polls, "the hand-off was never watched"
+
+
+def test_a_spawn_stub_returning_none_keeps_the_fire_and_forget_contract(frozen_exe):
+    """Injected spawns (and the pre-R11 seam) return nothing; the grace watch
+    must only engage when there is a child to poll."""
+    body = b"new-exe-bytes"
+    shutdowns = []
+    mgr = UpgradeManager(
+        _cfg(),
+        http_open=_fake_open(body),
+        spawn_fn=lambda exe: None,
+        request_shutdown=lambda: shutdowns.append(True),
+        sleep_fn=lambda s: (_ for _ in ()).throw(AssertionError("slept with no child")),
+    )
+    mgr.note_report_response({"upgrade": _info(body=body)})
+    assert mgr.apply() is True
+    assert shutdowns == [True]
+
+
 def test_apply_refuses_when_not_frozen(tmp_path, monkeypatch):
     monkeypatch.setattr(upgrade_mod, "is_frozen", lambda: False)
     spawned = []
@@ -901,11 +975,25 @@ def test_the_spawn_names_the_pid_it_replaces(tmp_path, darwin, popen_calls):
 
 
 def test_the_replaced_pid_is_set_on_windows_too(tmp_path, windows, popen_calls):
-    """Harmless where the named mutex already handles it, and one less thing
-    to be platform-conditional about."""
+    """Load-bearing since R11: the win32 mutex guard waits for exactly this
+    pid. Before that it was merely one less thing to be platform-conditional
+    about -- the mutex is NOT released the instant the predecessor dies from
+    the child's point of view; the child reaches the guard while the
+    predecessor is still tearing down lanes."""
     exe = tmp_path / "ccsync-companion.exe"
 
     UpgradeManager._default_spawn(exe)
 
     (_argv, kwargs), = popen_calls
     assert kwargs["env"]["CCSYNC_REPLACES_PID"] == str(os.getpid())
+
+
+def test_the_spawn_returns_the_child_it_launched(tmp_path, darwin, popen_calls):
+    """R11 belt-and-braces: _apply_inner watches this handle -- a child that
+    dies inside the grace window rolls the swap back instead of the parent
+    standing down over a corpse."""
+    exe = tmp_path / "ccsync-companion"
+
+    child = UpgradeManager._default_spawn(exe)
+
+    assert child is not None

@@ -71,6 +71,17 @@ _NEW_STEM = "ccsync-companion.new"
 # is `ccsync-companion.exe.old` on Windows and `ccsync-companion.old` on macOS
 # without any per-platform spelling.
 _OLD_SUFFIX = ".old"
+
+# R11 (2026-08-12): how long apply() watches the child it spawned before it
+# stands the running build down. The child's single-instance guard waits up
+# to app.PREDECESSOR_WAIT_SECONDS for US to exit, so a child that dies inside
+# this window did not lose the hand-off race -- it failed to start, and
+# shutting down anyway is how a one-click update left an editor's machine
+# with no companion at all (nothing retries: the Run-key autostart is
+# logon-only). Short on purpose: this blocks the tray thread that clicked
+# the update dialog.
+CHILD_TAKEOVER_GRACE_SECONDS = 2.0
+CHILD_TAKEOVER_POLL_SECONDS = 0.1
 # The published exe is ~20 MB. A ceiling stops a hostile or broken response
 # filling the editor's disk (there was none at all), and the free-space check
 # stops a download that cannot possibly complete (AUDIT_2 §2-low).
@@ -413,6 +424,8 @@ class UpgradeManager:
         spawn_fn: Optional[SpawnFn] = None,
         request_shutdown: Optional[Callable[[], None]] = None,
         on_available: Optional[Callable[[dict[str, Any]], None]] = None,
+        clock_fn: Callable[[], float] = time.monotonic,
+        sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
         self.cfg = cfg
         self._http_open = http_open or default_http_open
@@ -420,6 +433,8 @@ class UpgradeManager:
         self._spawn = spawn_fn or self._default_spawn
         self._request_shutdown = request_shutdown
         self._on_available = on_available
+        self._clock = clock_fn
+        self._sleep = sleep_fn
         self._lock = threading.Lock()
         self._available: Optional[dict[str, Any]] = None
         self._applying = False
@@ -632,11 +647,32 @@ class UpgradeManager:
             self._unlink_quietly(new)
             return False
         try:
-            self._spawn(exe)
+            child = self._spawn(exe)
         except Exception as exc:
             log.warning("upgrade: could not launch the new build: %s -- rolling back", exc)
             self._rollback(old, exe, aside=new)
             return False
+
+        # R11 belt-and-braces: don't stand down until the child has survived
+        # its own startup. Its single-instance guard now waits out our mutex,
+        # so an exit inside the grace window is a startup failure, not a lost
+        # race -- roll back and keep running rather than leave the machine
+        # with nothing. Only enforceable when the spawn seam hands back
+        # something poll()-able: _default_spawn does; injected spawns that
+        # return None keep the fire-and-forget contract.
+        if child is not None and hasattr(child, "poll"):
+            deadline = self._clock() + CHILD_TAKEOVER_GRACE_SECONDS
+            while self._clock() < deadline:
+                code = child.poll()
+                if code is not None:
+                    log.warning(
+                        "upgrade: the new build exited with code %s within %.0fs of "
+                        "launch -- rolling back rather than standing down",
+                        code, CHILD_TAKEOVER_GRACE_SECONDS,
+                    )
+                    self._rollback(old, exe, aside=new)
+                    return False
+                self._sleep(CHILD_TAKEOVER_POLL_SECONDS)
 
         log.info("upgrade: v%s launched; shutting down v%s", info["version"], config_mod.VERSION)
         if self._request_shutdown is not None:
@@ -686,7 +722,7 @@ class UpgradeManager:
             pass
 
     @staticmethod
-    def _default_spawn(exe: Path) -> None:
+    def _default_spawn(exe: Path) -> Any:
         # DETACHED_PROCESS decouples from this soon-dead process;
         # CREATE_NO_WINDOW stops Windows allocating a fresh (empty, killable)
         # console if the exe is ever a console build again -- closing that
@@ -731,15 +767,21 @@ class UpgradeManager:
         # The new build is launched BEFORE this one exits -- it has to be, or
         # a failed launch could not roll the swap back -- so for a second or
         # two there really are two companions, and the single-instance guard
-        # is entitled to refuse the newcomer. On Windows the named mutex is
-        # released the instant we die and the child simply wins by timing; on
-        # posix the guard is a pid file with a LIVENESS check, and the dying
-        # predecessor is alive for exactly as long as its lanes take to stop.
-        # This tells the child WHOSE pid it may wait for (app._acquire_lock_
-        # file). Set on every platform: harmless where it is not needed, and
-        # one less thing to be platform-conditional about.
+        # is entitled to refuse the newcomer. The dying predecessor holds the
+        # slot for exactly as long as its lanes take to stop, on BOTH
+        # platforms: posix's guard is a pid file with a liveness check, and
+        # the win32 named mutex lives until our last handle closes at exit
+        # (R11 -- "released the instant we die, the child wins by timing" was
+        # backwards, and cost an editor machine its companion 2026-08-12).
+        # This tells the child WHOSE pid it may wait for
+        # (app._acquire_lock_file / app._acquire_mutex_win32). Set on every
+        # platform: harmless where it is not needed, and one less thing to be
+        # platform-conditional about.
         env["CCSYNC_REPLACES_PID"] = str(os.getpid())
-        subprocess.Popen(
+        # Returned so _apply_inner can watch the hand-off: a child that dies
+        # within the grace window rolls the swap back instead of the parent
+        # standing down over a corpse.
+        return subprocess.Popen(
             [str(exe)],
             cwd=str(exe.parent),
             stdin=subprocess.DEVNULL,

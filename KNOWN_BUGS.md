@@ -155,6 +155,90 @@ nothing to mismatch); 113 have no unique top-slot sibling. End-to-end
 verified live: the archive preview now links to its imported clip. Editors
 need the 0.7.4 republish for the explicit link on insert.
 
+### R11 — the Windows self-upgrade races its own single-instance mutex — FIXED in repo 2026-08-12, ships with 0.7.6
+A remote editor's machine (ruskin, DESKTOP-LQQ41TC) was left with **no
+companion at all** by a one-click update. Its log is the whole proof:
+
+    00:34:53,950 upgrade: v0.7.3 launched; shutting down v0.7.0
+    00:34:53,950 timeline watcher stopped
+    00:34:55,034 another ccsync-companion is already running -- this instance is exiting
+
+The second line is the CHILD. `upgrade.apply()` has to spawn the new build
+before the old one exits (a failed spawn is what the rollback hangs off —
+`upgrade.py` ~line 635), so for a second or two there really are two
+companions. On posix the newcomer copes: `CCSYNC_REPLACES_PID` names the
+predecessor and `app._acquire_lock_file()` waits up to
+`PREDECESSOR_WAIT_SECONDS` for that exact pid to let go. **On Windows it does
+not.** `acquire_single_instance()` reads `_replaced_pid()` only to drop it,
+then returns False the moment `CreateMutexW` reports `ERROR_ALREADY_EXISTS`
+— on the stated assumption (`upgrade.py` ~line 734) that "the named mutex is
+released the instant we die and the child simply wins by timing". That is
+backwards: the child reaches the guard ~1.1 s after being spawned, while the
+parent is still tearing down lanes and holding the mutex. The child exits,
+the parent finishes exiting, and nothing is left running. Nothing retries —
+the Run-key autostart is logon-only — so the editor is silently offline until
+the next reboot or a manual start.
+
+It is a RACE, not a certainty: the same machine's 0.4.22 → 0.7.0 upgrade
+earlier the same day survived it, and the base rig has never lost it. That is
+why this has shipped several times unnoticed.
+
+Fixed 2026-08-12 (companion 0.7.5, both halves of the sketch above):
+- `app._acquire_mutex_win32()` — the win32 branch now keeps the
+  `_replaced_pid()` value and, on `ERROR_ALREADY_EXISTS` during an upgrade
+  hand-off, polls up to `PREDECESSOR_WAIT_SECONDS` re-trying `CreateMutexW`
+  each pass. Deliberately NOT `_wait_for_predecessor()`'s liveness-only
+  loop: `_pid_is_alive_win32` can read a dead process as alive (exit code
+  259 + both fail-safe arms), so the wait is keyed on the mutex actually
+  clearing; liveness only decides "the holder isn't our predecessor". Every
+  probe handle is closed before waiting — our own handle would keep the
+  named object alive forever. No hand-off pid → immediate refusal, exactly
+  the old behaviour. The mutex-broken fallback now hands the already-popped
+  pid to `_acquire_lock_file(replaces_pid=…)` instead of losing the wait to
+  a second (empty) env pop.
+- Belt and braces: `_default_spawn` returns the Popen and `apply()` watches
+  it for `CHILD_TAKEOVER_GRACE_SECONDS` (2 s) — a child that dies inside the
+  window rolls the swap back and keeps the old build running instead of
+  standing down over a corpse.
+
+Aftermath on that machine, worth knowing about:
+- The editor tried to restart it by hand at 00:37:42 and got a **stale
+  packaged build** — it logged `ccsync-companion v0.1.0 starting`, could not
+  use the current v2 identity (`sign-in required`, `dashboard report skipped:
+  no verified editor identity`) and was gone within 3 s. Prefetch shows it
+  ran from a path used exactly once (`CCSYNC-COMPANION.EXE-6E2F19E6.pf`,
+  distinct from the installed `…-BB78F76F.pf`) that no longer exists — most
+  likely the July `CCSync_Editor_Package` opened straight out of its zip or
+  out of the recycle bin (`C:\Users\user\Downloads\CCSync_Editor_Package.zip`
+  is still there; the extracted folder is in the recycle bin, and the exe in
+  it is a genuine v0.1.0 — its PYZ has `watcher`/`theme` and no
+  `reporter`/`identity`/`upgrade`). Unresolved residual: that log block also
+  contains lines only a post-0.2.0 build emits (`config OK:`, `sign-in
+  required`, `timeline watcher started`, the reporter DEBUG), so the "v0.1.0"
+  stamp and the code that ran do not match any commit here. Either two
+  processes interleaved into `~/.ccsync/companion.log`, or a build exists in
+  the wild whose `config.VERSION` was never bumped. Two lessons stand
+  regardless: pre-guard builds (< 0.2.0) have **no** single-instance guard at
+  all and will happily run alongside the real one, and every build shares the
+  one log file, so a stray old exe corrupts the evidence.
+- Resolved 2026-08-12 by installing **0.7.4** over SSH (exe + release
+  manifest into `%LOCALAPPDATA%\ccsync\bin`, sha256 verified against
+  `companion/dist`) and launching it into the console session via a throwaway
+  `InteractiveToken` scheduled task — an SSH-spawned process lands in the
+  network-logon session with no visible tray. It came up clean: identity
+  intact, lanes and sequencer started, Resolve bridge connected.
+  Note the CIM `*-ScheduledTask` cmdlets hang over that SSH logon; classic
+  `schtasks /create /xml` works, and the XML's `UserId` must be the **SID**
+  (`DOMAIN\user` fails with "No mapping between account names and security
+  IDs was done").
+- Both machines now have a Start Menu **CCSync** shortcut pointing at
+  `%LOCALAPPDATA%\ccsync\bin\ccsync-companion.exe`, so a lost companion is a
+  Start-menu search away rather than a hunt for a stale exe.
+- Still owed: 0.7.4 is NOT published to the dashboard upgrade channel, which
+  still advertises 0.7.3 as current. Both machines are on 0.7.4, and
+  `upgrade.py`'s deliberate "different, not newer" rule means they will be
+  offered an "Install v0.7.3" downgrade until the channel is bumped.
+
 ---
 
 ## Carryover — unchanged from before the 2026-08-11 hunt

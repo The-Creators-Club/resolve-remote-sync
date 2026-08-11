@@ -142,15 +142,19 @@ _single_instance_token: Any = None
 # Set by upgrade._default_spawn on the CHILD it launches, naming the pid the
 # child is replacing. The self-upgrade spawns the new build BEFORE the old
 # process has exited (it has to: request_shutdown() comes after the spawn, so
-# a failed launch can still roll the whole swap back). On Windows the named
-# mutex is released the instant the old process dies and the new one simply
-# wins by timing; on posix the pid file is a LIVENESS check, and the dying
-# predecessor is very much alive for the second or two its lanes take to stop
-# -- so the freshly-installed build exited immediately with "another
-# ccsync-companion is already running", leaving the machine with NO companion
-# until the next login. The wait below is the fix, and it is deliberately
-# narrow: only the pid we were told we replace, only for as long as a normal
-# shutdown takes.
+# a failed launch can still roll the whole swap back) -- so for a second or
+# two there really are two companions, and BOTH guards must let the newcomer
+# wait out its predecessor. On posix the pid file is a liveness check on the
+# recorded pid; on Windows the named mutex lives until the predecessor's
+# LAST HANDLE closes at process exit. Either way the dying predecessor holds
+# the slot for exactly as long as its lanes take to stop, and a newcomer
+# that refuses instead of waiting leaves the machine with NO companion until
+# the next logon (posix: seen live pre-0.7.0; win32: R11, a remote editor's
+# machine 2026-08-12 -- the old "the mutex is released the instant we die
+# and the child wins by timing" assumption was backwards, the child reaches
+# the guard ~1s in while the parent is still tearing down lanes). The wait
+# is deliberately narrow: only the pid we were told we replace, only for as
+# long as a normal shutdown takes.
 _REPLACES_PID_ENV = "CCSYNC_REPLACES_PID"
 PREDECESSOR_WAIT_SECONDS = 20.0
 PREDECESSOR_POLL_SECONDS = 0.25
@@ -263,19 +267,29 @@ def _wait_for_predecessor(
     return False
 
 
+# Distinguishes "caller already popped CCSYNC_REPLACES_PID" from "no
+# predecessor": None is a meaningful value here.
+_REPLACES_PID_NOT_GIVEN: Any = object()
+
+
 def _acquire_lock_file(
     alive_fn: Optional[Callable[[int], bool]] = None,
     clock: Callable[[], float] = time.monotonic,
     sleep_fn: Callable[[float], None] = time.sleep,
     wait_seconds: float = PREDECESSOR_WAIT_SECONDS,
+    replaces_pid: Any = _REPLACES_PID_NOT_GIVEN,
 ) -> bool:
     """Portable fallback: a pid file with a liveness check. A stale file from
     a crashed/killed companion must never lock the editor out permanently."""
     global _single_instance_token
     path = config_mod.CONFIG_DIR / _SINGLE_INSTANCE_LOCKFILE
-    # Popped unconditionally, before any early return: it must not survive
-    # into a child of ours whatever happens below.
-    replaces_pid = _replaced_pid()
+    if replaces_pid is _REPLACES_PID_NOT_GIVEN:
+        # Popped unconditionally, before any early return: it must not
+        # survive into a child of ours whatever happens below. The win32
+        # caller pops it before its own guard and hands the value through --
+        # a second pop here would read nothing and silently lose the
+        # predecessor wait exactly when the mutex guard is broken.
+        replaces_pid = _replaced_pid()
     # Resolved by NAME, not bound as a default: tests monkeypatch the module
     # global, and a default argument would have captured the real one at
     # import time.
@@ -300,18 +314,95 @@ def _acquire_lock_file(
         return True  # never block startup on the guard itself failing
 
 
+def _acquire_mutex_win32(
+    try_create: Callable[[], "tuple[Any, int]"],
+    close_handle: Callable[[Any], Any],
+    replaces_pid: Optional[int],
+    alive_fn: Optional[Callable[[int], bool]] = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    timeout: float = PREDECESSOR_WAIT_SECONDS,
+    poll_seconds: float = PREDECESSOR_POLL_SECONDS,
+) -> bool:
+    """R11 (2026-08-12): the named-mutex twin of _acquire_lock_file's
+    predecessor wait. The branch used to return False the moment CreateMutexW
+    reported ERROR_ALREADY_EXISTS, on the assumption the mutex "is released
+    the instant the predecessor dies and the child wins by timing". Backwards:
+    the self-upgrade's child reaches this guard ~1s after being spawned while
+    the predecessor is still tearing down its lanes and holding the mutex --
+    the child exited, the predecessor finished exiting, and the machine was
+    left with NO companion until the next logon.
+
+    A mutex cannot be asked WHO holds it, so the holder==predecessor check
+    the lock file does against its contents is keyed on CCSYNC_REPLACES_PID
+    alone, and the wait retries CreateMutexW itself rather than reusing
+    _wait_for_predecessor's liveness-only loop: _pid_is_alive_win32 can read
+    a DEAD process as alive (exit code 259, plus both fail-safe arms), and a
+    wait keyed on liveness alone would then sit out the full timeout and
+    refuse -- re-creating the mutex each poll takes the slot the moment it is
+    actually free, whatever the probe says."""
+    global _single_instance_token
+    is_alive = alive_fn if alive_fn is not None else _pid_is_alive
+    handle, last_error = try_create()
+    if not handle:
+        return True  # the guard itself failed -- never block a legitimate start
+    if last_error != _ERROR_ALREADY_EXISTS:
+        _single_instance_token = handle
+        return True
+    # Our probe handle keeps the named object ALIVE: while we hold it the
+    # mutex outlives the predecessor and every retry below would read
+    # ALREADY_EXISTS forever. Dropped before any wait, and after every
+    # failed retry.
+    close_handle(handle)
+    if replaces_pid is None:
+        return False  # not an upgrade hand-off: refuse immediately, as always
+    log.info(
+        "single-instance: the slot is held and this build replaces pid %s "
+        "-- waiting up to %.0fs for it to exit", replaces_pid, timeout,
+    )
+    deadline = clock() + timeout
+    while clock() < deadline:
+        # Sampled BEFORE the create attempt: dead before the attempt means
+        # its handles were already gone, so a mutex that still exists is some
+        # OTHER companion's -- while dead-after could just be the predecessor
+        # exiting between the two calls.
+        was_alive = is_alive(replaces_pid)
+        sleep_fn(poll_seconds)
+        handle, last_error = try_create()
+        if not handle:
+            return True
+        if last_error != _ERROR_ALREADY_EXISTS:
+            log.info(
+                "single-instance: predecessor pid %s released the slot -- taking it",
+                replaces_pid,
+            )
+            _single_instance_token = handle
+            return True
+        close_handle(handle)
+        if not was_alive:
+            log.warning(
+                "single-instance: pid %s is gone but the slot is still held "
+                "-- a different companion owns it", replaces_pid,
+            )
+            return False
+    log.warning(
+        "single-instance: the slot is still held %.0fs after the self-upgrade "
+        "spawned this build -- treating the holder as a live second instance",
+        timeout,
+    )
+    return False
+
+
 def acquire_single_instance() -> bool:
     """True when this process may run. False means another companion already
     holds the slot. Never raises; any failure of the guard itself returns
     True rather than blocking a legitimate start."""
-    global _single_instance_token
     if sys.platform != "win32":
         return _acquire_lock_file()
-    # Windows never has to WAIT for the build it replaces: the named mutex is
-    # released the instant the predecessor's last handle closes, so the
-    # newcomer wins by timing. Read (and drop) the variable anyway, so it
-    # cannot inherit into every rclone this process goes on to launch.
-    _replaced_pid()
+    # Popped here, before anything can fail: it must not inherit into every
+    # rclone this process goes on to launch. The value feeds whichever guard
+    # actually runs below.
+    replaces_pid = _replaced_pid()
     try:
         import ctypes
         from ctypes import wintypes
@@ -319,17 +410,16 @@ def acquire_single_instance() -> bool:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateMutexW.restype = wintypes.HANDLE
         kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
-        handle = kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX)
-        last_error = ctypes.get_last_error()
-        if not handle:
-            return True
-        if last_error == _ERROR_ALREADY_EXISTS:
-            return False
-        _single_instance_token = handle
-        return True
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        def _try_create() -> "tuple[Any, int]":
+            handle = kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX)
+            return handle, ctypes.get_last_error()
+
+        return _acquire_mutex_win32(_try_create, kernel32.CloseHandle, replaces_pid)
     except Exception:
         log.debug("single-instance mutex unavailable", exc_info=True)
-        return _acquire_lock_file()
+        return _acquire_lock_file(replaces_pid=replaces_pid)
 
 
 def _osascript_run(argv: list) -> None:

@@ -871,6 +871,31 @@ The original worklist (file:line, failure scenarios, fix hints) is archived verb
     generator is making files nothing will attach — visible only as Media Offline beside
     a perfectly good proxy, which is the exact failure `proxy_relink.py` exists for.
 
+24. **The proxy generator could not encode a single clip — no `-f mp4`, `.partial`
+    destination (found live on the base rig, fixed 2026-08-11).** `own_proxy_cmd` and
+    `preview_proxy_cmd` passed no output format, and the generator's destination is
+    `<name>.mp4.partial` (item 22's two-writers rule) — ffmpeg chooses the muxer from the
+    extension, ".partial" names none, and every encode exited `EINVAL` at muxer init
+    before one frame. Overnight 2026-08-10→11 on 0.6.1 the base rig attempted its whole
+    1040-clip queue — 6290 ffmpeg spawns, 978 clips failed to the retry cap, **zero
+    proxies made**. Reproduced in isolation: the identical argv fails on a
+    `.mp4.partial` destination and succeeds with `-f mp4`.
+
+    Never caught earlier because (a) no test runs a real ffmpeg (deliberate — see
+    test_ffmpeg_tools.py's header) and the argv pins simply pinned the bug, (b) the
+    b-roll indexer this spec was copied from writes straight to `<name>.mp4` so never
+    needed the flag, and (c) the give-up log line kept only the LAST three stderr lines
+    — ffmpeg explains this failure in the FIRST ("Unable to choose an output format"),
+    so the log showed boilerplate. Fixed by appending `-f mp4` to both builders (an
+    output option, before the destination; changes no output byte, so preview parity
+    with the indexer holds), regression-pinned on a literal `.mp4.partial` destination,
+    and the failure log now keeps five lines/500 chars. Item 23's live-proof gate exists
+    for exactly this class; it still has not been run — the encode half is now proven
+    only as far as "ffmpeg accepts the argv", and the Resolve-attach half remains open.
+    Version bumped to **0.6.2** (0.6.1 is published as CURRENT; same-version republish
+    is refused). The failure cap is in-process only, so the fleet retries everything on
+    the upgrade restart with no state to clear.
+
 Session-2 macOS findings in full — MAC-6 through MAC-9, what is now proven on real
 hardware, and the outstanding list these items come from — are written up in
 `docs/macos-first-run-2026-08-05.md`.

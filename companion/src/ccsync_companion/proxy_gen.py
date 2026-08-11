@@ -1207,8 +1207,13 @@ class ProxyGenerator:
 
             failure: Optional[str] = None
             if outcome.get("returncode"):
-                tail = "\n".join((outcome.get("stderr") or "").splitlines()[-3:])
-                failure = f"ffmpeg exited {outcome.get('returncode')}: {tail[:300]}"
+                # Five lines, not three: ffmpeg explains a refused output in
+                # FOUR ("Unable to choose an output format..." then three
+                # boilerplate "Error ..." lines), and keeping the last three
+                # cost exactly the explanatory one on the night the muxer flag
+                # was missing (2026-08-11).
+                tail = "\n".join((outcome.get("stderr") or "").splitlines()[-5:])
+                failure = f"ffmpeg exited {outcome.get('returncode')}: {tail[:500]}"
             else:
                 failure = self._verify(partial, info.get("duration_s"), forced)
                 if failure and self._interrupt_reason(forced):

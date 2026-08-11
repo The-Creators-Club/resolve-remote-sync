@@ -162,6 +162,23 @@ def test_own_proxy_audio_container_and_paths():
     assert cmd[-1] == "out.mp4"
 
 
+@pytest.mark.parametrize("builder", ["own", "preview"])
+@pytest.mark.parametrize("nvenc", [True, False])
+def test_proxy_cmds_force_the_mp4_muxer(builder, nvenc):
+    """The real destination is `<name>.mp4.partial`, and ffmpeg picks the
+    muxer from the extension: without an explicit `-f mp4` every encode fails
+    at muxer init (EINVAL) before one frame — which is how the base rig made
+    zero of 1040 queued proxies overnight, 2026-08-11."""
+    if builder == "own":
+        cmd = ft.own_proxy_cmd("ffmpeg", "in.mov", "out.mp4.partial", nvenc=nvenc)
+    else:
+        cmd = ft.preview_proxy_cmd("ffmpeg", "in.mp4", "out.mp4.partial", nvenc=nvenc)
+
+    # As an OUTPUT option: after the input, immediately before the destination.
+    assert cmd[-3:] == ["-f", "mp4", "out.mp4.partial"]
+    assert cmd.index("-f") > cmd.index("-i")
+
+
 def test_own_proxy_stringifies_path_objects():
     from pathlib import Path
 
@@ -178,17 +195,22 @@ def test_own_proxy_stringifies_path_objects():
 # (:180-194). If a change here is intentional, the b-roll indexer has to make
 # the same change — otherwise the two pipelines produce different files for
 # the same YouTube download, which is exactly what this tier exists to avoid.
+# `-f mp4` is the one deliberate divergence (no output byte differs): the
+# indexer writes to `<name>.mp4`, the generator to `<name>.mp4.partial`, and
+# ffmpeg cannot choose a muxer from ".partial" (2026-08-11).
 BROLL_NVENC_TAIL = [
     "-vf", "scale=-2:'min(540,ih)'",
     "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "34",
     "-c:a", "aac", "-b:a", "96k",
     "-movflags", "+faststart",
+    "-f", "mp4",
 ]
 BROLL_CPU_TAIL = [
     "-vf", "scale=-2:'min(540,ih)'",
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
     "-c:a", "aac", "-b:a", "96k",
     "-movflags", "+faststart",
+    "-f", "mp4",
 ]
 
 

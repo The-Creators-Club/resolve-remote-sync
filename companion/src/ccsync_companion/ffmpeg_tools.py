@@ -530,6 +530,11 @@ def own_proxy_cmd(
         "-tag:v", "hvc1",
         "-c:a", "aac", "-b:a", OWN_AUDIO_BITRATE,
         "-movflags", "+faststart",
+        # The generator encodes to `<name>.mp4.partial` and ffmpeg chooses the
+        # muxer by extension: ".partial" names none, so without an explicit
+        # format EVERY encode dies at muxer init (EINVAL) before a single
+        # frame -- the whole 1040-clip base-rig queue, overnight 2026-08-11.
+        "-f", "mp4",
         str(dest),
     ]
     return cmd
@@ -586,6 +591,11 @@ def preview_proxy_cmd(
         *video_codec,
         "-c:a", "aac", "-b:a", PROXY_AUDIO_BITRATE,
         "-movflags", "+faststart",
+        # The one deliberate divergence from the b-roll indexer's argv, and it
+        # changes no output byte: the indexer writes straight to `<name>.mp4`,
+        # this pipeline writes to `<name>.mp4.partial`, and ffmpeg cannot pick
+        # a muxer from ".partial" (EINVAL at init, overnight 2026-08-11).
+        "-f", "mp4",
         str(dest),
     ]
 

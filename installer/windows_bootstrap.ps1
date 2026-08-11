@@ -184,7 +184,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.21"
+$InstallerVersion = "1.0.22"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see

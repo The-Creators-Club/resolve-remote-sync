@@ -28,13 +28,12 @@ from typing import Any, Optional
 
 log = logging.getLogger("ccsync.config")
 
-# 0.6.3 carries NO companion change over 0.6.2. The 0.6.2 ship published the
-# companion and then failed on the installer (onboard.exe bundles this exe, so
-# its bytes moved while $InstallerVersion stood still, and the server keeps the
-# old build on a same-version/different-hash upload). Nothing can republish
-# 0.6.2 -- the publish guard and ship.ps1's preflight both refuse a version the
-# server already has -- so resuming a half-finished ship costs a version number.
-VERSION = "0.6.3"
+# 0.7.0: the 2026-08-11 fix pass -- all 82 KNOWN_BUGS findings (both popup
+# wedges, lane B stopped in managed mode, credentials off argv via
+# WNetAddConnection2W, own-proxy audio -map, 8899 hardening, BPG gating) plus
+# the ignoreDelete delete-protection retrofit and the /music/send endpoints
+# reaching editors for the first time. See docs/bug-hunt-2026-08-11.md.
+VERSION = "0.7.0"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

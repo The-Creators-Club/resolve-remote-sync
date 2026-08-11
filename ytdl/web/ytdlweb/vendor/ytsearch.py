@@ -28,6 +28,8 @@ yt_dlp is imported inside each function -- see vendor/__init__.py.
 from __future__ import annotations
 
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -159,7 +161,8 @@ def search(query: str, max_results: int, period: str | None = None) -> list[dict
     return entries[:max_results]
 
 
-def enrich(entries: list[dict], jobs: int = 4, progress=None) -> list[dict]:
+def enrich(entries: list[dict], jobs: int | None = None, progress=None,
+           pause: float | None = None, sleeper=time.sleep) -> list[dict]:
     """Fetch full metadata for each candidate (dates, real durations, views).
 
     Unavailable / private / live entries come back with an 'error' field rather
@@ -169,12 +172,46 @@ def enrich(entries: list[dict], jobs: int = 4, progress=None) -> list[dict]:
     replaces batch_dl's carriage-return print, and it is what moves the SPA's
     metadata counter. It is called from a pool thread, so the caller's callback
     has to be safe there (worker.py's just commits one UPDATE).
+
+    PACED, unlike batch_dl's original, which fanned four threads out with no
+    delay whatsoever: that is the shape that put 112 metadata calls out fast
+    enough for YouTube to start refusing the NAS's IP outright and take every
+    extraction in the fleet down with it (2026-08-11). Cookies + a PO token
+    made those requests legitimate; they did not make the volume look human.
+
+    `jobs` bounds how many are IN FLIGHT and `pause` the seconds between
+    requests -- between requests across the whole pool, not per thread: the
+    gate below is held during the wait, so the ceiling is 1/pause requests a
+    second whatever YouTube's own latency happens to be that day. Per-thread
+    sleeps would have made the real rate a function of that latency, which is
+    exactly the number nobody could measure when this went wrong.
+
+    `sleeper` is injectable so the suite can prove the pacing happens without
+    spending 75 real seconds doing it.
     """
     import yt_dlp  # lazy: see vendor/__init__.py
 
+    jobs = config.ENRICH_WORKERS if jobs is None else jobs
+    pause = config.ENRICH_PAUSE if pause is None else pause
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True, **net_opts()}
 
+    gate = threading.Lock()
+
+    def wait_turn():
+        """Take the next slot. Deliberately sleeps holding the lock.
+
+        Every request waits, including each chunk's first: worker.py calls this
+        function once per chunk of 8, so an unpaced first request would hand
+        back a free one every chunk and put the rate 12% over the ceiling for
+        no benefit anybody can see.
+        """
+        if not pause:
+            return
+        with gate:
+            sleeper(pause)
+
     def fetch(e):
+        wait_turn()
         url = e.get("url") or f"https://www.youtube.com/watch?v={e['id']}"
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:

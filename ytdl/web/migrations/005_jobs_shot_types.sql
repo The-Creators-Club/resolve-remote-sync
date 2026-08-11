@@ -1,0 +1,22 @@
+-- v5: jobs.shot_types -- which SHOT TYPES the editor ticked for this search
+-- (aerial, establishing, walkthrough, timelapse, event, raw, interview, news,
+-- commentary), as a comma-separated list of ytdlweb.claude_cli.SHOT_TYPES keys.
+--
+-- Both Claude calls read it off the job row and compose the {bias} block of
+-- their prompt from it, so it is stored per job rather than per editor: a job
+-- resumed after a container restart must be re-run with the boxes that were
+-- ticked when it was submitted.
+--
+-- The DEFAULT is the six footage types, which is exactly the fixed "prioritise
+-- visuals" bias every row written before this column ran under -- so every
+-- pre-existing job reads as what it actually did, and SQLite fills them in
+-- with no backfill of ours. (A NOT NULL default is legal in ADD COLUMN
+-- precisely because it is a constant.) It is NOT the empty string: '' is the
+-- editor deliberately ticking nothing, which means an unbiased search, and
+-- writing that here would rewrite the history of every old job.
+--
+-- The literal is duplicated from claude_cli.DEFAULT_SHOT_TYPES on purpose --
+-- SQL cannot import Python -- and tests/test_db.py pins the two together so
+-- the pair cannot drift.
+ALTER TABLE jobs ADD COLUMN shot_types TEXT NOT NULL
+    DEFAULT 'aerial,establishing,walkthrough,timelapse,event,raw';

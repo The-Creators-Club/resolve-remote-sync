@@ -18,6 +18,7 @@ plain source assertions at the bottom always run. If you are looking at a skip
 report and wondering: install node, or trust the source checks.
 """
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -87,7 +88,7 @@ class N {
   byClass(c) { return this.descendants().filter(n => (' ' + n.className + ' ').includes(' ' + c + ' ')); }
 }
 
-function makeContext(handler) {
+function makeContext(handler, seed) {
   const els = new Map();
   const get = id => {
     if (!els.has(id)) {
@@ -128,8 +129,17 @@ function makeContext(handler) {
       text: async () => res.text === undefined ? '' : res.text,
     };
   };
+  // Enough localStorage for the shot-type ticks. Seedable, because "the boxes
+  // this editor left ticked last week come back" is the whole feature and a
+  // fresh sandbox has nothing in it.
+  const store = Object.assign({}, seed || {});
+  const localStorage = {
+    getItem: k => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: k => { delete store[k]; },
+  };
   const ctx = {
-    document, location: {hash: ''}, console,
+    document, location: {hash: ''}, console, localStorage,
     fetch: fetchStub,
     setTimeout: (fn, ms) => timers.set(fn, ms),
     clearTimeout: id => timers.clear(id),
@@ -137,11 +147,11 @@ function makeContext(handler) {
     clearInterval: () => {},
   };
   vm.createContext(ctx);
-  return {ctx, els, get, timers, calls};
+  return {ctx, els, get, timers, calls, store};
 }
 
-async function boot(handler) {
-  const h = makeContext(handler);
+async function boot(handler, seed) {
+  const h = makeContext(handler, seed);
   vm.runInContext(APP, h.ctx, {filename: 'app.js'});
   // Top-level const/let are lexical, not properties of the sandbox, so they
   // have to be re-exported. One at a time and forgivingly, so this harness can
@@ -150,9 +160,9 @@ async function boot(handler) {
   vm.runInContext(
     'globalThis.__ = {};'
     + '["state","banners","poll","attach","detach","runSearch","runUrls",'
-    + '"toggle","bulk","loadHealth","loadProjects","loadManifest",'
+    + '"toggle","bulk","loadHealth","loadProjects","loadManifest","loadRecent",'
     + '"renderProgress","renderTerms","renderGrid","toast","setBanner",'
-    + '"visibleVideos"]'
+    + '"visibleVideos","SHOT_TYPES","shotKeys","shotSummary","renderShots"]'
     + '.forEach(k => { try { globalThis.__[k] = eval(k); } catch (e) {} });', h.ctx);
   await flush();
   h.app = h.ctx.__;
@@ -597,6 +607,221 @@ scenarios['a_url_job_shows_downloads_not_a_review_grid'] = async () => {
                                 search_cards: h.get('grid').byClass('card').length});
 };
 
+// ---- the shot-type checkboxes -------------------------------------------
+// "just make it a series of check boxes so the user can decide and tweak it"
+// (2026-08-11). The ticks are the editor's, remembered between visits, and
+// posted with the search -- the server owns what they MEAN.
+
+const shotBoxes = h => h.get('shots').descendants().filter(n => n.tagName === 'input');
+const clickShot = (h, key, on) => {
+  const b = shotBoxes(h).find(x => x.value === key);
+  b.checked = on;
+  b.onchange();                       // what a click does; the shim fires none
+};
+
+scenarios['shot_type_boxes_post_what_is_ticked'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 31}};
+    if (url === 'api/jobs/31') return {json: POLLRES(JOB({id: 31, phase: 'queued'}))};
+    return {json: {}};
+  });
+  const initial = shotBoxes(h).map(b => [b.value, !!b.checked]);
+  clickShot(h, 'raw', false);
+  clickShot(h, 'interview', true);
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  return {initial, body: post && post.body,
+          labels: h.get('shots').textContent,
+          stored: h.store['ytdl.shot_types'],
+          note: h.get('shotnote').textContent};
+};
+
+scenarios['shot_types_come_back_from_localstorage'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 32}};
+    if (url === 'api/jobs/32') return {json: POLLRES(JOB({id: 32}))};
+    return {json: {}};
+  }, {'ytdl.shot_types': JSON.stringify(['interview', 'aerial', 'klingon'])});
+  const ticked = shotBoxes(h).filter(b => b.checked).map(b => b.value);
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  return {ticked, posted: post && post.body.shot_types};
+};
+
+// All ticked and none ticked are the same instruction (no bias), and an editor
+// who has just cleared every box must be told so rather than left expecting a
+// filter that is not running.
+scenarios['the_degenerate_selections_say_so'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    return {json: {}};
+  });
+  const keys = h.app.SHOT_TYPES.map(s => s.key);
+  keys.forEach(k => clickShot(h, k, false));
+  const none = {note: h.get('shotnote').textContent, posted: h.app.shotKeys(),
+                stored: h.store['ytdl.shot_types']};
+  keys.forEach(k => clickShot(h, k, true));
+  return {none, all_note: h.get('shotnote').textContent,
+          all_posted: h.app.shotKeys().length,
+          // ...and a normal selection says nothing at all
+          some_note: (clickShot(h, 'news', false), h.get('shotnote').textContent)};
+};
+
+// An old search has to stay interpretable: what it was RUN with, not what the
+// header happens to be ticked to now.
+scenarios['the_selection_shows_on_the_job_and_recent_views'] = async () => {
+  const recent = [
+    {id: 41, kind: 'search', term: 'reef', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-11T09:00:00', shot_types: ['aerial', 'raw']},
+    {id: 42, kind: 'urls', term: 'links', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-11T09:10:00', shot_types: ['aerial']},
+    {id: 43, kind: 'search', term: 'wind', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-11T09:20:00', shot_types: []},
+  ];
+  const manifest = MANIFEST({
+    job: JOB({id: 41, phase: 'ready_for_review', shot_types: ['aerial', 'raw']}),
+    videos: [VIDEO('KKKKKKKKKKK')],
+    terms: [{id: 1, term: 'reef', lang: 'en', english_gloss: null,
+             source: 'user', hits: 1, videos: 1}],
+    counts: {relevant: 1, duplicates: 0, irrelevant: 0},
+  });
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/jobs?')) return {json: {jobs: recent}};
+    const b = baseline(method, url); if (b) return b;
+    if (url.startsWith('api/jobs/41/manifest')) return {json: manifest};
+    if (url === 'api/jobs/41') return {json: POLLRES(manifest.job)};
+    return {json: {}};
+  });
+  // the editor's CURRENT ticks are something else entirely
+  clickShot(h, 'aerial', false);
+  await h.app.attach(41);
+  await flush();
+  return {jobshots: h.get('jobshots').textContent,
+          rows: h.get('recentlist').byClass('recentrow')
+                 .map(r => r.byClass('shotsum').map(s => s.textContent).join(''))};
+};
+
+// ---- the candidate-limit dropdown ---------------------------------------
+// The other per-search dial, beside quality/date: how many candidates the
+// search may collect, i.e. how many metadata calls it makes at YouTube. 100 by
+// default because 112 rapid ones is where the NAS's IP was refused outright
+// (2026-08-11). Remembered per browser like the shot ticks are.
+
+const capSelect = h => h.get('maxcand');
+
+scenarios['the_candidate_limit_defaults_and_is_posted_with_the_search'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 51}};
+    if (url === 'api/jobs/51') return {json: POLLRES(JOB({id: 51, phase: 'queued'}))};
+    return {json: {}};
+  });
+  const initial = capSelect(h).value;
+  const options = capSelect(h).children.map(o => [o.value, o.textContent]);
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  return {initial, options, body: post && post.body};
+};
+
+scenarios['a_changed_candidate_limit_is_posted_and_remembered'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 52}};
+    if (url === 'api/jobs/52') return {json: POLLRES(JOB({id: 52}))};
+    return {json: {}};
+  });
+  capSelect(h).value = '400';
+  capSelect(h).onchange();              // what picking an option does
+  h.get('q').value = 'a thin topic';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  return {posted: post && post.body.max_candidates, stored: h.store['ytdl.max_candidates']};
+};
+
+scenarios['the_candidate_limit_comes_back_from_localstorage'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 53}};
+    if (url === 'api/jobs/53') return {json: POLLRES(JOB({id: 53}))};
+    return {json: {}};
+  }, {'ytdl.max_candidates': '200'});
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  return {value: capSelect(h).value, posted: post && post.body.max_candidates};
+};
+
+// A number this build no longer offers (or junk) must not be posted: the
+// server refuses one it does not know, which would 400 every search this
+// browser ever made until localStorage was cleared by hand.
+scenarios['a_stale_candidate_limit_falls_back_to_the_default'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 54}};
+    if (url === 'api/jobs/54') return {json: POLLRES(JOB({id: 54}))};
+    return {json: {}};
+  }, {'ytdl.max_candidates': '9999'});
+  const value = capSelect(h).value;
+  capSelect(h).value = 'nonsense';      // and a DOM nobody can explain either
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  return {value, posted: post && post.body.max_candidates};
+};
+
+// What a job was RUN with, on the manifest header and in Recent searches --
+// the answer to "why did that search find so much more than this one". An
+// absent number (an old row, an old server) is shown as nothing at all.
+scenarios['the_candidate_limit_shows_on_the_job_and_recent_views'] = async () => {
+  const recent = [
+    {id: 61, kind: 'search', term: 'reef', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-11T09:00:00', shot_types: [],
+     max_candidates: 400},
+    {id: 62, kind: 'urls', term: 'links', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-11T09:10:00', shot_types: [],
+     max_candidates: 100},
+    {id: 63, kind: 'search', term: 'wind', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-11T09:20:00', shot_types: []},
+  ];
+  const manifest = MANIFEST({
+    job: JOB({id: 61, phase: 'ready_for_review', shot_types: ['aerial'],
+              max_candidates: 400}),
+    videos: [VIDEO('LLLLLLLLLLL')],
+    terms: [{id: 1, term: 'reef', lang: 'en', english_gloss: null,
+             source: 'user', hits: 1, videos: 1}],
+    counts: {relevant: 1, duplicates: 0, irrelevant: 0},
+  });
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/jobs?')) return {json: {jobs: recent}};
+    const b = baseline(method, url); if (b) return b;
+    if (url.startsWith('api/jobs/61/manifest')) return {json: manifest};
+    if (url === 'api/jobs/61') return {json: POLLRES(manifest.job)};
+    return {json: {}};
+  });
+  await h.app.attach(61);
+  await flush();
+  return {jobshots: h.get('jobshots').textContent,
+          rows: h.get('recentlist').byClass('recentrow')
+                 .map(r => r.byClass('capsum').map(s => s.textContent).join(''))};
+};
+
 // ---- run them -----------------------------------------------------------
 (async () => {
   const out = {};
@@ -616,8 +841,12 @@ def spa(tmp_path_factory):
         pytest.skip('node is not installed; the source assertions still run')
     harness = tmp_path_factory.mktemp('spa') / 'harness.cjs'
     harness.write_text(HARNESS, encoding='utf-8')
+    # encoding='utf-8' is not optional: node writes UTF-8, Windows decodes
+    # subprocess output as cp1252 by default, and a shot-type label carrying a
+    # '·' then arrives as 'Â·' -- a test failure with no bug behind it.
     proc = subprocess.run([NODE, str(harness), str(APP_JS), str(STATIC / 'index.html')],
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, encoding='utf-8',
+                          timeout=120)
     assert proc.returncode == 0, f'harness failed:\n{proc.stderr}'
     # node exits 0 and silent if a scenario's promise never settles, which is
     # its own kind of bug report -- say so rather than dying in json.loads.
@@ -792,6 +1021,100 @@ def test_a_url_job_renders_its_downloads_and_no_review_grid(spa):
     assert r['search_cards'] == 2, r
 
 
+# ------------------------------------------------------- the shot-type boxes
+def test_the_boxes_start_on_the_documented_defaults_and_post_what_is_ticked(spa):
+    r = spa['shot_type_boxes_post_what_is_ticked']
+    assert r['initial'] == [['aerial', True], ['establishing', True],
+                            ['walkthrough', True], ['timelapse', True],
+                            ['event', True], ['raw', True],
+                            ['interview', False], ['news', False],
+                            ['commentary', False]], r['initial']
+    assert r['body']['shot_types'] == ['aerial', 'establishing', 'walkthrough',
+                                       'timelapse', 'event', 'interview'], r['body']
+    # ...as part of the same submit, not a second request
+    assert r['body']['term'] == 'reef' and r['body']['project_slug'] == 's'
+    # the boxes are labelled, and grouped so nine of them do not read as a wall
+    assert 'Aerial / drone' in r['labels'] and 'News reports' in r['labels']
+    assert 'shots of it:' in r['labels'] and 'also keep:' in r['labels']
+    assert r['note'] == '', 'a normal selection needs no note'
+
+
+def test_the_ticks_are_remembered_between_visits(spa):
+    """Per browser, not per job: an editor cutting one film ticks the same
+    boxes all week."""
+    r = spa['shot_type_boxes_post_what_is_ticked']
+    assert json.loads(r['stored']) == ['aerial', 'establishing', 'walkthrough',
+                                       'timelapse', 'event', 'interview']
+
+    back = spa['shot_types_come_back_from_localstorage']
+    assert back['ticked'] == ['aerial', 'interview'], back
+    # a key this build no longer has is dropped rather than posted: the server
+    # refuses unknown keys and would fail the whole search over it
+    assert back['posted'] == ['aerial', 'interview'], back
+
+
+def test_both_degenerate_selections_are_explained_rather_than_left_to_surprise(spa):
+    r = spa['the_degenerate_selections_say_so']
+    assert r['none']['posted'] == []
+    assert 'no bias' in r['none']['note'], r['none']['note']
+    assert json.loads(r['none']['stored']) == []
+    assert r['all_posted'] == 9
+    assert 'no bias' in r['all_note'], r['all_note']
+    assert r['some_note'] == '', 'a normal selection is not annotated'
+
+
+def test_a_finished_search_still_says_what_it_was_run_with(spa):
+    """The header shows what the editor has ticked NOW; a week-old manifest has
+    to show what it was actually searched and filtered with."""
+    r = spa['the_selection_shows_on_the_job_and_recent_views']
+    assert r['jobshots'] == 'shot types: Aerial / drone · Raw / uncut / no commentary', r
+    # recent rows: a search shows its selection compactly, one that ticked
+    # nothing says so, and a paste (never searched) shows none at all
+    assert r['rows'] == ['aerial+raw', '', 'no shot-type filter'], r['rows']
+
+
+# --------------------------------------------- the candidate-limit dropdown
+def test_the_limit_dropdown_offers_the_menu_and_defaults_to_100(spa):
+    """100 because 112 rapid metadata calls is the only measured point at which
+    YouTube has cut this NAS off (2026-08-11) -- a normal search sits just under
+    the one threshold in evidence."""
+    r = spa['the_candidate_limit_defaults_and_is_posted_with_the_search']
+    assert r['initial'] == '100', r
+    assert r['options'] == [['50', '50 candidates'], ['100', '100 candidates'],
+                            ['200', '200 candidates'], ['400', '400 candidates']], r
+    # ...as part of the same submit, not a second request
+    assert r['body']['max_candidates'] == 100, r['body']
+    assert r['body']['term'] == 'reef' and r['body']['project_slug'] == 's'
+
+
+def test_the_chosen_limit_is_posted_and_remembered_between_visits(spa):
+    """Per browser, like the shot ticks: the editor who needs 400 for a thin
+    topic needs it all afternoon."""
+    r = spa['a_changed_candidate_limit_is_posted_and_remembered']
+    assert r['posted'] == 400, r
+    assert r['stored'] == '400', r
+
+    back = spa['the_candidate_limit_comes_back_from_localstorage']
+    assert back['value'] == '200' and back['posted'] == 200, back
+
+
+def test_a_stale_or_junk_limit_is_never_posted(spa):
+    """The server refuses a number it does not know rather than clamping it, so
+    a value this build no longer offers would 400 every search from this
+    browser until localStorage was cleared by hand."""
+    r = spa['a_stale_candidate_limit_falls_back_to_the_default']
+    assert r['value'] == '100', r
+    assert r['posted'] == 100, r
+
+
+def test_a_finished_search_says_what_limit_it_ran_under(spa):
+    r = spa['the_candidate_limit_shows_on_the_job_and_recent_views']
+    assert r['jobshots'] == 'shot types: Aerial / drone · up to 400 candidates', r
+    # a search shows its ceiling, a paste (never searched) shows none, and a
+    # row from before the column existed claims nothing
+    assert r['rows'] == ['max 400', '', ''], r['rows']
+
+
 # --------------------------------------------------- source-level assertions
 # These run with or without node: they are the cheap backstop for the shapes
 # the harness proves, so a rewrite that reintroduces one is caught even on a
@@ -882,3 +1205,81 @@ def test_health_is_re_fetched_on_a_slow_interval():
     js = _js()
     assert 'setInterval(loadHealth, HEALTH_INTERVAL)' in js
     assert 'const HEALTH_INTERVAL = ' in js
+
+
+# The one duplication this feature carries: the server owns the prompt
+# fragments, the SPA owns the labels beside the boxes, and both need the keys.
+_SHOT_ROW = re.compile(
+    r"\{key: '([a-z]+)', label: '([^']+)', on: (true|false), "
+    r"group: '([a-z]+)', short: '([^']+)'\}")
+
+
+def test_the_shot_type_table_matches_the_servers_key_for_key():
+    """A key the server does not know is a 400 on every search; a label that
+    drifts is an editor ticking a box that does something else."""
+    from ytdlweb import claude_cli
+
+    rows = _SHOT_ROW.findall(_js())
+    assert len(rows) == len(claude_cli.SHOT_TYPES), rows
+    assert [r[0] for r in rows] == list(claude_cli.SHOT_TYPES), 'order differs'
+    for key, label, on, group, short in rows:
+        frag = claude_cli.SHOT_TYPES[key]
+        assert label == frag['label'], key
+        assert (on == 'true') is frag['default'], key
+        assert group == frag['group'], key
+        assert short.strip(), key
+
+
+_CAPS_LINE = re.compile(r'const CANDIDATE_CAPS = \[([\d, ]+)\];')
+
+
+def test_the_candidate_limit_choices_match_the_servers():
+    """The second duplication this feature carries (config -> the dropdown, and
+    config -> migration 006's SQL default): the server refuses a number that is
+    not on ITS list, so a drift here is a 400 on every search."""
+    from ytdlweb import config
+
+    m = _CAPS_LINE.search(_js())
+    assert m, 'the CANDIDATE_CAPS table is gone or reshaped'
+    assert [int(x) for x in m.group(1).split(',')] == list(config.CANDIDATE_CAPS)
+    assert f'const DEFAULT_CAP = {config.DEFAULT_MAX_CANDIDATES};' in _js()
+    assert "const CAP_KEY = 'ytdl.max_candidates'" in _js()
+
+
+def test_the_search_posts_a_validated_limit_and_the_paste_posts_none():
+    """A url job does no searching, so a ceiling on the search would be a field
+    that changes nothing -- and the raw DOM value is never posted, because an
+    unlisted number is refused rather than clamped."""
+    js = _js()
+    body = js[js.index('async function runSearch()'):js.index('async function runUrls()')]
+    assert 'max_candidates: capValue()' in body, body
+    paste = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
+    assert 'max_candidates' not in paste, paste
+
+
+def test_the_limit_is_validated_against_this_builds_list_on_the_way_in_and_out():
+    js = _js()
+    for fn in ('function loadCap()', 'function capValue()'):
+        body = js[js.index(fn):js.index('}', js.index('return', js.index(fn)))]
+        assert 'CANDIDATE_CAPS.includes(' in body, fn
+    # ...and localStorage is never allowed to break the page (see loadShots)
+    body = js[js.index('function loadCap()'):js.index('function capValue()')]
+    assert body.count('try {') >= 2 and body.count('catch') >= 2, body
+
+
+def test_the_search_posts_the_ticked_shot_types_in_source():
+    js = _js()
+    body = js[js.index('async function runSearch()'):js.index('async function runUrls()')]
+    assert 'shot_types: shotKeys()' in body, body
+    # ...and the paste box does NOT: a url job is never searched or filtered
+    paste = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
+    assert 'shot_types' not in paste, paste
+
+
+def test_localstorage_is_never_allowed_to_break_the_page():
+    """It throws outright in some privacy modes, and a page that cannot
+    remember the ticks must still be able to search."""
+    js = _js()
+    body = js[js.index('function loadShots()'):js.index('function renderShotNote()')]
+    assert body.count('try {') >= 2 and body.count('catch') >= 2, body
+    assert "const SHOTS_KEY = 'ytdl.shot_types'" in js

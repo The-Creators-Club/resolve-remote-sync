@@ -35,6 +35,27 @@ CREATE TABLE IF NOT EXISTS jobs (
     quality          TEXT NOT NULL DEFAULT '1080p',
     period           TEXT,                   -- hour|today|week|month|year, NULL = any
     max_per_term     INTEGER NOT NULL DEFAULT 15,
+    -- The ceiling on CANDIDATE VIDEOS this search may accumulate, and so on
+    -- the metadata calls the enrich phase makes: 24 terms x 15 results is 336
+    -- candidates, and 112 rapid metadata calls is where YouTube cut the NAS's
+    -- IP off (2026-08-11). One of ytdlweb.config.CANDIDATE_CAPS, validated in
+    -- routes_api and enforced in worker._phase_search where the candidates are
+    -- accumulated -- not after the fact, because the point is the CALLS.
+    -- Stored per job so a job resumed after a restart re-runs with the number
+    -- it was submitted with. Meaningless for kind='urls': nothing is searched,
+    -- so nothing accumulates. On an existing database this arrives via
+    -- migrations/006, whose default is this one (test_db.py pins the pair).
+    max_candidates   INTEGER NOT NULL DEFAULT 100,
+    -- Which SHOT TYPES the editor ticked for this search: a comma-separated
+    -- list of ytdlweb.claude_cli.SHOT_TYPES keys, composed into the {bias}
+    -- block of BOTH Claude prompts. The default here is that module's own
+    -- DEFAULT_SHOT_TYPES and the two are pinned together by a test -- an old
+    -- row (and one written by migrations/005) reads as the defaults, which is
+    -- the behaviour every job before the checkboxes actually ran with. An
+    -- EMPTY string is different and deliberate: the editor ticked nothing,
+    -- which means an unbiased search. Meaningless for kind='urls': nothing is
+    -- searched for, so nothing is biased.
+    shot_types       TEXT NOT NULL DEFAULT 'aerial,establishing,walkthrough,timelapse,event,raw',
     -- queued > generating_terms > searching > enriching > filtering >
     -- ready_for_review > downloading > done | failed | cancelled
     -- (kind='urls' skips the middle: queued > downloading > done)

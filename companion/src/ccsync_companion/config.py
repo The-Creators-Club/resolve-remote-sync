@@ -306,6 +306,16 @@ DEFAULTS: dict[str, Any] = {
     # machine, which is what keeps a LUT reference portable) and the real
     # local path on macOS, which has no P:.
     "lut_location_override": "",
+    # False = never re-scan Resolve's LUT list behind the editor's back.
+    # On by default: Resolve reads its LUT locations ONCE at startup, so an
+    # editor who opens it before P: has finished mapping loses the shared
+    # library for that whole session while the preference still reads
+    # correctly -- the symptom is "LUTs missing" plus a per-frame "Failed to
+    # read Shaper LUT" in Resolve's log. See luts.stale_lut_index().
+    "lut_index_repair_enabled": True,
+    # Resolve's own log, which is where that startup miss is visible. Blank =
+    # the platform default. Only needed for a non-standard install.
+    "resolve_log_override": "",
     # False = leave Resolve's gallery where it is. On by default: Resolve
     # derives the gallery directory from a media storage entry, which is a
     # different disk on every machine, and machines sharing a project
@@ -713,6 +723,14 @@ resolve_lut_dir = ""
 # Blank = the canonical P:\\Assets\\Luts on Windows, the real local path on Mac.
 lut_location_override = ""
 lut_check_interval = 900
+# Resolve reads its LUT locations ONCE at startup. Open it before P: has
+# finished mapping and the shared library is missing for that entire session,
+# with the preference still reading correctly -- "LUTs missing", and a
+# "Failed to read Shaper LUT" per rendered frame. The companion spots that in
+# Resolve's log and re-scans the list in place, no restart. False to disable.
+lut_index_repair_enabled = true
+# Resolve's own log file. Blank = the standard location for this platform.
+resolve_log_override = ""
 
 # Point Resolve's gallery (stills + PowerGrades) at the shared, synced folder
 # so every machine agrees on where stills live -- the disagreement is what

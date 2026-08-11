@@ -21,11 +21,15 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ytdlweb import config
+# For SHOT_TYPES / DEFAULT_SHOT_TYPES only, and deliberately from there rather
+# than a copy here: a shot type IS its two prompt fragments, so the module that
+# owns the fragments owns the key list. claude_cli imports config alone, so
+# there is no cycle to fall into.
+from ytdlweb import claude_cli, config
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 6
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -39,6 +43,10 @@ _MIGRATIONS = {
         lambda con: _index_exists(con, 'idx_jobs_one_active')),
     4: ('004_jobs_kind.sql',
         lambda con: 'kind' in _columns(con, 'jobs')),
+    5: ('005_jobs_shot_types.sql',
+        lambda con: 'shot_types' in _columns(con, 'jobs')),
+    6: ('006_jobs_max_candidates.sql',
+        lambda con: 'max_candidates' in _columns(con, 'jobs')),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -49,6 +57,98 @@ _MIGRATIONS = {
 KIND_SEARCH = 'search'
 KIND_URLS = 'urls'
 KINDS = (KIND_SEARCH, KIND_URLS)
+
+# The shot types the editor ticked for a search, stored as a comma-separated
+# list of claude_cli.SHOT_TYPES keys. Not JSON, because the values are
+# `[a-z]+` and this column is read by eye in sqlite3 more often than by code.
+#
+# NULL and '' are DIFFERENT and both are load-bearing: NULL is "this row
+# predates the column" and reads as the defaults (the behaviour every existing
+# job actually ran with), '' is the editor deliberately ticking nothing, which
+# means a neutral, unbiased search. A column default that collapsed the two
+# would silently re-bias every old row -- so migration 005 backfills the
+# literal default list rather than leaving NULLs behind.
+SHOT_TYPES = claude_cli.SHOT_TYPES
+DEFAULT_SHOT_TYPES = claude_cli.DEFAULT_SHOT_TYPES
+
+
+def encode_shot_types(shot_types):
+    """A selection -> the column value. None means the defaults."""
+    return ','.join(claude_cli.normalise_shot_types(shot_types))
+
+
+def shot_types_of(row_or_value):
+    """A jobs row (or the raw column, or a list) -> the selection.
+
+    Takes the ROW because every caller has one -- and because a row read from a
+    database the migration has not reached, or by a SELECT that did not ask for
+    the column, has no such key at all: that reads as the defaults, which is
+    the search those rows actually ran.
+    """
+    _SEQ = (list, tuple, set, frozenset)
+    value = row_or_value
+    if value is not None and not isinstance(value, (str, bytes) + _SEQ):
+        try:
+            value = row_or_value['shot_types']
+        except (IndexError, KeyError, TypeError):
+            value = None
+    if value is None:
+        return DEFAULT_SHOT_TYPES
+    # A job_dict has already turned the column into a list; a row has the
+    # stored string. Both are answers, and neither may be str()'d blindly.
+    if isinstance(value, _SEQ):
+        return claude_cli.normalise_shot_types(value)
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', 'replace')
+    return claude_cli.normalise_shot_types(str(value).split(','))
+
+
+# The candidate ceiling, as the API validates it and the search phase enforces
+# it. The allowed set lives in config beside the SPA's dropdown and migration
+# 006's SQL default; here is only "what does this row mean".
+CANDIDATE_CAPS = config.CANDIDATE_CAPS
+DEFAULT_MAX_CANDIDATES = config.DEFAULT_MAX_CANDIDATES
+# Nothing read out of this column may exceed the biggest choice on the menu,
+# whatever wrote it. The menu itself is the API's business (routes_api refuses
+# an unlisted number rather than clamping it, so the editor is never told they
+# searched wider than they did); this ceiling is the fleet's.
+MAX_CANDIDATE_CAP = max(CANDIDATE_CAPS)
+
+
+def max_candidates_of(row_or_value):
+    """A jobs row (or the raw column, or a number) -> the cap to search under.
+
+    Takes the ROW like shot_types_of does, and for the same reason: a row read
+    by a SELECT that did not ask for the column -- or from a database the
+    migration has not reached -- has no such key at all.
+
+    Two invariants, and neither is "the menu":
+      - there is ALWAYS a number. Absent, unreadable or nonsensical (<= 0)
+        reads as the default, never as "unbounded" -- unbounded is what reached
+        336 candidates and bot-checked the fleet's IP (2026-08-11), and no job
+        may be re-run into it;
+      - it is never larger than MAX_CANDIDATE_CAP, so a row written by another
+        build (or by hand) cannot re-create that pass either.
+    A smaller number that is not on the menu is honoured as it stands: bounded
+    is the property that matters, and rounding somebody's 137 up to 200 would
+    spend 63 metadata calls nobody asked for.
+    """
+    value = row_or_value
+    if value is not None and not isinstance(value, (int, float, str, bytes)):
+        try:
+            value = row_or_value['max_candidates']
+        except (IndexError, KeyError, TypeError):
+            value = None
+    if value is None or isinstance(value, bool):
+        return DEFAULT_MAX_CANDIDATES
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CANDIDATES
+    if n <= 0:
+        return DEFAULT_MAX_CANDIDATES
+    return min(n, MAX_CANDIDATE_CAP)
+
 
 # The phase machine, in order. Anything not terminal is "the worker owns this
 # job"; ready_for_review is the one non-terminal phase the worker is NOT
@@ -62,7 +162,11 @@ RESUMABLE = ('generating_terms', 'searching', 'enriching', 'filtering')
 
 # Columns the worker and the API are allowed to write through _update(). A
 # whitelist because the column name is interpolated into the SQL string --
-# values are always parameters, names never can be.
+# values are always parameters, names never can be. `kind`, `shot_types` and
+# `max_candidates` are absent on purpose: all three are inputs to the search
+# that already ran, and a later UPDATE of one would make the job row describe a
+# job nobody asked for -- including, for the cap, one whose manifest is bigger
+# than the number it says it was searched under.
 _JOB_COLS = frozenset({
     'phase', 'error', 'terms_total', 'terms_done', 'candidates',
     'enrich_total', 'enrich_done', 'dl_total', 'dl_done', 'dl_failed',
@@ -205,15 +309,27 @@ def _update(c, table, where_sql, where_args, allowed, cols):
 # ------------------------------------------------------------------- jobs
 
 def create_job(c, created_by, term, term_dir, project_slug, project_label,
-               quality='1080p', period=None, max_per_term=15):
+               quality='1080p', period=None, max_per_term=15, shot_types=None,
+               max_candidates=None):
+    """A kind='search' job. `shot_types=None` is the default selection, and
+    `max_candidates=None` the default candidate ceiling.
+
+    Both are written HERE and never again: the two Claude calls read the
+    selection off the row and the search phase reads the ceiling off it, so a
+    job that survives a container restart is re-run with the boxes the editor
+    actually ticked and the number they submitted -- not with whatever the
+    defaults have become since.
+    """
     ts = now()
     try:
         cur = c.execute(
             'INSERT INTO jobs(created_by,term,term_dir,project_slug,project_label,'
-            'quality,period,max_per_term,phase,created_at,updated_at) '
-            "VALUES(?,?,?,?,?,?,?,?,'queued',?,?)",
+            'quality,period,max_per_term,max_candidates,shot_types,phase,'
+            'created_at,updated_at) '
+            "VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
             (created_by, term, term_dir, project_slug, project_label, quality,
-             period, max_per_term, ts, ts))
+             period, max_per_term, max_candidates_of(max_candidates),
+             encode_shot_types(shot_types), ts, ts))
     except sqlite3.IntegrityError:
         # The one-active-job index refused it (YTDL-25) -- and a failed INSERT
         # leaves this connection's implicit transaction OPEN, holding a write
@@ -668,6 +784,16 @@ def job_dict(row):
     """A job row as JSON. The SPA's poll response is built on this."""
     d = dict(row)
     d['terminal'] = d['phase'] in TERMINAL
+    # A LIST, not the stored string: the SPA renders the ticked shot types on
+    # the job and in Recent searches so a week-old search is still readable,
+    # and 'aerial,raw' is not something to make a browser parse. A url job
+    # carries whatever the column default is and the SPA ignores it -- nothing
+    # was searched for, so no selection was ever applied.
+    d['shot_types'] = list(shot_types_of(row))
+    # Always a number the SPA can render, even for a row that came back without
+    # the column (a database the migration has not reached, a partial SELECT) --
+    # the same rule shot_types is read under.
+    d['max_candidates'] = max_candidates_of(row)
     return d
 
 

@@ -24,6 +24,15 @@ deliberate:
     canonical drive (SPEC.md "Path canon"). A Mac has no P:, so it gets its
     real local path -- the one case where the string differs.
 
+A correct preference is not enough on its own. **Resolve scans its LUT
+locations once, at startup, and caches the result for the whole session**, so
+a machine whose P: mapping is not up yet when Resolve launches runs blind to
+the library until it is restarted -- with the preference reading perfectly all
+the while. That is Ruskin's 2026-08-11 "LUTs missing": the pref said
+``P:\\Assets\\Luts``, the files were on disk, and every graded frame logged
+``Failed to read Shaper LUT``. stale_lut_index() below detects exactly that
+from Resolve's own log and repairs it with RefreshLUTList(), no restart.
+
 Everything here is best-effort and never raises: an editor whose preferences
 cannot be written keeps exactly the LUTs they have today, and the next check
 tries again.
@@ -33,6 +42,8 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Optional
@@ -50,6 +61,132 @@ LIBRARY_REL = ("Assets", "Luts")
 # the LUT/DCTL directory, never from an additional LUT location, so copying
 # one into the library would put it somewhere Resolve does not look.
 LUT_EXTENSIONS = frozenset({".cube", ".ilut", ".olut", ".3dl", ".dat", ".mga", ".cms", ".lut"})
+
+
+# -- the stale-index detector ----------------------------------------------
+#
+# Resolve logs one line per session start and one per LUT location it could
+# not scan, both stamped "YYYY-MM-DD HH:MM:SS,mmm". That format sorts
+# correctly as a plain string, so the "did this session fail to scan?"
+# comparison needs no date parsing, no locale and no timezone.
+_LOG_STAMP = re.compile(r"\|\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+)\s*\|")
+
+# Emitted by Resolve's Main logger at every launch. Its stamp is what
+# identifies the session, so a repair is attempted once per Resolve run and
+# not once per check.
+SESSION_START_MARKER = "Running DaVinci Resolve"
+
+# "SyManager.Lut | ERROR | <stamp> | P:\Assets\Luts : no dir"
+LUT_LOGGER_MARKER = "SyManager.Lut"
+NO_DIR_SUFFIX = ": no dir"
+
+# How much of the log to read. Only the tail matters, and a session that has
+# outrun this much logging is one where the startup lines are gone anyway --
+# in which case the detector reports "cannot tell" and does nothing.
+LOG_TAIL_BYTES = 2 * 1024 * 1024
+
+
+def resolve_log_path() -> Optional[Path]:
+    """Resolve's own log file, or None on a platform we do not know.
+
+    The Windows path is measured (Ruskin's machine, 2026-08-11); the macOS one
+    is Blackmagic's documented location. Both fail safe: a path that is not
+    there simply means no stale-index repair, never an error.
+    """
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA", "")
+        if not base:
+            return None
+        return (Path(base) / "Blackmagic Design" / "DaVinci Resolve"
+                / "Support" / "logs" / "davinci_resolve.log")
+    if system == "Darwin":
+        return (Path.home() / "Library" / "Application Support" / "Blackmagic Design"
+                / "DaVinci Resolve" / "logs" / "davinci_resolve.log")
+    return None
+
+
+def _same_location(path: str) -> str:
+    """Compare a path as it appears in Resolve's log against one from its
+    preferences. Same rule resolve_prefs uses for the LUT Locations list:
+    these are GUI-typed strings that travel between machines."""
+    return str(path or "").replace("\\", "/").rstrip("/").lower()
+
+
+def _log_stamp(line: str) -> str:
+    match = _LOG_STAMP.search(line)
+    return match.group(1) if match else ""
+
+
+def _no_dir_location(line: str) -> str:
+    """The directory named by a 'X : no dir' line, or ''."""
+    body = line.rsplit("|", 1)[-1].strip()
+    if not body.endswith(NO_DIR_SUFFIX):
+        return ""
+    return body[: -len(NO_DIR_SUFFIX)].strip()
+
+
+def read_log_tail(log_path: Path | str | None, tail_bytes: int = LOG_TAIL_BYTES) -> list[str]:
+    """The last `tail_bytes` of Resolve's log, as lines. Never raises."""
+    if not log_path:
+        return []
+    path = Path(log_path)
+    try:
+        if not path.is_file():
+            return []
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > tail_bytes:
+                handle.seek(size - tail_bytes)
+                # The seek lands mid-line; drop that fragment so a truncated
+                # timestamp cannot be mistaken for a session start.
+                handle.readline()
+            raw = handle.read()
+    except OSError:
+        return []
+    return raw.decode("utf-8", "replace").splitlines()
+
+
+def stale_lut_index(
+    location: str, log_path: Path | str | None, tail_bytes: int = LOG_TAIL_BYTES
+) -> Optional[str]:
+    """The running session's stamp if Resolve failed to scan `location` at
+    startup, else None.
+
+    Resolve caches the LUT list at launch. A location that was unreachable
+    then -- P: not mapped yet, the library still syncing -- stays missing for
+    the whole session even after it comes back, and every grade referencing a
+    LUT from it fails to render while the preference reads perfectly.
+
+    Returns the session-start stamp rather than a bare True so the caller can
+    repair once per Resolve run instead of once per check.
+
+    Conservative on every ambiguity: no log, no session line in the tail, or a
+    'no dir' older than the current session all return None. A missed repair
+    costs one Resolve restart; a spurious one runs on every check forever.
+    """
+    want = _same_location(location)
+    if not want:
+        return None
+    session = ""
+    no_dir = ""
+    for line in read_log_tail(log_path, tail_bytes):
+        if SESSION_START_MARKER in line:
+            stamp = _log_stamp(line)
+            if stamp:
+                session = stamp
+        elif LUT_LOGGER_MARKER in line and NO_DIR_SUFFIX in line:
+            if _same_location(_no_dir_location(line)) == want:
+                stamp = _log_stamp(line)
+                if stamp:
+                    no_dir = stamp
+    if not session or not no_dir:
+        return None
+    # Lexicographic on purpose -- see _LOG_STAMP. ">=" because the scan
+    # happens within the same second as the launch line often enough
+    # (13:32:02 launch, 13:32:05 scan, measured) that "after" is too strict
+    # only in theory, while equality is real.
+    return session if no_dir >= session else None
 
 
 def library_dir(local_root: Path | str) -> Path:
@@ -226,19 +363,44 @@ class LutLinkManager:
         local_root: Path | str,
         prefs_factory=None,
         refresh_fn=None,
+        log_path=None,
+        running_fn=None,
+        location_exists_fn=None,
     ) -> None:
         self.cfg = cfg or {}
         self.local_root = Path(local_root).expanduser()
         self._prefs_factory = prefs_factory or resolve_prefs.ResolvePrefs
         self._refresh_fn = refresh_fn
+        self._log_path = log_path
+        self._running_fn = running_fn or resolve_prefs.resolve_is_running
+        # Whether the LOCATION STRING resolves right now -- which on Windows
+        # is P:\..., not the local path library() returns. Injected because
+        # the canonical P: exists on the base rig, so a test asserting against
+        # it would pass there and nowhere else.
+        self._location_exists_fn = location_exists_fn or os.path.isdir
         self._last_status = ""
         # Warn once per streak, not once per check: "the library hasn't
         # arrived yet" is normal for a new editor's first hours.
         self._warned: set[str] = set()
+        # The Resolve session whose stale LUT index we have already repaired.
+        # In-process only: a companion restart re-reading the same log and
+        # refreshing once more is harmless, while a marker persisted to disk
+        # would suppress the repair after the one restart that needed it.
+        self._repaired_session = ""
 
     @property
     def enabled(self) -> bool:
         return bool(self.cfg.get("lut_sync_enabled", True))
+
+    @property
+    def repair_enabled(self) -> bool:
+        return bool(self.cfg.get("lut_index_repair_enabled", True))
+
+    def log_path(self):
+        configured = str(self.cfg.get("resolve_log_override", "") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return self._log_path if self._log_path is not None else resolve_log_path()
 
     def library(self) -> Path:
         return library_dir(self.local_root)
@@ -277,7 +439,10 @@ class LutLinkManager:
 
         try:
             if prefs.has_lut_location(location):
-                return self._report(resolve_prefs.ALREADY, False, "")
+                # The preference is right, which is NOT the same as Resolve
+                # having read the library -- see repair_stale_index().
+                repaired = self.repair_stale_index(location)
+                return self._report(resolve_prefs.ALREADY, repaired, "")
             status = prefs.add_lut_location(location)
         except resolve_prefs.PrefsError as exc:
             return self._report(exc.status, False, exc.message)
@@ -328,6 +493,54 @@ class LutLinkManager:
         if result.get("copied"):
             self.refresh_resolve()
         return result
+
+    def repair_stale_index(self, location: Optional[str] = None) -> bool:
+        """Re-scan the LUT list if THIS Resolve session launched without it.
+
+        The case the preference check cannot see: Resolve scans its LUT
+        locations once at startup, so an editor who opened Resolve before P:
+        finished mapping has a session-long hole where the shared library
+        should be. The pref reads correctly, the files are on disk, and every
+        graded frame logs "Failed to read Shaper LUT" (Ruskin, 2026-08-11).
+
+        RefreshLUTList() closes it without restarting Resolve or touching a
+        preference file -- so, unlike the rest of this module, it works while
+        the editor is mid-edit, which is exactly when they hit this.
+
+        Never raises. Returns whether a repair was actually made.
+        """
+        if not self.enabled or not self.repair_enabled:
+            return False
+        try:
+            location = location or self.location_string()
+            # Nothing to refresh in a Resolve that is not running, and the
+            # stale index dies with the process anyway.
+            if not self._running_fn():
+                return False
+            session = stale_lut_index(location, self.log_path())
+            if not session or session == self._repaired_session:
+                return False
+            # The drive may still be down. Refreshing now would "succeed"
+            # against an unreadable location, and marking the session repaired
+            # would then cost the editor the retry they actually need once it
+            # comes back -- the whole point being to avoid a Resolve restart.
+            if not self._location_exists_fn(location):
+                log.debug("luts: %s is still unreachable -- deferring the re-scan", location)
+                return False
+            if not self.refresh_resolve():
+                # Routine -- no project open yet, most likely. Leave the
+                # marker unset so the next check tries this session again.
+                log.debug("luts: stale LUT index found but the refresh did not take")
+                return False
+            self._repaired_session = session
+            log.warning(
+                "luts: Resolve started at %s without %s (it was not reachable yet) -- "
+                "re-scanned its LUT list", session, location,
+            )
+            return True
+        except Exception:
+            log.debug("luts: stale-index repair failed", exc_info=True)
+            return False
 
     def refresh_resolve(self) -> bool:
         """Ask a running Resolve to re-read its LUT directories. Never raises."""

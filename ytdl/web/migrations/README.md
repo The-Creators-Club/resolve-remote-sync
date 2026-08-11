@@ -31,3 +31,17 @@ This database was created at v1. Since then (2026-08-11 bug hunt):
   job can enter the same phase machine at the download phase instead of being
   handed to Claude as a search topic. Every pre-existing row is a search, which
   is the column's default, so there is no backfill.
+- `005_jobs_shot_types.sql` — v5, `jobs.shot_types`, the checkboxes the editor
+  ticked (the {bias} block of both Claude prompts is composed from them). The
+  default is the six footage types, which is what the fixed "prioritise
+  visuals" bias did before the boxes existed — so every pre-existing row reads
+  as the search it actually ran, and again there is no backfill. `''` means the
+  editor ticked nothing (an unbiased search) and is deliberately not the same
+  value as an absent one.
+- `006_jobs_max_candidates.sql` — v6, `jobs.max_candidates`, the ceiling on how
+  many candidate videos one search may accumulate and therefore on how many
+  metadata calls it makes at YouTube. Unlike 005, the default is **not** what
+  the old rows ran with: they ran unbounded, and unbounded is what reached 336
+  candidates and got the NAS's IP bot-checked at 112 metadata calls
+  (2026-08-11). There is deliberately no value meaning "no limit" — the only
+  rows the backfill can still affect are ones boot recovery re-runs.

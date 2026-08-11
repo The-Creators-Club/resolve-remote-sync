@@ -171,6 +171,74 @@ a.brand:hover { color: var(--red-hot); }
 }
 #folder { flex: 0 1 240px; font-size: 12px; }
 
+/* The shot-type row. Nine checkboxes must not out-shout the search box, so
+   they are 11px, unboxed until ticked, and allowed to wrap into as many lines
+   as the window needs. The two group captions ("shots of it:", "also keep:")
+   are what stops them reading as one undifferentiated wall. */
+.shotrow { gap: 6px 10px; }
+
+.shots {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.shothead {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-left: 4px;
+}
+.shothead:first-child { margin-left: 0; }
+
+.shot {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 1px 6px 1px 3px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.shot:hover { color: var(--text); border-color: var(--red-dim); }
+/* Same "current selection" idiom as the term chips and the dashboard. */
+.shot.on {
+  background: var(--field);
+  border-color: var(--red-dim);
+  box-shadow: inset 2px 0 0 var(--red);
+  color: var(--text);
+}
+.shot input { accent-color: #ff2140; margin: 0; cursor: pointer; }
+
+.shotnote { font-size: 10px; flex: 0 1 auto; }
+
+/* The same selection, one line long, on a Recent searches row. Deliberately
+   NOT .shots: that is the header's flex container. */
+.recentrow .shotsum {
+  color: var(--muted);
+  flex: 0 0 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+
+/* The candidate ceiling that search ran under, beside it. Its own class so it
+   is never the thing the ellipsis eats: "max 400" is four characters and it is
+   the answer to "why did that search find so much more than this one". */
+.recentrow .capsum {
+  color: var(--muted);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 select {
   background: var(--field);
   border: 1px solid var(--red-dim);
@@ -426,6 +494,8 @@ h2 {
 .recentrow:hover { color: var(--red-hot); }
 .recentrow .when { color: var(--muted); flex: 0 0 auto; }
 .recentrow .ph { flex: 0 0 auto; }
+/* Takes the slack so the shot-type summary sits at the right-hand end. */
+.recentrow .name { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
 /* ---------- toast ---------- */
 

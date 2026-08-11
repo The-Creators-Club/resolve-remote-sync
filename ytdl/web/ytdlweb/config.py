@@ -67,6 +67,42 @@ DOWNLOAD_PAUSE = float(os.environ.get('YTDL_DOWNLOAD_PAUSE') or '3')
 # so this is a ceiling on a bad day rather than a normal limit.
 MAX_TERMS = int(os.environ.get('YTDL_MAX_TERMS') or '24')
 
+# The candidate ceilings the editor may pick between, and what a search gets
+# when it names none. NOT env-overridable on purpose: the same four numbers are
+# the SPA's dropdown and the API's allow-list, and migration 006's column
+# default is DEFAULT_MAX_CANDIDATES written out in SQL -- a per-container
+# override would let a job be created with a cap no other layer accepts.
+# (tests/test_db.py and tests/test_static_app.py pin all three together.)
+#
+# 100 is reasoned, not round. On 2026-08-11 one search expanded to 24 terms ->
+# 336 candidates and YouTube began refusing the NAS's IP outright partway
+# through the metadata pass, at **112 metadata calls** -- the only measured
+# point at which the fleet has ever been cut off. A default search therefore
+# sits just under the one threshold in evidence, which also means it degrades
+# safely: if the cookies expire or the PO-token sidecar hiccups, the requests
+# drift back towards anonymous and the volume behind them is still under what
+# an authenticated IP was blocked for. 400 stays on the menu for a genuinely
+# thin topic, as a choice somebody made rather than something that happened.
+CANDIDATE_CAPS = (50, 100, 200, 400)
+DEFAULT_MAX_CANDIDATES = 100
+
+# Metadata enrichment pacing. The enrich phase is the one that got the IP
+# blocked: it ran through a ThreadPoolExecutor with 4 workers and NO delay, so
+# 112 calls went out in well under a minute -- which is what looked robotic,
+# cookies or no cookies (DEPLOY.md, "Volume is still the trigger").
+#
+#   YTDL_ENRICH_WORKERS  how many metadata fetches may be in flight at once.
+#     2, not 4: enough to keep a slow extract_info from stalling the phase,
+#     few enough that a burst of retries cannot fan out.
+#   YTDL_ENRICH_PAUSE    seconds between REQUESTS across the whole pool (not
+#     per worker -- ytsearch.enrich holds one gate, so the ceiling is 1/pause
+#     requests a second whatever YouTube's latency does). 0.75 s = 80
+#     requests/minute; the blocked burst was roughly three to six times that.
+#     At the default 100-candidate cap it costs ~75 s of pacing, so the whole
+#     enrich phase lands near where a 336-candidate unpaced one used to.
+ENRICH_WORKERS = int(os.environ.get('YTDL_ENRICH_WORKERS') or '2')
+ENRICH_PAUSE = float(os.environ.get('YTDL_ENRICH_PAUSE') or '0.75')
+
 # Standalone dev only: who the API thinks you are when no dashboard gate has
 # injected the header. Never set on a deployed host.
 DEV_USER = os.environ.get('YTDL_DEV_USER') or ''

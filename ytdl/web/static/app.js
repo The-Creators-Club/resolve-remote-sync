@@ -48,6 +48,40 @@ const HINTS = [
   ['claude_output:', 'Claude answered with something this app could not read. Trying again usually works.'],
 ];
 
+// The shot-type checkboxes. Mirrors ytdlweb.claude_cli.SHOT_TYPES -- key,
+// label and default tick -- and tests/test_static_app.py compares the two
+// tables key for key, because the server owns the prompt fragments and this
+// list is only their names. `group` is layout ('footage' = shots OF the
+// subject, 'coverage' = somebody talking about it); `short` is what fits in a
+// Recent searches row.
+const SHOT_TYPES = [
+  {key: 'aerial', label: 'Aerial / drone', on: true, group: 'footage', short: 'aerial'},
+  {key: 'establishing', label: 'Establishing / exteriors', on: true, group: 'footage', short: 'establishing'},
+  {key: 'walkthrough', label: 'Walk-through / POV / street', on: true, group: 'footage', short: 'walk-through'},
+  {key: 'timelapse', label: 'Timelapse', on: true, group: 'footage', short: 'timelapse'},
+  {key: 'event', label: 'Ceremonies / events / protests', on: true, group: 'footage', short: 'events'},
+  {key: 'raw', label: 'Raw / uncut / no commentary', on: true, group: 'footage', short: 'raw'},
+  {key: 'interview', label: 'Interviews / talking heads', on: false, group: 'coverage', short: 'interviews'},
+  {key: 'news', label: 'News reports', on: false, group: 'coverage', short: 'news'},
+  {key: 'commentary', label: 'Commentary / analysis / reaction', on: false, group: 'coverage', short: 'commentary'},
+];
+// Per browser, not per job: an editor cutting one film ticks the same boxes all
+// week, and re-ticking them on every visit is exactly the friction the fixed
+// bias was replaced to avoid.
+const SHOTS_KEY = 'ytdl.shot_types';
+
+// How many candidates one search may collect. Mirrors
+// ytdlweb.config.CANDIDATE_CAPS -- the server validates against its own list
+// and tests/test_static_app.py compares the two -- because each candidate is a
+// metadata request at YouTube, and 112 of those in a burst is where the NAS's
+// IP got refused outright (2026-08-11). 100 is the default for that reason;
+// 400 is there for a genuinely thin topic, chosen rather than stumbled into.
+const CANDIDATE_CAPS = [50, 100, 200, 400];
+const DEFAULT_CAP = 100;
+// Remembered like the shot ticks are, and for the same reason: the editor who
+// needs 400 for a thin topic needs it all afternoon.
+const CAP_KEY = 'ytdl.max_candidates';
+
 const POLL_FAST = 1500;
 const POLL_SLOW = 5000;
 const BACKOFF_AFTER = 120000;   // 2 min of polling, then ease off
@@ -66,6 +100,7 @@ const state = {
   manifest: null,      // {videos, terms, counts}
   termFilter: null,    // job_terms.id, or null for "everything"
   showFiltered: false,
+  shots: new Set(),    // ticked shot-type keys; init() fills it
   pollTimer: null,
   pollStart: 0,
 };
@@ -235,6 +270,131 @@ async function loadProjects() {
     o.value = p.slug;
     sel.appendChild(o);
   });
+}
+
+// ------------------------------------------------------------- shot types
+// Per-search, not per-fleet: what the two Claude passes look for. The ticks
+// are the editor's, remembered here and posted with the job; the SERVER stores
+// them on the job row and composes the prompts, so this file knows the names
+// and nothing about what they mean.
+
+const defaultShots = () => SHOT_TYPES.filter(s => s.on).map(s => s.key);
+
+// In TABLE order, always -- so two editors who ticked the same boxes post the
+// same list and an old localStorage value cannot smuggle in a key this build
+// dropped (the server would refuse the whole job over it).
+const shotKeys = () => SHOT_TYPES.filter(s => state.shots.has(s.key)).map(s => s.key);
+
+function loadShots() {
+  // localStorage throws outright in some privacy modes, so a page that cannot
+  // remember the ticks still has to be able to search.
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(SHOTS_KEY)); }
+  catch { /* unreadable or absent: fall back to the defaults */ }
+  if (!Array.isArray(saved)) return defaultShots();
+  return SHOT_TYPES.filter(s => saved.includes(s.key)).map(s => s.key);
+}
+
+function saveShots() {
+  try { localStorage.setItem(SHOTS_KEY, JSON.stringify(shotKeys())); }
+  catch { /* the choice still applies to this search, just not the next visit */ }
+}
+
+// All ticked and none ticked are the same instruction to the server -- no bias
+// at all -- and an editor who has just cleared every box deserves to be told
+// that rather than left expecting a filter that is not running.
+function renderShotNote() {
+  const n = state.shots.size;
+  $('#shotnote').textContent =
+    n === 0 ? 'nothing ticked: no bias, claude searches and filters on the topic alone'
+    : n === SHOT_TYPES.length ? 'everything ticked: no bias, claude searches and filters on the topic alone'
+    : '';
+}
+
+function renderShots() {
+  const box = $('#shots');
+  box.textContent = '';
+  let group = null;
+  SHOT_TYPES.forEach(s => {
+    if (s.group !== group) {
+      group = s.group;
+      box.appendChild(el('span', 'shothead',
+                         group === 'footage' ? 'shots of it:' : 'also keep:'));
+    }
+    const lab = el('label', 'shot' + (state.shots.has(s.key) ? ' on' : ''));
+    const pick = el('input', 'shotbox');
+    pick.type = 'checkbox';
+    pick.value = s.key;
+    pick.checked = state.shots.has(s.key);
+    // Only this label is touched, never a re-render: replacing the input the
+    // editor just clicked would take the focus ring with it.
+    pick.onchange = () => {
+      if (pick.checked) state.shots.add(s.key); else state.shots.delete(s.key);
+      lab.classList.toggle('on', pick.checked);
+      saveShots();
+      renderShotNote();
+    };
+    lab.appendChild(pick);
+    lab.appendChild(el('span', null, s.label));
+    box.appendChild(lab);
+  });
+  renderShotNote();
+}
+
+// What a job WAS run with, for the manifest header and Recent searches. An
+// absent list is a job row from before the column existed (or a server that
+// predates it): say nothing rather than claim a selection it never had.
+function shotSummary(list, long) {
+  if (!Array.isArray(list)) return '';
+  if (!list.length || list.length === SHOT_TYPES.length) return 'no shot-type filter';
+  const picked = SHOT_TYPES.filter(s => list.includes(s.key));
+  return picked.map(s => long ? s.label : s.short).join(long ? ' · ' : '+');
+}
+
+// ---------------------------------------------------------- candidate cap
+// The other per-search dial: how far the search is allowed to go before it
+// stops collecting. The SERVER enforces it where candidates accumulate; this
+// file only picks the number and remembers it.
+
+function loadCap() {
+  let saved = null;
+  // localStorage throws outright in some privacy modes, and a page that cannot
+  // remember the number must still be able to search.
+  try { saved = Number(localStorage.getItem(CAP_KEY)); }
+  catch { /* unreadable or absent: the default */ }
+  // Validated against THIS build's list, never trusted: the server refuses a
+  // number it does not know, so a stale value would 400 every search.
+  return CANDIDATE_CAPS.includes(saved) ? saved : DEFAULT_CAP;
+}
+
+function saveCap() {
+  try { localStorage.setItem(CAP_KEY, String(capValue())); }
+  catch { /* it still applies to this search, just not the next visit */ }
+}
+
+// Always one of CANDIDATE_CAPS, whatever the DOM holds.
+function capValue() {
+  const n = Number($('#maxcand').value);
+  return CANDIDATE_CAPS.includes(n) ? n : DEFAULT_CAP;
+}
+
+function renderCaps() {
+  const sel = $('#maxcand');
+  sel.innerHTML = '';
+  CANDIDATE_CAPS.forEach(n => {
+    const o = el('option', null, `${n} candidates`);
+    o.value = String(n);
+    sel.appendChild(o);
+  });
+  sel.value = String(loadCap());
+  sel.onchange = saveCap;
+}
+
+// What a job WAS run with, for the manifest header and Recent searches. An
+// absent number is a job row (or a server) from before the column existed:
+// say nothing rather than claim a ceiling it never had.
+function capSummary(n) {
+  return CANDIDATE_CAPS.includes(Number(n)) ? `up to ${Number(n)} candidates` : '';
 }
 
 // ---------------------------------------------------------------- polling
@@ -454,6 +614,13 @@ async function loadManifest(jobId = state.jobId) {
 }
 
 function renderTerms() {
+  // The ticks and the ceiling this search actually ran with -- not the ones in
+  // the header, which are whatever the editor has since changed them to.
+  const shots = shotSummary(state.manifest.job.shot_types, true);
+  const cap = capSummary(state.manifest.job.max_candidates);
+  $('#jobshots').textContent =
+    [shots ? 'shot types: ' + shots : '', cap].filter(Boolean).join(' · ');
+
   const box = $('#termchips');
   box.innerHTML = '';
   // Counts are of what the grid will SHOW, not of every linked video: a chip
@@ -653,6 +820,13 @@ async function runSearch() {
       term, project_slug: slug,
       quality: $('#quality').value,
       period: $('#period').value || null,
+      // Always sent, even when it is every box or none: the server tells an
+      // omitted field (an old client, which gets the defaults) apart from an
+      // empty one (this editor asked for no bias).
+      shot_types: shotKeys(),
+      // Always one of CANDIDATE_CAPS; the server refuses anything else rather
+      // than clamping it, so this must never send the raw DOM value.
+      max_candidates: capValue(),
     });
     // Only now: the server decides whether a second job is allowed, and
     // tearing the live view down first left the page showing nothing while
@@ -753,6 +927,12 @@ async function loadRecent() {
     // is what stops the two reading as the same kind of row.
     row.appendChild(el('span', 'name',
       `${j.kind === 'urls' ? 'links → ' : ''}${j.term} → ${j.project_label}`));
+    // A paste is never searched or filtered, so it has neither shot types nor
+    // a candidate ceiling to show -- its videos are the links that were pasted.
+    const shots = j.kind === 'urls' ? '' : shotSummary(j.shot_types);
+    if (shots) row.appendChild(el('span', 'shotsum', shots));
+    const cap = j.kind === 'urls' ? '' : capSummary(j.max_candidates);
+    if (cap) row.appendChild(el('span', 'capsum', `max ${Number(j.max_candidates)}`));
     row.onclick = () => attach(j.id);
     box.appendChild(row);
   });
@@ -783,6 +963,11 @@ async function loadDashboardTopbar() {
 // ---------------------------------------------------------------- init
 async function init() {
   loadDashboardTopbar();
+  // Before anything is awaited: the boxes are part of the SEARCH form and must
+  // be on screen (and ticked as this editor left them) from the first paint.
+  state.shots = new Set(loadShots());
+  renderShots();
+  renderCaps();
   $('#go').onclick = runSearch;
   $('#q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
   $('#golinks').onclick = runUrls;

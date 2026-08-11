@@ -9,14 +9,16 @@ any phase, by a test or by a container that just restarted.
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
 
 from tests.conftest import OTHER_USER, PROJECTS, USER
-from ytdlweb import claude_cli, db, worker
+from ytdlweb import claude_cli, config, db, worker
 from ytdlweb.vendor import ytsearch
 
 
@@ -168,6 +170,319 @@ def test_a_cancel_stops_the_walk_between_terms(con, job, fake_claude, fake_youtu
     db.request_cancel(con, job['id'])
     worker.run_job(con, job['id'])
     assert db.get_job(con, job['id'])['phase'] == 'cancelled'
+
+
+# ------------------------------------------------------- the shot types
+# The editor's checkboxes are stored on the job row, and BOTH Claude calls have
+# to be given them: terms generated for aerials and then filtered for
+# interviews would throw away most of what the search just found.
+
+def test_the_jobs_shot_types_reach_both_claude_calls(
+        con, job, fake_claude, fake_youtube):
+    slug, label, _ = PROJECTS[1]
+    db.set_phase(con, job['id'], 'cancelled')
+    mine = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
+                         slug, label, shot_types=['aerial', 'interview'])
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
+    worker.run_job(con, mine)
+
+    assert fake_claude.shot_types == [('terms', ('aerial', 'interview')),
+                                      ('relevance', ('aerial', 'interview'))]
+
+
+def test_a_job_that_ticked_nothing_asks_for_no_bias_not_the_defaults(
+        con, job, fake_claude, fake_youtube):
+    """'' on the row is the editor's own choice and must survive to the prompt
+    builder, which is what turns it into a neutral search."""
+    slug, label, _ = PROJECTS[1]
+    db.set_phase(con, job['id'], 'cancelled')
+    none = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
+                         slug, label, shot_types=[])
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
+    worker.run_job(con, none)
+
+    assert [s for _stage, s in fake_claude.shot_types] == [(), ()]
+
+
+def test_an_old_job_row_is_re_run_with_the_defaults(
+        con, job, fake_claude, fake_youtube):
+    """A job queued before the checkboxes existed is a job that ran under the
+    fixed visual bias -- migration 005 leaves it holding the six default ticks,
+    and boot recovery must re-run it as the search it was."""
+    assert db.get_job(con, job['id'])['shot_types'] == db.encode_shot_types(None)
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
+    worker.run_job(con, job['id'])
+
+    assert [s for _stage, s in fake_claude.shot_types] == [
+        db.DEFAULT_SHOT_TYPES, db.DEFAULT_SHOT_TYPES]
+
+
+# --------------------------------------------------- the candidate ceiling
+# 2026-08-11: 24 terms -> 336 candidates -> one metadata call each, and YouTube
+# refused the NAS's IP at 112 of them. The ceiling is enforced where candidates
+# are ACCUMULATED, so what it bounds is the number of metadata calls -- not the
+# length of the manifest after they have all been made.
+
+def _capped_job(con, con_job, cap, user=USER, term='algal reef controversy'):
+    """A fresh search job for `user` with an explicit candidate ceiling."""
+    slug, label, _ = PROJECTS[1]
+    if con_job is not None:
+        db.set_phase(con, con_job['id'], 'cancelled')   # one active job each
+    job_id = db.create_job(con, user, term, 'algal reef', slug, label,
+                           max_candidates=cap)
+    return db.get_job(con, job_id)
+
+
+def test_the_ceiling_bounds_the_metadata_calls_not_just_the_manifest(
+        con, job, fake_claude, fake_youtube):
+    """The assertion that matters is the CALL COUNT at the seam: a cap applied
+    to the finished manifest would leave this number at 6 and the fleet blocked
+    exactly as before."""
+    mine = _capped_job(con, job, 2)
+    _wire(fake_youtube, {
+        'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb'],
+        'algal reef taiwan': ['ccccccccccc', 'ddddddddddd'],
+        'lng terminal protest': ['eeeeeeeeeee'],
+        '藻礁 三接 爭議': ['fffffffffff'],
+    })
+    worker.run_job(con, mine['id'])
+
+    assert len(fake_youtube.enriched) == 2, fake_youtube.enriched
+    assert {v['video_id'] for v in db.videos(con, mine['id'])} == {
+        'aaaaaaaaaaa', 'bbbbbbbbbbb'}
+    fresh = db.get_job(con, mine['id'])
+    assert fresh['candidates'] == 2
+    assert fresh['enrich_total'] == 2 and fresh['enrich_done'] == 2
+    assert fresh['phase'] == 'ready_for_review'
+    # every term is still searched and still counted: 24 flat searches is not
+    # the volume in question, and terms_done drives the progress bar
+    assert fresh['terms_done'] == fresh['terms_total'] == 4
+    assert [t['hits'] for t in db.terms(con, mine['id'])] == [2, 2, 1, 1]
+
+
+def test_a_hit_past_the_ceiling_is_dropped_rather_than_attributed(
+        con, job, fake_claude, fake_youtube):
+    """A term_id pointing at a video with no row would inflate the chip counts
+    over a grid that cannot show it (YTDL-38's shape). A term that re-finds a
+    video already ON the job is still attributed -- that costs nothing."""
+    mine = _capped_job(con, job, 2)
+    _wire(fake_youtube, {
+        'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb'],
+        'algal reef taiwan': ['aaaaaaaaaaa', 'ccccccccccc'],
+    })
+    worker.run_job(con, mine['id'])
+
+    terms = {t['term']: t['id'] for t in db.terms(con, mine['id'])}
+    links = db.term_ids_by_video(con, mine['id'])
+    assert set(links['aaaaaaaaaaa']) == {terms['algal reef controversy'],
+                                         terms['algal reef taiwan']}
+    assert 'ccccccccccc' not in links
+    counts = db.term_hit_counts(con, mine['id'])
+    assert counts[terms['algal reef taiwan']] == 1, 'a dropped hit was counted'
+
+
+def test_the_default_ceiling_applies_to_a_job_that_named_none(
+        con, job, fake_claude, fake_youtube):
+    """The fixture job is an ordinary one: no dropdown, no cap in the request.
+    It must still be bounded -- unbounded is the incident."""
+    assert db.get_job(con, job['id'])['max_candidates'] == 100
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
+    worker.run_job(con, job['id'])
+    assert db.get_job(con, job['id'])['candidates'] == 1
+
+
+def test_a_resumed_job_re_runs_with_the_ceiling_it_was_submitted_with(
+        con, job, fake_claude, fake_youtube):
+    """Boot recovery wipes a mid-pipeline job's rows and re-runs it from
+    `queued`; the number has to come off the ROW, not from whatever the default
+    has become since."""
+    mine = _capped_job(con, job, 2)
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb',
+                                                    'ccccccccccc']})
+    db.set_phase(con, mine['id'], 'searching')
+    db.reset_stale_jobs(con)
+    assert db.get_job(con, mine['id'])['phase'] == 'queued'
+
+    worker.run_job(con, mine['id'])
+    assert len(fake_youtube.enriched) == 2
+    assert db.get_job(con, mine['id'])['max_candidates'] == 2
+
+
+def test_the_ceiling_counts_rows_already_on_a_resumed_job(
+        con, job, fake_claude, fake_youtube):
+    """`downloading` is the phase boot recovery keeps, but a search phase that
+    is re-entered with rows already written must treat the ceiling as absolute
+    rather than per-run -- otherwise a flapping container multiplies it."""
+    mine = _capped_job(con, job, 2)
+    db.add_video(con, mine['id'], 'zzzzzzzzzzz', 'u')
+    db.add_video(con, mine['id'], 'yyyyyyyyyyy', 'u')
+    con.commit()
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
+    db.set_phase(con, mine['id'], 'generating_terms')
+    worker.run_job(con, mine['id'])
+
+    assert {v['video_id'] for v in db.videos(con, mine['id'])} == {
+        'zzzzzzzzzzz', 'yyyyyyyyyyy'}
+    assert len(fake_youtube.enriched) == 2
+
+
+def test_a_bot_check_is_still_classified_when_the_ceiling_is_in_force(
+        con, job, fake_claude, fake_youtube):
+    """YTDL-21 must not be masked by the cap: a short manifest that stopped
+    because YouTube refused the IP is a different problem from one that stopped
+    because the editor asked for 50, and only one of them has a fix."""
+    mine = _capped_job(con, job, 2)
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb',
+                                                    'ccccccccccc']},
+          meta={'aaaaaaaaaaa': {'error': _BOT_MSG}})
+    worker.run_job(con, mine['id'])
+
+    fresh = db.get_job(con, mine['id'])
+    assert fresh['phase'] == 'failed'
+    assert 'YTDL_COOKIES_FILE' in fresh['error']
+
+
+def test_a_url_job_never_consults_the_ceiling(
+        con, fake_claude, fake_youtube, fake_downloader, project_root):
+    """It does no searching, so there is nothing to accumulate: a paste of more
+    links than the default ceiling downloads all of them."""
+    job = _url_job(con, [f'{i:011d}' for i in range(12)])
+    worker.run_job(con, job['id'])
+
+    fresh = db.get_job(con, job['id'])
+    assert fresh['max_candidates'] == 100        # the unused column default
+    assert fresh['dl_done'] == 12
+    assert fake_youtube.searched == [] and fake_youtube.enriched == []
+
+
+# ------------------------------------------------------------ enrich pacing
+# The download phase paced itself (YTDL_DOWNLOAD_PAUSE=3) and the metadata pass
+# -- the busier of the two -- did not pace at all: 4 pool threads, no delay.
+# That is what 112 calls in well under a minute looked like from YouTube's side.
+
+def test_the_worker_hands_the_configured_pacing_to_the_metadata_pass(
+        con, job, fake_claude, fake_youtube):
+    """The seam records what it was called with, because the pacing is only
+    real if the phase actually passes it down."""
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb']})
+    worker.run_job(con, job['id'])
+
+    assert fake_youtube.enrich_calls, 'the metadata pass never ran'
+    for call in fake_youtube.enrich_calls:
+        assert call['jobs'] == config.ENRICH_WORKERS
+        assert call['pause'] == config.ENRICH_PAUSE
+    # the defaults are the conservative ones, not batch_dl's unpaced four
+    assert config.ENRICH_WORKERS <= 4 and config.ENRICH_PAUSE > 0
+
+
+class _FakeYtDlp:
+    """The smallest `yt_dlp` ytsearch.enrich uses: a context manager with
+    extract_info. Injected into sys.modules because the real import is inside
+    the function (vendor/__init__.py) and this suite has no yt-dlp."""
+
+    def __init__(self, fail=()):
+        self.order = []                  # the ids actually asked for, in order
+        self.lock = threading.Lock()     # the pool is real; the list is not safe
+        self.fail = set(fail)
+
+    def module(self):
+        outer = self
+
+        class YoutubeDL:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def extract_info(self, url, download=False):
+                vid = url.rsplit('=', 1)[-1]
+                with outer.lock:
+                    outer.order.append(vid)
+                if vid in outer.fail:
+                    raise RuntimeError(f'ERROR: [youtube] {vid}: Private video')
+                return {'id': vid, 'webpage_url': url, 'title': f'{vid} title',
+                        'channel': 'ch', 'duration': 12.0,
+                        'upload_date': '20260801', 'view_count': 5,
+                        'thumbnail': None}
+
+        return types.SimpleNamespace(YoutubeDL=YoutubeDL)
+
+
+def _enrich(monkeypatch, ids, **kw):
+    """Run the REAL ytsearch.enrich against a faked yt_dlp. -> (results, sleeps)."""
+    sleeps = []
+    fake = _FakeYtDlp(fail=kw.pop('fail', ()))
+    monkeypatch.setitem(sys.modules, 'yt_dlp', fake.module())
+    entries = [{'id': v, 'url': f'https://www.youtube.com/watch?v={v}'} for v in ids]
+    out = ytsearch.enrich(entries, sleeper=sleeps.append, **kw)
+    return out, sleeps, fake
+
+
+def test_every_metadata_request_waits_its_turn(monkeypatch):
+    """One sleep per REQUEST, including each chunk's first: worker.py calls
+    enrich() once per chunk, so skipping the first would hand back a free
+    request every chunk."""
+    ids = [f'{i:011d}' for i in range(6)]
+    out, sleeps, _ = _enrich(monkeypatch, ids, jobs=2, pause=0.75)
+    assert [r['id'] for r in out] == ids, 'the input order must survive the pool'
+    assert sleeps == [0.75] * 6
+
+
+def test_the_pacing_is_between_requests_not_per_thread(monkeypatch):
+    """The gate is held during the wait, so the ceiling is 1/pause requests a
+    second whatever YouTube's latency is. Per-thread sleeps would have made the
+    real rate a function of that latency -- the number nobody could measure
+    when this went wrong."""
+    src = (Path(ytsearch.__file__)).read_text(encoding='utf-8')
+    body = src[src.index('def enrich('):]
+    assert 'with gate:' in body and 'sleeper(pause)' in body
+    # ...and the sleep is inside the lock, not after it
+    assert body.index('with gate:') < body.index('sleeper(pause)') < \
+        body.index('def fetch(')
+
+
+def test_the_metadata_pass_is_still_bounded_and_still_parallel(monkeypatch):
+    """Paced, not serialised: a 100-candidate search must not become an
+    afternoon. The worker count is what keeps the wait and the request
+    overlapping."""
+    ids = [f'{i:011d}' for i in range(4)]
+    out, sleeps, _ = _enrich(monkeypatch, ids, jobs=2, pause=0)
+    assert sleeps == [], 'pause=0 must not sleep at all'
+    assert len(out) == 4
+
+
+def test_pacing_does_not_swallow_a_dead_video(monkeypatch):
+    """One dead video still comes back as an 'error' row rather than raising --
+    which is also how the bot check reaches worker._bot_checked (YTDL-21)."""
+    ids = ['aaaaaaaaaaa', 'bbbbbbbbbbb']
+    out, sleeps, _ = _enrich(monkeypatch, ids, jobs=1, pause=0.5,
+                             fail=['bbbbbbbbbbb'])
+    assert sleeps == [0.5, 0.5]
+    assert out[0]['title'] == 'aaaaaaaaaaa title'
+    assert 'Private video' in out[1]['error']
+
+
+def test_the_progress_callback_still_fires_once_per_entry(monkeypatch):
+    """It is what moves the SPA's metadata counter, and it is called from a
+    pool thread -- the pacing must not have moved it out of one."""
+    seen = []
+    ids = [f'{i:011d}' for i in range(3)]
+    _enrich(monkeypatch, ids, jobs=2, pause=0.1,
+            progress=lambda done, total: seen.append((done, total)))
+    assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_enrich_defaults_to_the_configured_pacing(monkeypatch):
+    """A caller that names neither gets the container's settings, so there is
+    no path that quietly goes back to unpaced."""
+    monkeypatch.setattr(config, 'ENRICH_PAUSE', 0.25)
+    monkeypatch.setattr(config, 'ENRICH_WORKERS', 1)
+    _out, sleeps, _f = _enrich(monkeypatch, ['aaaaaaaaaaa', 'bbbbbbbbbbb'])
+    assert sleeps == [0.25, 0.25]
 
 
 # ------------------------------------------------------------------ download

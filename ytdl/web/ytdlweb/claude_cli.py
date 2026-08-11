@@ -25,9 +25,10 @@ one-time login" is a completely different call to action from "the model
 returned something unparseable", and an editor staring at a raw stderr dump
 cannot tell them apart.
 
-**Both prompts are biased towards VISUALS, from one place.** The tunable text
-lives in VISUAL_TERM_BIAS / VISUAL_FILTER_BIAS below rather than dissolved into
-the prose of the two prompts (2026-08-11).
+**Both prompts are biased by the SHOT TYPES the editor ticked, from one place.**
+The tunable text lives in the SHOT_TYPES table below -- one fragment per
+checkbox per stage -- rather than dissolved into the prose of the two prompts,
+which take it as `{bias}` (2026-08-11).
 """
 import json
 import logging
@@ -205,68 +206,261 @@ def ask_json(prompt, timeout=None, retries=1):
     raise last
 
 
-# -------------------------------------------------------- the visual bias
-# 2026-08-11: both calls used to optimise for "is this ABOUT the topic", which
-# is what a news desk wants and the opposite of what an editor cutting b-roll
-# wants. A search for `taiwan presidential palace` generated 24 terms and 336
-# candidates dominated by news packages, studio segments, political commentary
-# and panel shows -- clips about the building, not one shot OF it. The
-# preference now lives in these two fragments, interpolated into the prompts as
-# {bias}, so it can be tuned in one place instead of hunted through prose.
+# ------------------------------------------------------- the shot-type bias
+# 2026-08-11 (morning): both calls used to optimise for "is this ABOUT the
+# topic", which is what a news desk wants and the opposite of what an editor
+# cutting b-roll wants. A search for `taiwan presidential palace` generated 24
+# terms and 336 candidates dominated by news packages, studio segments,
+# political commentary and panel shows -- clips about the building, not one shot
+# OF it. That was fixed with two hardcoded fragments (VISUAL_TERM_BIAS /
+# VISUAL_FILTER_BIAS).
 #
-# Both halves are first-class: this fleet searches en+zh and a Taiwanese
-# footage idiom is not a translation of an English one (空拍 is the drone
-# search; 完整版 is what an unedited full-length ceremony is filed under). The
-# Chinese is written literally, as the _TERM_PROMPT example already is --
-# unlike worker.py, this file is not ASCII-only.
+# 2026-08-11 (afternoon): fixed policy is the wrong shape -- "just make it a
+# series of check boxes so the user can decide and tweak it". So the same text
+# is now split PER SHOT TYPE, and the editor's ticks decide which fragments are
+# composed into the two prompts. The six footage types below are ticked by
+# default, the three coverage types are not, and that default selection
+# reproduces the morning's behaviour word for word.
+#
+# Both languages are first-class in every fragment: this fleet searches en+zh
+# and a Taiwanese footage idiom is not a translation of an English one (空拍 is
+# the drone search; 完整版 is what an unedited full-length ceremony is filed
+# under). The Chinese is written literally, as the _TERM_PROMPT example already
+# is -- unlike worker.py, this file is not ASCII-only.
+#
+# Each entry carries four fragments and they are NOT symmetrical:
+#   seek  -- the search phrasings to generate       (used when TICKED)
+#   keep  -- the relevance filter's keep guidance   (used when TICKED)
+#   avoid -- search phrasings to steer away from    (used when UNTICKED)
+#   drop  -- the relevance filter's drop guidance   (used when UNTICKED)
+# Only the three COVERAGE types carry avoid/drop. An unticked footage type is
+# simply not sought -- an editor who wants aerials has not thereby banned
+# timelapses -- whereas an unticked coverage type must be actively pushed away
+# from, because interviews, news packages and reaction videos are what YouTube
+# returns for a topic by default and they crowd everything else off the
+# manifest. That asymmetry is the whole point of the feature.
 
-VISUAL_TERM_BIAS = """\
-PRIORITISE VISUALS. The editor needs FOOTAGE OF this subject -- shots that can
-be cut into a timeline -- not coverage ABOUT it. Bias the queries towards the
-phrasings that actually surface footage on YouTube:
-- English: establishing shot, exterior, aerial, drone footage, walking tour,
-  walkthrough, POV, street view, timelapse, ceremony, parade, full ceremony,
-  raw footage, unedited, uncut, no commentary, ambient, 4K, stock footage,
-  b-roll.
-- Traditional Chinese as used in Taiwan: 空拍, 空拍機, 縮時, 街景, 徒步,
-  漫步, 導覽, 實景, 現場, 全程, 完整版, 未剪輯, 原始畫面, 無旁白, 無解說,
-  環境音, 典禮, 儀式, 4K.
-At least two thirds of the queries in EACH language must carry a footage
-phrasing of that kind, combined with the names of the places, people, events
-and landmarks involved.
-AVOID the phrasings that return news packages and talking heads: breaking
-news, news update, analysis, commentary, explainer, debate, interview,
-reaction, podcast, top 10; and 快訊, 新聞, 分析, 評論, 辯論, 專訪, 訪談,
-政論, 名嘴, 懶人包.
+SHOT_TYPES = {
+    'aerial': {
+        'label': 'Aerial / drone',
+        'default': True,
+        'group': 'footage',
+        'seek': ('aerial, aerial view, drone footage, drone shot, flyover, '
+                 'from above; 空拍, 空拍機, 空拍畫面, 鳥瞰, 高空'),
+        'keep': 'aerials, drone shots and flyovers of the subject',
+    },
+    'establishing': {
+        'label': 'Establishing / exteriors',
+        'default': True,
+        'group': 'footage',
+        'seek': ('establishing shot, exterior, exteriors, wide shot, skyline, '
+                 'cityscape, landmark, night view; 外觀, 實景, 全景, 夜景, 地標'),
+        'keep': ('establishing shots, exteriors, interiors, streets and '
+                 'landmarks -- the place itself, held on screen'),
+    },
+    'walkthrough': {
+        'label': 'Walk-through / POV / street',
+        'default': True,
+        'group': 'footage',
+        'seek': ('walking tour, walkthrough, POV, first person, street view, '
+                 'driving tour; 徒步, 漫步, 導覽, 街景, 第一人稱'),
+        'keep': 'walking tours, POV walkthroughs, street-level and driving takes',
+    },
+    'timelapse': {
+        'label': 'Timelapse',
+        'default': True,
+        'group': 'footage',
+        'seek': ('timelapse, time lapse, hyperlapse, day to night; '
+                 '縮時, 縮時攝影, 縮時影片'),
+        'keep': 'timelapses and hyperlapses',
+    },
+    'event': {
+        'label': 'Ceremonies / events / protests',
+        'default': True,
+        'group': 'footage',
+        'seek': ('ceremony, full ceremony, parade, protest, rally, press '
+                 'conference, live from the scene; 典禮, 儀式, 遊行, 抗議, '
+                 '記者會, 現場, 全程'),
+        'keep': ('ceremonies, parades, protests, press events and other events '
+                 'shot on location, especially the raw or full-length versions'),
+    },
+    'raw': {
+        'label': 'Raw / uncut / no commentary',
+        'default': True,
+        'group': 'footage',
+        'seek': ('raw footage, unedited, uncut, no commentary, full version, '
+                 'ambient, 4K, stock footage, b-roll; 完整版, 未剪輯, 原始畫面, '
+                 '無旁白, 無解說, 環境音, 4K'),
+        'keep': ('raw, uncut and full-length takes, ambient no-narration '
+                 'material, and anything filed as b-roll or stock footage'),
+    },
+    'interview': {
+        'label': 'Interviews / talking heads',
+        'default': False,
+        'group': 'coverage',
+        'seek': ('interview, sit-down interview, talking head, in depth '
+                 'interview; 專訪, 訪談, 對談'),
+        'keep': ('interviews, talking heads and panel discussions -- the '
+                 'editor asked for these'),
+        'avoid': 'interview, sit-down interview, talking head; 專訪, 訪談',
+        'drop': 'interviews and talk/panel shows: 專訪, 訪談, 政論節目, 名嘴',
+    },
+    'news': {
+        'label': 'News reports',
+        'default': False,
+        'group': 'coverage',
+        'seek': ('news report, news package, news coverage, breaking news; '
+                 '新聞, 新聞報導, 快訊, 播報'),
+        'keep': ('news reports and packages, studio-led ones included -- the '
+                 'editor asked for these'),
+        'avoid': 'breaking news, news update, news report; 快訊, 新聞, 新聞報導',
+        # The field-report carve-out is deliberate and predates the checkboxes:
+        # a report whose PICTURES carry it is footage with a voice over it.
+        'drop': ('studio segments, news anchors and desk reads, pieces to '
+                 'camera -- but a field report where the shots of the subject '
+                 'clearly carry the video is footage, so keep that one'),
+    },
+    'commentary': {
+        'label': 'Commentary / analysis / reaction',
+        'default': False,
+        'group': 'coverage',
+        'seek': ('commentary, analysis, explainer, reaction, review, podcast; '
+                 '評論, 分析, 解析, 政論, 懶人包'),
+        'keep': ('commentary, analysis, explainers and reaction videos -- the '
+                 'editor asked for these'),
+        'avoid': ('analysis, commentary, explainer, debate, reaction, podcast, '
+                  'top 10; 分析, 評論, 辯論, 政論, 名嘴, 懶人包'),
+        'drop': ('commentary, analysis, explainers, reaction videos, podcasts, '
+                 'vlogs about it'),
+    },
+}
+
+# The ticks a page load starts with, and what an old job row (or a caller that
+# passes nothing) means. In SHOT_TYPES order, always.
+DEFAULT_SHOT_TYPES = tuple(k for k, v in SHOT_TYPES.items() if v['default'])
+
+# "footage of the subject" vs "somebody talking about the subject". The split
+# decides three things: only coverage types are steered away from when unticked
+# (see the note above), the PRIORITISE VISUALS framing is only asserted when at
+# least one footage type is ticked -- an editor who asked for nothing but
+# interviews must not be told to prefer pictures over talking -- and it is how
+# the SPA groups the nine boxes so they do not read as a wall.
+FOOTAGE_KEYS = tuple(k for k, v in SHOT_TYPES.items() if v['group'] == 'footage')
+COVERAGE_KEYS = tuple(k for k, v in SHOT_TYPES.items() if v['group'] == 'coverage')
+
+# Both degenerate selections mean the same thing and are handled here rather
+# than left to emerge from the loops: EVERYTHING ticked composes a filter that
+# is told to keep every kind of material and drop none, NOTHING ticked composes
+# one told to drop every kind and keep none. The first is a no-op dressed up as
+# an instruction and the second is incoherent -- an editor who ticks all nine
+# boxes plainly wants the search left alone, and one who ticks none has not
+# asked for an empty manifest. Both get a neutral, topic-only search.
+_NEUTRAL_TERM_BIAS = """\
+NO SHOT-TYPE PREFERENCE: the editor ticked either every kind of material or
+none, which mean the same thing here -- search the topic broadly and do not
+steer the queries towards or away from any particular kind of video. Cover the
+places, the people, the organisations and the events from as many angles as the
+topic has.
 """
 
-VISUAL_FILTER_BIAS = """\
-DROP anything with no real footage of its own:
-- studio segments, news anchors and desk reads, pieces to camera
-- interviews and talk/panel shows: 專訪, 訪談, 政論節目, 名嘴
-- commentary, analysis, explainers, reaction videos, podcasts, vlogs about it
-- compilations and edits buried under heavy overlays -- captions filling the
-  frame, zooms, memes, stock music, a hard cut every two seconds
-- unrelated results the search dragged in, music, gaming, and AI-generated or
-  still-image slideshow "footage"
+_NEUTRAL_FILTER_BIAS = """\
+NO SHOT-TYPE PREFERENCE: the editor ticked either every kind of material or
+none, which mean the same thing here -- judge on the TOPIC alone. A studio
+interview, a drone shot and a raw ceremony are all equally welcome.
 
-KEEP anything carrying real footage of the subject:
-- establishing shots, exteriors, interiors, streets, landmarks, aerials, drone
-- walking tours, POV walkthroughs, timelapses, ambient no-narration takes
-- ceremonies, parades, protests, press events and other events shot on
-  location, especially the raw or full-length versions
-- field reports where the shots of the subject clearly carry the video (an
-  anchor or reporter carrying it is a studio segment: drop it)
-- foreign-language material: narration the editor cannot use does not matter
-  when the pictures are the point
+DROP only what is not about this topic at all: unrelated results the search
+dragged in, music, gaming, and AI-generated or still-image slideshow "footage".
+When it is genuinely unclear, KEEP it -- a kept dud costs the editor one glance,
+a wrong drop hides a clip they never learn existed.
+"""
 
+# Asserted only when a footage type is ticked; see FOOTAGE_KEYS.
+_FOOTAGE_HEADER = """\
+PRIORITISE VISUALS. The editor needs FOOTAGE OF this subject -- shots that can
+be cut into a timeline -- not coverage ABOUT it.
+"""
+
+_PREFER_UNCUT = """\
 All else equal prefer the LONGER, steadier, less-edited item: an unedited
 12-minute walk-through beats a 90-second cut of the same place, and a 40-minute
 full ceremony beats the news summary of it.
-When it is genuinely unclear whether real footage is in there, KEEP it -- a
-kept dud costs the editor one glance, a wrong drop hides a clip they never
-learn existed.
 """
+
+
+def normalise_shot_types(shot_types):
+    """-> a tuple of known keys in SHOT_TYPES order. None means the defaults.
+
+    Tolerant on purpose: this is fed from a job row that may have been written
+    by an older (or newer) build, and an unrecognised key must cost a fragment,
+    never a search. The API is where an unknown key is refused.
+    """
+    if shot_types is None:
+        return DEFAULT_SHOT_TYPES
+    wanted = {str(k).strip().lower() for k in shot_types}
+    return tuple(k for k in SHOT_TYPES if k in wanted)
+
+
+def _is_neutral(selected):
+    """All ticked and none ticked are the same instruction: no bias."""
+    return not selected or len(selected) == len(SHOT_TYPES)
+
+
+def term_bias(shot_types=None):
+    """The {bias} block of the term prompt, composed from the ticked types."""
+    selected = normalise_shot_types(shot_types)
+    if _is_neutral(selected):
+        return _NEUTRAL_TERM_BIAS
+
+    out = []
+    if any(k in FOOTAGE_KEYS for k in selected):
+        out.append(_FOOTAGE_HEADER + '\n')
+    out.append('The editor asked for these kinds of material. Bias the queries '
+               'towards the\nphrasings that actually surface them on YouTube, '
+               'in BOTH languages:\n')
+    for key in selected:
+        out.append(f"- {SHOT_TYPES[key]['label']}: {SHOT_TYPES[key]['seek']}.\n")
+    out.append('At least two thirds of the queries in EACH language must carry '
+               'one of those\nphrasings, combined with the names of the places, '
+               'people, events and\nlandmarks involved.\n')
+
+    avoid = [SHOT_TYPES[k]['avoid'] for k in SHOT_TYPES
+             if k not in selected and SHOT_TYPES[k].get('avoid')]
+    if avoid:
+        out.append('\nAVOID the phrasings the editor did NOT ask for, in either '
+                   'language:\n')
+        out.extend(f'- {a}.\n' for a in avoid)
+    return ''.join(out)
+
+
+def filter_bias(shot_types=None):
+    """The {bias} block of the relevance prompt, composed from the ticked types."""
+    selected = normalise_shot_types(shot_types)
+    if _is_neutral(selected):
+        return _NEUTRAL_FILTER_BIAS
+
+    drops = [SHOT_TYPES[k]['drop'] for k in SHOT_TYPES
+             if k not in selected and SHOT_TYPES[k].get('drop')]
+    out = ['DROP:\n']
+    out.extend(f'- {d}\n' for d in drops)
+    if any(k in FOOTAGE_KEYS for k in selected):
+        out.append('- compilations and edits buried under heavy overlays -- '
+                   'captions filling the\n  frame, zooms, memes, stock music, '
+                   'a hard cut every two seconds\n')
+    out.append('- unrelated results the search dragged in, music, gaming, and '
+               'AI-generated or\n  still-image slideshow "footage"\n')
+
+    out.append('\nKEEP, because this is what the editor ticked:\n')
+    out.extend(f"- {SHOT_TYPES[k]['keep']}\n" for k in selected)
+    out.append('- foreign-language material: narration the editor cannot use '
+               'does not matter\n  when the pictures are the point\n')
+
+    out.append('\n')
+    if 'raw' in selected:
+        out.append(_PREFER_UNCUT)
+    out.append('When it is genuinely unclear whether an item is what the editor '
+               'asked for,\nKEEP it -- a kept dud costs the editor one glance, a '
+               'wrong drop hides a clip\nthey never learn existed.\n')
+    return ''.join(out)
 
 
 # ------------------------------------------------------------- call #1: terms
@@ -299,8 +493,11 @@ Reply with ONLY this JSON object and nothing else -- no prose, no code fence:
 """
 
 
-def generate_terms(topic, timeout=None):
+def generate_terms(topic, shot_types=None, timeout=None):
     """-> [{'q','lang','english_gloss'}]. Raises ClaudeError.
+
+    `shot_types` is the editor's ticked boxes (None = the defaults); it only
+    ever changes the {bias} block, never the JSON contract below.
 
     The gloss requirement is validated here rather than trusted, because the
     manifest's whole readability for a non-Chinese-reading editor (REQ 5) rests
@@ -313,7 +510,7 @@ def generate_terms(topic, timeout=None):
     and if that one is short a gloss too, those queries are dropped and the
     rest of the search goes ahead.
     """
-    prompt = _TERM_PROMPT.format(topic=topic, bias=VISUAL_TERM_BIAS)
+    prompt = _TERM_PROMPT.format(topic=topic, bias=term_bias(shot_types))
     out, missing = _usable_terms(ask_json(prompt, timeout))
     if missing:
         log.warning('claude returned %d query(ies) without english_gloss (%s); '
@@ -384,8 +581,13 @@ Every index from 0 to {last} must appear exactly once, in keep or in drop.
 RELEVANCE_BATCH = 40
 
 
-def filter_relevance(topic, videos, batch=RELEVANCE_BATCH, timeout=None):
+def filter_relevance(topic, videos, shot_types=None, batch=RELEVANCE_BATCH,
+                     timeout=None):
     """-> {video_id: (relevant: bool, why: str)} for everything it judged.
+
+    `shot_types` is the editor's ticked boxes (None = the defaults) and reaches
+    the model as the {bias} block only -- the indices-in, indices-out contract
+    below is the same whatever is ticked.
 
     Raises ClaudeError; the caller DEGRADES on that rather than failing the job
     (an unfiltered manifest with a banner beats no manifest at all).
@@ -395,6 +597,9 @@ def filter_relevance(topic, videos, batch=RELEVANCE_BATCH, timeout=None):
     silently hide a video from the editor.
     """
     verdicts = {}
+    # Composed once: the selection cannot change between batches of one job,
+    # and a 200-candidate job is five calls.
+    bias = filter_bias(shot_types)
     for start in range(0, len(videos), batch):
         chunk = videos[start:start + batch]
         listing = '\n'.join(
@@ -404,7 +609,7 @@ def filter_relevance(topic, videos, batch=RELEVANCE_BATCH, timeout=None):
             for i, v in enumerate(chunk))
         data = ask_json(_RELEVANCE_PROMPT.format(
             topic=topic, n=len(chunk), listing=listing, last=len(chunk) - 1,
-            bias=VISUAL_FILTER_BIAS), timeout)
+            bias=bias), timeout)
 
         # `or []` and the list check on BOTH: a reply that kept nothing comes
         # back as {"keep": null, ...} often enough, and the TypeError that used

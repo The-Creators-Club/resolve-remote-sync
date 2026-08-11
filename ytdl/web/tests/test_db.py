@@ -91,6 +91,12 @@ def test_a_v1_database_is_migrated_and_its_duplicate_active_jobs_retired(tmp_pat
     # column's default -- so the ADD COLUMN needs no backfill.
     assert 'kind' in db._columns(con, 'jobs')
     assert {r[0] for r in con.execute('SELECT DISTINCT kind FROM jobs')} == {'search'}
+    # v5: every row that predates the checkboxes ran under the fixed visual
+    # bias, which is what the six default ticks mean -- so those rows must read
+    # as the defaults and NOT as "the editor ticked nothing".
+    assert 'shot_types' in db._columns(con, 'jobs')
+    for row in con.execute('SELECT * FROM jobs'):
+        assert db.shot_types_of(row) == db.DEFAULT_SHOT_TYPES
     rows = con.execute('SELECT id, phase, error FROM jobs WHERE created_by=? '
                        'ORDER BY id', (USER,)).fetchall()
     assert [r['phase'] for r in rows] == ['cancelled', 'queued']
@@ -103,6 +109,306 @@ def test_a_v1_database_is_migrated_and_its_duplicate_active_jobs_retired(tmp_pat
                     (USER,))
     con.rollback()
     con.close()
+
+
+# The v4 shape: v1 plus everything 002/003/004 added, and nothing 005 does.
+# Written out for the same reason _V1_DDL is -- a copy that followed schema.sql
+# around would stop being the shape the fleet's database is actually in.
+_V4_DDL = """
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY, created_by TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'search', term TEXT NOT NULL,
+    term_dir TEXT NOT NULL, project_slug TEXT NOT NULL,
+    project_label TEXT NOT NULL, quality TEXT NOT NULL DEFAULT '1080p',
+    period TEXT, max_per_term INTEGER NOT NULL DEFAULT 15,
+    phase TEXT NOT NULL DEFAULT 'queued', error TEXT,
+    terms_total INTEGER DEFAULT 0, terms_done INTEGER DEFAULT 0,
+    candidates INTEGER DEFAULT 0, enrich_total INTEGER DEFAULT 0,
+    enrich_done INTEGER DEFAULT 0, dl_total INTEGER DEFAULT 0,
+    dl_done INTEGER DEFAULT 0, dl_failed INTEGER DEFAULT 0,
+    cancel_requested INTEGER DEFAULT 0, created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL);
+CREATE TABLE downloads (
+    video_id TEXT PRIMARY KEY, title TEXT, channel TEXT,
+    project_slug TEXT NOT NULL, project_label TEXT NOT NULL, term TEXT NOT NULL,
+    term_dir TEXT, rel_path TEXT NOT NULL, job_id INTEGER, downloaded_by TEXT,
+    downloaded_at TEXT NOT NULL);
+CREATE UNIQUE INDEX idx_jobs_one_active ON jobs(created_by)
+    WHERE phase NOT IN ('done', 'failed', 'cancelled');
+"""
+
+
+def test_a_v4_database_gains_shot_types_and_its_old_rows_read_as_the_defaults(
+        tmp_path):
+    """005. Every job written before the checkboxes ran under the fixed
+    "prioritise visuals" bias, and the six default ticks ARE that bias -- so an
+    old row must come back as the defaults. Reading them as "the editor ticked
+    nothing" would silently rewrite the history of every search the fleet has
+    ever run into an unbiased one."""
+    con = db.connect(tmp_path / 'v4.db')
+    con.executescript(_V4_DDL)
+    con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                "project_label,phase,created_at,updated_at) "
+                "VALUES(?,'reef','reef','s','2026/FF5/Energy','done','x','x')",
+                (USER,))
+    con.execute('PRAGMA user_version = 4')
+    con.commit()
+
+    db.ensure_schema(con)
+
+    assert con.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert db.CURRENT_SCHEMA_VERSION == 6
+    old = con.execute('SELECT * FROM jobs').fetchone()
+    assert db.shot_types_of(old) == db.DEFAULT_SHOT_TYPES
+    assert db.job_dict(old)['shot_types'] == list(db.DEFAULT_SHOT_TYPES)
+    # and a job created after the migration can still say "nothing ticked"
+    new = db.create_job(con, OTHER_USER, 'wind', 'wind', 's', '2026/FF5/Water',
+                        shot_types=[])
+    assert db.shot_types_of(db.get_job(con, new)) == ()
+    con.close()
+
+
+def test_the_migrations_default_is_the_pythons_default(tmp_path):
+    """SQL cannot import Python, so the list is written twice -- here is where
+    they are held together. A drift would migrate the fleet's history to a
+    selection this build does not agree with."""
+    sql = (config.MIGRATIONS_DIR / '005_jobs_shot_types.sql').read_text(
+        encoding='utf-8')
+    assert f"DEFAULT '{db.encode_shot_types(None)}'" in sql
+    schema = config.SCHEMA_PATH.read_text(encoding='utf-8')
+    assert f"DEFAULT '{db.encode_shot_types(None)}'" in schema
+    # ...and the pair is the version this app runs at
+    assert db._MIGRATIONS[5][0] == '005_jobs_shot_types.sql'
+    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION
+
+
+# The v5 shape: v1 plus everything 002/003/004/005 added, and nothing 006 does
+# -- the shape the fleet's ytdl.db is actually in as of this change. Written
+# out for the same reason _V1_DDL and _V4_DDL are.
+_V5_DDL = """
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY, created_by TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'search', term TEXT NOT NULL,
+    term_dir TEXT NOT NULL, project_slug TEXT NOT NULL,
+    project_label TEXT NOT NULL, quality TEXT NOT NULL DEFAULT '1080p',
+    period TEXT, max_per_term INTEGER NOT NULL DEFAULT 15,
+    shot_types TEXT NOT NULL
+        DEFAULT 'aerial,establishing,walkthrough,timelapse,event,raw',
+    phase TEXT NOT NULL DEFAULT 'queued', error TEXT,
+    terms_total INTEGER DEFAULT 0, terms_done INTEGER DEFAULT 0,
+    candidates INTEGER DEFAULT 0, enrich_total INTEGER DEFAULT 0,
+    enrich_done INTEGER DEFAULT 0, dl_total INTEGER DEFAULT 0,
+    dl_done INTEGER DEFAULT 0, dl_failed INTEGER DEFAULT 0,
+    cancel_requested INTEGER DEFAULT 0, created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL);
+CREATE TABLE downloads (
+    video_id TEXT PRIMARY KEY, title TEXT, channel TEXT,
+    project_slug TEXT NOT NULL, project_label TEXT NOT NULL, term TEXT NOT NULL,
+    term_dir TEXT, rel_path TEXT NOT NULL, job_id INTEGER, downloaded_by TEXT,
+    downloaded_at TEXT NOT NULL);
+CREATE UNIQUE INDEX idx_jobs_one_active ON jobs(created_by)
+    WHERE phase NOT IN ('done', 'failed', 'cancelled');
+"""
+
+
+def test_a_v5_database_gains_max_candidates_and_its_old_rows_read_as_the_default(
+        tmp_path):
+    """006. Unlike shot_types, the default here is NOT what those rows ran
+    with: every job written before the ceiling existed ran unbounded, and
+    unbounded is the thing that reached 336 candidates and got the NAS's IP
+    refused at 112 metadata calls. The only rows the backfill can still affect
+    are ones boot recovery re-runs, so they re-run bounded on purpose."""
+    con = db.connect(tmp_path / 'v5.db')
+    con.executescript(_V5_DDL)
+    con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                "project_label,phase,created_at,updated_at) "
+                "VALUES(?,'reef','reef','s','2026/FF5/Energy','done','x','x')",
+                (USER,))
+    con.execute('PRAGMA user_version = 5')
+    con.commit()
+
+    db.ensure_schema(con)
+
+    assert con.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert 'max_candidates' in db._columns(con, 'jobs')
+    old = con.execute('SELECT * FROM jobs').fetchone()
+    assert old['max_candidates'] == db.DEFAULT_MAX_CANDIDATES
+    assert db.max_candidates_of(old) == db.DEFAULT_MAX_CANDIDATES
+    assert db.job_dict(old)['max_candidates'] == db.DEFAULT_MAX_CANDIDATES
+    # ...and the shot types 005 wrote are untouched by the second migration
+    assert db.shot_types_of(old) == db.DEFAULT_SHOT_TYPES
+    con.close()
+
+
+def test_the_migrations_candidate_default_is_the_pythons_default(tmp_path):
+    """SQL cannot import Python, so the number is written three times -- config,
+    the migration, schema.sql. A drift would let a job be created with a
+    ceiling the API refuses, or migrate the fleet's rows to one."""
+    sql = (config.MIGRATIONS_DIR / '006_jobs_max_candidates.sql').read_text(
+        encoding='utf-8')
+    assert f'DEFAULT {db.DEFAULT_MAX_CANDIDATES};' in sql
+    schema = config.SCHEMA_PATH.read_text(encoding='utf-8')
+    assert f'max_candidates   INTEGER NOT NULL DEFAULT {db.DEFAULT_MAX_CANDIDATES}' \
+        in schema
+    # ...the default is one of the choices, and the pair is this app's version
+    assert db.DEFAULT_MAX_CANDIDATES in db.CANDIDATE_CAPS
+    assert db._MIGRATIONS[6][0] == '006_jobs_max_candidates.sql'
+    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION == 6
+
+
+def test_the_candidate_ceiling_survives_the_round_trip(con):
+    """Stored on the job, because the SEARCH phase reads it off the row --
+    including after a container restart re-runs the job from `queued`."""
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_job(con, USER, 'reef', 'reef', slug, label,
+                           max_candidates=400)
+    row = db.get_job(con, job_id)
+    assert row['max_candidates'] == 400
+    assert db.max_candidates_of(row) == 400
+    assert db.job_dict(row)['max_candidates'] == 400
+
+
+def test_no_ceiling_asked_for_stores_the_default_not_unbounded(con):
+    """None is "nobody said" -- an old client, an internal caller. It is the
+    one case that must NOT mean "as many as the search finds": that is the
+    behaviour the cap exists because of."""
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_job(con, USER, 'reef', 'reef', slug, label)
+    assert db.get_job(con, job_id)['max_candidates'] == db.DEFAULT_MAX_CANDIDATES
+
+
+def test_a_nonsensical_ceiling_reads_as_the_default_and_a_huge_one_is_clamped(
+        con, job):
+    """The API refuses an unlisted number, so the only way to hold one is a row
+    written by another build or by hand. Two invariants survive that: there is
+    always a number (never "unbounded"), and it is never bigger than the
+    biggest choice on the menu -- which is what stops the 336-candidate pass
+    being re-createable from the database."""
+    for stored in (0, -1):
+        con.execute('UPDATE jobs SET max_candidates=? WHERE id=?',
+                    (stored, job['id']))
+        con.commit()
+        assert db.max_candidates_of(db.get_job(con, job['id'])) == \
+            db.DEFAULT_MAX_CANDIDATES
+
+    con.execute('UPDATE jobs SET max_candidates=5000 WHERE id=?', (job['id'],))
+    con.commit()
+    assert db.max_candidates_of(db.get_job(con, job['id'])) == \
+        db.MAX_CANDIDATE_CAP == max(db.CANDIDATE_CAPS)
+
+    # a smaller off-menu number is honoured as it stands: bounded is the
+    # property that matters, and rounding 137 up would spend 63 metadata calls
+    con.execute('UPDATE jobs SET max_candidates=137 WHERE id=?', (job['id'],))
+    con.commit()
+    assert db.max_candidates_of(db.get_job(con, job['id'])) == 137
+    # ...and a bare number is answered as itself, so the worker can be told one
+    assert db.max_candidates_of(50) == 50
+    assert db.max_candidates_of('200') == 200
+    assert db.max_candidates_of('not a number') == db.DEFAULT_MAX_CANDIDATES
+
+
+def test_a_row_with_no_max_candidates_column_at_all_reads_as_the_default(con, job):
+    """A SELECT that did not ask for it, or a database the migration has not
+    reached: the answer is the default, never "no ceiling"."""
+    partial = con.execute('SELECT id, term FROM jobs WHERE id=?',
+                          (job['id'],)).fetchone()
+    assert db.max_candidates_of(partial) == db.DEFAULT_MAX_CANDIDATES
+    assert db.max_candidates_of(None) == db.DEFAULT_MAX_CANDIDATES
+    # a job_dict has already turned the column into a number; it reads as itself
+    assert db.max_candidates_of(db.job_dict(db.get_job(con, job['id']))) == \
+        db.DEFAULT_MAX_CANDIDATES
+
+
+def test_the_ceiling_cannot_be_updated_after_the_fact(con, job):
+    """Like `kind` and `shot_types`: an input to the search that already ran.
+    An UPDATE here would leave a job row claiming a ceiling smaller than the
+    manifest sitting under it."""
+    with pytest.raises(ValueError):
+        db.set_job(con, job['id'], max_candidates=400)
+
+
+def test_a_url_job_takes_the_default_ceiling_and_never_uses_it(con):
+    """A paste does no searching, so there is nothing to accumulate against --
+    the row takes the column default and the SPA does not show it."""
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_url_job(con, OTHER_USER, 'links', 'links', slug, label,
+                               _url_videos('vid00000001'))
+    row = db.get_job(con, job_id)
+    assert row['kind'] == db.KIND_URLS
+    assert row['max_candidates'] == db.DEFAULT_MAX_CANDIDATES
+
+
+def test_a_jobs_shot_types_survive_the_round_trip(con):
+    """Stored on the job, because BOTH claude calls read them off the row --
+    including after a container restart re-runs the job from `queued`."""
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_job(con, USER, 'reef', 'reef', slug, label,
+                           shot_types=['interview', 'aerial'])
+    row = db.get_job(con, job_id)
+    # canonical order, whatever the caller passed
+    assert row['shot_types'] == 'aerial,interview'
+    assert db.shot_types_of(row) == ('aerial', 'interview')
+    assert db.job_dict(row)['shot_types'] == ['aerial', 'interview']
+
+
+def test_no_selection_stores_the_defaults_and_an_empty_one_stores_nothing(con):
+    """The two are NOT the same fact: None is "nobody said" (an old row, an old
+    client) and [] is "the editor deliberately ticked nothing", which means an
+    unbiased search."""
+    slug, label, _ = PROJECTS[0]
+    a = db.create_job(con, USER, 'reef', 'reef', slug, label)
+    assert db.shot_types_of(db.get_job(con, a)) == db.DEFAULT_SHOT_TYPES
+
+    db.set_phase(con, a, 'done')
+    b = db.create_job(con, USER, 'wind', 'wind', slug, label, shot_types=[])
+    assert db.get_job(con, b)['shot_types'] == ''
+    assert db.shot_types_of(db.get_job(con, b)) == ()
+
+
+def test_a_url_job_carries_no_meaningful_selection_and_is_never_asked_for_one(con):
+    """A paste is not searched or filtered, so there is nothing for a bias to
+    bias -- the row takes the column default and the SPA ignores it."""
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_url_job(con, OTHER_USER, 'links', 'links', slug, label,
+                               _url_videos('vid00000001'))
+    row = db.get_job(con, job_id)
+    assert row['kind'] == db.KIND_URLS
+    assert db.shot_types_of(row) == db.DEFAULT_SHOT_TYPES
+
+
+def test_the_selection_cannot_be_updated_after_the_fact(con, job):
+    """Like `kind`: it is an input to the search that already ran, and a later
+    UPDATE would make the job row describe a job nobody asked for."""
+    with pytest.raises(ValueError):
+        db.set_job(con, job['id'], shot_types='aerial')
+    with pytest.raises(ValueError):
+        db.set_job(con, job['id'], kind='urls')
+
+
+def test_a_row_with_no_such_column_at_all_reads_as_the_defaults(con, job):
+    """The NOT NULL column cannot be null, so the only way to have no answer is
+    a row that predates it -- a SELECT that does not carry it, or a database
+    the migration has not reached yet. That is a search that ran under the
+    fixed visual bias, i.e. the defaults."""
+    partial = con.execute('SELECT id, term FROM jobs WHERE id=?',
+                          (job['id'],)).fetchone()
+    assert db.shot_types_of(partial) == db.DEFAULT_SHOT_TYPES
+    assert db.shot_types_of(None) == db.DEFAULT_SHOT_TYPES
+    # a job_dict, whose shot_types is already a list, reads back as itself --
+    # the same call must not answer "the defaults" for a job that ticked two
+    assert db.shot_types_of(db.job_dict(db.get_job(con, job['id']))) == \
+        db.DEFAULT_SHOT_TYPES
+    assert db.shot_types_of(['raw', 'aerial']) == ('aerial', 'raw')
+    assert db.shot_types_of([]) == ()
+
+
+def test_an_unknown_key_in_the_column_costs_a_fragment_not_a_search(con, job):
+    """A row written by another build must never break a job: the API refuses
+    unknown keys, this layer merely ignores them."""
+    con.execute("UPDATE jobs SET shot_types='aerial,klingon' WHERE id=?",
+                (job['id'],))
+    con.commit()
+    assert db.shot_types_of(db.get_job(con, job['id'])) == ('aerial',)
 
 
 def test_con_is_per_thread(con):

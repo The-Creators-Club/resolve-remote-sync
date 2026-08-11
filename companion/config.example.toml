@@ -360,6 +360,17 @@ resolve_lut_dir = ""
 lut_location_override = ""
 # How often the LUT Locations entry and the stray-LUT scan are re-checked.
 lut_check_interval = 900
+# Resolve scans its LUT locations ONCE, at startup. Open it before P: has
+# finished mapping and the shared library is missing for that whole session --
+# while the preference above still reads perfectly, so nothing else here can
+# see it. The symptom is "LUTs missing" plus a "Failed to read Shaper LUT" per
+# rendered frame in Resolve's log (Ruskin, 2026-08-11). The companion spots
+# that in the log and re-scans the list in place, with no restart and no
+# preference edit -- the one LUT fix that works while an editor is mid-edit.
+lut_index_repair_enabled = true
+# Resolve's own log file, which is where that startup miss is visible.
+# Blank = the standard location for this platform.
+resolve_log_override = ""
 
 # The shared Resolve gallery. Resolve derives the gallery directory from a
 # media storage entry -- by default each machine's own scratch disk, which is

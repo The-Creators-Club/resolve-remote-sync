@@ -257,12 +257,17 @@ def test_out_of_range_indices_are_ignored(run):
     assert set(out) == {'vid00000000'}
 
 
-# ------------------------------------------------------------ visual bias
-# 2026-08-11: the editor's complaint was "the youtube search should prioritise
-# visuals -- if we search 'presidential palace' we're looking for visuals of
-# presidential palace". `taiwan presidential palace` had returned 336
-# candidates of news packages, studio panels and commentary. Both AI stages now
-# carry the bias, and both halves of the bilingual search do.
+# ----------------------------------------------------------- the shot types
+# 2026-08-11 (morning): the editor's complaint was "the youtube search should
+# prioritise visuals -- if we search 'presidential palace' we're looking for
+# visuals of presidential palace". `taiwan presidential palace` had returned 336
+# candidates of news packages, studio panels and commentary, and both AI stages
+# were given a fixed visual bias.
+#
+# (afternoon): "just make it a series of check boxes so the user can decide and
+# tweak it". The fragments are per shot type now and the ticks compose them.
+# The DEFAULT selection reproduces the morning's behaviour, which is what the
+# first block below is: the same assertions, against the default ticks.
 
 def _prompt(run, i=0):
     """The prompt claude was actually handed. argv[2] by the -p contract that
@@ -277,11 +282,36 @@ def _terms_reply():
     ]})))
 
 
+ALL_SHOTS = list(claude_cli.SHOT_TYPES)
+
+
+def test_the_default_ticks_are_the_six_footage_types(run):
+    """The defaults ARE the old fixed bias, so an editor who touches nothing
+    gets exactly the search the fleet had before the checkboxes."""
+    assert claude_cli.DEFAULT_SHOT_TYPES == (
+        'aerial', 'establishing', 'walkthrough', 'timelapse', 'event', 'raw')
+    assert claude_cli.COVERAGE_KEYS == ('interview', 'news', 'commentary')
+    assert set(claude_cli.FOOTAGE_KEYS) | set(claude_cli.COVERAGE_KEYS) == set(ALL_SHOTS)
+    # Every key carries both stages' text, in both languages the fleet searches.
+    for key, frag in claude_cli.SHOT_TYPES.items():
+        assert frag['label'].strip(), key
+        assert frag['seek'].strip() and frag['keep'].strip(), key
+        assert frag['group'] in ('footage', 'coverage'), key
+        assert any('一' <= ch <= '鿿' for ch in frag['seek']), key
+        # avoid/drop belong to the coverage half alone: an unticked footage
+        # type is not sought, but it is never thrown away.
+        has_off_text = 'avoid' in frag or 'drop' in frag
+        assert has_off_text == (frag['group'] == 'coverage'), key
+    for key in claude_cli.COVERAGE_KEYS:
+        assert claude_cli.SHOT_TYPES[key]['avoid'].strip(), key
+        assert claude_cli.SHOT_TYPES[key]['drop'].strip(), key
+
+
 def test_the_term_prompt_asks_for_footage_of_the_topic_not_coverage_about_it(run):
     run.outcome = _terms_reply()
     claude_cli.generate_terms('taiwan presidential palace')
     p = _prompt(run)
-    assert claude_cli.VISUAL_TERM_BIAS in p, 'the bias fragment must reach the model'
+    assert claude_cli.term_bias() in p, 'the composed bias must reach the model'
     assert 'FOOTAGE OF' in p
     for phrasing in ('establishing shot', 'exterior', 'aerial', 'drone footage',
                      'walking tour', 'timelapse', 'ceremony', 'no commentary',
@@ -289,7 +319,7 @@ def test_the_term_prompt_asks_for_footage_of_the_topic_not_coverage_about_it(run
         assert phrasing in p, phrasing
 
 
-def test_the_term_prompt_steers_away_from_news_package_phrasings(run):
+def test_the_term_prompt_steers_away_from_the_types_left_unticked(run):
     run.outcome = _terms_reply()
     claude_cli.generate_terms('x')
     p = _prompt(run)
@@ -319,12 +349,12 @@ def test_the_chinese_half_gets_its_own_footage_idioms(run):
         assert idiom in p, idiom
 
 
-def test_the_visual_bias_did_not_disturb_the_term_output_contract(run):
+def test_the_shot_type_bias_did_not_disturb_the_term_output_contract(run):
     """The JSON envelope, the gloss requirement and the 8-12 per language are
     the contract worker.py and the manifest rest on -- the bias is additional
     prose, not a redesign."""
     run.outcome = _terms_reply()
-    out = claude_cli.generate_terms('x')
+    out = claude_cli.generate_terms('x', shot_types=['aerial', 'interview'])
     p = _prompt(run)
     assert '8 to 12 queries in English' in p
     assert '8 to 12 queries in Traditional Chinese' in p
@@ -339,7 +369,7 @@ def test_the_relevance_prompt_drops_studio_and_keeps_real_footage(run):
     run.outcome = FakeProc(envelope('{"keep": [0], "drop": []}'))
     claude_cli.filter_relevance('taiwan presidential palace', _videos(2))
     p = _prompt(run)
-    assert claude_cli.VISUAL_FILTER_BIAS in p
+    assert claude_cli.filter_bias() in p
     for drop in ('studio segments', 'news anchors', 'interviews',
                  'commentary', 'reaction videos', 'compilations',
                  'heavy overlays'):
@@ -362,28 +392,161 @@ def test_the_relevance_prompt_prefers_longer_steadier_less_edited(run):
     assert '0. title 0 | c | 1:00' in p
 
 
-def test_the_visual_bias_did_not_disturb_the_relevance_output_contract(run):
+def test_the_shot_type_bias_did_not_disturb_the_relevance_output_contract(run):
     run.outcome = FakeProc(envelope('{"keep": [0], "drop": []}'))
-    claude_cli.filter_relevance('topic', _videos(3))
+    claude_cli.filter_relevance('topic', _videos(3), shot_types=['event'])
     p = _prompt(run)
     assert '{"keep": [0, 3, 4], "drop": [{"i": 1, "why": "reason, 10 words max"}]}' in p
     assert 'Every index from 0 to 2 must appear exactly once' in p
     assert '{{' not in p and '{bias}' not in p and '{listing}' not in p
 
 
-def test_the_bias_is_one_tunable_constant_per_stage(run):
-    """It is exposed so it can be tuned in one place; nothing else in the
-    module should have to be edited to change what 'visual' means here."""
-    assert claude_cli.VISUAL_TERM_BIAS.strip()
-    assert claude_cli.VISUAL_FILTER_BIAS.strip()
-    assert 'PRIORITISE VISUALS' in claude_cli.VISUAL_TERM_BIAS
-    assert claude_cli.VISUAL_TERM_BIAS not in claude_cli.VISUAL_FILTER_BIAS
+def test_one_call_per_batch_composes_the_bias_once_and_identically(run):
+    """The selection cannot change mid-job, and a manifest whose second batch
+    was judged by different rules than its first is not one manifest."""
+    run.outcome = FakeProc(envelope('{"keep": [], "drop": []}'))
+    claude_cli.filter_relevance('topic', _videos(85), shot_types=['aerial'],
+                                batch=40)
+    assert len(run.calls) == 3
+    bias = claude_cli.filter_bias(['aerial'])
+    assert all(bias in _prompt(run, i) for i in range(3))
 
 
 def test_the_biased_filter_still_degrades_rather_than_failing(run):
     """YTDL-13's guard is upstream of the prompt text and stays that way."""
     run.outcome = FakeProc(envelope('{"keep": null, "drop": null}'))
-    assert claude_cli.filter_relevance('topic', _videos(2)) == {}
+    assert claude_cli.filter_relevance('topic', _videos(2),
+                                       shot_types=['aerial']) == {}
+
+
+# ------------------------------------------- the ticks compose the fragments
+
+def test_each_ticked_type_puts_its_own_phrasings_in_the_term_prompt():
+    """A fragment appears when its box is ticked and not otherwise -- the whole
+    point of the checkboxes."""
+    only_aerial = claude_cli.term_bias(['aerial'])
+    assert '空拍' in only_aerial and 'drone footage' in only_aerial
+    for absent in ('縮時', 'timelapse', 'walking tour', '完整版', '典禮'):
+        assert absent not in only_aerial, absent
+
+    only_timelapse = claude_cli.term_bias(['timelapse'])
+    assert '縮時' in only_timelapse and 'hyperlapse' in only_timelapse
+    assert '空拍' not in only_timelapse
+
+
+def test_ticking_a_coverage_type_stops_it_being_avoided_and_starts_it_being_sought():
+    """Ticking `interview` means the editor WANTS talking heads: the avoid line
+    has to go, and the seek line has to arrive."""
+    off = claude_cli.term_bias(['aerial'])
+    on = claude_cli.term_bias(['aerial', 'interview'])
+    assert 'sit-down interview' in off, 'unticked: an AVOID line'
+    assert 'AVOID' in off and '專訪' in off
+    assert 'Interviews / talking heads: interview' in on, 'ticked: a SEEK line'
+    # ...and it is no longer in the avoid list, which still holds the other two
+    avoid_block = on[on.index('AVOID'):]
+    assert 'talking head' not in avoid_block
+    assert 'breaking news' in avoid_block and 'reaction' in avoid_block
+
+
+def test_ticking_a_coverage_type_stops_the_filter_dropping_it():
+    """The half an editor actually notices: with `interview` on, an interview
+    must not be thrown away by the pass that runs after the search."""
+    off = claude_cli.filter_bias(claude_cli.DEFAULT_SHOT_TYPES)
+    on = claude_cli.filter_bias(list(claude_cli.DEFAULT_SHOT_TYPES) + ['interview'])
+    assert 'interviews and talk/panel shows' in off
+    drop_block = on[:on.index('KEEP')]
+    assert 'interviews and talk/panel shows' not in drop_block
+    assert '政論節目' not in drop_block
+    keep_block = on[on.index('KEEP'):]
+    assert 'interviews, talking heads and panel discussions' in keep_block
+    # the two the editor did NOT tick are still dropped
+    assert 'news anchors' in drop_block and 'reaction videos' in drop_block
+
+
+def test_an_unticked_footage_type_is_not_sought_but_is_never_dropped():
+    """The asymmetry, stated: an editor who wants aerials has not thereby
+    banned timelapses, but one who left `news` off IS saying no to news."""
+    bias = claude_cli.filter_bias(['aerial'])
+    drop_block = bias[:bias.index('KEEP')]
+    for footage in ('timelapse', 'walking tour', 'ceremon', 'establishing'):
+        assert footage not in drop_block.lower(), footage
+    assert 'news anchors' in drop_block
+
+
+def test_a_coverage_only_selection_does_not_ask_for_pictures_over_talking():
+    """PRIORITISE VISUALS is asserted only when a footage type is ticked."""
+    assert 'PRIORITISE VISUALS' in claude_cli.term_bias(['aerial'])
+    assert 'PRIORITISE VISUALS' not in claude_cli.term_bias(['interview'])
+    assert 'Interviews / talking heads' in claude_cli.term_bias(['interview'])
+    # ...and the footage-quality drop line goes with it: an interview IS a
+    # talking head, not an over-edited compilation.
+    assert 'heavy overlays' in claude_cli.filter_bias(['aerial'])
+    assert 'heavy overlays' not in claude_cli.filter_bias(['interview'])
+
+
+def test_the_uncut_preference_belongs_to_the_raw_box():
+    assert 'LONGER, steadier' in claude_cli.filter_bias(['raw'])
+    assert 'LONGER, steadier' not in claude_cli.filter_bias(['aerial'])
+
+
+@pytest.mark.parametrize('selection', [[], ALL_SHOTS])
+def test_all_ticked_and_none_ticked_both_mean_no_bias(selection):
+    """A filter told to keep everything and drop everything is incoherent, and
+    a filter told to keep every kind is a no-op -- so both are decided here
+    rather than left to emerge from the loops."""
+    terms = claude_cli.term_bias(selection)
+    filt = claude_cli.filter_bias(selection)
+    assert terms == claude_cli.term_bias([] if selection else ALL_SHOTS)
+    assert filt == claude_cli.filter_bias([] if selection else ALL_SHOTS)
+    assert 'NO SHOT-TYPE PREFERENCE' in terms and 'NO SHOT-TYPE PREFERENCE' in filt
+    assert 'AVOID' not in terms
+    assert 'DROP' in filt and 'KEEP it' in filt
+    # nothing is dropped for being the wrong KIND of video, only for being the
+    # wrong topic
+    for kind in ('studio segments', 'interviews and talk', 'reaction videos',
+                 'establishing shots', 'aerials'):
+        assert kind not in filt, kind
+
+
+def test_the_neutral_selection_still_reaches_the_model_intact(run):
+    """Both degenerate cases go down the same prompt path as any other, so the
+    envelope and the retry are untouched by them."""
+    run.outcome = _terms_reply()
+    out = claude_cli.generate_terms('x', shot_types=[])
+    assert [t['q'] for t in out] == ['presidential office building taipei aerial',
+                                     '總統府 空拍']
+    p = _prompt(run)
+    assert 'NO SHOT-TYPE PREFERENCE' in p
+    assert '8 to 12 queries in English' in p and '{bias}' not in p
+
+
+def test_an_unknown_or_repeated_key_costs_a_fragment_not_a_search():
+    """This is fed from a job row that another build may have written; the API
+    is where a bad key is refused, not here."""
+    assert claude_cli.normalise_shot_types(['aerial', 'aerial']) == ('aerial',)
+    assert claude_cli.normalise_shot_types(['nope']) == ()
+    assert claude_cli.normalise_shot_types(['NEWS', ' raw ']) == ('raw', 'news')
+    # ...and the order is the table's, whatever the caller sent
+    assert claude_cli.normalise_shot_types(['raw', 'aerial']) == ('aerial', 'raw')
+    # None is "nobody said", which is the defaults -- NOT the empty selection
+    assert claude_cli.normalise_shot_types(None) == claude_cli.DEFAULT_SHOT_TYPES
+    assert claude_cli.term_bias(None) == claude_cli.term_bias(
+        claude_cli.DEFAULT_SHOT_TYPES)
+    assert claude_cli.term_bias(None) != claude_cli.term_bias([])
+
+
+def test_the_bias_is_one_fragment_table_and_nothing_else(run):
+    """Tuning what a shot type means must be an edit to SHOT_TYPES, not a hunt
+    through the two prompts."""
+    src = (claude_cli.__file__).replace('.pyc', '.py')
+    with open(src, encoding='utf-8') as fh:
+        body = fh.read()
+    term_prompt = body[body.index('_TERM_PROMPT = '):body.index('def generate_terms')]
+    rel_prompt = body[body.index('_RELEVANCE_PROMPT = '):body.index('RELEVANCE_BATCH')]
+    for prompt in (term_prompt, rel_prompt):
+        assert '{bias}' in prompt
+        for leaked in ('drone', '空拍', 'timelapse', '專訪', 'studio'):
+            assert leaked not in prompt, leaked
 
 
 # ---------------------------------------------------------------- health

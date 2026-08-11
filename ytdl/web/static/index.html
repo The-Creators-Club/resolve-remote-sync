@@ -45,9 +45,25 @@
           <option value="month">this month</option>
           <option value="year">this year</option>
         </select>
+        <!-- How many candidates this search may collect, i.e. how many
+             metadata calls it makes at YouTube. Filled in by app.js from its
+             CANDIDATE_CAPS list (which mirrors ytdlweb.config.CANDIDATE_CAPS),
+             like #project is, and remembered in localStorage between visits.
+             Raise it for a thin topic; 400 is a deliberate choice, and the
+             reason there is a choice at all is 2026-08-11. -->
+        <select id="maxcand" title="How many candidate videos this search may collect before it stops looking — each one costs a metadata request at YouTube, and bulk requests from the NAS are what gets the IP bot-checked"></select>
       </div>
       <button id="go" class="primary-btn">SEARCH</button>
       <span id="health" class="rstatus" title="server-side Claude Code + yt-dlp"></span>
+    </div>
+
+    <!-- The shot types this search is biased towards, filled in by app.js from
+         its SHOT_TYPES table (which mirrors claude_cli.SHOT_TYPES). They apply
+         to the SEARCH box only -- a paste is not searched or filtered -- and
+         the ticks are remembered in localStorage between visits. -->
+    <div class="ctrl-row shotrow">
+      <div id="shots" class="shots" title="What the two Claude passes look for: the search phrasings they generate, and what the relevance filter keeps or drops"></div>
+      <span id="shotnote" class="shotnote muted"></span>
     </div>
 
     <!-- The second box: exact clips, no search and no review. It shares the
@@ -91,6 +107,10 @@
       <h2>Terms searched</h2>
       <div id="termchips" class="chips"></div>
       <div class="muted termhint">Chinese terms show a literal English gloss. Click a term to show only what it found.</div>
+      <!-- Which boxes were ticked when this search was submitted. A manifest
+           can sit here for a week, and "why is there no interview in this"
+           has to be answerable from the page. -->
+      <div id="jobshots" class="muted termhint"></div>
     </div>
 
     <div class="resulthead">

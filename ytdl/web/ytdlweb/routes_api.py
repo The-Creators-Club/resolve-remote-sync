@@ -108,6 +108,17 @@ class NewJob(BaseModel):
     quality: str = '1080p'
     period: str | None = None
     max_per_term: int = 15
+    # The ticked shot-type boxes. OMITTED is not the same as EMPTY: absent
+    # means "this client does not know about shot types" and gets the
+    # defaults, [] means the editor deliberately ticked nothing and gets an
+    # unbiased search. A client that predates the checkboxes therefore keeps
+    # the behaviour it has always had.
+    shot_types: list[str] | None = None
+    # The candidate ceiling, one of config.CANDIDATE_CAPS. OMITTED (an old
+    # client, or a caller with no opinion) is the DEFAULT and never "no limit":
+    # no limit is what reached 336 candidates and got the NAS's IP bot-checked
+    # partway through the metadata pass (2026-08-11).
+    max_candidates: int | None = None
 
 
 # A topic, not a document. The cap is a fleet-availability guard as much as a
@@ -116,6 +127,62 @@ class NewJob(BaseModel):
 # classified as "the claude CLI is not installed" -- pinning that false banner
 # on every editor's page until the container restarted.
 MAX_TERM_CHARS = 400
+
+# There are nine boxes, so anything longer is repeats or junk. Capped BEFORE
+# the keys are looked at, for the same reason MAX_TERM_CHARS is: a request body
+# is not a place to do unbounded work, and the 400 that names the cap is more
+# use than a 400 listing four thousand unknown keys (YTDL-7's shape).
+MAX_SHOT_TYPES = len(claude_cli.SHOT_TYPES)
+
+
+def _validated_shot_types(raw):
+    """The request's shot types -> what db.create_job wants, or HTTPException.
+
+    None (the field was not sent) passes straight through as None, which is
+    "the defaults" everywhere downstream. Unknown keys are REFUSED rather than
+    dropped: a typo that silently searched with a different bias would be
+    invisible to the editor and unexplainable afterwards.
+    """
+    if raw is None:
+        return None
+    if len(raw) > MAX_SHOT_TYPES:
+        raise HTTPException(
+            400, f'that is {len(raw)} shot types; there are only '
+                 f'{MAX_SHOT_TYPES}')
+    unknown = [k for k in raw if str(k) not in claude_cli.SHOT_TYPES]
+    if unknown:
+        raise HTTPException(
+            400, f'unknown shot type(s): {", ".join(str(k) for k in unknown[:5])}. '
+                 f'Known: {", ".join(claude_cli.SHOT_TYPES)}')
+    # Order and duplicates are the client's problem to have; normalise_shot_types
+    # settles both, so two clients ticking the same boxes store the same row.
+    return list(claude_cli.normalise_shot_types(raw))
+
+
+def _validated_max_candidates(raw):
+    """The request's candidate ceiling -> what db.create_job wants, or a 400.
+
+    None (the field was not sent) passes through as None, which is the default
+    everywhere downstream -- an old client gets the safe number rather than the
+    unbounded search it used to get.
+
+    An unlisted number is REFUSED rather than clamped. The set is a menu the
+    SPA renders, not a range: silently turning 5000 into 400 would tell an
+    editor their thin-topic search covered everything it could when it did not,
+    and silently turning 3 into 50 would spend forty metadata calls nobody
+    asked for.
+    """
+    if raw is None:
+        return None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = None
+    if n not in config.CANDIDATE_CAPS:
+        raise HTTPException(
+            400, f'{raw!r} is not one of the candidate limits: '
+                 f'{", ".join(str(x) for x in config.CANDIDATE_CAPS)}')
+    return n
 
 
 @router.post('/api/jobs')
@@ -138,6 +205,8 @@ def create_job(req: NewJob, request: Request):
         raise HTTPException(400, f'unknown period {req.period!r}')
     if req.quality not in ('best', '2160p', '1440p', '1080p', '720p', '480p'):
         raise HTTPException(400, f'unknown quality {req.quality!r}')
+    shot_types = _validated_shot_types(req.shot_types)
+    max_candidates = _validated_max_candidates(req.max_candidates)
 
     c = con()
     # One job per editor at a time. Not a resource limit -- the worker is
@@ -151,7 +220,8 @@ def create_job(req: NewJob, request: Request):
         job_id = db.create_job(
             c, user, term, config.safe_term_dirname(term), project['slug'],
             project['label'], quality=req.quality, period=req.period or None,
-            max_per_term=max(1, min(50, int(req.max_per_term))))
+            max_per_term=max(1, min(50, int(req.max_per_term))),
+            shot_types=shot_types, max_candidates=max_candidates)
     except sqlite3.IntegrityError:
         # The read above and this INSERT are not one transaction, and a
         # double-clicked SEARCH lands squarely between them; the partial unique
@@ -276,6 +346,13 @@ class NewUrlJob(BaseModel):
     project_slug: str
     quality: str = '1080p'
     folder: str = ''
+    # Deliberately NO shot_types and NO max_candidates: a url job does no
+    # searching at all, so there is nothing for a bias to bias and nothing to
+    # accumulate a ceiling against -- its videos are exactly the links pasted,
+    # already capped by MAX_URLS. The SPA posts the same form for both boxes,
+    # so one arriving here is ignored (pydantic drops unknown fields) rather
+    # than refused -- a 400 over a field that changes nothing would be a paste
+    # that mysteriously fails while the search beside it works.
 
 
 # A batch of links, not a bulk importer. The character cap is the same kind of

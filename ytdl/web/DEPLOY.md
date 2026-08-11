@@ -41,7 +41,15 @@ $env:YTDL_PROJECTS_ROOT = "E:\tmp\projects"
 | `YTDL_FFMPEG_DIR` | `/opt/ffmpeg` | passed to yt-dlp; auto-detected if that directory exists |
 | `YTDL_WORKER` | *(unset)* | `0` disables the pipeline thread. **The test suite sets it** |
 | `YTDL_DOWNLOAD_PAUSE` | `3` | seconds between downloads — pacing against bot detection |
+| `YTDL_ENRICH_WORKERS` | `2` | metadata fetches in flight at once during the enrich phase (was a hard-coded 4) |
+| `YTDL_ENRICH_PAUSE` | `0.75` | seconds between metadata **requests across the whole pool** — 80/minute. See below |
 | `YTDL_DEV_USER` / `YTDL_DEV_PROJECTS` | *(never set)* | standalone dev only |
+
+The candidate ceiling itself is **not** an env var: the editor picks it per
+search (50 / 100 / 200 / 400, default 100) and it is stored on the job row, so
+a job resumed after a restart re-runs with the number it was submitted with.
+The menu lives in `ytdlweb.config.CANDIDATE_CAPS` because the SPA's dropdown,
+the API's allow-list and migration 006's SQL default all have to agree.
 
 Every one is `YTDL_`-prefixed because this app shares one environment with the
 dashboard, with b-roll (`BROLL_*`) and with music (`MUSIC_*`).
@@ -130,7 +138,8 @@ Verify once on the NAS after the first job: the files must be visible at
 ## `cookies.txt` escape hatch
 
 Bulk anonymous downloads from a single datacentre IP is exactly what YouTube
-bot-checks. The mitigations in order: the 3 s pacing, modest per-term caps, and
+bot-checks. The mitigations in order: the 3 s download pacing, the 0.75 s
+metadata pacing, the per-search candidate ceiling, modest per-term caps, and
 — if it still happens — export cookies from a signed-in browser to a
 `cookies.txt` (Netscape format), put it somewhere only uid 3000 can read, and
 set `YTDL_COOKIES_FILE`. It is passed to yt-dlp as `cookiefile`.
@@ -191,16 +200,39 @@ line is the provider working. Cookies expire — when jobs start failing with
 the bot-check banner again, re-export them first.
 
 **Volume is still the trigger.** The fix makes requests legitimate; it does not
-make 336 rapid metadata calls look human. Pacing and per-term caps are the
-other half, and the worker's bot-check classification (`docs/youtube_dlp_bugs.md`
-YTDL-21) is what tells you it happened instead of burning retries.
+make 336 rapid metadata calls look human. Pacing and caps are the other half,
+and the worker's bot-check classification (`docs/youtube_dlp_bugs.md` YTDL-21)
+is what tells you it happened instead of burning retries.
+
+Both halves of that landed 2026-08-11, after the incident above:
+
+- **a candidate ceiling per search** — 50 / 100 / 200 / 400, **default 100**,
+  on `jobs.max_candidates` and enforced in `worker._phase_search` where the
+  candidates are accumulated. That is deliberate: the cap has to bound the
+  metadata CALLS (one per candidate row), not the length of the manifest after
+  they have all been made. 100 sits just under 112, the only measured point at
+  which YouTube has cut this IP off — so it also degrades safely if the cookies
+  expire and behaviour drifts back towards anonymous.
+- **a paced metadata phase** — `YTDL_ENRICH_WORKERS=2` in flight and
+  `YTDL_ENRICH_PAUSE=0.75` s between requests *across the pool* (one gate, held
+  during the wait, so the ceiling is 1/pause requests a second whatever
+  YouTube's latency does). Before this the enrich phase was four threads with
+  no delay at all — the download phase paced itself and the busier phase did
+  not.
+
+The arithmetic: 80 requests/minute against the roughly 240–480 the blocked
+burst managed. A default 100-candidate search spends ~75 s in pacing, which
+puts its whole metadata phase about where a 336-candidate unpaced one used to
+be; a deliberate 400 costs ~5 minutes there. Raising `YTDL_ENRICH_WORKERS`
+does **not** raise the rate — the gate does — it only lets a slow
+`extract_info` stop stalling the phase.
 
 ## Where things live
 
 ```
 ytdl/web/
   schema.sql            source of truth; ensure_schema() re-runs it on every DB it opens
-  migrations/           NNN_name.sql + a predicate in ytdlweb.db._MIGRATIONS (none yet)
+  migrations/           NNN_name.sql + a predicate in ytdlweb.db._MIGRATIONS (at v6; see its README)
   ytdlweb/
     config.py           env paths, safe_join(), safe_term_dirname()
     db.py               ALL the SQL
@@ -208,7 +240,7 @@ ytdl/web/
     projects.py         read-only query of the dashboard DB
     routes_api.py       sync, SQLite-only handlers
     worker.py           the pipeline thread + the phase machine
-    claude_cli.py       `claude -p` + the four error prefixes
+    claude_cli.py       `claude -p`, the four error prefixes, the SHOT_TYPES fragments
     vendor/             downloader.py + ytsearch.py from yt-credit-downloader
   static/               the SPA (every URL document-relative)
   tests/

@@ -289,7 +289,11 @@ def _phase_generate_terms(c, job):
     db.add_term(c, job_id, job['term'],
                 'zh' if _looks_chinese(job['term']) else 'en', 'user')
 
-    generated = claude_cli.generate_terms(job['term'])
+    # The shot types come off the JOB ROW, not from a default here: a job that
+    # sat queued over a restart must be expanded with the boxes the editor
+    # ticked when they submitted it.
+    generated = claude_cli.generate_terms(
+        job['term'], shot_types=db.shot_types_of(job))
     for item in generated:
         if len(db.terms(c, job_id)) >= config.MAX_TERMS:
             # A ceiling, not a target. 24 terms x 15 results is already a
@@ -312,8 +316,27 @@ def _phase_search(c, job):
     A term that fails is logged and marked searched with 0 hits rather than
     failing the job: YouTube rate-limiting one query out of twenty is normal,
     and nineteen terms' worth of manifest is worth having.
+
+    THIS is where the editor's candidate ceiling is enforced -- at the point
+    candidates are accumulated, not on the finished manifest. A cap applied
+    afterwards would trim the grid and change nothing about the thing that
+    actually got the NAS's IP bot-checked: one metadata call per candidate row,
+    336 of them, 112 in before YouTube stopped answering (2026-08-11).
+
+    Terms found AFTER the ceiling is reached are still searched and still
+    attributed to videos already on the job -- the chips and terms_done are the
+    manifest's account of what was looked for, and 24 flat searches is not the
+    volume in question. What stops is new rows.
     """
     job_id = job['id']
+    cap = db.max_candidates_of(job)
+    # Loaded once and kept in memory: the alternative is a SELECT per search
+    # hit, and this loop already runs 24 x 15 times on a big job. A resumed job
+    # starts from the rows it already has, so its ceiling is absolute rather
+    # than per-run.
+    have = {v['video_id'] for v in db.videos(c, job_id)}
+    capped = False
+
     for term in db.unsearched_terms(c, job_id):
         if _cancelled(c, job_id):
             return
@@ -330,32 +353,53 @@ def _phase_search(c, job):
             vid = e.get('id')
             if not vid:
                 continue
-            url = e.get('url') or f'https://www.youtube.com/watch?v={vid}'
-            if db.add_video(c, job_id, vid, url, e.get('title')):
-                new += 1
+            if vid not in have:
+                if len(have) >= cap:
+                    # Not added and NOT linked: a term_id pointing at a video
+                    # with no row would inflate the chip counts over a grid
+                    # that cannot show it (YTDL-38's shape).
+                    capped = True
+                    continue
+                url = e.get('url') or f'https://www.youtube.com/watch?v={vid}'
+                if db.add_video(c, job_id, vid, url, e.get('title')):
+                    new += 1
+                have.add(vid)
             # Linked for every term that returned it, seen before or not --
             # that is what the manifest's term chips filter on.
             db.link_term(c, job_id, vid, term['id'])
         c.commit()
 
+        # The RAW hit count, capped or not: it is what the term found, and the
+        # chip tooltip subtracts the visible ones from it.
         db.mark_term_searched(c, term['id'], len(entries))
         db.bump(c, job_id, 'terms_done')
         if new:
             db.bump(c, job_id, 'candidates', new)
 
+    if capped:
+        log.info('job %s: candidate cap %d reached; later hits are attributed '
+                 'but not added', job_id, cap)
     db.set_phase(c, job_id, 'enriching')
 
 
 # --------------------------------------------------------- 3. the metadata
 
-# Parallelism for the metadata fetch. batch_dl defaults to 8; 4 here, because
-# this runs from a datacentre IP against an account-less YouTube and the whole
-# job is throttle-shaped rather than CPU-shaped.
-ENRICH_JOBS = 4
+# Parallelism and pacing for the metadata fetch both live in config now
+# (YTDL_ENRICH_WORKERS / YTDL_ENRICH_PAUSE). They used to be a bare `4` here
+# with no delay at all, which is how 112 metadata calls went out fast enough
+# for YouTube to stop answering the NAS entirely (2026-08-11): the download
+# phase paced itself and this one, the busier of the two, did not.
 
 
 def _phase_enrich(c, job):
-    """Full metadata for every candidate: real durations, dates, thumbnails."""
+    """Full metadata for every candidate: real durations, dates, thumbnails.
+
+    One call per candidate row, so the SIZE of this phase is bounded by the
+    job's candidate ceiling back in _phase_search and its RATE by
+    config.ENRICH_PAUSE. Nothing is re-capped here: these rows are the search's
+    output and dropping some now would leave a manifest full of videos with no
+    metadata, which the filter phase then reads as "live or no duration".
+    """
     job_id = job['id']
     todo = [v for v in db.videos(c, job_id)
             if v['duration'] is None and not v['meta_error']]
@@ -376,12 +420,16 @@ def _phase_enrich(c, job):
 
     # Chunked so `enrich_done` reaches the database (and the poll response)
     # several times during a long metadata phase instead of once at the end.
-    CHUNK = ENRICH_JOBS * 4
+    # It is also how a cancel is honoured mid-phase: at 0.75 s a request a
+    # 400-candidate job is five minutes long, and the flag is read between
+    # chunks, never inside the pool.
+    CHUNK = max(4, config.ENRICH_WORKERS * 4)
     for start in range(0, len(entries), CHUNK):
         if _cancelled(c, job_id):
             return
         chunk = entries[start:start + CHUNK]
-        results = ytsearch.enrich(chunk, jobs=ENRICH_JOBS, progress=_seen)
+        results = ytsearch.enrich(chunk, jobs=config.ENRICH_WORKERS,
+                                  progress=_seen, pause=config.ENRICH_PAUSE)
         for r in results:
             if _bot_checked(r.get('error')):
                 # Not a dead video: the whole IP is challenged, and every
@@ -440,7 +488,11 @@ def _phase_filter(c, job):
                     'channel': v['channel'], 'duration': v['duration']}
                    for v in candidates]
         try:
-            verdicts = claude_cli.filter_relevance(job['term'], payload)
+            # The same selection the terms were generated from -- a manifest
+            # filtered for footage after a search that asked for interviews
+            # would drop most of what it just found.
+            verdicts = claude_cli.filter_relevance(
+                job['term'], payload, shot_types=db.shot_types_of(job))
         except claude_cli.ClaudeError as exc:
             claude_cli.note_failure(exc)
             log.warning('job %s: relevance filter unavailable (%s)', job_id, exc)

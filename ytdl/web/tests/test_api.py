@@ -174,6 +174,168 @@ def test_bad_period_and_quality_are_refused(client):
                                           'project_slug': PROJECTS[0][0]}).status_code == 400
 
 
+# ------------------------------------------------------------- shot types
+# "just make it a series of check boxes so the user can decide and tweak it"
+# (2026-08-11). The selection is per search, validated here and stored on the
+# job row, because both Claude calls read it back off that row.
+
+def _job_shots(client, con, **over):
+    body = {'term': 'reef', 'project_slug': PROJECTS[0][0]}
+    body.update(over)
+    r = client.post('/api/jobs', json=body)
+    return r, (db.get_job(con, r.json()['job_id']) if r.status_code == 200 else None)
+
+
+def test_the_ticked_shot_types_are_stored_on_the_job(client, con):
+    r, job = _job_shots(client, con, shot_types=['interview', 'aerial'])
+    assert r.status_code == 200, r.text
+    # normalised: table order, so two clients ticking the same boxes agree
+    assert job['shot_types'] == 'aerial,interview'
+    assert db.shot_types_of(job) == ('aerial', 'interview')
+
+
+def test_omitting_the_field_is_the_defaults_and_sending_none_is_no_bias(client, con):
+    """A client that predates the checkboxes keeps the behaviour it has always
+    had; an editor who unticks everything gets an unbiased search. Those are
+    different facts and the API must not collapse them."""
+    r, job = _job_shots(client, con)
+    assert r.status_code == 200
+    assert db.shot_types_of(job) == db.DEFAULT_SHOT_TYPES
+
+    client.post(f'/api/jobs/{job["id"]}/cancel')
+    r, job = _job_shots(client, con, shot_types=[])
+    assert r.status_code == 200
+    assert job['shot_types'] == '' and db.shot_types_of(job) == ()
+
+
+def test_an_unknown_shot_type_is_refused_rather_than_dropped(client, con):
+    """Silently dropping it would run a search under a bias the editor did not
+    choose and could not afterwards explain."""
+    r = client.post('/api/jobs', json={'term': 'reef', 'project_slug': PROJECTS[0][0],
+                                       'shot_types': ['aerial', 'helicopter']})
+    assert r.status_code == 400
+    assert 'helicopter' in r.json()['detail']
+    assert 'aerial' in r.json()['detail']          # ...and what IS accepted
+    assert db.active_job(con, USER) is None, 'the refused job was created anyway'
+
+
+def test_an_absurd_shot_type_list_is_capped(client):
+    """YTDL-7's shape: a request body is not a place to do unbounded work."""
+    r = client.post('/api/jobs', json={'term': 'reef', 'project_slug': PROJECTS[0][0],
+                                       'shot_types': ['aerial'] * 40})
+    assert r.status_code == 400
+    assert 'only 9' in r.json()['detail']
+
+
+def test_every_known_key_is_accepted_and_all_of_them_is_legal(client, con):
+    """All nine ticked is a degenerate selection, not an invalid one -- the
+    prompt builder is where it turns into "no bias"."""
+    from ytdlweb import claude_cli
+    r, job = _job_shots(client, con, shot_types=list(claude_cli.SHOT_TYPES))
+    assert r.status_code == 200, r.text
+    assert db.shot_types_of(job) == tuple(claude_cli.SHOT_TYPES)
+
+
+def test_the_poll_and_recent_views_report_the_selection_as_a_list(client, con):
+    """The SPA shows what a job was RUN with, so a week-old manifest is still
+    interpretable -- and it is a list, not the stored 'aerial,raw' string."""
+    r, job = _job_shots(client, con, shot_types=['aerial', 'raw'])
+    poll = client.get(f'/api/jobs/{job["id"]}').json()
+    assert poll['job']['shot_types'] == ['aerial', 'raw']
+    assert client.get(f'/api/jobs/{job["id"]}/manifest').json()['job']['shot_types'] \
+        == ['aerial', 'raw']
+    assert client.get('/api/jobs').json()['jobs'][0]['shot_types'] == ['aerial', 'raw']
+
+
+def test_a_url_job_ignores_a_shot_type_selection_cleanly(client, con):
+    """A paste is not searched or filtered, so there is nothing to bias -- and
+    the SPA posts one form for both boxes, so an arriving field must be ignored
+    rather than turned into a 400 the editor cannot act on."""
+    r = client.post('/api/jobs/urls', json={
+        'urls': 'https://youtu.be/' + VID, 'project_slug': PROJECTS[0][0],
+        'shot_types': ['interview']})
+    assert r.status_code == 200, r.text
+    job = db.get_job(con, r.json()['job_id'])
+    assert job['kind'] == 'urls'
+    assert db.shot_types_of(job) == db.DEFAULT_SHOT_TYPES
+
+    # ...including a selection that would be refused on a search job
+    db.set_phase(con, job['id'], 'cancelled')
+    assert client.post('/api/jobs/urls', json={
+        'urls': 'https://youtu.be/' + VID, 'project_slug': PROJECTS[0][0],
+        'shot_types': ['helicopter']}).status_code == 200
+
+
+# --------------------------------------------------------- the candidate cap
+# 2026-08-11: one search expanded to 24 terms -> 336 candidates, and YouTube
+# began refusing the NAS's IP outright at 112 metadata calls -- which blocked
+# extraction fleet-wide for hours. The editor picks the ceiling now; the API
+# validates it against the menu and stores it on the job row, because the
+# search phase reads it back off that row after a restart.
+
+def test_the_chosen_candidate_ceiling_is_stored_on_the_job(client, con):
+    for cap in (50, 100, 200, 400):
+        r, job = _job_shots(client, con, max_candidates=cap)
+        assert r.status_code == 200, r.text
+        assert job['max_candidates'] == cap
+        assert db.max_candidates_of(job) == cap
+        client.post(f'/api/jobs/{job["id"]}/cancel')
+
+
+def test_omitting_the_ceiling_is_the_default_not_an_unbounded_search(client, con):
+    """A client that predates the dropdown gets the SAFE number, not the
+    behaviour it used to have -- that behaviour is the incident."""
+    r, job = _job_shots(client, con)
+    assert r.status_code == 200
+    assert job['max_candidates'] == 100
+    from ytdlweb import config
+    assert config.DEFAULT_MAX_CANDIDATES == 100
+
+
+def test_a_ceiling_that_is_not_on_the_menu_is_refused_rather_than_clamped(
+        client, con):
+    """The set is a menu the SPA renders, not a range. Clamping 5000 to 400
+    would tell an editor their thin-topic search covered everything it could
+    when it did not; clamping 3 to 50 would spend metadata calls nobody asked
+    for -- and calls are the whole subject."""
+    for bad in (150, 0, -1, 5000, 99):
+        r = client.post('/api/jobs', json={'term': 'reef',
+                                           'project_slug': PROJECTS[0][0],
+                                           'max_candidates': bad})
+        assert r.status_code == 400, bad
+        assert '50, 100, 200, 400' in r.json()['detail']
+        assert db.active_job(con, USER) is None, 'the refused job was created anyway'
+
+
+def test_the_poll_and_recent_views_report_the_ceiling(client, con):
+    """The SPA shows what a job was RUN with, so "why did that search find so
+    much more than this one" is answerable off a week-old manifest."""
+    r, job = _job_shots(client, con, max_candidates=200)
+    assert client.get(f'/api/jobs/{job["id"]}').json()['job']['max_candidates'] == 200
+    assert client.get(f'/api/jobs/{job["id"]}/manifest').json()['job']['max_candidates'] \
+        == 200
+    assert client.get('/api/jobs').json()['jobs'][0]['max_candidates'] == 200
+
+
+def test_a_url_job_ignores_a_candidate_ceiling_cleanly(client, con):
+    """A paste does no searching, so there is nothing to accumulate against --
+    and the SPA posts one form for both boxes, so an arriving field must be
+    ignored rather than turned into a 400 the editor cannot act on."""
+    r = client.post('/api/jobs/urls', json={
+        'urls': 'https://youtu.be/' + VID, 'project_slug': PROJECTS[0][0],
+        'max_candidates': 400})
+    assert r.status_code == 200, r.text
+    job = db.get_job(con, r.json()['job_id'])
+    assert job['kind'] == 'urls'
+    assert job['max_candidates'] == 100      # the column default, unused
+
+    # ...including one that would be refused on a search job
+    db.set_phase(con, job['id'], 'cancelled')
+    assert client.post('/api/jobs/urls', json={
+        'urls': 'https://youtu.be/' + VID, 'project_slug': PROJECTS[0][0],
+        'max_candidates': 9999}).status_code == 200
+
+
 def test_another_editors_job_is_a_404_not_a_403(client, job):
     """404, because "there is no such job" is all another editor is entitled
     to know about it."""

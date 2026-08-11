@@ -187,15 +187,21 @@ class FakeClaude:
         self.term_error = term_error
         self.relevance_error = relevance_error
         self.calls = []
+        self.shot_types = []          # [(stage, what the worker passed), ...]
 
-    def generate_terms(self, topic, timeout=None):
+    def generate_terms(self, topic, shot_types=None, timeout=None):
+        # The shot types are recorded, not interpreted: what this fake is for
+        # is proving the JOB'S selection reached both calls.
         self.calls.append(('terms', topic))
+        self.shot_types.append(('terms', shot_types))
         if self.term_error:
             raise self.term_error
         return self.terms
 
-    def filter_relevance(self, topic, videos, batch=40, timeout=None):
+    def filter_relevance(self, topic, videos, shot_types=None, batch=40,
+                         timeout=None):
         self.calls.append(('relevance', topic, [v['id'] for v in videos]))
+        self.shot_types.append(('relevance', shot_types))
         if self.relevance_error:
             raise self.relevance_error
         return self.verdicts
@@ -226,6 +232,10 @@ class FakeYouTube:
         self.fail_terms = set(fail_terms)
         self.searched = []
         self.enriched = []
+        # One entry per enrich() CALL: {'n', 'jobs', 'pause'}. `enriched` counts
+        # metadata calls (one per entry), which is the number that got the NAS
+        # bot-checked; this records how the worker paced them.
+        self.enrich_calls = []
 
     def search(self, query, max_results, period=None):
         self.searched.append((query, max_results, period))
@@ -235,7 +245,10 @@ class FakeYouTube:
                  'url': f'https://www.youtube.com/watch?v={vid}'}
                 for vid in self.results.get(query, [])][:max_results]
 
-    def enrich(self, entries, jobs=4, progress=None):
+    def enrich(self, entries, jobs=None, progress=None, pause=None,
+               sleeper=None):
+        self.enrich_calls.append({'n': len(entries), 'jobs': jobs,
+                                  'pause': pause})
         out = []
         for i, e in enumerate(entries, start=1):
             self.enriched.append(e['id'])

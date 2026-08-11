@@ -1,0 +1,21 @@
+-- v6: jobs.max_candidates -- the ceiling on how many CANDIDATE VIDEOS one
+-- search may accumulate, which is the ceiling on how many metadata calls the
+-- enrich phase then makes against YouTube.
+--
+-- It is stored per job for the same reason shot_types is: a job that sat
+-- queued over a container restart is re-run from `queued`, and it must re-run
+-- with the number the editor submitted it with rather than with whatever the
+-- default has become since.
+--
+-- The DEFAULT is deliberately NOT "what these rows actually ran with". Every
+-- pre-existing row ran UNBOUNDED -- one of them reached 336 candidates and got
+-- the NAS's IP bot-checked at 112 metadata calls (2026-08-11), which took
+-- every extraction in the fleet down for hours. There is no value that means
+-- "unbounded" here on purpose: the only rows this backfill can still affect
+-- are ones boot recovery re-runs, and re-running the incident is not a history
+-- worth preserving.
+--
+-- The literal is duplicated from ytdlweb.config.DEFAULT_MAX_CANDIDATES because
+-- SQL cannot import Python (schema.sql carries the same one), and
+-- tests/test_db.py pins the three together so they cannot drift.
+ALTER TABLE jobs ADD COLUMN max_candidates INTEGER NOT NULL DEFAULT 100;

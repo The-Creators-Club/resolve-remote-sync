@@ -401,6 +401,17 @@ LAN_BIND_IP = "192.168.0.102"
 TAILNET_BIND_IP = "100.71.216.3"
 
 
+# yt-dlp's PO-token provider, run as a sidecar. The tag is pinned and MUST be
+# bumped together with the `bgutil-ytdlp-pot-provider` pin in
+# dashboard/deploy/requirements.txt -- the plugin and this server are one
+# component in two processes, and the project ships them as a matched pair.
+# server/tests/test_safety.py asserts the two versions agree.
+POT_PROVIDER_SERVICE = "bgutil"
+POT_PROVIDER_VERSION = "1.3.1"
+POT_PROVIDER_IMAGE = f"brainicism/bgutil-ytdlp-pot-provider:{POT_PROVIDER_VERSION}-deno"
+POT_PROVIDER_PORT = 4416
+
+
 def healthcheck_config(port: int) -> dict:
     """Mirrors compose.yaml's healthcheck -- keep the two identical.
 
@@ -501,6 +512,23 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     "YTDL_PROJECTS_ROOT": "/projects",
                     "YTDL_DASH_DB": "/data/dashboard.db",
                     "YTDL_CLAUDE_HOME": "/claude-home",
+                    # The PO-token provider sidecar below, by compose service
+                    # name. Without this yt-dlp finds no provider and every
+                    # signed-in request comes back with no formats.
+                    "YTDL_POT_BASE_URL": f"http://{POT_PROVIDER_SERVICE}:{POT_PROVIDER_PORT}",
+                    # A signed-in cookies.txt is MANDATORY here, not the
+                    # optional escape hatch it reads as elsewhere: this IP is
+                    # bot-checked, so anonymous extraction fails outright.
+                    # Operator-provisioned (it is a live Google session, so it
+                    # is never in this repo) -- see ytdl/web/DEPLOY.md. An
+                    # absent file is a supported state: yt-dlp ignores the
+                    # option and the failure is the honest bot-check message.
+                    "YTDL_COOKIES_FILE": "/ytdl-data/cookies.txt",
+                    # yt-dlp DOWNLOADS the EJS challenge solver at first use
+                    # and caches it. run.sh deliberately exports no HOME, so
+                    # the default lands on /.cache -- which uid 3000 cannot
+                    # create, making it re-fetch the solver on EVERY call.
+                    "YTDL_CACHE_DIR": "/ytdl-data/cache",
                     # DASH_PACKAGES_DIR intentionally unset: defaults to a
                     # "packages" dir next to DASH_DB_PATH (/data/packages),
                     # which is already the persistent volume.
@@ -594,7 +622,37 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                 ],
                 "restart": "unless-stopped",
                 "healthcheck": healthcheck_config(port),
-            }
+            },
+            # yt-dlp's PO-token provider, the ONE piece that makes YouTube
+            # extraction work from this NAS at all (2026-08-11). Measured
+            # against the live container, all four states:
+            #
+            #   anonymous                 -> "Sign in to confirm you're not a bot"
+            #   cookies alone             -> past the check, then NO FORMATS
+            #   cookies + PO token + EJS  -> works
+            #
+            # A datacentre IP doing bulk extraction is bot-checked, so
+            # authenticated is the only way in; and YouTube wants a GVS
+            # proof-of-origin token for authenticated requests, which yt-dlp
+            # has no provider for on its own. This runs one.
+            #
+            # A SIDECAR rather than a process inside the dashboard container:
+            # the provider is a JS service, the dashboard image is a stock
+            # python:slim that builds nothing, and the alternative (script
+            # mode) spawns a JS runtime PER CALL against a pipeline that makes
+            # hundreds. No ports published -- compose puts both services on one
+            # network and the dashboard reaches it by service name, so nothing
+            # on the LAN can ask this for tokens.
+            #
+            # The tag is pinned and MATCHED to the plugin pin in
+            # dashboard/deploy/requirements.txt: one component, two processes.
+            # The `-deno` flavour is deliberate (the `-node` one is the same
+            # server on a different runtime; deno is what this fleet already
+            # provisions for yt-dlp's JS challenges).
+            POT_PROVIDER_SERVICE: {
+                "image": POT_PROVIDER_IMAGE,
+                "restart": "unless-stopped",
+            },
         }
     }
 

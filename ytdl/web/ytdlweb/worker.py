@@ -267,7 +267,16 @@ def _looks_chinese(text):
 
 
 def _phase_start(c, job):
-    db.set_phase(c, job['id'], 'generating_terms')
+    """queued -> the first phase THIS KIND of job has.
+
+    A url job's videos were written by the API from the links the editor
+    pasted, so it has nothing to generate, search, enrich or filter: it starts
+    where the download phase starts. Branching here rather than creating the
+    job at `downloading` keeps every job's life identical everywhere else --
+    one row shape, one claim_next_job, one boot recovery, one cancel.
+    """
+    db.set_phase(c, job['id'],
+                 'downloading' if job['kind'] == db.KIND_URLS else 'generating_terms')
 
 
 def _phase_generate_terms(c, job):
@@ -604,7 +613,16 @@ def _disown_output(outdir, vid, before):
 
 
 def _phase_download(c, job):
-    """Fetch the editor's selection into <project>/Youtube/<term>/."""
+    """Fetch the editor's selection into <project>/Youtube/<term_dir>/.
+
+    Shared verbatim by both kinds of job: a url job arrives here with rows the
+    API wrote instead of rows the review grid selected, and everything below --
+    the outtmpl, the edit-ready conversion, the 0664/2775 widening, the ledger,
+    the dedupe re-check, the manifest -- is the same code for the same reason.
+    <project>/Youtube/<term_dir>/ is also exactly one level, which is where the
+    companion's youtube_import watcher looks (it lists one level under
+    Youtube/ and files each folder into Master/Youtube/<folder>).
+    """
     job_id = job['id']
     outdir = config.safe_join(config.PROJECTS_ROOT, job['project_label'],
                               'Youtube', job['term_dir'])
@@ -704,7 +722,12 @@ def _phase_download(c, job):
             _chmod(sidecar, 0o664)
         rel = 'Youtube/' + job['term_dir'] + '/' + os.path.basename(filepath)
 
+        # The title comes back from yt-dlp here, and for a url job it is the
+        # FIRST time anything knows it: those rows are created from a pasted
+        # link with no metadata fetch behind them, so without this the progress
+        # list names every clip by its 11-char id forever.
         db.set_video(c, job_id, vid, dl_state='done', filepath=filepath,
+                     title=res.get('title') or v['title'],
                      thumbnail=res.get('thumbnail') or v['thumbnail'])
         db.ledger_add(c, vid, res.get('title') or v['title'],
                       res.get('channel') or v['channel'],

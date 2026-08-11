@@ -221,11 +221,15 @@ async function loadProjects() {
                 + 'there is nowhere to put downloads. Tick one on the '
                 + 'dashboard first.');
     }
+    // BOTH submit buttons: the destination picker is shared, so with no
+    // project neither a search nor a paste has anywhere to land.
     $('#go').disabled = true;
+    $('#golinks').disabled = true;
     return;
   }
   setBanner('projects', null);
   $('#go').disabled = false;
+  $('#golinks').disabled = false;
   r.projects.forEach(p => {
     const o = el('option', null, p.label);
     o.value = p.slug;
@@ -439,6 +443,11 @@ async function loadManifest(jobId = state.jobId) {
   const m = await api(`api/jobs/${jobId}/manifest`);
   if (jobId !== state.jobId) return;   // a newer job owns the screen now
   state.manifest = m;
+  // A url job has no manifest to review: its videos are exactly the links the
+  // editor pasted and they are already downloading. The rows are still needed
+  // (renderDownloads reads state.manifest), but the grid would offer a
+  // selection nobody is being asked to make, over cards with no metadata.
+  if (m.job.kind === 'urls') return;
   $('#review').classList.remove('hidden');
   renderTerms();
   renderGrid();
@@ -666,6 +675,47 @@ async function runSearch() {
   }
 }
 
+// The second box: "download exactly these". Deliberately NOT folded into
+// runSearch -- the endpoint, the validation and the disabled-button guard are
+// per-button, and one shared submitter would either disable the wrong button
+// or need a flag argument for every difference. Everything AFTER the POST is
+// shared: detach/attach, the banner slots, the 409 re-attach (YTDL-8).
+async function runUrls() {
+  const btn = $('#golinks');
+  if (btn.disabled) return;           // no project, or a POST already in flight
+  const urls = $('#urls').value.trim();
+  if (!urls) return;
+  const slug = $('#project').value;
+  if (!slug) { toast('pick a project first', true); return; }
+  btn.disabled = true;
+  try {
+    const r = await post('api/jobs/urls', {
+      urls, project_slug: slug,
+      quality: $('#quality').value,
+      folder: $('#folder').value.trim(),
+    });
+    detach();
+    $('#progress').classList.remove('hidden');
+    await attach(r.job_id);
+    if (r.skipped && r.skipped.length) {
+      // Never silently: a link that fetches nothing because the fleet already
+      // has it is the answer to "why did I only get two of my four".
+      toast(`${r.queued} queued · ${r.skipped.length} already in the tree`,
+            false, 12000);
+    }
+  } catch (e) {
+    if (e.status === 409 && e.info && e.info.job_id) {
+      toast(`${e.message} — showing it below`, false, 12000);
+      $('#progress').classList.remove('hidden');
+      await attach(e.info.job_id);
+    } else {
+      toast(e.message, true, 12000);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function startDownload() {
   try {
     await post(`api/jobs/${state.jobId}/download`);
@@ -699,7 +749,10 @@ async function loadRecent() {
     const row = el('div', 'recentrow');
     row.appendChild(el('span', 'when', (j.created_at || '').slice(0, 16).replace('T', ' ')));
     row.appendChild(el('span', 'ph', j.phase));
-    row.appendChild(el('span', 'name', `${j.term} → ${j.project_label}`));
+    // `term` is a topic for a search and a folder name for a paste; the prefix
+    // is what stops the two reading as the same kind of row.
+    row.appendChild(el('span', 'name',
+      `${j.kind === 'urls' ? 'links → ' : ''}${j.term} → ${j.project_label}`));
     row.onclick = () => attach(j.id);
     box.appendChild(row);
   });
@@ -732,6 +785,12 @@ async function init() {
   loadDashboardTopbar();
   $('#go').onclick = runSearch;
   $('#q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
+  $('#golinks').onclick = runUrls;
+  // Ctrl/Cmd+Enter, not Enter: the links box is a textarea and Enter is how a
+  // second link gets onto its own line.
+  $('#urls').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runUrls();
+  });
   $('#cancel').onclick = cancelJob;
   $('#cancel2').onclick = cancelJob;
   $('#selall').onclick = () => bulk(true);

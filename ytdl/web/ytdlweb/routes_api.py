@@ -17,8 +17,10 @@ purpose:
     a project they do not sync.
 """
 import logging
+import re
 import shutil
 import sqlite3
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -168,6 +170,216 @@ def _one_job_409(running):
     return HTTPException(409, {
         'detail': 'you already have a job in progress',
         'job_id': running['id'], 'phase': running['phase']})
+
+
+# --------------------------------------------------------- pasted-link jobs
+# "Download exactly these": no topic, no Claude, no review grid. Everything
+# downstream of the job row is shared with a search job on purpose -- same
+# outtmpl, same edit-ready conversion, same ledger, same folder layout -- so
+# the only new logic is turning a paste into video ids.
+
+# The 11-char YouTube id. It is the key EVERYTHING here turns on: the ledger is
+# keyed on it, yt-dlp writes it into every filename as `[id]`, and both halves
+# of the dedupe read it back out. So a link is accepted only if an id can be
+# read out of it WITHOUT asking the network -- a handler that resolved URLs
+# would block the dashboard's single uvicorn worker for as long as YouTube felt
+# like taking.
+_VIDEO_ID_RE = re.compile(r'^[A-Za-z0-9_-]{11}$')
+
+# Matched after 'www.'/'m.' are stripped, and by EQUALITY: `youtube.com.evil.net`
+# and `notyoutube.com` both have to fail, which a substring test does not do.
+_YT_HOSTS = frozenset({'youtube.com', 'music.youtube.com',
+                       'youtube-nocookie.com', 'youtu.be'})
+
+# The path shapes that carry the id in the next segment. /watch?v= is handled
+# separately because its id is in the query string.
+_ID_PATHS = ('shorts', 'embed', 'live', 'v')
+
+
+def video_id_of(text):
+    """The video id in one pasted entry, or None. Pure; never touches the net.
+
+    Accepts what editors actually paste: a watch URL with any amount of
+    tracking on it (`&t=`, `?si=`, `&list=`), a youtu.be short link, a
+    /shorts//live//embed//v/ link, a scheme-less `youtu.be/...`, and a bare
+    11-char id (which is what the ledger, the filenames and the dedupe all
+    speak, and what an editor copies out of an ALREADY IN badge).
+    """
+    s = str(text or '').strip().strip('<>')
+    if not s:
+        return None
+    if _VIDEO_ID_RE.match(s):
+        return s
+    if '//' not in s:
+        # 'youtu.be/xxxx' pasted out of a chat window has no scheme, and
+        # urlparse would read the whole thing as a path with no host at all.
+        s = 'https://' + s
+    try:
+        u = urlparse(s)
+    except ValueError:
+        return None
+    if u.scheme not in ('http', 'https'):
+        return None
+    host = (u.hostname or '').lower()
+    for prefix in ('www.', 'm.'):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+    if host not in _YT_HOSTS:
+        return None
+
+    segs = [p for p in u.path.split('/') if p]
+    if host == 'youtu.be':
+        candidate = segs[0] if segs else ''
+    elif len(segs) == 1 and segs[0] == 'watch':
+        candidate = (parse_qs(u.query).get('v') or [''])[0]
+    elif len(segs) >= 2 and segs[0] in _ID_PATHS:
+        candidate = segs[1]
+    else:
+        # /playlist, /@channel, /results, /feed/... -- a YouTube URL that names
+        # no single video. Refused loudly rather than guessed at: a playlist
+        # link silently downloading one video would be worse than a 400.
+        candidate = ''
+    return candidate if _VIDEO_ID_RE.match(candidate) else None
+
+
+def watch_url(video_id):
+    """The canonical form every row stores. One shape in the database means the
+    ledger, the manifest and the retry path cannot disagree about a video."""
+    return f'https://www.youtube.com/watch?v={video_id}'
+
+
+def parse_url_list(raw):
+    """-> ([{'video_id','url'}, ...], [rejected entry, ...]), in paste order.
+
+    Split on whitespace AND commas, because a paste is as likely to be one
+    comma-separated line as it is a column. Duplicates inside one paste collapse
+    to their first occurrence: two rows for one video would double the
+    counters and race each other into the same file.
+    """
+    videos, rejects, seen = [], [], set()
+    for chunk in re.split(r'[\s,]+', str(raw or '')):
+        if not chunk:
+            continue
+        vid = video_id_of(chunk)
+        if vid is None:
+            rejects.append(chunk)
+            continue
+        if vid in seen:
+            continue
+        seen.add(vid)
+        videos.append({'video_id': vid, 'url': watch_url(vid)})
+    return videos, rejects
+
+
+class NewUrlJob(BaseModel):
+    urls: str | list[str] = ''
+    project_slug: str
+    quality: str = '1080p'
+    folder: str = ''
+
+
+# A batch of links, not a bulk importer. The character cap is the same kind of
+# guard as MAX_TERM_CHARS (YTDL-7) one layer under the dashboard's 4 MB body cap
+# (DASH-3): this handler splits and regexes the whole string on the request
+# thread, and the worker downloads the result one video at a time, three
+# seconds apart, from one bot-checkable NAS IP.
+MAX_URL_CHARS = 4000
+MAX_URLS = 50
+
+# Where links land when the editor names no folder. A fixed bucket rather than
+# a timestamp: it keeps `Youtube/` shallow, it is the same name on every
+# machine, and the companion files it into Master/Youtube/links in Resolve.
+# A title would need a network call in a request handler, which is exactly what
+# this app does not do.
+DEFAULT_URL_FOLDER = 'links'
+
+
+@router.post('/api/jobs/urls')
+def create_url_job(req: NewUrlJob, request: Request):
+    """Download exactly these videos into <project>/Youtube/<folder>/.
+
+    The same pipeline as a search job's download phase, entered directly: the
+    rows this writes are the rows the review grid would have written, so the
+    worker, the ledger, the dedupe, the chmod contract and the companion's
+    youtube_import watcher all see something they already understand.
+    """
+    user = current_user(request)
+    raw = '\n'.join(req.urls) if isinstance(req.urls, list) else (req.urls or '')
+    if len(raw) > MAX_URL_CHARS:
+        raise HTTPException(
+            400, f'that is {len(raw)} characters of links; paste at most '
+                 f'{MAX_URL_CHARS}')
+
+    videos, rejects = parse_url_list(raw)
+    if rejects:
+        shown = ', '.join(rejects[:3]) + ('...' if len(rejects) > 3 else '')
+        raise HTTPException(
+            400, f'{len(rejects)} of those are not YouTube video links: {shown}. '
+                 'Paste watch/youtu.be/shorts links (or bare 11-character video '
+                 'ids), one per line.')
+    if not videos:
+        raise HTTPException(400, 'paste at least one YouTube link')
+    if len(videos) > MAX_URLS:
+        raise HTTPException(
+            400, f'that is {len(videos)} links; {MAX_URLS} is the most one job '
+                 'may take. Split them into two.')
+
+    project = projects.resolve_project(user, req.project_slug)
+    if project is None:
+        raise HTTPException(
+            400, 'that project is not one you are syncing. Tick it on the '
+                 'dashboard first -- downloads go into the projects you sync.')
+    if req.quality not in ('best', '2160p', '1440p', '1080p', '720p', '480p'):
+        raise HTTPException(400, f'unknown quality {req.quality!r}')
+
+    folder = (req.folder or '').strip() or DEFAULT_URL_FOLDER
+    if len(folder) > MAX_TERM_CHARS:
+        raise HTTPException(
+            400, f'a folder name must be {MAX_TERM_CHARS} characters or fewer '
+                 f'(that one is {len(folder)})')
+    # Never re-implemented here: safe_term_dirname is what keeps a folder name
+    # openable over SMB by every Windows editor (YTDL-28's device names, the
+    # 80-byte cap, the illegal characters).
+    term_dir = config.safe_term_dirname(folder, fallback=DEFAULT_URL_FOLDER)
+
+    c = con()
+    running = db.active_job(c, user)
+    if running is not None:
+        raise _one_job_409(running)
+
+    # The ledger half of the dedupe, before any bandwidth is planned. The DISK
+    # half stays where it is (the worker's pre-download re-check): scanning a
+    # project's whole Youtube tree is an rglob over the NAS, and this handler
+    # runs on the dashboard's single uvicorn worker.
+    for v in videos:
+        held = db.ledger_get(c, v['video_id'])
+        if held is not None:
+            v['duplicate_of'] = (f"{held['project_label']}/"
+                                 f"{held['term_dir'] or held['term']}")
+    skipped = [{'video_id': v['video_id'], 'duplicate_of': v['duplicate_of']}
+               for v in videos if v.get('duplicate_of')]
+    if len(skipped) == len(videos):
+        # Creating the job anyway would burn the editor's one active job on
+        # something that downloads nothing (REQ 6: never re-downloaded).
+        raise HTTPException(409, {
+            'detail': 'the fleet already has ' + ('that video' if len(videos) == 1
+                                                  else 'all of those videos'),
+            'duplicates': skipped})
+
+    try:
+        job_id = db.create_url_job(
+            c, user, folder, term_dir, project['slug'], project['label'],
+            videos, quality=req.quality)
+    except sqlite3.IntegrityError:
+        # The partial unique index on jobs(created_by) (YTDL-25). Same window
+        # as create_job's, same answer: one editor, one job.
+        running = db.active_job(c, user)
+        if running is None:
+            raise
+        raise _one_job_409(running) from None
+    worker.nudge()
+    return {'job_id': job_id, 'phase': 'queued', 'term_dir': term_dir,
+            'queued': len(videos) - len(skipped), 'skipped': skipped}
 
 
 @router.get('/api/jobs')

@@ -149,9 +149,10 @@ async function boot(handler) {
   // to fail before the fix) without dying on the first renamed symbol.
   vm.runInContext(
     'globalThis.__ = {};'
-    + '["state","banners","poll","attach","detach","runSearch","toggle",'
-    + '"bulk","loadHealth","loadProjects","loadManifest","renderProgress",'
-    + '"renderTerms","renderGrid","toast","setBanner","visibleVideos"]'
+    + '["state","banners","poll","attach","detach","runSearch","runUrls",'
+    + '"toggle","bulk","loadHealth","loadProjects","loadManifest",'
+    + '"renderProgress","renderTerms","renderGrid","toast","setBanner",'
+    + '"visibleVideos"]'
     + '.forEach(k => { try { globalThis.__[k] = eval(k); } catch (e) {} });', h.ctx);
   await flush();
   h.app = h.ctx.__;
@@ -490,6 +491,112 @@ scenarios['toast_does_not_parse_html'] = async () => {
           raw: t.innerHTML};
 };
 
+// The second box: paste links, download exactly those. Same submit shape as
+// SEARCH (disable-while-in-flight, detach only after the POST is accepted,
+// 409 re-attach) against a different endpoint.
+scenarios['pasted_links_start_a_job'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs/urls') {
+      return {json: {job_id: 21, phase: 'queued', term_dir: 'reef links',
+                     queued: 1, skipped: [{video_id: 'IIIIIIIIIII',
+                                           duplicate_of: '2025/FF4/Nuclear/old'}]}};
+    }
+    if (url === 'api/jobs/21') {
+      return {json: POLLRES(JOB({id: 21, kind: 'urls', phase: 'queued'}))};
+    }
+    return {json: {}};
+  });
+  h.get('urls').value = ' https://youtu.be/JJJJJJJJJJJ \n https://youtu.be/IIIIIIIIIII ';
+  h.get('folder').value = 'reef links';
+  h.get('project').value = 's';
+  h.get('quality').value = '1080p';
+  await h.app.runUrls();
+  await flush();
+  const post = h.calls.filter(c => c.url === 'api/jobs/urls')[0];
+  return {job_id: h.app.state.jobId, body: post && post.body,
+          progress_hidden: h.get('progress').hidden,
+          toast: h.get('toast').textContent,
+          disabled_after: h.get('golinks').disabled};
+};
+
+scenarios['links_button_is_disabled_while_posting'] = async () => {
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs/urls') { await gate; return {json: {job_id: 22}}; }
+    if (url === 'api/jobs/22') return {json: POLLRES(JOB({id: 22, kind: 'urls'}))};
+    return {json: {}};
+  });
+  h.get('urls').value = 'https://youtu.be/JJJJJJJJJJJ';
+  h.get('project').value = 's';
+  const p = h.app.runUrls();
+  await flush();
+  const during = h.get('golinks').disabled;
+  const p2 = h.app.runUrls();          // the double-click
+  await flush();
+  const posts = h.calls.filter(c => c.url === 'api/jobs/urls').length;
+  release();
+  await Promise.all([p, p2]);
+  await flush();
+  return {disabled_during: during, posts, disabled_after: h.get('golinks').disabled};
+};
+
+// YTDL-8's shape on the new button: one active job per editor, so a paste can
+// be refused against a running SEARCH and must show it rather than nothing.
+scenarios['refused_paste_reattaches'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs/urls') {
+      return {status: 409, json: {detail: {detail: 'you already have a job in progress',
+                                           job_id: 23, phase: 'searching'}}};
+    }
+    if (url === 'api/jobs/23') return {json: POLLRES(JOB({id: 23, phase: 'searching'}))};
+    return {json: {}};
+  });
+  h.get('urls').value = 'https://youtu.be/JJJJJJJJJJJ';
+  h.get('project').value = 's';
+  await h.app.runUrls();
+  await flush();
+  return {job_id: h.app.state.jobId, progress_hidden: h.get('progress').hidden,
+          toast: h.get('toast').textContent, polling: h.polling()};
+};
+
+// A url job has no manifest to review: the grid would offer a selection nobody
+// is being asked for, over cards with no metadata behind them.
+// The SAME finished-download shape twice, differing only in `kind` -- so the
+// hidden grid is the branch doing its job and not just a section that never
+// got shown (#review starts hidden in the markup).
+scenarios['a_url_job_shows_downloads_not_a_review_grid'] = async () => {
+  const vids = [VIDEO('JJJJJJJJJJJ', {dl_state: 'done', selected: 1, title: null}),
+                VIDEO('IIIIIIIIIII', {dl_state: 'skipped', selected: 0, duplicate: 1})];
+  const done = over => JOB(Object.assign(
+    {phase: 'done', terminal: true, dl_total: 2, dl_done: 2, term_dir: 'reef links'},
+    over));
+  const jobs = {24: done({id: 24, kind: 'urls'}), 25: done({id: 25, kind: 'search'})};
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    for (const id of [24, 25]) {
+      if (url === `api/jobs/${id}`) return {json: POLLRES(jobs[id])};
+      if (url.startsWith(`api/jobs/${id}/manifest`)) {
+        return {json: MANIFEST({job: jobs[id], videos: vids})};
+      }
+    }
+    return {json: {}};
+  });
+  await h.app.attach(24);
+  await flush();
+  const urlJob = {review_hidden: h.get('review').hidden,
+                  downloads_hidden: h.get('downloads').hidden,
+                  rows: h.get('dllist').byClass('dlrow').length,
+                  row_text: h.get('dllist').byClass('dlrow').map(n => n.textContent)};
+  await h.app.attach(25);
+  await flush();
+  return Object.assign(urlJob, {search_review_hidden: h.get('review').hidden,
+                                search_cards: h.get('grid').byClass('card').length});
+};
+
 // ---- run them -----------------------------------------------------------
 (async () => {
   const out = {};
@@ -642,6 +749,49 @@ def test_a_server_detail_reaches_the_toast_as_text_not_markup(spa):
     assert '<img' not in r['raw'], 'the detail was assigned as innerHTML'
 
 
+# ------------------------------------------------------- the paste-links box
+def test_pasting_links_posts_the_whole_form_and_attaches_the_job(spa):
+    r = spa['pasted_links_start_a_job']
+    assert r['job_id'] == 21, r
+    assert r['body'] == {'urls': 'https://youtu.be/JJJJJJJJJJJ \n https://youtu.be/IIIIIIIIIII',
+                         'project_slug': 's', 'quality': '1080p',
+                         'folder': 'reef links'}, r['body']
+    assert r['progress_hidden'] is False
+    # the ledger's answer is not silent: it is why 2 links fetched 1 clip
+    assert 'already in the tree' in r['toast'], r['toast']
+    assert r['disabled_after'] is False
+
+
+def test_the_links_button_is_disabled_while_its_post_is_in_flight(spa):
+    """The same guard SEARCH got for YTDL-25: a double-click on a paste would
+    lose the race against the one-active-job index and 409 itself."""
+    r = spa['links_button_is_disabled_while_posting']
+    assert r['disabled_during'] is True
+    assert r['posts'] == 1, f"{r['posts']} jobs created by a double-click"
+    assert r['disabled_after'] is False
+
+
+def test_a_refused_paste_re_attaches_to_the_job_it_was_refused_against(spa):
+    r = spa['refused_paste_reattaches']
+    assert r['job_id'] == 23, r
+    assert r['progress_hidden'] is False
+    assert 'already have a job' in r['toast']
+    assert r['polling'] is True
+
+
+def test_a_url_job_renders_its_downloads_and_no_review_grid(spa):
+    """The rows still have to render (renderDownloads reads state.manifest), so
+    the branch returns AFTER storing it -- and the identical search job proves
+    the grid is being withheld rather than merely never reached."""
+    r = spa['a_url_job_shows_downloads_not_a_review_grid']
+    assert r['review_hidden'] is True, 'a url job offered a selection to review'
+    assert r['downloads_hidden'] is False
+    assert r['rows'] == 2, r
+    assert any('already downloaded' in t for t in r['row_text']), r['row_text']
+    assert r['search_review_hidden'] is False, r
+    assert r['search_cards'] == 2, r
+
+
 # --------------------------------------------------- source-level assertions
 # These run with or without node: they are the cheap backstop for the shapes
 # the harness proves, so a rewrite that reintroduces one is caught even on a
@@ -685,6 +835,29 @@ def test_the_search_button_is_guarded_in_source():
     assert body.index('detach()') > body.index("post('api/jobs'"), \
         'YTDL-8: detach() must come AFTER the POST is accepted'
     assert 'e.info.job_id' in body
+
+
+def test_the_links_button_is_guarded_in_source():
+    """Same three properties as runSearch, on the second submit path: the
+    button is the in-flight lock, the live job is only torn down AFTER the
+    server accepts (YTDL-8), and a 409 carries the job to re-attach to."""
+    js = _js()
+    body = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
+    assert 'btn.disabled = true' in body and 'btn.disabled = false' in body
+    assert body.index('detach()') > body.index("post('api/jobs/urls'")
+    assert 'e.info.job_id' in body
+
+
+def test_the_links_box_posts_a_document_relative_url():
+    """A leading slash here would hit the DASHBOARD's /api/jobs/urls under the
+    mount. test_mounted_prefix.py scans the bytes; this names the URL."""
+    assert "post('api/jobs/urls'" in _js()
+
+
+def test_a_url_job_is_not_offered_a_review_grid():
+    js = _js()
+    body = js[js.index('async function loadManifest('):js.index('function renderTerms()')]
+    assert "m.job.kind === 'urls'" in body, body
 
 
 def test_health_covers_every_state_the_contract_emits():

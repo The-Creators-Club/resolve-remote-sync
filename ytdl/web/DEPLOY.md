@@ -142,32 +142,58 @@ for the standalone utility's sake; nothing on the NAS sets it.
 Treat the file as a credential — it is a logged-in session for whichever
 account exported it.
 
-### Cookies alone now make things WORSE — measured 2026-08-11
+### Cookies are MANDATORY here, and useless on their own — measured 2026-08-11
 
-Do not add cookies "to be safe". Tested on this NAS, in the container, both
-directions against the same video:
+The NAS got bot-checked for real: one search enriched 336 candidates, and
+partway through the metadata pass YouTube started refusing the IP outright —
+after which even a single `--print title` failed. All four states were then
+tested in the live container against the same video:
 
-| | result |
+| setup | result |
 |---|---|
-| **with** a valid signed-in `cookies.txt` | `ERROR: No video formats found!` |
-| **without** cookies | extracts normally |
+| anonymous | `Sign in to confirm you're not a bot` |
+| cookies alone | past the bot check, then `No video formats found!` |
+| cookies + PO token | past the check, formats found, `n challenge solving failed` |
+| **cookies + PO token + EJS solver** | **works** |
 
-YouTube requires a **GVS PO token** for authenticated requests, and yt-dlp
-reports `[pot] PO Token Providers: none` — so an authenticated session gets no
-formats at all, while an anonymous one falls back to clients that need no
-token. A valid login with no PO token provider is strictly worse than no
-login, which is why `YTDL_COOKIES_FILE` is unset here and `/api/health`
-reporting `cookies: false` is the **wanted** state, not a missing step.
+Three things are load-bearing together, and any one alone reads as failure:
 
-If the NAS's IP ever does get bot-checked (the worker classifies it and says
-so — `docs/youtube_dlp_bugs.md` YTDL-21), cookies are only half the fix: a PO
-token provider has to come with them, i.e. the bgutil provider plugin plus its
-server, provisioned the same fetch-verify-push way as claude and deno. That
-work is not done; do it before reaching for cookies again.
+1. **`YTDL_COOKIES_FILE`** — a signed-in `cookies.txt`. There is no anonymous
+   path left for a datacentre IP doing bulk extraction. Operator-provisioned;
+   it is a live Google session, so it is never in this repo. Export it in
+   Netscape format (a "Get cookies.txt LOCALLY"-style extension; Chrome's
+   app-bound encryption defeats `--cookies-from-browser` on the desktop), then
+   `install -o 3000 -g 3000 -m 600` it at `<host-root>/ytdl-data/cookies.txt`.
+2. **`YTDL_POT_BASE_URL`** — the `bgutil` sidecar (compose). YouTube demands a
+   GVS proof-of-origin token for *authenticated* requests and yt-dlp ships no
+   provider, so cookies without this return **no formats at all** — the trap
+   that makes cookies look like the problem.
+3. **`YTDL_CACHE_DIR`** — yt-dlp *downloads* the EJS challenge solver
+   (`remote_components: ejs:github`) and caches it. `run.sh` exports no HOME,
+   so the default is `/.cache`, which uid 3000 cannot create: `PermissionError`
+   and a re-fetch on every call.
 
-(Unrelated but confirmed in the same test: deno IS being used —
-`JS runtimes: deno-2.9.5`, `[jsc:deno] Solving JS challenges using deno` — so
-the anonymous path gets the high-quality formats. That is deno's whole job.)
+`/api/health`'s `cookies: false` therefore means **broken**, not "fine, that
+one is optional" — the opposite of what this section said before the block.
+
+Sanity check the whole chain (expect a title and a real height):
+
+```sh
+docker exec -u 3000:3001 -e PATH=/opt/deno:/opt/ffmpeg:/usr/bin:/bin <container> \
+  /venv/bin/python -m yt_dlp --cookies /ytdl-data/cookies.txt \
+  --extractor-args "youtubepot-bgutilhttp:base_url=http://bgutil:4416" \
+  --remote-components ejs:github --skip-download \
+  --print "%(title)s | %(height)sp" https://www.youtube.com/watch?v=jNQXAC9IVRw
+```
+
+Look for `[pot:bgutil:http] Generating a gvs PO Token` in `-v` output: that
+line is the provider working. Cookies expire — when jobs start failing with
+the bot-check banner again, re-export them first.
+
+**Volume is still the trigger.** The fix makes requests legitimate; it does not
+make 336 rapid metadata calls look human. Pacing and per-term caps are the
+other half, and the worker's bot-check classification (`docs/youtube_dlp_bugs.md`
+YTDL-21) is what tells you it happened instead of burning retries.
 
 ## Where things live
 

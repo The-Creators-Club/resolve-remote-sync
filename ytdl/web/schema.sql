@@ -11,14 +11,24 @@
 -- ytdlweb.db.ensure_schema() owns the version.
 PRAGMA journal_mode=WAL;
 
--- One row per "editor typed a topic and hit SEARCH". The phase column is the
--- whole state machine and every transition is a committed UPDATE, because the
--- SPA polls this row 1500 ms apart and a phase held in memory would lie to it
--- across a container restart.
+-- One row per "editor typed a topic and hit SEARCH", or pasted links and hit
+-- GET LINKS. The phase column is the whole state machine and every transition
+-- is a committed UPDATE, because the SPA polls this row 1500 ms apart and a
+-- phase held in memory would lie to it across a container restart.
 CREATE TABLE IF NOT EXISTS jobs (
     id               INTEGER PRIMARY KEY,
     created_by       TEXT NOT NULL,          -- dashboard username; owns the job
-    term             TEXT NOT NULL,          -- what the editor typed, verbatim
+    -- 'search' = the Claude-expanded topic pipeline; 'urls' = the editor
+    -- pasted YouTube links and wants exactly those. A url job has no
+    -- search/claude/filter half at all: the API writes its job_videos rows
+    -- itself and _phase_start sends it straight to `downloading`. On an
+    -- existing database this arrives via migrations/004.
+    kind             TEXT NOT NULL DEFAULT 'search',
+    -- For a search job: what the editor typed. For a url job: the name of the
+    -- folder they are filing the links under -- same column because it is the
+    -- same fact downstream (the ledger's "why this clip is here", the manifest
+    -- header, and the folder under Youtube/).
+    term             TEXT NOT NULL,
     term_dir         TEXT NOT NULL,          -- filesystem-safe form of `term`
     project_slug     TEXT NOT NULL,
     project_label    TEXT NOT NULL,          -- rel path, e.g. '2026/FF5/Energy Transition'
@@ -27,6 +37,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     max_per_term     INTEGER NOT NULL DEFAULT 15,
     -- queued > generating_terms > searching > enriching > filtering >
     -- ready_for_review > downloading > done | failed | cancelled
+    -- (kind='urls' skips the middle: queued > downloading > done)
     phase            TEXT NOT NULL DEFAULT 'queued',
     -- Carries a machine-readable prefix the SPA maps to ops hint text:
     -- claude_auth: / claude_missing: / claude_timeout: / claude_output: .

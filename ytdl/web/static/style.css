@@ -123,12 +123,21 @@ a.brand:hover { color: var(--red-hot); }
   user-select: none;
 }
 
+/* Two rows: the topic search, then the paste-links box. A column of rows
+   rather than one wrapping line, so the second box's button stays beside it
+   at every width instead of wrapping onto a line of its own. */
 .header-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 1.2rem 6px;
+}
+
+.ctrl-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 12px;
-  padding: 8px 1.2rem 6px;
 }
 
 .search-bar {
@@ -138,7 +147,7 @@ a.brand:hover { color: var(--red-hot); }
   min-width: 0;
 }
 
-#q {
+#q, #urls, #folder {
   flex: 1 1 auto;
   min-width: 120px;
   background: var(--field);
@@ -148,8 +157,19 @@ a.brand:hover { color: var(--red-hot); }
   font-size: 13px;
   padding: 5px 9px;
 }
-#q::placeholder { color: var(--muted); }
-#q:focus { outline: none; border-color: var(--red); }
+#q::placeholder, #urls::placeholder, #folder::placeholder { color: var(--muted); }
+#q:focus, #urls:focus, #folder:focus { outline: none; border-color: var(--red); }
+
+/* One line tall until there is more than one link in it. Vertical resize only:
+   a horizontal drag would push the picker out of the header. */
+#urls {
+  font-size: 12px;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 28px;
+  max-height: 160px;
+}
+#folder { flex: 0 1 240px; font-size: 12px; }
 
 select {
   background: var(--field);

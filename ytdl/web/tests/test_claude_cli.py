@@ -257,6 +257,135 @@ def test_out_of_range_indices_are_ignored(run):
     assert set(out) == {'vid00000000'}
 
 
+# ------------------------------------------------------------ visual bias
+# 2026-08-11: the editor's complaint was "the youtube search should prioritise
+# visuals -- if we search 'presidential palace' we're looking for visuals of
+# presidential palace". `taiwan presidential palace` had returned 336
+# candidates of news packages, studio panels and commentary. Both AI stages now
+# carry the bias, and both halves of the bilingual search do.
+
+def _prompt(run, i=0):
+    """The prompt claude was actually handed. argv[2] by the -p contract that
+    test_the_command_line_is_the_documented_one pins."""
+    return run.calls[i]['cmd'][2]
+
+
+def _terms_reply():
+    return FakeProc(envelope(json.dumps({'terms': [
+        {'q': 'presidential office building taipei aerial', 'lang': 'en'},
+        {'q': '總統府 空拍', 'lang': 'zh', 'english_gloss': 'presidential office drone'},
+    ]})))
+
+
+def test_the_term_prompt_asks_for_footage_of_the_topic_not_coverage_about_it(run):
+    run.outcome = _terms_reply()
+    claude_cli.generate_terms('taiwan presidential palace')
+    p = _prompt(run)
+    assert claude_cli.VISUAL_TERM_BIAS in p, 'the bias fragment must reach the model'
+    assert 'FOOTAGE OF' in p
+    for phrasing in ('establishing shot', 'exterior', 'aerial', 'drone footage',
+                     'walking tour', 'timelapse', 'ceremony', 'no commentary',
+                     '4K'):
+        assert phrasing in p, phrasing
+
+
+def test_the_term_prompt_steers_away_from_news_package_phrasings(run):
+    run.outcome = _terms_reply()
+    claude_cli.generate_terms('x')
+    p = _prompt(run)
+    assert 'AVOID' in p
+    for phrasing in ('breaking', 'news update', 'analysis', 'commentary',
+                     'debate', 'interview', 'reaction', 'podcast'):
+        assert phrasing in p, phrasing
+    # The Chinese half of the same list: a zh query for 專訪 is a talking head
+    # in any language, and this fleet searches en+zh.
+    for phrasing in ('專訪', '快訊', '政論', '評論'):
+        assert phrasing in p, phrasing
+
+
+def test_the_chinese_half_gets_its_own_footage_idioms(run):
+    """Not translations of the English ones: 空拍 is how a Taiwanese drone shot
+    is filed, 完整版 is how the unedited full-length version is."""
+    run.outcome = _terms_reply()
+    claude_cli.generate_terms('x')
+    p = _prompt(run)
+    for idiom in ('空拍',        # aerial / drone
+                  '縮時',        # timelapse
+                  '街景',        # street view
+                  '導覽',        # guided walk-through
+                  '完整版',  # full version
+                  '無旁白',  # no narration
+                  '典禮'):       # ceremony
+        assert idiom in p, idiom
+
+
+def test_the_visual_bias_did_not_disturb_the_term_output_contract(run):
+    """The JSON envelope, the gloss requirement and the 8-12 per language are
+    the contract worker.py and the manifest rest on -- the bias is additional
+    prose, not a redesign."""
+    run.outcome = _terms_reply()
+    out = claude_cli.generate_terms('x')
+    p = _prompt(run)
+    assert '8 to 12 queries in English' in p
+    assert '8 to 12 queries in Traditional Chinese' in p
+    assert 'Every Chinese query MUST carry "english_gloss"' in p
+    assert '{"terms": [' in p and '{{' not in p, 'the doubled braces must render'
+    assert '{bias}' not in p and '{topic}' not in p
+    assert out[1] == {'q': '總統府 空拍', 'lang': 'zh',
+                      'english_gloss': 'presidential office drone'}
+
+
+def test_the_relevance_prompt_drops_studio_and_keeps_real_footage(run):
+    run.outcome = FakeProc(envelope('{"keep": [0], "drop": []}'))
+    claude_cli.filter_relevance('taiwan presidential palace', _videos(2))
+    p = _prompt(run)
+    assert claude_cli.VISUAL_FILTER_BIAS in p
+    for drop in ('studio segments', 'news anchors', 'interviews',
+                 'commentary', 'reaction videos', 'compilations',
+                 'heavy overlays'):
+        assert drop in p, drop
+    for keep in ('establishing shots', 'exteriors', 'aerials', 'drone',
+                 'walking tours', 'timelapses', 'ceremonies'):
+        assert keep in p, keep
+    # The zh half of the drop list: 政論節目 is a panel show whatever the
+    # channel is called.
+    assert '專訪' in p and '政論節目' in p
+
+
+def test_the_relevance_prompt_prefers_longer_steadier_less_edited(run):
+    """The listing already carries the duration, so this is actionable."""
+    run.outcome = FakeProc(envelope('{"keep": [0], "drop": []}'))
+    claude_cli.filter_relevance('topic', _videos(2))
+    p = _prompt(run)
+    assert 'LONGER, steadier, less-edited' in p
+    assert 'KEEP it' in p, 'when in doubt keep: an omission must not hide a clip'
+    assert '0. title 0 | c | 1:00' in p
+
+
+def test_the_visual_bias_did_not_disturb_the_relevance_output_contract(run):
+    run.outcome = FakeProc(envelope('{"keep": [0], "drop": []}'))
+    claude_cli.filter_relevance('topic', _videos(3))
+    p = _prompt(run)
+    assert '{"keep": [0, 3, 4], "drop": [{"i": 1, "why": "reason, 10 words max"}]}' in p
+    assert 'Every index from 0 to 2 must appear exactly once' in p
+    assert '{{' not in p and '{bias}' not in p and '{listing}' not in p
+
+
+def test_the_bias_is_one_tunable_constant_per_stage(run):
+    """It is exposed so it can be tuned in one place; nothing else in the
+    module should have to be edited to change what 'visual' means here."""
+    assert claude_cli.VISUAL_TERM_BIAS.strip()
+    assert claude_cli.VISUAL_FILTER_BIAS.strip()
+    assert 'PRIORITISE VISUALS' in claude_cli.VISUAL_TERM_BIAS
+    assert claude_cli.VISUAL_TERM_BIAS not in claude_cli.VISUAL_FILTER_BIAS
+
+
+def test_the_biased_filter_still_degrades_rather_than_failing(run):
+    """YTDL-13's guard is upstream of the prompt text and stays that way."""
+    run.outcome = FakeProc(envelope('{"keep": null, "drop": null}'))
+    assert claude_cli.filter_relevance('topic', _videos(2)) == {}
+
+
 # ---------------------------------------------------------------- health
 
 def test_the_health_probe_classifies_and_caches(run, monkeypatch):

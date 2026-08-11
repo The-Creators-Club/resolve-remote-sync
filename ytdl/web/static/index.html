@@ -26,27 +26,45 @@
   <div class="rule">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</div>
 
   <div class="header-controls">
-    <div class="search-bar">
-      <input id="q" type="search" autocomplete="off"
-             placeholder="one topic&hellip; algal reef controversy taiwan, offshore wind protest, drone show">
-      <select id="project" title="Where the clips land: &lt;project&gt;\Youtube\&lt;term&gt;"></select>
-      <select id="quality" title="1080p is the highest YouTube serves as AVC — anything above re-encodes on the NAS">
-        <option value="1080p">1080p</option>
-        <option value="720p">720p</option>
-        <option value="1440p">1440p</option>
-        <option value="2160p">2160p</option>
-        <option value="best">best</option>
-      </select>
-      <select id="period" title="YouTube's own upload-date filter">
-        <option value="">any date</option>
-        <option value="today">today</option>
-        <option value="week">this week</option>
-        <option value="month">this month</option>
-        <option value="year">this year</option>
-      </select>
+    <div class="ctrl-row">
+      <div class="search-bar">
+        <input id="q" type="search" autocomplete="off"
+               placeholder="one topic&hellip; algal reef controversy taiwan, offshore wind protest, drone show">
+        <select id="project" title="Where the clips land: &lt;project&gt;\Youtube\&lt;term&gt;"></select>
+        <select id="quality" title="1080p is the highest YouTube serves as AVC — anything above re-encodes on the NAS">
+          <option value="1080p">1080p</option>
+          <option value="720p">720p</option>
+          <option value="1440p">1440p</option>
+          <option value="2160p">2160p</option>
+          <option value="best">best</option>
+        </select>
+        <select id="period" title="YouTube's own upload-date filter">
+          <option value="">any date</option>
+          <option value="today">today</option>
+          <option value="week">this week</option>
+          <option value="month">this month</option>
+          <option value="year">this year</option>
+        </select>
+      </div>
+      <button id="go" class="primary-btn">SEARCH</button>
+      <span id="health" class="rstatus" title="server-side Claude Code + yt-dlp"></span>
     </div>
-    <button id="go" class="primary-btn">SEARCH</button>
-    <span id="health" class="rstatus" title="server-side Claude Code + yt-dlp"></span>
+
+    <!-- The second box: exact clips, no search and no review. It shares the
+         project and quality pickers above deliberately -- one destination
+         control on the page, so there is no way to set one and read the
+         other. The folder is optional and defaults to `links`. -->
+    <div class="ctrl-row">
+      <div class="search-bar">
+        <textarea id="urls" rows="1" spellcheck="false" autocomplete="off"
+                  placeholder="&hellip;or paste YouTube links — one per line — to download exactly those (ctrl+enter)"></textarea>
+        <input id="folder" type="text" autocomplete="off" class="folder"
+               placeholder="folder (default: links)"
+               title="The folder under &lt;project&gt;\Youtube\ these land in — and the Resolve bin they are filed into">
+      </div>
+      <button id="golinks" class="primary-btn"
+              title="Downloads exactly these videos into the project, through the same pipeline as a search">GET LINKS</button>
+    </div>
   </div>
   <!-- A CONTAINER, not a banner: app.js puts one .warnline in here per
        concern (claude health, the worker, your ticked projects, the running

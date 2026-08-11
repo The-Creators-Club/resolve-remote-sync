@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import PROJECTS, USER
+from tests.conftest import OTHER_USER, PROJECTS, USER
 from ytdlweb import claude_cli, db, worker
 from ytdlweb.vendor import ytsearch
 
@@ -367,6 +367,143 @@ def test_a_download_reporting_no_file_is_a_failure_not_an_empty_ledger_row(
     assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'failed'
     assert db.ledger_get(con, 'aaaaaaaaaaa') is None
     assert db.ledger_ids(con) == set()
+
+
+# ------------------------------------------------------- pasted-link jobs
+
+def _url_job(con, ids, folder='links', user=USER):
+    """A kind='urls' job for `ids`, exactly as routes_api.create_url_job makes
+    one: rows already pending, no terms, phase queued."""
+    slug, label, _ = PROJECTS[0]
+    videos = [{'video_id': v, 'url': f'https://www.youtube.com/watch?v={v}'}
+              for v in ids]
+    job_id = db.create_url_job(con, user, folder, folder, slug, label, videos)
+    return db.get_job(con, job_id)
+
+
+def test_a_url_job_walks_queued_straight_into_the_download_phase(
+        con, fake_claude, fake_youtube, fake_downloader, project_root):
+    """The whole feature: no term generation, no search, no enrichment, no
+    filter -- the same download phase, into the same tree, with the same
+    ledger and manifest."""
+    job = _url_job(con, ['aaaaaaaaaaa', 'bbbbbbbbbbb'])
+    worker.run_job(con, job['id'])
+
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'done'
+    assert (fresh['dl_done'], fresh['dl_failed']) == (2, 0)
+    assert fake_claude.calls == [], 'a pasted link must never reach claude'
+    assert fake_youtube.searched == [] and fake_youtube.enriched == []
+    assert db.terms(con, job['id']) == []
+    assert [c[0] for c in fake_downloader.calls] == ['aaaaaaaaaaa', 'bbbbbbbbbbb']
+
+
+def test_a_url_job_lands_where_the_companions_watcher_looks(
+        con, fake_claude, fake_youtube, fake_downloader, project_root):
+    """`<project>/Youtube/<folder>/<clip>` and no deeper: youtube_import lists
+    ONE level under Youtube/ and files each folder into Master/Youtube/<folder>
+    in the open Resolve project. A second level would be invisible to it, which
+    is the difference between "imports into Resolve" and "sits on the NAS"."""
+    job = _url_job(con, ['aaaaaaaaaaa'], folder='reef links')
+    worker.run_job(con, job['id'])
+
+    outdir = project_root / 'reef links'
+    assert outdir.is_dir()
+    assert outdir.parent.name == 'Youtube'
+    assert outdir.parent.parent == project_root.parent
+    clips = [p.name for p in outdir.iterdir() if p.suffix == '.mp4']
+    assert clips == ['Test Channel - aaaaaaaaaaa title [aaaaaaaaaaa].mp4']
+    assert not [p for p in outdir.iterdir() if p.is_dir()]
+    assert (outdir / 'manifest.json').is_file()
+    assert [p.name for p in outdir.iterdir() if p.name.endswith('.credits.json')]
+
+    # ...and the same ledger row a search job's download writes
+    row = db.ledger_get(con, 'aaaaaaaaaaa')
+    assert row['rel_path'] == 'Youtube/reef links/' + clips[0]
+    assert row['term_dir'] == 'reef links'
+    assert row['project_slug'] == PROJECTS[0][0] and row['downloaded_by'] == USER
+    assert row['job_id'] == job['id']
+
+    mf = json.loads((outdir / 'manifest.json').read_text(encoding='utf-8'))
+    assert mf['kind'] == 'urls' and mf['query'] == 'reef links'
+    assert [v['id'] for v in mf['videos']] == ['aaaaaaaaaaa']
+
+
+def test_a_url_jobs_rows_learn_their_title_from_the_download(
+        con, fake_claude, fake_youtube, fake_downloader, project_root):
+    """Nothing fetched metadata for these: without this the progress list names
+    every clip by its 11-char id forever."""
+    job = _url_job(con, ['aaaaaaaaaaa'])
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['title'] is None
+    worker.run_job(con, job['id'])
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['title'] == 'aaaaaaaaaaa title'
+
+
+def test_a_url_job_re_checks_the_ledger_immediately_before_spending_bandwidth(
+        con, fake_claude, fake_youtube, fake_downloader, project_root):
+    """The API checks the ledger when the links are pasted; another editor's
+    job can land the same clip between then and the worker claiming this one."""
+    job = _url_job(con, ['aaaaaaaaaaa'])
+    db.ledger_add(con, 'aaaaaaaaaaa', 't', 'c', '2025-ff4-nuclear',
+                  '2025/FF4/Nuclear', 'other term', 'Youtube/other term/x.mp4')
+    worker.run_job(con, job['id'])
+
+    assert fake_downloader.calls == []
+    v = db.get_video(con, job['id'], 'aaaaaaaaaaa')
+    assert v['dl_state'] == 'skipped' and v['duplicate'] == 1
+    assert v['duplicate_of'] == '2025/FF4/Nuclear/other term'
+    assert db.get_job(con, job['id'])['phase'] == 'done'
+
+
+def test_a_url_job_is_cancelled_between_videos_like_any_other(
+        con, fake_claude, fake_youtube, fake_downloader, project_root):
+    job = _url_job(con, ['aaaaaaaaaaa', 'bbbbbbbbbbb'])
+    db.request_cancel(con, job['id'])
+    worker.run_job(con, job['id'])
+    assert db.get_job(con, job['id'])['phase'] == 'cancelled'
+    assert fake_downloader.calls == []
+
+
+def test_a_url_job_is_claimed_by_the_same_serial_worker(
+        con, job, fake_claude, fake_youtube, fake_downloader, project_root):
+    """One queue, oldest first: a paste does not jump the queue, and a search
+    job already in flight is not disturbed by one."""
+    links = _url_job(con, ['aaaaaaaaaaa'], user=OTHER_USER)
+    assert db.claim_next_job(con)['id'] == job['id']
+    db.set_phase(con, job['id'], 'done')
+    assert db.claim_next_job(con)['id'] == links['id']
+
+
+def test_a_url_job_widens_every_artifact_for_the_fleet_too(
+        con, fake_claude, fake_youtube, fake_downloader, project_root, monkeypatch):
+    """YTDL-45's contract is the download phase's, and a url job goes through
+    exactly the same code -- so a 0600 clip invisible over SMB cannot come back
+    through the new door."""
+    asked = []
+    monkeypatch.setattr(worker, '_chmod', lambda p, m: asked.append((Path(p).name, m)))
+    job = _url_job(con, ['aaaaaaaaaaa'], folder='reef links')
+    worker.run_job(con, job['id'])
+
+    modes = dict(asked)
+    assert modes['reef links'] == 0o2775
+    assert modes['manifest.json'] == 0o664
+    assert sum(1 for n, _ in asked if n.endswith('.mp4')) == 1
+    assert sum(1 for n, _ in asked if n.endswith('.credits.json')) == 1
+
+
+def test_a_failed_link_is_one_dead_video_not_a_dead_job(
+        con, fake_claude, fake_youtube, fake_downloader, project_root):
+    fake_downloader.fail_ids = {'aaaaaaaaaaa'}
+    job = _url_job(con, ['aaaaaaaaaaa', 'bbbbbbbbbbb'])
+    worker.run_job(con, job['id'])
+
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'done' and (fresh['dl_done'], fresh['dl_failed']) == (1, 1)
+    assert 'yt-dlp said no' in db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_error']
+    # Nothing landed, so nothing is ledgered -- which is what makes "paste it
+    # again" the retry for a url job (there is no review grid to press DOWNLOAD
+    # in a second time, and the API would otherwise refuse it as a duplicate).
+    assert db.ledger_get(con, 'aaaaaaaaaaa') is None
 
 
 # ---------------------------------------------------------------- the sweep

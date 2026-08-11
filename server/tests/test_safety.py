@@ -1695,3 +1695,39 @@ def test_dry_run_opens_no_connection(argv, monkeypatch, capsys):
     rc = mod.main()
     capsys.readouterr()
     assert rc == 0
+
+
+# --- the PO-token provider is one component in two processes ----------------
+
+def test_the_pot_provider_plugin_and_image_are_the_same_version():
+    """The yt-dlp plugin (pip, in the dashboard venv) and the server it talks
+    to (a sidecar image) are one component split across two processes, and
+    bgutil ships them as a matched pair. They are pinned in two different
+    files, so nothing but this test stops a bump to one from silently leaving
+    the other behind -- which would fail at runtime as "no formats found",
+    indistinguishable from the bot check it exists to defeat (2026-08-11).
+    """
+    import re
+
+    reqs = (Path(install_dashboard_app.__file__).resolve().parents[1]
+            / "dashboard" / "deploy" / "requirements.txt").read_text(encoding="utf-8")
+    m = re.search(r"^bgutil-ytdlp-pot-provider==([0-9][^\s#]*)", reqs, re.M)
+    assert m, "requirements.txt no longer pins bgutil-ytdlp-pot-provider exactly"
+    pinned = m.group(1)
+
+    assert pinned == install_dashboard_app.POT_PROVIDER_VERSION, (
+        f"plugin pin {pinned} != POT_PROVIDER_VERSION "
+        f"{install_dashboard_app.POT_PROVIDER_VERSION}")
+    assert install_dashboard_app.POT_PROVIDER_IMAGE.startswith(
+        f"brainicism/bgutil-ytdlp-pot-provider:{pinned}"), (
+        f"image tag {install_dashboard_app.POT_PROVIDER_IMAGE} does not carry {pinned}")
+
+
+def test_the_pot_provider_is_reachable_only_from_inside_the_compose_network():
+    """It mints tokens for anyone who asks. Publishing a port would offer that
+    to the whole LAN and tailnet; the dashboard reaches it by service name on
+    the compose network instead."""
+    svc = install_dashboard_app.compose_config(
+        8480, "/mnt/tank/apps/ccsync-dashboard", "http://x:8384", "k", "t",
+    )["services"][install_dashboard_app.POT_PROVIDER_SERVICE]
+    assert "ports" not in svc, "the PO-token provider must not publish a port"

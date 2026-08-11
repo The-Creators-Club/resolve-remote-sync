@@ -4,7 +4,7 @@ Claude Code runs on the server under the operator's own account (a one-time
 `/login` writes credentials into the claude-home volume -- DEPLOY.md). This
 module is the only thing that shells out to it.
 
-Three decisions worth keeping:
+Four decisions worth keeping:
 
 **HOME/CLAUDE_CONFIG_DIR are set in the SUBPROCESS ENV ONLY.** uid 3000 has no
 passwd entry in the slim image, so `claude` cannot find a home to read its
@@ -24,6 +24,10 @@ claude_output:) that the SPA maps to ops hint text -- "an admin must run the
 one-time login" is a completely different call to action from "the model
 returned something unparseable", and an editor staring at a raw stderr dump
 cannot tell them apart.
+
+**Both prompts are biased towards VISUALS, from one place.** The tunable text
+lives in VISUAL_TERM_BIAS / VISUAL_FILTER_BIAS below rather than dissolved into
+the prose of the two prompts (2026-08-11).
 """
 import json
 import logging
@@ -201,6 +205,70 @@ def ask_json(prompt, timeout=None, retries=1):
     raise last
 
 
+# -------------------------------------------------------- the visual bias
+# 2026-08-11: both calls used to optimise for "is this ABOUT the topic", which
+# is what a news desk wants and the opposite of what an editor cutting b-roll
+# wants. A search for `taiwan presidential palace` generated 24 terms and 336
+# candidates dominated by news packages, studio segments, political commentary
+# and panel shows -- clips about the building, not one shot OF it. The
+# preference now lives in these two fragments, interpolated into the prompts as
+# {bias}, so it can be tuned in one place instead of hunted through prose.
+#
+# Both halves are first-class: this fleet searches en+zh and a Taiwanese
+# footage idiom is not a translation of an English one (空拍 is the drone
+# search; 完整版 is what an unedited full-length ceremony is filed under). The
+# Chinese is written literally, as the _TERM_PROMPT example already is --
+# unlike worker.py, this file is not ASCII-only.
+
+VISUAL_TERM_BIAS = """\
+PRIORITISE VISUALS. The editor needs FOOTAGE OF this subject -- shots that can
+be cut into a timeline -- not coverage ABOUT it. Bias the queries towards the
+phrasings that actually surface footage on YouTube:
+- English: establishing shot, exterior, aerial, drone footage, walking tour,
+  walkthrough, POV, street view, timelapse, ceremony, parade, full ceremony,
+  raw footage, unedited, uncut, no commentary, ambient, 4K, stock footage,
+  b-roll.
+- Traditional Chinese as used in Taiwan: 空拍, 空拍機, 縮時, 街景, 徒步,
+  漫步, 導覽, 實景, 現場, 全程, 完整版, 未剪輯, 原始畫面, 無旁白, 無解說,
+  環境音, 典禮, 儀式, 4K.
+At least two thirds of the queries in EACH language must carry a footage
+phrasing of that kind, combined with the names of the places, people, events
+and landmarks involved.
+AVOID the phrasings that return news packages and talking heads: breaking
+news, news update, analysis, commentary, explainer, debate, interview,
+reaction, podcast, top 10; and 快訊, 新聞, 分析, 評論, 辯論, 專訪, 訪談,
+政論, 名嘴, 懶人包.
+"""
+
+VISUAL_FILTER_BIAS = """\
+DROP anything with no real footage of its own:
+- studio segments, news anchors and desk reads, pieces to camera
+- interviews and talk/panel shows: 專訪, 訪談, 政論節目, 名嘴
+- commentary, analysis, explainers, reaction videos, podcasts, vlogs about it
+- compilations and edits buried under heavy overlays -- captions filling the
+  frame, zooms, memes, stock music, a hard cut every two seconds
+- unrelated results the search dragged in, music, gaming, and AI-generated or
+  still-image slideshow "footage"
+
+KEEP anything carrying real footage of the subject:
+- establishing shots, exteriors, interiors, streets, landmarks, aerials, drone
+- walking tours, POV walkthroughs, timelapses, ambient no-narration takes
+- ceremonies, parades, protests, press events and other events shot on
+  location, especially the raw or full-length versions
+- field reports where the shots of the subject clearly carry the video (an
+  anchor or reporter carrying it is a studio segment: drop it)
+- foreign-language material: narration the editor cannot use does not matter
+  when the pictures are the point
+
+All else equal prefer the LONGER, steadier, less-edited item: an unedited
+12-minute walk-through beats a 90-second cut of the same place, and a 40-minute
+full ceremony beats the news summary of it.
+When it is genuinely unclear whether real footage is in there, KEEP it -- a
+kept dud costs the editor one glance, a wrong drop hides a clip they never
+learn existed.
+"""
+
+
 # ------------------------------------------------------------- call #1: terms
 
 _TERM_PROMPT = """\
@@ -208,11 +276,13 @@ You are helping a documentary editor find archive/b-roll footage on YouTube.
 
 TOPIC: {topic}
 
-Write YouTube search queries that would surface footage about this topic:
-news reports, on-the-ground footage, press conferences, explainers, protest
-and location footage. Include synonyms, the names of the people, places,
-organisations and events involved, and closely related events.
+Write YouTube search queries that would surface footage OF this topic: the
+places, the people, the events -- on-the-ground and location footage, aerials,
+walk-throughs, ceremonies and press events as they happened. Include synonyms,
+the names of the people, places, organisations and events involved, and closely
+related events.
 
+{bias}
 Requirements:
 - 8 to 12 queries in English.
 - 8 to 12 queries in Traditional Chinese as used in TAIWAN (not Simplified,
@@ -243,7 +313,7 @@ def generate_terms(topic, timeout=None):
     and if that one is short a gloss too, those queries are dropped and the
     rest of the search goes ahead.
     """
-    prompt = _TERM_PROMPT.format(topic=topic)
+    prompt = _TERM_PROMPT.format(topic=topic, bias=VISUAL_TERM_BIAS)
     out, missing = _usable_terms(ask_json(prompt, timeout))
     if missing:
         log.warning('claude returned %d query(ies) without english_gloss (%s); '
@@ -296,12 +366,11 @@ A documentary editor searched YouTube for b-roll about this topic.
 
 TOPIC: {topic}
 
-Below are {n} results, numbered. Decide which are actually about the topic and
-usable as footage. Drop: unrelated results the search dragged in, reaction and
-commentary videos with no footage of their own, music, gaming, and clickbait
-compilations. Keep anything that plausibly contains footage of the subject,
-including foreign-language coverage of it.
+Below are {n} results, numbered, as "index. title | channel | duration". Judge
+each one on whether it is FOOTAGE OF the subject that can be cut into a
+timeline, not coverage ABOUT the subject.
 
+{bias}
 {listing}
 
 Reply with ONLY this JSON object -- indices only, no titles, no prose:
@@ -334,7 +403,8 @@ def filter_relevance(topic, videos, batch=RELEVANCE_BATCH, timeout=None):
                 _mmss(v.get('duration')))
             for i, v in enumerate(chunk))
         data = ask_json(_RELEVANCE_PROMPT.format(
-            topic=topic, n=len(chunk), listing=listing, last=len(chunk) - 1), timeout)
+            topic=topic, n=len(chunk), listing=listing, last=len(chunk) - 1,
+            bias=VISUAL_FILTER_BIAS), timeout)
 
         # `or []` and the list check on BOTH: a reply that kept nothing comes
         # back as {"keep": null, ...} often enough, and the TypeError that used

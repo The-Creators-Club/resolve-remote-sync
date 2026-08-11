@@ -27,3 +27,7 @@ This database was created at v1. Since then (2026-08-11 bug hunt):
   create_job's 409 (YTDL-25). It retires pre-existing duplicate active jobs
   BEFORE creating the index, because a `CREATE UNIQUE INDEX` that raises on a
   live database would take every `/ytdl` request down with it.
+- `004_jobs_kind.sql` — v4, `jobs.kind` ('search' | 'urls'), so a pasted-links
+  job can enter the same phase machine at the download phase instead of being
+  handed to Claude as a search topic. Every pre-existing row is a search, which
+  is the column's default, so there is no backfill.

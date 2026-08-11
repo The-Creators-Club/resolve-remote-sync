@@ -92,6 +92,37 @@ def _credits_action(field: str, meta_key: str):
     return (MetadataParserPP.Actions.INTERPRET, field, f"%(meta_{meta_key})s")
 
 
+# [vendor] Deployment facts rather than per-call choices, so they are read
+# from the environment here instead of threaded through every caller (the way
+# ffmpeg_location is): the PO-token provider's address and the cache dir are
+# properties of the container this runs in. Both no-op cleanly when unset --
+# the standalone utility keeps working with neither a sidecar nor a volume.
+POT_BASE_URL_ENV = "YTDL_POT_BASE_URL"
+CACHE_DIR_ENV = "YTDL_CACHE_DIR"
+# The provider plugin's own extractor-args namespace (bgutil-ytdlp-pot-provider,
+# installed from requirements.txt). Its HTTP mode is preferred over script mode:
+# script mode spawns a JS runtime per call, and this pipeline makes hundreds.
+POT_PROVIDER_KEY = "youtubepot-bgutilhttp"
+
+
+def pot_opts() -> dict:
+    """`extractor_args` naming the PO-token provider, or {} when unconfigured.
+
+    Empty is a supported state, not a failure: without a provider yt-dlp is
+    exactly as capable as it was before -- which is to say fine for an
+    unblocked IP and useless for a bot-checked one.
+    """
+    base_url = (os.environ.get(POT_BASE_URL_ENV) or "").strip()
+    if not base_url:
+        return {}
+    return {"extractor_args": {POT_PROVIDER_KEY: {"base_url": [base_url]}}}
+
+
+def cache_dir() -> str | None:
+    """Where yt-dlp may cache the downloaded EJS solver, or None for default."""
+    return (os.environ.get(CACHE_DIR_ENV) or "").strip() or None
+
+
 def build_opts(outdir: str, quality: str, container: str = "mp4",
                progress_hook=None, ffmpeg_location: str | None = None,
                edit_codec: str = "h264", cookies_browser: str | None = None,
@@ -152,6 +183,19 @@ def build_opts(outdir: str, quality: str, container: str = "mp4",
         # Use whichever runtime is installed and allow fetching the solver.
         "js_runtimes": {"deno": {}, "node": {}},
         "remote_components": ["ejs:github"],
+        # [vendor] A GVS PO token is required for AUTHENTICATED requests, and
+        # on this NAS authenticated is the ONLY way in: the datacentre IP is
+        # bot-checked outright without cookies (measured 2026-08-11). yt-dlp
+        # ships the PO-token framework but no provider, so a signed-in request
+        # reaches the player API and comes back with NO FORMATS AT ALL -- the
+        # exact "cookies made it worse" symptom. bgutil's provider answers
+        # over HTTP from a sidecar; see ytdl/web/DEPLOY.md.
+        **pot_opts(),
+        # [vendor] The EJS challenge solver is DOWNLOADED at first use, and
+        # run.sh deliberately exports no HOME -- so yt-dlp's default cache dir
+        # is /.cache, which uid 3000 cannot create. Left alone it raises
+        # PermissionError and re-fetches the solver on EVERY call.
+        "cachedir": cache_dir(),
     }
     if cookies_browser:
         opts["cookiesfrombrowser"] = (cookies_browser, None, None, None)

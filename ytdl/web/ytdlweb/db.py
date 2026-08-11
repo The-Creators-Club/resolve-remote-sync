@@ -25,7 +25,7 @@ from ytdlweb import config
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -37,7 +37,18 @@ _MIGRATIONS = {
         lambda con: 'term_dir' in _columns(con, 'downloads')),
     3: ('003_one_active_job_per_editor.sql',
         lambda con: _index_exists(con, 'idx_jobs_one_active')),
+    4: ('004_jobs_kind.sql',
+        lambda con: 'kind' in _columns(con, 'jobs')),
 }
+
+# What made a job. 'search' is a topic Claude expands and the editor reviews;
+# 'urls' is "download exactly these links", which has no search, claude or
+# filter phase and therefore starts where the download phase starts. The
+# column is deliberately NOT in _JOB_COLS: how a job was made is not something
+# a later UPDATE gets to change.
+KIND_SEARCH = 'search'
+KIND_URLS = 'urls'
+KINDS = (KIND_SEARCH, KIND_URLS)
 
 # The phase machine, in order. Anything not terminal is "the worker owns this
 # job"; ready_for_review is the one non-terminal phase the worker is NOT
@@ -213,6 +224,49 @@ def create_job(c, created_by, term, term_dir, project_slug, project_label,
         raise
     c.commit()
     return cur.lastrowid
+
+
+def create_url_job(c, created_by, term, term_dir, project_slug, project_label,
+                   videos, quality='1080p'):
+    """A kind='urls' job AND its videos, in one transaction. -> job id.
+
+    `videos` is [{'video_id', 'url', 'title'?, 'duplicate_of'?}] in the order
+    the editor pasted them. An entry carrying `duplicate_of` is written
+    skipped/deselected -- the same shape the download phase writes when its own
+    ledger re-check finds one -- so the fleet's "never re-downloaded" rule
+    (REQ 6) is applied before any bandwidth is planned, not only after.
+
+    One transaction because a url job has no search half to write the rows
+    later: a jobs row with no videos would be an ACTIVE job that can never
+    finish, and one active job per editor (YTDL-25) then locks that editor out
+    of the whole app with nothing to cancel from the UI.
+    """
+    ts = now()
+    pending = [v for v in videos if not v.get('duplicate_of')]
+    try:
+        cur = c.execute(
+            'INSERT INTO jobs(created_by,kind,term,term_dir,project_slug,'
+            'project_label,quality,dl_total,phase,created_at,updated_at) '
+            "VALUES(?,?,?,?,?,?,?,?,'queued',?,?)",
+            (created_by, KIND_URLS, term, term_dir, project_slug,
+             project_label, quality, len(pending), ts, ts))
+        job_id = cur.lastrowid
+        for v in videos:
+            dup = v.get('duplicate_of')
+            c.execute(
+                'INSERT INTO job_videos(job_id,video_id,url,title,selected,'
+                'duplicate,duplicate_of,dl_state) VALUES(?,?,?,?,?,?,?,?)',
+                (job_id, v['video_id'], v['url'], v.get('title'),
+                 0 if dup else 1, 1 if dup else 0, dup,
+                 'skipped' if dup else 'pending'))
+    except sqlite3.IntegrityError:
+        # Same reason create_job rolls back: a failed INSERT leaves this
+        # connection's implicit transaction open, holding a write lock that
+        # every later request on this thread would then wait 30 s for.
+        c.rollback()
+        raise
+    c.commit()
+    return job_id
 
 
 def get_job(c, job_id):
@@ -636,6 +690,10 @@ def manifest_json(c, job):
     term_rows = {t['id']: t for t in terms(c, job['id'])}
     return {
         'query': job['term'],
+        # 'search' | 'urls'. For a url job `query` is the folder the editor
+        # filed the links under rather than something that was searched for,
+        # and this is what says so to anyone reading the folder later.
+        'kind': job['kind'],
         'created': now(),
         'created_by': job['created_by'],
         'project': job['project_label'],

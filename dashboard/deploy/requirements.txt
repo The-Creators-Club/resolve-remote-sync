@@ -40,9 +40,8 @@ python-multipart>=0.0.9
 onnxruntime>=1.17
 
 # --- YouTube downloader UI (mounted at /ytdl) -------------------------------
-# The only runtime dependency the ytdl app adds: `fastapi`/`uvicorn` above
-# cover the rest, ffmpeg comes from /opt/ffmpeg (PATH, see run.sh) and the
-# Claude CLI is a subprocess, not a package.
+# `fastapi`/`uvicorn` above cover the web half; ffmpeg comes from /opt/ffmpeg
+# (PATH, see run.sh) and the Claude CLI is a subprocess, not a package.
 #
 # Pin the FLOOR generously and expect to raise it: yt-dlp releases track
 # YouTube's extractor changes, and an old one does not degrade -- it fails
@@ -50,3 +49,23 @@ onnxruntime>=1.17
 # also what makes run.sh re-run pip at all (it installs only when the hash
 # changes), so a version bump here IS the upgrade mechanism.
 yt-dlp>=2026.6.9
+
+# yt-dlp's PO-token provider. NOT optional on this NAS, and the reason is
+# measured rather than precautionary (2026-08-11, all four states tried
+# against the live container -- see ytdl/web/DEPLOY.md):
+#
+#   anonymous                    -> "Sign in to confirm you're not a bot"
+#   cookies alone                -> past the bot check, then NO FORMATS AT ALL
+#   cookies + PO token + EJS     -> works
+#
+# YouTube wants a GVS proof-of-origin token for AUTHENTICATED requests, and
+# the fleet has no anonymous option left: a datacentre IP running bulk
+# extraction gets bot-checked. yt-dlp ships the PO-token framework but no
+# provider, so without this package a signed-in request is strictly WORSE
+# than no request.
+#
+# EXACT pin, matched to the sidecar image tag in
+# server/install_dashboard_app.py (POT_PROVIDER_IMAGE): the plugin and the
+# server it talks to are one component in two processes and the project
+# ships them as a pair. Bump both together or neither.
+bgutil-ytdlp-pot-provider==1.3.1

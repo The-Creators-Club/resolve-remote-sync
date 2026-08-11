@@ -33,6 +33,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from ytdlweb import config
+from ytdlweb.vendor import downloader
 
 
 def net_opts() -> dict:
@@ -40,6 +41,13 @@ def net_opts() -> dict:
     opts = {
         "js_runtimes": {"deno": {}, "node": {}},
         "remote_components": ["ejs:github"],
+        # Search and metadata need the same two things the download path does
+        # (downloader.pot_opts/cache_dir carry the full reasoning): a GVS PO
+        # token, because the NAS's IP is bot-checked and cookies alone then
+        # return no formats; and a writable cache dir, because the container
+        # has no HOME and the EJS solver would be re-fetched every call.
+        **downloader.pot_opts(),
+        "cachedir": downloader.cache_dir(),
         # batch_dl runs these against an anonymous NAS IP; a transient 403 or a
         # throttle must not lose a whole term.
         "retries": 5,

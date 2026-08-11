@@ -7,7 +7,7 @@ you sync" are the actual product, not error handling.
 from fastapi.testclient import TestClient
 
 from tests.conftest import OTHER_USER, PROJECTS, USER
-from ytdlweb import db
+from ytdlweb import db, routes_api
 from ytdlweb.main import app
 
 
@@ -339,6 +339,227 @@ def test_recent_jobs_are_the_callers_own(client, con, job):
     db.create_job(con, OTHER_USER, 'theirs', 'theirs', '2025-ff4-nuclear', '2025/FF4/Nuclear')
     ids = [j['id'] for j in client.get('/api/jobs?limit=20').json()['jobs']]
     assert ids == [job['id']]
+
+
+# ----------------------------------------------- pasted links (kind='urls')
+# "we should maintain the ability to download specific clips": a second box
+# that takes YouTube links and downloads exactly those, through the SAME
+# pipeline -- so the refusals below are the same refusals a search gets, plus
+# the ones only a URL can earn.
+
+VID = 'dQw4w9WgXcQ'
+OTHER_VID = 'aaaaaaaaaaa'
+
+
+def test_the_url_parser_takes_every_shape_an_editor_pastes():
+    """All of these arrive in chat messages and browser address bars. Every one
+    yields the same 11-char id, because that id -- not the URL -- is what the
+    ledger, the `[id]` in the filename and both halves of the dedupe speak."""
+    for text in ('https://www.youtube.com/watch?v=' + VID,
+                 f'https://www.youtube.com/watch?v={VID}&t=42s',
+                 f'https://youtube.com/watch?v={VID}&list=PL123&index=2',
+                 'http://m.youtube.com/watch?v=' + VID,
+                 f'https://music.youtube.com/watch?v={VID}&si=abcd',
+                 'https://youtu.be/' + VID,
+                 f'https://youtu.be/{VID}?si=abcdef',
+                 'youtu.be/' + VID,                      # pasted with no scheme
+                 'WWW.YouTube.com/watch?v=' + VID,       # and no case
+                 'https://www.youtube.com/shorts/' + VID,
+                 'https://www.youtube.com/live/' + VID,
+                 'https://www.youtube.com/embed/' + VID,
+                 'https://www.youtube-nocookie.com/embed/' + VID,
+                 f'  <https://www.youtube.com/watch?v={VID}>  ',
+                 VID):                                   # the bare id
+        assert routes_api.video_id_of(text) == VID, text
+
+
+def test_the_url_parser_refuses_anything_that_is_not_one_video():
+    """A 400 naming the offending line, never a guess. The lookalike hosts are
+    the ones that matter: an equality test on the host is what stops
+    `youtube.com.evil.net` being read as YouTube."""
+    for text in ('', '   ', 'algal reef controversy',
+                 'https://vimeo.com/12345678901',
+                 'https://www.youtube.com/playlist?list=PL123',
+                 'https://www.youtube.com/@creatorsclub',
+                 'https://www.youtube.com/results?search_query=reef',
+                 f'https://youtube.com.evil.net/watch?v={VID}',
+                 f'https://notyoutube.com/watch?v={VID}',
+                 f'ftp://youtu.be/{VID}',
+                 'javascript:alert(1)', 'file:///etc/passwd',
+                 '../../etc/passwd',
+                 'https://www.youtube.com/watch?v=short',
+                 'https://youtu.be/'):
+        assert routes_api.video_id_of(text) is None, text
+
+
+def test_the_url_list_splits_on_newlines_and_commas_and_collapses_repeats():
+    """Two rows for one video would double the counters and race each other
+    into the same file."""
+    videos, rejects = routes_api.parse_url_list(
+        f'https://youtu.be/{VID},  {OTHER_VID}\nhttps://www.youtube.com/watch?v={VID}\nnope')
+    assert [v['video_id'] for v in videos] == [VID, OTHER_VID]
+    # canonicalised: one URL shape in the database, whatever was pasted
+    assert videos[0]['url'] == f'https://www.youtube.com/watch?v={VID}'
+    assert rejects == ['nope']
+
+
+def _urls_job(client, urls=None, **over):
+    body = {'urls': urls if urls is not None else 'https://youtu.be/' + VID,
+            'project_slug': PROJECTS[0][0]}
+    body.update(over)
+    return client.post('/api/jobs/urls', json=body)
+
+
+def test_pasted_links_become_a_job_that_starts_at_the_download_phase(client, con):
+    """No search, no claude, no review: the rows the review grid would have
+    written are written here, and the job enters the phase machine at `queued`
+    like any other -- _phase_start is what routes it to `downloading`."""
+    r = _urls_job(client, f'https://youtu.be/{VID}\nhttps://youtu.be/{OTHER_VID}')
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body['queued'] == 2 and body['skipped'] == []
+    assert body['term_dir'] == 'links'
+
+    job = db.get_job(con, body['job_id'])
+    assert job['kind'] == 'urls'
+    assert job['phase'] == 'queued'
+    assert job['created_by'] == USER
+    assert job['term'] == 'links' and job['term_dir'] == 'links'
+    assert job['project_label'] == PROJECTS[0][1]
+    assert job['dl_total'] == 2
+
+    rows = db.videos(con, job['id'])
+    assert [v['video_id'] for v in rows] == [VID, OTHER_VID]
+    assert all(v['dl_state'] == 'pending' and v['selected'] for v in rows)
+    assert [v['url'] for v in rows] == [f'https://www.youtube.com/watch?v={VID}',
+                                        f'https://www.youtube.com/watch?v={OTHER_VID}']
+
+
+def test_a_url_job_is_the_callers_own_like_any_other(client, con):
+    job_id = _urls_job(client).json()['job_id']
+    assert client.get(f'/api/jobs/{job_id}',
+                      headers=_headers(OTHER_USER)).status_code == 404
+    assert [j['id'] for j in client.get('/api/jobs').json()['jobs']] == [job_id]
+
+
+def test_the_folder_is_the_editors_and_is_made_safe_for_smb(client, con):
+    """YTDL-28's device names and the rest: safe_term_dirname is reused, never
+    re-implemented, because this folder is created on the NAS and then opened
+    over SMB by every Windows editor."""
+    job = db.get_job(con, _urls_job(client, folder='con').json()['job_id'])
+    assert job['term'] == 'con' and job['term_dir'] == 'con_'
+
+    db.set_phase(con, job['id'], 'cancelled')
+    job = db.get_job(con, _urls_job(
+        client, folder='reef: the "third" terminal').json()['job_id'])
+    assert job['term_dir'] == 'reef the third terminal'
+
+
+def test_a_blank_folder_falls_back_to_the_links_bucket(client, con):
+    job = db.get_job(con, _urls_job(client, folder='   ').json()['job_id'])
+    assert job['term_dir'] == routes_api.DEFAULT_URL_FOLDER
+
+
+def test_a_link_that_is_not_a_youtube_video_is_a_400_that_names_it(client):
+    r = _urls_job(client, f'https://youtu.be/{VID}\nhttps://vimeo.com/12345')
+    assert r.status_code == 400
+    assert 'https://vimeo.com/12345' in r.json()['detail']
+    assert _urls_job(client, '   ').status_code == 400
+
+
+def test_the_url_list_is_capped_like_the_search_term_is(client):
+    """YTDL-7's shape one layer under DASH-3's 4 MB body cap: this handler
+    splits and regexes the whole string on the request thread, and the worker
+    then downloads the result one video at a time from one NAS IP."""
+    assert _urls_job(client, 'x' * 4001).status_code == 400
+    many = '\n'.join(f'https://youtu.be/{i:011d}' for i in range(51))
+    r = _urls_job(client, many)
+    assert r.status_code == 400 and '50 is the most' in r.json()['detail']
+
+
+def test_a_url_job_validates_the_project_and_quality_server_side(client):
+    assert _urls_job(client, project_slug='2025-ff4-nuclear').status_code == 400
+    assert _urls_job(client, quality='8k').status_code == 400
+
+
+def test_pasted_links_obey_one_active_job_per_editor_in_both_directions(client):
+    """The partial unique index (YTDL-25) does not care which kind of job it
+    is, so neither may the handler -- an unhandled IntegrityError here would be
+    a 500 in place of the 409 the SPA re-attaches on."""
+    search = client.post('/api/jobs', json={'term': 'a', 'project_slug': PROJECTS[0][0]})
+    refused = _urls_job(client)
+    assert refused.status_code == 409
+    assert refused.json()['detail']['job_id'] == search.json()['job_id']
+
+    client.post(f'/api/jobs/{search.json()["job_id"]}/cancel')
+    links = _urls_job(client)
+    assert links.status_code == 200
+    second = client.post('/api/jobs', json={'term': 'b', 'project_slug': PROJECTS[0][0]})
+    assert second.status_code == 409
+    assert second.json()['detail']['job_id'] == links.json()['job_id']
+    assert _urls_job(client).status_code == 409
+
+
+def test_a_double_clicked_paste_cannot_create_two_active_jobs(client, con, monkeypatch):
+    """The same read-then-insert window create_job has, closed the same way:
+    the index refuses the loser and the handler turns that into the 409."""
+    from ytdlweb import db as dbmod
+
+    real, seen = dbmod.active_job, []
+
+    def blind(c, user):
+        seen.append(user)
+        return None if len(seen) <= 2 else real(c, user)
+
+    monkeypatch.setattr(dbmod, 'active_job', blind)
+    first = _urls_job(client)
+    second = _urls_job(client)
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()['detail']['job_id'] == first.json()['job_id']
+    assert len(db.recent_jobs(con, USER)) == 1
+    # ...and the loser left no orphaned video rows behind
+    assert len(db.videos(con, first.json()['job_id'])) == 1
+
+
+def test_a_link_the_fleet_already_has_is_recorded_skipped_not_queued(client, con):
+    """REQ 6 reaches the paste box too. The row is kept and marked, so the
+    editor sees WHERE it already is rather than a link that silently did
+    nothing."""
+    db.ledger_add(con, VID, 't', 'c', '2025-ff4-nuclear', '2025/FF4/Nuclear',
+                  'other term', 'Youtube/other term/x.mp4')
+    r = _urls_job(client, f'https://youtu.be/{VID}\nhttps://youtu.be/{OTHER_VID}')
+    assert r.status_code == 200
+    assert r.json()['queued'] == 1
+    assert r.json()['skipped'] == [{'video_id': VID,
+                                    'duplicate_of': '2025/FF4/Nuclear/other term'}]
+
+    job_id = r.json()['job_id']
+    assert db.get_job(con, job_id)['dl_total'] == 1
+    dup = db.get_video(con, job_id, VID)
+    assert dup['dl_state'] == 'skipped' and dup['duplicate'] == 1 and dup['selected'] == 0
+    assert [v['video_id'] for v in db.pending_videos(con, job_id)] == [OTHER_VID]
+
+
+def test_a_paste_of_nothing_but_duplicates_is_refused_outright(client, con):
+    """Creating it would burn the editor's one active job on a job that
+    downloads nothing."""
+    db.ledger_add(con, VID, 't', 'c', PROJECTS[0][0], PROJECTS[0][1], 'reef',
+                  'Youtube/reef/x.mp4')
+    r = _urls_job(client, 'https://youtu.be/' + VID)
+    assert r.status_code == 409
+    assert 'already has' in r.json()['detail']['detail']
+    assert r.json()['detail']['duplicates'][0]['duplicate_of'] == \
+        f'{PROJECTS[0][1]}/reef'
+    assert db.active_job(con, USER) is None
+
+
+def test_a_url_job_can_be_cancelled_before_the_worker_claims_it(client, con):
+    """`queued` has no phase in flight, so cancel_now ends it -- and the editor
+    is not locked out of their next job (YTDL-1)."""
+    job_id = _urls_job(client).json()['job_id']
+    assert client.post(f'/api/jobs/{job_id}/cancel').json()['phase'] == 'cancelled'
+    assert db.active_job(con, USER) is None
 
 
 def test_ui_is_served(client):

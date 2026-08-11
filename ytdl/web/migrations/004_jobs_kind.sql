@@ -1,0 +1,12 @@
+-- v4: jobs.kind -- 'search' (a topic, expanded by Claude, reviewed, then
+-- downloaded) or 'urls' (the editor pasted YouTube links and wants exactly
+-- those, into the same tree, through the same download phase).
+--
+-- The column is what worker._phase_start branches on and what the SPA reads to
+-- know there is no manifest to review; without it a url job entering the phase
+-- machine at `queued` would be handed to Claude as a search topic.
+--
+-- Every row that already exists is a search, which is the default -- so this is
+-- a plain ADD COLUMN with no backfill, and SQLite fills the existing rows with
+-- it. (A NOT NULL default is legal here precisely because it is a constant.)
+ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'search';

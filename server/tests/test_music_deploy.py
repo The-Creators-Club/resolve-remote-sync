@@ -96,7 +96,10 @@ def test_ffmpeg_is_not_wired_through_the_env_vars_musicweb_trusts():
     FileNotFoundError partway through an upload. PATH is the honest wiring."""
     env = _service()["environment"]
     assert "FFMPEG" not in env and "FFPROBE" not in env
-    assert 'export PATH="/opt/ffmpeg:$PATH"' in RUN_SH.read_text(encoding="utf-8")
+    # ffmpeg stays FIRST on PATH: /opt/claude and /opt/deno joined the line for
+    # the ytdl mount, and neither may displace the pinned ffmpeg build.
+    assert ('export PATH="/opt/ffmpeg:/opt/claude:/opt/deno:$PATH"'
+            in RUN_SH.read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------
@@ -154,14 +157,15 @@ def test_compose_yaml_carries_the_same_music_mounts():
 # run.sh -- all three app roots on PYTHONPATH
 # --------------------------------------------------------------------------
 
-def test_pythonpath_carries_all_three_app_roots():
+def test_pythonpath_carries_every_app_root():
     """/music-app on PYTHONPATH is the entire difference between a mounted
-    music UI and one that reports `absent` with a single WARNING in the log."""
+    music UI and one that reports `absent` with a single WARNING in the log --
+    and /ytdl-app is the same statement about the YouTube downloader."""
     text = RUN_SH.read_text(encoding="utf-8")
     m = re.search(r"^export PYTHONPATH=(\S+)$", text, re.M)
     assert m, "run.sh no longer exports a single-line PYTHONPATH"
     roots = m.group(1).split(":")
-    assert roots == ["/app/src", "/broll-app", "/music-app"], roots
+    assert roots == ["/app/src", "/broll-app", "/music-app", "/ytdl-app"], roots
 
 
 def test_pythonpath_entries_are_all_actually_mounted():

@@ -3542,6 +3542,103 @@ def test_the_tray_accessors_pass_the_generators_answers_through(tmp_path):
     assert len(app._tray_icon.notifications) == 2
 
 
+class _FakeImporter:
+    """The YouTube importer's lifecycle, recorded. Same division of labour as
+    _FakeGenerator above: this file is about the WIRING, the state machine has
+    its own suite (test_youtube_import.py)."""
+
+    def __init__(self):
+        self.started = 0
+        self.stopped = 0
+        self.joined: list[float] = []
+
+    def start(self):
+        self.started += 1
+
+    def stop(self):
+        self.stopped += 1
+
+    def join(self, timeout=5.0):
+        self.joined.append(timeout)
+
+    def status(self):
+        return {"state": "importing", "pending": 3, "imported_session": 7}
+
+
+def test_the_youtube_importer_is_built_with_the_apps_own_seams(tmp_path):
+    app = _make_app(tmp_path)
+    importer = app.youtube_importer
+    assert importer is not None
+    assert importer.local_root == app.config["local_root"]
+
+    # LIVE reads, like the generator's: pausing and unplugging the drive both
+    # have to reach a thread that started before either happened.
+    assert importer._is_paused() is False
+    app._paused = True
+    assert importer._is_paused() is True
+    app._root_absent = True
+    assert importer._root_present() is False
+
+    # And the project it imports into is whatever the watcher last saw --
+    # None while Resolve is closed, unreachable, or on an ignored project.
+    assert importer._current_project() is None
+    app.watcher.last_resolve_project = "Energy Transition"
+    assert importer._current_project() == "Energy Transition"
+
+
+def test_an_importer_that_cannot_be_built_never_stops_the_companion(tmp_path, monkeypatch):
+    """Same rule as the proxy generator's: a convenience bolted onto the thing
+    that keeps the fleet's media in sync must never be the reason a companion
+    fails to construct."""
+    from ccsync_companion import youtube_import as youtube_import_mod
+
+    def _boom(*a, **kw):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(youtube_import_mod, "YoutubeImporter", _boom)
+    app = _make_app(tmp_path)
+    assert app.youtube_importer is None
+    # ...and the reporter's getter stays safe, which is what keeps the section
+    # absent rather than the report broken.
+    assert app.youtube_import_status() == {}
+
+
+def test_start_and_shutdown_carry_the_youtube_importer(tmp_path, _inert_resolve):
+    """It needs no lanes and no sign-in -- the clips are already on this disk
+    -- only a project open in Resolve."""
+    app = _quiet_app(tmp_path, sync_enabled=False)
+    fake = _FakeImporter()
+    app.youtube_importer = fake
+    app.start()
+    app.shutdown()
+    assert fake.started == 1
+    assert fake.stopped == 1
+    # Bounded, like the generator's: its worker may be inside a fusionscript
+    # call on a Resolve that has stopped answering.
+    assert fake.joined and fake.joined[0] <= 5.0
+
+
+def test_an_importer_that_will_not_start_or_stop_costs_a_log_line(
+        tmp_path, _inert_resolve, caplog):
+    class _Broken(_FakeImporter):
+        def start(self):
+            raise RuntimeError("boom")
+
+        def stop(self):
+            raise RuntimeError("boom")
+
+        def join(self, timeout=5.0):
+            raise RuntimeError("boom")
+
+    app = _quiet_app(tmp_path)
+    app.youtube_importer = _Broken()
+    with caplog.at_level(logging.ERROR, logger="ccsync.app"):
+        app.start()
+        assert app._watcher_thread is not None and app._watcher_thread.is_alive()
+        app.shutdown()  # must not raise
+    assert any("youtube importer" in r.getMessage() for r in caplog.records)
+
+
 def test_the_stale_sweep_reports_half_made_proxies_without_deleting_them(
         tmp_path, caplog):
     """Same refusal as the .ccsync-tmp sweep: nothing on the filesystem

@@ -96,6 +96,9 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # music tree is absent, an unopenable DATA_ROOT is degraded, and neither
     # gets a nav link.
     context.setdefault("music_mounted", getattr(request.app.state, "music_mounted", False))
+    # ...and for the YouTube downloader (ytdl.MOUNTED only). Same rule a third
+    # time: absent tree or unusable YTDL_DATA_ROOT means no nav link.
+    context.setdefault("ytdl_mounted", getattr(request.app.state, "ytdl_mounted", False))
     return templates.TemplateResponse(request=request, name=name, context=context)
 
 

@@ -1,0 +1,34 @@
+[project]
+name = "ytdl-web"
+version = "0.1.0"
+description = "YouTube downloader app -- AI-expanded search, review manifest, batch download into a project's Youtube folder (see ../../SPEC.md)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    # The actual downloader. Kept OUT of the test extra on purpose: everything
+    # that touches it is imported lazily inside ytdlweb/vendor, so the suite
+    # runs (and the app mounts) without it -- which is what stops a yt-dlp
+    # upgrade breaking the dashboard's boot.
+    "yt-dlp>=2026.6.9",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+# There is deliberately no `claude` dependency: Claude Code is a binary the
+# deploy provisions next to ffmpeg (DEPLOY.md), reached by subprocess, and its
+# absence degrades one phase rather than failing an import.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ytdlweb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

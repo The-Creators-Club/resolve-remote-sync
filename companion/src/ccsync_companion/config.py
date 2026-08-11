@@ -259,6 +259,34 @@ DEFAULTS: dict[str, Any] = {
     # "" = find it at Resolve's install path. BPG is not a separate binary;
     # this is Resolve.exe, launched with -pg.
     "bpg_path": "",
+    # -- YouTube auto-import (youtube_import.py) ---------------------------
+    # False = never import downloaded YouTube clips into Resolve. On by
+    # default: the dashboard's YouTube page downloads into
+    # <project>/Youtube/<term>/, sync delivers it, and without this the editor
+    # has to find the folder and drag it in -- which is the whole point of
+    # having asked for the clips from inside the system. Reads the tree and
+    # the media pool; never moves, renames or deletes a file.
+    "youtube_import_enabled": True,
+    # How often (seconds) the open project's Youtube folder is re-listed. A
+    # one-level listdir per term folder, not a tree walk, so this can be
+    # eager compared with proxy_scan_interval -- clips arrive while the editor
+    # is sitting there waiting for them.
+    "youtube_import_scan_interval": 60,
+    # Settle window: same idea and the same number as
+    # proxy_gen_min_age_seconds. A file rclone/Syncthing is still writing has
+    # a fresh mtime, and importing half a video makes an offline clip.
+    "youtube_import_min_age_seconds": 120,
+    # Files handed to Resolve in one call, per term folder, per cycle. This is
+    # what bounds how long the import holds _API_LOCK -- the watcher polls
+    # every 3 s behind it -- so a 300-clip drop arrives over several cycles
+    # instead of freezing the tray for one long one.
+    "youtube_import_batch_limit": 20,
+    # Attempts on one file before it is left alone for the rest of the
+    # session. In-process only, exactly like proxy_gen_max_failures: a refusal
+    # remembered on disk turns one bad evening into a file that never imports
+    # again. Resolve being closed or the project having changed is a STATE,
+    # not a failure, and never counts against this.
+    "youtube_import_max_failures": 3,
     # False = leave Resolve's LUT directory alone. On by default: syncing the
     # shared LUT library to <local_root>/Assets/Luts accomplishes nothing on
     # its own, because Resolve reads LUTs from its own fixed directory and
@@ -646,6 +674,30 @@ proxy_gen_min_age_seconds = 120
 # on wherever this machine already generates proxies and BPG is installed.
 # bpg_enabled = true
 # bpg_path = 'C:\\Program Files\\Blackmagic Design\\DaVinci Resolve\\Resolve.exe'
+
+# Import clips downloaded by the dashboard's YouTube page into the project you
+# have open, under Master > Youtube > <search term>. They arrive on this
+# machine in <project>\\Youtube\\<term>\\ like any other synced media; this just
+# saves you finding the folder and dragging it in. Only ever ADDS media pool
+# items -- nothing on disk is moved, renamed or deleted, and a clip already in
+# the pool (in any bin, even one you moved it to) is never imported twice.
+youtube_import_enabled = true
+# How often (seconds) that folder is re-listed while the project is open.
+youtube_import_scan_interval = 60
+# Skip a file whose mtime is newer than this (seconds), and one whose size is
+# still changing: it is still arriving, and half a video imports as an offline
+# clip. Same settle window as proxy_gen_min_age_seconds above.
+youtube_import_min_age_seconds = 120
+# The rest of the importer's knobs, commented out for the same reason as the
+# generator's above -- the values shown ARE the defaults.
+# How many files are handed to Resolve in one go, per term folder, per cycle.
+# The rest follow on the next one; this is what keeps a big drop from freezing
+# the tray while Resolve chews through it.
+# youtube_import_batch_limit = 20
+# Attempts on one file before it is left alone for the rest of the session.
+# Never remembered across restarts. Resolve being closed, or you having
+# switched project, is not an attempt.
+# youtube_import_max_failures = 3
 
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about, so

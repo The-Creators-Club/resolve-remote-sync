@@ -1,0 +1,121 @@
+-- YouTube downloader schema v1. Every statement is CREATE ... IF NOT EXISTS, so
+-- this file is applied to every database the app opens and additive changes (a
+-- new table, a new index) need no migration -- the same arrangement music/web
+-- uses. Anything NOT expressible that way (an ALTER) needs a file in
+-- migrations/ and a bump of ytdlweb.db.CURRENT_SCHEMA_VERSION.
+--
+-- This file deliberately does NOT set `PRAGMA user_version`. Because it is
+-- re-run against EXISTING databases, a stamp here marks an unmigrated database
+-- as current and the migration it needs is then skipped forever -- that is not
+-- hypothetical, it cost music/web a live index (see its schema.sql header).
+-- ytdlweb.db.ensure_schema() owns the version.
+PRAGMA journal_mode=WAL;
+
+-- One row per "editor typed a topic and hit SEARCH". The phase column is the
+-- whole state machine and every transition is a committed UPDATE, because the
+-- SPA polls this row 1500 ms apart and a phase held in memory would lie to it
+-- across a container restart.
+CREATE TABLE IF NOT EXISTS jobs (
+    id               INTEGER PRIMARY KEY,
+    created_by       TEXT NOT NULL,          -- dashboard username; owns the job
+    term             TEXT NOT NULL,          -- what the editor typed, verbatim
+    term_dir         TEXT NOT NULL,          -- filesystem-safe form of `term`
+    project_slug     TEXT NOT NULL,
+    project_label    TEXT NOT NULL,          -- rel path, e.g. '2026/FF5/Energy Transition'
+    quality          TEXT NOT NULL DEFAULT '1080p',
+    period           TEXT,                   -- hour|today|week|month|year, NULL = any
+    max_per_term     INTEGER NOT NULL DEFAULT 15,
+    -- queued > generating_terms > searching > enriching > filtering >
+    -- ready_for_review > downloading > done | failed | cancelled
+    phase            TEXT NOT NULL DEFAULT 'queued',
+    -- Carries a machine-readable prefix the SPA maps to ops hint text:
+    -- claude_auth: / claude_missing: / claude_timeout: / claude_output: .
+    error            TEXT,
+    terms_total      INTEGER DEFAULT 0,
+    terms_done       INTEGER DEFAULT 0,
+    candidates       INTEGER DEFAULT 0,
+    enrich_total     INTEGER DEFAULT 0,
+    enrich_done      INTEGER DEFAULT 0,
+    dl_total         INTEGER DEFAULT 0,
+    dl_done          INTEGER DEFAULT 0,
+    dl_failed        INTEGER DEFAULT 0,
+    cancel_requested INTEGER DEFAULT 0,      -- honoured between terms/videos
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+-- The user's own term plus everything Claude expanded it into. `english_gloss`
+-- is what makes the zh half of the manifest readable to an editor who does not
+-- read Chinese (REQ 5); it is required for lang='zh' and NULL for lang='en'.
+CREATE TABLE IF NOT EXISTS job_terms (
+    id            INTEGER PRIMARY KEY,
+    job_id        INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    term          TEXT NOT NULL,
+    lang          TEXT NOT NULL,             -- 'en' | 'zh'
+    english_gloss TEXT,                      -- literal translation; zh terms only
+    source        TEXT NOT NULL,             -- 'user' | 'claude'
+    searched      INTEGER DEFAULT 0,
+    hits          INTEGER DEFAULT 0,
+    UNIQUE(job_id, term)
+);
+
+CREATE TABLE IF NOT EXISTS job_videos (
+    id             INTEGER PRIMARY KEY,
+    job_id         INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    video_id       TEXT NOT NULL,
+    url            TEXT NOT NULL,
+    title          TEXT,
+    channel        TEXT,
+    duration       REAL,
+    upload_date    TEXT,
+    view_count     INTEGER,
+    -- yt-dlp's own thumbnail URL when enrichment got one; the client falls back
+    -- to i.ytimg.com/vi/<id>/mqdefault.jpg, which needs no metadata at all.
+    thumbnail      TEXT,
+    meta_error     TEXT,                     -- unavailable/private/geo-blocked
+    relevant       INTEGER DEFAULT 1,
+    relevance_note TEXT,
+    duplicate      INTEGER DEFAULT 0,
+    duplicate_of   TEXT,                     -- '<project label>/<term>' it lives under
+    selected       INTEGER DEFAULT 1,        -- auto-selected (REQ 4); forced 0 when duplicate
+    dl_state       TEXT DEFAULT 'none',      -- none|pending|downloading|done|failed|skipped
+    dl_error       TEXT,
+    filepath       TEXT,
+    UNIQUE(job_id, video_id)
+);
+
+-- Which term(s) surfaced which video. A join table rather than a JSON column on
+-- job_videos because the manifest's term chips filter the grid by it, and a row
+-- is written for EVERY term that returned the video -- including the second and
+-- third term to hit one already seen, which is precisely the attribution a
+-- "first writer wins" column would throw away.
+CREATE TABLE IF NOT EXISTS job_video_terms (
+    job_id   INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL,
+    term_id  INTEGER NOT NULL REFERENCES job_terms(id) ON DELETE CASCADE,
+    PRIMARY KEY (job_id, video_id, term_id)
+);
+
+-- The permanent cross-project dedupe ledger (REQ 6). It outlives the job that
+-- wrote it -- jobs are history, this is "the fleet already has this clip" --
+-- so it is keyed on the video id alone and never cascades.
+CREATE TABLE IF NOT EXISTS downloads (
+    video_id      TEXT PRIMARY KEY,
+    title         TEXT,
+    channel       TEXT,
+    project_slug  TEXT NOT NULL,
+    project_label TEXT NOT NULL,
+    term          TEXT NOT NULL,
+    rel_path      TEXT NOT NULL,             -- 'Youtube/<term_dir>/<filename>' under the project
+    job_id        INTEGER,
+    downloaded_by TEXT,
+    downloaded_at TEXT NOT NULL
+);
+
+-- The poll endpoint reads a job's terms and videos on every tick.
+CREATE INDEX IF NOT EXISTS idx_jobs_user     ON jobs(created_by, id DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_phase    ON jobs(phase, id);
+CREATE INDEX IF NOT EXISTS idx_terms_job     ON job_terms(job_id, id);
+CREATE INDEX IF NOT EXISTS idx_videos_job    ON job_videos(job_id, id);
+CREATE INDEX IF NOT EXISTS idx_videos_state  ON job_videos(job_id, dl_state);
+CREATE INDEX IF NOT EXISTS idx_jvt_term      ON job_video_terms(job_id, term_id);

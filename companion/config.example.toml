@@ -315,6 +315,32 @@ proxy_gen_min_age_seconds = 120
 # separate binary -- this exe is launched with -pg.
 # bpg_path = 'C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe'
 
+# Import clips downloaded by the dashboard's YouTube page into the project you
+# have open, under Master > Youtube > <search term>. They land on this machine
+# in <project>\Youtube\<term>\ like any other synced media, and the companion
+# files them into matching bins so you do not have to go looking for the
+# folder. Only ever ADDS media pool items: nothing on disk is moved, renamed
+# or deleted, and a clip already anywhere in the pool -- including a bin you
+# moved it to yourself -- is never imported a second time. Only the project
+# currently OPEN in Resolve is touched; anything that arrived for another
+# project is imported when you open that one.
+youtube_import_enabled = true
+# How often (seconds) that folder is re-listed while the project is open. A
+# listing of one directory per search term, not a tree walk.
+youtube_import_scan_interval = 60
+# Skip a file whose mtime is newer than this (seconds), or whose size changed
+# since the last look: it is still arriving, and half a video imports as an
+# offline clip. Same settle window as proxy_gen_min_age_seconds above.
+youtube_import_min_age_seconds = 120
+# How many files are handed to Resolve in one go, per term folder, per cycle;
+# the rest follow on the next cycle. This is what stops a large drop from
+# holding the Resolve scripting lock (and with it the tray) for a long time.
+# youtube_import_batch_limit = 20
+# Attempts on one file before it is left alone for the rest of the session.
+# Never remembered across restarts -- and Resolve being closed, or you having
+# switched to another project, is not an attempt.
+# youtube_import_max_failures = 3
+
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about --
 # so the companion adds the library to Resolve's own supported list

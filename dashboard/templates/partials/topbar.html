@@ -1,8 +1,8 @@
 {# THE topbar. base.html includes it, and /partials/topbar (ui.py) serves it
-   to the mounted SPAs (/broll, /music), whose app.js swaps it in over their
-   static fallback header -- one template, so the headers cannot drift apart.
-   `nav_current` ('broll' / 'music') marks the entry for the page the viewer
-   is standing on; the dashboard's own pages don't set it.
+   to the mounted SPAs (/broll, /music, /ytdl), whose app.js swaps it in over
+   their static fallback header -- one template, so the headers cannot drift
+   apart. `nav_current` ('broll' / 'music' / 'ytdl') marks the entry for the
+   page the viewer is standing on; the dashboard's own pages don't set it.
    data-dash-topbar is the marker the SPAs check before injecting: a fetch
    that came back as something else (the login page, an error body) must
    leave their fallback header alone. #}
@@ -27,6 +27,14 @@
      its URLs against the document. Shown only when the mount fully took --
      an absent or degraded music tree gets no link, same rule as b-roll. #}
   <a class="btn nav-link{{ ' nav-current' if nav_current == 'music' }}" href="/music/">[ MUSIC ]</a>
+{% endif %}
+{% if ytdl_mounted %}
+  <span class="dim">//</span>
+  {# Trailing slash for the same reason as /broll/ and /music/: the downloader
+     SPA resolves every URL against the document, so at /ytdl (no slash) its
+     api/ calls would hit the dashboard root. Shown only when the mount fully
+     took -- an absent or degraded ytdl tree gets no link. #}
+  <a class="btn nav-link{{ ' nav-current' if nav_current == 'ytdl' }}" href="/ytdl/">[ YOUTUBE ]</a>
 {% endif %}
 <span class="dim">//</span>
 <a class="btn nav-link" href="/download" title="download the latest CC Sync installer for this computer">[ INSTALLER ]</a>

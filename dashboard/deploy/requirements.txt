@@ -38,3 +38,15 @@ python-multipart>=0.0.9
 # Without this the app falls back to the full CLAP model and search 500s,
 # because torch is deliberately absent.
 onnxruntime>=1.17
+
+# --- YouTube downloader UI (mounted at /ytdl) -------------------------------
+# The only runtime dependency the ytdl app adds: `fastapi`/`uvicorn` above
+# cover the rest, ffmpeg comes from /opt/ffmpeg (PATH, see run.sh) and the
+# Claude CLI is a subprocess, not a package.
+#
+# Pin the FLOOR generously and expect to raise it: yt-dlp releases track
+# YouTube's extractor changes, and an old one does not degrade -- it fails
+# every download with a signature/format error. Bumping this file's hash is
+# also what makes run.sh re-run pip at all (it installs only when the hash
+# changes), so a version bump here IS the upgrade mechanism.
+yt-dlp>=2026.6.9

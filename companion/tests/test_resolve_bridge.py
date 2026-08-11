@@ -125,13 +125,70 @@ class FakeFolder:
     def GetName(self):
         return self._name
 
+    # -- mutation, for the import tests. Real bins grow.
+    def add_clip(self, clip):
+        self._clips.append(clip)
+        return clip
+
+    def add_subfolder(self, folder):
+        self._subfolders.append(folder)
+        return folder
+
 
 class FakeMediaPool:
+    """The media pool. Since the YouTube importer, it also creates bins and
+    imports media -- with the current-folder bookkeeping ImportMedia actually
+    obeys (it files into whatever SetCurrentFolder last named)."""
+
     def __init__(self, root_folder):
         self._root_folder = root_folder
+        self._current = root_folder
+        self.import_calls: list[list[str]] = []
+        self.added_bins: list[tuple[str, str]] = []
+        # Every SetCurrentFolder target, in order -- the restore-in-finally
+        # contract is an assertion about this list.
+        self.current_folder_names: list[str] = []
+        # None = import everything asked for; a list = answer verbatim (an
+        # empty one is Resolve refusing the whole batch).
+        self.import_result = None
+        self.raise_on_import = False
+        # AddSubFolder returning None/False rather than raising is a thing
+        # Resolve does on a locked project.
+        self.add_subfolder_result = "make it"
 
     def GetRootFolder(self):
         return self._root_folder
+
+    def GetCurrentFolder(self):
+        return self._current
+
+    def SetCurrentFolder(self, folder):
+        self._current = folder
+        self.current_folder_names.append(_folder_name(folder))
+        return True
+
+    def AddSubFolder(self, parent, name):
+        self.added_bins.append((_folder_name(parent), name))
+        if self.add_subfolder_result != "make it":
+            return self.add_subfolder_result
+        return parent.add_subfolder(FakeFolder(name=name))
+
+    def ImportMedia(self, paths):
+        self.import_calls.append(list(paths))
+        if self.raise_on_import:
+            raise RuntimeError("boom")
+        if self.import_result is not None:
+            return self.import_result
+        items = []
+        for path in paths:
+            item = FakeMediaPoolItem(path, name=os.path.basename(path))
+            self._current.add_clip(item)
+            items.append(item)
+        return items
+
+
+def _folder_name(folder) -> str:
+    return folder.GetName() if folder is not None else ""
 
 
 class FakeProject:
@@ -1019,3 +1076,324 @@ def test_poll_timeline_items_is_the_only_caller_that_arms_the_cache(monkeypatch)
     resolve_bridge.get_timeline_items()
 
     assert seen == [True, False]
+
+
+# -- the YouTube auto-import bin path ---------------------------------------
+#
+# _ensure_bin_path and import_files_to_bin_path (resolve_bridge.py, bottom) are
+# what youtube_import.py drives. Two properties carry the feature: a bin is
+# FOUND rather than re-created (a duplicate CJK bin every cycle is the failure
+# this was written around), and a clip already anywhere in the pool is never
+# imported twice.
+
+
+def _import_world(monkeypatch, project_name="Energy Transition", pool_clips=()):
+    """A connected Resolve whose media pool holds `pool_clips` at the root."""
+    root = FakeFolder(clips=[FakeMediaPoolItem(p, name=os.path.basename(p))
+                             for p in pool_clips], name="Master")
+    media_pool = FakeMediaPool(root)
+    project = FakeProject(media_pool=media_pool, name=project_name)
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(project)))
+    return media_pool, root
+
+
+def test_ensure_bin_path_creates_every_missing_segment():
+    root = FakeFolder(name="Master")
+    pool = FakeMediaPool(root)
+
+    folder = resolve_bridge._ensure_bin_path(pool, root, ["Youtube", "algal reef"])
+
+    assert folder.GetName() == "algal reef"
+    assert pool.added_bins == [("Master", "Youtube"), ("Youtube", "algal reef")]
+    # ...and the tree really has them, one inside the other.
+    youtube = root.GetSubFolderList()[0]
+    assert youtube.GetName() == "Youtube"
+    assert [f.GetName() for f in youtube.GetSubFolderList()] == ["algal reef"]
+
+
+def test_ensure_bin_path_reuses_the_bins_it_already_made():
+    root = FakeFolder(name="Master")
+    pool = FakeMediaPool(root)
+
+    first = resolve_bridge._ensure_bin_path(pool, root, ["Youtube", "algal reef"])
+    second = resolve_bridge._ensure_bin_path(pool, root, ["Youtube", "algal reef"])
+
+    assert second is first
+    assert len(pool.added_bins) == 2, "the second pass must create nothing"
+
+
+def test_ensure_bin_path_matches_direct_children_only():
+    """A "Youtube" bin the editor keeps somewhere else in the pool must not
+    capture the import -- music_worker.find_folder's whole-tree search is
+    right for one well-known bin and wrong here."""
+    stray = FakeFolder(name="Youtube")
+    interviews = FakeFolder(subfolders=[stray], name="Interviews")
+    root = FakeFolder(subfolders=[interviews], name="Master")
+    pool = FakeMediaPool(root)
+
+    folder = resolve_bridge._ensure_bin_path(pool, root, ["Youtube"])
+
+    assert folder is not stray
+    assert pool.added_bins == [("Master", "Youtube")]
+
+
+def test_ensure_bin_path_returns_none_when_resolve_refuses():
+    """AddSubFolder answers None/False on a locked project rather than
+    raising. The caller reads None as "not this cycle", never as a file
+    failure."""
+    root = FakeFolder(name="Master")
+    pool = FakeMediaPool(root)
+    pool.add_subfolder_result = None
+
+    assert resolve_bridge._ensure_bin_path(pool, root, ["Youtube"]) is None
+
+
+def test_ensure_bin_path_matches_a_decomposed_cjk_name():
+    """macOS hands out NFD filenames and Resolve stores what it is given, so
+    the on-disk term and the bin name can be different STRINGS that render
+    identically. Comparing them raw is a new duplicate bin every cycle."""
+    import unicodedata
+
+    composed = "\u85fb\u790e\u516c\u5712"                             # 藻礁公園
+    decomposed = unicodedata.normalize("NFD", "\u30ac\u30fc\u30c9")   # NFD ガード
+    root = FakeFolder(name="Master")
+    pool = FakeMediaPool(root)
+
+    resolve_bridge._ensure_bin_path(pool, root, [composed])
+    resolve_bridge._ensure_bin_path(
+        pool, root, [unicodedata.normalize("NFD", composed)])
+    # ...and the same in the other direction: a bin made from an NFD name is
+    # found again by its NFC spelling.
+    resolve_bridge._ensure_bin_path(pool, root, [decomposed])
+    resolve_bridge._ensure_bin_path(
+        pool, root, [unicodedata.normalize("NFC", decomposed)])
+
+    assert len(pool.added_bins) == 2, "one bin per visible name, not one per spelling"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("algal reef", "algal reef"),
+    ("  algal reef  ", "algal reef"),
+    ("algal reef.", "algal reef"),
+    ("algal/reef", "algal-reef"),
+    ("algal\\reef", "algal-reef"),
+    ("...", resolve_bridge.FALLBACK_BIN_NAME),
+    ("", resolve_bridge.FALLBACK_BIN_NAME),
+])
+def test_bin_names_are_sanitised(raw, expected):
+    assert resolve_bridge._safe_bin_name(raw) == expected
+
+
+def test_import_files_to_bin_path_imports_into_the_term_bin(monkeypatch):
+    pool, root = _import_world(monkeypatch)
+    path = "P:\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+
+    result = resolve_bridge.import_files_to_bin_path(
+        [path], ("Youtube", "algal reef"),
+        expected_project_name="Energy Transition",
+    )
+
+    assert result["ok"] is True
+    assert result["imported"] == [path]
+    assert result["skipped_existing"] == []
+    assert result["failed"] == []
+    assert pool.import_calls == [[path]]
+    # Filed into the bin the segments name, not wherever the pool happened
+    # to be pointing.
+    youtube = root.GetSubFolderList()[0]
+    term_bin = youtube.GetSubFolderList()[0]
+    assert [c.GetName() for c in term_bin.GetClipList()] == ["a.mp4"]
+
+
+def test_import_files_are_deduped_against_the_whole_pool(monkeypatch):
+    """The editor dragged the clip into a bin of their own. It is still in the
+    pool, so importing it again would give them two of it (the
+    music_worker.existing_item rule)."""
+    already = "P:\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+    fresh = "P:\\Projects\\2026\\Youtube\\algal reef\\b.mp4"
+    root = FakeFolder(name="Master")
+    root.add_subfolder(FakeFolder(clips=[FakeMediaPoolItem(already)],
+                                  name="My Cutdowns"))
+    pool = FakeMediaPool(root)
+    project = FakeProject(media_pool=pool, name="Energy Transition")
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(project)))
+
+    result = resolve_bridge.import_files_to_bin_path(
+        [already, fresh], ("Youtube", "algal reef"))
+
+    assert result["skipped_existing"] == [already]
+    assert result["imported"] == [fresh]
+    assert pool.import_calls == [[fresh]]
+
+
+def test_import_files_folds_a_second_spelling_into_the_dedupe(monkeypatch):
+    """One file, two spellings. A clip the editor hand-imported through the
+    P: drive sits in the pool CANONICALLY (`P:\\Projects\\...`); the importer
+    hands this function local_root paths (ImportMedia cannot resolve "P:\\"
+    on a Mac). _norm_path never folds those together on its own, so without
+    the caller's alias fn the first scan of a Youtube folder that predates
+    the feature would duplicate every clip already filed by hand."""
+    from ccsync_companion import canon
+
+    canonical = "P:\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+    local = "C:\\Creators_Club\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+    pool, _root = _import_world(monkeypatch, pool_clips=[canonical])
+
+    result = resolve_bridge.import_files_to_bin_path(
+        [local], ("Youtube", "algal reef"),
+        path_alias_fn=lambda p: canon.canonical_to_local(
+            p, "C:\\Creators_Club", "P:\\"),
+    )
+
+    assert result["ok"] is True
+    assert result["skipped_existing"] == [local]
+    assert result["imported"] == []
+    assert pool.import_calls == []
+    assert pool.added_bins == [], "a fully-deduped import must not leave a bin"
+
+
+def test_import_files_survives_a_raising_alias_fn(monkeypatch):
+    """The alias is an OPTIMISATION (one more spelling in the dedupe set) and
+    must never be able to take the import down with it."""
+    fresh = "P:\\Projects\\2026\\Youtube\\algal reef\\b.mp4"
+    # One unrelated clip already in the pool, so the alias fn really runs.
+    pool, _root = _import_world(monkeypatch,
+                                pool_clips=["P:\\Assets\\Stills\\logo.mp4"])
+
+    def boom(_path):
+        raise RuntimeError("translation failed")
+
+    result = resolve_bridge.import_files_to_bin_path(
+        [fresh], ("Youtube", "algal reef"), path_alias_fn=boom)
+
+    assert result["ok"] is True
+    assert result["imported"] == [fresh]
+
+
+def test_import_files_makes_no_bin_when_everything_is_already_there(monkeypatch):
+    already = "P:\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+    pool, _root = _import_world(monkeypatch, pool_clips=[already])
+
+    result = resolve_bridge.import_files_to_bin_path([already], ("Youtube", "algal reef"))
+
+    assert result["ok"] is True
+    assert result["skipped_existing"] == [already]
+    assert pool.added_bins == [], "a no-op import must not leave an empty bin behind"
+
+
+def test_import_files_restores_the_current_bin(monkeypatch):
+    pool, root = _import_world(monkeypatch)
+    editors_bin = root.add_subfolder(FakeFolder(name="Interviews"))
+    pool.SetCurrentFolder(editors_bin)
+    pool.current_folder_names.clear()
+
+    resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+
+    assert pool.GetCurrentFolder() is editors_bin
+    assert pool.current_folder_names[-1] == "Interviews"
+
+
+def test_import_files_restores_the_current_bin_even_when_import_raises(monkeypatch):
+    """The editor's media pool selection is theirs. A background job that
+    parks it in a bin they never opened -- because ImportMedia threw -- is a
+    side effect of something they never asked to see."""
+    pool, root = _import_world(monkeypatch)
+    editors_bin = root.add_subfolder(FakeFolder(name="Interviews"))
+    pool.SetCurrentFolder(editors_bin)
+    pool.raise_on_import = True
+
+    result = resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+
+    assert result["ok"] is False
+    assert pool.GetCurrentFolder() is editors_bin
+    # A raise blames no file: nothing is proven wrong with the clip, and the
+    # caller's three-strikes counter must not be spent on the bridge.
+    assert result["failed"] == []
+
+
+def test_import_files_refuses_when_the_project_changed(monkeypatch):
+    """The scan and the import are seconds apart on a background thread, and
+    an editor can close one project and open another in between."""
+    pool, _root = _import_world(monkeypatch, project_name="Something Else")
+
+    result = resolve_bridge.import_files_to_bin_path(
+        ["P:\\a.mp4"], ("Youtube", "term"),
+        expected_project_name="Energy Transition",
+    )
+
+    assert result["ok"] is False
+    assert result["message"] == "project changed"
+    assert pool.import_calls == []
+    assert result["failed"] == []
+
+
+def test_import_files_reports_a_refused_import_as_failed(monkeypatch):
+    """ImportMedia answering [] is Resolve refusing the file (an unreadable
+    container, a codec it will not take). Reported, never raised."""
+    pool, _root = _import_world(monkeypatch)
+    pool.import_result = []
+
+    result = resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+
+    assert result["ok"] is False
+    assert result["failed"] == ["P:\\a.mp4"]
+    assert result["imported"] == []
+
+
+def test_import_files_verifies_the_bin_before_calling_anything_failed(monkeypatch):
+    """ImportMedia's return is not the whole truth -- it has been seen to
+    answer with fewer items than it filed. Re-read the bin first, or a clip
+    that IS in the project gets counted as a failure three times and then
+    left alone for the session."""
+    pool, _root = _import_world(monkeypatch)
+
+    def _quiet_import(paths):
+        pool.import_calls.append(list(paths))
+        for path in paths:
+            pool.GetCurrentFolder().add_clip(
+                FakeMediaPoolItem(path, name=os.path.basename(path)))
+        return []          # ...and says nothing about it
+
+    pool.ImportMedia = _quiet_import
+
+    result = resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+
+    assert result["ok"] is True
+    assert result["imported"] == ["P:\\a.mp4"]
+    assert result["failed"] == []
+
+
+def test_import_files_with_no_paths_never_touches_resolve(monkeypatch):
+    calls: list[int] = []
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: calls.append(1))
+
+    result = resolve_bridge.import_files_to_bin_path([], ("Youtube", "term"))
+
+    assert result == {"ok": True, "message": "nothing to import",
+                      "imported": [], "skipped_existing": [], "failed": []}
+    assert calls == []
+
+
+def test_import_files_explains_a_closed_resolve(monkeypatch, resolve_process):
+    resolve_process(False)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+
+    result = resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+
+    assert result["ok"] is False
+    assert result["message"] == resolve_bridge.NOT_RUNNING_MESSAGE
+    assert result["failed"] == []
+
+
+def test_import_files_defers_while_the_tray_menu_is_open(monkeypatch):
+    waits: list[int] = []
+    monkeypatch.setattr(resolve_bridge.ui_state, "wait_while_menu_open",
+                        lambda *a, **kw: waits.append(1))
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(None)))
+
+    resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
+
+    assert waits == [1]

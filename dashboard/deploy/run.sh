@@ -82,18 +82,20 @@ umask 077
 # The package runs straight off the read-only mount; templates/ and static/
 # resolve relative to /app/src exactly as they did under the old editable
 # install (which left a path entry pointing at the same directory).
-# /broll-app is the repo's broll/web tree and /music-app is its music/web
-# tree, both mounted read-only. Both are on the path unconditionally: the
-# mounts are gated (DASH_BROLL_ENABLED, and for music by whether the installer
-# shipped the tree at all) and ccsync_dashboard.broll / .music each guard the
-# import, so a path entry pointing at a volume that is not mounted costs
-# nothing. All three roots must be here -- an empty PYTHONPATH entry is how
-# /music came to report "absent" behind a green healthcheck.
+# /broll-app is the repo's broll/web tree, /music-app is its music/web tree and
+# /ytdl-app is its ytdl/web tree, all mounted read-only. All are on the path
+# unconditionally: the mounts are gated (DASH_BROLL_ENABLED, and for music and
+# ytdl by whether the installer shipped the tree at all) and
+# ccsync_dashboard.broll / .music / .ytdl each guard the import, so a path entry
+# pointing at a volume that is not mounted costs nothing. Every root must be
+# here -- an empty PYTHONPATH entry is how /music came to report "absent"
+# behind a green healthcheck.
 #
-# The two trees are top-level packages `app` (b-roll) and `musicweb` (music).
-# They are deliberately NOT both called `app`: two top-level packages of the
-# same name on one PYTHONPATH collide in sys.modules and one wins silently.
-export PYTHONPATH=/app/src:/broll-app:/music-app
+# The three trees are top-level packages `app` (b-roll), `musicweb` (music) and
+# `ytdlweb` (ytdl). They are deliberately NOT all called `app`: two top-level
+# packages of the same name on one PYTHONPATH collide in sys.modules and one
+# wins silently.
+export PYTHONPATH=/app/src:/broll-app:/music-app:/ytdl-app
 
 # Static ffmpeg/ffprobe, mounted read-only from the host at /opt/ffmpeg by
 # compose and put there by server/install_dashboard_app.py. This image is a
@@ -106,7 +108,22 @@ export PYTHONPATH=/app/src:/broll-app:/music-app
 # here") into a FileNotFoundError partway through an upload. shutil.which()
 # tells the truth about an empty mount. Prepended, so an image that ever does
 # ship its own ffmpeg does not silently take precedence over the pinned build.
-export PATH="/opt/ffmpeg:$PATH"
+#
+# /opt/claude and /opt/deno ride along on the same reasoning, for /ytdl:
+# the Claude Code CLI that expands one topic into EN+ZH search terms and
+# relevance-filters the results, and the static deno the updated yt-dlp needs
+# as a JS runtime for YouTube's challenges (without it the high-quality
+# formats fail). Both are provisioned onto the host by
+# server/install_dashboard_app.py and mounted read-only, exactly like ffmpeg,
+# and an empty mount is a supported state: ytdlweb reports "claude: missing"
+# on api/health rather than hanging.
+#
+# NOTHING sets HOME here on purpose. The container's uid 3000 has no passwd
+# entry, so `claude` needs a writable HOME -- but exporting one process-wide
+# would change the resolution of ~ for pip, uvicorn and every library in the
+# dashboard for the sake of one subprocess. ytdlweb.claude_cli sets
+# HOME/CLAUDE_CONFIG_DIR (from YTDL_CLAUDE_HOME) in the subprocess env alone.
+export PATH="/opt/ffmpeg:/opt/claude:/opt/deno:$PATH"
 
 exec "$VENV/bin/python" -m uvicorn --factory ccsync_dashboard.app:create_app \
     --host 0.0.0.0 --port "${DASH_PORT:-8480}" --workers 1

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CC SYNC // YOUTUBE</title>
+<!-- Document-relative on purpose: mounted at /ytdl/ a leading slash would
+     resolve against the dashboard's origin root. See tests/test_mounted_prefix.py. -->
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="app-header">
+  <!-- Fallback header for the standalone dev loop only. Mounted under the
+       dashboard, app.js fetches the REAL dashboard topbar from
+       ../partials/topbar and swaps it in here, so this page carries the same
+       header and nav as every other dashboard page. -->
+  <div class="topbar" id="dash-topbar">
+    <span class="brand">CREATORS CLUB <span class="dim">//</span> YOUTUBE</span>
+    <!-- Root-relative on purpose, unlike every asset URL here: mounted under
+         /ytdl/ this is the way back out to the dashboard at the origin root.
+         Standalone (dev) it harmlessly reloads this page. -->
+    <a class="btn nav-link" href="/" title="back to the CC Sync dashboard (project sync status)">[ DASHBOARD ]</a>
+  </div>
+  <div class="rule">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</div>
+
+  <div class="header-controls">
+    <div class="search-bar">
+      <input id="q" type="search" autocomplete="off"
+             placeholder="one topic&hellip; algal reef controversy taiwan, offshore wind protest, drone show">
+      <select id="project" title="Where the clips land: &lt;project&gt;\Youtube\&lt;term&gt;"></select>
+      <select id="quality" title="1080p is the highest YouTube serves as AVC — anything above re-encodes on the NAS">
+        <option value="1080p">1080p</option>
+        <option value="720p">720p</option>
+        <option value="1440p">1440p</option>
+        <option value="2160p">2160p</option>
+        <option value="best">best</option>
+      </select>
+      <select id="period" title="YouTube's own upload-date filter">
+        <option value="">any date</option>
+        <option value="today">today</option>
+        <option value="week">this week</option>
+        <option value="month">this month</option>
+        <option value="year">this year</option>
+      </select>
+    </div>
+    <button id="go" class="primary-btn">SEARCH</button>
+    <span id="health" class="rstatus" title="server-side Claude Code + yt-dlp"></span>
+  </div>
+  <div id="warn" class="warnline hidden"></div>
+</header>
+
+<main id="main">
+
+  <!-- progress: the pipeline running (REQ 3) -->
+  <section id="progress" class="panel hidden">
+    <div class="prow">
+      <span id="phase" class="phase"></span>
+      <span id="ticker" class="muted"></span>
+      <button id="cancel" class="text-btn">[ CANCEL ]</button>
+    </div>
+    <div class="bar"><div id="barfill" class="barfill"></div></div>
+  </section>
+
+  <!-- the manifest: terms searched (REQ 5) + the review grid (REQ 4) -->
+  <section id="review" class="hidden">
+    <div class="panel">
+      <h2>Terms searched</h2>
+      <div id="termchips" class="chips"></div>
+      <div class="muted termhint">Chinese terms show a literal English gloss. Click a term to show only what it found.</div>
+    </div>
+
+    <div class="resulthead">
+      <span id="counts"></span>
+      <button id="showfiltered" class="text-btn hidden">[ SHOW FILTERED OUT ]</button>
+      <span class="grow"></span>
+      <button id="selall" class="text-btn">[ SELECT ALL ]</button>
+      <button id="selnone" class="text-btn">[ SELECT NONE ]</button>
+      <button id="download" class="primary-btn">DOWNLOAD</button>
+    </div>
+
+    <div id="grid" class="grid"></div>
+    <div id="gridfoot" class="gridfoot muted"></div>
+  </section>
+
+  <!-- downloads in flight -->
+  <section id="downloads" class="panel hidden">
+    <div class="prow">
+      <span id="dlphase" class="phase"></span>
+      <span id="dlticker" class="muted"></span>
+      <button id="cancel2" class="text-btn">[ CANCEL ]</button>
+    </div>
+    <div class="bar"><div id="dlfill" class="barfill"></div></div>
+    <div id="dllist" class="dllist"></div>
+  </section>
+
+  <section id="recent" class="panel">
+    <h2>Recent searches</h2>
+    <div id="recentlist" class="recentlist muted"></div>
+  </section>
+
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -43,6 +43,18 @@
 #   /mnt/tank/apps/ccsync-dashboard/ffmpeg  (static ffmpeg + ffprobe, put
 #     there by the install script -- NOTHING BUILDS THIS IMAGE and the
 #     container is unprivileged, so it cannot install them itself)
+#   /mnt/tank/apps/ccsync-dashboard/ytdl-web  (this repo's ytdl/web tree;
+#     root:root 755, mounted :ro. SHIPPED by the install script -- an empty
+#     dir here means /ytdl is silently absent, exactly like broll-web)
+#   /mnt/tank/apps/ccsync-dashboard/ytdl-data  (ytdl.db + the worker's
+#     scratch; owned 3000:3000 mode 770 -- the ONLY ytdl path the container
+#     writes that is not inside Projects/)
+#   /mnt/tank/apps/ccsync-dashboard/claude-home  (the one-time `claude /login`
+#     credentials; 3000:3000 mode 700 -- it holds a live OAuth credential)
+#   /mnt/tank/apps/ccsync-dashboard/claude-bin,
+#   /mnt/tank/apps/ccsync-dashboard/deno  (the Claude Code CLI and a static
+#     deno for yt-dlp's JS challenges, root:root 755, put there by the install
+#     script for the same reason as ffmpeg: nothing builds this image)
 #   "/mnt/tank/TheCreatorsPool/Creators_Club/Assets/Music"  (the music library
 #     itself, P:\Assets\Music to an editor: broll:editors 2770 setgid like
 #     Projects/, mounted rw because queued ingest writes accepted uploads
@@ -105,6 +117,28 @@ services:
       MUSIC_SHARE_ROOT: "/music-share"
       MUSIC_PROXIES_DIR: "/music-proxies"
       MUSIC_TEXT_ENCODER_DIR: "/music-encoder"
+      # --- YouTube downloader UI, mounted in-process at /ytdl --------------
+      # No flag and no token, for the same reason as music: nothing under
+      # /ytdl is exempt from login_gate, so the session IS the credential and
+      # shipping the tree is the switch.
+      #
+      # YTDL_DATA_ROOT is the only writable one (ytdl.db + scratch). The other
+      # three are what the sub-app reaches THROUGH:
+      #   YTDL_PROJECTS_ROOT  where finished clips land, as
+      #                       <label>/Youtube/<term>/ -- the same /projects
+      #                       tree the dashboard provisions and sync
+      #                       distributes, not a private copy.
+      #   YTDL_DASH_DB        the dashboard's own SQLite, opened READ-ONLY
+      #                       (file:...?mode=ro) for the caller's ticked
+      #                       projects. Same container, same uid, WAL.
+      #   YTDL_CLAUDE_HOME    where the one-time `claude /login` credentials
+      #                       live. Read by ytdlweb.claude_cli, which sets
+      #                       HOME/CLAUDE_CONFIG_DIR in the SUBPROCESS env
+      #                       only -- run.sh deliberately exports no HOME.
+      YTDL_DATA_ROOT: "/ytdl-data"
+      YTDL_PROJECTS_ROOT: "/projects"
+      YTDL_DASH_DB: "/data/dashboard.db"
+      YTDL_CLAUDE_HOME: "/claude-home"
       # Published companion builds (upgrade channel). Optional: defaults to
       # a "packages" dir next to DASH_DB_PATH, i.e. /data/packages -- which
       # is already persistent. Only set this to move them elsewhere.
@@ -200,6 +234,33 @@ services:
       # onto the host by install_dashboard_app.py and mounted in. An empty dir
       # here is a supported state: ingest answers 503 and says why.
       - /mnt/tank/apps/ccsync-dashboard/ffmpeg:/opt/ffmpeg:ro
+      # This repo's ytdl/web tree (ytdlweb/, static/, schema.sql), read-only,
+      # on PYTHONPATH via run.sh -- same posture as /app, /broll-app and
+      # /music-app. Shipped there by install_dashboard_app.py (YTDL_WEB_SRC
+      # overrides the source); if it is empty, /ytdl is simply absent. The
+      # package inside is `ytdlweb`, not `app` and not `ytdl`.
+      - /mnt/tank/apps/ccsync-dashboard/ytdl-web:/ytdl-app:ro
+      # The one WRITABLE ytdl path: ytdl.db (jobs, manifests and the permanent
+      # cross-project dedupe ledger) and the worker's scratch. Owned 3000:3000
+      # mode 770, like /data and /music-data and for the same C-2 reason --
+      # group 3000, NOT editors. The finished CLIPS do not live here: they are
+      # written into /projects, which sync then distributes.
+      - /mnt/tank/apps/ccsync-dashboard/ytdl-data:/ytdl-data:rw
+      # Where the one-time `claude /login` puts its OAuth credentials, so they
+      # survive a redeploy (once per NAS). rw and 3000:3000 mode 700 -- it
+      # holds a live credential for the user's own Claude account, and the
+      # container's uid is the only thing that may read it. Until the login is
+      # done, ytdl jobs fail with an explicit "not logged in" banner.
+      - /mnt/tank/apps/ccsync-dashboard/claude-home:/claude-home:rw
+      # The Claude Code CLI and a static deno, provisioned onto the host by
+      # install_dashboard_app.py exactly like ffmpeg and mounted read-only:
+      # nothing builds this image and the container is unprivileged, so it can
+      # install neither for itself. deno is not optional decoration -- the
+      # updated yt-dlp asks for a JS runtime to answer YouTube's challenges,
+      # and without one the high-quality formats fail. run.sh puts both on
+      # PATH; empty dirs are a supported state (ytdlweb's api/health says so).
+      - /mnt/tank/apps/ccsync-dashboard/claude-bin:/opt/claude:ro
+      - /mnt/tank/apps/ccsync-dashboard/deno:/opt/deno:ro
     restart: unless-stopped
     # Without this, `restart: unless-stopped` only covers a process that
     # EXITS. A collector thread that died before entering its guarded loop

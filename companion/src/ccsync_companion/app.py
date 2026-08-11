@@ -41,6 +41,7 @@ from . import shutdown_guard as shutdown_guard_mod
 from . import stills as stills_mod
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
+from . import youtube_import as youtube_import_mod
 from .fixer import IgnoreTracker, _dest_dir_is_contained
 from .identity import IdentityManager
 from .manifest import ManifestCache
@@ -660,6 +661,34 @@ class CompanionApp:
         except Exception:
             log.exception("failed to build the proxy generator")
 
+        # YouTube auto-import (youtube_import.py): files the clips the
+        # dashboard's YouTube page downloaded into <project>\Youtube\<term>\
+        # into the open Resolve project's Master/Youtube/<term> bins. Its own
+        # try for the same reason as the block above -- a convenience bolted
+        # onto the thing that keeps the fleet's media in sync must never be
+        # the reason a companion fails to construct.
+        self.youtube_importer: Any = None
+        try:
+            self.youtube_importer = youtube_import_mod.YoutubeImporter(
+                cfg,
+                root_present_fn=self.root_is_present,
+                paused_fn=self.is_paused,
+                # Deferred: self.watcher is constructed below. Same lambda as
+                # the reporter's, and the same meaning -- None when Resolve is
+                # closed, unreachable, or sitting on an ignored project.
+                get_resolve_project=lambda: getattr(self.watcher, "last_resolve_project", None),
+                # The dashboard's authoritative project -> tree-path mapping.
+                # Absent in unmanaged mode, where the importer falls back to
+                # the same token-overlap match the popup fixer uses.
+                get_project_roots=(
+                    self.selection_client.project_roots_result
+                    if self.selection_client is not None else None
+                ),
+                import_fn=resolve_bridge.import_files_to_bin_path,
+            )
+        except Exception:
+            log.exception("failed to build the youtube importer")
+
         # Self-upgrade channel (upgrade.py): availability is fed by the
         # reporter's response callback below and by sign_in()'s verify
         # response; the tray surfaces it ("Update now") and apply() swaps
@@ -713,6 +742,10 @@ class CompanionApp:
             # zero-I/O read (proxy_gen.coverage()), so it rides every tick
             # rather than only the heavy ones.
             get_proxy_coverage=self.proxy_coverage,
+            # Same shape, same rules: "the clips you asked for are in your
+            # bins" is a handful of counters, and the dashboard's YouTube page
+            # wants to show it beside the download it started.
+            get_youtube_import=self.youtube_import_status,
         )
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
@@ -2944,6 +2977,14 @@ class CompanionApp:
                 self.proxy_generator.start()
         except Exception:
             log.exception("failed to start the proxy generator")
+        # Next to it, and behind its own try for the same reason: it needs no
+        # lanes and no sign-in (the clips are already on this disk), only a
+        # project open in Resolve.
+        try:
+            if self.youtube_importer is not None:
+                self.youtube_importer.start()
+        except Exception:
+            log.exception("failed to start the youtube importer")
         self._start_shutdown_guard()
         self._start_keep_awake()
         self._start_lut_link()
@@ -3053,6 +3094,15 @@ class CompanionApp:
         if self.proxy_generator is None:
             return {}
         return self.proxy_generator.coverage()
+
+    def youtube_import_status(self) -> dict[str, Any]:
+        """The reporter's YouTube auto-import section. NULL-SAFE and cached
+        for the same reasons as proxy_coverage() above: the importer's
+        constructor is allowed to fail without taking the companion with it,
+        and status() is a lock-guarded read that does no I/O."""
+        if self.youtube_importer is None:
+            return {}
+        return self.youtube_importer.status()
 
     def generate_proxies_now(self) -> None:
         """Tray action: scan now and encode without waiting for idle."""
@@ -3330,6 +3380,13 @@ class CompanionApp:
                 self.proxy_generator.stop()
         except Exception:
             log.exception("failed to stop the proxy generator")
+        # With it: the importer holds the Resolve scripting lock in bursts,
+        # and a self-upgrade must not swap the exe out from under one.
+        try:
+            if self.youtube_importer is not None:
+                self.youtube_importer.stop()
+        except Exception:
+            log.exception("failed to stop the youtube importer")
         self._stop_lanes()
         try:
             self.reporter.stop()
@@ -3368,6 +3425,14 @@ class CompanionApp:
                 self.proxy_generator.join(timeout=5.0)
         except Exception:
             log.exception("shutdown: failed to join the proxy generator")
+        # Bounded for the same reason again: its worker may be inside a
+        # fusionscript ImportMedia call on a Resolve that has stopped
+        # answering, and nothing in teardown may wait on that indefinitely.
+        try:
+            if self.youtube_importer is not None:
+                self.youtube_importer.join(timeout=5.0)
+        except Exception:
+            log.exception("shutdown: failed to join the youtube importer")
 
         # LAST, after every thread that can ask for a window has been told to
         # stop and joined: on macOS this is the main thread's Tk pump, so

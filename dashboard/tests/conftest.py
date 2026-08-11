@@ -35,3 +35,23 @@ def _music_data_root_off_the_real_library(tmp_path_factory):
     os.environ["DATA_ROOT"] = str(root)
     os.environ.setdefault("MUSIC_ROOT", str(root / "library"))
     yield root
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ytdl_data_root_off_the_checkout(tmp_path_factory):
+    """The same guard for the ytdl mount, which is one degree more dangerous.
+
+    mount_ytdl runs on every create_app (no flag, see ytdl.py) and its dev
+    fallback puts this repo's ytdl/web on sys.path -- so on a machine with
+    yt-dlp installed, every create_app in this suite would open the REAL
+    ytdl.db AND start the pipeline worker THREAD, which downloads video into
+    the Projects tree. YTDL_WORKER=0 is the sub-app's own test guard for that
+    thread; the data root is redirected for the same reason music's is.
+    ytdlweb.config reads both at IMPORT time, so this has to be set before the
+    first create_app: session-scoped and autouse.
+    """
+    root = tmp_path_factory.mktemp("ytdldata")
+    os.environ["YTDL_DATA_ROOT"] = str(root)
+    os.environ.setdefault("YTDL_PROJECTS_ROOT", str(root / "projects"))
+    os.environ.setdefault("YTDL_WORKER", "0")
+    yield root

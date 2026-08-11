@@ -20,6 +20,14 @@ Steps (each idempotent, one line printed per action):
                              group 3000, NOT 3001/editors.
        <host-root>/broll-web -- this repo's broll/web tree (shipped in step
                              2b); root:root 755, mounted :ro like app/.
+       <host-root>/ytdl-web, /claude-bin, /deno -- the ytdl code tree and the
+                             two binaries it shells out to; root:root 755,
+                             mounted :ro (steps 2f).
+       <host-root>/ytdl-data -- ytdl.db + the pipeline worker's scratch;
+                             3000:3000 mode 770, like data/ and music-data.
+       <host-root>/claude-home -- where the one-time `claude /login` keeps its
+                             OAuth credentials; 3000:3000 mode 700, because
+                             that is a live credential.
      ...and, when the b-roll UI is enabled, the b-roll DATA root -- which is
      the shared archive itself, /mnt/tank/.../Assets/B-roll Archive -- as
      broll:editors 2770 (setgid), the same posture setup_tree.py gives
@@ -78,6 +86,20 @@ Steps (each idempotent, one line printed per action):
      download alone outlived the SSH timeout; --ffmpeg-fetch remote is the old
      "let the NAS curl it" path, for a workstation with no route out.
      Non-fatal and idempotent; --no-ffmpeg skips it.
+  2f. Ship the ytdl web/ tree into <host-root>/ytdl-web (mounted read-only at
+     /ytdl-app, on PYTHONPATH), source YTDL_WEB_SRC, default ytdl/web in this
+     repo. WARN-AND-SKIP if missing, exactly like music: there is no
+     DASH_YTDL_ENABLED asserting the operator wanted it, so shipping the tree
+     IS the switch and a host without it hides the nav link. No data push goes
+     with it -- ytdl.db is created by the container in /ytdl-data.
+     Then provision the Claude CLI and a static deno into <host-root>/claude-bin
+     and <host-root>/deno (mounted read-only at /opt/claude and /opt/deno, on
+     PATH via run.sh), the same fetch-here-verify-push-install route as ffmpeg.
+     Neither has a pinned URL in this repo: set YTDL_CLAUDE_URL /
+     YTDL_CLAUDE_SHA256 and YTDL_DENO_URL / YTDL_DENO_SHA256 (or point
+     YTDL_CLAUDE_FILE / YTDL_DENO_FILE at a local download). Every failure here
+     -- including an unset URL -- is a NOTE, never a failed deploy: /ytdl then
+     reports the CLI missing instead of hanging. --no-ytdl-bins skips the step.
   3. If the app is not yet installed: POST /api/v2.0/app with
        {"custom_app": true, "app_name": "ccsync-dashboard",
         "custom_compose_config": {...}}   (compose dict mirrors
@@ -122,7 +144,14 @@ the tarball on this machine and pushes it over the LAN; "remote" makes the NAS
 download it), MUSIC_FFMPEG_FILE (a tarball already on this machine -- skips the
 download entirely, and is still checked against the pinned hash),
 MUSIC_FFMPEG_CACHE (where locally-fetched tarballs are kept between deploys,
-default <repo>/.cache/ffmpeg).
+default <repo>/.cache/ffmpeg),
+YTDL_WEB_SRC (the ytdl web/ tree to ship, default ytdl/web in this repo),
+YTDL_CLAUDE_URL / YTDL_CLAUDE_SHA256 and YTDL_DENO_URL / YTDL_DENO_SHA256 (the
+Claude CLI and static deno builds to install for /ytdl -- NO pinned defaults,
+and an unset URL skips that binary with a NOTE), YTDL_CLAUDE_FILE /
+YTDL_DENO_FILE (a download already on this machine, skipping the fetch),
+YTDL_BINARY_CACHE (where those downloads are kept between deploys, default
+<repo>/.cache/ytdl).
 
 Compose-level settings are baked in at CREATE time: after changing any of
 them, re-run with --recreate, otherwise the running app keeps the old ones.
@@ -282,6 +311,51 @@ FFMPEG_STAGED_NAME = "ffmpeg.tar.xz"
 # posture as the b-roll archive, and for the same reason.
 DEFAULT_MUSIC_LIBRARY_ROOT = DEFAULT_CC_ROOT + "/Assets/Music"
 
+# --------------------------------------------------------------------------
+# The YouTube downloader app (ytdl/web), mounted in-process at /ytdl
+# --------------------------------------------------------------------------
+# Deployed exactly the way music/web is, and warn-and-skip for the same reason:
+# there is no DASH_YTDL_ENABLED, so nothing on the command line asserts that the
+# operator wanted the feature. Shipping the tree IS the switch, and a host that
+# never received it reports the mount "absent" and hides the nav link.
+DEFAULT_YTDL_WEB_DIR = Path(__file__).resolve().parents[1] / "ytdl" / "web"
+# Same exclusions as broll/web: tests/, git metadata and a local venv have no
+# business on the NAS. Unlike music/web there is no data/ to leave behind --
+# ytdl's database is created in the container's own writable /ytdl-data.
+YTDL_EXCLUDE_DIRS = BROLL_EXCLUDE_DIRS
+
+# The two binaries the ytdl app shells out to, provisioned onto the host the
+# same way ffmpeg is and for the same reason: NOTHING BUILDS THIS IMAGE (compose
+# runs a stock pinned python:3.12.7-slim) and the container is unprivileged, so
+# it can install neither for itself.
+#
+# The difference from ffmpeg is that neither has a pinned URL here. There is no
+# stable, versioned, checksummable public tarball for the Claude CLI that this
+# repo can name today, and the deno release the container wants depends on the
+# yt-dlp version pinned in requirements.txt. So the URLs are OPERATOR-SUPPLIED
+# (YTDL_CLAUDE_URL / YTDL_DENO_URL) and an unset one is a NOTE, not a failure:
+# a fleet dashboard must not stop deploying because an optional download host
+# was not configured yet. The feature degrades exactly as designed -- ytdlweb's
+# api/health reports the CLI missing and the SPA says so before a job is
+# submitted.
+YTDL_BINARY_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "ytdl"
+# The staged name on the NAS is fixed rather than derived from the URL: it lands
+# in a fresh mktemp dir that nothing else writes to. The EXTENSION still comes
+# from the URL, because it is what says whether this is a tarball, a zip or a
+# bare binary.
+YTDL_BINARIES = (
+    # (name, <host-root> dir, container mount, binary, url env, sha env,
+    #  file env, what breaks without it)
+    ("claude", "claude-bin", "/opt/claude", "claude",
+     "YTDL_CLAUDE_URL", "YTDL_CLAUDE_SHA256", "YTDL_CLAUDE_FILE",
+     "every /ytdl job fails immediately with the 'claude CLI missing' banner "
+     "(term generation and relevance filtering both run through it)"),
+    ("deno", "deno", "/opt/deno", "deno",
+     "YTDL_DENO_URL", "YTDL_DENO_SHA256", "YTDL_DENO_FILE",
+     "yt-dlp has no JS runtime for YouTube's challenges, so the high-quality "
+     "formats fail and downloads fall back or error"),
+)
+
 # Minimum ingest-token strength, mirroring
 # ccsync_dashboard.broll.check_ingest_token -- the dashboard refuses to START
 # with a weaker one, and finding that out from a crash-looping container is a
@@ -389,6 +463,23 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     "MUSIC_SHARE_ROOT": "/music-share",
                     "MUSIC_PROXIES_DIR": "/music-proxies",
                     "MUSIC_TEXT_ENCODER_DIR": "/music-encoder",
+                    # YouTube downloader UI, mounted in-process at /ytdl. No
+                    # flag and no token, for music's reason: nothing under
+                    # /ytdl is exempt from login_gate, so shipping the tree is
+                    # the switch.
+                    #
+                    # YTDL_DATA_ROOT is the only writable one. The others are
+                    # what it reaches through: the SHARED Projects tree that
+                    # finished clips land in (sync distributes them from
+                    # there), the dashboard's own SQLite opened READ-ONLY for
+                    # the caller's ticked projects, and the home directory the
+                    # one-time `claude /login` writes its credentials into --
+                    # which ytdlweb.claude_cli puts in the SUBPROCESS env
+                    # only, because run.sh deliberately exports no HOME.
+                    "YTDL_DATA_ROOT": "/ytdl-data",
+                    "YTDL_PROJECTS_ROOT": "/projects",
+                    "YTDL_DASH_DB": "/data/dashboard.db",
+                    "YTDL_CLAUDE_HOME": "/claude-home",
                     # DASH_PACKAGES_DIR intentionally unset: defaults to a
                     # "packages" dir next to DASH_DB_PATH (/data/packages),
                     # which is already the persistent volume.
@@ -461,6 +552,24 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # script and mounted in; run.sh puts them on PATH. An empty
                     # dir here is fine -- ingest answers 503 and says so.
                     f"{host_root}/ffmpeg:/opt/ffmpeg:ro",
+                    # ytdl: code read-only (the /app posture again), data rw.
+                    f"{host_root}/ytdl-web:/ytdl-app:ro",
+                    # WRITABLE: ytdl.db -- jobs, manifests and the permanent
+                    # cross-project dedupe ledger. The finished CLIPS are not
+                    # here; they are written into /projects above, which is
+                    # what makes sync distribute them to the editors.
+                    f"{host_root}/ytdl-data:/ytdl-data:rw",
+                    # The one-time `claude /login` credentials, so they survive
+                    # a redeploy (once per NAS). 3000:3000 mode 700: a live
+                    # OAuth credential for the user's own Claude account.
+                    f"{host_root}/claude-home:/claude-home:rw",
+                    # The Claude CLI and a static deno, provisioned onto the
+                    # host like ffmpeg and mounted read-only for the same
+                    # reason -- no image build, unprivileged container. deno
+                    # is what answers YouTube's JS challenges for yt-dlp;
+                    # without it the high-quality formats fail.
+                    f"{host_root}/claude-bin:/opt/claude:ro",
+                    f"{host_root}/deno:/opt/deno:ro",
                 ],
                 "restart": "unless-stopped",
                 "healthcheck": healthcheck_config(port),
@@ -1107,6 +1216,276 @@ def provision_ffmpeg(root: str, fetch: str, dry_run: bool) -> None:
               f"and ffprobe exist in {target_dir}.", file=sys.stderr)
 
 
+def ytdl_web_source() -> Path:
+    """The ytdl web/ tree to ship -- ytdl/web in this repo, unless
+    YTDL_WEB_SRC points somewhere else."""
+    raw = os.environ.get("YTDL_WEB_SRC", "").strip()
+    return Path(raw) if raw else DEFAULT_YTDL_WEB_DIR
+
+
+def binary_cache_path(url: str) -> Path:
+    """Where a locally-fetched ytdl binary archive is kept between deploys.
+
+    Namespaced by a digest of the URL for ffmpeg_cache_path's reason: two
+    releases of the same tool are named the same thing, and a cache hit on
+    somebody else's bytes is the one failure a cache must not have.
+    """
+    raw = os.environ.get("YTDL_BINARY_CACHE", "").strip()
+    cache = Path(raw) if raw else YTDL_BINARY_CACHE_DIR
+    name = posixpath.basename(urllib.parse.urlparse(url).path) or "download"
+    return cache / f"{hashlib.sha256(url.encode()).hexdigest()[:12]}-{name}"
+
+
+def fetch_pinned_file(url: str, sha256: str, file_override: str,
+                      label: str) -> tuple[Path | None, str]:
+    """Get one archive/binary onto THIS machine. Returns (path, error).
+
+    fetch_ffmpeg_tarball's shape, for the operator-supplied downloads: three
+    sources in order -- a file the operator already has, the local cache, then
+    the network -- with the digest checked at every one of them INCLUDING the
+    cache, whose whole risk is serving bytes that were right once.
+
+    The digest is optional here in a way it is not for ffmpeg (there is no
+    pinned URL to pin a hash to), and that is said out loud at the call site.
+    A download that fails a supplied pin is DELETED rather than cached: keeping
+    it would make every later deploy fail the same way for a reason that reads
+    like tampering, long after the truncated transfer that caused it.
+    """
+    if file_override:
+        path = Path(file_override)
+        if not path.is_file():
+            return None, f"{path} is not a file"
+        if sha256 and sha256_file(path) != sha256:
+            return None, f"{path} does not match the supplied sha256"
+        print(f"using the {label} download at {path} "
+              f"({human_bytes(path.stat().st_size)})")
+        return path, ""
+
+    cached = binary_cache_path(url)
+    if cached.is_file():
+        if not sha256 or sha256_file(cached) == sha256:
+            print(f"using the cached {label} download at {cached} "
+                  f"({human_bytes(cached.stat().st_size)})")
+            return cached, ""
+        print(f"NOTE: the cached {label} download at {cached} no longer matches "
+              f"the supplied sha256 -- re-downloading", file=sys.stderr)
+
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    part = cached.with_name(cached.name + ".part")
+    print(f"fetching {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=FFMPEG_FETCH_TIMEOUT) as resp:
+            with part.open("wb") as out:
+                shutil.copyfileobj(resp, out, 1 << 20)
+    except Exception as exc:       # urllib raises URLError, socket.timeout, OSError...
+        part.unlink(missing_ok=True)
+        return None, f"{type(exc).__name__}: {exc}"
+    if sha256 and sha256_file(part) != sha256:
+        part.unlink(missing_ok=True)
+        return None, ("the download does not match the supplied sha256 "
+                      "-- nothing was sent to the NAS")
+    part.replace(cached)
+    print(f"fetched {human_bytes(cached.stat().st_size)} to {cached}")
+    return cached, ""
+
+
+def build_binary_install_script(target_dir: str, binary: str, staged: str,
+                                staging: str, sha256: str) -> str:
+    """Install one ytdl binary on the NAS from a file ALREADY STAGED there.
+
+    build_ffmpeg_unpack_script's guarantees, generalised over the three shapes
+    an upstream release comes in:
+      - idempotent (an already-installed binary is left alone, so a redeploy
+        does not re-download it);
+      - the digest is checked BEFORE anything is unpacked or created, so a
+        transfer that arrived wrong leaves no trace on the host at all;
+      - the candidate is EXECUTED (`--version`) before it is moved into place:
+        a build for the wrong architecture must not become the `claude` or
+        `deno` the app finds on PATH;
+      - nothing is deleted -- a previous install is only ever replaced by `mv`.
+
+    The archive kind is decided from the staged FILENAME, not sniffed: .zip
+    (deno's release format), .tar.gz/.tgz/.tar.xz, or anything else, which is
+    taken to be the bare binary itself. `unzip` is not guaranteed on a TrueNAS
+    host, so the zip branch falls back to python3's zipfile -- which is, and
+    which the middleware itself runs on.
+    """
+    d = shell_quote(target_dir)
+    tb = shell_quote(staged)
+    b = shell_quote(binary)
+    lower = staged.lower()
+    # Same explicit `if !` as the ffmpeg unpack script rather than a bare
+    # pipeline under `set -e`: a pipeline's exit status is its LAST command, so
+    # `check | filter` silently reports the filter's success.
+    verify = (
+        f"if ! printf '%s  %s\\n' {shell_quote(sha256)} {tb} | sha256sum -c - "
+        f">/dev/null 2>&1; then "
+        f'echo "the staged {binary} download does not match the digest that was '
+        f'sent -- the transfer was corrupted; nothing installed" >&2; exit 7; fi; '
+    ) if sha256 else ""
+    if lower.endswith(".zip"):
+        extract = (f'if command -v unzip >/dev/null 2>&1; then '
+                   f'unzip -oq {tb} -d "$t"; else '
+                   f'python3 -c "import sys,zipfile; '
+                   f'zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" '
+                   f'{tb} "$t"; fi; ')
+    elif lower.endswith((".tar.gz", ".tgz")):
+        extract = f'tar -xzf {tb} -C "$t"; '
+    elif lower.endswith((".tar.xz", ".txz")):
+        extract = f'tar -xJf {tb} -C "$t"; '
+    else:
+        # A bare binary: copy it into the scratch dir under the name we are
+        # about to look for, so the find below has one job in every branch.
+        extract = f'cp {tb} "$t"/{b}; '
+    return (
+        f"set -e; "
+        f"if [ -x {d}/{b} ]; then "
+        f'echo "{binary} already provisioned at {target_dir}"; exit 0; fi; '
+        f"{verify}"
+        f"mkdir -p {d}; "
+        f"t=$(mktemp -d /tmp/ccsync-ytdlbin.XXXXXX); "
+        f'trap "rm -rf $t" EXIT; '
+        f"{extract}"
+        f'f=$(find "$t" -type f -name {b} | head -n 1); '
+        f'if [ -z "$f" ]; then '
+        f'echo "the {binary} download holds no {binary} executable" >&2; exit 1; fi; '
+        f'install -o root -g root -m 755 "$f" {d}/{b}.new; '
+        f"if ! {d}/{b}.new --version >/dev/null 2>&1; then "
+        f'echo "the downloaded {binary} does not run on this host" >&2; '
+        f"rm -f {d}/{b}.new; exit 1; fi; "
+        f"mv {d}/{b}.new {d}/{b}; "
+        f"chmod 755 {d}; "
+        f"rm -rf {shell_quote(staging)}; "
+        f'echo "{binary} provisioned: {target_dir}"'
+    )
+
+
+def binary_present(root: str, host_dir: str, binary: str, dry_run: bool) -> bool:
+    """Does the NAS already have this binary?
+
+    The remote script is idempotent on its own; this exists so a routine
+    redeploy of an already-provisioned host does not fetch and push the archive
+    only to be told "already provisioned". A failed or unreadable probe counts
+    as absent -- re-provisioning is idempotent and cheap.
+    """
+    if dry_run:
+        run_ssh(f"true  # [dry-run] would check whether {binary} is already on the host",
+                dry_run=True)
+        return False
+    d = shell_quote(f"{root}/{host_dir}")
+    rc, out, _err = run_ssh(f'if [ -x {d}/{shell_quote(binary)} ]; '
+                            f'then echo yes; else echo no; fi')
+    return rc == 0 and out.strip().splitlines()[-1:] == ["yes"]
+
+
+def install_binary_over_lan(root: str, host_dir: str, binary: str,
+                            local_file: Path | None, url: str, sha256: str,
+                            dry_run: bool) -> tuple[bool, str]:
+    """Push one fetched binary/archive to the NAS and install it. (ok, error).
+
+    The same staged-then-verified-then-swapped route as everything else this
+    script ships: SFTP into a fresh mktemp dir, prove the staged bytes are the
+    bytes that were sent, and only then let root touch anything.
+    """
+    target_dir = f"{root}/{host_dir}"
+    staging = make_staging_dir(dry_run, f"ccsync-{binary}-upload")
+    # The name on the NAS keeps the URL's extension, because that is what
+    # build_binary_install_script reads to decide how to unpack it.
+    name = posixpath.basename(urllib.parse.urlparse(url).path) or binary
+    staged = posixpath.join(staging, name)
+    if dry_run:
+        print(f"[dry-run] would SFTP the {binary} download to {staged} on the NAS "
+              f"and install it into {target_dir}")
+    else:
+        expected_bytes = local_file.stat().st_size
+        host, user, pw = truenas_conn_params()
+        client = ssh_client(host, user, pw)
+        try:
+            sftp = client.open_sftp()
+            sftp.put(str(local_file), staged)
+            sftp.close()
+        finally:
+            client.close()
+        rc, out, err = run_ssh(f"wc -c < {shell_quote(staged)}")
+        staged_bytes = int(out.strip()) if rc == 0 and out.strip().isdigit() else -1
+        if staged_bytes != expected_bytes:
+            return False, (f"the staged {binary} download does not match what was "
+                           f"sent ({staged_bytes} bytes on the NAS vs "
+                           f"{expected_bytes} locally; staging left at {staging}): "
+                           f"{err.strip()[:200]}")
+        print(f"pushed {human_bytes(staged_bytes)} to staging {staging}")
+
+    script = build_binary_install_script(target_dir, binary, staged, staging, sha256)
+    rc, out, err = run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(script),
+                           dry_run=dry_run, timeout=300)
+    if rc != 0:
+        return False, err.strip()[:300] or f"the install exited {rc}"
+    if not dry_run:
+        print(out.strip().splitlines()[-1] if out.strip()
+              else f"{binary} provisioned: {target_dir}")
+    return True, ""
+
+
+def provision_ytdl_binaries(root: str, dry_run: bool) -> None:
+    """Step 2f. NON-FATAL throughout, like provision_ffmpeg -- and one step
+    softer: an UNSET url is a NOTE too, not just a failed download.
+
+    Neither binary has a pinned URL in this repo (see YTDL_BINARIES), so on a
+    host where the operator has not configured them yet this step does nothing
+    and says what that costs. The alternative -- refusing to deploy -- would
+    take the fleet dashboard down over an optional feature's optional download,
+    which is the opposite of every other rule here.
+    """
+    for (name, host_dir, mount, binary, url_env, sha_env, file_env,
+         consequence) in YTDL_BINARIES:
+        target_dir = f"{root}/{host_dir}"
+        url = os.environ.get(url_env, "").strip()
+        sha = os.environ.get(sha_env, "").strip()
+        local_override = os.environ.get(file_env, "").strip()
+        if not url and not local_override:
+            print(f"NOTE: {url_env} is not set -- skipping {name}. Everything else "
+                  f"deploys; until a {name} binary exists in {target_dir} (mounted "
+                  f"{mount}), {consequence}.", file=sys.stderr)
+            continue
+        if not sha:
+            # Said out loud rather than checked silently against nothing: with
+            # no digest, the 40 MB SFTP that follows is covered by exactly
+            # nothing, and that is a choice the operator is making.
+            print(f"NOTE: {sha_env} is not set -- the {name} download will NOT be "
+                  f"checksummed.", file=sys.stderr)
+
+        if binary_present(root, host_dir, binary, dry_run):
+            print(f"{name} already provisioned at {target_dir}")
+            continue
+
+        local_file = None
+        if dry_run:
+            print(f"[dry-run] would fetch {url or local_override} and push it to "
+                  f"the NAS over the LAN, installing {binary} into {target_dir}")
+        else:
+            local_file, err = fetch_pinned_file(url, sha, local_override, name)
+            if local_file is None:
+                print(f"NOTE: {name} was NOT provisioned -- the download could not "
+                      f"be fetched here ({err}). Everything else deploys; until it "
+                      f"exists in {target_dir}, {consequence}.\n"
+                      f"  Retry, or point {file_env} at a file already on this "
+                      f"machine.", file=sys.stderr)
+                continue
+            # With no supplied hash there is still one worth sending: the digest
+            # of the file actually fetched. It cannot speak for the download's
+            # provenance, but it does prove the NAS received what this machine
+            # holds -- the half of the problem the SFTP introduces.
+            if not sha:
+                sha = sha256_file(local_file)
+
+        ok_, err = install_binary_over_lan(root, host_dir, binary, local_file,
+                                           url or local_override, sha, dry_run)
+        if not ok_:
+            print(f"NOTE: {name} was NOT provisioned ({err}). Everything else "
+                  f"deploys; until it exists in {target_dir}, {consequence}.",
+                  file=sys.stderr)
+
+
 def weak_ingest_token(token: str) -> str | None:
     """None if `token` may guard the b-roll ingest write path, else the reason.
 
@@ -1379,6 +1758,11 @@ def main():
                     help="skip provisioning static ffmpeg/ffprobe onto the host. "
                          "Only /music's queued ingest uses them, and it answers 503 "
                          "with a readable message when they are missing.")
+    ap.add_argument("--no-ytdl-bins", action="store_true",
+                    help="skip provisioning the Claude CLI and deno onto the host "
+                         "for /ytdl. They are skipped anyway when YTDL_CLAUDE_URL / "
+                         "YTDL_DENO_URL are unset -- this is for re-running a deploy "
+                         "without re-probing the NAS for them.")
     ap.add_argument("--ffmpeg-fetch", choices=FFMPEG_FETCH_MODES,
                     default=os.environ.get("MUSIC_FFMPEG_FETCH",
                                            DEFAULT_FFMPEG_FETCH).strip()
@@ -1465,6 +1849,19 @@ def main():
               f"WITHOUT the /music UI; the dashboard will report the mount "
               f"'absent' and hide the nav link. music/web is part of THIS repo, "
               f"so a missing one means a partial checkout; MUSIC_WEB_SRC points "
+              f"at a web/ tree elsewhere.", file=sys.stderr)
+    # ytdl pre-flight: the music rule, verbatim. Nothing on this command line
+    # asserts that the operator wants the YouTube downloader -- shipping the
+    # tree IS the switch -- so a checkout without it deploys a dashboard whose
+    # /ytdl mount reports "absent" and whose nav link is simply not there.
+    ytdl_src = ytdl_web_source()
+    ship_ytdl = (ytdl_src / "ytdlweb" / "main.py").is_file()
+    if not ship_ytdl:
+        print(f"NOTE: no ytdl app at {ytdl_src} "
+              f"(looked for {ytdl_src / 'ytdlweb' / 'main.py'}) -- deploying "
+              f"WITHOUT the /ytdl UI; the dashboard will report the mount "
+              f"'absent' and hide the nav link. ytdl/web is part of THIS repo, "
+              f"so a missing one means a partial checkout; YTDL_WEB_SRC points "
               f"at a web/ tree elsewhere.", file=sys.stderr)
     music_data_mode = (args.music_data or "").strip().lower() or MUSIC_DATA_PUSH_DEFAULT
     music_forced, music_data_err = parse_music_data_push(music_data_mode)
@@ -1565,7 +1962,34 @@ def main():
             # in particular the live music.db is never touched from here.
             f"mkdir -p {shell_quote(root + '/music-data')} && "
             f"chown 3000:3000 {shell_quote(root + '/music-data')} && "
-            f"chmod 770 {shell_quote(root + '/music-data')}"
+            f"chmod 770 {shell_quote(root + '/music-data')} && "
+            # ytdl CODE and the two binary dirs: the /app posture again --
+            # root-owned, world-readable, mounted :ro. The binaries in
+            # particular are EXECUTED by the container and must not be
+            # replaceable from inside it.
+            f"mkdir -p {shell_quote(root + '/ytdl-web')} "
+            f"{shell_quote(root + '/claude-bin')} "
+            f"{shell_quote(root + '/deno')} && "
+            f"chown root:root {shell_quote(root + '/ytdl-web')} "
+            f"{shell_quote(root + '/claude-bin')} "
+            f"{shell_quote(root + '/deno')} && "
+            f"chmod 755 {shell_quote(root + '/ytdl-web')} "
+            f"{shell_quote(root + '/claude-bin')} "
+            f"{shell_quote(root + '/deno')} && "
+            # ytdl DATA root: ytdl.db and the worker's scratch, so data/'s
+            # posture -- 3000:3000 mode 770, group 3000 and NOT 3001/editors,
+            # for the same C-2 reason. Create-only; an existing one (with a
+            # live job ledger in it) is left alone.
+            f"mkdir -p {shell_quote(root + '/ytdl-data')} && "
+            f"chown 3000:3000 {shell_quote(root + '/ytdl-data')} && "
+            f"chmod 770 {shell_quote(root + '/ytdl-data')} && "
+            # The Claude home: 700, tighter than everything else here, because
+            # it holds a live OAuth credential for the user's own Claude
+            # account after the one-time `claude /login`. Same posture as the
+            # venv volume, and for the same class of reason.
+            f"mkdir -p {shell_quote(root + '/claude-home')} && "
+            f"chown 3000:3000 {shell_quote(root + '/claude-home')} && "
+            f"chmod 700 {shell_quote(root + '/claude-home')}"
         ),
         dry_run=args.dry_run,
     )
@@ -1574,7 +1998,8 @@ def main():
         return 1
     print(f"host dirs ready: {root}/app, {root}/venv, {root}/data, {root}/broll-web, "
           f"{root}/music-web, {root}/music-data, {root}/music-encoder, "
-          f"{root}/music-proxies, {root}/ffmpeg")
+          f"{root}/music-proxies, {root}/ffmpeg, {root}/ytdl-web, {root}/ytdl-data, "
+          f"{root}/claude-home, {root}/claude-bin, {root}/deno")
 
     # The b-roll DATA root: the one the compose file actually bind-mounts at
     # /broll-data. It is NOT under <host-root> -- it is the shared archive
@@ -1660,8 +2085,17 @@ def main():
     # ffmpeg/ffprobe for /music's queued ingest. NON-FATAL by design, and by
     # default fetched HERE and pushed over the LAN rather than downloaded by the
     # NAS -- see provision_ffmpeg.
-    if ship_music and not args.no_ffmpeg:
+    # ...and for /ytdl, which re-encodes to the edit-ready H.264/AAC/CFR
+    # profile with the same binaries off the same mount. Either mount being
+    # shipped is reason enough to provision them; the step is idempotent.
+    if (ship_music or ship_ytdl) and not args.no_ffmpeg:
         provision_ffmpeg(root, args.ffmpeg_fetch, args.dry_run)
+
+    # The Claude CLI and deno for /ytdl. Non-fatal in every direction,
+    # including an unset URL: see provision_ytdl_binaries. ffmpeg is not
+    # repeated here -- the step above covers both mounts.
+    if ship_ytdl and not args.no_ytdl_bins:
+        provision_ytdl_binaries(root, args.dry_run)
 
     # A pre-C-2 deployment has an editor-writable venv sitting inside data/.
     # Move it aside (never delete: no-deletion rule) so run.sh rebuilds a
@@ -1752,6 +2186,18 @@ def main():
                                     excludes=MUSIC_EXCLUDE_DIRS,
                                     staging_slug=f"ccsync-music{component}-upload"):
                     return 1
+
+    # Step 2f: ship the ytdl web/ tree into ytdl-web, the same staged-verify-
+    # swap route as broll-web and music-web -- the container mounts it
+    # read-only at /ytdl-app and imports ytdlweb.main off PYTHONPATH, so an
+    # empty dir there is a silently absent feature behind a green healthcheck.
+    # There is no data push to go with it: ytdl.db is created by the container
+    # in its own writable /ytdl-data on first request.
+    if ship_ytdl:
+        if not install_tree(root, "ytdl-web", ytdl_src, args.dry_run,
+                            excludes=YTDL_EXCLUDE_DIRS,
+                            staging_slug="ccsync-ytdlweb-upload"):
+            return 1
 
     # Step 3: create or redeploy the custom app.
     if args.recreate and app_installed(args.dry_run):

@@ -11,9 +11,10 @@ running yet, may be restarted, etc.
 Forked near-verbatim from the b-roll platform's standalone companion (env
 bootstrap + never-raise connect + _norm_path). That companion has since been
 absorbed into this one and retired (2026-08-10), so this file is now the only
-copy — its last unique function, perform_insert, is at the bottom. Everything
-between `_norm_path` and there is this app's own: timeline-item enumeration +
-ReplaceClip-based relinking for the watcher and fixer.
+copy — its last unique function, perform_insert, is near the bottom (the
+YouTube auto-import pair below it is newer). Everything between `_norm_path`
+and there is this app's own: timeline-item enumeration + ReplaceClip-based
+relinking for the watcher and fixer.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import platform
 import sys
 import threading
 import time
+import unicodedata
 from typing import Any, Optional
 
 from . import canon, resolve_prefs, ui_state
@@ -1019,3 +1021,319 @@ def _perform_insert_locked(local_path: str, in_frame: int, out_frame: int) -> di
         # action (AUDIT_2 UX-16, same finding as _SCRIPTING_ERROR_MESSAGE's).
         log.warning("resolve: b-roll insert failed: %s", exc, exc_info=True)
         return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
+
+
+# -- YouTube auto-import (Master/Youtube/<term>) ---------------------------
+#
+# Driven by youtube_import.py, which watches <project>/Youtube/<term>/ on disk
+# and hands the settled files here. In-process, like the b-roll insert above
+# and unlike music_worker's child process: the companion already walks the
+# media pool on background threads (get_media_pool_items), and a child would
+# have to pay for a full pool walk PER FILE.
+#
+# Nothing in here raises. The importer treats a refusal as a state to retry
+# next cycle, never as a per-file failure -- see youtube_import's gate.
+
+# What the media pool's root folder is called in Resolve's own UI. Only used
+# in log lines: _ensure_bin_path is handed the root folder itself.
+MASTER_BIN_NAME = "Master"
+
+# A bin name Resolve will accept for a term folder that sanitises down to
+# nothing (a directory called "..." or "   " -- rare, but the alternative is
+# AddSubFolder("") and a bin nobody can find).
+FALLBACK_BIN_NAME = "Untitled"
+
+
+def _safe_bin_name(segment: Any) -> str:
+    """A term folder's name, made safe to hand to AddSubFolder.
+
+    Three narrow rules, each for something a downloaded term folder really
+    carries: `/` and `\\` become `-` (they would read as a bin PATH inside a
+    single name), edge whitespace goes (a folder named "algal reef " and one
+    named "algal reef" must not become two bins), and trailing dots go with
+    it -- Windows silently strips them from directory names, so the folder on
+    disk and the name we would compare against differ by one character.
+    """
+    text = str(segment or "").replace("/", "-").replace("\\", "-")
+    # rstrip(" .") rather than rstrip(".") -- "term . " has to lose both, and
+    # in either order.
+    text = text.strip().rstrip(" .").strip()
+    return text or FALLBACK_BIN_NAME
+
+
+def _nfc(name: Any) -> str:
+    """A bin/folder name folded to Unicode NFC for comparison ONLY.
+
+    macOS hands out filenames in NFD (decomposed) and Resolve stores whatever
+    it was given, so "藻礁" from a macOS listdir and "藻礁" read back off a bin
+    Resolve made are different STRINGS that render identically. Comparing them
+    raw means no existing bin is ever recognised, so every cycle adds another
+    bin with the same visible name and re-imports into it -- which is exactly
+    the CJK-term failure this whole helper exists to avoid.
+    """
+    try:
+        return unicodedata.normalize("NFC", str(name or ""))
+    except Exception:
+        return str(name or "")
+
+
+def _ensure_bin_path(media_pool, root_folder, segments) -> Any:
+    """Walk/create `root_folder/<seg>/<seg>/...` and return the last folder.
+
+    `root_folder` IS "Master" -- the media pool root, which Resolve creates
+    and which nothing here may add or rename.
+
+    Each segment is matched against the parent's DIRECT children only
+    (`GetSubFolderList()`), never recursively: music_worker.find_folder
+    searches the whole tree by name, which is right for one well-known bin
+    ("Music") and wrong here -- an editor with their own "Youtube" bin three
+    levels down would otherwise capture every import.
+
+    Returns None when Resolve refuses to make a bin (AddSubFolder returns
+    None/False on a locked project, and has been seen to return False rather
+    than raise). The caller treats that as "not this cycle", never as a file
+    failure.
+    """
+    folder = root_folder
+    for segment in segments:
+        name = _safe_bin_name(segment)
+        target = _nfc(name)
+        try:
+            children = folder.GetSubFolderList() or []
+        except Exception:
+            log.debug("resolve: could not list sub-bins of %s",
+                      _safe_folder_name(folder) or MASTER_BIN_NAME, exc_info=True)
+            children = []
+        found = None
+        for child in children:
+            if _nfc(_safe_folder_name(child)) == target:
+                found = child
+                break
+        if found is None:
+            try:
+                found = media_pool.AddSubFolder(folder, name)
+            except Exception:
+                log.warning("resolve: AddSubFolder(%r) raised", name, exc_info=True)
+                return None
+            if not found:
+                log.warning("resolve: Resolve would not create the bin %r", name)
+                return None
+        folder = found
+    return folder
+
+
+def import_files_to_bin_path(
+    paths: Any, bin_segments: Any, expected_project_name: str = "",
+    path_alias_fn: Any = None,
+) -> dict[str, Any]:
+    """Import `paths` into `Master/<bin_segments...>`, once each. Never raises.
+
+    Returns {"ok", "message", "imported": [...], "skipped_existing": [...],
+    "failed": [...]} -- every list a list of the paths as they were passed in.
+
+    "skipped_existing" is POOL-WIDE, not bin-wide (music_worker.existing_item's
+    precedent): a clip the editor dragged out of Master/Youtube/<term> into
+    their own bin must never be re-imported, and the pool walk that answers
+    that question is the same one either way. It is matched on FILE PATH, so
+    the same video downloaded into two different term folders lands in both
+    bins -- each term bin is self-contained on purpose.
+
+    `expected_project_name` is the project the CALLER scanned the disk for.
+    Resolve is a moving target between a background scan and this call: the
+    editor can close one project and open another in that window, and a bin
+    full of another project's YouTube clips is a mess somebody has to undo by
+    hand. Blank means "whatever is open" (the b-roll insert's behaviour).
+
+    `path_alias_fn` folds a SECOND spelling of each pool path into the dedupe
+    set: called once per pool clip, returning an equivalent path or None.
+    Fleet projects hold the same file under two spellings -- clips an editor
+    imported by hand through the P: drive are stored canonically
+    (`P:\\Projects\\...`), while this module is handed local_root paths
+    (broll_server.default_broll_mount's reason: ImportMedia cannot resolve
+    "P:\\" on a Mac). Without the fold, `_norm_path` never matches the two and
+    the first scan of a pre-existing Youtube folder would duplicate every
+    hand-imported clip in it. The caller owns the translation because only it
+    knows local_root/canonical_prefix (canon.canonical_to_local); this stays
+    config-free.
+    """
+    wanted = [str(p) for p in (paths or [])]
+    if not wanted:
+        return {"ok": True, "message": "nothing to import",
+                "imported": [], "skipped_existing": [], "failed": []}
+    ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
+    with _API_LOCK:
+        result = _import_files_to_bin_path_locked(
+            wanted, list(bin_segments or []), str(expected_project_name or ""),
+            path_alias_fn,
+        )
+    return _explain_disconnection(result)
+
+
+def _refused(message: str) -> dict[str, Any]:
+    """An import that never got as far as ImportMedia.
+
+    `failed` is deliberately EMPTY: the caller counts per-file failures and
+    gives up on a file after three of them, and "Resolve is closed" / "you
+    opened a different project" is a state of the world, not something wrong
+    with the file. Charging them to the file would blacklist a perfectly good
+    clip for the rest of the session (proxy_gen's same rule, its :346-349).
+    """
+    return {"ok": False, "message": message,
+            "imported": [], "skipped_existing": [], "failed": []}
+
+
+def _import_files_to_bin_path_locked(
+    paths: list[str], bin_segments: list[Any], expected_project_name: str,
+    path_alias_fn: Any = None,
+) -> dict[str, Any]:
+    resolve = connect()
+    if resolve is None:
+        return _refused(_NOT_CONNECTED)
+
+    try:
+        project_manager = resolve.GetProjectManager()
+        project = project_manager.GetCurrentProject() if project_manager else None
+    except Exception:
+        project = None
+    if project is None:
+        return _refused("no project open in Resolve")
+
+    project_name = _safe_project_name(project)
+    if expected_project_name and project_name.strip() != expected_project_name.strip():
+        log.info(
+            "resolve: not importing into %r -- the open project is now %r",
+            expected_project_name, project_name,
+        )
+        return _refused("project changed")
+
+    try:
+        media_pool = project.GetMediaPool()
+    except Exception:
+        media_pool = None
+    if media_pool is None:
+        return _refused("no media pool available")
+
+    try:
+        root_folder = media_pool.GetRootFolder()
+    except Exception:
+        root_folder = None
+    if root_folder is None:
+        return _refused("no root folder in media pool")
+
+    # ONE walk for the whole batch. The pool walk is the expensive part of
+    # this function (four fusionscript calls per clip); doing it per file is
+    # what the batching in youtube_import exists to avoid.
+    existing: list[dict[str, Any]] = []
+    try:
+        _walk_media_pool_folder(root_folder, project_name, existing)
+    except Exception as exc:
+        log.warning("resolve: media pool walk failed before import: %s", exc, exc_info=True)
+        return _refused(_SCRIPTING_ERROR_MESSAGE)
+    in_pool = {_norm_path(item.get("file_path") or "") for item in existing}
+    if path_alias_fn is not None:
+        # Each alias is one more spelling of a file already in the pool, and a
+        # raising/None alias just means "no second spelling for this one".
+        for item in existing:
+            try:
+                alias = path_alias_fn(item.get("file_path") or "")
+            except Exception:
+                alias = None
+            if alias:
+                in_pool.add(_norm_path(alias))
+
+    skipped: list[str] = []
+    to_import: list[str] = []
+    queued: set[str] = set()
+    for path in paths:
+        key = _norm_path(path)
+        if key in in_pool:
+            skipped.append(path)
+            continue
+        if key in queued:
+            # The same file twice in one batch: ImportMedia would happily make
+            # two media pool items out of it.
+            continue
+        queued.add(key)
+        to_import.append(path)
+
+    if not to_import:
+        return {"ok": True, "message": "already in the media pool",
+                "imported": [], "skipped_existing": skipped, "failed": []}
+
+    bin_folder = _ensure_bin_path(media_pool, root_folder, bin_segments)
+    if bin_folder is None:
+        return {"ok": False, "message": "could not create the bin",
+                "imported": [], "skipped_existing": skipped, "failed": []}
+
+    # Remember/restore the editor's current bin around the import
+    # (music_worker.import_clip's shape). ImportMedia files into whatever
+    # SetCurrentFolder last named, and leaving the media pool selection parked
+    # somewhere the editor did not put it is a visible, confusing side effect
+    # of a background job they never asked to see.
+    try:
+        previous = media_pool.GetCurrentFolder()
+    except Exception:
+        previous = None
+    imported_items: Any = []
+    try:
+        media_pool.SetCurrentFolder(bin_folder)
+        imported_items = media_pool.ImportMedia(to_import) or []
+    except Exception as exc:
+        log.warning("resolve: ImportMedia raised for %d file(s): %s",
+                    len(to_import), exc, exc_info=True)
+        return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE,
+                "imported": [], "skipped_existing": skipped, "failed": []}
+    finally:
+        # In a finally, and guarded: a raising ImportMedia must not leave the
+        # editor's media pool pointing at a bin this job made.
+        if previous is not None:
+            try:
+                media_pool.SetCurrentFolder(previous)
+            except Exception:
+                log.debug("resolve: could not restore the current bin", exc_info=True)
+
+    landed = set()
+    for item in imported_items or []:
+        try:
+            props = item.GetClipProperty() or {}
+        except Exception:
+            props = {}
+        landed.add(_norm_path((props.get("File Path") or "").strip()))
+
+    imported = [p for p in to_import if _norm_path(p) in landed]
+    missing = [p for p in to_import if _norm_path(p) not in landed]
+    if missing:
+        # ImportMedia's return is not the whole truth: it has been seen to
+        # answer with fewer items than it filed (and a clip Resolve merges
+        # into an existing one comes back not at all). Re-read the bin before
+        # calling anything failed -- a file reported as failed here is
+        # retried, and after three retries left alone for the session.
+        try:
+            bin_clips = bin_folder.GetClipList() or []
+        except Exception:
+            bin_clips = []
+        in_bin = set()
+        for clip in bin_clips:
+            try:
+                props = clip.GetClipProperty() or {}
+            except Exception:
+                props = {}
+            in_bin.add(_norm_path((props.get("File Path") or "").strip()))
+        verified = [p for p in missing if _norm_path(p) in in_bin]
+        missing = [p for p in missing if _norm_path(p) not in in_bin]
+        imported = [p for p in to_import if p in set(imported) | set(verified)]
+
+    if missing:
+        log.warning(
+            "resolve: Resolve would not import %d of %d YouTube file(s) into %s",
+            len(missing), len(to_import), "/".join(
+                [MASTER_BIN_NAME] + [_safe_bin_name(s) for s in bin_segments]
+            ),
+        )
+    return {
+        "ok": not missing,
+        "message": "" if not missing else f"Resolve refused {len(missing)} file(s)",
+        "imported": imported,
+        "skipped_existing": skipped,
+        "failed": missing,
+    }

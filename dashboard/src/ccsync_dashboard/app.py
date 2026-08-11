@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
-from . import api, auth, broll, db, music, ui
+from . import api, auth, broll, db, music, ui, ytdl
 from .collector import Collector
 from .settings import Settings
 
@@ -240,8 +240,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # the same way the dashboard's own API does. Same for /music/api,
             # which carries both the music SPA's fetches and its <audio> src
             # (musicweb serves audio from /api/audio/{id}, not a /media prefix).
+            # /ytdl/api is the same story again, and worse if it is missed: the
+            # downloader SPA POLLS api/jobs/{id} every 1.5s, so a session that
+            # expired mid-pipeline would hand it a login page to JSON.parse
+            # once per tick.
             if path.startswith(("/api/", "/broll/api/", "/broll/media/",
-                                "/music/api/")):
+                                "/music/api/", "/ytdl/api/")):
                 return JSONResponse({"detail": "login required"}, status_code=401)
             # Preserve the destination through login (e.g. the companion's
             # /project-setup deep link) -- ui.py's _safe_next re-validates it.
@@ -273,6 +277,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # and a host without it simply reports ABSENT. See music.py.
     app.state.music_status = music.mount_music(app)
     app.state.music_mounted = app.state.music_status == music.MOUNTED
+
+    # And the YouTube downloader, on the same terms as music -- shipping the
+    # tree is the switch, no flag and no token. It gets `settings` rather than
+    # nothing because its gate mints the identity the sub-app authorises on
+    # (which projects a job may download into), and that identity is decoded
+    # from the session cookie with settings.session_secret. See ytdl.py.
+    app.state.ytdl_status = ytdl.mount_ytdl(app, settings)
+    app.state.ytdl_mounted = app.state.ytdl_status == ytdl.MOUNTED
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

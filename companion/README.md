@@ -78,6 +78,42 @@ no entry at all, because this app knows the tree — it defaults to
 `<local_root>/Assets/B-roll Archive`. An explicit entry always wins, and
 other shares have no derivable root, so they still need one line each.
 
+## YouTube auto-import
+
+`youtube_import.py` — a daemon thread that files the clips the dashboard's
+YouTube page downloaded into the project the editor has open, as
+`Master/Youtube/<search term>` bins matching the `<project>\Youtube\<term>\`
+folders sync delivers. Nothing new is transferred and nothing on disk is
+moved, renamed or deleted; the two bridge functions it drives
+(`resolve_bridge._ensure_bin_path` / `import_files_to_bin_path`) only ever ADD
+media pool items.
+
+Four rules, and everything awkward-looking in the module is one of them:
+
+* **Only the project that is open.** Importing needs it open anyway, and the
+  rescan is idempotent — so opening a project is what picks up everything
+  that arrived while it was closed. That is why there is no queue and no
+  per-project state.
+* **No database.** `to_import = settled files on disk MINUS the paths already
+  in the media pool`, recomputed every cycle from a single pool walk. Restart,
+  re-sync, a renamed bin and a project copied to another machine all self-heal.
+  The documented consequence: a clip DELETED from the pool while its file
+  stays on disk comes back after a companion restart (delete the file, or set
+  `youtube_import_enabled = false`).
+* **Nothing half-delivered.** Only `.mp4/.mov/.mkv/.webm/.m4v` (which excludes
+  the `.credits.json` sidecars and `manifest.json` the downloader writes
+  beside them), never a dotfile or a `.partial`/`.tmp`/`.lock`, and only once
+  a file is past `youtube_import_min_age_seconds` AND has held its size across
+  two consecutive scans.
+* **Dedupe is pool-wide, by path.** A clip the editor dragged into a bin of
+  their own is never re-imported (`music_worker.existing_item`'s rule). By
+  path rather than by video id, so the same video downloaded under two search
+  terms lands in both term bins — each one is self-contained on purpose.
+
+Bin names are matched NFC-normalised: macOS hands out decomposed filenames and
+Resolve stores what it is given, so a CJK term folder would otherwise spawn a
+duplicate bin with the same visible name on every cycle.
+
 ## Requirements
 
 - **DaVinci Resolve Studio**, with external scripting enabled:
@@ -170,6 +206,11 @@ of what either of those produces. Restart the app after editing.
 | `proxy_gen_max_failures` | `3` | Attempts on one file before it is skipped for the rest of the session. **In-process only** — a blacklist persisted to disk turns a transient GPU failure into a permanent one. Commented out. |
 | `proxy_notify_cooldown_seconds` | `86400` | How long before the same "clips have no proxy" toast may appear again. Persisted, so restarts don't re-nag. Commented out. |
 | `proxy_gen_skip_while_resolve_running` | `false` | Off by default: the idle gate already covers a Resolve you are sitting in front of. Turn on for a machine that leaves **unattended renders** going, which no input-based idle probe can see. Fails closed. Commented out. |
+| `youtube_import_enabled` | `true` | File the clips the dashboard's YouTube page downloaded into the project you have open, under `Master > Youtube > <search term>` (see below). Only ever ADDS media pool items. |
+| `youtube_import_scan_interval` | `60` | Seconds between re-listings of the open project's `Youtube/` folder. One `listdir` per term folder, not a tree walk — hence eager compared with `proxy_scan_interval`. A project change rescans immediately. |
+| `youtube_import_min_age_seconds` | `120` | Settle window, same idea and the same number as `proxy_gen_min_age_seconds`. A file must ALSO have held its size across two consecutive scans: a copy that preserves the source's mtime is born looking old. |
+| `youtube_import_batch_limit` | `20` | Files handed to Resolve in one call, per term folder, per cycle. This is what bounds how long the import holds the Resolve scripting lock (the timeline watcher polls behind it); the remainder goes on the next tick. Commented out. |
+| `youtube_import_max_failures` | `3` | Attempts on one file before it is left alone for the rest of the session. **In-process only**, exactly like `proxy_gen_max_failures`. Resolve being closed, or you having switched project, is a state and never counts as an attempt. Commented out. |
 
 With `dashboard_url` set, a fault-isolated reporter thread
 (`reporter.py`) POSTs the current status of all three lanes to the

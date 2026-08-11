@@ -152,6 +152,11 @@ def test_default_toml_text_documents_every_default_key():
         # TOML has no null, and an explicit value in every first-run file
         # would kill the derivation.
         "bpg_enabled", "bpg_path",
+        # The YouTube importer's tuning, same class as the generator's: the
+        # feature switch and the two windows an editor might actually want to
+        # change are written live, the batch/failure knobs are documented
+        # commented out so a later re-tune still reaches existing installs.
+        "youtube_import_batch_limit", "youtube_import_max_failures",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -196,6 +201,9 @@ EXAMPLE_COMMENTED_OUT = {
     # proxy_generation_enabled AND whether Resolve is installed, and bpg_path
     # is empty by default because the answer is "look where Resolve installs".
     "bpg_enabled", "bpg_path",
+    # The YouTube importer's batch/failure knobs -- tunable in the field,
+    # shipped values are the measured defaults (see DEFAULT_TOML_TEXT above).
+    "youtube_import_batch_limit", "youtube_import_max_failures",
 }
 
 

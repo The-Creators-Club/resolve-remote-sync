@@ -67,6 +67,13 @@ GetIdentityTokenFn = Callable[[], Optional[str]]
 # exactly the kind of thing an admin should not have to wait a heavy cycle
 # to learn.
 GetProxyCoverageFn = Callable[[], dict[str, Any]]
+# YouTube auto-import state (app.CompanionApp.youtube_import_status ->
+# youtube_import.py): whether the clips the dashboard downloaded have made it
+# into the editor's Resolve bins yet. Cached and zero-I/O like the proxy
+# coverage above, so it rides every tick -- the dashboard page that started
+# the download is watching for exactly this, and a heavy-cycle wait would
+# make a working import look like a stuck one.
+GetYoutubeImportFn = Callable[[], dict[str, Any]]
 # Upgrade-channel addition: called with the PARSED report response after
 # every successful post (the dashboard piggybacks its `upgrade`
 # advertisement on the report reply -- see upgrade.py). Exceptions are
@@ -142,6 +149,7 @@ class DashboardReporter:
         get_transport_health: Optional[Callable[[], dict[str, Any]]] = None,
         get_completions: Optional[Callable[[], list]] = None,
         get_proxy_coverage: Optional[GetProxyCoverageFn] = None,
+        get_youtube_import: Optional[GetYoutubeImportFn] = None,
     ) -> None:
         self._get_statuses = get_statuses
         self.cfg = cfg
@@ -178,6 +186,10 @@ class DashboardReporter:
         # simply absent (the dashboard ignores unknown keys and cannot miss
         # one it never knew about -- api.py:2187, extra="ignore").
         self._get_proxy_coverage = get_proxy_coverage
+        # Optional on the same terms: absent, or an empty dict from a
+        # companion whose importer failed to construct, simply omits the
+        # section rather than reporting a zeroed one.
+        self._get_youtube_import = get_youtube_import
 
         self.dashboard_url = str(cfg.get("dashboard_url", "")).strip()
         self.dashboard_token = str(cfg.get("dashboard_token", "")).strip()
@@ -312,6 +324,17 @@ class DashboardReporter:
                         list(projects.items())[:MAX_REPORT_PROJECTS]
                     )}
                 payload["proxy_coverage"] = coverage
+        if self._get_youtube_import is not None:
+            try:
+                youtube = self._get_youtube_import()
+            except Exception:
+                log.exception("get_youtube_import() failed")
+                youtube = None
+            # Empty is omitted, exactly like proxy_coverage above: that is
+            # what a companion with no importer returns, and a section of
+            # nothing on the wire cannot be told from "nothing to import".
+            if youtube:
+                payload["youtube_import"] = youtube
         if not light:
             if self._get_local_manifest is not None:
                 try:

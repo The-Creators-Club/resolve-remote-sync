@@ -56,6 +56,20 @@ music = [
     "onnxruntime>=1.17",
 ]
 
+# Runtime deps of the YouTube downloader app (ytdl/web), mounted in-process at
+# /ytdl on the same terms as b-roll and music. One package: ffmpeg is a static
+# binary on PATH (/opt/ffmpeg, see deploy/run.sh) and the Claude CLI is a
+# subprocess, not an import.
+#
+# It belongs here rather than in [project.dependencies] for the same reason the
+# other two groups do: ccsync_dashboard imports none of it, but the deployed
+# venv must have it or the mount fails at import and the feature is silently
+# absent. test_deploy_requirements_match_pyproject_dependencies checks both
+# directions against deploy/requirements.txt.
+ytdl = [
+    "yt-dlp>=2026.6.9",
+]
+
 dev = [
     "pytest>=7.4",
     "httpx>=0.27",

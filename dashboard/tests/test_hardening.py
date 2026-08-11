@@ -519,7 +519,7 @@ def test_deploy_requirements_match_pyproject_dependencies():
     # Every group whose packages are imported by an app this container mounts
     # in-process rather than by ccsync_dashboard itself. Add the group here
     # when a new one is mounted, or its deps read as "unaccounted-for".
-    for group in ("broll", "music"):
+    for group in ("broll", "music", "ytdl"):
         declared.update({
             _requirement_name(d): d.strip()
             for d in pyproject["project"].get("optional-dependencies", {}).get(group, [])

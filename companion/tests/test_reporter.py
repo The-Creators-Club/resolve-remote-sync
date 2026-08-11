@@ -1177,3 +1177,64 @@ def test_a_payload_that_fits_keeps_the_whole_proxy_map():
     payload = {"lanes": [], "proxy_coverage": _coverage()}
     fitted = reporter._fit_payload(dict(payload), budget=1_000_000)
     assert fitted["proxy_coverage"]["projects"]["2026/FF5/Nuclear"]["missing"] == 12
+
+
+# -- the YouTube auto-import section (youtube_import.py) ---------------------
+
+
+def _reporter_with_youtube(status, calls):
+    from ccsync_companion.sync.base import LaneStatus
+
+    def fake_post(url, data, headers, timeout):
+        calls.append(data)
+        return {}
+
+    return DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")],
+        _cfg(), http_post=fake_post,
+        get_youtube_import=(status if callable(status) else (lambda: status)),
+    )
+
+
+def test_the_youtube_section_rides_every_tick_including_light_ones():
+    """A handful of counters off a cached, zero-I/O read -- and the dashboard
+    page that started the download is watching for exactly this, so waiting
+    for a heavy cycle would make a working import look like a stuck one."""
+    calls = []
+    status = {"state": "importing", "pending": 4, "imported_session": 9,
+              "failed_session": 0, "last_import_at": "2026-08-11T12:00:00+00:00",
+              "last_bin": "Youtube/algal reef", "last_error": ""}
+    reporter = _reporter_with_youtube(status, calls)
+
+    reporter.post_once(light=True)
+    reporter.post_once(light=False)
+
+    assert len(calls) == 2
+    for sent in calls:
+        assert sent["youtube_import"]["state"] == "importing"
+        assert sent["youtube_import"]["imported_session"] == 9
+        assert sent["youtube_import"]["last_bin"] == "Youtube/algal reef"
+
+
+def test_no_youtube_getter_means_no_youtube_section():
+    """Same contract as proxy_coverage: a companion whose importer failed to
+    construct sends nothing rather than a section of zeroes, and the dashboard
+    cannot miss a key it never knew about."""
+    calls = []
+    _reporter_with(calls=calls).post_once(light=True)
+    assert "youtube_import" not in calls[0]
+
+    calls.clear()
+    _reporter_with_youtube({}, calls).post_once(light=True)
+    assert "youtube_import" not in calls[0]
+
+
+def test_a_youtube_getter_that_raises_costs_only_its_own_section():
+    calls = []
+
+    def _boom():
+        raise RuntimeError("the importer is on fire")
+
+    _reporter_with_youtube(_boom, calls).post_once(light=True)
+    assert "youtube_import" not in calls[0]
+    assert calls[0]["lanes"], "the rest of the report still went"

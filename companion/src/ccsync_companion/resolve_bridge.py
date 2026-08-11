@@ -28,7 +28,7 @@ import time
 import unicodedata
 from typing import Any, Optional
 
-from . import canon, resolve_prefs, ui_state
+from . import canon, proxy_relink, resolve_prefs, ui_state
 
 log = logging.getLogger("ccsync.resolve")
 
@@ -1004,6 +1004,43 @@ def _find_or_create_bin(media_pool, root_folder, name: str):
     return media_pool.AddSubFolder(root_folder, name)
 
 
+def _attach_adjacent_proxy(media_pool_item, local_path: str) -> None:
+    """Attach `<dir>/Proxy/<stem>.*` to a freshly inserted clip. Best-effort.
+
+    Scripted ImportMedia does NOT run Resolve's adjacent-Proxy auto-attach
+    (measured live 2026-08-12: an archive clip imported by this bridge showed
+    Proxy: None with its preview sitting right there), so the insert does it
+    itself. Called with _API_LOCK already held -- do NOT route through
+    link_proxy_media(), which takes the same non-reentrant lock.
+
+    A refusal is logged and swallowed: Resolve validates the pairing itself,
+    and a preview with no embedded timecode is refused against a source that
+    has one (KNOWN_BUGS R10 -- proven by remuxing the same bytes with
+    -timecode, after which the identical link succeeds). The insert still
+    stands; the editor just edits the original until the previews are fixed.
+    """
+    try:
+        props = media_pool_item.GetClipProperty() or {}
+        if str(props.get("Proxy") or "None") != "None":
+            return
+    except Exception:
+        return
+    for candidate in proxy_relink.expected_proxy_paths(local_path):
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            if media_pool_item.LinkProxyMedia(candidate):
+                log.info("resolve: attached proxy %s", candidate)
+            else:
+                log.warning(
+                    "resolve: refused %s as this clip's proxy -- no embedded "
+                    "timecode in the preview is the usual cause (R10)", candidate,
+                )
+        except Exception:
+            log.warning("resolve: LinkProxyMedia(%s) raised", candidate, exc_info=True)
+        return
+
+
 def _find_existing_clip(bin_folder, local_path: str):
     """The MediaPoolItem already holding `local_path`, or None.
 
@@ -1071,6 +1108,8 @@ def _perform_insert_locked(local_path: str, in_frame: int, out_frame: int) -> di
             if not imported:
                 return {"ok": False, "message": f"failed to import media at {local_path}"}
             media_pool_item = imported[0]
+
+        _attach_adjacent_proxy(media_pool_item, local_path)
 
         before = _video_track_count(timeline, BROLL_TRACK_INDEX)
         appended = media_pool.AppendToTimeline(

@@ -129,6 +129,37 @@ def test_build_proxy_forces_8bit_from_a_10bit_source(tmp_path):
     assert video.get("profile") != "High 10"
 
 
+def test_build_proxy_carries_the_sources_timecode(tmp_path):
+    """Resolve's LinkProxyMedia validates the pairing and REFUSES a proxy
+    with no embedded timecode against a source that has one (R10, proven
+    live 2026-08-12) -- so the preview must inherit the camera's timecode
+    or no archived clip can ever attach it."""
+    src = tmp_path / "shot.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc=size=640x360:duration=1:rate=10",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-timecode", "01:02:03:04", str(src)],
+        check=True,
+    )
+    # ffprobe renders the frame field unpadded at low rates ("01:02:03:4"),
+    # so pin the round trip, not the literal string: the proxy must carry
+    # exactly what the source carries.
+    src_tc = ffmpeg_tools.read_timecode(src)
+    assert src_tc is not None and src_tc.startswith("01:02:03")
+
+    dest = tmp_path / "proxy_tc.mp4"
+    ffmpeg_tools.build_proxy(src, dest, use_nvenc=False)
+    assert ffmpeg_tools.read_timecode(dest) == src_tc
+
+
+def test_a_source_without_timecode_still_proxies(tiny_clip, tmp_path):
+    assert ffmpeg_tools.read_timecode(tiny_clip) is None
+    dest = tmp_path / "proxy_notc.mp4"
+    ffmpeg_tools.build_proxy(tiny_clip, dest, use_nvenc=False)
+    assert dest.exists() and dest.stat().st_size > 0
+
+
 def test_build_sprite_and_poster(tiny_clip, tmp_path):
     sprite = tmp_path / "sprite.jpg"
     poster = tmp_path / "poster.jpg"

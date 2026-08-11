@@ -44,7 +44,7 @@ log = logging.getLogger("ccsync.config")
 # Club mark in brand red instead of April's pre-composed icon.png -- the same
 # white-on-transparent asset the tray already tints per status, so the taskbar,
 # the title bar and the tray finally show one logo.
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

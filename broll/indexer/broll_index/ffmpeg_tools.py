@@ -69,6 +69,31 @@ def _parse_fps(rate: str) -> float | None:
         return None
 
 
+def read_timecode(path: str | Path) -> str | None:
+    """The file's embedded start timecode (e.g. "03:40:27;12"), or None.
+
+    Cameras write it as a tmcd track (QuickTime) or a format/stream tag.
+    It matters because Resolve's LinkProxyMedia VALIDATES the pairing: a
+    proxy with no embedded timecode is refused against a source that has one
+    (KNOWN_BUGS R10, proven live 2026-08-12 -- remuxing the same bytes with
+    -timecode flipped the identical link from refused to accepted). Never
+    raises: a proxy without timecode is degraded, not a pipeline failure.
+    """
+    try:
+        info = run_ffprobe(path)
+    except Exception:
+        return None
+    tags = (info.get("format") or {}).get("tags") or {}
+    tc = tags.get("timecode")
+    if tc:
+        return str(tc)
+    for stream in info.get("streams") or []:
+        tc = ((stream.get("tags") or {}).get("timecode"))
+        if tc:
+            return str(tc)
+    return None
+
+
 def probe_video(path: str | Path) -> dict:
     """Return {duration_s, fps, width, height, codec, shot_date} for a source file."""
     info = run_ffprobe(path)
@@ -177,6 +202,13 @@ def build_proxy(
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
+    # Carried into the proxy so Resolve will accept it as the clip's proxy:
+    # LinkProxyMedia validates the pairing, and a timecode-less proxy is
+    # refused against a source that has one (R10). ffmpeg drops timecode on
+    # encode unless told otherwise.
+    timecode = read_timecode(src)
+    timecode_flags = ["-timecode", timecode] if timecode else []
+
     def _encode(nvenc: bool) -> None:
         video_codec = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(cq)] if nvenc else [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
@@ -200,6 +232,7 @@ def build_proxy(
             # rectangle on the editors' machines (found 2026-08-11: every
             # Creators_Club preview from a 10-bit source was unwatchable).
             "-pix_fmt", "yuv420p",
+            *timecode_flags,
             "-c:a", "aac", "-b:a", PROXY_AUDIO_BITRATE,
             "-movflags", "+faststart",
             str(dest),

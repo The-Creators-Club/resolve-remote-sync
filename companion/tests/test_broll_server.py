@@ -285,15 +285,24 @@ def test_the_derived_mount_is_not_required_to_exist_yet(tmp_path):
 
 
 class FakeMediaPoolItem:
-    def __init__(self, name: str, file_path: str):
+    def __init__(self, name: str, file_path: str, proxy: str = "None"):
         self._name = name
         self._file_path = file_path
+        self.proxy = proxy
+        self.link_proxy_calls: list = []
+        self.link_proxy_result = True
 
     def GetName(self):
         return self._name
 
     def GetClipProperty(self):
-        return {"File Path": self._file_path}
+        return {"File Path": self._file_path, "Proxy": self.proxy}
+
+    def LinkProxyMedia(self, path):
+        self.link_proxy_calls.append(path)
+        if self.link_proxy_result:
+            self.proxy = "960x540"
+        return self.link_proxy_result
 
 
 class FakeBinFolder:
@@ -670,6 +679,89 @@ def test_a_timeline_that_cannot_be_read_still_trusts_the_api(monkeypatch):
     monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
 
     assert resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 10)["ok"] is True
+
+
+def _archive_clip_with_preview(tmp_path):
+    """A top-slot file with its adjacent Proxy/ preview, archive-style."""
+    clip = tmp_path / "clip.mov"
+    clip.write_bytes(b"top slot")
+    proxy_dir = tmp_path / "Proxy"
+    proxy_dir.mkdir()
+    preview = proxy_dir / "clip.mp4"
+    preview.write_bytes(b"preview")
+    return clip, preview
+
+
+def test_perform_insert_attaches_the_adjacent_proxy(monkeypatch, tmp_path):
+    """Scripted ImportMedia does NOT run Resolve's adjacent-Proxy auto-attach
+    (measured live 2026-08-12: Proxy stayed None with the preview sitting
+    right there), so the insert links it explicitly."""
+    clip, preview = _archive_clip_with_preview(tmp_path)
+    resolve, media_pool, _root = _make_stack()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert(str(clip), 0, 10)
+
+    assert result["ok"] is True
+    item = media_pool.current_folder.clips[0]
+    assert item.link_proxy_calls == [str(preview)]
+    assert item.proxy == "960x540"
+
+
+def test_a_clip_without_an_adjacent_proxy_links_nothing(monkeypatch, tmp_path):
+    clip = tmp_path / "clip.mov"
+    clip.write_bytes(b"top slot")
+    resolve, media_pool, _root = _make_stack()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    assert resolve_bridge.perform_insert(str(clip), 0, 10)["ok"] is True
+    assert media_pool.current_folder.clips[0].link_proxy_calls == []
+
+
+def test_a_refused_proxy_link_does_not_fail_the_insert(monkeypatch, tmp_path):
+    """R10's live shape: Resolve validates the pairing and refuses a preview
+    with no embedded timecode. The clip is inserted and usable either way --
+    the editor just edits the original until the previews are fixed."""
+    clip, _preview = _archive_clip_with_preview(tmp_path)
+    resolve, media_pool, _root = _make_stack()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    def refuse_link(item):
+        item.link_proxy_result = False
+
+    orig_import = media_pool.ImportMedia
+
+    def import_and_refuse(paths):
+        items = orig_import(paths)
+        refuse_link(items[0])
+        return items
+
+    media_pool.ImportMedia = import_and_refuse
+
+    result = resolve_bridge.perform_insert(str(clip), 0, 10)
+
+    assert result["ok"] is True
+    item = media_pool.current_folder.clips[0]
+    assert item.link_proxy_calls != []
+    assert item.proxy == "None"
+
+
+def test_a_clip_that_already_has_a_proxy_is_left_alone(monkeypatch, tmp_path):
+    """Re-sending a clip whose earlier insert attached the proxy must not
+    churn the attachment on every send."""
+    clip, _preview = _archive_clip_with_preview(tmp_path)
+    resolve, media_pool, root = _make_stack()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    broll_bin = FakeBinFolder("B-Roll")
+    archive_bin = FakeBinFolder("Archive")
+    existing = FakeMediaPoolItem("clip.mov", str(clip), proxy="960x540")
+    archive_bin.clips.append(existing)
+    broll_bin.subfolders.append(archive_bin)
+    root.subfolders.append(broll_bin)
+
+    assert resolve_bridge.perform_insert(str(clip), 0, 10)["ok"] is True
+    assert existing.link_proxy_calls == []
 
 
 def test_perform_insert_append_failure_reported(monkeypatch):

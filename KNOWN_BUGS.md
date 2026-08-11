@@ -132,6 +132,23 @@ untouched, archive is under no sync lane so nothing fans out). NOT the
 companion's proxy generator: its 10-bit HEVC editing proxies are for
 Resolve, deliberate, untouched.
 
+### R10 — archive previews can't attach as Resolve proxies (no timecode) — FIXED in code, sweep pending
+Reported 2026-08-12: a b-roll insert landed from the correct archive path
+but with Proxy: None. Diagnosed live against Resolve: scripted ImportMedia
+never runs the adjacent-Proxy auto-attach, and an explicit LinkProxyMedia is
+REFUSED — because Resolve validates the pairing and the preview carries no
+embedded timecode while the camera original does (fps/frames/duration all
+match; remuxing the same bytes with `-timecode 03:40:27;12` flipped the
+identical link to accepted, in .mov and .mp4 alike — timecode is the
+deciding factor, container irrelevant). Fixes: `build_proxy` now embeds the
+source's timecode (`read_timecode` + `-timecode`); companion 0.7.4's insert
+explicitly links `<dir>/Proxy/<stem>.*` after import, best-effort (a refusal
+is logged, never fails the insert). The previews already in the archive stay
+unattachable until `broll/indexer/fix_proxy_timecode.py --apply` runs on the
+base rig — a container REMUX (`-c copy`), seconds per file, no GPU, no
+quality change, unrelated to the declined R9 re-encode. Editors need the
+0.7.4 republish for the explicit link.
+
 ---
 
 ## Carryover — unchanged from before the 2026-08-11 hunt

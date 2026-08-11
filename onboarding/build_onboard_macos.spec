@@ -201,7 +201,7 @@ app = BUNDLE(
     icon=None,
     bundle_identifier="com.creatorsclub.ccsync.onboard",
     info_plist={
-        "CFBundleShortVersionString": "1.0.20",  # INSTALLER_VERSION -- bump together
+        "CFBundleShortVersionString": "1.0.21",  # INSTALLER_VERSION -- bump together
         "NSHighResolutionCapable": True,
         # The wizard is a foreground app with a real window; no LSUIElement.
     },

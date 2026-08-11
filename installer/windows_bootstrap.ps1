@@ -162,6 +162,13 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.15: the fleet token moved off this script's command line into
 # CCSYNC_DASHBOARD_TOKEN in its environment (see the block just above), which
 # is a contract between this script and steps.py; they must ship as a pair.
+# 1.0.21: nothing in any installer source changed. onboard.exe BUNDLES the
+# companion exe, so a companion release rebuilds this package's bytes on its
+# own -- and the server refuses a same-version upload whose hash differs,
+# keeping the OLD build. That is exactly how the 0.6.2 ship half-failed
+# (companion published, installer rejected at 1.0.20, which was already on the
+# server bundling 0.6.1). This number moves with EVERY companion release,
+# whether or not a line of installer source changed; 1.0.21 ships with 0.6.3.
 # 1.0.19: MAC-9 -- the macOS bootstrap's rclone.conf rewrite destroyed the file
 # (BWK awk + an unchecked empty result). Nothing changed in this script; the
 # number is shared and moves when either platform's installer does.
@@ -177,7 +184,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.20"
+$InstallerVersion = "1.0.21"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see

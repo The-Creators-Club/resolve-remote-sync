@@ -56,6 +56,12 @@ from ccsync_companion import identity as identity_mod
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
+# 1.0.21: nothing in any installer source changed -- onboard.exe bundles the
+# companion exe, so a companion release changes its bytes by itself, and the
+# server rejects a same-version upload whose hash differs (keeping the old
+# build and failing the ship: that is how 0.6.2 shipped its companion but not
+# its installer). This number moves with every companion release; 1.0.21
+# ships with 0.6.3.
 # 1.0.19: MAC-9 -- macos_bootstrap.sh's rclone.conf stanza rewrite emptied the
 # file on macOS (BWK awk rejects a multi-line `-v` value, and the empty output
 # was mv'd over the config). 1.0.18 shipped with the bug and is superseded;
@@ -70,7 +76,7 @@ from ccsync_companion import identity as identity_mod
 # contract: CAPABILITY MISSING: markers + exit 3, RESOLVE-MAPPING-STATUS:
 # marker, and the existing-config rclone_path repair. The .sh and this file
 # must ship as a pair, same as the .ps1.
-INSTALLER_VERSION = "1.0.20"
+INSTALLER_VERSION = "1.0.21"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.

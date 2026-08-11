@@ -28,7 +28,13 @@ from typing import Any, Optional
 
 log = logging.getLogger("ccsync.config")
 
-VERSION = "0.6.2"
+# 0.6.3 carries NO companion change over 0.6.2. The 0.6.2 ship published the
+# companion and then failed on the installer (onboard.exe bundles this exe, so
+# its bytes moved while $InstallerVersion stood still, and the server keeps the
+# old build on a same-version/different-hash upload). Nothing can republish
+# 0.6.2 -- the publish guard and ship.ps1's preflight both refuse a version the
+# server already has -- so resuming a half-finished ship costs a version number.
+VERSION = "0.6.3"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

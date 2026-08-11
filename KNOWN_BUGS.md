@@ -132,7 +132,7 @@ untouched, archive is under no sync lane so nothing fans out). NOT the
 companion's proxy generator: its 10-bit HEVC editing proxies are for
 Resolve, deliberate, untouched.
 
-### R10 — archive previews can't attach as Resolve proxies (no timecode) — FIXED in code, sweep pending
+### R10 — archive previews can't attach as Resolve proxies (no timecode) — FIXED, sweep RUN 2026-08-12
 Reported 2026-08-12: a b-roll insert landed from the correct archive path
 but with Proxy: None. Diagnosed live against Resolve: scripted ImportMedia
 never runs the adjacent-Proxy auto-attach, and an explicit LinkProxyMedia is
@@ -143,11 +143,17 @@ identical link to accepted, in .mov and .mp4 alike — timecode is the
 deciding factor, container irrelevant). Fixes: `build_proxy` now embeds the
 source's timecode (`read_timecode` + `-timecode`); companion 0.7.4's insert
 explicitly links `<dir>/Proxy/<stem>.*` after import, best-effort (a refusal
-is logged, never fails the insert). The previews already in the archive stay
-unattachable until `broll/indexer/fix_proxy_timecode.py --apply` runs on the
-base rig — a container REMUX (`-c copy`), seconds per file, no GPU, no
-quality change, unrelated to the declined R9 re-encode. Editors need the
-0.7.4 republish for the explicit link.
+is logged, never fails the insert). SECOND half of the root cause (1643880):
+Sony rtmd tags print colon (non-drop) forms for drop-frame material, and at
+59.94 the colon reading is a different absolute frame — equally refused —
+so both the encoder and the sweep normalize to the semicolon form at
+29.97/59.94 (`dropframe_normalized`). The sweep
+(`broll/indexer/fix_proxy_timecode.py --apply`, a `-c copy` container remux,
+unrelated to the declined R9 re-encode) RAN 2026-08-12: 799 previews fixed,
+0 failed; 4,046 already matched; 2,152 have timecode-less sources (YouTube —
+nothing to mismatch); 113 have no unique top-slot sibling. End-to-end
+verified live: the archive preview now links to its imported clip. Editors
+need the 0.7.4 republish for the explicit link on insert.
 
 ---
 

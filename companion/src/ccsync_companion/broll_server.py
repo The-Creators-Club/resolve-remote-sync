@@ -10,11 +10,13 @@ Since port step 8 (2026-08-10) it also carries the MUSIC library's
 "Send to Resolve" actions as a route group:
   GET  /music/status
   POST /music/send
+and since 2026-08-11 the YouTube downloader page's reveal-in-file-manager:
+  POST /ytdl/reveal
 They are here, on this listener, rather than on one of their own precisely
 because this process already owns 8899 and a second server holding it breaks
-the tray app (CLAUDE.md). The music half's logic lives in music_server.py;
-only the dispatch below and the mount map in start() are shared, and the
-b-roll contract above is untouched by it.
+the tray app (CLAUDE.md). Those halves' logic lives in music_server.py and
+ytdl_server.py; only the dispatch below and the mount maps in start() are
+shared, and the b-roll contract above is untouched by either.
 
 ABSORBED from the standalone b-roll companion (`broll/companion/`, package
 `broll_companion`), retired 2026-08-10. The fleet was shipping two tray apps
@@ -48,6 +50,7 @@ from . import config as ccsync_config
 from . import music_server
 from . import music_worker
 from . import resolve_bridge
+from . import ytdl_server
 
 log = logging.getLogger("ccsync.broll")
 
@@ -127,6 +130,10 @@ This file has no comments (it's plain JSON), so here's what each field means:
       "Send to Resolve" buttons talk to the same companion, on the same
       port) and needs no entry either: it defaults to
       <local_root>/Assets/Music.
+
+      The "projects" share is read from it too -- it is what the YouTube
+      downloader page's download history opens a folder from -- and defaults
+      to <local_root>/Projects.
 
       On macOS, a share with no entry here is also probed for at
       /Volumes/<share>, /Volumes/<share>-1, /Volumes/<share>-2 (Finder's
@@ -582,6 +589,18 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             mounts = self.server.companion_config.get(music_server.MOUNTS_KEY, {})
             status, result = music_server.build_send_response(body, mounts)
             self._send_json(status, result)
+        elif path == "/ytdl/reveal":
+            # "message", not "error": the downloader page shows this string in
+            # the same toast the b-roll UI uses.
+            body = self._read_json_body("message")
+            if body is _REFUSED:
+                return
+            if body is None or not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "message": "invalid JSON body"})
+                return
+            mounts = self.server.companion_config.get(ytdl_server.MOUNTS_KEY, {})
+            status, result = ytdl_server.build_reveal_response(body, mounts)
+            self._send_json(status, result)
         elif path == "/insert":
             body = self._read_json_body("message")
             if body is _REFUSED:
@@ -673,8 +692,10 @@ def start(ccsync_cfg: dict[str, Any]) -> Optional[BrollCompanionServer]:
     # handing it the already-derived b-roll map would carry a "broll" entry
     # into the music route group's namespace.
     music_mounts = music_server.resolve_music_mounts(broll_cfg, ccsync_cfg)
+    ytdl_mounts = ytdl_server.resolve_ytdl_mounts(broll_cfg, ccsync_cfg)
     broll_cfg["mounts"] = resolve_mounts(broll_cfg, ccsync_cfg)
     broll_cfg[music_server.MOUNTS_KEY] = music_mounts
+    broll_cfg[ytdl_server.MOUNTS_KEY] = ytdl_mounts
 
     try:
         server = make_server(broll_cfg, HOST, port)
@@ -708,8 +729,9 @@ def start(ccsync_cfg: dict[str, Any]) -> Optional[BrollCompanionServer]:
 
     log.info(
         "broll: Send-to-Resolve listening on http://%s:%d (mounts: %s; "
-        "/music/* mounts: %s)",
+        "/music/* mounts: %s; /ytdl/* mounts: %s)",
         HOST, server.server_address[1], broll_cfg["mounts"], music_mounts,
+        ytdl_mounts,
     )
     return server
 

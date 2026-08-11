@@ -140,6 +140,12 @@ def _drop(tmp_path, names=("a.mp4",), term=TERM, age=SETTLED, size=1000):
     return paths
 
 
+def _drop_loose(tmp_path, names=("one off.mp4",), age=SETTLED, size=1000):
+    """Put files in <project>/Youtube/ ITSELF -- where a URL download lands,
+    because a pasted link has no search term to sort it under."""
+    return _drop(tmp_path, names, term="", age=age, size=size)
+
+
 def _settled(importer, tmp_path):
     """Two scans, which is what "size-stable across two consecutive scans"
     means. Returns the state of the SECOND one -- the one that imports."""
@@ -345,6 +351,193 @@ def test_the_import_call_carries_a_canonical_alias_fold(tmp_path):
     assert canon.norm(translated) == canon.norm(path)
     # A pool path that is not on the canonical prefix has no second spelling.
     assert alias("D:\\Somewhere\\else.mp4") is None
+
+
+# -- clips loose in Youtube/ itself (the paste-a-URL case, 0.7.1) -------------
+#
+# A URL carries no search term, so the downloader writes those clips straight
+# into `<project>/Youtube/`. The scan skipped every non-directory there, which
+# made them invisible to Resolve forever. This is a widening by exactly one
+# case: the root ITSELF, still not a recursive walk.
+
+
+def test_a_loose_clip_in_the_youtube_root_is_filed_into_the_youtube_bin(tmp_path):
+    (path,) = _drop_loose(tmp_path, ["one off [abc123].mp4"])
+    importer = _make(tmp_path)
+
+    state = _settled(importer, tmp_path)
+
+    call = importer._import_fn.calls[0]
+    assert call["paths"] == [path]
+    assert call["bin"] == ("Youtube",), "Master/Youtube itself, not a sub-bin"
+    assert call["project"] == PROJECT
+    assert state == youtube_import.STATE_NOTHING_TO_DO
+    status = importer.status()
+    assert status["imported_session"] == 1
+    assert status["last_bin"] == "Youtube"
+
+
+def test_a_loose_clip_never_produces_an_empty_or_untitled_bin(tmp_path):
+    """("Youtube", "") would come back from resolve_bridge._safe_bin_name as
+    Master/Youtube/Untitled -- a bin nobody named, holding the one clip the
+    editor is watching for."""
+    _drop_loose(tmp_path, ["a.mp4"])
+    importer = _make(tmp_path)
+
+    _settled(importer, tmp_path)
+
+    segments = importer._import_fn.calls[0]["bin"]
+    assert "" not in segments and None not in segments
+    assert "Untitled" not in segments
+    assert importer.status()["last_bin"] == "Youtube"
+
+
+def test_a_loose_clip_and_a_term_folder_are_both_handled_in_one_pass(tmp_path):
+    """The term folders keep behaving exactly as they did -- this adds a
+    second place to look, it does not move the first one."""
+    (loose,) = _drop_loose(tmp_path, ["one off.mp4"])
+    (in_term,) = _drop(tmp_path, ["a.mp4"], term=TERM)
+    importer = _make(tmp_path)
+
+    state = _settled(importer, tmp_path)
+
+    calls = importer._import_fn.calls
+    # The root first: a one-off URL download is the one an editor is waiting
+    # on, and it must not queue behind every term folder's batch.
+    assert [call["bin"] for call in calls] == [("Youtube",), ("Youtube", TERM)]
+    assert calls[0]["paths"] == [loose]
+    assert calls[1]["paths"] == [in_term]
+    assert state == youtube_import.STATE_NOTHING_TO_DO
+    assert importer.status()["imported_session"] == 2
+
+
+def test_a_still_arriving_loose_clip_waits_like_any_other(tmp_path):
+    """Half a video imports as an offline clip. The settle rules are the term
+    folders' rules, unchanged -- not a second set for the root."""
+    _drop_loose(tmp_path, ["a.mp4"], age=5)
+    importer = _make(tmp_path)
+
+    state = _settled(importer, tmp_path)
+
+    assert importer._import_fn.calls == []
+    assert state == youtube_import.STATE_WAITING_SETTLE
+    assert importer.status()["pending"] == 1
+
+
+def test_a_loose_file_that_grew_since_the_last_look_waits(tmp_path):
+    (path,) = _drop_loose(tmp_path, ["a.mp4"], size=1000)
+    importer = _make(tmp_path)
+
+    importer.scan_once(PROJECT, _project_dir(tmp_path))
+    with open(path, "ab") as handle:
+        handle.write(b"y" * 500)
+    stamp = time.time() - SETTLED
+    os.utime(path, (stamp, stamp))
+
+    assert importer.scan_once(PROJECT, _project_dir(tmp_path)) == \
+        youtube_import.STATE_WAITING_SETTLE
+    assert importer._import_fn.calls == []
+    assert importer.scan_once(PROJECT, _project_dir(tmp_path)) == \
+        youtube_import.STATE_NOTHING_TO_DO
+    assert importer._import_fn.calls[0]["paths"] == [path]
+
+
+@pytest.mark.parametrize("name", [
+    "manifest.json",
+    "a.credits.json",
+    "notes.txt",
+    "clip.mp4.partial",
+    "clip.mp4.tmp",
+    ".syncthing.clip.mp4.tmp",
+    "._clip.mp4",
+])
+def test_a_non_clip_in_the_youtube_root_is_still_ignored(tmp_path, name):
+    """The root gets the SAME filter, not a looser one: the downloader writes
+    its sidecars and its half-delivered files there too."""
+    _drop_loose(tmp_path, [name])
+    importer = _make(tmp_path)
+
+    state = _settled(importer, tmp_path)
+
+    assert importer._import_fn.calls == []
+    assert state == youtube_import.STATE_NOTHING_TO_DO
+
+
+def test_a_hidden_folder_in_the_root_is_left_alone(tmp_path):
+    """`.ccsync-trash` and friends are legitimately in the tree, and nothing
+    in them is a download."""
+    _drop(tmp_path, ["a.mp4"], term=".ccsync-trash")
+    importer = _make(tmp_path)
+
+    state = _settled(importer, tmp_path)
+
+    assert importer._import_fn.calls == []
+    assert state == youtube_import.STATE_NOTHING_TO_DO
+
+
+def test_a_term_folder_named_like_a_clip_is_not_imported_as_one(tmp_path):
+    """Both loops read the root now, so a directory called "reef.mp4" passes
+    the name filter -- and handing a directory to ImportMedia is not a thing
+    to find out about in Resolve."""
+    (inside,) = _drop(tmp_path, ["a.mp4"], term="reef.mp4")
+    importer = _make(tmp_path)
+
+    _settled(importer, tmp_path)
+
+    calls = importer._import_fn.calls
+    assert [call["bin"] for call in calls] == [("Youtube", "reef.mp4")]
+    assert calls[0]["paths"] == [inside]
+
+
+def test_the_widening_is_the_root_only_and_not_a_deeper_walk(tmp_path):
+    """The docstring's rule still holds: one level of term folder, plus the
+    root itself. Anything the editor has filed deeper stays theirs."""
+    folder = os.path.join(_project_dir(tmp_path), "Youtube", TERM, "extras")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "deep.mp4")
+    with open(path, "wb") as handle:
+        handle.write(b"x" * 100)
+    stamp = time.time() - SETTLED
+    os.utime(path, (stamp, stamp))
+    importer = _make(tmp_path)
+
+    state = _settled(importer, tmp_path)
+
+    assert importer._import_fn.calls == []
+    assert state == youtube_import.STATE_NOTHING_TO_DO
+
+
+def test_the_batch_cap_and_failure_cap_hold_for_loose_clips_too(tmp_path):
+    """The per-path bookkeeping is keyed by path, not by term, and the batch
+    cap applies to the rootless group like any other."""
+    paths = _drop_loose(tmp_path, ["a.mp4", "b.mp4", "c.mp4"])
+    importer = _make(tmp_path, _cfg(tmp_path, youtube_import_batch_limit=2))
+    importer._import_fn.fail_paths = {paths[0]}
+
+    state = _settled(importer, tmp_path)
+
+    assert importer._import_fn.calls[0]["paths"] == paths[:2]
+    assert state == youtube_import.STATE_IMPORTING, "one clip is still waiting"
+    assert importer._failures[paths[0]] == 1
+
+    # Three refusals and that file is left alone -- while the others still go.
+    importer.scan_once(PROJECT, _project_dir(tmp_path))
+    importer.scan_once(PROJECT, _project_dir(tmp_path))
+    assert importer._is_capped(paths[0]) is True
+    offered = [p for call in importer._import_fn.calls for p in call["paths"]]
+    assert offered.count(paths[0]) == 3
+    assert importer.status()["failed_session"] == 3
+
+
+def test_a_loose_clip_is_never_offered_twice_in_one_session(tmp_path):
+    (path,) = _drop_loose(tmp_path, ["a.mp4"])
+    importer = _make(tmp_path)
+
+    _settled(importer, tmp_path)
+    importer.scan_once(PROJECT, _project_dir(tmp_path))
+
+    assert len(importer._import_fn.calls) == 1
+    assert path in importer._done
 
 
 def test_a_disabled_importer_reports_disabled_before_any_tick(tmp_path):

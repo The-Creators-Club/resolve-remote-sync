@@ -346,6 +346,12 @@ def create_url_job(c, created_by, term, term_dir, project_slug, project_label,
                    videos, quality='1080p'):
     """A kind='urls' job AND its videos, in one transaction. -> job id.
 
+    `term` and `term_dir` are both EMPTY for every job the API creates now
+    (2026-08-11): a paste has no topic and no folder to sort by, and its clips
+    land in the project's Youtube root. They stay in the signature because they
+    are the same two columns a search job fills, and the download phase reads
+    term_dir either way -- empty simply means "no subfolder".
+
     `videos` is [{'video_id', 'url', 'title'?, 'duplicate_of'?}] in the order
     the editor pasted them. An entry carrying `duplicate_of` is written
     skipped/deselected -- the same shape the download phase writes when its own
@@ -732,31 +738,98 @@ def ledger_ids(c):
     return {r['video_id'] for r in c.execute('SELECT video_id FROM downloads')}
 
 
-def ledger_map(c):
-    """{video_id: '<project label>/<folder>'} -- what the ALREADY IN badge shows.
+# The folder every download lands under, inside the project. A SEARCH files its
+# clips one level below it (`Youtube/<term_dir>/`); a PASTE has no term to sort
+# by and lands in this folder itself (owner, 2026-08-11: "individual downloads
+# should just go into the /youtube root for the project folder actually, I
+# realised the problem with there being no term to sort the clips into
+# subfolders"). An empty term_dir therefore means the root, not "unknown".
+YOUTUBE_DIR = 'Youtube'
+
+
+def folder_label(term_dir):
+    """The folder to NAME for a stored term_dir. Empty is the Youtube root.
+
+    Never an empty string back: '<project label>/' with nothing after it is the
+    shape a badge must not have -- it reads as a broken path rather than as a
+    real folder an editor can open over SMB.
+    """
+    return str(term_dir or '') or YOUTUBE_DIR
+
+
+def ledger_where(row):
+    """'<project label>/<folder>' -- what the ALREADY IN badge shows.
 
     The FOLDER, not the term: they differ for any term carrying <>:"/\\|?* or
     more than 80 UTF-8 bytes, and the badge is an instruction to go and look at
-    a path over SMB (YTDL-31, 2026-08-11). term_dir is NULL on rows written
-    before it existed, and those fall back to the raw term as they always did.
+    a path over SMB (YTDL-31, 2026-08-11). Three cases, all of them live:
+      - a search: term_dir is the folder under Youtube/;
+      - a paste: term_dir is EMPTY, and the clip is in Youtube/ itself;
+      - a row written before term_dir existed: NULL, falling back to the raw
+        term exactly as the badge always did.
     """
-    return {r['video_id']: f"{r['project_label']}/{r['term_dir'] or r['term']}"
+    term_dir = row['term_dir']
+    if term_dir is None:
+        term_dir = row['term']
+    return f"{row['project_label']}/{folder_label(term_dir)}"
+
+
+def ledger_map(c):
+    """{video_id: the ALREADY IN badge's text} for the whole ledger."""
+    return {r['video_id']: ledger_where(r)
             for r in c.execute('SELECT video_id, project_label, term, term_dir '
                                'FROM downloads')}
 
 
 def _term_dir_of(rel_path, term):
-    """The folder a ledgered clip is actually in.
+    """The folder a ledgered clip is actually in, relative to Youtube/.
 
-    rel_path is written as 'Youtube/<term_dir>/<filename>' by the download
-    phase, so the truth is already in the argument list -- taking it from there
-    rather than re-deriving safe_term_dirname(term) means the ledger agrees
-    with the disk even if the naming rules change under it.
+    rel_path is written as 'Youtube/<term_dir>/<filename>' by a search's
+    download and as 'Youtube/<filename>' by a paste's, so the truth is already
+    in the argument list -- taking it from there rather than re-deriving
+    safe_term_dirname(term) means the ledger agrees with the disk even if the
+    naming rules change under it.
+
+    '' (the Youtube root) and None (no usable path at all) are different
+    answers: the first is a real location, the second is why ledger_where falls
+    back to the term.
     """
     parts = [p for p in str(rel_path or '').replace('\\', '/').split('/') if p]
-    if len(parts) >= 3 and parts[0] == 'Youtube':
-        return parts[1]
+    if parts and parts[0] == YOUTUBE_DIR:
+        return parts[1] if len(parts) >= 3 else ''
     return config.safe_term_dirname(term) if term else None
+
+
+# The history panel's page size, and its ceiling. The ledger is PERMANENT and
+# fleet-wide -- one row per clip the fleet has ever downloaded, never cascaded,
+# never pruned -- so "show me the downloads" is a query that grows for the life
+# of the product. It is read on the request thread like everything else here,
+# so it is paged at the source rather than trimmed in the browser (YTDL-7's
+# rule, applied to a read instead of a write).
+HISTORY_PAGE = 24
+MAX_HISTORY_LIMIT = 100
+
+
+def recent_downloads(c, limit=HISTORY_PAGE, offset=0):
+    """One page of the ledger, newest first. Bounded here, not by the caller.
+
+    Ordered by downloaded_at and NOT by rowid: the ledger upserts on video_id,
+    so a clip re-downloaded into another project keeps the rowid it was first
+    written with -- ordering by that would file today's download under last
+    month. rowid is the tie-break only, because downloaded_at has one-second
+    resolution and a batch of forty clips can share a timestamp.
+    """
+    limit = max(1, min(MAX_HISTORY_LIMIT, int(limit)))
+    offset = max(0, int(offset))
+    return c.execute('SELECT rowid, * FROM downloads '
+                     'ORDER BY downloaded_at DESC, rowid DESC LIMIT ? OFFSET ?',
+                     (limit, offset)).fetchall()
+
+
+def count_downloads(c):
+    """How many clips the fleet has. One row per video id, so this is also the
+    number the "showing N of M" line reports."""
+    return c.execute('SELECT COUNT(*) n FROM downloads').fetchone()['n']
 
 
 def ledger_add(c, video_id, title, channel, project_slug, project_label, term,
@@ -800,6 +873,53 @@ def job_dict(row):
 def video_dict(row, term_ids=None):
     d = dict(row)
     d['term_ids'] = term_ids or []
+    return d
+
+
+def reveal_path(row):
+    """A ledger row -> the clip's path UNDER THE PROJECTS ROOT, or None.
+
+    `rel_path` is stored relative to the project ('Youtube/<term_dir>/<file>')
+    because that is what the download phase writes and what the manifest and
+    the badge speak. The companion's `POST /ytdl/reveal` takes a path relative
+    to the Projects root instead -- the directory that holds the project labels,
+    `P:\\Projects` on a Windows editor -- because only the companion knows where
+    that is on the machine it is running on, and the page (served from the NAS)
+    must never learn a drive letter.
+
+    Joined HERE rather than in app.js: the join rule is a property of how this
+    app stores paths, and a browser deriving it would be a second place to get
+    it wrong. Forward slashes throughout; the companion splits and rejoins.
+    """
+    rel = str(row['rel_path'] or '').replace('\\', '/').strip('/')
+    label = str(row['project_label'] or '').replace('\\', '/').strip('/')
+    if not rel or not label:
+        # A row from a build that wrote no path (YTDL-15's shape) still belongs
+        # in the history -- it just has no folder to offer to open.
+        return None
+    return f'{label}/{rel}'
+
+
+def download_dict(row):
+    """A ledger row as the history panel reads it.
+
+    Everything derived is derived HERE, for the same reason ledger_where is:
+    term is what the editor typed and term_dir is what exists on disk, and the
+    two differ for any term carrying <>:"/\\|?* or more than 80 UTF-8 bytes
+    (YTDL-31). `folder_path` is what the panel prints as the destination and it
+    is honest about both shapes -- 'Youtube/<term>' for a search, plain
+    'Youtube' for a paste, never a trailing separator with nothing after it.
+    """
+    d = dict(row)
+    d.pop('rowid', None)          # a paging tie-break, not part of the contract
+    term_dir = d.get('term_dir')
+    if term_dir is None:
+        # A row written before the column existed: read the folder back out of
+        # the path, which is what ledger_add would fill the column with today.
+        term_dir = _term_dir_of(d.get('rel_path'), d.get('term'))
+    d['folder'] = folder_label(term_dir)
+    d['folder_path'] = (f'{YOUTUBE_DIR}/{term_dir}' if term_dir else YOUTUBE_DIR)
+    d['reveal_path'] = reveal_path(row)
     return d
 
 

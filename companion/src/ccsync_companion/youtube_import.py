@@ -6,6 +6,9 @@ delivers those files to this machine like any other media -- and then, until
 this module existed, somebody had to go and find the folder and drag it into
 Resolve. This watches for them and files them into `Master/Youtube/<term>`.
 
+A clip pasted in as a URL has no search term to sort it under, so it lands in
+`<project>/Youtube/` itself and is filed into `Master/Youtube` (0.7.1).
+
 Modelled on proxy_gen.ProxyGenerator (proxy_gen.py:263) down to the shape:
 one daemon thread, a 15 s tick with a slower scan cadence on top of it, a
 priority-ordered gate publishing plain-string states, and a `status()` that is
@@ -65,6 +68,18 @@ TICK_SECONDS = 15.0
 # editor looking at `P:\Projects\...\Youtube\algal reef` and at
 # `Master/Youtube/algal reef` must not have to learn a mapping.
 YOUTUBE_DIR_NAME = "Youtube"
+
+# The _collect key for clips sitting loose in `<project>/Youtube/` ITSELF.
+# The downloader's paste-a-URL box writes one-off clips there because a URL
+# carries no search term to sort them under, and until 0.7.1 the scan skipped
+# every non-directory in that folder, so those clips were invisible forever.
+#
+# The empty string cannot collide with a real term folder: os.listdir never
+# yields "", and no filesystem this ships on can name a directory that. It is
+# also never handed to Resolve as a bin segment -- ("Youtube", "") would come
+# back as Master/Youtube/Untitled (resolve_bridge.FALLBACK_BIN_NAME), a bin
+# nobody asked for -- see _import_batch.
+ROOT_TERM = ""
 
 # What counts as a downloaded clip. A whitelist rather than a blacklist
 # because the download writes SIDECARS next to every video -- `.credits.json`
@@ -506,9 +521,17 @@ class YoutubeImporter:
     def _collect(self, project_dir: str) -> tuple[dict[str, list[str]], int]:
         """({term: [settled paths]}, how many are still arriving).
 
-        One level deep under `<project>/Youtube/`, because that is exactly
-        how the downloader writes it -- `Youtube/<term>/<video>.mp4` -- and a
-        deeper walk would drag in whatever else an editor has filed there.
+        TWO places, and no deeper: the term folders the downloader writes
+        (`Youtube/<term>/<video>.mp4`) and `Youtube/` ITSELF, which is where a
+        clip pasted in by URL lands because there is no search term to sort it
+        under (0.7.1). Still not a recursive walk -- these two levels are
+        exactly the two the downloader writes, and a deeper one would drag in
+        whatever else an editor has filed there.
+
+        Loose clips come back under ROOT_TERM and are filed into the
+        `Master/Youtube` bin itself; everything else about them -- the clip
+        whitelist, the settle rules, the failure cap, the per-path
+        bookkeeping -- is the term folders' behaviour unchanged.
         """
         root = os.path.join(project_dir, YOUTUBE_DIR_NAME)
         if not self._safe_isdir(root):
@@ -518,16 +541,20 @@ class YoutubeImporter:
         seen: dict[str, tuple] = {}
         pending: dict[str, list[str]] = {}
         waiting = 0
-        for term in self._safe_listdir(root):
-            if term.startswith("."):
-                continue
-            term_dir = os.path.join(root, term)
-            if not self._safe_isdir(term_dir):
-                continue
-            for name in self._safe_listdir(term_dir):
+
+        def take(directory: str, term: str, skip_dirs: bool = False) -> None:
+            nonlocal waiting
+            for name in self._safe_listdir(directory):
                 if not self._is_clip_name(name):
                     continue
-                path = os.path.join(term_dir, name)
+                path = os.path.join(directory, name)
+                if skip_dirs and self._safe_isdir(path):
+                    # Only in the root, and only because BOTH loops read it
+                    # now: a term folder someone named "reef.mp4" passes the
+                    # clip whitelist on its name alone, and handing a
+                    # directory to ImportMedia is not a thing to find out
+                    # about in Resolve.
+                    continue
                 try:
                     stat = self._stat(path)
                     fingerprint = (int(stat.st_size), float(stat.st_mtime))
@@ -553,6 +580,18 @@ class YoutubeImporter:
                     waiting += 1
                     continue
                 pending.setdefault(term, []).append(path)
+
+        # The root's own loose clips first: a one-off URL download is the one
+        # an editor is watching for, and it should not queue behind every
+        # term folder's batch.
+        take(root, ROOT_TERM, skip_dirs=True)
+        for term in self._safe_listdir(root):
+            if term.startswith("."):
+                continue
+            term_dir = os.path.join(root, term)
+            if not self._safe_isdir(term_dir):
+                continue
+            take(term_dir, term)
         self._seen = seen
         return pending, waiting
 
@@ -570,9 +609,12 @@ class YoutubeImporter:
             return STATE_WAITING_SETTLE if waiting else STATE_NOTHING_TO_DO
 
         self._publish_state(STATE_IMPORTING)
+        loose = len(pending.get(ROOT_TERM, []))
         log.info(
-            "youtube import: %d clip(s) in %d term folder(s) ready for %r",
-            total, len(pending), project_name,
+            "youtube import: %d clip(s) in %d term folder(s)%s ready for %r",
+            total, len(pending) - (1 if ROOT_TERM in pending else 0),
+            f" plus {loose} loose in {YOUTUBE_DIR_NAME}/" if loose else "",
+            project_name,
         )
         deferred = 0
         for term, paths in pending.items():
@@ -593,14 +635,20 @@ class YoutubeImporter:
     def _import_batch(self, project_name: str, term: str, paths: list[str]) -> bool:
         """Hand one term folder's batch to Resolve. False = stop this cycle.
 
+        `term` is ROOT_TERM for the clips found loose in `Youtube/` itself,
+        and those go into `Master/Youtube` -- passing ("Youtube", "") would
+        have resolve_bridge._safe_bin_name turn the empty segment into
+        "Untitled" and file a URL download into a bin nobody named.
+
         Never raises: import_files_to_bin_path is a never-raise function, and
         this adds the same guarantee around a seam a test (or a future
         caller) might supply.
         """
-        bin_path = f"{YOUTUBE_DIR_NAME}/{term}"
+        segments = (YOUTUBE_DIR_NAME,) if term == ROOT_TERM else (YOUTUBE_DIR_NAME, term)
+        bin_path = "/".join(segments)
         try:
             result = self._import_fn(
-                list(paths), (YOUTUBE_DIR_NAME, term),
+                list(paths), segments,
                 expected_project_name=project_name,
                 path_alias_fn=self._pool_path_alias,
             )

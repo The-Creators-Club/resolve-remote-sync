@@ -103,6 +103,22 @@ DEFAULT_MAX_CANDIDATES = 100
 ENRICH_WORKERS = int(os.environ.get('YTDL_ENRICH_WORKERS') or '2')
 ENRICH_PAUSE = float(os.environ.get('YTDL_ENRICH_PAUSE') or '0.75')
 
+# Search pacing -- the hole the enrich pacing above left open, found the hard
+# way (2026-08-11, second block of the same day). With enrichment paced and the
+# candidate cap in force, a full search STILL bot-checked while a pasted link
+# downloaded fine, because `_phase_search` fires one flat search per term
+# back to back with no delay at all: ~24 requests, in a couple of seconds, to
+# YouTube's SEARCH endpoint rather than the player API. One paste is one
+# request, which is exactly why the URL box kept working.
+#
+# The worker's own docstring used to say "24 flat searches is not the volume in
+# question". It was wrong; this is the evidence.
+#
+# 2 s, deliberately slower than ENRICH_PAUSE: search is the cheaper call to
+# slow down (24 of them, not 100) and the more scrutinised endpoint. 24 terms
+# costs ~48 s, on a phase that already waits on Claude for the term list.
+SEARCH_PAUSE = float(os.environ.get('YTDL_SEARCH_PAUSE') or '2')
+
 # Standalone dev only: who the API thinks you are when no dashboard gate has
 # injected the header. Never set on a deployed host.
 DEV_USER = os.environ.get('YTDL_DEV_USER') or ''

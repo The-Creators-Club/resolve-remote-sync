@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import OTHER_USER, PROJECTS, USER
-from ytdlweb import claude_cli, config, db, worker
+from ytdlweb import claude_cli, config, db, routes_api, worker
 from ytdlweb.vendor import ytsearch
 
 
@@ -686,13 +686,16 @@ def test_a_download_reporting_no_file_is_a_failure_not_an_empty_ledger_row(
 
 # ------------------------------------------------------- pasted-link jobs
 
-def _url_job(con, ids, folder='links', user=USER):
+def _url_job(con, ids, user=USER):
     """A kind='urls' job for `ids`, exactly as routes_api.create_url_job makes
-    one: rows already pending, no terms, phase queued."""
+    one: rows already pending, no terms, phase queued -- and an EMPTY term and
+    term_dir, which is what "into the project's Youtube root, no subfolder"
+    looks like in the database (2026-08-11)."""
     slug, label, _ = PROJECTS[0]
     videos = [{'video_id': v, 'url': f'https://www.youtube.com/watch?v={v}'}
               for v in ids]
-    job_id = db.create_url_job(con, user, folder, folder, slug, label, videos)
+    job_id = db.create_url_job(con, user, routes_api.URL_JOB_TERM,
+                               routes_api.URL_JOB_TERM_DIR, slug, label, videos)
     return db.get_job(con, job_id)
 
 
@@ -713,35 +716,76 @@ def test_a_url_job_walks_queued_straight_into_the_download_phase(
     assert [c[0] for c in fake_downloader.calls] == ['aaaaaaaaaaa', 'bbbbbbbbbbb']
 
 
-def test_a_url_job_lands_where_the_companions_watcher_looks(
+def test_a_url_job_lands_in_the_projects_youtube_root(
         con, fake_claude, fake_youtube, fake_downloader, project_root):
-    """`<project>/Youtube/<folder>/<clip>` and no deeper: youtube_import lists
-    ONE level under Youtube/ and files each folder into Master/Youtube/<folder>
-    in the open Resolve project. A second level would be invisible to it, which
-    is the difference between "imports into Resolve" and "sits on the NAS"."""
-    job = _url_job(con, ['aaaaaaaaaaa'], folder='reef links')
+    """`<project>/Youtube/<clip>`, with NO subfolder at all (owner,
+    2026-08-11: there is no term to sort individual downloads by). Still no
+    deeper than the one level youtube_import walks -- it lists that level and
+    files each folder into Master/Youtube/<folder>, and collects the loose
+    clips in the root itself from companion 0.7.1."""
+    job = _url_job(con, ['aaaaaaaaaaa'])
     worker.run_job(con, job['id'])
 
-    outdir = project_root / 'reef links'
-    assert outdir.is_dir()
-    assert outdir.parent.name == 'Youtube'
-    assert outdir.parent.parent == project_root.parent
-    clips = [p.name for p in outdir.iterdir() if p.suffix == '.mp4']
+    clips = [p.name for p in project_root.iterdir() if p.suffix == '.mp4']
     assert clips == ['Test Channel - aaaaaaaaaaa title [aaaaaaaaaaa].mp4']
-    assert not [p for p in outdir.iterdir() if p.is_dir()]
-    assert (outdir / 'manifest.json').is_file()
-    assert [p.name for p in outdir.iterdir() if p.name.endswith('.credits.json')]
+    assert project_root.name == 'Youtube'
+    assert not [p for p in project_root.iterdir() if p.is_dir()], \
+        'a paste invented a folder to sit in'
+    assert [p.name for p in project_root.iterdir() if p.name.endswith('.credits.json')]
 
-    # ...and the same ledger row a search job's download writes
+    # ...and the same ledger row a search job's download writes, minus the level
     row = db.ledger_get(con, 'aaaaaaaaaaa')
-    assert row['rel_path'] == 'Youtube/reef links/' + clips[0]
-    assert row['term_dir'] == 'reef links'
+    assert row['rel_path'] == 'Youtube/' + clips[0]
+    assert row['term_dir'] == '', 'the root is empty, not a folder name'
     assert row['project_slug'] == PROJECTS[0][0] and row['downloaded_by'] == USER
     assert row['job_id'] == job['id']
+    # the badge an editor is shown has to name a folder that exists (YTDL-31),
+    # and '<label>/' with nothing after it is not one
+    assert db.ledger_where(row) == f'{PROJECTS[0][1]}/Youtube'
+    assert db.ledger_map(con)['aaaaaaaaaaa'] == f'{PROJECTS[0][1]}/Youtube'
 
-    mf = json.loads((outdir / 'manifest.json').read_text(encoding='utf-8'))
-    assert mf['kind'] == 'urls' and mf['query'] == 'reef links'
+    mf = json.loads((project_root / f'manifest.{job["id"]}.json').read_text(
+        encoding='utf-8'))
+    assert mf['kind'] == 'urls' and mf['query'] == ''
     assert [v['id'] for v in mf['videos']] == ['aaaaaaaaaaa']
+
+
+def test_two_pastes_do_not_overwrite_each_others_provenance(
+        con, fake_claude, fake_youtube, fake_downloader, project_root):
+    """A term folder belongs to one search, so `manifest.json` there is meant
+    to be replaced by a re-run. The Youtube root belongs to every paste the
+    project will ever receive -- one filename there would mean each paste
+    silently destroyed the record of the last."""
+    first = _url_job(con, ['aaaaaaaaaaa'])
+    worker.run_job(con, first['id'])
+    db.set_phase(con, first['id'], 'done')
+    second = _url_job(con, ['bbbbbbbbbbb'])
+    worker.run_job(con, second['id'])
+
+    manifests = sorted(p.name for p in project_root.iterdir()
+                       if p.name.startswith('manifest'))
+    assert manifests == [f'manifest.{first["id"]}.json',
+                         f'manifest.{second["id"]}.json']
+    # ...and a SEARCH still writes the flat name into its own term folder
+    assert worker.manifest_name({'id': 9, 'term_dir': 'algal reef'}) == 'manifest.json'
+
+
+def test_a_pasted_link_the_project_already_has_names_the_folder_it_is_in(
+        con, fake_claude, fake_youtube, fake_downloader, project_root):
+    """The disk half of the dedupe, with the paste's outdir being the WHOLE
+    Youtube tree: a clip that is really in a search's term folder must be
+    reported as being there, not as loose in the root."""
+    term_dir = project_root / 'algal reef'
+    term_dir.mkdir(parents=True, exist_ok=True)
+    (term_dir / 'Test Channel - old [aaaaaaaaaaa].mp4').write_bytes(b'landed earlier')
+
+    job = _url_job(con, ['aaaaaaaaaaa'])
+    worker.run_job(con, job['id'])
+
+    assert fake_downloader.calls == [], 'it was already in the project'
+    v = db.get_video(con, job['id'], 'aaaaaaaaaaa')
+    assert v['dl_state'] == 'skipped' and v['duplicate'] == 1
+    assert v['duplicate_of'] == f'{PROJECTS[0][1]}/algal reef'
 
 
 def test_a_url_jobs_rows_learn_their_title_from_the_download(
@@ -790,18 +834,23 @@ def test_a_url_job_is_claimed_by_the_same_serial_worker(
 
 
 def test_a_url_job_widens_every_artifact_for_the_fleet_too(
-        con, fake_claude, fake_youtube, fake_downloader, project_root, monkeypatch):
+        con, fake_claude, fake_youtube, fake_downloader, clean_projects,
+        monkeypatch):
     """YTDL-45's contract is the download phase's, and a url job goes through
     exactly the same code -- so a 0600 clip invisible over SMB cannot come back
-    through the new door."""
+    through the new door.
+
+    Deliberately WITHOUT the project_root fixture: the directory this job
+    creates is now `Youtube` itself, and pre-creating it would leave nothing for
+    ensure_outdir to widen (it only forces a mode on directories it made)."""
     asked = []
     monkeypatch.setattr(worker, '_chmod', lambda p, m: asked.append((Path(p).name, m)))
-    job = _url_job(con, ['aaaaaaaaaaa'], folder='reef links')
+    job = _url_job(con, ['aaaaaaaaaaa'])
     worker.run_job(con, job['id'])
 
     modes = dict(asked)
-    assert modes['reef links'] == 0o2775
-    assert modes['manifest.json'] == 0o664
+    assert modes['Youtube'] == 0o2775
+    assert modes[f'manifest.{job["id"]}.json'] == 0o664
     assert sum(1 for n, _ in asked if n.endswith('.mp4')) == 1
     assert sum(1 for n, _ in asked if n.endswith('.credits.json')) == 1
 
@@ -1034,3 +1083,65 @@ def test_run_job_never_raises_out_of_a_broken_phase(con, job, monkeypatch, fake_
     worker.run_job(con, job['id'])
     fresh = db.get_job(con, job['id'])
     assert fresh['phase'] == 'failed' and 'kaboom' in fresh['error']
+
+
+# --- the search phase paces too (2026-08-11, the second block of the day) ----
+
+def test_the_search_phase_waits_between_terms(con, job, fake_claude,
+                                              fake_youtube, monkeypatch):
+    """Enrichment was paced and the candidate ceiling was in force, and a full
+    search STILL bot-checked while a pasted link downloaded fine -- because
+    this loop fired one flat search per term back to back, ~24 requests in a
+    couple of seconds, and a paste is one request. The pause goes BEFORE each
+    search after the first: pausing after the last would only slow a cancel.
+    """
+    slept = []
+    monkeypatch.setattr(worker, '_sleep', slept.append)
+    monkeypatch.setattr(worker.config, 'SEARCH_PAUSE', 2.0)
+    _wire(fake_youtube, {t['q']: ['aaaaaaaaaaa'] for t in fake_claude.terms})
+
+    worker.run_job(con, job['id'])
+
+    # Counted from what the fake was actually asked, not from the canned term
+    # list: the gaps go BETWEEN searches, so the count has to follow the real
+    # number of searches however the job got its terms.
+    searched = len(fake_youtube.searched)
+    assert searched > 1, 'this test needs more than one search to have gaps'
+    assert len(slept) == searched - 1, (
+        f'{searched} searches want {searched - 1} gaps, got {len(slept)}')
+    assert set(slept) == {2.0}
+
+
+def test_pacing_off_means_no_waiting_at_all(con, job, fake_claude,
+                                            fake_youtube, monkeypatch):
+    """0 is a supported setting, not a 0-second sleep per term: the sleeper is
+    never called, so nothing has to be patched out in a hurry on a host that
+    wants the old behaviour back."""
+    slept = []
+    monkeypatch.setattr(worker, '_sleep', slept.append)
+    monkeypatch.setattr(worker.config, 'SEARCH_PAUSE', 0)
+    _wire(fake_youtube, {t: ['aaaaaaaaaaa'] for t in (x['q'] for x in fake_claude.terms)})
+
+    worker.run_job(con, job['id'])
+
+    assert slept == []
+
+
+def test_a_cancel_during_the_search_pause_is_honoured(con, job, fake_claude,
+                                                      fake_youtube, monkeypatch):
+    """A 24-term job now spends ~48 s in this loop. An editor who pressed
+    CANCEL must not wait it out, so cancellation is re-checked on the way out
+    of every sleep."""
+    monkeypatch.setattr(worker.config, 'SEARCH_PAUSE', 2.0)
+    _wire(fake_youtube, {t: ['aaaaaaaaaaa'] for t in (x['q'] for x in fake_claude.terms)})
+
+    def cancel_mid_pause(_seconds):
+        db.request_cancel(con, job['id'])
+
+    monkeypatch.setattr(worker, '_sleep', cancel_mid_pause)
+    worker.run_job(con, job['id'])
+
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'cancelled'
+    # the first term was searched; the second was abandoned in its pause
+    assert fresh['terms_done'] == 1

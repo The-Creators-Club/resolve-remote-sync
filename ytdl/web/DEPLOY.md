@@ -6,6 +6,12 @@ manifest, and the selected clips land in
 `<project>/Youtube/<term>/` on the NAS — from where sync distributes them and
 the companion imports them into Resolve.
 
+Pasted links (the second box) skip all of that and land in `<project>/Youtube/`
+**itself**, with no subfolder: there is no search term to sort them by, so a
+folder invented for them was a Resolve bin with nothing meaningful in it
+(2026-08-11). The companion collects those loose clips from **0.7.1** onwards —
+before that its importer only walked the one level of term folders.
+
 It is mounted in-process at `/ytdl` by `ccsync_dashboard.ytdl.mount_ytdl()`, on
 exactly the contract `broll/web` and `music/web` use: tri-state
 `mounted`/`absent`/`degraded`, fail-absent, no auth of its own. **A broken or
@@ -33,7 +39,7 @@ $env:YTDL_PROJECTS_ROOT = "E:\tmp\projects"
 | env var | container value | what it is |
 |---|---|---|
 | `YTDL_DATA_ROOT` | `/ytdl-data` | holds `ytdl.db`; also `claude`'s cwd. **The only tree this app owns** |
-| `YTDL_PROJECTS_ROOT` | `/projects` | the Projects tree. Downloads land under `<label>/Youtube/<term>/` |
+| `YTDL_PROJECTS_ROOT` | `/projects` | the Projects tree. A search's downloads land under `<label>/Youtube/<term>/`, a paste's directly in `<label>/Youtube/` |
 | `YTDL_DASH_DB` | `/data/dashboard.db` | the dashboard's database, opened **read-only** for the ticked-projects query |
 | `YTDL_CLAUDE_HOME` | `/claude-home` | HOME + CLAUDE_CONFIG_DIR **for the claude subprocess only** |
 | `YTDL_CLAUDE_BIN` | `claude` | absolute path if it is not on PATH |
@@ -132,7 +138,8 @@ would hand group `editors` write access to `dashboard.db` in the same
 container.
 
 Verify once on the NAS after the first job: the files must be visible at
-`P:\Projects\<label>\Youtube\<term>\` from an editor machine. (The NFSv4
+`P:\Projects\<label>\Youtube\<term>\` (a search) or `P:\Projects\<label>\Youtube\`
+(a paste) from an editor machine. (The NFSv4
 `aclmode` caveat `run.sh` already documents applies here too.)
 
 ## `cookies.txt` escape hatch
@@ -226,6 +233,25 @@ puts its whole metadata phase about where a 336-candidate unpaced one used to
 be; a deliberate 400 costs ~5 minutes there. Raising `YTDL_ENRICH_WORKERS`
 does **not** raise the rate — the gate does — it only lets a slow
 `extract_info` stop stalling the phase.
+
+## The download history needs a companion to open folders
+
+The page's history panel is the permanent `downloads` ledger, read back
+newest-first and **fleet-wide** (it is the cross-project dedupe record: every
+editor already sees everyone's rows through the ALREADY IN badge, and rows are
+upserted on the video id, so a per-caller view would lose clips as soon as
+somebody else re-downloaded one). It is still behind the dashboard's login like
+every other route here.
+
+Clicking a row opens that clip's folder **on the editor's own machine**, which a
+browser cannot do from an http page: it goes to the companion's loopback server
+(`POST http://127.0.0.1:8899/ytdl/reveal`, body `{"rel_path": "<path under the
+Projects root>"}`) exactly as b-roll's "Send to Resolve" does. Nothing about
+this deploy needs to know where `P:` is — the companion resolves the path.
+
+**Editors need companion 0.7.1 for it.** An older tray app 404s the route and
+the page says so and offers the path to copy instead; no companion at all is the
+same message. Nothing errors, and the rest of the panel works either way.
 
 ## Where things live
 

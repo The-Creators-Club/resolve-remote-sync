@@ -35,6 +35,12 @@ _thread = None
 _thread_lock = threading.Lock()
 _nudge = threading.Event()
 
+# Indirected so a test can assert the search phase PACED without waiting out a
+# real 48 seconds (ytsearch.enrich takes its sleeper as an argument for the
+# same reason; this loop has no such seam because ytsearch.search is one call
+# per term, not a pool).
+_sleep = time.sleep
+
 # {job_id: {video_id: {'percent': float, 'speed': str, 'status': str}}}. Poll
 # reads it, the download hook writes it; a dict assignment is atomic enough for
 # both under the GIL and a torn read here costs a wrong percentage for 1.5 s.
@@ -325,8 +331,16 @@ def _phase_search(c, job):
 
     Terms found AFTER the ceiling is reached are still searched and still
     attributed to videos already on the job -- the chips and terms_done are the
-    manifest's account of what was looked for, and 24 flat searches is not the
-    volume in question. What stops is new rows.
+    manifest's account of what was looked for. What stops is new rows.
+
+    PACED, like the enrich phase (config.SEARCH_PAUSE). This docstring used to
+    claim "24 flat searches is not the volume in question"; that was wrong, and
+    it cost a second bot check on the same day. With enrichment paced and the
+    ceiling in force, a full search STILL tripped it while a pasted link
+    downloaded fine -- because a paste is one request and this loop was ~24
+    back to back, in a couple of seconds, against YouTube's search endpoint.
+    The delay goes BEFORE each search after the first: pausing after the last
+    one would only make cancelling slower.
     """
     job_id = job['id']
     cap = db.max_candidates_of(job)
@@ -337,9 +351,18 @@ def _phase_search(c, job):
     have = {v['video_id'] for v in db.videos(c, job_id)}
     capped = False
 
+    first = True
     for term in db.unsearched_terms(c, job_id):
         if _cancelled(c, job_id):
             return
+        if not first and config.SEARCH_PAUSE > 0:
+            # Checked for cancellation on the way out of the sleep as well: a
+            # 24-term job now spends ~48 s in here, and an editor who pressed
+            # CANCEL must not wait it out.
+            _sleep(config.SEARCH_PAUSE)
+            if _cancelled(c, job_id):
+                return
+        first = False
         try:
             entries = ytsearch.search(term['term'], job['max_per_term'], job['period'])
         except Exception as exc:  # noqa: BLE001
@@ -671,9 +694,15 @@ def _phase_download(c, job):
     API wrote instead of rows the review grid selected, and everything below --
     the outtmpl, the edit-ready conversion, the 0664/2775 widening, the ledger,
     the dedupe re-check, the manifest -- is the same code for the same reason.
-    <project>/Youtube/<term_dir>/ is also exactly one level, which is where the
-    companion's youtube_import watcher looks (it lists one level under
-    Youtube/ and files each folder into Master/Youtube/<folder>).
+
+    An EMPTY term_dir is a paste, and it lands in <project>/Youtube/ itself
+    (owner, 2026-08-11: there is no term to sort individual downloads by, so a
+    folder per paste was clutter with nothing in it). safe_join drops the empty
+    segment, so this is one expression for both shapes. Neither goes deeper than
+    one level under Youtube/, which is what the companion's youtube_import
+    watcher walks -- it lists that level and files each folder into
+    Master/Youtube/<folder>, and collects the loose clips in the root itself
+    from companion 0.7.1.
     """
     job_id = job['id']
     outdir = config.safe_join(config.PROJECTS_ROOT, job['project_label'],
@@ -700,11 +729,21 @@ def _phase_download(c, job):
         held = db.ledger_get(c, vid)
         where = None
         if held is not None:
-            # The FOLDER, like db.ledger_map's badge -- the two halves of the
-            # same "ALREADY IN" string must not disagree (YTDL-31, 2026-08-11).
-            where = f"{held['project_label']}/{held['term_dir'] or held['term']}"
-        elif vid in ytsearch.existing_ids(outdir):
-            where = f"{job['project_label']}/{job['term_dir']}"
+            # The FOLDER, through db.ledger_where -- the two halves of the same
+            # "ALREADY IN" string must not disagree (YTDL-31, 2026-08-11), and
+            # a paste's clip is in Youtube/ itself with no folder name of its
+            # own.
+            where = db.ledger_where(held)
+        else:
+            # LOCATIONS, not just ids: for a paste `outdir` is the project's
+            # whole Youtube tree, so a clip that is really in a search's term
+            # folder must be named as being there rather than as being loose in
+            # the root. (The rglob is per video and deliberately so -- the point
+            # of this check is that it is made immediately before the bandwidth
+            # is spent, and the downloads are 3 s apart anyway.)
+            on_disk = ytsearch.existing_id_locations(outdir)
+            if vid in on_disk:
+                where = f"{job['project_label']}/{on_disk[vid]}"
         if where:
             db.set_video(c, job_id, vid, dl_state='skipped', duplicate=1,
                          selected=0, duplicate_of=where)
@@ -772,7 +811,13 @@ def _phase_download(c, job):
         sidecar = res.get('sidecar')
         if sidecar:
             _chmod(sidecar, 0o664)
-        rel = 'Youtube/' + job['term_dir'] + '/' + os.path.basename(filepath)
+        # 'Youtube/<term_dir>/<file>' for a search, 'Youtube/<file>' for a
+        # paste. Joined by dropping the empty part rather than by string
+        # concatenation: 'Youtube//x.mp4' would be a rel_path nothing downstream
+        # could split back into a folder (db._term_dir_of, the badge, the
+        # history panel's destination line).
+        rel = '/'.join(p for p in (db.YOUTUBE_DIR, job['term_dir'],
+                                   os.path.basename(filepath)) if p)
 
         # The title comes back from yt-dlp here, and for a url job it is the
         # FIRST time anything knows it: those rows are created from a pasted
@@ -799,8 +844,21 @@ def _phase_download(c, job):
     db.set_phase(c, job_id, 'done')
 
 
+def manifest_name(job):
+    """`manifest.json`, or `manifest.<job id>.json` in the Youtube root.
+
+    A term folder belongs to ONE search, so the flat name batch_dl.py
+    established is right there and a re-run of the same term is meant to replace
+    it. The root belongs to every paste this project will ever receive, and
+    those are different jobs by different editors on different days -- one
+    filename there would mean each paste silently destroyed the provenance of
+    the last (2026-08-11, when pasted links moved into the root).
+    """
+    return 'manifest.json' if job['term_dir'] else f"manifest.{job['id']}.json"
+
+
 def write_manifest(c, job_id, outdir):
-    """Drop a provenance manifest.json (0664) beside the clips.
+    """Drop a provenance manifest (0664) beside the clips.
 
     Same shape batch_dl.py writes, because that convention already exists and
     the companion, the editors and a future re-run all read the folder rather
@@ -810,7 +868,7 @@ def write_manifest(c, job_id, outdir):
     job = db.get_job(c, job_id)
     if job is None:
         return None
-    path = Path(outdir) / 'manifest.json'
+    path = Path(outdir) / manifest_name(job)
     try:
         path.write_text(db.dumps(db.manifest_json(c, job)), encoding='utf-8')
     except OSError as exc:  # noqa: BLE001 - provenance is not worth failing a job

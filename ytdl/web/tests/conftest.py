@@ -39,6 +39,14 @@ os.environ['YTDL_PROJECTS_ROOT'] = str(_PROJECTS)
 os.environ['YTDL_DASH_DB'] = str(_DASH_DB)
 os.environ['YTDL_DEV_USER'] = ''
 os.environ['YTDL_DOWNLOAD_PAUSE'] = '0'         # the 3 s pacing is not a test
+# Same for the search pause (2026-08-11). Not cosmetic: it defaults to 2 s and
+# the search phase runs once per TERM, so leaving it on made a single job-level
+# test sleep ~48 s and timed the suite out. The tests that are ABOUT pacing set
+# it themselves and inject a fake sleeper. ENRICH_PAUSE is deliberately NOT
+# zeroed here: ytsearch.enrich is faked wholesale in tests, so it never sleeps,
+# and a test asserts the worker hands the real configured value through.
+os.environ['YTDL_SEARCH_PAUSE'] = '0'
+
 os.environ['YTDL_CLAUDE_HOME'] = str(_TMP / 'claude-home')
 
 from ytdlweb import config, db                   # noqa: E402

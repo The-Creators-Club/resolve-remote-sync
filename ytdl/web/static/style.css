@@ -147,7 +147,7 @@ a.brand:hover { color: var(--red-hot); }
   min-width: 0;
 }
 
-#q, #urls, #folder {
+#q, #urls {
   flex: 1 1 auto;
   min-width: 120px;
   background: var(--field);
@@ -157,8 +157,8 @@ a.brand:hover { color: var(--red-hot); }
   font-size: 13px;
   padding: 5px 9px;
 }
-#q::placeholder, #urls::placeholder, #folder::placeholder { color: var(--muted); }
-#q:focus, #urls:focus, #folder:focus { outline: none; border-color: var(--red); }
+#q::placeholder, #urls::placeholder { color: var(--muted); }
+#q:focus, #urls:focus { outline: none; border-color: var(--red); }
 
 /* One line tall until there is more than one link in it. Vertical resize only:
    a horizontal drag would push the picker out of the header. */
@@ -169,12 +169,15 @@ a.brand:hover { color: var(--red-hot); }
   min-height: 28px;
   max-height: 160px;
 }
-#folder { flex: 0 1 240px; font-size: 12px; }
+/* There is no folder box beside it any more (owner's call, 2026-08-11): a
+   paste's destination is the project picker, exactly as a search's is. */
 
-/* The shot-type row. Nine checkboxes must not out-shout the search box, so
-   they are 11px, unboxed until ticked, and allowed to wrap into as many lines
-   as the window needs. The two group captions ("shots of it:", "also keep:")
-   are what stops them reading as one undifferentiated wall. */
+/* The shot-type row, which sits ABOVE the search box (2026-08-11): they are
+   what the topic is read with, so they are chosen before it is typed. Nine
+   checkboxes must not out-shout the box they sit over, so they are 11px,
+   unboxed until ticked, and allowed to wrap into as many lines as the window
+   needs. The two group captions ("shots of it:", "also keep:") are what stops
+   them reading as one undifferentiated wall. */
 .shotrow { gap: 6px 10px; }
 
 .shots {
@@ -208,11 +211,13 @@ a.brand:hover { color: var(--red-hot); }
   white-space: nowrap;
 }
 .shot:hover { color: var(--text); border-color: var(--red-dim); }
-/* Same "current selection" idiom as the term chips and the dashboard. */
+/* The one place that does NOT take the dashboard's "2px red left accent"
+   selection idiom: beside a ticked checkbox the accent read as a stray red line
+   rather than as state, and the box itself already says ticked (owner's call,
+   2026-08-11). The field background and the lit border carry it instead. */
 .shot.on {
   background: var(--field);
   border-color: var(--red-dim);
-  box-shadow: inset 2px 0 0 var(--red);
   color: var(--text);
 }
 .shot input { accent-color: #ff2140; margin: 0; cursor: pointer; }
@@ -471,12 +476,27 @@ h2 {
 /* ---------- downloads ---------- */
 
 .dllist { margin-top: 8px; font-size: 11px; }
+/* align-items: center, not baseline: a row now carries a picture, and a
+   baseline would hang it off the text. */
 .dlrow {
   display: flex;
   gap: 10px;
-  align-items: baseline;
+  align-items: center;
   border-bottom: 1px dotted var(--border);
-  padding: 2px 0;
+  padding: 3px 0;
+}
+/* Fixed box, both dimensions: ytimg is a third-party origin, and an image that
+   is blocked, 404s or arrives at some other aspect must not collapse the row
+   or stretch it. object-fit crops rather than letterboxes; alt is empty, so a
+   broken one draws nothing but the field it sits on. */
+.dlrow .dlthumb {
+  flex: 0 0 56px;
+  width: 56px;
+  height: 32px;
+  object-fit: cover;
+  background: var(--field);
+  border: 1px solid var(--border);
+  display: block;
 }
 .dlrow .name { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .dlrow .st { flex: 0 0 auto; color: var(--muted); }
@@ -497,6 +517,54 @@ h2 {
 /* Takes the slack so the shot-type summary sits at the right-hand end. */
 .recentrow .name { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
+/* ---------- download history ---------- */
+/* Thumbnail, title, where it went, when -- the shape the standalone utility's
+   history had, which is what was asked for. A row is a BUTTON in everything but
+   markup: clicking it asks the companion to open that folder on this machine. */
+
+.historylist { font-size: 11px; }
+
+.histrow {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border-bottom: 1px dotted var(--border);
+  padding: 4px 0;
+  cursor: pointer;
+}
+.histrow:hover { background: var(--field); }
+.histrow:hover .name { color: var(--red-hot); }
+/* A ledger row with no path recorded (YTDL-15's shape): still history, but
+   there is no folder to offer, so it must not look clickable. */
+.histrow.nopath { cursor: default; }
+.histrow.nopath:hover { background: none; }
+.histrow.nopath:hover .name { color: var(--text); }
+
+/* The same fixed box the download rows use, for the same reason: ytimg is a
+   third-party origin and a blocked or 404 image must not resize the row. */
+.histrow .histthumb {
+  flex: 0 0 64px;
+  width: 64px;
+  height: 36px;
+  object-fit: cover;
+  background: var(--field);
+  border: 1px solid var(--border);
+  display: block;
+}
+
+.histmeta { flex: 1 1 auto; min-width: 0; }
+.histmeta .name { color: var(--text); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.histmeta .sub { color: var(--muted); font-size: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.histrow .when { flex: 0 0 auto; color: var(--muted); }
+
+.historyfoot {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 10px;
+}
+
 /* ---------- toast ---------- */
 
 .toast {
@@ -511,3 +579,5 @@ h2 {
   z-index: 50;
 }
 .toast .bad { color: var(--red-hot); }
+/* The optional action, e.g. [ COPY PATH ] when no companion answered. */
+.toast .text-btn { margin-top: 4px; }

@@ -345,6 +345,16 @@ class NewUrlJob(BaseModel):
     urls: str | list[str] = ''
     project_slug: str
     quality: str = '1080p'
+    # ACCEPTED AND IGNORED, like shot_types and max_candidates below. The box it
+    # came from is gone and so is the destination it named (owner, 2026-08-11:
+    # "the direct download link does not need a separate folder, it just uses
+    # the same folder as the search" -> "individual downloads should just go
+    # into the /youtube root for the project folder actually, I realised the
+    # problem with there being no term to sort the clips into subfolders").
+    # Kept in the model rather than dropped so a browser holding the previous
+    # app.js in cache -- or an admin's curl -- does not get a 400 for a field
+    # that no longer changes anything; pydantic would drop it silently anyway,
+    # and this is the note saying that is deliberate.
     folder: str = ''
     # Deliberately NO shot_types and NO max_candidates: a url job does no
     # searching at all, so there is nothing for a bias to bias and nothing to
@@ -363,17 +373,27 @@ class NewUrlJob(BaseModel):
 MAX_URL_CHARS = 4000
 MAX_URLS = 50
 
-# Where links land when the editor names no folder. A fixed bucket rather than
-# a timestamp: it keeps `Youtube/` shallow, it is the same name on every
-# machine, and the companion files it into Master/Youtube/links in Resolve.
-# A title would need a network call in a request handler, which is exactly what
-# this app does not do.
-DEFAULT_URL_FOLDER = 'links'
+# Where pasted links land: <project>/Youtube/ ITSELF, with no subfolder at all
+# (owner, 2026-08-11 -- "individual downloads should just go into the /youtube
+# root for the project folder actually, I realised the problem with there being
+# no term to sort the clips into subfolders"). A search has a topic to name a
+# folder after; a paste has nothing but the links, so a folder invented for it
+# was a bin in Resolve with no meaning and a level of clicking for the editor.
+#
+# Both columns are EMPTY, and both deliberately: `term` because nothing was
+# searched for, `term_dir` because there is no subfolder. Everything downstream
+# reads an empty term_dir as "the Youtube root" -- the download phase's
+# safe_join, the rel_path it writes, db.ledger_where's badge and the history
+# panel's destination line. Loose clips in that root reach Resolve from
+# companion 0.7.1, which collects them alongside the one level of term folders
+# its youtube_import watcher already walks.
+URL_JOB_TERM = ''
+URL_JOB_TERM_DIR = ''
 
 
 @router.post('/api/jobs/urls')
 def create_url_job(req: NewUrlJob, request: Request):
-    """Download exactly these videos into <project>/Youtube/<folder>/.
+    """Download exactly these videos into <project>/Youtube/.
 
     The same pipeline as a search job's download phase, entered directly: the
     rows this writes are the rows the review grid would have written, so the
@@ -409,16 +429,11 @@ def create_url_job(req: NewUrlJob, request: Request):
     if req.quality not in ('best', '2160p', '1440p', '1080p', '720p', '480p'):
         raise HTTPException(400, f'unknown quality {req.quality!r}')
 
-    folder = (req.folder or '').strip() or DEFAULT_URL_FOLDER
-    if len(folder) > MAX_TERM_CHARS:
-        raise HTTPException(
-            400, f'a folder name must be {MAX_TERM_CHARS} characters or fewer '
-                 f'(that one is {len(folder)})')
-    # Never re-implemented here: safe_term_dirname is what keeps a folder name
-    # openable over SMB by every Windows editor (YTDL-28's device names, the
-    # 80-byte cap, the illegal characters).
-    term_dir = config.safe_term_dirname(folder, fallback=DEFAULT_URL_FOLDER)
-
+    # No folder is read, validated or invented: `req.folder` is accepted and
+    # ignored (see NewUrlJob). There is therefore nothing here for
+    # safe_term_dirname to make SMB-safe either -- the only directory this job
+    # can create is `Youtube`, which already exists in every project the
+    # downloader has ever written to.
     c = con()
     running = db.active_job(c, user)
     if running is not None:
@@ -431,8 +446,11 @@ def create_url_job(req: NewUrlJob, request: Request):
     for v in videos:
         held = db.ledger_get(c, v['video_id'])
         if held is not None:
-            v['duplicate_of'] = (f"{held['project_label']}/"
-                                 f"{held['term_dir'] or held['term']}")
+            # db.ledger_where, never a second copy of the format string: the
+            # badge, the worker's re-check and this must not disagree about
+            # where a clip is (YTDL-31), least of all now that a folder name
+            # can be empty.
+            v['duplicate_of'] = db.ledger_where(held)
     skipped = [{'video_id': v['video_id'], 'duplicate_of': v['duplicate_of']}
                for v in videos if v.get('duplicate_of')]
     if len(skipped) == len(videos):
@@ -445,8 +463,8 @@ def create_url_job(req: NewUrlJob, request: Request):
 
     try:
         job_id = db.create_url_job(
-            c, user, folder, term_dir, project['slug'], project['label'],
-            videos, quality=req.quality)
+            c, user, URL_JOB_TERM, URL_JOB_TERM_DIR, project['slug'],
+            project['label'], videos, quality=req.quality)
     except sqlite3.IntegrityError:
         # The partial unique index on jobs(created_by) (YTDL-25). Same window
         # as create_job's, same answer: one editor, one job.
@@ -455,7 +473,12 @@ def create_url_job(req: NewUrlJob, request: Request):
             raise
         raise _one_job_409(running) from None
     worker.nudge()
-    return {'job_id': job_id, 'phase': 'queued', 'term_dir': term_dir,
+    # `folder` is the DESTINATION as a human reads it, not a directory name --
+    # 'Youtube' for a paste, and the only thing in this response that says where
+    # the clips are going. `term_dir` stays for anything that already reads it,
+    # empty because that is what the row holds.
+    return {'job_id': job_id, 'phase': 'queued',
+            'term_dir': URL_JOB_TERM_DIR, 'folder': db.YOUTUBE_DIR,
             'queued': len(videos) - len(skipped), 'skipped': skipped}
 
 
@@ -464,6 +487,60 @@ def list_jobs(request: Request, limit: int = 20):
     user = current_user(request)
     return {'jobs': [db.job_dict(r) for r in
                      db.recent_jobs(con(), user, max(1, min(100, limit)))]}
+
+
+@router.get('/api/jobs/active')
+def active_job(request: Request):
+    """The caller's one non-terminal job, or None. **Declared before
+    /api/jobs/{job_id}** -- that route takes an int, so 'active' reaching it
+    first would be a 422 rather than a fall-through.
+
+    It exists because the SPA cannot infer this from the recent list: a job at
+    `ready_for_review` is deliberately ACTIVE (db.active_job), it is the one
+    that blocks every new search with a 409 (YTDL-25), and a page attached to a
+    stale `#job=` hash shows the editor something else entirely while that
+    happens. One row, one query, the same one the 409 path already reads.
+    """
+    user = current_user(request)
+    row = db.active_job(con(), user)
+    return {'job': db.job_dict(row) if row is not None else None}
+
+
+# --------------------------------------------------------- download history
+# The permanent ledger, read back as history. FLEET-WIDE and not per-editor, on
+# purpose (owner's request, 2026-08-11):
+#   - the ledger IS the cross-project dedupe record. Every editor already sees
+#     everyone else's rows through the ALREADY IN badge, naming the project and
+#     folder a clip landed in -- a history that hid them would contradict a
+#     badge on the same page;
+#   - rows are UPSERTED on video_id, so a re-download by another editor moves
+#     the row and rewrites downloaded_by. A per-caller filter would silently
+#     lose clips out of an editor's own history when someone else fetched them
+#     again, which is a history that cannot be trusted;
+#   - "who already has this and where" is the question this table is for, and
+#     an editor whose colleague downloaded the clip is exactly who needs it.
+# `downloaded_by` rides along on every row, so the panel can still say whose it
+# was. What it is NOT is public: current_user() gates it like every other route.
+
+@router.get('/api/downloads')
+def list_downloads(request: Request, limit: int = db.HISTORY_PAGE,
+                   offset: int = 0):
+    """One page of the ledger, newest first. Never the whole thing.
+
+    offset/limit rather than a since-cursor because the ordering key
+    (downloaded_at, one-second resolution) is not unique -- a cursor on it
+    would either skip or repeat rows inside a batch that landed in the same
+    second, and forty clips of one job routinely do.
+    """
+    current_user(request)
+    c = con()
+    limit = max(1, min(db.MAX_HISTORY_LIMIT, int(limit)))
+    offset = max(0, int(offset))
+    rows = db.recent_downloads(c, limit, offset)
+    total = db.count_downloads(c)
+    return {'downloads': [db.download_dict(r) for r in rows],
+            'total': total, 'limit': limit, 'offset': offset,
+            'has_more': offset + len(rows) < total}
 
 
 @router.get('/api/jobs/{job_id}')

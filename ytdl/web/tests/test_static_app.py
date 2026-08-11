@@ -88,7 +88,7 @@ class N {
   byClass(c) { return this.descendants().filter(n => (' ' + n.className + ' ').includes(' ' + c + ' ')); }
 }
 
-function makeContext(handler, seed) {
+function makeContext(handler, seed, hash) {
   const els = new Map();
   const get = id => {
     if (!els.has(id)) {
@@ -138,8 +138,15 @@ function makeContext(handler, seed) {
     setItem: (k, v) => { store[k] = String(v); },
     removeItem: k => { delete store[k]; },
   };
+  // The no-companion fallback offers to copy the path. Permissioned and absent
+  // in older browsers, so app.js guards it -- but the harness needs a real one
+  // to prove the offer actually copies something.
+  const copied = [];
+  const navigator = {clipboard: {writeText: async t => { copied.push(String(t)); }}};
   const ctx = {
-    document, location: {hash: ''}, console, localStorage,
+    // `hash` is seedable because "the page was opened on #job=4" is the whole
+    // premise of the opening-job scenarios.
+    document, location: {hash: hash || ''}, console, localStorage, navigator,
     fetch: fetchStub,
     setTimeout: (fn, ms) => timers.set(fn, ms),
     clearTimeout: id => timers.clear(id),
@@ -147,11 +154,11 @@ function makeContext(handler, seed) {
     clearInterval: () => {},
   };
   vm.createContext(ctx);
-  return {ctx, els, get, timers, calls, store};
+  return {ctx, els, get, timers, calls, store, copied};
 }
 
-async function boot(handler, seed) {
-  const h = makeContext(handler, seed);
+async function boot(handler, seed, hash) {
+  const h = makeContext(handler, seed, hash);
   vm.runInContext(APP, h.ctx, {filename: 'app.js'});
   // Top-level const/let are lexical, not properties of the sandbox, so they
   // have to be re-exported. One at a time and forgivingly, so this harness can
@@ -204,7 +211,21 @@ const VIDEO = (id, over = {}) => Object.assign({
   dl_state: 'none',
 }, over);
 
-// health/projects/topbar answers every scenario needs before it gets going.
+// One ledger row as /api/downloads serves it.
+const DL = (id, over = {}) => Object.assign({
+  video_id: id, title: id + ' title', channel: 'Test Channel',
+  project_slug: 's', project_label: '2026/FF5/Energy', term: 'algal reef',
+  term_dir: 'algal reef', folder: 'algal reef',
+  folder_path: 'Youtube/algal reef',
+  rel_path: `Youtube/algal reef/Channel [${id}].mp4`,
+  reveal_path: `2026/FF5/Energy/Youtube/algal reef/Channel [${id}].mp4`,
+  thumbnail: null, job_id: 1, downloaded_by: 'alex',
+  downloaded_at: '2026-08-11T09:30:00+00:00',
+}, over);
+
+// health/projects/topbar/active/history answers every scenario needs before it
+// gets going. The last two are asked for on EVERY page load now, so a scenario
+// about anything else must not have to script them.
 function baseline(method, url) {
   if (url.startsWith('api/health')) {
     return {json: {claude: 'ok', claude_detail: '', yt_dlp: 'ok',
@@ -213,6 +234,10 @@ function baseline(method, url) {
   if (url.startsWith('api/projects')) {
     return {json: {projects: [{slug: 's', label: '2026/FF5/Energy'}],
                    projects_available: true, error: null}};
+  }
+  if (url === 'api/jobs/active') return {json: {job: null}};
+  if (url.startsWith('api/downloads')) {
+    return {json: {downloads: [], total: 0, limit: 24, offset: 0, has_more: false}};
   }
   if (url.startsWith('api/jobs?')) return {json: {jobs: []}};
   if (url.includes('partials/topbar')) return {status: 404};
@@ -508,7 +533,7 @@ scenarios['pasted_links_start_a_job'] = async () => {
   const h = await boot(async (method, url) => {
     const b = baseline(method, url); if (b) return b;
     if (method === 'POST' && url === 'api/jobs/urls') {
-      return {json: {job_id: 21, phase: 'queued', term_dir: 'reef links',
+      return {json: {job_id: 21, phase: 'queued', term_dir: '', folder: 'Youtube',
                      queued: 1, skipped: [{video_id: 'IIIIIIIIIII',
                                            duplicate_of: '2025/FF4/Nuclear/old'}]}};
     }
@@ -518,7 +543,6 @@ scenarios['pasted_links_start_a_job'] = async () => {
     return {json: {}};
   });
   h.get('urls').value = ' https://youtu.be/JJJJJJJJJJJ \n https://youtu.be/IIIIIIIIIII ';
-  h.get('folder').value = 'reef links';
   h.get('project').value = 's';
   h.get('quality').value = '1080p';
   await h.app.runUrls();
@@ -605,6 +629,120 @@ scenarios['a_url_job_shows_downloads_not_a_review_grid'] = async () => {
   await flush();
   return Object.assign(urlJob, {search_review_hidden: h.get('review').hidden,
                                 search_cards: h.get('grid').byClass('card').length});
+};
+
+// ---- the download panel -------------------------------------------------
+// The bar was `(dl_done + dl_failed) / dl_total` -- WHOLE videos -- so a
+// one-video job, which is every pasted link, sat at 0% for the entire download
+// and read as hung (2026-08-11). The per-video percentage was already on the
+// page in the row text; it just never reached the bar.
+
+scenarios['the_bar_moves_inside_a_single_video'] = async () => {
+  const vids = [VIDEO('PPPPPPPPPPP', {dl_state: 'downloading', selected: 1})];
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/71') {
+      return {json: POLLRES(JOB({id: 71, kind: 'urls', phase: 'downloading',
+                                 dl_total: 1, dl_done: 0}),
+                            {progress: {PPPPPPPPPPP: {percent: 40, speed: '3.1MiB/s',
+                                                      status: 'downloading'}}})};
+    }
+    if (url.startsWith('api/jobs/71/manifest')) return {json: MANIFEST({videos: vids})};
+    return {json: {}};
+  });
+  await h.app.attach(71);
+  await flush();
+  return {width: h.get('dlfill').style.width,
+          ticker: h.get('dlticker').textContent,
+          rows: h.get('dllist').byClass('dlrow').map(n => n.textContent)};
+};
+
+// The trap in folding the live map in: an entry LINGERS at percent 100 /
+// 'merging' after dl_done has already counted that video, so a blind sum
+// double-counts it and the bar overshoots (here: 110% clamped to a full bar
+// while half the job is still to download).
+scenarios['a_merging_video_is_not_counted_twice'] = async () => {
+  const vids = [VIDEO('QQQQQQQQQQQ', {dl_state: 'done', selected: 1}),
+                VIDEO('RRRRRRRRRRR', {dl_state: 'downloading', selected: 1})];
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/72') {
+      return {json: POLLRES(JOB({id: 72, phase: 'downloading', dl_total: 2, dl_done: 1}),
+                            {progress: {QQQQQQQQQQQ: {percent: 100, speed: null,
+                                                      status: 'merging'},
+                                        RRRRRRRRRRR: {percent: 20, speed: '1.0MiB/s',
+                                                      status: 'downloading'}}})};
+    }
+    if (url.startsWith('api/jobs/72/manifest')) return {json: MANIFEST({videos: vids})};
+    return {json: {}};
+  });
+  await h.app.attach(72);
+  await flush();
+  return {width: h.get('dlfill').style.width,
+          rows: h.get('dllist').byClass('dlrow').map(n => n.textContent)};
+};
+
+// A refresh mid-download, before the first manifest fetch lands: no dl_state to
+// read, so the live map's own 'downloading' status is what separates the video
+// still arriving from the one dl_done has already counted.
+scenarios['the_bar_falls_back_to_the_live_map'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/73') {
+      return {json: POLLRES(JOB({id: 73, phase: 'downloading', dl_total: 2, dl_done: 1}),
+                            {progress: {SSSSSSSSSSS: {percent: 100, speed: null,
+                                                      status: 'merging'},
+                                        TTTTTTTTTTT: {percent: 50, speed: '2.0MiB/s',
+                                                      status: 'downloading'}}})};
+    }
+    if (url.startsWith('api/jobs/73/manifest')) return {status: 503, json: {detail: 'gateway'}};
+    return {json: {}};
+  });
+  await h.app.attach(73);
+  await flush();
+  return {width: h.get('dlfill').style.width,
+          manifest: h.app.state.manifest,
+          rows: h.get('dllist').byClass('dlrow').map(n => n.textContent),
+          thumbs: h.get('dllist').byClass('dlthumb').map(n => n.src)};
+};
+
+// Every row shows the clip, not just its title -- and the fallback URL needs
+// nothing but the video id, which is the whole point: a url job never runs an
+// enrich phase, so `thumbnail` is NULL for every pasted link.
+scenarios['thumbnails_on_the_download_rows'] = async () => {
+  const STORED = 'https://i.ytimg.com/vi/UUUUUUUUUUU/hqdefault.jpg';
+  const jobs = {
+    74: JOB({id: 74, kind: 'search', phase: 'downloading', dl_total: 2, dl_done: 1}),
+    75: JOB({id: 75, kind: 'urls', phase: 'downloading', dl_total: 1, dl_done: 0}),
+    76: JOB({id: 76, kind: 'search', phase: 'ready_for_review'}),
+  };
+  const vids = {
+    74: [VIDEO('UUUUUUUUUUU', {dl_state: 'done', selected: 1, thumbnail: STORED}),
+         VIDEO('VVVVVVVVVVV', {dl_state: 'downloading', selected: 1})],
+    75: [VIDEO('WWWWWWWWWWW', {dl_state: 'downloading', selected: 1, title: null})],
+    76: [VIDEO('XXXXXXXXXXX'), VIDEO('YYYYYYYYYYY', {thumbnail: STORED})],
+  };
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    for (const id of [74, 75, 76]) {
+      if (url === `api/jobs/${id}`) return {json: POLLRES(jobs[id])};
+      if (url.startsWith(`api/jobs/${id}/manifest`)) {
+        return {json: MANIFEST({job: jobs[id], videos: vids[id]})};
+      }
+    }
+    return {json: {}};
+  });
+  const rowThumbs = () => h.get('dllist').byClass('dlthumb').map(n => n.src);
+  await h.app.attach(74);
+  await flush();
+  const search_thumbs = rowThumbs();
+  await h.app.attach(75);
+  await flush();
+  const url_thumbs = rowThumbs();
+  await h.app.attach(76);
+  await flush();
+  return {search_thumbs, url_thumbs,
+          card_thumbs: h.get('grid').byClass('thumb').map(n => n.src)};
 };
 
 // ---- the shot-type checkboxes -------------------------------------------
@@ -822,6 +960,180 @@ scenarios['the_candidate_limit_shows_on_the_job_and_recent_views'] = async () =>
                  .map(r => r.byClass('capsum').map(s => s.textContent).join(''))};
 };
 
+// ---- the download history ----------------------------------------------
+// "once a video is downloaded we need a history like the original youtube
+// download utility which shows thumbnails, titles, and allows the user to open
+// in folder by clicking on it" (owner, 2026-08-11). The open half cannot be
+// done by a browser at all -- it goes through the companion's loopback server,
+// exactly as b-roll's Send to Resolve does, and must degrade when nothing
+// answers rather than error.
+
+const REVEAL_URL = 'http://127.0.0.1:8899/ytdl/reveal';
+
+scenarios['history_lists_the_ledger_and_opens_a_folder'] = async () => {
+  // A search's clip, a PASTE's (which is in the Youtube root, with no folder
+  // of its own), and a row from a build that recorded no path at all.
+  const page = {downloads: [DL('AAAAAAAAAAA'),
+                            DL('BBBBBBBBBBB', {thumbnail: 'https://i.ytimg.com/vi/BBBBBBBBBBB/hqdefault.jpg',
+                                               downloaded_by: 'sam',
+                                               title: '<img src=x onerror=alert(1)>',
+                                               term: '', term_dir: '',
+                                               folder: 'Youtube',
+                                               folder_path: 'Youtube',
+                                               rel_path: 'Youtube/Channel [BBBBBBBBBBB].mp4',
+                                               reveal_path: '2026/FF5/Energy/Youtube/Channel [BBBBBBBBBBB].mp4'}),
+                            DL('CCCCCCCCCCC', {reveal_path: null})],
+                total: 3, limit: 24, offset: 0, has_more: false};
+  const h = await boot(async (method, url, body) => {
+    if (url.startsWith('api/downloads')) return {json: page};
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === REVEAL_URL) {
+      return {json: {ok: true, message: 'opened the folder'}};
+    }
+    return {json: {}};
+  });
+  const rows = h.get('historylist').byClass('histrow');
+  rows[0].onclick();
+  await flush();
+  const call = h.calls.filter(c => c.url === REVEAL_URL)[0];
+  return {rows: rows.map(r => r.textContent),
+          thumbs: h.get('historylist').byClass('histthumb').map(n => n.src),
+          titles: h.get('historylist').byClass('name').map(n => n.textContent),
+          nopath: rows.map(r => r.className),
+          clickable: rows.map(r => typeof r.onclick === 'function'),
+          note: h.get('historynote').textContent,
+          more_hidden: h.get('historymore').hidden,
+          body: call && call.body,
+          toast: h.get('toast').textContent};
+};
+
+scenarios['history_degrades_with_no_companion'] = async () => {
+  const page = {downloads: [DL('DDDDDDDDDDD')], total: 1, limit: 24,
+                offset: 0, has_more: false};
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/downloads')) return {json: page};
+    const b = baseline(method, url); if (b) return b;
+    if (url === REVEAL_URL) {
+      // What a browser does when nothing is listening on 8899: the fetch
+      // itself rejects, before any status exists.
+      throw new Error('Failed to fetch');
+    }
+    return {json: {}};
+  });
+  h.get('historylist').byClass('histrow')[0].onclick();
+  await flush();
+  const t = h.get('toast');
+  const button = t.descendants().filter(n => n.tagName === 'button')[0];
+  const text = t.textContent;
+  button.onclick();
+  await flush();
+  return {text, raw: t.innerHTML, button: !!button, label: button && button.textContent,
+          copied: h.copied, after_copy: t.textContent};
+};
+
+scenarios['history_says_so_when_the_companion_is_too_old'] = async () => {
+  const page = {downloads: [DL('EEEEEEEEEEE')], total: 1, limit: 24,
+                offset: 0, has_more: false};
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/downloads')) return {json: page};
+    const b = baseline(method, url); if (b) return b;
+    // A companion that IS running but predates the route.
+    if (url === REVEAL_URL) return {status: 404, json: {ok: false, message: 'not found: /ytdl/reveal'}};
+    return {json: {}};
+  });
+  h.get('historylist').byClass('histrow')[0].onclick();
+  await flush();
+  return {toast: h.get('toast').textContent};
+};
+
+scenarios['history_refuses_to_dump_the_whole_ledger'] = async () => {
+  const pages = {
+    0: {downloads: [DL('FFFFFFFFFFF'), DL('GGGGGGGGGGG')], total: 3, limit: 24,
+        offset: 0, has_more: true},
+    2: {downloads: [DL('HHHHHHHHHHH')], total: 3, limit: 24, offset: 2,
+        has_more: false},
+  };
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/downloads')) {
+      const m = /offset=(\d+)/.exec(url);
+      return {json: pages[m ? Number(m[1]) : 0] || pages[0]};
+    }
+    const b = baseline(method, url); if (b) return b;
+    return {json: {}};
+  });
+  const first = {rows: h.get('historylist').byClass('histrow').length,
+                 more_hidden: h.get('historymore').hidden,
+                 note: h.get('historynote').textContent};
+  await h.get('historymore').onclick();
+  await flush();
+  return {first, urls: h.calls.filter(c => c.url.startsWith('api/downloads')).map(c => c.url),
+          rows: h.get('historylist').byClass('histrow').length,
+          more_hidden: h.get('historymore').hidden,
+          note: h.get('historynote').textContent};
+};
+
+// ---- what the page attaches to on load ----------------------------------
+// Found live, 2026-08-11: a finished paste job was pinned in the hash while a
+// ready_for_review job with 74 relevant clips sat unshown -- and because
+// ready_for_review counts as the editor's one ACTIVE job (YTDL-25), it was also
+// silently 409ing every new search they tried.
+
+const openingHandler = (active, jobs) => async (method, url) => {
+  if (url === 'api/jobs/active') return {json: {job: active}};
+  const b = baseline(method, url); if (b) return b;
+  for (const id of Object.keys(jobs)) {
+    if (url === `api/jobs/${id}`) return {json: POLLRES(jobs[id])};
+    if (url.startsWith(`api/jobs/${id}/manifest`)) {
+      return {json: MANIFEST({job: jobs[id], videos: [VIDEO('ZZZZZZZZZZZ')],
+                              terms: [{id: 1, term: 'reef', lang: 'en',
+                                       english_gloss: null, source: 'user',
+                                       hits: 1, videos: 1}],
+                              counts: {relevant: 1, duplicates: 0, irrelevant: 0}})};
+    }
+  }
+  return {json: {}};
+};
+
+const OPENING_JOBS = {
+  4: JOB({id: 4, kind: 'urls', phase: 'done', terminal: true, dl_total: 1, dl_done: 1}),
+  5: JOB({id: 5, phase: 'ready_for_review', terminal: false}),
+};
+
+scenarios['an_active_job_beats_a_stale_hash'] = async () => {
+  const h = await boot(openingHandler(OPENING_JOBS[5], OPENING_JOBS), null,
+                       'job=4');
+  await flush();
+  return {job_id: h.app.state.jobId, hash: h.ctx.location.hash,
+          review_hidden: h.get('review').hidden,
+          polled: h.calls.filter(c => c.url === 'api/jobs/4').length};
+};
+
+scenarios['a_terminal_hash_still_deep_links'] = async () => {
+  const h = await boot(openingHandler(null, OPENING_JOBS), null, 'job=4');
+  await flush();
+  return {job_id: h.app.state.jobId, hash: h.ctx.location.hash,
+          downloads_hidden: h.get('downloads').hidden};
+};
+
+scenarios['no_hash_and_no_active_job_attaches_nothing'] = async () => {
+  const h = await boot(openingHandler(null, OPENING_JOBS), null, '');
+  await flush();
+  return {job_id: h.app.state.jobId, hash: h.ctx.location.hash,
+          progress_hidden: h.get('progress').hidden,
+          polling: h.polling()};
+};
+
+// An older server has no such route. The hash is still better than nothing.
+scenarios['a_missing_active_route_falls_back_to_the_hash'] = async () => {
+  const h = await boot(async (method, url) => {
+    if (url === 'api/jobs/active') return {status: 404, json: {detail: 'nope'}};
+    const b = baseline(method, url); if (b) return b;
+    return openingHandler(null, OPENING_JOBS)(method, url);
+  }, null, 'job=4');
+  await flush();
+  return {job_id: h.app.state.jobId, hash: h.ctx.location.hash};
+};
+
 // ---- run them -----------------------------------------------------------
 (async () => {
   const out = {};
@@ -980,11 +1292,14 @@ def test_a_server_detail_reaches_the_toast_as_text_not_markup(spa):
 
 # ------------------------------------------------------- the paste-links box
 def test_pasting_links_posts_the_whole_form_and_attaches_the_job(spa):
+    """The form is the LINKS and the shared destination pickers, and nothing
+    else: there is no folder field any more (owner, 2026-08-11), because a
+    paste's clips go into the project's Youtube root."""
     r = spa['pasted_links_start_a_job']
     assert r['job_id'] == 21, r
     assert r['body'] == {'urls': 'https://youtu.be/JJJJJJJJJJJ \n https://youtu.be/IIIIIIIIIII',
-                         'project_slug': 's', 'quality': '1080p',
-                         'folder': 'reef links'}, r['body']
+                         'project_slug': 's', 'quality': '1080p'}, r['body']
+    assert 'folder' not in r['body'], r['body']
     assert r['progress_hidden'] is False
     # the ledger's answer is not silent: it is why 2 links fetched 1 clip
     assert 'already in the tree' in r['toast'], r['toast']
@@ -1019,6 +1334,55 @@ def test_a_url_job_renders_its_downloads_and_no_review_grid(spa):
     assert any('already downloaded' in t for t in r['row_text']), r['row_text']
     assert r['search_review_hidden'] is False, r
     assert r['search_cards'] == 2, r
+
+
+# ---------------------------------------------------------- the download bar
+def test_the_bar_advances_while_a_single_video_is_still_downloading(spa):
+    """The pasted-link case, which is one video per job: the bar counted
+    COMPLETED videos, so it sat at 0% for the whole download and read as hung
+    while the row beside it happily printed '40%'."""
+    r = spa['the_bar_moves_inside_a_single_video']
+    assert r['width'] == '40%', r
+    assert r['ticker'].startswith('0/1 downloaded'), r['ticker']
+    assert any('40%' in t for t in r['rows']), r['rows']
+
+
+def test_a_video_that_is_merging_is_not_added_to_the_bar_twice(spa):
+    """A live entry lingers at percent 100 / 'merging' AFTER dl_done has
+    counted that video. Summing the map blindly makes that 110% -- a full bar
+    with half the job still to fetch."""
+    r = spa['a_merging_video_is_not_counted_twice']
+    assert r['width'] == '60%', r        # (1 done + 0.2 in flight) of 2
+    assert len(r['rows']) == 2, r['rows']
+
+
+def test_the_bar_reads_the_live_map_when_no_manifest_has_landed_yet(spa):
+    """A refresh mid-download: with no dl_state to read, only the live map's
+    own 'downloading' status separates the video still arriving from the one
+    already counted."""
+    r = spa['the_bar_falls_back_to_the_live_map']
+    assert r['manifest'] is None, 'the scenario did not exercise the fallback'
+    assert r['width'] == '75%', r        # (1 done + 0.5 in flight) of 2
+    assert len(r['rows']) == 2, r['rows']
+    assert r['thumbs'] == [
+        'https://i.ytimg.com/vi/SSSSSSSSSSS/mqdefault.jpg',
+        'https://i.ytimg.com/vi/TTTTTTTTTTT/mqdefault.jpg'], r['thumbs']
+
+
+def test_every_download_row_shows_a_thumbnail(spa):
+    """Both halves: a search job has a stored thumbnail, and a url job never
+    ran an enrich phase so `thumbnail` is NULL for every pasted link -- the
+    id-only ytimg fallback is the only picture there can be."""
+    r = spa['thumbnails_on_the_download_rows']
+    assert r['search_thumbs'] == [
+        'https://i.ytimg.com/vi/UUUUUUUUUUU/hqdefault.jpg',
+        'https://i.ytimg.com/vi/VVVVVVVVVVV/mqdefault.jpg'], r['search_thumbs']
+    assert r['url_thumbs'] == [
+        'https://i.ytimg.com/vi/WWWWWWWWWWW/mqdefault.jpg'], r['url_thumbs']
+    # ...and the review card, which is where the trick came from, still has its
+    assert r['card_thumbs'] == [
+        'https://i.ytimg.com/vi/XXXXXXXXXXX/mqdefault.jpg',
+        'https://i.ytimg.com/vi/UUUUUUUUUUU/hqdefault.jpg'], r['card_thumbs']
 
 
 # ------------------------------------------------------- the shot-type boxes
@@ -1115,6 +1479,119 @@ def test_a_finished_search_says_what_limit_it_ran_under(spa):
     assert r['rows'] == ['max 400', '', ''], r['rows']
 
 
+# ------------------------------------------------------ the download history
+def test_the_history_lists_the_ledger_with_a_thumbnail_and_a_destination(spa):
+    """"once a video is downloaded we need a history like the original youtube
+    download utility which shows thumbnails, titles, and allows the user to open
+    in folder by clicking on it" (owner, 2026-08-11)."""
+    r = spa['history_lists_the_ledger_and_opens_a_folder']
+    assert len(r['rows']) == 3, r['rows']
+    # the stored thumbnail when there is one, the id-only ytimg fallback when
+    # there is not -- which is every pasted link, since a url job never enriches
+    assert r['thumbs'] == [
+        'https://i.ytimg.com/vi/AAAAAAAAAAA/mqdefault.jpg',
+        'https://i.ytimg.com/vi/BBBBBBBBBBB/hqdefault.jpg',
+        'https://i.ytimg.com/vi/CCCCCCCCCCC/mqdefault.jpg'], r['thumbs']
+    # title, destination, who -- and a hostile title arrives as TEXT (YTDL-35):
+    # these come from YouTube, so they are strings somebody else chose
+    assert r['titles'][1] == '<img src=x onerror=alert(1)>', r['titles']
+    # the destination, honestly, for BOTH shapes: a search's clip is in a term
+    # folder, a pasted one is in the project's Youtube root itself
+    assert '2026/FF5/Energy\\Youtube\\algal reef' in r['rows'][0], r['rows'][0]
+    assert '2026/FF5/Energy\\Youtube ' in r['rows'][1], r['rows'][1]
+    assert 'Youtube\\ ' not in r['rows'][1], 'a dangling separator for the root'
+    assert 'sam' in r['rows'][1], r['rows'][1]
+    assert '2026-08-11 09:30' in r['rows'][0], r['rows'][0]
+    assert r['note'].startswith('showing 3 of 3'), r['note']
+    assert r['more_hidden'] is True
+
+
+def test_clicking_a_history_row_asks_the_companion_to_open_the_folder(spa):
+    """A browser cannot open a local folder from an http page, so this goes to
+    the companion's loopback exactly as b-roll's Send to Resolve does -- with a
+    path relative to the PROJECTS ROOT, never an absolute one: the page is
+    served from the NAS and only the companion knows where P: is."""
+    r = spa['history_lists_the_ledger_and_opens_a_folder']
+    assert r['body'] == {
+        'rel_path': '2026/FF5/Energy/Youtube/algal reef/Channel [AAAAAAAAAAA].mp4'
+    }, r['body']
+    assert not r['body']['rel_path'].startswith('/'), r['body']
+    assert 'opened the folder' in r['toast'], r['toast']
+    # a ledger row with no path recorded is history with nothing to open, and
+    # must not pretend to be clickable
+    assert r['clickable'] == [True, True, False], r['clickable']
+    assert 'nopath' in r['nopath'][2], r['nopath']
+
+
+def test_no_companion_shows_the_path_instead_of_an_error(spa):
+    """The b-roll rule: an absent companion is a message, not a failure. Here it
+    also has to be USEFUL -- the editor was going to open that folder, so name
+    it and offer to copy it rather than saying "not running" and stopping."""
+    r = spa['history_degrades_with_no_companion']
+    assert 'not running' in r['text'], r['text']
+    assert 'Projects\\2026\\FF5\\Energy\\Youtube\\algal reef' in r['text'], r['text']
+    assert 'P: on Windows' in r['text'], r['text']    # no drive letter is known
+    assert r['button'] is True and '[ COPY PATH ]' in r['label']
+    assert r['copied'] == ['Projects\\2026\\FF5\\Energy\\Youtube\\algal reef'], r['copied']
+    assert 'copied' in r['after_copy'], r['after_copy']
+    assert '<' not in r['raw'], 'the toast was assigned as innerHTML'
+
+
+def test_a_companion_that_predates_the_route_says_upgrade_not_error(spa):
+    """404 from a companion that IS running: an upgrade, and the fleet gets it
+    through the dashboard's channel -- nothing the editor can fix by retrying."""
+    r = spa['history_says_so_when_the_companion_is_too_old']
+    assert 'too old' in r['toast'], r['toast']
+    assert 'Youtube\\algal reef' in r['toast'], r['toast']
+
+
+def test_the_history_is_paged_and_asks_for_the_next_page_by_offset(spa):
+    """The ledger is permanent and fleet-wide, so the panel never asks for all
+    of it -- and [ OLDER ] appends rather than replacing."""
+    r = spa['history_refuses_to_dump_the_whole_ledger']
+    assert r['first']['rows'] == 2 and r['first']['more_hidden'] is False
+    assert r['first']['note'].startswith('showing 2 of 3'), r['first']['note']
+    assert r['urls'] == ['api/downloads?limit=24&offset=0',
+                         'api/downloads?limit=24&offset=2'], r['urls']
+    assert r['rows'] == 3, 'the second page replaced the first instead of appending'
+    assert r['more_hidden'] is True
+    assert r['note'].startswith('showing 3 of 3'), r['note']
+
+
+# ------------------------------------------------ what the page opens on
+def test_an_active_job_beats_a_stale_hash_and_rewrites_it(spa):
+    """Found live, 2026-08-11: a finished paste job was pinned in `#job=4` while
+    a ready_for_review job with 74 relevant clips sat unshown -- and because
+    ready_for_review counts as the editor's one ACTIVE job, it was also silently
+    409ing every new search they tried, with nothing on screen saying why."""
+    r = spa['an_active_job_beats_a_stale_hash']
+    assert r['job_id'] == 5, r
+    assert r['hash'] == 'job=5', 'the URL still names the job nobody is looking at'
+    assert r['review_hidden'] is False, 'the manifest was not shown'
+    assert r['polled'] == 0, 'the stale job was attached to as well'
+
+
+def test_a_terminal_hash_still_deep_links_when_nothing_is_active(spa):
+    """Those links are what the Recent searches list writes, and a finished
+    job's manifest is a thing people come back to."""
+    r = spa['a_terminal_hash_still_deep_links']
+    assert r['job_id'] == 4, r
+    assert r['hash'] == 'job=4'
+    assert r['downloads_hidden'] is False    # a finished paste shows its clips
+
+
+def test_no_hash_and_no_active_job_attaches_nothing(spa):
+    r = spa['no_hash_and_no_active_job_attaches_nothing']
+    assert r['job_id'] is None, r
+    assert r['hash'] == '' and r['progress_hidden'] is True
+    assert r['polling'] is False, 'polling a job that does not exist'
+
+
+def test_a_server_without_the_active_route_still_honours_the_hash(spa):
+    r = spa['a_missing_active_route_falls_back_to_the_hash']
+    assert r['job_id'] == 4, r
+
+
 # --------------------------------------------------- source-level assertions
 # These run with or without node: they are the cheap backstop for the shapes
 # the harness proves, so a rewrite that reintroduces one is caught even on a
@@ -1122,6 +1599,57 @@ def test_a_finished_search_says_what_limit_it_ran_under(spa):
 
 def _js():
     return APP_JS.read_text(encoding='utf-8')
+
+
+def _html():
+    return (STATIC / 'index.html').read_text(encoding='utf-8')
+
+
+def _css():
+    return (STATIC / 'style.css').read_text(encoding='utf-8')
+
+
+def test_the_download_bar_counts_the_video_in_flight_not_just_finished_ones():
+    js = _js()
+    body = js[js.index('function renderDownloads('):js.index('async function loadManifest(')]
+    assert '(done + inflight)' in body, body
+    # the double-count guard: only what the MANIFEST still calls downloading
+    assert "v.dl_state === 'downloading'" in body, body
+    # ...and the no-manifest-yet branch, which has only the live status to go on
+    assert "live[k].status === 'downloading'" in body, body
+
+
+def test_the_rows_and_the_cards_share_one_thumbnail_helper():
+    """The row picture IS the card's trick -- ytimg direct, id-only fallback --
+    so it is one function, not two that can drift."""
+    js = _js()
+    assert 'function thumb(v, cls)' in js, js
+    rows = js[js.index('function renderDownloads('):js.index('async function loadManifest(')]
+    assert rows.count('thumb(') == 2, rows      # the manifest rows and the fallback rows
+    card = js[js.index('function card(v)'):js.index('const _selQueue')]
+    assert "thumb(v, 'thumb')" in card, card
+
+
+def test_the_shot_type_row_sits_above_the_search_box():
+    """Owner's call, 2026-08-11: the ticks are what the topic is read WITH, so
+    they are chosen before it is typed."""
+    html = _html()
+    assert html.index('class="ctrl-row shotrow"') < html.index('<input id="q"'), \
+        'the shot-type checkboxes are back below the search bar'
+    # still inside the header controls, and still the same two elements
+    assert html.index('class="header-controls"') < html.index('class="ctrl-row shotrow"')
+    row = html[html.index('class="ctrl-row shotrow"'):html.index('<div class="ctrl-row">')]
+    assert 'id="shots"' in row and 'id="shotnote"' in row, row
+
+
+def test_a_ticked_shot_box_carries_no_red_left_edge():
+    """The dashboard's "current selection" idiom is a 2px red inset accent; the
+    owner does not want it beside a checkbox, which says ticked by itself."""
+    css = _css()
+    block = css[css.index('.shot.on {'):css.index('}', css.index('.shot.on {'))]
+    assert 'box-shadow' not in block, block
+    # ...but it must still read as selected
+    assert 'var(--field)' in block and 'border-color' in block, block
 
 
 def test_the_toast_never_assigns_innerhtml():
@@ -1274,6 +1802,67 @@ def test_the_search_posts_the_ticked_shot_types_in_source():
     # ...and the paste box does NOT: a url job is never searched or filtered
     paste = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
     assert 'shot_types' not in paste, paste
+
+
+def test_the_paste_box_has_no_folder_field_left_anywhere():
+    """Owner, 2026-08-11: a paste's destination is the project, and its clips go
+    into that project's Youtube root -- there is no folder to name, in the
+    markup, in the POST or in the stylesheet."""
+    js, html, css = _js(), _html(), _css()
+    assert 'id="folder"' not in html, html[html.index('id="urls"'):][:400]
+    paste = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
+    assert 'folder:' not in paste, paste          # not posted
+    assert "$('#folder')" not in paste, paste     # and not read
+    assert '#folder' not in css
+
+
+def test_the_reveal_goes_to_the_companion_loopback_with_a_relative_path():
+    """The ONLY way a page served from the NAS can open a folder on the
+    editor's machine -- b-roll's precedent, and the same reason its
+    tests/test_mounted_prefix.py tolerates one absolute URL. The body carries a
+    path relative to the Projects root: the page must not learn a drive
+    letter."""
+    js = _js()
+    assert "const COMPANION_URL = 'http://127.0.0.1:8899';" in js
+    body = js[js.index('async function reveal(d)'):js.index('function noCompanion(')]
+    assert '`${COMPANION_URL}/ytdl/reveal`' in body, body
+    assert 'rel_path: d.reveal_path' in body, body
+    # every failure shape ends at the same place: a message and the path --
+    # nothing listening, a companion too old for the route, and any refusal
+    assert body.count('noCompanion(') == 3, body
+
+
+def test_the_absent_companion_never_reaches_an_error_state():
+    js = _js()
+    body = js[js.index('function noCompanion('):js.index('function copyText(')]
+    assert 'COPY PATH' in body and 'toast(' in body
+    # the clipboard is permissioned and absent in older browsers, so it is
+    # guarded rather than assumed
+    copy = js[js.index('function copyText('):js.index('// ------', js.index('function copyText('))]
+    assert 'navigator.clipboard' in copy and 'try {' in copy and 'catch' in copy
+
+
+def test_the_history_asks_for_a_page_not_the_whole_ledger():
+    js = _js()
+    body = js[js.index('async function loadHistory('):js.index('function historyRow(')]
+    assert "api/downloads?limit=${HISTORY_PAGE}&offset=${offset}" in body, body
+    assert 'const HISTORY_PAGE = ' in js
+    # server-derived text only ever through el()/textContent (YTDL-35): a title
+    # is a string YouTube gave us
+    row = js[js.index('function historyRow('):js.index('// Open the containing folder')]
+    assert 'innerHTML' not in row, row
+    assert "el('div', 'name', d.title || d.video_id)" in row, row
+
+
+def test_the_page_prefers_the_active_job_over_the_hash_in_source():
+    """The precedence itself, so a later edit to init() cannot quietly restore
+    "whatever the URL says" (found live, 2026-08-11)."""
+    js = _js()
+    body = js[js.index('async function openingJob()'):js.index('init().catch(')]
+    assert "api('api/jobs/active')" in body, body
+    assert '(active && active.id) || (m ? Number(m[1]) : null)' in body, body
+    # an old server without the route must not stop the hash working
+    assert 'catch' in body, body
 
 
 def test_localstorage_is_never_allowed_to_break_the_page():

@@ -6,7 +6,7 @@ you sync" are the actual product, not error handling.
 """
 from fastapi.testclient import TestClient
 
-from tests.conftest import OTHER_USER, PROJECTS, USER
+from tests.conftest import OTHER_PROJECT, OTHER_USER, PROJECTS, USER
 from ytdlweb import db, routes_api
 from ytdlweb.main import app
 
@@ -580,13 +580,15 @@ def test_pasted_links_become_a_job_that_starts_at_the_download_phase(client, con
     assert r.status_code == 200, r.text
     body = r.json()
     assert body['queued'] == 2 and body['skipped'] == []
-    assert body['term_dir'] == 'links'
+    assert body['folder'] == 'Youtube' and body['term_dir'] == ''
 
     job = db.get_job(con, body['job_id'])
     assert job['kind'] == 'urls'
     assert job['phase'] == 'queued'
     assert job['created_by'] == USER
-    assert job['term'] == 'links' and job['term_dir'] == 'links'
+    # nothing was searched for and there is no subfolder: the clips go into the
+    # project's Youtube root itself
+    assert job['term'] == '' and job['term_dir'] == ''
     assert job['project_label'] == PROJECTS[0][1]
     assert job['dl_total'] == 2
 
@@ -604,22 +606,35 @@ def test_a_url_job_is_the_callers_own_like_any_other(client, con):
     assert [j['id'] for j in client.get('/api/jobs').json()['jobs']] == [job_id]
 
 
-def test_the_folder_is_the_editors_and_is_made_safe_for_smb(client, con):
-    """YTDL-28's device names and the rest: safe_term_dirname is reused, never
-    re-implemented, because this folder is created on the NAS and then opened
-    over SMB by every Windows editor."""
-    job = db.get_job(con, _urls_job(client, folder='con').json()['job_id'])
-    assert job['term'] == 'con' and job['term_dir'] == 'con_'
+def test_a_paste_lands_in_the_projects_youtube_root_with_no_subfolder(client, con):
+    """Owner, 2026-08-11: "individual downloads should just go into the /youtube
+    root for the project folder actually, I realised the problem with there
+    being no term to sort the clips into subfolders". A search has a topic to
+    name a folder after; a paste has nothing but the links, so both columns are
+    EMPTY -- `term` because nothing was searched for, `term_dir` because there
+    is no subfolder -- and the download phase reads that as the Youtube root."""
+    r = client.post('/api/jobs/urls', json={'urls': 'https://youtu.be/' + VID,
+                                            'project_slug': PROJECTS[0][0]})
+    assert r.status_code == 200, r.text
+    assert r.json()['term_dir'] == routes_api.URL_JOB_TERM_DIR == ''
+    # ...and something a human can read, which a '' would not be
+    assert r.json()['folder'] == 'Youtube'
+    job = db.get_job(con, r.json()['job_id'])
+    assert job['term'] == '' and job['term_dir'] == ''
 
-    db.set_phase(con, job['id'], 'cancelled')
-    job = db.get_job(con, _urls_job(
-        client, folder='reef: the "third" terminal').json()['job_id'])
-    assert job['term_dir'] == 'reef the third terminal'
 
-
-def test_a_blank_folder_falls_back_to_the_links_bucket(client, con):
-    job = db.get_job(con, _urls_job(client, folder='   ').json()['job_id'])
-    assert job['term_dir'] == routes_api.DEFAULT_URL_FOLDER
+def test_a_folder_from_an_older_client_is_accepted_and_ignored(client, con):
+    """The field outlived its input box on purpose: a browser holding the
+    previous app.js in cache still posts one, and a 400 there would be a paste
+    that mysteriously fails while the search beside it works. It no longer
+    NAMES anything, though -- there are no subfolders under Youtube/ for a
+    paste to land in any more."""
+    for folder in ('reef links', 'con', 'reef: the "third" terminal', '   '):
+        r = _urls_job(client, folder=folder)
+        assert r.status_code == 200, r.text
+        job = db.get_job(con, r.json()['job_id'])
+        assert job['term'] == '' and job['term_dir'] == '', folder
+        db.set_phase(con, job['id'], 'cancelled')
 
 
 def test_a_link_that_is_not_a_youtube_video_is_a_400_that_names_it(client):
@@ -722,6 +737,143 @@ def test_a_url_job_can_be_cancelled_before_the_worker_claims_it(client, con):
     job_id = _urls_job(client).json()['job_id']
     assert client.post(f'/api/jobs/{job_id}/cancel').json()['phase'] == 'cancelled'
     assert db.active_job(con, USER) is None
+
+
+# ------------------------------------------------------- the active job
+# The SPA asks this on load, because a `#job=` hash can name a finished job
+# while the editor's ACTIVE one -- which is what blocks every new search with a
+# 409 -- sits unshown (found live, 2026-08-11).
+
+def test_the_active_job_route_answers_the_callers_one_live_job(client, con, job):
+    r = client.get('/api/jobs/active')
+    assert r.status_code == 200
+    assert r.json()['job']['id'] == job['id']
+    # ...including at ready_for_review, which is the case that hurts: it is
+    # active (it holds the 409) and it is waiting for the editor to look at it
+    db.set_phase(con, job['id'], 'ready_for_review')
+    assert client.get('/api/jobs/active').json()['job']['phase'] == 'ready_for_review'
+
+
+def test_the_active_job_route_is_null_when_nothing_is_running(client, con, job):
+    db.set_phase(con, job['id'], 'done')
+    assert client.get('/api/jobs/active').json() == {'job': None}
+
+
+def test_the_active_job_route_is_per_editor(client, con, job):
+    """Another editor's running job is not this editor's business, and it is
+    not what this page should attach to either."""
+    assert client.get('/api/jobs/active',
+                      headers=_headers(OTHER_USER)).json()['job'] is None
+
+
+def test_the_active_job_route_is_not_shadowed_by_the_job_id_route(client, con):
+    """/api/jobs/{job_id} takes an INT, so 'active' reaching it first is a 422
+    rather than a fall-through -- the route order in routes_api is the fix and
+    this is what would catch it being shuffled."""
+    assert client.get('/api/jobs/active').status_code == 200
+
+
+# --------------------------------------------------- the download history
+# The permanent ledger, read back. FLEET-WIDE on purpose: it is the
+# cross-project dedupe record, every editor already sees everyone's rows through
+# the ALREADY IN badge, and a row is upserted on video_id -- so a per-caller
+# filter would silently drop clips out of an editor's own history the moment
+# somebody else re-downloaded one.
+
+def _ledger(con, video_id, when, user=USER, project=None, term='reef'):
+    slug, label = project or (PROJECTS[0][0], PROJECTS[0][1])
+    db.ledger_add(con, video_id, f'{video_id} title', 'Test Channel', slug,
+                  label, term, f'Youtube/{term}/Channel - t [{video_id}].mp4',
+                  downloaded_by=user)
+    # ledger_add stamps now(), and a batch of forty clips shares a second --
+    # the ordering has to be set explicitly to be tested at all.
+    con.execute('UPDATE downloads SET downloaded_at=? WHERE video_id=?',
+                (when, video_id))
+    con.commit()
+
+
+def test_the_history_is_the_ledger_newest_first(client, con):
+    _ledger(con, 'vid00000001', '2026-08-09T10:00:00+00:00')
+    _ledger(con, 'vid00000002', '2026-08-11T10:00:00+00:00')
+    _ledger(con, 'vid00000003', '2026-08-10T10:00:00+00:00')
+    r = client.get('/api/downloads').json()
+    assert [d['video_id'] for d in r['downloads']] == \
+        ['vid00000002', 'vid00000003', 'vid00000001']
+    assert r['total'] == 3 and r['has_more'] is False
+    assert r['offset'] == 0 and r['limit'] == db.HISTORY_PAGE
+
+
+def test_a_history_row_carries_what_the_panel_draws(client, con):
+    """Thumbnail (the id is enough -- ytimg's fallback needs nothing else),
+    title, where it went, when, and the path the companion is handed to open
+    the folder."""
+    _ledger(con, 'vid00000001', '2026-08-11T10:00:00+00:00', term='algal reef')
+    d = client.get('/api/downloads').json()['downloads'][0]
+    assert d['video_id'] == 'vid00000001'
+    assert d['title'] == 'vid00000001 title' and d['channel'] == 'Test Channel'
+    assert d['project_label'] == PROJECTS[0][1] and d['folder'] == 'algal reef'
+    assert d['downloaded_by'] == USER
+    assert d['downloaded_at'] == '2026-08-11T10:00:00+00:00'
+    # relative to the PROJECTS ROOT, never absolute: the page is served from the
+    # NAS and only the companion knows where that tree is on this machine
+    assert d['reveal_path'] == \
+        f'{PROJECTS[0][1]}/Youtube/algal reef/Channel - t [vid00000001].mp4'
+    assert not d['reveal_path'].startswith('/')
+
+
+def test_the_history_shows_the_whole_fleets_downloads_and_says_whose(client, con):
+    """The ledger is the CROSS-PROJECT dedupe record: the ALREADY IN badge
+    already tells this editor where a colleague's clip landed, so a history
+    that hid it would contradict a badge on the same page -- and an upsert on
+    video_id would silently move rows out of a per-caller view."""
+    _ledger(con, 'vid00000001', '2026-08-11T10:00:00+00:00', user=USER)
+    _ledger(con, 'vid00000002', '2026-08-11T11:00:00+00:00', user=OTHER_USER,
+            project=OTHER_PROJECT)
+    rows = client.get('/api/downloads').json()['downloads']
+    assert [d['video_id'] for d in rows] == ['vid00000002', 'vid00000001']
+    assert [d['downloaded_by'] for d in rows] == [OTHER_USER, USER]
+    # ...and the other editor sees exactly the same two
+    theirs = client.get('/api/downloads', headers=_headers(OTHER_USER)).json()
+    assert [d['video_id'] for d in theirs['downloads']] == \
+        ['vid00000002', 'vid00000001']
+
+
+def test_the_history_is_paged_and_never_dumps_the_whole_ledger(client, con):
+    for i in range(5):
+        _ledger(con, f'vid0000000{i}', f'2026-08-1{i}T10:00:00+00:00')
+    first = client.get('/api/downloads?limit=2').json()
+    assert [d['video_id'] for d in first['downloads']] == ['vid00000004', 'vid00000003']
+    assert first['has_more'] is True and first['total'] == 5
+
+    second = client.get('/api/downloads?limit=2&offset=2').json()
+    assert [d['video_id'] for d in second['downloads']] == ['vid00000002', 'vid00000001']
+    assert second['has_more'] is True and second['offset'] == 2
+
+    last = client.get('/api/downloads?limit=2&offset=4').json()
+    assert [d['video_id'] for d in last['downloads']] == ['vid00000000']
+    assert last['has_more'] is False
+
+    past_the_end = client.get('/api/downloads?limit=2&offset=99').json()
+    assert past_the_end['downloads'] == [] and past_the_end['has_more'] is False
+
+
+def test_the_history_limit_is_capped_rather_than_trusted(client, con):
+    """A permanent table and a limit off the query string: the cap is the
+    difference between a page and "select everything the fleet has ever
+    downloaded", on the dashboard's single uvicorn worker."""
+    _ledger(con, 'vid00000001', '2026-08-11T10:00:00+00:00')
+    r = client.get('/api/downloads?limit=100000').json()
+    assert r['limit'] == db.MAX_HISTORY_LIMIT == 100
+    for junk in ('?limit=0', '?limit=-5', '?offset=-1'):
+        assert client.get('/api/downloads' + junk).status_code == 200
+
+
+def test_the_history_needs_a_signed_in_caller(con):
+    """Fleet-wide is not public: the dashboard's gate injects the header, and a
+    request without one is refused like every other route here."""
+    with TestClient(app) as c:
+        assert c.get('/api/downloads').status_code == 401
+        assert c.get('/api/jobs/active').status_code == 401
 
 
 def test_ui_is_served(client):

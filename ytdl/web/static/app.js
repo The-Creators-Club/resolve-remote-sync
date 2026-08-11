@@ -94,6 +94,20 @@ const HEALTH_INTERVAL = 120000;
 const WORKER_DEAD =
   'the pipeline worker is not running: jobs will queue and never start.';
 
+// The companion's loopback server, the way b-roll and music reach it. The
+// SECOND deliberate absolute URL in this file (after the ytimg thumbnail), and
+// for the opposite reason to the relative ones: this must NOT resolve against
+// the dashboard's origin -- the page is served from the NAS and the thing being
+// asked to open a folder is the editor's OWN machine. Only their companion
+// knows where the Projects tree is mounted there, which is why the request
+// carries a path relative to that root and never a drive letter.
+const COMPANION_URL = 'http://127.0.0.1:8899';
+
+// One page of download history. Small because the panel is a list of pictures
+// at the bottom of a page nobody scrolls to first, and the ledger is permanent
+// -- the fleet's whole download history is a table that only grows.
+const HISTORY_PAGE = 24;
+
 const state = {
   jobId: null,
   attachToken: 0,      // bumped by every attach/detach; see stale() below
@@ -103,6 +117,7 @@ const state = {
   shots: new Set(),    // ticked shot-type keys; init() fills it
   pollTimer: null,
   pollStart: 0,
+  historyOffset: 0,    // how many ledger rows are already on screen
 };
 
 // ---------------------------------------------------------------- helpers
@@ -149,13 +164,51 @@ const fmtTotal = s => {
 
 const fmtDate = d => d ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : '';
 
+// A stored (forward-slash) relative path as an editor reads it. split/join
+// rather than a replace with a regex literal: a slash-escaping pattern puts a
+// slash immediately after an opening bracket, which is exactly the shape
+// tests/test_mounted_prefix.py refuses to see in a shipped asset. Deny by
+// default is the point of that guard (YTDL-42), so this file works around it
+// rather than the other way round.
+const winPath = s => String(s || '').split('/').join('\\');
+// Everything but the last segment of a backslash path -- the FOLDER a file is
+// in, which is what a "reveal" is actually about.
+const winParent = s => String(s || '').slice(0, Math.max(0, String(s || '').lastIndexOf('\\')));
+
+// One thumbnail, for the review card and the download row alike. Straight from
+// ytimg: no proxying 40 images through the NAS, and the FALLBACK URL needs
+// nothing but the video id -- which is why a pasted link gets a picture at all,
+// since a url job never runs an enrich phase and its `thumbnail` is always NULL
+// (2026-08-11). A video whose metadata fetch failed shows one for the same
+// reason. no-referrer because the referrer would be the dashboard's internal
+// URL. The one deliberate absolute URL in this file besides the [ DASHBOARD ]
+// link -- see tests/test_mounted_prefix.py.
+function thumb(v, cls) {
+  const img = el('img', cls);
+  img.loading = 'lazy';
+  img.referrerPolicy = 'no-referrer';
+  img.src = v.thumbnail || `https://i.ytimg.com/vi/${v.video_id}/mqdefault.jpg`;
+  img.alt = '';
+  return img;
+}
+
 // Built with el()/textContent, never innerHTML: the text is server `detail`,
 // and one future detail quoting a YouTube title would otherwise be XSS from a
 // video someone else uploaded (YTDL-35, 2026-08-11).
-function toast(text, bad, ms = 7000) {
+//
+// `action` is {label, run} and is how a dead end becomes something the editor
+// can act on -- the no-companion path offers [ COPY PATH ] rather than only
+// naming a folder they would have to retype. Absent (every other caller) the
+// toast is exactly the one div it has always been.
+function toast(text, bad, ms = 7000, action) {
   const t = $('#toast');
   t.textContent = '';
   t.appendChild(el('div', bad ? 'bad' : null, String(text)));
+  if (action) {
+    const b = el('button', 'text-btn', action.label);
+    b.onclick = action.run;
+    t.appendChild(b);
+  }
   t.classList.remove('hidden');
   clearTimeout(toast._t);
   if (ms) toast._t = setTimeout(() => t.classList.add('hidden'), ms);
@@ -479,7 +532,13 @@ async function poll() {
     // Re-render the download list off the FINAL manifest, so the last rows
     // show done/failed (with the reason) rather than the last live tick.
     if (job.dl_total) renderProgress(job, r);
-    if (job.phase === 'done' || job.phase === 'cancelled') loadRecent();
+    if (job.phase === 'done' || job.phase === 'cancelled') {
+      loadRecent();
+      // The clips this job landed are ledger rows now, and the panel that
+      // lists them is on the same screen -- from the top, because they are the
+      // newest rows there are.
+      loadHistory();
+    }
     return;
   }
   schedulePoll();
@@ -542,10 +601,43 @@ function renderProgress(job, r) {
   $('#cancel').classList.toggle('hidden', !!job.terminal);
 }
 
+// How much of ONE video the live map says is on disk. Anything missing (before
+// the first progress_hook fires) or outside 0-100 counts as nothing rather than
+// dragging the bar backwards.
+const livePct = p => (p && p.percent != null
+  ? Math.min(100, Math.max(0, Number(p.percent) || 0)) / 100 : 0);
+
 function renderDownloads(job, r) {
   const total = job.dl_total || 0;
   const done = (job.dl_done || 0) + (job.dl_failed || 0);
-  $('#dlfill').style.width = total ? (done * 100 / total) + '%' : '0';
+  const live = r.progress || {};
+  // Every queued video gets a row -- pending, in flight, done, failed (with
+  // its reason), skipped -- not just the ones currently moving. The manifest
+  // is re-fetched each tick while downloading, so dl_state is current; the
+  // live map overrides it for the file yt-dlp is actually writing.
+  const vids = ((state.manifest && state.manifest.videos) || [])
+    .filter(v => v.dl_state && v.dl_state !== 'none');
+
+  // The bar counted WHOLE videos (dl_done + dl_failed), so a one-video job --
+  // which is every pasted link -- sat at 0% for the entire download and read
+  // as hung (2026-08-11). The in-flight fraction is the same live map the rows
+  // below print, folded into the same bar.
+  //
+  // Only videos the manifest still calls 'downloading' may be added: a live
+  // entry lingers at percent 100 / status 'merging' AFTER dl_done has counted
+  // that video, so summing the map blindly double-counts and overshoots.
+  const inflight = vids.length
+    ? vids.reduce((a, v) => a + (v.dl_state === 'downloading'
+                                 ? livePct(live[v.video_id]) : 0), 0)
+    // No manifest yet (a refresh mid-download): the live map is all there is,
+    // and only its 'downloading' entries can still be uncounted by dl_done.
+    : Object.keys(live).reduce((a, k) => a + (live[k] && live[k].status === 'downloading'
+                                              ? livePct(live[k]) : 0), 0);
+  // Rounded because (1 + 0.2) * 100 / 2 is 60.000000000000007 in floating
+  // point, and that string goes straight into a style attribute.
+  const pct = total
+    ? Math.round(Math.min(100, (done + inflight) * 100 / total) * 10) / 10 : 0;
+  $('#dlfill').style.width = pct + '%';
   $('#dlfill').classList.toggle('done', job.phase === 'done');
   $('#dlphase').textContent = PHASE_LABEL[job.phase] || job.phase;
   $('#dlticker').textContent =
@@ -554,19 +646,14 @@ function renderDownloads(job, r) {
 
   const list = $('#dllist');
   list.innerHTML = '';
-  const live = r.progress || {};
-  // Every queued video gets a row -- pending, in flight, done, failed (with
-  // its reason), skipped -- not just the ones currently moving. The manifest
-  // is re-fetched each tick while downloading, so dl_state is current; the
-  // live map overrides it for the file yt-dlp is actually writing.
-  const vids = ((state.manifest && state.manifest.videos) || [])
-    .filter(v => v.dl_state && v.dl_state !== 'none');
   if (!vids.length) {
     // A refresh mid-download, before the first manifest fetch lands: show
     // what the live map knows rather than nothing.
     Object.keys(live).forEach(vid => {
       const p = live[vid];
       const row = el('div', 'dlrow');
+      // The id is all this branch has, and it is all the fallback URL needs.
+      row.appendChild(thumb({video_id: vid}, 'dlthumb'));
       row.appendChild(el('span', 'name', vid));
       row.appendChild(el('span', 'st', p.status === 'downloading'
         ? `${p.percent == null ? '…' : p.percent + '%'} ${p.speed || ''}`
@@ -580,6 +667,7 @@ function renderDownloads(job, r) {
     const row = el('div', 'dlrow'
       + (v.dl_state === 'done' ? ' done' : '')
       + (v.dl_state === 'failed' ? ' failed' : ''));
+    row.appendChild(thumb(v, 'dlthumb'));
     row.appendChild(el('span', 'name', v.title || v.video_id));
     let st;
     if (p && p.status === 'downloading') {
@@ -703,16 +791,9 @@ function card(v) {
     + (v.duplicate ? ' dup' : '')
     + (filteredOut ? ' filtered' : ''));
 
-  const img = el('img', 'thumb');
-  // Straight from ytimg: no proxying through the NAS for 40 thumbnails, and
-  // the fallback URL needs nothing but the video id, so a video whose metadata
-  // fetch failed still shows one. no-referrer because the referrer would be
-  // the dashboard's internal URL.
-  img.loading = 'lazy';
-  img.referrerPolicy = 'no-referrer';
-  img.src = v.thumbnail || `https://i.ytimg.com/vi/${v.video_id}/mqdefault.jpg`;
-  img.alt = '';
-  n.appendChild(img);
+  // The same picture, and the same id-only fallback, as a download row -- see
+  // thumb() up in the helpers.
+  n.appendChild(thumb(v, 'thumb'));
 
   if (!v.duplicate) {
     const box = el('input', 'pick');
@@ -863,10 +944,13 @@ async function runUrls() {
   if (!slug) { toast('pick a project first', true); return; }
   btn.disabled = true;
   try {
+    // The links and the shared destination pickers, and nothing else: a paste
+    // has the same destination choice a search has, which is the project
+    // (owner's call, 2026-08-11), and its clips land in that project's Youtube
+    // root because there is no term to sort individual downloads by.
     const r = await post('api/jobs/urls', {
       urls, project_slug: slug,
       quality: $('#quality').value,
-      folder: $('#folder').value.trim(),
     });
     detach();
     $('#progress').classList.remove('hidden');
@@ -923,10 +1007,12 @@ async function loadRecent() {
     const row = el('div', 'recentrow');
     row.appendChild(el('span', 'when', (j.created_at || '').slice(0, 16).replace('T', ' ')));
     row.appendChild(el('span', 'ph', j.phase));
-    // `term` is a topic for a search and a folder name for a paste; the prefix
-    // is what stops the two reading as the same kind of row.
-    row.appendChild(el('span', 'name',
-      `${j.kind === 'urls' ? 'links → ' : ''}${j.term} → ${j.project_label}`));
+    // A search has a topic; a paste has neither a topic nor a folder any more
+    // (its clips go straight into the project's Youtube root), so naming its
+    // empty `term` would print a dangling arrow.
+    row.appendChild(el('span', 'name', j.kind === 'urls'
+      ? `links → ${j.project_label}\\Youtube`
+      : `${j.term} → ${j.project_label}`));
     // A paste is never searched or filtered, so it has neither shot types nor
     // a candidate ceiling to show -- its videos are the links that were pasted.
     const shots = j.kind === 'urls' ? '' : shotSummary(j.shot_types);
@@ -936,6 +1022,142 @@ async function loadRecent() {
     row.onclick = () => attach(j.id);
     box.appendChild(row);
   });
+}
+
+// --------------------------------------------------------- download history
+// The permanent ledger, newest first, fleet-wide -- the same rows the ALREADY
+// IN badge is built from, so the panel and the badge cannot disagree about
+// where a clip is. Paged, because the ledger outlives every job in it and
+// nothing ever prunes it.
+
+async function loadHistory(more) {
+  const box = $('#historylist');
+  const offset = more ? state.historyOffset : 0;
+  let r;
+  try {
+    r = await api(`api/downloads?limit=${HISTORY_PAGE}&offset=${offset}`);
+  } catch (e) {
+    // Never fatal and never a toast: this panel is history, and the page's job
+    // is the search above it.
+    if (!more) { box.textContent = ''; box.appendChild(el('div', 'muted', 'could not load the download history')); }
+    return;
+  }
+  // Never trusted to be a list: this panel is the bottom of the page, and a
+  // server that answered something unexpected must cost the history and not
+  // the search above it.
+  const items = (r && r.downloads) || [];
+  if (!more) { box.innerHTML = ''; state.historyOffset = 0; }
+  if (!items.length && !state.historyOffset) {
+    box.textContent = 'nothing downloaded yet';
+    $('#historymore').classList.add('hidden');
+    $('#historynote').textContent = '';
+    return;
+  }
+  items.forEach(d => box.appendChild(historyRow(d)));
+  state.historyOffset = offset + items.length;
+  $('#historymore').classList.toggle('hidden', !r.has_more);
+  $('#historynote').textContent =
+    `showing ${state.historyOffset} of ${r.total} — click a clip to open its folder`;
+}
+
+function historyRow(d) {
+  const row = el('div', 'histrow');
+  // The ledger row carries the video id, so the id-only ytimg fallback always
+  // has a picture even for a clip whose title arrived from a pasted link and
+  // whose `thumbnail` was never fetched.
+  row.appendChild(thumb(d, 'histthumb'));
+
+  const meta = el('div', 'histmeta');
+  // textContent, always: a title is a string YouTube gave us, i.e. a string
+  // somebody else chose (YTDL-35's rule, applied to the ledger).
+  meta.appendChild(el('div', 'name', d.title || d.video_id));
+  // The destination as it exists on disk, for both shapes: a search's clip is
+  // in Youtube\<term>, a pasted one is in Youtube itself. `folder_path` is
+  // derived server-side from the stored rel_path, so this line cannot invent a
+  // folder that is not there.
+  meta.appendChild(el('div', 'sub',
+    [`${d.project_label}\\${winPath(d.folder_path || 'Youtube')}`,
+     d.channel || '', d.downloaded_by || ''].filter(Boolean).join(' · ')));
+  row.appendChild(meta);
+
+  row.appendChild(el('span', 'when',
+    (d.downloaded_at || '').slice(0, 16).replace('T', ' ')));
+
+  if (d.reveal_path) {
+    row.title = 'open this clip\'s folder on this machine';
+    row.onclick = () => reveal(d);
+  } else {
+    // A row from a build that recorded no path (YTDL-15's shape). Shown, never
+    // clickable: there is no folder to name.
+    row.classList.add('nopath');
+  }
+  return row;
+}
+
+// Open the containing folder ON THE EDITOR'S MACHINE. A browser cannot, so it
+// goes through the companion's loopback server exactly as b-roll's "Send to
+// Resolve" does -- and the body is a path relative to the PROJECTS ROOT, never
+// an absolute one: this page is served from the NAS and only the companion
+// knows the tree is at P:\Projects there (or /Volumes/<SSD>/... on a Mac).
+//
+// DEGRADES, never errors. No companion, a companion too old to know the route,
+// or a Mac build that has not shipped yet all end at the same place: say where
+// the clip is and offer to copy the path, which is what the editor was going to
+// do with the folder anyway.
+async function reveal(d) {
+  let res;
+  try {
+    res = await fetch(`${COMPANION_URL}/ytdl/reveal`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({rel_path: d.reveal_path}),
+    });
+  } catch {
+    noCompanion(d, 'the CC Sync companion is not running on this machine');
+    return;
+  }
+  if (res.status === 404) {
+    // The tray app is there but predates this route: an upgrade, not a bug.
+    noCompanion(d, 'your companion is too old to open folders — it will be able '
+                + 'to after the next upgrade');
+    return;
+  }
+  let body = null;
+  try { body = await res.json(); } catch { /* not JSON; status is all we have */ }
+  if (!res.ok || !body || body.ok === false) {
+    const message = (body && (body.message || body.error))
+      || `the companion answered HTTP ${res.status}`;
+    noCompanion(d, message);
+    return;
+  }
+  toast((body && body.message) || 'opened the folder on this machine');
+}
+
+// The dead end, made useful. The FOLDER, not the file -- opening it is what
+// the click was for -- and no drive letter, because this page genuinely does
+// not know one (P: on Windows, /Volumes/<SSD> on a Mac). Named AND copyable:
+// retyping a project label with three slashes in it out of a toast is not a
+// fallback anybody uses.
+function noCompanion(d, why) {
+  const folder = 'Projects\\' + winParent(winPath(d.reveal_path));
+  toast(`${why} — the clip is in ${folder} on your sync drive (P: on Windows)`,
+        false, 15000,
+        {label: '[ COPY PATH ]', run: () => copyText(folder)});
+}
+
+// Best effort by design: clipboard access is permissioned, absent on old
+// browsers and refused outright in some privacy modes, and the path is already
+// on screen in the toast either way.
+function copyText(text) {
+  try {
+    const clip = typeof navigator !== 'undefined' && navigator.clipboard;
+    if (!clip) { toast('copy it from the line above', true); return; }
+    Promise.resolve(clip.writeText(text))
+      .then(() => toast('path copied'))
+      .catch(() => toast('copy it from the line above', true));
+  } catch {
+    toast('copy it from the line above', true);
+  }
 }
 
 // ---------------------------------------------------------------- topbar
@@ -987,6 +1209,7 @@ async function init() {
     renderTerms();
     renderGrid();
   };
+  $('#historymore').onclick = () => loadHistory(true);
 
   await loadProjects();
   loadHealth();
@@ -994,14 +1217,43 @@ async function init() {
   // worker) does not have to walk the fleet asking for reloads (YTDL-39).
   setInterval(loadHealth, HEALTH_INTERVAL);
   loadRecent();
+  loadHistory();
 
-  // A refresh mid-job re-attaches rather than losing it: the pipeline runs on
-  // the server and the tab is only a viewer.
+  await openingJob();
+}
+
+// What this page shows on load, in precedence order (2026-08-11, found live:
+// a finished paste job pinned in the hash while a `ready_for_review` job with
+// 74 relevant clips sat unshown, and the editor concluded the feature was
+// broken):
+//
+//   1. an ACTIVE job always wins, and the hash is rewritten to match. The
+//      editor's one non-terminal job is the one thing on the server that is
+//      either moving or waiting for them -- and `ready_for_review` counts as
+//      active (db.active_job), which is precisely the case that hurts: it
+//      blocks every new search with a 409 (YTDL-25) while the page shows
+//      something else and nothing on screen says why.
+//   2. otherwise a `#job=` hash is honoured even though it is terminal. Those
+//      deep links are what the Recent searches list writes, and a finished
+//      job's manifest is a thing people come back to.
+//   3. nothing either way: nothing is attached, as before.
+//
+// The active job is ASKED FOR rather than inferred from the recent list: one
+// row, in SQL, from the same db.active_job the 409 path uses -- inferring it
+// here would be a second definition of "active" to keep in step.
+async function openingJob() {
   const m = /job=(\d+)/.exec(location.hash || '');
-  if (m) {
-    $('#progress').classList.remove('hidden');
-    attach(Number(m[1]));
+  let active = null;
+  try {
+    active = (await api('api/jobs/active')).job;
+  } catch {
+    // An old server (no such route) or a blip. The hash is still better than
+    // nothing, so this must not stop rule 2.
   }
+  const id = (active && active.id) || (m ? Number(m[1]) : null);
+  if (!id) return;
+  $('#progress').classList.remove('hidden');
+  await attach(id);          // attach() writes location.hash, so the URL agrees
 }
 
 init().catch(e => {

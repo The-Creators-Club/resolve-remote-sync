@@ -35,7 +35,12 @@ log = logging.getLogger("ccsync.config")
 # reaching editors for the first time, and the parallel proxy generator
 # (maxed-out while idle, demoted to one worker while Resolve runs;
 # `proxy_gen_workers` overrides). See docs/bug-hunt-2026-08-11.md.
-VERSION = "0.7.0"
+# 0.7.1: POST /ytdl/reveal on the 8899 loopback server -- clicking a row in
+# the YouTube downloader page's download history opens that clip's folder in
+# the editor's own file manager (Explorer/Finder), from a rel_path under the
+# Projects root that the NAS-served page can send without knowing where this
+# machine's tree is. Editors on an older build simply 404 on it.
+VERSION = "0.7.1"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

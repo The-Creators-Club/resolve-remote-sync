@@ -142,6 +142,33 @@ for the standalone utility's sake; nothing on the NAS sets it.
 Treat the file as a credential — it is a logged-in session for whichever
 account exported it.
 
+### Cookies alone now make things WORSE — measured 2026-08-11
+
+Do not add cookies "to be safe". Tested on this NAS, in the container, both
+directions against the same video:
+
+| | result |
+|---|---|
+| **with** a valid signed-in `cookies.txt` | `ERROR: No video formats found!` |
+| **without** cookies | extracts normally |
+
+YouTube requires a **GVS PO token** for authenticated requests, and yt-dlp
+reports `[pot] PO Token Providers: none` — so an authenticated session gets no
+formats at all, while an anonymous one falls back to clients that need no
+token. A valid login with no PO token provider is strictly worse than no
+login, which is why `YTDL_COOKIES_FILE` is unset here and `/api/health`
+reporting `cookies: false` is the **wanted** state, not a missing step.
+
+If the NAS's IP ever does get bot-checked (the worker classifies it and says
+so — `docs/youtube_dlp_bugs.md` YTDL-21), cookies are only half the fix: a PO
+token provider has to come with them, i.e. the bgutil provider plugin plus its
+server, provisioned the same fetch-verify-push way as claude and deno. That
+work is not done; do it before reaching for cookies again.
+
+(Unrelated but confirmed in the same test: deno IS being used —
+`JS runtimes: deno-2.9.5`, `[jsc:deno] Solving JS challenges using deno` — so
+the anonymous path gets the high-quality formats. That is deno's whole job.)
+
 ## Where things live
 
 ```

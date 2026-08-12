@@ -3,8 +3,15 @@
 Per SPEC.md's watcher spec, every clip path found on the current timeline is
 classified as one of:
 
-  OK           — under local_root (case-insensitive on Windows).
+  OK           — under local_root (case-insensitive on Windows), spelled
+                 canonically (or no canonical prefix is configured).
+  NON_CANONICAL— under local_root but spelled with the LOCAL root instead of
+                 the canonical prefix -> healthy here, offline fleet-wide;
+                 auto-relinkable (the file exists). See the constant.
   OUT_OF_TREE  — exists on disk but outside local_root -> popup candidate.
+  FOREIGN      — not canonical, not in the tree, not on disk: another
+                 machine's private path -> warn-once, unfixable here. See
+                 the constant.
   BAD_PREFIX   — starts with the canonical shared prefix (e.g. "P:\\") AND
                  exists on disk (the mapping resolves to *something*) but
                  that something is not under local_root -> a genuinely
@@ -65,6 +72,27 @@ OK = "OK"
 OUT_OF_TREE = "OUT_OF_TREE"
 BAD_PREFIX = "BAD_PREFIX"
 MISSING = "MISSING"
+# The two classes the 2026-08-12 "Energy Transition" incident showed were
+# conflated into OK and MISSING respectively (200+ silently-broken clips):
+#
+# NON_CANONICAL -- under local_root, so the file is HERE and healthy, but
+#   spelled with the local root (`F:\Creators_Club\...`) instead of the
+#   canonical prefix (`P:\...`). Playable on this machine, offline on every
+#   other one. The file exists locally, so the fix is a pure ReplaceClip to
+#   canon.local_to_canonical's spelling -- no copy, safe to automate. Never
+#   produced on the base rig (there local_root IS the canonical prefix, so
+#   every in-tree path is already canonical), and never produced when no
+#   canonical prefix is configured.
+NON_CANONICAL = "NON_CANONICAL"
+# FOREIGN -- not canonical, not in this tree, and NOT on disk: a path from
+#   some other machine's private namespace (another editor's local_root
+#   spelling, their Z:\ archive drive, a Desktop file). It will never sync
+#   and never come online here, unlike MISSING -- which stays reserved for
+#   canonical-prefix paths whose file simply isn't downloaded (the designed
+#   steady state on a remote rig). Nothing on THIS machine can fix a FOREIGN
+#   clip (there is no file to copy), so it warns rather than popping the
+#   fixer.
+FOREIGN = "FOREIGN"
 
 # How long a prefix-resolution probe is reused. The watcher polls every 3s
 # and a timeline can carry hundreds of clips, so this turns "one realpath()
@@ -252,6 +280,13 @@ def classify_path(
     sep = plat.sep
 
     if norm_root and _is_under(norm_path, norm_root, sep):
+        # In the tree -- but stored under which SPELLING? A local_root
+        # spelling in a shared project is offline on every other machine
+        # (NON_CANONICAL's constant). On the base rig local_root IS the
+        # prefix, so is_canonical answers True for every in-tree path and
+        # this stays OK.
+        if canonical_prefix and not canon.is_canonical(path, canonical_prefix):
+            return NON_CANONICAL
         return OK
 
     # Membership in the canonical prefix is judged in the PREFIX's spelling,
@@ -319,4 +354,9 @@ def classify_path(
     if exists:
         return OUT_OF_TREE
 
-    return MISSING
+    # Not canonical, not in the tree, not on disk: another machine's private
+    # namespace (see FOREIGN's constant). NOT MISSING -- that class is
+    # reserved for canonical-prefix paths whose file simply isn't synced,
+    # and conflating the two silenced every warning the 2026-08-12 incident
+    # should have raised.
+    return FOREIGN

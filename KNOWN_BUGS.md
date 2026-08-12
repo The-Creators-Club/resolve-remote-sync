@@ -239,6 +239,48 @@ Aftermath on that machine, worth knowing about:
   `upgrade.py`'s deliberate "different, not newer" rule means they will be
   offered an "Install v0.7.3" downgrade until the channel is bumped.
 
+### R12 — the Energy Transition path-canon incident — FIXED in repo 2026-08-12 (evening), unshipped
+Two hundred–plus clips in the shared "Energy Transition" project carried
+machine-private paths with zero warnings from anyone: 47 imported on the base
+rig via `W:\Creators_Club\...`, 158 imported by the remote editor from his
+`F:\Creators_Club\...\Youtube\<term>\Proxy\*.mp4` (the 540p previews were the
+ONLY rendition any sync lane ever delivered to him), plus strays on `Z:\`,
+`I:\` and a Desktop. All relinked to `P:\` by script the same day; the repo
+fixes that stop it recurring, all with tests, all green (2646 + 81 + 77):
+
+- `resolve_bridge.replace_clip` now verifies by re-reading File Path with
+  retries — ReplaceClip returns None even on success, so the old code
+  misreported every success (resolve-relink's relink_one pattern).
+- Lane B also pulls `/Youtube/**` (originals + credits sidecars) down to
+  editors; `*.part`/`*.ytdl` debris excluded. youtube_import skips a root
+  `Youtube/Proxy/` dir instead of importing it as a term named "Proxy".
+- Canonicalize-at-import: youtube_import, the b-roll insert and the music
+  worker now ReplaceClip freshly imported clips to the `P:\` spelling
+  (identity no-op on the base rig); their dedupe folds both spellings.
+- `paths.classify_path` grew NON_CANONICAL (in-tree, local spelling →
+  auto-relinked, once per path) and FOREIGN (another machine's path, not on
+  disk → tray warn-once; MISSING stays reserved for canonical not-yet-synced
+  files). Wired into the timeline watcher AND a new classification pass on
+  the existing 120 s media-tree sweep — bins are no longer a blind spot.
+- Stale-fusionscript recovery: when the Resolve the companion had connected
+  to exits, the companion restarts itself (upgrade.restart_self — the R11
+  spawn/hand-off machinery without the swap; `bridge_auto_restart = false`
+  opts out). Left in place, the stale client wedges every NEW Resolve
+  session's scripting server for every client — proven live on the remote
+  editor's rig across three Resolve restarts, healed only by
+  companion-then-Resolve restart order. NO_SCRIPTING_MESSAGE now gives that
+  order.
+- Web UIs no longer assert "companion not running" on a rejected fetch (a
+  Chrome local-network-permission block on the http:// dashboard origin is
+  indistinguishable); they hedge and offer the `127.0.0.1:8899/status`
+  self-test. The music UI's inverted error mapping fixed.
+
+Not addressed here: serving the dashboard over HTTPS (makes the browser's
+local-network permission grantable/durable), and routing inserts through the
+dashboard's companion-poll channel instead of browser→loopback — both remain
+open options if the block recurs. Ships with the next companion release;
+remember the upgrade channel still advertises 0.7.3 (R11's residual).
+
 ---
 
 ## Carryover — unchanged from before the 2026-08-11 hunt

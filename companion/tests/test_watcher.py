@@ -751,3 +751,80 @@ def test_the_watcher_polls_through_the_cached_entry_point(tmp_path):
 
     assert watcher._get_timeline_items is resolve_bridge.poll_timeline_items
     assert watcher._get_timeline_items is not resolve_bridge.get_timeline_items
+
+
+# -- the 2026-08-12 classes: NON_CANONICAL is offered once, FOREIGN warns once
+
+
+def test_poll_once_offers_a_non_canonical_clip_exactly_once(tmp_path):
+    """In the tree, wrong spelling: handed to on_non_canonical (the app's
+    auto-relink) with the project name attached, and offered once per path
+    per process -- a successful relink changes the path (never seen again),
+    a refused one must not retry every 3 s."""
+    clip = tmp_path / "B-roll" / "clip.mov"
+    clip.parent.mkdir(parents=True)
+    clip.touch()
+    item = make_timeline_item(str(clip))
+
+    offered = []
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        on_non_canonical=lambda items: offered.append(items),
+        get_timeline_items=lambda: _ok_result(item, project_name="Energy Transition"),
+    )
+
+    summary = watcher.poll_once()
+    assert summary["non_canonical"] == 1
+    assert len(offered) == 1
+    assert offered[0][0]["file_path"] == str(clip)
+    assert offered[0][0]["resolve_project_name"] == "Energy Transition"
+    assert offered[0][0]["media_pool_item"] is not None
+
+    summary = watcher.poll_once()
+    assert summary["non_canonical"] == 0
+    assert len(offered) == 1
+
+
+def test_poll_once_warns_once_per_foreign_clip(tmp_path):
+    """Another machine's private path: never fixable here, but no longer
+    silent (it used to fall into MISSING -> DEBUG, which is how 200+ broken
+    clips accumulated unnoticed in Energy Transition)."""
+    item = make_timeline_item(r"W:\Creators_Club\Projects\x\a.braw")
+
+    warned = []
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        on_foreign=lambda it: warned.append(it),
+        get_timeline_items=lambda: _ok_result(item),
+    )
+
+    summary = watcher.poll_once()
+    assert summary["foreign_warnings"] == 1
+    assert len(warned) == 1
+    assert warned[0]["file_path"] == r"W:\Creators_Club\Projects\x\a.braw"
+
+    summary = watcher.poll_once()
+    assert summary["foreign_warnings"] == 0
+    assert len(warned) == 1
+
+
+def test_a_missing_canonical_clip_is_still_silent(tmp_path):
+    """The designed steady state on a remote rig -- an undownloaded original
+    on the canonical prefix -- must NOT become a FOREIGN warning."""
+    (tmp_path / "Projects").mkdir()
+
+    warned = []
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix=str(tmp_path),  # prefix == root: the identity rig
+        on_foreign=lambda it: warned.append(it),
+        get_timeline_items=lambda: _ok_result(
+            make_timeline_item(str(tmp_path / "Projects" / "not_synced.braw"))
+        ),
+    )
+
+    summary = watcher.poll_once()
+    assert summary["foreign_warnings"] == 0
+    assert warned == []

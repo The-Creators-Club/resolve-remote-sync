@@ -266,9 +266,17 @@ async function sendToResolve(t, action, btn, msg) {
     msg.textContent = r.ok ? (r.note || 'done') : (r.error || 'failed');
   } catch (e) {
     msg.className = 'rmsg err';
+    // The two failure shapes were INVERTED here (2026-08-12): an Error
+    // starting "companion" comes from companion() after the tray app
+    // ANSWERED with an HTTP error -- it is running; while a TypeError from
+    // fetch() means the request never reached 127.0.0.1 -- companion down,
+    // OR the browser blocked local connections (Chrome's local-network
+    // permission on an http:// dashboard origin does exactly this).
     msg.textContent = e.message.startsWith('companion')
-      ? 'no ccsync companion on this machine — is the tray app running?'
-      : e.message;
+      ? `the companion answered but refused the request (${e.message}) — see its log`
+      : 'couldn’t reach the ccsync companion — tray app not running, or the '
+        + 'browser blocked local connections (self-test: open '
+        + 'http://127.0.0.1:8899/status)';
   } finally {
     acts.forEach(b => { b.disabled = false; });
     refreshResolveStatus();

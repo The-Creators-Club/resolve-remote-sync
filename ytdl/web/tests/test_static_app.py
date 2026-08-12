@@ -1726,7 +1726,12 @@ def test_no_companion_shows_the_path_instead_of_an_error(spa):
     also has to be USEFUL -- the editor was going to open that folder, so name
     it and offer to copy it rather than saying "not running" and stopping."""
     r = spa['history_degrades_with_no_companion']
-    assert 'not running' in r['text'], r['text']
+    # 2026-08-12: a rejected fetch is NOT proof the companion is down (a
+    # browser local-network block looks identical), so the message may no
+    # longer assert "not running" as fact -- it hedges and offers the
+    # loopback self-test instead.
+    assert 'may not be running' in r['text'], r['text']
+    assert '127.0.0.1:8899/status' in r['text'], r['text']
     assert 'Projects\\2026\\FF5\\Energy\\Youtube\\algal reef' in r['text'], r['text']
     assert 'P: on Windows' in r['text'], r['text']    # no drive letter is known
     assert r['button'] is True and '[ COPY PATH ]' in r['label']

@@ -621,7 +621,7 @@ def test_the_broll_routes_still_answer_on_the_same_listener(live_server, tmp_pat
     (tmp_path / "clip.mov").write_bytes(b"fake")
     monkeypatch.setattr(
         broll_server.resolve_bridge, "perform_insert",
-        lambda local_path, in_frame, out_frame: {
+        lambda local_path, in_frame, out_frame, canonical_fn=None: {
             "ok": True, "message": f"Inserted clip.mov ({out_frame - in_frame} frames)"},
     )
 

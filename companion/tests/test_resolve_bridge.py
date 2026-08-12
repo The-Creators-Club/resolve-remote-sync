@@ -61,7 +61,12 @@ class FakeMediaPoolItem:
         self._file_path = file_path
         self._name = name
         self.replace_calls: list[str] = []
-        self.replace_result = True
+        # Model the real API: ReplaceClip returns None EVEN ON SUCCESS (the
+        # bug replace_clip used to have was trusting this value). Whether the
+        # swap actually takes is `replace_applies`; the truth signal is the
+        # File Path changing.
+        self.replace_result = None
+        self.replace_applies = True
         self.raise_on_replace = False
 
     def GetClipProperty(self):
@@ -74,6 +79,8 @@ class FakeMediaPoolItem:
         if self.raise_on_replace:
             raise RuntimeError("boom")
         self.replace_calls.append(new_path)
+        if self.replace_applies:
+            self._file_path = new_path
         return self.replace_result
 
 
@@ -455,18 +462,52 @@ def test_get_media_pool_items_recursion_depth_cap_on_self_referential_folder(mon
 
 
 def test_replace_clip_ok():
+    # Resolve returns None from ReplaceClip even on success -- ok must come
+    # from the File Path actually changing, not the return value.
     mpi = FakeMediaPoolItem(r"C:\old.mov")
+    assert mpi.replace_result is None
     result = resolve_bridge.replace_clip(mpi, r"C:\new.mov")
     assert result["ok"] is True
     assert mpi.replace_calls == [r"C:\new.mov"]
 
 
-def test_replace_clip_returns_false():
+def test_replace_clip_already_linked_is_ok_without_a_call():
+    mpi = FakeMediaPoolItem(r"C:\new.mov")
+    result = resolve_bridge.replace_clip(mpi, r"C:\new.mov")
+    assert result["ok"] is True
+    assert mpi.replace_calls == []
+
+
+def test_replace_clip_applies_on_a_retry(monkeypatch):
+    # A momentarily-busy Resolve: the first call is swallowed, the second
+    # takes. The old trust-the-return-value code reported failure here.
+    clock = _RecordingTime()
+    monkeypatch.setattr(resolve_bridge, "time", clock)
+    mpi = FakeMediaPoolItem(r"C:\old.mov")
+    mpi.replace_applies = False
+
+    original = mpi.ReplaceClip
+
+    def flaky(new_path):
+        if len(mpi.replace_calls) >= 1:
+            mpi.replace_applies = True
+        return original(new_path)
+
+    mpi.ReplaceClip = flaky
+    result = resolve_bridge.replace_clip(mpi, r"C:\new.mov")
+    assert result["ok"] is True
+    assert len(mpi.replace_calls) == 2
+    assert clock.sleeps  # backed off between attempts
+
+
+def test_replace_clip_refused_when_path_never_changes(monkeypatch):
     # UX-16: the message is editor-facing (it reaches the fixer dialog and a
     # tray toast verbatim), so it must name an action, not an API return
     # value. "ReplaceClip returned False for C:\..." was the old text.
+    clock = _RecordingTime()
+    monkeypatch.setattr(resolve_bridge, "time", clock)
     mpi = FakeMediaPoolItem(r"C:\old.mov")
-    mpi.replace_result = False
+    mpi.replace_applies = False
     result = resolve_bridge.replace_clip(mpi, r"C:\new.mov")
     assert result["ok"] is False
     assert "wouldn't relink" in result["message"]
@@ -474,13 +515,16 @@ def test_replace_clip_returns_false():
     assert "ReplaceClip" not in result["message"]
 
 
-def test_replace_clip_raises_never_propagates():
+def test_replace_clip_raises_never_propagates(monkeypatch):
+    clock = _RecordingTime()
+    monkeypatch.setattr(resolve_bridge, "time", clock)
     mpi = FakeMediaPoolItem(r"C:\old.mov")
     mpi.raise_on_replace = True
     result = resolve_bridge.replace_clip(mpi, r"C:\new.mov")
     assert result["ok"] is False
     # UX-16: was f"Resolve scripting error: {exc}" -- the exception text is
-    # now logged instead of shown.
+    # now logged instead of shown. Every attempt raising means Resolve went
+    # away, so the message stays the scripting-error one, not the refusal.
     assert "Resolve didn't answer" in result["message"]
     assert "boom" not in result["message"]
 
@@ -625,8 +669,11 @@ def test_a_running_resolve_that_wont_connect_says_so(
 
     assert result["ok"] is False
     assert result["message"] == resolve_bridge.NO_SCRIPTING_MESSAGE
-    # The actionable half: the user is told to restart the app, not to start it.
-    assert "Quit Resolve and reopen it" in result["message"]
+    # The actionable half -- and the ORDER matters (2026-08-12): a stale
+    # companion client can wedge every new Resolve session, so a Resolve-only
+    # restart provably cannot fix this state.
+    assert "Restart the companion first" in result["message"]
+    assert "reopen Resolve" in result["message"]
     assert result["message"] != resolve_bridge.NOT_RUNNING_MESSAGE
 
 
@@ -933,7 +980,10 @@ def test_every_resolve_entry_point_defers_while_the_tray_menu_is_open(monkeypatc
 
     calls[name]()
 
-    assert waits == [1]
+    # At least one wait, and always BEFORE the Resolve call. replace_clip
+    # legitimately waits more than once: its retry loop re-defers before every
+    # locked ReplaceClip attempt (and once for the pre-read of File Path).
+    assert waits and set(waits) == {1}
 
 
 # -- the poll cache: don't walk a timeline that hasn't changed --------------
@@ -1252,6 +1302,80 @@ def test_import_files_folds_a_second_spelling_into_the_dedupe(monkeypatch):
     assert result["imported"] == []
     assert pool.import_calls == []
     assert pool.added_bins == [], "a fully-deduped import must not leave a bin"
+
+
+def test_import_stores_the_canonical_spelling(monkeypatch):
+    r"""The systemic half of the 2026-08-12 Energy Transition incident:
+    ImportMedia is handed local_root paths and STORED them, so every
+    companion-imported clip was offline on the other editor's machine. With
+    canonical_fn, the freshly imported item is relinked to the `P:\` spelling
+    -- while the RESULT still reports the local path (the caller's `_done`
+    bookkeeping is keyed on what it passed in)."""
+    from ccsync_companion import canon
+
+    local = "F:\\Creators_Club\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+    pool, _root = _import_world(monkeypatch)
+
+    result = resolve_bridge.import_files_to_bin_path(
+        [local], ("Youtube", "algal reef"),
+        canonical_fn=lambda p: canon.local_to_canonical(
+            p, "F:\\Creators_Club", "P:\\"),
+    )
+
+    assert result["ok"] is True
+    assert result["imported"] == [local]
+    assert pool.import_calls == [[local]]
+    youtube = _root_bin(pool, "Youtube")
+    clip = youtube.GetSubFolderList()[0].GetClipList()[0]
+    assert clip.GetClipProperty()["File Path"] == (
+        "P:\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+    )
+
+
+def test_import_keeps_the_local_spelling_when_the_relink_is_refused(monkeypatch):
+    """canonical_fn is best-effort: a refused ReplaceClip must not fail the
+    import (the media is in the pool either way) and must leave the local
+    spelling in place, which is exactly the pre-fix behaviour."""
+    local = "F:\\Creators_Club\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+    pool, _root = _import_world(monkeypatch)
+    stubborn = FakeMediaPoolItem(local, name="a.mp4")
+    stubborn.replace_applies = False
+    pool.import_result = [stubborn]
+
+    result = resolve_bridge.import_files_to_bin_path(
+        [local], ("Youtube", "algal reef"),
+        canonical_fn=lambda p: "P:\\Projects\\2026\\Youtube\\algal reef\\a.mp4",
+    )
+
+    assert result["ok"] is True
+    assert result["imported"] == [local]
+    assert stubborn.GetClipProperty()["File Path"] == local
+
+
+def _root_bin(pool, name):
+    for sub in pool.GetRootFolder().GetSubFolderList():
+        if sub.GetName() == name:
+            return sub
+    raise AssertionError(f"no bin named {name}")
+
+
+def test_find_existing_clip_matches_the_canonical_spelling():
+    """After canonicalize-at-import, the stored path no longer equals the
+    local spelling textually -- without the fold every repeat b-roll insert
+    of the same file would file a duplicate media pool item."""
+    from ccsync_companion import canon
+
+    local = "F:\\Creators_Club\\Projects\\2026\\B-roll\\x.mov"
+    stored = "P:\\Projects\\2026\\B-roll\\x.mov"
+    bin_folder = FakeFolder(clips=[FakeMediaPoolItem(stored)], name="Archive")
+
+    assert resolve_bridge._find_existing_clip(bin_folder, local) is None
+    hit = resolve_bridge._find_existing_clip(
+        bin_folder, local,
+        canonical_fn=lambda p: canon.local_to_canonical(
+            p, "F:\\Creators_Club", "P:\\"),
+    )
+    assert hit is bin_folder.GetClipList()[0]
 
 
 def test_import_files_survives_a_raising_alias_fn(monkeypatch):

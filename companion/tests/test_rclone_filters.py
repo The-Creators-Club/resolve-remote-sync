@@ -85,15 +85,25 @@ def test_filter_rules_down_allows_proxy_dir_and_contents_then_excludes_rest():
     # first-match-wins reason: they must beat `+ **/Proxy/**`, or Resolve's
     # `.<name>.tmp` / `.<name>.lock` render sidecars get pulled down (and
     # re-pulled every pass, since the .tmp changes between them).
+    # `/Youtube/` (root-anchored only, matching youtube_import's scan scope):
+    # the NAS-side ytdl worker downloads originals into Youtube/<term>/, and
+    # without this include no lane ever shipped them down -- editors received
+    # only the generated 540p previews under Proxy/ and imported THOSE into
+    # shared projects (the 2026-08-12 Energy Transition incident).
+    # `*.part`/`*.ytdl` are yt-dlp's in-flight/control files, newly reachable
+    # through the Youtube include.
     assert rules == [
         "- ._*",
         "- /.ccsync-trash/**",
         "- *.tmp", "- *.lock", "- *.partial",
+        "- *.part", "- *.ytdl",
         "+ /Proxy/", "+ /Proxy/**",
         "+ **/Proxy/", "+ **/Proxy/**",
+        "+ /Youtube/", "+ /Youtube/**",
         "- **",
     ]
     assert rules.index("- *.tmp") < rules.index("+ **/Proxy/**")
+    assert rules.index("- *.part") < rules.index("+ /Youtube/**")
 
 
 def test_filter_rules_up_excludes_root_level_proxy():
@@ -795,6 +805,51 @@ def test_lane_b_sync_pulls_only_proxy_contents_including_nested(rclone_binary, f
         "B-roll/Proxy/clip1.mov",
         "Interviewees/Jane/Proxy/Nested/clip2.mov",
         "Proxy/clip_root.mov",
+    ]
+
+
+def test_lane_b_sync_pulls_youtube_originals_but_not_download_debris(
+    rclone_binary, fixture_tree, tmp_path
+):
+    """The 2026-08-12 Energy Transition fix: the NAS-side ytdl worker files
+    originals + .credits.json into Youtube/<term>/, and lane B must ship them
+    to editors (previously only the generated Proxy/ previews came down, so
+    editors imported 540p previews into shared projects). yt-dlp's in-flight
+    `.part` and `.ytdl` control files must NOT ride along, and a Youtube dir
+    NESTED deeper in the project (not the root-level tree the dashboard
+    writes) stays excluded."""
+    yt = fixture_tree / "Youtube" / "solar farms"
+    yt.mkdir(parents=True)
+    (yt / "MARK M - Offshore [udIShWBpHrk].mp4").write_text("original")
+    (yt / "MARK M - Offshore [udIShWBpHrk].credits.json").write_text("{}")
+    (yt / "manifest.json").write_text("{}")
+    (yt / "stale [x].mp4.part").write_text("dead download")
+    (yt / "stale [x].mp4.ytdl").write_text("control file")
+    (yt / "Proxy").mkdir()
+    (yt / "Proxy" / "MARK M - Offshore [udIShWBpHrk].mp4").write_text("540p preview")
+    nested = fixture_tree / "B-roll" / "Youtube"
+    nested.mkdir(parents=True)
+    (nested / "unrelated.mov").write_text("shares the name, not the tree")
+    _age_past_the_lane_b_gate(fixture_tree)
+
+    filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
+    dst = tmp_path / "dst_down_yt"
+    cmd = build_down_command(rclone_binary, str(dst), None, str(fixture_tree), filter_file)
+    cmd[2] = str(fixture_tree)
+    cmd[3] = str(dst)
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+    copied = sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*") if p.is_file())
+    assert copied == [
+        "B-roll/Proxy/clip1.mov",
+        "Interviewees/Jane/Proxy/Nested/clip2.mov",
+        "Proxy/clip_root.mov",
+        "Youtube/solar farms/MARK M - Offshore [udIShWBpHrk].credits.json",
+        "Youtube/solar farms/MARK M - Offshore [udIShWBpHrk].mp4",
+        "Youtube/solar farms/Proxy/MARK M - Offshore [udIShWBpHrk].mp4",
+        "Youtube/solar farms/manifest.json",
     ]
 
 

@@ -236,9 +236,17 @@ def try_connect() -> bool:
 _NOT_CONNECTED = "\x00ccsync:not-connected"
 
 NOT_RUNNING_MESSAGE = "DaVinci Resolve is not running"
+# The order matters and is not obvious: fusionscript.dll keeps process-global
+# IPC state, and a long-running client whose Resolve has restarted underneath
+# it can wedge the NEW Resolve's scripting server for EVERY client -- at which
+# point restarting Resolve alone can never fix it (proven live 2026-08-12:
+# three Resolve restarts changed nothing; companion-then-Resolve connected
+# first try). The companion now restarts itself when its Resolve goes away
+# (app._maybe_recover_stale_bridge), so this advice is the manual fallback.
 NO_SCRIPTING_MESSAGE = (
     "DaVinci Resolve is running but isn't accepting scripting connections. "
-    "Quit Resolve and reopen it."
+    "Restart the companion first (tray → Exit, then relaunch), THEN quit and "
+    "reopen Resolve."
 )
 
 # A process probe costs a spawn (tasklist/pgrep) and the watcher asks on every
@@ -835,32 +843,69 @@ def _get_media_pool_items_locked() -> dict[str, Any]:
     return {"ok": True, "message": "", "items": items, "project_name": project_name}
 
 
-def replace_clip(media_pool_item, new_path: str) -> dict[str, Any]:
+def replace_clip(media_pool_item, new_path: str, tries: int = 3) -> dict[str, Any]:
     """Relink `media_pool_item` to `new_path` via ReplaceClip.
 
     This preserves every timeline usage of the clip (per SPEC.md's fixer
     spec) rather than re-importing + re-editing. Returns
     {"ok": bool, "message": str}. Never raises.
+
+    ReplaceClip's return value is unreliable: Resolve returns None even when
+    the relink SUCCEEDED, and also returns None while momentarily busy (a
+    large project can spend seconds updating every timeline that references
+    the clip). Treating a falsy return as failure misreported every success
+    and made retry loops storm. The truth signal is the clip's File Path
+    actually changing -- re-read it, and retry (briefly, off-lock) through
+    transient stalls. Same battle-tested pattern as resolve-relink's
+    relink_one().
     """
     if media_pool_item is None:
         return {"ok": False, "message": "no media pool item to relink"}
+
+    def _file_path_locked() -> Optional[str]:
+        # No-arg form (full property dict), same as the import dedupe loop --
+        # the one-arg form is not implemented by every API build.
+        try:
+            props = media_pool_item.GetClipProperty() or {}
+            return props.get("File Path")
+        except Exception:
+            return None
+
+    norm_new = _norm_path(new_path)
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     with _API_LOCK:
-        try:
-            result = media_pool_item.ReplaceClip(new_path)
-        except Exception as exc:
-            log.warning("resolve: ReplaceClip(%s) raised: %s", new_path, exc, exc_info=True)
-            return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
-    if not result:
-        log.warning("resolve: ReplaceClip returned False for %s", new_path)
-        return {
-            "ok": False,
-            "message": (
-                "Copied the file in, but Resolve wouldn't relink it. Close the clip's "
-                "timeline and use tray → Scan whole project again."
-            ),
-        }
-    return {"ok": True, "message": f"Relinked to {new_path}"}
+        before = _file_path_locked()
+    if before is not None and _norm_path(before) == norm_new:
+        return {"ok": True, "message": f"Already linked to {new_path}"}
+
+    raised = 0
+    for attempt in range(max(1, tries)):
+        ui_state.wait_while_menu_open()
+        with _API_LOCK:
+            try:
+                media_pool_item.ReplaceClip(new_path)
+            except Exception as exc:
+                raised += 1
+                log.warning("resolve: ReplaceClip(%s) raised: %s", new_path, exc, exc_info=True)
+            after = _file_path_locked()
+        if after is not None and _norm_path(after) == norm_new:
+            return {"ok": True, "message": f"Relinked to {new_path}"}
+        if attempt + 1 < max(1, tries):
+            # Off-lock backoff: give Resolve's main thread room to finish the
+            # swap (or recover) before the next attempt.
+            time.sleep(1.0 * (attempt + 1))
+
+    if raised == max(1, tries):
+        # Every attempt raised -- Resolve went away, not a refusal.
+        return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
+    log.warning("resolve: ReplaceClip did not take for %s (path still %r)", new_path, before)
+    return {
+        "ok": False,
+        "message": (
+            "Copied the file in, but Resolve wouldn't relink it. Close the clip's "
+            "timeline and use tray → Scan whole project again."
+        ),
+    }
 
 
 def refresh_lut_list() -> bool:
@@ -1041,25 +1086,39 @@ def _attach_adjacent_proxy(media_pool_item, local_path: str) -> None:
         return
 
 
-def _find_existing_clip(bin_folder, local_path: str):
+def _find_existing_clip(bin_folder, local_path: str, canonical_fn: Any = None):
     """The MediaPoolItem already holding `local_path`, or None.
 
     Matched by FILE PATH, not by name: the archive routinely has the same
     filename in two categories, and re-importing a clip the bin already has
     would add a duplicate media pool item per insert.
+
+    `canonical_fn` folds the path's canonical spelling into the match: a
+    clip this module imported and then stored canonically (see
+    _canonicalize_imported) no longer matches its local spelling textually,
+    and without the fold every repeat insert would file a duplicate.
     """
-    target = _norm_path(local_path)
+    targets = {_norm_path(local_path)}
+    if canonical_fn is not None:
+        try:
+            spelled = canonical_fn(local_path)
+        except Exception:
+            spelled = None
+        if spelled:
+            targets.add(_norm_path(str(spelled)))
     for clip in bin_folder.GetClipList() or []:
         try:
             props = clip.GetClipProperty() or {}
         except Exception:
             props = {}
-        if _norm_path(props.get("File Path", "")) == target:
+        if _norm_path(props.get("File Path", "")) in targets:
             return clip
     return None
 
 
-def perform_insert(local_path: str, in_frame: int, out_frame: int) -> dict[str, Any]:
+def perform_insert(
+    local_path: str, in_frame: int, out_frame: int, canonical_fn: Any = None,
+) -> dict[str, Any]:
     """Append `local_path`, trimmed in_frame..out_frame, to the current timeline.
 
     The behaviour broll/SPEC.md's Companion API contract specifies: import
@@ -1067,14 +1126,23 @@ def perform_insert(local_path: str, in_frame: int, out_frame: int) -> dict[str, 
     already there) then AppendToTimeline. Returns {"ok": bool, "message":
     str} -- the shape the web UI renders straight into its toast. Never
     raises.
+
+    `canonical_fn`: import_files_to_bin_path's contract -- the spelling to
+    STORE for a freshly imported clip. For an archive insert (the usual
+    case: the file is outside the sync tree) canon.local_to_canonical falls
+    back to the physical path and this is a no-op; for an in-tree file it is
+    what keeps the shared project portable (2026-08-12 Energy Transition
+    incident).
     """
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     with _API_LOCK:
-        result = _perform_insert_locked(local_path, in_frame, out_frame)
+        result = _perform_insert_locked(local_path, in_frame, out_frame, canonical_fn)
     return _explain_disconnection(result)
 
 
-def _perform_insert_locked(local_path: str, in_frame: int, out_frame: int) -> dict[str, Any]:
+def _perform_insert_locked(
+    local_path: str, in_frame: int, out_frame: int, canonical_fn: Any = None,
+) -> dict[str, Any]:
     resolve = connect()
     if resolve is None:
         return {"ok": False, "message": _NOT_CONNECTED}
@@ -1101,15 +1169,24 @@ def _perform_insert_locked(local_path: str, in_frame: int, out_frame: int) -> di
         for name in BROLL_BIN_PATH:
             broll_bin = _find_or_create_bin(media_pool, broll_bin, name)
 
-        media_pool_item = _find_existing_clip(broll_bin, local_path)
+        media_pool_item = _find_existing_clip(broll_bin, local_path, canonical_fn)
+        freshly_imported = False
         if media_pool_item is None:
             media_pool.SetCurrentFolder(broll_bin)
             imported = media_pool.ImportMedia([local_path])
             if not imported:
                 return {"ok": False, "message": f"failed to import media at {local_path}"}
             media_pool_item = imported[0]
+            freshly_imported = True
 
         _attach_adjacent_proxy(media_pool_item, local_path)
+        if freshly_imported and canonical_fn is not None:
+            # After the proxy attach (which probes the LOCAL filesystem), and
+            # only for a clip this call created -- an existing clip's spelling
+            # is the editor's business, not an insert's.
+            _canonicalize_imported(
+                [local_path], {_norm_path(local_path): media_pool_item}, canonical_fn,
+            )
 
         before = _video_track_count(timeline, BROLL_TRACK_INDEX)
         appended = media_pool.AppendToTimeline(
@@ -1235,7 +1312,7 @@ def _ensure_bin_path(media_pool, root_folder, segments) -> Any:
 
 def import_files_to_bin_path(
     paths: Any, bin_segments: Any, expected_project_name: str = "",
-    path_alias_fn: Any = None,
+    path_alias_fn: Any = None, canonical_fn: Any = None,
 ) -> dict[str, Any]:
     """Import `paths` into `Master/<bin_segments...>`, once each. Never raises.
 
@@ -1266,6 +1343,17 @@ def import_files_to_bin_path(
     hand-imported clip in it. The caller owns the translation because only it
     knows local_root/canonical_prefix (canon.canonical_to_local); this stays
     config-free.
+
+    `canonical_fn` is the OTHER half of the same two-spellings problem:
+    ImportMedia is handed local_root paths (it cannot resolve "P:\\" on a
+    Mac), so left alone it STORES the local spelling -- which is offline on
+    every other machine in the fleet (the 2026-08-12 "Energy Transition"
+    incident: 158 F:\\-spelled clips). Called once per imported item with its
+    File Path; a canonical spelling that differs is written back with
+    ReplaceClip, the fixer's own mechanism (fixer.py stores canonical on
+    every platform -- macOS resolves it through Resolve's Mapped Mount).
+    Best-effort: a refusal keeps the local spelling and is logged, never
+    failed -- the media is in the pool either way.
     """
     wanted = [str(p) for p in (paths or [])]
     if not wanted:
@@ -1275,9 +1363,40 @@ def import_files_to_bin_path(
     with _API_LOCK:
         result = _import_files_to_bin_path_locked(
             wanted, list(bin_segments or []), str(expected_project_name or ""),
-            path_alias_fn,
+            path_alias_fn, canonical_fn,
         )
     return _explain_disconnection(result)
+
+
+def _canonicalize_imported(
+    imported: list[str], item_by_path: dict[str, Any], canonical_fn: Any,
+) -> None:
+    """Rewrite freshly imported items' stored paths to the canonical spelling.
+
+    One ReplaceClip attempt per item, verified by re-reading File Path (the
+    return value is unreliable -- see replace_clip). Refusals are logged and
+    left alone: the clip plays either way on THIS machine, it is merely not
+    yet portable. Caller already holds _API_LOCK (re-entrant).
+    """
+    for local_path in imported:
+        item = item_by_path.get(_norm_path(local_path))
+        if item is None:
+            continue
+        try:
+            target = canonical_fn(local_path)
+        except Exception:
+            log.debug("resolve: canonical_fn raised for %r", local_path, exc_info=True)
+            continue
+        if not target or _norm_path(str(target)) == _norm_path(local_path):
+            continue
+        result = replace_clip(item, str(target), tries=1)
+        if result.get("ok"):
+            log.info("resolve: stored %s canonically as %s", local_path, target)
+        else:
+            log.warning(
+                "resolve: imported %s but could not store the canonical spelling %s "
+                "(kept the local one): %s", local_path, target, result.get("message"),
+            )
 
 
 def _refused(message: str) -> dict[str, Any]:
@@ -1295,7 +1414,7 @@ def _refused(message: str) -> dict[str, Any]:
 
 def _import_files_to_bin_path_locked(
     paths: list[str], bin_segments: list[Any], expected_project_name: str,
-    path_alias_fn: Any = None,
+    path_alias_fn: Any = None, canonical_fn: Any = None,
 ) -> dict[str, Any]:
     resolve = connect()
     if resolve is None:
@@ -1404,12 +1523,16 @@ def _import_files_to_bin_path_locked(
                 log.debug("resolve: could not restore the current bin", exc_info=True)
 
     landed = set()
+    item_by_path: dict[str, Any] = {}
     for item in imported_items or []:
         try:
             props = item.GetClipProperty() or {}
         except Exception:
             props = {}
-        landed.add(_norm_path((props.get("File Path") or "").strip()))
+        fp = (props.get("File Path") or "").strip()
+        landed.add(_norm_path(fp))
+        if fp:
+            item_by_path.setdefault(_norm_path(fp), item)
 
     imported = [p for p in to_import if _norm_path(p) in landed]
     missing = [p for p in to_import if _norm_path(p) not in landed]
@@ -1429,10 +1552,21 @@ def _import_files_to_bin_path_locked(
                 props = clip.GetClipProperty() or {}
             except Exception:
                 props = {}
-            in_bin.add(_norm_path((props.get("File Path") or "").strip()))
+            fp = (props.get("File Path") or "").strip()
+            in_bin.add(_norm_path(fp))
+            if fp:
+                item_by_path.setdefault(_norm_path(fp), clip)
         verified = [p for p in missing if _norm_path(p) in in_bin]
         missing = [p for p in missing if _norm_path(p) not in in_bin]
         imported = [p for p in to_import if p in set(imported) | set(verified)]
+
+    if canonical_fn is not None and imported:
+        # LAST, after all bookkeeping: the dedupe/verification above matches
+        # on the local spellings ImportMedia was handed, and ReplaceClip
+        # changes the stored one. Single attempt, best-effort -- a clip left
+        # on its local spelling is what every import stored before this
+        # existed, and the media-tree sweep re-offers the fix later.
+        _canonicalize_imported(imported, item_by_path, canonical_fn)
 
     if missing:
         log.warning(

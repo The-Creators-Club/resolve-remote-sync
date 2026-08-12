@@ -378,29 +378,55 @@ def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list
 
 
 def build_filter_rules_down() -> list[str]:
-    """Lane B: only the contents of Proxy/ dirs, at any depth (root included).
+    """Lane B: Proxy/ dirs at any depth (root included), plus the project's
+    root-level Youtube/ tree.
 
     The trash exclude comes FIRST (first-match-wins): the backup dir mirrors
     the source layout, so `.ccsync-trash/<ts>/Sub/Proxy/x.mov` matches
     `**/Proxy/**` and would otherwise be both re-deleted every pass and
     rejected by rclone's backup-dir overlap check.
 
-    IN_PROGRESS_EXCLUDE_RULES come next, and before the `+ **/Proxy/**`
-    include for the same first-match-wins reason: they are what stops the
-    lane pulling a proxy Resolve is still writing (see the constant).
+    IN_PROGRESS_EXCLUDE_RULES come next, and before the includes for the same
+    first-match-wins reason: they are what stops the lane pulling a proxy
+    Resolve is still writing (see the constant).
 
     APPLEDOUBLE_EXCLUDE_RULE is ahead of both. It has no ordering quarrel with
-    them (all three are `-` rules), but it MUST beat `+ **/Proxy/**`, which
-    matches every byte under a Proxy dir -- `._p.mov` included.
+    them (all three are `-` rules), but it MUST beat the includes, which
+    match every byte under their dirs -- `._p.mov` included.
+
+    `/Youtube/` (project root only, where the dashboard downloader files
+    them): the NAS-side ytdl worker downloads originals into
+    `Youtube/<term>/` and the base rig generates their previews into
+    `Youtube/<term>/Proxy/` -- but no lane shipped the ORIGINALS down, so
+    the 540p previews were the only rendition an editor ever received, and
+    editors imported those into shared projects by hand (the 2026-08-12
+    "Energy Transition" incident: 158 preview clips in the pool). With the
+    originals synced down, youtube_import's documented flow works on editor
+    rigs too. Root-anchored, matching youtube_import's scan scope -- a
+    nested `**/Youtube/**` would drag along unrelated folders that merely
+    share the name. `*.part`/`*.ytdl` are yt-dlp's in-flight/control files
+    (min-age already keeps growing ones out; stale orphans on the NAS stay
+    out via these rules).
+
+    Known trade-off (tracked in KNOWN_BUGS carryover item 22): lane B is a
+    `sync`, so an editor-local file under Youtube/ that the NAS lacks is
+    swept to `.ccsync-trash` until its upload lands (videos via lane A,
+    everything else via lane C/Syncthing). The windows are the lanes' settle
+    intervals; the trash toast surfaces any sweep, and nothing is deleted
+    outright.
     """
     return [
         APPLEDOUBLE_EXCLUDE_RULE,
         TRASH_EXCLUDE_RULE,
         *IN_PROGRESS_EXCLUDE_RULES,
+        "- *.part",
+        "- *.ytdl",
         "+ /Proxy/",
         "+ /Proxy/**",
         "+ **/Proxy/",
         "+ **/Proxy/**",
+        "+ /Youtube/",
+        "+ /Youtube/**",
         "- **",
     ]
 

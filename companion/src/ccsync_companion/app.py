@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import broll_server as broll_server_mod
+from . import canon
 from . import config as config_mod
 from . import idle as idle_mod
 from . import luts as luts_mod
@@ -746,6 +747,16 @@ class CompanionApp:
         self._media_tree_lock = threading.Lock()
         self._media_tree_stop_event = threading.Event()
         self._media_tree_thread: Optional[threading.Thread] = None
+        # Once-per-process latches for _classify_pool_once, mirroring the
+        # watcher's own pair (see TimelineWatcher._offered_non_canonical) --
+        # separate sets because the two loops have different lifecycles and
+        # sharing them would let one loop swallow the other's first offer.
+        self._pool_offered_non_canonical: set[str] = set()
+        self._pool_warned_foreign: set[str] = set()
+        # Once-per-process latch for _maybe_recover_stale_bridge -- the
+        # replacement process starts unlatched, and a second restart from the
+        # SAME process could only mean the first one failed to take.
+        self._bridge_restart_started = False
 
         # The b-roll web UI's "Send to Resolve" loopback server
         # (broll_server.py), absorbed from the standalone broll-companion.
@@ -887,6 +898,8 @@ class CompanionApp:
             poll_interval=config_mod.coerce_numeric(cfg, "poll_interval", 3),
             on_out_of_tree=self._handle_out_of_tree,
             on_mapping_warning=self._handle_mapping_warning,
+            on_non_canonical=self._handle_non_canonical,
+            on_foreign=self._handle_foreign,
             ignore_tracker=self.ignore_tracker,
             on_project_changed=self._on_resolve_project_changed,
             ignored_projects=cfg.get("ignored_resolve_projects"),
@@ -1421,6 +1434,69 @@ class CompanionApp:
             "path doesn't land in your sync folder. Your P: drive (Windows) or Mapped Mount "
             "(Mac) is wrong. See EDITOR_SETUP step 6. Nothing will sync until this is fixed.",
             "ccsync-companion: mapping warning",
+        )
+
+    def _handle_non_canonical(self, items: list[dict[str, Any]]) -> None:
+        """Auto-relink in-tree clips stored under the LOCAL spelling.
+
+        The 2026-08-12 Energy Transition incident's importing-side class:
+        the file is here and healthy, only its stored spelling
+        (`F:\\Creators_Club\\...`) is machine-private. The fix is a pure
+        ReplaceClip to canon.local_to_canonical's spelling -- no copy, no
+        question to ask the editor, so no popup. Refusals are logged; the
+        watcher offers each path once per process, so a refusal never
+        storms.
+        """
+        fixed = 0
+        for item in items:
+            path = item.get("file_path", "")
+            mpi = item.get("media_pool_item")
+            if not path or mpi is None:
+                continue
+            try:
+                target = canon.local_to_canonical(
+                    path, self.config.get("local_root", ""),
+                    self.config.get("canonical_prefix", ""),
+                )
+            except Exception:
+                log.debug("canonical translation failed for %r", path, exc_info=True)
+                continue
+            if not target or canon.norm(str(target)) == canon.norm(path):
+                continue
+            result = resolve_bridge.replace_clip(mpi, str(target), tries=1)
+            if result.get("ok"):
+                fixed += 1
+                log.info("relinked non-canonical clip %s -> %s", path, target)
+            else:
+                log.warning(
+                    "could not relink non-canonical clip %s -> %s: %s",
+                    path, target, result.get("message"),
+                )
+        if fixed:
+            self._notify_tray(
+                f"Re-addressed {fixed} clip(s) to {self.config.get('canonical_prefix')} "
+                "so they stay online for every editor.",
+                "ccsync-companion",
+            )
+
+    def _handle_foreign(self, item: dict[str, Any]) -> None:
+        """One tray warning per clip stored under ANOTHER machine's path.
+
+        Nothing on this machine can fix it -- there is no local file to copy
+        or relink -- but silence is how the Energy Transition project
+        accumulated 200+ of these (2026-08-12). The companion on the machine
+        that HAS the file auto-fixes it (NON_CANONICAL there); this warning
+        exists so the clip's owner gets asked instead of nobody noticing.
+        """
+        path = item.get("file_path", "")
+        name = item.get("clip_name") or os.path.basename(path) or "a clip"
+        log.warning("clip stored under another machine's path (unfixable here): %s", path)
+        self._notify_tray(
+            f"\u201c{name}\u201d points at {path[:60]}\u2026 \u2014 a path that only exists on "
+            "another editor's machine, so it can never sync or come online here. "
+            "Whoever imported it should re-import it through the P: drive (their "
+            "companion will offer the fix).",
+            "ccsync-companion: foreign clip",
         )
 
     # -- popup plumbing (shared by the passive watcher and the manual
@@ -2051,6 +2127,7 @@ class CompanionApp:
         raises, and any failure just leaves the previous cache in place
         (except an explicit not-ok result, which clears it -- Resolve
         closing/switching projects should not keep reporting stale data)."""
+        self._maybe_recover_stale_bridge()
         try:
             result = resolve_bridge.get_media_pool_items()
         except Exception:
@@ -2097,6 +2174,134 @@ class CompanionApp:
         # exactly the same media pool enumeration, and that call is the
         # expensive part (one locked trip into fusionscript per clip).
         self._relink_proxies_once(result.get("items", []))
+        self._classify_pool_once(result.get("items", []))
+
+    def _maybe_recover_stale_bridge(self) -> None:
+        """Restart the companion when the Resolve it connected to has exited.
+
+        fusionscript.dll keeps process-global IPC state. Proven live
+        2026-08-12 (ruskin's rig): after his Resolve restarted, this
+        process's stale client wedged every NEW Resolve session's scripting
+        server -- for every client on the machine, across three Resolve
+        restarts -- until the companion was restarted FIRST. The safe moment
+        to shed the stale state is while Resolve is DOWN: nothing to wedge,
+        and the fresh process greets the next Resolve with a clean DLL.
+
+        Guards, in order: feature flag; once per process (the replacement
+        starts unlatched); ever_connected (a fresh DLL has no stale state);
+        currently disconnected; and the Resolve process actually ABSENT --
+        resolve_is_running fails closed (True), so an inconclusive probe
+        never triggers a restart. Never raises.
+        """
+        if not bool(self.config.get("bridge_auto_restart", True)):
+            return
+        if self._bridge_restart_started:
+            return
+        try:
+            state = resolve_bridge.session_state()
+            if state.get("connected") or not state.get("ever_connected"):
+                return
+            if resolve_prefs_mod.resolve_is_running():
+                return
+        except Exception:
+            return
+        self._bridge_restart_started = True
+        log.info(
+            "the Resolve this companion was connected to has exited -- "
+            "restarting the companion so its scripting link starts clean "
+            "(see resolve_bridge.NO_SCRIPTING_MESSAGE's note)"
+        )
+        try:
+            upgrade_mod.restart_self(request_shutdown=self.shutdown)
+        except Exception:
+            log.exception("stale-bridge self-restart failed")
+
+    def _classify_pool_once(self, items: list[dict[str, Any]]) -> None:
+        """The watcher's path classification, over the WHOLE media pool.
+
+        The passive watcher sees only the current timeline's video/audio
+        tracks, so clips sitting in bins accumulated broken paths with zero
+        signal -- the 2026-08-12 Energy Transition incident built up 200+
+        that way. Piggy-backed on the media-tree walk (same enumeration, no
+        extra Resolve calls) every media_tree_refresh_interval:
+
+          NON_CANONICAL -> auto-relink (once per path -- a fixed path never
+                           reappears, a refusal must not retry every pass);
+          FOREIGN       -> one batched tray warning per pass, warn-once per
+                           path;
+          OUT_OF_TREE   -> the popup queue, through the same snooze/ignore
+                           plumbing as the watcher's batches.
+
+        BAD_PREFIX stays the watcher's (a broken mapping warns fine from the
+        timeline, and warning twice helps nobody). Fault-isolated: never
+        raises.
+        """
+        try:
+            if self._local_root_is_broken():
+                return
+            if getattr(self, "_p_swap_busy", False):
+                return
+            try:
+                if self.p_mapping_mode() == "server":
+                    return
+            except Exception:
+                pass
+            from .watcher import _norm_key
+
+            local_root = self.config.get("local_root", "")
+            prefix = str(self.config.get("canonical_prefix", ""))
+            out_of_tree: list[dict[str, Any]] = []
+            non_canonical: list[dict[str, Any]] = []
+            foreign: list[dict[str, Any]] = []
+            for item in items:
+                path = item.get("file_path", "")
+                if not path:
+                    continue
+                cls = classify_path(path, local_root, prefix)
+                key = _norm_key(path)
+                if cls == OUT_OF_TREE:
+                    if not self.ignore_tracker.is_ignored(path):
+                        out_of_tree.append(item)
+                elif cls == paths_mod.NON_CANONICAL:
+                    if key not in self._pool_offered_non_canonical:
+                        self._pool_offered_non_canonical.add(key)
+                        non_canonical.append(item)
+                elif cls == paths_mod.FOREIGN:
+                    if key not in self._pool_warned_foreign:
+                        self._pool_warned_foreign.add(key)
+                        foreign.append(item)
+            if non_canonical:
+                self._handle_non_canonical(non_canonical)
+            if foreign:
+                self._handle_foreign_batch(foreign)
+            if out_of_tree:
+                self._handle_out_of_tree(out_of_tree)
+        except Exception:
+            log.exception("media pool classification pass failed")
+
+    def _handle_foreign_batch(self, items: list[dict[str, Any]]) -> None:
+        """One toast for a sweep's worth of FOREIGN clips, not one each.
+
+        The first sweep after this ships can meet a project-lifetime backlog
+        (Energy Transition held 161 at once) -- a toast per clip would be a
+        notification storm nobody reads. Every path still gets its own log
+        line.
+        """
+        for item in items:
+            log.warning(
+                "clip stored under another machine's path (unfixable here): %s",
+                item.get("file_path", ""),
+            )
+        first = items[0].get("clip_name") or os.path.basename(
+            items[0].get("file_path", "")) or "a clip"
+        more = f" and {len(items) - 1} other clip(s)" if len(items) > 1 else ""
+        self._notify_tray(
+            f"“{first}”{more} point at paths that only exist on another "
+            "editor's machine, so they can never sync or come online here. "
+            "Whoever imported them should re-import through the P: drive "
+            "(their companion will offer the fix). Details in the log.",
+            "ccsync-companion: foreign clips",
+        )
 
     def _relink_proxies_once(self, items: list[dict[str, Any]]) -> None:
         """Repoint stale/unlinked proxy attachments at the copies lane B

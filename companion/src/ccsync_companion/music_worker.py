@@ -48,7 +48,7 @@ import os
 import re
 import sys
 
-from . import resolve_bridge
+from . import canon, resolve_bridge
 
 # The argv token the frozen exe re-enters itself with. In a PyInstaller build
 # sys.executable IS the companion, so there is no interpreter to hand a script
@@ -125,14 +125,52 @@ def ensure_bin(pool, name):
     return find_folder(root, name) or pool.AddSubFolder(root, name) or root
 
 
-def existing_item(pool, path):
-    """Find a media pool item already pointing at this file, anywhere."""
-    target = os.path.normcase(os.path.abspath(path))
+def canonical_fn_from_config():
+    """The canonical-spelling translator for THIS machine, or None.
+
+    The worker is a one-shot child, so unlike resolve_bridge (deliberately
+    config-free -- its callers own the translation) it reads the config
+    itself: music_server hands it nothing but the request JSON. None when
+    the config is unreadable or no canonical prefix is set -- both mean
+    "store what ImportMedia was handed", which is the pre-2026-08-12
+    behaviour.
+    """
+    try:
+        from . import config as config_mod
+        cfg = config_mod.load_config()
+        local_root = str(cfg.get("local_root") or "")
+        prefix = str(cfg.get("canonical_prefix") or "")
+    except Exception:
+        return None
+    if not local_root or not prefix:
+        return None
+
+    def translate(path):
+        return canon.local_to_canonical(path, local_root, prefix)
+
+    return translate
+
+
+def existing_item(pool, path, canonical_fn=None):
+    """Find a media pool item already pointing at this file, anywhere.
+
+    Matches the path's canonical spelling too: a clip import_clip stored
+    canonically (`P:\\...`) no longer equals its local spelling textually,
+    and without the fold every send would import a duplicate.
+    """
+    targets = {canon.norm(os.path.abspath(path))}
+    if canonical_fn is not None:
+        try:
+            spelled = canonical_fn(path)
+        except Exception:
+            spelled = None
+        if spelled:
+            targets.add(canon.norm(str(spelled)))
 
     def walk(folder):
         for clip in folder.GetClipList():
             p = clip.GetClipProperty("File Path")
-            if p and os.path.normcase(os.path.abspath(p)) == target:
+            if p and canon.norm(p) in targets:
                 return clip
         for sub in folder.GetSubFolderList():
             hit = walk(sub)
@@ -143,9 +181,16 @@ def existing_item(pool, path):
     return walk(pool.GetRootFolder())
 
 
-def import_clip(pool, path, bin_name=MUSIC_BIN):
-    """Return (MediaPoolItem, already_present). Import is idempotent."""
-    have = existing_item(pool, path)
+def import_clip(pool, path, bin_name=MUSIC_BIN, canonical_fn=None):
+    """Return (MediaPoolItem, already_present). Import is idempotent.
+
+    A freshly imported clip is re-spelled canonically (`P:\\...`) via
+    resolve_bridge.replace_clip -- a local_root spelling stored in a shared
+    project is offline on every other machine in the fleet (the 2026-08-12
+    Energy Transition incident). Best-effort: a refusal keeps the local
+    spelling, exactly what every import stored before this existed.
+    """
+    have = existing_item(pool, path, canonical_fn)
     if have is not None:
         return have, True
     folder = ensure_bin(pool, bin_name)
@@ -158,6 +203,13 @@ def import_clip(pool, path, bin_name=MUSIC_BIN):
             pool.SetCurrentFolder(previous)
     if not items:
         raise RuntimeError("Resolve refused to import %s" % os.path.basename(path))
+    if canonical_fn is not None:
+        try:
+            spelled = canonical_fn(path)
+        except Exception:
+            spelled = None
+        if spelled and canon.norm(str(spelled)) != canon.norm(os.path.abspath(path)):
+            resolve_bridge.replace_clip(items[0], str(spelled), tries=1)
     return items[0], False
 
 
@@ -244,7 +296,8 @@ def act_status(_req):
 
 def act_bin(req):
     resolve, project, pool = connect()
-    mp, had = import_clip(pool, req["path"], req.get("bin", MUSIC_BIN))
+    mp, had = import_clip(pool, req["path"], req.get("bin", MUSIC_BIN),
+                          canonical_fn=canonical_fn_from_config())
     return {"ok": True,
             "note": ("already in the media pool (%s)" if had
                      else "imported to the %s bin") % req.get("bin", MUSIC_BIN),
@@ -262,7 +315,8 @@ def act_under(req):
     tl = project.GetCurrentTimeline()
     if tl is None:
         raise RuntimeError("no timeline is open")
-    mp, _had = import_clip(pool, req["path"], req.get("bin", MUSIC_BIN))
+    mp, _had = import_clip(pool, req["path"], req.get("bin", MUSIC_BIN),
+                           canonical_fn=canonical_fn_from_config())
 
     rec = playhead(tl)
     dur = clip_frames(mp, tl)
@@ -294,7 +348,8 @@ def act_insert(req):
     tl = project.GetCurrentTimeline()
     if tl is None:
         raise RuntimeError("no timeline is open")
-    mp, _had = import_clip(pool, req["path"], req.get("bin", MUSIC_BIN))
+    mp, _had = import_clip(pool, req["path"], req.get("bin", MUSIC_BIN),
+                           canonical_fn=canonical_fn_from_config())
 
     rec = playhead(tl)
     dur = clip_frames(mp, tl)
@@ -409,7 +464,8 @@ def act_broll_insert(req):
     toast reads, and it never raises on its own.
     """
     return resolve_bridge.perform_insert(
-        req["path"], int(req["in_frame"]), int(req["out_frame"])
+        req["path"], int(req["in_frame"]), int(req["out_frame"]),
+        canonical_fn=canonical_fn_from_config(),
     )
 
 

@@ -59,12 +59,13 @@ class _Import:
         self.refusal: dict | None = None
 
     def __call__(self, paths, bin_segments, expected_project_name="",
-                 path_alias_fn=None):
+                 path_alias_fn=None, canonical_fn=None):
         self.calls.append({
             "paths": list(paths),
             "bin": tuple(bin_segments),
             "project": expected_project_name,
             "alias_fn": path_alias_fn,
+            "canonical_fn": canonical_fn,
         })
         if self.refusal is not None:
             return dict(self.refusal, imported=[], skipped_existing=[], failed=[])
@@ -865,3 +866,51 @@ def test_a_hand_edited_interval_never_raises_at_construction(tmp_path):
     assert importer.scan_interval == 60
     assert importer.batch_limit == 20
     assert importer.max_failures == 3
+
+
+# -- the Proxy store is not a term folder, and imports store canonically ------
+
+
+def test_a_root_level_proxy_dir_is_not_a_term_folder(tmp_path):
+    """`Youtube/Proxy/` holds the generated previews for pasted-URL root
+    clips (and lane B delivers it to editors). Treating it as a term folder
+    imported 540p previews into a bin literally named "Proxy"."""
+    _drop(tmp_path, ["real.mp4"])
+    _drop(tmp_path, ["preview.mp4"], term="Proxy")
+
+    importer = _make(tmp_path)
+    _settled(importer, tmp_path)
+
+    imported = [p for call in importer._import_fn.calls for p in call["paths"]]
+    assert any(p.endswith("real.mp4") for p in imported)
+    assert not any(p.endswith("preview.mp4") for p in imported)
+    assert all(call["bin"] != ("Youtube", "Proxy") for call in importer._import_fn.calls)
+
+
+def test_the_import_is_handed_a_canonical_spelling_fn(tmp_path):
+    r"""The 2026-08-12 Energy Transition incident: imports stored local_root
+    spellings (`F:\Creators_Club\...`) in the SHARED project, which are
+    offline on every other machine. The importer must hand the bridge a
+    canonical_fn that answers the `P:\` spelling to store instead."""
+    paths = _drop(tmp_path, ["a.mp4"])
+    importer = _make(tmp_path, _cfg(tmp_path, canonical_prefix="P:\\"))
+    _settled(importer, tmp_path)
+
+    call = importer._import_fn.calls[0]
+    canonical_fn = call["canonical_fn"]
+    assert canonical_fn is not None
+    spelled = canonical_fn(paths[0])
+    assert spelled is not None
+    assert spelled.startswith("P:\\")
+    assert spelled == "P:\\" + os.path.relpath(paths[0], str(tmp_path)).replace("/", "\\")
+
+
+def test_the_canonical_spelling_fn_is_harmless_with_no_prefix_configured(tmp_path):
+    paths = _drop(tmp_path, ["a.mp4"])
+    importer = _make(tmp_path)  # _cfg sets no canonical_prefix
+    _settled(importer, tmp_path)
+
+    canonical_fn = importer._import_fn.calls[0]["canonical_fn"]
+    # No prefix -> the physical path comes back unchanged (the bridge's
+    # norm-equality check then makes the ReplaceClip a no-op).
+    assert canonical_fn(paths[0]) == paths[0]

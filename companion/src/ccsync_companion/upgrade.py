@@ -791,3 +791,54 @@ class UpgradeManager:
             env=env,
             **detach,
         )
+
+
+def restart_self(
+    request_shutdown: Callable[[], None],
+    spawn: Optional[Callable[..., Any]] = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Relaunch THIS build and shut the current instance down. Never raises.
+
+    The self-upgrade's spawn/hand-off machinery (mutex wait keyed on
+    CCSYNC_REPLACES_PID, PYINSTALLER_RESET_ENVIRONMENT, the R11 takeover
+    grace) without the download/swap: used by app._maybe_recover_stale_bridge
+    to shed a stale fusionscript client after the Resolve it was connected to
+    exits -- left in place, that client can wedge the NEXT Resolve's
+    scripting server for every client on the machine (proven live
+    2026-08-12).
+
+    False = nothing happened and the current instance keeps running: a source
+    run (nothing to relaunch; restart it by hand), a failed spawn, or a
+    replacement that died inside the takeover grace window.
+    """
+    if not is_frozen():
+        log.info("self-restart: source run -- restart the companion by hand "
+                 "to refresh its Resolve link")
+        return False
+    exe = Path(sys.executable)
+    run = spawn or UpgradeManager._default_spawn
+    try:
+        child = run(exe)
+    except Exception:
+        log.exception("self-restart: could not launch the replacement")
+        return False
+    if child is not None and hasattr(child, "poll"):
+        deadline = clock() + CHILD_TAKEOVER_GRACE_SECONDS
+        while clock() < deadline:
+            code = child.poll()
+            if code is not None:
+                log.warning(
+                    "self-restart: the replacement exited with code %s within "
+                    "%.0fs -- keeping this instance running",
+                    code, CHILD_TAKEOVER_GRACE_SECONDS,
+                )
+                return False
+            sleep_fn(CHILD_TAKEOVER_POLL_SECONDS)
+    log.info("self-restart: replacement launched; shutting this instance down")
+    try:
+        request_shutdown()
+    except Exception:
+        log.exception("self-restart: request_shutdown failed (exit manually)")
+    return True

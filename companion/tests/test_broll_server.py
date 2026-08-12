@@ -956,7 +956,7 @@ def test_insert_success_delegates_to_resolve_bridge(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_perform_insert(local_path, in_frame, out_frame):
+    def fake_perform_insert(local_path, in_frame, out_frame, canonical_fn=None):
         captured["local_path"] = local_path
         captured["in_frame"] = in_frame
         captured["out_frame"] = out_frame
@@ -986,7 +986,7 @@ def test_insert_over_http_full_round_trip(live_server, tmp_path, monkeypatch):
     monkeypatch.setattr(
         broll_server.resolve_bridge,
         "perform_insert",
-        lambda local_path, in_frame, out_frame: {
+        lambda local_path, in_frame, out_frame, canonical_fn=None: {
             "ok": True,
             "message": f"Inserted {os.path.basename(local_path)} ({out_frame - in_frame} frames)",
         },
@@ -1226,7 +1226,7 @@ def test_the_insert_goes_through_the_worker_with_the_translated_path(
     clip.write_bytes(b"fake")
     monkeypatch.setattr(
         broll_server.resolve_bridge, "perform_insert",
-        lambda path, in_frame, out_frame: {"ok": True, "message": "Inserted clip.mov"},
+        lambda path, in_frame, out_frame, canonical_fn=None: {"ok": True, "message": "Inserted clip.mov"},
     )
 
     status, body = broll_server.build_insert_response(
@@ -1348,7 +1348,7 @@ def test_a_finished_download_falls_through_to_the_insert(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         broll_server.resolve_bridge, "perform_insert",
-        lambda path, in_frame, out_frame: (
+        lambda path, in_frame, out_frame, canonical_fn=None: (
             captured.setdefault("path", path),
             {"ok": True, "message": "Inserted clip.mov (10 frames)"})[-1],
     )

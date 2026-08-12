@@ -24,7 +24,9 @@ from . import canon
 from . import config as config_mod
 from . import resolve_bridge
 from .fixer import IgnoreTracker
-from .paths import BAD_PREFIX, MISSING, OK, OUT_OF_TREE, classify_path
+from .paths import (
+    BAD_PREFIX, FOREIGN, MISSING, NON_CANONICAL, OK, OUT_OF_TREE, classify_path,
+)
 
 log = logging.getLogger("ccsync.watcher")
 
@@ -43,6 +45,15 @@ class TimelineWatcher:
     `on_mapping_warning(item)` is called once per newly seen BAD_PREFIX path
     (i.e. debounced the same way OUT_OF_TREE items are) — the tray layer
     turns this into a notification.
+
+    `on_non_canonical(items)` is called with newly seen NON_CANONICAL items —
+    in-tree clips stored under the local spelling. Offered ONCE per path per
+    process: the fix (an auto-ReplaceClip to the canonical spelling) changes
+    the clip's File Path, so a fixed clip simply never reappears, and a
+    refused one must not be retried every 3 s.
+
+    `on_foreign(item)` is called once per newly seen FOREIGN path — another
+    machine's private spelling, unfixable from here — for a tray warning.
     """
 
     def __init__(
@@ -52,6 +63,8 @@ class TimelineWatcher:
         poll_interval: float = 3.0,
         on_out_of_tree: Optional[Callable[[list[dict[str, Any]]], None]] = None,
         on_mapping_warning: Optional[Callable[[dict[str, Any]], None]] = None,
+        on_non_canonical: Optional[Callable[[list[dict[str, Any]]], None]] = None,
+        on_foreign: Optional[Callable[[dict[str, Any]], None]] = None,
         ignore_tracker: Optional[IgnoreTracker] = None,
         get_timeline_items: Optional[Callable[[], dict[str, Any]]] = None,
         on_project_changed: Optional[Callable[[str], None]] = None,
@@ -63,6 +76,8 @@ class TimelineWatcher:
         self.poll_interval = poll_interval
         self._on_out_of_tree = on_out_of_tree
         self._on_mapping_warning = on_mapping_warning
+        self._on_non_canonical = on_non_canonical
+        self._on_foreign = on_foreign
         self._on_project_changed = on_project_changed
         # Last NON-None project name seen -- deliberately NOT cleared when
         # the bridge flaps to None (Resolve restarting, transient failure),
@@ -93,6 +108,15 @@ class TimelineWatcher:
         # through the uncached entry points.
         self._get_timeline_items = get_timeline_items or resolve_bridge.poll_timeline_items
         self._warned_mapping: set[str] = set()
+        # Once-per-process latches for the two 2026-08-12 classes. Offered
+        # (not warned) is the right word for _offered_non_canonical: a
+        # successful auto-relink changes the clip's File Path so the key
+        # never comes back; the latch only stops a REFUSED relink being
+        # retried every poll. _warned_foreign mirrors _warned_mapping, but
+        # has no recovery reset -- a foreign path never heals on this
+        # machine (fixing it elsewhere changes its spelling, i.e. its key).
+        self._offered_non_canonical: set[str] = set()
+        self._warned_foreign: set[str] = set()
         # Most recently seen Resolve project name (see resolve_bridge's
         # "project_name" key), tracked across polls so other components
         # (the dashboard reporter) can report which project is open without
@@ -155,7 +179,9 @@ class TimelineWatcher:
             return {"ok": False, "message": result.get("message", ""), "out_of_tree": 0, "mapping_warnings": 0}
 
         new_out_of_tree: list[dict[str, Any]] = []
+        new_non_canonical: list[dict[str, Any]] = []
         new_mapping_warnings = 0
+        new_foreign_warnings = 0
         resolve_project_name = result.get("project_name", "")
         # Did anything under the canonical prefix classify as healthy this
         # poll? See the _warned_mapping reset below.
@@ -197,6 +223,13 @@ class TimelineWatcher:
                 item = dict(item)
                 item["resolve_project_name"] = resolve_project_name
                 new_out_of_tree.append(item)
+            elif cls == NON_CANONICAL:
+                if key in self._offered_non_canonical:
+                    continue
+                self._offered_non_canonical.add(key)
+                item = dict(item)
+                item["resolve_project_name"] = resolve_project_name
+                new_non_canonical.append(item)
             elif cls == BAD_PREFIX:
                 if key in self._warned_mapping:
                     continue
@@ -207,6 +240,16 @@ class TimelineWatcher:
                         self._on_mapping_warning(item)
                     except Exception:
                         log.exception("on_mapping_warning callback failed")
+            elif cls == FOREIGN:
+                if key in self._warned_foreign:
+                    continue
+                self._warned_foreign.add(key)
+                new_foreign_warnings += 1
+                if self._on_foreign is not None:
+                    try:
+                        self._on_foreign(item)
+                    except Exception:
+                        log.exception("on_foreign callback failed")
             elif cls == MISSING:
                 log.debug("clip path missing on disk, not under local_root/prefix: %s", path)
             # OK -> nothing to do
@@ -230,11 +273,19 @@ class TimelineWatcher:
             except Exception:
                 log.exception("on_out_of_tree callback failed")
 
+        if new_non_canonical and self._on_non_canonical is not None:
+            try:
+                self._on_non_canonical(new_non_canonical)
+            except Exception:
+                log.exception("on_non_canonical callback failed")
+
         return {
             "ok": True,
             "message": "",
             "out_of_tree": len(new_out_of_tree),
             "mapping_warnings": new_mapping_warnings,
+            "non_canonical": len(new_non_canonical),
+            "foreign_warnings": new_foreign_warnings,
         }
 
     def _note_bridge_state(self, connected: bool, reason: str = "") -> None:

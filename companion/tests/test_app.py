@@ -3300,7 +3300,7 @@ def test_diagnostics_answer_whether_the_bridge_ever_connected(tmp_path):
     line = next(l for l in app.build_diagnostics().splitlines()
                 if l.startswith("resolve bridge:"))
     assert "has connected this session: yes" in line
-    assert "Quit Resolve and reopen it" in line
+    assert "Restart the companion first" in line
 
 
 def test_the_bridge_state_read_is_cached_not_a_probe(tmp_path, monkeypatch):
@@ -4085,3 +4085,139 @@ def test_the_win32_pid_probe_agrees_with_reality():
     # A pid that cannot exist here: Windows pids are multiples of 4 and this
     # one is deliberately absurd.
     assert app_mod._pid_is_alive(0x7FFFFFF1) is False
+
+
+# -- the 120s pool sweep classifies every bin (the 2026-08-12 blind spot) ----
+
+
+def _pool_item(tmp_path, rel, make_file=True):
+    path = tmp_path / rel
+    if make_file:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    item = _item(str(path))
+    item["media_pool_item"] = _RelinkableItem(str(path))
+    return item
+
+
+class _RelinkableItem:
+    def __init__(self, path):
+        self._path = path
+        self.replace_calls = []
+
+    def GetClipProperty(self):
+        return {"File Path": self._path}
+
+    def ReplaceClip(self, new_path):
+        self.replace_calls.append(new_path)
+        self._path = new_path
+        return None  # Resolve returns None even on success
+
+
+def test_pool_sweep_auto_relinks_non_canonical_clips(tmp_path, monkeypatch):
+    """A bin-only clip stored under the LOCAL spelling never crosses the
+    timeline watcher; the media-tree sweep must catch it and relink it to
+    the canonical spelling without asking anybody anything."""
+    root = tmp_path / "root"
+    item = _pool_item(root, "B-roll/clip.mov")
+    app = _make_app(tmp_path, canonical_prefix="P:\\")
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items", lambda: _mp_result(item),
+    )
+
+    app._refresh_media_tree_once()
+
+    mpi = item["media_pool_item"]
+    assert mpi.replace_calls == [r"P:\B-roll\clip.mov"]
+    # Once per process: the next sweep must not re-offer the same path.
+    mpi._path = str(root / "B-roll" / "clip.mov")  # pretend the relink reverted
+    app._refresh_media_tree_once()
+    assert len(mpi.replace_calls) == 1
+
+
+def test_pool_sweep_warns_once_for_foreign_clips_in_one_batch(tmp_path, monkeypatch):
+    toasts = []
+    app = _make_app(tmp_path, canonical_prefix="P:\\")
+    monkeypatch.setattr(app, "_notify_tray", lambda msg, title="": toasts.append(msg))
+    foreign = [
+        _item(r"W:\Creators_Club\Projects\x\a.braw"),
+        _item(r"W:\Creators_Club\Projects\x\b.braw"),
+    ]
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items", lambda: _mp_result(*foreign),
+    )
+
+    app._refresh_media_tree_once()
+
+    assert len(toasts) == 1, "a backlog must be ONE toast, not one per clip"
+    assert "another editor's machine" in toasts[0]
+
+    app._refresh_media_tree_once()
+    assert len(toasts) == 1, "warn-once per path"
+
+
+from ccsync_companion import app as app_mod  # noqa: E402  (section-local import)
+
+
+# -- stale fusionscript recovery (the 2026-08-12 wedge) ----------------------
+
+
+def _arm_stale_bridge(app, monkeypatch, *, connected, ever, resolve_running):
+    resolve_bridge.note_connection(True)  # sets ever_connected
+    if not ever:
+        resolve_bridge.reset_session_state()
+    resolve_bridge.note_connection(connected)
+    if not connected and not ever:
+        resolve_bridge.reset_session_state()
+    monkeypatch.setattr(
+        app_mod.resolve_prefs_mod, "resolve_is_running", lambda: resolve_running,
+    )
+
+
+def test_stale_bridge_restarts_when_its_resolve_has_exited(tmp_path, monkeypatch):
+    """Connected once, now disconnected, Resolve process gone: the stale
+    fusionscript state must be shed NOW, while there is no Resolve to wedge
+    -- restarting Resolve alone provably cannot fix this (2026-08-12)."""
+    app = _make_app(tmp_path)
+    _arm_stale_bridge(app, monkeypatch, connected=False, ever=True, resolve_running=False)
+    calls = []
+    monkeypatch.setattr(app_mod.upgrade_mod, "restart_self",
+                        lambda request_shutdown: calls.append(request_shutdown))
+
+    app._maybe_recover_stale_bridge()
+    assert len(calls) == 1
+    assert calls[0] == app.shutdown
+
+    # Once per process -- a second sweep must not spawn a second replacement.
+    app._maybe_recover_stale_bridge()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("connected,ever,resolve_running", [
+    (True, True, False),    # still connected: nothing stale
+    (False, False, False),  # never connected: fresh DLL, nothing to shed
+    (False, True, True),    # Resolve still up: transient hiccup, not an exit
+])
+def test_stale_bridge_restart_does_not_fire_otherwise(
+    tmp_path, monkeypatch, connected, ever, resolve_running
+):
+    app = _make_app(tmp_path)
+    _arm_stale_bridge(app, monkeypatch,
+                      connected=connected, ever=ever, resolve_running=resolve_running)
+    calls = []
+    monkeypatch.setattr(app_mod.upgrade_mod, "restart_self",
+                        lambda request_shutdown: calls.append(1))
+
+    app._maybe_recover_stale_bridge()
+    assert calls == []
+
+
+def test_stale_bridge_restart_respects_the_config_flag(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, bridge_auto_restart=False)
+    _arm_stale_bridge(app, monkeypatch, connected=False, ever=True, resolve_running=False)
+    calls = []
+    monkeypatch.setattr(app_mod.upgrade_mod, "restart_self",
+                        lambda request_shutdown: calls.append(1))
+
+    app._maybe_recover_stale_bridge()
+    assert calls == []

@@ -588,6 +588,12 @@ class YoutubeImporter:
         for term in self._safe_listdir(root):
             if term.startswith("."):
                 continue
+            if term.lower() == "proxy":
+                # `Youtube/Proxy/` is where a pasted-URL root clip's preview
+                # is generated (and lane B delivers it to editors). It is a
+                # proxy store, not a term folder -- treating it as one filed
+                # 540p previews into a bin literally named "Proxy".
+                continue
             term_dir = os.path.join(root, term)
             if not self._safe_isdir(term_dir):
                 continue
@@ -651,6 +657,7 @@ class YoutubeImporter:
                 list(paths), segments,
                 expected_project_name=project_name,
                 path_alias_fn=self._pool_path_alias,
+                canonical_fn=self._canonical_spelling,
             )
         except Exception:
             log.exception("youtube import: the import call raised for %s", bin_path)
@@ -697,6 +704,26 @@ class YoutubeImporter:
         # it, and the next cycle retries what is left. Only a refusal that
         # touched NOTHING means "stop asking this cycle".
         return bool(imported or skipped or failed)
+
+    def _canonical_spelling(self, local_path: str) -> Optional[str]:
+        """The `P:\\`-spelled path to STORE IN RESOLVE for `local_path`.
+
+        The inverse direction of _pool_path_alias, for the same
+        two-spellings reason: ImportMedia is handed local_root paths, but a
+        local spelling stored in a shared project is offline on every other
+        machine in the fleet (the 2026-08-12 Energy Transition incident).
+        canon.local_to_canonical is the identity on the base rig (canonical
+        IS local there), so this changes nothing where the spellings agree.
+        None on any failure = keep the local spelling.
+        """
+        try:
+            return canon.local_to_canonical(
+                local_path, self.local_root, self.canonical_prefix
+            ) or None
+        except Exception:
+            log.debug("youtube import: canonical translation failed for %r",
+                      local_path, exc_info=True)
+            return None
 
     def _pool_path_alias(self, pool_path: str) -> Optional[str]:
         """A media-pool path's spelling on THIS machine's tree, or None.

@@ -1231,7 +1231,12 @@ async function reveal(d) {
       body: JSON.stringify({rel_path: d.reveal_path}),
     });
   } catch {
-    noCompanion(d, 'the CC Sync companion is not running on this machine');
+    // A rejected fetch also happens when the browser blocks a plain-HTTP
+    // dashboard origin from reaching 127.0.0.1 (Chrome's local-network
+    // permission) with a perfectly healthy companion behind it (2026-08-12).
+    noCompanion(d, 'couldn’t reach the CC Sync companion — it may not be '
+                + 'running, or the browser blocked local connections (self-test: '
+                + 'open http://127.0.0.1:8899/status)');
     return;
   }
   if (res.status === 404) {

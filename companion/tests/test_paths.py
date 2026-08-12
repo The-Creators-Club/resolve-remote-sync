@@ -8,7 +8,9 @@ import pytest
 
 from ccsync_companion.paths import (
     BAD_PREFIX,
+    FOREIGN,
     MISSING,
+    NON_CANONICAL,
     OK,
     OUT_OF_TREE,
     classify_path,
@@ -46,27 +48,56 @@ def _mapped_mount_to_home(path: str) -> str:
 # -- Windows-style paths -----------------------------------------------
 
 
-def test_windows_ok_under_local_root():
+def test_windows_in_tree_local_spelling_is_non_canonical():
+    # In the tree, so the file is here and healthy -- but stored under the
+    # LOCAL root's spelling, which is offline on every other machine (the
+    # 2026-08-12 Energy Transition incident: 158 such clips, classified OK
+    # and therefore never surfaced). Auto-relinkable, not popup-worthy.
     result = classify_path(
         r"C:\Creators_Club\B-roll\clip.mov",
         local_root=r"C:\Creators_Club",
         canonical_prefix="P:\\",
         is_windows=True,
     )
+    assert result == NON_CANONICAL
+
+
+def test_windows_in_tree_is_ok_when_no_prefix_is_configured():
+    # No canonical prefix, no portability contract -- the old OK behaviour.
+    result = classify_path(
+        r"C:\Creators_Club\B-roll\clip.mov",
+        local_root=r"C:\Creators_Club",
+        canonical_prefix="",
+        is_windows=True,
+    )
     assert result == OK
 
 
-def test_windows_ok_case_insensitive():
+def test_windows_base_rig_in_tree_is_ok():
+    # The base rig: local_root IS the canonical prefix, so every in-tree
+    # path is already spelled canonically.
     result = classify_path(
-        r"c:\CREATORS_CLUB\b-roll\CLIP.MOV",
-        local_root=r"C:\Creators_Club",
+        r"P:\Projects\2026\clip.mov",
+        local_root="P:\\",
         canonical_prefix="P:\\",
         is_windows=True,
     )
     assert result == OK
 
 
-def test_windows_ok_forward_slash_variant():
+def test_windows_tree_membership_folds_case():
+    result = classify_path(
+        r"c:\CREATORS_CLUB\b-roll\CLIP.MOV",
+        local_root=r"C:\Creators_Club",
+        canonical_prefix="P:\\",
+        is_windows=True,
+    )
+    # Still recognized as IN the tree (the point of this test) -- the class
+    # is the in-tree one, never OUT_OF_TREE/FOREIGN.
+    assert result == NON_CANONICAL
+
+
+def test_windows_tree_membership_folds_forward_slashes():
     # A stray forward-slash path should still normalize the same as native
     # backslashes on Windows (ntpath treats both as separators).
     result = classify_path(
@@ -75,7 +106,7 @@ def test_windows_ok_forward_slash_variant():
         canonical_prefix="P:\\",
         is_windows=True,
     )
-    assert result == OK
+    assert result == NON_CANONICAL
 
 
 def test_windows_out_of_tree_when_exists():
@@ -175,7 +206,12 @@ def test_windows_canonical_prefix_ok_when_subst_resolves_under_root():
     assert result == OK
 
 
-def test_windows_missing_when_nowhere_and_nonexistent():
+def test_windows_foreign_when_nowhere_and_nonexistent():
+    # Another machine's private namespace: not canonical, not in the tree,
+    # not on disk. Used to fall into MISSING -- the same silent class as a
+    # healthy not-yet-synced original -- which is how the remote side of the
+    # 2026-08-12 incident stayed invisible. MISSING stays reserved for
+    # canonical-prefix paths.
     result = classify_path(
         r"D:\Old Footage\clip.mov",
         local_root=r"C:\Creators_Club",
@@ -183,17 +219,17 @@ def test_windows_missing_when_nowhere_and_nonexistent():
         exists_fn=_always_false,
         is_windows=True,
     )
-    assert result == MISSING
+    assert result == FOREIGN
 
 
-def test_windows_root_itself_is_ok():
+def test_windows_root_itself_is_in_tree():
     result = classify_path(
         r"C:\Creators_Club",
         local_root=r"C:\Creators_Club",
         canonical_prefix="P:\\",
         is_windows=True,
     )
-    assert result == OK
+    assert result == NON_CANONICAL
 
 
 def test_windows_similar_prefix_sibling_dir_is_not_ok():
@@ -214,14 +250,14 @@ def test_windows_similar_prefix_sibling_dir_is_not_ok():
 # -- posix-style paths (macOS editors) -----------------------------------
 
 
-def test_posix_ok_under_local_root():
+def test_posix_in_tree_local_spelling_is_non_canonical():
     result = classify_path(
         "/Users/jane/Creators_Club/B-roll/clip.mov",
         local_root="/Users/jane/Creators_Club",
         canonical_prefix="/Volumes/CreatorsClub",
         is_windows=False,
     )
-    assert result == OK
+    assert result == NON_CANONICAL
 
 
 def test_posix_out_of_tree_when_exists():
@@ -398,8 +434,11 @@ def test_mac_prefix_health_probe_is_cached_like_the_windows_one():
     assert len(calls) == 1
 
 
-def test_mac_local_root_spelling_is_still_ok():
-    assert _mac(MAC_TWIN) == OK
+def test_mac_local_root_spelling_is_non_canonical():
+    # In the tree and playable here, but the stored spelling is the Mac's
+    # private /Users/... form -- offline fleet-wide, auto-relinkable to the
+    # `P:\` spelling (which Resolve reaches through its Mapped Mount).
+    assert _mac(MAC_TWIN) == NON_CANONICAL
 
 
 def test_mac_media_outside_the_tree_is_still_a_popup_candidate():

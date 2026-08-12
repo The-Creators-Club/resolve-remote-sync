@@ -1563,7 +1563,19 @@ async function sendToResolve() {
           body: JSON.stringify(payload),
         });
       } catch (e) {
-        toast("Companion app not running — download it from Settings", "error");
+        // A rejected fetch is NOT proof the companion is down: Chrome's
+        // local-network permission can block a plain-HTTP dashboard origin
+        // from reaching 127.0.0.1 with the identical error (seen live
+        // 2026-08-12 -- the companion was healthy the whole time). Opening
+        // /status directly in a tab is never gated, so it disambiguates.
+        toast(
+          "Couldn't reach the companion app. It may not be running — or your " +
+          "browser blocked the connection (look for a “local network” " +
+          "permission prompt, or allow it in site settings). Self-test: open " +
+          "http://127.0.0.1:8899/status — if that shows ok:true, it's the " +
+          "browser, not the companion. Downloads are in Settings.",
+          "error"
+        );
         return;
       }
 
@@ -1656,6 +1668,11 @@ async function checkCompanionStatus() {
       : "companion reports a problem";
   } catch (e) {
     dot.className = "status-dot status-bad";
-    text.textContent = "not reachable — companion app not running";
+    // Same caveat as the insert path: a blocked fetch (Chrome local-network
+    // permission on an http:// dashboard origin) looks identical to a
+    // stopped companion from here.
+    text.textContent =
+      "not reachable — companion not running, or the browser blocked local " +
+      "connections (self-test: open http://127.0.0.1:8899/status)";
   }
 }

@@ -239,6 +239,29 @@ Aftermath on that machine, worth knowing about:
   `upgrade.py`'s deliberate "different, not newer" rule means they will be
   offered an "Install v0.7.3" downgrade until the channel is bumped.
 
+### R13 — a half-failed ship had no way to finish itself — FIXED in repo 2026-08-13
+The 0.7.6 ship published the companion, then failed on the installer:
+`onboard.exe` bundles the companion exe, so a companion release changes the
+installer's bytes by itself, and 1.0.24 was already published — the server
+kept the old build and `build_editor_package.ps1` correctly called that a
+failed run (the 1.0.21 rule, third time it has bitten). What it left behind
+had no supported exit: the fix is installer-only, but `ship.cmd`'s fail-fast
+gate hard-stops on "companion 0.7.6 is ALREADY published", and
+`build_editor_package.ps1` publishes the companion FIRST and exited 1 on any
+409 — including a 409 whose bytes are identical, which is exactly what a
+half-failed ship guarantees.
+
+- Installer version bumped 1.0.24 → 1.0.25 across all four sites.
+- The companion 409 now compares the server's sha256 against the local exe,
+  the same way the installer upload has always done: identical bytes → say
+  so and carry on to the installer; different bytes (or unknown) → the old
+  hard stop, since the fleet would silently keep the old build. `-MakeCurrent`
+  cannot ride a skipped upload, so it says to confirm CURRENT by hand.
+
+`ship.cmd`'s own gate is deliberately NOT relaxed — a full ship builds a new
+companion, so re-shipping a published version is a real error there. Recovery
+runs the individual script, which is what it is for.
+
 ### R12 — the Energy Transition path-canon incident — FIXED in repo 2026-08-12 (evening), unshipped
 Two hundred–plus clips in the shared "Energy Transition" project carried
 machine-private paths with zero warnings from anyone: 47 imported on the base

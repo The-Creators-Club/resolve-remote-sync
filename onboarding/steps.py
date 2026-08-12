@@ -62,6 +62,10 @@ from ccsync_companion import identity as identity_mod
 # build and failing the ship: that is how 0.6.2 shipped its companion but not
 # its installer). This number moves with every companion release; 1.0.21
 # ships with 0.6.3.
+# 1.0.25: no installer source changed either -- the 1.0.21 rule again, for
+# companion 0.7.6 (R11/R12). 1.0.24 was already published, so the server kept
+# the old build and failed the ship rather than serve an onboard.exe whose
+# bundled companion no longer matches the channel.
 # 1.0.19: MAC-9 -- macos_bootstrap.sh's rclone.conf stanza rewrite emptied the
 # file on macOS (BWK awk rejects a multi-line `-v` value, and the empty output
 # was mv'd over the config). 1.0.18 shipped with the bug and is superseded;
@@ -76,7 +80,7 @@ from ccsync_companion import identity as identity_mod
 # contract: CAPABILITY MISSING: markers + exit 3, RESOLVE-MAPPING-STATUS:
 # marker, and the existing-config rclone_path repair. The .sh and this file
 # must ship as a pair, same as the .ps1.
-INSTALLER_VERSION = "1.0.24"
+INSTALLER_VERSION = "1.0.25"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.

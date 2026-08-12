@@ -616,6 +616,7 @@ if ($Publish) {
             Write-Warn2 "'$AdminUser' is not a dashboard admin (DASH_ADMIN_USERS) -- NOT publishing"
             exit 1
         }
+        $result = $null
         try {
             # -InFile streams the exe from disk under PS 5.1 -- no in-memory copy.
             $result = Invoke-RestMethod -Method Put -Uri $uri -InFile $ExePath `
@@ -625,20 +626,47 @@ if ($Publish) {
             $status = 0
             try { $status = [int]$_.Exception.Response.StatusCode } catch {}
             if ($status -eq 409) {
-                Write-Warn2 "version $version is ALREADY published on the server."
-                Write-Warn2 "bump VERSION in companion\src\ccsync_companion\config.py AND companion\pyproject.toml, then re-run with -RebuildExe -Publish"
+                # Same version already on the server -- the same two cases the
+                # installer upload below has always distinguished, and for the
+                # same reason. Different bytes is a real stop. IDENTICAL bytes
+                # is not: it means this exact build already published and a
+                # LATER step failed, which is precisely the state a half-failed
+                # ship leaves behind (2026-08-12: the companion published, the
+                # installer 409'd on an unbumped version, and the rerun needed
+                # to redo the installer alone -- exiting here made that
+                # impossible without hand-rolling the PUT).
+                $serverSha = ""
+                try {
+                    $cview = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/admin/packages" -WebSession $dashSession
+                    $serverSha = ($cview.packages | Where-Object {
+                        $_.kind -eq "companion" -and $_.platform -eq "windows" -and $_.version -eq $version
+                    } | Select-Object -First 1).sha256
+                } catch {}
+                if ($serverSha -and $serverSha -eq $sha) {
+                    Write-Step "companion v$version is already published (byte-identical) -- not republishing, continuing to the installer"
+                    if ($MakeCurrent) {
+                        Write-Step "NOTE: -MakeCurrent could not be applied by a skipped upload -- confirm v$version is CURRENT on the dashboard admin page"
+                    }
+                }
+                else {
+                    Write-Warn2 "version $version is ALREADY published on the server$(if ($serverSha) { ' WITH DIFFERENT CONTENT -- the fleet would keep the OLD build' })."
+                    Write-Warn2 "bump VERSION in companion\src\ccsync_companion\config.py AND companion\pyproject.toml, then re-run with -RebuildExe -Publish"
+                    exit 1
+                }
             }
             else {
                 Write-Warn2 "publish failed: $($_.Exception.Message)"
+                exit 1
             }
-            exit 1
         }
-        Write-Step "published v$version to $DashboardUrl$(if ($MakeCurrent) { ' and made it CURRENT' })"
-        try {
-            $retained = ($result.view.packages | Where-Object { $_.platform -eq "windows" -and $_.kind -eq "companion" } |
-                ForEach-Object { "$($_.version)$(if ($_.is_current) { '*' })" }) -join ", "
-            Write-Step "windows companion packages on server (* = current): $retained"
-        } catch {}
+        if ($result) {
+            Write-Step "published v$version to $DashboardUrl$(if ($MakeCurrent) { ' and made it CURRENT' })"
+            try {
+                $retained = ($result.view.packages | Where-Object { $_.platform -eq "windows" -and $_.kind -eq "companion" } |
+                    ForEach-Object { "$($_.version)$(if ($_.is_current) { '*' })" }) -join ", "
+                Write-Step "windows companion packages on server (* = current): $retained"
+            } catch {}
+        }
         if (-not $MakeCurrent) {
             Write-Step "NOTE: v$version is staged but NOT current -- flip [ MAKE CURRENT ] on the dashboard admin page (or re-run with -MakeCurrent)"
         }

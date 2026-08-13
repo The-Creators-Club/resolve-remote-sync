@@ -376,6 +376,27 @@ DEFAULTS: dict[str, Any] = {
     # media legitimately lives outside/next to the tree, so the popup is
     # noise there). Out-of-tree clips are still logged.
     "popup_enabled": True,
+    # False = never warn that Resolve is running with its scripting server
+    # dead. On by default, and it REPEATS (every
+    # resolve_scripting_warning_interval seconds) unlike everything else
+    # here: the editor cannot see this state -- Resolve is on screen looking
+    # normal while every companion feature that needs it is silently gone --
+    # and it never heals on its own (Resolve does not retry a script server
+    # that failed at launch). Cost ruskin's rig a full session, 2026-08-12.
+    "resolve_scripting_warning": True,
+    # Seconds between those warnings, and also how long the state must have
+    # held before the FIRST one -- Resolve's script server takes a moment to
+    # come up, and a dialog three seconds into every Resolve launch teaches
+    # editors to dismiss the one warning that matters. 0 or less switches it
+    # off, same as the flag above.
+    "resolve_scripting_warning_interval": 300,
+    # False = don't restart the companion when the Resolve it was connected
+    # to exits. On by default (added with the 2026-08-12 fixes): fusionscript
+    # keeps process-global IPC state, and a stale client can wedge the NEXT
+    # Resolve session's scripting server for every client on the machine --
+    # the state the warning above exists to report. The safe moment to shed
+    # it is while Resolve is down. See app._maybe_recover_stale_bridge.
+    "bridge_auto_restart": True,
     # False = don't serve the b-roll web UI's "Send to Resolve" button. On by
     # default: that button is what the b-roll library is FOR from an editor's
     # seat, and it used to require a SECOND tray app (the standalone
@@ -786,6 +807,21 @@ popup_enabled = true
 # before the passive watcher will pop it again.
 popup_snooze_seconds = 300
 
+# The recurring "Resolve is running but isn't accepting scripting
+# connections" warning. It repeats every interval (and waits one full
+# interval before the first one) because that state is invisible from
+# Resolve's side and never heals itself. Set the flag false, or the interval
+# to 0, to switch it off. The dialog's STOP WARNING ME button silences it
+# until the link recovers.
+resolve_scripting_warning = true
+resolve_scripting_warning_interval = 300
+
+# Restart the companion when the Resolve it was connected to exits, so its
+# scripting link starts clean against the next one. Leave this on unless you
+# are debugging: a stale fusionscript client can wedge the new Resolve's
+# scripting server for every client on the machine.
+bridge_auto_restart = true
+
 # "Send to Resolve" in the b-roll web UI. This companion listens on
 # 127.0.0.1:8899 for that button; the standalone BRoll Companion that used to
 # do it is retired and must not be left running (it would hold the port).
@@ -1024,7 +1060,7 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
         "selection_poll_interval", "project_rotation_seconds", "sequencer_idle_seconds",
         "selection_fetch_ttl", "project_roots_ttl",
         "dashboard_report_interval_active", "manifest_refresh_interval", "media_tree_refresh_interval",
-        "popup_snooze_seconds",
+        "popup_snooze_seconds", "resolve_scripting_warning_interval",
         "poll_interval", "transfers", "scan_interval_up", "scan_interval_down",
         "watch_debounce_seconds",
         # Transport tuning: a string in sftp_concurrency is the same class of

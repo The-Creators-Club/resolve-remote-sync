@@ -449,6 +449,31 @@ popup_enabled = true
 # before the passive watcher will pop it again.
 popup_snooze_seconds = 300
 
+# The recurring "DaVinci Resolve is running but isn't accepting scripting
+# connections" warning, and how many seconds apart it repeats (it also waits
+# one full interval before the FIRST one -- Resolve's script server takes a
+# moment to come up after launch, and a dialog three seconds into every
+# launch teaches editors to dismiss the one warning that matters).
+#
+# The only warning here that repeats, because it is the only failure the
+# editor cannot see: Resolve sits there looking perfectly normal while
+# everything CCSync does with it -- the out-of-tree popup, proxy attach,
+# b-roll/music/YouTube inserts -- is silently dead, and Resolve never retries
+# a script server that failed at launch. Set the flag false, or the interval
+# to 0, to switch it off; the dialog's STOP WARNING ME button silences it
+# until the link recovers.
+resolve_scripting_warning = true
+resolve_scripting_warning_interval = 300
+
+# Restart the companion when the Resolve it was connected to exits, so its
+# scripting link starts clean against the next one. Leave this on unless you
+# are debugging the companion itself: fusionscript keeps process-global IPC
+# state, and a stale client can wedge the NEXT Resolve session's scripting
+# server for every client on the machine -- the exact state the warning above
+# reports, and one that restarting Resolve alone provably cannot clear
+# (2026-08-12).
+bridge_auto_restart = true
+
 # "Send to Resolve" in the b-roll web UI (/broll on the dashboard). The
 # companion listens on 127.0.0.1:8899 for that button and drives Resolve's
 # media pool with it. The standalone BRoll Companion that used to do this is

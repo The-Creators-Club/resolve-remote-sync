@@ -4221,3 +4221,308 @@ def test_stale_bridge_restart_respects_the_config_flag(tmp_path, monkeypatch):
 
     app._maybe_recover_stale_bridge()
     assert calls == []
+
+
+# -- the recurring "Resolve is up but scripting is dead" warning -------------
+#
+# The one warning in this app that repeats. Everything else is
+# warn-once-per-path precisely so the companion is not a nag; this state
+# earns the exception because the editor cannot see it (Resolve looks
+# perfectly normal) and it never heals itself.
+
+
+NO_SCRIPTING = resolve_bridge.NO_SCRIPTING_MESSAGE
+
+
+class _InlineThread:
+    """threading.Thread stand-in that runs the target on start().
+
+    The real thread is right in production -- a Tk mainloop on the watcher
+    thread freezes timeline polling for as long as the window is up (AUDIT_2
+    CORE-M2) -- and useless here, where a test would have to join a daemon by
+    name to see anything.
+    """
+
+    def __init__(self, target=None, name="", daemon=False, args=(), kwargs=None):
+        self._target = target
+        self.name = name
+        self.daemon = daemon
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+
+
+class _InlineThreading:
+    """Stands in for app.py's `threading` module. Narrower than patching
+    threading.Thread itself, which is process-global and would follow the
+    monkeypatch into anything else running during the test."""
+
+    Thread = _InlineThread
+    Lock = threading.Lock
+    Event = threading.Event
+
+
+class _FakeClock:
+    """The app's _scripting_clock. One source for both the check (watcher
+    thread) and the re-stamp when the dialog closes (dialog thread), so a
+    test drives the real timing instead of poking _scripting_warned_at."""
+
+    def __init__(self, now=0.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def _arm_scripting_warning(app, monkeypatch, *, seen=True, silence=False, thread=_InlineThreading):
+    """Positive Resolve sighting, inline dialog thread, a fake clock, and a
+    dialog that never touches Tk. Returns (shown, clock)."""
+    shown: list = []
+
+    def _fake_show(a):
+        shown.append(a)
+        return silence
+
+    clock = _FakeClock()
+    app._scripting_clock = clock
+    monkeypatch.setattr(app_mod.resolve_prefs_mod, "resolve_process_state", lambda: seen)
+    monkeypatch.setattr(app_mod, "threading", thread)
+    import ccsync_companion.tray as tray_mod
+    monkeypatch.setattr(tray_mod, "show_scripting_warning", _fake_show)
+    return shown, clock
+
+
+def test_scripting_warning_waits_a_full_interval_before_the_first_one(tmp_path, monkeypatch):
+    """A dialog three seconds into every Resolve launch -- its script server
+    takes a moment to come up -- would train editors to dismiss the one
+    warning that matters."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch)
+
+    clock.now = 1000.0
+    app._maybe_warn_scripting_dead()
+    assert shown == [], "the first bad poll only starts the clock"
+
+    clock.now = 1000.0 + 299
+    app._maybe_warn_scripting_dead()
+    assert shown == []
+
+    clock.now = 1000.0 + 300
+    app._maybe_warn_scripting_dead()
+    assert len(shown) == 1
+
+
+def test_scripting_warning_repeats_every_interval(tmp_path, monkeypatch):
+    """The whole point: it keeps warning until the editor fixes it."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch)
+
+    app._maybe_warn_scripting_dead()
+    for tick in (300.0, 600.0, 900.0):
+        clock.now = tick
+        app._maybe_warn_scripting_dead()
+    assert len(shown) == 3
+
+    clock.now = 901.0
+    app._maybe_warn_scripting_dead()
+    assert len(shown) == 3, "and not in between"
+
+
+def test_the_process_probe_is_not_run_on_every_poll(tmp_path, monkeypatch):
+    """resolve_process_state() SHELLS OUT (tasklist/pgrep) and this runs on
+    the watcher's 3 s poll -- probing before the interval gate is twenty
+    spawns a minute for as long as Resolve's scripting stays down, the exact
+    cost resolve_bridge's _PROBE_TTL_SECONDS exists to avoid."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch)
+    probes: list = []
+    monkeypatch.setattr(app_mod.resolve_prefs_mod, "resolve_process_state",
+                        lambda: (probes.append(1), True)[1])
+
+    for tick in range(0, 601, 3):            # ten minutes of polling
+        clock.now = float(tick)
+        app._maybe_warn_scripting_dead()
+
+    assert len(shown) == 2, "two intervals, two warnings"
+    assert len(probes) == 2, f"one spawn per warning, not per poll (got {len(probes)})"
+
+
+def test_an_inconclusive_probe_is_not_retried_every_poll_either(tmp_path, monkeypatch):
+    """The warn slot is spent whether or not the probe confirms -- otherwise
+    a machine whose tasklist will not spawn re-tries it every 3 s forever."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch)
+    probes: list = []
+    monkeypatch.setattr(app_mod.resolve_prefs_mod, "resolve_process_state",
+                        lambda: (probes.append(1), None)[1])
+
+    for tick in range(0, 601, 3):
+        clock.now = float(tick)
+        app._maybe_warn_scripting_dead()
+
+    assert shown == []
+    assert len(probes) == 2
+
+
+def test_scripting_warning_never_fires_on_an_inconclusive_probe(tmp_path, monkeypatch):
+    """resolve_is_running() fails CLOSED (an unspawnable tasklist reports
+    "running"), which here would nag forever on a machine with Resolve shut.
+    This warning demands a POSITIVE sighting instead."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch, seen=None)
+
+    for tick in (0.0, 300.0, 600.0, 6000.0):
+        clock.now = tick
+        app._maybe_warn_scripting_dead()
+    assert shown == []
+
+
+def test_scripting_warning_stays_quiet_when_resolve_is_definitely_gone(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch, seen=False)
+
+    for tick in (0.0, 300.0):
+        clock.now = tick
+        app._maybe_warn_scripting_dead()
+    assert shown == []
+
+
+@pytest.mark.parametrize("overrides", [
+    {"resolve_scripting_warning": False},
+    {"resolve_scripting_warning_interval": 0},
+])
+def test_scripting_warning_can_be_switched_off(tmp_path, monkeypatch, overrides):
+    app = _make_app(tmp_path, **overrides)
+    shown, clock = _arm_scripting_warning(app, monkeypatch)
+
+    for tick in (0.0, 300.0, 3000.0):
+        clock.now = tick
+        app._maybe_warn_scripting_dead()
+    assert shown == []
+
+
+def test_scripting_warning_can_be_silenced_from_the_dialog(tmp_path, monkeypatch):
+    """STOP WARNING ME means it: an editor mid-render who cannot restart
+    Resolve right now has to be able to make it stop."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch, silence=True)
+
+    app._maybe_warn_scripting_dead()
+    clock.now = 300.0
+    app._maybe_warn_scripting_dead()
+    assert len(shown) == 1
+    assert app._scripting_warn_silenced is True
+
+    for tick in (600.0, 900.0, 9000.0):
+        clock.now = tick
+        app._maybe_warn_scripting_dead()
+    assert len(shown) == 1
+
+
+def test_a_recovered_bridge_resets_the_clock_and_the_silence(tmp_path, monkeypatch):
+    """Silenced until the link RECOVERS, not forever -- the next time
+    scripting dies, the editor hears about it again."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch, silence=True)
+
+    app._handle_bridge_state(False, NO_SCRIPTING)
+    clock.now = 300.0
+    app._handle_bridge_state(False, NO_SCRIPTING)
+    assert len(shown) == 1 and app._scripting_warn_silenced
+
+    app._handle_bridge_state(True, "")
+    assert app._scripting_warn_silenced is False
+    assert app._scripting_bad_since is None
+    assert app._scripting_warned_at is None
+
+
+def test_resolve_merely_closed_is_not_warned_about(tmp_path, monkeypatch):
+    """"Resolve is not running" is the normal state of an editor's evening,
+    and _maybe_recover_stale_bridge's business, not this one's."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch)
+
+    for tick in range(0, 4000, 300):
+        clock.now = float(tick)
+        app._handle_bridge_state(False, resolve_bridge.NOT_RUNNING_MESSAGE)
+    assert shown == []
+
+
+def test_scripting_warning_does_not_stack_dialogs(tmp_path, monkeypatch):
+    """The watcher polls every 3 s. One dialog left on screen must not
+    become a hundred of them."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch)
+    app._maybe_warn_scripting_dead()
+    app._scripting_warn_open = True          # as if one were on screen
+
+    for tick in (300.0, 600.0, 900.0):
+        clock.now = tick
+        app._maybe_warn_scripting_dead()
+    assert shown == []
+
+
+def test_the_dialog_runs_off_the_watcher_thread(tmp_path, monkeypatch):
+    """A Tk mainloop on the watcher thread freezes timeline polling for as
+    long as the window is up (AUDIT_2 CORE-M2)."""
+    spawned: list = []
+
+    class _Recording(_InlineThread):
+        def start(self):
+            spawned.append((self.name, self.daemon))
+
+    class _RecordingThreading(_InlineThreading):
+        Thread = _Recording
+
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    _shown, clock = _arm_scripting_warning(app, monkeypatch, thread=_RecordingThreading)
+
+    app._maybe_warn_scripting_dead()
+    clock.now = 300.0
+    app._maybe_warn_scripting_dead()
+    assert spawned == [("ccsync-scripting-warning", True)]
+
+
+def test_the_interval_is_measured_from_when_the_dialog_closes(tmp_path, monkeypatch):
+    """A window left up for an hour must not re-pop the instant it closes:
+    the next interval starts when the editor is DONE reading."""
+    app = _make_app(tmp_path, resolve_scripting_warning_interval=300)
+    shown, clock = _arm_scripting_warning(app, monkeypatch)
+
+    def _slow_read(_a):
+        shown.append(_a)
+        clock.now += 3600          # the editor left it up for an hour
+        return False
+
+    import ccsync_companion.tray as tray_mod
+    monkeypatch.setattr(tray_mod, "show_scripting_warning", _slow_read)
+
+    app._maybe_warn_scripting_dead()
+    clock.now = 300.0
+    app._maybe_warn_scripting_dead()
+    assert len(shown) == 1
+    assert app._scripting_warn_open is False
+
+    # Closed at 3900. One second later is NOT another warning...
+    clock.now = 3901.0
+    app._maybe_warn_scripting_dead()
+    assert len(shown) == 1
+
+    # ...a full interval after the close is.
+    clock.now = 3900.0 + 300
+    app._maybe_warn_scripting_dead()
+    assert len(shown) == 2
+
+
+def test_bridge_state_handling_never_raises(tmp_path, monkeypatch):
+    """It runs inside the watcher's poll loop, where a raise would cost that
+    poll its out-of-tree detection."""
+    def _boom():
+        raise RuntimeError("probe exploded")
+
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(app_mod.resolve_prefs_mod, "resolve_process_state", _boom)
+    app._handle_bridge_state(False, NO_SCRIPTING)   # must not raise

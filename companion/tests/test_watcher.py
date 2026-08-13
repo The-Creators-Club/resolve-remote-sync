@@ -828,3 +828,48 @@ def test_a_missing_canonical_clip_is_still_silent(tmp_path):
     summary = watcher.poll_once()
     assert summary["foreign_warnings"] == 0
     assert warned == []
+
+
+# -- the every-poll bridge-state callback (app._handle_bridge_state) --------
+
+
+def test_the_bridge_state_callback_fires_on_every_poll_not_just_transitions(tmp_path):
+    """The logging above is edge-triggered on purpose. Its consumer is not:
+    app times a recurring warning off this, and "how long has scripting been
+    down" cannot be measured from an edge."""
+    seen: list = []
+    stream = iter([_ok_result(), _down(NO_SCRIPTING), _down(NO_SCRIPTING),
+                   _down(NO_SCRIPTING)])
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: next(stream),
+        on_bridge_state=lambda connected, reason: seen.append((connected, reason)),
+    )
+    for _ in range(4):
+        watcher.poll_once()
+
+    assert seen == [
+        (True, ""),
+        (False, NO_SCRIPTING),
+        (False, NO_SCRIPTING),
+        (False, NO_SCRIPTING),
+    ]
+
+
+def test_a_bridge_state_consumer_that_raises_costs_nothing(tmp_path):
+    """It runs inside the poll loop: a raising consumer must not cost the
+    poll its logging, let alone the rest of the cycle."""
+    def boom(connected, reason):
+        raise RuntimeError("consumer exploded")
+
+    (tmp_path / "clip.mov").touch()
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(
+            make_timeline_item(str(tmp_path / "clip.mov"))),
+        on_bridge_state=boom,
+    )
+
+    assert watcher.poll_once()["ok"] is True

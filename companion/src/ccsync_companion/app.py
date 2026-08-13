@@ -758,6 +758,33 @@ class CompanionApp:
         # SAME process could only mean the first one failed to take.
         self._bridge_restart_started = False
 
+        # _maybe_warn_scripting_dead: "Resolve is open but scripting is dead"
+        # is the ONE broken state the editor can neither see nor is told
+        # about -- every Resolve feature (the fixer, proxy attach, b-roll and
+        # music inserts, YouTube import) is silently gone while Resolve looks
+        # perfectly normal on screen, and it cost ruskin's rig a full session
+        # on 2026-08-12. So this one nags, on a timer, until it is fixed or
+        # the editor silences it.
+        #   _since        monotonic stamp of the first poll in the bad state
+        #                 (None = not in it) -- the "held continuously"
+        #                 clock, reset by ANY good poll;
+        #   _warned_at    when the last dialog was shown;
+        #   _silenced     the editor pressed STOP WARNING ME (cleared when
+        #                 the link recovers, so the next breakage warns again);
+        #   _open         a dialog is on screen right now -- the watcher polls
+        #                 every 3 s and must not stack 100 of them.
+        self._scripting_bad_since: Optional[float] = None
+        self._scripting_warned_at: Optional[float] = None
+        self._scripting_warn_silenced = False
+        self._scripting_warn_open = False
+        self._scripting_warn_lock = threading.Lock()
+        # ONE clock for the whole interaction: the check runs on the watcher
+        # thread and the re-stamp runs on the dialog thread when the window
+        # closes, and the two comparing different time sources is only
+        # invisible because both happen to be time.monotonic in production
+        # (BpgLauncher/RateEstimator take theirs the same way).
+        self._scripting_clock: Callable[[], float] = time.monotonic
+
         # The b-roll web UI's "Send to Resolve" loopback server
         # (broll_server.py), absorbed from the standalone broll-companion.
         # None whenever it is switched off or could not take its port --
@@ -908,6 +935,7 @@ class CompanionApp:
             # unfixable popup) or BAD_PREFIX (a warning storm), and neither
             # names the actual problem. The watcher stands down instead.
             root_present_fn=self.root_is_present,
+            on_bridge_state=self._handle_bridge_state,
         )
 
     def _on_report_response(self, resp: Any) -> None:
@@ -2175,6 +2203,120 @@ class CompanionApp:
         # expensive part (one locked trip into fusionscript per clip).
         self._relink_proxies_once(result.get("items", []))
         self._classify_pool_once(result.get("items", []))
+
+    def _handle_bridge_state(self, connected: bool, reason: str) -> None:
+        """Every poll's Resolve-bridge state, from the watcher. Never raises.
+
+        Only one state warrants nagging: Resolve RUNNING with its scripting
+        server dead. Resolve simply being closed is normal (and is
+        _maybe_recover_stale_bridge's business, not this one's), so any other
+        state resets the clock -- including a recovery, which also clears the
+        silence so the NEXT breakage is warned about again.
+        """
+        try:
+            if connected or reason != resolve_bridge.NO_SCRIPTING_MESSAGE:
+                self._scripting_bad_since = None
+                self._scripting_warned_at = None
+                self._scripting_warn_silenced = False
+                return
+            self._maybe_warn_scripting_dead()
+        except Exception:
+            log.exception("bridge-state handling failed")
+
+    def _scripting_warn_interval(self) -> float:
+        """Seconds between warnings; <= 0 switches the warning off entirely
+        (as does resolve_scripting_warning = false)."""
+        if not bool(self.config.get("resolve_scripting_warning", True)):
+            return 0.0
+        try:
+            return float(self.config.get("resolve_scripting_warning_interval", 300))
+        except (TypeError, ValueError):
+            # validate_config coerces this, but a hand-edited config that
+            # skipped it must not silence the warning by accident.
+            return 300.0
+
+    def _maybe_warn_scripting_dead(self, now: Optional[float] = None) -> None:
+        """Nag, on a timer, while Resolve is up but not accepting scripting.
+
+        The editor cannot see this state: Resolve is on screen and behaving,
+        while every companion feature that needs it is dead. It is also the
+        one state that does NOT heal itself -- Resolve never retries a script
+        server that failed at launch (item 19), and a stale fusionscript
+        client can wedge the new session's server for every client on the
+        machine (2026-08-12). So unlike every other warning here, this one
+        repeats until it is fixed.
+
+        The first dialog waits a full interval rather than firing on the
+        first bad poll: Resolve's script server takes a moment to come up
+        after launch, and a popup in the editor's face three seconds into
+        every Resolve start would train them to dismiss the one warning that
+        matters. Thereafter every interval, silenceable from the dialog.
+        """
+        interval = self._scripting_warn_interval()
+        if interval <= 0:
+            return
+        if self._scripting_warn_silenced:
+            return
+        now = self._scripting_clock() if now is None else now
+        if self._scripting_bad_since is None:
+            self._scripting_bad_since = now
+            return
+        last = self._scripting_warned_at
+        waited = now - (last if last is not None else self._scripting_bad_since)
+        if waited < interval:
+            return
+        # Everything cheap first: this runs on the watcher's 3 s poll and the
+        # probe below SHELLS OUT (tasklist/pgrep). Behind the interval gate
+        # that is one spawn per warning instead of twenty a minute -- the
+        # same arithmetic as resolve_bridge's _PROBE_TTL_SECONDS. The slot is
+        # spent whether or not the probe confirms, so an inconclusive answer
+        # costs one attempt per interval rather than one every 3 s for as
+        # long as the bridge stays down.
+        self._scripting_warned_at = now
+        # A POSITIVE sighting only. describe_disconnection() reaches its
+        # NO_SCRIPTING verdict through a probe that fails CLOSED (an
+        # unspawnable tasklist, an unsupported platform -> "running"), which
+        # is right for its callers and wrong here: it would nag forever on a
+        # machine with Resolve shut. See resolve_prefs.resolve_process_state.
+        if resolve_prefs_mod.resolve_process_state() is not True:
+            return
+        with self._scripting_warn_lock:
+            if self._scripting_warn_open:
+                # Still on screen from last time (the editor is reading it,
+                # or has left it up). The timer restarts when it closes.
+                return
+            self._scripting_warn_open = True
+        self._scripting_warned_at = now
+        log.warning(
+            "Resolve is running but its scripting server is not answering -- "
+            "warning the editor (every %.0fs until it is fixed)", interval,
+        )
+        threading.Thread(
+            target=self._show_scripting_warning,
+            name="ccsync-scripting-warning", daemon=True,
+        ).start()
+
+    def _show_scripting_warning(self) -> None:
+        """The dialog thread. NEVER the watcher's: a Tk mainloop on that
+        thread freezes timeline polling for as long as the window is up
+        (AUDIT_2 CORE-M2, the same reason the fixer popup gets its own)."""
+        try:
+            from . import tray as tray_mod
+
+            if tray_mod.show_scripting_warning(self):
+                self._scripting_warn_silenced = True
+                log.info("scripting warning silenced by the editor until the link recovers")
+        except Exception:
+            log.exception("could not show the Resolve scripting warning")
+            self._notify_tray(
+                resolve_bridge.NO_SCRIPTING_MESSAGE, "ccsync-companion")
+        finally:
+            with self._scripting_warn_lock:
+                self._scripting_warn_open = False
+            # The interval is measured from the moment the editor is DONE
+            # reading, not from when the dialog opened -- otherwise a window
+            # left up for an hour re-pops the instant it is closed.
+            self._scripting_warned_at = self._scripting_clock()
 
     def _maybe_recover_stale_bridge(self) -> None:
         """Restart the companion when the Resolve it connected to has exited.

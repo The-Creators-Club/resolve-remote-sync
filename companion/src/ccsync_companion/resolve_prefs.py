@@ -125,10 +125,18 @@ def config_dir() -> Optional[Path]:
     return None
 
 
-def resolve_is_running() -> bool:
-    """Whether DaVinci Resolve is running. Fails CLOSED -- an inconclusive
-    check reports True, because writing prefs under a running Resolve loses
-    the edit silently, while a false "it's running" only defers it."""
+def resolve_process_state() -> Optional[bool]:
+    """True = seen, False = definitely absent, None = could not tell.
+
+    The honest three-valued answer behind resolve_is_running()'s two-valued
+    one. Most callers want the fail-closed collapse below; anything that
+    NAGS the editor on the strength of "Resolve is running" wants this
+    instead, and must act only on a positive sighting -- an unsupported
+    platform or a tasklist that will not spawn is not evidence of a running
+    Resolve, and treating it as one turns a periodic warning into a
+    permanent one on exactly the machines least able to diagnose it
+    (app._maybe_warn_scripting_dead).
+    """
     system = platform.system()
     try:
         if system == "Windows":
@@ -144,8 +152,15 @@ def resolve_is_running() -> bool:
             )
             return out.returncode == 0
     except Exception:
-        return True
-    return True
+        return None
+    return None
+
+
+def resolve_is_running() -> bool:
+    """Whether DaVinci Resolve is running. Fails CLOSED -- an inconclusive
+    check reports True, because writing prefs under a running Resolve loses
+    the edit silently, while a false "it's running" only defers it."""
+    return resolve_process_state() is not False
 
 
 class PrefFile:

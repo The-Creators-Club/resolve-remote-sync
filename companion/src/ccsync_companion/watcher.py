@@ -54,6 +54,11 @@ class TimelineWatcher:
 
     `on_foreign(item)` is called once per newly seen FOREIGN path — another
     machine's private spelling, unfixable from here — for a tray warning.
+
+    `on_bridge_state(connected, reason)` is called on EVERY poll with the
+    state of the Resolve scripting link — the one callback here that is not
+    edge-triggered, because its consumer measures how long a bad state has
+    lasted (app._handle_bridge_state).
     """
 
     def __init__(
@@ -70,6 +75,7 @@ class TimelineWatcher:
         on_project_changed: Optional[Callable[[str], None]] = None,
         ignored_projects: Optional[list[str]] = None,
         root_present_fn: Optional[Callable[[], bool]] = None,
+        on_bridge_state: Optional[Callable[[bool, str], None]] = None,
     ) -> None:
         self.local_root = local_root
         self.canonical_prefix = canonical_prefix
@@ -79,6 +85,10 @@ class TimelineWatcher:
         self._on_non_canonical = on_non_canonical
         self._on_foreign = on_foreign
         self._on_project_changed = on_project_changed
+        # EVERY poll's bridge state, not just the transitions _note_bridge_state
+        # logs: app._handle_bridge_state times a recurring warning off it, and
+        # "how long has this been broken" cannot be measured from an edge.
+        self._on_bridge_state = on_bridge_state
         # Last NON-None project name seen -- deliberately NOT cleared when
         # the bridge flaps to None (Resolve restarting, transient failure),
         # so name -> None -> same name never refires on_project_changed.
@@ -306,6 +316,14 @@ class TimelineWatcher:
         scripting connections" ask the reader for different actions.
         """
         reason = "" if connected else str(reason or "")
+        if self._on_bridge_state is not None:
+            # Before the transition filter, and fault-isolated like every
+            # other callback here: a consumer that raises must not cost this
+            # poll its logging, let alone the rest of the cycle.
+            try:
+                self._on_bridge_state(connected, reason)
+            except Exception:
+                log.exception("on_bridge_state callback failed")
         if connected == self._bridge_connected and reason == self._bridge_reason:
             return
         self._bridge_connected, self._bridge_reason = connected, reason

@@ -2217,3 +2217,71 @@ def test_a_companion_with_no_generator_at_all_renders_normally():
     assert snap["proxy_gap"] == {}
     assert _menu_fingerprint(snap)  # no exception, and no proxy contribution
     assert "Sync now" in _all_menu_labels(_build_menu(app, snap))
+
+
+# -- the recurring Resolve-scripting warning ---------------------------------
+
+
+def test_scripting_warning_yields_to_an_open_window(monkeypatch):
+    """It fires on a timer, so it is the one dialog here that can arrive
+    while the editor is mid-way through another. Losing a round costs
+    nothing (the next interval comes round again); stacking Tk roots is what
+    wedged the interpreter in AUDIT_2 CORE-M3."""
+    from ccsync_companion import resolve_bridge
+    from ccsync_companion import tray as tray_mod
+
+    app = _UpgradeApp()
+    app._popup_active_lock.acquire()          # e.g. the fixer popup is open
+    opened = []
+    monkeypatch.setattr(tray_mod, "_show_scripting_warning_locked",
+                        lambda a: opened.append(1))
+
+    assert tray_mod.show_scripting_warning(app) is False
+    assert opened == []
+    assert any(resolve_bridge.NO_SCRIPTING_MESSAGE in m for m in app.notified), \
+        "yielding must not mean saying nothing at all"
+
+
+def test_scripting_warning_releases_the_popup_lock(monkeypatch):
+    from ccsync_companion import tray as tray_mod
+
+    app = _UpgradeApp()
+    monkeypatch.setattr(tray_mod, "_show_scripting_warning_locked", lambda a: True)
+
+    assert tray_mod.show_scripting_warning(app) is True
+    assert not app._popup_active_lock.locked(), "the lock outlived the dialog"
+
+
+def test_scripting_warning_goes_through_ui_dispatch(monkeypatch):
+    """Same contract as the other three: on macOS a tray worker thread may
+    not touch Tk-Aqua at all."""
+    from ccsync_companion import tray as tray_mod
+
+    app = _UpgradeApp()
+    calls = _record_tray_dispatch(monkeypatch, run=True)
+    monkeypatch.setattr(tray_mod, "_build_scripting_warning_dialog", lambda a: True)
+
+    assert tray_mod._show_scripting_warning_locked(app) is True
+    assert len(calls) == 1
+
+
+def test_a_broken_scripting_warning_dialog_still_tells_the_editor(monkeypatch):
+    """The dialog exists to report an invisible failure. Failing to open it
+    silently would leave exactly the state it was written for."""
+    import sys
+    import types
+
+    from ccsync_companion import resolve_bridge
+    from ccsync_companion import tray as tray_mod
+
+    app = _UpgradeApp()
+    broken = types.ModuleType("tkinter")
+
+    def _boom(*a, **k):
+        raise RuntimeError("Tcl is wedged")
+
+    broken.Tk = _boom
+    monkeypatch.setitem(sys.modules, "tkinter", broken)
+
+    assert tray_mod._build_scripting_warning_dialog(app) is False
+    assert any(resolve_bridge.NO_SCRIPTING_MESSAGE in m for m in app.notified)

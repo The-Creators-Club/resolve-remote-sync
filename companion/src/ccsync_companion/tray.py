@@ -1210,6 +1210,100 @@ def _build_update_dialog(app: "CompanionApp", info: dict) -> bool:
     return bool(confirmed["value"])
 
 
+def show_scripting_warning(app: "CompanionApp") -> bool:
+    """Warn that Resolve is open but not accepting scripting connections.
+
+    Driven by app._maybe_warn_scripting_dead on a timer, NOT by a menu click
+    -- the only dialog in this file the editor did not ask for. That is
+    deliberate: it is the one failure they cannot see (Resolve looks fine;
+    every companion feature that needs it is dead) and the one that does not
+    heal on its own.
+
+    Returns True if the editor asked to stop being warned. Never raises: a
+    warning that takes the tray thread down would cost more than the state
+    it is warning about.
+    """
+    lock = getattr(app, "_popup_active_lock", None)
+    if lock is not None and not lock.acquire(blocking=False):
+        # Another CCSync window owns Tk (the fixer, an update offer). Say it
+        # in the tray and let the next interval try again -- this warning
+        # repeats by design, so a skipped round costs nothing, while queueing
+        # it would drop a stale nag on screen minutes after the fact.
+        log.info("scripting warning: another CCSync window is open -- notifying instead")
+        _notify(app, resolve_bridge.NO_SCRIPTING_MESSAGE)
+        return False
+    try:
+        return _show_scripting_warning_locked(app)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _show_scripting_warning_locked(app: "CompanionApp") -> bool:
+    """Caller holds the popup lock (see show_scripting_warning); ui_dispatch
+    only decides which thread builds the root."""
+    return bool(ui_dispatch.dispatch(lambda: _build_scripting_warning_dialog(app)))
+
+
+def _build_scripting_warning_dialog(app: "CompanionApp") -> bool:
+    try:
+        import tkinter as tk
+
+        from . import theme
+    except Exception as exc:
+        log.warning("scripting warning dialog unavailable (%s) -- notifying instead", exc)
+        _notify(app, resolve_bridge.NO_SCRIPTING_MESSAGE)
+        return False
+
+    silenced = {"value": False}
+    body = (
+        resolve_bridge.NO_SCRIPTING_MESSAGE + "\n\n"
+        "Until then CCSync can't see your timeline, so it can't warn you about "
+        "media outside your project folder, attach proxies, or send b-roll, "
+        "music and YouTube clips to Resolve. Your files and your sync are not "
+        "affected." + "\n\n"
+        "Save your work first -- nothing here is urgent enough to lose a take over."
+    )
+    try:
+        root = tk.Tk()
+        root.title("CCSYNC.EXE: Resolve scripting is down")
+        theme.apply_window_icon(tk, root)
+        root.attributes("-topmost", True)
+        root.configure(bg=theme.BG, padx=18, pady=14)
+
+        tk.Label(root, text="► RESOLVE SCRIPTING IS DOWN", bg=theme.BG, fg=theme.RED,
+                 font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+        tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        tk.Label(root, text=body, bg=theme.BG, fg=theme.MUTED, font=theme.mono(9),
+                 justify="left", anchor="w", wraplength=360).pack(anchor="w", pady=(6, 10))
+
+        btn_bar = tk.Frame(root, bg=theme.BG)
+        btn_bar.pack(anchor="e", pady=(12, 0))
+
+        def _dismiss():
+            root.destroy()
+
+        def _silence():
+            silenced["value"] = True
+            root.destroy()
+
+        # OK is the primary button, not "stop warning me": the action this
+        # dialog wants is the restart, and an editor who cannot do it right
+        # now should have to reach past the default to switch the warning off.
+        theme.neon_button(tk, btn_bar, "STOP WARNING ME", _silence, primary=False).pack(
+            side="left", padx=(0, 18))
+        theme.neon_button(tk, btn_bar, "OK", _dismiss, primary=True).pack(side="left")
+        root.bind("<Return>", lambda _e: _dismiss())
+        root.protocol("WM_DELETE_WINDOW", _dismiss)
+        ui_dispatch.run_dialog(root)
+    except Exception as exc:
+        log.warning("scripting warning dialog failed (%s) -- notifying instead", exc)
+        _notify(app, resolve_bridge.NO_SCRIPTING_MESSAGE)
+        return False
+
+    return bool(silenced["value"])
+
+
 def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
     """Confirm, then untick + unshare + delete a project's local copy (see
     app.remove_project_from_machine for the ordering guarantees). Runs on a

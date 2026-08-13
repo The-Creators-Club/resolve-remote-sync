@@ -234,3 +234,22 @@ def test_resolve_is_running_fails_closed(monkeypatch):
 
     monkeypatch.setattr(rp.subprocess, "run", boom)
     assert rp.resolve_is_running() is True
+
+
+def test_an_inconclusive_probe_is_None_not_True(monkeypatch):
+    """The three-valued answer behind the collapse above. A caller that
+    NAGS on "Resolve is running" (app._maybe_warn_scripting_dead) must be
+    able to tell a sighting from a failed probe -- given only the fail-closed
+    bool, an unspawnable tasklist becomes a warning every 5 minutes, forever,
+    on a machine with Resolve shut."""
+    def boom(*args, **kwargs):
+        raise OSError("no tasklist here")
+
+    monkeypatch.setattr(rp.subprocess, "run", boom)
+    assert rp.resolve_process_state() is None
+
+
+def test_an_unsupported_platform_is_inconclusive_too(monkeypatch):
+    monkeypatch.setattr(rp.platform, "system", lambda: "Linux")
+    assert rp.resolve_process_state() is None
+    assert rp.resolve_is_running() is True

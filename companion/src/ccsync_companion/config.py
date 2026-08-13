@@ -44,7 +44,13 @@ log = logging.getLogger("ccsync.config")
 # Club mark in brand red instead of April's pre-composed icon.png -- the same
 # white-on-transparent asset the tray already tints per status, so the taskbar,
 # the title bar and the tray finally show one logo.
-VERSION = "0.7.6"
+# 0.7.7: the recurring "Resolve is running but isn't accepting scripting
+# connections" dialog (every resolve_scripting_warning_interval, default
+# 300s) -- the only repeating warning here, for the only broken state the
+# editor cannot see. Plus the R12 path-canon work reaching the fleet with a
+# warning attached to it: 0.7.6 shipped the classification, this ships the
+# thing that TELLS someone when the bridge those fixes depend on is dead.
+VERSION = "0.7.7"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

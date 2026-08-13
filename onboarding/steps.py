@@ -62,6 +62,12 @@ from ccsync_companion import identity as identity_mod
 # build and failing the ship: that is how 0.6.2 shipped its companion but not
 # its installer). This number moves with every companion release; 1.0.21
 # ships with 0.6.3.
+# 1.0.26: the 1.0.21 rule a fourth time, for companion 0.7.7 (the recurring
+# scripting-down warning). 1.0.25 was published on 2026-08-13 bundling 0.7.6,
+# so shipping 0.7.7 changes onboard.exe's bytes under a version the server
+# already has -- exactly the 409 that failed the previous ship. Read this as
+# the standing rule it now plainly is: EVERY companion release needs an
+# installer bump, whether or not any installer source changed.
 # 1.0.25: no installer source changed either -- the 1.0.21 rule again, for
 # companion 0.7.6 (R11/R12). 1.0.24 was already published, so the server kept
 # the old build and failed the ship rather than serve an onboard.exe whose
@@ -80,7 +86,7 @@ from ccsync_companion import identity as identity_mod
 # contract: CAPABILITY MISSING: markers + exit 3, RESOLVE-MAPPING-STATUS:
 # marker, and the existing-config rclone_path repair. The .sh and this file
 # must ship as a pair, same as the .ps1.
-INSTALLER_VERSION = "1.0.25"
+INSTALLER_VERSION = "1.0.26"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.

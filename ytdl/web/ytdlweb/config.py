@@ -11,6 +11,7 @@ On a Windows dev box nothing at those paths exists, so every one of them is set
 by the caller (tests point them at a temp tree). Nothing here touches the disk
 at import -- see ensure_data_root() for why that matters to the mount.
 """
+import logging
 import os
 import re
 import unicodedata
@@ -86,6 +87,16 @@ MAX_TERMS = int(os.environ.get('YTDL_MAX_TERMS') or '24')
 CANDIDATE_CAPS = (50, 100, 200, 400)
 DEFAULT_MAX_CANDIDATES = 100
 
+# The longest video a SEARCH job will keep selected (admin request,
+# 2026-08-14): b-roll harvesting wants clips, and an hour-long documentary is
+# an hour of download + disk for footage nobody scrubs. A mechanical drop in
+# the filter phase, same soft semantics as a Claude verdict -- the card stays
+# in the manifest, deselected with a note, and an editor who genuinely wants
+# it can re-tick it. Pasted-link jobs are untouched on purpose: they skip the
+# filter phase entirely, and skipping a video someone deliberately pasted
+# would contradict the paste.
+MAX_DURATION_SECONDS = int(os.environ.get('YTDL_MAX_DURATION') or '1800')
+
 # Metadata enrichment pacing. The enrich phase is the one that got the IP
 # blocked: it ran through a ThreadPoolExecutor with 4 workers and NO delay, so
 # 112 calls went out in well under a minute -- which is what looked robotic,
@@ -126,6 +137,110 @@ DEV_USER = os.environ.get('YTDL_DEV_USER') or ''
 # Standalone dev only: 'slug=label,slug2=label2' so the project picker has
 # something to offer with no dashboard database in reach.
 DEV_PROJECTS = os.environ.get('YTDL_DEV_PROJECTS') or ''
+
+# ------------------------------------------- requester-first downloads (0.8.0)
+# docs/YTDL_LOCAL_DOWNLOAD.md. The requester's own companion downloads their
+# clips from their residential IP, and the NAS worker becomes the fallback
+# executor. Phase 1 (this) is the server half; with no 0.8.0 companion in the
+# fleet, nothing here ever fires.
+
+# The SPA's dispatch switch, and the ONLY switch this feature has (plan §10).
+# Default OFF: deployed with the flag down, the behaviour is byte-for-byte
+# today's, which is what makes phase 1 safe to soak on the live dashboard.
+# It gates the browser probe, not the endpoints below -- the fleet token is
+# what guards those, and a companion can only act on a job id the SPA gave it.
+LOCAL_DOWNLOAD = (os.environ.get('YTDL_LOCAL_DOWNLOAD') or '') == '1'
+
+# How long a claim is good for, and how often the holder must say it is alive.
+# 180/30 ship as the plan's numbers: three heartbeats' worth of slack, so one
+# missed beat (a suspended laptop, a busy tray) does not cost the lease, and a
+# genuinely dead holder is reclaimed in at most three minutes.
+LEASE_SECONDS = int(os.environ.get('YTDL_LEASE_SECONDS') or '180')
+HEARTBEAT_SECONDS = int(os.environ.get('YTDL_HEARTBEAT_SECONDS') or '30')
+
+# The oldest yt-dlp an editor's machine may download with. yt-dlp rots -- the
+# container's copy is fixable in one rebuild, and this is the equivalent lever
+# for the fleet: raise it the day YouTube breaks the old one and every stale
+# companion is refused its claim (403) and falls back to the server while its
+# sidecar self-updates (plan §6).
+#
+# RANKED NUMERICALLY, not compared as a string (COMP-BROLL-9, 2026-08-14). The
+# string rule is exact for yt-dlp's OWN output, whose fields are zero-padded --
+# and this value is not yt-dlp's output, it is free text an operator types into
+# the container's environment. One unpadded floor ('2026.8.5') sorts ABOVE
+# every real '2026.08.xx' and even '2026.12.xx', so it 403s the claim of every
+# machine in the fleet while each companion (which ranks numerically) concludes
+# it has nothing to update: local downloads dead everywhere, and the only log
+# line anywhere says somebody's yt-dlp is old. The companion now says so out
+# loud when the two sides disagree; this is the side that stops it happening.
+DEFAULT_MIN_YTDLP_VERSION = '2026.07.04'
+MIN_YTDLP_VERSION = os.environ.get('YTDL_MIN_YTDLP_VERSION') or DEFAULT_MIN_YTDLP_VERSION
+
+_VERSION_PART = re.compile(r'^\d+$')
+
+
+def version_rank(version):
+    """A dotted-numeric version as a tuple of ints, or None if it is not one.
+
+    '2026.8.4' -> (2026, 8, 4), and (2026, 8, 4) < (2026, 8, 10) the way the
+    releases actually went out. A nightly's '2026.07.04.123456' ranks after the
+    release it follows, because a longer tuple with an equal prefix is greater.
+
+    None -- deliberately strict -- for anything that is not all-numeric
+    ('nightly', '2026.08.04-hotfix', ''). Truncating to the numeric prefix
+    would rank a hotfix BELOW the release it patches, and the two callers of
+    this both have a safe answer for "cannot rank" already. Never raises.
+
+    Mirrors ccsync_companion.upgrade.parse_version, which is what the other end
+    of this comparison uses; it is not imported because this app must run with
+    no companion source in reach.
+    """
+    try:
+        raw = str(version or '').strip()
+        if raw[:1] in ('v', 'V'):
+            raw = raw[1:]
+        parts = raw.split('.')
+        if not raw or not all(_VERSION_PART.match(p) for p in parts):
+            return None
+        return tuple(int(p) for p in parts)
+    except Exception:                            # noqa: BLE001 - never raises
+        return None
+
+
+def _validated_floor(configured):
+    """The fleet's yt-dlp floor, or the shipped default if it cannot be ranked.
+
+    A floor nothing can rank is worse than no floor at all: it cannot let
+    anybody through, so it silently turns every editor's downloads back to the
+    server and looks exactly like "the whole fleet is running old yt-dlp". A
+    typo in one env var must not be able to do that quietly, so the bad value
+    is REFUSED (never used for a comparison, never published to the fleet by
+    /api/config/ytdl-client) and the reason is logged at ERROR -- which is
+    where an operator looks when local downloads stop happening.
+    """
+    if version_rank(configured) is not None:
+        return str(configured).strip()
+    logging.getLogger(__name__).error(
+        'YTDL_MIN_YTDLP_VERSION=%r is not a dotted-numeric version, so nothing '
+        'can be compared against it. Falling back to %s. Until it is fixed, '
+        'the floor in force is the shipped one, NOT the value in the '
+        'environment.', configured, DEFAULT_MIN_YTDLP_VERSION)
+    return DEFAULT_MIN_YTDLP_VERSION
+
+
+MIN_YTDLP_VERSION = _validated_floor(MIN_YTDLP_VERSION)
+
+# The fleet token the companion already holds, deliberately NOT YTDL_-prefixed:
+# it is the DASHBOARD's shared secret (`DASH_REPORT_TOKEN`), the same one the
+# companion authenticates its status reports and package downloads with, and a
+# second name for it would mean a second thing to rotate. Machine-to-machine
+# only -- the browser session authorises humans, this authorises companions,
+# and neither crosses into the other's lane (plan §8).
+#
+# FAIL CLOSED: unset means every fleet endpoint answers 403, never "open".
+# The b-roll ingest gate's precedent, and the same reasoning -- a dashboard
+# deployed without the secret must refuse machine callers, not trust them.
+REPORT_TOKEN = os.environ.get('DASH_REPORT_TOKEN') or ''
 
 HOST = os.environ.get('YTDL_HOST') or '127.0.0.1'
 PORT = int(os.environ.get('YTDL_PORT') or '8791')

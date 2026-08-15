@@ -273,8 +273,7 @@ async function applyHistoryState() {
     state.path = p.get("path") || "";
     state.offset = parseInt(p.get("off") || "0", 10) || 0;
     $("#q-input").value = state.q;
-    const select = $("#category-select");
-    if (select) select.value = state.collection === "creators_club" ? "" : state.category;
+    syncCategorySelect();
     renderFolderTree();
 
     const vid = parseInt(p.get("v") || "", 10);
@@ -532,6 +531,23 @@ function parentFolder(category) {
   return lastSlash === -1 ? "" : category.slice(0, lastSlash);
 }
 
+/** Point the category <select> at whatever state now says, from ONE place.
+ *
+ * Creators_Club folders are shoot paths (`ff4::Whisky / Interviews`), and
+ * loadCategories only ever populates this control from /api/categories --
+ * subject slugs. Assigning a <select> a value no option carries silently sets
+ * selectedIndex = -1 and renders the box empty, which reads as a filter the
+ * editor can neither see nor identify (the trap R15 fix 1 documents for the
+ * ytdl project picker). applyHistoryState and jumpToSearch both guarded it;
+ * selectFolder did not, so the same folder rendered two different ways
+ * depending on whether it was reached by click or by Back (BROLL-WEB-8,
+ * 2026-08-14). Hoisted rather than triplicated so the next writer of this
+ * control cannot diverge again. */
+function syncCategorySelect() {
+  const select = $("#category-select");
+  if (select) select.value = state.collection === "creators_club" ? "" : state.category;
+}
+
 function selectFolder(collection, category) {
   // Clicking the folder you are already in backs out to its parent, so the
   // tree doubles as its own breadcrumb and there is no dead click. Exactly one
@@ -552,8 +568,7 @@ function selectFolder(collection, category) {
   // previous choice rather than intersecting with it.
   state.path = "";
   state.offset = 0;
-  const select = $("#category-select");
-  if (select) select.value = category;
+  syncCategorySelect();
   renderFolderTree();
   syncHistory(true);
   runSearch();
@@ -815,11 +830,15 @@ function wireDetailView() {
   // edge of the bar; the real duration only exists once metadata is in, so the
   // markers are laid out again here.
   player.addEventListener("loadedmetadata", renderSeekMarkers);
+  player.addEventListener("loadedmetadata", applyPendingSeek);
   wireSeekQueue(player);
   wireSeekbarScrub(player);
   wireDragScrub(player);
 
-  $("#send-resolve-btn").addEventListener("click", sendToResolve);
+  // Explicit modes, not the bare handler: an event object arriving as `mode`
+  // would read as junk and be refused by the companion.
+  $("#send-resolve-btn").addEventListener("click", () => sendToResolve("append"));
+  $("#place-resolve-btn").addEventListener("click", () => sendToResolve("playhead"));
 
   document.addEventListener("keydown", onKeydown);
 }
@@ -1020,15 +1039,26 @@ async function openDetail(videoId, seekToSeconds, hits) {
   $("#tc-out").textContent = "--:--:--:--";
   $("#tc-rate").textContent = "1x";
 
-  if (seekToSeconds != null) {
-    player.addEventListener(
-      "loadedmetadata",
-      () => {
-        player.currentTime = seekToSeconds;
-      },
-      { once: true }
-    );
-  }
+  // The seek itself is applied by applyPendingSeek off the ONE permanent
+  // loadedmetadata handler, from state.detailSeekTo set above -- see there.
+}
+
+/** Jump to the timecode of the hit that brought the editor here, once this
+ * clip's metadata is in (duration/seekability do not exist before that).
+ *
+ * Registered once on the persistent #player, not armed per-open with
+ * {once:true}: that only detaches after it FIRES, so a clip whose proxy 404s
+ * (an un-archived row's /media/proxy has nothing behind it) or that the editor
+ * left before metadata arrived kept its listener attached -- and closeDetail's
+ * removeAttribute("src") + load() fires `emptied`, never `loadedmetadata`, so
+ * nothing cleared it. It then fired against the NEXT clip and silently opened
+ * it two minutes in, at a timecode belonging to a different video (BROLL-WEB-4,
+ * 2026-08-14). state.detailSeekTo is per-clip, set by openDetail and cleared by
+ * closeDetail, so there is no listener state left to leak. */
+function applyPendingSeek() {
+  if (state.detailSeekTo == null) return;
+  $("#player").currentTime = state.detailSeekTo;
+  state.detailSeekTo = null;
 }
 
 function closeDetail() {
@@ -1070,8 +1100,7 @@ function jumpToSearch(mutate) {
   closeDetail();
   state.offset = 0;
   mutate();
-  const select = $("#category-select");
-  if (select) select.value = state.collection === "creators_club" ? "" : state.category;
+  syncCategorySelect();
   renderFolderTree();
   syncHistory(true);
   runSearch();
@@ -1431,7 +1460,7 @@ function onKeydown(e) {
       break;
     case "Enter":
       e.preventDefault();
-      sendToResolve();
+      sendToResolve(e.shiftKey ? "playhead" : "append");
       break;
     default:
       break;
@@ -1515,7 +1544,7 @@ function syncProgressLabel(progress) {
   return "SYNCING…";
 }
 
-async function sendToResolve() {
+async function sendToResolve(mode = "append") {
   if (!state.detail || sendInFlight) return;
   const { video } = state.detail;
   const fps = video.fps || 24;
@@ -1545,13 +1574,17 @@ async function sendToResolve() {
     in_frame: inFrame,
     out_frame: outFrame,
     fps: fps,
-    mode: "append",
+    mode: mode,
   };
 
-  const btn = $("#send-resolve-btn");
+  // The active button carries the SYNCING label; both are disabled, because
+  // "one send in flight" is per companion, not per button.
+  const btn = $(mode === "playhead" ? "#place-resolve-btn" : "#send-resolve-btn");
+  const otherBtn = $(mode === "playhead" ? "#send-resolve-btn" : "#place-resolve-btn");
   const originalLabel = btn ? btn.innerHTML : null;
   sendInFlight = true;
   if (btn) btn.disabled = true;
+  if (otherBtn) otherBtn.disabled = true;
   let announcedSync = false;
   try {
     for (;;) {
@@ -1597,7 +1630,16 @@ async function sendToResolve() {
       }
 
       if (!res.ok || !body || body.ok === false) {
-        const message = (body && body.message) || `Companion returned HTTP ${res.status}`;
+        let message = (body && body.message) || `Companion returned HTTP ${res.status}`;
+        // Fleet companions built before Place at Playhead existed (0.6.x-0.7.x)
+        // answer an unknown mode with a bare "not implemented yet" -- true, but
+        // it names no action. Newer builds refuse junk modes with their own
+        // "needs an update" text, so only the legacy string is rewritten.
+        if (mode === "playhead" && /not implemented yet/.test(message)) {
+          message =
+            "This companion build predates Place at Playhead — update the " +
+            "companion app (tray icon → check for updates), or use Append.";
+        }
         toast(message, "error");
         return;
       }
@@ -1611,6 +1653,7 @@ async function sendToResolve() {
       btn.disabled = false;
       if (originalLabel != null) btn.innerHTML = originalLabel;
     }
+    if (otherBtn) otherBtn.disabled = false;
   }
 }
 

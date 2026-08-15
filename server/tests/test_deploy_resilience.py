@@ -25,6 +25,7 @@ Run with:
     cd E:\\Projects\\resolve-remote-sync\\server
     python -m pytest tests -q
 """
+import os
 import shutil
 import socket
 import subprocess
@@ -36,6 +37,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import install_dashboard_app as ida  # noqa: E402
+
+# The same minimal requests.Response stand-in the rest of the suite uses; the
+# API-shaped findings of 2026-08-14 need it here too.
+from test_safety import _Resp  # noqa: E402
 
 BASH = shutil.which("bash")
 needs_bash = pytest.mark.skipif(BASH is None, reason="a POSIX shell is required")
@@ -237,7 +242,7 @@ def test_orphaned_staging_is_reclaimed_before_this_run_adds_its_own(monkeypatch,
     monkeypatch.setattr(ida, "run_ssh", fake_run_ssh)
     ida.prune_orphaned_staging(False)
 
-    assert "find /tmp" in sent["cmd"] and ida.STAGING_GLOB in sent["cmd"]
+    assert "'/tmp'" in sent["cmd"] and ida.STAGING_GLOB in sent["cmd"]
     # only debris: anything younger than the cutoff could belong to this run
     assert f"-mmin +{ida.STAGING_ORPHAN_MINUTES}" in sent["cmd"]
     assert "sudo" not in sent["cmd"], "the staging dirs belong to the SSH user"
@@ -259,12 +264,18 @@ def test_staging_can_be_asked_for_somewhere_other_than_tmp(monkeypatch):
     assert got.startswith(root + "/")
 
 
-def test_a_staging_dir_outside_the_parent_we_asked_for_is_refused(monkeypatch):
-    """mktemp's answer is what everything below cp -a's from, as root."""
+def test_a_staging_dir_outside_the_parent_we_asked_for_is_refused(monkeypatch, capsys):
+    """mktemp's answer is what everything below cp -a's from, as root.
+
+    SERVER-8 (2026-08-14): the refusal is a "" RESULT, not sys.exit(1) -- this
+    is reached from steps 2b/2c/2d/2f, i.e. after the `app` swap, where an exit
+    walks past fail_after_app_swap's container restart.
+    """
     monkeypatch.setattr(ida, "run_ssh",
                         lambda *a, **k: (0, "/etc\n", ""))
-    with pytest.raises(SystemExit):
-        ida.make_staging_dir(False, "ccsync-musicdb-upload", "/mnt/tank/x/staging")
+    assert ida.make_staging_dir(False, "ccsync-musicdb-upload",
+                                "/mnt/tank/x/staging") == ""
+    assert "FAILED to create staging dir" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------
@@ -283,6 +294,33 @@ def _dry_run(monkeypatch, capsys, cmds, extra_argv=()):
     monkeypatch.setattr(ida, "run_ssh", record)
     monkeypatch.setattr(sys, "argv", ["install_dashboard_app.py", "--dry-run",
                                       *extra_argv])
+    rc = ida.main()
+    captured = capsys.readouterr()
+    return rc, "\n".join([captured.out, captured.err, *cmds])
+
+
+def _real_run(monkeypatch, capsys, cmds, extra_argv=("--music-data", "none")):
+    """main() WITHOUT --dry-run, against fakes for everything that leaves the
+    process. --dry-run returns at the compose body (that is the point of it),
+    so the step-3 findings of 2026-08-14 -- the create job nobody waits on
+    (SERVER-2) and the queries that used to sys.exit past the container restart
+    (SERVER-8) -- are only reachable from a real run. Nothing here opens a
+    socket: run_ssh, the tree installs and both binary-provisioning steps are
+    stubbed, and the caller supplies truenas_api/app_installed.
+    """
+    def record(cmd, dry_run=False, timeout=120):
+        cmds.append(cmd)
+        return 0, "", ""
+
+    for name, value in (("SYNCTHING_API_KEY", "k"), ("DASH_REPORT_TOKEN", "t"),
+                        ("DASH_SESSION_SECRET", "s"), ("TRUENAS_PW", "pw"),
+                        ("BROLL_INGEST_TOKEN", "ingestTOKENsentinel4b7d1e9a03c6")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(ida, "run_ssh", record)
+    monkeypatch.setattr(ida, "install_tree", lambda *a, **k: True)
+    monkeypatch.setattr(ida, "provision_ffmpeg", lambda *a, **k: None)
+    monkeypatch.setattr(ida, "provision_ytdl_binaries", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["install_dashboard_app.py", *extra_argv])
     rc = ida.main()
     captured = capsys.readouterr()
     return rc, "\n".join([captured.out, captured.err, *cmds])
@@ -316,3 +354,316 @@ def test_a_failed_music_push_restarts_the_container_before_returning(monkeypatch
     assert rc == 1
     assert any("docker restart" in c for c in cmds), \
         "the container was left serving the previous code directory"
+
+
+# --------------------------------------------------------------------------
+# The 2026-08-14 bug hunt: the same four questions, asked of the halves of
+# the deploy that OPS-2/3/5/8 did not reach.
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# SERVER-1 -- the SFTP is the longest-lived step and had no error path at all
+# --------------------------------------------------------------------------
+
+class _Boom(Exception):
+    """Stands in for paramiko.SSHException / socket.timeout out of sftp.put."""
+
+
+def _seed_tree(tmp_path: Path) -> Path:
+    source = tmp_path / "tree"
+    source.mkdir()
+    (source / "a.bin").write_bytes(b"x" * 4096)
+    return source
+
+
+def test_a_dropped_sftp_is_a_failure_result_not_a_traceback(monkeypatch, tmp_path,
+                                                            capsys):
+    """906 MB of proxies is the likeliest place in the whole script for the
+    transport to go, and it was the only major step with no `except`."""
+    monkeypatch.setenv("TRUENAS_PW", "pw")
+
+    def boom(*a, **k):
+        raise _Boom("Server connection dropped")
+
+    monkeypatch.setattr(ida, "ssh_client", boom)
+    assert ida.upload_tree("/tmp/ccsync-musicproxies-upload.AbC",
+                           False, _seed_tree(tmp_path)) == -1
+    err = capsys.readouterr().err
+    assert "SFTP transfer" in err and "_Boom" in err
+    # the operator is told where the debris is, like every other failure here
+    assert "ccsync-musicproxies-upload.AbC" in err
+
+
+def test_install_tree_refuses_after_a_dropped_sftp_and_moves_nothing(monkeypatch,
+                                                                     tmp_path,
+                                                                     capsys):
+    """The exact OPS-2 precondition: this runs after `mv app app.old.<ts>`, so
+    an escaping exception skips fail_after_app_swap and the container is never
+    restarted. A False return is what every call site already routes."""
+    cmds: list = []
+
+    def record(cmd, dry_run=False, timeout=120):
+        cmds.append(cmd)
+        return 0, "1\n4096\n", ""
+
+    monkeypatch.setattr(ida, "run_ssh", record)
+    monkeypatch.setattr(ida, "make_staging_dir",
+                        lambda dry_run, slug="s", parent="/tmp": f"{parent}/{slug}.abc")
+    monkeypatch.setattr(ida, "upload_tree", lambda *a, **k: -1)
+
+    assert ida.install_tree("/mnt/tank/apps/ccsync-dashboard", "music-proxies",
+                            _seed_tree(tmp_path), False) is False
+    assert not any("sudo" in c for c in cmds), "the swap ran on a broken upload"
+    assert "untouched" in capsys.readouterr().err
+
+
+def test_the_restart_that_ends_the_exposure_survives_a_dropped_transport(monkeypatch,
+                                                                         capsys):
+    """fail_after_app_swap calls the restart ON a failure path. If the drop
+    that caused the failure also raises out of `docker restart`, the fix for
+    OPS-2 becomes the traceback OPS-2 was."""
+    def boom(cmd, dry_run=False, timeout=120):
+        raise _Boom("Socket is closed")
+
+    monkeypatch.setattr(ida, "run_ssh", boom)
+    assert ida.fail_after_app_swap(False) == 1
+    err = capsys.readouterr().err
+    assert "PREVIOUS code" in err and "next deploy" in err
+
+
+def test_the_transfer_guard_covers_the_whole_client_not_just_the_put(monkeypatch,
+                                                                    tmp_path):
+    """ssh_client() itself raises on a refused/timed-out connect, which is the
+    same answer -- it must not escape either."""
+    monkeypatch.setenv("TRUENAS_PW", "pw")
+
+    class _Client:
+        def open_sftp(self):
+            raise _Boom("channel open failed")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ida, "ssh_client", lambda *a, **k: _Client())
+    assert ida.upload_tree("/tmp/s", False, _seed_tree(tmp_path)) == -1
+
+
+# --------------------------------------------------------------------------
+# SERVER-5 -- the sweep must look where the 1.4 GB actually stages
+# --------------------------------------------------------------------------
+
+def test_the_sweep_covers_both_staging_parents(monkeypatch):
+    """OPS-8 moved the music pushes to <host-root>/staging and left the reclaim
+    pointed at /tmp, so it ran against the location the big pushes no longer
+    use and never against the one they do. Nothing else in this repo deletes
+    those dirs."""
+    sent = {}
+
+    def fake_run_ssh(cmd, dry_run=False, timeout=120):
+        sent["cmd"] = cmd
+        return 0, "", ""
+
+    monkeypatch.setattr(ida, "run_ssh", fake_run_ssh)
+    ida.prune_orphaned_staging(False, ("/tmp", "/mnt/tank/apps/ccsync-dashboard/staging"))
+
+    assert "'/tmp'" in sent["cmd"]
+    assert "'/mnt/tank/apps/ccsync-dashboard/staging'" in sent["cmd"]
+    assert sent["cmd"].count("find") == 2
+    assert "sudo" not in sent["cmd"], "the staging dirs belong to the SSH user"
+
+
+def test_a_parent_that_does_not_exist_does_not_break_the_sweep(monkeypatch, capsys,
+                                                               tmp_path):
+    """<host-root>/staging is created lazily, so on a first install it is not
+    there -- and a `find` on a missing dir must not cost the /tmp half."""
+    sent = {}
+
+    def fake_run_ssh(cmd, dry_run=False, timeout=120):
+        sent["cmd"] = cmd
+        return 0, "", ""
+
+    monkeypatch.setattr(ida, "run_ssh", fake_run_ssh)
+    ida.prune_orphaned_staging(False, ("/tmp", str(tmp_path / "nope")))
+    assert '[ -d "$d" ]' in sent["cmd"]
+
+
+@needs_bash
+def test_the_sweep_deletes_only_old_staging_dirs(tmp_path):
+    """Run the generated shell for real: the glob and the age cutoff decide
+    what a root-owned 906 MB dir on the pool loses."""
+    parent = tmp_path / "staging"
+    parent.mkdir()
+    old = parent / "ccsync-musicproxies-upload.AbC123"
+    old.mkdir()
+    (old / "big").write_bytes(b"x" * 16)
+    young = parent / "ccsync-musicdb-upload.XyZ789"
+    young.mkdir()
+    keep = parent / "not-ours"
+    keep.mkdir()
+    # backdate the orphan past the cutoff; utime touches mtime, which -mmin reads
+    stale = os.path.getmtime(old) - (ida.STAGING_ORPHAN_MINUTES + 60) * 60
+    os.utime(old, (stale, stale))
+
+    sent = {}
+
+    def fake_run_ssh(cmd, dry_run=False, timeout=120):
+        sent["cmd"] = cmd
+        return 0, "", ""
+
+    ida_run_ssh = ida.run_ssh
+    try:
+        ida.run_ssh = fake_run_ssh
+        ida.prune_orphaned_staging(False, (str(parent),))
+    finally:
+        ida.run_ssh = ida_run_ssh
+
+    proc = _run_sh(sent["cmd"], tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert not old.exists(), "the orphan survived"
+    assert young.exists(), "a dir that could belong to THIS run was deleted"
+    assert keep.exists(), "the glob is not ours to widen"
+
+
+def test_a_deploy_sweeps_the_host_root_staging_parent(monkeypatch, capsys):
+    cmds: list = []
+    rc, _transcript = _dry_run(monkeypatch, capsys, cmds)
+    assert rc == 0
+    prunes = [c for c in cmds if ida.STAGING_GLOB in c]
+    assert prunes, "nothing reclaims orphaned staging"
+    assert any(f"{ida.DEFAULT_HOST_ROOT}/staging" in c for c in prunes), \
+        "the ~900 MB-per-retry parent is never swept"
+
+
+# --------------------------------------------------------------------------
+# SERVER-6 -- verifying two integers must not re-read 906 MB to do it
+# --------------------------------------------------------------------------
+
+def test_the_verify_reads_metadata_not_every_shipped_byte():
+    cmd = ida.count_and_size_cmd("/mnt/tank/apps/ccsync-dashboard/music-proxies")
+    assert "-exec cat" not in cmd, "the whole tree is being re-read to size it"
+    assert "-printf '%s" in cmd
+
+
+def test_the_candidate_tree_is_sized_the_same_cheap_way():
+    """It ran TWICE per tree -- once on staging, once inside the swap script."""
+    swap = ida.build_swap_script("/r", "/tmp/s", "/r/music-proxies.new",
+                                 "/r/music-proxies.old.20260810120000", 3, 99,
+                                 target_dir="/r/music-proxies")
+    assert "-exec cat" not in swap
+    assert "-printf '%s" in swap
+
+
+@needs_bash
+def test_the_metadata_size_agrees_with_the_local_manifest(tmp_path):
+    """The numbers still have to be the SAME two numbers: a transfer that wrote
+    every file but truncated the last one must still fail the check."""
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "a.bin").write_bytes(b"x" * 4096)
+    (tree / "sub" / "b.bin").write_bytes(b"y" * 7)
+    (tree / "sub" / "empty.bin").write_bytes(b"")
+    count, size = ida.local_manifest(tree, ida.EXCLUDE_DIRS)
+
+    proc = _run_sh(ida.count_and_size_cmd(str(tree)), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    nums = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip().isdigit()]
+    assert [int(nums[0]), int(nums[1])] == [count, size]
+
+
+# --------------------------------------------------------------------------
+# SERVER-8 -- no post-swap path may sys.exit past fail_after_app_swap
+# --------------------------------------------------------------------------
+
+def test_a_failed_mktemp_is_a_result_and_uploads_nothing(monkeypatch, tmp_path,
+                                                         capsys):
+    """An empty staging path reaching upload_tree would SFTP into relative
+    paths, i.e. the SSH user's home, so it must stop before that."""
+    monkeypatch.setattr(ida, "run_ssh", lambda *a, **k: (1, "", "No space left"))
+    monkeypatch.setattr(ida, "upload_tree",
+                        lambda *a, **k: pytest.fail("uploaded with no staging dir"))
+
+    assert ida.install_tree("/mnt/tank/apps/ccsync-dashboard", "music-proxies",
+                            _seed_tree(tmp_path), False) is False
+    assert "no staging dir" in capsys.readouterr().err
+
+
+def test_a_failed_mktemp_does_not_kill_the_optional_binary_steps(monkeypatch):
+    """provision_ffmpeg promises "NON-FATAL throughout"; a sys.exit inside
+    make_staging_dir made that untrue for the LAN push."""
+    monkeypatch.setattr(ida, "make_staging_dir", lambda *a, **k: "")
+    ok_, err = ida.install_ffmpeg_over_lan("/r", None, "d" * 64, False)
+    assert ok_ is False and "staging" in err
+
+
+def test_an_unanswerable_app_query_is_not_an_exit(monkeypatch, capsys):
+    """app_installed runs in step 3, after the swap. sys.exit(1) there left the
+    container on app.old.<ts> with no restart and no NOTE."""
+    monkeypatch.setattr(ida, "truenas_api",
+                        lambda *a, **k: _Resp(500, text="middleware error"))
+    assert ida.app_installed(False) is None
+    assert "FAILED to query installed apps" in capsys.readouterr().err
+
+
+def test_a_step_3_query_failure_restarts_the_container(monkeypatch, capsys):
+    cmds: list = []
+    monkeypatch.setattr(ida, "app_installed", lambda dry_run: None)
+    rc, _transcript = _real_run(monkeypatch, capsys, cmds)
+    assert rc == 1
+    assert any("docker restart" in c for c in cmds), \
+        "the container was left serving the previous code directory"
+
+
+# --------------------------------------------------------------------------
+# SERVER-2 -- POST /app returns a JOB ID, not a finished install
+# --------------------------------------------------------------------------
+
+def test_the_create_job_is_waited_on_and_a_failed_one_fails_the_deploy(monkeypatch,
+                                                                       capsys):
+    """A stale --bind-lan makes Docker refuse to start the app with "cannot
+    assign requested address" -- asynchronously, long after the 200 on the
+    POST. Printing "installed custom app" and exiting 0 for that is the
+    exit-code-lies class of OPS-4."""
+    cmds: list = []
+    waited = {}
+
+    def fake_wait(job_id, timeout=900, poll=5):
+        waited["job_id"] = job_id
+        return "FAILED", "cannot assign requested address"
+
+    monkeypatch.setattr(ida, "app_installed", lambda dry_run: False)
+    monkeypatch.setattr(ida, "wait_for_job", fake_wait)
+    monkeypatch.setattr(ida, "truenas_api",
+                        lambda method, path, **k: _Resp(200, payload=4242))
+
+    rc, transcript = _real_run(monkeypatch, capsys, cmds)
+    assert rc == 1
+    assert waited["job_id"] == 4242
+    assert "installed custom app" not in transcript
+    assert "cannot assign requested address" in transcript
+
+
+def test_a_successful_create_job_still_reports_success(monkeypatch, capsys):
+    cmds: list = []
+    monkeypatch.setattr(ida, "app_installed", lambda dry_run: False)
+    monkeypatch.setattr(ida, "wait_for_job", lambda *a, **k: ("SUCCESS", ""))
+    monkeypatch.setattr(ida, "truenas_api",
+                        lambda method, path, **k: _Resp(200, payload=7))
+
+    rc, transcript = _real_run(monkeypatch, capsys, cmds)
+    assert rc == 0
+    assert "installed custom app" in transcript
+
+
+def test_a_create_with_no_job_id_says_it_could_not_be_waited_on(monkeypatch, capsys):
+    """The middleware's answer shape is ASSUMED here; saying so out loud is
+    what install_syncthing_app already does."""
+    cmds: list = []
+    monkeypatch.setattr(ida, "app_installed", lambda dry_run: False)
+    monkeypatch.setattr(ida, "wait_for_job",
+                        lambda *a, **k: pytest.fail("nothing to wait on"))
+    monkeypatch.setattr(ida, "truenas_api",
+                        lambda method, path, **k: _Resp(200, payload={"result": None}))
+
+    rc, transcript = _real_run(monkeypatch, capsys, cmds)
+    assert rc == 0
+    assert "could not be waited on" in transcript

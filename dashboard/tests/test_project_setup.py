@@ -348,6 +348,93 @@ def test_create_over_a_container_of_projects_rejected(env):
         provision.scan_project_dirs(projects_dir)
 
 
+def _container_of_two_projects(projects_dir, marked: bool):
+    """Projects/2026/CCT holding two real projects -- optionally with a marker
+    hand-dropped on the CONTAINER itself (a plain JSON file on a share every
+    editor can write). That marker is what blinds scan_project_dirs: it prunes
+    its walk there, so the two real projects underneath are invisible to any
+    guard that asks it what lives below (DASH-1, 2026-08-14)."""
+    from ccsync_dashboard import provision
+
+    container = projects_dir / "2026" / "CCT"
+    for name, slug in (("Season 1", "2026-cct-season-1"), ("Season 2", "2026-cct-season-2")):
+        (container / name).mkdir(parents=True)
+        provision.write_marker(container / name, slug)
+    if marked:
+        provision.write_marker(container, "2026-cct")
+    return container
+
+
+def test_link_over_a_marked_container_of_projects_rejected(env):
+    """DASH-1: adopt_folder's descendant guard used to be a whole-tree
+    scan_project_dirs, which prunes at the container's own marker -- so the
+    one shape that needs catching sailed through, and the projects row it
+    wrote was one the collector then refuses to provision every cycle
+    (collector._creatable), i.e. a project that silently never syncs."""
+    client, conn, projects_dir = env
+    _container_of_two_projects(projects_dir, marked=True)
+    as_user(client, "jsmith")
+
+    resp = client.post("/api/v1/projects/link",
+                       json={"rel": "2026/CCT", "resolve_project": ""})
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "already contains a project" in detail
+    assert "2026/CCT/Season 1" in detail and "+1 more" in detail
+    assert conn.execute("SELECT 1 FROM projects WHERE slug='2026-cct'").fetchone() is None
+
+
+def test_link_over_an_unmarked_container_of_projects_still_rejected(env):
+    """The case the old whole-tree scan did catch -- it must keep working."""
+    client, _conn, projects_dir = env
+    _container_of_two_projects(projects_dir, marked=False)
+    as_user(client, "jsmith")
+
+    resp = client.post("/api/v1/projects/link",
+                       json={"rel": "2026/CCT", "resolve_project": ""})
+    assert resp.status_code == 422
+    assert "already contains a project" in resp.json()["detail"]
+
+
+def test_link_a_real_project_folder_is_unaffected(env):
+    """The guard looks BELOW the folder only: a marked project with no marked
+    descendants adopts exactly as before (its own marker is not a descendant)."""
+    client, _conn, projects_dir = env
+    from ccsync_dashboard import provision
+    season = projects_dir / "2026" / "CCT" / "Season 1"
+    season.mkdir(parents=True)
+    provision.write_marker(season, "2026-cct-season-1")
+    (season / "B-roll").mkdir()
+    as_user(client, "jsmith")
+
+    resp = client.post("/api/v1/projects/link",
+                       json={"rel": "2026/CCT/Season 1", "resolve_project": ""})
+    assert resp.status_code == 200
+    assert resp.json()["slug"] == "2026-cct-season-1"
+
+
+def test_create_over_a_marked_container_of_projects_rejected(env):
+    """The same hole on the create side: when the container's existing marker
+    slug happens to equal slugify(rel), create_tree_project takes its
+    partial-create convergence branch and would have re-marked the container
+    over the top of two live projects."""
+    client, conn, projects_dir = env
+    from ccsync_dashboard import provision
+    container = _container_of_two_projects(projects_dir, marked=True)
+    as_user(client, "jsmith")
+
+    resp = client.post("/api/v1/projects", json=create_body(parent_rel="2026", name="CCT"))
+    assert resp.status_code == 422
+    assert "already contains a project" in resp.json()["detail"]
+    # the container keeps the identity it had, and no template folders were
+    # sprayed into it
+    assert provision.read_marker(container) == "2026-cct"
+    assert not (container / "B-roll").exists()
+    assert conn.execute("SELECT 1 FROM projects WHERE slug='2026-cct'").fetchone() is None
+    # ...and both real projects are still discoverable
+    assert provision.marked_descendants(container) == ["Season 1", "Season 2"]
+
+
 def test_create_over_existing_folder_offers_it_instead(env):
     """The double-nesting bug: 2026/CCT/Website Highlights was already on the
     NAS, the flow's only remaining action was 'type a new folder name', and
@@ -456,6 +543,58 @@ def test_browse_drills_down_and_flags_projects(env):
     assert page.status_code == 200
     assert "[ PROJECT ]" in page.text     # Nuclear flagged as a project
     assert "Nuclear" in page.text
+
+
+def test_browse_survives_one_unreadable_sibling(env, monkeypatch):
+    """DASH-5: the cosmetic has_children probe (one iterdir per child, purely
+    to pick a link's label) sat inside the loop's shared try. One child the
+    container's uid cannot read -- 0700 from a hand-copy, or an ESTALE from
+    the NFS-backed /projects mount -- ended the whole listing, so every
+    alphabetically LATER sibling vanished from the picker and, because
+    can_link_current needs error is None, [ USE THIS FOLDER ] went with it."""
+    from pathlib import Path
+
+    client, _conn, projects_dir = env
+    for name in ("Aurora", "Bulkhead", "CCT"):
+        (projects_dir / "2026" / name).mkdir(parents=True)
+    real_iterdir = Path.iterdir
+
+    def unreadable_bulkhead(self):
+        if self.name == "Bulkhead":
+            raise PermissionError(13, "Permission denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", unreadable_bulkhead)
+    as_user(client, "jsmith")
+
+    page = client.get("/partials/project-setup/browse?rel=2026&resolve_project=CCT")
+    assert page.status_code == 200
+    for name in ("Aurora", "Bulkhead", "CCT"):
+        assert name in page.text
+    assert "could not list the folder" not in page.text
+    assert "You are in Projects/2026" in page.text      # [ USE THIS FOLDER ]
+
+
+def test_browse_still_reports_a_folder_it_cannot_list_at_all(env, monkeypatch):
+    """The outer handler still exists: an unreadable TARGET is a banner, not
+    an empty folder pretending to be one."""
+    from pathlib import Path
+
+    client, _conn, projects_dir = env
+    (projects_dir / "2026").mkdir()
+    real_iterdir = Path.iterdir
+
+    def unreadable_target(self):
+        if self.name == "2026":
+            raise PermissionError(13, "Permission denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", unreadable_target)
+    as_user(client, "jsmith")
+
+    page = client.get("/partials/project-setup/browse?rel=2026&resolve_project=CCT")
+    assert page.status_code == 200
+    assert "could not list the folder" in page.text
 
 
 def test_browse_traversal_guard(env):

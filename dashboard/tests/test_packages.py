@@ -4,6 +4,7 @@ advertisement on the report/verify responses."""
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -370,6 +371,85 @@ def test_publish_counts_the_bytes_it_actually_receives(env, monkeypatch):
     assert resp.status_code == 413
     assert dbmod.get_package(conn, "windows", "9.9.9") is None
     assert list((settings.packages_path() / "windows").glob("*.part")) == []
+
+
+def test_each_publish_stages_under_its_own_name(env, monkeypatch):
+    """DASH-3: the staging name was `filename + '.part'` -- derived only from
+    (kind, platform, version), so every attempt at the same version shared it.
+    Two in-flight PUTs interleaved into one file handle while each hashed only
+    its own bytes (the sha256 gate then passing for a file matching neither),
+    and the `except: part.unlink()` of an ABANDONED upload -- ClientDisconnect
+    is an Exception like any other -- deleted the live one's staging file."""
+    from ccsync_dashboard import api as apimod
+
+    client, _conn, _settings = env
+    staged: list[str] = []
+    real_run_in_threadpool = apimod.run_in_threadpool
+
+    async def recording(func, *args, **kwargs):
+        # the route writes the body as `run_in_threadpool(fh.write, chunk)`
+        if getattr(func, "__name__", "") == "write":
+            staged.append(getattr(func.__self__, "name", ""))
+        return await real_run_in_threadpool(func, *args, **kwargs)
+
+    monkeypatch.setattr(apimod, "run_in_threadpool", recording)
+    as_user(client, "alex")
+
+    # a first attempt that fails its integrity gate leaves nothing published,
+    # so the version is still free for the retry
+    assert publish(client, "0.5.0", body=b"one", sha="b" * 64).status_code == 400
+    assert publish(client, "0.5.0", body=b"two").status_code == 200
+
+    names = {Path(p).name for p in staged}
+    assert len(names) == 2, names                      # never the same path twice
+    for name in names:
+        assert name.startswith("ccsync-companion-0.5.0.exe.") and name.endswith(".part")
+
+
+def test_a_failed_publish_only_deletes_its_own_staging_file(env):
+    """The other half of DASH-3: an upload that dies must not take a
+    concurrent one's staging file with it."""
+    client, conn, settings = env
+    as_user(client, "alex")
+    dest_dir = settings.packages_path() / "windows"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    # what the OLD code called its staging file -- i.e. exactly the path a
+    # second, still-streaming publish of this version would have owned
+    in_flight = dest_dir / "ccsync-companion-0.6.0.exe.part"
+    in_flight.write_bytes(b"another request is streaming into this")
+
+    assert publish(client, "0.6.0", body=b"mine", sha="c" * 64).status_code == 400
+
+    assert in_flight.read_bytes() == b"another request is streaming into this"
+    assert dbmod.get_package(conn, "windows", "0.6.0") is None
+    # ...and the failed request cleaned up after itself
+    assert len(list(dest_dir.glob("*.part"))) == 1
+
+
+def test_publish_sweeps_abandoned_staging_files(env):
+    """A unique staging name means a publish the process never got to clean up
+    (SIGKILL, container restart) is no longer overwritten by the retry, so
+    ~40 MB orphans would accumulate on the dataset the SQLite DB lives on."""
+    import os
+    import time
+
+    from ccsync_dashboard.api import STALE_PART_SECONDS
+
+    client, _conn, settings = env
+    as_user(client, "alex")
+    dest_dir = settings.packages_path() / "windows"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    orphan = dest_dir / "ccsync-companion-0.1.0.exe.deadbeef.part"
+    orphan.write_bytes(b"x" * 32)
+    old = time.time() - STALE_PART_SECONDS - 60
+    os.utime(orphan, (old, old))
+    fresh = dest_dir / "ccsync-companion-0.1.0.exe.cafebabe.part"
+    fresh.write_bytes(b"x" * 32)
+
+    assert publish(client, "0.7.0", body=b"a build").status_code == 200
+
+    assert not orphan.exists()
+    assert fresh.exists()        # young enough to still be somebody's upload
 
 
 def test_publish_still_works_at_the_default_cap(env):

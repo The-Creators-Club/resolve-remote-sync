@@ -165,6 +165,16 @@ def similar(track_id: int, k: int = 20):
 
 @router.post('/api/reload')
 def reload_index():
-    """Pick up a fresh index without restarting the server."""
+    """Pick up a fresh index without restarting the server.
+
+    The invalidate() first is what makes that true of a REPLACED file (MUSIC-10,
+    2026-08-14). con() hands back a connection cached for the life of its
+    thread, and a sqlite3 connection is bound to an inode -- so after a deploy
+    swaps music.db by rename, refresh() faithfully rebuilt the matrices from the
+    unlinked old database and this route answered 200 with the old counts.
+    Re-indexing in place (the base rig's own case) never needed it, which is why
+    it survived this long.
+    """
+    db.invalidate()
     refresh(con())
     return stats()

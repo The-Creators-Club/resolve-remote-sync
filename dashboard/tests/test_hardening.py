@@ -699,3 +699,21 @@ def test_compose_binds_are_env_driven_and_image_is_pinned():
     assert "${DASH_BIND_TAILNET:-100.71.216.3}:8480:8480" in compose
     assert re.search(r"image: python:3\.12\.\d+-slim", compose)
     assert "healthcheck:" in compose and "/api/v1/health" in compose
+
+
+def test_compose_healthcheck_reads_the_bodys_ok_flag():
+    """DASH-2: the probe used to assert `.status == 200` and never read the
+    body -- but api_health answers 200 on every path (deliberately: ship.ps1
+    and the macOS wizard treat non-200 as 'the dashboard is down'), so the
+    dead-collector signal it exists to catch lives entirely in `ok`. A
+    status-only probe is exactly blind to it.
+
+    server/install_dashboard_app.py's healthcheck_config mirrors this string
+    character for character (server/tests/test_safety.py asserts it), so this
+    is also the canary for that pair drifting apart."""
+    compose = (DASHBOARD_ROOT / "deploy" / "compose.yaml").read_text(encoding="utf-8")
+    m = re.search(r'test: \["CMD-SHELL", "(.*)"\]', compose)
+    assert m, "the healthcheck is no longer a CMD-SHELL one-liner"
+    probe = m.group(1)
+    assert "json.load" in probe and ".get('ok')" in probe
+    assert ".status == 200" not in probe

@@ -34,7 +34,7 @@ from pathlib import Path
 
 import yaml
 
-from broll_index.claude_client import extract_reset_hint, seconds_until_reset
+from broll_index.claude_client import extract_reset_hint, is_rate_limited, seconds_until_reset
 
 LOCAL_STAGES = ["probe", "transcribe", "proxy", "frames"]
 API_STAGES = ["claude"]
@@ -64,6 +64,46 @@ PARALLEL_CLAUDE = Path(__file__).parent / "parallel_claude.py"
 # reset time was printed in the error string — roughly 546 calls spent learning
 # nothing, out of the same budget that had just run out.
 RETRY_WAIT_S = 15 * 60
+
+# Ceiling on time spent in the rate-limit branch without the queue moving.
+# A real session window is hours — claude_client.MAX_RESET_WAIT_S bounds a single
+# parsed hint at six — so a stage that has waited this long and still cannot
+# place one video is not waiting out a limit, it is stuck. Say so and stop
+# instead of sleeping forever (BROLL-IDX-3, 2026-08-14). Reset whenever an
+# attempt does move the queue, so a genuinely bursty multi-day run is unaffected.
+MAX_LIMIT_WAIT_S = 6 * 3600
+
+# How a child stage states that it aborted, as opposed to its progress chatter.
+# The retry decision used to grep the WHOLE tee'd transcript for "429"/"rate
+# limit", and parallel_claude's own progress lines print "429 videos to index"
+# and "[429/2024] ... last=4291:ok" — so on a queue of that size ANY permanent
+# failure (expired login, exhausted credit, a bad model name) read as a
+# transient limit, and the run slept 15 minutes and relaunched, forever, burning
+# a full set of concurrent auth-failing calls each time while the watchdog saw a
+# live run_queue and stayed quiet (BROLL-IDX-3, 2026-08-14). Match only the line
+# the child emits to explain itself:
+#   * parallel_claude.py prints "claude stage aborted: <fatal>" and exits 1;
+#   * the serial CLI lets FatalRunError out, so the traceback tail carries it.
+_ABORT_PREFIXES = (
+    "claude stage aborted:",
+    "broll_index.pipeline.FatalRunError:",
+    "FatalRunError:",
+)
+
+
+def abort_reason(out: str) -> str | None:
+    """The child's own statement of why it aborted, or None if it never gave one.
+
+    The LAST such line wins: a relaunch inside one invocation can print more
+    than one, and the final word is the one that ended the stage.
+    """
+    reason: str | None = None
+    for line in out.splitlines():
+        stripped = line.strip()
+        for prefix in _ABORT_PREFIXES:
+            if stripped.startswith(prefix):
+                reason = stripped[len(prefix):].strip()
+    return reason
 
 
 def counts(db_path: str) -> dict:
@@ -178,6 +218,7 @@ def main() -> int:
 
     for stages in plan:
         label = ",".join(stages)
+        waited_s = 0.0  # time slept on limits since the queue last moved
         while True:
             if args.max_hours and (time.time() - started) / 3600 >= args.max_hours:
                 log.info("max-hours reached; stopping cleanly")
@@ -194,13 +235,19 @@ def main() -> int:
             if rc == 0:
                 break
 
-            lowered = out.lower()
-            if any(k in lowered for k in ("session limit", "rate limit", "429", "usage limit")):
+            # Only the child's own abort line decides this, never its whole
+            # transcript — see _ABORT_PREFIXES (BROLL-IDX-3, 2026-08-14).
+            reason = abort_reason(out)
+            if reason is not None and is_rate_limited(reason):
                 # Expected on a long run. The queue is intact; wait and resume.
                 # Sleep until the reset the error itself names, when it names one:
                 # retrying before then cannot succeed, and each attempt costs a
                 # full set of concurrent calls (see RETRY_WAIT_S).
-                hint = extract_reset_hint(out)
+                if after < before:
+                    # The attempt indexed videos before it hit the limit, so the
+                    # waiting is working; don't count it against the ceiling.
+                    waited_s = 0.0
+                hint = extract_reset_hint(reason)
                 wait = seconds_until_reset(hint)
                 if wait is not None:
                     log.info("[%s] rate limited — resets %s, sleeping %.0f min, "
@@ -210,6 +257,14 @@ def main() -> int:
                     log.info("[%s] rate limited — no usable reset time%s, "
                              "waiting %d min, queue untouched",
                              label, f" in {hint!r}" if hint else "", wait // 60)
+                if waited_s >= MAX_LIMIT_WAIT_S:
+                    # Checked BEFORE adding this wait, so the first one is always
+                    # taken however long the reset hint asks for.
+                    log.error("[%s] waited %.1f h on rate limits without placing a "
+                              "single video; stopping rather than sleeping on. Last "
+                              "abort: %s", label, waited_s / 3600, reason)
+                    return 1
+                waited_s += wait
                 time.sleep(wait)
                 continue
 

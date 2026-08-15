@@ -76,15 +76,34 @@ $Suites = @(
     @{ Name = "ytdl/web";      Dir = "$repo\ytdl\web";      Py = "$repo\dashboard\.venv\Scripts\python.exe" }
 )
 
+# A suite whose Py is the bare string "python" was never existence-checked
+# (SHIP-5, 2026-08-14): the check below skipped exactly the two system-python
+# suites, and `& python` with no python on PATH is a NON-TERMINATING
+# CommandNotFoundException under $ErrorActionPreference='Continue'. PowerShell
+# only sets $LASTEXITCODE when a native process actually RAN, so the table read
+# the value the PREVIOUS suite left there and printed PASS for a suite that
+# never executed -- OPS-6's defect, one line further down the same file.
+# Resolve it once, here, so "python" is a path like every other Py.
+$SystemPython = (Get-Command python -ErrorAction SilentlyContinue).Source
+
 $results = @()
 foreach ($s in $Suites) {
     Write-Host "`n=== $($s.Name) ===" -ForegroundColor Cyan
-    if (-not (Test-Path $s.Py) -and $s.Py -ne "python") {
-        $results += @{ Name = $s.Name; Outcome = "NO INTERPRETER ($($s.Py))" }
+    $py = $s.Py
+    if ($py -eq "python") { $py = $SystemPython }
+    if (-not $py) {
+        $results += @{ Name = $s.Name; Outcome = "NO INTERPRETER (no 'python' on PATH)" }
         continue
     }
+    if (-not (Test-Path $py)) {
+        $results += @{ Name = $s.Name; Outcome = "NO INTERPRETER ($py)" }
+        continue
+    }
+    # 9999, never 0: a command that fails to start leaves $LASTEXITCODE alone,
+    # and the value it would inherit is the previous suite's success (SHIP-5).
     if ($s.Bash -and $bashExe) {
-        & $bashExe -lc "cd '$(ConvertTo-BashPath $s.Dir)' && '$(ConvertTo-BashPath $s.Py)' -m pytest tests -q"
+        $global:LASTEXITCODE = 9999
+        & $bashExe -lc "cd '$(ConvertTo-BashPath $s.Dir)' && '$(ConvertTo-BashPath $py)' -m pytest tests -q"
         $outcome = $(if ($LASTEXITCODE -eq 0) { "PASS" } else { "FAIL (exit $LASTEXITCODE)" })
     }
     else {
@@ -92,7 +111,8 @@ foreach ($s in $Suites) {
             Write-Host "WARNING: no Git bash found -- the tests that EXECUTE the generated remote scripts will SKIP, not pass" -ForegroundColor Yellow
         }
         Push-Location $s.Dir
-        & $s.Py -m pytest tests -q
+        $global:LASTEXITCODE = 9999
+        & $py -m pytest tests -q
         $outcome = $(if ($LASTEXITCODE -ne 0) { "FAIL (exit $LASTEXITCODE)" }
                      elseif ($s.Bash) { "PASS* (no Git bash: the remote-script tests SKIPPED, not passed)" }
                      else { "PASS" })
@@ -102,6 +122,7 @@ foreach ($s in $Suites) {
 }
 
 Write-Host "`n=== installer (Pester-less table tests) ===" -ForegroundColor Cyan
+$global:LASTEXITCODE = 9999
 powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-DriveMapParser.ps1"
 $results += @{ Name = "installer"; Outcome = $(if ($LASTEXITCODE -eq 0) { "PASS" } else { "FAIL (exit $LASTEXITCODE)" }) }
 

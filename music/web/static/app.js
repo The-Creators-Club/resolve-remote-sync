@@ -175,7 +175,7 @@ async function openPane(row, t, autoplay) {
   sim.onclick = () => showSimilar(t);
   acts.appendChild(sim);
   const rev = el('button', null, 'reveal');
-  rev.onclick = () => api(`api/reveal/${t.id}`).catch(() => {});
+  rev.onclick = () => revealOnThisMachine(t, rev, msg);
   acts.appendChild(rev);
 
   bar.append(pbtn, time, acts);
@@ -231,7 +231,7 @@ function togglePlay(row, t) {
 }
 
 // ---------------------------------------------------------------- resolve
-// These two calls go to the EDITOR'S OWN MACHINE, not to this server, and are
+// These calls go to the EDITOR'S OWN MACHINE, not to this server, and are
 // therefore the only absolute URLs in this file.
 //
 // The web app is served from the NAS. Its 127.0.0.1 is the NAS, so it cannot
@@ -280,6 +280,39 @@ async function sendToResolve(t, action, btn, msg) {
   } finally {
     acts.forEach(b => { b.disabled = false; });
     refreshResolveStatus();
+  }
+}
+
+// Reveal goes to the companion too (MUSIC-6, 2026-08-14). It used to GET
+// `api/reveal/<id>`, which ran Explorer on whatever host served the page: the
+// base rig standalone, and on the NAS a 200 {"ok": false} that this handler
+// threw away -- so for every editor the button did nothing at all, silently,
+// forever. Only the editor's own browser can reach the editor's own Explorer.
+async function revealOnThisMachine(t, btn, msg) {
+  btn.disabled = true;
+  msg.className = 'rmsg';
+  msg.textContent = 'opening the folder…';
+  try {
+    const r = await companion('/music/reveal', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({share: t.share || 'music', rel_path: t.rel_path}),
+    });
+    msg.className = 'rmsg ' + (r.ok ? 'ok' : 'err');
+    msg.textContent = r.ok ? (r.message || 'opened') : (r.error || r.message || 'failed');
+  } catch (e) {
+    msg.className = 'rmsg err';
+    // Same two shapes sendToResolve distinguishes -- and one more here: a
+    // companion older than the build that added /music/reveal answers 404,
+    // which arrives as "companion 404" rather than as silence.
+    msg.textContent = e.message.startsWith('companion')
+      ? `the companion refused the request (${e.message}) — an older build has `
+        + 'no reveal; update the tray app'
+      : 'couldn’t reach the ccsync companion — tray app not running, or the '
+        + 'browser blocked local connections (self-test: open '
+        + 'http://127.0.0.1:8899/status)';
+  } finally {
+    btn.disabled = false;
   }
 }
 

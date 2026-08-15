@@ -426,6 +426,42 @@ def copy_with_progress(
 # concurrent FIX ALL (or another companion mid-restart).
 STALE_TMP_AGE_SECONDS = 3600.0
 
+# How long the `.ccsync-tmp` beside a 0-byte reservation must have gone
+# UNTOUCHED before the reservation counts as crash residue rather than an
+# in-flight copy (COMP-GUARD-1, 2026-08-14). Seconds, deliberately not the
+# hour above: lane A picks the reservation up --min-age 120s after it is
+# created and --ignore-existing then makes the empty file permanent on the
+# NAS, so a sweep that waits an hour is a sweep that always loses the race.
+# A live copy rewrites its tmp continuously, so an idle one is a dead one.
+RESERVATION_IDLE_SECONDS = 30.0
+
+# `<final name>.<pid>-<uuid8>.ccsync-tmp` -- the name fix_clip builds (the
+# pid+uuid half is AUDIT_2 CORE-M1's fix for two overlapping FIX ALLs).
+_RESERVATION_TMP_RE = re.compile(
+    r"^(?P<final>.+)\.(?P<pid>\d+)-[0-9a-f]+" + re.escape(TMP_SUFFIX) + r"$"
+)
+
+
+def reserved_name_for_tmp(tmp_path: str) -> tuple[Optional[str], Optional[int]]:
+    """(final destination path, writing pid) for one `*.ccsync-tmp`, or
+    (None, None) when the name is not one fix_clip built.
+
+    The tmp is `<final>.<pid>-<uuid8>.ccsync-tmp` and the final name is the
+    O_EXCL reservation _claim_destination_path created BEFORE the copy
+    started -- which is the whole point: the pair identifies both halves of
+    one interrupted fix_clip. Older, pre-CORE-M1 tmps carry no pid segment
+    and are deliberately not matched: without it there is nothing tying the
+    tmp to a specific writer."""
+    directory, name = os.path.split(str(tmp_path))
+    m = _RESERVATION_TMP_RE.match(name)
+    if not m:
+        return None, None
+    try:
+        pid = int(m.group("pid"))
+    except ValueError:
+        return None, None
+    return os.path.join(directory, m.group("final")), pid
+
 
 def _claim_destination_path(dest_dir: Path, filename: str) -> Path:
     """Pick a non-colliding name AND create it atomically (O_CREAT|O_EXCL),
@@ -456,10 +492,116 @@ def _claim_destination_path(dest_dir: Path, filename: str) -> Path:
         return candidate
 
 
+def walk_ccsync_tmp_files(local_root: str) -> list[tuple[float, str]]:
+    """(mtime, path) for every `*.ccsync-tmp` under local_root, oldest first.
+
+    Split out so the two sweeps below -- stale partials and orphaned name
+    reservations -- share ONE walk of the tree at startup instead of two
+    (COMP-GUARD-1, 2026-08-14). Never raises; an unreadable tree is [].
+    """
+    found: list[tuple[float, str]] = []
+    if not str(local_root).strip():
+        return []
+    try:
+        for dirpath, dirnames, filenames in os.walk(local_root):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            for name in filenames:
+                if not name.endswith(TMP_SUFFIX):
+                    continue
+                full = os.path.join(dirpath, name)
+                try:
+                    stat = os.stat(full)
+                except OSError:
+                    continue
+                found.append((stat.st_mtime, full))
+    except Exception:
+        log.debug("stale .ccsync-tmp walk failed under %s", local_root, exc_info=True)
+        return []
+    found.sort()
+    return found
+
+
+def sweep_orphan_reservations(
+    local_root: str,
+    idle_seconds: float = RESERVATION_IDLE_SECONDS,
+    now_fn: Callable[[], float] = time.time,
+    tmp_files: Optional[list[tuple[float, str]]] = None,
+) -> list[str]:
+    """DELETE the 0-byte final names stranded beside an interrupted copy.
+
+    fix_clip reserves the FINAL destination name with O_CREAT|O_EXCL before
+    the multi-GB copy starts (DEL-7's fix for the TOCTOU that let lane C land
+    on that exact path mid-copy) and removes it on both of its failure exits
+    -- but a process that simply DIES (self-upgrade shutdown, reboot, Quit,
+    force-quit, power loss) removes nothing, and the tmp sweep above has
+    never known reservations existed (COMP-GUARD-1, 2026-08-14).
+
+    The residue is a real video-extension file: lane A's up-filter matches
+    it, --min-age 120s releases it, and --ignore-existing then guarantees the
+    real bytes can NEVER replace it on the NAS -- from where lane C fans the
+    0-byte clip out to every editor, and the 2026-08-11 ignoreDelete retrofit
+    makes it effectively immortal (R5/R15). The editor's next FIX ALL files
+    the real copy as `<name> (2).ext`, so the project keeps the empty one.
+
+    THE ONE DELETION THIS MODULE MAKES UNPROMPTED, and deliberately the
+    narrowest possible: the file must be exactly 0 bytes (the same "provably
+    not the editor's data" test remove_reserved_name applies), must sit
+    beside OUR `<name>.<pid>-<uuid>.ccsync-tmp` for that same name, that tmp
+    must have gone untouched for `idle_seconds` (a live copy rewrites it
+    continuously), and the pid must not be this process. Anything else is
+    logged and left alone. Returns the paths removed; never raises.
+    """
+    if not str(local_root).strip():
+        return []
+    if tmp_files is None:
+        tmp_files = walk_ccsync_tmp_files(local_root)
+    now = now_fn()
+    my_pid = os.getpid()
+    removed: list[str] = []
+    for mtime, tmp in tmp_files:
+        if (now - mtime) < idle_seconds:
+            continue
+        final, pid = reserved_name_for_tmp(tmp)
+        if final is None:
+            continue
+        if pid == my_pid:
+            # This process's own FIX ALL, stalled but alive. Its reservation
+            # is the thing keeping the name ours.
+            continue
+        try:
+            stat = os.stat(final)
+        except OSError:
+            continue
+        if stat.st_size:
+            log.info(
+                "leftover reservation %s is not empty, so it is not ours to remove "
+                "-- left in place", final,
+            )
+            continue
+        try:
+            os.remove(final)
+        except OSError as exc:
+            log.warning(
+                "COULD NOT REMOVE the empty placeholder file at %s (%s) -- delete it "
+                "by hand; a 0-byte file under that name uploads to the server and "
+                "--ignore-existing means the real footage can never replace it",
+                final, exc,
+            )
+            continue
+        removed.append(final)
+        log.warning(
+            "removed the 0-byte placeholder an interrupted FIX ALL left under the "
+            "final name: %s (its half-copied %s is reported above, NOT deleted)",
+            final, os.path.basename(tmp),
+        )
+    return removed
+
+
 def sweep_stale_tmp_files(
     local_root: str,
     max_age_seconds: float = STALE_TMP_AGE_SECONDS,
     now_fn: Callable[[], float] = time.time,
+    tmp_files: Optional[list[tuple[float, str]]] = None,
 ) -> list[str]:
     """REPORT (do not delete) leftover `*.ccsync-tmp` files under local_root.
 
@@ -474,30 +616,19 @@ def sweep_stale_tmp_files(
     it, and an automatic delete here would be the system's only unprompted
     removal of a file under local_root.
 
+    The 0-byte final-name RESERVATION the same interrupted copy leaves is a
+    different animal and has its own sweep -- see sweep_orphan_reservations.
+
     Returns the paths found (oldest first). Never raises."""
-    found: list[tuple[float, str]] = []
     if not str(local_root).strip():
         return []
+    if tmp_files is None:
+        tmp_files = walk_ccsync_tmp_files(local_root)
     now = now_fn()
-    try:
-        for dirpath, dirnames, filenames in os.walk(local_root):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-            for name in filenames:
-                if not name.endswith(TMP_SUFFIX):
-                    continue
-                full = os.path.join(dirpath, name)
-                try:
-                    stat = os.stat(full)
-                except OSError:
-                    continue
-                if (now - stat.st_mtime) < max_age_seconds:
-                    continue
-                found.append((stat.st_mtime, full))
-    except Exception:
-        log.debug("stale .ccsync-tmp sweep failed under %s", local_root, exc_info=True)
-        return []
-
-    found.sort()
+    found = [
+        (mtime, path) for mtime, path in tmp_files
+        if (now - mtime) >= max_age_seconds
+    ]
     for mtime, path in found:
         log.warning(
             "leftover partial copy from an interrupted FIX ALL: %s (%.1f MB, last written %s) "

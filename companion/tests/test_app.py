@@ -4126,12 +4126,16 @@ def test_pool_sweep_auto_relinks_non_canonical_clips(tmp_path, monkeypatch):
     )
 
     app._refresh_media_tree_once()
+    # The relink batch runs on its own daemon thread (COMP-GUARD-5), so the
+    # sweep returns before it lands -- join it the way the popup tests do.
+    _join_canon_relink()
 
     mpi = item["media_pool_item"]
     assert mpi.replace_calls == [r"P:\B-roll\clip.mov"]
     # Once per process: the next sweep must not re-offer the same path.
     mpi._path = str(root / "B-roll" / "clip.mov")  # pretend the relink reverted
     app._refresh_media_tree_once()
+    _join_canon_relink()
     assert len(mpi.replace_calls) == 1
 
 
@@ -4526,3 +4530,377 @@ def test_bridge_state_handling_never_raises(tmp_path, monkeypatch):
     app = _make_app(tmp_path)
     monkeypatch.setattr(app_mod.resolve_prefs_mod, "resolve_process_state", _boom)
     app._handle_bridge_state(False, NO_SCRIPTING)   # must not raise
+
+
+# ===========================================================================
+# 2026-08-14 hunt: COMP-CORE / COMP-GUARD
+# ===========================================================================
+
+
+# -- COMP-CORE-2: the stale-bridge restart inherits apply_upgrade's guards --
+
+
+def test_stale_bridge_restart_waits_for_a_consolidate_to_finish(tmp_path, monkeypatch):
+    """restart_self is the same spawn + request_shutdown() sequence
+    apply_upgrade refuses to run mid-copy (AUDIT_2 CORE-H8/H5): shutdown()
+    stops the lanes and the process exits ~1 s later, killing the consolidate
+    worker inside shutil.copy2. Quitting Resolve part-way through "Copy this
+    project's media in" passes every other guard."""
+    app = _make_app(tmp_path)
+    _arm_stale_bridge(app, monkeypatch, connected=False, ever=True, resolve_running=False)
+    calls = []
+    monkeypatch.setattr(app_mod.upgrade_mod, "restart_self",
+                        lambda request_shutdown: calls.append(1))
+
+    app._consolidate_active = True
+    app._maybe_recover_stale_bridge()
+    assert calls == []
+    # DEFERRED, not abandoned: the latch must stay unset or the recovery is
+    # lost for the rest of the process's life.
+    assert app._bridge_restart_started is False
+
+    app._consolidate_active = False
+    app._maybe_recover_stale_bridge()
+    assert len(calls) == 1
+
+
+def test_stale_bridge_restart_waits_for_an_open_ccsync_window(tmp_path, monkeypatch):
+    app = _make_app(tmp_path)
+    _arm_stale_bridge(app, monkeypatch, connected=False, ever=True, resolve_running=False)
+    calls = []
+    monkeypatch.setattr(app_mod.upgrade_mod, "restart_self",
+                        lambda request_shutdown: calls.append(1))
+
+    app._popup_active_lock.acquire()
+    try:
+        app._maybe_recover_stale_bridge()
+    finally:
+        app._popup_active_lock.release()
+    assert calls == []
+    assert app._bridge_restart_started is False
+
+    app._maybe_recover_stale_bridge()
+    assert len(calls) == 1
+
+
+def test_one_predicate_answers_for_both_stand_down_callers(tmp_path):
+    """The point of factoring it out: a third caller of restart_self cannot
+    miss the test."""
+    app = _make_app(tmp_path)
+    assert app._standing_down_would_kill_work() == ""
+    app._consolidate_active = True
+    assert app._standing_down_would_kill_work() == "consolidate"
+    app._consolidate_active = False
+    app._popup_active_lock.acquire()
+    try:
+        assert app._standing_down_would_kill_work() == "popup"
+    finally:
+        app._popup_active_lock.release()
+
+
+# -- COMP-CORE-6: the tray reads the P: mapping, it does not probe for it ----
+
+
+def test_the_tray_read_of_the_p_mapping_never_spawns_a_probe(tmp_path, monkeypatch):
+    """_tray_snapshot pulls this every 2 s, so a 10 s memo expired and
+    re-populated forever: ~8,600 `net use P:` processes a day to re-derive a
+    value that normally never changes."""
+    app = _make_app(tmp_path)
+    probes = []
+
+    def _probe():
+        probes.append(1)
+        return "server"
+
+    monkeypatch.setattr(app, "_probe_p_mapping_mode", _probe)
+    monkeypatch.setattr(app_mod.os, "name", "nt")
+
+    # Cold cache: exactly one probe, so the first menu is still right.
+    assert app.p_mapping_mode_cached() == "server"
+    assert len(probes) == 1
+
+    for _ in range(50):
+        assert app.p_mapping_mode_cached() == "server"
+    assert len(probes) == 1, "the tray must read the cache, never re-derive it"
+
+
+def test_the_background_refresh_catches_a_mapping_changed_outside_this_process(
+    tmp_path, monkeypatch
+):
+    """P: can also be remapped by the installer's logon task or a manual
+    `net use`, so the cache-only tray read needs something refreshing it."""
+    monkeypatch.setattr(app_mod.os, "name", "nt")
+    app = _make_app(tmp_path)
+    answers = ["local", "server"]
+    monkeypatch.setattr(app, "_probe_p_mapping_mode", lambda: answers.pop(0))
+
+    assert app.p_mapping_mode_cached() == "local"
+    app._refresh_p_mapping_mode()
+    assert app.p_mapping_mode_cached() == "server"
+
+
+def test_a_grade_swap_invalidates_the_cached_mapping(tmp_path, monkeypatch):
+    """Both in-process mutators clear the cache, which is what lets the tray
+    read it without a TTL."""
+    from ccsync_companion import drive_swap as drive_swap_mod
+
+    app = _make_app(tmp_path)
+    app._p_mode_cache = (time.monotonic(), "local")
+    monkeypatch.setattr(drive_swap_mod, "swap_to_local", lambda root: (True, "ok"))
+
+    app.swap_p_to_local()
+    assert app._p_mode_cache is None
+
+
+# -- COMP-CORE-7: a returning drive restamps the REAL blocker ----------------
+
+
+def test_a_returning_drive_restamps_the_sign_in_gate_on_the_lanes(tmp_path, monkeypatch):
+    """start()'s _root_absent branch outranks the sign-in gate, so all three
+    lanes read "PAUSED: your Creators Club drive is disconnected". With the
+    drive back that sentence names nothing the editor can fix -- and the tray
+    renders it as "up to date (PAUSED: your drive is disconnected)"."""
+    app = _make_app(tmp_path, sync_enabled=True, require_login=True)
+    app._root_absent = True
+    app._mark_lanes_root_absent()
+    started = []
+    monkeypatch.setattr(app, "_start_lanes", lambda: started.append("start"))
+
+    app._on_root_present()
+
+    assert started == [], "the sign-in gate still holds the lanes down"
+    details = [str(s.detail) for s in app.lane_statuses()]
+    assert details and all("sign in required" in d for d in details)
+    assert not any("disconnected" in d for d in details)
+
+
+def test_a_returning_drive_restamps_a_config_problem_on_the_lanes(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, sync_enabled=True, require_login=False)
+    app._root_absent = True
+    app._mark_lanes_root_absent()
+    app.config_problems = ["remote is blank -- set it to the rclone remote name"]
+    monkeypatch.setattr(app, "_start_lanes", lambda: pytest.fail("must not start"))
+
+    app._on_root_present()
+
+    details = [str(s.detail) for s in app.lane_statuses()]
+    assert details and all("NOT SYNCING" in d for d in details)
+    assert not any("disconnected" in d for d in details)
+
+
+# -- COMP-CORE-8: the diagnostics tail seeks, it does not read 5 MB ----------
+
+
+def test_the_log_tail_reads_a_window_off_the_end_of_a_rotating_log(tmp_path):
+    """setup_logging rotates companion.log at 5 MB and machines sit at that
+    ceiling, so readlines()[-40:] decoded the whole file to keep 40 lines --
+    on the tray worker thread, inside "Copy diagnostics"."""
+    app = _make_app(tmp_path)
+    log_file = Path(app.log_path)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_file, "w", encoding="utf-8") as fh:
+        for i in range(60000):
+            fh.write(f"2026-08-14 12:00:00 INFO ccsync.app line {i} " + "x" * 60 + "\n")
+
+    tail = app._diagnostic_log_tail(40)
+
+    assert len(tail) == 40
+    assert tail[-1].endswith("x" * 60)
+    assert "line 59999" in tail[-1]
+    assert "line 59960" in tail[0]
+    # No partial first line: the window almost never starts on a boundary.
+    assert all(line.startswith("2026-08-14") for line in tail)
+
+
+def test_the_log_tail_handles_a_file_shorter_than_the_window(tmp_path):
+    app = _make_app(tmp_path)
+    log_file = Path(app.log_path)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    assert app._diagnostic_log_tail(40) == ["one", "two", "three"]
+
+
+def test_the_log_tail_still_explains_an_unreadable_log(tmp_path):
+    app = _make_app(tmp_path)
+    app.log_path = str(tmp_path / "nope" / "companion.log")
+    tail = app._diagnostic_log_tail(40)
+    assert len(tail) == 1 and "could not read" in tail[0]
+
+
+# -- COMP-GUARD-5: the relink batch leaves the watcher thread ----------------
+
+
+def _join_canon_relink():
+    for thread in threading.enumerate():
+        if thread.name == "ccsync-canon-relink":
+            thread.join(timeout=5)
+
+
+def test_non_canonical_relinks_run_off_the_watcher_thread(tmp_path, monkeypatch):
+    """The watcher calls on_non_canonical synchronously from poll_once, and
+    the batch is every newly-seen NON_CANONICAL clip -- 158 of them in the
+    incident that motivated the handler. Inline, that parked the watcher for
+    80+ seconds: last_resolve_project stale, no further detection, and
+    _stop_event unobserved so a Quit could not stop it cleanly (CORE-M2)."""
+    root = tmp_path / "root"
+    items = [_pool_item(root, f"B-roll/clip{i}.mov") for i in range(5)]
+    app = _make_app(tmp_path, canonical_prefix="P:\\")
+    app._tray_icon = _FakeTray()
+
+    # A ReplaceClip that has not answered yet must not hold the CALLER: this
+    # is the watcher's poll thread.
+    release = threading.Event()
+    inside = threading.Event()
+    original = app_mod.resolve_bridge.replace_clip
+
+    def _slow_replace(mpi, path, **kw):
+        inside.set()
+        release.wait(5.0)
+        return original(mpi, path, **kw)
+
+    monkeypatch.setattr(app_mod.resolve_bridge, "replace_clip", _slow_replace)
+
+    app._handle_non_canonical(items)
+    assert inside.wait(5.0), "the batch never started"
+    release.set()
+    # Handed to a named daemon thread -- exactly what _handle_out_of_tree
+    # does, and for the same reason.
+    _join_canon_relink()
+
+    for item in items:
+        assert item["media_pool_item"].replace_calls == [
+            "P:\\B-roll\\" + Path(item["file_path"]).name
+        ]
+
+
+def test_overlapping_relink_batches_extend_one_thread(tmp_path, monkeypatch):
+    """Single-flight, but nothing is dropped: the watcher offers each path
+    once per process, so a batch discarded here is a clip stranded forever."""
+    root = tmp_path / "root"
+    spawned = []
+    real_thread = threading.Thread
+
+    class _CountingThread(real_thread):
+        def start(self):
+            spawned.append(self.name)
+            return super().start()
+
+    monkeypatch.setattr(threading, "Thread", _CountingThread)
+    app = _make_app(tmp_path, canonical_prefix="P:\\")
+    app._tray_icon = _FakeTray()
+
+    # Hold the worker inside its first ReplaceClip so the second batch lands
+    # while it is busy.
+    release = threading.Event()
+    inside = threading.Event()
+    original = app_mod.resolve_bridge.replace_clip
+
+    def _slow_replace(mpi, path, **kw):
+        inside.set()
+        release.wait(5.0)
+        return original(mpi, path, **kw)
+
+    monkeypatch.setattr(app_mod.resolve_bridge, "replace_clip", _slow_replace)
+
+    first = [_pool_item(root, "B-roll/a.mov")]
+    second = [_pool_item(root, "B-roll/b.mov")]
+    app._handle_non_canonical(first)
+    assert inside.wait(5.0)
+    app._handle_non_canonical(second)
+    release.set()
+    _join_canon_relink()
+
+    assert spawned.count("ccsync-canon-relink") == 1
+    assert first[0]["media_pool_item"].replace_calls == ["P:\\B-roll\\a.mov"]
+    assert second[0]["media_pool_item"].replace_calls == ["P:\\B-roll\\b.mov"]
+
+
+def test_a_relink_batch_stops_when_the_companion_is_shutting_down(tmp_path):
+    """The R11 hand-off hazard: a self-upgrade landing mid-batch must not
+    have to wait out 158 ReplaceClips."""
+    root = tmp_path / "root"
+    items = [_pool_item(root, f"B-roll/clip{i}.mov") for i in range(4)]
+    app = _make_app(tmp_path, canonical_prefix="P:\\")
+    app._stop_event.set()
+
+    app._relink_non_canonical(items)
+
+    assert all(i["media_pool_item"].replace_calls == [] for i in items)
+
+
+# -- COMP-GUARD-1: the 0-byte reservation a hard kill leaves behind ----------
+
+
+def test_the_startup_sweep_removes_a_stranded_0_byte_reservation(tmp_path, caplog):
+    """fix_clip creates the FINAL name with O_CREAT|O_EXCL before the copy
+    starts and cleans it on both failure exits -- but a process that simply
+    dies cleans nothing, and lane A then uploads the empty file that
+    --ignore-existing guarantees the real footage can never replace."""
+    from ccsync_companion import fixer as fixer_mod
+
+    root = Path(_make_local_root(tmp_path))
+    folder = root / "B-roll" / "Editor Added" / "ruskin"
+    folder.mkdir(parents=True)
+    reservation = folder / "A001_C012.braw"
+    reservation.write_bytes(b"")
+    partial = folder / f"A001_C012.braw.424242-abcd1234{fixer_mod.TMP_SUFFIX}"
+    partial.write_bytes(b"ten minutes of copying")
+    old = time.time() - 600
+    os.utime(partial, (old, old))
+    os.utime(reservation, (old, old))
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    with caplog.at_level(logging.WARNING, logger="ccsync.fixer"):
+        app._sweep_stale_tmp_files()
+
+    assert not reservation.exists()
+    assert partial.exists(), "the half-copied file is still the editor's data"
+    assert "0-byte placeholder" in " ".join(r.getMessage() for r in caplog.records)
+
+
+def test_a_reservation_too_fresh_to_judge_is_rechecked_once_it_ages(tmp_path, monkeypatch):
+    """The self-upgrade restarts in SECONDS, so the residue of the copy it
+    killed is normally younger than the idle floor when the startup sweep
+    reaches it -- and lane A releases the 0-byte file 120 s after creation,
+    after which --ignore-existing makes it permanent on the NAS."""
+    from ccsync_companion import fixer as fixer_mod
+
+    monkeypatch.setattr(fixer_mod, "RESERVATION_IDLE_SECONDS", 0.05)
+    root = Path(_make_local_root(tmp_path))
+    folder = root / "B-roll" / "Editor Added" / "ruskin"
+    folder.mkdir(parents=True)
+    reservation = folder / "A002_C001.braw"
+    reservation.write_bytes(b"")
+    partial = folder / f"A002_C001.braw.424242-abcd1234{fixer_mod.TMP_SUFFIX}"
+    partial.write_bytes(b"seconds ago")
+
+    app = _make_app(tmp_path)
+    app._tray_icon = _FakeTray()
+    tmp_files = fixer_mod.walk_ccsync_tmp_files(str(root))
+    # Too fresh on the first pass: the reservation survives it...
+    assert fixer_mod.sweep_orphan_reservations(str(root), tmp_files=tmp_files) == []
+    assert reservation.exists()
+
+    app._recheck_orphan_reservations(str(root), tmp_files)
+
+    assert not reservation.exists()
+    assert partial.exists()
+
+
+def test_the_recheck_gives_up_immediately_when_the_companion_is_stopping(tmp_path):
+    from ccsync_companion import fixer as fixer_mod
+
+    root = Path(_make_local_root(tmp_path))
+    folder = root / "B-roll"
+    folder.mkdir(parents=True)
+    (folder / "A003.braw").write_bytes(b"")
+    (folder / f"A003.braw.424242-abcd1234{fixer_mod.TMP_SUFFIX}").write_bytes(b"x")
+
+    app = _make_app(tmp_path)
+    app._stop_event.set()
+    started = time.monotonic()
+    app._recheck_orphan_reservations(
+        str(root), fixer_mod.walk_ccsync_tmp_files(str(root)))
+    assert time.monotonic() - started < 1.0
+    assert (folder / "A003.braw").exists()

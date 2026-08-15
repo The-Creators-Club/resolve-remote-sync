@@ -49,6 +49,18 @@ os.environ['YTDL_SEARCH_PAUSE'] = '0'
 
 os.environ['YTDL_CLAUDE_HOME'] = str(_TMP / 'claude-home')
 
+# The fleet token the companion authenticates its claim/heartbeat/manifest/
+# status calls with (docs/YTDL_LOCAL_DOWNLOAD.md §4). Explicitly EMPTY, and set
+# here rather than left to the ambient environment: the base rig genuinely
+# exports DASH_REPORT_TOKEN for `tools\\ship.cmd`, and a suite that behaved one
+# way in that shell and another way in CI would hide the property that matters
+# most -- an unconfigured token FAILS CLOSED. The tests that need a working
+# token set ytdlweb.config.REPORT_TOKEN themselves.
+os.environ['DASH_REPORT_TOKEN'] = ''
+# ...and the local-download feature ships OFF (plan §10). Nothing here turns it
+# on, so the default the fleet deploys with is the default the suite runs.
+os.environ.pop('YTDL_LOCAL_DOWNLOAD', None)
+
 from ytdlweb import config, db                   # noqa: E402
 from ytdlweb.main import app                     # noqa: E402
 

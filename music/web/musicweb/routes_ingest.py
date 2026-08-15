@@ -1,10 +1,11 @@
-"""The write routes: drag-and-drop ingest, Resolve actions, reveal-in-Explorer.
+"""The write route: drag-and-drop ingest.
 
-Everything here needs something the NAS container does not have -- a GPU for
-the inline half of ingest, a local Resolve and a local Explorer for the rest --
-so all of it imports its machinery lazily and fails with a readable message
-rather than at startup. Port step 8 moves the Resolve actions into
-ccsync_companion on 127.0.0.1:8899.
+What is left here needs something the NAS container does not have -- a GPU for
+the inline half of ingest -- so it imports its machinery lazily and fails with
+a readable message rather than at startup. Everything that needed the EDITOR'S
+machine (the Resolve actions, and reveal after MUSIC-6) has moved onto
+ccsync_companion's loopback on 127.0.0.1:8899, where the editor's browser can
+reach it and this process cannot.
 
 Ingest (port step 7, done) has two shapes and picks between them by what this
 host can actually do:
@@ -36,12 +37,10 @@ from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from pydantic import BaseModel
 
 from musicweb import config, db
 from musicweb.db import con
 from musicweb.routes_api import TRACK_COLS, hydrate
-from musicweb.routes_media import track_path
 from musicweb.search import index, refresh
 
 log = logging.getLogger(__name__)
@@ -193,12 +192,18 @@ def _make_readable_to_the_fleet(path):
                     'over SMB until it is chmod 664', path, exc)
 
 
-def queue_one(upload_name, data, c):
+def queue_one(upload_name, src, c):
     """Validate, de-duplicate, land and enqueue one upload. Never raises.
 
     Every step that the inline path does before it needs the GPU, in the same
     order and for the same reasons -- in particular the re-encode check runs
     BEFORE transcoding, so a duplicate .ogg costs no ffmpeg time at all.
+
+    `src` is the upload's FILE OBJECT, not its bytes (MUSIC-9, 2026-08-14).
+    Starlette has already spooled anything over 1 MB to disk, so `await
+    up.read()` was pulling a 60 MB wav back into the dashboard container's heap
+    only to write it straight out again -- a third pass over the file and a
+    resident spike per upload, in the process that also serves the fleet.
     """
     staging = config.DATA_ROOT / STAGING
     staging.mkdir(parents=True, exist_ok=True)
@@ -213,7 +218,7 @@ def queue_one(upload_name, data, c):
     work = Path(tempfile.mkdtemp(prefix='ing-', dir=str(staging)))
     try:
         staged = work / name
-        staged.write_bytes(data)
+        db.stream_to(src, staged)
 
         probed = _probe(staged)
         if probed['duration'] <= 0:
@@ -263,37 +268,52 @@ def queue_one(upload_name, data, c):
         shutil.rmtree(work, ignore_errors=True)
 
 
+# SYNCHRONOUS `def`, all three of them, and it is load-bearing (MUSIC-2,
+# 2026-08-14). They used to be `async def`, which means Starlette runs them ON
+# THE EVENT LOOP -- and every step below blocks it: writing the upload to
+# staging, ffprobe (120 s timeout), a 900 s ffmpeg transcode, hashing library
+# files off the share mount, and a cross-mount shutil.move that degrades to
+# copy+unlink. This app is mounted IN-PROCESS inside the fleet dashboard behind
+# a single uvicorn worker, so for the 30-60 s an eight-file drop takes, nothing
+# else was served at all -- not the sync-status pages, not /api/report from
+# every companion, not the container healthcheck. A plain `def` is dispatched to
+# the threadpool, where blocking is what the threads are for.
 @router.post('/api/ingest')
-async def ingest_files(files: List[UploadFile] = File(...)):
+def ingest_files(files: List[UploadFile] = File(...)):
     """Drag-and-drop ingest: analysed here, or queued for the base rig."""
     indexer = _load_indexer()
     if indexer is None:
-        return await _ingest_queued(files)
-    return await _ingest_inline(files, *indexer)
+        return _ingest_queued(files)
+    return _ingest_inline(files, *indexer)
 
 
-async def _ingest_queued(files):
+def _ingest_queued(files):
     """No GPU here: land the files and let a base-rig indexer run analyse them."""
     _require_ffmpeg()                      # before anything is written anywhere
     c = con()
     results = []
     for up in files:
-        data = await up.read()
-        results.append(queue_one(up.filename, data, c))
+        results.append(queue_one(up.filename, up.file, c))
     return {'mode': 'queued', 'results': results, 'added': 0,
             'queued': sum(1 for r in results if r['status'] == 'queued'),
             'pending': db.queue_counts(c)['pending']}
 
 
-async def _ingest_inline(files, _ingest, index_music):
-    """The base rig: analyse and index each accepted file in the request."""
+def _ingest_inline(files, _ingest, index_music):
+    """The base rig: analyse and index each accepted file in the request.
+
+    No `library_hashes()` here any more (MUSIC-7, 2026-08-14): it rglob'ed the
+    share root and blake2b-hashed all 376 files -- 9.5 GB, and W: is an SMB
+    mount of the same NAS, not local disk -- once per request, to answer a
+    question `db.find_content_duplicate` answers from the bytes index in one or
+    two file reads. ingest_one now asks that instead, so both halves run the
+    same duplicate defence off the same index.
+    """
     clap = index().clap                    # reuse the already-loaded model
     c = con()
-    known = _ingest.library_hashes()
     results = []
     for up in files:
-        data = await up.read()
-        r = _ingest.ingest_one(up.filename, data, clap, c, known)
+        r = _ingest.ingest_one(up.filename, up.file, clap, c)
         r['status'] = 'added' if r.get('ok') else 'error'
         results.append(r)
 
@@ -342,19 +362,16 @@ def ingest_queue(limit: int = 50):
 # CLAUDE.md's "How the pieces join".
 
 
-@router.get('/api/reveal/{track_id}')
-def reveal(track_id: int):
-    """Open the containing folder in Explorer with the file selected."""
-    r = con().execute('SELECT share, rel_path FROM tracks WHERE id=?',
-                      (track_id,)).fetchone()
-    if not r:
-        raise HTTPException(404, 'unknown track')
-    path = track_path(r)
-    if os.name == 'nt' and path.exists():
-        # No cmd.exe (MUSIC-2, 2026-08-11): it re-parses shell metacharacters,
-        # and `safe_upload_name` strips `<>:"/\|?*` but not `&`, so a library
-        # file named `x&calc.mp3` turned a reveal click into local command
-        # execution. Popen hands explorer the argument with no shell in between.
-        subprocess.Popen(['explorer', f'/select,{path}'])
-        return {'ok': True, 'path': str(path)}
-    return {'ok': False, 'path': str(path)}
+# There is deliberately no /api/reveal here any more either (MUSIC-6,
+# 2026-08-14) -- it was left behind by port step 8 and had been a dead control
+# ever since. It ran `explorer /select,<path>` on the host serving the page:
+# right on the base rig, and on the NAS container `os.name != 'nt'`, so it fell
+# through to a 200 {"ok": false} that app.js discarded. The editor clicked and
+# nothing happened, forever, with no message. It also handed the browser the
+# NAS's absolute filesystem path, which the (share, rel_path) model exists to
+# keep out of the payload.
+#
+# Reveal now goes browser -> the editor's own companion, `POST /music/reveal`
+# with {share, rel_path}, beside /music/send and the same arrangement ytdl's
+# reveal got on 2026-08-11. Editors on a companion older than that 404 on it
+# and the page says so, which is strictly better than the silence.

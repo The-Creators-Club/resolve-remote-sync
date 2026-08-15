@@ -801,6 +801,9 @@ def test_a_failed_ignores_reassert_never_unpauses_the_folder():
     admin = FakeAdmin()  # nothing pending: accepted long ago
     admin.paused_state["s-a"] = True  # and left paused by the previous run
     admin.ignore_raises.add("s-a")
+    # SYNC-6 (2026-08-14): the re-assert reads first, so the folder has to
+    # actually BE missing its patterns for the failing write to be attempted.
+    admin.folder_ignores["s-a"] = None
     seq, lane_a, lane_b, events = _build(selection, admin, sequencer_idle_seconds=0.02)
 
     seq.start()
@@ -836,6 +839,7 @@ def test_a_failing_ignore_delete_does_not_block_the_unpause():
     selection = FakeSelectionClient(selection=[])
     admin = FakeAdmin()
     admin.ignore_delete_raises.add("s-a")
+    admin.folder_ignores["s-a"] = None   # SYNC-6: read-first, so give it a reason to write
     seq, lane_a, lane_b, events = _build(selection, admin)
 
     assert seq._reassert_folder_policy("s-a") is True
@@ -900,14 +904,21 @@ def test_a_clean_turn_clears_the_ignores_latch():
     assert seq._ignores_unconfirmed == set()
 
 
-def test_successful_turn_reasserts_ignores_and_versioning_every_turn():
+def test_a_turn_repairs_the_ignores_and_versioning_of_a_folder_it_never_accepted():
     """AUDIT_2 L-3/P6/DEL-6: nothing in the codebase ever set ignores or
     versioning on a folder it did not itself accept, so a folder accepted by
     an older companion or by hand in the Syncthing GUI stayed un-ignored (and
-    unversioned) forever."""
+    unversioned) forever.
+
+    SYNC-6 (2026-08-14): the re-assert now READS the folder's .stignore first
+    and writes only when a pattern is actually missing -- so this drives the
+    hand-accepted folder (an empty .stignore) rather than the steady state.
+    The steady state costing no write at all is pinned in
+    test_sync_sequencer_policy.py."""
     items = [_item("s-a", "2026/FF5/Alpha", 0)]
     selection = FakeSelectionClient(selection=items)
     admin = FakeAdmin()  # nothing pending: the folder was accepted long ago
+    admin.folder_ignores["s-a"] = []   # ...by hand, with no patterns at all
     seq, lane_a, lane_b, events = _build(selection, admin)
 
     seq.start()
@@ -1119,8 +1130,13 @@ def test_startup_ignores_fetch_error_is_fail_closed():
 
 
 def test_startup_ignores_verification_is_a_bounded_one_get_per_folder():
-    """One GET per selected folder AT STARTUP -- not per pass, and not per
-    project turn."""
+    """One GET per selected folder AT STARTUP, before anything is released --
+    not per pass.
+
+    SYNC-6 (2026-08-14) added a per-TURN read as well, which REPLACED the
+    unconditional per-turn .stignore rewrite: the steady-state cost of a turn
+    is now a read and no config write, which is what the second assertion
+    pins."""
     items = [_item("s-a", "2026/FF5/Alpha", 0), _item("s-b", "2026/FF5/Bravo", 1)]
     selection = FakeSelectionClient(selection=items, cached=items)
     admin = FakeAdmin()
@@ -1130,7 +1146,8 @@ def test_startup_ignores_verification_is_a_bounded_one_get_per_folder():
     assert _wait_until(lambda: len(lane_a.calls) >= 6, timeout=5.0)
     seq.stop()
 
-    assert sorted(admin.get_ignores_calls) == ["s-a", "s-b"], admin.get_ignores_calls
+    assert admin.get_ignores_calls[:2] == ["s-a", "s-b"], admin.get_ignores_calls
+    assert admin.ignore_calls == [], "a complete .stignore must never be rewritten"
 
 
 @pytest.mark.parametrize(

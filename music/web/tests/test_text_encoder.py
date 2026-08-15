@@ -195,6 +195,45 @@ def test_manifest_is_the_version_this_loader_understands():
     assert m['check']['min_cosine'] >= 0.999
 
 
+def _fake_artefact(directory, manifest):
+    (directory / te.MANIFEST_NAME).write_text(json.dumps(manifest), encoding='utf-8')
+    (directory / te.MODEL_NAME).write_bytes(b'not really onnx')
+    (directory / te.TOKENIZER_NAME).write_bytes(b'{}')
+    return directory
+
+
+def test_an_artefact_that_records_no_check_is_not_available(tmp_path):
+    """MUSIC-1 (2026-08-14): the exporter wrote the model, the tokenizer and a
+    manifest into the real output directory and only THEN verified them, so a
+    run that failed -- and printed "Not writing the artefact" -- left a
+    complete, loadable, version-1 artefact behind. Its only distinguishing mark
+    was the missing `check` block, and this function looked at everything
+    except that, so the artefact its own exporter had declared wrong loaded on
+    the next boot and silently reordered every search result."""
+    _fake_artefact(tmp_path, {'artefact_version': te.ARTEFACT_VERSION,
+                              'format': 'onnx', 'dim': 512})
+    assert te.artefact_available(tmp_path) is False
+
+
+def test_an_artefact_below_the_threshold_is_not_available(tmp_path):
+    _fake_artefact(tmp_path, {'artefact_version': te.ARTEFACT_VERSION,
+                              'check': {'min_cosine': 0.87}})
+    assert te.artefact_available(tmp_path) is False
+
+
+def test_a_verified_artefact_is_available(tmp_path):
+    _fake_artefact(tmp_path, {'artefact_version': te.ARTEFACT_VERSION,
+                              'check': {'min_cosine': 0.9999999,
+                                        'threshold': te.MIN_COSINE}})
+    assert te.artefact_available(tmp_path) is True
+
+
+def test_a_nonsense_check_block_is_not_available(tmp_path):
+    _fake_artefact(tmp_path, {'artefact_version': te.ARTEFACT_VERSION,
+                              'check': {'min_cosine': 'excellent'}})
+    assert te.artefact_available(tmp_path) is False
+
+
 @artefact
 def test_stale_artefact_version_is_treated_as_absent(tmp_path):
     """A manifest from a future layout must degrade to the CLAP fallback rather
@@ -336,6 +375,133 @@ def test_text_search_goes_through_the_encoder():
     assert fake.calls == ['anything at all']
     assert len(hits) == 3
     assert idx._clap is None            # never touched the full model
+
+
+# ------------------------------------------------ the exporter's stage-and-swap
+# No torch here on purpose: export() is now pure orchestration and the two
+# halves that need a GPU (write_artefact, verify_artefact) are stubbed, which is
+# the only way this venv can pin the ORDER they happen in.
+
+@pytest.fixture()
+def exporter():
+    if not config.add_indexer_to_path():
+        pytest.skip('no indexer checked out here')
+    import export_text_encoder
+    return export_text_encoder
+
+
+@pytest.fixture()
+def previous_artefact(tmp_path):
+    """An artefact already in place, of the kind an export would replace."""
+    out = tmp_path / 'text_encoder'
+    out.mkdir()
+    (out / te.MODEL_NAME).write_bytes(b'the good model')
+    (out / te.TOKENIZER_NAME).write_bytes(b'{}')
+    (out / te.MANIFEST_NAME).write_text(
+        json.dumps({'artefact_version': te.ARTEFACT_VERSION,
+                    'check': {'min_cosine': 0.9999999}}), encoding='utf-8')
+    return out
+
+
+def _stub_write(ete, monkeypatch, manifest=None):
+    """Stand in for the torch half: files into whatever directory it is given."""
+    def write_artefact(out_dir, model_name=None, opset=None):
+        Path(out_dir, te.MODEL_NAME).write_bytes(b'the new model')
+        Path(out_dir, te.TOKENIZER_NAME).write_bytes(b'{}')
+        Path(out_dir, te.MANIFEST_NAME).write_text(json.dumps(
+            manifest or {'artefact_version': te.ARTEFACT_VERSION,
+                         'model': 'test-model'}), encoding='utf-8')
+        return (manifest or {'artefact_version': te.ARTEFACT_VERSION,
+                             'model': 'test-model'}), object()
+    monkeypatch.setattr(ete, 'write_artefact', write_artefact)
+
+
+def test_the_exporter_and_the_loader_share_one_threshold(exporter):
+    """Two copies of 0.999 could only drift, and the loader is now the half
+    that refuses (MUSIC-1, 2026-08-14)."""
+    assert exporter.MIN_COSINE is te.MIN_COSINE
+
+
+def test_a_failed_check_leaves_the_previous_artefact_untouched(
+        exporter, previous_artefact, monkeypatch):
+    """The failure this is all for: a `transformers` upgrade shifts the
+    tokenizer, verify_tokenizer exits 1 with "Not writing the artefact" -- and
+    before MUSIC-1 (2026-08-14) it had already written it, over the good one."""
+    _stub_write(exporter, monkeypatch)
+    monkeypatch.setattr(exporter, 'verify_artefact',
+                        lambda *a, **kw: (_ for _ in ()).throw(SystemExit('FAIL')))
+
+    with pytest.raises(SystemExit):
+        exporter.export(previous_artefact)
+
+    assert (previous_artefact / te.MODEL_NAME).read_bytes() == b'the good model'
+    assert te.artefact_available(previous_artefact) is True
+    # and nothing half-exported is left lying beside it
+    assert not previous_artefact.with_name(previous_artefact.name + '.new').exists()
+
+
+def test_a_passing_export_swaps_in_and_keeps_the_one_it_replaced(
+        exporter, previous_artefact, monkeypatch):
+    _stub_write(exporter, monkeypatch)
+    checked = {}
+
+    def verify_artefact(directory, manifest, tokenizer, queries=None):
+        # the checks must run on the STAGED copy, never on the live directory
+        checked['dir'] = Path(directory)
+        manifest['check'] = {'queries': 49, 'min_cosine': 0.9999999,
+                             'mean_cosine': 0.9999999,
+                             'threshold': exporter.MIN_COSINE}
+        Path(directory, te.MANIFEST_NAME).write_text(json.dumps(manifest),
+                                                     encoding='utf-8')
+        return manifest
+
+    monkeypatch.setattr(exporter, 'verify_artefact', verify_artefact)
+
+    manifest = exporter.export(previous_artefact)
+
+    assert checked['dir'] != previous_artefact
+    assert checked['dir'].name.endswith('.new')
+    assert manifest['check']['min_cosine'] == 0.9999999
+    assert (previous_artefact / te.MODEL_NAME).read_bytes() == b'the new model'
+    assert te.artefact_available(previous_artefact) is True
+    kept = previous_artefact.with_name(previous_artefact.name + '.prev')
+    assert (kept / te.MODEL_NAME).read_bytes() == b'the good model'
+
+
+def test_a_first_export_needs_no_previous_artefact(exporter, tmp_path, monkeypatch):
+    _stub_write(exporter, monkeypatch)
+    monkeypatch.setattr(exporter, 'verify_artefact',
+                        lambda directory, manifest, tokenizer, queries=None: manifest)
+    out = tmp_path / 'text_encoder'
+
+    exporter.export(out)
+
+    assert (out / te.MODEL_NAME).read_bytes() == b'the new model'
+    assert not out.with_name(out.name + '.prev').exists()
+
+
+def test_check_can_record_a_passing_result_on_an_older_artefact(exporter, tmp_path):
+    """--check runs the same corpus at the same threshold the export does, so
+    an artefact that predates the `check` block can earn one without a 500 MB
+    re-export -- otherwise the MUSIC-1 gate would strand it."""
+    _fake_artefact(tmp_path, {'artefact_version': te.ARTEFACT_VERSION,
+                              'model': 'test-model'})
+    assert te.artefact_available(tmp_path) is False
+
+    manifest = exporter.record_check(tmp_path, 0.9999999, 1.0, 49)
+
+    assert manifest['check']['threshold'] == te.MIN_COSINE
+    assert manifest['model'] == 'test-model'          # nothing else was lost
+    assert te.artefact_available(tmp_path) is True
+
+
+def test_the_staging_directory_is_a_sibling_of_the_output(exporter, tmp_path):
+    """A rename is only atomic within one filesystem, and the swap is a rename
+    of 500 MB."""
+    out = tmp_path / 'text_encoder'
+    staging = exporter.staging_dir(out)
+    assert staging.parent == out.parent
+    assert staging.is_dir() and not any(staging.iterdir())
 
 
 # ------------------------------------------------------- vs the full ClapModel

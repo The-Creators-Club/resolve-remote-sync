@@ -516,6 +516,21 @@ h2 {
 
 /* ---------- downloads ---------- */
 
+/* Which machine is fetching this job's clips (docs/YTDL_LOCAL_DOWNLOAD.md §9).
+   Same chip shape as the health pip, and green only when the answer is "yours"
+   — the server is the ordinary case and must not read as a warning. */
+.dlmode {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.dlmode.local { color: var(--green); border-color: var(--green); }
+/* .prow .text-btn pushes buttons to the right edge; this one belongs BESIDE the
+   badge it acts on, and only [ CANCEL ] keeps the auto margin. */
+#dlserver { margin-left: 0; }
+
 .dllist { margin-top: 8px; font-size: 11px; }
 /* align-items: center, not baseline: a row now carries a picture, and a
    baseline would hang it off the text. */

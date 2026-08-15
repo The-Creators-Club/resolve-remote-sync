@@ -1521,3 +1521,124 @@ def test_import_files_defers_while_the_tray_menu_is_open(monkeypatch):
     resolve_bridge.import_files_to_bin_path(["P:\\a.mp4"], ("Youtube", "term"))
 
     assert waits == [1]
+
+
+# -- the b-roll insert against a project Resolve will not add a bin to ------
+
+
+def test_a_project_that_refuses_the_bin_says_so_instead_of_didnt_answer(monkeypatch):
+    """COMP-MEDIA-8: AddSubFolder returns None/False on a locked project
+    rather than raising, and BROLL_BIN_PATH is TWO segments -- so the raw
+    answer was fed back in as the next root and the walk dereferenced None.
+    The editor was told "Resolve didn't answer. Make sure a project is open"
+    with their project open, about a bin Resolve had refused."""
+    root = FakeFolder(name="Master")
+    pool = FakeMediaPool(root)
+    pool.add_subfolder_result = None
+    project = FakeProject(
+        timeline=FakeTimeline({"video": {1: []}, "audio": {1: []}}), media_pool=pool
+    )
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(project)))
+
+    result = resolve_bridge.perform_insert(r"P:\Assets\B-roll Archive\a.mov", 0, 10)
+
+    assert result["ok"] is False
+    assert result["message"] == resolve_bridge.BIN_REFUSED_MESSAGE
+    assert result["message"] != resolve_bridge._SCRIPTING_ERROR_MESSAGE
+    assert pool.import_calls == [], "nothing was imported into a bin that isn't there"
+
+
+def test_find_or_create_bin_returns_none_when_resolve_refuses():
+    """The contract _ensure_bin_path already had, two hundred lines below."""
+    root = FakeFolder(name="Master")
+    pool = FakeMediaPool(root)
+    pool.add_subfolder_result = False
+
+    assert resolve_bridge._find_or_create_bin(pool, root, "B-Roll") is None
+
+
+# -- a fusionscript call that does not come back (COMP-MEDIA-9) -------------
+
+
+@pytest.fixture(autouse=True)
+def _clean_bridge_activity():
+    """The in-flight record is module-global, like the session state and the
+    process probe cache above it."""
+    resolve_bridge.reset_bridge_activity()
+    yield
+    resolve_bridge.reset_bridge_activity()
+
+
+def test_the_call_in_flight_is_readable_without_touching_the_bridge():
+    """The thread that knows a call is wedged is the one that cannot say so,
+    so the fact has to be readable from outside -- cheaply, with no lock on
+    the bridge and no probe (the tray render path's rule)."""
+    assert resolve_bridge.bridge_activity() == {}
+
+    with resolve_bridge._bridge_call("ImportMedia"):
+        activity = resolve_bridge.bridge_activity()
+
+    assert activity["call"] == "ImportMedia"
+    assert activity["seconds"] >= 0.0
+    assert resolve_bridge.bridge_activity() == {}
+
+
+def test_a_nested_call_keeps_the_outer_name_and_does_not_deadlock():
+    """Every public function calls connect() with the lock already held; the
+    RLock lets it through and the OUTER call is the one worth naming."""
+    with resolve_bridge._bridge_call("perform_insert"):
+        with resolve_bridge._bridge_call("connect"):
+            assert resolve_bridge.bridge_activity()["call"] == "perform_insert"
+        assert resolve_bridge.bridge_activity()["call"] == "perform_insert"
+
+    assert resolve_bridge.bridge_activity() == {}
+
+
+def test_a_wedged_call_is_named_in_the_log_by_the_thread_stuck_behind_it(
+        monkeypatch, caplog):
+    """The failure this exists for: P: drops mid-import, ImportMedia never
+    returns, and the watcher, the media-tree thread and the tray all park on
+    _API_LOCK with nothing in the log to say why. Nothing here can interrupt
+    a native call -- but the wait is now attributable."""
+    monkeypatch.setattr(resolve_bridge, "BRIDGE_WEDGE_SECONDS", 0.02)
+    held = threading.Event()
+    release = threading.Event()
+
+    def _wedged():
+        with resolve_bridge._bridge_call("ImportMedia"):
+            held.set()
+            release.wait(10.0)
+
+    stuck = threading.Thread(target=_wedged, daemon=True)
+    stuck.start()
+    assert held.wait(5.0)
+    threading.Timer(0.2, release.set).start()
+
+    with caplog.at_level(logging.WARNING, logger="ccsync.resolve"):
+        with resolve_bridge._bridge_call("poll_timeline_items"):
+            pass
+    stuck.join(timeout=5.0)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    # ONE line per episode, not one per timeout per waiting thread: four
+    # threads behind a wedge would otherwise flood the rotating log.
+    assert len(warnings) == 1
+    assert "ImportMedia" in warnings[0]
+    assert "poll_timeline_items" in warnings[0]
+
+
+def test_a_public_entry_point_names_itself_while_it_holds_the_bridge(
+        monkeypatch, resolve_process):
+    resolve_process(False)
+    seen: dict = {}
+
+    def _connect():
+        seen["activity"] = resolve_bridge.bridge_activity()
+        return None
+
+    monkeypatch.setattr(resolve_bridge, "connect", _connect)
+    resolve_bridge.get_media_pool_items()
+
+    assert seen["activity"]["call"] == "get_media_pool_items"
+    assert resolve_bridge.bridge_activity() == {}

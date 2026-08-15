@@ -5,6 +5,7 @@ embedder assigned to `_encoder` exercises the whole scoring path without the
 model. That is the same reason the container can run this app at all.
 """
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -141,6 +142,93 @@ def test_refresh_is_visible_to_every_thread(tmp_path, isolated_index):
         for t in ts:
             t.join()
         assert all(s is fresh for s in seen)
+    finally:
+        con.close()
+
+
+# --- MUSIC-5 / MUSIC-8: the models are per PROCESS, not per Index ------------
+
+@pytest.fixture()
+def no_models(monkeypatch):
+    """Empty the module-level model cache, and put it back afterwards."""
+    monkeypatch.setattr(search, '_encoder', None)
+    monkeypatch.setattr(search, '_clap', None)
+
+
+def test_two_cold_searches_build_one_encoder(no_models, monkeypatch):
+    """MUSIC-5 (2026-08-14): the lazy load was an unguarded check-then-assign
+    on the Index, and /api/search is a sync route -- so two requests arriving
+    inside the ~2 s cold load both saw None and both built an
+    ort.InferenceSession over the 500 MB artefact. Doubling the peak is the one
+    thing the whole ONNX exercise exists to avoid, in a container that is also
+    serving the fleet dashboard."""
+    built = []
+    loading = threading.Event()
+
+    def slow_load(directory=None):
+        loading.set()
+        time.sleep(0.1)                    # the cold-load window
+        enc = FakeEncoder(len(built))
+        built.append(enc)
+        return enc
+
+    monkeypatch.setattr(search.text_encoder, 'load', slow_load)
+
+    got = []
+    first = threading.Thread(target=lambda: got.append(search.shared_encoder()))
+    second = threading.Thread(target=lambda: got.append(search.shared_encoder()))
+    first.start()
+    assert loading.wait(timeout=5)         # the second arrives mid-load
+    second.start()
+    first.join(); second.join()
+
+    assert len(built) == 1, f'{len(built)} encoders were loaded'
+    assert got[0] is got[1] is built[0]
+
+
+def test_the_encoder_is_loaded_once_for_the_whole_process(no_models, monkeypatch):
+    loads = []
+    monkeypatch.setattr(search.text_encoder, 'load',
+                        lambda directory=None: loads.append(1) or FakeEncoder())
+    first = search.shared_encoder()
+    assert search.shared_encoder() is first
+    assert len(loads) == 1
+
+
+def test_refresh_keeps_the_loaded_models(tmp_path, isolated_index, no_models,
+                                         monkeypatch):
+    """MUSIC-8 (2026-08-14): both models were cached ON the Index, and
+    `refresh` replaces the Index -- after every inline ingest and every
+    /api/reload. Dropping three cues one at a time paid three full 777 MB
+    ClapModel loads, and a reload made the next search pay the ONNX cold start
+    again for nothing. Neither model depends on anything the Index holds."""
+    loads = []
+    monkeypatch.setattr(search.text_encoder, 'load',
+                        lambda directory=None: loads.append(1) or FakeEncoder())
+    con, _ = _index_over(tmp_path / 'keep.db')
+    try:
+        search._index = search.Index(con)
+        encoder = search.index().encoder
+        clap = object()
+        monkeypatch.setattr(search, '_clap', clap)
+
+        after = search.refresh(con)
+
+        assert after.encoder is encoder
+        assert after.clap is clap
+        assert len(loads) == 1
+    finally:
+        con.close()
+
+
+def test_an_index_still_takes_an_injected_encoder(tmp_path, no_models):
+    """The tests' own escape hatch, and the reason `_encoder` survives on the
+    instance at all: a fake assigned there must beat the shared one."""
+    con, idx = _index_over(tmp_path / 'inject.db')
+    try:
+        assert idx._encoder is not None
+        assert idx.encoder is idx._encoder
+        assert search._encoder is None       # nothing was loaded to find that out
     finally:
         con.close()
 

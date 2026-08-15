@@ -76,8 +76,9 @@ to a page that 500s on every request is worse than no link.
 routes are an unauthenticated-by-design write path for the indexer (not a browser, no
 session), so they are allowed *past* `login_gate` — and the b-roll app's own guard treats
 the token as optional ("not configured = dev mode = open"). None of that applies here:
-`/api/ingest`, `/api/resolve*` and `/api/reveal` are all called by the SPA from a
-logged-in browser, nothing about `/music/*` is exempt from `login_gate`, and there is no
+`/api/ingest` is called by the SPA from a logged-in browser (as `/api/resolve*` and
+`/api/reveal` were before they moved onto the companion's loopback), nothing about
+`/music/*` is exempt from `login_gate`, and there is no
 upstream dev-mode branch to reach. **The session is the credential.** The day music grows
 a machine-to-machine ingest for the base rig (port step 7's queued handoff), it needs the
 full b-roll treatment — a mandatory token validated in `create_app` and re-checked in
@@ -116,7 +117,7 @@ path or answer 503/404 with a readable message instead.
 |---|---|---|---|
 | `musicweb/`, `static/`, `schema.sql`, `migrations/` | 131 KB | `<host-root>/music-web` → `/music-app` **:ro** | the app itself |
 | `data/music.db` | 19.5 MB | `<host-root>/music-data` → `/music-data` **:rw** | the entire index (376 tracks). **Writable**: queued ingest writes `pending` rows into it |
-| `data/text_encoder/` | 481.6 MB | `<host-root>/music-encoder` → `/music-encoder` :ro | without it `Index.clap` falls back to the full CLAP model, which needs torch, which the container deliberately does not have → **`/music/api/search` 500s** |
+| `data/text_encoder/` | 481.6 MB | `<host-root>/music-encoder` → `/music-encoder` :ro | without it `Index.clap` falls back to the full CLAP model, which needs torch, which the container deliberately does not have → **`/music/api/search` 500s**. Ship the directory the exporter published, not a hand-assembled one: an artefact whose `manifest.json` carries no passing `check` block is treated as absent (MUSIC-1, 2026-08-14), and the exporter leaves the one it replaced beside it as `text_encoder.prev` — do not ship that |
 | `data/proxies/` | 864.4 MB, 338 files | `<host-root>/music-proxies` → `/music-proxies` :ro | without them `/api/audio` still works and streams the 60 MB originals over Tailscale |
 | static `ffmpeg` + `ffprobe` | ~160 MB unpacked | `<host-root>/ffmpeg` → `/opt/ffmpeg` :ro, on `PATH` | `/api/ingest`'s queued path returns 503 without them |
 
@@ -319,10 +320,18 @@ about an empty mount.
   ([Draining the NAS ingest queue](#draining-the-nas-ingest-queue)). It is still a write path on the
   fleet's origin, and it is still guarded by nothing but the dashboard session — which is
   the deliberate choice argued above, not an oversight.
-- `/api/resolve*` and `/api/reveal` — **port step 8 landed**: they live in
+- `/api/resolve*` — **port step 8 landed**: they live in
   `ccsync_companion/music_server.py` on the editor's own `127.0.0.1:8899` now, reached by
   the browser. Nothing in this process talks to Resolve, and nothing here should — this
   process runs on the NAS, where `127.0.0.1` is the NAS.
+- `/api/reveal` — port step 8 **missed this one**, and this document claimed otherwise
+  until MUSIC-6 (2026-08-14). It stayed here running `explorer /select,<path>` on the
+  serving host: on the container `os.name != 'nt'`, so it answered a 200 `{"ok": false}`
+  that `app.js` threw away, and the button did nothing for every editor, silently, from
+  the day music was mounted. It is gone from this app; the page now posts
+  `{share, rel_path}` to `POST /music/reveal` on the companion, beside `/music/send`.
+  **Editors need a companion new enough to have that route** — older builds 404 and the
+  pane says so.
 
 #### Known gap: ingested files land unreadable to editors
 

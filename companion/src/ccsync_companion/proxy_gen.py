@@ -398,6 +398,11 @@ class ProxyGenerator:
         # registered exactly like a worker's; insertion order is start order,
         # which is what makes _current deterministic.
         self._encoding: dict[int, str] = {}
+        # The `.partial` paths those encodes are WRITING, normcased. Keyed on
+        # the output rather than the source because that is what rule 2 is
+        # about, and two sources can share one output (COMP-MEDIA-2,
+        # 2026-08-14 -- see _claim_partial).
+        self._partials: set[str] = set()
         # Encode slots taken by the drain's workers. Held from before the clip
         # is popped to after the encode returns, so it covers the window
         # _encoding does not (the probe, the still-needed re-check) -- which is
@@ -499,6 +504,37 @@ class ProxyGenerator:
         return value
 
     # -- what is encoding right now ----------------------------------------
+    @staticmethod
+    def _partial_key(partial: str) -> str:
+        return os.path.normcase(os.path.normpath(str(partial or "")))
+
+    def _claim_partial(self, partial: str) -> bool:
+        """Take the OUTPUT path, or say it is already taken.
+
+        Rule 2 ("never two writers on one proxy") was enforced against BPG
+        (is_bpg_busy) and against lane B (_publish's re-check) but never
+        against the generator itself: `_encoding` holds SOURCE paths, and two
+        sources in one directory that differ only by container -- `A001.mov`
+        and `A001.mp4` -- share one `Proxy/A001.mp4.partial`. Since the drain
+        went parallel (2026-08-11) two workers could hold that file at once,
+        interleave their writes, and publish whichever finished first over a
+        file the other was still writing (COMP-MEDIA-2, 2026-08-14).
+
+        The scan no longer queues both, so this is the backstop that also
+        covers a direct encode_once(clip), a clip re-queued while its twin
+        encodes, and two projects that resolve to the same directory.
+        """
+        key = self._partial_key(partial)
+        with self._lock:
+            if key in self._partials:
+                return False
+            self._partials.add(key)
+            return True
+
+    def _release_partial(self, partial: str) -> None:
+        with self._lock:
+            self._partials.discard(self._partial_key(partial))
+
     def _mark_encoding(self, path: str) -> None:
         with self._lock:
             self._encoding[threading.get_ident()] = path
@@ -773,12 +809,31 @@ class ProxyGenerator:
         """"Stop making proxies". Kills the encode in flight (leaving no
         partial behind) and drops the queue for this cycle; the next scheduled
         scan refills it. Deliberately not a disable: switching the feature off
-        is a config decision, not a menu click."""
+        is a config decision, not a menu click.
+
+        With NOTHING in flight the flag is not set at all, and the queue is
+        dropped here instead. `_cancel` is only ever cleared by a drain that
+        ran, so setting it with no drain running latched it until the next one
+        -- which then died on its first clip, after paying for a probe and a
+        spawn, and dropped the whole freshly scanned queue with it
+        (COMP-MEDIA-7, 2026-08-14). That is not a corner case: the tray builds
+        its menu from a snapshot, so "Stop making proxies" is still on screen
+        for a drain that rule 1 already ended the moment the editor touched
+        the keyboard -- which is the moment they reach for the tray.
+        """
         with self._lock:
             self._forced = False
-        self._cancel.set()
+            in_flight = self._active > 0 or bool(self._encoding)
+            if not in_flight:
+                self._queue = []
+        if in_flight:
+            self._cancel.set()
         self._wake.set()
-        log.info("proxy gen: stop requested from the tray")
+        log.info(
+            "proxy gen: stop requested from the tray%s",
+            "" if in_flight else " -- nothing was encoding, so this cycle's "
+                                "queue was dropped and nothing is left armed",
+        )
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
@@ -887,6 +942,10 @@ class ProxyGenerator:
             # -- and the one that holds for a direct caller.
             queue_empty = not self._queue and not self._encoding and self._active <= 0
             needs_resolve = int(self._totals.get("needs_resolve", 0))
+            # WHERE those clips are, not just how many: BPG watches folders and
+            # takes no file list, so a launcher given only a count can do
+            # nothing but open a window (bpg.py fact 3, 2026-08-13).
+            watch_dirs = list(self._totals.get("needs_resolve_dirs") or ())
         try:
             self._bpg.maybe_launch(
                 queue_empty=queue_empty,
@@ -895,6 +954,7 @@ class ProxyGenerator:
                 # other condition has passed, which on a machine with no BRAW
                 # gap is never (MED-8).
                 user_away=self._user_is_away,
+                watch_dirs=watch_dirs,
             )
         except Exception:
             log.exception("proxy gen: the BPG launcher raised")
@@ -925,6 +985,13 @@ class ProxyGenerator:
         try:
             result = self._scan_fn(
                 self.local_root, selected, self.min_age_seconds,
+                # Capped clips are dropped by the SCAN now, before it spends
+                # its 500-per-project slots on them: filtering afterwards (the
+                # line below, kept as a backstop) let a project whose newest
+                # 500 clips had all failed report an empty queue for ever,
+                # while the older encodable ones were never even offered
+                # (COMP-MEDIA-4, 2026-08-14).
+                skip_fn=self._is_capped,
             )
         except Exception:
             log.exception("proxy gen: the scan failed")
@@ -947,7 +1014,10 @@ class ProxyGenerator:
         queue.sort(key=lambda clip: (-float(clip.get("mtime") or 0), str(clip.get("path"))))
         # Anything that has already failed its way past the cap stays out of
         # the queue entirely, or every cycle would re-attempt it first (it is
-        # usually the newest file -- a truncated download).
+        # usually the newest file -- a truncated download). The scan is asked
+        # to leave them out in the first place (skip_fn above); this still
+        # runs, for an injected scan_fn that ignores the predicate and for a
+        # clip capped between the walk and here.
         queue = [clip for clip in queue if not self._is_capped(clip)]
 
         # Probed OUTSIDE the lock: ffmpeg_available can spawn a process and
@@ -969,11 +1039,17 @@ class ProxyGenerator:
             self._nvenc = nvenc
         missing = int(totals.get("missing", 0))
         if missing:
+            capped = int(totals.get("capped", 0))
             log.info(
                 "proxy gap: %d clip(s) in %d project(s) have no proxy -- %d queued for "
-                "encoding, %d need Resolve/BPG",
+                "encoding, %d need Resolve/BPG%s",
                 missing, int(totals.get("projects", 0)), len(queue),
                 int(totals.get("needs_resolve", 0)),
+                # The line that was missing on the 0.6.1 muxer night: a
+                # machine reporting 1040 missing and 0 queued said nothing
+                # about WHY it had stopped trying (COMP-MEDIA-4).
+                f", {capped} given up on until the file changes or a restart"
+                if capped else "",
             )
         return result
 
@@ -1349,34 +1425,49 @@ class ProxyGenerator:
         partial = proxy_scan.partial_path(path)
         if not partial:
             return RESULT_SKIPPED
+        if not self._claim_partial(partial):
+            # Another worker is writing this exact file for a DIFFERENT
+            # original (same stem, other container). Skipped rather than
+            # requeued: whatever that encode publishes covers this clip too,
+            # since the coverage convention is the same stem (COMP-MEDIA-2).
+            log.debug(
+                "proxy gen: skipping %s -- another encode is already writing %s",
+                path, os.path.basename(partial),
+            )
+            return RESULT_SKIPPED
         try:
-            os.makedirs(os.path.dirname(partial), exist_ok=True)
-        except OSError as exc:
-            self._record_failure(clip, f"the Proxy folder could not be made ({exc})")
-            return RESULT_FAILED
+            try:
+                os.makedirs(os.path.dirname(partial), exist_ok=True)
+            except OSError as exc:
+                self._record_failure(clip, f"the Proxy folder could not be made ({exc})")
+                return RESULT_FAILED
 
-        try:
-            info = self._probe_fn(self.ffmpeg_path, path)
-        except ffmpeg_tools.UnreadableMediaError as exc:
-            # Not transient: a file with no moov atom will never grow one.
-            # Counted like any other failure so the cap eventually silences it.
-            self._record_failure(clip, str(exc))
-            return RESULT_FAILED
-        except Exception as exc:
-            self._record_failure(clip, f"could not be probed ({exc})")
-            return RESULT_FAILED
+            try:
+                info = self._probe_fn(self.ffmpeg_path, path)
+            except ffmpeg_tools.UnreadableMediaError as exc:
+                # Not transient: a file with no moov atom will never grow one.
+                # Counted like any other failure so the cap eventually silences it.
+                self._record_failure(clip, str(exc))
+                return RESULT_FAILED
+            except Exception as exc:
+                self._record_failure(clip, f"could not be probed ({exc})")
+                return RESULT_FAILED
 
-        duration = info.get("duration_s")
-        try:
-            ceiling = max(STUCK_FLOOR_SECONDS, float(duration or 0) * STUCK_DURATION_FACTOR)
-        except (TypeError, ValueError):
-            ceiling = STUCK_FLOOR_SECONDS
+            duration = info.get("duration_s")
+            try:
+                ceiling = max(
+                    STUCK_FLOOR_SECONDS, float(duration or 0) * STUCK_DURATION_FACTOR
+                )
+            except (TypeError, ValueError):
+                ceiling = STUCK_FLOOR_SECONDS
 
-        self._mark_encoding(path)
-        try:
-            return self._encode_clip(clip, info, partial, ceiling, forced)
+            self._mark_encoding(path)
+            try:
+                return self._encode_clip(clip, info, partial, ceiling, forced)
+            finally:
+                self._clear_encoding()
         finally:
-            self._clear_encoding()
+            self._release_partial(partial)
 
     def _encode_clip(self, clip: dict[str, Any], info: dict[str, Any], partial: str,
                      ceiling: float, forced: bool) -> str:

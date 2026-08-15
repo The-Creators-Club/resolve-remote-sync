@@ -104,18 +104,57 @@ PAYLOAD_BUDGET_BYTES = 7 * 1024 * 1024
 MAX_REPORT_PROJECTS = 64
 
 
+class _MeasuredPayload(dict):
+    """A report body that carries the JSON bytes _fit_payload already built
+    to measure it.
+
+    Still a plain dict to every injected HttpPostFn (the tests' doubles
+    included) -- only default_http_post below knows to reuse `encoded`, so
+    the seam is unchanged. Exists because the heavy tick serialised a
+    multi-MB local_manifest + media_tree once to size it, threw that away,
+    and then dumped the identical structure again inside default_http_post:
+    2x CPU and 2x transient peak memory every 60 s, on the base rig that is
+    also running the proxy encoder and the b-roll indexer (COMP-CORE-5,
+    2026-08-14).
+    """
+
+    __slots__ = ("encoded",)
+
+
+def _encode_payload(payload: dict[str, Any]) -> Optional[bytes]:
+    """The report body as JSON bytes, or None when it won't serialize (which
+    is the http_post's problem to report, not this guard's)."""
+    try:
+        return json.dumps(payload).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+
+
+def _measured(payload: dict[str, Any], body: Optional[bytes]) -> dict[str, Any]:
+    """Hand `payload` back with its already-serialized `body` attached."""
+    if body is None:
+        return payload
+    carrier = _MeasuredPayload(payload)
+    carrier.encoded = body
+    return carrier
+
+
 def payload_size(payload: dict[str, Any]) -> int:
     """Serialized size of the report body, or 0 if it can't be measured (a
     payload that won't serialize is the http_post's problem, not this
     guard's)."""
-    try:
-        return len(json.dumps(payload).encode("utf-8"))
-    except (TypeError, ValueError):
-        return 0
+    body = _encode_payload(payload)
+    return len(body) if body is not None else 0
 
 
 def default_http_post(url: str, data: dict, headers: dict, timeout: float) -> Any:
-    body = json.dumps(data).encode("utf-8")
+    # Reuse the bytes _fit_payload already produced when it measured this
+    # body against PAYLOAD_BUDGET_BYTES (COMP-CORE-5). Anything else -- light
+    # ticks, identity.py's verify POST, a caller passing a plain dict -- takes
+    # the normal path.
+    body = getattr(data, "encoded", None)
+    if not isinstance(body, bytes):
+        body = json.dumps(data).encode("utf-8")
     # NOTE: urllib.request title-cases every outgoing header name in
     # AbstractHTTPHandler.do_open() regardless of the casing passed in here
     # (e.g. "X-CCSync-Token" is sent on the wire as "X-Ccsync-Token"). HTTP
@@ -369,10 +408,15 @@ class DashboardReporter:
 
         Never raises: a payload that cannot be measured is passed through
         untouched (the POST will fail and be retried like any other failure).
+
+        Returns the payload with the JSON bytes of the FINAL measurement
+        attached (see _MeasuredPayload) so default_http_post doesn't
+        serialize the same multi-MB structure a second time (COMP-CORE-5).
         """
-        size = payload_size(payload)
+        body = _encode_payload(payload)
+        size = len(body) if body is not None else 0
         if size <= budget:
-            return payload
+            return _measured(payload, body)
 
         manifest = payload.get("local_manifest")
         if isinstance(manifest, dict):
@@ -396,9 +440,10 @@ class DashboardReporter:
                     "report payload is %.1f MB (budget %.1f MB): dropped the per-file "
                     "lists from %d project(s); rollup counts are unaffected",
                     size / 1e6, budget / 1e6, stripped)
-                size = payload_size(payload)
+                body = _encode_payload(payload)
+                size = len(body) if body is not None else 0
                 if size <= budget:
-                    return payload
+                    return _measured(payload, body)
 
         tree = payload.get("media_tree")
         if isinstance(tree, dict) and tree:
@@ -413,9 +458,10 @@ class DashboardReporter:
             if clips_dropped:
                 log.warning("report payload still %.1f MB: trimmed %d media-pool clip(s)",
                             size / 1e6, clips_dropped)
-                size = payload_size(payload)
+                body = _encode_payload(payload)
+                size = len(body) if body is not None else 0
                 if size <= budget:
-                    return payload
+                    return _measured(payload, body)
 
         coverage = payload.get("proxy_coverage")
         if isinstance(coverage, dict) and coverage.get("projects"):
@@ -426,18 +472,20 @@ class DashboardReporter:
             log.warning(
                 "report payload still %.1f MB: dropped the per-project proxy gap map; "
                 "the totals are unaffected", size / 1e6)
-            size = payload_size(payload)
+            body = _encode_payload(payload)
+            size = len(body) if body is not None else 0
             if size <= budget:
-                return payload
+                return _measured(payload, body)
 
         if isinstance(manifest, dict) and len(manifest) > 1:
             keep = max(1, len(manifest) // 2)
             log.warning("report payload still %.1f MB: reporting %d of %d project(s)",
                         size / 1e6, keep, len(manifest))
             payload["local_manifest"] = dict(list(manifest.items())[:keep])
-            size = payload_size(payload)
+            body = _encode_payload(payload)
+            size = len(body) if body is not None else 0
             if size <= budget:
-                return payload
+                return _measured(payload, body)
 
         for key in ("media_tree", "local_manifest"):
             if payload.get(key) is not None:
@@ -446,10 +494,11 @@ class DashboardReporter:
                     "the report (lane status, transfers, presence) still reaches the "
                     "dashboard", size / 1e6, key)
                 payload.pop(key, None)
-                size = payload_size(payload)
+                body = _encode_payload(payload)
+                size = len(body) if body is not None else 0
                 if size <= budget:
-                    return payload
-        return payload
+                    return _measured(payload, body)
+        return _measured(payload, body)
 
     def post_once(self, light: bool = False) -> None:
         """Build and send a single report. Raises on failure -- callers

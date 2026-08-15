@@ -124,7 +124,19 @@ function makeContext(handler, seed, hash) {
     const method = (opts && opts.method) || 'GET';
     const body = opts && opts.body ? JSON.parse(opts.body) : null;
     calls.push({method, url, body});
-    const res = await handler(method, url, body);
+    // A real fetch REJECTS when its signal aborts, and the companion probe's
+    // whole point is that a hung loopback costs one second and then nothing
+    // (docs/YTDL_LOCAL_DOWNLOAD.md §2). A handler that never settles + the fake
+    // 1 s timer is how a scenario spells "the companion did not answer".
+    let onAbort = null;
+    const aborted = new Promise((_, rej) => {
+      onAbort = () => rej(Object.assign(new Error('aborted'), {name: 'AbortError'}));
+    });
+    aborted.catch(() => {});     // the abort may land after the race settled;
+    const signal = opts && opts.signal;   // an unhandled rejection kills node
+    if (signal) signal.addEventListener('abort', onAbort);
+    const res = signal ? await Promise.race([handler(method, url, body), aborted])
+                       : await handler(method, url, body);
     const status = res.status === undefined ? 200 : res.status;
     return {
       ok: status >= 200 && status < 300,
@@ -153,6 +165,10 @@ function makeContext(handler, seed, hash) {
     // premise of the opening-job scenarios.
     document, location: {hash: hash || ''}, console, localStorage, navigator,
     fetch: fetchStub,
+    // node's own, not a shim: the companion probe builds one per call and the
+    // 1 s bound is the only thing standing between a hung tray app and an
+    // editor watching a review panel that will not go away.
+    AbortController,
     setTimeout: (fn, ms) => timers.set(fn, ms),
     clearTimeout: id => timers.clear(id),
     setInterval: (fn, ms) => { timers.intervals++; return -1; },
@@ -174,7 +190,8 @@ async function boot(handler, seed, hash) {
     + '["state","banners","poll","attach","detach","runSearch","runUrls",'
     + '"toggle","bulk","loadHealth","loadProjects","loadManifest","loadRecent",'
     + '"renderProgress","renderTerms","renderGrid","toast","setBanner",'
-    + '"visibleVideos","SHOT_TYPES","shotKeys","shotSummary","renderShots"]'
+    + '"visibleVideos","SHOT_TYPES","shotKeys","shotSummary","renderShots",'
+    + '"startDownload","dispatchLocal","lockToServer","renderMode"]'
     + '.forEach(k => { try { globalThis.__[k] = eval(k); } catch (e) {} });', h.ctx);
   await flush();
   h.app = h.ctx.__;
@@ -965,6 +982,64 @@ scenarios['the_candidate_limit_shows_on_the_job_and_recent_views'] = async () =>
                  .map(r => r.byClass('capsum').map(s => s.textContent).join(''))};
 };
 
+// ---- the destination project -------------------------------------------
+// The picker had no memory at all, so every page load put it back on the
+// project the server happened to list FIRST. Live, 2026-08-14: 16 term folders
+// meant for 2026/FF5/Energy Transition (position 3) landed in 2026/CCT/Creator
+// Profiles/Season 1 (position 1), which the editor experienced as "the folder
+// select keeps switching back to Creator Profiles".
+
+const PROJECTS = [
+  {slug: 'cct-s1', label: '2026/CCT/Creator Profiles/Season 1'},
+  {slug: 'ff5-nuclear', label: '2026/FF5/Nuclear'},
+  {slug: 'ff5-energy', label: '2026/FF5/Energy Transition'},
+];
+
+// Three projects rather than baseline()'s one: "the third one comes back" is
+// the whole assertion, and against a one-project list every bug passes.
+const projectPage = (seed, jobId) => boot(async (method, url) => {
+  if (url.startsWith('api/projects')) {
+    return {json: {projects: PROJECTS, projects_available: true, error: null}};
+  }
+  const b = baseline(method, url); if (b) return b;
+  if (method === 'POST' && url === 'api/jobs') return {json: {job_id: jobId}};
+  if (url === `api/jobs/${jobId}`) return {json: POLLRES(JOB({id: jobId}))};
+  return {json: {}};
+}, seed);
+
+scenarios['picking_a_project_remembers_it'] = async () => {
+  const h = await projectPage(null, 91);
+  const sel = h.get('project');
+  sel.value = 'ff5-energy';
+  sel.onchange();                       // what picking an option does
+  return {stored: h.store['ytdl.project'],
+          options: sel.children.map(o => [o.value, o.textContent]),
+          wired: typeof sel.onchange === 'function'};
+};
+
+scenarios['the_remembered_project_comes_back_and_is_posted'] = async () => {
+  const h = await projectPage({'ytdl.project': 'ff5-energy'}, 92);
+  const restored = h.get('project').value;
+  h.get('q').value = 'reef';            // deliberately NOT setting the project:
+  await h.app.runSearch();              // the restore is what has to reach the POST
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  return {restored, posted: post && post.body.project_slug};
+};
+
+// A project this editor has since unticked on the dashboard is not in the list
+// any more. Assigning a <select> a value none of its options carry selects
+// NOTHING in some browsers, which would leave runSearch with no slug at all --
+// so an unknown slug must be left alone, silently, on the first option.
+scenarios['a_project_that_is_gone_falls_back_silently'] = async () => {
+  const h = await projectPage({'ytdl.project': 'deleted-last-month'}, 93);
+  const sel = h.get('project');
+  return {value: sel.value,
+          options: sel.children.map(o => o.value),
+          banners: h.banners(),
+          go_disabled: h.get('go').disabled};
+};
+
 // ---- the download history ----------------------------------------------
 // "once a video is downloaded we need a history like the original youtube
 // download utility which shows thumbnails, titles, and allows the user to open
@@ -1332,6 +1407,253 @@ scenarios['attaching_to_an_old_review_respects_the_fold'] = async () => {
           stored_after: h.store['ytdl.collapsed']};
 };
 
+// ---- requester-first downloads ------------------------------------------
+// docs/YTDL_LOCAL_DOWNLOAD.md §§2/9/10. The SPA's whole part in this is: probe
+// the editor's own companion when the server says the feature is on, hand it a
+// job id, and name the executor in the header. Every one of those has to be
+// invisible when it fails -- the clips arrive from the NAS either way -- so the
+// scenarios below are mostly about what does NOT happen.
+
+const CAP_URL = 'http://127.0.0.1:8899/ytdl/capabilities';
+const LOCAL_DL_URL = 'http://127.0.0.1:8899/ytdl/download';
+
+// Everything this page said to 127.0.0.1, in order.
+const loopback = h => h.calls.filter(c => c.url.startsWith('http://127.0.0.1:8899'))
+  .map(c => ({method: c.method, url: c.url, body: c.body}));
+
+// A page with one reviewed job (90) ready to submit. `flag` is the server's
+// phase-1 switch as api/health reports it -- UNDEFINED means a server that
+// predates the field at all, which is not the same test as `false`. `cap`/`dl`
+// script the companion's two routes; `mode` is what the server then says about
+// the job (a function of the poll number, for the reclaim case).
+function dispatchPage(opts) {
+  const {flag, cap, dl, lock, mode, quality} = opts || {};
+  let started = false, downloadPolls = 0;
+  return boot(async (method, url, body) => {
+    if (url.startsWith('api/health')) {
+      const j = {claude: 'ok', claude_detail: '', yt_dlp: 'ok',
+                 worker_alive: true, cookies: false};
+      if (flag !== undefined) j.local_download = flag;
+      return {json: j};
+    }
+    const b = baseline(method, url); if (b) return b;
+    // The companion. Absent by default: 404 is what a tray app that predates
+    // 0.8.0 answers, and it is the fleet's normal state through all of phase 1.
+    if (url === CAP_URL) return cap ? cap() : {status: 404, json: {}};
+    if (url === LOCAL_DL_URL) return dl ? dl() : {status: 503, json: {ok: false}};
+    if (method === 'POST' && url === 'api/jobs/90/download') {
+      started = true;
+      return {json: {ok: true}};
+    }
+    if (method === 'POST' && url === 'api/jobs/90/mode-lock') {
+      return lock ? lock(body) : {json: {ok: true, download_mode: 'server'}};
+    }
+    if (url === 'api/jobs/90') {
+      if (!started) return {json: POLLRES(JOB({id: 90, phase: 'ready_for_review'}))};
+      downloadPolls++;
+      const m = typeof mode === 'function' ? mode(downloadPolls) : mode;
+      return {json: POLLRES(JOB({id: 90, phase: 'downloading', dl_total: 1,
+                                 dl_done: 0, download_mode: m,
+                                 claimed_by: m === 'local' ? 'alex' : null}))};
+    }
+    if (url.startsWith('api/jobs/90/manifest')) {
+      return {json: MANIFEST({job: JOB({id: 90, phase: 'ready_for_review',
+                                        quality}),
+                              videos: [VIDEO('AAAAAAAAAA9', {selected: 1,
+                                                             dl_state: 'pending'})]})};
+    }
+    return {json: {}};
+  });
+}
+
+const submit = async h => {
+  await h.app.attach(90);
+  await flush();
+  await h.app.startDownload();
+  await flush(20);
+  return h;
+};
+
+const CAPABLE = () => ({json: {ok: true, editor: 'alex',
+                               ytdlp_version: '2026.08.10', free_bytes: 9e11}});
+const ACCEPTED = () => ({status: 202, json: {ok: true, job_id: 90}});
+
+// §10 phase 1: the flag is what makes any of this exist. Off -- or absent, on a
+// server that has not been deployed yet -- the page must not so much as LOOK at
+// 127.0.0.1, and must not badge a download_mode the server sent anyway.
+scenarios['the_server_flag_gates_the_whole_feature'] = async () => {
+  const off = await submit(await dispatchPage(
+    {flag: false, mode: 'local', cap: CAPABLE, dl: ACCEPTED}));
+  const older = await submit(await dispatchPage(
+    {mode: 'local', cap: CAPABLE, dl: ACCEPTED}));
+  return {off: loopback(off), older: loopback(older),
+          // ...and the server was still given the selection, as always
+          submitted: off.calls.filter(c => c.url === 'api/jobs/90/download').length,
+          badge_hidden: off.get('dlmode').hidden,
+          badge_text: off.get('dlmode').textContent,
+          link_hidden: off.get('dlserver').hidden,
+          downloads_hidden: off.get('downloads').hidden};
+};
+
+// The happy path (§2, steps 1-3): probe, then one POST carrying a job id and
+// nothing else. Never twice -- there is no retry loop and no polling of the
+// loopback, so a dozen later ticks add no calls.
+scenarios['a_capable_companion_is_handed_the_job'] = async () => {
+  const h = await submit(await dispatchPage(
+    {flag: true, mode: 'local', cap: CAPABLE, dl: ACCEPTED}));
+  const dispatched = loopback(h);
+  await h.timers.fire();
+  await h.timers.fire();
+  return {dispatched, after_more_polls: loopback(h).length,
+          // the server's own accept comes FIRST: the job downloads either way
+          order: h.calls.map(c => c.url)
+            .filter(u => u === 'api/jobs/90/download' || u.startsWith('http://127')),
+          badge: h.get('dlmode').textContent,
+          badge_hidden: h.get('dlmode').hidden,
+          badge_class: h.get('dlmode').className,
+          badge_title: h.get('dlmode').title,
+          link_hidden: h.get('dlserver').hidden,
+          review_hidden: h.get('review').hidden,
+          toast_hidden: h.get('toast').hidden};
+};
+
+// §11's whole first column, one scenario: every way the companion can fail to
+// be a companion ends with no dispatch, no error, and the server worker doing
+// the job exactly as it does today.
+scenarios['a_companion_that_cannot_take_it_is_never_handed_it'] = async () => {
+  const run = over => dispatchPage(Object.assign(
+    {flag: true, mode: 'server'}, over)).then(submit);
+  // nothing listening (or the browser refusing a local connection)
+  const dead = await run({cap: () => { throw new Error('Failed to fetch'); }});
+  const old = await run({cap: () => ({status: 404, json: {}})});          // pre-0.8.0
+  const unable = await run({cap: () => ({json: {ok: false, reason: 'yt-dlp too old'}})});
+  const refused = await run({cap: CAPABLE, dl: () => ({status: 503, json: {ok: false}})});
+  const busy = await run({cap: CAPABLE, dl: () => ({status: 409, json: {ok: false}})});
+  return {dead: loopback(dead), old: loopback(old), unable: loopback(unable),
+          refused: loopback(refused).map(c => c.url),
+          busy: loopback(busy).map(c => c.url),
+          // not one of them says a word to the editor
+          quiet: [dead, old, unable, refused, busy]
+            .map(p => [p.get('toast').hidden, p.warnText()]),
+          // and every one of them is downloading, on the server
+          badges: [dead, old, unable, refused, busy]
+            .map(p => p.get('dlmode').textContent)};
+};
+
+// The companion that answers NOTHING -- a wedged tray, a machine that went to
+// sleep between the click and the probe. The abort is what makes this a
+// one-second cost instead of a promise that never settles, so the scenario
+// waits for the dispatch to actually give up rather than for the call count to
+// stay put (which it would either way).
+scenarios['a_hung_probe_is_abandoned_after_a_second'] = async () => {
+  const hang = () => new Promise(() => {});
+  // What the EDITOR sees meanwhile: startDownload never awaits the probe, so
+  // the review panel is away and the job is on screen downloading regardless.
+  const page = await submit(await dispatchPage(
+    {flag: true, mode: 'server', cap: hang}));
+  const during = {calls: loopback(page).length,
+                  review_hidden: page.get('review').hidden,
+                  downloads_hidden: page.get('downloads').hidden,
+                  badge: page.get('dlmode').textContent,
+                  toast_hidden: page.get('toast').hidden};
+
+  // And the probe itself: called directly, because the only way to see it give
+  // up is its own return value -- the call COUNT stays at one whether it was
+  // abandoned after PROBE_MS or is still waiting for a tray app that will
+  // never answer.
+  const h = await dispatchPage({flag: true, mode: 'server', cap: hang});
+  await h.app.attach(90);
+  await flush();
+  const p = h.app.dispatchLocal(90);
+  await flush();
+  await h.timers.fire();                  // the PROBE_MS abort
+  // Bounded on purpose: an unbounded await on a probe that was never abandoned
+  // would hang the whole harness instead of failing this one scenario.
+  const stuck = {};
+  const out = await Promise.race([p, flush(50).then(() => stuck)]);
+  return {during, abandoned: out === false, never_gave_up: out === stuck,
+          calls: loopback(h).length};
+};
+
+// COMP-BROLL-10: the local executor only runs the rungs it can NAME correctly
+// (480p/720p/1080p -- the rest need the server's transcode, whose filename it
+// cannot reproduce). It declares that in its capabilities, and a job outside it
+// is never dispatched: the claim would be taken and handed straight back. A
+// companion that declares nothing behaves exactly as it did before the field.
+scenarios['an_out_of_scope_job_is_never_handed_over'] = async () => {
+  const SCOPED = () => ({json: {ok: true, editor: 'alex',
+                                ytdlp_version: '2026.08.10', free_bytes: 9e11,
+                                scope_qualities: ['480p', '720p', '1080p']}});
+  const run = (q, capfn) => dispatchPage(
+    {flag: true, mode: 'server', quality: q, cap: capfn, dl: ACCEPTED}).then(submit);
+  const inScope = await run('1080p', SCOPED);
+  const outOfScope = await run('2160p', SCOPED);
+  const undeclared = await run('2160p', CAPABLE);
+  return {in_scope: loopback(inScope).map(c => c.url),
+          out_of_scope: loopback(outOfScope).map(c => c.url),
+          undeclared: loopback(undeclared).map(c => c.url),
+          // the server was still given the selection in every case
+          submitted: [inScope, outOfScope, undeclared]
+            .map(p => p.calls.filter(c => c.url === 'api/jobs/90/download').length),
+          quiet: [outOfScope.get('toast').hidden, outOfScope.warnText()]};
+};
+
+// §9: the badge is derived from the poll payload every tick and remembered
+// nowhere, so a lease that expires and is reclaimed server-side (§3) flips it
+// on its own -- which is the point, because a silent executor swap is how
+// editors conclude a feature is broken.
+scenarios['the_badge_flips_when_the_server_reclaims'] = async () => {
+  const h = await submit(await dispatchPage(
+    {flag: true, cap: CAPABLE, dl: ACCEPTED,
+     mode: n => (n <= 2 ? 'local' : 'server')}));
+  const local = {badge: h.get('dlmode').textContent,
+                 cls: h.get('dlmode').className,
+                 title: h.get('dlmode').title,
+                 link_hidden: h.get('dlserver').hidden};
+  await h.timers.fire();                  // poll 2: still ours
+  const still = h.get('dlmode').textContent;
+  await h.timers.fire();                  // poll 3: the server took it back
+  return {local, still, reclaimed: h.get('dlmode').textContent,
+          reclaimed_cls: h.get('dlmode').className,
+          reclaimed_title: h.get('dlmode').title,
+          link_hidden_after: h.get('dlserver').hidden,
+          dispatches: loopback(h).length};
+};
+
+// The per-job escape hatch (§9). One POST however many times it is clicked, to
+// a document-relative URL, and the page changes nothing itself: it finds out
+// from the next poll, exactly as it finds out about a reclaim it did not ask
+// for.
+scenarios['handing_the_job_back_posts_once'] = async () => {
+  const h = await submit(await dispatchPage(
+    {flag: true, cap: CAPABLE, dl: ACCEPTED,
+     mode: n => (n <= 1 ? 'local' : 'server')}));
+  const btn = h.get('dlserver');
+  const before = btn.hidden;
+  btn.onclick();
+  btn.onclick();                          // the double-click
+  await flush();
+  const posts = h.calls.filter(c => c.url.includes('mode-lock'));
+  const after_click = {badge: h.get('dlmode').textContent, disabled: btn.disabled};
+  await h.timers.fire();                  // ...and the next poll is the truth
+  return {before, posts, after_click, toast: h.get('toast').textContent,
+          badge_after_poll: h.get('dlmode').textContent,
+          link_hidden_after: btn.hidden};
+};
+
+// A blip on that POST must not leave the editor with a dead button and no
+// explanation: this one is a deliberate human action, unlike the dispatch.
+scenarios['a_refused_hand_back_says_so_and_comes_back'] = async () => {
+  const h = await submit(await dispatchPage(
+    {flag: true, mode: 'local', cap: CAPABLE, dl: ACCEPTED,
+     lock: () => ({status: 503, json: {detail: 'the lease is already gone'}})}));
+  const btn = h.get('dlserver');
+  btn.onclick();
+  await flush();
+  return {toast: h.get('toast').textContent, disabled: btn.disabled,
+          hidden: btn.hidden};
+};
+
 // ---- run them -----------------------------------------------------------
 (async () => {
   const out = {};
@@ -1677,6 +1999,47 @@ def test_a_finished_search_says_what_limit_it_ran_under(spa):
     assert r['rows'] == ['max 400', '', ''], r['rows']
 
 
+# ------------------------------------------------------ the destination picker
+def test_the_picked_project_is_remembered_between_visits(spa):
+    """It had no memory at all, so every load put it back on whatever the
+    server listed first. Live, 2026-08-14: 16 term folders meant for
+    2026/FF5/Energy Transition landed in 2026/CCT/Creator Profiles/Season 1."""
+    r = spa['picking_a_project_remembers_it']
+    assert r['wired'] is True, 'nothing is listening for a change of project'
+    assert r['stored'] == 'ff5-energy', r
+    # ...and the list itself is still the server's, in the server's order
+    assert r['options'] == [['cct-s1', '2026/CCT/Creator Profiles/Season 1'],
+                            ['ff5-nuclear', '2026/FF5/Nuclear'],
+                            ['ff5-energy', '2026/FF5/Energy Transition']], r
+
+
+def test_the_remembered_project_is_restored_and_reaches_the_post(spa):
+    """Restoring the DOM value is only half of it: the submit path reads
+    `$('#project').value`, so the restore has to be what the job is created
+    with, not a cosmetic selection."""
+    r = spa['the_remembered_project_comes_back_and_is_posted']
+    assert r['restored'] == 'ff5-energy', r
+    assert r['posted'] == 'ff5-energy', r
+
+
+def test_a_remembered_project_that_is_no_longer_offered_is_not_restored(spa):
+    """localStorage outlives a dashboard tick: assigning a <select> a value
+    none of its options carry selects NOTHING in some browsers, which would
+    leave runSearch with an empty slug and refuse every search."""
+    r = spa['a_project_that_is_gone_falls_back_silently']
+    assert r['value'] != 'deleted-last-month', r
+    # the harness's <select> has no implicit first-option default, so "left
+    # alone" reads as '' here -- in a browser that IS the first option, i.e.
+    # exactly the behaviour this picker had before 2026-08-14
+    assert r['value'] == '', r
+    assert r['options'] == ['cct-s1', 'ff5-nuclear', 'ff5-energy'], \
+        'the fallback came from an empty list, not a real one'
+    # silently: a stale key is not the editor's problem to be warned about, and
+    # the page still works
+    assert r['banners'] == [], r['banners']
+    assert r['go_disabled'] is False, r
+
+
 # ------------------------------------------------------ the download history
 def test_the_history_lists_the_ledger_with_a_thumbnail_and_a_destination(spa):
     """"once a video is downloaded we need a history like the original youtube
@@ -1934,6 +2297,142 @@ def test_attaching_to_a_job_already_at_review_leaves_the_fold_alone(spa):
     assert f['cards'] == 3, 'the grid was not built under the fold'
     assert r['after_unfold'] is False, r
     assert json.loads(r['stored_after']) == [], r['stored_after']
+
+
+# ------------------------------------------- requester-first downloads (§2/9)
+# docs/YTDL_LOCAL_DOWNLOAD.md. Phase 1 is the SPA half: probe the editor's own
+# companion, hand it a job id, name the executor. It ships with the server flag
+# OFF and reaches a fleet with no companion that answers these routes, so
+# "nothing happens" is the behaviour under test far more than "it works".
+
+CAPABILITIES = 'http://127.0.0.1:8899/ytdl/capabilities'
+LOCAL_DOWNLOAD = 'http://127.0.0.1:8899/ytdl/download'
+
+
+def test_with_the_flag_off_the_page_never_looks_at_the_loopback(spa):
+    """§10, phase 1: flag off is byte-for-byte the old page. The scenario's
+    server answers a capable companion AND reports download_mode=local, so
+    every part of this is the flag's doing and nothing else's."""
+    r = spa['the_server_flag_gates_the_whole_feature']
+    assert r['off'] == [], r['off']
+    # ...and the same for a server too old to have the field at all
+    assert r['older'] == [], r['older']
+    assert r['submitted'] == 1, 'the selection did not reach the server'
+    assert r['downloads_hidden'] is False, 'the job is downloading, as always'
+    assert r['badge_hidden'] is True and r['badge_text'] == '', r
+    assert r['link_hidden'] is True, r
+
+
+def test_a_capable_companion_is_probed_then_handed_the_job_id(spa):
+    """§2 steps 2-3. One probe, one dispatch, a body of exactly {job_id} --
+    the companion gets everything else from the server under its own token,
+    because a page may not be trusted with the work order (§8)."""
+    r = spa['a_capable_companion_is_handed_the_job']
+    assert [c['method'] for c in r['dispatched']] == ['GET', 'POST'], r['dispatched']
+    assert r['dispatched'][0]['url'] == CAPABILITIES, r['dispatched']
+    assert r['dispatched'][1]['url'] == LOCAL_DOWNLOAD, r['dispatched']
+    assert r['dispatched'][1]['body'] == {'job_id': 90}, r['dispatched']
+    # the server accepted the selection BEFORE any of it: the job downloads
+    # either way, and this is only a shortcut on top of that
+    assert r['order'] == ['api/jobs/90/download', CAPABILITIES, LOCAL_DOWNLOAD], r['order']
+    # exactly one attempt per submission -- no retry loop, no loopback polling
+    assert r['after_more_polls'] == 2, r
+    assert r['badge'] == 'downloading on your machine', r
+    assert r['badge_hidden'] is False and 'local' in r['badge_class'].split(), r
+    assert r['badge_title'] == 'claimed by alex', r
+    assert r['link_hidden'] is False, 'no way back to the server'
+    assert r['review_hidden'] is True and r['toast_hidden'] is True, r
+
+
+def test_no_companion_no_dispatch_and_no_word_about_it(spa):
+    """§11's first column. Nothing listening, a tray predating the routes, a
+    stale yt-dlp, a claim that lost the race, a companion already busy with
+    another job: all five end at the server worker doing the job exactly as
+    today, and none of them says anything to the editor."""
+    r = spa['a_companion_that_cannot_take_it_is_never_handed_it']
+    for name in ('dead', 'old', 'unable'):
+        assert [c['url'] for c in r[name]] == [CAPABILITIES], f'{name}: {r[name]}'
+    # a probe that says yes and a dispatch that is declined/busy: attempted
+    # once, consequence nil
+    assert r['refused'] == [CAPABILITIES, LOCAL_DOWNLOAD], r['refused']
+    assert r['busy'] == [CAPABILITIES, LOCAL_DOWNLOAD], r['busy']
+    for hidden, warn in r['quiet']:
+        assert hidden is True, 'a failed fast path toasted at the editor'
+        assert warn == '', warn
+    assert r['badges'] == ['downloading on the server'] * 5, r['badges']
+
+
+def test_a_probe_that_is_never_answered_is_abandoned(spa):
+    """§2 step 2's timeout, the failure mode with no error to catch: a wedged
+    tray app, or a laptop that slept between the click and the probe. The
+    editor's page has already moved on, and the probe gives up by itself."""
+    r = spa['a_hung_probe_is_abandoned_after_a_second']
+    assert r['during'] == {'calls': 1, 'review_hidden': True,
+                           'downloads_hidden': False,
+                           'badge': 'downloading on the server',
+                           'toast_hidden': True}, r['during']
+    assert r['never_gave_up'] is False, \
+        'the probe has no timeout: it waits on the companion forever'
+    assert r['abandoned'] is True, r
+    assert r['calls'] == 1, 'the abandoned probe still dispatched'
+
+
+def test_a_job_this_machine_cannot_name_correctly_is_not_dispatched(spa):
+    """COMP-BROLL-10 (2026-08-14): the executor runs 480p/720p/1080p and says
+    so. A 2160p job handed over would be claimed, read off the manifest, found
+    out of scope and abandoned -- a lease taken for nothing. A companion that
+    declares no scope is one that predates the field, and it is dispatched to
+    exactly as it was before."""
+    r = spa['an_out_of_scope_job_is_never_handed_over']
+    assert r['in_scope'] == [CAPABILITIES, LOCAL_DOWNLOAD], r['in_scope']
+    assert r['out_of_scope'] == [CAPABILITIES], r['out_of_scope']
+    assert r['undeclared'] == [CAPABILITIES, LOCAL_DOWNLOAD], r['undeclared']
+    assert r['submitted'] == [1, 1, 1], 'the server lost a selection'
+    assert r['quiet'] == [True, ''], 'a fast path that did not fire said so'
+
+
+def test_the_badge_flips_on_its_own_when_the_server_reclaims(spa):
+    """§3/§9: the lease expires (laptop closed, tray upgraded), the server takes
+    the job back, and the header says so within a poll -- because the badge is
+    read off the payload and remembered nowhere."""
+    r = spa['the_badge_flips_when_the_server_reclaims']
+    assert r['local']['badge'] == 'downloading on your machine', r['local']
+    assert 'local' in r['local']['cls'].split(), r['local']
+    assert r['local']['title'] == 'claimed by alex', r['local']
+    assert r['local']['link_hidden'] is False, r['local']
+    assert r['still'] == 'downloading on your machine', r
+    assert r['reclaimed'] == 'downloading on the server', r
+    assert 'local' not in r['reclaimed_cls'].split(), r
+    assert r['reclaimed_title'] == '', r
+    assert r['link_hidden_after'] is True, 'a job the server owns offered a hand-back'
+    assert r['dispatches'] == 2, 'the reclaim re-dispatched'
+
+
+def test_the_hand_back_posts_once_and_waits_for_the_poll(spa):
+    """§9's per-job escape hatch. One request however many clicks, document-
+    relative like every other API call here, and the page asserts nothing about
+    the mode itself -- the next poll is the truth."""
+    r = spa['handing_the_job_back_posts_once']
+    assert r['before'] is False, 'the link was not offered on a local job'
+    assert len(r['posts']) == 1, r['posts']
+    assert r['posts'][0]['url'] == 'api/jobs/90/mode-lock', r['posts'][0]
+    assert r['posts'][0]['method'] == 'POST'
+    assert r['posts'][0]['body'] == {'mode': 'server'}, r['posts'][0]
+    assert r['after_click']['disabled'] is True, 'clickable twice'
+    assert r['after_click']['badge'] == 'downloading on your machine', \
+        'the page decided the mode itself instead of asking'
+    assert 'server' in r['toast']
+    assert r['badge_after_poll'] == 'downloading on the server', r
+    assert r['link_hidden_after'] is True, r
+
+
+def test_a_refused_hand_back_is_said_out_loud(spa):
+    """The one action here that is NOT a silent fast path: the editor asked for
+    this, so a failure says so and the button comes back."""
+    r = spa['a_refused_hand_back_says_so_and_comes_back']
+    assert 'lease is already gone' in r['toast'], r
+    assert r['disabled'] is False, 'a blip left a dead button'
+    assert r['hidden'] is False, r
 
 
 # --------------------------------------------------- source-level assertions
@@ -2294,3 +2793,159 @@ def test_localstorage_is_never_allowed_to_break_the_page():
     body = js[js.index('function loadShots()'):js.index('function renderShotNote()')]
     assert body.count('try {') >= 2 and body.count('catch') >= 2, body
     assert "const SHOTS_KEY = 'ytdl.shot_types'" in js
+
+
+def test_the_destination_project_is_remembered_like_every_other_choice():
+    """Same shape as SHOTS_KEY/CAP_KEY/COLLAPSE_KEY: one key, guarded both
+    directions, and validated against what the SERVER just listed on the way in
+    -- the restore has to happen after the options exist, or it selects
+    nothing (2026-08-14)."""
+    js = _js()
+    assert "const PROJECT_KEY = 'ytdl.project'" in js
+    guard = js[js.index('function loadProject()'):js.index('async function loadProjects()')]
+    assert guard.count('try {') >= 2 and guard.count('catch') >= 2, guard
+    body = js[js.index('async function loadProjects()'):js.index('const defaultShots')]
+    assert body.index('loadProject()') > body.index('sel.appendChild(o)'), \
+        'the restore runs before the options exist'
+    # only a slug the server still offers, and the change is what saves it
+    assert 'r.projects.some(p => p.slug === saved)' in body, body
+    assert 'sel.onchange = saveProject' in body, body
+
+
+# --- requester-first downloads: the shapes, for a machine with no node --------
+
+def _dispatch():
+    js = _js()
+    return js[js.index('async function dispatchLocal('):js.index('function renderMode(')]
+
+
+def test_the_local_dispatch_is_gated_on_the_servers_own_flag():
+    """docs/YTDL_LOCAL_DOWNLOAD.md §10: phase 1 deploys with YTDL_LOCAL_DOWNLOAD
+    off and soaks on the live dashboard, which only holds if the flag is read
+    strictly -- absent means off, and off means this page is what it was."""
+    js = _js()
+    health = js[js.index('async function loadHealth()'):js.index('// ------', js.index('async function loadHealth()'))]
+    assert 'state.localDownload = h.local_download === true;' in health, health
+    assert 'if (!state.localDownload' in _dispatch(), _dispatch()
+
+
+def test_the_probe_is_bounded_and_every_failure_of_it_is_silent():
+    """§2 step 2: 1 s, then the server path. It sits between the editor clicking
+    DOWNLOAD and the page moving on, and a tray app that is wedged (or a browser
+    refusing the local connection) must cost that second and nothing else."""
+    js = _js()
+    assert 'const PROBE_MS = 1000;' in js
+    body = js[js.index('async function companionCapabilities('):js.index('async function dispatchLocal(')]
+    assert '`${COMPANION_URL}/ytdl/capabilities`' in body, body
+    assert 'new AbortController()' in body and 'ctl.abort()' in body, body
+    assert 'setTimeout(() => ctl.abort(), PROBE_MS)' in body, body
+    # the timer is only half of it: the signal has to reach the fetch
+    assert '{signal: ctl.signal}' in body, body
+    assert 'clearTimeout(timer)' in body, body
+    # 200 with ok:false is a companion saying why not; it is a no like any other
+    assert 'body.ok === true' in body, body
+    assert 'if (!res.ok) return null' in body, body
+    # not one word to the editor: this is a fast path, not a feature they have
+    # to watch fail (§11)
+    for banned in ('toast(', 'setBanner('):
+        assert banned not in body + _dispatch(), banned
+
+
+def test_the_dispatch_carries_a_job_id_and_nothing_else():
+    """§2/§8: the browser is the dispatcher because it is the only party that
+    can see both sides -- but the work order is not its to give. Urls, quality,
+    destination and template all reach the companion from the server."""
+    js = _js()
+    assert "const COMPANION_URL = 'http://127.0.0.1:8899';" in js
+    body = _dispatch()
+    assert '`${COMPANION_URL}/ytdl/download`' in body, body
+    assert 'JSON.stringify({job_id: jobId})' in body, body
+    assert 'res.status === 202' in body, body
+    # exactly one attempt per submission: no loop, no retry, no timer
+    for banned in ('for (', 'while (', 'setTimeout', 'setInterval'):
+        assert banned not in body, banned
+
+
+def test_the_dispatch_respects_a_companions_declared_scope():
+    """COMP-BROLL-10: the one thing this page may decide with, and it decides
+    it the safe way round -- a companion that declares no scope, or a quality
+    the page does not know, is dispatched to exactly as before."""
+    body = _dispatch()
+    assert 'Array.isArray(cap.scope_qualities)' in body, body
+    assert 'cap.scope_qualities.includes(quality)' in body, body
+    assert 'async function dispatchLocal(jobId, quality)' in _js()
+
+
+def test_the_dispatch_happens_only_after_the_server_accepts_the_selection():
+    """§2 step 1: the job is downloading server-side from the moment the POST
+    is accepted, and nothing about the companion is allowed to be a
+    precondition for that -- nor to make the editor wait for a probe."""
+    js = _js()
+    body = js[js.index('async function startDownload()'):js.index('async function cancelJob()')]
+    assert body.index('dispatchLocal(jobId') > body.index('post(`api/jobs/${jobId}/download`)'), body
+    assert 'await dispatchLocal' not in body, 'the review panel now waits on the probe'
+    # ...and the quality it hands the dispatcher is the JOB's, off the manifest
+    # under review -- never the header picker, which is whatever the editor has
+    # changed it to since (COMP-BROLL-10, 2026-08-14)
+    assert 'state.manifest.job.quality' in body, body
+    assert "$('#quality')" not in body, body
+
+
+def test_the_executor_badge_is_derived_from_the_payload_and_nothing_else():
+    """§9: it must flip on a reclaim the page never asked for (§3), so it is
+    read off every poll response and remembered nowhere -- the only local thing
+    it consults is the server's own feature flag."""
+    js = _js()
+    body = js[js.index('function renderMode('):js.index('async function lockToServer(')]
+    assert 'job.download_mode' in body and "job.phase === 'downloading'" in body, body
+    assert 'downloading on your machine' in body, body
+    assert 'downloading on the server' in body, body
+    assert 'job.claimed_by' in body, body
+    assert 'state.' not in body.replace('state.localDownload', ''), \
+        'the badge grew a piece of state that can go stale'
+    # ...and it is rendered from the same tick as the bar and the counter
+    rows = js[js.index('function renderDownloads('):js.index('async function loadManifest(')]
+    assert 'renderMode(job)' in rows, rows
+
+
+def test_the_hand_back_is_document_relative_and_one_shot():
+    """A leading slash would hit the DASHBOARD's api under the mount
+    (test_mounted_prefix.py scans the bytes; this names the URL), and a second
+    click is the same request, not a second one."""
+    js = _js()
+    body = js[js.index('async function lockToServer('):js.index('// -------', js.index('async function lockToServer('))]
+    assert "post(`api/jobs/${state.jobId}/mode-lock`, {mode: 'server'})" in body, body
+    assert 'if (btn.disabled' in body and 'btn.disabled = true' in body, body
+    # the page never decides the mode itself: §9's "then relies on polling"
+    assert 'download_mode' not in body, body
+    # ...and the one-shot is per ATTACHMENT: job B may be local when job A was
+    # handed back
+    attached = js[js.index('async function attach('):js.index('async function poll()')]
+    assert "$('#dlserver').disabled = false" in attached, attached
+
+
+def test_the_badge_and_the_link_live_in_the_downloads_header():
+    """Both hidden in the markup: with the flag off (the whole of phase 1 on
+    the live dashboard) nothing new may appear on this page at all."""
+    html = _html()
+    start = html.index('<div class="prow panelhead">')
+    head = html[start:html.index('<div class="bar">', start)]
+    assert 'id="dlmode" class="dlmode hidden"' in head, head
+    assert '<button id="dlserver" class="text-btn hidden"' in head, head
+    assert head.index('id="dlmode"') < head.index('id="dlserver"'), head
+    assert head.index('id="dlserver"') < head.index('id="cancel2"'), head
+    js = _js()
+    assert "$('#dlserver').onclick = lockToServer;" in js
+
+
+def test_the_executor_badge_reads_as_a_status_chip_not_a_warning():
+    """The server doing the download is the ordinary case and the whole of
+    phase 1 -- it must not look like something went wrong."""
+    css = _css()
+    plain = css[css.index('.dlmode {'):css.index('}', css.index('.dlmode {'))]
+    assert 'var(--muted)' in plain, plain
+    assert 'var(--red)' not in plain and 'var(--amber)' not in plain, plain
+    local = css[css.index('.dlmode.local {'):css.index('}', css.index('.dlmode.local {'))]
+    assert 'var(--green)' in local, local
+    # beside the badge it acts on, not shoved to the right edge with [ CANCEL ]
+    assert '#dlserver { margin-left: 0; }' in css

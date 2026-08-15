@@ -160,7 +160,7 @@ def dest_dir(video: dict, creators: set[str]) -> str:
 
 
 def dest_rel(video: dict, creators: set[str], suffix: str = ".mp4", *,
-             as_preview: bool = True) -> str:
+             as_preview: bool = True, stem: str | None = None) -> str:
     """Where this clip belongs in the archive, as a forward-slash relative path.
 
     ONE rule for both collections: the best available media sits in the folder,
@@ -181,8 +181,12 @@ def dest_rel(video: dict, creators: set[str], suffix: str = ".mp4", *,
     `suffix` follows the file actually being placed -- a `.mov` copied verbatim
     keeps its extension, because renaming it `.mp4` is a container lie that
     ffprobe, Resolve and every editor would eventually trip over.
+
+    `stem` overrides the name derived from the source file: main() passes the
+    one this clip already holds (see claim_name), so the top slot and the
+    preview beneath it always share a name and neither moves between runs.
     """
-    stem = safe_name(PurePosixPath(video["rel_path"]).stem)
+    stem = stem or safe_name(PurePosixPath(video["rel_path"]).stem)
     folder = dest_dir(video, creators)
     return (f"{folder}/{PROXY_DIR}/{stem}{suffix}" if as_preview
             else f"{folder}/{stem}{suffix}")
@@ -251,29 +255,83 @@ def preview_source(video: dict, top: Path | None, proxies_dir: Path) -> Path | N
     return None
 
 
-def dedupe(path: Path, taken: set[str]) -> Path:
-    """Resolve two clips wanting the same filename, deterministically.
+def claim_key(folder: str, stem: str) -> str:
+    """The name two clips contend for: a folder and a stem, extension aside.
 
-    Collisions are settled against THIS run's claimed names only -- never
-    against what is on disk. That distinction is the whole point: a file
-    already at the target path is almost always this clip's own copy from an
-    earlier run, and treating it as a collision renamed all 2,093 clips to
-    `_2` on the second build.
-
-    Because `videos` is walked in id order, the same clip resolves to the same
-    name on every run. That stability is a requirement, not a nicety: the path
-    is stored on the row and ends up in editors' timelines, so it must not move
-    underneath them.
+    Claimed per stem rather than per full path so a clip's top slot and the
+    preview under `Proxy/` always resolve to the SAME name. Keying on the whole
+    path let them diverge whenever the two files had different extensions --
+    `<folder>/name.mov` (base name free) beside `<folder>/Proxy/name_2.mp4`
+    (taken) -- which is how a newcomer could still land on top of an already
+    published clip's original (BROLL-IDX-5, 2026-08-14).
     """
-    key = str(path).lower()
-    if key not in taken:
-        taken.add(key)
-        return path
+    return f"{folder}/{stem}".lower()
+
+
+def published_names(db_path: str) -> dict[int, tuple[str, str]]:
+    """{video id: (folder, stem)} for every clip that already has an archive path.
+
+    Read from the DB, not from this run's plan: the rows that make a name unsafe
+    to re-derive are precisely the ones the current run may not select (see
+    claim_name).
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT id, archive_path FROM videos WHERE archive_path IS NOT NULL "
+            "AND archive_path <> ''"
+        ).fetchall()
+    finally:
+        conn.close()
+    out: dict[int, tuple[str, str]] = {}
+    for vid, rel in rows:
+        p = PurePosixPath(rel)
+        parent = p.parent
+        # The stored path is the PREVIEW, i.e. <folder>/Proxy/<stem>.<ext>; the
+        # name is contended for at <folder> level.
+        if parent.name == PROXY_DIR:
+            parent = parent.parent
+        out[int(vid)] = (str(parent), p.stem)
+    return out
+
+
+def claim_name(folder: str, stem: str, taken: set[str], *,
+               published: tuple[str, str] | None = None) -> str:
+    """This clip's name in `folder`, suffixed `_2`.. only if it must be.
+
+    Collisions are settled against claimed names, never against what is on disk.
+    That distinction is the whole point: a file already at the target path is
+    almost always this clip's own copy from an earlier run, and treating it as a
+    collision renamed all 2,093 clips to `_2` on the second build.
+
+    A clip that already HOLDS a name keeps it, unconditionally. The old rule was
+    "walk `videos` in id order and the same clip resolves to the same name every
+    run", which only holds while the eligible set grows at the tail -- and it
+    does not: a 'discovered' or 'error' row re-run to 'indexed', or a Downloads
+    row that finally gets a category (the BROLL-7 carve-out), joins at its own
+    low id. It then claimed the base name, every later colliding clip shifted by
+    one, write_paths rewrote their `archive_path`, and the copy loop wrote the
+    newcomer's bytes over a file already recorded on another row, already served
+    by the web app and already cut into editors' timelines (BROLL-IDX-5,
+    2026-08-14). main() seeds `taken` from every published name for the same
+    reason, so a newcomer cannot claim one even when its owner is not in this
+    run's plan.
+    """
+    if published is not None:
+        # Its own claim, already registered by the seed. Honoured even if the
+        # folder has since changed (a Downloads clip categorised after it
+        # shipped): moving a clip between folders is a deliberate re-file, but
+        # its NAME must not change under the editors who already linked it.
+        taken.add(claim_key(folder, published[1]))
+        return published[1]
+    if claim_key(folder, stem) not in taken:
+        taken.add(claim_key(folder, stem))
+        return stem
     n = 2
     while True:
-        cand = path.with_name(f"{path.stem}_{n}{path.suffix}")
-        if str(cand).lower() not in taken:
-            taken.add(str(cand).lower())
+        cand = f"{stem}_{n}"
+        if claim_key(folder, cand) not in taken:
+            taken.add(claim_key(folder, cand))
             return cand
         n += 1
 
@@ -368,19 +426,26 @@ def main() -> int:
     share_roots = {n: s.root for n, s in cfg.shares.items()}
 
     plan, missing = [], []
-    taken: set[str] = set()
+    # Every name any clip already holds, claimed before a single new one is
+    # handed out -- including clips this run will not even look at (BROLL-IDX-5).
+    published = published_names(cfg.db.path)
+    taken: set[str] = {claim_key(folder, stem) for folder, stem in published.values()}
     stills_planned = {kind: 0 for kind in STILL_DIRS}
     no_still = {kind: 0 for kind in STILL_DIRS}
     for v in videos:
+        # One name per clip, used by both slots below, so they can never diverge.
+        name = claim_name(dest_dir(v, creators),
+                          safe_name(PurePosixPath(v["rel_path"]).stem),
+                          taken, published=published.get(v["id"]))
+
         # The TOP slot: the best media we have for this clip. For a download
         # that is the actual original; for our own shoots it is the shoot's
         # editor proxy, which Resolve treats as the original -- so the clip is
         # online and renderable either way, with no per-collection special case.
         top = archive_source(v, cfg, share_roots, proxies)
         if top is not None:
-            plan.append((v, top, dedupe(
-                dest_root / dest_rel(v, creators, top.suffix.lower(),
-                                     as_preview=False), taken)))
+            plan.append((v, top, dest_root / dest_rel(
+                v, creators, top.suffix.lower(), as_preview=False, stem=name)))
         else:
             missing.append(v)
 
@@ -389,9 +454,8 @@ def main() -> int:
         # leave a clip with nothing there.
         preview = preview_source(v, top, proxies)
         if preview is not None:
-            plan.append((v, preview, dedupe(
-                dest_root / dest_rel(v, creators, preview.suffix.lower(),
-                                     as_preview=True), taken)))
+            plan.append((v, preview, dest_root / dest_rel(
+                v, creators, preview.suffix.lower(), as_preview=True, stem=name)))
 
         # The STILLS: poster and sprite, by id, in flat top-level folders. Not
         # run through dedupe() -- `{video_id}.jpg` cannot collide, and passing

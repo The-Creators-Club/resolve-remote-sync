@@ -231,7 +231,7 @@ def _decode(raw: Any) -> str:
     return str(raw)
 
 
-# -- the two endpoints -------------------------------------------------------
+# -- the endpoints -----------------------------------------------------------
 #
 # Same status-code split as broll_server's /insert, and for the same reason:
 # the music web UI's api() helper THROWS on a non-2xx and shows only
@@ -249,6 +249,91 @@ def build_status_response(caller: Optional[Callable[..., dict]] = None) -> tuple
     """
     run = caller if caller is not None else call
     return 200, run("status")
+
+
+def build_reveal_response(
+    body: dict,
+    mounts: dict,
+    spawner: Optional[Callable[[list], None]] = None,
+    platform: Optional[str] = None,
+    isfile: Optional[Callable[[str], bool]] = None,
+    isdir: Optional[Callable[[str], bool]] = None,
+) -> tuple[int, dict]:
+    """POST /music/reveal. Returns (http_status, json_body).
+
+    Body: {"share": "music", "rel_path": "Cinematic/Slow Build.wav"} -- the
+    same pair /music/send takes and for the same reason: the page is served
+    from the NAS and only this machine knows where the library is on it.
+
+    MUSIC-6 (2026-08-14): the music web app's own /api/reveal drove Explorer
+    ON THE SERVER. That was already the wrong machine when the app ran beside
+    the editor, and since the dashboard mounted it in a Linux container it is
+    permanently dead -- an editor clicking "show in folder" was asking the NAS
+    to open a window nobody would ever see. Revealing a file is an action on
+    the machine the editor is sitting at, which is what the loopback is, so
+    the route lives here beside /music/send.
+
+    The file manager half is ytdl_server's -- reveal_command's shell-free argv
+    list (MUSIC-2, 2026-08-11: cmd.exe re-parsed `&` out of a filename) and
+    its sanitized-env spawn -- rather than a second copy. One reveal
+    implementation for both route groups; only the message wording and the
+    `error` key differ, and both of those belong to the page that reads them.
+    """
+    # Deferred for the same reason local_path_for's import is: broll_server
+    # imports THIS module to dispatch its routes, and ytdl_server imports it
+    # too, so either at module level would be a cycle. sys.modules makes it
+    # free after the first call.
+    from . import broll_server
+    from . import ytdl_server
+
+    try:
+        local = local_path_for(body.get("share"), body.get("rel_path"), mounts)
+    except broll_server.PathTraversalError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except broll_server.MountNotConfiguredError as exc:
+        return 200, {"ok": False, "error": str(exc)}
+
+    file_check = isfile if isfile is not None else os.path.isfile
+    dir_check = isdir if isdir is not None else os.path.isdir
+
+    path = Path(local)
+    folder = path.parent
+    if file_check(str(path)):
+        target, select = str(path), True
+        message = f"Showing {path.name} in {folder}"
+    elif dir_check(str(folder)):
+        # The track is in the index and the file is not here yet: still
+        # syncing, or the share is only half-mounted. The folder is the useful
+        # answer, and it is what the editor clicked the row to look at -- but
+        # SAY SO. An editor on this branch is usually asking "why isn't my
+        # track here", and "Showing X in Y" claims a file they can see. Word
+        # for word ytdl_server's line: two route groups on one listener, one
+        # language.
+        target, select = str(folder), False
+        message = f"{path.name} is not there — opened {folder} instead"
+    else:
+        # Nothing to point a file manager at. Spawning "explorer <missing>"
+        # here opens the editor's Documents folder and looks like a bug.
+        return 200, {
+            "ok": False,
+            "error": f"{path} is not on this machine — is the share mounted?",
+        }
+
+    argv = ytdl_server.reveal_command(target, select, platform)
+    if argv is None:
+        return 200, {
+            "ok": False,
+            "error": f"opening a folder is only supported on Windows and macOS "
+                     f"— the file is at {target}",
+        }
+
+    run = spawner if spawner is not None else ytdl_server.spawn
+    try:
+        run(argv)
+    except OSError as exc:
+        log.warning("music: could not open the file manager (%s)", exc)
+        return 200, {"ok": False, "error": f"could not open the file manager: {exc}"}
+    return 200, {"ok": True, "message": message}
 
 
 def build_send_response(

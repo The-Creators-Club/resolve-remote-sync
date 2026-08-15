@@ -423,6 +423,36 @@ def test_a_file_younger_than_min_age_is_deferred_not_uploaded(tmp_path):
     assert len(calls) == 1
 
 
+def test_a_0_byte_file_is_never_uploaded(tmp_path):
+    """COMP-GUARD-1 (2026-08-14): the express twin of lane A's --min-size
+    floor. rclone refuses --min-size next to --files-from-raw (same CRITICAL
+    as --min-age), and express is `copy --ignore-existing` too -- so an empty
+    upload would be the NAS's permanent copy of that clip. A hard kill in the
+    middle of the fixer's copy strands exactly such a file, under its real
+    name, and the watchdog fires on it."""
+    calls: list = []
+    lane = _make_lane(tmp_path, popen_factory=_recording_popen(calls))
+    local = Path(lane.local_root)
+    p = _old_file(local, "Projects/2026/FF5/Alpha/stranded.mov", b"")
+    assert p.stat().st_size == 0
+
+    lane.notify_path_changed(str(p))
+    _flush_now(lane)
+    _flush_now(lane)  # a second size-stable observation would satisfy L-14
+
+    assert calls == [], "an empty file must never travel a copy --ignore-existing lane"
+    # Deferred, not dropped: a file that was only just created is 0 bytes for
+    # an instant, and the next window sees the real ones.
+    assert "Projects/2026/FF5/Alpha/stranded.mov" in lane._express_pending
+
+    p.write_bytes(b"x" * 64)
+    old = time.time() - (LANE_A_MIN_AGE_SECONDS + 60)
+    os.utime(p, (old, old))
+    _flush_now(lane)   # first non-zero observation: size changed -> defer
+    _flush_now(lane)   # stable at 64 bytes -> away it goes
+    assert len(calls) == 1
+
+
 def test_a_path_deleted_before_the_window_closes_is_dropped_silently(tmp_path):
     calls: list = []
     lane = _make_lane(tmp_path, popen_factory=_recording_popen(calls))

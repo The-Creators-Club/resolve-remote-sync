@@ -1,86 +1,70 @@
-r"""`/api/reveal` must not hand a library path to a shell.
+r"""Reveal is the EDITOR'S file manager, so it is not a route of this app.
 
-MUSIC-2 (2026-08-11): it used to `os.spawnl` COMSPEC with `/c explorer
-/select,<path>`, and cmd.exe re-parses what it is given. `db.safe_upload_name`
-strips `<>:"/\|?*` but NOT `&`, so a file called `x&calc.mp3` -- a legal
-Windows filename an editor can drop into the library over SMB -- turned a
-logged-in user's reveal click into local command execution, and an innocent
-`rock&roll.mp3` just opened Explorer somewhere else.
+MUSIC-6 (2026-08-14): `GET /api/reveal/{id}` ran `explorer /select,<path>` on
+whatever host served the page. Port step 8 moved the Resolve actions off this
+server for exactly that reason and left reveal behind: on the NAS container
+`os.name != 'nt'`, so it answered 200 `{"ok": false, "path": "/mnt/tank/..."}`
+-- a success as far as app.js's `api()` was concerned, discarded by a bare
+`.catch(() => {})`. Every editor's reveal button did nothing, ever, with no
+message, and the response handed the browser the NAS's absolute filesystem
+path that the (share, rel_path) model exists to keep out of the payload.
 
-The route only ever spawns on Windows; on the NAS container it answers
-`ok: False` and touches nothing.
+It now goes browser -> `POST /music/reveal` on the editor's own companion
+(127.0.0.1:8899), beside `/music/send`, translated against THAT machine's
+mounts. What this file pins is that nothing here serves it any more, and that
+the page asks the companion for it.
+
+The older shell-injection guard this file used to hold (MUSIC-2, 2026-08-11:
+`x&calc.mp3` through cmd.exe) moved with the route -- it is the companion's
+`reveal_command`, which builds an argv list and never a command string.
 """
-import os
+from pathlib import Path
 
-import pytest
-
-from musicweb import routes_ingest
-from musicweb.db import connect
-
-pytestmark = pytest.mark.skipif(os.name != 'nt',
-                                reason='the reveal route only spawns on Windows')
-
-NASTY = 'rock&roll & calc.mp3'
+STATIC = Path(__file__).resolve().parent.parent / 'static'
+APP_JS = (STATIC / 'app.js').read_text(encoding='utf-8')
 
 
-@pytest.fixture()
-def rows(client, seeded_db):
-    """Two extra tracks -- one with a real file, one without.
-
-    Removed again afterwards: the seeded database is session-scoped and other
-    tests count its rows.
-    """
-    path = seeded_db / 'library' / NASTY
-    path.write_bytes(b'0' * 16)
-    con = connect()
-    for tid, rel in ((90, NASTY), (91, 'gone.mp3')):
-        con.execute('INSERT OR REPLACE INTO tracks(id,rel_path,filename,ext,'
-                    'bytes,duration,embedding,dim,file_hash,model) '
-                    "VALUES(?,?,?,'.mp3',16,10.0,NULL,8,'h','test-model')",
-                    (tid, rel, rel))
-    con.commit()
-    yield 90, 91
-    con.execute('DELETE FROM tracks WHERE id IN (90,91)')
-    con.commit()
-    con.close()
-    path.unlink(missing_ok=True)
+def test_this_app_no_longer_serves_reveal(client):
+    """A 404, not a dead 200: whatever the browser is told, it must not be
+    told that revealing worked."""
+    assert client.get('/api/reveal/1').status_code == 404
 
 
-@pytest.fixture()
-def spawned(monkeypatch):
-    calls = []
-
-    class FakePopen:
-        def __init__(self, args, *a, **kw):
-            calls.append((args, kw))
-
-    monkeypatch.setattr(routes_ingest.subprocess, 'Popen', FakePopen)
-    # anything reaching for a shell is the bug itself
-    monkeypatch.setattr(routes_ingest.os, 'spawnl',
-                        lambda *a, **kw: pytest.fail('reveal shelled out: %r' % (a,)))
-    return calls
+def test_no_route_of_this_app_is_a_reveal():
+    """Belt to the 404's braces: a route by another name would be the same bug.
+    The container has no Explorer and the NAS's Finder is nobody's."""
+    from musicweb.main import app
+    assert not [r for r in app.routes
+                if 'reveal' in str(getattr(r, 'path', ''))]
 
 
-def test_reveal_spawns_explorer_directly_with_no_shell(client, rows, spawned):
-    present, _ = rows
-    r = client.get(f'/api/reveal/{present}')
-    assert r.status_code == 200 and r.json()['ok'] is True
-
-    (args, kw), = spawned
-    assert isinstance(args, list), 'the argv must be a list, not a command string'
-    assert args[0] == 'explorer'
-    assert len(args) == 2 and args[1].startswith('/select,')
-    # the whole path travels as ONE argument, metacharacters and all
-    assert args[1].endswith(NASTY)
-    assert not kw.get('shell')
+def test_nothing_in_the_web_half_spawns_a_process():
+    src = (Path(__file__).resolve().parent.parent
+           / 'musicweb' / 'routes_ingest.py').read_text(encoding='utf-8')
+    # subprocess is still how ffprobe/ffmpeg are reached; a Popen that nothing
+    # waits for is what a file manager launch looks like.
+    assert 'Popen' not in src
 
 
-def test_reveal_of_an_unknown_track_is_404(client, spawned):
-    assert client.get('/api/reveal/999').status_code == 404
-    assert spawned == []
+def test_the_page_asks_the_companion_to_reveal():
+    assert "companion('/music/reveal'" in APP_JS
+    assert 'api(`api/reveal' not in APP_JS
 
 
-def test_reveal_of_a_missing_file_spawns_nothing(client, rows, spawned):
-    _, missing = rows
-    assert client.get(f'/api/reveal/{missing}').json()['ok'] is False
-    assert spawned == []
+def test_reveal_sends_the_pair_and_never_a_path():
+    """Same contract as /music/send: the page is served from the NAS, so only
+    the editor's companion knows where the library is on their machine."""
+    at = APP_JS.index("companion('/music/reveal'")
+    body = APP_JS[at:at + 400]
+    assert 'JSON.stringify({share:' in body
+    assert 'rel_path: t.rel_path' in body
+
+
+def test_a_reveal_failure_is_reported_and_not_swallowed():
+    """The bug was silence. A companion that is missing, blocked or too old to
+    know the route has to reach the editor as words in the pane."""
+    at = APP_JS.index('async function revealOnThisMachine')
+    fn = APP_JS[at:APP_JS.index('async function refreshResolveStatus')]
+    assert 'msg.textContent' in fn
+    assert 'catch (e)' in fn
+    assert '.catch(() => {})' not in fn

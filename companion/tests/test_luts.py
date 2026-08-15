@@ -175,6 +175,33 @@ def test_never_offers_the_library_back_to_itself(tmp_path):
     assert luts.stray_luts([library], library) == []
 
 
+def test_a_sibling_directory_that_merely_extends_the_library_path_is_not_the_library(
+    tmp_path,
+):
+    """COMP-GUARD-6: the containment test was a bare startswith, so
+    "…/Assets/Luts Local" read as INSIDE "…/Assets/Luts" -- every file in it
+    was silently dropped, the tray never rendered "N LUTs only on this
+    machine", and nothing was logged. canon._is_under documents the same trap
+    for media paths."""
+    library = _library(tmp_path)
+    sibling = tmp_path / "root" / "Assets" / "Luts Local"
+    sibling.mkdir(parents=True)
+    (sibling / "GR Film.cube").write_text("y" * 20)
+
+    found = luts.stray_luts([sibling], library)
+    assert [f["name"] for f in found] == ["GR Film.cube"]
+
+
+def test_a_nested_copy_inside_the_library_is_still_skipped(tmp_path):
+    """The containment test still has to do its actual job."""
+    library = _library(tmp_path)
+    nested = library / "Ruskin"
+    nested.mkdir()
+    (nested / "inside.cube").write_text("z" * 12)
+
+    assert luts.stray_luts([nested], library) == []
+
+
 def test_copy_into_library_preserves_the_pack_folder(tmp_path):
     library = _library(tmp_path)
     lut_dir = tmp_path / "resolve-lut"

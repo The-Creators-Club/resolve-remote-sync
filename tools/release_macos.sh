@@ -2,9 +2,9 @@
 #
 # Creators Club Sync -- macOS companion release.
 #
-# The Mac-side twin of tools/release.ps1: verify version parity, run the
-# tests, run PyInstaller, confirm the ad-hoc signature, and stamp a manifest
-# describing exactly what came out. Optionally publish it to the dashboard's
+# The Mac-side twin of tools/release.ps1: verify version + vendored-file
+# parity, run the tests, run PyInstaller, confirm the ad-hoc signature, and
+# stamp a manifest describing exactly what came out. Optionally publish it to the dashboard's
 # upgrade channel, which is the ONLY place a macOS companion is ever served
 # from (it never goes on the P:\ editor share -- that package carries the
 # Windows exe and the two bootstrap scripts).
@@ -192,11 +192,53 @@ capture() {
     sed -n "$expr" "$path" 2>/dev/null | head -n 1
 }
 
+# Is the companion's vendored copy still byte-identical to its source? Prints
+# "" when they agree, or a one-line description of the problem -- the bash twin
+# of release.ps1's Get-VendorParityProblem (SHIP-3, 2026-08-14: this script
+# calls itself "the Mac-side twin of tools/release.ps1" and had no such gate,
+# and the suite that DOES pin this parity is server/tests, which this script
+# does not run and a Mac cannot run through ship.cmd).
+#
+# FAIL SAFE, exactly like the Windows copy: a missing, unreadable or
+# marker-less file is a problem, never a skip -- "I could not check" must not
+# read as "fine".
+vendor_parity_problem() {
+    local source_path="$1" vendored_path="$2" marker="$3" count marker_line
+    [ -f "$source_path" ] || { printf '%s' "cannot read $source_path (missing) -- refusing rather than skipping the check"; return 0; }
+    [ -f "$vendored_path" ] || { printf '%s' "cannot read $vendored_path (missing) -- refusing rather than skipping the check"; return 0; }
+
+    count="$(grep -c -x -F "$marker" "$vendored_path" 2>/dev/null || true)"
+    [ -n "$count" ] || count=0
+    if [ "$count" -eq 0 ]; then
+        printf '%s' "the vendored copy has no '$marker' line -- that marker is what separates its header from the vendored bytes; restore it"
+        return 0
+    fi
+    if [ "$count" -gt 1 ]; then
+        printf '%s' "the vendored copy carries '$marker' more than once -- ambiguous header end; leave exactly one, as the last line of the header"
+        return 0
+    fi
+
+    marker_line="$(grep -n -x -F "$marker" "$vendored_path" | head -n 1 | cut -d: -f1)"
+    # Everything BELOW the marker line must be the source file, byte for byte.
+    if tail -n "+$((marker_line + 1))" "$vendored_path" | cmp -s - "$source_path"; then
+        printf '%s' ""
+    else
+        printf '%s' "the vendored copy has DRIFTED from its source below the marker (cmp says the bytes differ)"
+    fi
+}
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 COMPANION_DIR="$REPO_ROOT/companion"
 CONFIG_PY="$COMPANION_DIR/src/ccsync_companion/config.py"
 PYPROJECT="$COMPANION_DIR/pyproject.toml"
+# The vendored-file parity pair (docs/YTDL_LOCAL_DOWNLOAD.md section 5).
+# ytdl/web's copy is the SOURCE OF TRUTH; the companion carries a header and
+# then the same bytes, because the frozen binary has no ytdlweb and the
+# dashboard container has no ccsync_companion.
+YTDL_COMMON_SRC="$REPO_ROOT/ytdl/web/ytdlweb/ytdl_common.py"
+YTDL_COMMON_VENDORED="$COMPANION_DIR/src/ccsync_companion/ytdl_common.py"
+VENDOR_MARKER="# --- vendored content below, byte-identical ---"
 DIST_DIR="$COMPANION_DIR/dist"
 ARTIFACT="$DIST_DIR/ccsync-companion"
 MANIFEST="$DIST_DIR/ccsync-release.json"
@@ -271,6 +313,36 @@ if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     fail "VERSION '$VERSION' does not look like 1.2.3 -- the dashboard refuses to publish anything else"
 fi
 step "version parity OK"
+
+# --- vendored-file parity (docs/YTDL_LOCAL_DOWNLOAD.md section 5) -----
+#
+# Same class of failure as the installer version drift below, one layer down: a
+# file duplicated across two trees that cannot import each other. The
+# consequence is worse -- a companion whose ytdl_common has drifted from the
+# NAS worker's downloads the same YouTube clip under a second filename into the
+# one canonical tree, and nobody finds out until an editor sees the same video
+# twice. The binary about to be built BAKES IN whatever is in companion/src, so
+# this is the last moment the two copies can be compared, and the suite this
+# script runs (companion/) does not compare them: the assertion lives in
+# server/tests/test_cross_component.py, which only ship.cmd runs and which
+# cannot run on a Mac. Hence a hard refusal here, exactly as tools/release.ps1
+# does on Windows (SHIP-3, 2026-08-14).
+VENDOR_PROBLEM="$(vendor_parity_problem "$YTDL_COMMON_SRC" "$YTDL_COMMON_VENDORED" "$VENDOR_MARKER")"
+if [ -n "$VENDOR_PROBLEM" ]; then
+    echo ""
+    fail "vendored-file parity check failed:
+         $VENDOR_PROBLEM
+         source   (edit THIS one): $YTDL_COMMON_SRC
+         vendored (do not edit)  : $YTDL_COMMON_VENDORED
+         Fix: make the change in ytdl/web/ytdlweb/ytdl_common.py -- it is the source of
+         truth -- then re-copy that whole file into the companion BELOW the marker line
+         \"$VENDOR_MARKER\", leaving the companion header above it untouched.
+         (docs/YTDL_LOCAL_DOWNLOAD.md section 5: the two executors must write
+         byte-identical artifacts into one canonical tree; bump TEMPLATE_VERSION/
+         SIDECAR_VERSION in the source if the shape changed, so old companions decline
+         the claim instead.)"
+fi
+step "vendored parity OK (ytdl_common.py: companion copy == ytdl/web below the marker)"
 
 # The installer number is a separate thing from the companion version and this
 # script publishes none of the three files that carry it -- so drift here is

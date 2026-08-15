@@ -19,7 +19,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $log     = 'E:\broll-queue\watchdog.log'
-$indexer = 'E:\Projects\broll-platform\indexer'
+# The indexer is THIS script's own directory, never a hardcoded path
+# (BROLL-IDX-2, 2026-08-14). It read E:\Projects\broll-platform\indexer — the
+# standalone repo b-roll was folded out of on 2026-08-10 — so a restart ran a
+# pre-fold checkout against the live DB and archive: 10-bit previews (R9),
+# proxies with no timecode Resolve would link (R10) and NULL sprite geometry
+# (BROLL-1/2), all silently, with nothing in the log saying which tree ran.
+# PS 5.1: $PSScriptRoot is empty when a script is piped to the interpreter
+# rather than run by path, so fall back to the in-repo location.
+$indexer = $PSScriptRoot
+if (-not $indexer) { $indexer = 'E:\Projects\resolve-remote-sync\broll\indexer' }
 $python  = 'C:\Users\alex\AppData\Local\Programs\Python\Python312\python.exe'
 $db      = 'E:\broll-queue\broll.db'
 
@@ -74,7 +83,10 @@ try {
         -RedirectStandardOutput "E:\broll-queue\claude-$stamp.log" `
         -RedirectStandardError  "E:\broll-queue\claude-$stamp.err" `
         -WindowStyle Hidden
-    Write-Log "RESTARTED - $remaining videos remaining, log claude-$stamp.log"
+    # The tree is logged because it was wrong for months and nothing said so
+    # (BROLL-IDX-2). If this line ever names anything but the in-repo indexer,
+    # the scheduled task is still registered against an old copy of this script.
+    Write-Log "RESTARTED from $indexer - $remaining videos remaining, log claude-$stamp.log"
 }
 catch {
     Write-Log "watchdog error: $_"

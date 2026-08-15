@@ -51,11 +51,11 @@ def test_peaks_refuses_it_too(client, planted, track_id):
     assert client.get(f'/api/peaks/{track_id}').status_code == 400
 
 
-@pytest.mark.parametrize('track_id', sorted(BAD_ROWS))
-def test_reveal_refuses_it_too(client, planted, track_id):
-    """reveal hands the path to Explorer, so an unvalidated join here opens an
-    arbitrary folder on the host."""
-    assert client.get(f'/api/reveal/{track_id}').status_code == 400
+# There was a third route here, reveal, whose unvalidated join would have
+# opened an arbitrary folder on the host. It is not this app's route any more
+# (MUSIC-6, 2026-08-14): it is the companion's POST /music/reveal, which runs
+# the same pair through local_path_for's containment check before it spawns
+# anything. See tests/test_reveal.py.
 
 
 def test_a_good_row_still_resolves_and_streams(client):

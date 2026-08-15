@@ -681,6 +681,282 @@ def test_a_timeline_that_cannot_be_read_still_trusts_the_api(monkeypatch):
     assert resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 10)["ok"] is True
 
 
+# ---------------------------------------------------------------------------
+# perform_insert, mode "playhead"
+# ---------------------------------------------------------------------------
+
+
+class FakeSpanItem:
+    """A timeline item with an extent, which the overlay free-track scan and
+    the placement verification both read."""
+
+    def __init__(self, start, end):
+        self._start = start
+        self._end = end
+
+    def GetStart(self):
+        return self._start
+
+    def GetEnd(self):
+        return self._end
+
+
+class FakePlayheadTimeline:
+    """A timeline the playhead placement can fully interrogate: frame rate,
+    current timecode, per-kind track lists, AddTrack, DeleteClips."""
+
+    def __init__(self, video_tracks=1, audio_tracks=1, fps="24",
+                 tc="01:00:00:12"):
+        self.tracks = {"video": [[] for _ in range(video_tracks)],
+                       "audio": [[] for _ in range(audio_tracks)]}
+        self._fps = fps
+        self._tc = tc
+        self.added_tracks: list = []
+        self.add_track_result = True
+        self.deleted: list = []
+
+    def GetSetting(self, key):
+        return self._fps if key == "timelineFrameRate" else None
+
+    def GetCurrentTimecode(self):
+        return self._tc
+
+    def GetStartFrame(self):
+        return 86400
+
+    def GetTrackCount(self, kind):
+        return len(self.tracks[kind])
+
+    def GetItemListInTrack(self, kind, index):
+        lanes = self.tracks[kind]
+        return list(lanes[index - 1]) if 1 <= index <= len(lanes) else []
+
+    def AddTrack(self, kind, subtype=None):
+        self.added_tracks.append((kind, subtype))
+        if self.add_track_result:
+            self.tracks[kind].append([])
+        return self.add_track_result
+
+    def DeleteClips(self, items, ripple):
+        self.deleted.extend(items)
+        return True
+
+
+def _stack_with_playhead(*, timeline=None, honest=True):
+    """A full fake stack whose AppendToTimeline honours (or, honest=False,
+    quietly ignores) the requested recordFrame -- the Resolve behaviours the
+    playhead mode must respectively use and survive."""
+    root = FakeRootFolder()
+    media_pool = FakeMediaPool(root)
+    tl = timeline if timeline is not None else FakePlayheadTimeline()
+
+    def _append(clips):
+        media_pool.append_calls.append(clips)
+        info = clips[0]
+        requested = info.get("recordFrame", 0)
+        start = requested if honest else requested + 7
+        item = FakeSpanItem(start, start + (info["endFrame"] - info["startFrame"]))
+        lanes = tl.tracks["video"]
+        index = info.get("trackIndex", 1)
+        if honest and 1 <= index <= len(lanes):
+            lanes[index - 1].append(item)
+        return [item]
+
+    media_pool.AppendToTimeline = _append
+    project = FakeProject(media_pool, tl)
+    return FakeResolve(FakeProjectManager(project)), media_pool, tl
+
+
+def test_playhead_payload_shape(monkeypatch):
+    """recordFrame at the playhead (ABSOLUTE frames -- the 1-hour start
+    counts), an explicit overlay trackIndex, and no mediaType: the nat sound
+    must come along, the append's own rule."""
+    resolve, media_pool, _tl = _stack_with_playhead()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert(
+        "Y:/broll/clip.mov", 24, 74, mode=resolve_bridge.INSERT_MODE_PLAYHEAD)
+
+    assert result["ok"] is True
+    payload = media_pool.append_calls[0][0]
+    assert payload["startFrame"] == 24
+    assert payload["endFrame"] == 74
+    assert payload["recordFrame"] == 86412        # 01:00:00:12 @ 24
+    assert payload["trackIndex"] == resolve_bridge.FIRST_OVERLAY_TRACK
+    assert "mediaType" not in payload
+
+
+def test_playhead_creates_both_overlay_lanes_on_a_bare_timeline(monkeypatch):
+    """V1/A1 only: the overlay needs V2 AND A2 to exist before the append --
+    appending to a track that does not exist returns an item yet places
+    nothing (music_worker's landmine list)."""
+    resolve, _media_pool, tl = _stack_with_playhead()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert(
+        "Y:/broll/clip.mov", 0, 10, mode=resolve_bridge.INSERT_MODE_PLAYHEAD)
+
+    assert result["ok"] is True
+    assert ("video", None) in tl.added_tracks
+    assert ("audio", "stereo") in tl.added_tracks
+    assert "(new track)" in result["message"]
+
+
+def test_playhead_skips_an_occupied_overlay_track(monkeypatch):
+    """V2 busy across the playhead -> the clip goes to V3, never on top of
+    what is already there."""
+    tl = FakePlayheadTimeline(video_tracks=2, audio_tracks=1)
+    tl.tracks["video"][1].append(FakeSpanItem(86400, 86500))
+    resolve, media_pool, _tl = _stack_with_playhead(timeline=tl)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert(
+        "Y:/broll/clip.mov", 0, 10, mode=resolve_bridge.INSERT_MODE_PLAYHEAD)
+
+    assert result["ok"] is True
+    assert media_pool.append_calls[0][0]["trackIndex"] == 3
+
+
+def test_playhead_audio_occupancy_also_moves_the_slot(monkeypatch):
+    """One trackIndex serves both streams, so a slot whose AUDIO lane is busy
+    is not free even with its video lane clear -- placing there would drop
+    the nat sound onto an occupied track."""
+    tl = FakePlayheadTimeline(video_tracks=1, audio_tracks=2)
+    tl.tracks["audio"][1].append(FakeSpanItem(86400, 86500))
+    resolve, media_pool, _tl = _stack_with_playhead(timeline=tl)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert(
+        "Y:/broll/clip.mov", 0, 10, mode=resolve_bridge.INSERT_MODE_PLAYHEAD)
+
+    assert result["ok"] is True
+    assert media_pool.append_calls[0][0]["trackIndex"] == 3
+
+
+def test_playhead_reuses_an_existing_free_track(monkeypatch):
+    """V2/A2 already there and clear: no tracks are added and the message
+    does not claim one was."""
+    tl = FakePlayheadTimeline(video_tracks=2, audio_tracks=2)
+    resolve, media_pool, _tl = _stack_with_playhead(timeline=tl)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert(
+        "Y:/broll/clip.mov", 0, 10, mode=resolve_bridge.INSERT_MODE_PLAYHEAD)
+
+    assert result == {"ok": True,
+                      "message": "Placed clip.mov on V2 at the playhead"}
+    assert tl.added_tracks == []
+    assert media_pool.append_calls[0][0]["trackIndex"] == 2
+
+
+def test_playhead_a_misplaced_clip_is_deleted_and_reported(monkeypatch):
+    """A returned item is not proof of placement, and for a placement the
+    ONLY acceptable landing is the requested frame (music_worker's place()
+    verification): a clip that landed elsewhere is removed, not shown as
+    success."""
+    resolve, _media_pool, tl = _stack_with_playhead(honest=False)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert(
+        "Y:/broll/clip.mov", 0, 10, mode=resolve_bridge.INSERT_MODE_PLAYHEAD)
+
+    assert result["ok"] is False
+    assert "placement failed on V2" in result["message"]
+    assert len(tl.deleted) == 1
+
+
+def test_playhead_refuses_when_a_track_cannot_be_added(monkeypatch):
+    tl = FakePlayheadTimeline()
+    tl.add_track_result = False
+    resolve, media_pool, _tl = _stack_with_playhead(timeline=tl)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert(
+        "Y:/broll/clip.mov", 0, 10, mode=resolve_bridge.INSERT_MODE_PLAYHEAD)
+
+    assert result["ok"] is False
+    assert "couldn't add" in result["message"]
+    assert media_pool.append_calls == []
+
+
+def test_playhead_drop_frame_math_matches_music_worker(monkeypatch):
+    """_tc_to_frame is music_worker.tc_to_frame duplicated (that module
+    imports this one, so the import cannot go the other way) -- pin the copy
+    against its origin so they cannot drift apart silently."""
+    for tc, base in [("01:00:00;02", 30), ("00:10:00;00", 60),
+                     ("01:00:00:12", 24)]:
+        assert resolve_bridge._tc_to_frame(tc, base) == \
+            music_worker.tc_to_frame(tc, base)
+
+
+def test_an_unknown_mode_never_reaches_resolve(monkeypatch):
+    """Belt and braces under broll_server's own gate: this module's contract
+    is never-raise, so a caller bug answers like an editor state."""
+    resolve, media_pool, _root = _make_stack()
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.perform_insert(
+        "Y:/broll/clip.mov", 0, 10, mode="sideways")
+
+    assert result["ok"] is False
+    assert "sideways" in result["message"]
+    assert media_pool.append_calls == []
+
+
+# ---------------------------------------------------------------------------
+# /insert's mode gate (build_insert_response)
+# ---------------------------------------------------------------------------
+
+
+def _mode_gate_body(tmp_path, **overrides):
+    clip = tmp_path / "clip.mov"
+    if not clip.exists():
+        clip.write_bytes(b"top slot")
+    body = {"share": "broll", "rel_path": "clip.mov",
+            "in_frame": 0, "out_frame": 10}
+    body.update(overrides)
+    return body, {"broll": str(tmp_path)}
+
+
+def test_insert_forwards_the_mode_to_the_worker(
+        tmp_path, worker_in_process, monkeypatch, resolve_process):
+    resolve_process(False)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+    body, mounts = _mode_gate_body(tmp_path, mode="playhead")
+
+    status, _result = broll_server.build_insert_response(body, mounts)
+
+    assert status == 200
+    action, kw = worker_in_process[0]
+    assert action == music_worker.BROLL_INSERT_ACTION
+    assert kw["mode"] == "playhead"
+
+
+def test_a_body_without_a_mode_still_appends(
+        tmp_path, worker_in_process, monkeypatch, resolve_process):
+    """Every deployed page sends mode explicitly, but the field is optional
+    in the contract and its absence must mean v1 behaviour."""
+    resolve_process(False)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+    body, mounts = _mode_gate_body(tmp_path)
+
+    broll_server.build_insert_response(body, mounts)
+
+    assert worker_in_process[0][1]["mode"] == "append"
+
+
+def test_an_unknown_mode_is_refused_before_the_worker_spawns(
+        tmp_path, worker_in_process):
+    body, mounts = _mode_gate_body(tmp_path, mode="sideways")
+
+    status, result = broll_server.build_insert_response(body, mounts)
+
+    assert status == 200
+    assert result["ok"] is False
+    assert "sideways" in result["message"]
+    assert worker_in_process == []
+
+
 def _archive_clip_with_preview(tmp_path):
     """A top-slot file with its adjacent Proxy/ preview, archive-style."""
     clip = tmp_path / "clip.mov"
@@ -905,14 +1181,18 @@ def test_the_header_is_present_on_real_responses_too(live_server):
 # ---------------------------------------------------------------------------
 
 
-def test_insert_mode_playhead_not_implemented():
+def test_insert_mode_playhead_passes_the_gate(tmp_path):
+    """"playhead" stopped being reserved 2026-08-14: it must fall through to
+    the ordinary path machinery (here: the missing-file answer), never the
+    unknown-mode refusal it drew in v1."""
+    mounts = {"broll": str(tmp_path).replace("\\", "/")}
     status, body = broll_server.build_insert_response(
-        {"share": "broll", "rel_path": "clip.mov", "in_frame": 0, "out_frame": 10,
+        {"share": "broll", "rel_path": "missing.mov", "in_frame": 0, "out_frame": 10,
          "mode": "playhead"},
-        {"broll": "Y:/broll"},
+        mounts,
     )
     assert status == 200
-    assert body == {"ok": False, "message": "not implemented yet"}
+    assert "file not found at" in body["message"]
 
 
 def test_insert_no_mount_configured():
@@ -956,7 +1236,8 @@ def test_insert_success_delegates_to_resolve_bridge(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_perform_insert(local_path, in_frame, out_frame, canonical_fn=None):
+    def fake_perform_insert(local_path, in_frame, out_frame, canonical_fn=None,
+                            mode="append"):
         captured["local_path"] = local_path
         captured["in_frame"] = in_frame
         captured["out_frame"] = out_frame
@@ -986,7 +1267,7 @@ def test_insert_over_http_full_round_trip(live_server, tmp_path, monkeypatch):
     monkeypatch.setattr(
         broll_server.resolve_bridge,
         "perform_insert",
-        lambda local_path, in_frame, out_frame, canonical_fn=None: {
+        lambda local_path, in_frame, out_frame, canonical_fn=None, mode="append": {
             "ok": True,
             "message": f"Inserted {os.path.basename(local_path)} ({out_frame - in_frame} frames)",
         },
@@ -1156,6 +1437,76 @@ def test_the_music_route_is_capped_on_the_same_terms(live_server):
     assert "error" in json.loads(body)
 
 
+# ---------------------------------------------------------------------------
+# POST /music/reveal (MUSIC-6, 2026-08-14)
+# ---------------------------------------------------------------------------
+#
+# The music page's "show in folder" used to POST the SERVER's /api/reveal,
+# which drove Explorer inside the dashboard's Linux container -- a button no
+# editor could ever see the result of. It is a route on THIS listener now, for
+# the same reason /music/send is: the one machine that can both be reached by
+# that page and open a window in front of the editor is this one. What is
+# pinned here is the DISPATCH; music_server owns the behaviour and
+# test_music_server owns its tests.
+
+
+def test_the_music_reveal_route_dispatches_with_this_groups_mounts(
+        live_server, companion_config, monkeypatch):
+    seen: list = []
+
+    def _recorder(body, mounts):
+        seen.append((body, mounts))
+        return 200, {"ok": True, "message": "Showing cue.wav in P:\\Assets\\Music"}
+
+    companion_config[music_server.MOUNTS_KEY] = {"music": "P:/Assets/Music"}
+    monkeypatch.setattr(music_server, "build_reveal_response", _recorder)
+
+    _srv, client = live_server
+    status, _headers, body = client.post_json(
+        "/music/reveal", {"share": "music", "rel_path": "Ambient/cue.wav"})
+
+    assert status == 200
+    assert json.loads(body)["ok"] is True
+    (posted, mounts), = seen
+    # The body reaches the handler intact, and the mounts come from the MUSIC
+    # group's own key -- not "mounts", which is what GET /status hands the
+    # b-roll settings panel.
+    assert posted == {"share": "music", "rel_path": "Ambient/cue.wav"}
+    assert mounts == {"music": "P:/Assets/Music"}
+
+
+def test_the_music_reveal_route_answers_without_a_mount_configured(live_server):
+    """No monkeypatching: the real handler, on a machine with no music mount.
+    200 with the reason, because the page shows it inline -- and nothing is
+    launched, so this cannot open a window on the developer's desktop."""
+    _srv, client = live_server
+    status, _headers, body = client.post_json(
+        "/music/reveal", {"share": "music", "rel_path": "cue.wav"})
+    assert status == 200
+    assert json.loads(body) == {
+        "ok": False, "error": "no mount configured for share 'music'"}
+
+
+@pytest.mark.parametrize("payload", [b"{not json", b'"just a string"', b"[1, 2]",
+                                     b"null"])
+def test_a_music_reveal_body_that_is_not_an_object_is_400(live_server, payload):
+    """`body.get` on a list is a crash, not a route -- in the music group's
+    `error` shape, which is the key that page's api() helper reads."""
+    _srv, client = live_server
+    status, body = client.post_raw("/music/reveal", payload)
+    assert status == 400
+    parsed = json.loads(body)
+    assert parsed["ok"] is False and "error" in parsed
+
+
+def test_the_music_reveal_route_is_capped_on_the_same_terms(live_server):
+    _srv, client = live_server
+    status, body = client.post_raw(
+        "/music/reveal", b"", content_length=broll_server.MAX_BODY_BYTES + 1)
+    assert status == 413
+    assert "error" in json.loads(body)
+
+
 def test_a_handler_that_raises_answers_500_and_logs(live_server, monkeypatch, caplog):
     """The dispatch guard. socketserver's own handler prints the traceback to
     sys.stderr, which is None in the windowed build."""
@@ -1226,7 +1577,7 @@ def test_the_insert_goes_through_the_worker_with_the_translated_path(
     clip.write_bytes(b"fake")
     monkeypatch.setattr(
         broll_server.resolve_bridge, "perform_insert",
-        lambda path, in_frame, out_frame, canonical_fn=None: {"ok": True, "message": "Inserted clip.mov"},
+        lambda path, in_frame, out_frame, canonical_fn=None, mode="append": {"ok": True, "message": "Inserted clip.mov"},
     )
 
     status, body = broll_server.build_insert_response(
@@ -1348,7 +1699,7 @@ def test_a_finished_download_falls_through_to_the_insert(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         broll_server.resolve_bridge, "perform_insert",
-        lambda path, in_frame, out_frame, canonical_fn=None: (
+        lambda path, in_frame, out_frame, canonical_fn=None, mode="append": (
             captured.setdefault("path", path),
             {"ok": True, "message": "Inserted clip.mov (10 frames)"})[-1],
     )

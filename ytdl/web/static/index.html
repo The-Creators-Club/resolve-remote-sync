@@ -154,6 +154,14 @@
               aria-expanded="true" aria-controls="dllist">[-] DOWNLOADS</button>
       <span id="dlphase" class="phase"></span>
       <span id="dlticker" class="muted"></span>
+      <!-- WHICH MACHINE is fetching these clips, and the way to change the
+           answer: docs/YTDL_LOCAL_DOWNLOAD.md §9. Both start hidden and app.js
+           only ever shows them while a job is downloading AND the server's
+           local_download flag is on — with the flag off this header is exactly
+           what it was before the feature (plan §10, phase 1). -->
+      <span id="dlmode" class="dlmode hidden"></span>
+      <button id="dlserver" class="text-btn hidden"
+              title="Hand this job back to the NAS: it downloads whatever your machine has not finished. For a tethered or hotel-wifi machine, or one you are about to close.">[ DOWNLOAD ON THE SERVER INSTEAD ]</button>
       <button id="cancel2" class="text-btn">[ CANCEL ]</button>
     </div>
     <div class="bar"><div id="dlfill" class="barfill"></div></div>

@@ -109,6 +109,27 @@ _TRIGRAM_MIN_LEN = 3
 # default and not something this corpus's scale calls for retuning.
 RRF_K = 60
 
+# Rows one FTS table may contribute to one pass. Uncapped, a broad query
+# dragged its whole match set into Python -- full description/text column plus
+# a snippet() per row -- and every one of those rows became a meta entry, an
+# RRF rank-list entry and, for the paged videos, a serialized hit: measured
+# 2026-08-14 on the live 15k-clip archive, q="the" pulled 9,663 transcript +
+# 3,375 segment rows and produced 1.01 MB of `hits` for one 24-card page
+# (BROLL-WEB-3). RRF only ever reads rank POSITION, and a row ranked past this
+# contributes 1/(60+1000) -- ~6% of a top hit, i.e. noise -- so the cut cannot
+# meaningfully reorder anything. It DOES cap `total` on a query broad enough to
+# hit the limit: an exact "how many of the 15,103 clips contain 'the'" is worth
+# less than the search coming back promptly over a Tailscale link.
+FTS_SOURCE_ROW_LIMIT = 1000
+
+# Hits serialized per video by search_videos. The grid reads hits[0] (card
+# thumbnail + seek target) and the detail seekbar draws one yellow band per
+# hit; on the real archive a single video carried 193 of them, transferred and
+# parsed for nothing. Twenty bands is already past what the bar can
+# distinguish, and the clip that actually gets opened still gets every segment
+# and cue from /api/videos/{id} (BROLL-WEB-3, 2026-08-14).
+MAX_HITS_PER_VIDEO = 20
+
 # Only retry with fuzzy matching when the exact keyword pass is this thin on
 # distinct videos. Keeps fuzzy matching from ever touching a query that
 # already works -- see test requirement "an exact query with plenty of
@@ -138,8 +159,11 @@ SEMANTIC_COSINE_FLOOR = 0.50
 # "extra" relative to) or mode="keyword" (no semantic contribution at all).
 SEMANTIC_ONLY_MAX_VIDEOS = 5
 
-# A CJK query that the keyword pass could not match at all gets NO semantic
-# contribution. Measured on the real archive: a multilingual embedding places
+# In mode="hybrid", a CJK query that the keyword pass could not match at all
+# gets NO semantic contribution (mode="semantic" is an explicit request for
+# meaning-only retrieval and is exempt -- BROLL-WEB-1, 2026-08-14, where this
+# gate ran before the mode split and emptied every CJK semantic search).
+# Measured on the real archive: a multilingual embedding places
 # any Chinese string near any Chinese content, so the score reflects script
 # identity rather than meaning. Two strings absent from the corpus scored
 # HIGHER than every genuine cross-lingual match --
@@ -543,6 +567,14 @@ def _ordered_by_rank(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
 # snippet() cannot be used together with GROUP BY in the same statement
 # ("unable to use function bm25 in the requested context"), so grouping by
 # video and merging across tables happens in Python instead (search_videos).
+#
+# Each is capped at FTS_SOURCE_ROW_LIMIT best-ranked rows (BROLL-WEB-3,
+# 2026-08-14). The ORDER BY names bm25(<table>) explicitly rather than the
+# `rank` alias: `rank` is also a real column of every FTS5 table joined here,
+# and which of the two a bare `ORDER BY rank` resolves to is not worth
+# depending on. The id tie-break is what makes the cut deterministic -- bm25
+# ties are common on short documents, and an arbitrary cut inside a tie would
+# make the same query page differently on consecutive requests.
 # ---------------------------------------------------------------------------
 
 
@@ -563,12 +595,16 @@ def _search_segments_en(
         "FROM segments s "
         "JOIN segments_fts ON segments_fts.rowid = s.id "
         "JOIN videos v ON v.id = s.video_id "
-        f"WHERE {where}"
+        f"WHERE {where} "
+        "ORDER BY bm25(segments_fts), s.id LIMIT ?"
     )
     # snippet()'s two '?' placeholders appear first (textually, in the
     # SELECT list) so their bind values must come first too -- sqlite3 binds
     # params in left-to-right order of '?' occurrence.
-    params = [SNIPPET_START, SNIPPET_END, fts_query, *cat_params, *flags_params]
+    params = [
+        SNIPPET_START, SNIPPET_END, fts_query, *cat_params, *flags_params,
+        FTS_SOURCE_ROW_LIMIT,
+    ]
     return conn.execute(sql, params).fetchall()
 
 
@@ -588,9 +624,10 @@ def _search_segments_cjk(
         "FROM segments s "
         "JOIN segments_cjk_fts ON segments_cjk_fts.rowid = s.id "
         "JOIN videos v ON v.id = s.video_id "
-        f"WHERE {where}"
+        f"WHERE {where} "
+        "ORDER BY bm25(segments_cjk_fts), s.id LIMIT ?"
     )
-    params = [fts_query, *cat_params, *flags_params]
+    params = [fts_query, *cat_params, *flags_params, FTS_SOURCE_ROW_LIMIT]
     try:
         return conn.execute(sql, params).fetchall()
     except sqlite3.OperationalError:
@@ -616,9 +653,13 @@ def _search_transcript_en(
         "FROM transcript_segments ts "
         "JOIN transcript_fts ON transcript_fts.rowid = ts.id "
         "JOIN videos v ON v.id = ts.video_id "
-        f"WHERE {where}"
+        f"WHERE {where} "
+        "ORDER BY bm25(transcript_fts), ts.id LIMIT ?"
     )
-    params = [SNIPPET_START, SNIPPET_END, fts_query, *cat_params, *flags_params]
+    params = [
+        SNIPPET_START, SNIPPET_END, fts_query, *cat_params, *flags_params,
+        FTS_SOURCE_ROW_LIMIT,
+    ]
     return conn.execute(sql, params).fetchall()
 
 
@@ -638,9 +679,10 @@ def _search_transcript_cjk(
         "FROM transcript_segments ts "
         "JOIN transcript_cjk_fts ON transcript_cjk_fts.rowid = ts.id "
         "JOIN videos v ON v.id = ts.video_id "
-        f"WHERE {where}"
+        f"WHERE {where} "
+        "ORDER BY bm25(transcript_cjk_fts), ts.id LIMIT ?"
     )
-    params = [fts_query, *cat_params, *flags_params]
+    params = [fts_query, *cat_params, *flags_params, FTS_SOURCE_ROW_LIMIT]
     try:
         return conn.execute(sql, params).fetchall()
     except sqlite3.OperationalError:
@@ -791,7 +833,15 @@ def _run_fuzzy_pass(
     retry never reaches into the excluded kind's tables either.
     """
     prefix_q = fuzzy.prefix_query(raw_terms)
-    if prefix_q:
+    # BROLL-WEB-5, 2026-08-14: terms under fuzzy._MIN_TERM_LEN_FOR_PREFIX are
+    # passed through unexpanded, so an all-short-term query ("surf pier",
+    # 槍戰現場) comes back byte-identical to the exact pass. Re-running it costs
+    # two pointless FTS queries AND registers fuzzy_prefix_segments_fts /
+    # fuzzy_prefix_transcript_fts as extra RRF sources holding exactly the
+    # exact pass's ranking -- doubling the porter tables' vote while the
+    # trigram tables (include_cjk=False below) keep one, which demotes a CJK
+    # substring hit only the trigram table could find.
+    if prefix_q and prefix_q != _terms_to_fts_query(raw_terms):
         _run_fts_pass(
             conn,
             prefix_q,
@@ -853,9 +903,11 @@ def _allowed_video_ids(
     flags_clause: str,
     flags_params: list[Any],
 ) -> set[int] | None:
-    """None means "no filter" (the common case) -- distinguished from an
-    empty set (filter active, nothing matches) so callers don't need a
-    separate has-a-filter flag."""
+    """None means "no filter" -- distinguished from an empty set (filter
+    active, nothing matches) so callers don't need a separate has-a-filter
+    flag. search_videos always passes a non-empty cat_clause since 2026-08-14
+    (BROWSE_PREDICATE is folded into it there, BROLL-WEB-2), so on the search
+    path this now always runs; the None case remains for any other caller."""
     if not cat_clause and not flags_clause:
         return None
     rows = conn.execute(
@@ -961,10 +1013,14 @@ def _browse(
     them produced a grid that was mostly broken thumbnails (2,254 of 4,482 rows
     on the real archive) and a total that overstated the library by 2x.
     'excluded' joined the list 2026-08-10: the FF4 shoot's camera .MP4s sat as
-    ghost no-preview cards beside their own indexed proxies. Search never
-    surfaced any of these anyway: with no segments and no transcript they
-    cannot match, so this only aligns browse with what search could already
-    see."""
+    ghost no-preview cards beside their own indexed proxies.
+
+    The search path applies the same predicate (see search_videos). It did not
+    until 2026-08-14, on the since-disproved reasoning that these rows "cannot
+    match anyway, having no segments and no transcript": a row marked
+    `duplicate_of` keeps every segment, cue, embedding and FTS entry it had --
+    pick_canonical ranks group members BY segment count, i.e. the losing copy
+    is normally already indexed (BROLL-WEB-2)."""
     where = BROWSE_PREDICATE + cat_clause + flags_clause
     base_params = [*cat_params, *flags_params]
 
@@ -1090,6 +1146,21 @@ def search_videos(
     if not raw_terms:
         return _browse(conn, cat_clause, cat_params, flags_clause, flags_params, limit, offset)
 
+    # BROLL-WEB-2, 2026-08-14: everything past this point is the search path,
+    # which filtered on category/collection/shoot/path/flags and nothing else
+    # -- so a row the browse path hides came back as its own card. That matters
+    # most for `duplicate_of`: marking a duplicate writes ONLY that column, so
+    # the losing copy keeps its segments, cues, embeddings and FTS entries and
+    # matches everything the kept copy does. It has no archive_path, so its
+    # /media/proxy 404s (black player) and "Send to Resolve" falls back to the
+    # ingest share no companion has a mount for -- the exact 2026-08-12 failure
+    # R12 exists to prevent -- and the sidebar count disagrees with the click.
+    # Appended to cat_clause rather than threaded as another parameter because
+    # every FTS builder and _allowed_video_ids already join `videos v` and
+    # splice this fragment in at the same point. _browse is unaffected: it
+    # returned above, and applies BROWSE_PREDICATE itself.
+    cat_clause += " AND " + BROWSE_PREDICATE
+
     rank_lists: dict[str, list[tuple[str, int]]] = {}
     meta: dict[tuple[str, int], dict[str, Any]] = {}
     keyword_video_ids: set[int] = set()
@@ -1140,23 +1211,35 @@ def search_videos(
         # floor is discarded rather than treated as a match of any kind.
         semantic_hits = [h for h in semantic_hits if h["score"] >= SEMANTIC_COSINE_FLOOR]
 
-        # A CJK query the keyword pass could not match at all: drop the
-        # semantic contribution entirely. Its score reflects script identity,
-        # not meaning — see is_cjk_query for the measurements. Only applies
-        # when there is NO keyword corroboration; a CJK query that did match
-        # still gets semantic hits fused normally.
-        if semantic_hits and not keyword_video_ids and is_cjk_query(q):
-            semantic_hits = []
-
         if mode == "semantic":
             # Explicit user choice to search by meaning alone: no keyword
-            # pass to be "extra" relative to, so no cap either.
+            # pass to be "extra" relative to, so no cap either -- and no CJK
+            # gate either. That gate lived one branch up until 2026-08-14,
+            # where `keyword_video_ids` is empty BY CONSTRUCTION in this mode
+            # (the keyword branch never ran), so it fired for every
+            # predominantly-CJK query and /api/search answered
+            # {"results": [], "total": 0} -- the archive's entire
+            # Chinese-language corpus unreachable in the one mode that exists
+            # to search it by meaning, while the same query in hybrid worked
+            # (BROLL-WEB-1). The leak it guards is specific to hybrid: there,
+            # "keyword found nothing" is evidence the corpus has nothing, and
+            # a multilingual embedding will still confidently rank any Chinese
+            # string near any Chinese content. Here the editor asked for
+            # meaning-only retrieval; the floor is the only gate that applies.
             if semantic_hits:
                 rank_lists["semantic"] = [
                     (h["source"], h["source_id"]) for h in semantic_hits
                 ]
                 _fill_semantic_meta(conn, semantic_hits, raw_terms, meta)
         else:
+            # A CJK query the keyword pass could not match at all: drop the
+            # semantic contribution entirely. Its score reflects script
+            # identity, not meaning — see is_cjk_query for the measurements.
+            # Only applies when there is NO keyword corroboration; a CJK query
+            # that did match still gets semantic hits fused normally.
+            if semantic_hits and not keyword_video_ids and is_cjk_query(q):
+                semantic_hits = []
+
             # mode == "hybrid": semantic only ever ADDS videos keyword
             # missed, capped -- see _select_semantic_only_hits. A hit on a
             # video keyword already found is dropped entirely, not fused in,
@@ -1211,6 +1294,8 @@ def search_videos(
     results: list[dict[str, Any]] = []
     for vid in page_video_ids:
         items = sorted(hits_by_video[vid], key=lambda pair: (-pair[0], pair[1][0], pair[1][1]))
+        # Best-fused first, then cut -- see MAX_HITS_PER_VIDEO (BROLL-WEB-3).
+        items = items[:MAX_HITS_PER_VIDEO]
         hits = []
         for score, key in items:
             kind, obj_id = key

@@ -133,13 +133,19 @@ def _as_qs(request: Request, editor: str | None) -> str:
 def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     settings = request.app.state.settings
     queue_editor = _queue_editor(request)
+    # ONE snapshot for both panels: the sidebar and the queue each used to
+    # build the whole thing (collector status + lanes + the N+1 fetch_projects)
+    # from their own `now`, so one page render was ~2x the queries and the two
+    # panels could disagree by construction (DASH-6, 2026-08-14).
+    projects_view = build_projects_view(conn)
     context = {
         # _sidebar_context, not a bare view: the every-30s /partials/sidebar
         # refresh has always rendered the checkboxes, so building this page's
         # first paint without them made the sidebar sprout controls 30s in.
-        **_sidebar_context(request, conn, None),
+        **_sidebar_context(request, conn, None, projects_view=projects_view),
         "fleet": build_editors_view(conn),
-        "queue": build_queue_view(conn, queue_editor) if queue_editor else None,
+        "queue": build_queue_view(conn, queue_editor, projects_view=projects_view)
+                 if queue_editor else None,
     }
     if queue_editor:
         context.update(_roots_context(
@@ -388,9 +394,22 @@ def _browse_context(request: Request, resolve_project: str, rel: str) -> dict:
                 continue
             child_rel = f"{norm_rel}/{child.name}" if norm_rel else child.name
             slug = provision.read_marker(child)
-            has_children = any(
-                g.is_dir() and not g.name.startswith(".") for g in child.iterdir()
-            ) if slug is None else False
+            # Per-CHILD try, not the outer one: this probe only decides a
+            # link's label, and it used to be able to end the whole listing.
+            # One unreadable sibling (0700 from a hand-copy under another uid,
+            # or an ESTALE/EIO from the NFS-backed /projects mount) raised out
+            # to the OSError handler below, so every alphabetically later
+            # folder silently vanished from the picker AND can_link_current
+            # went false -- the editor lost both the folder they came for and
+            # [ USE THIS FOLDER ] (DASH-5, 2026-08-14).
+            has_children = False
+            if slug is None:
+                try:
+                    has_children = any(
+                        g.is_dir() and not g.name.startswith(".") for g in child.iterdir()
+                    )
+                except OSError:
+                    pass   # unreadable: it just doesn't get the "drill in" label
             entries.append({
                 "name": child.name,
                 "rel": child_rel,
@@ -659,20 +678,24 @@ def page_project(slug: str, request: Request, conn: sqlite3.Connection = Depends
 
 
 def _sidebar_context(request: Request, conn, current: str | None,
-                     editor: str | None = None) -> dict:
+                     editor: str | None = None,
+                     projects_view: dict | None = None) -> dict:
     """Sidebar data incl. the checkbox state for the viewer's own selection
     (or the ?as=<editor> focus for admins).
 
     `editor` pins the target explicitly; toggle re-renders pass the editor
     from the POST path so the fragment that comes back can never disagree
-    with the row that was just ticked."""
+    with the row that was just ticked.
+
+    `projects_view` is the same snapshot-sharing hatch build_queue_view has --
+    the fleet page renders both off one build (DASH-6, 2026-08-14)."""
     toggle_editor = editor or _queue_editor(request)   # session user, or ?as for admins
     selected = set()
     if toggle_editor:
         selected = {s["slug"] for s in db.fetch_selections(conn, toggle_editor)}
     return {
         **_switcher_context(request, conn, current, toggle_editor),
-        "view": build_projects_view(conn),
+        "view": projects_view if projects_view is not None else build_projects_view(conn),
         "current_slug": current or None,
         "selected_slugs": selected,
         "toggle_editor": toggle_editor,

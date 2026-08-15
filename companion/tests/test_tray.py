@@ -794,6 +794,26 @@ def test_menu_offers_grade_swap_and_label_flips():
     assert not any("Grade" in l for l in labels)
 
 
+def test_the_snapshot_prefers_the_cached_p_mapping_over_a_probe():
+    """COMP-CORE-6: p_mapping_mode() forks `net use P:`, and the snapshot runs
+    every 2 s -- so the app's cached read is what the tray must use, and the
+    probing one is only the fallback for an app that has none."""
+    from ccsync_companion.tray import _tray_snapshot
+
+    probes = []
+    app = _FakeApp({"dashboard_url": ""})
+    app.p_mapping_mode = lambda: probes.append(1) or "local"
+    app.p_mapping_mode_cached = lambda: "server"
+
+    assert _tray_snapshot(app)["p_mode"] == "server"
+    assert probes == []
+
+    # An app with only the old accessor still renders (the tray is written to
+    # degrade, never to require a newer app object).
+    del app.p_mapping_mode_cached
+    assert _tray_snapshot(app)["p_mode"] == "local"
+
+
 def test_the_fingerprint_moves_when_the_stray_lut_count_does():
     """UI-3: the count was gathered and rendered but left OUT of the
     fingerprint, and the refresh loop only reassigns icon.menu when the

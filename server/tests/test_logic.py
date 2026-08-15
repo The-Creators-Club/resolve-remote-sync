@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import (
     TEMPLATE_FOLDERS,
     VIDEO_EXTENSIONS,
+    YTDL_IGNORE_LINES,
     build_stignore_lines,
     project_path,
     project_relative_dirs,
@@ -142,6 +143,67 @@ def test_build_stignore_lines_ignores_proxy_dirs():
 def test_build_stignore_lines_no_duplicates():
     lines = build_stignore_lines()
     assert len(lines) == len(set(lines))
+
+
+def test_build_stignore_lines_ignores_ytdl_in_flight_files():
+    """The NAS ytdl worker downloads into the shared Projects tree, so lane C
+    used to replicate every growing `.part` to each editor with the project
+    ticked -- and with ignoreDelete=True on editor folders (2026-08-11) the
+    worker's completion rename/delete never follows, so the leftovers are
+    permanent. 27 of them (~1.5 GB) on one editor's disk, 2026-08-13/14."""
+    lines = build_stignore_lines()
+    for pattern in YTDL_IGNORE_LINES:
+        assert pattern in lines
+    assert "(?i)*.part" in lines
+    assert "(?i)*.ytdl" in lines
+
+
+def test_the_ytdl_patterns_match_yt_dlp_s_real_in_flight_names():
+    """Real names taken from ytdl/web's own sweeper tests. A pattern with no
+    '/' matches the base name at any depth in Syncthing, which is what
+    fnmatch models here. `.part-Frag84` is the one that does NOT end in
+    `.part`, so it needs its own pattern rather than riding along."""
+    import fnmatch  # noqa: PLC0415
+
+    globs = [line[len("(?i)"):] for line in build_stignore_lines()
+             if line.startswith("(?i)") and "/" not in line[len("(?i)"):]]
+    names = [
+        "Chan - T [abcdefghijk].f616.mp4.part",
+        "Chan - T [abcdefghijk].f616.mp4.ytdl",
+        "Chan - T [abcdefghijk].part",
+        "Chan - T [abcdefghijk].part-Frag12",
+        "X.f137.mp4.part-Frag84.part",
+    ]
+    for name in names:
+        assert any(fnmatch.fnmatch(name.lower(), g.lower()) for g in globs), (
+            f"{name} matches no ignore pattern")
+
+
+def test_the_ytdl_patterns_do_not_swallow_a_finished_download():
+    """yt-dlp renames the `.part` away on completion and the worker's
+    `.editready` fallback IS the deliverable (YTDL-17) -- ignoring either
+    would mean the clip never reaches an editor at all, since Youtube/ mp4s
+    ride lane B and everything else in the folder rides lane C."""
+    import fnmatch  # noqa: PLC0415
+
+    globs = [line[len("(?i)"):] for line in YTDL_IGNORE_LINES]
+    for name in ("Chan - T [abcdefghijk].mp4", "Chan - T [abcdefghijk].editready.mp4",
+                 "The .part standard explained [ccccccccccc].mp4", "manifest.json",
+                 "Timeline.drp", "notes.txt"):
+        assert not any(fnmatch.fnmatch(name.lower(), g.lower()) for g in globs), (
+            f"{name} was matched by a ytdl in-flight pattern")
+
+
+def test_the_ytdl_patterns_are_not_in_the_asset_stignore():
+    """The LUT library has no ytdl worker writing into it, and its list is
+    pinned byte-identical across server/dashboard/companion -- an extra line
+    here makes the collector and the companion rewrite the file at each
+    other every cycle."""
+    from common import build_asset_stignore_lines  # noqa: PLC0415
+
+    asset = build_asset_stignore_lines()
+    for pattern in YTDL_IGNORE_LINES:
+        assert pattern not in asset
 
 
 def test_shell_quote_wraps_simple_value():

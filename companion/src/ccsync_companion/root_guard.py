@@ -648,7 +648,20 @@ class RootGuard:
     # -- the part worth testing --------------------------------------------
 
     def probe_once(self) -> str:
-        """Probe, fire the callback if the answer CHANGED, return the state."""
+        """Probe, fire the callback if the answer CHANGED, return the state.
+
+        Both stop-event checks are load-bearing (COMP-GUARD-4, 2026-08-14):
+        the callbacks START LANES, and one firing during teardown leaves a
+        sequencer and an rclone child running in a process that is exiting
+        (app.shutdown's own comment states the requirement). stop() cannot
+        provide that on its own -- it joins for 2.5 s and returns regardless,
+        while a probe can easily run longer: on darwin the misplaced-drive
+        path spawns `diskutil info -plist` per mounted volume at 10 s each,
+        and on Windows an isdir() against a dropped SMB mapping blocks on the
+        network timeout.
+        """
+        if self._stop_event.is_set():
+            return self.state
         state = probe_root(
             self.local_root,
             is_darwin=self._is_darwin,
@@ -667,12 +680,23 @@ class RootGuard:
             return state
         if state == self._state:
             return state
+        if self._stop_event.is_set():
+            # stop() landed while this probe ran. Do NOT record the new state
+            # either: a later start() would then see no transition and never
+            # fire, so the lanes would stay down after the drive came back.
+            log.info("root guard: %s seen during teardown -- not acting on it", state)
+            return state
         previous, self._state = self._state, state
         log.info("root guard: %s -> %s (%s)", previous or "startup", state, self.local_root)
         self._fire(state)
         return state
 
     def _fire(self, state: str) -> None:
+        if self._stop_event.is_set():
+            # Belt and braces with probe_once's own check: every path to a
+            # callback that starts lanes goes through here (COMP-GUARD-4).
+            log.debug("root guard: not firing the %s callback -- stopping", state)
+            return
         try:
             if state == ROOT_PRESENT:
                 if self._on_present is not None:
@@ -705,10 +729,23 @@ class RootGuard:
             self._thread = None
 
     def stop(self) -> None:
-        thread, self._thread = self._thread, None
+        thread = self._thread
         self._stop_event.set()
         if thread is not None and thread.is_alive():
             thread.join(timeout=max(2.0, self._poll_seconds / 2))
+            if thread.is_alive():
+                # KEEP the reference (SYNC-15's precedent in
+                # _WindowsShutdownGuard.stop): a probe can outlive this join,
+                # and dropping it here let a later start() -- which clears
+                # _stop_event -- spawn a SECOND poller alongside one that
+                # never saw the set (COMP-GUARD-4, 2026-08-14).
+                log.warning(
+                    "root guard: its probe did not finish within %.1fs -- keeping the "
+                    "thread rather than starting a second one",
+                    max(2.0, self._poll_seconds / 2),
+                )
+                return
+        self._thread = None
 
     def _loop(self) -> None:
         try:

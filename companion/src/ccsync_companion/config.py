@@ -50,7 +50,7 @@ log = logging.getLogger("ccsync.config")
 # editor cannot see. Plus the R12 path-canon work reaching the fleet with a
 # warning attached to it: 0.7.6 shipped the classification, this ships the
 # thing that TELLS someone when the bridge those fixes depend on is dead.
-VERSION = "0.7.7"
+VERSION = "0.7.8"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -275,6 +275,20 @@ DEFAULTS: dict[str, Any] = {
     # "" = find it at Resolve's install path. BPG is not a separate binary;
     # this is Resolve.exe, launched with -pg.
     "bpg_path": "",
+    # Add the folders holding unproxied BRAW/R3D/CRM to BPG's own watch list
+    # before starting it. On by default because the alternative is what the
+    # base rig did for months: start a watcher whose list was empty, three
+    # times a day, and never close the gap (bpg.py fact 3, 2026-08-13).
+    # Additive only -- an entry the editor added is never removed or rewritten,
+    # and the file is backed up once before the first change.
+    "bpg_manage_watch_folders": True,
+    # Press Start in BPG's window once it is up. Its queue does NOT start
+    # itself and there is no flag for it (fact 4), so a False here means an
+    # editor has to click Start by hand for anything to encode.
+    "bpg_autostart": True,
+    # "" = %APPDATA%\Blackmagic Design\... . An override for a machine whose
+    # BPG keeps its settings somewhere else; nothing in the fleet needs it yet.
+    "bpg_settings_path": "",
     # -- YouTube auto-import (youtube_import.py) ---------------------------
     # False = never import downloaded YouTube clips into Resolve. On by
     # default: the dashboard's YouTube page downloads into
@@ -303,6 +317,24 @@ DEFAULTS: dict[str, Any] = {
     # again. Resolve being closed or the project having changed is a STATE,
     # not a failure, and never counts against this.
     "youtube_import_max_failures": 3,
+    # -- local YouTube downloads (ytdlp_manager.py) ------------------------
+    # False = this machine never downloads YouTube clips itself; the dashboard's
+    # server-side worker does it, exactly as it always has. On by default (plan
+    # §13 Q3: absent means opted in) -- the requester's own residential IP is
+    # what YouTube is least hostile to, and clips born on the requester's
+    # machine reach them with no NAS round trip. The key exists for an editor on
+    # a metered or tethered link. With it false the sidecar manager below does
+    # NOTHING: no binary is downloaded, nothing is checked, no thread starts.
+    "ytdl_local_downloads": True,
+    # "" = the companion manages its own yt-dlp under
+    # %LOCALAPPDATA%\ccsync\tools (macOS: ~/Library/Application Support/ccsync/
+    # tools), installing it once and letting `yt-dlp -U` keep it current --
+    # yt-dlp needs updating every few weeks (YouTube breaks it deliberately)
+    # and the companion's own release cadence is months for some machines, so
+    # the downloader must not be bundled with it. Set this to a yt-dlp you
+    # manage yourself (a brew install, a nightly) and the companion only ever
+    # READS its version: it never installs over it and never runs -U against it.
+    "ytdlp_path": "",
     # False = leave Resolve's LUT directory alone. On by default: syncing the
     # shared LUT library to <local_root>/Assets/Luts accomplishes nothing on
     # its own, because Resolve reads LUTs from its own fixed directory and
@@ -721,6 +753,18 @@ proxy_gen_min_age_seconds = 120
 # on wherever this machine already generates proxies and BPG is installed.
 # bpg_enabled = true
 # bpg_path = 'C:\\Program Files\\Blackmagic Design\\DaVinci Resolve\\Resolve.exe'
+# BPG watches FOLDERS -- it takes no file list -- and it does not start its own
+# queue. Both of these are on by default, because with either one off a
+# generator can be up with your BRAW sitting there and nothing encoding, which
+# is exactly what the base rig did for months. The watch list is only ever
+# ADDED to (your own entries are never removed or rewritten, and the file is
+# backed up once before the first change), and Start is only ever pressed when
+# the button says "Start" -- never Stop.
+bpg_manage_watch_folders = true
+bpg_autostart = true
+# "" = %APPDATA%\\Blackmagic Design\\... . Only for a BPG that keeps its
+# settings somewhere else.
+# bpg_settings_path = ''
 
 # Import clips downloaded by the dashboard's YouTube page into the project you
 # have open, under Master > Youtube > <search term>. They arrive on this
@@ -745,6 +789,22 @@ youtube_import_min_age_seconds = 120
 # Never remembered across restarts. Resolve being closed, or you having
 # switched project, is not an attempt.
 # youtube_import_max_failures = 3
+
+# Download the YouTube clips YOU asked for on THIS machine, instead of the
+# server downloading them and syncing them to you. Your own connection is the
+# one YouTube is least suspicious of, and the clips land in your tree with no
+# round trip through the NAS. Set false to always leave the downloading to the
+# server (an editor on a metered or tethered link); nothing else changes -- the
+# search, review and history pages are the same either way.
+ytdl_local_downloads = true
+# "" = the companion looks after its own copy of yt-dlp, under
+# %LOCALAPPDATA%\\ccsync\\tools (macOS: ~/Library/Application Support/ccsync/
+# tools), and keeps it current on its own -- yt-dlp has to be updated every few
+# weeks because YouTube deliberately breaks it, which is exactly why it is not
+# built into this app. Point this at a yt-dlp you install and update YOURSELF
+# and the companion will only read its version: it never installs over your
+# binary and never runs `yt-dlp -U` against it.
+ytdlp_path = ""
 
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about, so
@@ -959,14 +1019,25 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
             f"not what's in the file -- {load_error}"
         )
 
-    local_root = str(cfg.get("local_root", "")).strip()
-    if not local_root:
+    raw_local_root = cfg.get("local_root", "")
+    if not isinstance(raw_local_root, str):
+        # PRESENT AND WRONG-TYPED, the same failure class the log_path check
+        # below exists for: `local_root = 5` is valid TOML, and str()-ing it
+        # here reported "local_root does not exist: 5" while the real fault
+        # was Path(5)'s TypeError inside resolved_local_root -- which used to
+        # kill the windowed exe on the _start_lut_link() call, before the tray
+        # icon existed (COMP-CORE-4, 2026-08-14).
+        errors.append(
+            f"local_root must be a path string, got {raw_local_root!r} -- "
+            f"nothing syncs until it names this machine's sync root"
+        )
+    elif not raw_local_root.strip():
         errors.append(
             "local_root is blank -- the timeline watcher and both rclone lanes "
             "have no tree to work against; set it to this machine's sync root"
         )
-    elif not Path(local_root).expanduser().exists():
-        errors.append(f"local_root does not exist: {local_root}")
+    elif not Path(raw_local_root.strip()).expanduser().exists():
+        errors.append(f"local_root does not exist: {raw_local_root.strip()}")
 
     if not str(cfg.get("remote", "")).strip():
         errors.append("remote is blank -- set it to the rclone remote name from rclone.conf")
@@ -1348,4 +1419,21 @@ def resolved_log_path(cfg: dict[str, Any]) -> Path:
 
 
 def resolved_local_root(cfg: dict[str, Any]) -> Path:
-    return Path(cfg.get("local_root", "")).expanduser()
+    """Never raises, for the same reason resolved_log_path() doesn't: a
+    hand-edited or mis-templated `local_root = 5` is valid TOML, and this is
+    the FIRST statement of _start_lut_link(), which start() calls outside any
+    try -- so Path(5)'s TypeError tore the process down before the tray icon
+    existed, leaving the editor with no tray, no toast and only a log line
+    they had no tray menu item to open (COMP-CORE-4, 2026-08-14).
+
+    A non-str value degrades to Path(""), i.e. exactly the "we don't know
+    where the tree is" state every caller already refuses on (fixer's
+    CORE-H1 guard, _local_root_is_broken); validate_config() reports the bad
+    value."""
+    raw = cfg.get("local_root", "")
+    if not isinstance(raw, str):
+        raw = ""
+    try:
+        return Path(raw).expanduser()
+    except Exception:
+        return Path("")

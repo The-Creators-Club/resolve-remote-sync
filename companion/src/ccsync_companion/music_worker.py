@@ -461,11 +461,14 @@ def act_broll_insert(req):
     """resolve_bridge.perform_insert, in a process the parent can kill.
 
     Returns its dict verbatim -- {"ok", "message"} is what the b-roll web UI's
-    toast reads, and it never raises on its own.
+    toast reads, and it never raises on its own. `mode` is optional and
+    defaults to append: broll_server validates it before the child spawns,
+    so the .get is for direct callers (tests), not the wire.
     """
     return resolve_bridge.perform_insert(
         req["path"], int(req["in_frame"]), int(req["out_frame"]),
         canonical_fn=canonical_fn_from_config(),
+        mode=req.get("mode") or resolve_bridge.INSERT_MODE_APPEND,
     )
 
 

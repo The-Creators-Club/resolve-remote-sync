@@ -99,6 +99,29 @@ def test_current_p_target_parses_net_use_then_subst():
     assert drive_swap.current_p_target(subst_run) == "D:\\Creators_Club"
 
 
+def test_current_p_target_keeps_a_unc_containing_a_space():
+    """COMP-GUARD-7: `\\S+` stopped at the first space, so a share path with
+    one came back truncated, classify_p_target answered "other" for a
+    deliberate grade-swap, and the watcher then fired "nothing will sync
+    until this is fixed" once per clip."""
+    unc = "\\\\100.65.15.123\\TheCreatorsPool\\Creator Profiles"
+
+    def net_use_run(args):
+        assert args[:2] == ["net", "use"]
+        return _proc(
+            0,
+            "Local name        P:\r\n"
+            f"Remote name       {unc}   \r\n"
+            "Resource type     Disk\r\n"
+            "Status            OK\r\n"
+            "\r\nThe command completed successfully.\r\n",
+        )
+
+    target = drive_swap.current_p_target(net_use_run)
+    assert target == unc
+    assert drive_swap.classify_p_target(target, r"D:\Creators_Club", unc) == "server"
+
+
 def test_swap_to_server_sequence_and_auth_hint(monkeypatch):
     calls = []
     unc = "\\\\nas\\TheCreatorsPool\\Creators_Club"

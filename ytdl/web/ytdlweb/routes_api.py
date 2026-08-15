@@ -64,6 +64,14 @@ def health(request: Request):
         'js_runtime': _js_runtime_state(),
         'worker_alive': worker.is_alive(),
         'cookies': bool(config.COOKIES_FILE),
+        # Whether this dashboard wants the SPA to offer the requester's own
+        # machine the download (docs/YTDL_LOCAL_DOWNLOAD.md §10). The page
+        # already asks for health on every load, so gating the loopback probe on
+        # it costs no extra round trip -- and with the flag down the probe never
+        # happens, which is what makes phase 1 deployable with no behaviour
+        # change at all. Not a promise that a companion can do it: that is the
+        # probe's answer, and a 404 from an old tray falls back silently.
+        'local_download': config.LOCAL_DOWNLOAD,
     }
 
 
@@ -667,10 +675,64 @@ def start_download(job_id: int, request: Request):
     # A cancel the worker never got to honour must not survive into the run the
     # editor is asking for right now (YTDL-1).
     db.clear_cancel(c, job_id)
+    # ...nor may the last run's executor pin (YTDL-WEB-7, 2026-08-14). end_lease
+    # sets mode_lock='server' on the ORDINARY close-out as well as on a reclaim,
+    # and nothing cleared it -- so this retry, the one YTDL-16 exists for and
+    # the one the plan's second-chance sweep expects to be used for clips that
+    # failed on an editor's IP, was permanently refused to that editor's machine
+    # and ran from the NAS's IP instead. This is a fresh human request; the pin
+    # belonged to the run that ended.
+    db.clear_mode_lock(c, job_id)
     db.set_job(c, job_id, dl_total=n, dl_done=0, dl_failed=0)
     db.set_phase(c, job_id, 'downloading')
     worker.nudge()
     return {'ok': True, 'queued': n}
+
+
+class ModeLock(BaseModel):
+    mode: str = 'server'
+
+
+@router.post('/api/jobs/{job_id}/mode-lock')
+def mode_lock(job_id: int, req: ModeLock, request: Request):
+    """"Download on the server instead" -- the per-job escape hatch (plan §9).
+
+    A BROWSER route, session-authed like every other route in this file and
+    deliberately NOT token-authed: this is a human decision about their own job
+    (they are tethered, on hotel wifi, or about to close the laptop), and the
+    fleet token belongs to machines. It is per-job and not a global toggle
+    because per-job is enough and self-documenting.
+
+    A lease that is already running ENDS (db.lock_mode, YTDL-WEB-2,
+    2026-08-14): it is expired on the spot, the companion's next call answers
+    410 and it stops, and the worker's ordinary reclaim credits what landed and
+    fetches the rest -- which is exactly what the SPA's toast has always
+    promised. The previous version pinned the column and left the lease alone,
+    which meant the click did nothing in the only state the SPA offers it in.
+
+    Only 'server' is accepted. There is no lock TO local: the local executor is
+    an offer the requester's machine makes, not something the server can compel.
+    """
+    user = current_user(request)
+    c = con()
+    job = _job_or_404(c, job_id, user)
+    if req.mode != db.MODE_SERVER:
+        raise HTTPException(400, f'unknown mode {req.mode!r}: only '
+                                 f'{db.MODE_SERVER!r} can be locked')
+    db.lock_mode(c, job_id, db.MODE_SERVER)
+    # The reclaim itself is the worker's, not this thread's: it re-queues rows
+    # and rglobs the term folder, and this handler shares its process with the
+    # fleet status page. Nudged rather than waited for -- the SPA finds out from
+    # the next poll, exactly as it finds out about a reclaim it did not ask for.
+    worker.nudge()
+    fresh = db.get_job(c, job_id)
+    return {'ok': True, 'mode_lock': db.MODE_SERVER,
+            # What the badge should say NOW. It still comes off the row rather
+            # than being asserted here: the worker has not run yet, so this is
+            # 'local' with a dead lease until it does.
+            'download_mode': fresh['download_mode'],
+            'lease_active': db.lease_active(fresh),
+            'phase': job['phase']}
 
 
 @router.post('/api/jobs/{job_id}/cancel')
@@ -686,6 +748,15 @@ def cancel(job_id: int, request: Request):
     {ok:true} and change nothing, leaving an active job that 409'd every later
     search with no way out but editing ytdl.db by hand (YTDL-1, 2026-08-11).
     Those two phases have no phase in flight, so they are cancelled outright.
+
+    A LOCAL download is the third door onto the same room (YTDL-WEB-1,
+    2026-08-14) and it was open for the whole of a 41-clip job: the flag is read
+    inside run_job, and claim_next_job deliberately hides a leased job from the
+    worker, so with a companion heartbeating every 30 s the worker never saw the
+    request until the editor's machine had downloaded, and lane A had uploaded,
+    every byte they cancelled. Ending the lease is what closes it -- the
+    companion is told 410 at its next call and stops, and the worker has the job
+    back on this nudge rather than three minutes later.
     """
     user = current_user(request)
     c = con()
@@ -695,5 +766,6 @@ def cancel(job_id: int, request: Request):
     if db.cancel_now(c, job_id):
         return {'ok': True, 'phase': 'cancelled'}
     db.request_cancel(c, job_id)
+    stopped = db.expire_lease(c, job_id)
     worker.nudge()
-    return {'ok': True, 'phase': job['phase']}
+    return {'ok': True, 'phase': job['phase'], 'stopped_local_download': stopped}

@@ -331,11 +331,50 @@ def _timecode_from(info: dict) -> Optional[str]:
     return None
 
 
+# The only rates drop-frame timecode exists at. 23.976 is fractional too but
+# has no DF variant; integer rates never drop. Copied from
+# broll/indexer/broll_index/ffmpeg_tools.py:97-99 with dropframe_normalized
+# below -- the two modules already keep the 540p preview spec identical by
+# hand, and this is the same kind of shared fact.
+NTSC_DF_RATES = (29.97, 59.94)
+
+
+def dropframe_normalized(tc: Optional[str], fps: Optional[float]) -> Optional[str]:
+    """The timecode string as Resolve will count it against an NTSC source.
+
+    Sony bodies store the start TC in an rtmd data stream whose tag prints
+    with COLONS even when the camera counts drop-frame -- and at 59.94 the
+    non-drop reading of "03:40:27:12" is a different absolute frame than the
+    drop reading, so a proxy carrying the tag verbatim fails the
+    LinkProxyMedia validation R10 exists for (proven live 2026-08-12: colon
+    form refused, semicolon form accepted, byte-identical otherwise; the
+    matching clip property in Resolve reads "Drop frame: 1"). A genuinely
+    non-drop NTSC source would get a wrong (semicolon) form here and its link
+    would be refused -- which is the status quo for it, never a wrong pairing:
+    Resolve validates every attach.
+
+    Ported verbatim from the indexer (COMP-MEDIA-1, 2026-08-14): R10's second
+    half landed only on the b-roll preview pipeline, so the companion -- which
+    makes the fleet's EDITING proxies -- kept writing the colon form.
+    test_ffmpeg_tools carries the indexer's own regression test so the two
+    copies cannot drift again.
+    """
+    if not tc or ";" in tc or fps is None:
+        return tc
+    if not any(abs(fps - rate) < 0.01 for rate in NTSC_DF_RATES):
+        return tc
+    head, sep, frames = tc.rpartition(":")
+    return f"{head};{frames}" if sep else tc
+
+
 def probe_video(ffmpeg_path: str, path: str | Path) -> dict:
     """Facts about a source clip, or UnreadableMediaError.
 
     Returns {duration_s, fps, width, height, codec, has_audio,
-    audio_channels, timecode}. `has_audio` decides nothing here -- the argv
+    audio_channels, timecode}. `timecode` is DROP-FRAME NORMALIZED against
+    `fps` before it is returned, so every caller -- own_proxy_cmd today, any
+    other tomorrow -- writes the form Resolve counts in (COMP-MEDIA-1,
+    2026-08-14; see dropframe_normalized). `has_audio` decides nothing here -- the argv
     builders always ask for AAC, and ffmpeg ignores an audio codec for a
     silent input -- but the generator reports it, and a clip with no audio
     stream at all is worth being able to see when a proxy comes back silent.
@@ -407,7 +446,10 @@ def probe_video(ffmpeg_path: str, path: str | Path) -> dict:
         "codec": video_stream.get("codec_name"),
         "has_audio": audio_stream is not None,
         "audio_channels": (audio_stream or {}).get("channels"),
-        "timecode": _timecode_from(info),
+        # Normalized HERE rather than in the argv builder: the tag is only
+        # wrong relative to the source's frame rate, and this is the one place
+        # that holds both (COMP-MEDIA-1, 2026-08-14).
+        "timecode": dropframe_normalized(_timecode_from(info), fps),
     }
 
 

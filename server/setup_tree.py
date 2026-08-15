@@ -24,10 +24,12 @@ stay group-rwx) recursively on the whole project directory. Proxy/
 subfolders are NOT created here -- the Blackmagic Proxy Generator creates
 them on demand next to media.
 
-Idempotent: every mkdir is preceded by a `test -d` check so re-running only
-reports "already exists" for what's there and creates what's missing; chown/
-chmod are always re-applied (cheap, safe, and self-healing if permissions
-drifted).
+Idempotent: every mkdir is preceded by a PRIVILEGED `test -d` check so
+re-running only reports "already exists" for what's there and creates what's
+missing; chown/chmod are always re-applied (cheap, safe, and self-healing if
+permissions drifted). Privileged because TRUENAS_USER has no traverse rights on
+the 770 dataset, so an unprivileged probe false-negatives on a tree that is
+right there (SERVER-9, 2026-08-14).
 
 Identity-safe, by design:
   - the .ccsync-project marker is written only when ABSENT. Re-running this
@@ -137,11 +139,20 @@ def build_remote_script(base: str, owner: str, group: str, slug: str = "",
 
     lines.append(f'echo "$SUDO_PW" | sudo -S -p "" mkdir -p {base_q}')
 
+    # SERVER-9 (2026-08-14): the probe runs with the SAME privilege as the
+    # mkdir. It used to be a bare `[ -d ]`, i.e. as TRUENAS_USER, who has no
+    # traverse rights on the 770 dataset (check_health.check_tree and
+    # setup_syncthing_folder.read_marker_slug both say so) -- so on a re-run it
+    # false-negatived on every template folder and the output was eight
+    # `created:` lines, indistinguishable from having just built a fresh tree at
+    # a mistyped path. mkdir -p made that harmless; the REPORT was the damage,
+    # and the module docstring promises idempotency.
     for rel in project_relative_dirs():
         full = f"{base}/{rel}"
         full_q = shell_quote(full)
         lines.append(
-            f'if [ -d {full_q} ]; then echo {shell_quote("exists: " + rel)}; '
+            f'if echo "$SUDO_PW" | sudo -S -p "" test -d {full_q}; then '
+            f'echo {shell_quote("exists: " + rel)}; '
             f'else echo "$SUDO_PW" | sudo -S -p "" mkdir -p {full_q} '
             f"&& echo {shell_quote('created: ' + rel)}; fi"
         )

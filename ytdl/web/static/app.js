@@ -82,6 +82,14 @@ const DEFAULT_CAP = 100;
 // needs 400 for a thin topic needs it all afternoon.
 const CAP_KEY = 'ytdl.max_candidates';
 
+// The destination, remembered for a blunter reason than the other two: with
+// nothing remembered the picker sits on whatever the server listed FIRST, and
+// on 2026-08-14 sixteen term folders meant for 2026/FF5/Energy Transition
+// (position 3 in that editor's list) landed in 2026/CCT/Creator Profiles/
+// Season 1 (position 1) one search at a time -- reported as "the folder select
+// keeps switching back to Creator Profiles".
+const PROJECT_KEY = 'ytdl.project';
+
 const POLL_FAST = 1500;
 const POLL_SLOW = 5000;
 const BACKOFF_AFTER = 120000;   // 2 min of polling, then ease off
@@ -111,6 +119,10 @@ const HISTORY_PAGE = 24;
 const state = {
   jobId: null,
   attachToken: 0,      // bumped by every attach/detach; see stale() below
+  localDownload: false,// the server's YTDL_LOCAL_DOWNLOAD flag, off until health
+                       // says otherwise: with it off this page never speaks to
+                       // the companion about downloads and shows no executor
+                       // badge (docs/YTDL_LOCAL_DOWNLOAD.md §10, phase 1)
   manifest: null,      // {videos, terms, counts}
   termFilter: null,    // job_terms.id, or null for "everything"
   showFiltered: false,
@@ -267,6 +279,11 @@ async function loadHealth() {
   } catch {
     return;                       // the page still works; a job will say why
   }
+  // The phase-1 flag (docs/YTDL_LOCAL_DOWNLOAD.md §10). Read strictly: a server
+  // that predates the field, a flag that is off, and a health fetch that failed
+  // outright all leave this page dispatching nothing and badging nothing, which
+  // is the rollback story -- flag off is byte-for-byte the old page.
+  state.localDownload = h.local_download === true;
   const pip = $('#health');
   const claudeOk = h.claude === 'ok';
   pip.textContent = `claude ${h.claude}` + (h.yt_dlp === 'ok' ? '' : ' · yt-dlp missing');
@@ -297,6 +314,19 @@ async function loadHealth() {
 }
 
 // ---------------------------------------------------------------- projects
+
+function loadProject() {
+  // localStorage throws outright in some privacy modes, and a page that cannot
+  // remember where the last download went must still be able to search.
+  try { return localStorage.getItem(PROJECT_KEY); }
+  catch { return null; /* unreadable or absent: whatever the list starts on */ }
+}
+
+function saveProject() {
+  try { localStorage.setItem(PROJECT_KEY, $('#project').value); }
+  catch { /* it still applies to this search, just not the next visit */ }
+}
+
 async function loadProjects() {
   const sel = $('#project');
   sel.innerHTML = '';
@@ -331,6 +361,15 @@ async function loadProjects() {
     o.value = p.slug;
     sel.appendChild(o);
   });
+  // After the options exist, and only for a slug the server still offers: a
+  // project this editor has since unticked is no longer in the list, and
+  // assigning a <select> a value none of its options carry selects NOTHING in
+  // some browsers -- which would hand runSearch an empty `$('#project').value`
+  // and refuse every search. An unknown slug falls back in silence to the
+  // first option, which is what the page did before 2026-08-14.
+  const saved = loadProject();
+  if (r.projects.some(p => p.slug === saved)) sel.value = saved;
+  sel.onchange = saveProject;
 }
 
 // ------------------------------------------------------------- shot types
@@ -571,6 +610,9 @@ async function attach(jobId) {
   state.manifest = null;              // job A's videos must not render as B's
   state.termFilter = null;
   state.phase = null;                 // job B's phases are not job A's
+  // The hand-back link is one-shot per attachment, not per page: job B may be
+  // local when job A was already handed back (docs/YTDL_LOCAL_DOWNLOAD.md §9).
+  $('#dlserver').disabled = false;
   setBanner('job', null);
   state.pollStart = Date.now();
   location.hash = `job=${jobId}`;     // a refresh re-attaches to the same job
@@ -749,6 +791,8 @@ function renderDownloads(job, r) {
   $('#dlticker').textContent =
     `${job.dl_done || 0}/${total} downloaded` + (job.dl_failed ? ` · ${job.dl_failed} failed` : '');
   $('#cancel2').classList.toggle('hidden', !!job.terminal);
+  // WHOSE machine is fetching these clips, off this tick's payload (§9).
+  renderMode(job);
 
   const list = $('#dllist');
   list.innerHTML = '';
@@ -784,6 +828,12 @@ function renderDownloads(job, r) {
       st = 'failed — ' + (v.dl_error || 'see the server log');
     } else if (v.dl_state === 'skipped') {
       st = 'already downloaded';
+    } else if (v.dl_state === 'done' && v.dl_error) {
+      // A note on a DONE row is the quality downgrade the worker had to make
+      // (SAQBbd1Rxmo, 2026-08-13: YouTube served f137 truncated from two IPs
+      // and only the 720p rung would come down). The clip is here; nothing
+      // else in the UI would ever say it is not the rung that was asked for.
+      st = 'done — ' + v.dl_error;
     } else {
       st = v.dl_state;                   // 'pending', 'done', 'downloading'
     }
@@ -1086,8 +1136,24 @@ async function runUrls() {
 }
 
 async function startDownload() {
+  const jobId = state.jobId;
   try {
-    await post(`api/jobs/${state.jobId}/download`);
+    await post(`api/jobs/${jobId}/download`);
+    // Only after the SERVER has accepted the selection: the job is downloading
+    // either way from here, and offering it to this editor's own machine is a
+    // shortcut on top of that, never a precondition for it
+    // (docs/YTDL_LOCAL_DOWNLOAD.md §2, step 1). Deliberately not awaited -- the
+    // probe below is allowed a whole second to time out and the review panel
+    // must not sit there for it.
+    //
+    // The quality is the JOB's, off the manifest this page is reviewing -- not
+    // the header's picker, which is whatever the editor has since changed it
+    // to. It is the one thing the dispatcher may decide with, because a
+    // companion that does not run this rung would take the lease and hand it
+    // straight back (COMP-BROLL-10); the work order itself still comes from
+    // the server (§8).
+    dispatchLocal(jobId, state.manifest && state.manifest.job
+      ? state.manifest.job.quality : null);
     $('#review').classList.add('hidden');
     state.pollStart = Date.now();
     await poll();
@@ -1103,6 +1169,133 @@ async function cancelJob() {
     toast('cancelling — it stops after the video in flight');
   } catch (e) {
     toast(e.message, true);
+  }
+}
+
+// ------------------------------------------------ requester-first downloads
+// docs/YTDL_LOCAL_DOWNLOAD.md §2: a job's clips can be fetched by the machine
+// that ASKED for them instead of by the NAS. YouTube is hostile to one static
+// IP making bulk anonymous requests (2026-08-13: five clips refused outright),
+// and a clip born on the requester's machine is theirs immediately rather than
+// after a NAS download plus a sync hop down.
+//
+// The browser is the only party that can see both the dashboard and the
+// editor's own loopback, so it is the dispatcher -- and what it dispatches is a
+// JOB ID and nothing else. The urls, the quality, the destination and the
+// naming template all reach the companion from the SERVER over its own
+// token-authed channel; this is the music-send rule ("never trust the page with
+// a path") extended to never trusting it with the work order either (§2, §8).
+//
+// EVERY failure below is silent and lands on the server worker downloading
+// exactly as it does today (§11): no companion, a companion too old for these
+// routes, a browser blocking local connections, a stale yt-dlp, a claim that
+// lost the race to another tab. This is a fast path, not a feature an editor
+// has to watch fail -- the clips arrive either way and the only visible
+// difference is the badge in the downloads header (§9).
+
+// One second, then the probe is abandoned. It sits between the editor clicking
+// DOWNLOAD and the page showing them the job, and a companion that cannot
+// answer a locally-computed question in a second is not one to hand a job to.
+const PROBE_MS = 1000;
+
+// Is there a companion on this machine willing to do the work? 200 with
+// ok:false is a companion saying WHY not (no yt-dlp, disk nearly full, an older
+// naming template than the server's -- §5/§6); it is a no, like every other
+// answer that is not a yes.
+async function companionCapabilities() {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), PROBE_MS);
+  try {
+    const res = await fetch(`${COMPANION_URL}/ytdl/capabilities`, {signal: ctl.signal});
+    if (!res.ok) return null;              // 404: a companion predating 0.8.0
+    const body = await res.json();
+    return body && body.ok === true ? body : null;
+  } catch {
+    // Nothing listening, the abort above, or Chrome's local-network permission
+    // refusing a plain-HTTP origin -- indistinguishable here, and all the same
+    // answer: the server downloads it.
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Exactly ONE attempt per submission: no retry loop and no polling of the
+// loopback. A companion that was not there when the editor clicked DOWNLOAD is
+// not going to be handed a job that the server has already started, and a
+// retry loop against a machine that is asleep would be a background fetch
+// nobody ever sees fail.
+async function dispatchLocal(jobId, quality) {
+  if (!state.localDownload || !jobId) return false;
+  const cap = await companionCapabilities();
+  if (!cap) return false;
+  // The rungs that companion actually runs (COMP-BROLL-10). The server refuses
+  // an out-of-scope claim too, and would be right to -- but a claim refused is
+  // still a round trip and a log line for a job this page already knew was not
+  // theirs. A companion that does not declare the field, or a quality this page
+  // does not know, dispatches exactly as before.
+  if (Array.isArray(cap.scope_qualities) && quality
+      && !cap.scope_qualities.includes(quality)) return false;
+  try {
+    const res = await fetch(`${COMPANION_URL}/ytdl/download`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      // The whole work order. Anything else here would be the page telling the
+      // companion what to download, which is the thing §8 forbids.
+      body: JSON.stringify({job_id: jobId}),
+    });
+    // 202 dispatched; 409 already busy, 503 declined (its claim was refused, or
+    // the capability went away between the probe and now) -- and any of those
+    // simply means the server worker keeps the job, which it has all along.
+    return res.status === 202;
+  } catch {
+    return false;
+  }
+}
+
+// §9: the executor, named. A silent swap between machines is how editors
+// conclude a feature is broken (the 2026-08-11 hash-pinning lesson), so this is
+// derived from the poll payload on EVERY tick and remembered nowhere -- when a
+// lease expires and the server reclaims the job (§3), the badge flips on its
+// own within a poll and the hand-back link disappears with it.
+function renderMode(job) {
+  const badge = $('#dlmode');
+  const btn = $('#dlserver');
+  // Flag off, or a server that predates the field: no badge and no link, i.e.
+  // the header this page has always had (§10, phase 1).
+  const mode = state.localDownload ? job.download_mode : null;
+  const live = job.phase === 'downloading';
+  badge.textContent = mode === 'local' ? 'downloading on your machine'
+    : mode === 'server' ? 'downloading on the server' : '';
+  // Which editor holds the lease, for the case the answer is surprising -- a
+  // title rather than a line, because for a local job it is always this editor.
+  badge.title = job.claimed_by ? `claimed by ${job.claimed_by}` : '';
+  badge.classList.toggle('local', mode === 'local');
+  badge.classList.toggle('hidden', !live || !badge.textContent);
+  // Only while THIS machine holds it: handing back a job the server is already
+  // doing is a no-op with a confusing button attached.
+  btn.classList.toggle('hidden', !live || mode !== 'local');
+}
+
+// "download on the server instead" (§9): the escape hatch for an editor who is
+// tethered, on hotel wifi, or about to close the laptop. Per-job on purpose --
+// there is no global toggle, because a per-job link is self-documenting and
+// cannot be left on by accident. The server flips the mode and reclaims; this
+// page changes nothing itself and finds out from the next poll, exactly as it
+// finds out about a reclaim it did not ask for.
+async function lockToServer() {
+  const btn = $('#dlserver');
+  if (btn.disabled || !state.jobId) return;   // one-shot: a second click is the
+  btn.disabled = true;                        // same request, not a second one
+  try {
+    await post(`api/jobs/${state.jobId}/mode-lock`, {mode: 'server'});
+    toast('handing this job back to the server — it picks up whatever your '
+          + 'machine has not finished');
+  } catch (e) {
+    // A deliberate human action, unlike the dispatch above: this one says so
+    // when it fails, and comes back so a blip is not a dead end.
+    toast(e.message, true, 12000);
+    btn.disabled = false;
   }
 }
 
@@ -1326,6 +1519,7 @@ async function init() {
   });
   $('#cancel').onclick = cancelJob;
   $('#cancel2').onclick = cancelJob;
+  $('#dlserver').onclick = lockToServer;
   $('#selall').onclick = () => bulk(true);
   $('#selnone').onclick = () => bulk(false);
   $('#download').onclick = startDownload;

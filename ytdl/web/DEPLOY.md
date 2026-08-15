@@ -49,6 +49,12 @@ $env:YTDL_PROJECTS_ROOT = "E:\tmp\projects"
 | `YTDL_DOWNLOAD_PAUSE` | `3` | seconds between downloads — pacing against bot detection |
 | `YTDL_ENRICH_WORKERS` | `2` | metadata fetches in flight at once during the enrich phase (was a hard-coded 4) |
 | `YTDL_ENRICH_PAUSE` | `0.75` | seconds between metadata **requests across the whole pool** — 80/minute. See below |
+| `YTDL_MAX_DURATION` | *(unset = 1800)* | longest video (seconds) a **search** job keeps selected; longer ones are deselected with an "over N minutes" note the editor can overrule. Pasted-link jobs are exempt — they skip the filter phase |
+| `YTDL_LOCAL_DOWNLOAD` | *(unset)* | `1` lets the SPA offer download jobs to the requester's companion (docs/YTDL_LOCAL_DOWNLOAD.md). Off = today's server-side behaviour, byte for byte |
+| `YTDL_LEASE_SECONDS` | `180` | how long a companion's download claim lives without a heartbeat before the server reclaims the job |
+| `YTDL_HEARTBEAT_SECONDS` | `30` | how often the local executor is told to heartbeat (returned to it at claim time) |
+| `YTDL_MIN_YTDLP_VERSION` | `2026.07.04` | claims from a companion whose yt-dlp is older are refused 403; its sidecar manager reads this via `GET /ytdl/api/config/ytdl-client` and self-updates |
+| `DASH_REPORT_TOKEN` | *(the dashboard's)* | **required for local downloads**: the fleet routes (claim/heartbeat/manifest/clip-status) fail closed without it. Shared with the dashboard process — the mount runs in it |
 | `YTDL_DEV_USER` / `YTDL_DEV_PROJECTS` | *(never set)* | standalone dev only |
 
 The candidate ceiling itself is **not** an env var: the editor picks it per

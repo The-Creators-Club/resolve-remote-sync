@@ -34,6 +34,7 @@ from common import (
     DEFAULT_PROJECTS_ROOT,
     MARKER_FILENAME,
     add_host_key_arg,
+    build_marker_read_cmd,
     build_marker_write_cmd,
     project_path_rel,
     run_ssh,
@@ -67,12 +68,15 @@ def read_existing_marker(base: str, dry_run: bool) -> tuple[bool, str, str]:
     Read as root (the dataset is 770 and TRUENAS_USER has no traverse
     rights). In dry-run mode nothing is connected and (False, "", "") comes
     back, same convention as everywhere else in this package.
+
+    SERVER-4 (2026-08-14): "no marker" must come from the PRIVILEGED shell, not
+    from a sudo that failed -- see common.build_marker_read_cmd. It matters more
+    here than anywhere: this tool's write is UNCONDITIONAL (only the Python side
+    guards an identity change behind --force), so a failed read that reported
+    "absent" would take the fresh-identity path and reassign a live project's
+    slug without ever showing the operator the `old -> new` line.
     """
-    marker_q = shell_quote(f"{base}/{MARKER_FILENAME}")
-    cmd = (f'if echo "$SUDO_PW" | sudo -S -p "" test -e {marker_q}; then '
-           f'echo "MARKER-PRESENT"; echo "$SUDO_PW" | sudo -S -p "" cat {marker_q}; '
-           f'else echo "MARKER-ABSENT"; fi')
-    rc, out, err = run_ssh(cmd, dry_run=dry_run)
+    rc, out, err = run_ssh(build_marker_read_cmd(base), dry_run=dry_run)
     if dry_run:
         return False, "", ""
     if rc != 0:
@@ -81,6 +85,13 @@ def read_existing_marker(base: str, dry_run: bool) -> tuple[bool, str, str]:
         sys.exit(1)
     lines = out.splitlines()
     if "MARKER-PRESENT" not in lines:
+        if "MARKER-ABSENT" not in lines:
+            print(f"FAILED to read the existing marker at {base}: the read printed "
+                  f"neither MARKER-PRESENT nor MARKER-ABSENT, so whether this "
+                  f"project already has an identity is unknown "
+                  f"({(err.strip() or out.strip())[:200]!r}). REFUSING to write a "
+                  f"fresh one over it.", file=sys.stderr)
+            sys.exit(1)
         return False, "", ""
     idx = lines.index("MARKER-PRESENT")
     raw = "\n".join(lines[idx + 1:]).strip()

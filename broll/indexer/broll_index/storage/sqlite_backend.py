@@ -242,6 +242,47 @@ class SqliteBackend(Storage):
         bump_search_generation(self.conn)
         self.conn.commit()
 
+    def update_search_norms(self, rows: list[tuple[str, int, str]]) -> None:
+        """One transaction for a whole video's normalized blobs (BROLL-IDX-8, 2026-08-14).
+
+        Same writes as update_search_norm, and the generation bump is still in the
+        same transaction as them — only the fsync-per-row and the repeated UPDATE of
+        the single hot `meta` row go away. Shape borrowed from embed_transcripts.py,
+        which has always batched this work.
+        """
+        if not rows:
+            return
+        by_table: dict[str, list[tuple[str, int]]] = {}
+        for source, source_id, search_norm in rows:
+            table = self._SEARCH_NORM_TABLES.get(source)
+            if table is None:
+                raise ValueError(
+                    f"unknown search_norm source {source!r} (expected 'segment' or 'transcript')")
+            by_table.setdefault(table, []).append((search_norm, source_id))
+        for table, params in by_table.items():
+            self.conn.executemany(
+                f"UPDATE {table} SET search_norm = ? WHERE id = ?", params)
+        bump_search_generation(self.conn)
+        self.conn.commit()
+
+    def upsert_embeddings(
+        self, rows: list[tuple[str, int, int, str, int, bytes]]
+    ) -> None:
+        """One transaction for a whole video's vectors (BROLL-IDX-8, 2026-08-14)."""
+        if not rows:
+            return
+        self.conn.executemany(
+            "INSERT INTO embeddings (source, source_id, video_id, model, dim, vec) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(source, source_id) DO UPDATE SET "
+            "video_id = excluded.video_id, model = excluded.model, dim = excluded.dim, vec = excluded.vec",
+            rows,
+        )
+        # Same reason as the single-row arm: a replaced vector on the same rowid
+        # is the one shape the readers' caches cannot see for themselves.
+        bump_search_generation(self.conn)
+        self.conn.commit()
+
     def get_embedding_models(self, video_id: int) -> dict[tuple[str, int], str]:
         rows = self.conn.execute(
             "SELECT source, source_id, model FROM embeddings WHERE video_id = ?", (video_id,)

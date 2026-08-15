@@ -303,17 +303,36 @@ proxy_gen_min_age_seconds = 120
 # place only when complete, and BPG's write behaviour is its own -- so a
 # started BPG is left to finish what it began.
 #
-# BPG takes no file list; it watches the folders in its own settings
-# (%APPDATA%\Blackmagic Design\Blackmagic Proxy Generator), which the
-# companion deliberately does NOT edit -- that config is yours, and silently
-# narrowing it would change what a manual launch does later.
-#
 # Default is derived, like proxy_gen_enabled: on wherever this machine already
 # generates proxies AND has Resolve installed, which is the base rig.
 # bpg_enabled = true
 # Where Resolve lives, if it is not at the standard install path. BPG is not a
 # separate binary -- this exe is launched with -pg.
 # bpg_path = 'C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe'
+
+# BPG takes no file list: it watches the FOLDERS in its own settings
+# (%APPDATA%\Blackmagic Design\Blackmagic Proxy Generator), and it does not
+# start its own queue -- its window opens Idle with a Start button. Left to
+# itself that means a generator can be up, your BRAW sitting at "Waiting", and
+# nothing encoding: the base rig ran exactly like that for months (2026-08-13).
+# So the companion adds the folders holding those clips to the watch list and
+# presses Start once the window is up.
+#
+# The watch list is only ever ADDED to -- an entry you added is never removed
+# or rewritten, an ancestor you already watch is left to cover it, and the file
+# is backed up once (.ccsync-backup) before the first change. Start is only
+# ever pressed when the button reads "Start"; nothing here ever presses Stop.
+#
+# Worth knowing before you turn these on for a folder full of finished work:
+# BPG proxies EVERY unproxied clip in a folder it watches, and it does not
+# recognise this companion's Proxy\<stem>.mp4 -- only its own .mov. So a folder
+# with 6 BRAW gaps and 173 clips the companion already proxied gets all 179
+# encoded again.
+bpg_manage_watch_folders = true
+bpg_autostart = true
+# "" = %APPDATA%\Blackmagic Design\... . Only for a BPG that keeps its settings
+# somewhere else; nothing in the fleet needs this.
+# bpg_settings_path = ''
 
 # Import clips downloaded by the dashboard's YouTube page into the project you
 # have open, under Master > Youtube > <search term>. They land on this machine
@@ -340,6 +359,27 @@ youtube_import_min_age_seconds = 120
 # Never remembered across restarts -- and Resolve being closed, or you having
 # switched to another project, is not an attempt.
 # youtube_import_max_failures = 3
+
+# Download the YouTube clips you asked for on THIS machine rather than having
+# the server download them and sync them down to you. Two reasons it is the
+# default: your own connection is the one YouTube is least hostile to (the NAS
+# fetches for the whole fleet from one static IP, and has already been rate
+# limited for it), and the clips appear in your tree immediately instead of
+# after a NAS download plus a sync hop. Set false to leave every download to
+# the server -- worth doing on a metered or tethered connection. Everything
+# else about the YouTube page is identical either way, and any clip that fails
+# here is retried on the server before the job closes.
+ytdl_local_downloads = true
+# Which yt-dlp does the downloading. "" = the companion installs and maintains
+# its own under %LOCALAPPDATA%\ccsync\tools (macOS: ~/Library/Application
+# Support/ccsync/tools), checking it at startup and once a day and letting
+# `yt-dlp -U` update it. That is deliberate rather than bundling yt-dlp into
+# the companion: YouTube breaks it every few weeks, and waiting for a companion
+# release to fix downloading is how a machine spends a month unable to
+# download. Set an absolute path to a yt-dlp you manage yourself and the
+# companion only READS its version -- it will never install over it, and never
+# run -U against it.
+ytdlp_path = ""
 
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about --

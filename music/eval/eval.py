@@ -10,10 +10,14 @@ Two things are measured, because they fail in different ways:
 
     python eval.py            # report current settings
     python eval.py --sweep    # compare calibration strengths
+
+The sweep re-scores the whole library once per alpha, so it works on a scratch
+COPY of the index and never on the file that ships (MUSIC-4, 2026-08-14).
 """
 import argparse
 import collections
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -23,8 +27,11 @@ import numpy as np
 _MUSIC = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_MUSIC / 'indexer'))
 
-from music_index import tagging, vocab            # noqa: E402  (also puts web/ on sys.path)
-from musicweb import db                           # noqa: E402
+from music_index import vocab                     # noqa: E402  (also puts web/ on sys.path)
+from musicweb import config, db                   # noqa: E402
+
+# `tagging` is imported inside the sweep, not here: it pulls in
+# music_index.clap_model and therefore torch, and the report half needs neither.
 
 # (query, filename fragment that ought to rank highly)
 RETRIEVAL = [
@@ -78,6 +85,52 @@ def retrieval_report(index, con):
     return top10, mrr
 
 
+def open_scratch_copy(tmp_dir, path=None):
+    """A throwaway copy of the index, open for writing. -> (con, path).
+
+    MUSIC-4 (2026-08-14): the sweep is not a read. `tagging.write_scores` opens
+    with `DELETE FROM tags` / `DELETE FROM axes`, re-inserts and commits, and
+    the sweep ran it once per alpha against `config.DB_PATH` -- the very file
+    `install_dashboard_app.py --music-data db` ships. It left the live index
+    scored at whatever alpha the loop ended on (1.0) while `vocab.CALIBRATION`
+    said 0.5, invisibly: every row present and well-formed, just scored under a
+    setting nobody chose, and `vocab_hash` deliberately does not cover
+    CALIBRATION so nothing could notice.
+    """
+    live = db.connect(path)
+    try:
+        dest = db.backup_to(live, Path(tmp_dir) / 'sweep.db')
+    finally:
+        live.close()
+    return db.connect(dest), dest
+
+
+def sweep(con, alphas=(0.0, 0.25, 0.5, 0.75, 1.0)):
+    """Re-score the tags at each calibration strength and report the bias.
+
+    `con` must be a scratch copy -- see open_scratch_copy.
+    """
+    from music_index import tagging
+    from music_index.clap_model import Clap
+
+    clap = Clap()
+    cats, axes = tagging.build_label_space(clap)
+    ids, mat = db.load_matrix(con)
+    original = vocab.CALIBRATION
+    try:
+        for alpha in alphas:
+            vocab.CALIBRATION = alpha
+            tags, axvals = tagging.score_all(mat, cats, axes)
+            tagging.write_scores(con, ids, tags, axvals)
+            print(f'\n-- CALIBRATION = {alpha}')
+            avg = bias_report(con, top=4)
+            print(f'    mean top-label share across categories: {avg*100:.1f}%')
+    finally:
+        # the module global is process-wide; leaving it at the last alpha would
+        # mis-score anything else this interpreter went on to do
+        vocab.CALIBRATION = original
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--sweep', action='store_true')
@@ -95,22 +148,18 @@ def main():
         print()
         return
 
-    # Retrieval does not depend on calibration (it works off raw embeddings),
-    # so the sweep only needs to re-score tags in memory.
-    from music_index.clap_model import Clap
-    clap = Clap()
-    cats, axes = tagging.build_label_space(clap)
-    ids, mat = db.load_matrix(con)
-
     print('\n=== calibration sweep ===')
-    for alpha in (0.0, 0.25, 0.5, 0.75, 1.0):
-        vocab.CALIBRATION = alpha
-        tags, axvals = tagging.score_all(mat, cats, axes)
-        tagging.write_scores(con, ids, tags, axvals)
-        print(f'\n-- CALIBRATION = {alpha}')
-        avg = bias_report(con, top=4)
-        print(f'    mean top-label share across categories: {avg*100:.1f}%')
+    with tempfile.TemporaryDirectory(prefix='music-sweep-') as tmp:
+        scratch, path = open_scratch_copy(tmp)
+        print(f'  scoring into a scratch copy at {path};\n'
+              f'  {config.DB_PATH} is left alone')
+        try:
+            sweep(scratch)
+        finally:
+            scratch.close()
 
+    # Retrieval does not depend on calibration -- it works off the raw
+    # embeddings -- so it reads the live index, which the sweep never touched.
     print('\nRetrieval (independent of calibration):')
     retrieval_report(index, con)
     print()

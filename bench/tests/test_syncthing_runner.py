@@ -14,6 +14,7 @@ poll sequence is scripted and the assertions are about the decision logic.
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -382,6 +383,53 @@ def test_peer_connected_is_false_while_the_gui_is_still_refusing():
 
     inst._get = boom  # type: ignore[method-assign]
     assert inst.peer_connected("PEERID") is False
+
+
+# ---------------------------------------------------------------------------
+# the clock's resolution (SHIP-10)
+# ---------------------------------------------------------------------------
+
+
+def test_poll_interval_is_fine_while_a_run_is_young_and_backs_off_after():
+    """0.5 s of slop at each end of a ~2 s sync is ~25% instrument error; the
+    same 0.5 s on a 30-minute transfer is nothing, and polling a local REST API
+    20 times a second for half an hour would start perturbing what it measures."""
+    assert syncthing.poll_interval_for(0.0) == syncthing.FINE_POLL_INTERVAL_S
+    assert syncthing.poll_interval_for(syncthing.FINE_POLL_WINDOW_S - 0.01) == syncthing.FINE_POLL_INTERVAL_S
+    assert syncthing.poll_interval_for(syncthing.FINE_POLL_WINDOW_S) == syncthing.POLL_INTERVAL_S
+    assert syncthing.poll_interval_for(3600.0) == syncthing.POLL_INTERVAL_S
+    assert syncthing.FINE_POLL_INTERVAL_S < syncthing.POLL_INTERVAL_S
+
+
+def test_wait_for_sync_defaults_to_the_fine_interval_not_half_a_second():
+    """Two polls at the old fixed 0.5 s would take >= 1.0 s to notice a
+    completion that had already happened."""
+    inst = FakeInstance(
+        [
+            _status(state="idle", need=0, glob=0),
+            _status(state="syncing", need=4096, glob=4096),
+            _status(state="idle", need=0, glob=4096),
+        ]
+    )
+    start = time.monotonic()
+    completed, _seconds, _detail = syncthing._wait_for_sync(inst, "f", 5.0, expected_bytes=4096)
+    elapsed = time.monotonic() - start
+
+    assert completed is True
+    assert inst.polls == 3
+    assert elapsed < 0.5  # three polls at 0.05 s, not at 0.5 s
+
+
+def test_the_connect_wait_polls_finely_because_that_window_is_untimed_transfer():
+    """The dataset is seeded before the peers connect, so everything between
+    the real connection and the poll that sees it is transfer happening before
+    the caller's timer starts."""
+    assert syncthing.CONNECT_POLL_INTERVAL_S == syncthing.FINE_POLL_INTERVAL_S
+
+    inst = FakeInstance([_status()], connected_after=3)
+    start = time.monotonic()
+    assert syncthing._wait_for_peer_connection(inst, "PEER", timeout_s=5.0)
+    assert time.monotonic() - start < 0.5
 
 
 # ---------------------------------------------------------------------------

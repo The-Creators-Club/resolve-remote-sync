@@ -62,7 +62,8 @@ def test_health_detail_requires_authentication(app_env):
     client.cookies.delete(auth.COOKIE_NAME)
 
     anon = client.get("/api/v1/health")
-    # the healthcheck only reads the status code, and that must not change
+    # the healthcheck reads `ok` out of this body (DASH-2), and the shape of
+    # the anonymous answer must not change under it
     assert anon.status_code == 200
     assert set(anon.json()) == {"ok", "version"}
     assert anon.json()["ok"] is True
@@ -77,6 +78,53 @@ def test_health_detail_requires_authentication(app_env):
     # ...and so does any session
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
     assert "folder_errors" in client.get("/api/v1/health").json()
+
+
+def test_a_dead_collector_shows_up_in_ok_while_the_status_stays_200(tmp_path):
+    """DASH-2: this is the contract the container healthcheck now depends on.
+    A collector that stopped advancing poll_runs clears syncthing_reachable
+    (COLLECTOR_STALE_SECONDS), and that has to reach the probe through `ok` --
+    while the STATUS stays 200 either way, because ship.ps1's post-deploy poll
+    and the macOS wizard's connection test both read a non-200 as 'the
+    dashboard is down'."""
+    import datetime as dt
+
+    db_path = tmp_path / "hc.db"
+    settings = Settings(
+        db_path=str(db_path), report_token="sekrit", session_secret=SECRET,
+        admin_users=frozenset({"admin"}),
+        # `ok` is about Syncthing only where Syncthing is configured at all
+        # (api_health's `or not syncthing_url`), so a lab deployment without
+        # one stays healthy by definition. Nothing listens on this port.
+        syncthing_url="http://127.0.0.1:1",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        # ...otherwise it keeps writing its own failing poll runs underneath
+        # these assertions
+        client.app.state.collector.stop()
+        conn = dbmod.connect(db_path)
+        conn.execute("DELETE FROM poll_runs")
+        now = dbmod.utcnow_iso()
+        dbmod.record_poll_run(conn, "completion", now, now, True, None)
+        conn.commit()
+        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "admin"))
+        assert client.get("/api/v1/health").json()["ok"] is True
+
+        old = (dt.datetime.now(dt.timezone.utc)
+               - dt.timedelta(seconds=dbmod.COLLECTOR_STALE_SECONDS + 60)).isoformat()
+        dbmod.record_poll_run(conn, "completion", old, old, True, None)
+        conn.commit()
+
+        resp = client.get("/api/v1/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False and body["collector_stale"] is True
+
+        client.cookies.delete(auth.COOKIE_NAME)
+        anon = client.get("/api/v1/health")
+        assert anon.status_code == 200 and anon.json()["ok"] is False
+        conn.close()
 
 
 def test_projects_and_detail(app_env):
@@ -119,6 +167,44 @@ def test_ui_pages_render(app_env):
 
     partial = client.get(f"/partials/project/2025-ff4-nuclear/missing/{DEVICE_ID}")
     assert partial.status_code == 200 and "Audio/Music/track1.wav" in partial.text
+
+
+def test_the_fleet_page_builds_the_snapshot_once(app_env, monkeypatch):
+    """DASH-6: page_fleet spread _sidebar_context (build_projects_view) and
+    then called build_queue_view, whose first act was build_projects_view
+    again -- so one render did collector-status + lanes + the N+1
+    fetch_projects TWICE, off two independently-taken `now` values, and the
+    sidebar's status dots and the queue's percentages came from two different
+    reads of the same tables."""
+    from ccsync_dashboard import api as apimod
+    from ccsync_dashboard import ui as uimod
+
+    client, conn = app_env
+    seed(conn)
+    dbmod.add_selection(conn, "admin", "2025-ff4-nuclear", "admin", dbmod.utcnow_iso())
+    conn.commit()
+
+    calls = {"n": 0}
+    real_build = apimod.build_projects_view
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real_build(*args, **kwargs)
+
+    # both namespaces: ui.py imported the name, build_queue_view calls api's
+    monkeypatch.setattr(apimod, "build_projects_view", counting)
+    monkeypatch.setattr(uimod, "build_projects_view", counting)
+
+    page = client.get("/")
+    assert page.status_code == 200
+    assert calls["n"] == 1
+
+    # ...and both panels rendered off that one snapshot
+    assert "2025/FF4/Nuclear" in page.text
+    view = real_build(conn)
+    queue = apimod.build_queue_view(conn, "admin", projects_view=view)
+    assert queue["generated_at"] == view["generated_at"]
+    assert [i["slug"] for i in queue["queue"]] == ["2025-ff4-nuclear"]
 
 
 # -- who-has-what: report-only machines + the sidebar tree (2026-07-26) -----

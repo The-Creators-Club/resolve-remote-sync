@@ -20,7 +20,15 @@
          the installer version constant is duplicated three ways --
          installer/windows_bootstrap.ps1, onboarding/steps.py and
          installer/macos_bootstrap.sh -- all mismatches are listed and the
-         build refuses to start.
+         build refuses to start. The companion VERSION must also LOOK like
+         1.2.3: the dashboard rejects anything else, so a "-rc1" would build
+         fine here and 422 at the publish (SHIP-11).
+
+         The same step also byte-compares the VENDORED files: the companion's
+         copy of ytdl_common.py must match ytdl/web/ytdlweb/ytdl_common.py
+         exactly below its header marker (docs/YTDL_LOCAL_DOWNLOAD.md section 5,
+         2026-08-14). Drift there is not a wrong version number, it is two
+         spellings of the same downloaded clip in one canonical tree.
 
          This script builds the WINDOWS artifact. PyInstaller does not
          cross-compile, so the macOS companion is built on the Mac by
@@ -89,6 +97,13 @@ $PyprojectToml = Join-Path $CompanionDir "pyproject.toml"
 $BootstrapPs1 = Join-Path $RepoRoot "installer\windows_bootstrap.ps1"
 $OnboardSteps = Join-Path $RepoRoot "onboarding\steps.py"
 $BootstrapSh = Join-Path $RepoRoot "installer\macos_bootstrap.sh"
+# The vendored-file parity pair (docs/YTDL_LOCAL_DOWNLOAD.md section 5, 2026-08-14).
+# ytdl/web's copy is the SOURCE OF TRUTH; the companion carries a header and
+# then the same bytes, because the frozen exe has no ytdlweb and the dashboard
+# container has no ccsync_companion.
+$YtdlCommonSrc = Join-Path $RepoRoot "ytdl\web\ytdlweb\ytdl_common.py"
+$YtdlCommonVendored = Join-Path $CompanionDir "src\ccsync_companion\ytdl_common.py"
+$VendorMarker = "# --- vendored content below, byte-identical ---"
 $DistDir = Join-Path $CompanionDir "dist"
 $ExePath = Join-Path $DistDir "ccsync-companion.exe"
 $ManifestPath = Join-Path $DistDir "ccsync-release.json"
@@ -106,6 +121,73 @@ function Get-Capture {
     $m = Select-String -Path $Path -Pattern $Pattern
     if (-not $m) { return "" }
     return $m.Matches[0].Groups[1].Value
+}
+
+function Get-FileBytesAsText {
+    # A file's bytes as a string whose chars ARE those bytes: Latin-1 (28591)
+    # maps 0x00-0xFF one-to-one, so IndexOf/Substring/Equals below are byte
+    # operations. Get-Content would decode UTF-8 and normalise line endings --
+    # both of which would make a BYTE comparison lie (2026-08-14).
+    param([string]$Path)
+    return [System.Text.Encoding]::GetEncoding(28591).GetString(
+        [System.IO.File]::ReadAllBytes($Path))
+}
+
+function Get-VendorParityProblem {
+    <#
+        Is the companion's vendored copy still byte-identical to its source?
+
+        docs/YTDL_LOCAL_DOWNLOAD.md section 5: server and companion must produce
+        byte-identical artifacts for the same clip -- same outtmpl, same
+        sidecar, same fallback rung -- because they write into ONE canonical
+        tree that syncs fleet-wide. A vendored copy that drifts does not throw;
+        it quietly grows a second spelling of the same video, discovered months
+        later. So this refuses the build the way the installer version drift
+        check above does.
+
+        Returns "" when the two agree, or a one-line description of the
+        problem. FAIL SAFE: a missing, unreadable or marker-less file is a
+        problem, never a skip -- "I could not check" must not read as "fine".
+    #>
+    param([string]$SourcePath, [string]$VendoredPath, [string]$Marker)
+
+    foreach ($p in @($SourcePath, $VendoredPath)) {
+        if (-not (Test-Path -LiteralPath $p)) {
+            return "cannot read $p (missing) -- refusing rather than skipping the check"
+        }
+    }
+    try {
+        $src = Get-FileBytesAsText -Path $SourcePath
+        $vend = Get-FileBytesAsText -Path $VendoredPath
+    }
+    catch {
+        return "cannot read the parity pair: $($_.Exception.Message)"
+    }
+
+    $first = $vend.IndexOf($Marker, [StringComparison]::Ordinal)
+    if ($first -lt 0) {
+        return "the vendored copy has no '$Marker' line -- that marker is what separates its header from the vendored bytes; restore it"
+    }
+    if ($vend.IndexOf($Marker, $first + $Marker.Length, [StringComparison]::Ordinal) -ge 0) {
+        return "the vendored copy carries '$Marker' more than once -- ambiguous header end; leave exactly one, as the last line of the header"
+    }
+
+    # Strip the marker LINE, terminator and all, then compare what is left
+    # against the whole source file.
+    $rest = $vend.Substring($first + $Marker.Length)
+    if ($rest.StartsWith("`r`n")) { $rest = $rest.Substring(2) }
+    elseif ($rest.StartsWith("`n")) { $rest = $rest.Substring(1) }
+
+    if ([string]::Equals($rest, $src, [StringComparison]::Ordinal)) { return "" }
+
+    $n = [Math]::Min($rest.Length, $src.Length)
+    $offset = $n
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($rest[$i] -ne $src[$i]) { $offset = $i; break }
+    }
+    $line = ($src.Substring(0, [Math]::Min($offset, $src.Length)) -split "`n").Count
+    return ("the vendored copy has DRIFTED from its source: $($rest.Length) byte(s) below the marker " +
+            "vs $($src.Length) in the source, first difference at byte $offset (source line ~$line)")
 }
 
 function Invoke-Native {
@@ -194,7 +276,7 @@ function Install-CompanionEditable {
 # --- 1. version parity -----------------------------------------------------
 
 Write-Host ""
-Write-Step "--- step 1/5: version parity ---"
+Write-Step "--- step 1/5: version + vendored-file parity ---"
 
 $Version = Get-Capture -Path $ConfigPy -Pattern '^VERSION\s*=\s*"([^"]+)"'
 if (-not $Version) {
@@ -248,7 +330,51 @@ if ($mismatches.Count -gt 0) {
     Write-Step "     (installer version is its own number -- keep windows_bootstrap.ps1, onboarding/steps.py and installer/macos_bootstrap.sh in step)"
     exit 1
 }
+
+# Agreeing with itself is not enough: the dashboard rejects anything that is
+# not exactly 1.2.3 (_PACKAGE_VERSION_RE -> 422 "version must look like
+# 1.2.3"). A "0.7.9-rc1" set consistently in both files passes every check
+# above, survives ship's dashboard deploy and both suites and a five-minute
+# PyInstaller build, and only 422s at build_editor_package's PUT. The macOS
+# twin has refused it in 20 ms since it was written -- this is the port
+# (SHIP-11, 2026-08-14; tools/release_macos.sh step 2/6).
+if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    Write-Host ""
+    Write-Fail "VERSION '$Version' does not look like 1.2.3 -- the dashboard refuses to publish anything else"
+    Write-Step "fix: use a plain three-number version in companion/src/ccsync_companion/config.py and companion/pyproject.toml"
+    Write-Step "     (a suffix like -rc1/-dev would build fine here and 422 at the publish, after the whole build)"
+    exit 1
+}
 Write-Step "version parity OK"
+
+# --- vendored-file parity (docs/YTDL_LOCAL_DOWNLOAD.md section 5, 2026-08-14) ------
+#
+# Same class of failure as the installer version drift above, one layer down:
+# a constant duplicated across two trees that cannot import each other. The
+# consequence is worse, though -- an installer that reports the wrong version
+# is embarrassing, a companion whose ytdl_common has drifted from the NAS
+# worker's downloads the same YouTube clip under a second filename into the one
+# canonical tree, and nobody finds out until an editor sees the same video
+# twice. The exe about to be built BAKES IN whatever is in companion/src, so
+# this is the last moment the two copies can be compared.
+$vendorProblem = Get-VendorParityProblem -SourcePath $YtdlCommonSrc `
+    -VendoredPath $YtdlCommonVendored -Marker $VendorMarker
+if ($vendorProblem) {
+    Write-Host ""
+    Write-Fail "vendored-file parity check failed:"
+    Write-Host "    - $vendorProblem" -ForegroundColor Red
+    Write-Host "      source   (edit THIS one): $YtdlCommonSrc" -ForegroundColor Red
+    Write-Host "      vendored (do not edit)  : $YtdlCommonVendored" -ForegroundColor Red
+    Write-Host ""
+    Write-Step "fix: make the change in ytdl/web/ytdlweb/ytdl_common.py -- it is the source of truth --"
+    Write-Step "     then re-copy that whole file into the companion BELOW the marker line"
+    Write-Step "     `"$VendorMarker`", leaving the companion header above it untouched."
+    Write-Step "     (docs/YTDL_LOCAL_DOWNLOAD.md section 5: the two executors must write byte-identical"
+    Write-Step "     artifacts into one canonical tree; bump TEMPLATE_VERSION/SIDECAR_VERSION in the"
+    Write-Step "     source if the shape changed, so old companions decline the claim instead.)"
+    exit 1
+}
+Write-Step "vendored parity OK (ytdl_common.py: companion copy == ytdl/web below the marker)"
 
 # The dashboard ships separately (Docker) and carries its own VERSION; it is
 # reported, never enforced against the companion's.

@@ -32,6 +32,7 @@ stays per-half, because tool discovery differs between the two hosts.
 import hashlib
 import os
 import re
+import shutil
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -143,6 +144,29 @@ _local = threading.local()
 _schema_lock = threading.Lock()
 _schema_ready = False
 
+# Bumped by invalidate(). A sqlite3 connection is bound to an INODE, not to a
+# path, so every cached connection keeps reading the file it opened even after
+# that file has been renamed away and replaced -- which is exactly how a new
+# index ships (install_music_db renames the live music.db to
+# music.db.old.<ts> and moves the staged copy in). Without this, /api/reload
+# rebuilt the matrices from the unlinked old database and answered 200 with the
+# old numbers (MUSIC-10, 2026-08-14).
+_generation = 0
+
+
+def invalidate():
+    """Drop every thread's cached connection, so the next con() reopens by PATH.
+
+    Each thread closes its OWN connection, on its next call -- nothing here
+    touches a connection another thread may be using. The schema flag is reset
+    with it: a file that was swapped underneath us is a different database and
+    may be at a different schema version.
+    """
+    global _generation, _schema_ready
+    with _schema_lock:
+        _generation += 1
+        _schema_ready = False
+
 
 def con():
     """One SQLite connection per thread.
@@ -155,6 +179,12 @@ def con():
     """
     global _schema_ready
     c = getattr(_local, 'con', None)
+    if c is not None and getattr(_local, 'generation', None) != _generation:
+        try:
+            c.close()
+        except sqlite3.Error:                  # already closed, or mid-failure
+            pass
+        c = None
     if c is None:
         c = connect()
         # The check and the set are one critical section (MUSIC-11,
@@ -168,7 +198,27 @@ def con():
                 init(c)
                 _schema_ready = True
         _local.con = c
+        _local.generation = _generation
     return c
+
+
+def backup_to(con, dest):
+    """Write a consistent copy of an open database to `dest`. -> Path(dest).
+
+    sqlite3's online backup rather than shutil.copy2, because this database
+    runs in WAL mode (schema.sql): a plain file copy taken before a checkpoint
+    silently leaves everything committed since it in the -wal file it did not
+    copy. Used by anything that wants to SCRIBBLE on the index without touching
+    the one that ships -- eval.py --sweep (MUSIC-4, 2026-08-14).
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    out = sqlite3.connect(dest)
+    try:
+        con.backup(out)
+    finally:
+        out.close()
+    return dest
 
 
 def to_blob(vec):
@@ -223,6 +273,60 @@ def load_debias(con):
     return np.stack([np.frombuffer(r['vec'], dtype=np.float32) for r in rows])
 
 
+class PruneRefused(RuntimeError):
+    """Too much of the library appears to have vanished to believe the scan."""
+
+
+def prune_missing(con, present, force=False, max_share=0.2, floor=5):
+    """Delete tracks rows whose file is no longer in the library. -> rel_paths.
+
+    Nothing used to remove a row (MUSIC-3, 2026-08-14): `upsert` is keyed
+    ON CONFLICT(rel_path), so renaming a cue -- which SPEC.md says is expected,
+    a third of the library is named by numeric id or UUID -- indexed the new
+    name and left the old row forever. The ghost is not inert: it is in
+    load_matrix, so it ranks in search and /api/similar; retag re-scores over
+    it, skewing every other track's percentile; and proxies are keyed by id, so
+    it even previews correctly. The ONLY place it fails is the last one, the
+    companion's "file not found at P:\\Assets\\Music\\... -- is the share
+    mounted?", which sends an editor to debug a mount that is fine.
+
+    `present` is every rel_path a FULL sweep saw. windows/tags/axes/peaks go
+    with the row (ON DELETE CASCADE in schema.sql) and an ingest_queue row's
+    track_id is set NULL, so this is the whole deletion.
+
+    It refuses rather than deletes when the scan looks wrong: an empty scan, or
+    more than `max_share` of the library missing at once, is a half-mounted W:
+    far more often than it is a real purge, and this is the one operation here
+    that destroys embeddings. `force=True` (index_music.py --prune) is the
+    override for a genuine bulk removal.
+
+    It lives in the storage layer rather than in index_music.py because the
+    indexer is unimportable without torch, and a DELETE that cascades across
+    five tables is exactly the thing that needs a test.
+    """
+    if not con.execute('PRAGMA foreign_keys').fetchone()[0]:
+        # without the cascade this would orphan windows/tags/axes/peaks
+        raise PruneRefused('refusing to prune with foreign keys disabled')
+
+    present = {str(p) for p in present}
+    rows = [r['rel_path'] for r in con.execute('SELECT rel_path FROM tracks')]
+    gone = sorted(r for r in rows if r not in present)
+    if not gone:
+        return []
+    if not present:
+        raise PruneRefused(
+            'the scan found no audio files at all -- that is a share that is '
+            'not mounted, not an empty library. Nothing pruned.')
+    if not force and len(gone) > max(floor, int(len(rows) * max_share)):
+        raise PruneRefused(
+            f'{len(gone)} of {len(rows)} tracks are missing from the scan. '
+            'That is usually a partly-mounted share, not a deletion -- check '
+            'the root, then re-run with --prune if it really is one.')
+    con.executemany('DELETE FROM tracks WHERE rel_path=?', [(g,) for g in gone])
+    con.commit()
+    return gone
+
+
 def save_debias(con, dirs):
     con.execute('DELETE FROM debias')
     if dirs is not None and dirs.size:
@@ -252,6 +356,28 @@ def content_hash(path, chunk=1 << 20):
                 break
             h.update(b)
     return h.hexdigest()
+
+
+def stream_to(src, dest, chunk=1 << 20):
+    """Copy an upload's file object into `dest` in chunks. -> Path(dest).
+
+    Both ingest halves land a file this way (MUSIC-9, 2026-08-14) instead of
+    reading the upload into a `bytes` first: Starlette has already spooled
+    anything over 1 MB to disk, so `await up.read()` bought a second full copy
+    of a 60 MB wav in the heap of the process that also serves the fleet
+    dashboard, and a third pass over the file.
+
+    seek(0) because a spooled temp file that was just written sits at its end;
+    a reader without one (a test stub) is taken as already positioned.
+    """
+    try:
+        src.seek(0)
+    except (AttributeError, OSError, ValueError):
+        pass
+    dest = Path(dest)
+    with open(dest, 'wb') as fh:
+        shutil.copyfileobj(src, fh, chunk)
+    return dest
 
 
 def safe_upload_name(name):
@@ -329,15 +455,18 @@ def find_reencode(con, name, duration, tol=2.0):
 def find_content_duplicate(con, path, digest=None):
     """rel_path of a library file with byte-identical content, or None.
 
-    The base rig answers this by hashing every file under the share root
-    (`music_index.ingest.library_hashes`), which is fine over a local W:. The
-    NAS container cannot: that is a 9.5 GB read across the mount for every
-    dropped file. Identical content implies an identical byte count, so only
-    the rows whose `bytes` already match are opened -- the same answer, one or
-    two file reads instead of 376.
+    Identical content implies an identical byte count, so only the rows whose
+    `bytes` already match are opened -- one or two file reads instead of 376,
+    backed by idx_tracks_bytes.
+
+    BOTH halves use this now (MUSIC-7, 2026-08-14). The base rig used to hash
+    every file under the share root instead (`music_index.ingest.
+    library_hashes`), on the premise that W: is local: it is not, it is an SMB
+    mount of the same NAS, so the base rig was paying the 9.5 GB read this
+    exists to avoid -- on every dropped file, before ffprobe was even consulted.
 
     Files sitting in the library that no row knows about are therefore missed
-    here and caught by the base rig instead, on the run that indexes them.
+    here, and caught by the sweep that indexes them.
     """
     path = Path(path)
     size = path.stat().st_size

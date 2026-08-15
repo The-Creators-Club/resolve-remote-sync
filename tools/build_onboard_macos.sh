@@ -5,7 +5,8 @@
 # Builds "CCSync Onboarding.app" (onboarding/build_onboard_macos.spec) and
 # zips it for handoff. The Mac-side sibling of the -RebuildOnboard half of
 # installer/build_editor_package.ps1: version parity, staleness guard on the
-# bundled companion, PyInstaller, signature check, zip.
+# bundled companion, an already-published pre-flight when --publish is asked
+# for (before the build, not after it), PyInstaller, signature check, zip.
 #
 # WATCH THE FIRST RUN AFTER 2026-08-05: the spec moved from onefile to ONEDIR
 # (KNOWN_BUGS item 9 -- onefile .app bundles become a hard error in
@@ -59,6 +60,10 @@ while [ $# -gt 0 ]; do
         *) echo "Unknown argument: $1"; usage ;;
     esac
 done
+
+# Normalised HERE and not in the publish section any more: the already-published
+# pre-flight added by SHIP-12 runs BEFORE the build, and it builds URLs too.
+DASHBOARD_URL="${DASHBOARD_URL%/}"
 
 step() { echo "[onboard-build] $1"; }
 warn() { echo "[onboard-build] WARNING: $1" >&2; }
@@ -257,6 +262,47 @@ else
 fi
 
 # ----------------------------------------------------------------------
+# 3b/5 pre-flight: is this installer version already published? (--publish)
+# ----------------------------------------------------------------------
+# BEFORE the build, not after it (SHIP-12, 2026-08-14). The server was first
+# consulted at the PUT, which is behind PyInstaller, two codesign passes, a
+# ditto zip, a zip round-trip verification AND a password prompt -- so an
+# admin re-running this after a half-failed ship spent all of that to be told
+# to bump a version number and start over. tools/release_macos.sh learned this
+# in its own words ("discovering that after a password prompt wastes the run --
+# tools/ship.ps1 learned the same lesson on 2026-07-26"); this is that
+# pre-flight, keyed on the macos onboard slot.
+if [ "$PUBLISH" = 1 ] && [ "$DRY_RUN" != 1 ]; then
+    have_cmd curl || fail "no curl on PATH -- cannot publish"
+    REPORT_TOKEN="$(capture "$HOME/.ccsync/config.toml" 's/^[[:space:]]*dashboard_token[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')"
+    if [ -z "$REPORT_TOKEN" ]; then
+        step "NOTE: no dashboard_token in ~/.ccsync/config.toml -- skipping the already-published pre-flight (a 409 after the build means exactly that)"
+    else
+        # -K - : the token rides in curl's config on stdin, never on its command
+        # line, where any local process could read it out of the process list.
+        # -r 0-0 : ask for the first byte only. The route is GET-only (HEAD is a
+        # 405, measured 2026-08-03) and FileResponse honours Range with a 206.
+        PRE_CODE="$(printf 'header = "X-CCSync-Token: %s"\n' "$REPORT_TOKEN" \
+            | curl -s -K - -o /dev/null -r 0-0 -w '%{http_code}' --max-time 20 \
+              "$DASHBOARD_URL/api/v1/companion/package/macos/$ONBOARD_VERSION?kind=onboard" || true)"
+        if [ "$PRE_CODE" = "200" ] || [ "$PRE_CODE" = "206" ]; then
+            fail "a macos installer (kind=onboard) v$ONBOARD_VERSION is ALREADY published -- nothing has been built.
+         Bump the shared installer version in ALL FOUR places and re-run:
+             onboarding/steps.py                    INSTALLER_VERSION
+             installer/windows_bootstrap.ps1        \$InstallerVersion
+             installer/macos_bootstrap.sh           INSTALLER_VERSION
+             onboarding/build_onboard_macos.spec    CFBundleShortVersionString
+         (If you meant to republish the SAME wizard: ditto stamps the zip, so a
+         rebuild is never byte-identical and the server would keep what it has.)"
+        elif [ "$PRE_CODE" = "404" ]; then
+            step "pre-flight: installer v$ONBOARD_VERSION is not on the macos channel yet"
+        else
+            warn "pre-flight check returned HTTP $PRE_CODE (not 200/206/404) -- continuing anyway"
+        fi
+    fi
+fi
+
+# ----------------------------------------------------------------------
 # 4/5 PyInstaller
 # ----------------------------------------------------------------------
 if [ "$DRY_RUN" = 1 ]; then
@@ -268,6 +314,7 @@ if [ "$DRY_RUN" = 1 ]; then
     if [ "$PUBLISH" = 1 ]; then
         MC=0
         [ "$MAKE_CURRENT" = 1 ] && MC=1
+        dry "would first ask (with the report token from ~/.ccsync/config.toml, BEFORE building) whether macos installer v$ONBOARD_VERSION is already published"
         dry "would log in to $DASHBOARD_URL as '$ADMIN_USER' (password read from the terminal, never argv)"
         dry "would PUT $DASHBOARD_URL/api/v1/admin/packages/macos/$ONBOARD_VERSION?kind=onboard&sha256=<sha256>&make_current=$MC"
     fi
@@ -358,8 +405,6 @@ fi
 # ----------------------------------------------------------------------
 # 6/6 publish (macos, kind=onboard -- what a Mac's [ INSTALLER ] serves)
 # ----------------------------------------------------------------------
-DASHBOARD_URL="${DASHBOARD_URL%/}"
-
 if [ "$PUBLISH" != 1 ]; then
     echo ""
     rule
@@ -426,11 +471,27 @@ echo ""
 echo ""
 
 if [ "$PUT_CODE" = "409" ]; then
-    fail "HTTP 409: a macos onboard package v$ONBOARD_VERSION is already published
-         (different bytes, or a pre-1.0.17 Windows ship uploaded the .sh at this
-         number). The server keeps what it has. Bump the shared installer
-         version (steps.py + windows_bootstrap.ps1 + macos_bootstrap.sh + the
-         spec's CFBundleShortVersionString), rebuild, and re-run."
+    # 409 has two very different meanings and only one of them is a failure --
+    # the distinction build_editor_package.ps1 makes on the Windows side and
+    # this script did not (SHIP-12). Ask what the server actually holds: the
+    # download route reports the stored sha in a header and accepts this admin
+    # session, so no JSON parsing and no second credential is needed.
+    SERVER_SHA="$(curl -s -D - -o /dev/null -r 0-0 --max-time 20 -b "$COOKIE_JAR" \
+        "$DASHBOARD_URL/api/v1/companion/package/macos/$ONBOARD_VERSION?kind=onboard" 2>/dev/null \
+        | LC_ALL=C awk 'tolower($1) == "x-ccsync-sha256:" { gsub(/[[:space:]]/, "", $2); print tolower($2); exit }' || true)"
+    if [ -n "$SERVER_SHA" ] && [ "$SERVER_SHA" = "$ZIP_SHA" ]; then
+        step "macos installer v$ONBOARD_VERSION is already published and is BYTE-IDENTICAL to the zip just built -- nothing to upload"
+        if [ "$MAKE_CURRENT" = 1 ]; then
+            step "NOTE: --make-current could not be applied by a skipped upload -- confirm v$ONBOARD_VERSION is CURRENT on the dashboard admin page"
+        fi
+        exit 0
+    fi
+    fail "HTTP 409: a macos onboard package v$ONBOARD_VERSION is already published with
+         DIFFERENT bytes (server holds sha ${SERVER_SHA:-unknown}, this zip is $ZIP_SHA) --
+         or a pre-1.0.17 Windows ship uploaded the .sh at this number. The server keeps
+         what it has. Bump the shared installer version (steps.py +
+         windows_bootstrap.ps1 + macos_bootstrap.sh + the spec's
+         CFBundleShortVersionString), rebuild, and re-run."
 elif [ "$PUT_CODE" != "200" ]; then
     fail "publish failed with HTTP $PUT_CODE -- see the response above. Nothing is current that was not current before."
 fi

@@ -31,10 +31,12 @@ def test_a_newer_database_is_refused(tmp_path):
     con.close()
 
 
-# The two tables the v2/v3 migrations touch, exactly as schema.sql v1 created
-# them. Written out rather than derived from schema.sql: the point of the test
-# is a database that predates both migrations, and a copy that follows the
-# current file around would stop being one.
+# The tables the migrations touch, exactly as schema.sql v1 created them.
+# Written out rather than derived from schema.sql: the point of the test is a
+# database that predates the migrations, and a copy that follows the current
+# file around would stop being one. job_videos is here because 007 alters it
+# too -- and because a fixture that omits a table schema.sql has always created
+# would make an ALTER fail here that cannot fail on the fleet's database.
 _V1_DDL = """
 CREATE TABLE jobs (
     id INTEGER PRIMARY KEY, created_by TEXT NOT NULL, term TEXT NOT NULL,
@@ -53,6 +55,14 @@ CREATE TABLE downloads (
     project_slug TEXT NOT NULL, project_label TEXT NOT NULL, term TEXT NOT NULL,
     rel_path TEXT NOT NULL, job_id INTEGER, downloaded_by TEXT,
     downloaded_at TEXT NOT NULL);
+CREATE TABLE job_videos (
+    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL, url TEXT NOT NULL, title TEXT, channel TEXT,
+    duration REAL, upload_date TEXT, view_count INTEGER, thumbnail TEXT,
+    meta_error TEXT, relevant INTEGER DEFAULT 1, relevance_note TEXT,
+    duplicate INTEGER DEFAULT 0, duplicate_of TEXT, selected INTEGER DEFAULT 1,
+    dl_state TEXT DEFAULT 'none', dl_error TEXT, filepath TEXT,
+    UNIQUE(job_id, video_id));
 """
 
 
@@ -133,6 +143,14 @@ CREATE TABLE downloads (
     project_slug TEXT NOT NULL, project_label TEXT NOT NULL, term TEXT NOT NULL,
     term_dir TEXT, rel_path TEXT NOT NULL, job_id INTEGER, downloaded_by TEXT,
     downloaded_at TEXT NOT NULL);
+CREATE TABLE job_videos (
+    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL, url TEXT NOT NULL, title TEXT, channel TEXT,
+    duration REAL, upload_date TEXT, view_count INTEGER, thumbnail TEXT,
+    meta_error TEXT, relevant INTEGER DEFAULT 1, relevance_note TEXT,
+    duplicate INTEGER DEFAULT 0, duplicate_of TEXT, selected INTEGER DEFAULT 1,
+    dl_state TEXT DEFAULT 'none', dl_error TEXT, filepath TEXT,
+    UNIQUE(job_id, video_id));
 CREATE UNIQUE INDEX idx_jobs_one_active ON jobs(created_by)
     WHERE phase NOT IN ('done', 'failed', 'cancelled');
 """
@@ -156,8 +174,7 @@ def test_a_v4_database_gains_shot_types_and_its_old_rows_read_as_the_defaults(
 
     db.ensure_schema(con)
 
-    assert con.execute('PRAGMA user_version').fetchone()[0] == 6
-    assert db.CURRENT_SCHEMA_VERSION == 6
+    assert con.execute('PRAGMA user_version').fetchone()[0] == db.CURRENT_SCHEMA_VERSION
     old = con.execute('SELECT * FROM jobs').fetchone()
     assert db.shot_types_of(old) == db.DEFAULT_SHOT_TYPES
     assert db.job_dict(old)['shot_types'] == list(db.DEFAULT_SHOT_TYPES)
@@ -206,6 +223,14 @@ CREATE TABLE downloads (
     project_slug TEXT NOT NULL, project_label TEXT NOT NULL, term TEXT NOT NULL,
     term_dir TEXT, rel_path TEXT NOT NULL, job_id INTEGER, downloaded_by TEXT,
     downloaded_at TEXT NOT NULL);
+CREATE TABLE job_videos (
+    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL, url TEXT NOT NULL, title TEXT, channel TEXT,
+    duration REAL, upload_date TEXT, view_count INTEGER, thumbnail TEXT,
+    meta_error TEXT, relevant INTEGER DEFAULT 1, relevance_note TEXT,
+    duplicate INTEGER DEFAULT 0, duplicate_of TEXT, selected INTEGER DEFAULT 1,
+    dl_state TEXT DEFAULT 'none', dl_error TEXT, filepath TEXT,
+    UNIQUE(job_id, video_id));
 CREATE UNIQUE INDEX idx_jobs_one_active ON jobs(created_by)
     WHERE phase NOT IN ('done', 'failed', 'cancelled');
 """
@@ -229,7 +254,7 @@ def test_a_v5_database_gains_max_candidates_and_its_old_rows_read_as_the_default
 
     db.ensure_schema(con)
 
-    assert con.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert con.execute('PRAGMA user_version').fetchone()[0] == db.CURRENT_SCHEMA_VERSION
     assert 'max_candidates' in db._columns(con, 'jobs')
     old = con.execute('SELECT * FROM jobs').fetchone()
     assert old['max_candidates'] == db.DEFAULT_MAX_CANDIDATES
@@ -253,7 +278,7 @@ def test_the_migrations_candidate_default_is_the_pythons_default(tmp_path):
     # ...the default is one of the choices, and the pair is this app's version
     assert db.DEFAULT_MAX_CANDIDATES in db.CANDIDATE_CAPS
     assert db._MIGRATIONS[6][0] == '006_jobs_max_candidates.sql'
-    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION == 6
+    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION
 
 
 def test_the_candidate_ceiling_survives_the_round_trip(con):

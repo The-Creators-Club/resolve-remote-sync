@@ -22,6 +22,13 @@ size of what was seeded on the sending side). Measured live: the old rule
 matched 0.031s in with 0 bytes on disk; the new one matched at 2.047s with all
 of them.
 
+**The clock is polled, not bracketed, so it has a resolution** -- see
+POLL_INTERVAL_S and friends. Both ends of the measured interval are decided by
+a REST poll, so each is up to one interval out; on a ~2 s lane-C sync the old
+fixed 0.5 s made that ~25% instrument error that read as run-to-run variance.
+Polls are now fine while a run is young and every row carries the resulting
+`timing_resolution_s` so the report can say what the number is worth (SHIP-10).
+
 Only "up" and "down" are measurable here. `direction = "bidirectional"` is
 rejected rather than silently measured one-way -- see `run()`.
 
@@ -77,11 +84,38 @@ ENGINE = "syncthing"
 
 STARTUP_TIMEOUT_S = 20
 DEFAULT_SYNC_TIMEOUT_S = 1800
+
+# THE CLOCK (SHIP-10, 2026-08-14). This runner does not bracket a child process
+# with a Timer -- it decides "started" and "finished" by polling a local REST
+# API -- so every poll interval is slop at BOTH ends: the dataset is already
+# seeded when the peers connect, and the connection (and therefore the
+# transfer) can be a whole interval older than the poll that observes it, which
+# is untimed transfer; completion is likewise only seen at a poll boundary,
+# which overstates. At one interval each way that was +/-1.0 s of instrument
+# error on the module docstring's own measured 2.047 s completion -- ~25% of
+# the quantity being reported, arriving in the report as run-to-run variance.
+#
+# So: poll FINELY while the run is young, where the granularity actually
+# matters, and back off to the old interval once it cannot (0.05 s is 2.5% of a
+# 2 s sync and 0.003% of a 30 minute one, and a 20 Hz localhost REST poll for
+# hours would start perturbing what it measures).
 POLL_INTERVAL_S = 0.5
+FINE_POLL_INTERVAL_S = 0.05
+FINE_POLL_WINDOW_S = 10.0
+# The connect wait always polls finely: everything between the real connection
+# and the poll that sees it is transfer that happens off the clock, and the
+# whole wait is normally a second or two.
+CONNECT_POLL_INTERVAL_S = FINE_POLL_INTERVAL_S
 # How long to wait (untimed, before the clock starts) for the two instances to
 # actually dial each other. Loopback with fixed addresses and no discovery, so
 # this is normally a second or two; a minute is a "something is wrong" ceiling.
 CONNECT_TIMEOUT_S = 60
+
+
+def poll_interval_for(elapsed_s: float) -> float:
+    """The poll interval to use `elapsed_s` into a wait -- and, equivalently,
+    the worst-case error of a boundary observed at that point (SHIP-10)."""
+    return FINE_POLL_INTERVAL_S if elapsed_s < FINE_POLL_WINDOW_S else POLL_INTERVAL_S
 
 
 def available(cfg: dict[str, Any] | None = None) -> tuple[bool, str]:
@@ -449,7 +483,7 @@ def _wait_for_peer_connection(
     instance: "_Instance",
     peer_device_id: str,
     timeout_s: float = CONNECT_TIMEOUT_S,
-    poll_interval: float = POLL_INTERVAL_S,
+    poll_interval: float = CONNECT_POLL_INTERVAL_S,
 ) -> bool:
     """Block (untimed) until `instance` has actually connected to the peer.
 
@@ -457,6 +491,10 @@ def _wait_for_peer_connection(
     must fail loudly rather than be measured, and the TCP dial + TLS handshake
     is setup, not transfer -- the same reason the rclone runners seed and
     pre-clean untimed.
+
+    The interval is fine on purpose (SHIP-10): the dataset is already seeded,
+    so everything between the real connection and the poll that notices it is
+    transfer happening BEFORE the caller starts its timer, i.e. off the clock.
     """
     deadline = time.monotonic() + timeout_s
     while True:
@@ -473,7 +511,7 @@ def _wait_for_sync(
     timeout_s: float,
     *,
     expected_bytes: int = 0,
-    poll_interval: float = POLL_INTERVAL_S,
+    poll_interval: float | None = None,
 ) -> tuple[bool, float, str]:
     """Wait until `folder_id` on `instance` holds everything the peer offers.
 
@@ -491,6 +529,10 @@ def _wait_for_sync(
     was seeded on the other side. Directories count toward syncthing's
     `globalBytes` (a synthetic 128 bytes each), so the seeded payload size is a
     safe lower bound.
+
+    `poll_interval=None` (the default) polls adaptively -- see
+    `poll_interval_for`: completion is only ever detected AT a poll, so the
+    interval is the resolution of the seconds this returns (SHIP-10).
     """
     start = time.monotonic()
     deadline = start + timeout_s
@@ -507,9 +549,10 @@ def _wait_for_sync(
         saw_index = saw_index or index_arrived
         if index_arrived and last_need == 0 and last_state in ("idle", ""):
             return True, time.monotonic() - start, ""
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now >= deadline:
             break
-        time.sleep(poll_interval)
+        time.sleep(poll_interval if poll_interval is not None else poll_interval_for(now - start))
 
     elapsed = time.monotonic() - start
     if not saw_index:
@@ -626,6 +669,11 @@ def run(
                 dest, folder_id, sync_timeout_s, expected_bytes=expected_bytes
             )
         seconds = timer.seconds
+        # What this row's seconds are worth (SHIP-10): one connect-poll of
+        # possibly-untimed transfer before the timer started, plus one
+        # completion-poll of late detection at the end. Carried on the row so
+        # the report can print it rather than let it read as variance.
+        timing_resolution = CONNECT_POLL_INTERVAL_S + poll_interval_for(seconds)
 
         if not completed:
             return RunResult(
@@ -650,6 +698,7 @@ def run(
                 seconds=seconds, num_bytes=moved_bytes, MB_s=0.0, verified=False, ok=False,
                 reason=short, lane=lane, endpoint="localhost-pair", repeat_index=repeat_index,
                 bytes_source="destination-listing", verify_method="none", loopback=True,
+                timing_resolution_s=timing_resolution,
             )
 
         verified = False
@@ -677,6 +726,7 @@ def run(
             bytes_source="destination-listing",
             verify_method=verify_method,
             loopback=True,
+            timing_resolution_s=timing_resolution,
         )
     except Exception as exc:  # noqa: BLE001 -- runners must never raise
         return RunResult(

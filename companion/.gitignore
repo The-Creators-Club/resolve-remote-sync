@@ -6,3 +6,6 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+# A test that points LOCALAPPDATA at this directory leaves PowerShell's module
+# cache behind (measured 2026-08-15, during a tools\run_all_tests.ps1 run).
+Microsoft/

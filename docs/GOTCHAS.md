@@ -373,6 +373,26 @@ of step with the published one for no gain.
   and do NOT hand-rename the local file: pre-fix rclone treats the
   corrected name as a different file and re-downloads the `‛` version.
 
+  **Still seen on a pinned companion (2026-08-14, ruskin's box, v0.7.4.)**
+  Lane A flapped `error` on Creator Profiles/Season 1 with
+  `failed to open source object: ...Satu‛‛： Piloting...: The system cannot
+  find the file specified` -- a DOUBLY escaped name that exists on no disk,
+  which only an rclone run WITHOUT the pin can produce. Every builder
+  (`build_up_command`, `build_express_command`, `build_down_command`)
+  carries it via `_transport_flags()`, and hand-running the same argv with
+  the pin succeeds, so the offending invocation was never identified.
+  Diagnose it in one read-only command pair -- diff the names from
+  `rclone lsl <dir> --local-encoding <LOCAL_ENCODING>` against plain
+  `rclone lsl <dir>`: on that project 628 of 2507 entries differed, i.e. a
+  quarter of the tree resolves to two different names depending on one flag.
+  Belt and braces, applied on that machine: set the USER env var
+  `RCLONE_LOCAL_ENCODING` to the same value as LOCAL_ENCODING. rclone reads
+  it for the implicit local backend, so it covers every invocation whatever
+  its argv, and an explicit `--local-encoding` still wins where one is
+  passed. It is inherited from the environment the companion was started
+  in, so the companion must be restarted (or the user logged back in)
+  before it takes effect.
+
 - **A Syncthing that connects and drops after exactly ~1 second is a
   device-list problem, not a network problem.** NAS-side log signature:
   `Established secure connection` then `Lost device connection ...

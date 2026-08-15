@@ -26,6 +26,7 @@ import pytest
 
 from ccsync_companion.sync.rclone_lane import (
     APPLEDOUBLE_EXCLUDE_RULE,
+    LANE_A_MIN_SIZE,
     LANE_B_MIN_AGE_SECONDS,
     ExpressListError,
     RcloneTuning,
@@ -175,6 +176,60 @@ def test_build_up_command_shape(tmp_path):
     assert "--timeout" in cmd and "--contimeout" in cmd and "--retries-sleep" in cmd
     # No budget passed -> no --max-duration.
     assert "--max-duration" not in cmd
+
+
+# -- lane A's 0-byte floor (COMP-GUARD-1, 2026-08-14) ----------------------
+#
+# --ignore-existing makes the FIRST version of a name to reach the NAS the
+# only one that ever will, so an empty final -- what a hard kill mid-copy
+# strands under the real name -- would be the fleet's canonical copy of that
+# clip forever. Lane A carries nothing but video containers, none of which can
+# legitimately be empty.
+
+
+def test_up_command_carries_a_one_byte_size_floor(tmp_path):
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    cmd = build_up_command("rclone", "C:\\root", "nas", "Creators_Club", filter_file)
+    assert cmd[cmd.index("--min-size") + 1] == LANE_A_MIN_SIZE
+    # "1B", never a bare "1": measured against the bundled rclone 1.74.4, a
+    # unit-less number is parsed as KiB and skips real 64-byte files. The
+    # floor exists to drop empties, not small clips.
+    assert LANE_A_MIN_SIZE == "1B"
+    # It is only meaningful next to the flag that makes an empty upload
+    # permanent -- if that ever goes, this test should be revisited, not the
+    # floor silently kept.
+    assert "--ignore-existing" in cmd
+
+
+def test_lane_b_has_no_size_floor(tmp_path):
+    """Deliberately absent. Lane B is `sync`, the one verb here that removes
+    local files: a size filter changes what the run can SEE, and a file the
+    run cannot see is a file its delete/backup-dir accounting reasons about
+    differently. Nothing in COMP-GUARD-1 is about the download direction."""
+    filter_file = tmp_path / "f.txt"
+    filter_file.write_text("- **\n")
+    cmd = build_down_command("rclone", "C:\\root", "nas", "Creators_Club", filter_file)
+    assert "--min-size" not in cmd
+
+
+def test_express_command_has_no_size_floor_because_rclone_refuses_it(tmp_path):
+    """Measured against the bundled 1.74.4 -- `--min-size` alongside
+    `--files-from-raw` dies with the same CRITICAL that rules out --min-age
+    and --filter-from:
+
+        CRITICAL: Failed to initialise global options: failed to reload
+        "filter" options: the usage of --files-from-raw overrides all other
+        filters, it should be used alone or with --files-from
+
+    so the express floor is enforced in Python instead (see
+    RcloneLane._express_partition). A regression here would make every express
+    run die at startup."""
+    cmd = build_express_command(
+        "rclone", "C:\\root", "nas", "Creators_Club", tmp_path / "list.txt"
+    )
+    assert "--min-size" not in cmd
+    assert "--ignore-existing" in cmd, "which is why the Python-side floor exists"
 
 
 def test_build_down_command_shape(tmp_path):
@@ -788,6 +843,42 @@ def test_lane_a_ignore_existing_never_clobbers(rclone_binary, fixture_tree, tmp_
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert dest_file.read_text() == "original", "--ignore-existing must not clobber the NAS copy"
+
+
+def test_lane_a_never_uploads_a_0_byte_final_but_still_takes_small_ones(
+    rclone_binary, tmp_path
+):
+    """COMP-GUARD-1 (2026-08-14), against the real binary.
+
+    Two halves, and the second is the one that needs a live rclone: an empty
+    .mov must not travel (a hard kill mid-copy strands one under its real
+    name, and --ignore-existing would make that the NAS's permanent copy),
+    AND a 64-byte one must still travel -- `--min-size 1` is parsed as 1 KiB
+    by this binary and would silently strand every genuinely tiny file
+    instead."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "stranded.mov").write_bytes(b"")
+    (src / "tiny.mov").write_bytes(b"x" * 64)
+    (src / "real.mov").write_bytes(b"y" * 3000)
+    old_time = time.time() - 3600
+    for f in src.rglob("*"):
+        os.utime(f, (old_time, old_time))
+
+    filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    dst = tmp_path / "dst_up"
+    cmd = build_up_command(rclone_binary, str(src), None, str(dst), filter_file)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+    assert not (dst / "stranded.mov").exists(), (
+        "a 0-byte final reached the NAS -- with --ignore-existing that is permanent"
+    )
+    assert (dst / "tiny.mov").read_bytes() == b"x" * 64, (
+        "the floor is bytes, not KiB: a real 64-byte file must still upload"
+    )
+    assert (dst / "real.mov").exists()
 
 
 def test_lane_b_sync_pulls_only_proxy_contents_including_nested(rclone_binary, fixture_tree, tmp_path):

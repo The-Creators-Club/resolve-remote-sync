@@ -146,16 +146,56 @@ def slugify(text: str) -> str:
 # test_cross_component.py asserts exactly that).
 PARTIAL_IGNORE_LINES = ["(?i)**/*.partial", "(?i)*.partial"]
 
+# yt-dlp's in-flight files, same failure as B12 one lane over. The NAS-side
+# ytdl worker downloads INTO the shared Projects tree (Youtube/), which is a
+# sendreceive Syncthing root, so lane C replicated every growing `.part` out
+# to each editor with the project ticked. Since the 2026-08-11 delete-
+# protection retrofit set ignoreDelete=True on EDITOR folders too, the
+# rename/delete the worker performs on completion never propagates: what
+# lands on an editor's disk is permanent until someone deletes it by hand.
+# Observed live 2026-08-13/14 on editor ruskin's machine -- 27 orphaned
+# .part/.ytdl files, ~1.5 GB, accumulated over three days.
+#
+# rclone lane B has excluded `- *.part` / `- *.ytdl` since the Youtube/
+# includes were added (companion sync/rclone_lane.build_filter_rules_down),
+# so Syncthing was the LAST lane still leaking them; this closes it.
+#
+# `.part-FragN` needs its own pair: a fragment is named "<file>.part-Frag84"
+# and does NOT end in `.part` (see ytdl/web/ytdlweb/worker.py `_sweepable`,
+# which tests `.part-Frag` as a separate prefix for exactly this reason), so
+# `*.part` alone would leave the fragments syncing.
+#
+# Deliberately NOT folded into PARTIAL_IGNORE_LINES above: that list is also
+# spent by build_asset_stignore_lines(), whose output must stay byte-
+# identical across server/dashboard/companion or the collector and the
+# companion rewrite the LUT library's .stignore at each other every cycle
+# (server/tests/test_cross_component.py pins it). No ytdl worker writes into
+# a shared asset folder, so the lines have no business there.
+#
+# For these to SURVIVE on a live folder, dashboard provision.
+# build_stignore_lines() and companion syncthing_admin.STIGNORE_LINES need
+# the identical lines: the dashboard collector's _ensure_ignores() compares
+# a folder's live ignores to its own list with `have == want` and re-POSTs
+# on any difference, so a pattern only this file knows about is stripped on
+# the next provision cycle.
+YTDL_IGNORE_LINES = [
+    "(?i)**/*.part", "(?i)*.part",
+    "(?i)**/*.part-Frag*", "(?i)*.part-Frag*",
+    "(?i)**/*.ytdl", "(?i)*.ytdl",
+]
+
 
 def build_stignore_lines() -> list[str]:
     """Build the .stignore content for a project's Syncthing folder.
 
     One case-insensitive line per video extension, plus a case-insensitive
     line ignoring any Proxy/ directory anywhere in the tree (proxies travel
-    via rclone lane B, not Syncthing) and rclone's orphaned .partial files.
+    via rclone lane B, not Syncthing), rclone's orphaned .partial files and
+    yt-dlp's in-flight .part/.part-FragN/.ytdl files.
     """
     lines = [f"(?i)*{ext}" for ext in VIDEO_EXTENSIONS]
     lines.extend(PARTIAL_IGNORE_LINES)
+    lines.extend(YTDL_IGNORE_LINES)
     # Bare name matches a Proxy dir at ANY depth including the folder root;
     # the **/ variants alone would miss a root-level Proxy/.
     lines.append("(?i)Proxy")
@@ -199,7 +239,9 @@ def build_asset_stignore_lines() -> list[str]:
         it is not a silent surprise.
 
     rclone's .partial pattern is included for symmetry only: no rclone lane
-    ever writes here.
+    ever writes here. YTDL_IGNORE_LINES deliberately is NOT: the ytdl worker
+    writes into Projects/, never into a shared asset folder, and this list
+    must stay byte-identical to the dashboard's and the companion's copies.
     """
     lines = [f"(?i)*{ext}" for ext in VIDEO_EXTENSIONS]
     lines.extend(PARTIAL_IGNORE_LINES)
@@ -270,6 +312,41 @@ def validate_slug(slug: str) -> str:
 # side of the never-overwrite check. Single-quoted below; contains no quotes
 # of its own that would need escaping.
 _MARKER_SLUG_SED = r's/.*"slug"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+
+# read_marker_cmd's third answer. A marker that exists but cannot be read is a
+# REFUSAL, not a fallback (see setup_syncthing_folder's module docstring), and
+# that distinction only survives if the shell can express it.
+MARKER_UNREADABLE_SENTINEL = "MARKER-UNREADABLE"
+MARKER_READ_RC = 9
+
+
+def build_marker_read_cmd(base: str) -> str:
+    """Shell reading `base`'s marker, distinguishing THREE states, not two.
+
+    Prints "MARKER-PRESENT" then the marker's contents, or "MARKER-ABSENT", or
+    -- when the privileged read could not run at all -- prints
+    MARKER_UNREADABLE_SENTINEL on stderr and exits MARKER_READ_RC.
+
+    Read as root: the dataset is 770 and TRUENAS_USER has no traverse rights.
+
+    SERVER-4 (2026-08-14): this used to be
+    `if echo "$SUDO_PW" | sudo -S -p "" test -e M; then ... else echo
+    MARKER-ABSENT; fi`, and an `if` CONDITION is exempt from its command's exit
+    status -- so any sudo-level failure (revoked sudoer, lockout after failed
+    attempts, requiretty, a policy change) took the else branch and the whole
+    remote command still exited 0. The caller saw a clean "there is no marker
+    here" and fell back to slugify(--project-rel-path), which for a project
+    that has MOVED is a different identity: a second Syncthing folder over the
+    same directory, shared with nobody, cleaned up by nothing -- exactly what
+    reading the marker exists to prevent. The sentinels are now printed by the
+    privileged shell itself, so sudo failing means no sentinel and a non-zero
+    exit, never MARKER-ABSENT.
+    """
+    marker_q = shell_quote(f"{base}/{MARKER_FILENAME}")
+    inner = (f'if [ -e {marker_q} ]; then echo MARKER-PRESENT; cat {marker_q}; '
+             f"else echo MARKER-ABSENT; fi")
+    return (f'echo "$SUDO_PW" | sudo -S -p "" sh -c {shell_quote(inner)} '
+            f"|| {{ echo {MARKER_UNREADABLE_SENTINEL} >&2; exit {MARKER_READ_RC}; }}")
 
 
 def build_marker_write_cmd(base: str, slug: str, created_by: str = "setup_tree",

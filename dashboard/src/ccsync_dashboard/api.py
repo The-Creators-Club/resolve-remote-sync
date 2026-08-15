@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
@@ -600,11 +601,17 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
 
     The full body carries project slugs, project labels and Syncthing's
     folder error strings, and this route is in app.py's _OPEN_EXACT so the
-    Docker healthcheck (which only reads the status code, from 127.0.0.1) can
-    reach it without credentials -- which made the client roster readable by
-    anyone who could reach the port. Unauthenticated callers now get
-    {"ok", "version"} and the same 200/exception behaviour; a session or the
-    companion's X-CCSync-Token unlocks the rest."""
+    Docker healthcheck can reach it from 127.0.0.1 without credentials --
+    which made the client roster readable by anyone who could reach the port.
+    Unauthenticated callers now get {"ok", "version"} and the same
+    200/exception behaviour; a session or the companion's X-CCSync-Token
+    unlocks the rest.
+
+    The status code stays 200 even when `ok` is False, and that is load
+    bearing: ship.ps1 polls this route after a deploy and the macOS
+    onboarding wizard uses it as its connection test, so a 503 for "Syncthing
+    is unreachable" would read as "the dashboard is down". The container
+    healthcheck reads `ok` out of the body instead (DASH-2, 2026-08-14)."""
     settings = request.app.state.settings
     collector = db.fetch_collector_status(conn)
     if not (
@@ -622,8 +629,9 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
         "version": VERSION,
         "syncthing_reachable": collector["syncthing_reachable"],
         # True = the last poll succeeded but finished too long ago, i.e. the
-        # collector thread is dead/wedged. Docker's healthcheck (see
-        # deploy/compose.yaml) uses syncthing_reachable, which this clears.
+        # collector thread is dead/wedged. That state also clears
+        # syncthing_reachable, hence `ok` above -- which is what Docker's
+        # healthcheck (see deploy/compose.yaml) parses out of this body.
         "collector_stale": collector["collector_stale"],
         "folder_errors": collector["folder_errors"],
         "last_polls": {
@@ -683,10 +691,23 @@ def api_editors(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     return build_editors_view(conn)
 
 
-def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = None) -> dict[str, Any]:
-    """The editor's ordered sync queue with per-project progress, for MY QUEUE."""
-    now = now or db.utcnow_iso()
-    projects = {p["slug"]: p for p in build_projects_view(conn, now)["projects"]}
+def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = None,
+                     projects_view: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The editor's ordered sync queue with per-project progress, for MY QUEUE.
+
+    `projects_view` lets a caller that has already built the fleet snapshot
+    hand it over. The fleet page renders the sidebar (build_projects_view) and
+    this panel side by side, and used to build the whole snapshot -- collector
+    status + lanes + the N+1 fetch_projects -- twice per render, from two
+    independently-taken `now` values, so the sidebar's status dots and this
+    panel's percentages came from two different reads of the same tables
+    (DASH-6, 2026-08-14)."""
+    if projects_view is not None:
+        now = now or projects_view.get("generated_at") or db.utcnow_iso()
+    else:
+        now = now or db.utcnow_iso()
+        projects_view = build_projects_view(conn, now)
+    projects = {p["slug"]: p for p in projects_view["projects"]}
     lane_rows = _lanes_by_editor(conn).get(editor, [])
     # The companion reports current_project as a project SLUG.
     current = next((r["current_project"] for r in lane_rows if r["current_project"]), None)
@@ -1195,6 +1216,32 @@ def _marked_ancestor(projects_dir: Path, rel: str) -> str | None:
     return provision.marked_ancestor(projects_dir, rel, include_self=True)
 
 
+def _raise_if_container_of_projects(target: Path, rel: str) -> None:
+    """Refuse a folder that CONTAINS projects -- a container is not a project.
+
+    DASH-1, 2026-08-14: both create and link used to look for descendants with
+    provision.scan_project_dirs(projects_dir), which prunes its os.walk at
+    every marker it finds. A marker is a plain JSON file on a share every
+    editor can write, so the case that actually needs catching -- someone
+    dropped one on Projects/2026/CCT/, which holds three real projects -- is
+    precisely the case that scan blinds itself to: it yields the container and
+    stops, the descendant loop sees nothing, and the adopt/create succeeds.
+    The projects row that gets written is then one the collector refuses to
+    provision every cycle (collector._creatable, which has used
+    marked_descendants all along), i.e. a project that silently never syncs.
+    """
+    from . import provision
+
+    below = provision.marked_descendants(target)
+    if not below:
+        return
+    first = f"{rel}/{below[0]}"
+    more = f" (+{len(below) - 1} more)" if len(below) > 1 else ""
+    raise ProjectSetupError(
+        f"that folder already contains a project ({first}{more}) -- pick that instead"
+    )
+
+
 def may_first_claim(
     settings, conn: sqlite3.Connection, user: str | None, resolve_project: str
 ) -> bool:
@@ -1277,13 +1324,19 @@ def create_tree_project(
     # mkdir(exist_ok=True) happily reuses an existing directory, so "create
     # 2026/CCT" over a container that already holds three real projects would
     # otherwise drop a marker on the container: scan_project_dirs prunes at
-    # it, all three vanish from discovery, and a Syncthing folder is
-    # provisioned whose path CONTAINS three other folders' paths.
-    for child_rel, _child_slug in provision.scan_project_dirs(projects_dir):
-        if child_rel.startswith(rel + "/"):
-            raise ProjectSetupError(
-                f"that folder already contains a project ({child_rel}) -- pick that instead"
-            )
+    # it, all three vanish from discovery, and the collector then refuses to
+    # provision the container forever (collector._creatable) -- a project that
+    # silently never syncs.
+    #
+    # DASH-1, 2026-08-14: this used to ask scan_project_dirs for the WHOLE
+    # tree, which prunes its walk at every marker -- so on the one path that
+    # matters (the container already carries a hand-dropped marker, the
+    # partial-create convergence branch below) the scan stopped AT the
+    # container and the projects underneath were invisible to their own guard.
+    # marked_descendants is the scoped look-below written for exactly this
+    # (provision.py), and it walks the candidate directory instead of the
+    # whole depth-8 Projects tree on every create POST.
+    _raise_if_container_of_projects(parent_path / name, rel)
 
     try:
         slug = provision.slugify(rel)
@@ -1350,11 +1403,10 @@ def adopt_folder(
     if marked is not None and marked != rel:
         raise ProjectSetupError(f"this folder is inside an existing project ({marked})")
     # No marked descendants either -- a container of projects isn't a project.
-    for child_rel, child_slug in provision.scan_project_dirs(projects_dir):
-        if child_rel != rel and child_rel.startswith(rel + "/"):
-            raise ProjectSetupError(
-                f"this folder contains an existing project ({child_rel}) -- pick that instead"
-            )
+    # Scoped look-below, not a whole-tree scan: see _raise_if_container_of_
+    # projects (DASH-1, 2026-08-14) for why the whole-tree scan could not see
+    # them once the container itself carried a marker.
+    _raise_if_container_of_projects(target, rel)
 
     slug = provision.read_marker(target)
     if slug is None:
@@ -1447,18 +1499,28 @@ def build_admin_users_view(settings) -> dict[str, Any]:
     Returns {"error": <str>} instead of raising when a backend is
     unreachable, mirroring the rest of the dashboard's "stale banner, don't
     crash the page" convention.
+
+    The two backends fail INDEPENDENTLY (DASH-7, 2026-08-14). A TrueNAS blip
+    used to return early with pending_devices=[] as well, so the panel's
+    Syncthing half -- the device-approval table, which is the whole reason an
+    admin has this page open while somebody's machine is being onboarded --
+    vanished behind a banner about an unrelated backend. `truenas_error` and
+    `syncthing_error` say WHICH half is missing so the template can avoid
+    reporting an unreachable backend as "none pending".
     """
     if not settings.truenas_pw:
-        return {"truenas_configured": False, "editors": [], "pending_devices": [], "error": None}
+        return {"truenas_configured": False, "editors": [], "pending_devices": [],
+                "error": None, "truenas_error": None, "syncthing_error": None}
 
     truenas = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
                               base_url=settings.truenas_base_url or None,
                               verify_ssl=settings.truenas_verify_ssl)
+    truenas_error: str | None = None
+    editors: list[dict[str, Any]] = []
     try:
         editors = truenas.list_editors()
     except TrueNASError as exc:
-        return {"truenas_configured": True, "editors": [], "pending_devices": [],
-                "error": f"truenas: {exc}"}
+        truenas_error = f"truenas: {exc}"
 
     editor_rows = [{
         "username": u["username"],
@@ -1470,6 +1532,7 @@ def build_admin_users_view(settings) -> dict[str, Any]:
         "locked": bool(u.get("locked")),
     } for u in sorted(editors, key=lambda u: u["username"])]
 
+    syncthing_error: str | None = None
     pending: list[dict[str, Any]] = []
     if settings.syncthing_url:
         syncthing = SyncthingClient.from_settings(settings)
@@ -1495,10 +1558,19 @@ def build_admin_users_view(settings) -> dict[str, Any]:
                     "status": "pending",
                 })
         except SyncthingError as exc:
-            return {"truenas_configured": True, "editors": editor_rows, "pending_devices": [],
-                    "error": f"syncthing: {exc}"}
+            syncthing_error = f"syncthing: {exc}"
+            pending = []
 
-    return {"truenas_configured": True, "editors": editor_rows, "pending_devices": pending, "error": None}
+    return {
+        "truenas_configured": True,
+        "editors": editor_rows,
+        "pending_devices": pending,
+        # kept as one string for existing callers/tests; the per-backend keys
+        # are what the template renders each half's empty state from
+        "error": "; ".join(e for e in (truenas_error, syncthing_error) if e) or None,
+        "truenas_error": truenas_error,
+        "syncthing_error": syncthing_error,
+    }
 
 
 def _truenas_client_or_503(request: Request) -> TrueNASClient:
@@ -1689,6 +1761,36 @@ def _unlink_package_file(settings, row: sqlite3.Row | dict[str, Any]) -> None:
         pass  # a stray file is harmless; the DB row is the source of truth
 
 
+# Old enough that no publish still in flight can own it: the request would
+# have to have been streaming for six hours (DASH-3, 2026-08-14).
+STALE_PART_SECONDS = 6 * 3600
+
+
+def _sweep_stale_parts(dest_dir: Path, now: float | None = None) -> list[str]:
+    """Delete abandoned *.part staging files. Best-effort by construction --
+    an orphan wastes disk, a raise here would refuse a publish."""
+    import time
+
+    now = time.time() if now is None else now
+    swept: list[str] = []
+    try:
+        parts = list(dest_dir.glob("*.part"))
+    except OSError:
+        return swept
+    for path in parts:
+        try:
+            if now - path.stat().st_mtime < STALE_PART_SECONDS:
+                continue
+            path.unlink()
+        except OSError:
+            continue
+        swept.append(path.name)
+    if swept:
+        log.warning("removed %d abandoned package staging file(s): %s",
+                    len(swept), ", ".join(sorted(swept)))
+    return swept
+
+
 def _upgrade_info(
     conn: sqlite3.Connection, platform: str | None, running: str | None
 ) -> dict[str, Any] | None:
@@ -1780,8 +1882,9 @@ async def api_publish_package(
     """Publish a companion build: raw exe bytes as the request body (no
     multipart -- python-multipart isn't a dependency and doesn't need to be),
     expected sha256 as a query param, verified server-side before anything
-    becomes visible. A `.part` staging file + os.replace means the served
-    file is always complete.
+    becomes visible. A per-request `.part` staging file + os.replace means the
+    served file is always complete, and that two publishes in flight at once
+    cannot write into (or delete) each other's staging file.
 
     `?prune=1` opts IN to deleting all but the current build and the two
     newest non-current ones. It is off by default: publishing must not
@@ -1826,7 +1929,27 @@ async def api_publish_package(
     dest_dir = settings.packages_path() / platform
     dest_dir.mkdir(parents=True, exist_ok=True)
     filename = _package_filename(kind, platform, version)
-    part = dest_dir / (filename + ".part")
+    # Per-REQUEST staging name. It used to be `filename + ".part"`, derived
+    # only from (kind, platform, version) and therefore identical for every
+    # attempt at the same version, while the except below unlinks that exact
+    # path on ANY exception -- including the ClientDisconnect that
+    # request.stream() raises when an upload is abandoned. Ctrl-C a stalled
+    # 40 MB publish over Tailscale, re-run it while uvicorn is still draining
+    # the first request, and the dying request deletes the live one's staging
+    # file (os.replace -> FileNotFoundError -> 500, nothing published, and
+    # ship's "already published" gate to work around). Worse when both
+    # complete: every threadpool write is an await point, so the two streams
+    # interleave into one file while each hashes only its own bytes -- the
+    # sha256 gate passes for a file that matches neither, and make_current=1
+    # then hands the fleet a build that fails its own verification
+    # (DASH-3, 2026-08-14).
+    part = dest_dir / f"{filename}.{uuid.uuid4().hex}.part"
+    # A unique staging name means an upload the process never got to clean up
+    # (SIGKILL, container restart) can no longer be overwritten by the retry,
+    # so sweep the abandoned ones. Best-effort and generously old: the point is
+    # that ~40 MB orphans must not accumulate on the dataset the SQLite DB
+    # lives on, not to be prompt (DASH-3, 2026-08-14).
+    _sweep_stale_parts(dest_dir)
     digest = hashlib.sha256()
     size = 0
     too_big = False

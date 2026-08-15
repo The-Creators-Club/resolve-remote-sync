@@ -19,7 +19,68 @@ itself on next boot.
 
 This file is the ledger of what is STILL open.
 
+**2026-08-14: a third full-repo hunt ran (12 Opus hunters + 12 adversarial
+verifiers, every tracked source file, briefed on this ledger and both 08-11
+archives). It confirmed 94 NEW findings — 10 critical / 46 major / 38 minor —
+plus 7 uncertain. FIXED the same evening by an 11-agent Opus fix pass
+(disjoint file territories, orchestrator-reconciled; resolution header and
+per-finding outcomes in `docs/bug-hunt-2026-08-14.md`). All 10 criticals
+fixed; all 10 suites green (`tools\run_all_tests.ps1`: 0 of 10 failed,
+~+250 tests); eight findings deliberately NOT fixed — see R16. Two pieces
+of the pass already happened outside the repo: the base rig's
+`broll-indexer-watchdog` scheduled task was re-registered against the
+in-repo `watchdog.ps1` (still Disabled, ops half of BROLL-IDX-2), and the
+music UI's reveal now requires a companion carrying `POST /music/reveal` —
+one more entry in the "editors need a republished companion" column.
+NOTHING SHIPPED: same ship path as above (companion → 0.8.0 was already the
+target; this pass adds no new version spots).**
+
 ---
+
+## Open — residuals from the 2026-08-14 fix pass
+
+### R16 — eight 08-14 findings deliberately not fixed
+Each was investigated by its territory's agent and declined for cause; the
+full reasoning lives in each finding's entry in `docs/bug-hunt-2026-08-14.md`.
+
+Needs a live spike or real-media benchmark before any code change:
+- **YTDL-WEB-5** (enrich re-fetches flat-search metadata) — the collapse
+  would silently drop the availability gate, the BotCheckError tripwire and
+  `upload_date`; needs a live yt-dlp session to establish what flat entries
+  actually carry.
+- **COMP-GUARD-8** (proactive MappedRoot canon) — MappedRoot is unproven in
+  both directions and `ensure_media_storage` renumbers `GALLERY_FS_KEY`
+  entries; needs a base-rig experiment.
+- **BROLL-IDX-7** (fold frame extraction into the scene-detect decode) —
+  crosses the status-gated `organised` stage boundary and most timestamps
+  derive FROM the detection output; needs benchmarking, and `stage_frames`
+  is already input-seek + marker-idempotent.
+
+Two-sided designs that must land atomically (design written, not built):
+- **BROLL-WEB-7** (incremental semantic-cache invalidation) — the web half
+  alone reintroduces the BROLL-17/R2 staleness class, and the vocabulary
+  half is unsound without per-token refcounting; the safe two-sided design
+  (dirty-video generation ledger in `meta`) is in the b-roll agent's report
+  inside the hunt doc's entry.
+
+New subsystems, not patches:
+- **SERVER-10** (rclone-backed music-data push) — new command + remote
+  config + root-owned post-step; its concrete costs were reduced by
+  SERVER-1/-5/-6 this pass. **SERVER-11** (image-based provisioning) — no
+  proven build/delivery path from this fleet's infrastructure.
+
+Architecture changes declined on the merits:
+- **DASH-8** (polling → SSE) — verifier holed two premises; unweighed costs
+  on the page whose failure mode is "nobody can tell whether footage syncs".
+- **DASH-7**'s cache halves (pending devices are not stored anywhere to
+  serve from; a TrueNAS roster TTL cache would stale the admin's own
+  actions) — the real harm (one backend blip blanks the whole panel) WAS
+  fixed: the two backends now fail independently.
+
+Also carried from the pass: `resolve_bridge.bridge_activity()` (COMP-MEDIA-9)
+is a new zero-I/O reader nothing surfaces yet — a tray status line or
+reporter field would make a wedged fusionscript call visible without log
+archaeology.
 
 ## Open — residuals from the 2026-08-11 fix pass
 
@@ -238,6 +299,103 @@ Aftermath on that machine, worth knowing about:
   still advertises 0.7.3 as current. Both machines are on 0.7.4, and
   `upgrade.py`'s deliberate "different, not newer" rule means they will be
   offered an "Install v0.7.3" downgrade until the channel is bumped.
+
+### R15 — the empty Youtube folder: ytdl delivered json and corpses, never videos — FOUR FIXES in repo 2026-08-14, unshipped
+Investigated live on ruskin's machine 2026-08-13 23:2x → 2026-08-14 (full
+writeup: "The Empty Youtube Folder" artifact; hybrid redesign plan:
+docs/YTDL_LOCAL_DOWNLOAD.md). One editor-visible symptom — every
+`credits.json` and 540p preview present, zero videos, a growing pile of
+`.part` files — decomposed into four independent defects:
+
+1. **The ytdl page's project select reverts to position 1 on every load**
+   (`app.js` rebuilt it fresh, ordered by the editor's dashboard sync
+   positions, nothing remembered), so searches meant for Energy Transition
+   filed 16 term folders under Creator Profiles. Fixed: last pick persisted
+   in localStorage, restored only if the slug is still in the server's list
+   (assigning a `<select>` a missing value silently selects nothing);
+   ytdl/web suite 362.
+2. **YouTube serving one format truncated failed the whole clip.** Video
+   SAQBbd1Rxmo's f137 died at ~10 MB from BOTH the NAS's IP and the base
+   rig's ("N bytes read, M more expected … Giving up after 10 retries")
+   while f136 worked; five clips across the tree had a stalled `.part` and
+   no deliverable anywhere. Fixed in `worker.py` (vendor file untouched —
+   retry policy is the worker's): the truncation signature (both markers,
+   DownloadError by name) triggers ONE retry a rung down via the
+   downloader's own QUALITY_HEIGHTS, note recorded on the done row;
+   transient 403s/bot checks never downgrade. Final failure now sweeps the
+   clip's own `[id]`-bearing `.part`/`.ytdl` litter via the unified
+   `_record_failure()`. All five stranded clips hand-recovered to the NAS
+   the same night (two only had 720p left server-side).
+3. **Syncthing replicated yt-dlp's in-flight files and the editor-side
+   `ignoreDelete=True` retrofit (2026-08-11) made them immortal** —
+   `.stignore` ignored rclone's `*.partial` but not `*.part`/`*.part-Frag*`/
+   `*.ytdl`: 27 orphans, 1.6 GB, three days deep on ruskin's disk (cleaned).
+   Fixed three ways in lockstep — server/common.py, dashboard provision.py
+   (the load-bearing copy: `collector._ensure_ignores` re-POSTs on ANY
+   list difference, so a server-only fix would be stripped every provision
+   cycle), companion syncthing_admin.py — plus a three-way cross-component
+   pin. server 244, dashboard 425, companion 2752.
+4. **The watcher's per-clip "missing on disk" DEBUG line rotated 5 MB of
+   log every ~25 min** on a machine missing media (thousands of clips ×
+   every poll), rotating away the very upgrade history the investigation
+   needed. Fixed: per-watcher dedupe set (assignment-per-pass, so recovery
+   re-arms and the set is bounded by the open timeline), one line per
+   newly-missing path plus a per-pass count summary.
+
+Delivery context, so the symptom reads right: NO lane carried Youtube
+originals on his 0.7.4 build (Syncthing stignores video extensions by
+design, lane B was Proxy-only until 8985571's `+ /Youtube/**` shipped in
+0.7.6, lane A is up-only) — the fix existed a full day, published 12:40
+2026-08-13, parked behind the notify-and-one-click upgrade he hadn't
+clicked. The LNG folders (~9 GB, 86 clips) were hand-pulled to his machine
+that night via his own rclone under schtasks; both folders verified equal
+to the NAS.
+
+Still owed: fixes 1–3 ride the next dashboard deploy + companion publish
+(fix 3 is INERT until both — the deployed collector strips the new ignore
+lines every provision cycle until it is redeployed); fix 4 rides 0.7.8;
+`setup_syncthing_folder.py` re-run per existing project (no --force) to
+push the new stignore; ruskin (and any other stale tray) onto ≥0.7.6.
+
+### R14 — the BPG hand-off launched a generator that watched nothing, then never started it — FIXED in repo 2026-08-13, unshipped
+`bpg.py` opened the Blackmagic Proxy Generator whenever BRAW/R3D/CRM had no
+proxy and deliberately touched neither its watch list ("that config is
+yours") nor its window. Both halves were load-bearing, and on the base rig
+both were empty:
+
+- `watchFolderList=@Invalid()` — Qt's spelling of "no folders". BPG rewrites
+  that file from memory on every exit, so a folder removed once is gone for
+  good, and a watcher with no folders is a silent no-op. The rig launched it
+  at 14:09, 15:26 and 18:13 on 2026-08-13 alone, against 6 BRAW clips that
+  had had no proxy since 2026-05-20 (`…/Creator Profiles/Season 1/B-roll/
+  Editor Added/ruskin/`), and the gap never moved.
+- Even with folders, the window opens **Idle** with a **Start** button and the
+  folders at "Waiting". There is no flag, env var or INI key for it.
+
+Fixed: `proxy_scan` now reports `needs_resolve_dirs` (a count cannot tell a
+watcher where to look), `bpg.ensure_watch_folders` seeds the list additively
+before launch — user entries carried over as text, ancestors honoured, one
+`.ccsync-backup`, capped, only while BPG is down since a running one would
+overwrite the file — and `bpg.press_start` presses Start over UI Automation
+(PowerShell + `UIAutomationClient`, the CIM probe's precedent). The control's
+NAME is its state, "Start"/"Stop", so we press only when it says "Start" and
+never press Stop; `InvokePattern.Invoke()` works where `TogglePattern.Toggle()`
+silently does not. Both halves have config opt-outs
+(`bpg_manage_watch_folders`, `bpg_autostart`, on by default). Live-verified
+end to end on the rig the same evening: all 6 BRAW clips now have proxies.
+
+**Open decision — the duplicate-encode collateral.** BPG watches folders, not
+files, and recognises only its own `Proxy/<stem>.mov`; it re-encoded 172 clips
+in that folder that the companion had already proxied as `.mp4` (the 161 `.mp4`
+duplicates were deleted afterwards, keeping BPG's `.mov` side, which is what
+BPG itself tracks). The candidate fix is to make `proxy_scan.GENERATED_EXT`
+`.mov` (with `-f mov` in both `ffmpeg_tools` builders) so BPG treats companion
+output as done and only ever encodes what ffmpeg cannot decode. It does not
+touch the b-roll browser, which serves the INDEXER's 540p H.264 `.mp4`
+(`broll/web/app/routes_media.py:44-47`, `Content-Type` hardcoded `video/mp4`)
+from the archive tree and never a `proxy_gen` file — and `archive_path` may
+already be `.mov` today by design (`broll/indexer/build_archive.py:181-183`).
+Not taken yet: it changes what every machine in the fleet writes.
 
 ### R13 — a half-failed ship had no way to finish itself — FIXED in repo 2026-08-13
 The 0.7.6 ship published the companion, then failed on the installer:

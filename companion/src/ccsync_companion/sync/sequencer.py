@@ -64,6 +64,14 @@ PROJECTS_PREFIX = "Projects/"
 PAUSE_SCHEME_NONE = "none"
 PAUSE_SCHEME_ROTATE = "rotate"
 
+# What a per-turn read of a folder's .stignore found (SYNC-6, 2026-08-14).
+# "missing" deliberately covers a read that failed as well as one that came
+# back short: the re-assert is a fail-closed retry path, so not knowing means
+# writing.
+IGNORES_OK = "ok"
+IGNORES_MISSING = "missing"
+IGNORES_ABSENT = "absent"  # 404 -- this folder is not configured here at all
+
 
 def _sort_by_position(selection: list[dict]) -> list[dict]:
     return sorted(selection, key=lambda item: item.get("position", 0))
@@ -309,8 +317,40 @@ class Sequencer:
         self._stop_event.clear()
         self._interrupt.clear()
         self._resume_event.set()
+        self._arm_lanes()
         self._thread = threading.Thread(target=self._run, name="ccsync-sequencer", daemon=True)
         self._thread.start()
+
+    def _arm_lanes(self) -> None:
+        """Clear the stop latch on the lanes this sequencer drives.
+
+        SYNC-1 (2026-08-14): in managed mode both rclone lanes are STOPPED on
+        sign-out (app._stop_lanes), but only lane A is re-armed on the way
+        back in -- start_watchdog_only() installs a fresh stop event, while
+        lane B has no equivalent entry point at all, because run_once() from
+        here IS its whole drive. A latched lane B returned its stale
+        LaneStatus from every subsequent run_once() for the life of the
+        process: no proxy was ever downloaded again after one
+        sign-out/sign-in or token expiry, and the fleet grid kept showing the
+        lane idle-and-green. Arming from HERE rather than from app.py keeps
+        "the sequencer drives these lanes" and "the sequencer un-latches
+        them" in the same place.
+
+        Best-effort per lane: `arm` is not part of the LaneAdapter contract
+        (a test double, or a future adapter with no stop latch, need not have
+        it), and a lane that cannot be armed must not stop the sequencer from
+        starting -- the pass would still run every other lane.
+        """
+        for lane in (self.lane_a, self.lane_b):
+            arm = getattr(lane, "arm", None)
+            if arm is None:
+                continue
+            try:
+                arm()
+            except Exception:
+                log.exception(
+                    "sequencer: could not re-arm lane %s", getattr(lane, "name", lane)
+                )
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -779,7 +819,55 @@ class Sequencer:
             log.debug("sequencer: ignores_confirmed(%s) failed", slug, exc_info=True)
             return False
 
+    def _paused_folder_ids(self) -> Optional[set[str]]:
+        """Which folders the local Syncthing has PAUSED right now, or None
+        when that could not be read.
+
+        SYNC-7 (2026-08-14): _unpause_all issued _set_paused(slug, False) --
+        a config-mutating PATCH on the 30 s config_write_timeout, one per
+        selected project -- after every pass, on every tray Resume, at every
+        startup and on stop(), unconditionally. Under the default
+        lane_c_pause_scheme ("none") this sequencer never pauses anything, so
+        essentially all of those writes were no-ops that still took
+        Syncthing's config lock, in a module whose own comments cite config
+        churn as the reason the rotate scheme was retired. ONE read of the
+        folder list answers "which of these is actually paused?" for the whole
+        sweep, so steady state costs one GET and no config writes -- the same
+        shape ensure_max_folder_concurrency and SharedFolderManager already
+        use.
+
+        Scoping the sweep to _paused_by_us (what _release_paused_folders does)
+        was the other candidate and is wrong here: this sweep is also the only
+        in-run release for a folder THIS process never paused -- accept_folder
+        creates folders paused, an older companion or a crashed pass leaves
+        them paused, and a hand-pause in the GUI is real. A state check keeps
+        that coverage.
+
+        None means "could not tell", and the caller then falls back to the
+        unconditional sweep: a folder left paused is a project that silently
+        syncs nothing at all, so this fails towards the write.
+        """
+        getter = getattr(self.admin, "get_folders", None)
+        if getter is None:  # an admin double that predates the getter
+            return None
+        try:
+            folders = getter()
+        except Exception:
+            log.debug(
+                "sequencer: could not read the folder list for the unpause sweep",
+                exc_info=True,
+            )
+            return None
+        if not isinstance(folders, (list, tuple)):
+            return None
+        return {
+            str(folder.get("id"))
+            for folder in folders
+            if isinstance(folder, dict) and folder.get("id") and folder.get("paused")
+        }
+
     def _unpause_all(self, selection: list[dict]) -> None:
+        releasable: list[str] = []
         for item in selection:
             # SYNC-2 (2026-08-11): this swept by RAW slug while
             # _verify_startup_ignores skips invalid items -- so the one folder
@@ -805,6 +893,23 @@ class Sequencer:
                 log.debug(
                     "sequencer: folder %s stays paused -- its ignores never landed", slug
                 )
+                continue
+            releasable.append(slug)
+
+        if not releasable:
+            return
+        # One read for the whole sweep, and only for a sweep that has
+        # something to release (SYNC-7).
+        paused_ids = self._paused_folder_ids()
+        for slug in releasable:
+            if paused_ids is not None and str(slug) not in paused_ids:
+                # Already running: no PATCH needed. The bookkeeping still has
+                # to be kept honest, or a folder someone else released would
+                # sit in _paused_by_us and be retried at every project
+                # boundary by _release_paused_folders for the life of the
+                # process.
+                with self._lock:
+                    self._paused_by_us.discard(slug)
                 continue
             self._set_paused(slug, False)
 
@@ -1260,16 +1365,50 @@ class Sequencer:
         blocking the unpause on one would stop lane C entirely for a folder
         whose ignores are fine.
         """
+        state = self._ignores_state(slug)
+        if state == IGNORES_ABSENT:
+            log.debug("sequencer: folder %s not configured locally yet", slug)
+            return True
+        if state == IGNORES_MISSING:
+            try:
+                self.admin.set_ignores(slug, STIGNORE_LINES)
+            except Exception as exc:
+                if _is_not_found(exc):
+                    log.debug("sequencer: folder %s not configured locally yet", slug)
+                    return True
+                log.exception("sequencer: could not re-assert ignores for %s", slug)
+                return False
+        else:
+            # The .stignore was READ and carries every line, which is stronger
+            # evidence than a POST that returned -- so the admin's
+            # half-accepted latch can be cleared from here too (SYNC-6),
+            # otherwise a folder whose set_ignores timed out AFTER Syncthing
+            # applied it would stay latched forever and be excluded from every
+            # leak-recovery unpause sweep.
+            note = getattr(self.admin, "note_ignores_confirmed", None)
+            if note is not None:
+                try:
+                    note(slug)
+                except Exception:
+                    log.debug("sequencer: note_ignores_confirmed(%s) failed", slug, exc_info=True)
+
+        # ONE folder fetch for both checks below (SYNC-6): each ensure_* does
+        # its own GET /rest/config/folders/<id> when it isn't handed a config,
+        # which made a steady-state turn cost two identical reads. Same shape
+        # as SharedFolderManager._reconcile_one. A read we could not make is
+        # passed on as None, which just restores the old per-call fetch.
+        folder: Optional[dict] = None
+        get_folder = getattr(self.admin, "get_folder", None)
+        if get_folder is not None:
+            try:
+                fetched_folder = get_folder(slug)
+                folder = fetched_folder if isinstance(fetched_folder, dict) else None
+            except Exception as exc:
+                if _is_not_found(exc):
+                    return True
+                log.debug("sequencer: could not read folder %s's config", slug, exc_info=True)
         try:
-            self.admin.set_ignores(slug, STIGNORE_LINES)
-        except Exception as exc:
-            if _is_not_found(exc):
-                log.debug("sequencer: folder %s not configured locally yet", slug)
-                return True
-            log.exception("sequencer: could not re-assert ignores for %s", slug)
-            return False
-        try:
-            self.admin.ensure_versioning(slug)
+            self.admin.ensure_versioning(slug, folder)
         except Exception as exc:
             if _is_not_found(exc):
                 return True
@@ -1278,12 +1417,51 @@ class Sequencer:
         # the retrofit path for folders accepted by an older companion or by
         # hand. One PATCH on the first turn after the upgrade, silence after.
         try:
-            self.admin.ensure_ignore_delete(slug)
+            self.admin.ensure_ignore_delete(slug, folder)
         except Exception as exc:
             if _is_not_found(exc):
                 return True
             log.exception("sequencer: could not ensure ignoreDelete for %s", slug)
         return True
+
+    def _ignores_state(self, slug: str) -> str:
+        """IGNORES_OK | IGNORES_MISSING | IGNORES_ABSENT for one folder.
+
+        SYNC-6 (2026-08-14): _reassert_folder_policy POSTed the full
+        STIGNORE_LINES on every project's turn, forever -- one .stignore
+        rewrite, plus the ignore-matcher re-evaluation that follows it, per
+        project per pass, in a steady state where nothing is ever missing.
+        Reading first is the shape SharedFolderManager._ensure_ignores already
+        proved ("steady state costs one GET and no config write").
+
+        It keeps the B5 posture that made the unconditional write a
+        deliberate retry path: a read that FAILS counts as missing, so the
+        write still happens and the folder still stays paused if that write
+        fails. Only a read that actually returned a complete .stignore skips
+        it. IGNORES_ABSENT (404) is the one benign case -- the folder is not
+        configured on this machine, so there is nothing to run unfiltered.
+        """
+        getter = getattr(self.admin, "get_ignores", None)
+        if getter is None:  # an admin double that predates the getter
+            return IGNORES_MISSING
+        try:
+            fetched = getter(slug)
+        except Exception as exc:
+            if _is_not_found(exc):
+                return IGNORES_ABSENT
+            log.debug(
+                "sequencer: could not read folder %s's ignores (%s) -- re-asserting them",
+                slug, exc,
+            )
+            return IGNORES_MISSING
+        missing = missing_ignore_lines(fetched)
+        if not missing:
+            return IGNORES_OK
+        log.info(
+            "sequencer: folder %s is missing %d of its %d ignore patterns (e.g. %s) "
+            "-- re-asserting", slug, len(missing), len(STIGNORE_LINES), ", ".join(missing[:3]),
+        )
+        return IGNORES_MISSING
 
     def _verify_current_folder_unpaused(self, slug: str) -> None:
         """Confirm the turn actually left this folder running.

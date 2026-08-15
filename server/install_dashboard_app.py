@@ -117,7 +117,9 @@ Steps (each idempotent, one line printed per action):
      payload shape is ASSUMED from the TrueNAS 25.10 middleware; if the POST
      is rejected the script prints the manual fallback (paste
      dashboard/deploy/compose.yaml into Apps > Install via YAML) instead of
-     guessing at other shapes.
+     guessing at other shapes. The 2xx only means the create job was ACCEPTED,
+     so the job is WAITED ON (SERVER-2): a bind address the NAS does not have
+     fails there, asynchronously, not on the POST.
      If the app IS installed: POST /api/v2.0/app/redeploy {"app_name": ...}
      so the freshly-uploaded code is picked up (also an assumed shape, same
      fallback: restart the app from the TrueNAS UI).
@@ -420,11 +422,16 @@ def healthcheck_config(port: int) -> dict:
     answers nothing useful forever. /api/v1/health is unauthenticated by
     design for exactly this. urllib rather than curl: the python:*-slim image
     has no curl.
+
+    It reads the BODY, not the status code: api_health answers 200 on every
+    path on purpose, so the dead-collector signal lives entirely in `ok`
+    (DASH-2, 2026-08-14). Mirrored from dashboard/deploy/compose.yaml -- the
+    two are asserted identical, character for character, by tests/test_safety.py.
     """
     probe = (
-        "python -c \"import urllib.request,sys; sys.exit(0 if "
-        f"urllib.request.urlopen('http://127.0.0.1:{port}/api/v1/health', "
-        "timeout=5).status == 200 else 1)\""
+        "python -c \"import json,urllib.request,sys; sys.exit(0 if "
+        f"json.load(urllib.request.urlopen('http://127.0.0.1:{port}/api/v1/health', "
+        "timeout=5)).get('ok') else 1)\""
     )
     return {
         "test": ["CMD-SHELL", probe],
@@ -802,7 +809,12 @@ def music_components_present(root: str, dry_run: bool) -> dict[str, bool]:
         f'then echo "{name} yes"; else echo "{name} no"; fi'
         for name, path in paths.items()
     )
-    rc, out, _err = run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(probe))
+    # SERVER-1: this probe runs in step 2d, i.e. AFTER the `app` swap, so an
+    # escaping transport error here skips fail_after_app_swap like any other.
+    # A failed probe already means "absent", which re-pushes -- the safe way to
+    # be wrong.
+    rc, out, _err = run_ssh_guarded(
+        'echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(probe), False, 120)
     present = {name: False for name in paths}
     if rc != 0:
         return present
@@ -878,6 +890,17 @@ def build_db_swap_script(data_root: str, staging: str, target: str,
         f'mv {shell_quote(target + s)} {shell_quote(old + s)}; fi;'
         for s in MUSIC_DB_SIDECARS
     )
+    # SERVER-7 (2026-08-14): the rollback used to restore only the .db, leaving
+    # its -wal/-shm at music.db.old.<ts>-wal. SQLite then opened a database with
+    # no WAL beside it and every commit since the last checkpoint -- the queued
+    # ingest's `pending` rows -- was silently gone, while the operator was told
+    # "previous index restored". The sidecars belong to the file they sit
+    # beside, in both directions.
+    sidecars_back = " ".join(
+        f'if [ -e {shell_quote(old + s)} ]; then '
+        f'mv {shell_quote(old + s)} {shell_quote(target + s)}; fi;'
+        for s in MUSIC_DB_SIDECARS
+    )
     return (
         f"set -e; "
         f"mkdir -p {root_q}; "
@@ -893,6 +916,7 @@ def build_db_swap_script(data_root: str, staging: str, target: str,
         f"if [ -e {db_q} ]; then mv {db_q} {old_q}; fi; "
         f"{sidecars} "
         f"mv {new_q} {db_q} || {{ if [ -e {old_q} ]; then mv {old_q} {db_q}; fi; "
+        f"{sidecars_back} "
         f'echo "swap failed, previous index restored" >&2; exit 9; }}; '
         f"rm -rf {staging_q}"
     )
@@ -929,19 +953,30 @@ def install_music_db(root: str, source: Path, dry_run: bool,
     expected_bytes = db.stat().st_size
     timeout = tree_ssh_timeout(expected_bytes)  # OPS-3, same reasoning as install_tree
     staging = make_staging_dir(dry_run, "ccsync-musicdb-upload", staging_parent)
+    if not staging:  # SERVER-8: a failed mktemp is a result, not a sys.exit
+        print(f"FAILED: no staging dir on the NAS -- the installed index is "
+              f"untouched", file=sys.stderr)
+        return False
     staged_db = posixpath.join(staging, MUSIC_DB_FILENAME)
     if dry_run:
         print(f"[dry-run] would SFTP {MUSIC_DB_FILENAME} "
               f"({human_bytes(expected_bytes)}) from {db} to {staging} on the NAS")
     else:
         host, user, pw = truenas_conn_params()
-        client = ssh_client(host, user, pw)
-        try:
-            sftp = client.open_sftp()
-            sftp.put(str(db), staged_db)
-            sftp.close()
-        finally:
-            client.close()
+        try:  # SERVER-1: a dropped transport is an error result, not a traceback
+            client = ssh_client(host, user, pw)
+            try:
+                sftp = client.open_sftp()
+                sftp.put(str(db), staged_db)
+                sftp.close()
+            finally:
+                client.close()
+        except Exception as exc:  # noqa: BLE001 - every transport failure means the same
+            print(f"FAILED: the SFTP transfer of {MUSIC_DB_FILENAME} did not "
+                  f"finish ({type(exc).__name__}: {exc}) -- the installed index "
+                  f"is untouched (staging left at {staging} for inspection).",
+                  file=sys.stderr)
+            return False
         rc, out, err = run_ssh_guarded(f"wc -c < {shell_quote(staged_db)}",
                                        False, timeout)
         staged_bytes = int(out.strip()) if rc == 0 and out.strip().isdigit() else -1
@@ -1174,8 +1209,10 @@ def ffmpeg_present(root: str, dry_run: bool) -> bool:
                 dry_run=True)
         return False
     d = shell_quote(f"{root}/ffmpeg")
-    rc, out, _err = run_ssh(f'if [ -x {d}/ffmpeg ] && [ -x {d}/ffprobe ]; '
-                            f'then echo yes; else echo no; fi')
+    # SERVER-1: guarded like every other remote step in this NON-FATAL chain --
+    # a dropped probe reads as "absent", which re-provisions (idempotent, cheap).
+    rc, out, _err = run_ssh_guarded(f'if [ -x {d}/ffmpeg ] && [ -x {d}/ffprobe ]; '
+                                    f'then echo yes; else echo no; fi', False, 120)
     return rc == 0 and out.strip().splitlines()[-1:] == ["yes"]
 
 
@@ -1189,6 +1226,8 @@ def install_ffmpeg_over_lan(root: str, tarball: Path | None, sha256: str,
     """
     target_dir = f"{root}/ffmpeg"
     staging = make_staging_dir(dry_run, "ccsync-ffmpeg-upload")
+    if not staging:  # SERVER-8: a failed mktemp is this step's own failure
+        return False, "no staging dir could be created on the NAS"
     staged = posixpath.join(staging, FFMPEG_STAGED_NAME)
     if dry_run:
         print(f"[dry-run] would SFTP the ffmpeg tarball to {staged} on the NAS "
@@ -1196,14 +1235,24 @@ def install_ffmpeg_over_lan(root: str, tarball: Path | None, sha256: str,
     else:
         expected_bytes = tarball.stat().st_size
         host, user, pw = truenas_conn_params()
-        client = ssh_client(host, user, pw)
+        # SERVER-1 (2026-08-14): provision_ffmpeg's docstring promises "NON-FATAL
+        # throughout ... Every failure below prints a NOTE and returns", and an
+        # unguarded 42 MB SFTP (plus the plain run_ssh that followed it) made
+        # that untrue -- a transport drop took the whole dashboard deploy down
+        # over an optional download.
         try:
-            sftp = client.open_sftp()
-            sftp.put(str(tarball), staged)
-            sftp.close()
-        finally:
-            client.close()
-        rc, out, err = run_ssh(f"wc -c < {shell_quote(staged)}")
+            client = ssh_client(host, user, pw)
+            try:
+                sftp = client.open_sftp()
+                sftp.put(str(tarball), staged)
+                sftp.close()
+            finally:
+                client.close()
+        except Exception as exc:  # noqa: BLE001 - every transport failure means the same
+            return False, (f"the ffmpeg tarball transfer did not finish "
+                           f"({type(exc).__name__}: {exc}; staging left at "
+                           f"{staging})")
+        rc, out, err = run_ssh_guarded(f"wc -c < {shell_quote(staged)}", False, 120)
         staged_bytes = int(out.strip()) if rc == 0 and out.strip().isdigit() else -1
         if staged_bytes != expected_bytes:
             return False, (f"the staged tarball does not match what was sent "
@@ -1213,8 +1262,8 @@ def install_ffmpeg_over_lan(root: str, tarball: Path | None, sha256: str,
         print(f"pushed {human_bytes(staged_bytes)} to staging {staging}")
 
     script = build_ffmpeg_unpack_script(target_dir, staged, staging, sha256)
-    rc, out, err = run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(script),
-                           dry_run=dry_run, timeout=300)
+    rc, out, err = run_ssh_guarded('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(script),
+                                   dry_run, 300)
     if rc != 0:
         return False, err.strip()[:300] or f"the unpack exited {rc}"
     if not dry_run:
@@ -1256,11 +1305,15 @@ def provision_ffmpeg(root: str, fetch: str, dry_run: bool) -> None:
         return
 
     if fetch == "remote":
-        rc, out, err = run_ssh(
+        # SERVER-1: the 600 s ceiling below is the one this function's own error
+        # text says johnvansickle blows through at ~28 kB/s -- and paramiko
+        # answers that by RAISING, not by returning non-zero, so the "everything
+        # else deploys" promise needed the guard to be true.
+        rc, out, err = run_ssh_guarded(
             'echo "$SUDO_PW" | sudo -S sh -c '
             + shell_quote(build_ffmpeg_install_script(target_dir, url, sha)),
-            dry_run=dry_run,
-            timeout=600,
+            dry_run,
+            600,
         )
         if dry_run:
             print(f"[dry-run] would have the NAS download {url} and provision "
@@ -1465,8 +1518,9 @@ def binary_present(root: str, host_dir: str, binary: str, dry_run: bool) -> bool
                 dry_run=True)
         return False
     d = shell_quote(f"{root}/{host_dir}")
-    rc, out, _err = run_ssh(f'if [ -x {d}/{shell_quote(binary)} ]; '
-                            f'then echo yes; else echo no; fi')
+    # SERVER-1: guarded, same reasoning as ffmpeg_present.
+    rc, out, _err = run_ssh_guarded(f'if [ -x {d}/{shell_quote(binary)} ]; '
+                                    f'then echo yes; else echo no; fi', False, 120)
     return rc == 0 and out.strip().splitlines()[-1:] == ["yes"]
 
 
@@ -1481,6 +1535,8 @@ def install_binary_over_lan(root: str, host_dir: str, binary: str,
     """
     target_dir = f"{root}/{host_dir}"
     staging = make_staging_dir(dry_run, f"ccsync-{binary}-upload")
+    if not staging:  # SERVER-8: a failed mktemp is this step's own failure
+        return False, "no staging dir could be created on the NAS"
     # The name on the NAS keeps the URL's extension, because that is what
     # build_binary_install_script reads to decide how to unpack it.
     name = posixpath.basename(urllib.parse.urlparse(url).path) or binary
@@ -1491,14 +1547,21 @@ def install_binary_over_lan(root: str, host_dir: str, binary: str,
     else:
         expected_bytes = local_file.stat().st_size
         host, user, pw = truenas_conn_params()
-        client = ssh_client(host, user, pw)
+        # SERVER-1: same non-fatal contract as provision_ffmpeg -- /ytdl's
+        # optional binaries must not be able to abort a dashboard deploy.
         try:
-            sftp = client.open_sftp()
-            sftp.put(str(local_file), staged)
-            sftp.close()
-        finally:
-            client.close()
-        rc, out, err = run_ssh(f"wc -c < {shell_quote(staged)}")
+            client = ssh_client(host, user, pw)
+            try:
+                sftp = client.open_sftp()
+                sftp.put(str(local_file), staged)
+                sftp.close()
+            finally:
+                client.close()
+        except Exception as exc:  # noqa: BLE001 - every transport failure means the same
+            return False, (f"the {binary} transfer did not finish "
+                           f"({type(exc).__name__}: {exc}; staging left at "
+                           f"{staging})")
+        rc, out, err = run_ssh_guarded(f"wc -c < {shell_quote(staged)}", False, 120)
         staged_bytes = int(out.strip()) if rc == 0 and out.strip().isdigit() else -1
         if staged_bytes != expected_bytes:
             return False, (f"the staged {binary} download does not match what was "
@@ -1508,8 +1571,8 @@ def install_binary_over_lan(root: str, host_dir: str, binary: str,
         print(f"pushed {human_bytes(staged_bytes)} to staging {staging}")
 
     script = build_binary_install_script(target_dir, binary, staged, staging, sha256)
-    rc, out, err = run_ssh('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(script),
-                           dry_run=dry_run, timeout=300)
+    rc, out, err = run_ssh_guarded('echo "$SUDO_PW" | sudo -S sh -c ' + shell_quote(script),
+                                   dry_run, 300)
     if rc != 0:
         return False, err.strip()[:300] or f"the install exited {rc}"
     if not dry_run:
@@ -1651,20 +1714,28 @@ def make_staging_dir(dry_run: bool, slug: str = "ccsync-dashboard-upload",
     1.4 GB music artefacts (OPS-8): /tmp on the NAS may be RAM-backed, and the
     staging dir is deliberately LEFT BEHIND on failure so the operator can
     inspect it.
+
+    Returns "" -- never sys.exit -- when mktemp fails or answers with a path
+    outside `parent`. SERVER-8 (2026-08-14): this is called from steps 2b/2c/2d
+    and 2f, i.e. AFTER `mv app app.old.<ts>`, and a bare sys.exit(1) there
+    walked straight past fail_after_app_swap, leaving the container serving the
+    previous code directory with no restart and no NOTE (the OPS-2 exposure).
+    Every caller turns "" into its own ordinary failure result instead.
     """
     parent = parent.rstrip("/") or "/tmp"
     if dry_run:
         return f"{parent}/{slug}.dryrun"
-    rc, out, err = run_ssh(f"mktemp -d {shell_quote(parent + '/' + slug + '.XXXXXX')}")
+    rc, out, err = run_ssh_guarded(
+        f"mktemp -d {shell_quote(parent + '/' + slug + '.XXXXXX')}", False, 120)
     staging = out.strip().splitlines()[-1].strip() if out.strip() else ""
     if rc != 0 or not staging.startswith(f"{parent}/{slug}."):
         print(f"FAILED to create staging dir: {err or out}", file=sys.stderr)
-        sys.exit(1)
+        return ""
     return staging
 
 
-def prune_orphaned_staging(dry_run: bool) -> None:
-    """Reclaim the NAS's /tmp from staging dirs a FAILED earlier run left.
+def prune_orphaned_staging(dry_run: bool, parents: tuple[str, ...] = ("/tmp",)) -> None:
+    """Reclaim the NAS from staging dirs a FAILED earlier run left behind.
 
     OPS-8 (2026-08-11): a failed push leaves its staging behind on purpose (the
     operator has to be able to inspect it), and a DETERMINISTIC failure -- an
@@ -1674,16 +1745,30 @@ def prune_orphaned_staging(dry_run: bool) -> None:
     hours cannot belong to this run; the dirs are mode 700 owned by the SSH
     user, so no sudo is involved. Entirely non-fatal -- this is housekeeping,
     not a deploy step.
+
+    SERVER-5 (2026-08-14) on WHERE: this swept only /tmp, which is exactly
+    where the big pushes stopped staging when OPS-8 pointed them at
+    <host-root>/staging -- so the reclaim ran against the location the 1.4 GB
+    artefacts no longer use and never against the one they do, and nothing else
+    in this repo deletes <host-root>/staging/* (the swap scripts' `rm -rf` is on
+    the SUCCESS path only, and both install paths leave staging behind on
+    failure by design). Every parent the run may stage into is swept, and a
+    parent that does not exist is skipped rather than failing the sweep.
     """
-    cmd = (f"find /tmp -maxdepth 1 -name {shell_quote(STAGING_GLOB)} "
-           f"-mmin +{STAGING_ORPHAN_MINUTES} -print -exec rm -rf {{}} + 2>/dev/null")
-    rc, out, _err = run_ssh(cmd, dry_run=dry_run)
+    guarded = "; ".join(
+        f'd={shell_quote(p.rstrip("/") or "/tmp")}; if [ -d "$d" ]; then '
+        f"find \"$d\" -maxdepth 1 -name {shell_quote(STAGING_GLOB)} "
+        f"-mmin +{STAGING_ORPHAN_MINUTES} -print -exec rm -rf {{}} + 2>/dev/null; fi"
+        for p in dict.fromkeys(parents or ("/tmp",))
+    )
+    # SERVER-1: "entirely non-fatal" has to survive the transport too.
+    rc, out, _err = run_ssh_guarded(guarded, dry_run, 120)
     if dry_run:
         return
     removed = [ln.strip() for ln in out.splitlines() if ln.strip()]
     if rc == 0 and removed:
-        print(f"reclaimed {len(removed)} orphaned staging dir(s) from the NAS's "
-              f"/tmp (left by an earlier FAILED run): {', '.join(removed[:4])}"
+        print(f"reclaimed {len(removed)} orphaned staging dir(s) from the NAS "
+              f"(left by an earlier FAILED run): {', '.join(removed[:4])}"
               + (" ..." if len(removed) > 4 else ""))
 
 
@@ -1700,6 +1785,20 @@ def local_manifest(base: Path = LOCAL_DASHBOARD_DIR,
 
 def upload_tree(staging_dir: str, dry_run: bool, base: Path = LOCAL_DASHBOARD_DIR,
                 excludes: set = EXCLUDE_DIRS) -> int:
+    """SFTP `base` into `staging_dir`. File count, or -1 if the transfer broke.
+
+    SERVER-1 (2026-08-14): this loop is the longest-lived operation in the whole
+    script -- 906 MB of proxies, 482 MB of encoder -- and so the likeliest place
+    for paramiko to raise, yet it had no `except` at all. A dropped channel
+    escaped upload_tree -> install_tree -> main() as a traceback, which is the
+    exact post-swap hole run_ssh_guarded (OPS-3) was added to close for the
+    SHELL steps: `app` has already been renamed to app.old.<ts> by the time
+    steps 2b-2f run, so the traceback skips fail_after_app_swap and the
+    container is never restarted onto the code that was just installed.
+    A transport failure means the same here as it does there -- assume it did
+    not finish; nothing live has been touched yet -- so it gets the same answer
+    as a failed verify: an error RESULT the caller already knows how to route.
+    """
     files = list(iter_local_files(base, excludes))
     if dry_run:
         print(f"[dry-run] would SFTP {len(files)} files from {base} "
@@ -1707,26 +1806,33 @@ def upload_tree(staging_dir: str, dry_run: bool, base: Path = LOCAL_DASHBOARD_DI
         return len(files)
 
     host, user, pw = truenas_conn_params()
-    client = ssh_client(host, user, pw)
     try:
-        sftp = client.open_sftp()
-        made: set[str] = set()
-        for local, rel in files:
-            remote = posixpath.join(staging_dir, rel)
-            parent = posixpath.dirname(remote)
-            parts = parent.split("/")
-            for i in range(2, len(parts) + 1):
-                d = "/".join(parts[:i])
-                if d and d not in made:
-                    try:
-                        sftp.stat(d)
-                    except FileNotFoundError:
-                        sftp.mkdir(d)
-                    made.add(d)
-            sftp.put(str(local), remote)
-        sftp.close()
-    finally:
-        client.close()
+        client = ssh_client(host, user, pw)
+        try:
+            sftp = client.open_sftp()
+            made: set[str] = set()
+            for local, rel in files:
+                remote = posixpath.join(staging_dir, rel)
+                parent = posixpath.dirname(remote)
+                parts = parent.split("/")
+                for i in range(2, len(parts) + 1):
+                    d = "/".join(parts[:i])
+                    if d and d not in made:
+                        try:
+                            sftp.stat(d)
+                        except FileNotFoundError:
+                            sftp.mkdir(d)
+                        made.add(d)
+                sftp.put(str(local), remote)
+            sftp.close()
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 - any transport failure is the same answer
+        print(f"FAILED: the SFTP transfer of {base} to {staging_dir} did not "
+              f"finish ({type(exc).__name__}: {exc}) -- nothing on the NAS has "
+              f"been moved (staging left at {staging_dir} for inspection).",
+              file=sys.stderr)
+        return -1
     print(f"uploaded {len(files)} files to staging {staging_dir}")
     return len(files)
 
@@ -1734,11 +1840,21 @@ def upload_tree(staging_dir: str, dry_run: bool, base: Path = LOCAL_DASHBOARD_DI
 def count_and_size_cmd(path: str) -> str:
     """Shell printing two lines for `path`: file count, then total bytes.
 
-    `cat | wc -c` rather than `find -printf '%s'` so the check does not
-    depend on GNU find; the tree is well under a megabyte.
+    This was `find -type f -exec cat {} + | wc -c`, justified by "so the check
+    does not depend on GNU find; the tree is well under a megabyte". SERVER-6
+    (2026-08-14): that premise died when steps 2c/2d started routing the music
+    artefacts (906 MB of proxies, 482 MB of encoder) through the same
+    install_tree. It runs TWICE per tree -- once on staging, once on the
+    candidate inside build_swap_script -- so a --music-data all publish read
+    ~2.8 GB off the pool to compare two integers, silently, which is what made
+    tree_ssh_timeout necessary in the first place (OPS-3). The remote is
+    TrueNAS SCALE, i.e. Debian with GNU findutils, and this script SSHes
+    nowhere else, so the portability caveat no longer binds. Same two numbers,
+    metadata only.
     """
     q = shell_quote(path)
-    return f"find {q} -type f | wc -l; find {q} -type f -exec cat {{}} + | wc -c"
+    return (f"find {q} -type f | wc -l; "
+            f"find {q} -type f -printf '%s\\n' | awk '{{s+=$1}} END {{print s+0}}'")
 
 
 def build_swap_script(root: str, staging: str, new_dir: str, old_dir: str,
@@ -1769,7 +1885,9 @@ def build_swap_script(root: str, staging: str, new_dir: str, old_dir: str,
         f"chown -R root:root {new_q}; "
         f"chmod -R u+rwX,go+rX,go-w {new_q}; "
         f"n=$(find {new_q} -type f | wc -l); "
-        f"b=$(find {new_q} -type f -exec cat {{}} + | wc -c); "
+        # SERVER-6: sizes from the directory entries, not by re-reading 906 MB
+        # of proxies a second time (see count_and_size_cmd).
+        f"b=$(find {new_q} -type f -printf '%s\\n' | awk '{{s+=$1}} END {{print s+0}}'); "
         f'if [ "$n" -ne {expected_count} ] || [ "$b" -ne {expected_bytes} ]; then '
         f'echo "candidate tree incomplete: $n files/$b bytes, expected '
         f'{expected_count}/{expected_bytes} -- app left untouched" >&2; exit 8; fi; '
@@ -1845,11 +1963,24 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
     """
     target = f"{root}/{target_name}"
     staging = make_staging_dir(dry_run, staging_slug, staging_parent)
+    if not staging:
+        # SERVER-8 (2026-08-14): make_staging_dir used to sys.exit(1) here,
+        # which is called from steps 2b/2c/2d/2f -- all AFTER the `app` swap --
+        # and so bypassed fail_after_app_swap's container restart. An empty
+        # staging path must also never reach upload_tree: posixpath.join("", rel)
+        # is a RELATIVE path, i.e. the SSH user's home.
+        print(f"FAILED: no staging dir on the NAS -- {target} is untouched",
+              file=sys.stderr)
+        return False
     expected = upload_tree(staging, dry_run, source, excludes)
     expected_count, expected_bytes = local_manifest(source, excludes)
     if expected_count == 0:
         print(f"FAILED: {source} contains no files to ship -- refusing to install an "
               f"empty {target}", file=sys.stderr)
+        return False
+    if expected < 0:  # SERVER-1: the SFTP dropped (upload_tree said where)
+        print(f"  {target} is untouched -- it is only ever replaced by a rename, "
+              f"and no rename has run.", file=sys.stderr)
         return False
     new_dir_raw = f"{target}.new"
     old_dir_raw = f"{target}.old.{time.strftime('%Y%m%d%H%M%S')}"
@@ -1911,9 +2042,12 @@ def restart_dashboard_container(dry_run: bool) -> tuple[bool, str]:
     restart is done directly. Compose name convention: ix-<app_name>-<service>-1.
     """
     container = f"ix-{APP_NAME}-dashboard-1"
-    rc, _out, err = run_ssh(
+    # SERVER-1: guarded because fail_after_app_swap calls this ON a failure
+    # path -- a transport error raising out of the restart would turn the fix
+    # for OPS-2 back into the traceback OPS-2 was.
+    rc, _out, err = run_ssh_guarded(
         f'echo "$SUDO_PW" | sudo -S docker restart {shell_quote(container)}',
-        dry_run=dry_run,
+        dry_run, 120,
     )
     return (dry_run or rc == 0), err
 
@@ -1947,7 +2081,14 @@ def fail_after_app_swap(dry_run: bool) -> int:
     return 1
 
 
-def app_installed(dry_run: bool) -> bool:
+def app_installed(dry_run: bool) -> bool | None:
+    """Is APP_NAME installed? None means the question could not be answered.
+
+    SERVER-8 (2026-08-14): this used to sys.exit(1) on a failed GET /app, and
+    it runs in step 3 -- after the `app` swap -- so that exit skipped
+    fail_after_app_swap's restart and left the container on app.old.<ts>.
+    The tri-state lets main() route it like every other post-swap failure.
+    """
     # No query-filters param: the 25.10 middleware was observed returning []
     # for a filtered GET /app even when the app exists (2026-07-24 live run),
     # so fetch the full list and filter client-side.
@@ -1957,7 +2098,7 @@ def app_installed(dry_run: bool) -> bool:
     if not ok(resp):
         print(f"FAILED to query installed apps: HTTP {resp.status_code} {resp.text}",
               file=sys.stderr)
-        sys.exit(1)
+        return None
     return any(a.get("name") == APP_NAME for a in resp.json())
 
 
@@ -2237,9 +2378,6 @@ def main():
           f"{root}/music-proxies, {root}/ffmpeg, {root}/ytdl-web, {root}/ytdl-data, "
           f"{root}/claude-home, {root}/claude-bin, {root}/deno")
 
-    # Debris from a previous FAILED run, before this one adds its own (OPS-8).
-    prune_orphaned_staging(args.dry_run)
-
     # Where the 1.4 GB music artefacts are staged (OPS-8). /tmp on the NAS may
     # be RAM-backed and holds the whole component until the swap `cp -a`s it
     # into place; <host-root>/staging is on the same pool as the target, so the
@@ -2266,6 +2404,16 @@ def main():
             print(f"NOTE: could not prepare {staging_root} "
                   f"({stage_err.strip()[:200]}) -- staging the music data in "
                   f"/tmp instead", file=sys.stderr)
+
+    # Debris from a previous FAILED run, before this one adds its own (OPS-8).
+    # SERVER-5 (2026-08-14): BOTH parents, and deliberately after the block
+    # above so <host-root>/staging exists to be swept. The sweep used to run
+    # twelve lines earlier against /tmp only -- i.e. never against the parent
+    # the ~900 MB music pushes actually stage into -- and nothing else in this
+    # repo deletes those, so every retry of a deterministic failure added
+    # another copy. <host-root>/staging is swept even on a run that ships no
+    # music data: the debris is there either way.
+    prune_orphaned_staging(args.dry_run, ("/tmp", f"{root}/staging"))
 
     # The b-roll DATA root: the one the compose file actually bind-mounts at
     # /broll-data. It is NOT under <host-root> -- it is the shared archive
@@ -2468,7 +2616,13 @@ def main():
             return fail_after_app_swap(args.dry_run)
 
     # Step 3: create or redeploy the custom app.
-    if args.recreate and app_installed(args.dry_run):
+    # SERVER-8: a GET /app that cannot be answered is a post-swap failure like
+    # any other -- restart the container onto the code that was just installed
+    # rather than leaving it on app.old.<ts>.
+    recreate_installed = app_installed(args.dry_run) if args.recreate else False
+    if recreate_installed is None:
+        return fail_after_app_swap(args.dry_run)
+    if args.recreate and recreate_installed:
         resp = truenas_api("DELETE", f"/app/id/{APP_NAME}",
                            json_body={"remove_ix_volumes": False}, dry_run=args.dry_run)
         if args.dry_run:
@@ -2489,7 +2643,10 @@ def main():
                     return 1
             print(f"deleted app for re-create: {APP_NAME}")
 
-    if app_installed(args.dry_run):
+    installed = app_installed(args.dry_run)
+    if installed is None:
+        return fail_after_app_swap(args.dry_run)
+    if installed:
         container = f"ix-{APP_NAME}-dashboard-1"
         restarted, err = restart_dashboard_container(args.dry_run)
         if restarted:
@@ -2533,6 +2690,40 @@ def main():
               "YAML, paste dashboard/deploy/compose.yaml and fill in SYNCTHING_API_KEY "
               "and DASH_REPORT_TOKEN.", file=sys.stderr)
         return 1
+
+    # SERVER-2 (2026-08-14): a 2xx here only means the create job was ACCEPTED --
+    # /app returns a job id and brings the compose up asynchronously (AUDIT
+    # INST-24, and the --recreate DELETE above already waits the same way). The
+    # failures this hides are the ones this script's own docstring names: a
+    # stale --bind-lan/--bind-tailnet makes Docker refuse to start the app with
+    # "cannot assign requested address", and the image pull can fail. Printing
+    # "installed custom app" and exiting 0 for either is the exit-code-lies class
+    # of OPS-4.
+    try:
+        job_id = resp.json()
+    except ValueError:
+        job_id = None
+    if isinstance(job_id, int):
+        print(f"app create job {job_id} accepted; waiting for it to finish "
+              f"(the image pull can take a few minutes)...")
+        state, job_err = wait_for_job(job_id, timeout=900, poll=5)
+        if state != "SUCCESS":
+            print(f"FAILED: app create job {job_id} ended {state}: {job_err}",
+                  file=sys.stderr)
+            print(f"A bind address the NAS does not have (--bind-lan/--bind-tailnet) "
+                  f"fails HERE, not on the POST: Docker refuses to start the app with "
+                  f"'cannot assign requested address'. Check Apps > {APP_NAME} in the "
+                  f"TrueNAS UI -- a partially created app may need deleting before "
+                  f"re-running this script.", file=sys.stderr)
+            print("Manual fallback: TrueNAS UI > Apps > Discover Apps > (...) > Install "
+                  "via YAML, paste dashboard/deploy/compose.yaml and fill in "
+                  "SYNCTHING_API_KEY and DASH_REPORT_TOKEN.", file=sys.stderr)
+            return 1
+    else:
+        print(f"NOTE: POST /app returned {job_id!r} rather than a job id, so the install "
+              f"could not be waited on -- confirm {APP_NAME} is actually running in the "
+              f"TrueNAS UI before continuing.", file=sys.stderr)
+
     print(f"installed custom app: {APP_NAME} on port {args.port}")
     print(f"Next: open http://<tailnet-ip>:{args.port}/ and check /api/v1/health; then set "
           f"dashboard_url/dashboard_token in each editor's ~/.ccsync/config.toml.")

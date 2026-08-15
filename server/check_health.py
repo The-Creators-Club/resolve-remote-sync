@@ -348,16 +348,33 @@ def check_editor_accounts(dry_run: bool):
     if not groups:
         report(False, f"group {EDITORS_GROUP!r} does not exist -- no editor accounts can exist yet")
         return
-    gid = groups[0]["gid"]
+    # SERVER-3 (2026-08-14): membership is keyed on the group's DATABASE id,
+    # not its unix gid -- setup_editor_account.ensure_group carries the same
+    # note ("passing the gid fails validation with 'This group does not exist'",
+    # learned against the live 25.10 API) and returns the two as separate
+    # values for exactly this reason. Testing the unix gid found no members on
+    # a fully provisioned NAS, so check 6 always FAILed and check_health could
+    # never exit 0 -- the one command whose whole contract is its exit code.
+    # `group` is a nested object, so it is unwrapped, never compared to an int
+    # (dashboard/src/ccsync_dashboard/truenas_client.py:165 is the canonical
+    # form of this test).
+    grp = groups[0]
+    db_id, unix_gid = grp.get("id"), grp.get("gid")
+    if db_id is None:
+        report(False, f"group {EDITORS_GROUP!r} row carries no database id, so its "
+                      f"membership cannot be checked: {sorted(grp)}")
+        return
 
     resp = truenas_api("GET", "/user", dry_run=dry_run)
     if not ok(resp):
         report(False, f"could not list users (HTTP {resp.status_code})")
         return
     members = [u["username"] for u in resp.json()
-               if gid in u.get("groups", []) or u.get("group") == gid]
+               if db_id in (u.get("groups") or [])
+               or (u.get("group") or {}).get("id") == db_id]
     if members:
-        report(True, f"editor accounts found in group {EDITORS_GROUP!r}: {members}")
+        report(True, f"editor accounts found in group {EDITORS_GROUP!r} "
+                     f"(gid {unix_gid}): {members}")
     else:
         report(False, f"group {EDITORS_GROUP!r} exists but has no members yet")
 

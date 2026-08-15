@@ -4,11 +4,19 @@
     python index_music.py --retag         # re-score from stored embeddings only
     python index_music.py --force         # re-analyse everything
     python index_music.py --limit 20      # try a handful first
+    python index_music.py --no-prune      # keep rows whose file has gone
     python index_music.py --queue         # analyse what the web app queued
     python index_music.py --queue-status  # what is waiting, and what failed
     python index_music.py --db <path>     # work on another copy of the index
 
 Resumable: interrupt it and re-run; completed tracks are skipped by hash.
+
+A full sweep also PRUNES: a row whose file is no longer under the root is
+deleted, because a renamed cue otherwise survives as a ghost that ranks in
+search, previews correctly off its id-keyed proxy, skews every other track's
+percentile, and only fails at the very end when the companion cannot find the
+old name on P: (MUSIC-3, 2026-08-14). It refuses to prune in bulk unless told
+to -- see --prune / --no-prune.
 
 `--queue` is the base-rig end of port step 7: a web app with no GPU accepts a
 drag-and-drop upload, lands the file in the share and writes a `pending` row,
@@ -335,6 +343,17 @@ def main():
                     help='print the ingest queue (and its failures) and exit')
     ap.add_argument('--retry-failed', action='store_true',
                     help='with --queue: re-attempt rows parked as failed')
+    # A full sweep is the only thing that knows what the library actually
+    # contains, so it is the only thing that can drop a row whose file has
+    # gone (MUSIC-3, 2026-08-14). --prune forces the delete through the "too
+    # much of the library is missing" guard; --no-prune skips the sweep
+    # entirely, for a run against a root that is only partly there.
+    ap.add_argument('--prune', action='store_true',
+                    help='delete rows for missing files even in bulk '
+                         '(a rename leaves a ghost row that previews fine and '
+                         'only fails at "send to Resolve")')
+    ap.add_argument('--no-prune', action='store_true',
+                    help='keep rows whose file is no longer in the library')
     ap.add_argument('--root', default=str(config.share_root()))
     # The queue is written on the NAS and drained here, and the two halves had
     # no way to meet until this existed (MUSIC-3, 2026-08-11): --queue always
@@ -432,6 +451,33 @@ def main():
             print(f'  [{i}/{len(todo)}] FAIL {rel}: {type(e).__name__}: {e}', flush=True)
 
     print(f'\nanalysed {ok}, failed {failed}, {(time.time()-t0)/60:.1f} min')
+
+    # Only a full, unlimited sweep has seen the whole library, so only a full
+    # sweep may delete (MUSIC-3, 2026-08-14). Under --limit the file list is
+    # truncated by construction and every row it did not reach would look
+    # missing, and under --db the rows came from ANOTHER machine's copy of the
+    # index -- neither is evidence that a file is gone. prune_missing itself
+    # then refuses a scan that lost more than a fifth of the library, which is
+    # what a half-mounted W: looks like.
+    if args.limit or args.no_prune or (args.db and not args.prune):
+        print('skipping the prune pass (rows for files that have gone are kept)')
+    else:
+        try:
+            gone = db.prune_missing(con, [rel for _, rel in files],
+                                    force=args.prune)
+        except db.PruneRefused as e:
+            print(f'  ! {e}')
+        else:
+            if gone:
+                print(f'pruned {len(gone)} track(s) whose file is no longer '
+                      f'under {root}:')
+                for rel in gone[:20]:
+                    print(f'    - {rel}')
+                if len(gone) > 20:
+                    print(f'    ... and {len(gone) - 20} more')
+                print('  their proxies are now orphaned: '
+                      'python make_proxies.py --prune')
+
     # A queued upload lives in the library like any other file, so this sweep
     # has just indexed it without ever reading the queue -- close those rows
     # rather than leave them claiming `pending` about a searchable track.

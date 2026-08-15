@@ -1,7 +1,8 @@
 """Orchestrated benchmark matrix: reads bench.toml, runs every
 engine x lane x param x repeat combination, appends each RunResult as a row
-to results/results.jsonl (append-only, resumable -- combos already present
-are skipped unless --rerun).
+to results/results.jsonl (append-only, resumable -- combos already MEASURED
+are skipped unless --rerun; a combo that was skipped or failed is retried,
+because "it was attempted" is not "there is a number for it" -- SHIP-6).
 
 Three things here exist to keep the numbers honest:
 
@@ -141,7 +142,7 @@ def run_matrix(
                     all_results.append(result)
                     continue
                 for params in combos:
-                    # Registered before the skip-cached check on purpose: a
+                    # Registered before the skip-measured check on purpose: a
                     # resumed matrix whose every combo is already recorded
                     # still wrote to the remote on the earlier run, and that
                     # scratch subtree must still be cleaned up at the end.
@@ -153,7 +154,7 @@ def run_matrix(
                             lane=lane, repeat_index=repeat_index,
                         ).key()
                         if key in known_keys and not rerun:
-                            progress(f"[skip-cached] lane={lane} {engine} {direction} {params} rep={repeat_index}")
+                            progress(f"[skip-measured] lane={lane} {engine} {direction} {params} rep={repeat_index}")
                             continue
 
                         dest_dir = None
@@ -180,7 +181,10 @@ def run_matrix(
                             )
                         _report_one(result, progress)
                         append_result(results_file, result)
-                        known_keys.add(result.key())
+                        # Same rule as existing_keys (SHIP-6): only a row that
+                        # produced a measurement marks its combo done.
+                        if result.ok and not result.skipped:
+                            known_keys.add(result.key())
                         all_results.append(result)
 
                         if dest_dir is not None and dest_dir.exists():
@@ -216,7 +220,7 @@ def run_matrix(
                         lane=NET_LANE, repeat_index=repeat_index,
                     ).key()
                     if key in known_keys and not rerun:
-                        progress(f"[skip-cached] iperf3 {direction} {params} rep={repeat_index}")
+                        progress(f"[skip-measured] iperf3 {direction} {params} rep={repeat_index}")
                         continue
                     progress(f"[run] iperf3 {direction} {params} rep={repeat_index} ...")
                     try:
@@ -230,7 +234,8 @@ def run_matrix(
                         result = _crashed("iperf3", "network", direction, params, NET_LANE, repeat_index, exc)
                     _report_one(result, progress)
                     append_result(results_file, result)
-                    known_keys.add(result.key())
+                    if result.ok and not result.skipped:
+                        known_keys.add(result.key())
                     all_results.append(result)
 
     if not keep_remote_data:
@@ -273,7 +278,14 @@ def _report_one(result: RunResult, progress: Any) -> None:
 def add_subparser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("run", help="run the full benchmark matrix from bench.toml")
     p.add_argument("--config", required=True, help="path to bench.toml")
-    p.add_argument("--rerun", action="store_true", help="re-run combos already present in results.jsonl")
+    p.add_argument(
+        "--rerun",
+        action="store_true",
+        help="re-run combos that already produced a MEASUREMENT (skipped/failed combos are "
+             "retried without it). Note the file is append-only, so the re-measured rows join "
+             "the old ones in the same median -- point --results at a fresh file, or use "
+             "`ccbench report --since` afterwards, when re-measuring after a tuning change.",
+    )
     p.add_argument("--engines", help="comma-separated engine allowlist (default: all in bench.toml)")
     p.add_argument(
         "--lanes",

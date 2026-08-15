@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import re
 import sys
 import threading
 import time
@@ -43,6 +44,130 @@ log = logging.getLogger("ccsync.resolve")
 # down with zero log output. Reentrant because the public functions call
 # connect() internally (AUDIT_2 CORE-H4).
 _API_LOCK = threading.RLock()
+
+# -- when a fusionscript call does not come back ---------------------------
+#
+# Nothing bounds a native call. ImportMedia against a P: mapping that has
+# gone away, a media-pool walk on a stalled SMB mount, R12's stale-fusionscript
+# wedge: any of them holds _API_LOCK (and the GIL) indefinitely, and every
+# other thread that talks to Resolve -- the timeline watcher, the media-tree
+# refresh, the tray's "Scan whole project", the b-roll /insert handler --
+# parks behind it with NOTHING in the log, because the call that would have
+# logged is the one that never returned (COMP-MEDIA-9, 2026-08-14).
+#
+# This does not make the wedge recoverable in process, and deliberately does
+# not pretend to: a native call cannot be interrupted, and abandoning the
+# thread that owns an RLock would leave it owned for ever. What it does is
+# make the wedge VISIBLE and attributable -- "ImportMedia has been inside
+# Resolve for 4 minutes" instead of "the companion froze" -- both in the log
+# and in bridge_activity(), which is cheap enough for a status reader.
+# Everything queues exactly as it did before; no call gains a new failure
+# mode. The real fix is music_worker's shape (a killable child process), and
+# resolve_bridge:1216-1220 records why the importer is not there yet.
+BRIDGE_WEDGE_SECONDS = 30.0
+# One line per episode, not one per waiting thread per 30 s: four threads
+# behind a wedged call would otherwise write 480 WARNINGs an hour into the
+# same 5 MB-rotating log the R15 investigation lost its history to.
+BRIDGE_WEDGE_REPEAT_SECONDS = 300.0
+
+_CALL_STATE_LOCK = threading.Lock()
+# (name, owning thread ident, started monotonic) for the call inside the lock.
+_call_in_flight: Optional[tuple[str, int, float]] = None
+_last_wedge_warning_at: Optional[float] = None
+
+
+def _note_wedge(waiting_for: str, waited: float) -> None:
+    """Say that `waiting_for` has been waiting `waited` seconds. Never raises."""
+    global _last_wedge_warning_at
+    with _CALL_STATE_LOCK:
+        current = _call_in_flight
+        now = time.monotonic()
+        if (_last_wedge_warning_at is not None
+                and (now - _last_wedge_warning_at) < BRIDGE_WEDGE_REPEAT_SECONDS):
+            return
+        _last_wedge_warning_at = now
+    if current is None:
+        # The holder took the lock without going through this guard, or let
+        # go between the timeout and this read. Either way the wait is real.
+        held, holder = waited, "another Resolve call"
+    else:
+        holder, _ident, started = current
+        held = max(0.0, time.monotonic() - started)
+    log.warning(
+        "resolve: %s has been inside Resolve for %.0fs and everything else that "
+        "talks to it is waiting (%s has waited %.0fs). Resolve is busy, modal, or "
+        "its media is on a share that has gone away -- nothing here can interrupt "
+        "a scripting call, so if this does not clear, quit and reopen Resolve",
+        holder, held, waiting_for, waited,
+    )
+
+
+class _bridge_call:
+    """Take _API_LOCK for a named call, and say so when the wait is not normal.
+
+    A class rather than @contextmanager so a nested (reentrant) take costs
+    nothing: the public functions call connect() with the lock already held,
+    and that must stay as free as a plain `with _API_LOCK`.
+    """
+
+    __slots__ = ("_name", "_nested")
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._nested = False
+
+    def __enter__(self) -> "_bridge_call":
+        global _call_in_flight
+        ident = threading.get_ident()
+        with _CALL_STATE_LOCK:
+            current = _call_in_flight
+        if current is not None and current[1] == ident:
+            # Same thread, same call: the RLock lets it straight through and
+            # the outer name is the one worth reporting.
+            self._nested = True
+            _API_LOCK.acquire()
+            return self
+        started = time.monotonic()
+        while not _API_LOCK.acquire(timeout=BRIDGE_WEDGE_SECONDS):
+            _note_wedge(self._name, time.monotonic() - started)
+        with _CALL_STATE_LOCK:
+            _call_in_flight = (self._name, ident, time.monotonic())
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        global _call_in_flight
+        if not self._nested:
+            with _CALL_STATE_LOCK:
+                if (_call_in_flight is not None
+                        and _call_in_flight[1] == threading.get_ident()):
+                    _call_in_flight = None
+        _API_LOCK.release()
+        return None
+
+
+def bridge_activity() -> dict[str, Any]:
+    """{"call": str, "seconds": float} for the fusionscript call in flight.
+
+    Empty when nothing is inside Resolve. Cached facts only -- no lock on the
+    bridge itself, no probe, no I/O -- so a tray snapshot or the reporter may
+    call it on their own threads, which is the whole point: the one thread
+    that knows a call is wedged is the one that cannot say so.
+    """
+    with _CALL_STATE_LOCK:
+        current = _call_in_flight
+    if current is None:
+        return {}
+    name, _ident, started = current
+    return {"call": name, "seconds": max(0.0, time.monotonic() - started)}
+
+
+def reset_bridge_activity() -> None:
+    """Forget the in-flight call and the wedge-warning cooldown -- tests only."""
+    global _call_in_flight, _last_wedge_warning_at
+    with _CALL_STATE_LOCK:
+        _call_in_flight = None
+        _last_wedge_warning_at = None
+
 
 # Set process-wide by _pin_frozen_python3_home() so fusionscript.dll loads
 # OUR python3.dll. They must not be inherited by children: they point at the
@@ -181,7 +306,7 @@ def connect():
     fusionscript.dll, a failed import and "Resolve simply isn't running" were
     all indistinguishable -- same message to the caller, nothing in the log,
     impossible to diagnose remotely (AUDIT_2 §2-low)."""
-    with _API_LOCK:
+    with _bridge_call("connect"):
         try:
             _ensure_env_and_syspath()
         except Exception:
@@ -490,7 +615,7 @@ def get_timeline_items(allow_cached: bool = False) -> dict[str, Any]:
     # run through a Python window procedure that needs that same GIL -- one
     # poll here froze the hover highlight for a second-plus (2026-07-26).
     ui_state.wait_while_menu_open()
-    with _API_LOCK:
+    with _bridge_call("get_timeline_items"):
         result = _get_timeline_items_locked(allow_cached=allow_cached)
     return _explain_disconnection(result)
 
@@ -533,7 +658,7 @@ def reset_timeline_cache() -> None:
     """Forget the last poll — for tests only; the companion polls one
     timeline for its whole life and never calls this."""
     global _timeline_cache_fingerprint, _timeline_cache_result, _polls_since_full_walk
-    with _API_LOCK:
+    with _bridge_call("reset_timeline_cache"):
         _timeline_cache_fingerprint = None
         _timeline_cache_result = None
         _polls_since_full_walk = 0
@@ -798,7 +923,7 @@ def get_media_pool_items() -> dict[str, Any]:
     get_timeline_items.
     """
     ui_state.wait_while_menu_open()  # same GIL courtesy as get_timeline_items
-    with _API_LOCK:
+    with _bridge_call("get_media_pool_items"):
         result = _get_media_pool_items_locked()
     return _explain_disconnection(result)
 
@@ -873,7 +998,7 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3) -> dict[str, An
 
     norm_new = _norm_path(new_path)
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
-    with _API_LOCK:
+    with _bridge_call("replace_clip (read)"):
         before = _file_path_locked()
     if before is not None and _norm_path(before) == norm_new:
         return {"ok": True, "message": f"Already linked to {new_path}"}
@@ -881,7 +1006,7 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3) -> dict[str, An
     raised = 0
     for attempt in range(max(1, tries)):
         ui_state.wait_while_menu_open()
-        with _API_LOCK:
+        with _bridge_call("replace_clip"):
             try:
                 media_pool_item.ReplaceClip(new_path)
             except Exception as exc:
@@ -922,7 +1047,7 @@ def refresh_lut_list() -> bool:
     is on disk either way, and Resolve picks it up at its next start.
     """
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
-    with _API_LOCK:
+    with _bridge_call("refresh_lut_list"):
         try:
             resolve = connect()
             if resolve is None:
@@ -955,7 +1080,7 @@ def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
     if not proxy_path:
         return {"ok": False, "message": "no proxy path given"}
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
-    with _API_LOCK:
+    with _bridge_call("link_proxy_media"):
         try:
             result = media_pool_item.LinkProxyMedia(proxy_path)
         except Exception as exc:
@@ -996,11 +1121,183 @@ BROLL_TRACK_INDEX = 1
 
 # What an editor is told when Resolve accepted the append and the timeline did
 # not change. Names the cause, because the cause is a button they can see.
+# What an editor is told when Resolve will not create the bin the clip has to
+# land in. Names the real cause: the generic "Resolve didn't answer, make sure
+# a project is open" they used to get is advice they cannot act on, with a
+# project open in front of them (COMP-MEDIA-8, 2026-08-14).
+BIN_REFUSED_MESSAGE = (
+    "Resolve wouldn't create the B-Roll/Archive bin — the project is locked "
+    "(or open elsewhere in a collaboration). Unlock it and try again."
+)
+
 NOTHING_PLACED_MESSAGE = (
     "Resolve reported no error but nothing landed on the timeline — check the "
     "destination track buttons (V1/A1) at the left of the timeline; with the "
     "video destination off, an append is silently dropped."
 )
+
+# The /insert modes. "append" is v1's only behaviour; "playhead" (2026-08-14)
+# places the clip at the playhead on the lowest free overlay track instead of
+# at the end of the timeline. The string values are the wire contract with
+# the web page (broll/SPEC.md) — broll_server refuses anything else before it
+# reaches this module.
+INSERT_MODE_APPEND = "append"
+INSERT_MODE_PLAYHEAD = "playhead"
+
+# The lowest track "place at playhead" will consider. V1 is the edit itself,
+# so an overlay starts looking at V2 — music_worker's FIRST_MUSIC_TRACK
+# reasoning (keep the base lane for the base material), mirrored vertically.
+# Even over an empty stretch of V1 the clip goes above: "on top" that
+# sometimes means "into the cut" would make the button's behaviour depend on
+# where the playhead happens to be parked.
+FIRST_OVERLAY_TRACK = 2
+
+
+def _timeline_fps(timeline) -> float:
+    """The timeline frame rate, 24.0 when it cannot be read (music_worker's
+    exact_fps fallback — only used for ruler math, never persisted)."""
+    try:
+        return float(timeline.GetSetting("timelineFrameRate"))
+    except Exception:
+        return 24.0
+
+
+def _tc_to_frame(tc: Any, base: int) -> Optional[int]:
+    """music_worker.tc_to_frame, duplicated because that module imports this
+    one. Drop-frame aware (";" separator); None for anything not H:M:S:F."""
+    try:
+        drop = ";" in tc
+        parts = [int(p) for p in re.split(r"[:;]", tc)]
+    except (TypeError, ValueError):
+        return None
+    if len(parts) != 4:
+        return None
+    h, m, s, f = parts
+    frame = (3600 * h + 60 * m + s) * base + f
+    if drop:
+        dropped = 4 if base == 60 else 2
+        total_min = 60 * h + m
+        frame -= dropped * (total_min - total_min // 10)
+    return frame
+
+
+def _playhead_frame(timeline) -> Optional[int]:
+    """Where the playhead is, in absolute timeline frames, or None.
+
+    Absolute (the 1-hour start counts) because that is what AppendToTimeline's
+    recordFrame wants — music_worker.playhead() computes it the same way and
+    its placements land, which is the live verification for this math. NOT
+    the GetStartFrame-relative convention SetMarkInOut uses.
+    """
+    base = int(round(_timeline_fps(timeline)))
+    try:
+        tc = timeline.GetCurrentTimecode()
+    except Exception:
+        tc = None
+    frame = _tc_to_frame(tc, base) if tc else None
+    if frame is not None:
+        return frame
+    try:
+        return int(timeline.GetStartFrame())
+    except Exception:
+        return None
+
+
+def _track_count(timeline, kind: str) -> Optional[int]:
+    try:
+        return int(timeline.GetTrackCount(kind))
+    except Exception:
+        return None
+
+
+def _span_is_free(timeline, kind: str, index: int, rec: int, span: int) -> bool:
+    """Nothing on that track crosses [rec, rec+span).
+
+    An unreadable TRACK answers True — "cannot tell" must never veto, the
+    same rule as _video_track_count. An unreadable ITEM answers False: a
+    specific thing is sitting there and its extent is unknown, and placing
+    blind on top of it is the silent wrongness this scan exists to avoid.
+    """
+    try:
+        items = timeline.GetItemListInTrack(kind, index)
+    except Exception:
+        return True
+    for item in items or []:
+        try:
+            if int(item.GetStart()) < rec + span and int(item.GetEnd()) > rec:
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _overlay_track(timeline, rec: int, span: int) -> Optional[tuple[int, bool]]:
+    """(track index, any_track_is_new) for the lowest slot whose video AND
+    audio lanes are both clear across [rec, rec+span), or None when the
+    track layout cannot be read at all.
+
+    One index serves both streams because AppendToTimeline takes a single
+    trackIndex — the clip's nat sound rides to the same-numbered audio
+    track, so a slot only counts as free when both lanes are. max+1 always
+    exists as an answer: a track index past both counts is free by
+    definition (the tracks get created before the place).
+    """
+    v_count = _track_count(timeline, "video")
+    a_count = _track_count(timeline, "audio")
+    if v_count is None or a_count is None:
+        return None
+    top = max(v_count, a_count) + 1
+    for index in range(FIRST_OVERLAY_TRACK, top + 1):
+        video_ok = index > v_count or _span_is_free(timeline, "video", index, rec, span)
+        audio_ok = index > a_count or _span_is_free(timeline, "audio", index, rec, span)
+        if video_ok and audio_ok:
+            return index, index > v_count or index > a_count
+    return top, True
+
+
+def _ensure_track(timeline, kind: str, index: int) -> bool:
+    """Grow `kind` until track `index` exists.
+
+    AddTrack only ever appends at the top, so reaching an index can mean
+    creating the tracks under it too (a timeline with V1 and four busy audio
+    tracks sends the overlay to slot 5 — V2..V5 all get made). Appending to
+    a track that does not exist returns an item yet places NOTHING
+    (music_worker's landmine list), which is why this runs first.
+    """
+    count = _track_count(timeline, kind)
+    if count is None:
+        return False
+    while count < index:
+        try:
+            added = (timeline.AddTrack(kind, "stereo") if kind == "audio"
+                     else timeline.AddTrack(kind))
+        except Exception:
+            return False
+        if not added:
+            return False
+        count += 1
+    return True
+
+
+def _estimated_timeline_span(media_pool_item, n_source_frames: int, timeline) -> int:
+    """The timeline frames the clip will cover, best effort.
+
+    in/out arrive in ORIGINAL-media frames (SPEC's /insert contract); on a
+    timeline running at a different rate the placed extent differs, and the
+    free-track scan must not measure with the wrong ruler. An unreadable
+    clip fps falls back to the raw source count — close enough for a scan
+    that only picks a shelf, and the post-place verification catches any
+    real collision regardless.
+    """
+    try:
+        props = media_pool_item.GetClipProperty() or {}
+        src_fps = float(props.get("FPS") or 0)
+    except Exception:
+        src_fps = 0.0
+    tl_fps = _timeline_fps(timeline)
+    if src_fps > 0 and tl_fps > 0:
+        return max(1, int(round(n_source_frames * tl_fps / src_fps)))
+    return max(1, n_source_frames)
 
 
 def _video_track_count(timeline, track_index: int) -> Optional[int]:
@@ -1043,10 +1340,24 @@ def _placement_landed(timeline, track_index: int, before: Optional[int], appende
 
 
 def _find_or_create_bin(media_pool, root_folder, name: str):
+    """The direct child bin called `name`, creating it if it is not there.
+
+    None when Resolve REFUSES to make it. AddSubFolder returns None/False on a
+    locked project rather than raising -- documented and handled by
+    _ensure_bin_path below -- and returning that raw made the caller walk the
+    second segment of BROLL_BIN_PATH off None, so a locked project told the
+    editor "Resolve didn't answer. Make sure a project is open" while their
+    project was open and the real problem was the bin (COMP-MEDIA-8,
+    2026-08-14).
+    """
     for sub in root_folder.GetSubFolderList() or []:
         if sub.GetName() == name:
             return sub
-    return media_pool.AddSubFolder(root_folder, name)
+    created = media_pool.AddSubFolder(root_folder, name)
+    if not created:
+        log.warning("resolve: Resolve would not create the bin %r", name)
+        return None
+    return created
 
 
 def _attach_adjacent_proxy(media_pool_item, local_path: str) -> None:
@@ -1118,14 +1429,18 @@ def _find_existing_clip(bin_folder, local_path: str, canonical_fn: Any = None):
 
 def perform_insert(
     local_path: str, in_frame: int, out_frame: int, canonical_fn: Any = None,
+    mode: str = INSERT_MODE_APPEND,
 ) -> dict[str, Any]:
-    """Append `local_path`, trimmed in_frame..out_frame, to the current timeline.
+    """Insert `local_path`, trimmed in_frame..out_frame, into the current timeline.
 
     The behaviour broll/SPEC.md's Companion API contract specifies: import
     into the "B-Roll/Archive" bin (reusing the MediaPoolItem if it is
-    already there) then AppendToTimeline. Returns {"ok": bool, "message":
-    str} -- the shape the web UI renders straight into its toast. Never
-    raises.
+    already there) then place it. `mode` "append" adds it at the end of the
+    timeline on V1 (v1's only behaviour); "playhead" places it at the
+    playhead on the lowest overlay track (V2+) whose video and audio lanes
+    are both clear, adding tracks when none is. Returns {"ok": bool,
+    "message": str} -- the shape the web UI renders straight into its
+    toast. Never raises.
 
     `canonical_fn`: import_files_to_bin_path's contract -- the spelling to
     STORE for a freshly imported clip. For an archive insert (the usual
@@ -1135,14 +1450,22 @@ def perform_insert(
     incident).
     """
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
-    with _API_LOCK:
-        result = _perform_insert_locked(local_path, in_frame, out_frame, canonical_fn)
+    with _bridge_call("perform_insert"):
+        result = _perform_insert_locked(
+            local_path, in_frame, out_frame, canonical_fn, mode
+        )
     return _explain_disconnection(result)
 
 
 def _perform_insert_locked(
     local_path: str, in_frame: int, out_frame: int, canonical_fn: Any = None,
+    mode: str = INSERT_MODE_APPEND,
 ) -> dict[str, Any]:
+    if mode not in (INSERT_MODE_APPEND, INSERT_MODE_PLAYHEAD):
+        # broll_server refuses unknown modes before spawning the worker, so
+        # reaching this is a caller bug, not an editor state -- but this
+        # module's contract is "never raise", so it answers like one.
+        return {"ok": False, "message": f"unknown insert mode {mode!r}"}
     resolve = connect()
     if resolve is None:
         return {"ok": False, "message": _NOT_CONNECTED}
@@ -1168,6 +1491,8 @@ def _perform_insert_locked(
         broll_bin = root_folder
         for name in BROLL_BIN_PATH:
             broll_bin = _find_or_create_bin(media_pool, broll_bin, name)
+            if broll_bin is None:
+                return {"ok": False, "message": BIN_REFUSED_MESSAGE}
 
         media_pool_item = _find_existing_clip(broll_bin, local_path, canonical_fn)
         freshly_imported = False
@@ -1186,6 +1511,11 @@ def _perform_insert_locked(
             # is the editor's business, not an insert's.
             _canonicalize_imported(
                 [local_path], {_norm_path(local_path): media_pool_item}, canonical_fn,
+            )
+
+        if mode == INSERT_MODE_PLAYHEAD:
+            return _place_at_playhead(
+                timeline, media_pool, media_pool_item, in_frame, out_frame
             )
 
         before = _video_track_count(timeline, BROLL_TRACK_INDEX)
@@ -1209,6 +1539,74 @@ def _perform_insert_locked(
         # action (AUDIT_2 UX-16, same finding as _SCRIPTING_ERROR_MESSAGE's).
         log.warning("resolve: b-roll insert failed: %s", exc, exc_info=True)
         return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
+
+
+def _place_at_playhead(
+    timeline, media_pool, media_pool_item, in_frame: int, out_frame: int,
+) -> dict[str, Any]:
+    """Place the clip at the playhead on the lowest free overlay track.
+
+    Nothing moves: this is music_worker's act_under ("place, don't ripple"),
+    mirrored to video. recordFrame + an explicit trackIndex, no mediaType --
+    the nat sound comes along, per the append's own rule above. The one
+    AppendToTimeline behaviour this leans on that music_worker's audio-only
+    place() never exercised is a DUAL-stream clip riding one trackIndex to
+    the same-numbered A track; the post-place GetStart verification catches
+    a Resolve that answers differently, but a live check on a real timeline
+    is owed at ship time (the R1 rule).
+
+    Runs inside _perform_insert_locked's try, so an unexpected raise becomes
+    _SCRIPTING_ERROR_MESSAGE like everything else in the insert.
+    """
+    rec = _playhead_frame(timeline)
+    if rec is None:
+        return {"ok": False,
+                "message": "couldn't read the playhead position from Resolve"}
+    span = _estimated_timeline_span(media_pool_item, out_frame - in_frame, timeline)
+    slot = _overlay_track(timeline, rec, span)
+    if slot is None:
+        return {"ok": False, "message": "couldn't read the timeline's tracks"}
+    track, is_new = slot
+    for kind in ("video", "audio"):
+        if not _ensure_track(timeline, kind, track):
+            return {"ok": False,
+                    "message": f"couldn't add a {kind} track for the overlay -- "
+                               "is the timeline locked?"}
+
+    appended = media_pool.AppendToTimeline(
+        [{"mediaPoolItem": media_pool_item,
+          "startFrame": in_frame,
+          "endFrame": out_frame,
+          "recordFrame": rec,
+          "trackIndex": track}]
+    )
+    item = appended[0] if isinstance(appended, (list, tuple)) and appended else None
+    start = None
+    if item is not None:
+        try:
+            start = int(item.GetStart())
+        except Exception:
+            start = None
+    if item is None or start != rec:
+        # A returned item is not proof of placement, and for a placement the
+        # ONLY acceptable landing is the requested frame -- music_worker's
+        # place() verification, including its cleanup of a clip that landed
+        # somewhere else.
+        if item is not None:
+            try:
+                timeline.DeleteClips([item], False)
+            except Exception:
+                log.warning("resolve: couldn't remove a misplaced overlay",
+                            exc_info=True)
+        return {"ok": False,
+                "message": f"placement failed on V{track} at the playhead -- "
+                           "something already occupies that span, or the track "
+                           "is locked"}
+
+    name = _safe_clip_name(media_pool_item)
+    suffix = " (new track)" if is_new else ""
+    return {"ok": True,
+            "message": f"Placed {name} on V{track} at the playhead{suffix}"}
 
 
 # -- YouTube auto-import (Master/Youtube/<term>) ---------------------------
@@ -1360,7 +1758,7 @@ def import_files_to_bin_path(
         return {"ok": True, "message": "nothing to import",
                 "imported": [], "skipped_existing": [], "failed": []}
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
-    with _API_LOCK:
+    with _bridge_call("import_files_to_bin_path"):
         result = _import_files_to_bin_path_locked(
             wanted, list(bin_segments or []), str(expected_project_name or ""),
             path_alias_fn, canonical_fn,

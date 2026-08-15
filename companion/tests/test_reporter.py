@@ -981,6 +981,58 @@ def test_fit_payload_drops_the_heavy_sections_last_and_keeps_the_report():
     assert "media_tree" not in fitted and "local_manifest" not in fitted
 
 
+# -- COMP-CORE-5: measure once, send those same bytes -------------------------
+
+
+def test_a_fitted_payload_carries_the_bytes_it_was_measured_as():
+    """_fit_payload serialised the whole body to size it and threw that away,
+    and default_http_post then dumped the identical structure again -- 2x CPU
+    and 2x transient peak memory per heavy report on the machine with the
+    64-project manifest."""
+    reporter = _reporter_with()
+    payload = {"editor_name": "alex", "machine": "PC", "lanes": []}
+    fitted = reporter._fit_payload(dict(payload), budget=reporter_mod.PAYLOAD_BUDGET_BYTES)
+
+    body = getattr(fitted, "encoded", None)
+    assert isinstance(body, bytes)
+    assert json.loads(body.decode("utf-8")) == payload
+    # ...and it is still a plain dict to every injected HttpPostFn.
+    assert isinstance(fitted, dict) and fitted == payload
+
+
+def test_a_shed_payload_carries_the_bytes_of_its_FINAL_shape():
+    """The reused bytes must be the LAST measurement, never a pre-shedding
+    one -- sending those would put the dropped sections back on the wire."""
+    reporter = _reporter_with()
+    payload = {
+        "editor_name": "alex", "machine": "PC", "lanes": [],
+        "media_tree": {"Big": [{"clip_name": "x" * 400} for _ in range(4000)]},
+    }
+    fitted = reporter._fit_payload(dict(payload), budget=4096)
+
+    body = getattr(fitted, "encoded", None)
+    assert isinstance(body, bytes)
+    assert json.loads(body.decode("utf-8")) == fitted
+    assert "media_tree" not in json.loads(body.decode("utf-8"))
+
+
+def test_default_http_post_sends_the_pre_encoded_body_when_there_is_one(
+    fake_dashboard_server,
+):
+    """...and a bare dict still serialises itself: identity.py's verify POST
+    and every injected double hand this one of those."""
+    port = fake_dashboard_server.server_address[1]
+    url = f"http://127.0.0.1:{port}/api/v1/report"
+    headers = {"Content-Type": "application/json"}
+
+    measured = reporter_mod._measured({"editor_name": "alex"}, b'{"editor_name": "alex"}')
+    default_http_post(url, measured, headers, 5.0)
+    default_http_post(url, {"editor_name": "ruskin"}, headers, 5.0)
+
+    bodies = [r["body"] for r in fake_dashboard_server.captured]
+    assert bodies == [{"editor_name": "alex"}, {"editor_name": "ruskin"}]
+
+
 def test_the_queue_is_capped_at_the_dashboards_ceiling(caplog):
     calls = []
     reporter = _reporter_with(queue=[f"slug-{i}" for i in range(120)], calls=calls)

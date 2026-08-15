@@ -14,6 +14,8 @@ real thing is exercised by hand against real audio; what is pinned here is the
 part that would silently rot: which uploads are refused, what lands where, and
 what the queue row says afterwards.
 """
+import inspect
+import io
 import sqlite3
 
 import pytest
@@ -304,6 +306,58 @@ def test_a_half_present_ffmpeg_is_still_refused(client, probe, monkeypatch):
     assert 'ffprobe' in r.json()['detail']
 
 
+# ------------------------------------------------- off the event loop, streamed
+def test_the_ingest_route_is_dispatched_to_the_threadpool():
+    """MUSIC-2 (2026-08-14): these were `async def`, so Starlette ran them ON
+    the event loop -- and every step blocks it (ffprobe at 120s, ffmpeg at
+    900s, hashing library files off the mount, a cross-mount copy). This app is
+    mounted in-process in the fleet dashboard behind one uvicorn worker, so an
+    eight-file drop stopped the dashboard answering anything for the duration:
+    no sync status, no /api/report, not even the healthcheck. A plain `def` is
+    dispatched to the threadpool, which is where blocking belongs."""
+    for fn in (routes_ingest.ingest_files, routes_ingest._ingest_queued,
+               routes_ingest._ingest_inline):
+        assert not inspect.iscoroutinefunction(fn), fn.__name__
+
+
+def test_the_upload_is_streamed_to_staging_never_read_whole(client, probe):
+    """MUSIC-9 (2026-08-14): Starlette has already spooled anything over 1 MB
+    to disk, so `await up.read()` bought a second full copy of a 60 MB wav in
+    the container's heap and a third pass over the file. This reader refuses
+    the whole-file read, which is what the old path did first."""
+    probe(60.0)
+
+    class ChunkedOnly(io.BytesIO):
+        def read(self, size=-1):
+            if size is None or size < 0:
+                raise AssertionError('the upload was read whole, not streamed')
+            return super().read(size)
+
+    c = db.connect()
+    try:
+        got = routes_ingest.queue_one('Streamed Cue.wav',
+                                      ChunkedOnly(b'audio' * 2000), c)
+    finally:
+        c.close()
+    assert got['status'] == 'queued'
+    assert (config.share_root() / 'Streamed Cue.wav').read_bytes() == b'audio' * 2000
+
+
+def test_a_partly_read_upload_still_lands_whole(client, probe):
+    """The file object arrives wherever the multipart parser left it, so the
+    copy seeks to the start first."""
+    probe(12.0)
+    src = io.BytesIO(b'0123456789' * 100)
+    src.read(64)                                  # somebody peeked
+
+    c = db.connect()
+    try:
+        routes_ingest.queue_one('Peeked Cue.wav', src, c)
+    finally:
+        c.close()
+    assert (config.share_root() / 'Peeked Cue.wav').read_bytes() == b'0123456789' * 100
+
+
 # ------------------------------------------------------------ the queue's states
 def test_the_states_are_pending_done_failed():
     assert db.QUEUE_STATES == ('pending', 'done', 'failed')
@@ -495,8 +549,10 @@ def test_a_host_with_the_indexer_still_ingests_inline(client, monkeypatch):
             return {}
 
         @staticmethod
-        def ingest_one(name, data, clap, con, known):
+        def ingest_one(name, src, clap, con):
             calls.append('ingest_one')
+            # a file object, not bytes (MUSIC-9, 2026-08-14)
+            assert hasattr(src, 'read')
             return {'name': name, 'ok': True, 'id': 1, 'rel_path': name,
                     'duration': 120.0, 'bpm': 128.0, 'key': 'A minor'}
 
@@ -524,5 +580,7 @@ def test_a_host_with_the_indexer_still_ingests_inline(client, monkeypatch):
     assert got['status'] == 'added'
     assert got['bpm'] == 128.0
     assert got['track']['id'] == 1              # hydrated from the tracks row
-    assert calls == ['hashes', 'ingest_one', 'retag', 'refresh']
+    # no 'hashes': the inline half stopped hashing all 376 library files off
+    # the share to answer one duplicate question (MUSIC-7, 2026-08-14)
+    assert calls == ['ingest_one', 'retag', 'refresh']
     assert queue_rows() == []                   # nothing queued on this host

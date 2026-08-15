@@ -27,7 +27,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 from urllib.parse import urlencode
 
 from .base import (
@@ -241,13 +241,45 @@ class SyncthingLane(LaneAdapter):
                 candidates.append(key)
         return candidates
 
+    def _api_key_attempts(self) -> Iterator[str]:
+        """The same order as _api_key_candidates, LAZILY.
+
+        SYNC-8 (2026-08-14): the twin of SyncthingAdmin._api_key_attempts,
+        and the hotter of the two -- _poll_loop makes roughly 3 + 2N requests
+        every 15 s, each of which rebuilt the candidate list by ET.parse-ing
+        up to two whole config.xml files to re-learn a key that has not
+        changed since boot. The key the instance last accepted is tried
+        first; the multi-home fallback below is unchanged and still runs on
+        the 401/403 that is its only trigger (see default_api_key_paths for
+        why it exists at all)."""
+        if self._configured_api_key:
+            yield self._configured_api_key
+            return
+        tried: set[str] = set()
+        if self._active_api_key:
+            tried.add(self._active_api_key)
+            yield self._active_api_key
+        for key in self._api_key_candidates():
+            if key and key not in tried:
+                tried.add(key)
+                yield key
+
+    def _has_any_api_key(self) -> bool:
+        """Is there any key at all to try? A key the running instance has
+        already accepted answers it without touching the disk (SYNC-8)."""
+        return bool(
+            self._configured_api_key or self._active_api_key or self._api_key_candidates()
+        )
+
     def _get(self, path: str) -> Any:
         """GET with per-home API-key fallback: a 401/403 means "running, but
         that key belongs to a different Syncthing home", so the next
         candidate is tried; any other failure propagates unchanged."""
         url = f"{self.base_url}{path}"
         last_auth_error: Optional[Exception] = None
-        for api_key in self._api_key_candidates() or [""]:
+        tried_any = False
+        for api_key in self._api_key_attempts():
+            tried_any = True
             try:
                 result = self._http_get(url, api_key, self.timeout)
             except urllib.error.HTTPError as exc:
@@ -258,7 +290,11 @@ class SyncthingLane(LaneAdapter):
             if api_key:
                 self._active_api_key = api_key
             return result
-        assert last_auth_error is not None  # loop always runs at least once
+        if not tried_any:
+            # No key anywhere: one unauthenticated attempt, exactly as the
+            # `or [""]` fallback this replaced did.
+            return self._http_get(url, "", self.timeout)
+        assert last_auth_error is not None
         raise last_auth_error
 
     def _set_status(self, status: LaneStatus) -> None:
@@ -332,7 +368,7 @@ class SyncthingLane(LaneAdapter):
 
     def check_once(self) -> LaneStatus:
         """Single synchronous status check. Never raises."""
-        if not self._api_key_candidates():
+        if not self._has_any_api_key():
             status = LaneStatus(
                 name=self.name,
                 state=STATE_ERROR,

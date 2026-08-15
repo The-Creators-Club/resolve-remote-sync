@@ -372,6 +372,57 @@ def test_explicit_config_xml_path_scopes_key_discovery(_windows_paths, tmp_path)
     assert seen == ["explicit-key"]
 
 
+def test_a_settled_key_costs_no_config_xml_parse_per_request(_windows_paths, monkeypatch):
+    """SYNC-8 (2026-08-14): _poll_loop makes roughly 3 + 2N requests every
+    15 s, and each one rebuilt the candidate list by ET.parse-ing up to two
+    whole config.xml files to re-learn a key that has not changed since boot.
+    The key the instance already accepted is now tried alone."""
+    managed, stock = _windows_paths
+    _write_config_xml(managed, "managed-key")
+    _write_config_xml(stock, "stock-key")
+    parses: list = []
+    real_read = syncthing_lane.read_api_key_from_config
+    monkeypatch.setattr(
+        syncthing_lane,
+        "read_api_key_from_config",
+        lambda path: (parses.append(str(path)), real_read(path))[1],
+    )
+    lane = SyncthingLane(
+        api_key="", expected_folder_ids=["x"],
+        http_get=_http_get_requiring("managed-key", []),
+    )
+
+    lane.check_once()
+    assert parses, "sanity: the first poll has to learn the key from disk"
+
+    parses.clear()
+    for _ in range(5):
+        lane.check_once()
+    assert parses == [], "a settled key must not re-parse config.xml per request"
+
+
+def test_the_stock_home_is_still_reached_when_the_settled_key_starts_failing(_windows_paths):
+    """The lazy candidate list must not cost the multi-home fallback its only
+    trigger -- a 401/403 still fans out over every known home."""
+    managed, stock = _windows_paths
+    _write_config_xml(managed, "managed-key")
+    _write_config_xml(stock, "stock-key")
+    seen: list = []
+    lane = SyncthingLane(
+        api_key="", expected_folder_ids=["x"],
+        http_get=_http_get_requiring("stock-key", seen),
+    )
+    lane.check_once()
+    assert seen[:2] == ["managed-key", "stock-key"]
+
+    # Syncthing is restarted from the managed home: the remembered stock key
+    # now 403s, and the fan-out has to happen again.
+    seen.clear()
+    lane._http_get = _http_get_requiring("managed-key", seen)
+    lane.check_once()
+    assert seen[:2] == ["stock-key", "managed-key"]
+
+
 # -- relay detection (AUDIT_2 P3/C-6) ---------------------------------------
 
 

@@ -265,10 +265,18 @@ def current_p_target(run_fn: RunFn = _default_run) -> str:
     try:
         proc = run_fn(["net", "use", P_DRIVE])
         if proc.returncode == 0:
-            # Locale-proof: take the first UNC-shaped token in the output.
-            m = re.search(r"(\\\\\S+)", proc.stdout or "")
-            if m:
-                return m.group(1).rstrip()
+            # Locale-proof: the first line carrying a UNC-shaped value, taken
+            # to the END OF THE FIELD rather than to the first space. `\S+`
+            # truncated any share path containing a space, so
+            # classify_p_target answered "other" for a P: the editor had
+            # deliberately grade-swapped to the server -- and the watcher then
+            # fired the "nothing will sync until this is fixed" toast once per
+            # clip (COMP-GUARD-7, 2026-08-14). Same trailing-anchored shape
+            # paths._local_share_target already uses for `net share`.
+            for line in (proc.stdout or "").splitlines():
+                m = re.search(r"(\\\\\S(?:.*\S)?)\s*$", line)
+                if m:
+                    return m.group(1)
     except Exception:
         log.debug("net use query failed", exc_info=True)
     try:

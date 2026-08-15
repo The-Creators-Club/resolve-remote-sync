@@ -234,6 +234,50 @@ def test_the_local_runner_can_see_an_organised_clip(tmp_path, schema_path):
     assert vid in parallel_local.eligible_ids(str(db_path))
 
 
+def test_the_serial_runner_can_see_an_organised_clip_too(tmp_path, schema_path, monkeypatch):
+    """Same requirement, the other runner — and it did not hold (BROLL-IDX-4,
+    2026-08-14). run_pipeline's work list was ["discovered","probed","proxied"],
+    so `broll-index run` on a re-enabled share printed "processed 0 video(s)" and
+    left its clips sitting at 'organised': the reopen that rescues them lives in
+    _process_video, which only ever sees rows the query returned."""
+    db = SqliteBackend(tmp_path / "r6.db", schema_path=schema_path)
+    vid = db.upsert_video("own", "Proxy/a.mov", status=ORGANISED_STATUS, duration_s=10.0)
+    (tmp_path / "Proxy").mkdir(exist_ok=True)
+    (tmp_path / "Proxy" / "a.mov").write_bytes(b"x")
+
+    frames, claude = [], []
+    monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: frames.append(1))
+    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: claude.append(1))
+
+    count = pipeline.run_pipeline(_cfg(tmp_path, index=True), db, model="haiku",
+                                  stages=["frames", "claude"])
+
+    assert count == 1, "the re-enabled clip must reach the runner at all"
+    assert db.get_video(vid)["status"] == "proxied", "reopened where it stopped"
+    assert frames and claude, "then treated like any other share"
+
+
+def test_the_serial_runner_leaves_a_still_opted_out_clip_resting(
+    tmp_path, schema_path, monkeypatch
+):
+    """Widening the work list must not start spending on shares that opted out:
+    every status-gated stage declines a row that stays 'organised'."""
+    db = SqliteBackend(tmp_path / "r7.db", schema_path=schema_path)
+    vid = db.upsert_video("own", "Proxy/a.mov", status=ORGANISED_STATUS, duration_s=10.0)
+    (tmp_path / "Proxy").mkdir(exist_ok=True)
+    (tmp_path / "Proxy" / "a.mov").write_bytes(b"x")
+
+    frames, claude = [], []
+    monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: frames.append(1))
+    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: claude.append(1))
+
+    pipeline.run_pipeline(_cfg(tmp_path, index=False), db, model="haiku",
+                          stages=["frames", "claude"])
+
+    assert not frames and not claude
+    assert db.get_video(vid)["status"] == ORGANISED_STATUS
+
+
 # --- transcribe: false ---------------------------------------------------------
 
 def test_transcription_is_skipped_when_the_share_opts_out(tmp_path, schema_path, monkeypatch):

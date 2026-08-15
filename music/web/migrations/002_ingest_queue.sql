@@ -43,13 +43,13 @@ CREATE TABLE IF NOT EXISTS ingest_queue (
 CREATE INDEX IF NOT EXISTS idx_queue_state ON ingest_queue(state, id);
 CREATE INDEX IF NOT EXISTS idx_queue_hash  ON ingest_queue(content_hash);
 
--- Not part of the queue, but the reason the queued path can afford its
--- content-hash duplicate check at all. The base rig hashes every file under the
--- share root on each upload (`music_index.ingest.library_hashes`); the
--- container cannot -- that is a 9.5 GB read over the mount, per drop. Identical
--- content implies an identical byte count, so the queued path hashes only the
--- library files whose `bytes` already match, and this index is what makes that
--- lookup one seek instead of a 376-row scan.
+-- Not part of the queue, but the reason the ingest paths can afford their
+-- content-hash duplicate check at all. Hashing every file under the share root
+-- is a 9.5 GB read over the mount, per drop. Identical content implies an
+-- identical byte count, so only the library files whose `bytes` already match
+-- are hashed, and this index is what makes that lookup one seek instead of a
+-- 376-row scan. (The base rig did the whole-library read until MUSIC-7,
+-- 2026-08-14 -- W: is an SMB mount of the same NAS, not local disk.)
 CREATE INDEX IF NOT EXISTS idx_tracks_bytes ON tracks(bytes);
 
 PRAGMA user_version = 2;

@@ -45,3 +45,13 @@ This database was created at v1. Since then (2026-08-11 bug hunt):
   candidates and got the NAS's IP bot-checked at 112 metadata calls
   (2026-08-11). There is deliberately no value meaning "no limit" — the only
   rows the backfill can still affect are ones boot recovery re-runs.
+- `007_local_download.sql` — v7 (2026-08-14), the requester-first download
+  columns: `jobs.download_mode` / `claimed_by` / `lease_expires_at` /
+  `mode_lock`, and `job_videos.download_host`
+  (`docs/YTDL_LOCAL_DOWNLOAD.md` §4). Purely additive and inert without a 0.8.0
+  companion — every existing job reads as `download_mode='server'`, which is
+  what they all ran as, so there is no backfill and no schema rollback to plan
+  for. It is the first migration to touch **two** tables, so its predicate asks
+  about both: a predicate that only checked `jobs` would call a database with
+  no `job_videos.download_host` migrated and every clip status post would then
+  die on "no such column".

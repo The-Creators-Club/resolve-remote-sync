@@ -283,8 +283,19 @@ services:
     # EXITS. A collector thread that died before entering its guarded loop
     # (or a wedged event loop) leaves a container that answers nothing useful
     # forever. /api/v1/health is unauthenticated by design for exactly this.
+    #
+    # It reads the BODY, not the status code. api_health answers 200 on every
+    # path (deliberately: ship.ps1's post-deploy version poll and the macOS
+    # onboarding wizard's connection test both treat any non-200 as "the
+    # dashboard is down"), so the dead-collector signal lives entirely in
+    # `ok` -- which db.fetch_collector_status clears once the newest non-prune
+    # poll run is older than COLLECTOR_STALE_SECONDS. A status-only probe
+    # therefore could not see the one thing this healthcheck exists to catch
+    # (DASH-2, 2026-08-14). Mirrored in server/install_dashboard_app.py's
+    # healthcheck_config -- keep the two identical, character for character
+    # (server/tests/test_safety.py asserts it).
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8480/api/v1/health', timeout=5).status == 200 else 1)\""]
+      test: ["CMD-SHELL", "python -c \"import json,urllib.request,sys; sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8480/api/v1/health', timeout=5)).get('ok') else 1)\""]
       interval: 60s
       timeout: 10s
       retries: 3

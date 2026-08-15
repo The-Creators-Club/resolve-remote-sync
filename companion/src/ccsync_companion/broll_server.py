@@ -10,13 +10,20 @@ Since port step 8 (2026-08-10) it also carries the MUSIC library's
 "Send to Resolve" actions as a route group:
   GET  /music/status
   POST /music/send
+  POST /music/reveal      (2026-08-14, MUSIC-6)
 and since 2026-08-11 the YouTube downloader page's reveal-in-file-manager:
   POST /ytdl/reveal
+and since 2026-08-14 (companion 0.8.0) the local download executor -- the
+requester's own machine fetching its own YouTube clips instead of the NAS:
+  GET  /ytdl/capabilities
+  POST /ytdl/download
+  GET  /ytdl/progress
 They are here, on this listener, rather than on one of their own precisely
 because this process already owns 8899 and a second server holding it breaks
-the tray app (CLAUDE.md). Those halves' logic lives in music_server.py and
-ytdl_server.py; only the dispatch below and the mount maps in start() are
-shared, and the b-roll contract above is untouched by either.
+the tray app (CLAUDE.md). Those halves' logic lives in music_server.py,
+ytdl_server.py and ytdl_executor.py; only the dispatch below and the mount
+maps in start() are shared, and the b-roll contract above is untouched by any
+of them.
 
 ABSORBED from the standalone b-roll companion (`broll/companion/`, package
 `broll_companion`), retired 2026-08-10. The fleet was shipping two tray apps
@@ -44,13 +51,14 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import broll_fetch
 from . import config as ccsync_config
 from . import music_server
 from . import music_worker
 from . import resolve_bridge
+from . import ytdl_executor
 from . import ytdl_server
 
 log = logging.getLogger("ccsync.broll")
@@ -466,9 +474,14 @@ def build_insert_response(
     out_frame = body.get("out_frame")
     mode = body.get("mode", "append")
 
-    if mode != "append":
-        # mode "playhead" is reserved; anything else isn't a defined v1 mode.
-        return 200, {"ok": False, "message": "not implemented yet"}
+    if mode not in (resolve_bridge.INSERT_MODE_APPEND,
+                    resolve_bridge.INSERT_MODE_PLAYHEAD):
+        # "playhead" was reserved from v1 and is real as of 0.8.x; anything
+        # else is a page newer than this build. Deployed pre-playhead
+        # companions answer this same shape with "not implemented yet",
+        # which the web UI translates into "update the companion".
+        return 200, {"ok": False, "message": f"unknown insert mode {mode!r} -- "
+                                             "this companion may need an update"}
 
     if not isinstance(in_frame, int) or not isinstance(out_frame, int):
         return 400, {"ok": False, "message": "in_frame and out_frame must be integers"}
@@ -531,6 +544,7 @@ def build_insert_response(
     result = run(
         music_worker.BROLL_INSERT_ACTION,
         path=str(local_path), in_frame=in_frame, out_frame=out_frame,
+        mode=mode,
     )
     if not isinstance(result, dict):
         return 200, {"ok": False, "message": resolve_bridge._SCRIPTING_ERROR_MESSAGE}
@@ -643,14 +657,48 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._guarded(self._dispatch_post)
 
+    def _ytdl_deps(self) -> Any:
+        """The executor's view of this companion.
+
+        app.py builds one at startup and hands it to start() -- it holds the
+        LIVE YtDlpManager (whose cached daily check is what makes the
+        capability probe answer inside the SPA's 1 s budget) and the verified
+        editor identity. The fallback is deliberately capability-less rather
+        than clever: a server built without deps (tests pinning the older
+        contract, an app that failed to construct one) answers ok:false and the
+        fleet downloads on the NAS, which is what it did before 0.8.0.
+        """
+        deps = getattr(self.server, "ytdl_deps", None)
+        if deps is not None:
+            return deps
+        return ytdl_executor.Deps(getattr(self.server, "ccsync_cfg", None) or {})
+
     def _dispatch_get(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/status":
             mounts = self.server.companion_config.get("mounts", {})
             self._send_json(200, build_status_response(mounts))
         elif path == "/music/status":
             status, result = music_server.build_status_response()
             self._send_json(status, result)
+        elif path == "/ytdl/capabilities":
+            # 200 ALWAYS, with the verdict in the body (plan §7): the SPA's
+            # probe is one round trip with a 1 s budget, and a non-200 would
+            # read to it as "no companion here" -- which is the same fallback,
+            # but with nothing in the log to say WHY this machine declined.
+            self._send_json(200, ytdl_executor.capabilities(self._ytdl_deps()))
+        elif path == "/ytdl/progress":
+            # The job id is a query parameter and it is OPTIONAL: with none, the
+            # answer is whatever this machine is doing, which is what a page
+            # that has just dispatched wants. Unparseable = None, never a 400 --
+            # this endpoint is a mirror the SPA may ignore entirely.
+            raw = (parse_qs(parsed.query).get("job_id") or [""])[0]
+            try:
+                job_id = int(raw) if raw else None
+            except (TypeError, ValueError):
+                job_id = None
+            self._send_json(200, ytdl_executor.progress(job_id))
         else:
             self._send_json(404, {"ok": False, "message": f"not found: {path}"})
 
@@ -666,6 +714,23 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             mounts = self.server.companion_config.get(music_server.MOUNTS_KEY, {})
             status, result = music_server.build_send_response(body, mounts)
             self._send_json(status, result)
+        elif path == "/music/reveal":
+            # MUSIC-6 (2026-08-14): the music app's own /api/reveal drove
+            # Explorer on the SERVER, which since the dashboard mounted it in a
+            # Linux container has been a button that could never work. "Show in
+            # folder" is an action on the machine the editor is sitting at --
+            # this one. Same body as /music/send ({share, rel_path}, never a
+            # path) and the same "error" key, which is what the music page's
+            # api() helper reads.
+            body = self._read_json_body("error")
+            if body is _REFUSED:
+                return
+            if body is None or not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "error": "invalid JSON body"})
+                return
+            mounts = self.server.companion_config.get(music_server.MOUNTS_KEY, {})
+            status, result = music_server.build_reveal_response(body, mounts)
+            self._send_json(status, result)
         elif path == "/ytdl/reveal":
             # "message", not "error": the downloader page shows this string in
             # the same toast the b-roll UI uses.
@@ -677,6 +742,23 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 return
             mounts = self.server.companion_config.get(ytdl_server.MOUNTS_KEY, {})
             status, result = ytdl_server.build_reveal_response(body, mounts)
+            self._send_json(status, result)
+        elif path == "/ytdl/download":
+            body = self._read_json_body("message")
+            if body is _REFUSED:
+                return
+            if body is None or not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "message": "invalid JSON body"})
+                return
+            # `job_id` and NOTHING ELSE is read out of this body (plan §8): the
+            # destination, the URLs, the quality and the naming template all
+            # come from the server under the fleet token. The browser is the
+            # only party that can see both the dashboard and this loopback,
+            # which is why it dispatches -- not why it should be trusted with
+            # the work order. Same principle as /music/send's refusal to accept
+            # a path.
+            status, result = ytdl_executor.start(body.get("job_id"),
+                                                 self._ytdl_deps())
             self._send_json(status, result)
         elif path == "/insert":
             body = self._read_json_body("message")
@@ -713,21 +795,28 @@ class BrollCompanionServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, server_address, handler_cls, companion_config: dict,
-                 ccsync_cfg: Optional[dict] = None):
+                 ccsync_cfg: Optional[dict] = None,
+                 ytdl_deps: Optional[Any] = None):
         super().__init__(server_address, handler_cls)
         self.companion_config = companion_config
         # The companion's own config.toml dict, for the on-demand archive
         # fetch (remote/remote_root/rclone_path/tuning). None in tests that
         # pin the pre-fetch contract; the fetch simply stays off then.
         self.ccsync_cfg = ccsync_cfg
+        # ytdl_executor.Deps: the live yt-dlp sidecar manager, the verified
+        # editor identity and this machine's project selection, for the /ytdl
+        # download executor. None = no capability (see _ytdl_deps).
+        self.ytdl_deps = ytdl_deps
 
 
 def make_server(
     cfg: dict, host: str = HOST, port: int = PORT,
     ccsync_cfg: Optional[dict] = None,
+    ytdl_deps: Optional[Any] = None,
 ) -> BrollCompanionServer:
     """Bind a loopback-only server. Raises OSError if the port is taken."""
-    return BrollCompanionServer((host, port), BrollRequestHandler, cfg, ccsync_cfg)
+    return BrollCompanionServer((host, port), BrollRequestHandler, cfg,
+                                ccsync_cfg, ytdl_deps)
 
 
 # -- startup ----------------------------------------------------------------
@@ -757,7 +846,8 @@ def configured_port(ccsync_cfg: dict[str, Any]) -> int:
     return port
 
 
-def start(ccsync_cfg: dict[str, Any]) -> Optional[BrollCompanionServer]:
+def start(ccsync_cfg: dict[str, Any],
+          ytdl_deps: Optional[Any] = None) -> Optional[BrollCompanionServer]:
     """Start the /broll insert server on a daemon thread. Never raises.
 
     Returns the server (call .shutdown() then .server_close()) or None when
@@ -783,7 +873,8 @@ def start(ccsync_cfg: dict[str, Any]) -> Optional[BrollCompanionServer]:
     broll_cfg[ytdl_server.MOUNTS_KEY] = ytdl_mounts
 
     try:
-        server = make_server(broll_cfg, HOST, port, ccsync_cfg=ccsync_cfg)
+        server = make_server(broll_cfg, HOST, port, ccsync_cfg=ccsync_cfg,
+                             ytdl_deps=ytdl_deps)
     except OSError as exc:
         log.warning(
             "broll: could not listen on %s:%d (%s) -- \"Send to Resolve\" in the "
@@ -831,6 +922,14 @@ def stop(server: Optional[BrollCompanionServer]) -> None:
         broll_fetch.stop_all()
     except Exception:
         log.debug("broll: stopping fetch jobs failed", exc_info=True)
+    # ...and a YouTube download running on this machine, for the same reason:
+    # a yt-dlp still writing into the project tree after the tray exits is an
+    # orphan nothing supervises. Its lease then expires and the server picks up
+    # whatever is missing (docs/YTDL_LOCAL_DOWNLOAD.md §3).
+    try:
+        ytdl_executor.stop_all()
+    except Exception:
+        log.debug("broll: stopping the ytdl executor failed", exc_info=True)
     if server is None:
         return
     try:

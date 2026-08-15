@@ -38,8 +38,10 @@ session -- so they had to be allowed PAST login_gate, and once past it the only
 thing left between the tailnet and "repoint every clip's archive path" was a
 token that the upstream app treats as optional ("not configured = dev mode =
 open"). mount_broll therefore re-checks that token itself. musicweb has no such
-route: its write paths (/api/ingest drag-and-drop, /api/resolve*, /api/reveal)
-are all called by the SPA from a logged-in browser, nothing about /music/* is
+route: its write paths (/api/ingest drag-and-drop, /api/resolve* -- reveal
+moved to the companion's 8899 loopback, MUSIC-6 2026-08-14, it drove Explorer
+on the SERVER here) are all called by the SPA from a logged-in browser, and
+nothing about /music/* is
 exempted from login_gate, and there is no upstream dev-mode branch to reach. The
 session IS the credential. The day music grows a machine-to-machine ingest for
 the base rig, it gets the full broll treatment -- a mandatory token validated in

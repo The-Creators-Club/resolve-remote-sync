@@ -9,12 +9,20 @@
   {% if not admin_users.truenas_configured %}
     <div class="muted">TRUENAS_PW is not configured on the dashboard, so this section is unavailable.
       Set TRUENAS_HOST / TRUENAS_USER / TRUENAS_PW on the app and redeploy.</div>
-  {% elif admin_users.error %}
-    <div class="banner">▲ {{ admin_users.error }}</div>
   {% else %}
 
+  {# One unreachable backend used to replace the WHOLE panel, so a TrueNAS
+     blip took the device-approval table -- the reason this page is open
+     during an onboarding -- with it (DASH-7, 2026-08-14). Banner, then render
+     whichever half answered. #}
+  {% if admin_users.error %}
+    <div class="banner">▲ {{ admin_users.error }}</div>
+  {% endif %}
+
   <div class="side-head" style="margin-top:0.8rem">[ DEVICES AWAITING APPROVAL ]</div>
-  {% if admin_users.pending_devices %}
+  {% if admin_users.syncthing_error %}
+    <div class="muted">device list unavailable -- {{ admin_users.syncthing_error }}</div>
+  {% elif admin_users.pending_devices %}
     <table class="editors">
       <thead><tr><th>DEVICE ID</th><th>STATUS</th><th>CURRENT NAME</th><th>ASSIGN USERNAME</th><th></th></tr></thead>
       <tbody>
@@ -40,7 +48,9 @@
   {% endif %}
 
   <div class="side-head" style="margin-top:1.2rem">[ EDITOR ACCOUNTS ]</div>
-  {% if admin_users.editors %}
+  {% if admin_users.truenas_error %}
+    <div class="muted">account list unavailable -- {{ admin_users.truenas_error }}</div>
+  {% elif admin_users.editors %}
     <table class="editors">
       <thead><tr><th>USERNAME</th><th>UID</th><th>SSH KEY</th><th>SMB</th><th>LOCKED</th><th>SET PASSWORD</th></tr></thead>
       <tbody>

@@ -1,4 +1,6 @@
 """Browse/filter/stats endpoints, and the facet ordering the sidebar relies on."""
+from musicweb import db, routes_api
+
 from tests.conftest import CATEGORIES, TRACKS
 
 
@@ -41,6 +43,25 @@ def test_tracks_filters(client):
     hits = client.get('/api/tracks?category=genre&label=ambient').json()['tracks']
     assert len(hits) == len(TRACKS)
     assert client.get('/api/tracks?category=genre&label=nope').json()['tracks'] == []
+
+
+def test_reload_drops_the_cached_connections_first(client, monkeypatch):
+    """MUSIC-10 (2026-08-14): the route promises "a fresh index without
+    restarting", but con() hands back a connection cached for the life of its
+    thread and a sqlite3 connection is bound to an inode -- so after a deploy
+    swapped music.db by rename it rebuilt the matrices from the unlinked old
+    file and answered 200 with the old counts."""
+    order = []
+    real_invalidate, real_refresh = db.invalidate, routes_api.refresh
+    monkeypatch.setattr(db, 'invalidate',
+                        lambda: order.append('invalidate') or real_invalidate())
+    monkeypatch.setattr(routes_api, 'refresh',
+                        lambda con: order.append('refresh') or real_refresh(con))
+
+    body = client.post('/api/reload').json()
+
+    assert order == ['invalidate', 'refresh']
+    assert body['tracks'] == len(TRACKS)
 
 
 def test_ui_is_served(client):

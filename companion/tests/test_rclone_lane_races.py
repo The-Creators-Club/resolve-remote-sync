@@ -28,6 +28,7 @@ import pytest
 
 from ccsync_companion.sync.base import STATE_IDLE
 from ccsync_companion.sync.rclone_lane import (
+    DIRECTION_DOWN,
     DIRECTION_UP,
     LANE_A_MIN_AGE_SECONDS,
     RcloneLane,
@@ -681,3 +682,249 @@ def test_a_busy_requeue_on_a_stopping_lane_arms_nothing(tmp_path):
     lane._express_requeue(list(batch), batch)
 
     assert lane._express_timer is None
+
+
+# ===========================================================================
+# SYNC-1 (2026-08-14): a lane driven ONLY by run_once() has to be re-armable
+#
+# Managed mode stops lane B on sign-out but had no way back in: run_once() is
+# its whole drive, and start()/start_watchdog_only() are the only two things
+# that ever cleared the stop latch (and the latter returns immediately for a
+# DOWN lane). One sign-out/sign-in and no proxy was ever downloaded again --
+# silently, at DEBUG, with the lane still reporting its last idle status.
+# ===========================================================================
+
+
+def _lane_b(tmp_path, calls):
+    lane = _make_lane(
+        tmp_path,
+        direction=DIRECTION_DOWN,
+        popen_factory=lambda cmd, **kw: calls.append(list(cmd)) or _FakeProc(),
+    )
+    (Path(lane.local_root) / "Projects/2026/FF5/Alpha").mkdir(parents=True, exist_ok=True)
+    return lane
+
+
+def test_lane_b_is_dead_after_a_stop_until_it_is_armed(tmp_path):
+    calls: list = []
+    lane = _lane_b(tmp_path, calls)
+    subpath = "Projects/2026/FF5/Alpha"
+
+    lane.run_once(subpath=subpath)
+    assert len(calls) == 1, "sanity: the lane syncs before it is stopped"
+
+    lane.stop()
+    lane.run_once(subpath=subpath)
+    assert len(calls) == 1, "sanity: a stopped lane must not spawn"
+
+    lane.arm()
+    lane.run_once(subpath=subpath)
+    assert len(calls) == 2, "an armed lane B must sync again -- this is SYNC-1"
+
+
+def test_arm_is_idempotent_and_does_not_disturb_a_running_lane(tmp_path):
+    """arm() on a lane that was never stopped must not swap the event out from
+    under a live generation -- clearing an in-use event in place is the AUDIT_2
+    L-2 thread-resurrection bug."""
+    calls: list = []
+    lane = _lane_b(tmp_path, calls)
+    before = lane._stop_event
+
+    lane.arm()
+    lane.arm()
+
+    assert lane._stop_event is before
+    lane.run_once(subpath="Projects/2026/FF5/Alpha")
+    assert len(calls) == 1
+
+
+def test_arm_leaves_a_live_periodic_generation_its_own_event(tmp_path):
+    """A periodic thread owns the event it was handed. arm() must never
+    replace it while that thread is alive, or stop() would signal an event
+    nobody is watching."""
+    calls: list = []
+    lane = _lane_b(tmp_path, calls)
+    lane.scan_interval = 30.0
+    lane.start()
+    try:
+        live_event = lane._stop_event
+        lane.arm()
+        assert lane._stop_event is live_event
+    finally:
+        lane.stop()
+
+
+# ===========================================================================
+# SYNC-5 (2026-08-14): stop() mid-transfer is a stand-down, not a failure
+# ===========================================================================
+
+
+def test_a_child_terminated_by_stop_stands_down_instead_of_painting_the_lane_red(tmp_path):
+    """stop() joins the run thread with a 5 s timeout and then terminates the
+    child; the run thread returns rclone's terminated exit code and used to
+    fall straight through to STATE_ERROR ("rclone exited 1"). A deliberate
+    sign-out is not a lane failure -- and for lane B in managed mode that red
+    was the LAST status the lane ever published (SYNC-1)."""
+    spawned = threading.Event()
+    lane = _make_lane(tmp_path, direction=DIRECTION_DOWN)
+    subpath = "Projects/2026/FF5/Alpha"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+    proc = _FakeProc(returncode=1, wait_for_terminate=True)
+
+    def factory(cmd, **kwargs):
+        spawned.set()
+        return proc
+
+    lane.popen_factory = factory
+    result: list = []
+    runner = threading.Thread(target=lambda: result.append(lane.run_once(subpath=subpath)))
+    runner.start()
+    assert spawned.wait(10)
+    lane.stop()
+    runner.join(timeout=10)
+
+    assert proc.terminated is True
+    status = result[0]
+    assert status.state == STATE_IDLE, "a lane that was told to stop did not fail"
+    assert status.detail == "stopped mid-transfer"
+    assert status.current_project is None
+    assert status.transferring == 0
+
+
+def test_a_genuinely_failing_run_is_still_an_error(tmp_path):
+    """The stand-down above keys on the stop latch, so a real non-zero exit on
+    a running lane must still paint the lane red."""
+    lane = _make_lane(
+        tmp_path,
+        direction=DIRECTION_DOWN,
+        popen_factory=lambda cmd, **kw: _FakeProc(returncode=1),
+    )
+    subpath = "Projects/2026/FF5/Alpha"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+
+    status = lane.run_once(subpath=subpath)
+
+    assert status.state == "error"
+    assert status.last_error
+
+
+# ===========================================================================
+# SYNC-3 (2026-08-14): express stands aside for the periodic run in flight
+#
+# rclone parses --filter-from once, at startup, so _build_command's
+# express-exclusion can only close the ordering where the claim came FIRST.
+# The common ordering is the other one -- a periodic pass lasts up to 600 s
+# while an express window is ~10 s -- and there both rclones climbed the same
+# file at once over one uplink (measured 2026-08-02).
+# ===========================================================================
+
+
+def _periodic_run_in_flight(lane, subpath, release, express_cmds):
+    """Start a periodic run whose child does not exit until `release` is set,
+    and return the thread. Express commands land in `express_cmds`."""
+    spawned = threading.Event()
+
+    def factory(cmd, **kwargs):
+        if "--files-from-raw" in cmd:
+            express_cmds.append(list(cmd))
+            return _FakeProc()
+        spawned.set()
+        assert release.wait(10), "the periodic child was never released"
+        return _FakeProc()
+
+    lane.popen_factory = factory
+    thread = threading.Thread(target=lambda: lane.run_once(subpath=subpath))
+    thread.start()
+    assert spawned.wait(10)
+    return thread
+
+
+def test_express_defers_a_path_the_in_flight_periodic_run_covers(tmp_path):
+    express_cmds: list = []
+    release = threading.Event()
+    lane = _make_lane(tmp_path)
+    root = Path(lane.local_root)
+    subpath = "Projects/2026/FF5/Alpha"
+    clip = _old_file(root, f"{subpath}/clip.mov")
+    thread = _periodic_run_in_flight(lane, subpath, release, express_cmds)
+    try:
+        assert lane.periodic_inflight_subpath() == subpath
+        lane.notify_path_changed(str(clip))
+        _flush_now(lane)
+
+        assert express_cmds == [], "express raced the periodic run for the same bytes"
+        # Deferred, not dropped: it comes back next window.
+        assert f"{subpath}/clip.mov" in lane._express_pending
+    finally:
+        release.set()
+        thread.join(timeout=10)
+    assert lane.periodic_inflight_subpath() is None, "the scope must clear with the child"
+
+    # The run is over -- the same path now goes express immediately.
+    _flush_now(lane)
+    assert len(express_cmds) == 1
+    lane.stop()
+
+
+def test_express_still_runs_for_a_project_the_periodic_run_is_not_covering(tmp_path):
+    """Deferring the whole tree would give the fleet back the latency express
+    exists to remove: only paths UNDER the in-flight subpath stand aside."""
+    express_cmds: list = []
+    release = threading.Event()
+    lane = _make_lane(tmp_path)
+    root = Path(lane.local_root)
+    clip = _old_file(root, "Projects/2026/FF5/Bravo/clip.mov")
+    # Lane A refuses to run against a project dir that isn't local yet, so the
+    # covering run needs a real directory to be copying.
+    (root / "Projects/2026/FF5/Alpha").mkdir(parents=True)
+    thread = _periodic_run_in_flight(
+        lane, "Projects/2026/FF5/Alpha", release, express_cmds
+    )
+    try:
+        lane.notify_path_changed(str(clip))
+        _flush_now(lane)
+        assert len(express_cmds) == 1
+    finally:
+        release.set()
+        thread.join(timeout=10)
+    lane.stop()
+
+
+def test_the_give_up_clock_still_beats_the_deferral(tmp_path):
+    """A path may never be stranded by a long-running periodic pass: past
+    EXPRESS_PENDING_MAX_SECONDS express drops it and the periodic pass owns
+    it, deferral or not."""
+    express_cmds: list = []
+    release = threading.Event()
+    lane = _make_lane(tmp_path)
+    root = Path(lane.local_root)
+    subpath = "Projects/2026/FF5/Alpha"
+    clip = _old_file(root, f"{subpath}/clip.mov")
+    rel = f"{subpath}/clip.mov"
+    thread = _periodic_run_in_flight(lane, subpath, release, express_cmds)
+    try:
+        lane.notify_path_changed(str(clip))
+        size = lane._express_pending[rel][0]
+        lane._express_pending[rel] = (size, time.monotonic() - 3600)
+        _flush_now(lane)
+        assert express_cmds == []
+        assert lane._express_pending == {}, "a deferred path must not outlive its clock"
+    finally:
+        release.set()
+        thread.join(timeout=10)
+    lane.stop()
+
+
+def test_a_crashed_periodic_run_does_not_latch_express_off(tmp_path):
+    """The scope is cleared in a finally: a spawn that raises must not exclude
+    that subpath from express for the life of the process."""
+    def factory(cmd, **kwargs):
+        raise OSError("rclone vanished")
+
+    lane = _make_lane(tmp_path, popen_factory=factory)
+    subpath = "Projects/2026/FF5/Alpha"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+
+    lane.run_once(subpath=subpath)
+
+    assert lane.periodic_inflight_subpath() is None

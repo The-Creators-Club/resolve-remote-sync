@@ -170,12 +170,22 @@ def do_scan(
     skip_editor_proxies: bool = True,
     source: str = "originals",
     exclude: Sequence[str] | None = None,
+    rehash: bool = False,
 ) -> int:
     """Walk `root`, upserting a `videos` row (status=discovered on first sight) per file.
 
     Rescanning an already-processed video only refreshes hash/size_bytes/in_inbox — it
     never resets `status` back to discovered, since SPEC.md doesn't call for re-indexing
     unchanged files and doing so would silently undo completed work on every rescan.
+
+    A file already on the index whose size is unchanged keeps its stored hash rather
+    than being read again (BROLL-IDX-6, 2026-08-14). hash_file_partial reads 8 MiB of
+    head and 8 MiB of tail, and the shares are 25 NETWORK roots — so a rescan to pick
+    up a handful of new downloads was pulling ~16 MiB per already-known file over the
+    wire (~70 GB, ~25 min at the measured 46 MB/s, on one 4,482-file share) to
+    recompute a digest that cannot have changed unless the file did. `rehash=True`
+    restores the unconditional read for the one case size cannot see: an in-place edit
+    that kept the byte count.
 
     `source` selects which side of a proxy/original pair is the archive copy — see
     initial_status(). `skip_editor_proxies=False` overrides it to take everything
@@ -194,10 +204,19 @@ def do_scan(
     count = 0
     for sf in scan_share(root, data_root, exclude=exclude):
         size = sf.path.stat().st_size
-        digest = hash_file_partial(sf.path)
         in_inbox = 1 if _path_is_in_inbox(sf.path, inbox_root) else 0
 
+        # Looked up BEFORE hashing, which is the whole point: the row already
+        # carries the digest, and the stat() above is the cheap discriminator.
         existing = storage.get_video_by_path(share, sf.rel_path)
+        reusable = bool(
+            not rehash
+            and existing is not None
+            and existing.get("hash")
+            and existing.get("size_bytes") == size
+        )
+        digest = existing["hash"] if reusable else hash_file_partial(sf.path)
+
         fields: dict = {"hash": digest, "size_bytes": size, "in_inbox": in_inbox}
         if existing is None:
             fields["status"] = (

@@ -190,12 +190,87 @@ def test_fetch_failure_logs_once_per_streak(tmp_path, caplog):
     client = SelectionClient(_cfg(), tmp_path, http_get=failing_get)
     with caplog.at_level(logging.DEBUG, logger="ccsync.selection"):
         client.fetch()
-        client.fetch()
+        # force=True: an unforced repeat is now throttled away entirely
+        # (COMP-CORE-3), and the streak logging is about repeated ATTEMPTS.
+        client.fetch(force=True)
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     debugs = [r for r in caplog.records if r.levelno == logging.DEBUG]
     assert len(warnings) == 1
     assert len(debugs) == 1
+
+
+# -- COMP-CORE-3: a FAILING dashboard is throttled like a succeeding one ------
+
+
+def test_a_failing_fetch_is_throttled_for_fetch_ttl(tmp_path):
+    """The TTL used to be stamped on success only, so a dashboard that was
+    down meant one blocking 5 s urlopen PER CALLER -- and the tray's 2 s
+    refresh tick is one of them (app.removable_projects)."""
+    calls = []
+
+    def failing_get(url, headers, timeout):
+        calls.append(url)
+        raise RuntimeError("connection refused")
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=failing_get)
+    for _ in range(5):
+        assert client.fetch() is None
+    assert len(calls) == 1
+
+    # ...and it IS retried once the TTL is up, rather than being latched off.
+    client._last_failure_at -= client.fetch_ttl + 1
+    assert client.fetch() is None
+    assert len(calls) == 2
+
+
+def test_the_failure_throttle_never_blocks_a_forced_fetch(tmp_path):
+    calls = []
+
+    def failing_get(url, headers, timeout):
+        calls.append(url)
+        raise RuntimeError("boom")
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=failing_get)
+    client.fetch()
+    client.fetch(force=True)
+    assert len(calls) == 2
+
+
+def test_get_still_serves_the_cache_while_the_failure_throttle_holds(tmp_path):
+    """Throttling the REQUEST must not change what get() answers: the
+    sequencer keeps working the last-known order through an outage."""
+    responses = [{"selection": _SAMPLE}]
+
+    def flaky_get(url, headers, timeout):
+        if responses:
+            return responses.pop()
+        raise RuntimeError("dashboard down")
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=flaky_get)
+    assert client.get() == (_SAMPLE, "live")
+
+    # Age out the success TTL, then fail: the failure stamp takes over.
+    client._last_response_at -= client.fetch_ttl + 1
+    assert client.get() == (_SAMPLE, "cache")
+    client._last_response_at -= client.fetch_ttl + 1
+    assert client.get() == (_SAMPLE, "cache")
+
+
+def test_a_successful_fetch_clears_the_failure_throttle(tmp_path):
+    state = {"fail": True}
+
+    def flaky_get(url, headers, timeout):
+        if state["fail"]:
+            raise RuntimeError("boom")
+        return {"selection": _SAMPLE}
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=flaky_get)
+    assert client.fetch() is None
+    state["fail"] = False
+    client._last_failure_at -= client.fetch_ttl + 1
+    assert client.fetch() == _SAMPLE
+    assert client._last_failure_at == 0.0
 
 
 def test_fetch_bad_shape_returns_none(tmp_path):

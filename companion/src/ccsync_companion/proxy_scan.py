@@ -95,6 +95,11 @@ BRAW_EXT = ".braw"
 # the reporter both have to carry, for a queue that will take days to drain.
 MAX_QUEUE_PER_PROJECT = 500
 
+# Tree-wide cap on the folders handed to BPG's watch list. Every entry is a
+# recursive watch BPG rescans on every change, and they end up in a settings
+# file an editor also edits by hand.
+MAX_WATCH_DIRS = 24
+
 # How settled a file must be before it counts. A clip still being copied in
 # (or still being written by BPG) is not a gap, it is a file in flight --
 # same idea as lane B's lane_b_min_age_seconds. Callers pass the configured
@@ -228,6 +233,13 @@ def empty_gap() -> dict[str, Any]:
     capped subset of the own+preview part and `braw` a subset of
     needs_resolve. Clips BPG is mid-way through, and .insv/.360, are counted
     nowhere: neither is a gap anyone can act on.
+
+    `needs_resolve_dirs` is the needs_resolve counterpart of `clips`: the
+    DIRECTORIES those clips live in, deduplicated. BPG takes no file list --
+    it watches folders -- so a count on its own cannot tell it where to look,
+    which is how the base rig spent months launching a generator with an empty
+    watch list (bpg.py fact 3, 2026-08-13). Directories rather than paths
+    because that is all a watch list can express.
     """
     return {
         "missing": 0,
@@ -236,7 +248,13 @@ def empty_gap() -> dict[str, Any]:
         KIND_OWN: 0,
         KIND_PREVIEW: 0,
         "clips": [],
+        "needs_resolve_dirs": [],
         "truncated": False,
+        # How many missing clips the caller's skip_fn refused (proxy_gen's
+        # failure cap). Counted so "nothing is queued" can be told apart from
+        # "nothing is left", which is exactly what nobody could tell on the
+        # 0.6.1 muxer night (COMP-MEDIA-4, 2026-08-14).
+        "capped": 0,
     }
 
 
@@ -259,6 +277,38 @@ def _is_pruned_dir(name: str) -> bool:
     )
 
 
+def _one_per_proxy_name(
+    candidates: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Keep the FIRST candidate for each proxy name, and say which were dropped.
+
+    Two originals in one directory that differ only by container --
+    `A001.mov` (camera original) and `A001.mp4` (a transcode) -- map to the
+    same `Proxy/A001.mp4`, because the convention is keyed on the STEM and is
+    shared with BPG and Resolve's own adjacent-Proxy auto-link. Queuing both
+    puts two ffmpegs on one `.partial` (the drain runs up to 4 wide since
+    2026-08-11) and whichever publishes first replaces a file the other is
+    still writing -- rule 2 of proxy_gen's design, broken by the generator
+    against itself (COMP-MEDIA-2, 2026-08-14).
+
+    Only the QUEUE is de-duplicated; the counts are not. Both files really do
+    lack a proxy, and no second name exists that Resolve would attach, so
+    saying otherwise would be a lie in the direction of silence.
+    """
+    seen: set[tuple[str, str]] = set()
+    kept: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    for clip in candidates:
+        proxy_dir, stem = _proxy_dir_and_stem(clip.get("path"))
+        key = (os.path.normcase(proxy_dir), os.path.normcase(stem))
+        if key in seen:
+            dropped.append(str(clip.get("path") or ""))
+            continue
+        seen.add(key)
+        kept.append(clip)
+    return kept, dropped
+
+
 def _stat_exists(path: str, stat_fn: Callable[[str], Any]) -> bool:
     try:
         stat_fn(path)
@@ -273,6 +323,7 @@ def scan_project(
     min_age_seconds: float = DEFAULT_MIN_AGE_SECONDS,
     now: Optional[float] = None,
     stat_fn: Callable[[str], Any] = os.stat,
+    skip_fn: Optional[Callable[[dict[str, Any]], bool]] = None,
 ) -> dict[str, Any]:
     """The proxy gap for ONE project dir. Never raises.
 
@@ -280,9 +331,21 @@ def scan_project(
     size/mtime for originals AND doubles as the existence probe for candidate
     proxies (a stat that raises is "not there"), so a test can drive the
     whole walk without a real tree.
+
+    `skip_fn` is asked, per candidate clip, whether the caller has given up on
+    it -- proxy_gen's failure cap is the only implementation. It runs BEFORE
+    the MAX_QUEUE_PER_PROJECT truncation on purpose: the generator used to
+    filter capped clips out of the queue AFTER the scan had already spent all
+    500 slots on them, so a project whose newest 500 clips had all failed
+    reported an empty queue forever while thousands of encodable older clips
+    sat there and the gate published "nothing to do" (COMP-MEDIA-4,
+    2026-08-14). Never trusted to be safe: a raising predicate means "don't
+    skip", the same bias as everything else in this module.
     """
     gap = empty_gap()
     candidates: list[dict[str, Any]] = []
+    braw_dirs: list[str] = []
+    seen_dirs: set[str] = set()
     try:
         try:
             stamp = time.time() if now is None else float(now)
@@ -343,21 +406,48 @@ def scan_project(
                     gap["needs_resolve"] += 1
                     if ext == BRAW_EXT:
                         gap["braw"] += 1
+                    # normcase for the dedup only: the watch list gets the
+                    # directory in the spelling the walk found it, because
+                    # that is the spelling BPG shows the editor.
+                    key = os.path.normcase(dirpath)
+                    if key not in seen_dirs:
+                        seen_dirs.add(key)
+                        braw_dirs.append(dirpath)
                     continue
                 kind = classify_footage(path)
                 gap[kind] += 1
-                candidates.append(
-                    {"path": path, "kind": kind, "size": size, "mtime": mtime}
-                )
+                clip = {"path": path, "kind": kind, "size": size, "mtime": mtime}
+                if skip_fn is not None:
+                    try:
+                        skipped = bool(skip_fn(clip))
+                    except Exception:
+                        log.debug("proxy scan: skip_fn(%r) failed", path, exc_info=True)
+                        skipped = False
+                    if skipped:
+                        gap["capped"] += 1
+                        continue
+                candidates.append(clip)
 
         # Newest first: the clip someone shot this morning is the one their
         # collaborators are waiting on. `path` breaks mtime ties so the queue
         # is deterministic between scans.
         candidates.sort(key=lambda clip: (-clip["mtime"], clip["path"]))
+        candidates, shared = _one_per_proxy_name(candidates)
+        if shared:
+            # INFO, not WARNING: it is a folder layout, not a fault, and the
+            # newest of the pair still gets its proxy. But it is the only
+            # place anyone would ever learn that the .mp4 beside the .mov can
+            # never have a proxy of its own (COMP-MEDIA-2).
+            log.info(
+                "proxy scan: %d clip(s) under %s share a proxy name with a newer "
+                "original and are not queued: %s",
+                len(shared), project_dir, "; ".join(os.path.basename(p) for p in shared[:5]),
+            )
         if len(candidates) > MAX_QUEUE_PER_PROJECT:
             gap["truncated"] = True
             candidates = candidates[:MAX_QUEUE_PER_PROJECT]
         gap["clips"] = candidates
+        gap["needs_resolve_dirs"] = sorted(braw_dirs)
     except Exception:
         log.exception("proxy scan: %s could not be scanned", project_dir)
     return gap
@@ -371,8 +461,10 @@ def _empty_totals() -> dict[str, Any]:
         KIND_OWN: 0,
         KIND_PREVIEW: 0,
         "queued": 0,
+        "capped": 0,
         "projects": 0,
         "dropped": 0,
+        "needs_resolve_dirs": [],
         "truncated": False,
     }
 
@@ -384,6 +476,7 @@ def scan_missing_proxies(
     max_projects: int = manifest.MAX_PROJECTS,
     now: Optional[float] = None,
     stat_fn: Callable[[str], Any] = os.stat,
+    skip_fn: Optional[Callable[[dict[str, Any]], bool]] = None,
 ) -> dict[str, Any]:
     """{"projects": {project_rel: gap}, "totals": {...}} for the whole tree.
 
@@ -412,19 +505,39 @@ def scan_missing_proxies(
         )
         totals = result["totals"]
         totals["dropped"] = dropped
+        watch_dirs: list[str] = []
+        watch_seen: set[str] = set()
         for project_rel in project_rels:
             project_dir = os.path.join(
                 root, "Projects", project_rel.replace("/", os.sep)
             )
             gap = scan_project(
-                project_dir, min_age_seconds=min_age_seconds, now=now, stat_fn=stat_fn
+                project_dir, min_age_seconds=min_age_seconds, now=now,
+                stat_fn=stat_fn, skip_fn=skip_fn,
             )
             result["projects"][project_rel] = gap
-            for key in ("missing", "braw", "needs_resolve", KIND_OWN, KIND_PREVIEW):
-                totals[key] += gap[key]
+            for key in ("missing", "braw", "needs_resolve", KIND_OWN, KIND_PREVIEW,
+                        "capped"):
+                # .get, not [key]: a caller holding a gap dict built before
+                # "capped" existed must not take the whole sweep down.
+                totals[key] += int(gap.get(key, 0))
             totals["queued"] += len(gap["clips"])
             totals["truncated"] = totals["truncated"] or bool(gap["truncated"])
+            for directory in gap.get("needs_resolve_dirs") or ():
+                marker = os.path.normcase(str(directory))
+                if marker not in watch_seen:
+                    watch_seen.add(marker)
+                    watch_dirs.append(str(directory))
         totals["projects"] = len(result["projects"])
+        # Capped where the queue is capped and for the same reason: this list
+        # becomes entries in somebody's settings file, and bpg.py caps it
+        # again on the way in. Newest-first is meaningless for directories, so
+        # the order is the walk's -- deterministic between scans.
+        if len(watch_dirs) > MAX_WATCH_DIRS:
+            log.info("proxy scan: %d folders need BPG, reporting the first %d",
+                     len(watch_dirs), MAX_WATCH_DIRS)
+            watch_dirs = watch_dirs[:MAX_WATCH_DIRS]
+        totals["needs_resolve_dirs"] = watch_dirs
     except Exception:
         log.exception("proxy scan: the sweep of %r failed", local_root)
     return result

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ccsync_companion import paths
+from ccsync_companion import canon, paths
 from ccsync_companion.fixer import IgnoreTracker
 from ccsync_companion.resolve_bridge import NO_SCRIPTING_MESSAGE as NO_SCRIPTING
 from ccsync_companion.resolve_bridge import NOT_RUNNING_MESSAGE as NOT_RUNNING
@@ -873,3 +873,177 @@ def test_a_bridge_state_consumer_that_raises_costs_nothing(tmp_path):
     )
 
     assert watcher.poll_once()["ok"] is True
+
+
+# -- the MISSING log flood (2026-08-13, ruskin's machine) -------------------
+#
+# "Energy Transition" carries thousands of clips whose media has not synced
+# down yet. Every one of them logged its own DEBUG line EVERY poll (3 s), so
+# a full 5 MB companion.log rotated every ~25 minutes and took the rest of
+# the record with it -- the upgrade-history lines from a few hours earlier
+# were already gone when we went looking for them. The path is diagnostic the
+# first time; after that only the count is.
+
+
+@pytest.fixture
+def downloaded(tmp_path, monkeypatch):
+    """A healthy P:\\ -> tmp_path mapping whose canonical clips can be flipped
+    between "synced down" and "not here yet" mid-test.
+
+    The watcher passes classify_path no exists_fn, so the seam differs per
+    host: on Windows the probe is the literal "P:\\..." string (faked here,
+    real paths still answered by the real os.path.exists), while on posix
+    nothing can stat a drive letter, so classify_path probes
+    canon.canonical_to_local's twin -- a real file under tmp_path.
+    """
+    present: set[str] = set()
+    real_exists = os.path.exists
+
+    def fake_exists(p):
+        p = str(p)
+        if p.upper().startswith("P:\\"):
+            return p in present
+        return real_exists(p)
+
+    monkeypatch.setattr(paths.os.path, "exists", fake_exists)
+    _subst(monkeypatch, "P:\\", str(tmp_path) + "\\")
+
+    def set_downloaded(canonical: str, is_here: bool) -> None:
+        twin = Path(canon.canonical_to_local(canonical, str(tmp_path), "P:\\"))
+        if is_here:
+            present.add(canonical)
+            twin.parent.mkdir(parents=True, exist_ok=True)
+            twin.touch()
+        else:
+            present.discard(canonical)
+            if twin.exists():
+                twin.unlink()
+        paths.clear_prefix_cache()
+
+    return set_downloaded
+
+
+def _missing_paths(caplog):
+    return [r.getMessage() for r in caplog.records
+            if "missing on disk, not under" in r.getMessage()]
+
+
+def _missing_summaries(caplog):
+    return [r.getMessage() for r in caplog.records
+            if "clip paths missing on disk (" in r.getMessage()]
+
+
+def test_a_clip_that_stays_missing_logs_its_path_once_and_a_count_per_poll(
+        tmp_path, downloaded, caplog):
+    clip = r"P:\Projects\Energy Transition\a.braw"
+    items = [make_timeline_item(clip)]
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(*items),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.watcher"):
+        first = watcher.poll_once()
+        second = watcher.poll_once()
+
+    assert (first["missing"], first["missing_new"]) == (1, 1)
+    assert (second["missing"], second["missing_new"]) == (1, 0)
+    assert _missing_paths(caplog) == [
+        f"clip path missing on disk, not under local_root/prefix: {clip}"
+    ]
+    # The count still shows up every poll -- that is the signal worth keeping.
+    assert _missing_summaries(caplog) == [
+        "1 clip paths missing on disk (1 new)",
+        "1 clip paths missing on disk (0 new)",
+    ]
+
+
+def test_a_newly_missing_clip_still_gets_its_own_line(tmp_path, downloaded, caplog):
+    """The flood is the bug, not the message: a path appearing for the FIRST
+    time is exactly what a reader needs to see."""
+    a = r"P:\Projects\Energy Transition\a.braw"
+    b = r"P:\Projects\Energy Transition\b.braw"
+    items = [make_timeline_item(a)]
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(*items),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.watcher"):
+        watcher.poll_once()
+        items.append(make_timeline_item(b))
+        summary = watcher.poll_once()
+
+    assert (summary["missing"], summary["missing_new"]) == (2, 1)
+    assert [m.rsplit(": ", 1)[-1] for m in _missing_paths(caplog)] == [a, b]
+    assert _missing_summaries(caplog)[-1] == "2 clip paths missing on disk (1 new)"
+
+
+def test_a_clip_that_syncs_down_and_vanishes_again_re_logs(tmp_path, downloaded, caplog):
+    """The dedupe must not become a once-per-process latch: an editor whose
+    media arrives (lane B catches up) and then goes away again -- a deleted
+    file, a re-pointed folder -- has a genuinely new fact to report."""
+    clip = r"P:\Projects\Energy Transition\a.braw"
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(make_timeline_item(clip)),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.watcher"):
+        assert watcher.poll_once()["missing_new"] == 1
+        downloaded(clip, True)
+        assert watcher.poll_once()["missing"] == 0
+        assert watcher._missing_logged == set()  # re-armed, and bounded
+        downloaded(clip, False)
+        assert watcher.poll_once()["missing_new"] == 1
+
+    assert len(_missing_paths(caplog)) == 2
+    assert _missing_summaries(caplog) == [
+        "1 clip paths missing on disk (1 new)",
+        "1 clip paths missing on disk (1 new)",
+    ]
+
+
+def test_the_missing_set_is_rebuilt_from_the_open_timeline(tmp_path, downloaded, caplog):
+    """Unbounded growth is the other half of the flood: the seen-set is
+    rebuilt from each full pass, so switching project/timeline drops the
+    clips that left with it rather than accumulating them for the session."""
+    first_project = [make_timeline_item(r"P:\Projects\Energy Transition\a.braw")]
+    second_project = [make_timeline_item(r"P:\Projects\Nuclear\b.braw")]
+    items = first_project
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(*items, project_name="whatever"),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.watcher"):
+        watcher.poll_once()
+        items = second_project
+        summary = watcher.poll_once()
+
+    assert (summary["missing"], summary["missing_new"]) == (1, 1)
+    assert len(watcher._missing_logged) == 1
+    assert len(_missing_paths(caplog)) == 2
+
+
+def test_a_healthy_timeline_says_nothing_about_missing_clips(tmp_path, downloaded, caplog):
+    """No missing clips -> not even a zero line: the per-poll summary exists
+    to replace a flood, not to start a quieter one."""
+    clip = r"P:\Projects\Energy Transition\a.braw"
+    downloaded(clip, True)
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(make_timeline_item(clip)),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.watcher"):
+        summary = watcher.poll_once()
+
+    assert (summary["missing"], summary["missing_new"]) == (0, 0)
+    assert _missing_summaries(caplog) == []
+    assert _missing_paths(caplog) == []

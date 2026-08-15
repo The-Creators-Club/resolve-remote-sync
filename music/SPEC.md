@@ -85,8 +85,8 @@ If MTG tags are ever wanted, run Essentia on a Linux box and add its labels as a
 | `web/musicweb/main.py` | FastAPI app. Owns nothing; reads the DB the indexer writes. |
 | `web/musicweb/routes_api.py` | stats / facets / tracks / search / similar / reload |
 | `web/musicweb/routes_media.py` | audio streaming (HTTP Range) + waveform peaks |
-| `web/musicweb/routes_ingest.py` | ingest, Resolve actions, reveal — the write routes |
-| `web/musicweb/search.py` | query logic; CLAP is loaded lazily and only here |
+| `web/musicweb/routes_ingest.py` | ingest — the only write route left here; the Resolve actions and reveal are the companion's, on the editor's own 127.0.0.1:8899 |
+| `web/musicweb/search.py` | query logic; CLAP is loaded lazily and only here, once per process |
 | `web/musicweb/projection.py` | applies the source-bias axes (query time) |
 
 ## Text search needs CLAP at query time — but not a GPU
@@ -270,8 +270,11 @@ changes need no migration — see `web/migrations/README.md` for when one is nee
 - `GET  /api/audio/{id}` — audio stream with HTTP range support
 - `GET  /api/peaks/{id}` — 900-byte waveform overview
 - `GET  /api/stats` — library summary
-- `POST /api/reload` — pick up a fresh index without restarting
-- `POST /api/ingest`, `GET/POST /api/resolve*`, `GET /api/reveal/{id}` — the write routes
+- `POST /api/reload` — pick up a fresh index without restarting (drops the cached
+  connections first, so a music.db that was REPLACED by rename is picked up too)
+- `POST /api/ingest` — the one write route. "Send to Resolve" and "reveal" are **not**
+  routes of this app: they are `POST /music/send` and `POST /music/reveal` on the
+  editor's own companion (127.0.0.1:8899), because this process runs on the NAS
 
 `/api/facets` returns categories as JSON keys and the frontend renders them in key order,
 so that order is load-bearing. It used to come from `vocab.CATEGORIES`; `vocab.py` is the

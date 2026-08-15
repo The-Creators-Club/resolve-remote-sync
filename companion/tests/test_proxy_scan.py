@@ -330,6 +330,71 @@ def test_ties_are_broken_deterministically(tmp_path):
     assert order == ["a.mov", "b.mov", "c.mov"]
 
 
+def test_two_originals_sharing_a_proxy_name_queue_only_the_newest(tmp_path):
+    """COMP-MEDIA-2: `A001.mov` and `A001.mp4` in one directory both map to
+    `Proxy/A001.mp4`, so queuing both puts two ffmpegs on one `.partial` -- the
+    drain runs 4 wide. Both stay COUNTED: they really are missing, and the
+    stem convention (shared with BPG and Resolve's adjacent-Proxy auto-link)
+    has no second name to offer."""
+    project = _make_project(tmp_path)
+    _clip(project / "A001.mov", at=time.time() - SETTLED)
+    _clip(project / "A001.mp4", at=time.time() - SETTLED - 600)
+    _clip(project / "A002.mov", at=time.time() - SETTLED)
+
+    gap = _scan(project)
+
+    assert gap["missing"] == 3
+    assert gap["own"] == 3
+    queued = sorted(os.path.basename(clip["path"]) for clip in gap["clips"])
+    assert queued == ["A001.mov", "A002.mov"]
+
+
+def test_the_same_stem_in_two_directories_is_not_a_collision(tmp_path):
+    """Each directory has its own Proxy/ -- only a shared parent collides."""
+    project = _make_project(tmp_path)
+    _clip(project / "Day1" / "A001.mov")
+    _clip(project / "Day2" / "A001.mov")
+
+    assert len(_scan(project)["clips"]) == 2
+
+
+def test_a_capped_clip_never_takes_a_queue_slot(tmp_path):
+    """COMP-MEDIA-4: the cap is applied BEFORE the 500-clip truncation, or a
+    project whose newest 500 clips have all failed reports an empty queue for
+    ever while the older encodable ones are never offered to ffmpeg."""
+    project = _make_project(tmp_path)
+    total = proxy_scan.MAX_QUEUE_PER_PROJECT + 5
+    for index in range(total):
+        _clip(project / f"clip{index:04d}.mov", age=SETTLED + index * 60)
+
+    # The newest 500 have "failed": exactly the 0.6.1 muxer night's shape.
+    capped = {
+        os.path.join(str(project), f"clip{index:04d}.mov")
+        for index in range(proxy_scan.MAX_QUEUE_PER_PROJECT)
+    }
+    gap = _scan(project, skip_fn=lambda clip: clip["path"] in capped)
+
+    assert gap["missing"] == total, "the count is still the truth"
+    assert gap["capped"] == proxy_scan.MAX_QUEUE_PER_PROJECT
+    assert [os.path.basename(clip["path"]) for clip in gap["clips"]] == [
+        f"clip{index:04d}.mov" for index in range(total - 5, total)
+    ]
+
+
+def test_a_skip_predicate_that_raises_does_not_skip(tmp_path):
+    """Never trusted: the whole module's bias is that a failure costs
+    information, never work."""
+    project = _make_project(tmp_path)
+    _clip(project / "A001.mov")
+
+    def boom(_clip):
+        raise RuntimeError("the failure map went away")
+
+    gap = _scan(project, skip_fn=boom)
+    assert len(gap["clips"]) == 1
+    assert gap["capped"] == 0
+
+
 # -- scan_project: never raises ------------------------------------------------
 
 

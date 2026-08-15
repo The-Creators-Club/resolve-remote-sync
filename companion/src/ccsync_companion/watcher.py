@@ -7,7 +7,8 @@ item's "File Path" clip property and classifies it (see paths.py):
   OK          -> ignored
   OUT_OF_TREE -> queued for the popup fixer (debounced per session)
   BAD_PREFIX  -> mapping-health tray notification (debounced per session)
-  MISSING     -> logged at debug level, no user-facing action
+  MISSING     -> logged at debug level ONCE per path, plus a per-poll
+                 count; no user-facing action
 
 The watcher never raises: resolve_bridge already returns friendly dicts on
 every Resolve-side failure, and this module wraps its own loop body in
@@ -127,6 +128,18 @@ class TimelineWatcher:
         # machine (fixing it elsewhere changes its spelling, i.e. its key).
         self._offered_non_canonical: set[str] = set()
         self._warned_foreign: set[str] = set()
+        # MISSING paths already logged individually. Seen live 2026-08-13 on
+        # ruskin's machine (0.7.4, log_level=DEBUG): "Energy Transition" has
+        # thousands of clips whose media has not synced down yet, and every
+        # one of them logged its own DEBUG line every poll -- 5 MB of
+        # companion.log rotated every ~25 minutes, which drowned (and then
+        # rotated away) the upgrade-history lines we were trying to read
+        # hours later. The per-path line is diagnostic ONCE; after that only
+        # the per-poll count below is. Rebuilt from THIS poll's missing set at
+        # the end of every full pass, so it cannot grow past the number of
+        # clips on the open timeline and a path that recovers -- or a project
+        # switch that takes it away -- re-arms its line.
+        self._missing_logged: set[str] = set()
         # Most recently seen Resolve project name (see resolve_bridge's
         # "project_name" key), tracked across polls so other components
         # (the dashboard reporter) can report which project is open without
@@ -192,6 +205,11 @@ class TimelineWatcher:
         new_non_canonical: list[dict[str, Any]] = []
         new_mapping_warnings = 0
         new_foreign_warnings = 0
+        # Every MISSING key seen this poll (not just the newly logged ones):
+        # it is both the pass summary's N and the next value of
+        # _missing_logged -- see the log-flood note in __init__.
+        missing_now: set[str] = set()
+        new_missing = 0
         resolve_project_name = result.get("project_name", "")
         # Did anything under the canonical prefix classify as healthy this
         # poll? See the _warned_mapping reset below.
@@ -261,8 +279,23 @@ class TimelineWatcher:
                     except Exception:
                         log.exception("on_foreign callback failed")
             elif cls == MISSING:
-                log.debug("clip path missing on disk, not under local_root/prefix: %s", path)
+                missing_now.add(key)
+                if key not in self._missing_logged:
+                    new_missing += 1
+                    log.debug("clip path missing on disk, not under local_root/prefix: %s", path)
             # OK -> nothing to do
+
+        if missing_now:
+            # The count is the signal worth having every poll ("is the sync
+            # catching up?"); the paths are not. Silent when nothing is
+            # missing, so a healthy rig writes nothing here at all.
+            log.debug("%d clip paths missing on disk (%d new)", len(missing_now), new_missing)
+        # Assignment, not update(): dropping the keys that did NOT come back
+        # missing this pass is what re-arms a recovered (or switched-away)
+        # path and what bounds the set. Only reached on a full poll -- an
+        # early return above leaves the previous pass's set alone, so a
+        # disconnected bridge does not replay every path on reconnect.
+        self._missing_logged = missing_now
 
         if prefix_healthy and not prefix_broken and self._warned_mapping:
             # The mapping is working again. Warning once per PROCESS lifetime
@@ -296,6 +329,8 @@ class TimelineWatcher:
             "mapping_warnings": new_mapping_warnings,
             "non_canonical": len(new_non_canonical),
             "foreign_warnings": new_foreign_warnings,
+            "missing": len(missing_now),
+            "missing_new": new_missing,
         }
 
     def _note_bridge_state(self, connected: bool, reason: str = "") -> None:

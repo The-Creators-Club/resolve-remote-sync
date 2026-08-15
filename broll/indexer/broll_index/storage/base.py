@@ -111,6 +111,26 @@ class Storage(ABC):
         """Write the normalized keyword blob (broll_index/normalize.searchable_blob) back
         onto one row. `source` is 'segment' or 'transcript' (matching embeddings.source)."""
 
+    # The two batch twins below are deliberately CONCRETE: the default is the
+    # single-row loop every backend already implements, so a backend only
+    # overrides them if it can actually do better. SqliteBackend can (one
+    # executemany, one search-generation bump, one commit per video instead of
+    # one transaction, fsync and `meta` UPDATE per row — ~83,000 of them for a
+    # full re-embed of this corpus, where ~7,100 will do; BROLL-IDX-8,
+    # 2026-08-14). HttpBackend inherits the loop and so keeps raising its
+    # "not supported over the ingest API" NotImplementedError unchanged.
+    def update_search_norms(self, rows: list[tuple[str, int, str]]) -> None:
+        """update_search_norm for a whole video's rows: (source, source_id, search_norm)."""
+        for source, source_id, search_norm in rows:
+            self.update_search_norm(source, source_id, search_norm)
+
+    def upsert_embeddings(
+        self, rows: list[tuple[str, int, int, str, int, bytes]]
+    ) -> None:
+        """upsert_embedding for a whole video's rows: (source, source_id, video_id, model, dim, vec)."""
+        for source, source_id, video_id, model, dim, vec in rows:
+            self.upsert_embedding(source, source_id, video_id, model, dim, vec)
+
     @abstractmethod
     def get_embedding_models(self, video_id: int) -> dict[tuple[str, int], str]:
         """(source, source_id) -> model for every `embeddings` row already stored for this

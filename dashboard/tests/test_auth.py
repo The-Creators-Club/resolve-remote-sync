@@ -95,6 +95,51 @@ def test_login_gate_allows_authenticated(client):
     assert client.get("/api/v1/projects").status_code == 200
 
 
+def test_expired_session_answers_htmx_pollers_with_hx_redirect(client):
+    """DASH-4: /partials/* is not in the JSON-401 prefix list, so an expired
+    session used to hand every self-refreshing fragment a 303 -- which XHR
+    follows transparently -- and htmx swapped the WHOLE login document into
+    <main>/<aside>. The page then kept polling a login page every 2s and
+    never navigated anywhere. HX-Redirect is what htmx turns into a real
+    browser navigation."""
+    resp = client.get(
+        "/partials/transfers",
+        headers={"HX-Request": "true", "HX-Current-URL": "http://dash/transfers"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 401
+    # the PAGE, not the fragment -- ?next=/partials/transfers would log the
+    # editor back in onto a bare fragment
+    assert resp.headers["HX-Redirect"] == "/login?next=%2Ftransfers"
+    # and nothing swappable came back
+    assert "<!doctype html" not in resp.text.lower()
+    assert "password" not in resp.text.lower()
+
+
+def test_htmx_redirect_keeps_the_pages_query_and_survives_a_missing_current_url(client):
+    resp = client.get(
+        "/partials/sidebar?current=x",
+        headers={"HX-Request": "true",
+                 "HX-Current-URL": "http://dash/project/2026-cct?as=ruskin"},
+        follow_redirects=False,
+    )
+    assert resp.headers["HX-Redirect"] == "/login?next=%2Fproject%2F2026-cct%3Fas%3Druskin"
+    # no HX-Current-URL (htmx always sends it, but a hand-rolled caller may
+    # not): fall back to the request's own path rather than dropping the header
+    resp = client.get("/partials/sidebar", headers={"HX-Request": "true"},
+                      follow_redirects=False)
+    assert resp.headers["HX-Redirect"] == "/login?next=%2Fpartials%2Fsidebar"
+
+
+def test_plain_document_gets_still_get_the_303(client):
+    """The companion's /project-setup deep link is a document GET and must
+    keep landing on the login page with its destination preserved."""
+    resp = client.get("/project-setup?resolve_project=Doc", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/login?next=%2Fproject-setup")
+    assert "HX-Redirect" not in resp.headers
+
+
 def test_selection_open_with_token_but_gated_without(tmp_path):
     settings = Settings(db_path=str(tmp_path / "t.db"), session_secret=SECRET, report_token="tok")
     app = create_app(settings)

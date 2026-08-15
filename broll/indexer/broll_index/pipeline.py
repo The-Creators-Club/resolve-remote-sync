@@ -456,20 +456,31 @@ def stage_embed(cfg: Config, storage: Storage, video: dict[str, Any]) -> None:
         existing_models = storage.get_embedding_models(video["id"])
 
         to_embed: list[tuple[str, int, str]] = []  # (source, source_id, text)
+        # Accumulated and written once per video (BROLL-IDX-8, 2026-08-14): the
+        # per-row calls each committed their own transaction and bumped the
+        # single `meta` search-generation row, which for a full re-embed of this
+        # corpus is ~83,000 fsyncs where ~7,100 do the same job — and made that
+        # one row a hot spot every concurrent writer contends on.
+        norms: list[tuple[str, int, str]] = []  # (source, source_id, search_norm)
 
         for seg in segments:
             text = _segment_search_text(seg)
             if not seg.get("search_norm"):
-                storage.update_search_norm("segment", seg["id"], normalize.searchable_blob(text))
+                norms.append(("segment", seg["id"], normalize.searchable_blob(text)))
             if text.strip() and existing_models.get(("segment", seg["id"])) != model_name:
                 to_embed.append(("segment", seg["id"], text))
 
         for cue in transcripts:
             text = cue.get("text") or ""
             if not cue.get("search_norm"):
-                storage.update_search_norm("transcript", cue["id"], normalize.searchable_blob(text))
+                norms.append(("transcript", cue["id"], normalize.searchable_blob(text)))
             if text.strip() and existing_models.get(("transcript", cue["id"])) != model_name:
                 to_embed.append(("transcript", cue["id"], text))
+
+        # Flushed before the embedding work and before the early returns below:
+        # normalization is useful on its own (it is what keyword search reads),
+        # and a machine without fastembed must still get it.
+        storage.update_search_norms(norms)
 
         if not to_embed:
             return
@@ -480,8 +491,10 @@ def stage_embed(cfg: Config, storage: Storage, video: dict[str, Any]) -> None:
         texts = [t for _, _, t in to_embed]
         vectors = embed.embed_texts(texts, model_name=model_name, batch_size=cfg.embedding.batch_size)
         dim = int(vectors.shape[1]) if vectors.size else 0
-        for (source, source_id, _text), vec in zip(to_embed, vectors):
-            storage.upsert_embedding(source, source_id, video["id"], model_name, dim, embed.to_blob(vec))
+        storage.upsert_embeddings([
+            (source, source_id, video["id"], model_name, dim, embed.to_blob(vec))
+            for (source, source_id, _text), vec in zip(to_embed, vectors)
+        ])
     except Exception as e:  # noqa: BLE001 - additive enrichment, must never fail the video
         logger.warning("embed: video %s failed: %s", video["id"], e)
 
@@ -615,7 +628,14 @@ def _process_video(
             # ClaudeCallError here, so a 429 delivered by non-zero exit slipped
             # through and marked 1,097 videos 'error' in a single night —
             # precisely what FatalRunError exists to prevent.
-            elif is_fatal_api_error(str(e)):
+            #
+            # Gated on the stage that actually calls the API (BROLL-IDX-1,
+            # 2026-08-14): probe/proxy/frames failures carry filenames and whole
+            # ffmpeg argvs, so their text routinely contains API-ish substrings
+            # that have nothing to do with the account. Classifying one of those
+            # as account-wide aborted the run AND left the clip runnable, so
+            # every re-run stopped on the same clip forever.
+            elif stage == "claude" and is_fatal_api_error(str(e)):
                 # Environmental, not per-video: exhausted credit, bad auth, and the
                 # like will fail every remaining call identically. Marking each video
                 # 'error' would march through the archive destroying the queue's
@@ -645,7 +665,16 @@ def run_pipeline(
     requested_stages = set(stages) if stages else set(DEFAULT_STAGES)
     resolved_model = model or cfg.model
 
-    statuses = ["discovered", "probed", "proxied"]
+    # ORGANISED_STATUS is in the work list even though no stage claims it as a
+    # prerequisite (BROLL-IDX-4, 2026-08-14): it is a RESTING status, and
+    # _process_video's reopen_if_now_indexable is what puts those clips back in
+    # the queue when a share's `index: false` is revisited. Without it that call
+    # was unreachable from the CLI — `broll-index run` printed "processed 0
+    # video(s)" on a re-enabled share whose clips were all sitting at
+    # 'organised', and only parallel_local.eligible_ids (which has always
+    # included it) could see them. A row whose share is still opted out costs a
+    # dict lookup and is declined by every status-gated stage.
+    statuses = ["discovered", "probed", "proxied", ORGANISED_STATUS]
     if "transcribe" in requested_stages or "embed" in requested_stages:
         # Both are status-independent additive enrichment, so already-finished videos
         # are still eligible — otherwise an archive indexed before these stages existed

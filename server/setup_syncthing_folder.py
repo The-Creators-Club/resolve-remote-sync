@@ -33,10 +33,17 @@ GUI URL + API key come from -- Syncthing app config, or its config.xml):
          propagate)
        - ignoreDelete: true (the NAS copy is the authority and never applies
          a delete an editor made -- docs/delete-protection-ignoredelete.md)
-  4. POST /rest/db/ignores?folder=<id> with the .stignore content: one
-     case-insensitive line per video extension, plus **/Proxy -- videos and
-     proxies never travel through Syncthing (lanes A/B, rclone, handle
-     those).
+  4. POST /rest/db/ignores?folder=<id> with the .stignore content
+     (common.build_stignore_lines): one case-insensitive line per video
+     extension, plus **/Proxy -- videos and proxies never travel through
+     Syncthing (lanes A/B, rclone, handle those) -- plus the in-flight
+     markers no lane should ever carry: rclone's *.partial (B12) and
+     yt-dlp's *.part / *.part-FragN / *.ytdl (2026-08-14).
+
+     Re-running this script for an EXISTING folder is how a deployed folder
+     picks up new ignore lines: nothing else on the NAS side rewrites them
+     (the dashboard collector's provision cycle repairs them from ITS copy
+     of the list, so that copy has to agree -- see common.YTDL_IGNORE_LINES).
 
 WHICH FOLDER ID
 ---------------
@@ -90,12 +97,12 @@ from common import (
     DEFAULT_PROJECTS_ROOT,
     MARKER_FILENAME,
     add_host_key_arg,
+    build_marker_read_cmd,
     build_stignore_lines,
     ok,
     project_path_rel,
     run_ssh,
     set_host_key_pin,
-    shell_quote,
     slugify,
     syncthing_api,
     validate_slug,
@@ -233,12 +240,8 @@ def read_marker_slug(projects_root: str, rel: str) -> tuple[str, str]:
     except ValueError as exc:
         return MARKER_UNAVAILABLE, str(exc)
 
-    marker_q = shell_quote(f"{base}/{MARKER_FILENAME}")
-    cmd = (f'if echo "$SUDO_PW" | sudo -S -p "" test -e {marker_q}; then '
-           f'echo "MARKER-PRESENT"; echo "$SUDO_PW" | sudo -S -p "" cat {marker_q}; '
-           f'else echo "MARKER-ABSENT"; fi')
     try:
-        rc, out, err = run_ssh(cmd, dry_run=False)
+        rc, out, err = run_ssh(build_marker_read_cmd(base), dry_run=False)
     except Exception as exc:
         return MARKER_UNAVAILABLE, f"{type(exc).__name__}: {exc}"
     if rc != 0:
@@ -246,6 +249,13 @@ def read_marker_slug(projects_root: str, rel: str) -> tuple[str, str]:
 
     lines = (out or "").splitlines()
     if "MARKER-PRESENT" not in lines:
+        # SERVER-4: absent is what the PRIVILEGED shell said, never what a
+        # failed sudo left behind -- no sentinel at all is unavailable.
+        if "MARKER-ABSENT" not in lines:
+            return MARKER_UNAVAILABLE, (
+                f"the marker read at {base} printed neither MARKER-PRESENT nor "
+                f"MARKER-ABSENT, so whether this project has an identity is "
+                f"unknown: {((err or '').strip() or (out or '').strip())[:200]!r}")
         return MARKER_ABSENT, base
     raw = "\n".join(lines[lines.index("MARKER-PRESENT") + 1:]).strip()
     slug = parse_marker_slug(raw)

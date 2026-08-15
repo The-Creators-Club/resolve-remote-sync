@@ -63,10 +63,11 @@
     kind=onboard package is the zipped onboarding wizard, and like the macOS
     companion it cannot be built on Windows -- both come from the Mac
     (tools/build_onboard_macos.sh --publish / tools/release_macos.sh
-    --publish). This script still byte-scans macos_bootstrap.sh for CR (a
-    CRLF copy inside the editor package would fail on the editor's Mac on
-    its very first line) and warns when either macos channel -- installer or
-    companion -- has fallen behind the repo version.
+    --publish). What -Publish adds on the macOS side is the advisory when
+    either macos channel -- installer or companion -- has fallen behind the
+    repo version. The CR byte-scan of macos_bootstrap.sh is NOT part of it:
+    that file is copied into the package on every run, so it is scanned on
+    every run (SHIP-8).
 
 .PARAMETER MakeCurrent
     With -Publish: immediately make the uploaded version the one offered to
@@ -246,6 +247,10 @@ if ($RebuildExe) {
 # --- optionally rebuild the onboarding installer --------------------------
 $OnboardingDir = Join-Path $RepoRoot "onboarding"
 $OnboardExePath = Join-Path $OnboardingDir "dist\onboard.exe"
+# The onboard build's exit code, kept for the publish below -- the OPS-7 fix
+# above, applied to the half it was never applied to (SHIP-1, 2026-08-14). 0
+# also means "no rebuild was asked for".
+$script:OnboardPyInstallerExit = 0
 if ($RebuildOnboard) {
     $onboardPython = Join-Path $OnboardingDir ".venv\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $onboardPython)) {
@@ -263,8 +268,9 @@ if ($RebuildOnboard) {
         try {
             & $onboardPython -m PyInstaller build_onboard.spec --noconfirm 2>&1 |
                 ForEach-Object { Write-Host "    $_" }
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warn2 "PyInstaller exited $LASTEXITCODE -- onboard.exe may be stale or missing"
+            $script:OnboardPyInstallerExit = $LASTEXITCODE
+            if ($script:OnboardPyInstallerExit -ne 0) {
+                Write-Warn2 "PyInstaller exited $script:OnboardPyInstallerExit -- onboard.exe may be stale or missing"
             }
             else {
                 Write-Step "onboard.exe rebuilt"
@@ -273,6 +279,19 @@ if ($RebuildOnboard) {
         finally {
             $ErrorActionPreference = $prevEAP
             Pop-Location
+        }
+        # SHIP-1 (2026-08-14): a failed onboard build used to be a yellow
+        # WARNING and nothing else, so the run carried on and -Publish uploaded
+        # YESTERDAY'S onboard.exe under the NEW installer version. The only
+        # thing standing in the way was the "older than the companion exe"
+        # mtime test below, which passes whenever the companion was not rebuilt
+        # in the same run -- i.e. exactly the R13 recovery invocation
+        # (-RebuildOnboard -Publish -MakeCurrent, no -RebuildExe). That hands
+        # every new editor a companion that cannot self-update (the 2026-07-25
+        # rollout failure), and the channel refuses to reuse a version for
+        # different bytes, so undoing it costs another version bump.
+        if ($script:OnboardPyInstallerExit -ne 0) {
+            Set-Failed "PyInstaller exited $script:OnboardPyInstallerExit for onboard.exe -- dist\ still holds the PREVIOUS installer"
         }
     }
 }
@@ -304,6 +323,27 @@ $Files = @(
 $OptionalFiles = @(
     @{ Src = "companion\dist\ccsync-release.json"; Dst = "ccsync-release.json" }
 )
+
+# --- LF guard on the one file a Mac executes ------------------------------
+# macos_bootstrap.sh is $Files entry 6 and is copied to the share on EVERY
+# run, so the CR scan belongs here and not (as it did until SHIP-8,
+# 2026-08-14) inside `if ($Publish)`. The documented package-refresh
+# invocation -- .\build_editor_package.ps1 -RebuildExe -RebuildOnboard, this
+# script's own .EXAMPLE and CLAUDE.md's -- publishes nothing and pushed the
+# .sh to P:\ completely unchecked; the failure then surfaced on the editor's
+# Mac at line 1 ("set -eu" -> "Illegal option -"), not here.
+$bootstrapSh = Join-Path $RepoRoot "installer\macos_bootstrap.sh"
+if (-not (Test-Path -LiteralPath $bootstrapSh)) {
+    # The copy loop below records the same file as a MISSING source; this says
+    # it in the language of the thing that breaks.
+    Set-Failed "no macos_bootstrap.sh at $bootstrapSh -- the editor package would ship without it"
+}
+elseif (Test-FileHasCr -Path $bootstrapSh) {
+    Set-Failed "macos_bootstrap.sh contains CARRIAGE RETURNS -- a Mac's bash would fail on the first line. Fix the checkout (git add --renormalize installer/macos_bootstrap.sh, or re-clone with the .gitattributes rules in place); the copy in the editor package would be broken"
+}
+else {
+    Write-Step "macos_bootstrap.sh is LF-clean"
+}
 
 if (-not $DryRun) {
     if (-not (Test-Path -LiteralPath $Destination)) {
@@ -535,10 +575,20 @@ if ($Publish) {
     # Third copy of the same number: the macOS bootstrap ships in the same
     # editor package, and the macos onboard channel (the zipped wizard, built
     # on the Mac) carries the same number -- the advisory below compares
-    # against it.
-    $bootstrapSh = Join-Path $RepoRoot "installer\macos_bootstrap.sh"
-    $mIv3 = Select-String -Path $bootstrapSh -Pattern '^INSTALLER_VERSION="([^"]+)"'
-    if (-not $mIv -or -not $mIv2 -or -not $mIv3) {
+    # against it. ($bootstrapSh and its LF guard now live above the copy loop,
+    # because that copy happens whether or not this run publishes -- SHIP-8.)
+    $mIv3 = $null
+    if (Test-Path -LiteralPath $bootstrapSh) {
+        $mIv3 = Select-String -Path $bootstrapSh -Pattern '^INSTALLER_VERSION="([^"]+)"'
+    }
+    if ($script:OnboardPyInstallerExit -ne 0) {
+        # FIRST in the chain, before any staleness heuristic (SHIP-1): the exe
+        # in onboarding\dist is the PREVIOUS build, and its mtime says nothing
+        # about that -- it is newer than the companion exe whenever the
+        # companion was not rebuilt in this run.
+        $onboardSkipReason = "PyInstaller exited $script:OnboardPyInstallerExit earlier in this run -- onboard.exe in dist\ is the PREVIOUS build"
+    }
+    elseif (-not $mIv -or -not $mIv2 -or -not $mIv3) {
         $onboardSkipReason = "could not parse the installer version from windows_bootstrap.ps1 / steps.py / macos_bootstrap.sh"
     }
     elseif ($mIv.Matches[0].Groups[1].Value -ne $mIv2.Matches[0].Groups[1].Value) {
@@ -566,16 +616,9 @@ if ($Publish) {
     # --publish --make-current. Publishing macos_bootstrap.sh into that slot
     # from here (the pre-1.0.17 behavior) would collide with the wizard at
     # the same shared version number and hand Macs a Terminal script instead
-    # of the wizard. What remains here: the LF guard on the .sh that still
-    # ships INSIDE the editor package on P:\ (and inside the wizard bundle)
-    # -- a CRLF copy fails on the editor's Mac at its very first line -- and
-    # the channel-staleness advisory further down.
-    if (-not (Test-Path -LiteralPath $bootstrapSh)) {
-        Set-Failed "no macos_bootstrap.sh at $bootstrapSh -- the editor package would ship without it"
-    }
-    elseif (Test-FileHasCr -Path $bootstrapSh) {
-        Set-Failed "macos_bootstrap.sh contains CARRIAGE RETURNS -- a Mac's bash would fail on the first line. Fix the checkout (git add --renormalize installer/macos_bootstrap.sh, or re-clone with the .gitattributes rules in place); the copy in the editor package would be broken"
-    }
+    # of the wizard. What remains here: the channel-staleness advisory further
+    # down. (The LF guard on the .sh that ships INSIDE the editor package on
+    # P:\ ran above, before the copy loop -- SHIP-8.)
 
     # A skipped installer upload is a FAILED ship, not a footnote: the whole
     # point of -Publish is that the dashboard's [ INSTALLER ] download serves
@@ -594,7 +637,7 @@ if ($Publish) {
             Write-Step "[dry-run] would publish installer v$onboardVersion ($([int]((Get-Item -LiteralPath $OnboardExePath).Length/1KB)) KB, sha256 $($onboardSha.Substring(0,12))...) via PUT $onboardUri"
         }
         if (Test-Path -LiteralPath $bootstrapSh) {
-            Write-Step "[dry-run] macos_bootstrap.sh is LF-clean ($([int]((Get-Item -LiteralPath $bootstrapSh).Length/1KB)) KB) -- ships inside the editor package; NOT published from here since 1.0.17"
+            Write-Step "[dry-run] macos_bootstrap.sh ($([int]((Get-Item -LiteralPath $bootstrapSh).Length/1KB)) KB) ships inside the editor package (CR-scanned above); NOT published from here since 1.0.17"
         }
         Write-Step "[dry-run] would then check the macos INSTALLER and COMPANION channels against the repo versions (both are built on the Mac: tools/build_onboard_macos.sh --publish / tools/release_macos.sh --publish)"
     }

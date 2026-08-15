@@ -35,6 +35,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 from app.db import read_search_generation
@@ -87,6 +88,55 @@ _MAX_LEN_DELTA_FOR_CORRECTION = 3
 _MIN_TERM_LEN_FOR_PREFIX = 5
 
 
+@dataclass(frozen=True)
+class CorrectionIndex:
+    """The vocabulary in the shape correct_terms actually consumes it.
+
+    Both members used to be rebuilt per request from the cached word list
+    (BROLL-WEB-6, 2026-08-14): measured on the live 15k-clip archive, the
+    lowercase map is 315,562 entries and ~80 ms to build, and the length-window
+    candidate list for a 9-character term was a 167,093-entry scan of it at
+    ~19 ms per query term -- ~110 ms of pure re-derivation added to exactly the
+    queries that already under-delivered (fuzzy only runs when the exact pass
+    returned fewer than FUZZY_MIN_VIDEO_RESULTS videos). Nothing about either
+    depends on the query, so both are derived once per vocabulary generation
+    and `candidates` becomes a concat of a handful of length buckets.
+
+    `lower_to_original` maps a lowercased vocabulary word to the corpus casing
+    to substitute back in; `by_length` buckets those lowercased keys by their
+    length, so the _MAX_LEN_DELTA_FOR_CORRECTION window is a slice of buckets
+    rather than a full scan.
+    """
+
+    lower_to_original: dict[str, str]
+    by_length: dict[int, list[str]]
+
+    def candidates(self, length: int, max_delta: int) -> list[str]:
+        out: list[str] = []
+        for n in range(length - max_delta, length + max_delta + 1):
+            out.extend(self.by_length.get(n, ()))
+        return out
+
+
+def _build_correction_index(vocab: Any) -> CorrectionIndex:
+    """Derive a CorrectionIndex from a vocabulary of corpus words.
+
+    Very short candidates (1-2 chars) are dropped here, as they always were:
+    rapidfuzz's WRatio rates a short substring match (e.g. "an" inside
+    "ambluance") above the actual intended word purely because the short
+    string matches "completely" within the longer one. Same length floor
+    already applied to query terms in correct_terms.
+    """
+    lower_to_original: dict[str, str] = {}
+    for term in vocab:
+        if len(term) >= _MIN_TERM_LEN_FOR_CORRECTION:
+            lower_to_original[term.lower()] = term
+    by_length: dict[int, list[str]] = {}
+    for lower in lower_to_original:
+        by_length.setdefault(len(lower), []).append(lower)
+    return CorrectionIndex(lower_to_original=lower_to_original, by_length=by_length)
+
+
 class VocabularyCache:
     """Process-wide cache of the distinct word tokens present in the corpus's
     text columns (see _SEGMENT_VOCAB_COLUMNS/_TRANSCRIPT_VOCAB_COLUMNS).
@@ -110,11 +160,15 @@ class VocabularyCache:
     def __init__(self) -> None:
         self._vocab: list[str] | None = None
         self._key: tuple[str, int, int, int, int] | None = None
+        self._index: CorrectionIndex | None = None
+        self._index_of: Any = None
         self._lock = threading.Lock()
 
     def reset(self) -> None:
         self._vocab = None
         self._key = None
+        self._index = None
+        self._index_of = None
 
     def _cache_key(self, conn: sqlite3.Connection) -> tuple[str, int, int, int, int]:
         db_row = conn.execute("PRAGMA database_list").fetchone()
@@ -136,6 +190,27 @@ class VocabularyCache:
             self._vocab = vocab
             self._key = key
             return vocab
+
+    def get_correction_index(self, conn: sqlite3.Connection) -> CorrectionIndex:
+        """The same vocabulary, derived into what correct_terms needs -- see
+        CorrectionIndex (BROLL-WEB-6, 2026-08-14).
+
+        Cached against the IDENTITY of the list get() handed back rather than
+        against a second copy of the cache key: get() returns the very same
+        list object for as long as its key holds and a brand-new one the moment
+        it rebuilds, so identity tracks the existing invalidation exactly, with
+        no way for the two caches to disagree about which generation they are
+        on. A subclass whose get() returns a fresh object each call (the test
+        doubles) simply rebuilds each call -- correct, just uncached.
+        """
+        vocab = self.get(conn)
+        with self._lock:
+            if self._index is not None and self._index_of is vocab:
+                return self._index
+            index = _build_correction_index(vocab)
+            self._index = index
+            self._index_of = vocab
+            return index
 
     def _build(self, conn: sqlite3.Connection) -> list[str]:
         terms: set[str] = set()
@@ -177,19 +252,11 @@ def correct_terms(conn: sqlite3.Connection, terms: list[str]) -> list[str] | Non
     """
     if not available() or not terms:
         return None
-    vocab = get_vocabulary_cache().get(conn)
-    if not vocab:
+    index = get_vocabulary_cache().get_correction_index(conn)
+    vocab_lower = index.lower_to_original
+    if not vocab_lower:
         return None
 
-    # Very short candidates (1-2 chars) make rapidfuzz's WRatio behave
-    # pathologically here: partial-ratio scoring can rate a short substring
-    # match (e.g. "an" inside "ambluance") above the actual intended word
-    # ("ambulance") purely because the short string matches "completely"
-    # within the longer one. Excluding them is the same length floor
-    # already applied to query terms below, just on the candidate side.
-    vocab_lower = {
-        t.lower(): t for t in vocab if len(t) >= _MIN_TERM_LEN_FOR_CORRECTION
-    }
     corrected: list[str] = []
     changed = False
     for term in terms:
@@ -207,10 +274,7 @@ def correct_terms(conn: sqlite3.Connection, terms: list[str]) -> list[str] | Non
         # Rewriting a term the user actually meant is worse than not correcting
         # at all, because it silently changes what was searched for. Plain ratio
         # is edit-distance based and symmetric, so containment earns nothing.
-        candidates = [
-            v for v in vocab_lower
-            if abs(len(v) - len(lower)) <= _MAX_LEN_DELTA_FOR_CORRECTION
-        ]
+        candidates = index.candidates(len(lower), _MAX_LEN_DELTA_FOR_CORRECTION)
         match = process.extractOne(
             lower,
             candidates,
@@ -229,8 +293,17 @@ def correct_terms(conn: sqlite3.Connection, terms: list[str]) -> list[str] | Non
 def prefix_query(terms: list[str]) -> str | None:
     """Build an FTS5 prefix-match query ('"term"*' per token/phrase, ANDed)
     from raw user terms, for the porter/unicode61 tables only (see module
-    docstring). Returns None if no term survives sanitization (e.g. the
-    query was entirely punctuation) or if no term is long enough to expand.
+    docstring). Returns None only if no term survives sanitization (e.g. the
+    query was entirely punctuation).
+
+    A query whose terms are ALL too short to expand therefore comes back as a
+    plain quoted AND-of-terms, i.e. byte-identical to the exact pass's query.
+    That is the caller's problem to notice, not this function's: app.search's
+    _run_fuzzy_pass compares the two and skips the redundant pass, because
+    running it would register duplicate RRF sources (BROLL-WEB-5,
+    2026-08-14). This docstring promised the None until then and did not
+    deliver it; returning None here instead would also swallow the mixed
+    punctuation case, where the sanitized form is a genuinely different query.
 
     Short terms are NOT prefix-expanded. The index is Porter-stemmed, so the
     stem is expanded rather than the word typed: measured, "mars" stems to

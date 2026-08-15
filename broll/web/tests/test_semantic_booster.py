@@ -286,3 +286,70 @@ def test_mode_semantic_still_applies_the_cosine_floor(client, conn, monkeypatch)
     ids = {row["video"]["id"] for row in r.json()["results"]}
     assert ids == {above_video}
     assert SEMANTIC_COSINE_FLOOR == pytest.approx(0.50)
+
+
+# ---------------------------------------------------------------------------
+# BROLL-WEB-1: the CJK semantic-leak gate is a mode="hybrid" rule and must not
+# reach mode="semantic", where there is no keyword pass for it to read.
+# ---------------------------------------------------------------------------
+
+# Predominantly-CJK (is_cjk_query true) and matching no indexed word here, so
+# the ONLY way this query can return anything is the semantic pass -- which is
+# the point: 防彈衣 <-> "bulletproof vest" is one of the 9/9 cross-lingual
+# matches migrations/004's header measured the embedding model on.
+CJK_QUERY = "防彈衣"
+
+
+def _seed_cross_lingual_clip(conn, score: float):
+    video_id = insert_video(conn, share="broll", rel_path="vest.mov")
+    seg_id = insert_segment(
+        conn, video_id, description="a bulletproof vest on a mannequin"
+    )
+    insert_embedding(
+        conn, source="segment", source_id=seg_id, video_id=video_id,
+        vec=_unit_2d_with_cosine(score), model=MODEL,
+    )
+    return video_id
+
+
+def test_mode_semantic_returns_hits_for_a_cjk_query(client, conn, monkeypatch):
+    """The gate ran before the mode split, where keyword_video_ids is empty BY
+    CONSTRUCTION (mode="semantic" never runs the keyword branch) -- so it fired
+    for every predominantly-CJK query and /api/search answered
+    {"results": [], "total": 0}, putting the whole Chinese-language corpus out
+    of reach of the one mode that exists to search it by meaning."""
+    video_id = _seed_cross_lingual_clip(conn, 0.80)
+    _patch_encoder(monkeypatch, {CJK_QUERY: QUERY_VEC})
+
+    r = client.get("/api/search", params={"q": CJK_QUERY, "mode": "semantic"})
+    assert r.status_code == 200
+    body = r.json()
+    assert {row["video"]["id"] for row in body["results"]} == {video_id}
+    assert body["total"] == 1
+
+
+def test_mode_semantic_cjk_hit_still_obeys_the_floor(client, conn, monkeypatch):
+    """Exempting mode="semantic" from the CJK gate must not exempt it from the
+    one gate that does apply there."""
+    _seed_cross_lingual_clip(conn, 0.35)
+    _patch_encoder(monkeypatch, {CJK_QUERY: QUERY_VEC})
+
+    r = client.get("/api/search", params={"q": CJK_QUERY, "mode": "semantic"})
+    assert r.status_code == 200
+    assert r.json()["results"] == []
+
+
+def test_mode_hybrid_still_drops_an_uncorroborated_cjk_semantic_hit(
+    client, conn, monkeypatch
+):
+    """The other half of the same fix: in hybrid, "keyword found nothing" is
+    evidence the corpus has nothing, and a multilingual embedding will still
+    place any Chinese string near any Chinese content (see is_cjk_query's
+    measured table). Same seed, same score, opposite answer -- that asymmetry
+    is the feature."""
+    _seed_cross_lingual_clip(conn, 0.80)
+    _patch_encoder(monkeypatch, {CJK_QUERY: QUERY_VEC})
+
+    r = client.get("/api/search", params={"q": CJK_QUERY, "mode": "hybrid"})
+    assert r.status_code == 200
+    assert r.json()["results"] == []

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -94,6 +95,23 @@ VIDEO_EXTS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".m4v"})
 # Syncthing writes `.syncthing.<name>.tmp`, and both are files that will
 # become real media in a moment and must not be imported halfway there.
 SKIP_SUFFIXES = (".partial", ".tmp", ".lock")
+
+# yt-dlp's own per-format intermediates, by STEM: `Channel - Title
+# [id].f137.mp4` is the video-only stream it merges with the audio afterwards,
+# and `... [id].temp.mp4` is the merge target mid-write. COMP-BROLL-4
+# (2026-08-14): before 0.8.0 no yt-dlp ever ran on an editor rig -- lane B
+# delivered finished files only -- but the local download executor runs it
+# INSIDE `<project>/Youtube/<term>/`, which is exactly what _collect walks. A
+# finished f137's mtime stops advancing the instant the video stream is done,
+# so it settles (unchanged size+mtime, older than min_age_seconds) minutes
+# before the merge finishes, gets imported under its canonical `P:\` spelling,
+# and is then DELETED by yt-dlp -- leaving a Media Offline clip in a shared
+# project pointing at a path that exists on no machine in the fleet, which
+# decision 2 above (no database) means nothing ever reaps.
+#
+# The same rule as ytdl_executor._INTERMEDIATE_STEM_RE, and for the same
+# reason: a finished clip's stem always ends in `[id]`, never in `.fNNN`.
+_INTERMEDIATE_STEM_RE = re.compile(r"\.(f\d+|temp)$", re.IGNORECASE)
 
 # Gate answers, published verbatim as status()["state"]. Plain strings rather
 # than an enum because they cross into the report payload, and a dashboard
@@ -504,16 +522,21 @@ class YoutubeImporter:
 
         Excluded, and each for a reason seen in a real term folder: dotfiles
         (Syncthing's `.syncthing.<name>.tmp`, macOS's `._name`), the
-        half-delivered suffixes above, and anything outside the video
-        whitelist -- which is what keeps `<name>.credits.json` (the sidecar
-        the Resolve credits script reads) and `manifest.json` out of the pool.
+        half-delivered suffixes above, yt-dlp's own per-format intermediates
+        (which ARE `.mp4` and would otherwise pass on their extension alone --
+        COMP-BROLL-4), and anything outside the video whitelist -- which is
+        what keeps `<name>.credits.json` (the sidecar the Resolve credits
+        script reads) and `manifest.json` out of the pool.
         """
         if not name or name.startswith("."):
             return False
         lowered = name.lower()
         if lowered.endswith(SKIP_SUFFIXES):
             return False
-        return os.path.splitext(lowered)[1] in VIDEO_EXTS
+        stem, ext = os.path.splitext(lowered)
+        if _INTERMEDIATE_STEM_RE.search(stem):
+            return False
+        return ext in VIDEO_EXTS
 
     def _is_capped(self, path: str) -> bool:
         return self._failures.get(path, 0) >= max(1, self.max_failures)

@@ -636,6 +636,138 @@ def test_sweep_stale_tmp_files_tolerates_a_blank_or_missing_root(tmp_path):
     assert fixer.sweep_stale_tmp_files(str(tmp_path / "nope")) == []
 
 
+# -- COMP-GUARD-1: the OTHER half of an interrupted FIX ALL -------------------
+
+
+def _interrupted_fix(root, name="A001_C012.braw", pid=424242, reservation=b"",
+                     age_seconds=600.0):
+    """The residue of a fix_clip killed mid-copy: the O_EXCL reservation under
+    the FINAL name plus the partial it was copying into."""
+    import os
+    import time
+
+    folder = root / "B-roll" / "Editor Added" / "ruskin"
+    folder.mkdir(parents=True, exist_ok=True)
+    final = folder / name
+    final.write_bytes(reservation)
+    tmp = folder / f"{name}.{pid}-abcd1234{fixer.TMP_SUFFIX}"
+    tmp.write_bytes(b"partially copied bytes")
+    old = time.time() - age_seconds
+    os.utime(tmp, (old, old))
+    os.utime(final, (old, old))
+    return final, tmp
+
+
+def test_orphan_reservation_sweep_removes_the_0_byte_final_name(tmp_path):
+    """A hard kill (self-upgrade, reboot, power loss) runs neither of
+    fix_clip's cleanup exits, so the 0-byte name it reserved stays. Lane A
+    uploads it 120 s later and --ignore-existing then guarantees the real
+    footage can never replace it -- from where lane C fans the empty clip out
+    to the fleet, immortal since the ignoreDelete retrofit."""
+    root = tmp_path / "root"
+    final, tmp = _interrupted_fix(root)
+
+    removed = fixer.sweep_orphan_reservations(str(root))
+
+    assert removed == [str(final)]
+    assert not final.exists()
+    # The PARTIAL is still the editor's data and is never deleted -- that
+    # half of the bargain does not change.
+    assert tmp.exists()
+
+
+def test_orphan_reservation_sweep_leaves_a_non_empty_file_alone(tmp_path):
+    """DEL-7's case: something else (lane C carrying another editor's
+    same-named file down) landed on that exact path. Non-empty is not ours."""
+    root = tmp_path / "root"
+    final, _tmp = _interrupted_fix(root, reservation=b"real footage")
+
+    assert fixer.sweep_orphan_reservations(str(root)) == []
+    assert final.read_bytes() == b"real footage"
+
+
+def test_orphan_reservation_sweep_leaves_an_in_flight_copy_alone(tmp_path):
+    """A live copy rewrites its tmp continuously, so a FRESH tmp means the
+    reservation is still doing its job."""
+    root = tmp_path / "root"
+    final, _tmp = _interrupted_fix(root, age_seconds=0.0)
+
+    assert fixer.sweep_orphan_reservations(str(root)) == []
+    assert final.exists()
+
+
+def test_orphan_reservation_sweep_never_touches_this_processes_own(tmp_path):
+    import os
+
+    root = tmp_path / "root"
+    final, _tmp = _interrupted_fix(root, pid=os.getpid())
+
+    assert fixer.sweep_orphan_reservations(str(root)) == []
+    assert final.exists()
+
+
+def test_orphan_reservation_sweep_ignores_a_tmp_with_no_writer(tmp_path):
+    """Pre-CORE-M1 tmps carry no pid segment, so nothing ties them to a
+    writer -- and the adjacent name may be an ordinary file."""
+    root = tmp_path / "root"
+    import os
+    import time
+
+    folder = root / "B-roll"
+    folder.mkdir(parents=True)
+    final = folder / "C003.braw"
+    final.write_bytes(b"")
+    tmp = folder / ("C003.braw" + fixer.TMP_SUFFIX)
+    tmp.write_bytes(b"partial")
+    old = time.time() - 600
+    os.utime(tmp, (old, old))
+
+    assert fixer.sweep_orphan_reservations(str(root)) == []
+    assert final.exists()
+
+
+def test_orphan_reservation_sweep_tolerates_a_blank_or_missing_root(tmp_path):
+    assert fixer.sweep_orphan_reservations("") == []
+    assert fixer.sweep_orphan_reservations(str(tmp_path / "nope")) == []
+
+
+def test_both_sweeps_can_share_one_walk_of_the_tree(tmp_path):
+    """The startup sweep walks local_root once and feeds both."""
+    root = tmp_path / "root"
+    final, tmp = _interrupted_fix(root, age_seconds=7200)
+
+    walked = fixer.walk_ccsync_tmp_files(str(root))
+    assert [path for _mtime, path in walked] == [str(tmp)]
+    assert fixer.sweep_stale_tmp_files(str(root), tmp_files=walked) == [str(tmp)]
+    assert fixer.sweep_orphan_reservations(str(root), tmp_files=walked) == [str(final)]
+
+
+def test_reserved_name_for_tmp_reads_back_what_fix_clip_writes(tmp_path):
+    """Pins the pairing against a name fix_clip actually produced, so the two
+    halves cannot drift apart."""
+    import os
+
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "outside" / "A001.braw"
+    src.parent.mkdir()
+    src.write_bytes(b"x" * 16)
+
+    seen = {}
+
+    def record(s, d):
+        seen["tmp"] = str(d)
+        import shutil as _sh
+        _sh.copy2(s, d)
+
+    result = fixer.fix_clip(str(src), "B-roll", str(root), [], copy_fn=record,
+                            replace_clip_fn=lambda mpi, p: {"ok": True, "message": ""})
+    assert result["ok"]
+    final, pid = fixer.reserved_name_for_tmp(seen["tmp"])
+    assert final == result["copied_to"]
+    assert pid == os.getpid()
+
+
 def test_list_destination_dirs_scopes_to_the_project_prefix(tmp_path):
     """AUDIT_2 CORE-H3. popup.py called this with no project_prefix and a
     hardcoded EMPTY editor_name, so the dropdown offered bare "Audio/Music",

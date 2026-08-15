@@ -7,11 +7,12 @@ model depends on workers=1; see db.py).
 from __future__ import annotations
 
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
@@ -251,6 +252,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # its length and matching prefix through timing.
         return api.token_ok(settings.report_token, request.headers.get("x-ccsync-token", ""))
 
+    # The ytdl fleet routes (docs/YTDL_LOCAL_DOWNLOAD.md §4): claim, heartbeat,
+    # manifest, per-clip status. Machine-to-machine, so they authenticate with
+    # the fleet token and there is no session to gate on -- but ONLY these
+    # four shapes. /ytdl/api/jobs/{id} itself (the SPA's 1.5 s poll), mode-lock,
+    # cancel and the rest stay session-gated: the bypass is per-suffix, not
+    # per-prefix, so a leaked token cannot read a browser's job view.
+    _ytdl_fleet_re = re.compile(
+        r"^/ytdl/api/jobs/\d+/(claim|heartbeat|download-manifest|clips/[^/]+/status)$"
+    )
+
     @app.middleware("http")
     async def login_gate(request, call_next):
         path = request.url.path
@@ -264,6 +275,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             or (path.startswith("/api/v1/companion/package/") and _companion_token_ok(request))
             # the indexer pushing into the mounted b-roll app, token-gated
             or (path.startswith("/broll/api/ingest/") and _broll_ingest_token_ok(request))
+            # the ytdl local-download client config: unauthenticated-read BY
+            # DESIGN (docs/YTDL_LOCAL_DOWNLOAD.md §4) -- the companion's
+            # yt-dlp sidecar manager reads it before it holds anything to
+            # claim, and nothing in it is secret (a version floor and a pause).
+            or path == "/ytdl/api/config/ytdl-client"
+            # the companion executing a local download for a claimed job --
+            # same fleet-token posture as the selection route above
+            or (_ytdl_fleet_re.match(path) is not None and _companion_token_ok(request))
         ):
             return await call_next(request)
         if auth.get_session_user(request) is None:
@@ -282,9 +301,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return JSONResponse({"detail": "login required"}, status_code=401)
             # Preserve the destination through login (e.g. the companion's
             # /project-setup deep link) -- ui.py's _safe_next re-validates it.
-            from urllib.parse import quote
+            from urllib.parse import quote, urlsplit
 
             target = path + (f"?{request.url.query}" if request.url.query else "")
+            # htmx polls every live fragment on every page (/partials/transfers
+            # every 2s, the sidebar every 30s, ...) over XHR, which follows a
+            # 303 TRANSPARENTLY: the poll got 200 + the whole login DOCUMENT
+            # and swapped it inside <main> or the sidebar -- a garbled page,
+            # nested <html>, a second topbar still naming the logged-out user,
+            # still polling, and no navigation to /login ever. HX-Redirect is
+            # the header htmx turns into a real browser navigation; plain
+            # document GETs keep the 303 (DASH-4, 2026-08-14).
+            if request.headers.get("hx-request", "").lower() == "true":
+                # ...to the PAGE the fragment belongs to, not the fragment's
+                # own URL -- ?next=/partials/transfers would land the editor on
+                # a bare fragment after logging in.
+                current = urlsplit(request.headers.get("hx-current-url", ""))
+                page = current.path + (f"?{current.query}" if current.query else "")
+                if page.startswith("/"):
+                    target = page
+                return Response(
+                    status_code=401,
+                    headers={"HX-Redirect": f"/login?next={quote(target, safe='')}"},
+                )
             return RedirectResponse(f"/login?next={quote(target, safe='')}", status_code=303)
         return await call_next(request)
 

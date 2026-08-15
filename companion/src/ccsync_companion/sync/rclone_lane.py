@@ -200,6 +200,29 @@ DEFAULT_ORDER_BY_DOWN = "size,ascending"
 LANE_A_MIN_AGE_SECONDS = 120
 LANE_A_MIN_AGE = f"{LANE_A_MIN_AGE_SECONDS}s"
 
+# -- lane A size floor (COMP-GUARD-1, 2026-08-14) --------------------------
+#
+# Lane A is `copy --ignore-existing`, so the FIRST version of a name to reach
+# the NAS is the only one that ever will: a later run sees the destination
+# exists and skips it forever. That makes a 0-byte upload permanent, and
+# 0-byte finals are a state the fleet actually produces -- a hard kill in the
+# middle of the fixer's copy strands the destination at its real name with
+# nothing in it (the fixer now sweeps those; this is the second line of
+# defence, upstream of the sweep).
+#
+# Safe because lane A carries NOTHING BUT video: build_filter_rules_up is
+# `+ *<ext>` over VIDEO_EXTS and then `- **`, and every one of those is a
+# container format with a mandatory header (ftyp/RIFF/EBML/...). There is no
+# sidecar, marker or sentinel file on this lane that could legitimately be
+# empty -- lane C carries all of those.
+#
+# "1B", NOT "1". Measured against the bundled rclone 1.74.4: `--min-size 1`
+# is parsed as 1 KiB and skipped a real 64-byte file, while `--min-size 1B`
+# skips only the empty one. A bare number silently raising the floor a
+# thousandfold is exactly the kind of quiet data loss this flag is here to
+# prevent.
+LANE_A_MIN_SIZE = "1B"
+
 # -- lane B stability gate (2026-08-01) ------------------------------------
 #
 # The same gate on the download side, added for a failure the fleet actually
@@ -1055,6 +1078,13 @@ def build_up_command(
         # only after wasting the whole transfer upstream and painting the
         # lane red with "corrupted on transfer" (AUDIT_2 L-14).
         "--min-age", LANE_A_MIN_AGE,
+        # COMP-GUARD-1 (2026-08-14): --ignore-existing above is what makes an
+        # empty upload PERMANENT -- the first version of a name to land on the
+        # NAS is the only one that will, so a 0-byte final stranded by a hard
+        # kill mid-copy would be the fleet's canonical copy of that clip
+        # forever. See LANE_A_MIN_SIZE for why 1B and why nothing legitimate
+        # on this lane can be empty.
+        "--min-size", LANE_A_MIN_SIZE,
         "--transfers", str(transfers),
         *tuning.flags(DIRECTION_UP),
         *_transport_flags(),
@@ -1645,6 +1675,14 @@ class RcloneLane(LaneAdapter):
         # rclone that outlived the parent (KNOWN_BUGS B13). Never held while
         # waiting on the child.
         self._proc_lock = threading.Lock()
+        # What the periodic run in flight is copying: its subpath, "" for the
+        # whole tree, None when no child is running. Read by the express path
+        # so it can defer paths that run already covers (SYNC-3, 2026-08-14 --
+        # see periodic_inflight_subpath). Its OWN lock, for the same reason
+        # _express_inflight has one: the express thread reads it while the
+        # periodic thread writes it, and neither may queue behind a run lock.
+        self._periodic_scope: Optional[str] = None
+        self._periodic_scope_lock = threading.Lock()
         self._observer = None  # watchdog Observer, lane A only
         self._debounce_timer: Optional[threading.Timer] = None
         # Watcher pre-flight state (MAC-12): the re-check timer, how long the
@@ -1748,6 +1786,30 @@ class RcloneLane(LaneAdapter):
         deterministic for a given set."""
         with self._express_inflight_lock:
             return sorted(self._express_inflight)
+
+    def periodic_inflight_subpath(self) -> Optional[str]:
+        """Scope of the periodic run that is copying RIGHT NOW ("" = the whole
+        tree), or None when no child of this lane is running.
+
+        SYNC-3 (2026-08-14): _build_command's express exclusion only closes
+        one of the two orderings -- rclone parses --filter-from once, at
+        startup, so a path express claims AFTER the periodic child started
+        cannot be excluded from that run at all. And that is the COMMON
+        ordering: a periodic pass lasts up to project_rotation_seconds (600 s
+        by default) while an express window is watch_debounce_seconds (10 s)
+        plus the stability/min-age gate, so express almost always starts
+        during a periodic run rather than before it. This is the other half of
+        the exclusion: express asks what is in flight and defers anything that
+        run already covers (_express_partition). The symptom it removes is the
+        one measured on an editor's machine 2026-08-02 -- the same .mov
+        climbing on two concurrent connections, splitting a saturated uplink.
+        """
+        with self._periodic_scope_lock:
+            return self._periodic_scope
+
+    def _set_periodic_scope(self, subpath: Optional[str]) -> None:
+        with self._periodic_scope_lock:
+            self._periodic_scope = subpath
 
     @staticmethod
     def _relativize_to_subpath(rel: str, subpath: Optional[str]) -> Optional[str]:
@@ -1898,6 +1960,35 @@ class RcloneLane(LaneAdapter):
             # thread before generation events existed.
             self._stop_event = threading.Event()
         self._start_watchdog()
+
+    def arm(self) -> None:
+        """Clear the stop latch so an externally-driven run_once() can spawn
+        again. Idempotent, and a no-op on a lane that was never stopped.
+
+        SYNC-1 (2026-08-14): nothing re-armed LANE B in managed mode.
+        _stop_lanes() stops it (RcloneLane.stop() is the only path to
+        _kill_running_process), but the managed _start_lanes() starts lane C,
+        the sequencer and lane A's watchdog only -- lane B is driven purely by
+        sequencer.run_once(subpath). So after one sign-out/sign-in, or a token
+        expiry followed by a re-sign-in, lane B's _stop_event stayed set for
+        the life of the process: every later run_once() returned the STALE
+        LaneStatus at the guard in _run_once_locked without spawning rclone,
+        nothing logged above DEBUG, and the fleet grid kept showing the lane
+        idle-and-green while no proxy was ever downloaded again. The sequencer
+        calls this for both lanes it drives (see Sequencer.start).
+
+        Same rule as start_watchdog_only's event reset, for the same reason: a
+        LIVE periodic generation owns the event it was handed, and clearing
+        that in place is exactly what resurrected stale threads before
+        per-generation events existed (AUDIT_2 L-2). Install a fresh one
+        instead, and only when no such generation is running.
+        """
+        if self._periodic_thread is not None and self._periodic_thread.is_alive():
+            return
+        if not self._stop_event.is_set():
+            return
+        log.info("%s: re-armed (a previous stop() had latched it off)", self.name)
+        self._stop_event = threading.Event()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -2156,51 +2247,80 @@ class RcloneLane(LaneAdapter):
                 self._status.current_project = None
             return self.status()
 
-        if self._legacy_run:
-            try:
-                # Same guard as the Popen path, minus the handle: this seam
-                # blocks in subprocess_run and hands back a finished process,
-                # so there is nothing for stop() to kill -- the pre-spawn
-                # check is the only cancellation point it has.
-                with self._proc_lock:
-                    self._raise_if_stopping("run")
-                proc = self.subprocess_run(
-                    cmd,
-                    capture_output=True,
-                    timeout=None,
-                    encoding="utf-8",
-                    errors="replace",
-                    creationflags=_win_creationflags(),
-                )
-            except SpawnCancelled:
-                return self._stand_down_status()
-            except Exception as exc:
-                with self._lock:
-                    self._status.state = STATE_ERROR
-                    self._status.last_error = str(exc)
-                    self._status.transferring = 0
-                    self._status.current_project = None
-                return self.status()
-            returncode = proc.returncode
-            stderr_text = proc.stderr or ""
-            result = parse_json_log(stderr_text)
-        else:
-            try:
-                returncode, stderr_text, result = self._run_popen(cmd)
-            except SpawnCancelled:
-                return self._stand_down_status()
-            except Exception as exc:
-                with self._lock:
-                    self._status.state = STATE_ERROR
-                    self._status.last_error = str(exc)
-                    self._status.transferring = 0
-                    self._status.speed_bps = None
-                    self._status.eta_seconds = None
-                    self._status.transfers = []
-                    self._status.current_project = None
-                return self.status()
+        # Published for as long as this run's child lives: the express path
+        # reads it and defers anything this run already covers, because
+        # rclone read our --filter-from at spawn and can no longer be told
+        # about an express claim made after that (SYNC-3, 2026-08-14 -- see
+        # periodic_inflight_subpath). Cleared in the finally, including on
+        # every early return below, or a crashed run would exclude its
+        # subpath from express forever.
+        self._set_periodic_scope(str(subpath or "").replace("\\", "/").strip("/"))
+        try:
+            if self._legacy_run:
+                try:
+                    # Same guard as the Popen path, minus the handle: this seam
+                    # blocks in subprocess_run and hands back a finished process,
+                    # so there is nothing for stop() to kill -- the pre-spawn
+                    # check is the only cancellation point it has.
+                    with self._proc_lock:
+                        self._raise_if_stopping("run")
+                    proc = self.subprocess_run(
+                        cmd,
+                        capture_output=True,
+                        timeout=None,
+                        encoding="utf-8",
+                        errors="replace",
+                        creationflags=_win_creationflags(),
+                    )
+                except SpawnCancelled:
+                    return self._stand_down_status()
+                except Exception as exc:
+                    with self._lock:
+                        self._status.state = STATE_ERROR
+                        self._status.last_error = str(exc)
+                        self._status.transferring = 0
+                        self._status.current_project = None
+                    return self.status()
+                returncode = proc.returncode
+                stderr_text = proc.stderr or ""
+                result = parse_json_log(stderr_text)
+            else:
+                try:
+                    returncode, stderr_text, result = self._run_popen(cmd)
+                except SpawnCancelled:
+                    return self._stand_down_status()
+                except Exception as exc:
+                    with self._lock:
+                        self._status.state = STATE_ERROR
+                        self._status.last_error = str(exc)
+                        self._status.transferring = 0
+                        self._status.speed_bps = None
+                        self._status.eta_seconds = None
+                        self._status.transfers = []
+                        self._status.current_project = None
+                    return self.status()
+        finally:
+            self._set_periodic_scope(None)
 
         self._record_completions(result, subpath)
+
+        if returncode != 0 and self._stop_event.is_set():
+            # SYNC-5 (2026-08-14): stop() terminated this child mid-transfer,
+            # so rclone's non-zero exit says "we killed it", not "the lane
+            # failed" -- the same reasoning _stand_down_status already carries
+            # for the pre-spawn cancellation ("a lane that was told to stop did
+            # not fail"). It used to fall through to STATE_ERROR with
+            # last_error="rclone exited 1", which painted the editor's lane red
+            # on the fleet grid for a deliberate sign-out; for lane B in managed
+            # mode that red was also the LAST status the lane ever published,
+            # because the stop latch then swallowed every later run (SYNC-1).
+            log.info(
+                "%s: run ended by stop() (rclone exited %s) -- standing down, not failing",
+                self.name, returncode,
+            )
+            status = self._stand_down_status("stopped mid-transfer")
+            self._notify_trash(result)
+            return status
 
         with self._lock:
             self._status.transferring = 0
@@ -2259,6 +2379,24 @@ class RcloneLane(LaneAdapter):
                     _most_informative_error(result.errors)
                     or _stderr_for_log(stderr_text)
                     or f"rclone exited {returncode}"
+                )
+                # The only LOCAL trace of a red lane. Until 2026-08-14 this
+                # branch set STATE_ERROR and returned in silence -- the
+                # failure reached the dashboard and nowhere else, so the
+                # editor's own machine held no record of a lane the fleet
+                # grid was painting red. Tracing one lane A failure (rclone
+                # asking for a doubly-escaped fullwidth name, `‛‛：`, that
+                # exists on no disk) meant reading the dashboard's sqlite by
+                # hand and then hand-running candidate commands, because
+                # companion.log knew nothing about it.
+                #
+                # The argv goes in deliberately: WHICH FLAGS the failing run
+                # actually carried is the first question every time, and
+                # --local-encoding in particular decides whether a fullwidth
+                # yt-dlp name resolves at all (see LOCAL_ENCODING).
+                log.error(
+                    "%s: rclone exited %s -- %s\n  argv: %s",
+                    self.name, returncode, self._status.last_error, " ".join(cmd),
                 )
             else:
                 if result.errors:
@@ -2357,12 +2495,18 @@ class RcloneLane(LaneAdapter):
             )
             raise SpawnCancelled(f"{self.name}: {what} cancelled by stop()")
 
-    def _stand_down_status(self) -> LaneStatus:
+    def _stand_down_status(self, detail: str = "stopped before this pass started") -> LaneStatus:
         """Clear the SYNCING bookkeeping a cancelled run had already set.
 
         Deliberately IDLE, not ERROR: a lane that was told to stop did not
         fail, and painting it red would make every self-upgrade/sign-out look
-        like a broken lane on the grid."""
+        like a broken lane on the grid.
+
+        `detail` distinguishes the two stand-downs: the default is the
+        pre-spawn cancellation, and SYNC-5's terminated-mid-transfer case
+        passes its own so the tray does not claim a run that moved gigabytes
+        never started. last_error is deliberately left alone -- a stand-down
+        neither creates nor clears a lane's health history."""
         with self._lock:
             self._status.state = STATE_IDLE
             self._status.transferring = 0
@@ -2370,7 +2514,7 @@ class RcloneLane(LaneAdapter):
             self._status.eta_seconds = None
             self._status.transfers = []
             self._status.current_project = None
-            self._status.detail = "stopped before this pass started"
+            self._status.detail = detail
         return self.status()
 
     # -- Popen-based runner with live --stats JSON parsing ---------------
@@ -3045,6 +3189,14 @@ class RcloneLane(LaneAdapter):
         deferred: dict[str, tuple[int, float]] = {}
         now = time.monotonic()
         wall = time.time()
+        # SYNC-3 (2026-08-14): the other half of _build_command's exclusion.
+        # A periodic run already in flight cannot be told to skip a path
+        # claimed after it spawned, so express stands aside for anything that
+        # run covers instead of racing it for the same bytes. Snapshotted once
+        # per window: a run that ends mid-loop only means one more window's
+        # wait for the paths already judged.
+        scope = self.periodic_inflight_subpath()
+        deferred_to_periodic = 0
         for rel, (seen_size, first_seen) in batch.items():
             full = os.path.join(str(self.local_root), rel.replace("/", os.sep))
             try:
@@ -3057,6 +3209,28 @@ class RcloneLane(LaneAdapter):
                     self.name, rel, now - first_seen,
                 )
                 continue
+            if st.st_size <= 0:
+                # COMP-GUARD-1 (2026-08-14): the express twin of lane A's
+                # --min-size floor, in Python because rclone REFUSES the flag
+                # here -- measured against the bundled 1.74.4, `--min-size`
+                # alongside `--files-from-raw` dies with the same CRITICAL
+                # "overrides all other filters" that rules out --min-age and
+                # --filter-from (see build_express_command). Express is
+                # `copy --ignore-existing` too, so an empty upload is just as
+                # permanent. Deferred rather than dropped: a file that was
+                # only just created is legitimately 0 bytes for an instant,
+                # and the next window sees the real ones.
+                deferred[rel] = (0, first_seen)
+                continue
+            if scope is not None and self._relativize_to_subpath(rel, scope) is not None:
+                # Deferring loses nothing: that run's own walk usually reaches
+                # the file, and if it doesn't, the next window uploads it (or,
+                # after EXPRESS_PENDING_MAX_SECONDS, the next periodic pass
+                # does -- the give-up check above stays ahead of this one so a
+                # long-running lane A can never strand a path here).
+                deferred[rel] = (st.st_size, first_seen)
+                deferred_to_periodic += 1
+                continue
             if st.st_size != seen_size:
                 # Still growing (or shrinking): observe again next window.
                 deferred[rel] = (st.st_size, first_seen)
@@ -3066,6 +3240,11 @@ class RcloneLane(LaneAdapter):
                 deferred[rel] = (st.st_size, first_seen)
                 continue
             ready.append(rel)
+        if deferred_to_periodic:
+            log.info(
+                "%s: express deferred %d path(s) to the periodic run already in "
+                "flight for %s", self.name, deferred_to_periodic, scope or "the whole tree",
+            )
         return ready, deferred
 
     def _express_run(self, rels: list[str]) -> None:

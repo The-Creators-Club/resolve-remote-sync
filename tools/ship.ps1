@@ -10,7 +10,10 @@
 
       0. GATES      secrets present, working tree clean (a +dirty build must
          not reach the fleet -- docs/RELEASE.md), this companion version not
-         already published, and the server/ + onboarding/ suites green.
+         already published, THIS INSTALLER VERSION not already published
+         either (onboard.exe bundles the companion exe, so every ship changes
+         the installer's bytes and needs its own new number -- SHIP-4), and
+         the server/ + onboarding/ suites green.
          server/ is the code step 1 executes against the live NAS; the
          companion and dashboard suites run in step 2a, inside release.ps1.
       1. DASHBOARD  python server\install_dashboard_app.py  (code-only
@@ -164,6 +167,38 @@ if (-not $DashboardOnly) {
         Write-Step "(and, if onboard.exe's contents changed, `$InstallerVersion in installer\windows_bootstrap.ps1 + onboarding\steps.py), then re-run"
         exit 1
     }
+
+    # The SAME question about the OTHER artifact this ship publishes, which is
+    # the one that must be bumped on EVERY ship (SHIP-4, 2026-08-14):
+    # onboard.exe BUNDLES the companion exe, so a companion release changes the
+    # installer's bytes by itself and an unbumped INSTALLER_VERSION is a
+    # guaranteed different-bytes 409 (KNOWN_BUGS R13 -- "third time it has
+    # bitten"). Without this the 409 arrives in step 2b, AFTER the dashboard
+    # deploy, both suites, a five-minute PyInstaller build and the password
+    # prompt, and AFTER the companion has been published and made CURRENT for
+    # the whole fleet -- leaving the installer channel still serving bytes that
+    # bundle the previous companion. The four copies of this number are checked
+    # against EACH OTHER by step 0b and release.ps1; nothing but this asks the
+    # server whether the number is still free.
+    $mShipIv = Select-String -Path "installer\windows_bootstrap.ps1" -Pattern '^\$InstallerVersion\s*=\s*"([^"]+)"'
+    if (-not $mShipIv) {
+        Write-Fail "could not parse `$InstallerVersion from installer\windows_bootstrap.ps1 -- step 2b would refuse to publish the installer anyway"
+        exit 1
+    }
+    $InstallerVersion = $mShipIv.Matches[0].Groups[1].Value
+    Write-Step "repo says: installer v$InstallerVersion"
+    # -r 0-0: the first byte is enough to answer "does this version exist" and
+    # the route honours Range with a 206 (measured against the live dashboard,
+    # 2026-08-14) -- so this costs one byte, not a whole onboard.exe.
+    $ivCode = Invoke-CurlWithToken `
+        -Uri "http://192.168.0.102:8480/api/v1/companion/package/windows/${InstallerVersion}?kind=onboard" `
+        -Token $env:DASH_REPORT_TOKEN `
+        -ExtraArgs @("-o", "NUL", "-r", "0-0", "--max-time", "20", "-w", "%{http_code}")
+    if ($ivCode -eq "200" -or $ivCode -eq "206") {
+        Write-Fail "installer v$InstallerVersion is ALREADY published on the server -- and this ship rebuilds onboard.exe around a NEW companion, so its bytes WILL differ and the upload will 409."
+        Write-Step "bump `$InstallerVersion in installer\windows_bootstrap.ps1 AND INSTALLER_VERSION in onboarding\steps.py AND installer\macos_bootstrap.sh AND build_onboard_macos.spec's CFBundleShortVersionString, then re-run"
+        exit 1
+    }
 }
 
 # --- 0. the suite that guards what step 1 is about to do --------------------
@@ -244,8 +279,21 @@ if (-not $SkipTests) {
     # onboard.exe whose bundle disagrees with itself; only this suite noticed
     # on 2026-08-10. System python, no venv, ~0.3s.
     Write-Step "--- step 0b: onboarding tests (they guard onboard.exe) ---"
+    # RESOLVE the interpreter, and never read a stale exit code (SHIP-5,
+    # 2026-08-14). `& python` with no python on PATH is a NON-TERMINATING
+    # CommandNotFoundException under $ErrorActionPreference='Continue', and
+    # PowerShell only sets $LASTEXITCODE when a native process actually ran --
+    # so $obRc was whatever the server suite left behind (0), and a suite that
+    # never executed gated the ship as a pass. Same class as OPS-6.
+    $obPython = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if (-not $obPython) {
+        Write-Fail "no 'python' on PATH -- the onboarding suite cannot run, and it is the ONLY check on build_onboard_macos.spec's copy of the installer version"
+        Write-Step "install python (or re-run with -SkipTests if you accept shipping without that check)"
+        exit 1
+    }
     Push-Location (Join-Path $RepoRoot "onboarding")
-    & python -m pytest tests -q
+    $global:LASTEXITCODE = 9999
+    & $obPython -m pytest tests -q
     $obRc = $LASTEXITCODE
     Pop-Location
     if ($obRc -ne 0) {
@@ -402,7 +450,24 @@ if ($LASTEXITCODE -ne 0) {
     Write-Step "close whatever holds the exe (AV scan, Explorer preview) and re-run: installer\windows_upgrade.ps1 -CompanionExe companion\dist\ccsync-companion.exe"
     exit 1
 }
-& powershell -NoProfile -ExecutionPolicy Bypass -File "tools\check_deploy_drift.ps1"
+# READ the doctor, don't just run it (SHIP-2, 2026-08-14). check_deploy_drift
+# exits 0 by design -- "the report is the output; the exit code says only that
+# the check itself ran" -- so ship printed "ship complete" over a VERDICT
+# saying this machine is not running what the fleet was just offered. Only the
+# LOCAL-state drift lines gate: the macos-lagging and other-machines-behind
+# lines are advisory by design and fire on a perfectly good Windows ship.
+# Colour is lost by capturing a child powershell's output; the text is not.
+$driftLines = @(& powershell -NoProfile -ExecutionPolicy Bypass -File "tools\check_deploy_drift.ps1" 2>&1 |
+    ForEach-Object { $line = "$_"; Write-Host $line; $line })
+$localDrift = @($driftLines | Where-Object {
+    $_ -match '^\s*DRIFT\s+(installed companion is v|no ccsync-companion process is running|the running process is |the exe on disk is NEWER)'
+})
 Write-Host ""
+if ($localDrift.Count -gt 0) {
+    Write-Fail "the drift doctor says THIS machine is not running v$CompanionVersion -- which is already PUBLISHED and CURRENT for the fleet:"
+    foreach ($d in $localDrift) { Write-Host "        $($d.Trim())" -ForegroundColor Yellow }
+    Write-Step "the fleet half of this ship stands; fix this machine before verifying anything against it (docs\RELEASE.md)"
+    exit 1
+}
 Write-Step "ship complete. Editors' trays will offer v$CompanionVersion on their next report."
 exit 0

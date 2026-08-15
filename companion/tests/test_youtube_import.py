@@ -268,6 +268,53 @@ def test_half_delivered_files_are_never_imported(tmp_path, name):
     assert state == youtube_import.STATE_NOTHING_TO_DO
 
 
+@pytest.mark.parametrize("name", [
+    # yt-dlp's video-only and audio-only streams, before the merge. Both are
+    # real names from a 1080p AVC download: f137 is the video, f140 the audio.
+    "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].f137.mp4",
+    "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].f299.webm",
+    # ...and the merge target, mid-write.
+    "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].temp.mp4",
+])
+def test_yt_dlp_intermediates_are_never_imported(tmp_path, name):
+    """COMP-BROLL-4. Before companion 0.8.0 no yt-dlp ever ran on an editor
+    rig -- lane B delivered finished files only -- but the local download
+    executor runs it INSIDE `<project>/Youtube/<term>/`, which is the folder
+    this scan walks. `[id].f137.mp4` has extension `.mp4` and passed the
+    whitelist; its mtime stops advancing the instant the video stream is done,
+    so it settles minutes before the audio and the merge are finished, gets
+    imported under its canonical `P:\\` spelling, and is then DELETED by
+    yt-dlp. What is left is a Media Offline clip in a shared project pointing
+    at a path that exists on no machine in the fleet -- and decision 2 (no
+    database) means nothing ever reaps it."""
+    _drop(tmp_path, [name])
+    importer = _make(tmp_path)
+
+    state = _settled(importer, tmp_path)
+
+    assert importer._import_fn.calls == []
+    assert state == youtube_import.STATE_NOTHING_TO_DO
+
+
+def test_the_merged_clip_itself_is_still_imported(tmp_path):
+    """The rule is anchored on the stem, so the deliverable -- whose stem ends
+    in `[id]` -- is untouched, and so is a title that merely mentions a format
+    number."""
+    _drop(tmp_path, [
+        "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].mp4",
+        "Some Channel - Inside the f137 format [aaaaaaaaaaa].mp4",
+    ])
+    importer = _make(tmp_path)
+
+    _settled(importer, tmp_path)
+
+    names = sorted(os.path.basename(p) for p in importer._import_fn.calls[0]["paths"])
+    assert names == [
+        "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].mp4",
+        "Some Channel - Inside the f137 format [aaaaaaaaaaa].mp4",
+    ]
+
+
 def test_a_freshly_written_file_waits_for_the_settle_window(tmp_path):
     """A file whose mtime is seconds old is still arriving, and half a video
     imports as an offline clip."""

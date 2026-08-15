@@ -560,6 +560,49 @@ def test_cancel_run_empties_the_queue_for_this_cycle_only(tmp_path):
     assert len(gen._queue) == 1
 
 
+def test_stop_while_an_encode_runs_still_kills_it(tmp_path):
+    """The half of "Stop making proxies" that must not change: a click while
+    ffmpeg is running kills the child and leaves no partial behind."""
+    src = _original(tmp_path)
+    gen = _make_gen(tmp_path)
+
+    class _CancelsMidway(_FakeFfmpeg):
+        def __call__(self, cmd, should_stop, ceiling):
+            gen.cancel_run()
+            return super().__call__(cmd, should_stop, ceiling)
+
+    gen._encode_fn = _CancelsMidway()
+    gen._queue = [_clip(src)]
+
+    assert gen.encode_once() == proxy_gen.RESULT_INTERRUPTED
+    assert gen._cancel.is_set(), "an encode was in flight -- the flag is the kill"
+    assert not os.path.exists(proxy_scan.partial_path(str(src)))
+
+
+def test_stop_with_nothing_encoding_does_not_arm_the_next_drain(tmp_path):
+    """COMP-MEDIA-7: `_cancel` is only ever cleared by a drain that RAN, and
+    the tray shows "Stop making proxies" from a snapshot -- so a click after
+    rule 1 has already ended the drain (i.e. the moment the editor touches the
+    keyboard) used to latch the flag until that night's drain, which then died
+    on its first clip and dropped the whole freshly scanned queue."""
+    src = _original(tmp_path)
+    gen = _make_gen(tmp_path)
+    gen._queue = [_clip(src), {"path": "later.mp4", "kind": "own",
+                               "size": 1, "mtime": 1.0}]
+
+    gen.cancel_run()
+
+    assert not gen._cancel.is_set()
+    assert gen._queue == [], "the cycle's queue is still dropped"
+
+    # That night: the scan refills and the drain does the work.
+    gen._scan_fn = lambda *a, **k: _scan_result([_clip(src)])
+    gen.scan_once()
+    assert gen._drain_queue() == proxy_gen.STATE_NOTHING_TO_DO
+    assert gen.gap()["generated"] == 1
+    assert gen.gap()["failed"] == 0
+
+
 def test_a_stuck_encode_is_killed_and_counted(tmp_path):
     src = _original(tmp_path)
     ffmpeg = _FakeFfmpeg()
@@ -759,6 +802,90 @@ def test_make_them_now_forgets_the_failure_cap(tmp_path):
     gen._scan_fn = lambda *a, **k: _scan_result([dict(clip)])
     gen.scan_once()
     assert [c["path"] for c in gen._queue] == [str(src)]
+
+
+def test_the_scan_is_told_which_clips_are_capped(tmp_path):
+    """COMP-MEDIA-4: the per-project queue is capped at 500 NEWEST-first, and
+    the generator used to filter capped clips out only AFTER that truncation.
+    A project whose newest 500 had all failed therefore reported an empty
+    queue every 900 s -- for ever, since _failures is only cleared by the tray
+    or a restart -- while the older encodable clips were never even scanned."""
+    src = _original(tmp_path)
+    ffmpeg = _FakeFfmpeg()
+    ffmpeg.encode_returncode = 1
+    gen = _make_gen(tmp_path, encode_fn=ffmpeg)
+    clip = _clip(src)
+    for _ in range(3):
+        gen.encode_once(dict(clip))
+
+    asked: dict = {}
+
+    def _scan(root, selected, min_age, **kwargs):
+        asked["skip_fn"] = kwargs.get("skip_fn")
+        return _scan_result([])
+
+    gen._scan_fn = _scan
+    gen.scan_once()
+
+    assert asked["skip_fn"] is not None
+    assert asked["skip_fn"](dict(clip)) is True
+    assert asked["skip_fn"](_clip(_original(tmp_path, name="B002.mp4"))) is False
+
+
+def test_capped_clips_are_counted_so_the_log_can_say_why_nothing_runs(tmp_path):
+    """"1040 missing, 0 queued" said nothing at all about why the machine had
+    stopped trying (COMP-MEDIA-4)."""
+    result = _scan_result([], missing=1040, own=1040)
+    result["totals"]["capped"] = 1040
+    gen = _make_gen(tmp_path, scan_fn=lambda *a, **k: result)
+    gen.scan_once()
+
+    assert gen.gap()["missing"] == 1040
+    assert gen._queue == []
+    assert gen._totals["capped"] == 1040
+
+
+def test_two_originals_never_write_the_same_partial(tmp_path):
+    """Rule 2, against the generator itself: `A001.mov` and `A001.mp4` share
+    `Proxy/A001.mp4.partial`, and since the drain went parallel two workers
+    could hold that one file at once (COMP-MEDIA-2)."""
+    first = _original(tmp_path, name="A001.mov")
+    second = _original(tmp_path, name="A001.mp4")
+    gen = _make_gen(tmp_path)
+    partial = proxy_scan.partial_path(str(first))
+    assert partial == proxy_scan.partial_path(str(second))
+
+    claimed: list[str] = []
+
+    class _WhileEncoding(_FakeFfmpeg):
+        def __call__(self, cmd, should_stop, ceiling):
+            # Re-entered while the first encode is "running": the second
+            # worker must be refused the file, not join it.
+            if not claimed:
+                claimed.append("in")
+                assert gen.encode_once(_clip(second)) == proxy_gen.RESULT_SKIPPED
+            return super().__call__(cmd, should_stop, ceiling)
+
+    gen._encode_fn = _WhileEncoding()
+    assert gen.encode_once(_clip(first)) == proxy_gen.RESULT_DONE
+    assert claimed == ["in"]
+    # ...and the claim is released again, so the twin is only ever refused
+    # while an encode really is in flight.
+    assert gen._partials == set()
+
+
+def test_a_refused_partial_is_not_lost_for_ever(tmp_path):
+    """The skip is a claim, not a cap: nothing is recorded against the clip."""
+    src = _original(tmp_path)
+    gen = _make_gen(tmp_path)
+    clip = _clip(src)
+    assert gen._claim_partial(proxy_scan.partial_path(str(src))) is True
+
+    assert gen.encode_once(dict(clip)) == proxy_gen.RESULT_SKIPPED
+    assert gen._failures == {}
+
+    gen._release_partial(proxy_scan.partial_path(str(src)))
+    assert gen.encode_once(dict(clip)) == proxy_gen.RESULT_DONE
 
 
 def test_a_changed_file_gets_a_fresh_three_attempts(tmp_path):
@@ -1322,10 +1449,11 @@ class _RecordingBpg:
         self.enabled = enabled
         self.calls: list[dict] = []
 
-    def maybe_launch(self, *, queue_empty, needs_resolve, user_away):
+    def maybe_launch(self, *, queue_empty, needs_resolve, user_away, watch_dirs=()):
         self.calls.append({"queue_empty": queue_empty,
                            "needs_resolve": needs_resolve,
-                           "user_away": user_away})
+                           "user_away": user_away,
+                           "watch_dirs": list(watch_dirs)})
         return None
 
 

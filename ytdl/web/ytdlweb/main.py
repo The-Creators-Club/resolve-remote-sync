@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from ytdlweb import config, db, worker
 from ytdlweb.routes_api import router as api_router
+from ytdlweb.routes_fleet import router as fleet_router
 
 
 @asynccontextmanager
@@ -36,6 +37,13 @@ async def lifespan(_app):
 
 app = FastAPI(title='CC Sync YouTube', lifespan=lifespan)
 app.include_router(api_router)
+# The companion's claim/lease/manifest/status routes. A SEPARATE router because
+# they are authenticated differently -- the fleet token, not the browser session
+# (docs/YTDL_LOCAL_DOWNLOAD.md §8) -- and mixing the two in one module is how a
+# session-only assumption gets applied to a machine-to-machine route by
+# accident. Included second: its paths are all longer than routes_api's, so
+# nothing shadows anything either way.
+app.include_router(fleet_router)
 
 
 # The frontend asks for these DOCUMENT-relative ('app.js', 'style.css',

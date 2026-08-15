@@ -57,7 +57,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     exclude = share_cfg.exclude if share_cfg else []
     count = do_scan(
         storage, args.share, args.root, data_root=cfg.data_root, inbox=args.inbox,
-        source=source, exclude=exclude,
+        source=source, exclude=exclude, rehash=getattr(args, "rehash", False),
     )
     note = f", source={source}" if source != "originals" else ""
     if exclude:
@@ -253,6 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--share", required=True)
     p_scan.add_argument("--root", required=True)
     p_scan.add_argument("--inbox", default=None, help="inbox subfolder (relative to --root)")
+    p_scan.add_argument("--rehash", action="store_true",
+                        help="re-read every known file's head/tail instead of trusting "
+                             "its stored hash when the size is unchanged (see do_scan)")
     p_scan.set_defaults(func=cmd_scan)
 
     p_run = sub.add_parser("run", help="drain the job queue through probe/proxy/frames/claude")

@@ -42,6 +42,14 @@ class RunResult:
     # syncthing pair, local_test_dir selftest runs). Such rows are NOT
     # comparable with rows measured over the real network.
     loopback: bool = False
+    # How coarse this row's clock is, in seconds (SHIP-10, 2026-08-14). Runners
+    # that bracket a child process with a Timer measure to the microsecond and
+    # leave it 0.0; a runner that decides "started"/"finished" by POLLING (the
+    # syncthing pair) can be a whole poll interval late at each end, and on a
+    # ~2 s lane-C sync that is a material fraction of the number being
+    # reported. Recorded so the report can say so instead of presenting
+    # instrument error as run-to-run variance.
+    timing_resolution_s: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -135,5 +143,23 @@ def read_results(path: Path) -> list[RunResult]:
     return out
 
 
-def existing_keys(path: Path) -> set[str]:
-    return {r.key() for r in read_results(path)}
+def existing_keys(path: Path, *, measured_only: bool = True) -> set[str]:
+    """The combos a resumed matrix should treat as ALREADY DONE.
+
+    Only rows that actually produced a measurement count (SHIP-6, 2026-08-14).
+    `key()` carries neither `ok` nor `skipped`, so this used to be every row in
+    the file -- including the ones written by `make_skipped()` (no syncthing on
+    PATH, unsupported direction, unsupported syncthing major) and every
+    `ok=False` row (timeout, rclone non-zero, short transfer, runner crash).
+    Installing the missing binary and re-running then printed `[skip-cached]`
+    for every lane-C combo, measured nothing, and left the report still saying
+    "No successful runs recorded for this lane yet." The only escape was
+    `--rerun`, which also re-runs the rows that DID succeed -- and since the
+    file is append-only, that blends the old and new measurements into one
+    median (SHIP-7).
+    """
+    return {
+        r.key()
+        for r in read_results(path)
+        if (not measured_only) or (r.ok and not r.skipped)
+    }

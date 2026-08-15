@@ -121,6 +121,34 @@ def test_a_live_stream_is_dropped_mechanically(con, job, fake_claude, fake_youtu
     assert v['relevant'] == 0 and v['relevance_note'] == 'live or no duration'
 
 
+def test_a_video_over_the_length_cap_is_dropped_mechanically(
+        con, job, fake_claude, fake_youtube):
+    """Admin request 2026-08-14: a search harvest skips anything over 30
+    minutes. Soft, like a Claude verdict -- the card stays in the manifest so
+    the editor can overrule -- and the judge never sees (never spends tokens
+    on) a card the length cap already decided. Pasted-link jobs bypass the
+    filter phase entirely, so a deliberately pasted long video still
+    downloads."""
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb']},
+          meta={'bbbbbbbbbbb': {'duration': 1801.0}})
+    worker.run_job(con, job['id'])
+
+    dropped = db.get_video(con, job['id'], 'bbbbbbbbbbb')
+    assert dropped['relevant'] == 0 and dropped['selected'] == 0
+    assert dropped['relevance_note'] == 'over 30 minutes'
+    assert len(db.videos(con, job['id'])) == 2
+    judged = [call[2] for call in fake_claude.calls if call[0] == 'relevance']
+    assert all('bbbbbbbbbbb' not in ids for ids in judged)
+
+
+def test_a_video_at_exactly_the_cap_is_kept(con, job, fake_claude, fake_youtube):
+    """The cap is "over half an hour", not "half an hour and up"."""
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']},
+          meta={'aaaaaaaaaaa': {'duration': 1800.0}})
+    worker.run_job(con, job['id'])
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['relevant'] == 1
+
+
 def test_claudes_verdicts_deselect_but_keep_the_rows(con, job, fake_claude, fake_youtube):
     """Filtered-out cards stay in the manifest so the editor can overrule."""
     _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb']})
@@ -684,6 +712,177 @@ def test_a_download_reporting_no_file_is_a_failure_not_an_empty_ledger_row(
     assert db.ledger_ids(con) == set()
 
 
+# --------------------------------------------------- a truncated DASH stream
+
+class DownloadError(RuntimeError):
+    """yt-dlp's exception class, by NAME.
+
+    This suite has no yt_dlp at all (vendor/__init__.py) and
+    worker._stream_truncated matches the class by name for exactly that reason,
+    so a stand-in spelled the same way is the whole seam. A subclass, because
+    the classifier walks the MRO -- yt-dlp's real one is a subclass of
+    YoutubeDLError.
+    """
+
+
+# Verbatim from the incident (SAQBbd1Rxmo, 2026-08-13): f137 (1080p avc) died
+# this way on every attempt, from the NAS worker and from the base rig alike.
+_TRUNCATED = ('ERROR: unable to download video data: Got error: 8 bytes read, '
+              '10288457 more expected. Giving up after 10 retries')
+
+
+class TruncatingDownloader:
+    """A downloader whose ONE bad rung always ends short, like YouTube's did.
+
+    Every other rung writes a real file, because the dedupe re-check greps the
+    destination folder for `[id]` names and a mock that wrote nothing would let
+    a broken dedupe pass. The bad rung leaves the `.f137.mp4.part` the live
+    incident left behind, spelled the way the outtmpl spells it.
+    """
+
+    def __init__(self, bad_quality='1080p', error=None, bad_everywhere=False):
+        self.bad_quality = bad_quality
+        self.bad_everywhere = bad_everywhere      # nothing works, at any rung
+        self.error = error or DownloadError(_TRUNCATED)
+        self.calls = []
+
+    def download(self, url, outdir, quality='best', **_kw):
+        vid = url.rsplit('=', 1)[-1]
+        self.calls.append((vid, quality))
+        if self.bad_everywhere or quality == self.bad_quality:
+            part = Path(outdir) / f'Test Channel - {vid} title [{vid}].f137.mp4.part'
+            part.write_bytes(b'x' * 8)
+            raise self.error
+        path = Path(outdir) / f'Test Channel - {vid} title [{vid}].mp4'
+        path.write_bytes(b'fake video')
+        side = path.with_suffix('.credits.json')
+        side.write_text('{}', encoding='utf-8')
+        return {'title': f'{vid} title', 'channel': 'Test Channel',
+                'video_url': url, 'thumbnail': None, 'duration': 120,
+                'filepath': str(path), 'sidecar': str(side)}
+
+
+def test_the_fallback_rung_is_the_downloaders_own_next_one_down():
+    """One quality table, not two: the retry downloads with the format string
+    format_selector builds from this same dict."""
+    assert worker._lower_quality('1080p') == '720p'
+    assert worker._lower_quality('2160p') == '1440p'
+    assert worker._lower_quality('720p') == '480p'
+    assert worker._lower_quality('480p') is None       # the bottom rung
+    assert worker._lower_quality('audio') is None      # not on this ladder
+    # `best` is UNCAPPED, so a cap above the source's own height re-selects the
+    # identical stream; the 1080p rung asks for AVC and is a different format.
+    assert worker._lower_quality('best') == '1080p'
+
+
+def test_a_truncated_stream_is_retried_one_rung_down_and_the_row_says_so(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """SAQBbd1Rxmo (2026-08-13): YouTube served f137 (1080p avc) truncated to
+    two different IPs, from a fresh start, for hours -- while f136 (720p) came
+    down fine from both minutes later. The clip failed outright and the editor
+    got NOTHING, when a downloadable rung was one line of format string away."""
+    fake = TruncatingDownloader(bad_quality='1080p')
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    assert job['quality'] == '1080p'
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    assert fake.calls == [('aaaaaaaaaaa', '1080p'), ('aaaaaaaaaaa', '720p')]
+    fresh = db.get_job(con, job['id'])
+    assert (fresh['dl_done'], fresh['dl_failed']) == (1, 0)
+
+    v = db.get_video(con, job['id'], 'aaaaaaaaaaa')
+    assert v['dl_state'] == 'done'
+    # the downgrade is RECORDED: the clip is here, but not at the rung asked for
+    assert v['dl_error'] == '1080p stream truncated by YouTube, fell back to 720p'
+    assert db.ledger_get(con, 'aaaaaaaaaaa') is not None
+
+    outdir = project_root / job['term_dir']
+    assert [p.name for p in outdir.iterdir() if p.name.endswith('.part')] == [], \
+        'the truncated .part is what the retry would have resumed from'
+
+
+@pytest.mark.parametrize('exc', [
+    # The bot check, a throttle and a dead network are MOMENTS, not formats:
+    # downgrading quality on any of them would cost resolution nobody asked to
+    # lose, on a clip that would have come down fine a minute later.
+    DownloadError('ERROR: unable to download video data: HTTP Error 403: Forbidden'),
+    DownloadError('ERROR: [youtube] SAQBbd1Rxmo: Unable to download API page'),
+    # yt-dlp is still retrying this one itself -- "giving up after" is what says
+    # the budget is spent and the FORMAT is the problem.
+    DownloadError('WARNING: Got error: 8 bytes read, 10288457 more expected. '
+                  'Retrying (attempt 3 of 10)'),
+    # ...and the same words out of something that is not a DownloadError at all
+    # (an ffmpeg failure, a bug in here) are not yt-dlp giving up on a format.
+    RuntimeError('Got error: 8 bytes read, 10288457 more expected. '
+                 'Giving up after 10 retries'),
+])
+def test_a_transient_failure_is_never_a_silent_quality_downgrade(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch, exc):
+    fake = TruncatingDownloader(bad_quality='1080p', error=exc)
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    assert fake.calls == [('aaaaaaaaaaa', '1080p')], 'the 720p rung was tried'
+    v = db.get_video(con, job['id'], 'aaaaaaaaaaa')
+    assert v['dl_state'] == 'failed' and str(exc)[:40] in v['dl_error']
+
+
+def test_the_fallback_is_one_rung_not_a_walk_down_the_ladder(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """A bad afternoon on YouTube's side must not quietly put 480p footage in
+    the canonical tree: one rung is what the incident needed, and a clip that
+    fails at both is a failed clip."""
+    fake = TruncatingDownloader(bad_everywhere=True)
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    assert fake.calls == [('aaaaaaaaaaa', '1080p'), ('aaaaaaaaaaa', '720p')]
+    fresh = db.get_job(con, job['id'])
+    assert (fresh['dl_done'], fresh['dl_failed']) == (0, 1)
+    v = db.get_video(con, job['id'], 'aaaaaaaaaaa')
+    assert v['dl_state'] == 'failed'
+    # the row names both halves: what YouTube did, and that the fallback ran
+    assert '1080p stream truncated' in v['dl_error']
+    assert '720p retry failed too' in v['dl_error']
+    assert db.ledger_get(con, 'aaaaaaaaaaa') is None
+
+
+def test_a_finally_failed_clip_takes_its_own_partials_and_nobody_elses(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """SAQBbd1Rxmo (2026-08-13): the give-up left a 10 MB
+    `... [SAQBbd1Rxmo].f137.mp4.part` in the term folder forever -- the lane
+    filters exclude `*.part` so it never syncs, but it sits in the CANONICAL
+    tree as a corpse, and yt-dlp resumes a .part, so the next attempt starts
+    from the poisoned bytes and dies the same way.
+
+    Scoped to the `[id]` segment: the term folder is shared, and a neighbour's
+    .part may belong to a download that is still running."""
+    outdir = project_root / job['term_dir']
+    outdir.mkdir(parents=True, exist_ok=True)
+    neighbour = outdir / 'Test Channel - other [bbbbbbbbbbb].f137.mp4.part'
+    neighbour.write_bytes(b'still downloading')
+    unrelated = outdir / 'The .part standard explained [ccccccccccc].mp4'
+    unrelated.write_bytes(b'a deliverable whose TITLE says .part')
+
+    def truncated(url, outdir_, quality='best', **_kw):
+        vid = url.rsplit('=', 1)[-1]
+        for name in (f'A [{vid}].f137.mp4.part', f'A [{vid}].f137.mp4.ytdl',
+                     f'A [{vid}].part-Frag7'):
+            (Path(outdir_) / name).write_bytes(b'x')
+        raise RuntimeError('yt-dlp said no')
+
+    monkeypatch.setattr(worker.downloader, 'download', truncated)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'failed'
+    left = sorted(p.name for p in outdir.iterdir())
+    assert 'A [aaaaaaaaaaa].f137.mp4.part' not in left
+    assert 'A [aaaaaaaaaaa].f137.mp4.ytdl' not in left
+    assert 'A [aaaaaaaaaaa].part-Frag7' not in left
+    assert neighbour.name in left, "another clip's resume state is not ours"
+    assert unrelated.name in left, 'a deliverable is not a leftover (YTDL-17)'
+
+
 # ------------------------------------------------------- pasted-link jobs
 
 def _url_job(con, ids, user=USER):
@@ -892,6 +1091,64 @@ def test_the_sweep_takes_fragments_and_leaves_the_deliverables(project_root):
 
     worker._sweep_stale(d)
     assert sorted(p.name for p in d.iterdir()) == sorted(kept)
+
+
+def test_the_sweep_takes_a_completed_per_format_stream_too(project_root):
+    """COMP-BROLL-3 (2026-08-14): the litter nothing on either machine deleted.
+
+    A 1080p rung is `bestvideo+bestaudio`, so yt-dlp renames
+    `... [id].f137.mp4.part` to `... [id].f137.mp4` the moment that stream
+    completes and keeps it for resume if the audio or the merge then fails. It
+    is not a sweepable SUFFIX, `_landed_file` correctly refuses to read it as
+    the clip, and it matches lane A's `+ *.mp4` include and no stignore line --
+    so one abandoned job put a 1.4 GB video-only orphan in the canonical tree
+    and on every editor with that project ticked, permanently. The local
+    executor grew this rule the same day; both executors write into one tree
+    and must leave the same things behind in it."""
+    d = project_root / 'term'
+    d.mkdir(parents=True, exist_ok=True)
+    swept = ['A [aaaaaaaaaaa].f137.mp4', 'A [aaaaaaaaaaa].f251.webm',
+             'A [aaaaaaaaaaa].temp.mp4']
+    # ...and the deliverable can never match: the outtmpl ends every finished
+    # name in `[id].<ext>`, so its stem ends in `[id]`
+    kept = ['A [aaaaaaaaaaa].mp4', 'A [aaaaaaaaaaa].editready.mp4',
+            'A [aaaaaaaaaaa].credits.json', 'manifest.json']
+    for name in swept + kept:
+        p = d / name
+        p.write_bytes(b'x')
+        old = time.time() - worker.STALE_AFTER - 60
+        os.utime(p, (old, old))
+
+    worker._sweep_stale(d)
+    assert sorted(p.name for p in d.iterdir()) == sorted(kept)
+
+
+def test_a_completed_per_format_stream_is_never_the_clip_and_always_litter():
+    """The two halves of the same rule, at the function that decides both:
+    _sweepable says it is litter, and _landed_file (which anchors on `[id]` at
+    the end of the stem) has always refused to read it as the clip."""
+    for name in ('A [aaaaaaaaaaa].f137.mp4', 'A [aaaaaaaaaaa].temp.mp4',
+                 'A [aaaaaaaaaaa].f137.mp4.part', 'A [aaaaaaaaaaa].part-Frag7'):
+        assert worker._sweepable(name) is True, name
+    for name in ('A [aaaaaaaaaaa].mp4', 'A [aaaaaaaaaaa].editready.mp4',
+                 'A [aaaaaaaaaaa].credits.json',
+                 'The .part standard explained [ccccccccccc].mp4'):
+        assert worker._sweepable(name) is False, name
+
+
+def test_a_failed_clip_takes_its_completed_streams_with_it(project_root):
+    """The id-scoped half: _clear_partials is what runs on a give-up, and it
+    must now take the finished-but-unmerged stream as well -- while leaving a
+    neighbour's alone, because the term folder is shared with clips that may
+    still be downloading (SAQBbd1Rxmo)."""
+    d = project_root / 'term'
+    d.mkdir(parents=True, exist_ok=True)
+    for name in ('A [aaaaaaaaaaa].f137.mp4', 'A [aaaaaaaaaaa].f140.m4a.part',
+                 'B [bbbbbbbbbbb].f137.mp4', 'A [aaaaaaaaaaa].mp4.failed'):
+        (d / name).write_bytes(b'x')
+    worker._clear_partials(d, 'aaaaaaaaaaa')
+    assert sorted(p.name for p in d.iterdir()) == [
+        'A [aaaaaaaaaaa].mp4.failed', 'B [bbbbbbbbbbb].f137.mp4']
 
 
 def test_the_sweep_leaves_this_runs_resume_state_alone(project_root):

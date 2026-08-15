@@ -70,10 +70,16 @@ def compute_directions(mat, filenames, min_group=MIN_GROUP):
     dirs = []
     for g in sorted(groups):
         members = groups[g]
-        others = [i for i in range(mat.shape[0]) if i not in set(members)]
-        if len(members) < min_group or not others:
+        # A boolean mask, not `[i for i in range(n) if i not in set(members)]`
+        # (MUSIC-11, 2026-08-14): that rebuilt the set on every one of the n
+        # iterations, i.e. O(n * |members|) per group. Invisible at 376 tracks
+        # and ~50M redundant insertions at 10,000, inside every --retag, which
+        # is the cheap tuning path the whole workflow leans on.
+        mask = np.zeros(mat.shape[0], dtype=bool)
+        mask[members] = True
+        if len(members) < min_group or mask.all():
             continue
-        v = mat[members].mean(axis=0) - mat[others].mean(axis=0)
+        v = mat[mask].mean(axis=0) - mat[~mask].mean(axis=0)
         for u in dirs:                       # Gram-Schmidt
             v = v - np.dot(v, u) * u
         n = np.linalg.norm(v)

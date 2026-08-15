@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -200,16 +201,34 @@ _RATE_LIMIT_MARKERS = (
     "session limit",
     "rate_limit_error",
     "rate limit",
-    "429",
     "usage limit",
     "quota exceeded",
     "too many requests",
 )
 
+# A bare "429" used to sit in the list above, and it matched ANY error text that
+# merely contained those three digits (BROLL-IDX-1, 2026-08-14). The archive is
+# full of them: `ffprobe failed on C0429.MP4`, an ffmpeg stderr carrying
+# .../sheets/4291/frames/frame_0003.jpg, a JSONDecodeError rendering
+# "(char 429)". Each of those was then reclassified as an account-wide limit —
+# the run aborted with "rate limit reached", and because that path deliberately
+# leaves the clip's status alone so it can be retried, every subsequent run died
+# on exactly the same clip and the queue never advanced. Anchor the status code
+# to the shapes the CLI and the API actually emit ("API error 429: ...",
+# "status 429", "HTTP 429", "429 Too Many Requests") instead.
+_RATE_LIMIT_PATTERNS = (
+    re.compile(r"\berror[:\s]\s*429\b"),
+    re.compile(r"\bstatus(?:\s*code)?[:\s]\s*429\b"),
+    re.compile(r"\bhttp[/\s]?[\d.]*\s*429\b"),
+    re.compile(r"\b429[:\s]\s*too many requests\b"),
+)
+
 
 def is_rate_limited(message: str) -> bool:
     lowered = message.lower()
-    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+    if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+        return True
+    return any(p.search(lowered) for p in _RATE_LIMIT_PATTERNS)
 
 
 def is_fatal_api_error(message: str) -> bool:

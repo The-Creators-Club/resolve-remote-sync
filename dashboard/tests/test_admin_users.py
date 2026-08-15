@@ -88,6 +88,44 @@ def test_admin_sees_unmapped_and_pending_devices(env):
     assert EDITOR_ID not in statuses
 
 
+def test_a_truenas_blip_does_not_hide_the_device_approval_half(env):
+    """DASH-7: a TrueNASError returned early with pending_devices=[] too, so
+    the panel an admin has open BECAUSE somebody just plugged a machine in --
+    the Syncthing approval table, which has nothing to do with TrueNAS --
+    disappeared behind a banner about the other backend."""
+    client, truenas, syncthing = env
+    new_id = "NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1"
+    syncthing.state["pending_devices"] = {new_id: {"name": "", "address": "100.9.9.9:22000"}}
+    truenas.stop()                      # the blip
+    as_user(client, "alex")
+
+    body = client.get("/api/v1/admin/users").json()
+    assert body["truenas_error"] and "truenas:" in body["error"]
+    assert body["syncthing_error"] is None
+    assert body["editors"] == []
+    assert new_id in {d["device_id"] for d in body["pending_devices"]}
+
+    panel = client.get("/partials/admin/users")
+    assert panel.status_code == 200
+    assert new_id in panel.text and "[ APPROVE ]" in panel.text
+    # ...and the missing half says so rather than claiming there are none
+    assert "account list unavailable" in panel.text
+    assert "no editor accounts yet" not in panel.text
+
+
+def test_a_syncthing_blip_does_not_hide_the_account_half(env):
+    client, _truenas, syncthing = env
+    syncthing.stop()
+    as_user(client, "alex")
+
+    body = client.get("/api/v1/admin/users").json()
+    assert body["syncthing_error"] and body["truenas_error"] is None
+    panel = client.get("/partials/admin/users")
+    assert "device list unavailable" in panel.text
+    assert "none pending" not in panel.text
+    assert "[ CREATE NEW EDITOR ACCOUNT ]" in panel.text
+
+
 def test_create_editor_account_end_to_end(env):
     client, truenas, _syncthing = env
     as_user(client, "alex")

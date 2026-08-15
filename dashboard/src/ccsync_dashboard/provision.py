@@ -82,10 +82,38 @@ def slugify(text: str) -> str:
 # EXTENSION and so matched none of them.
 PARTIAL_IGNORE_LINES = ["(?i)**/*.partial", "(?i)*.partial"]
 
+# Intentional copy of server/common.py's YTDL_IGNORE_LINES (read that block for
+# the full story). The NAS-side ytdl worker downloads INTO the shared Projects
+# tree, so lane C replicated every growing `.part` out to each editor with the
+# project ticked; since the 2026-08-11 ignoreDelete retrofit the worker's
+# completion rename never propagates, so what lands on an editor's disk is
+# permanent -- 27 orphans, ~1.6 GB, over three days on editor ruskin's machine
+# (2026-08-13/14).
+#
+# THIS copy is the one that decides whether the patterns survive: collector.
+# _ensure_ignores() compares a folder's live ignores to build_stignore_lines()
+# below with `have == want` and re-POSTs on ANY difference, so a line the
+# server writes and the dashboard does not know about is stripped on the next
+# provision cycle (with a misleading "REPAIRED .stignore" warning). Order
+# matters for the same reason: keep this list, and the extend() order below,
+# byte-identical to server/common.py (server/tests/test_cross_component.py
+# asserts it across server, dashboard and companion).
+#
+# `.part-FragN` needs its own pair: a fragment is "<file>.part-Frag84" and does
+# NOT end in `.part`. Deliberately NOT added to build_asset_stignore_lines():
+# no ytdl worker writes into the LUT library, and that list must stay
+# byte-identical across the three components.
+YTDL_IGNORE_LINES = [
+    "(?i)**/*.part", "(?i)*.part",
+    "(?i)**/*.part-Frag*", "(?i)*.part-Frag*",
+    "(?i)**/*.ytdl", "(?i)*.ytdl",
+]
+
 
 def build_stignore_lines() -> list[str]:
     lines = [f"(?i)*{ext}" for ext in VIDEO_EXTENSIONS]
     lines.extend(PARTIAL_IGNORE_LINES)
+    lines.extend(YTDL_IGNORE_LINES)
     lines.append("(?i)Proxy")
     lines.append("(?i)**/Proxy")
     lines.append("(?i)**/Proxy/**")

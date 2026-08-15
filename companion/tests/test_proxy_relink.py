@@ -6,7 +6,23 @@ the same way test_paths.py does it.
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 from ccsync_companion import proxy_relink
+
+
+@pytest.fixture(autouse=True)
+def _clean_refusal_memory():
+    """The refusal memory is module-global (it has to outlive a pass), so one
+    test's refusal must not answer another's question -- the same rule the
+    ffmpeg_tools probe caches and resolve_bridge's session state are reset
+    under."""
+    proxy_relink.reset_refusals()
+    yield
+    proxy_relink.reset_refusals()
+
 
 LOCAL_ROOT = r"F:\Creators_Club"
 CANON = "P:\\"
@@ -264,3 +280,144 @@ def test_apply_survives_a_raising_link_fn():
 def test_apply_with_nothing_to_do_is_silent():
     result = proxy_relink.apply_relinks([], lambda *_: {"ok": True})
     assert result == {"ok": True, "relinked": 0, "failed": 0, "failures": [], "message": ""}
+# -- a proxy Resolve refuses is not re-offered every 120 s (COMP-MEDIA-5) -----
+
+
+class _Stat:
+    def __init__(self, mtime, size):
+        self.st_mtime = float(mtime)
+        self.st_size = int(size)
+
+
+OTHER_BRAW = PANEL + r"\A002_04182004_C062.braw"
+OTHER_PROXY = PANEL + r"\Proxy\A002_04182004_C062.mov"
+
+
+def _stat_for(files):
+    """A stat seam over {path: (mtime, size)}; anything else "is not there",
+    the same shape exists_only has."""
+    table = {p.lower().replace("/", "\\"): v for p, v in files.items()}
+
+    def _stat(path):
+        try:
+            mtime, size = table[str(path).lower().replace("/", "\\")]
+        except KeyError:
+            raise OSError("not there")
+        return _Stat(mtime, size)
+
+    return _stat
+
+
+def _refused_once(stat_fn):
+    """Plan the panel clip, have Resolve refuse it, and hand back the plan."""
+    items = [item(BRAW, STALE_PROXY, "Offline", name="A001")]
+    ops = proxy_relink.plan_relinks(
+        items, LOCAL_ROOT, CANON, exists_fn=exists_only(GOOD_PROXY),
+        is_windows=True, stat_fn=stat_fn,
+    )
+    assert len(ops) == 1 and ops[0]["new_proxy"] == GOOD_PROXY
+    proxy_relink.apply_relinks(
+        ops, lambda mpi, path: {"ok": False, "message": "timecode mismatch"}, stat_fn,
+    )
+    return items
+
+
+def _plan_again(items, stat_fn):
+    return proxy_relink.plan_relinks(
+        items, LOCAL_ROOT, CANON, exists_fn=exists_only(GOOD_PROXY),
+        is_windows=True, stat_fn=stat_fn,
+    )
+
+
+def test_a_refused_proxy_is_not_planned_again_next_pass():
+    """A refusal leaves NOTHING on the clip -- proxy_path stays "" and
+    proxy_state stays "None" -- so the identical op was regenerated every
+    120 s, for one _API_LOCK'd LinkProxyMedia and one WARNING per clip per
+    pass, for ever."""
+    stat = _stat_for({GOOD_PROXY: (1000.0, 4096)})
+    items = _refused_once(stat)
+
+    assert _plan_again(items, stat) == []
+
+
+def test_a_re_encoded_proxy_re_arms_the_pairing():
+    """The repair for a refused proxy IS a new file (proxy_gen re-encoding it
+    with the right timecode, lane B re-delivering it, the archive sweep
+    remuxing it), so a changed (mtime, size) has to be a new question."""
+    items = _refused_once(_stat_for({GOOD_PROXY: (1000.0, 4096)}))
+
+    fresh = _stat_for({GOOD_PROXY: (2000.0, 5120)})
+    ops = _plan_again(items, fresh)
+
+    assert len(ops) == 1 and ops[0]["new_proxy"] == GOOD_PROXY
+
+
+def test_a_refusal_of_one_proxy_does_not_silence_another_clip():
+    stat = _stat_for({GOOD_PROXY: (1000.0, 4096), OTHER_PROXY: (1000.0, 4096)})
+    _refused_once(stat)
+
+    ops = proxy_relink.plan_relinks(
+        [item(OTHER_BRAW, STALE_PROXY, "Offline", name="A002")],
+        LOCAL_ROOT, CANON, exists_fn=exists_only(OTHER_PROXY),
+        is_windows=True, stat_fn=stat,
+    )
+
+    assert len(ops) == 1 and ops[0]["new_proxy"] == OTHER_PROXY
+
+
+def test_one_warning_per_pass_not_one_per_refused_clip(caplog):
+    """R15 fix 4's shape: the pass says how many and which one to look at,
+    and the per-clip detail goes to DEBUG. 200 refused clips every 120 s is
+    ~144,000 lines a day into the log that rotates every 5 MB."""
+    ops = [
+        {"media_pool_item": object(), "clip_name": name,
+         "file_path": rf"P:\Projects\{name}.braw",
+         "new_proxy": rf"P:\Projects\Proxy\{name}.mov", "old_proxy": ""}
+        for name in ("a", "b", "c")
+    ]
+    stat = _stat_for({})
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.proxy_relink"):
+        result = proxy_relink.apply_relinks(
+            ops, lambda mpi, path: {"ok": False, "message": "mismatch"}, stat,
+        )
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "3 proxy link(s) refused" in warnings[0]
+    assert "first: a" in warnings[0]
+    # The detail is still THERE, just not at WARNING.
+    assert sum(1 for r in caplog.records if r.levelno == logging.DEBUG) == 3
+    # ...and the contract app and the tray read is unchanged.
+    assert result["relinked"] == 0
+    assert result["failed"] == 3
+    assert result["failures"] == ["a", "b", "c"]
+    assert result["ok"] is False
+
+
+def test_a_link_that_raises_is_not_remembered_as_a_refusal(caplog):
+    """fusionscript going away says nothing about the pairing -- remembering
+    it would skip a clip Resolve never answered about."""
+    stat = _stat_for({GOOD_PROXY: (1000.0, 4096)})
+    items = [item(BRAW, STALE_PROXY, "Offline", name="A001")]
+    ops = _plan_again(items, stat)
+
+    def _boom(mpi, path):
+        raise RuntimeError("fusionscript went away")
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.proxy_relink"):
+        proxy_relink.apply_relinks(ops, _boom, stat)
+
+    assert len(_plan_again(items, stat)) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "link failed for A001" in warnings[0]
+
+
+def test_a_successful_relink_leaves_no_memory_behind():
+    stat = _stat_for({GOOD_PROXY: (1000.0, 4096)})
+    items = [item(BRAW, STALE_PROXY, "Offline", name="A001")]
+    ops = _plan_again(items, stat)
+
+    proxy_relink.apply_relinks(ops, lambda mpi, path: {"ok": True}, stat)
+
+    assert proxy_relink.is_refused(BRAW, GOOD_PROXY, stat) is False

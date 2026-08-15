@@ -1,0 +1,1708 @@
+r"""The requester's own machine as the YouTube download executor (plan §7).
+
+docs/YTDL_LOCAL_DOWNLOAD.md is the design; this is its companion half. The
+short version, from the 2026-08-13/14 incident: bulk anonymous downloads out of
+the NAS's one datacentre IP is exactly YouTube's bot-check profile (five clips
+failed outright on 2026-08-13, and the fleet had already been cut off at 112
+metadata calls on 2026-08-11), while an editor fetching their own reviewed
+selections from a residential IP is not -- and the requester's clips then land
+on the requester's disk with no sync hop to wait for.
+
+The flow, all of it started by ONE job id arriving on the loopback (§2):
+
+    SPA -> POST 127.0.0.1:8899/ytdl/download {job_id}
+        -> claim        (fleet token; the server flips download_mode=local)
+        -> manifest     (what to fetch, where it goes, under which contract)
+        -> yt-dlp per clip, status posted per clip, heartbeat every 30 s
+        -> the last clip hands the job back; the server sweeps what failed
+
+Rules that are not negotiable here:
+
+  - **THE BROWSER CONTRIBUTES A JOB ID AND NOTHING ELSE** (§8). Paths, URLs,
+    quality and the naming template all arrive from the server under the fleet
+    token. This is /music/send's principle ("never trust the page with paths")
+    extended to never trusting it with the work order either.
+  - **ANY 410 IS THE END OF THE JOB, QUIETLY.** routes_fleet answers 410 to
+    every way a lease can be over -- it expired and the server reclaimed the
+    job, another editor holds it, the job finished. The companion's answer to
+    all of them is identical: stop, delete its own partials, say nothing to
+    the editor. Reclaim is one-way (§3): no retry, no ping-pong, no error UI.
+  - **NAMING IS A CONTRACT** (§5). The outtmpl, the sidecar and the
+    quality-fallback rung come from the vendored `ytdl_common`, which is
+    byte-identical to the server's copy. Divergence is silent data skew in one
+    canonical tree -- two spellings of the same clip, found months later.
+  - **NEVER RAISE INTO THE TRAY.** Everything here runs on a daemon thread and
+    swallows its own failures: a machine that cannot download locally is a
+    machine that downloads the way the whole fleet did before this existed.
+
+Scope cut, deliberate and documented (see SCOPE_QUALITIES): only 480p/720p/
+1080p are executed locally. Everything above them -- and `audio` -- needs
+vendor/downloader.py's ensure_edit_ready transcode machinery, whose output
+lands under a DIFFERENT NAME (`<stem>.editready.mp4`) that this executor
+cannot reproduce, and half the fleet spelling a clip differently is the one
+failure this feature must not have. Those jobs are handed back to the server.
+
+Added 2026-08-14 (companion 0.8.0).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from . import canon
+from . import config as config_mod
+from . import ffmpeg_tools
+from . import resolve_bridge
+from . import upgrade as upgrade_mod
+from . import ytdl_common
+from . import ytdlp_manager
+from .sync.repath import normalized_safe_rel
+
+log = logging.getLogger("ccsync.ytdl")
+
+# The dashboard's fleet API for this feature. One prefix, so a deployment that
+# moved the ytdl mount is one edit.
+API_PREFIX = "/ytdl/api"
+
+# What this executor will run itself. The rungs above 1080p and `audio` are
+# NOT a capability gap in yt-dlp -- they are a NAMING one: YouTube serves
+# nothing above 1080p as AVC, so the server converts those to h264 and the
+# deliverable is `<stem>.editready.mp4` (worker._swap_in), a name built by
+# machinery that lives in the vendored downloader and cannot be reproduced
+# from the CLI. Downloading them here would put a second spelling of the clip
+# in the tree, which is the exact failure §5 exists to prevent.
+SCOPE_QUALITIES = ("480p", "720p", "1080p")
+
+# yt-dlp's own in-flight litter, matched as a SUFFIX. Worker parity
+# (worker._SWEEPABLE / _sweepable, YTDL-17): `'.part' in name` also matched a
+# video whose TITLE contains ".part", and `.editready` is deliberately absent
+# because it is a deliverable, not a leftover.
+SWEEPABLE_SUFFIXES = (".part", ".ytdl", ".temp")
+
+# The file yt-dlp has FINISHED writing but has not merged yet, matched on the
+# STEM. COMP-BROLL-3 (2026-08-14): every rung this executor runs is a
+# `bestvideo+bestaudio` selector, so yt-dlp renames `... [id].f137.mp4.part` to
+# `... [id].f137.mp4` the moment that stream completes and KEEPS it (for
+# resume) if anything after it fails. Nothing on the machine deleted it: it is
+# not a suffix above, `landed_file` correctly refuses to read it as the clip,
+# and it matches lane A's `+ *.mp4` include and no stignore line -- so a laptop
+# lid closed at clip 7 put a 1.4 GB video-only orphan on the NAS and on every
+# editor with that project ticked, permanently. `.temp` is the same file half a
+# second later (FFmpegMergerPP writes `... [id].temp.mp4`).
+#
+# A deliverable can never match: the outtmpl ends every finished name in
+# `[id].<ext>`, so its stem ends in `[id]`, and both callers are id-scoped to
+# that segment anyway.
+_INTERMEDIATE_STEM_RE = re.compile(r"\.(f\d+|temp)$")
+
+# What a failed attempt's leftovers are RENAMED to, rather than deleted --
+# worker.DISOWNED_SUFFIX and _disown_output, verbatim rule (YTDL-3,
+# 2026-08-11). A half-converted original is still footage somebody may want and
+# the disk cost should be visible, but under its real name it carries the
+# `[id]` the disk-scan dedupe reads: every later search would call the clip
+# "already in the fleet" and point the editor at a file they cannot open. The
+# suffix also takes it out of lane A's video-extension include, so a disowned
+# corpse stays on the machine that made it.
+DISOWNED_SUFFIX = ".failed"
+
+# The OTHER half of the naming contract (§5: "the outtmpl, the sidecar,
+# EMBEDDED TAGS, ..."), which the 0.8.0 argv simply did not have -- COMP-BROLL-2
+# (2026-08-14). vendor/downloader.py:137-155 embeds these on the NAS with a
+# MetadataParser pre_process pass plus FFmpegMetadata, and its module header
+# calls them "three redundant metadata channels" the downstream DaVinci Resolve
+# credits script reads; without them a clip fetched by an editor and the same
+# clip fetched by the NAS have IDENTICAL NAMES and different insides, which is
+# exactly the silent skew §5 exists to prevent.
+#
+# Spelled as CLI equivalents because this side drives the standalone binary
+# (§6): `--parse-metadata FROM:TO` IS MetadataParserPP.Actions.INTERPRET, and
+# its default WHEN is pre_process -- the same pass, so FFmpegMetadata picks the
+# tags up. The list is not in ytdl_common because it cannot drift: its source
+# (`downloader._credits_action`, in a file vendored VERBATIM from
+# yt-credit-downloader and never edited) is frozen, and tests/test_ytdl_executor
+# pins this spelling against it.
+CREDITS_METADATA_ARGS = (
+    "--parse-metadata", "%(channel,uploader)s:%(meta_channel)s",
+    "--parse-metadata", "%(webpage_url)s:%(meta_video_url)s",
+    "--parse-metadata", "%(channel_url,uploader_url)s:%(meta_channel_url)s",
+    "--parse-metadata", "%(uploader,channel)s:%(meta_uploader)s",
+    # The two standard tags the same pass writes: channel -> artist,
+    # url -> comment.
+    "--parse-metadata", "%(channel,uploader)s:%(artist)s",
+    "--parse-metadata", "%(webpage_url)s:%(meta_comment)s",
+    # `--embed-metadata` is {'key': 'FFmpegMetadata', 'add_metadata': True}.
+    # `--embed-chapters` is not redundant: FFmpegMetadataPP's own default for
+    # add_chapters is True, so the server's one-key dict embeds chapters and
+    # the CLI (which defaults that flag OFF) would not. With both flags, yt-dlp
+    # 2026.08.04 builds {'key': 'FFmpegMetadata', 'add_chapters': True,
+    # 'add_metadata': True, 'add_infojson': 'if_exists'} -- byte for byte the
+    # postprocessor the NAS gets (measured 2026-08-14).
+    "--embed-metadata",
+    "--embed-chapters",
+)
+
+# Where yt-dlp's `--write-info-json` output goes. COMP-BROLL-1 (2026-08-14):
+# it used to go where the video goes, which is a Syncthing SENDRECEIVE folder
+# whose stignore ignores video extensions, `.part` and `.ytdl` but deliberately
+# NOT `.json` (sidecars and manifest.json are meant to travel). yt-dlp writes it
+# at extraction time, i.e. minutes before the media finishes, so every one of a
+# 40-clip job's ~120 KB info jsons was indexed and fanned out to the NAS and to
+# every other editor -- and since the 2026-08-11 delete-protection retrofit set
+# ignoreDelete=true on editor folders, the executor deleting them afterwards
+# never propagated. Permanent, undeletable litter, byte for byte the failure
+# R15 fix 3 closed for `.part` files.
+#
+# Beside the sidecar manager's tools dir rather than inside it (that one holds
+# binaries it owns), with the system temp dir as the fallback.
+INFO_JSON_DIR_NAME = "ytdl-info"
+
+# Where a clip may legitimately come from. Matched after `www.`/`m.` are
+# stripped and by EQUALITY, routes_api._YT_HOSTS's rule: `youtube.com.evil.net`
+# and `notyoutube.com` both have to fail, which a substring test does not do.
+# googlevideo.com is YouTube's media CDN and is matched as a SUFFIX because its
+# hosts are per-datacentre (`rr3---sn-abc.googlevideo.com`).
+YOUTUBE_HOSTS = frozenset({
+    "youtube.com", "music.youtube.com", "youtube-nocookie.com", "youtu.be",
+})
+YOUTUBE_HOST_SUFFIXES = (".googlevideo.com",)
+
+# HTTP to the dashboard. Short: every one of these calls is a small JSON
+# round trip on the tailnet, and a wedged one must not outlive the lease it is
+# there to hold (180 s).
+HTTP_TIMEOUT_SECONDS = 15.0
+
+# One clip's whole yt-dlp run, merge included. Generous for an editor on a
+# hotel link and a 1080p feature-length clip; bounded because an unbounded
+# wait would hold the job's lease -- and therefore the server's fallback --
+# forever. A timeout is reported as an ordinary clip failure, so the
+# second-chance sweep picks it up (§2 step 7).
+CLIP_TIMEOUT_SECONDS = 2 * 3600.0
+
+# Fallbacks for what the server normally tells us. Both are config on the
+# server (YTDL_LEASE_SECONDS / YTDL_HEARTBEAT_SECONDS, shipped as 180/30) and
+# arrive in the claim response; these only cover a server that answered
+# without them.
+DEFAULT_HEARTBEAT_SECONDS = 30.0
+DEFAULT_PAUSE_SECONDS = 3.0
+
+# The free-space floor, checked BEFORE the claim (§7: "decline the claim,
+# don't die at clip 40" -- the 0.7.x upgrade lesson). MIN_FREE_BYTES_MARGIN is
+# imported rather than re-typed for the reason ytdlp_manager imports it: two
+# copies of a number meaning "don't be the thing that fills an editor's disk"
+# would drift. NOMINAL_JOB_BYTES is a FLOOR and not a forecast -- a reviewed
+# selection is routinely 20-40 clips and a few GB, and nothing tells us the
+# sizes up front, so this refuses on a disk that is already in trouble rather
+# than pretending to predict the job.
+MIN_FREE_BYTES_MARGIN = upgrade_mod.MIN_FREE_BYTES_MARGIN
+NOMINAL_JOB_BYTES = 5 * 1024 * 1024 * 1024
+
+# capabilities() reasons. Small, closed and editor-readable: the SPA shows
+# nothing (it just falls back to the server path), but this is what the
+# companion log says when an editor asks why their machine is not downloading.
+REASON_DISABLED = "local YouTube downloads are switched off in config"
+REASON_NO_DASHBOARD = "this machine has no dashboard URL or token configured"
+REASON_NO_EDITOR = "nobody is signed in on this machine"
+# COMP-BROLL-5 (2026-08-14). ffmpeg is an OPTIONAL dependency on this fleet
+# (ffmpeg_tools.ffmpeg_available says so, and proxy_generation_enabled is
+# tri-state for the same reason), but EVERY rung this executor runs is a
+# `bestvideo+bestaudio` merge selector -- yt-dlp refuses those outright with no
+# merger. Without this check a machine with no ffmpeg claimed the job, failed
+# 100% of its clips, burned the editor's IP on the metadata calls anyway and
+# left a history of red rows, which is the opposite of §6's promise that
+# "editors never see a broken local downloader -- they see the old behaviour".
+REASON_NO_FFMPEG = ("ffmpeg is not installed on this machine, so downloaded "
+                    "video and audio cannot be merged")
+
+
+class LeaseLost(Exception):
+    """The server answered 410: this job is no longer ours to download.
+
+    Its own exception because every caller does the same thing with it and
+    nothing else: stop. See the module docstring's second rule.
+    """
+
+
+# ---------------------------------------------------------------------------
+# http
+# ---------------------------------------------------------------------------
+
+
+def default_request(method: str, url: str, body: Optional[dict],
+                    headers: dict, timeout: float) -> tuple[int, Any]:
+    """One fleet API call -> (status_code, parsed_json_or_None).
+
+    An HTTP error status is an ANSWER here, not an exception: 410 means "the
+    lease is gone" and 409 means "somebody else has it", and both are ordinary
+    outcomes this executor branches on. urllib raises HTTPError for them, so it
+    is caught and unwrapped -- a caller that had to know urllib's shape would
+    be a caller that stubs it wrong in tests.
+
+    A transport failure (no route, DNS, timeout, a body that is not JSON) still
+    raises: those are not answers, and the claim path treats them as "no
+    capability today", exactly like a refused claim.
+    """
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read()
+        except Exception:
+            raw = b""
+        status = exc.code
+    try:
+        return status, (json.loads(raw.decode("utf-8")) if raw else None)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # A proxy's HTML error page, or a dashboard that fell over mid-answer.
+        # The STATUS is what every caller acts on, so it survives.
+        return status, None
+
+
+# (method, url, body, headers, timeout) -> (status, parsed). The one seam the
+# tests stub, deliberately the same shape as default_request above.
+RequestFn = Callable[[str, str, Optional[dict], dict, float], tuple[int, Any]]
+# (argv, timeout, on_spawn) -> object with .returncode/.stdout/.stderr.
+RunFn = Callable[[list, float, Optional[Callable[[Any], None]]], Any]
+
+
+def default_run(argv: list, timeout: float,
+                on_spawn: Optional[Callable[[Any], None]] = None) -> Any:
+    """Run yt-dlp, captured, windowless, with a sanitized env and a kill handle.
+
+    Popen rather than subprocess.run for ONE reason: `on_spawn` hands the live
+    process to the caller so a lost lease can kill a download in flight
+    (subprocess.run gives nothing to kill until it returns, and a 40-clip job
+    would keep fetching for an hour after the server took it back).
+
+    Everything else is ytdlp_manager._default_run's construction, for its
+    reasons: resolve_bridge.sanitized_child_env() because PYTHONHOME/
+    PYTHON3HOME are pinned process-wide at OUR _MEIPASS (AUDIT_2 CORE-M6) and
+    yt-dlp.exe is itself a frozen Python; CREATE_NO_WINDOW because this is a
+    windowed build and an unflagged spawn flashes a console on the editor's
+    desktop; stdin closed because a yt-dlp that decided to prompt would
+    otherwise block until the timeout.
+    """
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=ytdlp_manager._win_creationflags(),
+        env=resolve_bridge.sanitized_child_env(),
+    )
+    if on_spawn is not None:
+        on_spawn(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        out, err = proc.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+# ---------------------------------------------------------------------------
+# what this machine can say about itself
+# ---------------------------------------------------------------------------
+
+
+class Deps:
+    """Everything the executor needs from the running companion, injectable.
+
+    Built once by app.py and handed to the 8899 listener (broll_server holds it
+    on the server object, the way it already holds ccsync_cfg). The `ytdlp` and
+    `editor_fn`/`selection_fn` seams matter live and not only in tests:
+
+      - `ytdlp` is THE YtDlpManager the tray already runs. Its status() is a
+        lock-guarded, zero-I/O read of the last daily check, which is what
+        makes GET /ytdl/capabilities answer inside the SPA's 1 s probe budget
+        (running `yt-dlp --version` inline costs seconds on a cold PyInstaller
+        binary behind an AV scanner -- ytdlp_manager.VERSION_TIMEOUT_SECONDS
+        allows fifteen);
+      - `editor_fn` is app.editor_identity, not cfg["editor_name"]: a lease
+        needs the VERIFIED holder, and reporting under a config-file name the
+        dashboard does not know would take a lease nobody can trace;
+      - `selection_fn` returns this machine's synced projects, which is what
+        the manifest's project_label is validated against (§7).
+
+    Absent seams degrade to "no capability", never to a guess.
+    """
+
+    def __init__(
+        self,
+        cfg: dict[str, Any],
+        ytdlp: Optional[Any] = None,
+        editor_fn: Optional[Callable[[], Optional[str]]] = None,
+        selection_fn: Optional[Callable[[], Optional[list]]] = None,
+        request_fn: Optional[RequestFn] = None,
+        run_fn: Optional[RunFn] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ) -> None:
+        self.cfg = cfg or {}
+        self.ytdlp = ytdlp
+        self._editor_fn = editor_fn
+        self._selection_fn = selection_fn
+        self.request = request_fn or default_request
+        self.run = run_fn or default_run
+        self.sleep = sleep_fn or time.sleep
+
+    # -- config-derived, zero-I/O ----------------------------------------
+    @property
+    def dashboard_url(self) -> str:
+        return str(self.cfg.get("dashboard_url", "") or "").strip().rstrip("/")
+
+    @property
+    def token(self) -> str:
+        """The shared fleet token, read from cfg PER CALL.
+
+        reporter.post_once's rule and its reason: /api/v1/verify hands the
+        current report token back at sign-in and IdentityManager republishes it
+        into this same dict, so a rotated (or mistyped) config.toml
+        `dashboard_token` stops 403-ing the moment the editor signs in.
+        """
+        return str(self.cfg.get("dashboard_token", "") or "").strip()
+
+    def editor(self) -> str:
+        """The verified editor name, or "" when nobody is signed in.
+
+        "" is a REFUSAL, not a fallback: routes_fleet.claim answers 400 to an
+        empty editor because a lease needs a holder.
+        """
+        if self._editor_fn is not None:
+            try:
+                return str(self._editor_fn() or "").strip()
+            except Exception:
+                log.debug("ytdl: editor_fn failed", exc_info=True)
+                return ""
+        return str(self.cfg.get("editor_name", "") or "").strip()
+
+    def selection_labels(self) -> Optional[set]:
+        """This machine's synced project labels, or None when unknowable.
+
+        None and empty are different answers and callers must treat them so:
+        empty is "this editor syncs nothing" (refuse), None is "we could not
+        ask" (also refuse, but for a reason worth logging differently). Both
+        fail closed -- the cost is a job the server downloads instead.
+        """
+        if self._selection_fn is None:
+            return None
+        try:
+            items = self._selection_fn()
+        except Exception:
+            log.debug("ytdl: selection_fn failed", exc_info=True)
+            return None
+        if items is None:
+            return None
+        labels = set()
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("rel_path", "label"):
+                value = normalize_label(item.get(key))
+                if value:
+                    labels.add(value)
+        return labels
+
+    def ytdlp_status(self) -> dict:
+        """The sidecar's last check. Never runs the binary (see the class
+        docstring's 1 s probe budget)."""
+        if self.ytdlp is None:
+            return {"ok": False, "version": None,
+                    "message": "the yt-dlp sidecar manager is not running"}
+        try:
+            return dict(self.ytdlp.status() or {})
+        except Exception:
+            log.debug("ytdl: ytdlp status read failed", exc_info=True)
+            return {"ok": False, "version": None,
+                    "message": "the yt-dlp sidecar could not be read"}
+
+    def ytdlp_binary(self) -> Path:
+        return ytdlp_manager.binary_path(self.cfg)
+
+    @property
+    def is_base_rig(self) -> bool:
+        return str(self.cfg.get("mode", "editor") or "").strip().lower() == "base"
+
+
+def normalize_label(value: Any) -> str:
+    """A project label folded to one comparable spelling.
+
+    The dashboard's selection and the ytdl job row hold the SAME string (the
+    folder label that is the year/series/project rel path -- dashboard
+    api._selection_view pins `rel_path` to it), but they travel through
+    different hands: one has been through a config file and a JSON cache, the
+    other through a search form. Case and separators are folded so
+    `2026/FF5/Show` and `2026\\FF5\\show` are the one project they obviously
+    are; nothing else is touched.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.replace("\\", "/").strip().strip("/").casefold()
+
+
+def free_bytes_at(path: Any) -> Optional[int]:
+    """Free bytes on the volume holding `path`, or None if unknowable.
+
+    Walks UP to the first existing ancestor: the destination folder of a
+    first-ever download does not exist yet, and disk_usage on a missing path
+    raises rather than answering for the volume it would live on.
+    """
+    try:
+        p = Path(str(path))
+    except Exception:
+        return None
+    for candidate in (p, *p.parents):
+        try:
+            if candidate.exists():
+                return int(shutil.disk_usage(str(candidate)).free)
+        except Exception:
+            continue
+    return None
+
+
+def projects_root(cfg: dict[str, Any]) -> Optional[str]:
+    """`<local_root>/Projects` on THIS machine, or None.
+
+    local_root and not the canonical `P:\\` prefix, for broll_server
+    .default_broll_mount's reason: this string is handed to the filesystem, and
+    on a Mac there is no drive namespace to resolve `P:\\` against.
+    """
+    try:
+        root = config_mod.resolved_local_root(cfg or {})
+    except Exception:
+        return None
+    if not str((cfg or {}).get("local_root") or "").strip():
+        return None
+    return str(Path(root, "Projects"))
+
+
+def destination_for(cfg: dict[str, Any], project_rel_path: Any) -> Optional[str]:
+    """The manifest's `project_rel_path` -> the folder to download into here.
+
+    THROUGH PATH CANON (§7), not by joining onto local_root directly. The
+    manifest speaks the canonical tree -- `<label>/Youtube/<term>` under the
+    fleet's one Projects root -- because only the companion knows where that
+    root is on the machine it is running on. So the path is built canonically
+    (`P:\\Projects\\...`, in the PREFIX's spelling, backslashes on a Mac too)
+    and then translated to this host's spelling. On the base rig
+    canonical_prefix IS local_root and the translation is the identity, which
+    is exactly why the base rig is the pilot machine: its "local" download
+    writes straight onto the NAS.
+
+    None when the rel path is not a contained relative path.
+    normalized_safe_rel is the fleet's one answer to that question (the same
+    helper selection.py validates dashboard rel_paths with) -- a second set of
+    traversal rules is how a traversal gets served.
+    """
+    rel = normalized_safe_rel(project_rel_path)
+    if rel is None:
+        return None
+    parts = [p for p in rel.replace("\\", "/").split("/") if p and p != "."]
+    if not parts:
+        return None
+    local_root = str((cfg or {}).get("local_root", "") or "").strip()
+    if not local_root:
+        return None
+    prefix = str((cfg or {}).get("canonical_prefix", "") or "").strip()
+    if not prefix:
+        # A machine with no canonical prefix configured (legacy / unmanaged):
+        # there is no canon to translate through, and its local tree IS the
+        # only spelling it has.
+        return os.path.join(local_root, "Projects", *parts)
+    sep = canon.plat_for(prefix).sep
+    canonical = prefix.rstrip("\\/") + sep + sep.join(["Projects", *parts])
+    return canon.canonical_to_local(canonical, local_root, prefix)
+
+
+def url_is_youtube(url: Any) -> bool:
+    """Is this a URL we are willing to hand to yt-dlp? Never raises.
+
+    The manifest arrives token-authed from our own dashboard, so this is a
+    defence against a SERVER bug (or a compromised row) rather than against the
+    browser -- which contributes nothing but a job id. Cheap, and the failure
+    it prevents is "the editor's machine fetched something arbitrary off the
+    internet on the fleet's say-so".
+    """
+    try:
+        parsed = urllib.parse.urlparse(str(url or ""))
+    except Exception:
+        return False
+    if parsed.scheme.lower() not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    for stripped in ("www.", "m."):
+        if host.startswith(stripped):
+            host = host[len(stripped):]
+    if host in YOUTUBE_HOSTS:
+        return True
+    return any(host.endswith(suffix) for suffix in YOUTUBE_HOST_SUFFIXES)
+
+
+def capabilities(deps: Deps) -> dict:
+    """What GET /ytdl/capabilities answers. 200 always; `ok` carries the verdict.
+
+    MUST BE FAST -- the SPA's probe aborts at 1 s and any failure sends the job
+    down the server path with no UI noise (§2 step 2). So nothing here runs a
+    subprocess or makes a request: the yt-dlp version is the sidecar manager's
+    CACHED daily result (ytdlp_manager.status(), a lock-guarded read that does
+    no I/O by design), the ffmpeg question is answered by the proxy generator's
+    _resolve_binary (a which()/exists() pair, never a `-version` spawn), and the
+    only other syscall is one disk_usage.
+
+    `ok: false` is a complete answer, not an error: it means this machine
+    downloads the way every machine did before 0.8.0.
+    """
+    status = deps.ytdlp_status()
+    result = {
+        "ok": False,
+        "reason": None,
+        "editor": deps.editor(),
+        "ytdlp_version": status.get("version"),
+        "template_version": ytdl_common.TEMPLATE_VERSION,
+        "sidecar_version": ytdl_common.SIDECAR_VERSION,
+        # COMP-BROLL-10 (2026-08-14): the rungs this machine will actually run.
+        # The SPA knows the job's quality when it decides whether to dispatch,
+        # so a probe that says "480p/720p/1080p" lets it not dispatch a 2160p
+        # job at all -- today it dispatches every job, the companion claims it,
+        # reads the manifest, finds a rung only the server can name and hands
+        # it back by letting the lease expire, and the job sits still for up to
+        # 180 s. An SPA that ignores the field behaves exactly as it does now.
+        "scope_qualities": list(SCOPE_QUALITIES),
+        "free_bytes": free_bytes_at(projects_root(deps.cfg) or Path.home()),
+    }
+    if not ytdlp_manager.local_downloads_enabled(deps.cfg):
+        result["reason"] = REASON_DISABLED
+        return result
+    if not deps.dashboard_url or not deps.token:
+        result["reason"] = REASON_NO_DASHBOARD
+        return result
+    if not result["editor"]:
+        result["reason"] = REASON_NO_EDITOR
+        return result
+    if not status.get("ok"):
+        result["reason"] = str(status.get("message") or "yt-dlp is not ready on this machine")
+        return result
+    if not _ffmpeg_location(deps.cfg):
+        # The SAME call build_argv makes, so a capability that said yes is a
+        # capability whose `--ffmpeg-location` will be there (COMP-BROLL-5).
+        result["reason"] = REASON_NO_FFMPEG
+        return result
+    result["ok"] = True
+    return result
+
+
+# ---------------------------------------------------------------------------
+# the fleet API client
+# ---------------------------------------------------------------------------
+
+
+class FleetClient:
+    """routes_fleet, from the other end. Token-authed, browser-free.
+
+    Every method raises LeaseLost on 410 -- that is the whole error model above
+    the claim, because the server answers 410 to every way a lease can end and
+    the companion's response to all of them is to stop (§3).
+    """
+
+    def __init__(self, deps: Deps, editor: str,
+                 timeout: float = HTTP_TIMEOUT_SECONDS) -> None:
+        self.deps = deps
+        self.editor = editor
+        self.timeout = timeout
+
+    def _url(self, suffix: str) -> str:
+        return f"{self.deps.dashboard_url}{API_PREFIX}{suffix}"
+
+    def _headers(self) -> dict:
+        # X-CCSync-Identity alongside the token on every call: routes_fleet
+        # treats it as a MISTAKE-PREVENTER (the live lease is the real
+        # authority), and sending it means a stale companion acting for the
+        # wrong editor gets a 410 instead of quietly downloading somebody
+        # else's job.
+        return {
+            "Content-Type": "application/json",
+            "X-CCSync-Token": self.deps.token,
+            "X-CCSync-Identity": self.editor,
+        }
+
+    def _call(self, method: str, suffix: str, body: Optional[dict] = None):
+        status, parsed = self.deps.request(
+            method, self._url(suffix), body, self._headers(), self.timeout)
+        if status == 410:
+            raise LeaseLost(_detail_of(parsed) or "this job is no longer yours")
+        return status, parsed
+
+    def claim(self, job_id: int, ytdlp_version: Optional[str],
+              free_bytes: Optional[int]) -> Optional[dict]:
+        """Take the lease, or None.
+
+        None for EVERY refusal there is -- 403 (yt-dlp older than the fleet
+        minimum), 409 (somebody else holds it), 410 (not claimable: finished,
+        pinned to the server, or a naming-contract skew), a 500, an unreachable
+        dashboard. They are one outcome to this side: the server worker
+        downloads exactly as it does today, which is the whole rollback story
+        (§10), and none of them is an error the editor should see.
+        """
+        body = {
+            "editor": self.editor,
+            "ytdlp_version": ytdlp_version or "",
+            "template_version": ytdl_common.TEMPLATE_VERSION,
+            # COMP-BROLL-6 (2026-08-14): the sidecar half of the §5 handshake
+            # was advertised by the server (the manifest and the client config
+            # both carry it) and compared by nobody, so a server that grew a
+            # ninth SIDECAR_FIELD would have taken 8-field sidecars from every
+            # 0.8.0 companion without a word. The two numbers are separate
+            # precisely because they fail differently (ytdl_common:56-60).
+            "sidecar_version": ytdl_common.SIDECAR_VERSION,
+            # COMP-BROLL-10 (2026-08-14): what this executor will actually run.
+            # The server holds the job's quality at claim time, so declaring
+            # the scope here is what lets it answer 410 immediately instead of
+            # granting a lease it must then wait out -- three minutes of a
+            # 2160p job sitting still, per job, for nothing. A server that does
+            # not read the field behaves exactly as it does today: the manifest
+            # check below still hands the job back.
+            "scope_qualities": list(SCOPE_QUALITIES),
+            "free_bytes": free_bytes,
+        }
+        try:
+            status, parsed = self.deps.request(
+                "POST", self._url(f"/jobs/{job_id}/claim"), body,
+                self._headers(), self.timeout)
+        except Exception as exc:
+            log.info("ytdl: job %s could not be claimed (%s) -- the server "
+                     "downloads it", job_id, exc)
+            return None
+        if status == 200 and isinstance(parsed, dict):
+            return parsed
+        log.info("ytdl: job %s was not given to this machine (HTTP %s: %s) -- "
+                 "the server downloads it", job_id, status,
+                 _detail_of(parsed) or "no detail")
+        if status == 403:
+            _warn_on_a_version_floor_we_rank_differently(parsed, ytdlp_version)
+        return None
+
+    def heartbeat(self, job_id: int) -> None:
+        self._call("POST", f"/jobs/{job_id}/heartbeat", {"editor": self.editor})
+
+    def manifest(self, job_id: int) -> Optional[dict]:
+        status, parsed = self._call("GET", f"/jobs/{job_id}/download-manifest")
+        if status != 200 or not isinstance(parsed, dict):
+            log.warning("ytdl: job %s did not answer a manifest (HTTP %s)",
+                        job_id, status)
+            return None
+        return parsed
+
+    def clip_status(self, job_id: int, video_id: str, state: str,
+                    error: Optional[str] = None, note: Optional[str] = None,
+                    filepath_rel: Optional[str] = None,
+                    title: Optional[str] = None,
+                    channel: Optional[str] = None) -> None:
+        """Mirror one clip's outcome into the job rows.
+
+        Failures other than 410 are logged and swallowed: the download itself
+        already happened (or already failed), and dying on a lost status post
+        would abandon the rest of the job over a blip. The server's
+        second-chance sweep is what makes that safe -- a clip whose `done`
+        never landed is simply retried once server-side (§2 step 7).
+
+        `title`/`channel` are OMITTED rather than sent as null when we do not
+        know them (YTDL-WEB-8, 2026-08-14): routes_fleet falls back to the
+        existing row for each, exactly as the NAS worker's `res.get('channel')
+        or v['channel']` does, and a pasted-link job's row -- which has no
+        channel until a download reports one -- must not be overwritten with a
+        None by the executor that could not read an info json.
+        """
+        body = {"state": state, "error": error, "note": note,
+                "filepath_rel": filepath_rel}
+        if title:
+            body["title"] = title
+        if channel:
+            body["channel"] = channel
+        status, parsed = self._call(
+            "POST", f"/jobs/{job_id}/clips/{urllib.parse.quote(str(video_id), safe='')}"
+                    "/status", body)
+        if status != 200:
+            log.warning("ytdl: job %s clip %s: the dashboard refused the %r "
+                        "status (HTTP %s: %s)", job_id, video_id, state, status,
+                        _detail_of(parsed) or "no detail")
+
+
+def _detail_of(parsed: Any) -> str:
+    """FastAPI's error body -> one readable line. Never raises."""
+    try:
+        detail = parsed.get("detail") if isinstance(parsed, dict) else None
+        if isinstance(detail, dict):
+            return str(detail.get("detail") or detail)
+        return str(detail or "")
+    except Exception:
+        return ""
+
+
+def _detail_dict(parsed: Any) -> dict:
+    """routes_fleet's structured `detail` payload, or {}. Never raises."""
+    try:
+        detail = parsed.get("detail") if isinstance(parsed, dict) else None
+        return detail if isinstance(detail, dict) else {}
+    except Exception:
+        return {}
+
+
+def _warn_on_a_version_floor_we_rank_differently(parsed: Any,
+                                                 ours: Optional[str]) -> None:
+    """Say so when the server calls our yt-dlp stale and we call it current.
+
+    COMP-BROLL-9 (2026-08-14). The two sides rank the same two strings with
+    different rules: this one parses them into tuples of ints
+    (ytdlp_manager.version_is_older -> upgrade.parse_version), the dashboard
+    compares the raw strings, which is exact for yt-dlp's own zero-padded
+    YYYY.MM.DD output and NOT for the free-text `YTDL_MIN_YTDLP_VERSION` an
+    operator types. One unpadded floor ('2026.8.5') therefore 403s every claim
+    from every machine in the fleet while every companion concludes it has
+    nothing to update -- local downloads silently dead everywhere, and the only
+    log line anywhere says the yt-dlp is old.
+
+    The ranking here is the correct one and is deliberately NOT bent to match;
+    what this adds is the sentence that names the cause, because the failure is
+    a config typo on the NAS and nothing on this side can fix it.
+    """
+    detail = _detail_dict(parsed)
+    if str(detail.get("reason") or "") != "ytdlp_version":
+        return
+    floor = str(detail.get("min_ytdlp_version") or "").strip()
+    if not floor or not ours:
+        return
+    if ytdlp_manager.version_is_older(ours, floor):
+        return          # ordinary staleness; the sidecar updates itself
+    log.warning(
+        "ytdl: the dashboard refused this machine's yt-dlp %s as older than "
+        "its minimum %r, but %s is not older than %r by version order. The "
+        "fleet minimum is probably not zero-padded (YTDL_MIN_YTDLP_VERSION on "
+        "the dashboard); until it is, every machine's downloads run on the "
+        "server.", ours, floor, ours, floor)
+
+
+# ---------------------------------------------------------------------------
+# files on disk
+# ---------------------------------------------------------------------------
+
+
+def is_sweepable(name: str) -> bool:
+    """yt-dlp's own litter for one clip -- in flight OR finished-but-unmerged.
+
+    The suffix half is worker._sweepable, verbatim rule. The stem half is
+    COMP-BROLL-3's addition (see _INTERMEDIATE_STEM_RE): a `... [id].f137.mp4`
+    that yt-dlp finished and kept for resume is not "in flight" by any suffix
+    test, and it was the one thing here that nothing on the machine ever
+    deleted. The server worker's _sweepable should grow the same rule -- until
+    it does, this side simply cleans up more thoroughly than that one.
+    """
+    path = Path(str(name))
+    if path.suffix in SWEEPABLE_SUFFIXES or path.suffix.startswith(".part-Frag"):
+        return True
+    return bool(_INTERMEDIATE_STEM_RE.search(path.stem))
+
+
+def id_bearing_files(outdir: Any, video_id: str) -> set:
+    """{name} of everything in outdir carrying `[video_id]`.
+
+    Substring, never a glob: a video id may contain any of `[]-_` and one bad
+    escape silently matches nothing (worker._id_bearing_files).
+    """
+    try:
+        return {p.name for p in Path(str(outdir)).iterdir()
+                if p.is_file() and f"[{video_id}]" in p.name}
+    except OSError:
+        return set()
+
+
+def landed_file(outdir: Any, video_id: str) -> Optional[str]:
+    """The FINISHED file this clip left in `outdir`, or None.
+
+    The `[id]`-at-the-end-of-the-stem anchor (worker._landed_file, and
+    ytsearch._ID_RE's rule, YTDL-27) is what keeps `... [id].info.json` and
+    `... [id].credits.json` from being read as the clip itself: their stems end
+    in `.info` / `.credits`, not in `[id]`. A DISOWNED corpse is skipped for
+    worker._landed_file's other reason: a previous attempt's leftover is not
+    this attempt's output.
+    """
+    for name in sorted(id_bearing_files(outdir, video_id)):
+        if is_sweepable(name) or name.endswith(DISOWNED_SUFFIX):
+            continue
+        if Path(name).stem.endswith(f"[{video_id}]"):
+            return name
+    return None
+
+
+def clear_partials(outdir: Any, video_id: str) -> None:
+    """Delete THIS clip's own in-progress leftovers. Never fatal.
+
+    ID-SCOPED, never a glob of the folder (worker._clear_partials): the term
+    folder is shared with every other clip of the search, and a `.part` in
+    there may belong to a download that is still running -- another editor's,
+    even, since both executors write into one canonical tree.
+
+    SAQBbd1Rxmo (2026-08-13) is why it happens at all: a give-up left a 10 MB
+    `... [id].f137.mp4.part` behind forever, and yt-dlp RESUMES a .part, so
+    every later attempt started from the poisoned bytes and died the same way.
+    """
+    for name in id_bearing_files(outdir, video_id):
+        if not is_sweepable(name):
+            continue
+        try:
+            (Path(str(outdir)) / name).unlink()
+        except OSError as exc:
+            log.warning("ytdl: could not remove %s in %s (%s); a later retry "
+                        "may resume from it", name, outdir, exc)
+
+
+def disown_output(outdir: Any, video_id: str, before: set) -> None:
+    """Rename what a FAILED attempt landed so nothing downstream reads it.
+
+    worker._disown_output's rule (YTDL-3, 2026-08-11), which this executor was
+    missing entirely: a download that got as far as a real file and then died
+    left `... [id].mp4` in the term folder -- unledgered, half-written, and
+    carrying the `[id]` the disk-scan dedupe anchors on, so every later search
+    called the clip "already in the fleet" and pointed the editor at a file
+    they cannot open. On THIS side it is worse than on the NAS's, because lane
+    A would then carry the corpse up to the NAS and lane B fan it out; the
+    `.failed` suffix takes it out of that include list too.
+
+    Only files that were NOT there before this attempt are touched, and yt-dlp's
+    own resume state is left to clear_partials. Never fatal.
+    """
+    for name in id_bearing_files(outdir, video_id) - set(before or ()):
+        if is_sweepable(name) or name.endswith(DISOWNED_SUFFIX):
+            continue
+        path = Path(str(outdir)) / name
+        try:
+            path.rename(path.with_name(name + DISOWNED_SUFFIX))
+        except OSError as exc:
+            log.warning("ytdl: could not disown %s (%s); it may block "
+                        "re-downloading %s until it is removed by hand",
+                        path, exc, video_id)
+
+
+def info_scratch_dir() -> Optional[Path]:
+    """Where `--write-info-json` may write, OUTSIDE the canonical tree.
+
+    COMP-BROLL-1's destination (see INFO_JSON_DIR_NAME for what writing it
+    beside the footage cost). None when neither candidate can be created, which
+    the caller answers by not asking yt-dlp for an info json at all: a clip with
+    no credits sidecar is a smaller problem than permanent fleet-wide litter,
+    and write_sidecar already handles "there was no info json" as an ordinary
+    outcome.
+    """
+    candidates = []
+    try:
+        candidates.append(ytdlp_manager.tools_dir().parent / INFO_JSON_DIR_NAME)
+    except Exception:
+        log.debug("ytdl: could not derive the tools dir", exc_info=True)
+    try:
+        candidates.append(Path(tempfile.gettempdir()) / ("ccsync-" + INFO_JSON_DIR_NAME))
+    except Exception:
+        log.debug("ytdl: could not derive a temp dir", exc_info=True)
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except OSError as exc:
+            log.debug("ytdl: %s is not usable for info json (%s)", candidate, exc)
+    log.warning("ytdl: nowhere outside the project tree to put yt-dlp's info "
+                "json -- downloading without one, so these clips get no "
+                "credits sidecar")
+    return None
+
+
+def info_json_template(scratch: Any) -> str:
+    """The `-o infojson:` template. `%(id)s` and nothing else from the clip.
+
+    Deliberately NOT the outtmpl: this file never travels, so it needs no
+    uploader/title (which is also what keeps it clear of Windows' 260-character
+    limit, COMP-BROLL-8's neighbour). yt-dlp forces the extension to
+    `info.json` for this output type, so the result is `<scratch>/<id>.info.json`
+    -- a name this side can predict without parsing yt-dlp's output. Measured
+    against yt-dlp 2026.08.04 on 2026-08-14: `-o infojson:<abs path>` is
+    honoured even though the default `-o` is absolute (`--paths` is NOT, which
+    is why this is spelled as a second output template and not as `-P`).
+    """
+    return "infojson:" + os.path.join(str(scratch), "%(id)s.%(ext)s")
+
+
+def scratch_info_json(scratch: Any, video_id: str) -> Optional[Path]:
+    """The redirected info json for one clip, or None if it is not there."""
+    if not scratch or not video_id:
+        return None
+    candidate = Path(str(scratch)) / f"{video_id}.info.json"
+    try:
+        return candidate if candidate.is_file() else None
+    except OSError:
+        return None
+
+
+def info_json_for(outdir: Any, video_id: str, video_name: Optional[str]) -> Optional[Path]:
+    """The `--write-info-json` file for this clip IN THE TREE, or None.
+
+    yt-dlp writes it as `<name-without-extension>.info.json`, so the video's
+    own name answers it directly; the id scan is the fallback for the case
+    where the video is not where we expected but its metadata is.
+
+    Since COMP-BROLL-1 this is the fallback path only -- the info json is
+    redirected out of the tree (info_json_template) and normally found by
+    scratch_info_json. It stays because a yt-dlp that ignored the per-type
+    output template would otherwise silently lose every sidecar, and because
+    the sidecar has to be written from wherever the info json actually is.
+    """
+    directory = Path(str(outdir))
+    if video_name:
+        candidate = directory / (Path(video_name).stem + ".info.json")
+        if candidate.exists():
+            return candidate
+    for name in sorted(id_bearing_files(directory, video_id)):
+        if name.endswith(".info.json"):
+            return directory / name
+    return None
+
+
+def write_sidecar(video_path: Path,
+                  info_path: Optional[Path]) -> tuple[Optional[str], Optional[dict]]:
+    """`<video>.credits.json` from yt-dlp's info json, then delete the info json.
+
+    -> (sidecar path or None, the parsed info dict or None). The dict is handed
+    back rather than discarded because the clip's `done` post carries the title
+    and channel into the ledger (YTDL-WEB-8, 2026-08-14): a pasted-link job's
+    row has no channel at all until a download reports one, and this is the
+    only place on this side that ever knows it. The two halves are deliberately
+    INDEPENDENT -- a parsed dict whose sidecar could not be written is still
+    the right answer for the status post (COMP-BROLL-8's other half).
+
+    The sidecar is the contract (ytdl_common.credits_sidecar/sidecar_path); the
+    info json is 40-200 KB of yt-dlp internals per clip and is NOT -- the
+    downstream Resolve credits script reads the sidecar, and the NAS worker
+    produces no info json at all (downloader.build_opts sets no writeinfojson;
+    it reads the info dict in-process). Deleting it is housekeeping in the
+    scratch dir it now lives in, not the fleet-wide hazard it was before
+    COMP-BROLL-1 moved it out of the tree.
+
+    ONLY ON SUCCESS, though (COMP-BROLL-8, 2026-08-14): the unlink used to run
+    whatever happened above it, so an unreadable info json or a failed sidecar
+    write -- a full disk, a share that dropped, a name over Windows' 260
+    characters -- destroyed the one artifact the credits could have been
+    rebuilt from, for a clip that is then reported `done` and never revisited.
+    A leftover info json is recoverable; a deleted one is not.
+
+    Never raises: a clip that landed is a clip that landed, sidecar or not.
+    """
+    if info_path is None:
+        log.info("ytdl: no info json beside %s -- no credits sidecar written",
+                 video_path.name)
+        return None, None
+    try:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+    except Exception:
+        log.warning("ytdl: could not read %s -- no credits sidecar written",
+                    info_path.name, exc_info=True)
+        info = None
+    if not isinstance(info, dict):
+        info = None
+    target = None
+    if info is not None:
+        target = ytdl_common.sidecar_path(str(video_path))
+        try:
+            # `indent=2, ensure_ascii=False`, matching downloader._write_sidecar
+            # exactly: §5 says BYTE-identical artifacts, and ensure_ascii
+            # defaults to True -- so without it every CJK or accented title
+            # would be \u-escaped here and literal on the NAS. Same file, two
+            # encodings, one canonical tree.
+            #
+            # newline="\n" for the other half of the same rule: text mode
+            # translates "\n" to os.linesep, so a Windows editor would write
+            # CRLF into a file the Linux container writes LF into -- two byte
+            # streams for one artifact, and on the base rig (whose local_root
+            # IS the NAS share) both spellings would land in the same folder.
+            # The repo learned this once already, from a CRLF run.sh that took
+            # the dashboard down (.gitattributes, CLAUDE.md).
+            Path(target).write_text(
+                json.dumps(ytdl_common.credits_sidecar(info), indent=2,
+                           ensure_ascii=False),
+                encoding="utf-8", newline="\n")
+        except OSError:
+            log.warning("ytdl: could not write the credits sidecar for %s -- "
+                        "keeping %s so it can be rebuilt from",
+                        video_path.name, info_path.name, exc_info=True)
+            target = None
+    if target is None:
+        return None, info
+    try:
+        info_path.unlink()
+    except OSError:
+        log.debug("ytdl: could not remove %s", info_path, exc_info=True)
+    return target, info
+
+
+# ---------------------------------------------------------------------------
+# the job
+# ---------------------------------------------------------------------------
+
+
+class DownloadJob:
+    """One claimed job, executed on this machine. One at a time (see start()).
+
+    Threads: the caller's daemon thread runs run(); a second daemon thread
+    heartbeats the lease while it does. The heartbeat thread is the only thing
+    that can cut a download short, and it does so for exactly one reason -- a
+    410, i.e. the server has taken the job back.
+    """
+
+    def __init__(self, job_id: int, deps: Deps) -> None:
+        self.job_id = int(job_id)
+        self.deps = deps
+        self.client: Optional[FleetClient] = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()          # tray shutdown
+        self._lease_lost = threading.Event()    # a 410, anywhere
+        self._proc: Optional[Any] = None
+        self._current: Optional[tuple] = None   # (outdir, video_id) in flight
+        # Resolved once per job, when there is work: yt-dlp's info json goes
+        # here and NEVER into the project tree (COMP-BROLL-1). None = this
+        # machine has nowhere to put one, so none is asked for.
+        self.info_dir: Optional[Path] = None
+        self.running = True
+        self.total = 0
+        self.done = 0
+        self.failed = 0
+        self.clip: Optional[str] = None
+
+    # -- progress mirror --------------------------------------------------
+    def snapshot(self) -> dict:
+        """What GET /ytdl/progress answers. The SERVER rows remain the truth
+        (§7) -- this exists so the SPA can show something in the first seconds,
+        before the first status post has made the round trip."""
+        with self._lock:
+            return {"job_id": self.job_id, "running": self.running,
+                    "clip": self.clip, "done": self.done,
+                    "failed": self.failed, "total": self.total}
+
+    def _set(self, **fields) -> None:
+        with self._lock:
+            for key, value in fields.items():
+                setattr(self, key, value)
+
+    # -- lease ------------------------------------------------------------
+    def _register_proc(self, proc: Any) -> None:
+        with self._lock:
+            self._proc = proc
+        if self._lease_lost.is_set() or self._stop.is_set():
+            # The lease went away between the decision to spawn and the spawn
+            # itself. Kill it here rather than let a download run on for an
+            # hour on a job the server has already taken back.
+            self._kill_proc()
+
+    def _kill_proc(self) -> None:
+        with self._lock:
+            proc = self._proc
+        if proc is None:
+            return
+        try:
+            proc.kill()
+        except Exception:
+            log.debug("ytdl: could not kill yt-dlp", exc_info=True)
+
+    def lose_lease(self, why: str) -> None:
+        """A 410 arrived. Stop everything, quietly (module docstring, rule 2)."""
+        if self._lease_lost.is_set():
+            return
+        self._lease_lost.set()
+        log.info("ytdl: job %s is no longer ours (%s) -- stopping; the server "
+                 "downloads what is missing", self.job_id, why)
+        self._kill_proc()
+
+    def stop(self) -> None:
+        """Tray shutdown. Same shape as broll_fetch.stop_all's cancel: killing
+        mid-download is safe, because the litter it leaves is id-scoped and the
+        next executor -- ours or the server's -- clears it."""
+        self._stop.set()
+        self._kill_proc()
+
+    def _should_stop(self) -> bool:
+        return self._lease_lost.is_set() or self._stop.is_set()
+
+    def _heartbeat_loop(self, interval: float) -> None:
+        while not self._stop.wait(interval):
+            if self._lease_lost.is_set():
+                return
+            try:
+                self.client.heartbeat(self.job_id)
+            except LeaseLost as exc:
+                self.lose_lease(str(exc))
+                return
+            except Exception as exc:
+                # A blip, not a verdict: the lease is 180 s and this runs every
+                # 30 s, so six failures in a row are needed before it matters --
+                # and when it does, the next call answers 410 and we stop then.
+                log.debug("ytdl: heartbeat for job %s failed (%s)", self.job_id, exc)
+
+    # -- the run ----------------------------------------------------------
+    def run(self) -> None:
+        """Thread target. Never raises, never leaves the module guard held."""
+        try:
+            self._run()
+        except LeaseLost as exc:
+            self.lose_lease(str(exc))
+            self._cleanup_current()
+        except Exception:
+            log.exception("ytdl: job %s failed", self.job_id)
+        finally:
+            self._set(running=False, clip=None)
+            _release(self)
+
+    def _run(self) -> None:
+        cap = capabilities(self.deps)
+        if not cap["ok"]:
+            log.info("ytdl: job %s not started -- %s", self.job_id, cap["reason"])
+            return
+
+        # BEFORE the claim (§7, the 0.7.x free-space lesson). The claim body
+        # wants the number anyway, so this costs nothing extra.
+        free = cap["free_bytes"]
+        needed = MIN_FREE_BYTES_MARGIN + NOMINAL_JOB_BYTES
+        if free is not None and free < needed:
+            log.warning(
+                "ytdl: %.1f GB free on this machine but a download job needs "
+                "about %.1f GB -- not claiming job %s. The server downloads it.",
+                free / 1_000_000_000, needed / 1_000_000_000, self.job_id)
+            return
+
+        editor = cap["editor"]
+        self.client = FleetClient(self.deps, editor)
+        lease = self.client.claim(self.job_id, cap["ytdlp_version"], free)
+        if lease is None:
+            return
+
+        heartbeat = _positive_number(lease.get("heartbeat_seconds"),
+                                     DEFAULT_HEARTBEAT_SECONDS)
+        thread = threading.Thread(target=self._heartbeat_loop, args=(heartbeat,),
+                                  name=f"ccsync-ytdl-hb-{self.job_id}", daemon=True)
+        thread.start()
+        try:
+            self._download_all()
+        finally:
+            # Stops the heartbeat WITHOUT ending the lease: there is no
+            # "release" call in routes_fleet, and there does not need to be --
+            # the server reclaims on expiry (<=lease_seconds, shipped as 180 s)
+            # and then downloads only what is missing (§3). That is the exit
+            # path for every early return below, and it is cheap and honest:
+            # three minutes of a job sitting still, versus a second endpoint
+            # whose failure mode is a job nobody owns.
+            self._stop.set()
+
+    def _download_all(self) -> None:
+        manifest = self.client.manifest(self.job_id)
+        if not manifest:
+            return
+
+        # Belt to the claim's braces: routes_fleet.claim already refuses a
+        # template skew (410), so reaching here means the server changed its
+        # mind mid-job or a proxy served a stale answer. Either way, downloading
+        # under a template we do not share is the one thing §5 forbids.
+        template = manifest.get("template_version")
+        if template != ytdl_common.TEMPLATE_VERSION:
+            log.warning("ytdl: job %s speaks naming template %s, this build "
+                        "speaks %s -- handing it back", self.job_id, template,
+                        ytdl_common.TEMPLATE_VERSION)
+            return
+
+        # The other half of the same handshake (COMP-BROLL-6). Checked here as
+        # well as in the claim because the two numbers fail differently: a
+        # template skew duplicates clips, a sidecar skew feeds the Resolve
+        # credits script a shape it does not read -- and the second is invisible
+        # in the tree, so nothing else would ever notice it.
+        sidecar = manifest.get("sidecar_version")
+        if sidecar != ytdl_common.SIDECAR_VERSION:
+            log.warning("ytdl: job %s wants credits sidecar version %s, this "
+                        "build writes %s -- handing it back", self.job_id,
+                        sidecar, ytdl_common.SIDECAR_VERSION)
+            return
+
+        quality = str(manifest.get("quality") or "").strip()
+        if quality not in SCOPE_QUALITIES:
+            # The SPA does not know the quality when it dispatches (it sends a
+            # job id and nothing else, §8), so this cannot be declined before
+            # the claim. Nothing is posted and nothing is downloaded; the lease
+            # simply expires and the server picks the job up as if no companion
+            # had ever answered. See SCOPE_QUALITIES for why these rungs are
+            # not ours to run.
+            log.info("ytdl: job %s is a %s job, which only the server can name "
+                     "correctly -- letting the lease expire", self.job_id,
+                     quality or "(no quality)")
+            return
+
+        label = manifest.get("project_label")
+        if not self._label_is_ours(label):
+            return
+
+        outdir = destination_for(self.deps.cfg, manifest.get("project_rel_path"))
+        if not outdir:
+            log.warning("ytdl: job %s named a destination this machine cannot "
+                        "resolve (%r) -- downloading nothing", self.job_id,
+                        manifest.get("project_rel_path"))
+            return
+        try:
+            Path(outdir).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("ytdl: could not create %s (%s) -- downloading nothing",
+                        outdir, exc)
+            return
+
+        clips = [c for c in (manifest.get("clips") or []) if isinstance(c, dict)]
+        pause = _positive_number(manifest.get("download_pause_seconds"),
+                                 DEFAULT_PAUSE_SECONDS)
+        self.info_dir = info_scratch_dir()
+        self._set(total=len(clips))
+        log.info("ytdl: job %s -- %d clip(s) at %s into %s", self.job_id,
+                 len(clips), quality, outdir)
+
+        for index, clip in enumerate(clips):
+            if self._should_stop():
+                self._cleanup_current()
+                return
+            if index:
+                # Residential pacing, server-provided (§7): the NAS's 3 s is a
+                # bot-check defence for ONE static IP, and an editor's own line
+                # can afford to be gentler or brisker as the server decides.
+                self.deps.sleep(pause)
+                if self._should_stop():
+                    self._cleanup_current()
+                    return
+            self._download_one(clip, outdir, quality)
+
+    def _label_is_ours(self, label: Any) -> bool:
+        """Does this machine sync the project the manifest names? (§7)
+
+        THE POINT IS THE DISK, not authorisation: the token already proved the
+        caller is our dashboard. A server bug that pointed an editor's machine
+        at a project it does not sync would write gigabytes into a folder
+        nothing on that machine watches, uploads or ever cleans up -- and on
+        the base rig, straight into the canonical tree under a label nobody
+        chose.
+
+        The base rig is the documented exception and not a hole: its local_root
+        IS the NAS share, so it "syncs" every project by definition and has no
+        selection to check against. The directory-exists test replaces it,
+        which still refuses a label that names nothing real.
+        """
+        wanted = normalize_label(label)
+        if not wanted:
+            log.warning("ytdl: job %s named no project label -- downloading "
+                        "nothing", self.job_id)
+            return False
+        if self.deps.is_base_rig:
+            root = projects_root(self.deps.cfg)
+            here = Path(root) / Path(*wanted.split("/")) if root else None
+            if here is not None and here.is_dir():
+                return True
+            log.warning("ytdl: job %s names project %r, which is not in this "
+                        "base rig's tree -- downloading nothing", self.job_id,
+                        label)
+            return False
+        labels = self.deps.selection_labels()
+        if labels is None:
+            log.warning("ytdl: job %s names project %r and this machine cannot "
+                        "confirm what it syncs -- downloading nothing (the "
+                        "server will)", self.job_id, label)
+            return False
+        if wanted in labels:
+            return True
+        log.warning("ytdl: job %s names project %r, which this machine does not "
+                    "sync -- downloading nothing", self.job_id, label)
+        return False
+
+    # -- one clip ---------------------------------------------------------
+    def _download_one(self, clip: dict, outdir: str, quality: str) -> None:
+        video_id = str(clip.get("video_id") or "").strip()
+        url = clip.get("url")
+        if not video_id:
+            log.warning("ytdl: job %s has a clip with no video id -- skipping it",
+                        self.job_id)
+            return
+        self._set(clip=video_id)
+        if not url_is_youtube(url):
+            # Recorded as a failure rather than silently skipped: the row has to
+            # say something, and the server's second-chance sweep is what gets
+            # the editor their clip if the URL is fine and this check is wrong.
+            log.warning("ytdl: job %s clip %s: refusing a non-YouTube URL (%r)",
+                        self.job_id, video_id, url)
+            self.client.clip_status(self.job_id, video_id, "failed",
+                                    error="the download URL was not a YouTube "
+                                          "URL, so this machine refused it")
+            self._set(failed=self.failed + 1)
+            return
+
+        # Marked in flight BEFORE the first post, not after: if the `downloading`
+        # post is the call that answers 410, this clip is still the one whose
+        # litter has to be cleaned on the way out.
+        self._current = (outdir, video_id)
+        # What was already there, for disown_output: a corpse this attempt did
+        # not create belongs to whoever did (worker._record_failure's `before`).
+        before = id_bearing_files(outdir, video_id)
+        self.client.clip_status(self.job_id, video_id, "downloading")
+
+        ok, note, error = self._run_ytdlp_with_fallback(url, outdir, quality, video_id)
+        if self._should_stop():
+            # A lost lease (or a tray shutdown) killed the child. Nothing is
+            # posted -- the job is not ours to report on any more -- and this
+            # clip's own litter goes with it.
+            self._cleanup_current()
+            return
+
+        if not ok:
+            self._fail_clip(outdir, video_id, before, error)
+            return
+
+        name = landed_file(outdir, video_id)
+        if not name:
+            # yt-dlp exited 0 and left nothing whose stem ends in [id]. Reported
+            # as a failure for YTDL-15's reason, applied on this side: a `done`
+            # with no file writes a ledger row that says "the fleet already has
+            # this" and points at nothing, and the ledger never cascades.
+            self._fail_clip(outdir, video_id, before,
+                            "yt-dlp reported success but left no output file")
+            return
+
+        video_path = Path(outdir) / name
+        # The scratch copy first (COMP-BROLL-1); the in-tree one is the fallback
+        # for a yt-dlp that ignored the per-type output template.
+        info_path = (scratch_info_json(self.info_dir, video_id)
+                     or info_json_for(outdir, video_id, name))
+        _sidecar, info = write_sidecar(video_path, info_path)
+        # The ledger's title and channel, from the one dict on this machine
+        # that knows them (YTDL-WEB-8). Read through credits_sidecar rather
+        # than off the info dict directly so the `channel or uploader` fallback
+        # is the SAME one the sidecar and the NAS worker use -- a clip must not
+        # be credited to one name in its sidecar and another in the ledger.
+        credits = ytdl_common.credits_sidecar(info) if info else {}
+        self.client.clip_status(self.job_id, video_id, "done",
+                                filepath_rel=name, note=note,
+                                title=credits.get("title"),
+                                channel=credits.get("channel"))
+        self._set(done=self.done + 1)
+        self._current = None
+
+    def _fail_clip(self, outdir: str, video_id: str, before: set,
+                   error: str) -> None:
+        """This clip is over. Disown what it landed, delete what it half-landed.
+
+        worker._record_failure's order and its reason: ANY final failure can
+        leave a `.part` behind (SAQBbd1Rxmo, 2026-08-13), and a clip that has
+        finished failing has no resume state worth keeping -- the server's
+        second-chance sweep starts it over from nothing (§2 step 7).
+        """
+        disown_output(outdir, video_id, before)
+        clear_partials(outdir, video_id)
+        self._drop_scratch_info(video_id)
+        self.client.clip_status(self.job_id, video_id, "failed", error=error)
+        self._set(failed=self.failed + 1)
+        self._current = None
+
+    def _drop_scratch_info(self, video_id: str) -> None:
+        """Bin the redirected info json for a clip that will not get a sidecar.
+
+        Housekeeping only -- it is outside the tree (COMP-BROLL-1), so nothing
+        depends on it going. The one copy deliberately left behind is the one
+        write_sidecar could not write a sidecar from (COMP-BROLL-8).
+        """
+        path = scratch_info_json(self.info_dir, video_id)
+        if path is None:
+            return
+        try:
+            path.unlink()
+        except OSError:
+            log.debug("ytdl: could not remove %s", path, exc_info=True)
+
+    def _run_ytdlp_with_fallback(self, url: Any, outdir: str, quality: str,
+                                 video_id: str) -> tuple[bool, Optional[str], Optional[str]]:
+        """-> (ok, note, error). ONE rung down on a truncated stream, never two.
+
+        The signature and the ladder are ytdl_common's, shared with the NAS
+        worker, so both executors make the SAME call from the same evidence --
+        or the fleet ends up with one clip at 1080p on the NAS and the same clip
+        at 720p on an editor's machine, or a failure on one side and a silent
+        downgrade on the other (SAQBbd1Rxmo, 2026-08-13).
+
+        Matched as TEXT, on the binary's stderr: there is no DownloadError class
+        on a CLI boundary -- ytdl_common.stream_truncated's docstring anticipates
+        exactly this case -- so the class test it makes for the worker is
+        replaced by "the process failed", and BOTH markers are still required.
+        The byte-count phrase alone is the ordinary short read yt-dlp retries
+        out of by itself; "giving up after" is what says the retry budget is
+        spent and the FORMAT, rather than the moment, is the problem. Nothing
+        else may cost an editor 360 lines of resolution nobody asked to lose.
+        """
+        ok, stderr = self._run_ytdlp(url, outdir, quality)
+        if ok:
+            return True, None, None
+        if self._should_stop():
+            return False, None, None
+        lower = (ytdl_common.lower_quality(quality, ytdl_common.QUALITY_HEIGHTS)
+                 if _looks_truncated(stderr) else None)
+        if lower is None or lower not in SCOPE_QUALITIES:
+            return False, None, _error_tail(stderr)
+        log.warning("ytdl: job %s: %s came back truncated at %s; retrying at %s",
+                    self.job_id, video_id, quality, lower)
+        # The .part IS the truncated bytes and yt-dlp resumes a .part, so the
+        # retry has to start from nothing or it inherits the corpse.
+        clear_partials(outdir, video_id)
+        ok, stderr2 = self._run_ytdlp(url, outdir, lower)
+        if ok:
+            return True, ytdl_common.TRUNCATED_NOTE.format(q=quality, lower=lower), None
+        return False, None, _error_tail(stderr2)
+
+    def _run_ytdlp(self, url: Any, outdir: str, quality: str) -> tuple[bool, str]:
+        argv = self.build_argv(url, outdir, quality)
+        try:
+            proc = self.deps.run(argv, CLIP_TIMEOUT_SECONDS, self._register_proc)
+        except subprocess.TimeoutExpired:
+            return False, (f"yt-dlp did not finish within "
+                           f"{CLIP_TIMEOUT_SECONDS / 3600:.0f}h and was killed")
+        except Exception as exc:
+            return False, f"yt-dlp could not be run: {exc}"
+        finally:
+            with self._lock:
+                self._proc = None
+        if getattr(proc, "returncode", 1) == 0:
+            return True, ""
+        return False, str(getattr(proc, "stderr", "") or "")
+
+    def build_argv(self, url: Any, outdir: str, quality: str) -> list:
+        """The yt-dlp command line. The NAMING half of it is the contract.
+
+        `-f`, the outtmpl and the mp4 container are ytdl_common's and the
+        server's build_opts', spelled the same way on purpose: same rung, same
+        request to YouTube, same filename out. `prefer_avc=True` because the
+        edit codec is h264 -- which is also why the rungs above 1080p are not
+        run here at all (SCOPE_QUALITIES).
+
+        The embedded credits tags are the same contract's other half
+        (CREDITS_METADATA_ARGS, COMP-BROLL-2): the NAS embeds them, so a clip
+        fetched here must too, or one folder holds two shapes of the same clip
+        and only ffprobe can tell.
+
+        --no-playlist because a URL that turned out to name a playlist must not
+        become forty unasked-for downloads on an editor's disk; --write-info-json
+        because the credits sidecar is built from it -- redirected OUT of the
+        project tree, because that folder syncs fleet-wide and a delete in it
+        does not (COMP-BROLL-1); --ffmpeg-location because the merge needs it
+        and the proxy generator already knows where it is (§6: no new binary
+        management). The flag is conditional only for a caller who bypassed
+        capabilities(), which refuses the job when ffmpeg does not resolve.
+        """
+        argv = [
+            str(self.deps.ytdlp_binary()),
+            "-f", ytdl_common.format_selector(quality, prefer_avc=True),
+            "--merge-output-format", "mp4",
+            "-o", ytdl_common.outtmpl(outdir),
+            "--no-playlist",
+            "--no-progress",
+        ]
+        argv += list(CREDITS_METADATA_ARGS)
+        if self.info_dir is not None:
+            argv += ["--write-info-json", "-o", info_json_template(self.info_dir)]
+        ffmpeg_dir = _ffmpeg_location(self.deps.cfg)
+        if ffmpeg_dir:
+            argv += ["--ffmpeg-location", ffmpeg_dir]
+        argv.append(str(url))
+        return argv
+
+    def _cleanup_current(self) -> None:
+        """Delete the in-flight clip's own litter. Id-scoped, never fatal."""
+        current = self._current
+        self._current = None
+        if current is None:
+            return
+        outdir, video_id = current
+        clear_partials(outdir, video_id)
+        self._drop_scratch_info(video_id)
+
+
+def _looks_truncated(stderr: Any) -> bool:
+    low = str(stderr or "").lower()
+    return all(marker in low for marker in ytdl_common.TRUNCATION_MARKERS)
+
+
+def _error_tail(stderr: Any, limit: int = 400) -> str:
+    """The last few lines of yt-dlp's stderr, for the clip row.
+
+    The TAIL and not the head: yt-dlp's first lines are warnings about the
+    extractor and its last are what actually went wrong. Trimmed because
+    routes_fleet stores 500 characters and a wall of text in a job row helps
+    nobody read it.
+    """
+    text = " ".join(str(stderr or "").split())
+    if not text:
+        return "the download failed and yt-dlp said nothing"
+    return text[-limit:]
+
+
+def _ffmpeg_location(cfg: dict[str, Any]) -> Optional[str]:
+    """The directory holding this machine's ffmpeg, or None. Never raises."""
+    try:
+        configured = str((cfg or {}).get("ffmpeg_path",
+                                         config_mod.DEFAULTS.get("ffmpeg_path", "ffmpeg")) or "")
+        resolved = ffmpeg_tools._resolve_binary(configured)
+        return os.path.dirname(resolved) if resolved else None
+    except Exception:
+        return None
+
+
+def _positive_number(value: Any, fallback: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if number > 0 else fallback
+
+
+# ---------------------------------------------------------------------------
+# the module guard: ONE job at a time
+# ---------------------------------------------------------------------------
+#
+# Module level and not per-server, because the thing being protected is the
+# MACHINE: two jobs downloading at once would compete for the same line, and
+# two claims from one editor is exactly the "two browser tabs" case the lease
+# is designed around (§11). The 409 below is the local half of that.
+
+_GUARD = threading.Lock()
+_CURRENT: Optional[DownloadJob] = None
+_LAST: Optional[dict] = None
+
+
+def _release(job: DownloadJob) -> None:
+    global _CURRENT, _LAST
+    with _GUARD:
+        if _CURRENT is job:
+            _CURRENT = None
+        _LAST = job.snapshot()
+
+
+def current_job() -> Optional[DownloadJob]:
+    with _GUARD:
+        return _CURRENT
+
+
+def start(job_id: Any, deps: Deps) -> tuple[int, dict]:
+    """POST /ytdl/download's logic. -> (http_status, json_body).
+
+    202 the moment the thread is spawned: the SPA is waiting on this response
+    and the job takes minutes, so nothing about the download may happen on the
+    request thread. 409 when this machine is already running one, 503 when the
+    capability is gone since the probe (an editor who switched the config off,
+    a signed-out tray, a yt-dlp that broke this morning).
+    """
+    global _CURRENT
+    job_id = _job_id_or_none(job_id)
+    if job_id is None:
+        return 400, {"ok": False, "message": "job_id must be a positive integer"}
+
+    # The running job is checked BEFORE the capability, and the order is the
+    # answer's usefulness: a machine with a download in flight is a machine
+    # that was capable when it started one, and "you are already downloading
+    # job 7" is what the second tab needs to hear. Capability can only have
+    # gone away underneath it (a sign-out, a config edit), and saying so here
+    # would send the SPA down the server path for a job this machine is
+    # already, visibly, working.
+    with _GUARD:
+        if _CURRENT is not None and _CURRENT.running:
+            return 409, {"ok": False, "job_id": _CURRENT.job_id,
+                         "message": f"this machine is already downloading job "
+                                    f"{_CURRENT.job_id}"}
+
+    cap = capabilities(deps)
+    if not cap["ok"]:
+        return 503, {"ok": False, "message": cap["reason"], "job_id": job_id}
+
+    with _GUARD:
+        if _CURRENT is not None and _CURRENT.running:
+            # Re-checked under the lock the claim is taken with: capabilities()
+            # does a syscall, and two tabs a millisecond apart both passing the
+            # check above is exactly the race the lease exists for.
+            return 409, {"ok": False, "job_id": _CURRENT.job_id,
+                         "message": f"this machine is already downloading job "
+                                    f"{_CURRENT.job_id}"}
+        job = DownloadJob(job_id, deps)
+        _CURRENT = job
+
+    thread = threading.Thread(target=job.run, name=f"ccsync-ytdl-{job_id}",
+                              daemon=True)
+    try:
+        thread.start()
+    except Exception:
+        log.exception("ytdl: could not start the download thread for job %s", job_id)
+        _release(job)
+        return 503, {"ok": False, "job_id": job_id,
+                     "message": "the download thread could not be started"}
+    return 202, {"ok": True, "job_id": job_id, "state": "started"}
+
+
+def progress(job_id: Any = None) -> dict:
+    """GET /ytdl/progress's body. Small on purpose -- the server rows are the
+    truth (§7) and this is a first-seconds mirror, not a second ledger."""
+    wanted = _job_id_or_none(job_id)
+    job = current_job()
+    if job is not None and (wanted is None or job.job_id == wanted):
+        return job.snapshot()
+    with _GUARD:
+        last = dict(_LAST) if _LAST else None
+    if last is not None and (wanted is None or last.get("job_id") == wanted):
+        return last
+    return {"job_id": wanted, "running": False, "clip": None,
+            "done": 0, "failed": 0, "total": 0}
+
+
+def stop_all() -> None:
+    """Tray shutdown. Kills a download in flight; never raises.
+
+    Called from broll_server.stop for broll_fetch.stop_all's reason: a yt-dlp
+    still writing into the project tree after the tray exits is an orphan
+    nothing supervises. What it leaves is an id-scoped `.part`, which is
+    stignored on the editor side (2026-08-14) and which the next attempt --
+    ours or the server's -- clears before it downloads.
+    """
+    job = current_job()
+    if job is None:
+        return
+    try:
+        job.stop()
+    except Exception:
+        log.debug("ytdl: stopping the running job failed", exc_info=True)
+
+
+def _job_id_or_none(value: Any) -> Optional[int]:
+    """A job id off the wire, or None. THE ONLY THING READ FROM THE BODY (§8).
+
+    bools are refused explicitly: `isinstance(True, int)` is True in Python, so
+    a JSON `true` would otherwise become job 1. Strings are refused too -- the
+    SPA sends the id it read from the job row, which is a number.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None

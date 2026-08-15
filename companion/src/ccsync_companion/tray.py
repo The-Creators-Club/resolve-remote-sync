@@ -1646,7 +1646,15 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # because every consumer below treats it as "nothing to say".
     _get("proxy_gap", lambda: (getattr(app, "proxy_gap", None) or (lambda: {}))() or {}, {})
     _get("p_swap_available", lambda: (getattr(app, "p_swap_available", None) or (lambda: False))(), False)
-    _get("p_mode", lambda: (getattr(app, "p_mapping_mode", None) or (lambda: "none"))(), "none")
+    # The CACHED classification, never a probe: p_mapping_mode() spawns
+    # `net use P:` (plus a `subst` on a subst-mapped rig), and reading it here
+    # every 2 s meant its 10 s memo expired and re-populated forever -- a
+    # process fork on one tick in five, from the one place documented above as
+    # where nothing may stall (COMP-CORE-6, 2026-08-14). The app refreshes the
+    # cache on its slow media-tree tick and both swap actions invalidate it.
+    _get("p_mode", lambda: (getattr(app, "p_mapping_mode_cached", None)
+                            or getattr(app, "p_mapping_mode", None)
+                            or (lambda: "none"))(), "none")
     snap["color"] = compute_overall_color(statuses, app)
     _get("pulse", lambda: should_pulse(snap["color"], statuses), False)
     return snap

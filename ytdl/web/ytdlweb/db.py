@@ -18,7 +18,7 @@ apart, so an uncommitted counter is a counter that lies.
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # For SHOT_TYPES / DEFAULT_SHOT_TYPES only, and deliberately from there rather
@@ -29,7 +29,7 @@ from ytdlweb import claude_cli, config
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -47,6 +47,16 @@ _MIGRATIONS = {
         lambda con: 'shot_types' in _columns(con, 'jobs')),
     6: ('006_jobs_max_candidates.sql',
         lambda con: 'max_candidates' in _columns(con, 'jobs')),
+    # Two tables in one file, so the predicate asks about BOTH. _apply_migration
+    # wraps the script in its own transaction and sqlite's DDL is transactional,
+    # so a half-applied 007 should be impossible -- but the predicate, not the
+    # recorded version, is what decides here (migrations/README.md), and a
+    # predicate that only looked at `jobs` would call a database with no
+    # job_videos.download_host migrated and let every status post die on
+    # "no such column".
+    7: ('007_local_download.sql',
+        lambda con: ('download_mode' in _columns(con, 'jobs')
+                     and 'download_host' in _columns(con, 'job_videos'))),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -174,7 +184,17 @@ _JOB_COLS = frozenset({
 _VIDEO_COLS = frozenset({
     'url', 'title', 'channel', 'duration', 'upload_date', 'view_count',
     'thumbnail', 'meta_error', 'relevant', 'relevance_note', 'duplicate',
-    'duplicate_of', 'selected', 'dl_state', 'dl_error', 'filepath'})
+    'duplicate_of', 'selected', 'dl_state', 'dl_error', 'filepath',
+    'download_host'})
+
+# The claim/lease columns are deliberately NOT in _JOB_COLS. Every one of them
+# is written by a compare-and-set below (claim_download / heartbeat_download /
+# end_lease / reclaim_download / lock_mode), because "who holds this job" is
+# decided by a WHERE clause and not by a caller that read the row a moment ago
+# -- a set_job() path would be a second way to take a lease, with no CAS in it
+# (docs/YTDL_LOCAL_DOWNLOAD.md §3).
+MODE_SERVER = 'server'
+MODE_LOCAL = 'local'
 
 
 def now():
@@ -517,11 +537,261 @@ def claim_next_job(c):
     Serial by design: one job at a time, oldest first, and `downloading` is in
     the set because the download phase is entered by the API (the editor
     pressing DOWNLOAD), not by the phase before it.
+
+    A job an editor's companion is downloading right now (an unexpired lease,
+    docs/YTDL_LOCAL_DOWNLOAD.md §3) is INVISIBLE here rather than skipped by the
+    caller. Two reasons, and the second is the one that bites: a skip decided
+    after the row is handed over makes _tick report "I did work", and the loop
+    then re-ticks immediately -- a three-minute lease would be three minutes of
+    a spinning CPU inside the dashboard's single uvicorn process. Filtering in
+    SQL also lets the NEXT job through, which is what "one at a time" should
+    have meant all along: an editor downloading locally does not queue the
+    fleet behind them.
     """
     return c.execute(
         "SELECT * FROM jobs WHERE phase IN ('queued','generating_terms',"
-        "'searching','enriching','filtering','downloading') ORDER BY id "
-        'LIMIT 1').fetchone()
+        "'searching','enriching','filtering','downloading') "
+        "AND NOT (download_mode='local' AND lease_expires_at IS NOT NULL "
+        '          AND lease_expires_at > ?) '
+        'ORDER BY id LIMIT 1', (now(),)).fetchone()
+
+
+# ----------------------------------------- the claim/lease (requester-first)
+# docs/YTDL_LOCAL_DOWNLOAD.md §3. One holder per job; the holder can vanish
+# without telling anyone, so possession EXPIRES rather than being released.
+# Every write below is a compare-and-set with the whole rule in its WHERE
+# clause -- read-then-write would be a race between two browser tabs, and
+# "which machine is downloading these clips" is not a question two answers can
+# be given to.
+
+def _future(seconds):
+    """now() + seconds, in the exact shape now() produces.
+
+    Both halves of every lease comparison come from here or from now(), which
+    is why comparing these timestamps as STRINGS is sound: same producer, same
+    '+00:00' offset, same second resolution, so lexicographic order is
+    chronological order.
+    """
+    return (datetime.now(timezone.utc)
+            + timedelta(seconds=max(0, int(seconds)))).isoformat(timespec='seconds')
+
+
+def _column(row, key):
+    """row[key], or None if this row does not carry the column at all.
+
+    Same defensive read shot_types_of makes, for the same two cases: a partial
+    SELECT, and a database the migration has not reached yet (in which case
+    there is no lease, which is the correct answer).
+    """
+    if row is None:
+        return None
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def lease_active(job, at=None):
+    """Is a LOCAL executor holding this job right this second?
+
+    The one question the worker asks before touching a `downloading` job, and
+    the one the fleet endpoints ask before believing a status post.
+    """
+    if _column(job, 'download_mode') != MODE_LOCAL:
+        return False
+    expires = _column(job, 'lease_expires_at')
+    return bool(expires and str(expires) > (at or now()))
+
+
+def is_leaseholder(job, editor, at=None):
+    """Is `editor` the live leaseholder of this job?
+
+    `editor=None` means "somebody holds it and the caller did not say who" --
+    accepted, because the fleet token is the trust boundary here and the
+    identity a companion sends is self-asserted (the same posture the
+    dashboard's own selection route takes: token, plus an identity header that
+    catches mistakes rather than attacks).
+    """
+    if not lease_active(job, at):
+        return False
+    return editor is None or str(_column(job, 'claimed_by') or '') == str(editor)
+
+
+def claim_download(c, job_id, editor, lease_seconds, at=None):
+    """Take (or refresh) the lease. -> did it happen.
+
+    THE compare-and-set. Everything that decides the answer is in the WHERE
+    clause:
+      - the job must still be in the download phase. A finished, failed or
+        cancelled job has nothing to fetch, and a job at ready_for_review has
+        not been asked for yet;
+      - mode_lock='server' pins it to the NAS worker -- set by the editor (plan
+        §9) or by a reclaim, which is what makes a reclaim one-way (§3);
+      - a pending cancel means nobody downloads it, here or on the NAS
+        (YTDL-WEB-1, 2026-08-14): the flag is honoured by run_job, which the
+        worker cannot reach while a companion holds the lease, so a job handed
+        out with a cancel already on it downloads to completion and is
+        cancelled afterwards;
+      - and it must be free: not local at all, or leased to THIS editor (a
+        refresh -- the companion re-announcing itself after a restart is not a
+        second holder), or leased to somebody whose lease has run out.
+    """
+    at = at or now()
+    cur = c.execute(
+        f"UPDATE jobs SET download_mode='{MODE_LOCAL}', claimed_by=?, "
+        'lease_expires_at=?, updated_at=? '
+        "WHERE id=? AND phase='downloading' "
+        f"AND (mode_lock IS NULL OR mode_lock<>'{MODE_SERVER}') "
+        'AND COALESCE(cancel_requested,0)=0 '
+        f"AND (download_mode<>'{MODE_LOCAL}' OR claimed_by=? "
+        '     OR lease_expires_at IS NULL OR lease_expires_at<=?)',
+        (editor, _future(lease_seconds), at, job_id, editor, at))
+    c.commit()
+    return bool(cur.rowcount)
+
+
+def heartbeat_download(c, job_id, editor, lease_seconds, at=None):
+    """Extend a live lease. -> did it happen.
+
+    Deliberately NOT a re-claim: an expired lease is not extended here, because
+    by then the worker may already have taken the job back and started
+    downloading it (§3, no ping-pong). The companion is told 410 and stops.
+    """
+    at = at or now()
+    cur = c.execute(
+        'UPDATE jobs SET lease_expires_at=?, updated_at=? '
+        f"WHERE id=? AND download_mode='{MODE_LOCAL}' AND claimed_by=? "
+        'AND lease_expires_at>?',
+        (_future(lease_seconds), at, job_id, editor, at))
+    c.commit()
+    return bool(cur.rowcount)
+
+
+def expire_lease(c, job_id, at=None):
+    """Wind a live lease back to NOW. -> did anything change.
+
+    THE STOP SIGNAL, and deliberately the only one (YTDL-WEB-1/-2,
+    2026-08-14). Two things end a local download from the server side -- the
+    editor cancelling the job, and the editor pinning it to the server -- and
+    both used to be silent: `cancel_requested` is read inside run_job, which
+    the worker cannot reach while a lease is live (claim_next_job hides the
+    job), and `mode_lock` was read only by claim_download, which a companion
+    already heartbeating never calls again. Either way the executor renewed its
+    lease every 30 s and downloaded all 41 clips onto a machine whose owner had
+    asked it to stop.
+
+    Expiring rather than reclaiming, and expiring rather than adding predicates
+    to heartbeat_download, because expiry is the path the whole feature is
+    already built around: the companion's next call finds it is no longer the
+    leaseholder and stops (routes_fleet answers 410 to every way a lease can
+    end, and ytdl_executor stops on nothing else), claim_next_job stops hiding
+    the job, and _phase_download runs the SAME _reclaim_local_job it runs for a
+    laptop that closed -- which is what credits the clips that did land and
+    re-queues the ones that did not. One reclaim path, not three.
+    """
+    at = at or now()
+    cur = c.execute(
+        'UPDATE jobs SET lease_expires_at=?, updated_at=? '
+        f"WHERE id=? AND download_mode='{MODE_LOCAL}' "
+        'AND lease_expires_at IS NOT NULL AND lease_expires_at>?',
+        (at, at, job_id, at))
+    c.commit()
+    return bool(cur.rowcount)
+
+
+def end_lease(c, job_id, editor=None, at=None):
+    """The local executor is finished with this job. -> did it happen.
+
+    What is left of the job is the SERVER's: the manifest, the `done` phase,
+    and one retry of anything that failed on the editor's machine (§2 step 7).
+    So the mode goes back to 'server' -- honestly, because that is where the
+    remaining work runs -- while `claimed_by` STAYS as the record of who
+    fetched the clips, and every clip row keeps its own `download_host`.
+
+    mode_lock is set at the same time so nothing can re-claim a job whose
+    close-out the worker is now performing, and so the worker's own
+    reclaim-on-expiry path (which only looks at download_mode='local') does not
+    mistake an orderly hand-back for an abandoned laptop.
+    """
+    args = [at or now(), job_id]
+    sql = (f"UPDATE jobs SET download_mode='{MODE_SERVER}', "
+           'lease_expires_at=NULL, '
+           f"mode_lock='{MODE_SERVER}', updated_at=? "
+           f"WHERE id=? AND download_mode='{MODE_LOCAL}'")
+    if editor is not None:
+        sql += ' AND claimed_by=?'
+        args.append(editor)
+    cur = c.execute(sql, args)
+    c.commit()
+    return bool(cur.rowcount)
+
+
+def reclaim_download(c, job_id, at=None):
+    """The server takes an abandoned job back. -> did anything change.
+
+    One-way (§3): mode_lock='server' means the companion that went away cannot
+    take it again when the laptop wakes up and finds a stale job id in its
+    queue, and the badge flips to "downloading on the server" because a silent
+    executor swap is how editors conclude features are broken (§9).
+    """
+    cur = c.execute(
+        f"UPDATE jobs SET download_mode='{MODE_SERVER}', claimed_by=NULL, "
+        f"lease_expires_at=NULL, mode_lock='{MODE_SERVER}', updated_at=? "
+        'WHERE id=?', (at or now(), job_id))
+    c.commit()
+    return bool(cur.rowcount)
+
+
+def lock_mode(c, job_id, mode=MODE_SERVER):
+    """Pin a job to an executor, and end the run it is pinned away from.
+
+    "Download on the server instead" (plan §9) is the escape hatch for an
+    editor on hotel wifi with 9 GB left to fetch, so the pin ALONE was the
+    whole feature missing (YTDL-WEB-2, 2026-08-14): mode_lock is read by
+    claim_download and by nothing else, and a companion that is already
+    heartbeating never claims again -- so the click set a column, the toast
+    promised a hand-back, and all 86 clips carried on over the hotel
+    connection with the badge still reading "downloading on your machine". The
+    only state the lock took effect in was the one where the job was on the
+    server already.
+
+    This version had a reason, and it is worth keeping the answer to it: the
+    original refused to yank "every clip in flight, and the .part litter to
+    prove it". The executor is strictly sequential, so exactly ONE clip is ever
+    in flight, and the companion's own 410 path kills it and clears that clip's
+    id-scoped litter before it stops -- which the server's reclaim then
+    re-queues. One partly-fetched clip is what the hand-back costs, and an
+    editor who asked to stop using their connection has already priced it.
+
+    Only a lock TO the server ends a lease; there is no lock to local (the
+    local executor is an offer the requester's machine makes, not something
+    the server can compel), so nothing here can take a job off the worker.
+    """
+    c.execute('UPDATE jobs SET mode_lock=?, updated_at=? WHERE id=?',
+              (mode, now(), job_id))
+    c.commit()
+    if mode == MODE_SERVER:
+        expire_lease(c, job_id)
+
+
+def clear_mode_lock(c, job_id):
+    """Forget a per-run pin. Called when the editor asks for work again.
+
+    end_lease pins a job to the server on the ORDINARY close-out as well as on
+    a reclaim, and nothing ever cleared it -- so a job that ran locally once
+    could never run locally again, and the YTDL-16 retry path (press DOWNLOAD
+    on a `done` job to re-fetch the clips that failed) silently ran from the
+    NAS's IP: the exact IP whose bot-checks the failed clips are most likely to
+    have come from (YTDL-WEB-7, 2026-08-14).
+
+    Safe precisely because start_download is the only caller and it accepts
+    only `ready_for_review` and `done`: there is no run in flight for this to
+    unpin, so neither the close-out pin nor the reclaim pin is undermined --
+    both are about the run that just ended, and this is the next one.
+    """
+    c.execute('UPDATE jobs SET mode_lock=NULL, updated_at=? WHERE id=?',
+              (now(), job_id))
+    c.commit()
 
 
 def reset_stale_jobs(c):
@@ -711,6 +981,68 @@ def mark_pending(c, job_id):
 def pending_videos(c, job_id):
     return c.execute("SELECT * FROM job_videos WHERE job_id=? AND dl_state='pending' "
                      'ORDER BY id', (job_id,)).fetchall()
+
+
+def begin_download(c, job_id, video_id):
+    """Take ONE clip: pending -> downloading, compare-and-set. -> is it ours.
+
+    The row is the boundary between the two executors, and it was being taken
+    too late (YTDL-WEB-4, 2026-08-14). The worker checked the job's LEASE at the
+    top of each iteration but did not write `downloading` until after the dedupe
+    re-check -- which for a paste is an rglob of the project's whole Youtube
+    tree, ~1 s on the NAS mount. A claim landing inside that window is invisible
+    to the worker for the rest of the clip, and pending_videos (which the
+    manifest the companion immediately asks for is built from) still lists it:
+    two yt-dlp processes writing the same `[id]` fragments into one directory,
+    each one's give-up path deleting the other's resume state.
+
+    False means somebody else has it -- the companion's `downloading` status
+    post, or a second pass of this loop -- and the caller skips the clip. A row
+    left `downloading` by a crash is put back by reset_stale_jobs on boot, the
+    same repair it has always had.
+    """
+    cur = c.execute("UPDATE job_videos SET dl_state='downloading' "
+                    "WHERE job_id=? AND video_id=? AND dl_state='pending'",
+                    (job_id, video_id))
+    c.commit()
+    return bool(cur.rowcount)
+
+
+# What "this job's downloads are still going" means, in one place. Both states
+# count: `pending` is not started, `downloading` is in flight, and the fleet
+# status route asks "was that the last clip?" after every post.
+UNFINISHED_STATES = ('pending', 'downloading')
+
+
+def unfinished_downloads(c, job_id):
+    """How many clips are still pending or in flight."""
+    ph = ','.join('?' * len(UNFINISHED_STATES))
+    return c.execute(f'SELECT COUNT(*) n FROM job_videos WHERE job_id=? AND '
+                     f'dl_state IN ({ph})',
+                     (job_id, *UNFINISHED_STATES)).fetchone()['n']
+
+
+def failed_videos(c, job_id):
+    return c.execute("SELECT * FROM job_videos WHERE job_id=? AND dl_state='failed' "
+                     'ORDER BY id', (job_id,)).fetchall()
+
+
+def requeue_failed(c, job_id):
+    """Put every failed clip back to `pending`. -> how many.
+
+    The SECOND-CHANCE SWEEP (docs/YTDL_LOCAL_DOWNLOAD.md §2 step 7): a clip
+    that failed on the editor's machine -- their IP bot-checked, their wifi
+    dropped -- is retried once by the NAS worker, whose failure modes are
+    different ones. Final completeness is the max of both executors.
+
+    dl_error is cleared exactly as mark_pending clears it; the worker overwrites
+    it on the first line of the next attempt anyway, and a stale "yt-dlp said
+    no" on a row that is queued again reads as a failure that is not happening.
+    """
+    cur = c.execute("UPDATE job_videos SET dl_state='pending', dl_error=NULL "
+                    "WHERE job_id=? AND dl_state='failed'", (job_id,))
+    c.commit()
+    return cur.rowcount
 
 
 def counts(c, job_id):

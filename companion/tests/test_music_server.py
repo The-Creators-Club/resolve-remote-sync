@@ -31,7 +31,30 @@ from pathlib import Path
 
 import pytest
 
-from ccsync_companion import broll_server, music_server, music_worker
+from ccsync_companion import broll_server, music_server, music_worker, ytdl_server
+
+
+@pytest.fixture(autouse=True)
+def _no_real_file_manager(monkeypatch):
+    """/music/reveal launches Explorer/Finder (MUSIC-6), and a test that
+    actually did would open windows all over the developer's desktop.
+
+    test_ytdl_server's guard, on the same seam -- music_server.build_reveal
+    _response deliberately reuses ytdl_server.spawn rather than owning a second
+    launcher. The tests that care about the argv inject their own recorder on
+    top of this."""
+    def _boom(argv):
+        pytest.fail(f"a test spawned a real file manager: {argv!r}")
+
+    monkeypatch.setattr(ytdl_server, "spawn", _boom)
+
+
+@pytest.fixture
+def spawned(monkeypatch):
+    """Record what would have been launched, and launch nothing."""
+    calls: list = []
+    monkeypatch.setattr(ytdl_server, "spawn", lambda argv: calls.append(argv))
+    return calls
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +558,184 @@ def test_the_workers_answer_is_returned_verbatim(tmp_path):
     assert body == answer
 
 
+# ---------------------------------------------------------------------------
+# build_reveal_response (MUSIC-6, 2026-08-14)
+# ---------------------------------------------------------------------------
+#
+# The music page's "show in folder" used to POST the SERVER's /api/reveal,
+# which spawned Explorer in the dashboard's Linux container -- a button that
+# could not work for any editor, ever. Revealing a file is an action on the
+# machine the editor is sitting at, so it is a route here. Nothing below
+# spawns a real file manager: the launcher is injected, exactly as
+# test_ytdl_server drives the same code.
+
+
+def _spawns() -> tuple:
+    """(recorder, spawned-argv list). The one seam a real Explorer is behind."""
+    spawned: list = []
+    return spawned.append, spawned
+
+
+def test_reveal_selects_the_track_in_its_folder(tmp_path):
+    cue = tmp_path / "Ambient" / "cue.wav"
+    cue.parent.mkdir()
+    cue.write_bytes(b"RIFF")
+    spawner, spawned = _spawns()
+
+    status, body = music_server.build_reveal_response(
+        {"share": "music", "rel_path": "Ambient/cue.wav"},
+        {"music": str(tmp_path)}, spawner=spawner, platform="win32",
+    )
+
+    assert status == 200 and body["ok"] is True
+    assert body["message"] == f"Showing cue.wav in {cue.parent}"
+    (argv,) = spawned
+    # A LIST with the path as ONE element (MUSIC-2, 2026-08-11): a track called
+    # `rock & roll.wav` is an argument, never a command separator, because
+    # nothing re-parses this.
+    assert isinstance(argv, list)
+    assert argv == ["explorer", f"/select,{cue}"]
+
+
+def test_reveal_on_macos_asks_finder(tmp_path):
+    cue = tmp_path / "cue.wav"
+    cue.write_bytes(b"RIFF")
+    spawner, spawned = _spawns()
+
+    status, body = music_server.build_reveal_response(
+        {"share": "music", "rel_path": "cue.wav"},
+        {"music": str(tmp_path)}, spawner=spawner, platform="darwin",
+    )
+
+    assert status == 200 and body["ok"] is True
+    assert spawned == [["open", "-R", str(cue)]]
+
+
+def test_reveal_falls_back_to_the_folder_when_the_track_has_not_synced(tmp_path):
+    """The row is in the index and the file is not here: still syncing, or a
+    half-mounted share. The folder is what the editor clicked the row to look
+    at, and it is opened WITHOUT /select -- selecting a file that is not there
+    is what makes Explorer open Documents instead.
+
+    The message SAYS the file is not there, in ytdl_server's words: an editor
+    on this branch is usually asking "why isn't my track here", and
+    "Showing X in Y" would claim a file they can see."""
+    (tmp_path / "Ambient").mkdir()
+    spawner, spawned = _spawns()
+
+    status, body = music_server.build_reveal_response(
+        {"share": "music", "rel_path": "Ambient/cue.wav"},
+        {"music": str(tmp_path)}, spawner=spawner, platform="win32",
+    )
+
+    assert status == 200 and body["ok"] is True
+    assert spawned == [["explorer", str(tmp_path / "Ambient")]]
+    assert body["message"] == \
+        f"cue.wav is not there — opened {tmp_path / 'Ambient'} instead"
+
+
+def test_reveal_with_nothing_there_says_so_and_launches_nothing(tmp_path):
+    """Spawning `explorer <missing>` opens the editor's Documents folder and
+    looks like a bug -- so the answer is the message, not a window."""
+    spawner, spawned = _spawns()
+
+    status, body = music_server.build_reveal_response(
+        {"share": "music", "rel_path": "Nowhere/cue.wav"},
+        {"music": str(tmp_path)}, spawner=spawner, platform="win32",
+    )
+
+    assert status == 200 and body["ok"] is False
+    # `error`, not `message`: the music page's api() helper reads r.error
+    # first, and a message-only body would show it a blank failure.
+    assert "is the share mounted?" in body["error"]
+    assert spawned == []
+
+
+def test_reveal_traversal_is_http_400_and_launches_nothing(tmp_path):
+    """Same translator as /music/send (local_path_for), so the '..' rules, the
+    absolute-rel_path refusal and MED-11's containment check apply here too --
+    and this route hands its answer to a process spawner."""
+    for rel_path in ("../../etc/passwd", "/etc/passwd", "C:/Windows/System32"):
+        spawner, spawned = _spawns()
+        status, body = music_server.build_reveal_response(
+            {"share": "music", "rel_path": rel_path},
+            {"music": str(tmp_path)}, spawner=spawner, platform="win32",
+        )
+        assert status == 400, rel_path
+        assert body["ok"] is False and body["error"]
+        assert spawned == [], "nothing may be launched after a rejected path"
+
+
+def test_reveal_without_a_mount_is_200_so_the_page_can_show_it():
+    spawner, spawned = _spawns()
+
+    status, body = music_server.build_reveal_response(
+        {"share": "music", "rel_path": "cue.wav"}, {}, spawner=spawner,
+        platform="win32",
+    )
+
+    assert status == 200
+    assert body == {"ok": False, "error": "no mount configured for share 'music'"}
+    assert spawned == []
+
+
+def test_reveal_on_a_platform_with_no_file_manager_answers_instead_of_raising(
+        tmp_path):
+    cue = tmp_path / "cue.wav"
+    cue.write_bytes(b"RIFF")
+    spawner, spawned = _spawns()
+
+    status, body = music_server.build_reveal_response(
+        {"share": "music", "rel_path": "cue.wav"},
+        {"music": str(tmp_path)}, spawner=spawner, platform="linux",
+    )
+
+    assert status == 200 and body["ok"] is False
+    assert str(cue) in body["error"]
+    assert spawned == []
+
+
+def test_a_file_manager_that_will_not_start_is_not_a_500(tmp_path):
+    cue = tmp_path / "cue.wav"
+    cue.write_bytes(b"RIFF")
+
+    def _boom(argv):
+        raise OSError("explorer is not installed")
+
+    status, body = music_server.build_reveal_response(
+        {"share": "music", "rel_path": "cue.wav"},
+        {"music": str(tmp_path)}, spawner=_boom, platform="win32",
+    )
+
+    assert status == 200 and body["ok"] is False
+    assert "could not open the file manager" in body["error"]
+
+
+def test_reveal_reuses_the_ytdl_route_groups_launcher():
+    """One reveal implementation on this listener, not two: the shell-free argv
+    (MUSIC-2) and the sanitized-env spawn are ytdl_server's, and a second copy
+    is how one of them quietly grows a shell."""
+    from ccsync_companion import ytdl_server
+
+    assert music_server.build_reveal_response.__module__ == "ccsync_companion.music_server"
+    assert ytdl_server.reveal_command("/x/y.wav", select=True, platform="darwin") == \
+        ["open", "-R", "/x/y.wav"]
+
+
+def test_the_isfile_and_isdir_probes_are_injectable(tmp_path):
+    """The checks are seams for the same reason the spawner is: a test must be
+    able to describe a share that is mounted, half-mounted or absent without
+    building three of them."""
+    spawner, spawned = _spawns()
+    status, body = music_server.build_reveal_response(
+        {"share": "music", "rel_path": "Ambient/cue.wav"},
+        {"music": str(tmp_path)}, spawner=spawner, platform="darwin",
+        isfile=lambda path: True, isdir=lambda path: False,
+    )
+    assert status == 200 and body["ok"] is True
+    assert spawned == [["open", "-R", str(tmp_path / "Ambient" / "cue.wav")]]
+
+
 def test_build_status_response_is_the_workers_dict():
     status, body = music_server.build_status_response(
         caller=lambda action, **kw: {"ok": True, "project": "P", "timeline": "T"}
@@ -567,6 +768,55 @@ def test_music_send_over_http(live_server, tmp_path):
     assert json.loads(body)["ok"] is True
     assert calls[0][0] == "under"
     assert Path(calls[0][1]["path"]) == tmp_path / "cue.wav"
+
+
+def test_music_reveal_over_http(live_server, tmp_path, spawned):
+    """MUSIC-6 end to end, on the ONE listener: the page posts {share,
+    rel_path} -- never a path -- and the file manager opens HERE, on the
+    machine the editor is sitting at, instead of in the dashboard's container
+    where the old server-side /api/reveal sent it."""
+    _srv, client, calls = live_server
+    (tmp_path / "cue.wav").write_bytes(b"RIFF")
+
+    status, _headers, body = client.post_json(
+        "/music/reveal", {"share": "music", "rel_path": "cue.wav"}
+    )
+
+    assert status == 200
+    assert json.loads(body)["ok"] is True
+    (argv,) = spawned
+    assert isinstance(argv, list), "the argv must be a list, not a command string"
+    assert Path(argv[-1].split(",", 1)[-1]) == tmp_path / "cue.wav"
+    assert calls == [], "revealing a file must not go near Resolve"
+
+
+def test_music_reveal_traversal_over_http_is_400(live_server, spawned):
+    _srv, client, _calls = live_server
+    status, _headers, body = client.post_json(
+        "/music/reveal",
+        {"share": "music", "rel_path": "../../../Windows/System32/config/SAM"},
+    )
+    assert status == 400
+    assert json.loads(body)["ok"] is False
+    assert spawned == [], "nothing may be launched after a rejected path"
+
+
+def test_music_reveal_malformed_body_is_400_in_the_pages_error_shape(live_server,
+                                                                     spawned):
+    _srv, client, _calls = live_server
+    status, body = client.post_raw("/music/reveal", b"{not json")
+    assert status == 400
+    parsed = json.loads(body)
+    assert parsed["ok"] is False
+    assert "error" in parsed, "the music page reads `error`, not `message`"
+    assert spawned == []
+
+
+def test_a_get_on_the_reveal_route_is_404_not_a_500(live_server):
+    _srv, client, _calls = live_server
+    status, _headers, body = client.get("/music/reveal")
+    assert status == 404
+    assert json.loads(body)["ok"] is False
 
 
 def test_music_traversal_over_http_is_400(live_server):
@@ -621,7 +871,7 @@ def test_the_broll_routes_still_answer_on_the_same_listener(live_server, tmp_pat
     (tmp_path / "clip.mov").write_bytes(b"fake")
     monkeypatch.setattr(
         broll_server.resolve_bridge, "perform_insert",
-        lambda local_path, in_frame, out_frame, canonical_fn=None: {
+        lambda local_path, in_frame, out_frame, canonical_fn=None, mode="append": {
             "ok": True, "message": f"Inserted clip.mov ({out_frame - in_frame} frames)"},
     )
 

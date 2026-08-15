@@ -288,7 +288,7 @@ def stray_luts(search_dirs: list[Path], library: Path, max_results: int = 200) -
                 continue
             # Never offer something that is already inside the library
             # (a search dir could contain it, e.g. a link or a nested copy).
-            if _resolved(path).startswith(library_resolved):
+            if _is_under(_resolved(path), library_resolved):
                 continue
             try:
                 size = path.stat().st_size
@@ -311,6 +311,22 @@ def stray_luts(search_dirs: list[Path], library: Path, max_results: int = 200) -
 def _dest_rel(path: Path, base: Path) -> str:
     rel = path.relative_to(base)
     return rel.as_posix()
+
+
+def _is_under(resolved: str, base_resolved: str) -> bool:
+    """Path containment on already-normcased strings, WITH the separator.
+
+    A bare startswith made `P:\\Assets\\Luts Local` read as inside
+    `P:\\Assets\\Luts`, so an editor who pointed Resolve's LUT folder at a
+    sibling directory had every stray silently discarded and was never
+    offered the "N LUTs only on this machine" item (COMP-GUARD-6,
+    2026-08-14). canon._is_under documents the same trap for media paths.
+    """
+    if not base_resolved:
+        return False
+    if resolved == base_resolved:
+        return True
+    return resolved.startswith(base_resolved.rstrip("\\/") + os.sep)
 
 
 def _resolved(path: Path) -> str:

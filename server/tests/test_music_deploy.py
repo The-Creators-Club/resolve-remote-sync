@@ -368,6 +368,50 @@ def test_db_swap_rolls_back_when_the_swap_in_fails(tmp_path):
     assert (data_root / "music.db").read_bytes() == b"OLD INDEX\n"
 
 
+@needs_bash
+def test_the_rollback_brings_the_wal_back_with_the_database(tmp_path):
+    """SERVER-7 (2026-08-14): the rollback restored only the .db and left its
+    -wal/-shm at music.db.old.<ts>-wal. SQLite then opened a database with no
+    WAL beside it, every commit since the last checkpoint -- the queued
+    ingest's `pending` rows -- was silently gone, and the operator had just
+    been told "previous index restored"."""
+    data_root, staging, size = _seed_db(tmp_path)
+    old = str(data_root / "music.db.old.20260810120000")
+    script = ida.build_db_swap_script(str(data_root), str(staging),
+                                      str(data_root / "music.db"), old, size)
+    live = ida.shell_quote(str(data_root / "music.db"))
+    candidate = ida.shell_quote(str(data_root / "music.db.new"))
+    sabotage = script.replace(f"mv {live} ", f"rm -f {candidate}; mv {live} ", 1)
+    proc = run_remote_script(sabotage, tmp_path)
+
+    assert proc.returncode == 9
+    assert "previous index restored" in proc.stderr
+    assert (data_root / "music.db").read_bytes() == b"OLD INDEX\n"
+    # ...and it is restored BESIDE its WAL, which is what "restored" has to mean
+    assert (data_root / "music.db-wal").read_bytes() == b"OLD WAL\n"
+    assert not Path(old + "-wal").exists()
+
+
+def test_every_sidecar_moves_in_both_directions():
+    script = ida.build_db_swap_script("/r/music-data", "/tmp/s",
+                                      "/r/music-data/music.db",
+                                      "/r/music-data/music.db.old.20260810120000", 10)
+    for sidecar in ida.MUSIC_DB_SIDECARS:
+        aside = ("mv '/r/music-data/music.db{s}' "
+                 "'/r/music-data/music.db.old.20260810120000{s}'").format(s=sidecar)
+        back = ("mv '/r/music-data/music.db.old.20260810120000{s}' "
+                "'/r/music-data/music.db{s}'").format(s=sidecar)
+        assert aside in script, sidecar
+        assert back in script, sidecar
+        # the way back lives inside the rollback braces: after the swap-in mv
+        # that can fail, before the message claiming the index was restored
+        swap_in = "mv '/r/music-data/music.db.new' '/r/music-data/music.db'"
+        assert script.index(aside) < script.index(swap_in), sidecar
+        assert (script.index(swap_in)
+                < script.index(back)
+                < script.index("swap failed, previous index restored")), sidecar
+
+
 def test_db_ownership_is_the_container_not_root():
     """install_tree chowns root:root and strips group write, which is correct
     for code and would make every queued ingest fail to write its `pending`
@@ -587,6 +631,95 @@ def test_a_failed_local_fetch_is_a_note_not_a_failed_deploy(monkeypatch, capsys)
     err = capsys.readouterr().err
     assert "ffmpeg was NOT provisioned" in err and "URLError" in err
     assert "MUSIC_FFMPEG_FILE" in err and "--ffmpeg-fetch remote" in err
+
+
+# --------------------------------------------------------------------------
+# SERVER-1 (2026-08-14) -- the SFTP had no error path in ANY of the four
+# places it is used, and these two are the ones whose callers promise the
+# deploy survives them
+# --------------------------------------------------------------------------
+
+class _Dropped(Exception):
+    """Stands in for paramiko.SSHException / socket.timeout out of sftp.put."""
+
+
+def _raising_ssh_client(monkeypatch):
+    def boom(*a, **k):
+        raise _Dropped("Server connection dropped")
+
+    monkeypatch.setenv("TRUENAS_PW", "pw")
+    monkeypatch.setattr(ida, "ssh_client", boom)
+
+
+def test_a_dropped_index_transfer_leaves_the_live_index_alone(monkeypatch, tmp_path,
+                                                              capsys):
+    """install_music_db runs in step 2d, after the `app` swap: an exception out
+    of sftp.put skipped fail_after_app_swap entirely."""
+    source = tmp_path / "data"
+    source.mkdir()
+    (source / ida.MUSIC_DB_FILENAME).write_bytes(b"INDEX" * 100)
+    monkeypatch.setattr(ida, "make_staging_dir",
+                        lambda *a, **k: "/mnt/tank/x/staging/ccsync-musicdb-upload.AbC")
+    _raising_ssh_client(monkeypatch)
+
+    assert ida.install_music_db("/mnt/tank/x", source, False) is False
+    err = capsys.readouterr().err
+    assert "did not finish" in err and "_Dropped" in err
+    assert "installed index is untouched" in err
+
+
+def test_a_dropped_ffmpeg_push_is_a_note_not_a_failed_deploy(monkeypatch, tmp_path,
+                                                             capsys):
+    """provision_ffmpeg's docstring says "NON-FATAL throughout ... Every failure
+    below prints a NOTE and returns"; an unguarded 42 MB SFTP made that untrue,
+    so an optional download could take the whole dashboard deploy down."""
+    tarball = tmp_path / "ffmpeg.tar.xz"
+    tarball.write_bytes(b"tarball")
+    monkeypatch.setattr(ida, "make_staging_dir",
+                        lambda *a, **k: "/tmp/ccsync-ffmpeg-upload.AbC")
+    _raising_ssh_client(monkeypatch)
+
+    ok_, err = ida.install_ffmpeg_over_lan("/r", tarball, "d" * 64, False)
+    assert ok_ is False
+    assert "did not finish" in err and "_Dropped" in err
+
+    # ...and provision_ffmpeg turns that into the promised NOTE
+    monkeypatch.setattr(ida, "run_ssh", lambda *a, **k: (0, "no\n", ""))
+    monkeypatch.setattr(ida, "fetch_ffmpeg_tarball", lambda *a: (tarball, ""))
+    ida.provision_ffmpeg("/mnt/tank/apps/ccsync-dashboard", "local", dry_run=False)
+    assert "ffmpeg was NOT provisioned" in capsys.readouterr().err
+
+
+def test_a_timed_out_remote_ffmpeg_download_is_a_note_too(monkeypatch, capsys):
+    """The 600 s ceiling this step's own error text says johnvansickle blows
+    through at ~28 kB/s: paramiko answers that by RAISING, not by returning a
+    non-zero rc, so the guard is what makes the NOTE reachable."""
+    def boom(cmd, dry_run=False, timeout=120):
+        if "sudo" in cmd:
+            raise _Dropped("timed out")
+        return 0, "no\n", ""
+
+    monkeypatch.setattr(ida, "run_ssh", boom)
+    ida.provision_ffmpeg("/mnt/tank/apps/ccsync-dashboard", "remote", dry_run=False)
+    err = capsys.readouterr().err
+    assert "ffmpeg was NOT provisioned" in err
+    assert "28 kB/s" in err
+
+
+def test_the_binary_push_survives_a_dropped_transport(monkeypatch, tmp_path):
+    """provision_ytdl_binaries is one step SOFTER than provision_ffmpeg -- a
+    dashboard must never fail to deploy over /ytdl's optional downloads."""
+    local = tmp_path / "claude.tar.gz"
+    local.write_bytes(b"archive")
+    monkeypatch.setattr(ida, "make_staging_dir",
+                        lambda *a, **k: "/tmp/ccsync-claude-upload.AbC")
+    _raising_ssh_client(monkeypatch)
+
+    ok_, err = ida.install_binary_over_lan(
+        "/r", "claude-bin", "claude", local,
+        "https://example.invalid/claude.tar.gz", "", False)
+    assert ok_ is False
+    assert "did not finish" in err and "_Dropped" in err
 
 
 # --------------------------------------------------------------------------

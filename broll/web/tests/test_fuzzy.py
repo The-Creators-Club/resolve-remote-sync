@@ -4,7 +4,7 @@ matching and typo correction are separate, additive mechanisms.
 """
 from __future__ import annotations
 
-from app import fuzzy
+from app import fuzzy, search
 from tests.factories import insert_segment, insert_video
 
 
@@ -113,7 +113,11 @@ def test_correction_does_not_pick_a_contained_substring(monkeypatch):
 
         pytest.skip("rapidfuzz not installed")
 
-    class FakeCache:
+    # Subclassed rather than duck-typed: correct_terms consumes the derived
+    # CorrectionIndex (BROLL-WEB-6), which the base class builds from whatever
+    # get() hands back -- so overriding get() alone still injects the exact
+    # vocabulary this test is about.
+    class FakeCache(fuzzy.VocabularyCache):
         def get(self, conn):
             return {"ambulance", "ambulances", "Blu", "blues", "nuclear", "marshall"}
 
@@ -132,7 +136,7 @@ def test_correction_leaves_a_real_word_alone(monkeypatch):
 
         pytest.skip("rapidfuzz not installed")
 
-    class FakeCache:
+    class FakeCache(fuzzy.VocabularyCache):
         def get(self, conn):
             return {"marshall", "marriage", "married", "surfing"}
 
@@ -140,3 +144,107 @@ def test_correction_leaves_a_real_word_alone(monkeypatch):
 
     # length-delta guard plus edit-distance scoring both reject "marshall"
     assert fuzzy.correct_terms(object(), ["mars"]) is None
+
+
+# ---------------------------------------------------------------------------
+# BROLL-WEB-5: the pass level, which the string-level tests above cannot see.
+# ---------------------------------------------------------------------------
+
+
+def _fuzzy_sources(conn, terms):
+    rank_lists: dict = {}
+    meta: dict = {}
+    search._run_fuzzy_pass(conn, terms, "", [], "", [], rank_lists, meta)
+    return set(rank_lists)
+
+
+def test_an_all_short_term_query_does_not_re_run_the_exact_query(conn):
+    """prefix_query leaves a term under its length floor unexpanded, so for an
+    all-short-term query it hands back the exact pass's query verbatim. Running
+    it again is not merely two wasted FTS queries: fuzzy_prefix_segments_fts
+    and fuzzy_prefix_transcript_fts register as separate RRF sources carrying
+    the exact pass's own ranking, so the porter tables vote twice while the
+    trigram tables (which the prefix pass skips entirely) vote once -- and a
+    CJK substring hit that only the trigram table can find gets demoted for it.
+    """
+    _seed_vocab(conn)
+    assert fuzzy.prefix_query(["past"]) == '"past"', (
+        "premise of this test: nothing expanded, so the query is unchanged"
+    )
+
+    sources = _fuzzy_sources(conn, ["past"])
+
+    assert not {s for s in sources if s.startswith("fuzzy_prefix_")}
+
+
+def test_a_term_long_enough_to_expand_still_gets_its_prefix_pass(conn):
+    """The other side of the guard -- this is a real, different query."""
+    _seed_vocab(conn)
+    assert fuzzy.prefix_query(["harbor"]) == '"harbor"*'
+
+    sources = _fuzzy_sources(conn, ["harbor"])
+
+    assert "fuzzy_prefix_segments_fts" in sources
+
+
+# ---------------------------------------------------------------------------
+# BROLL-WEB-6: the derived structures are cached with the vocabulary, not
+# rebuilt per request.
+# ---------------------------------------------------------------------------
+
+
+def test_the_correction_index_is_built_once_per_generation(conn):
+    """Measured on the live archive: the lowercase map is 315,562 entries and
+    ~80 ms, and the length-window candidate list was a 167,093-entry scan of it
+    per query TERM -- ~110 ms of pure re-derivation on every fuzzy-triggered
+    search, i.e. on exactly the queries that were already the slowest."""
+    _seed_vocab(conn)
+    cache = fuzzy.get_vocabulary_cache()
+
+    first = cache.get_correction_index(conn)
+    assert cache.get_correction_index(conn) is first
+
+
+def test_the_correction_index_follows_the_vocabulary_invalidation(conn):
+    """Same key, same invalidation -- a derived cache that outlived the
+    vocabulary would keep correcting typos towards words the corpus no longer
+    has, which is the BROLL-17/R2 staleness this must not reintroduce."""
+    _seed_vocab(conn)
+    cache = fuzzy.get_vocabulary_cache()
+    first = cache.get_correction_index(conn)
+    assert "submarine" not in first.lower_to_original
+
+    v2 = insert_video(conn, share="broll", rel_path="clip2.mov")
+    insert_segment(conn, v2, description="A submarine surfaces near the coast")
+
+    second = cache.get_correction_index(conn)
+    assert second is not first
+    assert "submarine" in second.lower_to_original
+
+
+def test_the_length_buckets_agree_with_a_full_scan(conn):
+    """The buckets replaced a per-term filter over the whole map; they have to
+    select exactly what that filter did, or a correction quietly changes."""
+    _seed_vocab(conn)
+    index = fuzzy.get_vocabulary_cache().get_correction_index(conn)
+
+    for length in range(1, 12):
+        expected = {
+            v for v in index.lower_to_original
+            if abs(len(v) - length) <= fuzzy._MAX_LEN_DELTA_FOR_CORRECTION
+        }
+        got = index.candidates(length, fuzzy._MAX_LEN_DELTA_FOR_CORRECTION)
+        assert len(got) == len(set(got)), "no word may be scored twice"
+        assert set(got) == expected
+
+
+def test_the_index_keeps_the_short_word_floor(conn):
+    """1-2 char candidates are excluded here exactly as they were in the
+    per-request comprehension -- see _build_correction_index."""
+    _seed_vocab(conn)
+    index = fuzzy.get_vocabulary_cache().get_correction_index(conn)
+
+    assert all(
+        len(v) >= fuzzy._MIN_TERM_LEN_FOR_CORRECTION for v in index.lower_to_original
+    )
+    assert "an" not in index.lower_to_original  # "An ambulance rushes past ..."

@@ -748,6 +748,75 @@ def test_probe_video_no_timecode_anywhere_is_none_not_zero(monkeypatch):
     assert ft.probe_video("ffmpeg", "download.mp4")["timecode"] is None
 
 
+def test_dropframe_normalization():
+    """Sony rtmd tags print colon (non-drop) forms for drop-frame material;
+    at NTSC rates the colon reading is a different absolute frame and Resolve
+    refuses the pairing (measured live 2026-08-12: colon refused, semicolon
+    accepted, same bytes otherwise).
+
+    Copied from broll/indexer/tests/test_ffmpeg_tools.py:156 on purpose
+    (COMP-MEDIA-1, 2026-08-14): R10's fix landed only on the indexer's copy of
+    this module for two days, and the two must not drift again."""
+    f = ft.dropframe_normalized
+    assert f("03:40:27:12", 59.94) == "03:40:27;12"
+    assert f("03:40:27:12", 29.97) == "03:40:27;12"
+    # Already drop-form, integer rates, 23.976 (no DF variant), and unknown
+    # fps all pass through untouched.
+    assert f("03:40:27;12", 59.94) == "03:40:27;12"
+    assert f("03:40:27:12", 25.0) == "03:40:27:12"
+    assert f("03:40:27:12", 23.976) == "03:40:27:12"
+    assert f("03:40:27:12", None) == "03:40:27:12"
+    assert f(None, 59.94) is None
+
+
+@pytest.mark.parametrize("rate", ["60000/1001", "30000/1001"])
+def test_probe_video_normalizes_a_drop_frame_timecode(monkeypatch, rate):
+    """The COMP-MEDIA-1 failure, end to end: an FX3/FX6 clip at 59.94 DF whose
+    tag prints with colons. own_proxy_cmd writes probe_video's answer straight
+    into `-timecode`, so a verbatim tag is a proxy that claims non-drop against
+    a drop-frame original -- and Resolve refuses every attach of it."""
+    _patch_probe(monkeypatch, stdout=_probe_json(
+        fmt_tags={"timecode": "03:40:27:12"},
+        streams=[_video_stream(avg_frame_rate=rate, r_frame_rate=rate),
+                 _audio_stream()],
+    ))
+
+    info = ft.probe_video("ffmpeg", "C0001.MP4")
+
+    assert info["timecode"] == "03:40:27;12"
+    assert _sub(
+        ft.own_proxy_cmd("ffmpeg", "C0001.MP4", "out.mp4.partial", nvenc=True,
+                         timecode=info["timecode"]),
+        ["-timecode", "03:40:27;12"],
+    )
+
+
+def test_probe_video_leaves_a_non_ntsc_timecode_alone(monkeypatch):
+    """25p is never drop-frame: normalizing there would break the pairing this
+    exists to keep."""
+    _patch_probe(monkeypatch, stdout=_probe_json(
+        fmt_tags={"timecode": "03:40:27:12"},
+        streams=[_video_stream(avg_frame_rate="25/1", r_frame_rate="25/1")],
+    ))
+
+    assert ft.probe_video("ffmpeg", "A001.mxf")["timecode"] == "03:40:27:12"
+
+
+def test_probe_video_normalizes_a_tmcd_stream_timecode_too(monkeypatch):
+    """The rtmd/tmcd TRACK is where Sony actually writes it -- the fallback
+    path has to be normalized or the fix misses the cameras it is for."""
+    _patch_probe(monkeypatch, stdout=_probe_json(
+        fmt_tags={"encoder": "x"},
+        streams=[
+            _video_stream(avg_frame_rate="30000/1001", r_frame_rate="30000/1001"),
+            {"codec_type": "data", "codec_tag_string": "tmcd",
+             "tags": {"timecode": "01:23:45:12"}},
+        ],
+    ))
+
+    assert ft.probe_video("ffmpeg", "A001.mxf")["timecode"] == "01:23:45;12"
+
+
 def test_probe_video_tolerates_a_null_tags_object(monkeypatch):
     _patch_probe(monkeypatch, stdout=json.dumps({
         "format": {"duration": "3.0", "tags": None},

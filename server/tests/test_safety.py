@@ -51,6 +51,16 @@ done
 exec "$@"
 """
 
+# A sudo that REFUSES -- the shape of a revoked sudoer, a lockout after failed
+# attempts, requiretty, or a policy change. SERVER-4 (2026-08-14): the marker
+# read used to put `sudo test -e` in an `if` CONDITION, which is exempt from
+# the exit status, so this stub made the remote command print MARKER-ABSENT and
+# exit 0 -- "this project has no identity" for a project that has one.
+SUDO_REFUSING_STUB = """#!/bin/sh
+echo "sudo: a password is required" >&2
+exit 1
+"""
+
 
 def single_quoted_mask(script: str) -> list[bool]:
     """Per-character 'is inside a single-quoted region' mask for a sh script.
@@ -115,12 +125,16 @@ class _Resp:
         return self._payload
 
 
-def run_remote_script(script: str, workdir: Path):
-    """Execute a generated remote script with a stub sudo. Returns CompletedProcess."""
+def run_remote_script(script: str, workdir: Path, sudo_stub: str = SUDO_STUB):
+    """Execute a generated remote script with a stub sudo. Returns CompletedProcess.
+
+    `sudo_stub` is SUDO_REFUSING_STUB for the tests that ask what a script does
+    when the privileged half cannot run at all (SERVER-4).
+    """
     bindir = workdir / "stubbin"
     bindir.mkdir(exist_ok=True)
     sudo = bindir / "sudo"
-    sudo.write_text(SUDO_STUB, encoding="utf-8", newline="\n")
+    sudo.write_text(sudo_stub, encoding="utf-8", newline="\n")
     sudo.chmod(0o755)
     chown = bindir / "chown"
     chown.write_text(CHOWN_STUB, encoding="utf-8", newline="\n")
@@ -637,6 +651,44 @@ class TestReadMarkerSlug:
         assert status == SSF.MARKER_UNAVAILABLE
         assert "Permission denied" in detail
 
+    def test_a_refused_sudo_is_unavailable_not_absent(self, monkeypatch):
+        """SERVER-4 (2026-08-14): the answer the REAL remote shell gives when
+        sudo is revoked or locked out -- MARKER_READ_RC and the sentinel on
+        stderr, and in particular NOT a clean MARKER-ABSENT."""
+        def run_ssh(cmd, dry_run=False, timeout=120):
+            return (common.MARKER_READ_RC, "",
+                    "sudo: a password is required\n"
+                    + common.MARKER_UNREADABLE_SENTINEL + "\n")
+
+        monkeypatch.setattr(SSF, "run_ssh", run_ssh)
+        status, detail = SSF.read_marker_slug("/mnt/tank/x/Projects",
+                                              "2026/CCT/Season 1")
+        assert status == SSF.MARKER_UNAVAILABLE
+        assert common.MARKER_UNREADABLE_SENTINEL in detail
+
+    def test_an_answer_with_no_sentinel_at_all_is_unavailable(self, monkeypatch):
+        """The belt to the shell's braces: rc 0 and nothing recognisable means
+        we do not know whether this project has an identity, and the one thing
+        we must not do is guess one from the current path."""
+        monkeypatch.setattr(SSF, "run_ssh",
+                            lambda *a, **k: (0, "sudo: a password is required\n", ""))
+        status, detail = SSF.read_marker_slug("/mnt/tank/x/Projects",
+                                              "2026/CCT/Season 1")
+        assert status == SSF.MARKER_UNAVAILABLE
+        assert "neither MARKER-PRESENT nor MARKER-ABSENT" in detail
+
+    def test_the_sentinels_are_printed_by_the_privileged_shell(self):
+        """The whole defect in one assertion: `if sudo test -e ...; then` puts
+        the privileged command in a CONDITION, where its exit status is
+        discarded, so a sudo failure fell out of the ELSE branch as
+        MARKER-ABSENT with a clean exit 0."""
+        cmd = common.build_marker_read_cmd("/mnt/tank/x/Projects/2026/CCT/Season 1")
+        assert 'if echo "$SUDO_PW" | sudo -S -p "" test -e' not in cmd
+        assert "sh -c" in cmd
+        assert cmd.index("sudo -S") < cmd.index("MARKER-ABSENT")
+        assert common.MARKER_UNREADABLE_SENTINEL in cmd
+        assert f"exit {common.MARKER_READ_RC}" in cmd
+
     def test_a_raising_run_ssh_never_escapes(self, monkeypatch):
         def boom(*a, **k):
             raise common.EnvError("Required environment variable TRUENAS_PW is not set.")
@@ -918,8 +970,9 @@ def test_install_dashboard_swap_never_guts_app(monkeypatch, capsys):
     assert "/app.new" in joined
     assert "/app.old." in joined
     assert "mv " in joined
-    # and the verification covers bytes, not just file count
-    assert "wc -c" in joined
+    # and the verification covers bytes, not just file count -- read off the
+    # directory entries rather than by cat-ing the whole tree (SERVER-6)
+    assert "-printf '%s" in joined
 
 
 def _fake_health(monkeypatch, payload, seen):
@@ -1731,3 +1784,179 @@ def test_the_pot_provider_is_reachable_only_from_inside_the_compose_network():
         8480, "/mnt/tank/apps/ccsync-dashboard", "http://x:8384", "k", "t",
     )["services"][install_dashboard_app.POT_PROVIDER_SERVICE]
     assert "ports" not in svc, "the PO-token provider must not publish a port"
+
+
+# --------------------------------------------------------------------------
+# The 2026-08-14 bug hunt -- the privileged half of three remote reads
+# --------------------------------------------------------------------------
+
+# SERVER-4 -- a marker that cannot be READ is not a marker that is ABSENT
+
+@needs_bash
+def test_the_marker_read_answers_present_and_absent(tmp_path):
+    """The two ordinary states, through the real generated shell."""
+    base = tmp_path / "Season 1"
+    base.mkdir()
+    cmd = common.build_marker_read_cmd("Season 1")
+
+    proc = run_remote_script(cmd, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "MARKER-ABSENT" in proc.stdout
+    assert "MARKER-PRESENT" not in proc.stdout
+
+    (base / MARKER_FILENAME).write_text(
+        json.dumps({"slug": "2026-cct-season-1"}), encoding="utf-8", newline="\n")
+    proc = run_remote_script(cmd, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "MARKER-PRESENT" in proc.stdout
+    assert "2026-cct-season-1" in proc.stdout
+
+
+@needs_bash
+def test_a_refused_sudo_never_reports_the_marker_absent(tmp_path):
+    """SERVER-4 (2026-08-14): THE regression. The SSH account can log in but
+    its sudo is revoked or locked out. The old shell put `sudo test -e` in an
+    `if` CONDITION -- exempt from the exit status -- so this printed
+    MARKER-ABSENT and exited 0, choose_folder_id took the slugify(rel) branch,
+    and a moved project got a SECOND Syncthing folder over the same directory:
+    shared with nobody, failing the collector every cycle, cleaned up by
+    nothing."""
+    base = tmp_path / "Season 1"
+    base.mkdir()
+    (base / MARKER_FILENAME).write_text(
+        json.dumps({"slug": "2026-cct-season-1"}), encoding="utf-8", newline="\n")
+
+    proc = run_remote_script(common.build_marker_read_cmd("Season 1"), tmp_path,
+                             sudo_stub=SUDO_REFUSING_STUB)
+
+    assert proc.returncode == common.MARKER_READ_RC
+    assert "MARKER-ABSENT" not in proc.stdout
+    assert "MARKER-PRESENT" not in proc.stdout
+    assert common.MARKER_UNREADABLE_SENTINEL in proc.stderr
+
+
+@needs_bash
+def test_the_refused_read_reaches_choose_folder_id_as_a_refusal(tmp_path, monkeypatch):
+    """End to end from the shell's real answer: a script that cannot read the
+    marker must refuse, not derive an identity from the current path."""
+    proc = run_remote_script(common.build_marker_read_cmd("Season 1"), tmp_path,
+                             sudo_stub=SUDO_REFUSING_STUB)
+    monkeypatch.setattr(
+        setup_syncthing_folder, "run_ssh",
+        lambda cmd, dry_run=False, timeout=120: (proc.returncode, proc.stdout,
+                                                 proc.stderr))
+    status, detail = setup_syncthing_folder.read_marker_slug(
+        "/mnt/tank/x/Projects", "2027/Moved/Elsewhere")
+    assert status == setup_syncthing_folder.MARKER_UNAVAILABLE
+
+    fid, _source, refusal = setup_syncthing_folder.choose_folder_id(
+        "2027/Moved/Elsewhere", "", status, detail)
+    assert fid == "" and "REFUSING" in refusal
+
+
+def test_write_marker_refuses_rather_than_writing_a_fresh_identity_blind(monkeypatch,
+                                                                         capsys):
+    """write_marker's remote write is UNCONDITIONAL -- only the Python side
+    guards a change behind --force -- so a read that wrongly says "absent"
+    reassigns a live project's slug without ever showing the `old -> new`
+    line."""
+    monkeypatch.setattr(write_marker, "run_ssh",
+                        lambda *a, **k: (0, "sudo: a password is required\n", ""))
+    with pytest.raises(SystemExit):
+        write_marker.read_existing_marker("/mnt/tank/x/Projects/2026/CCT/Season 1",
+                                          dry_run=False)
+    assert "REFUSING to write a fresh one" in capsys.readouterr().err
+
+
+def test_both_marker_readers_use_the_one_builder():
+    """A second copy of "how do I read a marker" is how one of them keeps the
+    `if sudo test -e` shape after the other loses it."""
+    server_dir = Path(__file__).resolve().parents[1]
+    for name in ("setup_syncthing_folder.py", "write_marker.py"):
+        text = (server_dir / name).read_text(encoding="utf-8")
+        assert "build_marker_read_cmd" in text, name
+        assert 'sudo -S -p "" test -e' not in text, name
+
+
+# SERVER-9 -- setup_tree's idempotency probe must see what root sees
+
+def test_setup_tree_probes_with_the_same_privilege_as_the_mkdir():
+    """TRUENAS_USER has no traverse rights on the 770 dataset (check_health
+    and setup_syncthing_folder both say so), so a bare `[ -d ]` false-negatived
+    on every template folder and a re-run printed eight `created:` lines --
+    indistinguishable from having just built a fresh tree at a mistyped path."""
+    base = "/p/2026/CCT/Season 1"
+    script = build_remote_script(base, "broll", "editors",
+                                 slug="2026-cct-season-1", projects_root="/p")
+    assert "if [ -d '" not in script, "an unprivileged probe is back"
+    for rel in setup_tree.project_relative_dirs():
+        probe = f'sudo -S -p "" test -d {common.shell_quote(base + "/" + rel)}'
+        assert probe in script, rel
+
+
+@needs_bash
+def test_a_setup_tree_rerun_reports_exists_not_created(tmp_path):
+    base_rel = "Projects/2026/CCT/Season 1"
+    script = build_remote_script(base_rel, "broll", "editors",
+                                 slug="2026-cct-season-1", projects_root="Projects")
+
+    first = run_remote_script(script, tmp_path)
+    assert first.returncode == 0, first.stderr
+    assert "created: Audio/Music" in first.stdout
+
+    second = run_remote_script(script, tmp_path)
+    assert second.returncode == 0, second.stderr
+    assert "created:" not in second.stdout, second.stdout
+    assert "exists: Audio/Music" in second.stdout
+
+
+# SERVER-3 -- /user's group fields hold DATABASE ids, not unix gids
+
+def _fake_group_and_users(monkeypatch, group_row, users):
+    def fake_api(method, path, **kwargs):
+        if path == "/group":
+            return _Resp(200, [group_row])
+        return _Resp(200, users)
+
+    monkeypatch.setattr(check_health, "truenas_api", fake_api)
+
+
+def test_editor_accounts_are_found_by_the_groups_database_id(monkeypatch, capsys):
+    """The unix gid and the database id are different numbers, and
+    setup_editor_account.ensure_group returns them as two values for exactly
+    this reason ("passing the gid fails validation with 'This group does not
+    exist'"). Testing the gid found no members on a fully provisioned NAS, so
+    check 6 always FAILed and check_health -- whose whole contract is "exit
+    code = number of failed checks" -- could never exit 0."""
+    check_health.RESULTS.clear()
+    _fake_group_and_users(
+        monkeypatch,
+        {"group": check_health.EDITORS_GROUP, "id": 41, "gid": 3001},
+        [{"username": "jsmith", "groups": [41],
+          "group": {"id": 3010, "bsdgrp_gid": 3010}},
+         {"username": "rusk", "groups": [],
+          "group": {"id": 41, "bsdgrp_gid": 3001}},
+         {"username": "nobody", "groups": [], "group": {"id": 1, "bsdgrp_gid": 0}}],
+    )
+
+    check_health.check_editor_accounts(dry_run=False)
+    out = capsys.readouterr().out
+    assert "PASS" in out
+    assert "jsmith" in out and "rusk" in out
+    assert "nobody" not in out
+    assert all(passed for passed, _ in check_health.RESULTS)
+
+
+def test_the_unix_gid_is_never_used_as_a_membership_key(monkeypatch, capsys):
+    """The exact live shape: every editor's row carries the DB id, never the
+    gid, and `group` is a nested object that can never equal an int."""
+    check_health.RESULTS.clear()
+    _fake_group_and_users(
+        monkeypatch,
+        {"group": check_health.EDITORS_GROUP, "id": 41, "gid": 3001},
+        [{"username": "jsmith", "groups": [3001],
+          "group": {"id": 3010, "bsdgrp_gid": 3010}}],
+    )
+
+    check_health.check_editor_accounts(dry_run=False)
+    assert "no members yet" in capsys.readouterr().out

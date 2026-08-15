@@ -20,8 +20,11 @@ here. Measured on the base rig, interleaved against the full model:
 so the artefact is also the fastest of the three; the image saving is the point
 but nothing is being traded for it. Cosine against the full model over the 49
 queries in `export_text_encoder.QUERIES` is min 0.9999999 -- the artefact is
-the same numbers, not an approximation, and `export_text_encoder` refuses to
-write an artefact that is not.
+the same numbers, not an approximation. `export_text_encoder` exports into a
+staging directory and only swaps it into place once that check has passed, and
+`artefact_available` below refuses to load one whose manifest does not record
+the passing check -- so a drifting artefact reaches neither the disk nor a
+search (MUSIC-1, 2026-08-14).
 
 If the artefact is absent (a dev checkout that never ran the export) or
 onnxruntime is not installed, this falls back to the full `ClapModel` through
@@ -48,6 +51,13 @@ TOKENIZER_NAME = 'tokenizer.json'
 # The export writes it into the manifest; a mismatch is treated as "no artefact"
 # so a stale export degrades to the CLAP fallback instead of crashing search.
 ARTEFACT_VERSION = 1
+
+# The cosine an artefact must reach against the full ClapModel over the
+# exporter's check corpus. It lives HERE, not in export_text_encoder, because
+# both ends need it: the exporter refuses to publish below it, and this loader
+# refuses to LOAD an artefact whose manifest does not record having passed it
+# (MUSIC-1, 2026-08-14). The exporter imports it back so the two cannot drift.
+MIN_COSINE = 0.999
 
 
 def config_model_name():
@@ -306,13 +316,29 @@ class ClapTextEncoder:
 
 
 def artefact_available(directory=None):
-    """True if a readable artefact of a version this loader understands exists."""
+    """True if a VERIFIED artefact of a version this loader understands exists.
+
+    The `check` block is required, not decoration (MUSIC-1, 2026-08-14). The
+    exporter used to write the model, the tokenizer and a manifest into the
+    real output directory and only then run its checks, so a run that failed
+    them -- and said "Not writing the artefact" -- left a complete, loadable,
+    version-1 artefact behind with no `check` key. This function looked at
+    everything except that key, so the artefact its own exporter had declared
+    wrong loaded cleanly on the next boot and silently reordered every search
+    result. An unverified artefact is not an artefact.
+    """
     d = Path(directory or artefact_dir())
     try:
         manifest = json.loads((d / MANIFEST_NAME).read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return False
     if int(manifest.get('artefact_version', 0)) != ARTEFACT_VERSION:
+        return False
+    check = manifest.get('check') or {}
+    try:
+        if float(check.get('min_cosine', 0)) < MIN_COSINE:
+            return False
+    except (TypeError, ValueError):
         return False
     return (d / MODEL_NAME).is_file() and (d / TOKENIZER_NAME).is_file()
 

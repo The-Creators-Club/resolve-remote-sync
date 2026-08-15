@@ -46,6 +46,7 @@ import logging
 import ntpath
 import os
 import posixpath
+import threading
 from typing import Any, Callable, Iterable, Optional
 
 from . import canon
@@ -169,12 +170,115 @@ def find_proxy_on_disk(
     return None
 
 
+# -- what Resolve has already refused ---------------------------------------
+#
+# A refusal leaves NOTHING on the clip: `proxy_path` stays "" and `proxy_state`
+# stays "None", so the identical op is planned again on the very next pass.
+# app._relink_proxies_once runs off the media-tree thread every 120 s over the
+# whole media pool, so 200 clips whose adjacent proxies Resolve won't accept
+# (a timecode mismatch -- COMP-MEDIA-1's old output, or the timecode-less
+# archive previews R10 describes) cost 200 _API_LOCK'd LinkProxyMedia calls
+# and 200 WARNING lines every two minutes: ~144,000 lines a day into the one
+# 5 MB-rotating companion.log, plus a permanent stream of GIL-holding native
+# calls competing with the tray and the watcher (COMP-MEDIA-5, 2026-08-14).
+#
+# Every other repeating path in this companion already has this brake --
+# proxy_gen's `_failures` cap, the watcher's warn-once, R15 fix 4's per-watcher
+# dedupe, app._classify_pool_once's _pool_offered_non_canonical ("a refusal
+# must not retry every pass").
+#
+# IN-PROCESS ONLY, deliberately, and for proxy_gen._failures' reason verbatim:
+# "a blacklist persisted to disk turns one bad night for the GPU into a
+# permanent refusal to ever proxy those clips again". Here it would be worse --
+# the usual repair is a re-encoded or re-synced proxy, and that is exactly what
+# re-arms this: the value is the proxy file's (mtime, size) at refusal time, so
+# a changed file is a new question and gets asked again.
+_REFUSAL_LOCK = threading.Lock()
+_REFUSALS: dict[tuple[str, str], Optional[tuple[float, int]]] = {}
+
+
+def _refusal_key(file_path: Any, new_proxy: Any) -> tuple[str, str]:
+    """The identity of one (clip, proxy) pairing.
+
+    Both halves are normalized with the path module that fits the STRING (a
+    canonical `P:\\...` is ntpath even on a Mac), so the key a refusal is
+    stored under is the key the next pass looks up.
+    """
+    original, proxy = str(file_path or ""), str(new_proxy or "")
+    return (
+        _norm(original, _plat_for(original, None)) if original else "",
+        _norm(proxy, _plat_for(proxy, None)) if proxy else "",
+    )
+
+
+def _proxy_fingerprint(
+    path: str, stat_fn: Callable[[str], Any] = os.stat
+) -> Optional[tuple[float, int]]:
+    """(mtime, size) of the proxy, or None when it cannot be read.
+
+    None is a legitimate value to STORE and to compare: a proxy that could not
+    be statted at refusal time and still cannot be is the same file as far as
+    anyone here can tell, and re-offering it would be the churn this exists to
+    stop. It becomes a real fingerprint the moment the file is reachable,
+    which re-arms the pairing.
+    """
+    try:
+        stat = stat_fn(str(path))
+        return (float(stat.st_mtime), int(stat.st_size))
+    except Exception:
+        return None
+
+
+def note_refusal(op: dict[str, Any], stat_fn: Callable[[str], Any] = os.stat) -> None:
+    """Remember that Resolve refused this pairing. Never raises."""
+    try:
+        new_proxy = str(op.get("new_proxy") or "")
+        if not new_proxy:
+            return
+        key = _refusal_key(op.get("file_path"), new_proxy)
+        with _REFUSAL_LOCK:
+            _REFUSALS[key] = _proxy_fingerprint(new_proxy, stat_fn)
+    except Exception:
+        log.debug("proxy relink: could not record a refusal", exc_info=True)
+
+
+def is_refused(
+    file_path: str, new_proxy: str, stat_fn: Callable[[str], Any] = os.stat
+) -> bool:
+    """Has Resolve already refused THIS proxy file for this clip?
+
+    False once the proxy's (mtime, size) differ from the ones recorded: a
+    re-encoded proxy (proxy_gen), one lane B re-delivered, or one the archive
+    sweep remuxed with a corrected timecode is a different file and deserves
+    the attempt. Never raises -- a refusal memory that throws would take the
+    whole relink pass with it.
+    """
+    try:
+        key = _refusal_key(file_path, new_proxy)
+        with _REFUSAL_LOCK:
+            if key not in _REFUSALS:
+                return False
+            remembered = _REFUSALS[key]
+        return _proxy_fingerprint(str(new_proxy), stat_fn) == remembered
+    except Exception:
+        log.debug("proxy relink: refusal check failed", exc_info=True)
+        return False
+
+
+def reset_refusals() -> None:
+    """Forget every refusal -- tests only; the companion has one session and
+    a restart is the intended (and only) way to clear this in the field."""
+    with _REFUSAL_LOCK:
+        _REFUSALS.clear()
+
+
 def plan_relinks(
     items: Iterable[dict[str, Any]],
     local_root: str,
     canonical_prefix: str,
     exists_fn: Optional[Callable[[str], bool]] = None,
     is_windows: Optional[bool] = None,
+    stat_fn: Optional[Callable[[str], Any]] = None,
 ) -> list[dict[str, Any]]:
     """Decide which clips need their proxy repointed. Pure -- no Resolve calls.
 
@@ -184,8 +288,13 @@ def plan_relinks(
     Each op: {"media_pool_item", "clip_name", "file_path", "old_proxy",
     "new_proxy", "reason"} where reason is "stale" (a proxy was attached but
     unreachable) or "unlinked" (none attached and auto-link never fired).
+
+    `stat_fn` is the seam `is_refused` reads the proxy's (mtime, size)
+    through, alongside `exists_fn` -- the pass keeps NO Resolve calls and no
+    real filesystem in a test.
     """
     ops: list[dict[str, Any]] = []
+    stat = stat_fn if stat_fn is not None else os.stat
     for item in items or []:
         try:
             file_path = str(item.get("file_path") or "").strip()
@@ -208,6 +317,12 @@ def plan_relinks(
                 # unreadable, not mis-addressed. Relinking would change
                 # nothing, so don't churn the project every 120 s.
                 continue
+            if is_refused(file_path, new_proxy, stat):
+                # Resolve has already said no to this exact file, and a
+                # refusal leaves nothing on the clip to suppress the retry --
+                # so without this the identical op is re-planned, re-locked
+                # and re-logged every 120 s for ever (COMP-MEDIA-5).
+                continue
             ops.append(
                 {
                     "media_pool_item": item.get("media_pool_item"),
@@ -224,20 +339,31 @@ def plan_relinks(
     return ops
 
 
-def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], dict[str, Any]]
+def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], dict[str, Any]],
+                  stat_fn: Optional[Callable[[str], Any]] = None,
                   ) -> dict[str, Any]:
     """Run the plan through `link_fn` (resolve_bridge.link_proxy_media).
 
     Returns {"ok", "relinked", "failed", "message", "failures": [...]}. Never
     raises: one clip Resolve refuses must not stop the rest.
+
+    Every refusal is REMEMBERED (note_refusal) so the next pass does not
+    re-offer the same file, and the per-clip line is DEBUG with one WARNING
+    summarising the pass -- 200 refused clips used to write 200 WARNINGs every
+    120 s (COMP-MEDIA-5, 2026-08-14; R15 fix 4 did the same for the watcher).
     """
+    stat = stat_fn if stat_fn is not None else os.stat
     relinked = 0
     failures: list[str] = []
+    refused: list[str] = []
     for op in ops or []:
         name = op.get("clip_name") or "clip"
         try:
             result = link_fn(op.get("media_pool_item"), op["new_proxy"])
         except Exception:
+            # NOT a refusal: fusionscript going away says nothing about this
+            # pairing, and remembering it would skip a clip that never got an
+            # answer. It stays a WARNING for the same reason.
             log.warning("proxy relink: link failed for %s", name, exc_info=True)
             failures.append(name)
             continue
@@ -249,11 +375,20 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
             )
         else:
             failures.append(name)
-            log.warning(
+            refused.append(name)
+            note_refusal(op, stat)
+            log.debug(
                 "proxy relink: Resolve refused %s -> %s (%s)",
                 name, op["new_proxy"],
                 (result or {}).get("message", "no reason given"),
             )
+    if refused:
+        log.warning(
+            "proxy relink: %d proxy link(s) refused by Resolve (first: %s) -- not "
+            "retried until the proxy file changes. A timecode that does not match "
+            "the original is the usual cause (KNOWN_BUGS R10)",
+            len(refused), refused[0],
+        )
     message = ""
     if relinked or failures:
         message = f"repointed {relinked} proxy link(s)"

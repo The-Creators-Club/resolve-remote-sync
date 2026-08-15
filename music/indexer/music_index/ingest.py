@@ -25,7 +25,9 @@ from musicweb import db
 # One copy of each, in the storage layer both halves share: the queued path has
 # to reject exactly the duplicates this one rejects, on a host where nothing in
 # this package can even be imported.
-from musicweb.db import content_hash, find_reencode, unique_dest  # noqa: F401
+from musicweb.db import (  # noqa: F401
+    content_hash, find_content_duplicate, find_reencode, stream_to, unique_dest,
+)
 
 from music_index import audio, config
 import index_music        # the CLI's analyse_one/upsert, reused verbatim here
@@ -38,7 +40,17 @@ _safe_name = db.safe_upload_name
 
 
 def library_hashes():
-    """content hash -> rel_path for everything already in the library."""
+    """content hash -> rel_path for everything already in the library.
+
+    OPT-IN ONLY since MUSIC-7 (2026-08-14). `ingest_one` used to build this on
+    every drag-and-drop, which is a 9.5 GB / 376-file read to answer "is this
+    one dropped file already here" -- and W: is an SMB mount of the NAS, not
+    local disk, so the base rig was paying exactly the cost the container was
+    spared. `db.find_content_duplicate` gives the same answer from the bytes
+    index in one or two file reads. What it cannot see is a file sitting in the
+    library that no `tracks` row knows about; pass this in as `known` when that
+    case matters (nothing does today -- the next sweep indexes it).
+    """
     out = {}
     root = config.share_root()
     for p in root.rglob('*'):
@@ -73,8 +85,18 @@ def transcode_to_mp3(src: Path, dest_dir: Path):
     return dest
 
 
-def ingest_one(upload_name, data, clap, con, known=None):
-    """data: bytes. Returns a result dict (never raises for expected failures)."""
+def ingest_one(upload_name, src, clap, con, known=None):
+    """Returns a result dict (never raises for expected failures).
+
+    `src` is the upload's FILE OBJECT and is streamed to staging, not its bytes
+    (MUSIC-9, 2026-08-14): the caller's `await up.read()` pulled a whole 60 MB
+    wav into the heap only for it to be written straight back out.
+
+    `known` is an optional pre-built content-hash -> rel_path map
+    (`library_hashes()`). Without one the duplicate check goes through
+    `db.find_content_duplicate`, which reads the two files whose byte count
+    already matches instead of the whole library (MUSIC-7, 2026-08-14).
+    """
     STAGING.mkdir(parents=True, exist_ok=True)
     name = _safe_name(upload_name)
     ext = os.path.splitext(name)[1].lower()
@@ -87,7 +109,7 @@ def ingest_one(upload_name, data, clap, con, known=None):
     work = Path(tempfile.mkdtemp(prefix='ing-', dir=str(STAGING)))
     try:
         staged = work / name
-        staged.write_bytes(data)
+        stream_to(src, staged)
 
         probed = audio.probe(staged)
         if probed['duration'] <= 0:
@@ -108,18 +130,19 @@ def ingest_one(upload_name, data, clap, con, known=None):
             result['transcoded'] = True
             result['name'] = staged.name
 
-        if known is None:
-            known = library_hashes()
         h = content_hash(staged)
-        if h in known:
-            result['error'] = 'already in the library as %s' % known[h]
+        dup = known.get(h) if known is not None else find_content_duplicate(
+            con, staged, h)
+        if dup:
+            result['error'] = 'already in the library as %s' % dup
             result['duplicate'] = True
             return result
 
         dest = unique_dest(staged.name)
         config.share_root().mkdir(parents=True, exist_ok=True)
         shutil.move(str(staged), str(dest))
-        known[h] = dest.name
+        if known is not None:
+            known[h] = dest.name
 
         fields, windows = index_music.analyse_one(dest, clap)
         if fields is None:

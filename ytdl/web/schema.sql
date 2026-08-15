@@ -72,6 +72,22 @@ CREATE TABLE IF NOT EXISTS jobs (
     dl_done          INTEGER DEFAULT 0,
     dl_failed        INTEGER DEFAULT 0,
     cancel_requested INTEGER DEFAULT 0,      -- honoured between terms/videos
+    -- WHO DOWNLOADS THIS JOB'S CLIPS (docs/YTDL_LOCAL_DOWNLOAD.md). 'server' is
+    -- the NAS worker, which is the default and the fallback executor; 'local'
+    -- means the requester's own companion holds a lease and is fetching them
+    -- from their residential IP (the 2026-08-13/14 incident: bulk anonymous
+    -- downloads out of one datacentre IP is the bot-check profile). One holder
+    -- at a time, compare-and-set in ytdlweb.db.claim_download.
+    download_mode    TEXT NOT NULL DEFAULT 'server',
+    claimed_by       TEXT,                   -- the leaseholder's username
+    -- ISO-8601 UTC (db.now()), compared as a STRING -- see migrations/007.
+    -- Expiry is what makes a vanished laptop recoverable: the worker takes the
+    -- job back and downloads only what is missing.
+    lease_expires_at TEXT,
+    -- 'server' pins the job to the NAS worker for good: the editor asked for it
+    -- (plan §9), or the server reclaimed an expired lease -- which is one-way
+    -- per job (plan §3), and this column is how.
+    mode_lock        TEXT,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
 );
@@ -113,6 +129,10 @@ CREATE TABLE IF NOT EXISTS job_videos (
     dl_state       TEXT DEFAULT 'none',      -- none|pending|downloading|done|failed|skipped
     dl_error       TEXT,
     filepath       TEXT,
+    -- 'server' or the editor whose machine fetched it: the history row's
+    -- "whose IP got this clip", and the first thing to look at when one editor's
+    -- downloads fail and everybody else's do not (YTDL_LOCAL_DOWNLOAD.md §4).
+    download_host  TEXT,
     UNIQUE(job_id, video_id)
 );
 

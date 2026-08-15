@@ -47,9 +47,13 @@ from ccsync_companion import identity as identity_mod
 # -- constants ---------------------------------------------------------------
 
 # Bump this AND $InstallerVersion in installer/windows_bootstrap.ps1 AND
-# INSTALLER_VERSION in installer/macos_bootstrap.sh together -- one installer
-# number covers all three, and build_editor_package.ps1 / tools/release.ps1
-# refuse on drift between any of them.
+# INSTALLER_VERSION in installer/macos_bootstrap.sh AND
+# CFBundleShortVersionString in onboarding/build_onboard_macos.spec together --
+# one installer number covers all FOUR, and build_editor_package.ps1 /
+# tools/release.ps1 refuse on drift between any of them. The .spec is the one
+# that gets forgotten (it reads like build config, not a version); it is why
+# TestInstallerVersionParity::test_all_four_agree exists -- run the onboarding
+# suite after every bump rather than discovering the drift at ship time.
 # 1.0.15: the fleet token moved off the bootstrap's command line into
 # CCSYNC_DASHBOARD_TOKEN in its environment (run_bootstrap below), which is a
 # contract between this file and that script; they must ship as a pair.
@@ -62,6 +66,10 @@ from ccsync_companion import identity as identity_mod
 # build and failing the ship: that is how 0.6.2 shipped its companion but not
 # its installer). This number moves with every companion release; 1.0.21
 # ships with 0.6.3.
+# 1.0.27: the 1.0.21 rule a fifth time, for companion 0.7.8 (R14 -- BPG's
+# watch-folder seeding and Start press). No installer source changed; 1.0.26
+# was published on 2026-08-13 bundling 0.7.7, so this number has to move or
+# the 409 takes the ship down again.
 # 1.0.26: the 1.0.21 rule a fourth time, for companion 0.7.7 (the recurring
 # scripting-down warning). 1.0.25 was published on 2026-08-13 bundling 0.7.6,
 # so shipping 0.7.7 changes onboard.exe's bytes under a version the server
@@ -86,7 +94,7 @@ from ccsync_companion import identity as identity_mod
 # contract: CAPABILITY MISSING: markers + exit 3, RESOLVE-MAPPING-STATUS:
 # marker, and the existing-config rclone_path repair. The .sh and this file
 # must ship as a pair, same as the .ps1.
-INSTALLER_VERSION = "1.0.26"
+INSTALLER_VERSION = "1.0.27"
 
 DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
 # Base rig talks to the dashboard over the LAN, not the tailnet.

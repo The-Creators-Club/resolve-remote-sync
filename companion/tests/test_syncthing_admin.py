@@ -629,6 +629,129 @@ def test_request_raises_the_auth_error_when_every_key_is_rejected(tmp_path, monk
         admin.get_config()
 
 
+# -- SYNC-8 (2026-08-14): the key candidates are built LAZILY ---------------
+#
+# syncthing_api_key ships as "", so every real editor runs the fallback path
+# -- and building the candidate list means an ET.parse of up to two whole
+# config.xml files, on EVERY request, to re-learn a key that has not changed
+# since boot (order 150k parses a machine a day).
+
+
+def _two_homes(tmp_path, monkeypatch):
+    from ccsync_companion.sync import syncthing_lane as lane_mod
+
+    monkeypatch.setattr(lane_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    for rel, key in (("ccsync/syncthing-config/config.xml", "managed-key"),
+                     ("Syncthing/config.xml", "stock-key")):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            f"<configuration><gui><apikey>{key}</apikey></gui></configuration>",
+            encoding="utf-8",
+        )
+
+
+def test_a_known_good_key_costs_no_config_xml_parse(tmp_path, monkeypatch):
+    _two_homes(tmp_path, monkeypatch)
+    parses: list = []
+
+    from ccsync_companion.sync import syncthing_admin as admin_mod
+
+    real_read = admin_mod.read_api_key_from_config
+
+    def counting_read(path):
+        parses.append(str(path))
+        return real_read(path)
+
+    monkeypatch.setattr(admin_mod, "read_api_key_from_config", counting_read)
+    admin = SyncthingAdmin(api_key="", http_request=lambda *a, **kw: {})
+
+    admin.get_config()
+    first_pass = len(parses)
+    assert first_pass >= 1, "sanity: the first request has to learn the key somehow"
+
+    parses.clear()
+    for _ in range(20):
+        admin.folder_status("abcd-nuclear")
+    assert parses == [], "a settled key must not re-parse config.xml per request"
+
+
+def test_the_multi_home_fallback_still_expands_on_a_403(tmp_path, monkeypatch):
+    """The lazy list must not cost the fallback its only trigger: a key that
+    stops being accepted has to reach the other home's config.xml (the
+    alex_laptop 2026-07-26 failure)."""
+    import urllib.error
+
+    _two_homes(tmp_path, monkeypatch)
+    seen: list = []
+    accepted = {"key": "managed-key"}
+
+    def fake_http_request(method, url, api_key, body, timeout):
+        seen.append(api_key)
+        if api_key != accepted["key"]:
+            raise urllib.error.HTTPError(url, 403, "Forbidden", None, None)
+        return {}
+
+    admin = SyncthingAdmin(api_key="", http_request=fake_http_request)
+    admin.get_config()
+    assert seen == ["managed-key"]
+
+    # Syncthing is restarted from the OTHER home: the remembered key is now
+    # refused, and the parse-the-homes fan-out has to happen after all.
+    accepted["key"] = "stock-key"
+    seen.clear()
+    admin.get_config()
+    assert seen == ["managed-key", "stock-key"]
+
+
+def test_no_key_anywhere_still_makes_one_unauthenticated_attempt(tmp_path, monkeypatch):
+    """The `or [""]` fallback this replaced: a GUI with auth off has no key in
+    any config.xml and must still be reachable."""
+    from ccsync_companion.sync import syncthing_lane as lane_mod
+
+    monkeypatch.setattr(lane_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    seen: list = []
+
+    def fake_http_request(method, url, api_key, body, timeout):
+        seen.append(api_key)
+        return {"ok": True}
+
+    admin = SyncthingAdmin(api_key="", http_request=fake_http_request)
+    assert admin.get_config() == {"ok": True}
+    assert seen == [""]
+
+
+# -- SYNC-7/SYNC-6 (2026-08-14): read-before-write helpers ------------------
+
+
+def test_get_folders_reads_the_whole_folder_list_in_one_request():
+    admin, calls = _admin()
+    admin.get_folders()
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["url"] == "http://127.0.0.1:8384/rest/config/folders"
+    # A read: the short timeout, not config_write_timeout.
+    assert calls[0]["timeout"] == admin.timeout
+
+
+def test_note_ignores_confirmed_clears_the_half_accepted_latch():
+    """SYNC-6: with the sequencer reading before it writes, a folder whose
+    set_ignores timed out AFTER Syncthing applied it would otherwise stay
+    latched for the life of the process and be excluded from every
+    leak-recovery unpause sweep."""
+    admin, _calls = _admin()
+    admin._ignores_unconfirmed.add("abcd-nuclear")
+    assert admin.ignores_confirmed("abcd-nuclear") is False
+
+    admin.note_ignores_confirmed("abcd-nuclear")
+
+    assert admin.ignores_confirmed("abcd-nuclear") is True
+    # Idempotent, and never raises for a folder it has never heard of.
+    admin.note_ignores_confirmed("abcd-nuclear")
+    admin.note_ignores_confirmed("never-seen")
+
+
 def test_remove_folder_sends_delete():
     admin, calls = _admin()
     admin.remove_folder("2026-cct-website-highlights-website-highlights")

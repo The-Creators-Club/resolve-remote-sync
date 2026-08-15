@@ -38,6 +38,9 @@ class Index:
         self.sim_mat = (projection.apply(self.track_mat, self.dirs)
                         if self.dirs.size else self.track_mat)
         self.pos = {tid: i for i, tid in enumerate(self.track_ids)}
+        # Injection slots, not caches: both models live at module scope (see
+        # shared_encoder/shared_clap). Left here because the tests assign a fake
+        # embedder to an Index without loading anything.
         self._clap = None
         self._encoder = None
 
@@ -51,10 +54,15 @@ class Index:
         audio tower. If the artefact has not been exported it falls back to the
         full ClapModel, which is what this used to do unconditionally -- so a
         dev checkout still searches, it just pays for torch to do it.
+
+        The instance holds no cache of its own (MUSIC-8, 2026-08-14): `refresh`
+        swaps a whole new Index in on every inline ingest and after every
+        /api/reload, and caching the model on the Index threw away a 500 MB
+        onnxruntime session (or a 777 MB ClapModel) each time it did.
         """
-        if self._encoder is None:
-            self._encoder = text_encoder.load()
-        return self._encoder
+        if self._encoder is not None:
+            return self._encoder
+        return shared_encoder()
 
     @property
     def clap(self):
@@ -66,15 +74,10 @@ class Index:
         the text-only artefact cannot do and which only ever happens on the
         base rig. Keeping the two apart is what lets the container hold only
         the text half.
-
-        CLAP lives with the indexer, so the import needs music/indexer on
-        sys.path -- see config.add_indexer_to_path.
         """
-        if self._clap is None:
-            config.add_indexer_to_path()
-            from music_index.clap_model import Clap
-            self._clap = Clap()
-        return self._clap
+        if self._clap is not None:
+            return self._clap
+        return shared_clap()
 
     def text_search(self, query, k=50, pool='max'):
         """Free-text search over the CLAP embedding space.
@@ -147,6 +150,50 @@ class Index:
 _index = None
 _index_lock = threading.Lock()
 
+# The two models, held PER PROCESS rather than per Index, each behind its own
+# lock (MUSIC-5 and MUSIC-8, 2026-08-14). Neither depends on anything an Index
+# holds -- the encoder is a pure function of the artefact directory and Clap of
+# CLAP_MODEL -- so an Index has no business owning them:
+#
+#   * unguarded, two cold /api/search requests (a sync route, so FastAPI runs
+#     them on the threadpool) both saw `None` and both built an
+#     ort.InferenceSession over the ~500 MB artefact, doubling the peak in a
+#     container whose whole reason for running ONNX is memory. On the CLAP
+#     fallback the loser was a full 777 MB ClapModel.
+#   * cached on the Index, `refresh()` discarded them on every inline ingest,
+#     so drag-and-dropping three cues one at a time loaded CLAP three times.
+#
+# Separate locks on purpose: an ingest loading the 2.6 s audio tower must not
+# hold up a search that only needs the text one.
+_encoder = None
+_encoder_lock = threading.Lock()
+_clap = None
+_clap_lock = threading.Lock()
+
+
+def shared_encoder():
+    """The process-wide query-text embedder. Built once, on first use."""
+    global _encoder
+    with _encoder_lock:
+        if _encoder is None:
+            _encoder = text_encoder.load()
+        return _encoder
+
+
+def shared_clap():
+    """The process-wide FULL CLAP model (audio tower included).
+
+    CLAP lives with the indexer, so the import needs music/indexer on sys.path
+    -- see config.add_indexer_to_path. Only the base rig ever gets here.
+    """
+    global _clap
+    with _clap_lock:
+        if _clap is None:
+            config.add_indexer_to_path()
+            from music_index.clap_model import Clap
+            _clap = Clap()
+        return _clap
+
 
 def index():
     """Shared search index. Holds numpy matrices, not a DB connection, so it is
@@ -163,7 +210,9 @@ def refresh(con):
 
     The build happens OUTSIDE the lock and the swap is a single rebind, so a
     request holding the old index keeps a consistent one for its whole life and
-    the next request gets the new one whole (MUSIC-10, 2026-08-11).
+    the next request gets the new one whole (MUSIC-10, 2026-08-11). It swaps
+    only the DB-derived matrices: the models are module-level and survive it
+    (MUSIC-8, 2026-08-14).
     """
     global _index
     fresh = Index(con)

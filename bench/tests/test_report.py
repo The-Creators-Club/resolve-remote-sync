@@ -1,20 +1,35 @@
 from __future__ import annotations
 
-from ccbench.report import classify_lane, lane_of, render_report, summarize_repeats
+import time
+
+import pytest
+
+from ccbench.report import (
+    BLEND_WARN_SECONDS,
+    classify_lane,
+    filter_since,
+    lane_of,
+    parse_since,
+    render_report,
+    summarize_repeats,
+)
 from ccbench.result import RunResult
 
 
 def _r(
     engine, dataset, direction, params, MB_s, verified=True, ok=True, repeat_index=0,
     skipped=False, reason="", lane=None, loopback=False, verify_method="spot-check-sha256",
+    timestamp=None, seconds=100.0, timing_resolution_s=0.0,
 ):
     return RunResult(
         engine=engine, dataset=dataset, direction=direction, params=params,
-        seconds=100.0, num_bytes=int(MB_s * 1_000_000 * 100), MB_s=MB_s,
+        seconds=seconds, num_bytes=int(MB_s * 1_000_000 * seconds), MB_s=MB_s,
         verified=verified, ok=ok, skipped=skipped, reason=reason,
         lane=classify_lane(dataset, direction) if lane is None else lane,
         repeat_index=repeat_index, loopback=loopback,
         bytes_source="rclone-stats", verify_method=verify_method,
+        timestamp=time.time() if timestamp is None else timestamp,
+        timing_resolution_s=timing_resolution_s,
     )
 
 
@@ -196,3 +211,111 @@ def test_verification_method_is_visible_in_the_table():
     ]
     md = render_report(rows)
     assert "exit-code-only" in md
+
+
+# ---------------------------------------------------------------------------
+# SHIP-7: a median that blends two sittings must say so
+# ---------------------------------------------------------------------------
+
+
+def test_repeats_measured_back_to_back_are_not_flagged_as_blended():
+    now = time.time()
+    rows = [
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 380.0, repeat_index=0, timestamp=now),
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 390.0, repeat_index=1, timestamp=now + 120),
+    ]
+    s = summarize_repeats(rows)[0]
+    assert s.blended is False
+    assert "BLENDED" not in render_report(rows)
+
+
+def test_a_rerun_after_a_tuning_change_is_flagged_not_silently_medianed():
+    """The NAS is retuned between two matrix runs and --rerun appends: 380/380
+    and 760/760 median to 570 MB/s, a number nobody measured, with n 4/4."""
+    now = time.time()
+    old = now - 3 * 86400
+    rows = [
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 380.0, repeat_index=0, timestamp=old),
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 380.0, repeat_index=1, timestamp=old + 60),
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 760.0, repeat_index=0, timestamp=now),
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 760.0, repeat_index=1, timestamp=now + 60),
+    ]
+    s = summarize_repeats(rows)[0]
+    assert s.median_mb_s == 570.0  # the fabricated middle is still computed...
+    assert s.span_seconds > BLEND_WARN_SECONDS
+    assert s.blended is True
+
+    md = render_report(rows)
+    assert "BLENDED" in md            # ...but it is no longer presented silently
+    assert "3.0 d" in md
+    assert "--since" in md
+    # and the caveat follows the winner into the recommendation somebody copies
+    assert "BLENDED" in md.split("Recommended per-lane config")[1]
+
+
+def test_a_failed_attempt_from_last_week_does_not_make_todays_repeats_a_blend():
+    now = time.time()
+    rows = [
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 0.0, ok=False, verified=False,
+           reason="exit 1", repeat_index=0, timestamp=now - 7 * 86400),
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 380.0, repeat_index=0, timestamp=now),
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 390.0, repeat_index=1, timestamp=now + 60),
+    ]
+    assert summarize_repeats(rows)[0].blended is False
+
+
+def test_since_filters_rows_by_their_recorded_timestamp():
+    now = time.time()
+    rows = [
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 380.0, timestamp=now - 5 * 86400),
+        _r("rclone_sftp", "large", "up", {"transfers": 8}, 760.0, timestamp=now),
+    ]
+    kept = filter_since(rows, now - 86400)
+    assert [r.MB_s for r in kept] == [760.0]
+
+    md = render_report(kept, since_label="2026-08-14")
+    assert "**760.0 MB/s median**" in md
+    assert "2026-08-14" in md  # the slice is stated in the artifact itself
+
+
+@pytest.mark.parametrize("text, hours", [("24h", 24), ("7d", 168), ("1.5h", 1.5), ("2 D", 48)])
+def test_parse_since_relative_shorthand(text, hours):
+    now = 1_000_000.0
+    assert parse_since(text, now=now) == pytest.approx(now - hours * 3600)
+
+
+def test_parse_since_iso8601_and_refusal_to_guess():
+    assert parse_since("2026-08-14") == pytest.approx(
+        __import__("datetime").datetime(2026, 8, 14).timestamp()
+    )
+    for bad in ("", "last tuesday", "24x", "2026-13-01"):
+        with pytest.raises(ValueError):
+            parse_since(bad)
+
+
+# ---------------------------------------------------------------------------
+# SHIP-10: a polled clock's resolution is printed, not swallowed
+# ---------------------------------------------------------------------------
+
+
+def test_a_coarse_clock_on_a_short_run_is_called_out():
+    rows = [
+        _r("syncthing", "small", "up", {}, 30.0, lane="C", loopback=True,
+           seconds=2.0, timing_resolution_s=0.1),
+    ]
+    md = render_report(rows)
+    assert "clock +/-0.10s on a 2.0s run" in md
+    assert "5% instrument error" in md
+
+
+def test_the_same_resolution_on_a_long_run_is_not_worth_saying():
+    rows = [
+        _r("syncthing", "large", "up", {}, 30.0, lane="A", loopback=True,
+           seconds=600.0, timing_resolution_s=0.1),
+    ]
+    assert "instrument error" not in render_report(rows)
+
+
+def test_rows_from_bracketed_runners_carry_no_clock_note():
+    rows = [_r("rclone_sftp", "large", "up", {"transfers": 8}, 90.0, seconds=2.0)]
+    assert "instrument error" not in render_report(rows)

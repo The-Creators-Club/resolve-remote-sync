@@ -357,7 +357,8 @@ def test_the_api_answers_401_json_not_a_login_redirect(tmp_path, music_env):
 
 def test_the_write_routes_are_behind_the_login_gate(tmp_path, music_env):
     """musicweb has no token of its own, so login_gate IS the credential for
-    /api/ingest, /api/resolve* and /api/reveal. Nothing about /music/* may be
+    /api/ingest and /api/resolve* (reveal moved to the companion loopback,
+    MUSIC-6 2026-08-14). Nothing about /music/* may be
     exempted from it -- that exemption is what b-roll needs a token to make
     safe, and the day music grows a machine-to-machine ingest it needs one
     too."""

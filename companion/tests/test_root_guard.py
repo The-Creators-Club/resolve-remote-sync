@@ -481,6 +481,70 @@ def test_start_polls_and_stop_ends_the_thread(monkeypatch):
     assert guard._thread is None  # noqa: SLF001
 
 
+# -- COMP-GUARD-4: a probe in flight when stop() lands must not start lanes --
+
+
+def test_a_probe_that_outlives_stop_does_not_fire_its_callback(monkeypatch):
+    """app.shutdown stops the guard because its callbacks START LANES, and
+    one firing during teardown leaves a sequencer and an rclone child running
+    in a process that is exiting. stop() joins for 2.5 s and returns
+    regardless -- a darwin probe running `diskutil info -plist` per mounted
+    volume (10 s each) easily outlives that."""
+    rec = _Recorder()
+    guard = rg.RootGuard(ROOT, on_present=rec.on_present, on_absent=rec.on_absent,
+                         poll_seconds=0.01, is_darwin=True)
+
+    def _slow_probe(*args, **kwargs):
+        # The stop lands WHILE this probe is running.
+        guard.stop()
+        return rg.ROOT_PRESENT
+
+    monkeypatch.setattr(rg, "probe_root", _slow_probe)
+    assert guard.probe_once() == rg.ROOT_PRESENT
+    assert rec.present == 0, "a transition seen during teardown must not start lanes"
+    # ...and the transition is not RECORDED either: a later start() must still
+    # see it, or the lanes never come back after the drive does.
+    assert guard.state == rg.ROOT_UNKNOWN
+
+
+def test_fire_is_gated_on_the_stop_event_too(monkeypatch):
+    rec = _Recorder()
+    guard = rg.RootGuard(ROOT, on_present=rec.on_present, on_absent=rec.on_absent,
+                         is_darwin=True)
+    guard.stop()
+    guard._fire(rg.ROOT_PRESENT)  # noqa: SLF001
+    guard._fire(rg.ROOT_ABSENT)  # noqa: SLF001
+    assert rec.present == 0 and rec.absent == []
+
+
+def test_stop_keeps_a_thread_that_did_not_finish(monkeypatch):
+    """SYNC-15's precedent (_WindowsShutdownGuard.stop): dropping the
+    reference let a later start() -- which clears _stop_event -- spawn a
+    SECOND poller beside one that never saw the set."""
+    release = threading.Event()
+    started = threading.Event()
+
+    def _wedged_probe(*args, **kwargs):
+        started.set()
+        release.wait(10.0)
+        return rg.ROOT_PRESENT
+
+    monkeypatch.setattr(rg, "probe_root", _wedged_probe)
+    guard = rg.RootGuard(ROOT, poll_seconds=0.01, is_darwin=True)
+    guard.start()
+    try:
+        assert started.wait(5.0), "the guard never polled"
+        first = guard._thread  # noqa: SLF001
+        guard.stop()           # joins 2.0 s, times out
+        assert guard._thread is first, "the wedged thread must be kept, not dropped"  # noqa: SLF001
+
+        guard.start()          # must NOT spawn a rival poller
+        assert guard._thread is first  # noqa: SLF001
+    finally:
+        release.set()
+        guard.stop()
+
+
 def test_a_nonsense_poll_interval_falls_back():
     guard = rg.RootGuard(ROOT, poll_seconds="soon")
     assert guard._poll_seconds == rg.POLL_SECONDS  # noqa: SLF001

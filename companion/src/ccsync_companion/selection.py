@@ -100,6 +100,16 @@ class SelectionClient:
         self._last_response: Optional[dict[str, Any]] = None
         # Monotonic stamp for the TTLs below.
         self._last_response_at = 0.0
+        # Monotonic stamp of the last FAILED attempt (0.0 = none this run),
+        # and whose selection it was for. The TTL above is stamped only on
+        # success, so with the dashboard unreachable -- container restarting,
+        # laptop off the tailnet, rotated token -- every caller fell straight
+        # through to a fresh blocking 5 s urlopen. The tray's 2 s refresh tick
+        # calls this (app.removable_projects), which is ~12,000 doomed
+        # requests a day and an icon/tooltip that lags its own state change
+        # (COMP-CORE-3, 2026-08-14).
+        self._last_failure_at = 0.0
+        self._last_failure_editor: Optional[str] = None
         # How long get()/fetch() may serve the in-memory response without
         # going back to the network. get() used to do a LIVE HTTP fetch (and
         # a disk write) on every call, and the sequencer calls it from a
@@ -166,6 +176,18 @@ class SelectionClient:
             # any other fetch failure, but without the network round trip
             # or log spam (see the selection-identity finding).
             return None
+        # A FAILING dashboard is retried at fetch_ttl too, not on every call
+        # (COMP-CORE-3): the throttle above is stamped on success only, so an
+        # outage turned every caller into its own 5 s blocking round trip.
+        # `force=True` still bypasses it -- the paths that genuinely want a
+        # round trip (sign-in, an explicit refresh) are unaffected.
+        if (
+            not force
+            and self._last_failure_at
+            and editor_name == self._last_failure_editor
+            and (time.monotonic() - self._last_failure_at) < self.fetch_ttl
+        ):
+            return None
         url = f"{self.dashboard_url.rstrip('/')}/api/v1/selection/{quote(editor_name, safe='')}"
         headers = self._headers()
         try:
@@ -179,9 +201,12 @@ class SelectionClient:
                 self._error_logged = True
             else:
                 log.debug("selection fetch failed: %s", exc)
+            self._last_failure_at = time.monotonic()
+            self._last_failure_editor = editor_name
             return None
 
         self._error_logged = False
+        self._last_failure_at = 0.0
         self._last_response = response if isinstance(response, dict) else {"selection": selection}
         self._last_response_at = time.monotonic()
         self._last_response_editor = editor_name
@@ -311,6 +336,10 @@ class SelectionClient:
         except Exception as exc:
             return False, f"dashboard unreachable: {exc}"
         self._last_response_at = 0.0
+        # ...and the failure throttle with it, so an untick that lands right
+        # after a failed poll is still reflected on the very next get()
+        # (COMP-CORE-3, 2026-08-14).
+        self._last_failure_at = 0.0
         return True, "unticked"
 
     def get(self) -> tuple[Optional[list[dict]], str]:

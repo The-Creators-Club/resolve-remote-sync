@@ -149,11 +149,19 @@ Still authoritative; implemented since 2026-08-10 by
 - `POST /insert` — body:
   `{share, rel_path, in_frame, out_frame, fps, mode}` where frames are in **original-media
   frames** (web UI converts player seconds → frames using the video's fps from the DB),
-  `mode` is `"append"` (v1; `"playhead"` reserved).
+  `mode` is `"append"` | `"playhead"` (playhead implemented 2026-08-14; before that it was
+  reserved and pre-playhead companions answer it `{ok: false, "not implemented yet"}`,
+  which the web UI rewrites into "update the companion").
   Behaviour: translate path via mounts config → verify file exists → connect to Resolve →
   import into bin `B-Roll/Archive` (reuse existing MediaPoolItem if already imported, matched
-  by file path) → `AppendToTimeline([{mediaPoolItem, startFrame: in_frame, endFrame: out_frame}])`
-  on the current timeline. → `{ok, message}` with useful error text on every failure path
+  by file path) → place on the current timeline. `append`:
+  `AppendToTimeline([{mediaPoolItem, startFrame: in_frame, endFrame: out_frame, trackIndex: 1}])`.
+  `playhead`: place at the playhead (recordFrame, absolute timeline frames) on the lowest
+  overlay track ≥ V2 whose video AND audio lanes are clear across the clip's extent
+  (one trackIndex serves both streams; no mediaType, so nat sound comes along), adding
+  video/audio tracks when none is free; the returned item's GetStart() is verified against
+  the requested frame and a misplaced clip is deleted rather than reported as success.
+  → `{ok, message}` with useful error text on every failure path
   (no mount, file missing, Resolve not running, no project open, no timeline).
   **Missing-file behaviour (added 2026-08-11):** when the share is `broll` at its *derived*
   mount (no hand-written entry, not a base rig) and the companion has a working rclone

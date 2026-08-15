@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 import pytest
 
@@ -114,6 +115,24 @@ def test_resolved_local_root(tmp_path):
     assert config_mod.resolved_local_root(cfg) == tmp_path
 
 
+@pytest.mark.parametrize("value", [5, True, ["D:/x"], None, {"a": 1}])
+def test_resolved_local_root_never_raises_on_a_non_string(value):
+    """COMP-CORE-4: `local_root = 5` is valid TOML, and this is the first
+    statement of _start_lut_link() -- which start() used to call outside any
+    try, so Path(5)'s TypeError killed the windowed exe before the tray icon
+    existed. Same guard resolved_log_path has carried since CORE-H2."""
+    assert config_mod.resolved_local_root({"local_root": value}) == Path("")
+
+
+def test_validate_config_flags_a_non_string_local_root(tmp_path):
+    errors, _ = config_mod.validate_config(_good_cfg(tmp_path, local_root=5))
+    assert any("local_root must be a path string" in p for p in errors)
+    # ...and does not ALSO claim it does not exist / is blank: str()-ing the
+    # value reported "local_root does not exist: 5", which names the wrong
+    # fault (COMP-CORE-4, 2026-08-14).
+    assert not any("does not exist" in p or "is blank" in p for p in errors)
+
+
 def test_default_toml_text_documents_every_default_key():
     # Every key in DEFAULTS should appear as a `key =` assignment somewhere
     # in DEFAULT_TOML_TEXT, so the shipped template never drifts from the
@@ -152,6 +171,9 @@ def test_default_toml_text_documents_every_default_key():
         # TOML has no null, and an explicit value in every first-run file
         # would kill the derivation.
         "bpg_enabled", "bpg_path",
+        # An override for a path that is otherwise %APPDATA%-derived -- writing
+        # one in pins a location that only ever needs pinning by hand.
+        "bpg_settings_path",
         # The YouTube importer's tuning, same class as the generator's: the
         # feature switch and the two windows an editor might actually want to
         # change are written live, the batch/failure knobs are documented
@@ -200,7 +222,9 @@ EXAMPLE_COMMENTED_OUT = {
     # The BPG hand-off, same reasoning: bpg_enabled derives from
     # proxy_generation_enabled AND whether Resolve is installed, and bpg_path
     # is empty by default because the answer is "look where Resolve installs".
-    "bpg_enabled", "bpg_path",
+    # bpg_settings_path is an override for a %APPDATA%-derived path, so it is
+    # documented the way server_p_unc is: there to be found, not to be copied.
+    "bpg_enabled", "bpg_path", "bpg_settings_path",
     # The YouTube importer's batch/failure knobs -- tunable in the field,
     # shipped values are the measured defaults (see DEFAULT_TOML_TEXT above).
     "youtube_import_batch_limit", "youtube_import_max_failures",

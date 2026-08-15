@@ -51,11 +51,21 @@ Indexing is resumable and skips unchanged files by size+mtime. A full rebuild of
 tracks takes ~9 min on the RTX 3080. `--retag` takes seconds because it re-scores from
 stored embeddings without touching audio.
 
+A full sweep also **prunes**: a row whose file is no longer under the root is deleted, so
+a renamed cue does not survive as a ghost that ranks in search and only fails at "send to
+Resolve" (MUSIC-3, 2026-08-14). It refuses to delete in bulk — an empty or badly thinned
+scan is a half-mounted share far more often than it is a purge — so a genuine bulk removal
+needs `--prune`, and `--no-prune` turns the pass off. Orphaned previews go with
+`make_proxies.py --prune`.
+
 The indexer writes `music/web/data/music.db` — the database lives with the tree that gets
 shipped to the NAS. It imports `musicweb.db` and `web/schema.sql` rather than keeping its
 own copy, so the writer and the reader cannot drift.
 
 After re-indexing while the server is running: `curl -X POST localhost:8790/api/reload`.
+That also picks up a database file that was REPLACED rather than rewritten in place — it
+drops every cached connection first, since a sqlite3 connection is bound to an inode and
+kept reading the old one otherwise (MUSIC-10, 2026-08-14).
 
 ## Using it
 
@@ -115,8 +125,10 @@ captions. Add a label, give it 2–3 natural-language captions, run `--retag`, d
 work far better than bare words — CLAP was trained on sentences.
 
 `eval/eval.py` measures two failure modes: label bias (one label winning everywhere) and
-retrieval rank. `eval.py --sweep` compares calibration settings. `eval/validate.py`
-spot-checks tags against tracks whose filenames state what they are.
+retrieval rank. `eval.py --sweep` compares calibration settings — it re-scores the whole
+library once per alpha, so it does that on a scratch COPY of the index and never on the
+file that ships (MUSIC-4, 2026-08-14). `eval/validate.py` spot-checks tags against tracks
+whose filenames state what they are.
 
 ## Honest limits
 
@@ -141,9 +153,8 @@ web/
     main.py                 FastAPI app + the SPA routes
     routes_api.py           stats / facets / tracks / search / similar / reload
     routes_media.py         audio (HTTP Range) / peaks
-    routes_ingest.py        ingest / resolve / reveal   (the write routes)
-    resolve_link.py         spawns the Resolve worker with a timeout   <- port step 8
-    resolve_worker.py       the actual Resolve calls (child process)   <- port step 8
+    routes_ingest.py        ingest (the only write route left here)
+                            resolve + reveal are the companion's, on 127.0.0.1:8899
   static/                   index.html, app.js, style.css
   schema.sql                SQLite schema                              <- shared with the indexer
   migrations/               empty for now; see its README

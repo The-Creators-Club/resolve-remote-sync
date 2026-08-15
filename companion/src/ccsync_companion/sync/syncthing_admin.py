@@ -23,7 +23,7 @@ import logging
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 from urllib.parse import quote, urlencode
 
 from .syncthing_lane import (
@@ -60,9 +60,38 @@ _VIDEO_EXTS = [
 # asserts that across all three builders.
 PARTIAL_IGNORE_LINES = ["(?i)**/*.partial", "(?i)*.partial"]
 
+# yt-dlp's in-flight files, B12's failure one lane over. The NAS-side ytdl
+# worker downloads into the shared Projects tree (Youtube/), which is a
+# sendreceive Syncthing root, so lane C carried every growing `.part` down to
+# each editor with the project ticked -- and since the 2026-08-11 delete-
+# protection retrofit set ignoreDelete=True on EDITOR folders too, the
+# rename/delete the worker performs on completion never follows: what lands
+# here is permanent until someone deletes it by hand (27 orphans, ~1.6 GB,
+# three days, editor ruskin's machine 2026-08-13/14). rclone lane B has always
+# excluded these (rclone_lane.build_filter_rules_down), so lane C was the last
+# leak.
+#
+# This editor-side copy matters on its own: accept_folder() writes STIGNORE_
+# LINES when it takes a newly offered folder, which happens before any
+# dashboard provision cycle reaches that folder -- without these lines the new
+# folder leaks in-flight files until the collector's pass overwrites it.
+#
+# `.part-FragN` needs its own pair: a fragment is "<file>.part-Frag84" and does
+# NOT end in `.part`. Kept byte-identical to server/common.YTDL_IGNORE_LINES
+# and dashboard provision.YTDL_IGNORE_LINES (server/tests/
+# test_cross_component.py asserts it), and deliberately kept OUT of
+# ASSET_STIGNORE_LINES below -- no ytdl worker writes into a shared asset
+# folder, and that list must not drift from the other two components'.
+YTDL_IGNORE_LINES = [
+    "(?i)**/*.part", "(?i)*.part",
+    "(?i)**/*.part-Frag*", "(?i)*.part-Frag*",
+    "(?i)**/*.ytdl", "(?i)*.ytdl",
+]
+
 STIGNORE_LINES: list[str] = (
     [f"(?i)*{ext}" for ext in _VIDEO_EXTS]
     + PARTIAL_IGNORE_LINES
+    + YTDL_IGNORE_LINES
     # The fixer copies to "<dest>.ccsync-tmp" then os.replace()s it into
     # place. The extension patterns above match by EXTENSION, so
     # "A001.braw.ccsync-tmp" matches none of them -- lane C would upload a
@@ -140,9 +169,9 @@ def missing_ignore_lines(fetched: Any) -> list[str]:
     """Which of STIGNORE_LINES are absent from a GET /rest/db/ignores body.
 
     An empty list means this folder's .stignore carries every load-bearing
-    pattern -- the per-extension video lines, the .partial pair, the
-    .ccsync-tmp pair and the Proxy patterns -- so lane C cannot offer
-    anything lanes A/B already own.
+    pattern -- the per-extension video lines, the .partial pair, yt-dlp's
+    in-flight trio, the .ccsync-tmp pair and the Proxy patterns -- so lane C
+    cannot offer anything lanes A/B already own.
 
     Fails CLOSED on every shape that is not a list of lines: Syncthing sends
     `{"ignore": null}` for a folder with no .stignore AT ALL, which is the
@@ -241,6 +270,33 @@ class SyncthingAdmin:
                 candidates.append(key)
         return candidates
 
+    def _api_key_attempts(self) -> Iterator[str]:
+        """The same order as _api_key_candidates, LAZILY.
+
+        SYNC-8 (2026-08-14): syncthing_api_key ships as "" (config.py /
+        config.example.toml), so on every real editor the fallback path runs
+        -- and building the candidate LIST means an ET.parse of up to two
+        whole config.xml files. _request is called once per REST call, and
+        the callers are hot: _wait_for_folder_sync polls folder_status every
+        5 s for up to a 600 s turn, lane C polls ~3+2N endpoints every 15 s.
+        That was order 150k config.xml parses a machine a day to re-learn a
+        key that has not changed since boot. Yielding the key the instance
+        last accepted FIRST and parsing only if it is refused leaves the
+        multi-home fallback (default_api_key_paths) exactly as it was -- it
+        still runs on the 401/403 that is its only trigger.
+        """
+        if self._configured_api_key:
+            yield self._configured_api_key
+            return
+        tried: set[str] = set()
+        if self._active_api_key:
+            tried.add(self._active_api_key)
+            yield self._active_api_key
+        for key in self._api_key_candidates():
+            if key and key not in tried:
+                tried.add(key)
+                yield key
+
     def _request(
         self, method: str, path: str, body: Optional[dict] = None, timeout: Optional[float] = None
     ) -> Any:
@@ -251,7 +307,9 @@ class SyncthingAdmin:
         url = f"{self.base_url}{path}"
         effective_timeout = self.timeout if timeout is None else timeout
         last_auth_error: Optional[Exception] = None
-        for api_key in self._api_key_candidates() or [""]:
+        tried_any = False
+        for api_key in self._api_key_attempts():
+            tried_any = True
             try:
                 result = self._http_request(method, url, api_key, body, effective_timeout)
             except urllib.error.HTTPError as exc:
@@ -262,7 +320,11 @@ class SyncthingAdmin:
             if api_key:
                 self._active_api_key = api_key
             return result
-        assert last_auth_error is not None  # loop always runs at least once
+        if not tried_any:
+            # No key anywhere: one unauthenticated attempt, exactly as the
+            # `or [""]` fallback this replaced did (a GUI with auth off).
+            return self._http_request(method, url, "", body, effective_timeout)
+        assert last_auth_error is not None
         raise last_auth_error
 
     def _write_request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
@@ -293,6 +355,15 @@ class SyncthingAdmin:
 
     def get_folder(self, folder_id: str) -> Any:
         return self._request("GET", self._folder_path(folder_id))
+
+    def get_folders(self) -> Any:
+        """GET /rest/config/folders -- every folder's config in ONE request.
+
+        What the sequencer's between-passes unpause sweep reads before it
+        writes (SYNC-7, 2026-08-14): asking per folder would only trade N
+        config PATCHes for N GETs; this trades them for one. A read, so the
+        short timeout."""
+        return self._request("GET", "/rest/config/folders")
 
     def set_folder_paused(self, folder_id: str, paused: bool) -> Any:
         return self._write_request(
@@ -446,6 +517,22 @@ class SyncthingAdmin:
         # -- a timed-out config write is exactly the case this exists for.
         self._ignores_unconfirmed.discard(str(folder_id))
         return result
+
+    def note_ignores_confirmed(self, folder_id: str) -> None:
+        """Clear the half-accepted latch for a folder whose .stignore has been
+        READ and found complete.
+
+        SYNC-6 (2026-08-14): the latch was cleared only by a set_ignores that
+        returned, which was enough while the sequencer re-asserted
+        unconditionally every turn. Now that it reads first and writes only
+        when a line is actually missing, a folder whose ignores DID land --
+        from a set_ignores whose config write exceeded config_write_timeout
+        after Syncthing had already applied it, the exact case the latch
+        exists for -- would otherwise stay latched for the life of the
+        process and be excluded from every leak-recovery unpause sweep. A GET
+        that proves the file is complete is stronger evidence than a POST
+        that returned."""
+        self._ignores_unconfirmed.discard(str(folder_id))
 
     def ignores_confirmed(self, folder_id: str) -> bool:
         """False only while this process knows a folder's ignores are NOT in

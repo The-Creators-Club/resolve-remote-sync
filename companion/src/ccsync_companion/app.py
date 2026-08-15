@@ -43,6 +43,8 @@ from . import stills as stills_mod
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
 from . import youtube_import as youtube_import_mod
+from . import ytdl_executor as ytdl_executor_mod
+from . import ytdlp_manager as ytdlp_mod
 from .fixer import IgnoreTracker, _dest_dir_is_contained
 from .identity import IdentityManager
 from .manifest import ManifestCache
@@ -753,6 +755,16 @@ class CompanionApp:
         # sharing them would let one loop swallow the other's first offer.
         self._pool_offered_non_canonical: set[str] = set()
         self._pool_warned_foreign: set[str] = set()
+        # The non-canonical relink batch runs on its OWN thread (see
+        # _handle_non_canonical): the watcher calls that handler inline from
+        # poll_once, and one ReplaceClip per clip over a 158-clip backlog
+        # parked the watcher thread for minutes (COMP-GUARD-5, 2026-08-14).
+        # Single-flight with a pending list, so overlapping polls extend the
+        # batch instead of stacking threads -- and nothing offered is dropped,
+        # since each path is offered only once per process.
+        self._canon_relink_lock = threading.Lock()
+        self._canon_relink_pending: list[dict[str, Any]] = []
+        self._canon_relink_busy = False
         # Once-per-process latch for _maybe_recover_stale_bridge -- the
         # replacement process starts unlatched, and a second restart from the
         # SAME process could only mean the first one failed to take.
@@ -860,6 +872,21 @@ class CompanionApp:
             )
         except Exception:
             log.exception("failed to build the youtube importer")
+
+        # The yt-dlp sidecar (ytdlp_manager.py): the standalone binary that
+        # will let this machine download its OWN YouTube clips instead of
+        # waiting for the NAS to fetch and sync them. Built here, behind its
+        # own try, for the same reason as the two blocks above -- and with a
+        # sharper edge: this one downloads a binary off the internet, and a
+        # third-party release being unreachable, renamed or unverifiable must
+        # cost a log line and nothing else. Absent capability = the fleet's
+        # long-standing server-side download path, which is what every editor
+        # has today.
+        self.ytdlp: Any = None
+        try:
+            self.ytdlp = ytdlp_mod.YtDlpManager(cfg)
+        except Exception:
+            log.exception("failed to build the yt-dlp sidecar manager")
 
         # Self-upgrade channel (upgrade.py): availability is fed by the
         # reporter's response callback below and by sign_in()'s verify
@@ -1301,7 +1328,23 @@ class CompanionApp:
         if self._paused:
             log.info("drive is back, but syncing is paused from the tray -- leaving it")
             return
-        if self.config_problems or self._login_gate_blocks_sync():
+        # RESTAMP before refusing. start()'s _root_absent branch deliberately
+        # outranks the sign-in gate, so all three lanes read "PAUSED: your
+        # Creators Club drive is disconnected" -- and with the drive back that
+        # sentence names nothing the editor can fix, while the real blocker
+        # (sign in / a config problem) appears nowhere in the menu. Every
+        # sibling refusal path stamps its own reason; this one didn't
+        # (COMP-CORE-7, 2026-08-14).
+        if self.config_problems:
+            self._mark_lanes_misconfigured()
+            log.warning(
+                "drive is back, but %d config problem(s) still stop syncing",
+                len(self.config_problems),
+            )
+            return
+        if self._login_gate_blocks_sync():
+            self._mark_lanes_pending_login()
+            log.info("drive is back, but nobody is signed in -- lanes stay down")
             return
         if not self._lanes_started:
             try:
@@ -1474,9 +1517,67 @@ class CompanionApp:
         question to ask the editor, so no popup. Refusals are logged; the
         watcher offers each path once per process, so a refusal never
         storms.
+
+        HANDED OFF to a daemon thread, exactly as _handle_out_of_tree is and
+        for the same reason: the watcher calls this synchronously from
+        poll_once, every ReplaceClip waits on the Resolve menu and takes the
+        API lock, and the batch is unbounded (158 clips in the incident that
+        motivated the handler). Inline, that parked the watcher thread for
+        minutes -- last_resolve_project stale on the dashboard, no further
+        detection, and _stop_event unobserved so a Quit or self-upgrade could
+        not stop the watcher cleanly (AUDIT_2 CORE-M2 / COMP-GUARD-5,
+        2026-08-14).
         """
+        fresh = [
+            item for item in items
+            if item.get("file_path") and item.get("media_pool_item") is not None
+        ]
+        if not fresh:
+            return
+        with self._canon_relink_lock:
+            self._canon_relink_pending.extend(fresh)
+            if self._canon_relink_busy:
+                return
+            self._canon_relink_busy = True
+        try:
+            threading.Thread(
+                target=self._canon_relink_loop, name="ccsync-canon-relink", daemon=True,
+            ).start()
+        except Exception:
+            with self._canon_relink_lock:
+                self._canon_relink_busy = False
+            log.exception("could not start the non-canonical relink thread")
+
+    def _canon_relink_loop(self) -> None:
+        """Drain _canon_relink_pending until it is empty, then stand down.
+
+        Draining (rather than one thread per batch) is what makes the
+        single-flight flag safe: a poll landing mid-relink extends the work
+        instead of being dropped, which matters because the watcher offers
+        each path exactly once per process."""
+        try:
+            while not self._stop_event.is_set():
+                with self._canon_relink_lock:
+                    batch, self._canon_relink_pending = self._canon_relink_pending, []
+                    if not batch:
+                        self._canon_relink_busy = False
+                        return
+                self._relink_non_canonical(batch)
+        except Exception:
+            log.exception("non-canonical relink pass failed")
+        finally:
+            with self._canon_relink_lock:
+                self._canon_relink_busy = False
+
+    def _relink_non_canonical(self, items: list[dict[str, Any]]) -> None:
+        """One batch of ReplaceClips, on the relink thread. Never raises."""
         fixed = 0
         for item in items:
+            if self._stop_event.is_set():
+                # Teardown/self-upgrade: stop between clips rather than
+                # holding the process open for the rest of a 158-clip batch.
+                log.info("non-canonical relink stopped part-way: shutting down")
+                break
             path = item.get("file_path", "")
             mpi = item.get("media_pool_item")
             if not path or mpi is None:
@@ -2331,9 +2432,10 @@ class CompanionApp:
 
         Guards, in order: feature flag; once per process (the replacement
         starts unlatched); ever_connected (a fresh DLL has no stale state);
-        currently disconnected; and the Resolve process actually ABSENT --
+        currently disconnected; the Resolve process actually ABSENT --
         resolve_is_running fails closed (True), so an inconclusive probe
-        never triggers a restart. Never raises.
+        never triggers a restart; and finally apply_upgrade's own
+        stand-down test. Never raises.
         """
         if not bool(self.config.get("bridge_auto_restart", True)):
             return
@@ -2346,6 +2448,19 @@ class CompanionApp:
             if resolve_prefs_mod.resolve_is_running():
                 return
         except Exception:
+            return
+        blocker = self._standing_down_would_kill_work()
+        if blocker:
+            # DEFERRED, not abandoned -- the latch stays unset so the next
+            # media-tree tick tries again once the work is done. Quitting
+            # Resolve part-way through a "Copy this project's media in" is
+            # enough to pass every guard above, and standing the process down
+            # there kills the consolidate worker mid-shutil.copy2
+            # (COMP-CORE-2, 2026-08-14).
+            log.info(
+                "stale-bridge restart deferred: %s in progress -- retrying on a "
+                "later pass", blocker,
+            )
             return
         self._bridge_restart_started = True
         log.info(
@@ -2479,6 +2594,11 @@ class CompanionApp:
                 self._refresh_media_tree_once()
             except Exception:
                 log.exception("media tree refresh loop failed")
+            # Piggy-backed here because it is the one slow background tick
+            # this process already has: it keeps the tray's cache-only read of
+            # the P: mapping fresh without the tray forking `net use` every
+            # 10 s (COMP-CORE-6, 2026-08-14).
+            self._refresh_p_mapping_mode()
             if self._media_tree_stop_event.wait(self.media_tree_refresh_interval):
                 break
 
@@ -2592,18 +2712,59 @@ class CompanionApp:
         cached = getattr(self, "_p_mode_cache", None)
         if cached is not None and now - cached[0] < 10.0:
             return cached[1]
+        mode = self._probe_p_mapping_mode()
+        self._p_mode_cache = (now, mode)
+        return mode
+
+    def _probe_p_mapping_mode(self) -> str:
+        """One `net use P:` (plus a `subst` on a subst-mapped rig). Never
+        raises -- "none" is the "we could not tell" answer every caller
+        already treats as "say nothing"."""
         from . import drive_swap
 
         try:
-            mode = drive_swap.classify_p_target(
+            return drive_swap.classify_p_target(
                 drive_swap.current_p_target(),
                 str(self.config.get("local_root", "")),
                 self._server_p_unc(),
             )
         except Exception:
-            mode = "none"
-        self._p_mode_cache = (now, mode)
-        return mode
+            return "none"
+
+    def p_mapping_mode_cached(self) -> str:
+        """The TRAY's read: whatever the cache holds, never a fresh probe.
+
+        _tray_snapshot pulls this on every 2 s refresh tick, which guaranteed
+        the 10 s memo above expired and re-populated forever -- ~8,600 `net
+        use` processes a day (up to ~17,000 with the subst fallback) on every
+        Windows machine in the fleet, to re-derive a value that normally
+        changes never, from the one place documented as where nothing may
+        stall (COMP-CORE-6, 2026-08-14). Both in-process mutators
+        (swap_p_to_server / swap_p_to_local) already invalidate the cache
+        explicitly, and _refresh_p_mapping_mode re-derives it on the slow
+        media-tree tick so an out-of-process remap (the installer's
+        CCSync-SubstP logon task, a manual `net use`) still lands. Only a
+        cold cache -- first tick of the process, or straight after a swap --
+        pays for a probe.
+        """
+        cached = getattr(self, "_p_mode_cache", None)
+        if cached is not None:
+            return cached[1]
+        return self.p_mapping_mode()
+
+    def _refresh_p_mapping_mode(self) -> None:
+        """Re-derive the P: classification in the background (COMP-CORE-6).
+
+        Called from the media-tree loop, i.e. once per
+        media_tree_refresh_interval, which is what keeps the tray's
+        cache-only read honest about a mapping changed from OUTSIDE this
+        process. Never raises."""
+        if os.name != "nt":
+            return
+        try:
+            self._p_mode_cache = (time.monotonic(), self._probe_p_mapping_mode())
+        except Exception:
+            log.debug("P: mapping refresh failed", exc_info=True)
 
     def swap_p_to_server(self, username: str = "", password: str = "") -> tuple[bool, str]:
         """Remap P: to the server tree for full-res grading. On failure the
@@ -3001,6 +3162,26 @@ class CompanionApp:
         if self.project_setup is not None:
             self.project_setup.trigger_setup()
 
+    def _standing_down_would_kill_work(self) -> str:
+        """"" when this process may spawn a replacement and exit, else the
+        name of the work that says otherwise ("popup" | "consolidate").
+
+        ONE predicate for every caller of upgrade.restart_self. apply_upgrade
+        was hardened against standing this process down mid-copy -- the
+        spawned copy is killed inside shutil.copy2, leaving a partial
+        .ccsync-tmp and a project where some clips are relinked and some are
+        not (AUDIT_2 CORE-H8/H5) -- and R12's stale-bridge recovery then
+        reused the same spawn+shutdown sequence with none of those guards, so
+        quitting Resolve mid-consolidate was enough to reproduce exactly that
+        outcome (COMP-CORE-2, 2026-08-14). A third caller must inherit the
+        test rather than have to remember it.
+        """
+        if self._popup_active_lock.locked():
+            return "popup"
+        if self._consolidate_active:
+            return "consolidate"
+        return ""
+
     def apply_upgrade(self) -> None:
         """Download, verify, swap the exe and restart. Blocking (a ~20 MB
         download) -- the tray calls this on a daemon thread. On failure the
@@ -3008,16 +3189,13 @@ class CompanionApp:
         info = self.upgrade.available
         if info is None:
             return
-        # Never swap the exe and exit out from under work in progress: the
-        # spawned copy would be killed mid-shutil.copy2, leaving a partial
-        # .ccsync-tmp and a project where some clips are relinked and some
-        # are not (AUDIT_2 CORE-H8/H5).
-        if self._popup_active_lock.locked():
+        blocker = self._standing_down_would_kill_work()
+        if blocker == "popup":
             self._notify_tray(
                 "Can't update while a CCSync window is open. Close it and try again.",
                 "ccsync-companion")
             return
-        if self._consolidate_active:
+        if blocker:
             self._notify_tray(
                 "Can't update while media is being copied in. Let it finish, then try again.",
                 "ccsync-companion")
@@ -3095,10 +3273,31 @@ class CompanionApp:
             log.exception("sequencer state read failed")
             return "", ""
 
+    # How far back from the end of companion.log to read for the tail. 64 KB
+    # is ~200 lines of this formatter, comfortably more than the 40 asked for.
+    _LOG_TAIL_WINDOW_BYTES = 64 * 1024
+
     def _diagnostic_log_tail(self, lines: int = 40) -> list[str]:
+        # Seek, don't readlines(): setup_logging rotates at 5 MB and R15 fix 4
+        # documents machines that sit at that ceiling, so keeping 40 lines
+        # decoded 5 MB of UTF-8 and allocated tens of thousands of strings --
+        # on the tray worker thread, inside "Copy diagnostics"
+        # (COMP-CORE-8, 2026-08-14). The except arm still answers with the
+        # explanatory placeholder for an unreadable (or mid-rotation) file.
         try:
-            with open(self.log_path, "r", encoding="utf-8", errors="replace") as fh:
-                return [line.rstrip("\n") for line in fh.readlines()[-lines:]]
+            with open(self.log_path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                window = min(size, self._LOG_TAIL_WINDOW_BYTES)
+                fh.seek(size - window)
+                chunk = fh.read(window)
+            text = chunk.decode("utf-8", errors="replace")
+            tail = text.splitlines()
+            # The first line of a mid-file window is almost always a partial
+            # one; drop it unless the window covers the whole file.
+            if window < size and tail:
+                tail = tail[1:]
+            return tail[-lines:]
         except Exception as exc:
             return [f"(could not read {self.log_path}: {exc})"]
 
@@ -3516,11 +3715,41 @@ class CompanionApp:
                 self.youtube_importer.start()
         except Exception:
             log.exception("failed to start the youtube importer")
-        self._start_shutdown_guard()
-        self._start_keep_awake()
-        self._start_lut_link()
-        self._start_root_guard()
-        self._start_broll_server()
+        # Each behind its own try, on the same terms as the features above:
+        # start() runs BEFORE the tray icon exists, so anything raising out of
+        # here leaves the editor with no tray, no toast and only a log line
+        # they have no menu item to open. _start_lut_link's first statement
+        # reads local_root, which a hand-edited `local_root = 5` made raise
+        # (COMP-CORE-4, 2026-08-14) -- but the rule is the general one, not
+        # that one value.
+        for name, starter in (
+            ("shutdown guard", self._start_shutdown_guard),
+            ("keep-awake", self._start_keep_awake),
+            ("LUT/stills link", self._start_lut_link),
+            ("root guard", self._start_root_guard),
+            ("b-roll server", self._start_broll_server),
+            ("yt-dlp manager", self._start_ytdlp_manager),
+        ):
+            try:
+                starter()
+            except Exception:
+                log.exception("failed to start the %s", name)
+
+    def _start_ytdlp_manager(self) -> None:
+        """Keep this machine's yt-dlp binary present and current.
+
+        LAST, next to the b-roll server, and behind its own try for the same
+        reason: its own daemon thread, no lanes, no sign-in and no Resolve --
+        and a failure means one capability this fleet has never had is still
+        missing, while everything that moves footage carries on. The thread
+        itself waits 30 s before its first check so a 17 MB download never
+        competes with startup (ytdlp_manager.INITIAL_DELAY_SECONDS).
+        """
+        try:
+            if self.ytdlp is not None:
+                self.ytdlp.start()
+        except Exception:
+            log.exception("failed to start the yt-dlp sidecar manager")
 
     def _start_broll_server(self) -> None:
         """Serve the b-roll web UI's "Send to Resolve" button.
@@ -3532,10 +3761,47 @@ class CompanionApp:
         cause and it says so in the log) -- this catch is for the rest.
         """
         try:
-            self._broll_server = broll_server_mod.start(self.config)
+            self._broll_server = broll_server_mod.start(
+                self.config, ytdl_deps=self._ytdl_deps())
         except Exception:
             log.exception("failed to start the b-roll Send-to-Resolve server")
             self._broll_server = None
+
+    def _ytdl_deps(self) -> Any:
+        """What the /ytdl download executor is allowed to know about this
+        machine (ytdl_executor.Deps, docs/YTDL_LOCAL_DOWNLOAD.md §7).
+
+        Three live seams, and each of them is the app's answer rather than a
+        config key on purpose:
+
+          - the yt-dlp sidecar manager itself, because its CACHED daily check
+            is what lets GET /ytdl/capabilities answer inside the SPA's 1 s
+            probe budget -- running the binary there would blow it;
+          - editor_identity, not cfg["editor_name"], because a lease needs the
+            VERIFIED holder (reporter.post_once's rule);
+          - the project selection, because the manifest's project_label is
+            validated against it before anything is written to disk -- a
+            project this machine does not sync is refused.
+
+        Returns None on any failure, which the server reads as "no local
+        download capability": the fleet then downloads on the NAS exactly as it
+        did before 0.8.0.
+        """
+        try:
+            selection = self.selection_client
+            return ytdl_executor_mod.Deps(
+                self.config,
+                ytdlp=self.ytdlp,
+                editor_fn=self.editor_identity,
+                # get() is live-then-cache-then-None; None is "we could not
+                # ask", which the executor refuses on rather than guessing.
+                selection_fn=(
+                    (lambda: selection.get()[0]) if selection is not None else None
+                ),
+            )
+        except Exception:
+            log.exception("failed to build the ytdl executor dependencies")
+            return None
 
     def _start_lut_link(self) -> None:
         """Keep Resolve's LUT directory pointed at the synced LUT library.
@@ -3828,7 +4094,9 @@ class CompanionApp:
 
         local_root = str(self.config.get("local_root", ""))
         try:
-            leftovers = fixer_mod.sweep_stale_tmp_files(local_root)
+            # ONE walk of the tree feeds both sweeps below.
+            tmp_files = fixer_mod.walk_ccsync_tmp_files(local_root)
+            leftovers = fixer_mod.sweep_stale_tmp_files(local_root, tmp_files=tmp_files)
         except Exception:
             log.exception("stale-tmp sweep failed")
             return
@@ -3837,6 +4105,25 @@ class CompanionApp:
                 f"Found {len(leftovers)} half-copied file(s) from an interrupted copy. "
                 "Nothing was deleted. Tray → Copy diagnostics for your admin.",
                 "ccsync-companion")
+        # ...and the OTHER half of an interrupted FIX ALL: the 0-byte final
+        # name it reserved before starting the copy. Unlike the partial above
+        # that one is deleted -- it is empty, so it is provably not the
+        # editor's data, and left alone lane A uploads it and
+        # --ignore-existing makes the empty file permanent for the whole
+        # fleet (COMP-GUARD-1, 2026-08-14). No toast: there is nothing for
+        # the editor to do, and their next FIX ALL now lands on the right
+        # name instead of "<clip> (2).braw".
+        try:
+            reservations = fixer_mod.sweep_orphan_reservations(
+                local_root, tmp_files=tmp_files)
+        except Exception:
+            log.exception("orphan reservation sweep failed")
+            reservations = []
+        if reservations:
+            log.warning(
+                "removed %d empty placeholder file(s) left by an interrupted copy "
+                "-- see the lines above", len(reservations),
+            )
         # Half-made proxies from an encode that was killed (power cut, kill -9,
         # a publish that hit an SMB sharing violation). REPORTED, never
         # deleted -- the same refusal as the .ccsync-tmp sweep above, and the
@@ -3854,6 +4141,46 @@ class CompanionApp:
                 "%d half-made proxy file(s) are left over from interrupted encodes "
                 "-- see the lines above; nothing was deleted", len(partials),
             )
+        self._recheck_orphan_reservations(local_root, tmp_files)
+
+    def _recheck_orphan_reservations(
+        self, local_root: str, tmp_files: list[tuple[float, str]]
+    ) -> None:
+        """Second look at the candidates that were too FRESH to judge.
+
+        The self-upgrade restarts in seconds, so the residue of the copy it
+        killed is usually younger than fixer.RESERVATION_IDLE_SECONDS when
+        the startup sweep reaches it -- and lane A releases the 0-byte
+        reservation 120 s after it was created, after which
+        --ignore-existing makes the empty file permanent on the NAS
+        (COMP-GUARD-1, 2026-08-14). Re-checks the paths the walk ALREADY
+        found rather than walking the tree again, and waits on _stop_event so
+        a Quit in that window is not held up. Never raises.
+        """
+        from . import fixer as fixer_mod
+
+        try:
+            now = time.time()
+            fresh = [
+                entry for entry in tmp_files
+                if (now - entry[0]) < fixer_mod.RESERVATION_IDLE_SECONDS
+            ]
+            if not fresh:
+                return
+            if self._stop_event.wait(fixer_mod.RESERVATION_IDLE_SECONDS + 1.0):
+                return
+            removed = fixer_mod.sweep_orphan_reservations(
+                local_root,
+                idle_seconds=fixer_mod.RESERVATION_IDLE_SECONDS,
+                tmp_files=fresh,
+            )
+            if removed:
+                log.warning(
+                    "removed %d empty placeholder file(s) left by a copy this "
+                    "process's own restart interrupted", len(removed),
+                )
+        except Exception:
+            log.exception("orphan reservation re-check failed")
 
     def _identity_watch_loop(self) -> None:
         """Notice a token EXPIRING, not just a sign-out.
@@ -3935,6 +4262,16 @@ class CompanionApp:
                 self.youtube_importer.stop()
         except Exception:
             log.exception("failed to stop the youtube importer")
+        # With them: its thread is usually asleep until tomorrow, but it may be
+        # mid-download of a yt-dlp binary, and stop() only sets an event -- it
+        # never waits, so this costs teardown nothing. NOT joined below: the
+        # partial download is a `.new` temp file that the next install()
+        # truncates, so nothing is left in a state anyone has to clean up.
+        try:
+            if self.ytdlp is not None:
+                self.ytdlp.stop()
+        except Exception:
+            log.exception("failed to stop the yt-dlp sidecar manager")
         self._stop_lanes()
         try:
             self.reporter.stop()

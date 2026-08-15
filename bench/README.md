@@ -82,12 +82,22 @@ dir.
    Runs every engine x lane x param-sweep x repeat combination sequentially,
    printing progress, and appends each result as one JSON line to
    `results/results.jsonl` (append-only). Re-running the same command is
-   *resumable* -- combos already recorded are skipped; pass `--rerun` to
-   force everything to run again. Use `--engines rclone_sftp,syncthing` or
-   `--lanes A,B` to scope a run. The iperf3 sweep belongs to the synthetic
+   *resumable* -- combos that already produced a **measurement** are skipped,
+   and combos that were skipped (missing binary, unsupported direction) or
+   failed (timeout, short transfer, runner crash) are **retried**: install the
+   missing syncthing, re-run, and the lane-C cells actually get measured.
+   `--rerun` re-runs even the good ones. Use `--engines rclone_sftp,syncthing`
+   or `--lanes A,B` to scope a run. The iperf3 sweep belongs to the synthetic
    lane `net`, so `--lanes A,B` skips it and `--lanes net` runs only it.
    Remote scratch cleanup still happens at the end of a fully-resumed run,
    even when every combo was already recorded.
+
+   **Re-measuring after you change something** (a NAS tuning change, a new
+   NIC): the file is append-only, so `--rerun` puts the new numbers in the same
+   median as the old ones -- 2 repeats at 380 MB/s plus 2 at 760 report as
+   ~570 MB/s, `n 4/4`. Either point `--results` at a fresh file, or use
+   `ccbench report --since` below. The report flags any combo whose repeats
+   span more than a few hours, so a blend is visible either way.
 
 5. **Read the report**:
    ```powershell
@@ -100,6 +110,14 @@ dir.
    "did we beat Resolve Cloud" section comparing the winning MB/s against
    the ~60 mb/s baseline read both as Mbps and as MB/s (the unit Blackmagic
    quotes is ambiguous, so both are shown).
+
+   `--since 24h` (or `7d`, or an ISO date like `2026-08-14`) cuts the history
+   at a known event so a median cannot span it; the window is printed in the
+   report itself. Rows whose repeats span more than a few hours are marked
+   `BLENDED` in the Notes column and in the winner's caveats, and a row whose
+   clock is coarse relative to what it timed (the syncthing pair polls rather
+   than brackets, so both ends of its interval land on a poll) says so as
+   instrument error instead of leaving it to look like variance.
 
 ## Nothing here deletes anything outside a `_bench` path
 

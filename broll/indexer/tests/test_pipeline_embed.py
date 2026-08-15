@@ -102,6 +102,111 @@ def test_stage_embed_covers_transcript_segments_too(tmp_path, sqlite_storage_v4)
     assert sqlite_storage_v4.get_embedding_models(vid) == {("transcript", cue["id"]): "fake-model"}
 
 
+# ---------------------------------------------------------------------------
+# one transaction per video, not per row (BROLL-IDX-8, 2026-08-14)
+# ---------------------------------------------------------------------------
+# update_search_norm and upsert_embedding each committed their own transaction
+# and bumped the single `meta` search-generation row. stage_embed called them in
+# a loop over every segment and every transcript cue, so a re-embed of the live
+# corpus (53,226 segments + 29,783 cues) was ~83,000 fsyncs and ~83,000 UPDATEs
+# of one hot row where ~7,100 — one per video — do the same job. The batched
+# shape already existed in embed_transcripts.py; the stage just did not use it.
+
+def _many_segments(storage, tmp_path, n=12, rel="many.mov"):
+    (tmp_path / rel).write_bytes(b"x")
+    vid = storage.upsert_video("broll", rel, status="proxied")
+    storage.write_index_result(
+        vid, themes=[], quality_flags=[], category_hint=None,
+        segments=[{"t_start": float(i), "t_end": float(i + 1),
+                   "description": f"shot {i}", "objects": [], "setting": "street",
+                   "motion": "static"} for i in range(n)],
+        model="claude-sonnet-5",
+    )
+    storage.write_transcript(
+        vid, [TranscriptCue(float(i), float(i + 1), f"line {i}") for i in range(n)], "en")
+    return vid
+
+
+def _generation(storage) -> int:
+    from broll_index.storage.sqlite_backend import SEARCH_GENERATION_KEY
+
+    row = storage.conn.execute(
+        "SELECT value FROM meta WHERE key = ?", (SEARCH_GENERATION_KEY,)).fetchone()
+    return int(row["value"])
+
+
+class _CountingConn:
+    """Delegates to the real connection, tallying commits (sqlite3.Connection's
+    own attributes are read-only, so it cannot be patched in place)."""
+
+    def __init__(self, conn, commits):
+        self._conn = conn
+        self._commits = commits
+
+    def commit(self):
+        self._commits.append(1)
+        self._conn.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_stage_embed_commits_per_video_not_per_row(tmp_path, sqlite_storage_v4, monkeypatch):
+    vid = _many_segments(sqlite_storage_v4, tmp_path, n=12)
+    cfg = _cfg(tmp_path, model="fake-model")
+    commits = []
+    monkeypatch.setattr(sqlite_storage_v4, "conn",
+                        _CountingConn(sqlite_storage_v4.conn, commits))
+
+    pipeline.stage_embed(cfg, sqlite_storage_v4, sqlite_storage_v4.get_video(vid))
+
+    # 24 rows: one flush for the search norms, one for the vectors.
+    assert len(commits) == 2, f"one transaction per video, got {len(commits)} for 24 rows"
+
+
+def test_the_generation_is_still_bumped_for_every_batched_write(tmp_path, sqlite_storage_v4):
+    """The counter is the only thing the web app's caches can see a re-embed by
+    (KNOWN_BUGS R2), so batching must not drop it — one bump per batch, in the
+    same transaction as the batch."""
+    vid = _many_segments(sqlite_storage_v4, tmp_path, n=4)
+    before = _generation(sqlite_storage_v4)
+
+    pipeline.stage_embed(_cfg(tmp_path, model="fake-model"), sqlite_storage_v4,
+                         sqlite_storage_v4.get_video(vid))
+
+    assert _generation(sqlite_storage_v4) == before + 2
+
+
+def test_batched_writes_land_the_same_rows_as_the_single_row_calls(tmp_path, sqlite_storage_v4):
+    vid = _many_segments(sqlite_storage_v4, tmp_path, n=5)
+
+    pipeline.stage_embed(_cfg(tmp_path, model="fake-model"), sqlite_storage_v4,
+                         sqlite_storage_v4.get_video(vid))
+
+    segs = sqlite_storage_v4.get_segments(vid)
+    cues = sqlite_storage_v4.get_transcript_segments(vid)
+    assert all(s["search_norm"] for s in segs)
+    assert all(c["search_norm"] for c in cues)
+    models = sqlite_storage_v4.get_embedding_models(vid)
+    assert len(models) == len(segs) + len(cues)
+    assert set(models.values()) == {"fake-model"}
+
+
+def test_an_unknown_search_norm_source_still_raises(sqlite_storage_v4):
+    """The batch path must keep the single-row guard: a typo'd source silently
+    writing nowhere is worse than a crash."""
+    with pytest.raises(ValueError, match="unknown search_norm source"):
+        sqlite_storage_v4.update_search_norms([("segmnet", 1, "blob")])
+
+
+def test_the_batch_entry_points_are_no_ops_on_an_empty_list(sqlite_storage_v4):
+    before = _generation(sqlite_storage_v4)
+    sqlite_storage_v4.update_search_norms([])
+    sqlite_storage_v4.upsert_embeddings([])
+    assert _generation(sqlite_storage_v4) == before, \
+        "a video with nothing to write must not invalidate every reader's cache"
+
+
 def test_stage_embed_never_touches_video_status(tmp_path, sqlite_storage_v4):
     vid = _make_indexed_video(sqlite_storage_v4, tmp_path)
     cfg = _cfg(tmp_path)

@@ -22,12 +22,21 @@ job for a number nobody reads twice.
 """
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
 
-from ytdlweb import claude_cli, config, db
+from ytdlweb import claude_cli, config, db, ytdl_common
 from ytdlweb.vendor import downloader, ytsearch
+# The naming/fallback contract BOTH executors run under, moved out of this file
+# on 2026-08-14 so the companion can vendor it (docs/YTDL_LOCAL_DOWNLOAD.md §5).
+# Re-imported under the names this module has always used, so the worker's own
+# behaviour -- and everything that reads these -- is unchanged by the move.
+from ytdlweb.ytdl_common import (BEST_FALLBACK_QUALITY,  # noqa: F401
+                                 TRUNCATED_NOTE)
+from ytdlweb.ytdl_common import TRUNCATION_MARKERS as _TRUNCATION_MARKERS  # noqa: F401
+from ytdlweb.ytdl_common import stream_truncated as _stream_truncated
 
 log = logging.getLogger(__name__)
 
@@ -226,6 +235,14 @@ def run_job(c, job_id):
         if job['cancel_requested'] and job['phase'] not in db.TERMINAL:
             _clear_progress(job_id)
             db.set_phase(c, job_id, 'cancelled')
+            return
+        # A job an editor's companion is downloading RIGHT NOW is not ours
+        # (docs/YTDL_LOCAL_DOWNLOAD.md §3). db.claim_next_job already hides a
+        # leased job from the loop; this is the same rule at the other door,
+        # because the API and the tests call run_job directly. RETURN, never
+        # "skip and carry on": nothing in here would change the phase, so a
+        # continue would spin on this row until the lease expired.
+        if db.lease_active(job):
             return
         handler = handlers.get(job['phase'])
         if handler is None:
@@ -494,12 +511,20 @@ def _phase_filter(c, job):
 
     # (a) mechanical. A live stream has no fixed duration and cannot be cut
     # with; a missing duration means the metadata fetch got nothing usable.
+    # Over-length videos (config.MAX_DURATION_SECONDS) are dropped the same
+    # soft way, BEFORE the Claude judge sees them -- no tokens spent judging
+    # a card the length cap already decided, and the editor can still
+    # overrule from the manifest.
     for v in rows:
         if v['meta_error']:
             continue
         if not v['duration']:
             db.set_video(c, job_id, v['video_id'], relevant=0, selected=0,
                          relevance_note='live or no duration')
+        elif v['duration'] > config.MAX_DURATION_SECONDS:
+            db.set_video(c, job_id, v['video_id'], relevant=0, selected=0,
+                         relevance_note='over %d minutes'
+                                        % (config.MAX_DURATION_SECONDS // 60))
 
     # (b) Claude's relevance verdicts. DEGRADE, DO NOT FAIL: an editor with an
     # unfiltered manifest and a banner is fine; an editor with no manifest
@@ -619,10 +644,29 @@ def ensure_outdir(outdir):
 # referencing it Media Offline.
 _SWEEPABLE = ('.part', '.ytdl', '.temp')
 
+# The other half of the same litter, by STEM (COMP-BROLL-3, 2026-08-14). A
+# 1080p rung is `bestvideo+bestaudio`, so yt-dlp renames `... [id].f137.mp4.part`
+# to `... [id].f137.mp4` the moment that stream completes and KEEPS it, for
+# resume, if the audio or the merge then fails. Nothing deleted it: it is not a
+# suffix above, _landed_file already refuses to read it as the clip, and it
+# matches lane A's `+ *.mp4` include and no stignore line -- so one lid closed
+# at clip 7 put a 1.4 GB video-only orphan in the canonical tree and on every
+# editor with that project ticked, permanently. `.temp` is the same file half a
+# second later (FFmpegMergerPP writes `... [id].temp.mp4`).
+#
+# A DELIVERABLE can never match: the outtmpl ends every finished name in
+# `[id].<ext>`, so its stem ends in `[id]`. Identical to the local executor's
+# ytdl_executor._INTERMEDIATE_STEM_RE, deliberately -- both executors write
+# into one canonical tree and must leave the same things behind in it.
+_INTERMEDIATE_STEM = re.compile(r'\.(f\d+|temp)$')
+
 
 def _sweepable(name):
-    suffix = Path(name).suffix
-    return suffix in _SWEEPABLE or suffix.startswith('.part-Frag')
+    path = Path(name)
+    suffix = path.suffix
+    if suffix in _SWEEPABLE or suffix.startswith('.part-Frag'):
+        return True
+    return bool(_INTERMEDIATE_STEM.search(path.stem))
 
 
 def _sweep_stale(outdir):
@@ -665,6 +709,53 @@ def _id_bearing_files(outdir, vid):
         return set()
 
 
+def _clear_partials(outdir, vid):
+    """Delete THIS clip's own in-progress leftovers. Never fatal.
+
+    SAQBbd1Rxmo (2026-08-13): the give-up left a 10 MB
+    `... [SAQBbd1Rxmo].f137.mp4.part` in the term folder forever. The lane
+    filters exclude `*.part` so it never syncs anywhere, but it sits in the
+    CANONICAL tree as a corpse -- and yt-dlp resumes a .part, so the next
+    attempt starts from the poisoned bytes and dies the same way.
+
+    Scoped to the `[id]` segment the outtmpl puts in every name, never a glob of
+    the folder: the term folder is shared with every other clip of the search
+    (and, for a paste, with the whole project's Youtube root), and a .part in
+    there may well belong to a download that is still running. The age rule in
+    _sweep_stale owns everything this does not.
+    """
+    for name in _id_bearing_files(outdir, vid):
+        if not _sweepable(name):
+            continue
+        try:
+            (Path(outdir) / name).unlink()
+        except OSError as exc:  # noqa: BLE001
+            log.warning('could not remove %s in %s (%s); a later retry may '
+                        'resume from it', name, outdir, exc)
+
+
+def _landed_file(outdir, vid):
+    """The FINISHED file `vid` left in `outdir`, or None.
+
+    Built on _id_bearing_files -- the same substring scan the corpse cleanup
+    uses, and for the same reason: a video id may contain any of `[]-_` and one
+    bad glob escape here silently matches nothing.
+
+    What it then rejects is what "finished" excludes: yt-dlp's own in-flight
+    litter (_sweepable), output a failed attempt disowned (DISOWNED_SUFFIX),
+    and anything whose id is not the LAST thing in the stem -- which is the
+    disk-scan dedupe's anchoring rule (ytsearch._ID_RE, YTDL-27) and is what
+    keeps `... [id].credits.json` and `... [id].editready.mp4` from being read
+    as the clip itself.
+    """
+    for name in sorted(_id_bearing_files(outdir, vid)):
+        if _sweepable(name) or name.endswith(DISOWNED_SUFFIX):
+            continue
+        if Path(name).stem.endswith(f'[{vid}]'):
+            return name
+    return None
+
+
 def _disown_output(outdir, vid, before):
     """Rename whatever this failed attempt left behind so dedupe ignores it.
 
@@ -685,6 +776,193 @@ def _disown_output(outdir, vid, before):
         except OSError as exc:  # noqa: BLE001
             log.warning('could not disown %s (%s); it may block re-downloading '
                         '%s until it is removed by hand', p, exc, vid)
+
+
+# --------------------------------------------------- a truncated DASH stream
+
+# The signature, the rung and the note all live in ytdl_common now (imported at
+# the top of this file): the local executor has to make the SAME call from the
+# same evidence, or the fleet ends up with one clip at 1080p on the NAS and the
+# same clip at 720p on an editor's machine, or a failure on one side and a
+# silent downgrade on the other. The reasoning that produced them -- and the
+# 2026-08-13 incident it came from -- travels with them.
+
+
+def _lower_quality(quality):
+    """The rung below `quality`, or None when there is nothing below it.
+
+    The rule is ytdl_common's (shared with the companion); the TABLE it is read
+    out of stays downloader.QUALITY_HEIGHTS, because the format string the retry
+    actually downloads with is built from that same dict and a second quality
+    table would be a second thing to forget.
+    """
+    return ytdl_common.lower_quality(quality, downloader.QUALITY_HEIGHTS)
+
+
+def _download_video(job_id, vid, url, outdir, quality, hook, status):
+    """downloader.download(), with ONE lower rung tried on a truncated stream.
+
+    -> (summary, note). `note` is None on the ordinary path and the downgrade
+    line when the lower rung is what actually landed, so the clip row can say
+    so. Anything else raises exactly what it always raised.
+
+    ONE rung, not the whole ladder: 1080p -> 720p is what the incident needed,
+    and walking a ladder blindly would turn a bad afternoon on YouTube's side
+    into 480p footage in the canonical tree with nobody the wiser.
+    """
+    def attempt(q):
+        return downloader.download(
+            url, str(outdir), quality=q,
+            progress_hook=hook, write_sidecar=True, edit_codec='h264',
+            ffmpeg_location=config.FFMPEG_DIR or None,
+            cookies_file=config.COOKIES_FILE or None,
+            on_status=status)
+
+    try:
+        return attempt(quality), None
+    except Exception as exc:  # noqa: BLE001 - re-raised unless it is THE case
+        lower = _lower_quality(quality) if _stream_truncated(exc) else None
+        if lower is None:
+            raise
+        log.warning('job %s: %s came back truncated at %s (%s); retrying at %s',
+                    job_id, vid, quality, exc, lower)
+        # The .part IS the truncated bytes, and yt-dlp resumes a .part -- the
+        # retry has to start from nothing or it inherits the corpse.
+        _clear_partials(outdir, vid)
+        if status:
+            status(f'{quality} stream truncated; retrying at {lower}')
+        try:
+            return attempt(lower), TRUNCATED_NOTE.format(q=quality, lower=lower)
+        except Exception as exc2:  # noqa: BLE001
+            # Wrapped rather than re-raised bare so the row says why it failed
+            # twice. exc2's own text is carried through verbatim, which is what
+            # the bot-check classifier at the call site reads.
+            raise RuntimeError(
+                f'{quality} stream truncated by YouTube and the {lower} '
+                f'retry failed too: {exc2}') from exc2
+
+
+def _record_failure(c, job_id, vid, outdir, before, error):
+    """One dead video: disown what it landed, delete what it half-landed.
+
+    The corpse cleanup is here rather than only on the truncation path because
+    ANY final failure can leave a .part behind (SAQBbd1Rxmo, 2026-08-13), and a
+    clip that has finished failing has no resume state worth keeping -- the row
+    goes back to `pending` on a re-run and starts over.
+    """
+    _disown_output(outdir, vid, before)
+    _clear_partials(outdir, vid)
+    db.set_video(c, job_id, vid, dl_state='failed', dl_error=str(error)[:500])
+    db.bump(c, job_id, 'dl_failed')
+    _clear_progress(job_id, vid)
+
+
+# ------------------------------------------------- the pre-download dedupe
+
+def duplicate_location(c, job, vid, outdir, on_disk=None):
+    """Where the fleet ALREADY has this clip, as the badge spells it, or None.
+
+    REQ 6's last line of defence, made immediately before the bandwidth is
+    spent: between review and download another editor's job may have fetched
+    the same video, and a job resumed after a restart may have finished this one
+    already -- its .part turned into a real file that no row knows about.
+
+    Two sources, in cost order. The LEDGER answers through db.ledger_where --
+    the two halves of the same "ALREADY IN" string must not disagree (YTDL-31,
+    2026-08-11), and a paste's clip is in Youtube/ itself with no folder name of
+    its own. The DISK answers with LOCATIONS, not just ids: for a paste `outdir`
+    is the project's whole Youtube tree, so a clip that is really in a search's
+    term folder must be named as being there rather than as being loose in the
+    root.
+
+    `on_disk` is the scan, hoisted out for a caller that has several clips to
+    ask about (routes_fleet's manifest, YTDL-WEB-3): the worker leaves it None
+    and scans per video on purpose -- the point of its check is that it is made
+    immediately before the download, and its clips are 3 s apart anyway.
+    """
+    held = db.ledger_get(c, vid)
+    if held is not None:
+        return db.ledger_where(held)
+    if on_disk is None:
+        on_disk = ytsearch.existing_id_locations(outdir)
+    if vid in on_disk:
+        return f"{job['project_label']}/{on_disk[vid]}"
+    return None
+
+
+def mark_duplicate(c, job_id, vid, where):
+    """One clip the fleet already has -> `skipped`, with where to find it.
+
+    The row shape BOTH executors' paths write (worker._phase_download and the
+    download-manifest's re-check, YTDL-WEB-3): deselected as well as skipped, so
+    a later DOWNLOAD press does not queue it again.
+    """
+    db.set_video(c, job_id, vid, dl_state='skipped', duplicate=1, selected=0,
+                 duplicate_of=where)
+
+
+# ------------------------------------------- taking a job back from an editor
+
+def _reclaim_local_job(c, job, outdir):
+    """An editor's lease expired. Take the job back and re-queue only what is
+    MISSING. -> (clips found already landed, clips queued for the server).
+
+    The laptop closed, the tray upgraded mid-job, the companion was killed
+    (docs/YTDL_LOCAL_DOWNLOAD.md §11). The lease is how that becomes
+    recoverable rather than a job that hangs forever, and this is what happens
+    when it runs out.
+
+    MISSING is decided against the DISK, not just against the rows: a clip that
+    finished on the editor's machine arrives on the NAS by lane A carrying the
+    `[video_id]` in its name, and the status post that would have recorded it
+    may be exactly what the closed laptop lost. Re-downloading it would spend
+    the bandwidth twice and (worse) hand YouTube a second request for a video
+    the fleet already has.
+
+    A clip that IS on disk is recorded `done` with a ledger row rather than left
+    to the pre-download dedupe's `skipped`: the ledger is what tells every other
+    editor's search that the fleet already has this video, and a skipped row
+    tells nobody anything.
+
+    Everything else -- pending, half-downloaded, or failed on the editor's IP --
+    goes back to `pending`, which is the second chance (§2 step 7) arriving
+    through the reclaim path instead of through job close.
+    """
+    job_id = job['id']
+    holder = job['claimed_by'] or 'an editor'
+    log.warning('job %s: the local download lease held by %s expired; the '
+                'server is taking the job back', job_id, holder)
+    db.reclaim_download(c, job_id)
+
+    landed = queued = refailed = 0
+    for v in db.videos(c, job_id):
+        if v['dl_state'] not in db.UNFINISHED_STATES + ('failed',):
+            continue                    # done, skipped, or never selected
+        vid = v['video_id']
+        name = _landed_file(outdir, vid)
+        if name is not None:
+            rel = '/'.join(p for p in (db.YOUTUBE_DIR, job['term_dir'], name) if p)
+            db.set_video(c, job_id, vid, dl_state='done',
+                         filepath=str(Path(outdir) / name), dl_error=None,
+                         download_host=v['download_host'] or holder)
+            db.ledger_add(c, vid, v['title'], v['channel'], job['project_slug'],
+                          job['project_label'], job['term'], rel, job_id,
+                          job['created_by'])
+            db.bump(c, job_id, 'dl_done')
+            landed += 1
+            continue
+        if v['dl_state'] == 'failed':
+            # The counter tracks clips that are failed RIGHT NOW; this one is
+            # queued again, and the retry will bump it back if it fails again.
+            refailed += 1
+        db.set_video(c, job_id, vid, dl_state='pending', dl_error=None)
+        queued += 1
+    if refailed:
+        db.bump(c, job_id, 'dl_failed', -refailed)
+
+    log.info('job %s: reclaimed from %s -- %d clip(s) already landed, %d to '
+             'download here', job_id, holder, landed, queued)
+    return landed, queued
 
 
 def _phase_download(c, job):
@@ -710,6 +988,13 @@ def _phase_download(c, job):
     ensure_outdir(outdir)
     _sweep_stale(outdir)
 
+    # Reached with download_mode='local' only when the lease has EXPIRED --
+    # run_job returns early while it is live, and db.claim_next_job hides the
+    # job from the loop entirely. So this is the reclaim, and it runs before the
+    # pending list is read because it is what decides what is still pending.
+    if job['download_mode'] == db.MODE_LOCAL:
+        _reclaim_local_job(c, job, outdir)
+
     pending = db.pending_videos(c, job_id)
     if not job['dl_total']:
         # Normally the API sets this when the editor presses DOWNLOAD; a job
@@ -720,36 +1005,50 @@ def _phase_download(c, job):
         if _cancelled(c, job_id):
             _clear_progress(job_id)
             return
+        # ...and re-read the LEASE between clips, for the same reason the cancel
+        # flag is re-read: it arrives on a request thread while this loop is
+        # running. The race is not exotic, it is the NORMAL order of events once
+        # companion 0.8.0 ships -- start_download nudges the worker in the same
+        # millisecond the SPA starts probing the requester's loopback, so the
+        # worker is usually a clip or two in by the time the claim lands. Both
+        # executors downloading the same clips into one canonical tree is the
+        # thing this whole feature exists to avoid, so the server steps back.
+        #
+        # Checked HERE, at the top of the iteration, so nothing is left mid
+        # -flight: no row has been moved to `downloading` yet, so every clip
+        # this loop has not reached is still `pending` and lands in the
+        # manifest the companion is about to ask for.
+        if db.lease_active(db.get_job(c, job_id)):
+            log.info('job %s: claimed by an editor mid-phase; the server is '
+                     'standing down after %d clip(s)', job_id, i)
+            _clear_progress(job_id)
+            return
         vid = v['video_id']
 
-        # Re-check the dedupe immediately before spending bandwidth. Between
-        # review and download another editor's job may have fetched the same
-        # clip, and a job resumed after a restart may have finished this one
-        # already -- its .part turned into a real file that no row knows about.
-        held = db.ledger_get(c, vid)
-        where = None
-        if held is not None:
-            # The FOLDER, through db.ledger_where -- the two halves of the same
-            # "ALREADY IN" string must not disagree (YTDL-31, 2026-08-11), and
-            # a paste's clip is in Youtube/ itself with no folder name of its
-            # own.
-            where = db.ledger_where(held)
-        else:
-            # LOCATIONS, not just ids: for a paste `outdir` is the project's
-            # whole Youtube tree, so a clip that is really in a search's term
-            # folder must be named as being there rather than as being loose in
-            # the root. (The rglob is per video and deliberately so -- the point
-            # of this check is that it is made immediately before the bandwidth
-            # is spent, and the downloads are 3 s apart anyway.)
-            on_disk = ytsearch.existing_id_locations(outdir)
-            if vid in on_disk:
-                where = f"{job['project_label']}/{on_disk[vid]}"
-        if where:
-            db.set_video(c, job_id, vid, dl_state='skipped', duplicate=1,
-                         selected=0, duplicate_of=where)
+        # TAKE THE ROW FIRST, before the dedupe scan below spends up to a second
+        # on an rglob (YTDL-WEB-4, 2026-08-14). The lease check above is a JOB
+        # -level check made once per clip; a claim landing after it was invisible
+        # to this iteration, and the clip -- still `pending` -- was still in the
+        # manifest the companion asks for the moment its claim lands. Two yt-dlp
+        # processes then wrote the same `[id]` fragments into one directory and
+        # each one's give-up path deleted the other's resume state. The
+        # compare-and-set is what makes the row, not the job, the boundary: from
+        # here on the companion's manifest cannot list this clip.
+        if not db.begin_download(c, job_id, vid):
             continue
 
-        db.set_video(c, job_id, vid, dl_state='downloading', dl_error=None)
+        # Re-check the dedupe immediately before spending bandwidth.
+        where = duplicate_location(c, job, vid, outdir)
+        if where:
+            mark_duplicate(c, job_id, vid, where)
+            continue
+
+        # download_host is written HERE, once, rather than on each outcome: from
+        # this line on the clip belongs to the server's IP whatever happens to
+        # it, and the history panel's "whose machine got this" must be right for
+        # the failures too (docs/YTDL_LOCAL_DOWNLOAD.md §4).
+        db.set_video(c, job_id, vid, dl_state='downloading', dl_error=None,
+                     download_host=db.MODE_SERVER)
 
         def hook(d, _vid=vid, _job=job_id):
             # Several times a second: memory only, merged into the poll
@@ -774,18 +1073,13 @@ def _phase_download(c, job):
 
         before = _id_bearing_files(outdir, vid)
         try:
-            res = downloader.download(
-                v['url'], str(outdir), quality=job['quality'],
-                progress_hook=hook, write_sidecar=True, edit_codec='h264',
-                ffmpeg_location=config.FFMPEG_DIR or None,
-                cookies_file=config.COOKIES_FILE or None,
-                on_status=status)
+            # `note` is the quality downgrade, when the clip only landed
+            # because the rung below the editor's choice was tried.
+            res, note = _download_video(job_id, vid, v['url'], outdir,
+                                        job['quality'], hook, status)
         except Exception as exc:  # noqa: BLE001 - one dead video, not one dead job
             log.warning('job %s: download failed for %s (%s)', job_id, vid, exc)
-            _disown_output(outdir, vid, before)
-            db.set_video(c, job_id, vid, dl_state='failed', dl_error=str(exc)[:500])
-            db.bump(c, job_id, 'dl_failed')
-            _clear_progress(job_id, vid)
+            _record_failure(c, job_id, vid, outdir, before, exc)
             if _bot_checked(exc):
                 raise BotCheckError(BOT_CHECK_NOTE) from exc
             continue
@@ -798,11 +1092,8 @@ def _phase_download(c, job):
             # this" pointing at nothing, and the ledger never cascades, so only
             # hand-editing ytdl.db could undo it.
             log.warning('job %s: download for %s returned no file', job_id, vid)
-            _disown_output(outdir, vid, before)
-            db.set_video(c, job_id, vid, dl_state='failed',
-                         dl_error='the downloader reported no output file')
-            db.bump(c, job_id, 'dl_failed')
-            _clear_progress(job_id, vid)
+            _record_failure(c, job_id, vid, outdir, before,
+                            'the downloader reported no output file')
             continue
 
         _chmod(filepath, 0o664)
@@ -823,7 +1114,12 @@ def _phase_download(c, job):
         # FIRST time anything knows it: those rows are created from a pasted
         # link with no metadata fetch behind them, so without this the progress
         # list names every clip by its 11-char id forever.
+        # dl_error on a DONE row is the downgrade note, not a failure: the clip
+        # landed, just not at the rung that was asked for, and this row is the
+        # only place that would ever say so (SAQBbd1Rxmo, 2026-08-13). It is
+        # None on every ordinary download, which is what the row already holds.
         db.set_video(c, job_id, vid, dl_state='done', filepath=filepath,
+                     dl_error=note,
                      title=res.get('title') or v['title'],
                      thumbnail=res.get('thumbnail') or v['thumbnail'])
         db.ledger_add(c, vid, res.get('title') or v['title'],

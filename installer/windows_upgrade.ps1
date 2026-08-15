@@ -16,7 +16,9 @@
       4. Add any config keys the new version needs that the file is missing
          (never overwrites existing values) -- and set dashboard_token if you
          pass -DashboardToken.
-      5. Relaunch the companion.
+      5. Relaunch the companion -- and confirm it is STILL RUNNING three
+         seconds later. A build that dies on startup is a failed upgrade,
+         not a completed one (SHIP-2); this script exits 1 for it.
 
     Syncthing, rclone, Tailscale, and the drive mapping are untouched. Safe to
     re-run; -DryRun changes nothing.
@@ -303,17 +305,54 @@ else {
 # Start-Process under $ErrorActionPreference = "Stop" is a terminating error
 # that kills the script before the summary below -- i.e. the one place that
 # would have explained why. Test first and carry on.
-if ($DryRun) { Write-Step "[dry-run] would relaunch $CompanionExePath" }
+#
+# AND CONFIRMED ALIVE (SHIP-2, 2026-08-14). Start-Process succeeding means
+# CreateProcess succeeded and nothing more: a build that dies a second later
+# (a frozen-build DLL/config failure, an unparseable config.toml) still
+# produced "Upgrade complete -- now running v<X>" and exit 0, so ship.ps1 --
+# which gates on this exit code alone -- printed "ship complete" for a machine
+# with NO companion running at all, while the fleet was already offered the
+# same build as CURRENT. Nothing retries: the Run key is logon-only. Same
+# 3-second confirmation onboarding\steps.py has always done after ITS launch,
+# and windows_bootstrap.ps1 after its companion step.
+$RelaunchConfirmSeconds = 3
+$relaunchAlive = $true
+if ($DryRun) { Write-Step "[dry-run] would relaunch $CompanionExePath and confirm it is still running ${RelaunchConfirmSeconds}s later" }
 elseif (-not (Test-Path -LiteralPath $CompanionExePath)) {
     Write-Warn2 "nothing to relaunch: no companion exe at $CompanionExePath (see the copy failure above)."
+    $relaunchAlive = $false
 }
 else {
+    $launched = $null
     try {
-        Start-Process -FilePath $CompanionExePath -WorkingDirectory $BinDir
-        Write-Step "relaunched companion"
+        $launched = Start-Process -FilePath $CompanionExePath -WorkingDirectory $BinDir -PassThru
+        Write-Step "relaunched companion -- confirming it is still running in ${RelaunchConfirmSeconds}s..."
     }
     catch {
         Write-Warn2 "could not relaunch the companion: $($_.Exception.Message) -- start it from $CompanionExePath, or just log off and back on (autostart is registered)."
+        $relaunchAlive = $false
+    }
+    if ($relaunchAlive) {
+        Start-Sleep -Seconds $RelaunchConfirmSeconds
+        # The launched process itself, not a name lookup: on a machine where a
+        # stale companion survived the kill in step 1, Get-Process would find
+        # THAT one and call this a success. Name lookup is only the fallback
+        # for a Start-Process that returned nothing to hold on to.
+        $stillUp = $false
+        if ($launched) {
+            try { $stillUp = -not $launched.HasExited } catch { $stillUp = $false }
+        }
+        else {
+            $stillUp = [bool](Get-Process -Name ccsync-companion -ErrorAction SilentlyContinue)
+        }
+        if ($stillUp) {
+            Write-Step "companion is running (pid $(if ($launched) { $launched.Id } else { 'unknown' }))"
+        }
+        else {
+            $relaunchAlive = $false
+            Write-Warn2 "the companion EXITED within ${RelaunchConfirmSeconds}s of being started -- this machine has NO companion running: no sync lanes, no Resolve bridge, no proxy generation, and nothing will retry before the next logon."
+            Write-Warn2 "run it by hand to see why: `"$CompanionExePath`"  (then check $env:USERPROFILE\.ccsync\companion.log and config.toml)"
+        }
     }
 }
 
@@ -322,6 +361,13 @@ Write-Host "=================================================================="
 if (-not $copySucceeded) {
     Write-Step "Upgrade INCOMPLETE: the new companion build could not be installed (see the WARNING above); the previous build was relaunched instead."
     Write-Step "Exit code 1 -- an INCOMPLETE upgrade must not read as a success to whatever ran this."
+}
+elseif (-not $relaunchAlive) {
+    # SHIP-2: the bytes are in place, so a re-run of this script fixes nothing
+    # -- what is wrong is the build itself, and saying "complete" here is how
+    # ship printed "ship complete" over a machine running no companion.
+    Write-Step "Upgrade INSTALLED BUT NOT RUNNING: the new build is at $CompanionExePath and autostart points at it, but it did not stay up (see the WARNING above)."
+    Write-Step "Exit code 1 -- a companion that is not running must not read as a success to whatever ran this."
 }
 else {
     $verSuffix = ""
@@ -343,5 +389,10 @@ Write-Host "=================================================================="
 # PREVIOUS build: the "verified against a build nobody was running" state of
 # 2026-07-25, reached by way of a warning nobody's script could read. Same
 # exit-code-vs-warning root cause as B23. A dry run sets $copySucceeded true.
+#
+# $relaunchAlive joins it for SHIP-2 (2026-08-14): copying the bytes is not the
+# upgrade, RUNNING them is, and a build that exits on startup left ship saying
+# "ship complete" over a machine with no companion. A dry run sets it true.
 if (-not $copySucceeded) { exit 1 }
+if (-not $relaunchAlive) { exit 1 }
 exit 0

@@ -6,7 +6,7 @@ indexes, then builds search vectors.
 ```powershell
 Start-Process -FilePath "C:\Users\alex\AppData\Local\Programs\Python\Python312\python.exe" `
   -ArgumentList "-u","run_queue.py","--config","config.queue.yaml","--model","haiku","--api-workers","12" `
-  -WorkingDirectory "E:\Projects\broll-platform\indexer" `
+  -WorkingDirectory "E:\Projects\resolve-remote-sync\broll\indexer" `
   -RedirectStandardOutput "E:\broll-queue\claude.log" `
   -RedirectStandardError "E:\broll-queue\claude.err" -WindowStyle Hidden
 ```
@@ -74,8 +74,8 @@ folders, deliberately excluded.
 ## Measure the result in the morning
 
 ```powershell
-cd E:\Projects\broll-platform
-.\web\.venv\Scripts\python.exe eval\run_eval_api.py E:\broll-queue\broll.db --queries eval\queries_archive.yaml
+cd E:\Projects\resolve-remote-sync\broll
+E:\Projects\broll-platform\web\.venv\Scripts\python.exe eval\run_eval_api.py E:\broll-queue\broll.db --queries eval\queries_archive.yaml
 ```
 
 Before indexing this scored **recall 19/20, guards 4/5**, with the one miss

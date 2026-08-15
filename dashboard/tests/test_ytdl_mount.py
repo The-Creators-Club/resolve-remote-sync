@@ -387,15 +387,76 @@ def test_the_api_answers_401_json_not_a_login_redirect(tmp_path, ytdl_env):
 
 
 def test_the_write_routes_are_behind_the_login_gate(tmp_path, ytdl_env):
-    """ytdlweb has no token of its own, so login_gate IS the credential for
-    POST api/jobs (which spends the NAS's bandwidth and disk) -- and nothing
-    about /ytdl/* may ever be exempted from it, which is exactly the exemption
-    b-roll needs a token to make safe."""
+    """ytdlweb has no session of its own, so login_gate IS the credential for
+    POST api/jobs (which spends the NAS's bandwidth and disk). The ONLY
+    exemptions from it are the four fleet-token route shapes and the open
+    client-config read (2026-08-14, docs/YTDL_LOCAL_DOWNLOAD.md §4) -- the
+    browser-facing routes, this one included, are never among them."""
     app = _app(tmp_path)
     with TestClient(app) as c:
         assert c.post("/ytdl/api/jobs", follow_redirects=False).status_code == 401
         as_user(c)
         assert c.post("/ytdl/api/jobs").json() == {"created_by": "jsmith"}
+
+
+# --- the fleet-token bypass: four route shapes, nothing else ------------------
+# docs/YTDL_LOCAL_DOWNLOAD.md §4: claim/heartbeat/manifest/clip-status happen
+# when no browser is open, so they authenticate with X-CCSync-Token exactly the
+# way the companion's selection fetch does. The gate only steps aside; the
+# sub-app's own require_fleet_token still validates, so these tests assert
+# "not the gate's 401", never a specific sub-app answer.
+
+FLEET_PATHS = (
+    ("post", "/ytdl/api/jobs/1/claim"),
+    ("post", "/ytdl/api/jobs/1/heartbeat"),
+    ("get", "/ytdl/api/jobs/1/download-manifest"),
+    ("post", "/ytdl/api/jobs/1/clips/abc-12_345/status"),
+)
+
+
+def test_the_fleet_routes_pass_the_gate_with_the_token(tmp_path, ytdl_env):
+    app = _app(tmp_path, report_token="fleet-tok")
+    with TestClient(app) as c:
+        for method, path in FLEET_PATHS:
+            r = getattr(c, method)(path, follow_redirects=False)
+            assert r.status_code == 401, f"{path} without a token"
+            r = getattr(c, method)(path, follow_redirects=False,
+                                   headers={"X-CCSync-Token": "fleet-tok"})
+            assert r.status_code != 401, f"{path} with the token"
+            assert r.status_code != 303, f"{path} must never redirect to login"
+
+
+def test_a_wrong_token_never_passes_the_fleet_gate(tmp_path, ytdl_env):
+    app = _app(tmp_path, report_token="fleet-tok")
+    with TestClient(app) as c:
+        for method, path in FLEET_PATHS:
+            r = getattr(c, method)(path, follow_redirects=False,
+                                   headers={"X-CCSync-Token": "wrong"})
+            assert r.status_code == 401, path
+
+
+def test_the_client_config_is_open_by_design(tmp_path, ytdl_env):
+    """The yt-dlp sidecar manager reads the version floor BEFORE it holds
+    anything to claim, and sends no token doing it (companion
+    ytdlp_manager). Nothing in the payload is secret."""
+    app = _app(tmp_path)
+    with TestClient(app) as c:
+        r = c.get("/ytdl/api/config/ytdl-client", follow_redirects=False)
+        assert r.status_code not in (303, 401)
+
+
+def test_the_browser_job_routes_stay_session_gated_even_with_the_token(tmp_path, ytdl_env):
+    """The bypass is per-suffix, not per-prefix: a leaked fleet token must not
+    read a browser's job view or lock its mode."""
+    app = _app(tmp_path, report_token="fleet-tok")
+    with TestClient(app) as c:
+        for method, path in (("get", "/ytdl/api/jobs/1"),
+                             ("post", "/ytdl/api/jobs/1/mode-lock"),
+                             ("post", "/ytdl/api/jobs/1/cancel"),
+                             ("post", "/ytdl/api/jobs")):
+            r = getattr(c, method)(path, follow_redirects=False,
+                                   headers={"X-CCSync-Token": "fleet-tok"})
+            assert r.status_code == 401, path
 
 
 # --- identity: the header is minted here, never accepted from outside ---------

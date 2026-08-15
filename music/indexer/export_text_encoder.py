@@ -44,10 +44,19 @@ The exporter refuses to write an artefact whose embeddings differ from
 `ClapModel.get_text_features`: cosine over QUERIES below must be >= MIN_COSINE
 for every one of them. A shifted embedding would silently reorder every search
 result, which is exactly the failure that would not show up in a smoke test.
+
+That refusal used to happen AFTER the write (MUSIC-1, 2026-08-14): everything
+went straight into the output directory and the checks ran on it there, so a
+failed export destroyed the previous good artefact and left a complete,
+loadable, version-1 one in its place -- with no `check` key, which was the only
+thing distinguishing it and the one thing nothing looked at. Every export now
+goes into `<out>.new`, is verified there, and is swapped in only once it has
+passed; the artefact it replaces is kept beside it as `<out>.prev`.
 """
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -63,7 +72,10 @@ import numpy as np
 from music_index import config                       # noqa: F401  (sys.path side effect)
 from musicweb import text_encoder as te
 
-MIN_COSINE = 0.999
+# The LOADER owns this number now: `te.artefact_available` refuses to load an
+# artefact whose manifest does not record having passed it, so a second copy
+# here could only ever drift (MUSIC-1, 2026-08-14).
+MIN_COSINE = te.MIN_COSINE
 OPSET = 17
 
 # Varied on purpose: the ten eval.py retrieval queries, single words, long
@@ -203,7 +215,94 @@ def verify_tokenizer(directory, tokenizer, queries=QUERIES):
     print(f'  tokenizer matches transformers on all {len(queries)} queries')
 
 
+def staging_dir(out_dir):
+    """`<out>.new`, emptied. A SIBLING of out_dir, deliberately: the swap below
+    is a rename, and a rename is only atomic within one filesystem."""
+    staging = Path(out_dir).with_name(Path(out_dir).name + '.new')
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    return staging
+
+
+def swap_into_place(staging, out_dir):
+    """Move a verified artefact into out_dir, keeping the old one. -> previous.
+
+    Two renames, not a copy: 500 MB copied over a live artefact is a window in
+    which the container can load half of it. The previous artefact is moved to
+    `<out>.prev` rather than deleted, so a bad-but-passing export is one `mv`
+    away from being undone -- the same reason install_music_db keeps
+    music.db.old.<ts>. os.replace cannot overwrite a non-empty directory on
+    either platform, hence moving the old one out of the way first.
+    """
+    out_dir = Path(out_dir)
+    previous = out_dir.with_name(out_dir.name + '.prev')
+    if out_dir.exists():
+        shutil.rmtree(previous, ignore_errors=True)
+        os.replace(out_dir, previous)
+    else:
+        previous = None
+    os.replace(staging, out_dir)
+    return previous
+
+
 def export(out_dir, model_name=None, opset=OPSET, queries=QUERIES):
+    """Export, verify, and only then publish. -> the manifest.
+
+    Nothing touches `out_dir` until both checks have passed (MUSIC-1,
+    2026-08-14); a failed export raises SystemExit with the previous artefact
+    exactly as it was.
+    """
+    out_dir = Path(out_dir)
+    staging = staging_dir(out_dir)
+    try:
+        manifest, tokenizer = write_artefact(staging, model_name, opset)
+        manifest = verify_artefact(staging, manifest, tokenizer, queries)
+        previous = swap_into_place(staging, out_dir)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    print(f'\n  wrote {out_dir}')
+    if previous:
+        print(f'  the artefact it replaced is at {previous}')
+    return manifest
+
+
+def record_check(directory, min_cos, mean_cos, n_queries):
+    """Write a passing check into an artefact's manifest. -> the manifest.
+
+    The one thing `te.artefact_available` requires and the only thing a
+    pre-MUSIC-1 artefact can be missing.
+    """
+    path = Path(directory) / te.MANIFEST_NAME
+    manifest = json.loads(path.read_text(encoding='utf-8'))
+    manifest['check'] = {'queries': n_queries, 'min_cosine': float(min_cos),
+                         'mean_cosine': float(mean_cos), 'threshold': MIN_COSINE}
+    path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+    return manifest
+
+
+def verify_artefact(directory, manifest, tokenizer, queries=QUERIES):
+    """Both checks against the STAGED artefact, then record the result in its
+    manifest. -> the manifest. Raises SystemExit on any drift."""
+    verify_tokenizer(directory, tokenizer, queries)
+
+    print('  embedding the check corpus with the full ClapModel ...')
+    from music_index.clap_model import Clap
+    clap = Clap(name=manifest['model'], device='cpu')
+    ref = reference_embeddings(clap, queries)
+    lo, mean = verify(directory, reference=ref, queries=queries)
+
+    # Written LAST and read by te.artefact_available: an artefact with no
+    # `check` block is one that was never verified, and must not load.
+    return record_check(directory, lo, mean, len(queries))
+
+
+def write_artefact(out_dir, model_name=None, opset=OPSET):
+    """The torch half: ONNX + tokenizer + an UNVERIFIED manifest into out_dir.
+
+    -> (manifest, the model's own tokenizer, for verify_tokenizer). Always
+    called on a staging directory; see export().
+    """
     import torch
     import transformers
     from transformers import ClapModel, ClapProcessor
@@ -283,21 +382,7 @@ def export(out_dir, model_name=None, opset=OPSET, queries=QUERIES):
     }
     (out_dir / te.MANIFEST_NAME).write_text(json.dumps(manifest, indent=2),
                                             encoding='utf-8')
-
-    verify_tokenizer(out_dir, tokenizer, queries)
-
-    print('  embedding the check corpus with the full ClapModel ...')
-    from music_index.clap_model import Clap
-    clap = Clap(name=model_name, device='cpu')
-    ref = reference_embeddings(clap, queries)
-    lo, mean = verify(out_dir, reference=ref, queries=queries)
-
-    manifest['check'] = {'queries': len(queries), 'min_cosine': lo,
-                         'mean_cosine': mean, 'threshold': MIN_COSINE}
-    (out_dir / te.MANIFEST_NAME).write_text(json.dumps(manifest, indent=2),
-                                            encoding='utf-8')
-    print(f'\n  wrote {out_dir}')
-    return manifest
+    return manifest, tokenizer
 
 
 def _get_text_features(model, inputs):
@@ -325,11 +410,26 @@ def main():
     out = Path(args.out) if args.out else te.artefact_dir()
 
     if args.check:
-        if not te.artefact_available(out):
+        # Presence, not te.artefact_available: an artefact the loader would
+        # REFUSE (no `check` block -- MUSIC-1) is precisely the one an operator
+        # runs --check on, and answering "no artefact at ..." about a directory
+        # full of files would be a lie.
+        if not (out / te.MODEL_NAME).is_file():
             raise SystemExit(f'no artefact at {out}')
         print(f'  checking {out}')
+        unverified = not te.artefact_available(out)
+        if unverified:
+            print('  ! this artefact records no passing check, so the web app '
+                  'will NOT load it (MUSIC-1)')
         lo, mean = verify(out)
         print(f'\n  OK  min {lo:.7f}  mean {mean:.7f}')
+        if unverified:
+            # A check that PASSED is exactly what the manifest is missing, and
+            # this run just did it against the same corpus and the same
+            # threshold the export uses -- so record it rather than making the
+            # operator re-export 500 MB to earn a key.
+            record_check(out, lo, mean, len(QUERIES))
+            print(f'  recorded the result in {te.MANIFEST_NAME}; it will load now')
         return
 
     export(out, model_name=args.model, opset=args.opset)

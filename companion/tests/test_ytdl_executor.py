@@ -585,6 +585,68 @@ def test_the_argv_is_the_shared_naming_contract(tmp_path, ytdlp):
     assert argv[-1] == watch(VID1)
 
 
+def test_a_managed_deno_is_passed_to_yt_dlp(tmp_path, ytdlp, monkeypatch):
+    """COMP-YTDL (2026-08-16): without a JS runtime, an anonymous download
+    still works but cookies make every format vanish. yt-dlp enables only deno
+    by default and bundles none, so when the sidecar installed one the executor
+    hands it over by path (it lives off PATH)."""
+    monkeypatch.setattr(ex.sidecar_tools, "managed_deno", lambda: r"C:\deno\deno.exe")
+    deps = make_deps(tmp_path, fleet=FakeFleet(manifest_for()), ytdlp=ytdlp)
+
+    run_job(deps)
+
+    (argv,) = ytdlp.calls
+    assert argv[argv.index("--js-runtimes") + 1] == r"deno:C:\deno\deno.exe"
+
+
+def test_no_deno_means_no_js_runtimes_flag(tmp_path, ytdlp, monkeypatch):
+    """An anonymous download without a runtime is still a working download
+    (yt-dlp's deprecated no-runtime path), so the flag is simply omitted."""
+    monkeypatch.setattr(ex.sidecar_tools, "managed_deno", lambda: None)
+    deps = make_deps(tmp_path, fleet=FakeFleet(manifest_for()), ytdlp=ytdlp)
+
+    run_job(deps)
+
+    (argv,) = ytdlp.calls
+    assert "--js-runtimes" not in argv
+
+
+def test_a_configured_cookies_file_is_passed(tmp_path, ytdlp):
+    """The editor's signed-in cookies.txt is what passes the bot check and
+    unlocks age-gated clips on their own machine (2026-08-16)."""
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+    deps = make_deps(tmp_path, fleet=FakeFleet(manifest_for()), ytdlp=ytdlp,
+                     cfg=make_cfg(tmp_path, ytdl_cookies_file=str(cookies)))
+    deps.cfg["ytdlp_path"] = str(ytdlp.script)
+
+    run_job(deps)
+
+    (argv,) = ytdlp.calls
+    assert argv[argv.index("--cookies") + 1] == str(cookies)
+
+
+def test_a_missing_cookies_file_is_not_passed(tmp_path, ytdlp):
+    """A configured-but-absent path is treated as no cookies: yt-dlp would
+    abort the whole download on a missing --cookies file, and an anonymous
+    attempt beats refusing to try."""
+    deps = make_deps(tmp_path, fleet=FakeFleet(manifest_for()), ytdlp=ytdlp,
+                     cfg=make_cfg(tmp_path, ytdl_cookies_file=str(tmp_path / "gone.txt")))
+    deps.cfg["ytdlp_path"] = str(ytdlp.script)
+
+    run_job(deps)
+
+    (argv,) = ytdlp.calls
+    assert "--cookies" not in argv
+
+
+def test_no_cookies_configured_means_no_cookies_flag(tmp_path, ytdlp):
+    deps = make_deps(tmp_path, fleet=FakeFleet(manifest_for()), ytdlp=ytdlp)
+    run_job(deps)
+    (argv,) = ytdlp.calls
+    assert "--cookies" not in argv
+
+
 def test_the_argv_embeds_the_same_credits_tags_the_nas_embeds(tmp_path, ytdlp):
     """COMP-BROLL-2: §5's must-be-identical set is "the outtmpl, the sidecar,
     EMBEDDED TAGS, ..." and the embedded half was simply missing from the argv.

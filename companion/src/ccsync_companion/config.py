@@ -237,7 +237,7 @@ DEFAULTS: dict[str, Any] = {
     # proxy_generation_enabled() for the whole reason.
     "proxy_gen_enabled": None,
     # Never bundled with the companion (80-120 MB on every upgrade). Since
-    # 2026-08-16 the ffmpeg sidecar (ffmpeg_manager) installs a pinned static
+    # 2026-08-16 the sidecar (sidecar_tools) installs a pinned static
     # ffmpeg+ffprobe into the tools dir when local YouTube downloads are on,
     # and the bare default name falls back to it behind PATH -- so "ffmpeg"
     # resolves on a fresh editor machine too. An explicit path is the
@@ -339,6 +339,18 @@ DEFAULTS: dict[str, Any] = {
     # manage yourself (a brew install, a nightly) and the companion only ever
     # READS its version: it never installs over it and never runs -U against it.
     "ytdlp_path": "",
+    # A Netscape cookies.txt exported from a signed-in YouTube session, or "".
+    # Set = the local downloader sends it (yt-dlp --cookies), which is what
+    # lets an editor's machine pass the bot check and download age-gated
+    # clips instead of falling back to the server (2026-08-16). Deliberately
+    # a FILE, never --cookies-from-browser: Chrome's app-bound encryption
+    # defeats live-browser extraction on Windows, and reading a browser
+    # profile the editor is using rotates the session out from under them.
+    # Export it from a private window and DON'T use YouTube in that session
+    # afterwards (docs/YTDL_LOCAL_DOWNLOAD.md). Absent = anonymous local
+    # downloads, exactly as before -- fine for public clips, and age-gated
+    # ones fall back to the server (which has its own signed-in cookies).
+    "ytdl_cookies_file": "",
     # False = leave Resolve's LUT directory alone. On by default: syncing the
     # shared LUT library to <local_root>/Assets/Luts accomplishes nothing on
     # its own, because Resolve reads LUTs from its own fixed directory and
@@ -810,6 +822,17 @@ ytdl_local_downloads = true
 # and the companion will only read its version: it never installs over your
 # binary and never runs `yt-dlp -U` against it.
 ytdlp_path = ""
+
+# A cookies.txt exported from a signed-in YouTube session (Netscape format).
+# Set this and YOUR downloads use it: it is what passes YouTube's bot check
+# and unlocks age-restricted clips on this machine, instead of handing those
+# jobs back to the server. Leave it "" for anonymous downloads (public clips
+# work fine; age-gated ones fall back to the server). Export it from a
+# Firefox/Chrome "cookies.txt" extension in a PRIVATE window, signed in to
+# the account you want to use, and don't browse YouTube in that window
+# afterwards or the session rotates and the file goes stale. The tray's
+# "Sign in to YouTube (for downloads)…" writes this for you.
+ytdl_cookies_file = ""
 
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about, so

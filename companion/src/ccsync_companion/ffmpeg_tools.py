@@ -99,14 +99,14 @@ def _win_creationflags() -> int:
 def _managed_binary(name: str) -> Optional[str]:
     """The companion-installed copy of a bare `ffmpeg`/`ffprobe`, or None.
 
-    ffmpeg_manager (2026-08-16) puts a pinned static ffmpeg + ffprobe into the
+    sidecar_tools (2026-08-16) puts a pinned static ffmpeg + ffprobe into the
     same tools dir yt-dlp lives in, because no editor machine had one and the
     local YouTube downloader cannot merge without it. It is a FALLBACK behind
     PATH on purpose: an editor's own install (`winget install Gyan.FFmpeg`,
     brew) keeps winning, exactly as before, and this only answers when the
     bare name resolves to nothing. Only the bare default names are mapped --
     an explicit `ffmpeg_path` that does not exist stays not-found rather than
-    silently running a different binary. Deferred import: ffmpeg_manager
+    silently running a different binary. Deferred import: sidecar_tools
     imports this module for the own-install check."""
     stem = os.path.basename(name).lower()
     for suffix in (".exe", ""):
@@ -116,8 +116,8 @@ def _managed_binary(name: str) -> Optional[str]:
     if stem not in ("ffmpeg", "ffprobe") or os.path.dirname(name):
         return None
     try:
-        from . import ffmpeg_manager
-        candidate = ffmpeg_manager.managed_path(stem)
+        from . import sidecar_tools
+        candidate = sidecar_tools.managed_path(stem)
         return str(candidate) if candidate.is_file() else None
     except Exception:
         return None

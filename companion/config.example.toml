@@ -383,6 +383,21 @@ ytdl_local_downloads = true
 # run -U against it.
 ytdlp_path = ""
 
+# A cookies.txt exported from a signed-in YouTube session (Netscape format).
+# Set this and YOUR downloads use it: it is what passes YouTube's bot check
+# and unlocks age-restricted clips on this machine, rather than handing those
+# jobs to the server. Leave it "" for anonymous downloads (public clips work
+# fine; age-gated ones fall back to the server). Easiest way to fill it is the
+# tray's "Sign in to YouTube (for downloads)…", which validates a cookies.txt
+# and saves it to ~/.ccsync/youtube-cookies.txt (used automatically when this
+# is blank). Export from a Firefox/Chrome "cookies.txt" extension in a PRIVATE
+# window, signed in to the account you want, and don't browse YouTube in that
+# window afterwards or the session rotates and the file goes stale. The
+# companion also installs a static ffmpeg + a deno JS runtime beside yt-dlp
+# for this -- both are required for signed-in downloads and neither is
+# bundled; nothing to configure.
+ytdl_cookies_file = ""
+
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about --
 # so the companion adds the library to Resolve's own supported list

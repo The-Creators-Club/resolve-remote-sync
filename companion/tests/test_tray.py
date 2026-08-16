@@ -2305,3 +2305,80 @@ def test_a_broken_scripting_warning_dialog_still_tells_the_editor(monkeypatch):
 
     assert tray_mod._build_scripting_warning_dialog(app) is False
     assert any(resolve_bridge.NO_SCRIPTING_MESSAGE in m for m in app.notified)
+
+
+# -- YouTube sign-in for the local downloader (2026-08-16) ------------------
+
+
+def test_menu_offers_youtube_sign_in_when_local_downloads_on():
+    from ccsync_companion.tray import _build_menu
+
+    labels = _all_menu_labels(_build_menu(
+        _FakeApp({"dashboard_url": "", "ytdl_local_downloads": True})))
+    assert "Sign in to YouTube (for downloads)…" in labels
+
+
+def test_menu_hides_youtube_sign_in_when_local_downloads_off():
+    from ccsync_companion.tray import _build_menu
+
+    labels = _all_menu_labels(_build_menu(
+        _FakeApp({"dashboard_url": "", "ytdl_local_downloads": False})))
+    assert not any("Sign in to YouTube" in label for label in labels)
+
+
+def test_menu_offers_youtube_sign_in_by_default():
+    """Absent means on, ytdlp_manager.local_downloads_enabled's own rule."""
+    from ccsync_companion.tray import _build_menu
+
+    labels = _all_menu_labels(_build_menu(_FakeApp({"dashboard_url": ""})))
+    assert "Sign in to YouTube (for downloads)…" in labels
+
+
+def test_install_youtube_cookies_installs_a_picked_file(tmp_path, monkeypatch):
+    from ccsync_companion import tray, ytdl_cookies
+
+    src = tmp_path / "export.txt"
+    src.write_text("# Netscape HTTP Cookie File\n"
+                   + "\t".join([".youtube.com", "TRUE", "/", "TRUE", "1900000000", "SID", "x"]) + "\n"
+                   + "\t".join([".youtube.com", "TRUE", "/", "TRUE", "1900000000", "SAPISID", "y"]) + "\n")
+    dest = tmp_path / "youtube-cookies.txt"
+    monkeypatch.setattr(ytdl_cookies, "default_cookies_path", lambda: dest)
+
+    notices = []
+    app = _FakeApp({})
+    app._notify_tray = lambda msg, title="ccsync-companion": notices.append(msg)
+
+    tray._install_youtube_cookies(app, picker=lambda: str(src))
+
+    assert dest.read_text() == src.read_text()
+    assert notices and "saved" in notices[-1]
+
+
+def test_install_youtube_cookies_cancelled_does_nothing(tmp_path, monkeypatch):
+    from ccsync_companion import tray, ytdl_cookies
+    dest = tmp_path / "youtube-cookies.txt"
+    monkeypatch.setattr(ytdl_cookies, "default_cookies_path", lambda: dest)
+    notices = []
+    app = _FakeApp({})
+    app._notify_tray = lambda msg, title="ccsync-companion": notices.append(msg)
+
+    tray._install_youtube_cookies(app, picker=lambda: "")
+
+    assert not dest.exists()
+    assert notices == []
+
+
+def test_install_youtube_cookies_reports_a_bad_file(tmp_path, monkeypatch):
+    from ccsync_companion import tray, ytdl_cookies
+    src = tmp_path / "loggedout.txt"
+    src.write_text("# Netscape HTTP Cookie File\n"
+                   + "\t".join([".youtube.com", "TRUE", "/", "TRUE", "1900000000", "PREF", "x"]) + "\n")
+    monkeypatch.setattr(ytdl_cookies, "default_cookies_path", lambda: tmp_path / "out.txt")
+    notices = []
+    app = _FakeApp({})
+    app._notify_tray = lambda msg, title="ccsync-companion": notices.append(msg)
+
+    tray._install_youtube_cookies(app, picker=lambda: str(src))
+
+    assert notices and "signed-in" in notices[-1]
+    assert not (tmp_path / "out.txt").exists()

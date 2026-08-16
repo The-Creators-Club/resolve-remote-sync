@@ -21,15 +21,38 @@ invisible because the server path is the designed fallback and kept working:
    `local_download: false`, so the SPA never probed the companion at all.
    `install_dashboard_app.py` and `dashboard/deploy/compose.yaml` now set it
    (the two are pinned equal by `server/tests/test_safety.py`).
-2. **No editor machine has ffmpeg.** `/ytdl/capabilities` on his box:
-   `ok:false — ffmpeg is not installed on this machine` (COMP-BROLL-5 refusing
-   correctly). Nothing had ever put one there — ffmpeg was the proxy
-   generator's optional dependency. Companion 0.7.9 adds `ffmpeg_manager.py`:
-   a **pinned** static ffmpeg+ffprobe (eugeneware/ffmpeg-static b6.1.1,
-   sha256 hardcoded per asset, verified against a real download) installed
-   into the same tools dir as yt-dlp on the yt-dlp manager's daily thread,
-   and `ffmpeg_tools._resolve_binary` falls back to it behind PATH for the
-   bare default `ffmpeg_path`. An editor's own install still wins.
+2. **No editor machine has ffmpeg** (nor a JS runtime). `/ytdl/capabilities`
+   on his box: `ok:false — ffmpeg is not installed on this machine`
+   (COMP-BROLL-5 refusing correctly). Nothing had ever put one there — ffmpeg
+   was the proxy generator's optional dependency. Companion 0.7.9 adds
+   `sidecar_tools.py`: a **pinned** static ffmpeg+ffprobe (eugeneware/
+   ffmpeg-static b6.1.1) **and a deno** (denoland/deno v2.9.5), each sha256
+   hardcoded per asset and verified against a real download, installed into
+   the same tools dir as yt-dlp on the yt-dlp manager's daily thread.
+   `ffmpeg_tools._resolve_binary` falls back to the managed ffmpeg behind
+   PATH for the bare default `ffmpeg_path`; the executor hands yt-dlp the
+   deno by path (`--js-runtimes deno:<path>`). An editor's own ffmpeg/deno
+   still wins.
+
+**Signed-in local downloads (COMP-YTDL, same release).** Measured on the base
+rig with the fleet's yt-dlp 2026.07.04: anonymous downloads reach 1080p with
+NO JS runtime, but the moment a `--cookies` file is supplied every format
+vanishes ("n challenge solving failed … Only images are available") — the
+signed-in web client demands the JS challenge be solved, which needs a
+runtime. So the deno sidecar is a prerequisite for cookies, not an
+alternative to the PO-token sidecar: with deno + a signed-in cookies.txt the
+age gate passes (`age_limit=18`, 1080p returned) on a residential IP, no
+PO-token provider needed. The executor sends `--cookies` from
+`ytdl_cookies.resolve()`: the `ytdl_cookies_file` config key if set, else the
+tray-written `~/.ccsync/youtube-cookies.txt`, else nothing (anonymous — public
+clips only, age-gated ones fall back to the server's own signed-in cookies).
+The tray's **"Sign in to YouTube (for downloads)…"** validates a browser-
+exported cookies.txt (Netscape header + real youtube.com session cookies —
+`__Secure-3P*` alone is rejected, that is the logged-out shape the NAS's own
+broken file had) and saves it 0600. Deliberately a FILE, never
+`--cookies-from-browser`: Chrome's app-bound encryption defeats live
+extraction on Windows, and reading a profile the editor is using rotates the
+session out from under them.
 
 And a policy reversal in the same release: **lane B no longer pulls
 `/Youtube/**` down** (owner's call, 2026-08-16). The R12 include existed

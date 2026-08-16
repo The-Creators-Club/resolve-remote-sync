@@ -28,6 +28,7 @@ from . import config as config_mod
 from . import resolve_bridge
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
+from . import ytdlp_manager
 from .sync.base import STATE_ERROR, STATE_PAUSED, STATE_SYNCING, LaneStatus
 
 if TYPE_CHECKING:
@@ -1110,6 +1111,50 @@ def _on_sign_out(app: "CompanionApp") -> None:
         log.exception("sign_out() failed")
 
 
+def _install_youtube_cookies(app: "CompanionApp", picker: Optional[Any] = None) -> None:
+    """Ask for a cookies.txt and install it for the local YouTube downloader.
+
+    A native file picker, not a themed form: there is nothing to type, only a
+    file to choose, and askopenfilename is the one dialog every editor already
+    knows. `picker` is the test seam -- it returns a path or "" (cancelled).
+    The actual validate-and-copy is ytdl_cookies.install, so this function is
+    only the GUI around it and stays out of the test's way.
+
+    No popup lock: askopenfilename is a native modal, not one of this
+    process's Tk roots, so it does not hit the sibling-Tk-root hazard the
+    themed dialogs take the lock for (AUDIT_2 CORE-H8)."""
+    from . import ytdl_cookies
+
+    if picker is None:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            try:
+                chosen = filedialog.askopenfilename(
+                    parent=root,
+                    title="Choose your exported YouTube cookies.txt",
+                    filetypes=[("cookies.txt", "*.txt"), ("All files", "*.*")],
+                )
+            finally:
+                root.destroy()
+        except Exception as exc:
+            log.warning("youtube cookies: file picker unavailable (%s)", exc)
+            _notify(app, "Couldn't open the file chooser. Set ytdl_cookies_file in "
+                         "config.toml instead.")
+            return
+    else:
+        chosen = picker()
+
+    if not chosen:
+        return  # cancelled
+    ok, message = ytdl_cookies.install(chosen)
+    _notify(app, message)
+
+
 def _show_update_dialog(app: "CompanionApp") -> None:
     """Confirmation dialog for the one-click self-upgrade -- same tkinter
     plumbing as _show_sign_in_dialog, including the popup lock.
@@ -1638,6 +1683,12 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # for a project sitting safely on a drive in the editor's bag.
     _get("root_absent", lambda: bool(getattr(app, "_root_absent", False)), False)
     _get("dashboard_url", lambda: _dashboard_url(app), "")
+    # Whether the "Sign in to YouTube (for downloads)…" item is offered at
+    # all -- ytdlp_manager.local_downloads_enabled's own key, read the same
+    # tri-state way (absent means on). False hides the item, matching the
+    # sidecar manager doing nothing on that machine.
+    _get("ytdl_local_downloads",
+         lambda: ytdlp_manager.local_downloads_enabled(getattr(app, "config", {})), True)
     _get("sequencer_line", lambda: _sequencer_line(app), None)
     _get("current_project_line", lambda: _current_project_line(app), None)
     # Cheap by construction: resolve_bridge records this on the way out of
@@ -1710,7 +1761,7 @@ def _menu_fingerprint(snap: dict) -> tuple:
         snap["sequencer_line"], snap["current_project_line"],
         snap.get("resolve_line"),
         snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
-        snap["dashboard_url"], snap["color"],
+        snap["dashboard_url"], snap.get("ytdl_local_downloads"), snap["color"],
         tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
         snap.get("p_swap_available"), snap.get("p_mode"),
         # The stray-LUT count decides whether the "N LUTs only on this
@@ -1875,6 +1926,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     def on_sign_in(icon, item):
         _spawn(app, "Sign in", lambda: _show_sign_in_dialog(app))
 
+    def on_youtube_sign_in(icon, item):
+        _spawn(app, "Sign in to YouTube", lambda: _install_youtube_cookies(app))
+
     def on_sign_out(icon, item):
         _spawn(app, "Sign out", lambda: _on_sign_out(app))
 
@@ -1897,6 +1951,16 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     dashboard_items = (
         [pystray.MenuItem("Open dashboard", on_open_dashboard)]
         if snap["dashboard_url"] else []
+    )
+    # Sign in to YouTube for the LOCAL downloader (ytdl_cookies.py): points it
+    # at a cookies.txt so this machine passes the bot check and can fetch
+    # age-restricted clips itself instead of handing them to the server. Only
+    # while local downloads are enabled -- with them off nothing here ever
+    # runs yt-dlp. Under Advanced would hide it from the editor who needs it;
+    # it sits by "Open dashboard" because it is an account action.
+    youtube_items = (
+        [pystray.MenuItem("Sign in to YouTube (for downloads)…", on_youtube_sign_in)]
+        if snap.get("ytdl_local_downloads") else []
     )
     # Present only while the open Resolve project has no server-side root
     # (see project_setup.py) -- clicking opens the /project-setup deep link.
@@ -2030,6 +2094,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
             )
         ] if snap.get("p_swap_available") else []),
         *dashboard_items,
+        *youtube_items,
         *setup_items,
         *lut_items,
         *proxy_items,

@@ -1,4 +1,4 @@
-"""The ffmpeg sidecar (ffmpeg_manager.py) and the tools-dir fallback in
+"""The pinned sidecar tools (sidecar_tools.py: ffmpeg, ffprobe, deno) and the tools-dir fallback in
 ffmpeg_tools that makes the rest of the companion see what it installs.
 
 Same isolation as test_ytdlp_manager: LOCALAPPDATA is redirected so nothing
@@ -14,11 +14,13 @@ import hashlib
 import io
 import os
 import sys
+import zipfile
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
-from ccsync_companion import ffmpeg_manager as fm
+from ccsync_companion import sidecar_tools as fm
 from ccsync_companion import ffmpeg_tools
 from ccsync_companion import ytdl_executor as ex
 from ccsync_companion import ytdlp_manager as ytdlp_mod
@@ -53,19 +55,28 @@ def _gz(payload: bytes) -> bytes:
     return buf.getvalue()
 
 
-def _pin(monkeypatch, assets: dict[str, bytes]):
-    """Pin THIS platform to fake assets: {tool: gz bytes}. Returns the fake
-    opener, which records the URLs it served."""
-    table = {tool: (f"{tool}-fake.gz", hashlib.sha256(body).hexdigest())
+def _zip(member: str, payload: bytes) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(member, payload)
+    return buf.getvalue()
+
+
+def _pin(monkeypatch, assets: dict[str, bytes], kinds: Optional[dict[str, str]] = None):
+    """Pin THIS platform to fake assets: {tool: archive bytes} (gz unless
+    `kinds` says zip). Returns the fake opener, which records the URLs it
+    served."""
+    kinds = kinds or {}
+    table = {tool: (f"https://github.com/x/y/releases/download/t/{tool}-fake.{kinds.get(tool, 'gz')}",
+                    hashlib.sha256(body).hexdigest(), kinds.get(tool, fm.KIND_GZ))
              for tool, body in assets.items()}
     monkeypatch.setattr(fm, "pinned_assets", lambda *a, **k: table)
     calls: list[str] = []
 
     def opener(url, headers, timeout):
         calls.append(url)
-        name = url.rsplit("/", 1)[-1]
-        for tool, (asset, _sha) in table.items():
-            if asset == name:
+        for tool, (asset_url, _sha, _kind) in table.items():
+            if asset_url == url:
                 return _FakeResponse(assets[tool])
         raise AssertionError(f"unexpected download URL {url}")
 
@@ -74,8 +85,20 @@ def _pin(monkeypatch, assets: dict[str, bytes]):
 
 
 def _no_own_ffmpeg(monkeypatch):
-    """The editor has no ffmpeg of their own (which() finds nothing)."""
+    """The editor has no ffmpeg (or deno) of their own: which() finds nothing."""
     monkeypatch.setattr(ffmpeg_tools.shutil, "which", lambda *_a, **_k: None)
+    monkeypatch.setattr(fm.shutil, "which", lambda *_a, **_k: None)
+
+
+def _both(extra: Optional[dict[str, bytes]] = None) -> dict[str, bytes]:
+    """The trio every install test needs, plus whatever else."""
+    d = {"ffmpeg": _gz(b"I am ffmpeg"), "ffprobe": _gz(b"I am ffprobe"),
+         "deno": _zip(fm.binary_name("deno"), b"I am deno")}
+    d.update(extra or {})
+    return d
+
+
+ZIP = {"deno": "zip"}
 
 
 # ---------------------------------------------------------------------------
@@ -84,16 +107,22 @@ def _no_own_ffmpeg(monkeypatch):
 
 
 @pytest.mark.parametrize("plat,machine,expect", [
-    ("win32", "AMD64", ("ffmpeg-win32-x64.gz", "ffprobe-win32-x64.gz")),
-    ("darwin", "arm64", ("ffmpeg-darwin-arm64.gz", "ffprobe-darwin-arm64.gz")),
-    ("darwin", "x86_64", ("ffmpeg-darwin-x64.gz", "ffprobe-darwin-x64.gz")),
+    ("win32", "AMD64", ("ffmpeg-win32-x64.gz", "ffprobe-win32-x64.gz",
+                        "deno-x86_64-pc-windows-msvc.zip")),
+    ("darwin", "arm64", ("ffmpeg-darwin-arm64.gz", "ffprobe-darwin-arm64.gz",
+                         "deno-aarch64-apple-darwin.zip")),
+    ("darwin", "x86_64", ("ffmpeg-darwin-x64.gz", "ffprobe-darwin-x64.gz",
+                          "deno-x86_64-apple-darwin.zip")),
 ])
-def test_every_editor_platform_has_a_pinned_pair(plat, machine, expect):
+def test_every_editor_platform_has_a_pinned_trio(plat, machine, expect):
     table = fm.pinned_assets(plat, machine)
     assert table is not None
-    assert (table["ffmpeg"][0], table["ffprobe"][0]) == expect
-    for _asset, sha in table.values():
+    assert tuple(table[t][0].rsplit("/", 1)[-1] for t in ("ffmpeg", "ffprobe", "deno")) == expect
+    for url, sha, kind in table.values():
+        assert url.startswith("https://github.com/")
         assert len(sha) == 64 and int(sha, 16)
+        assert kind in (fm.KIND_GZ, fm.KIND_ZIP)
+    assert table["deno"][2] == fm.KIND_ZIP and table["ffmpeg"][2] == fm.KIND_GZ
 
 
 @pytest.mark.parametrize("plat,machine", [
@@ -121,50 +150,80 @@ def test_ensure_reports_unsupported_and_downloads_nothing(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_ensure_installs_both_verified_binaries_into_the_tools_dir(monkeypatch):
+def test_ensure_installs_all_three_verified_binaries_into_the_tools_dir(monkeypatch):
     _no_own_ffmpeg(monkeypatch)
-    opener = _pin(monkeypatch, {"ffmpeg": _gz(b"I am ffmpeg"),
-                                "ffprobe": _gz(b"I am ffprobe")})
+    opener = _pin(monkeypatch, _both(), kinds=ZIP)
 
     status = fm.ensure({"ytdl_local_downloads": True}, github_open=opener)
 
     assert status["ok"] is True and status["action"] == fm.ACTION_INSTALLED
     assert fm.managed_path("ffmpeg").read_bytes() == b"I am ffmpeg"
     assert fm.managed_path("ffprobe").read_bytes() == b"I am ffprobe"
+    assert fm.managed_path("deno").read_bytes() == b"I am deno", "the zip's one member"
+    assert fm.managed_deno() == str(fm.managed_path("deno"))
     assert fm.managed_path("ffmpeg").parent == ytdlp_mod.tools_dir(), \
         "one tools dir, shared with yt-dlp"
-    assert len(opener.calls) == 2
-    # No debris: neither the .gz nor the .new survive a clean install.
+    assert len(opener.calls) == 3
+    # No debris: neither the archives nor the .new survive a clean install.
     leftovers = [p.name for p in ytdlp_mod.tools_dir().iterdir()
-                 if p.name.endswith((".new", ".gz"))]
+                 if p.name.endswith((".new", ".gz", ".zip"))]
     assert leftovers == []
     if sys.platform != "win32":
         assert os.access(fm.managed_path("ffmpeg"), os.X_OK)
+        assert os.access(fm.managed_path("deno"), os.X_OK)
+
+
+def test_a_zip_with_the_wrong_member_installs_nothing(monkeypatch):
+    """Exactly the named member is read, never extractall: a zip missing it
+    (or carrying ../ paths) fails closed."""
+    _no_own_ffmpeg(monkeypatch)
+    opener = _pin(monkeypatch, _both({"deno": _zip("../evil.exe", b"nope")}), kinds=ZIP)
+
+    status = fm.ensure({"ytdl_local_downloads": True}, github_open=opener)
+
+    assert status["ok"] is False and status["action"] == fm.ACTION_FAILED
+    assert not fm.managed_path("deno").exists()
+    assert not (ytdlp_mod.tools_dir().parent / "evil.exe").exists()
+    assert fm.managed_path("ffmpeg").exists(), "the good ones still land"
+
+
+def test_a_path_deno_is_left_alone(monkeypatch, tmp_path):
+    """yt-dlp finds a PATH deno itself; ours would be 97 MB of duplicate."""
+    monkeypatch.setattr(ffmpeg_tools.shutil, "which", lambda *_a, **_k: None)
+    monkeypatch.setattr(fm.shutil, "which",
+                        lambda name, *a, **k: str(tmp_path / "deno") if name == "deno" else None)
+    opener = _pin(monkeypatch, _both(), kinds=ZIP)
+
+    fm.ensure({"ytdl_local_downloads": True}, github_open=opener)
+
+    assert not fm.managed_path("deno").exists()
+    assert fm.managed_path("ffmpeg").exists()
+    assert fm.managed_deno() is None
 
 
 def test_a_digest_that_is_not_the_pin_is_discarded_unread(monkeypatch):
     """The whole point of pinning: a swapped or corrupted asset never gets
     inflated, never gets a name ffmpeg_tools would find."""
     _no_own_ffmpeg(monkeypatch)
-    good = _gz(b"real")
-    opener = _pin(monkeypatch, {"ffmpeg": good, "ffprobe": _gz(b"probe")})
+    opener = _pin(monkeypatch, _both({"ffmpeg": _gz(b"real")}), kinds=ZIP)
     # Serve DIFFERENT bytes than the ones the pin was computed from.
-    monkeypatch.setattr(fm, "pinned_assets", lambda *a, **k: {
-        "ffmpeg": ("ffmpeg-fake.gz", hashlib.sha256(b"something else").hexdigest()),
-        "ffprobe": ("ffprobe-fake.gz", hashlib.sha256(_gz(b"probe")).hexdigest()),
-    })
+    table = fm.pinned_assets()
+    table["ffmpeg"] = (table["ffmpeg"][0], hashlib.sha256(b"something else").hexdigest(),
+                       fm.KIND_GZ)
+    monkeypatch.setattr(fm, "pinned_assets", lambda *a, **k: table)
 
     status = fm.ensure({"ytdl_local_downloads": True}, github_open=opener)
 
     assert status["ok"] is False and status["action"] == fm.ACTION_FAILED
     assert not fm.managed_path("ffmpeg").exists()
-    assert fm.managed_path("ffprobe").exists(), "the good one still lands"
+    assert fm.managed_path("ffprobe").exists(), "the good ones still land"
+    assert fm.managed_path("deno").exists()
     assert not (ytdlp_mod.tools_dir() / "ffmpeg-fake.gz.new").exists()
 
 
 def test_a_second_ensure_touches_nothing(monkeypatch):
     _no_own_ffmpeg(monkeypatch)
-    opener = _pin(monkeypatch, {"ffmpeg": _gz(b"a"), "ffprobe": _gz(b"b")})
+    opener = _pin(monkeypatch, _both(), kinds=ZIP)
     fm.ensure({"ytdl_local_downloads": True}, github_open=opener)
     before = len(opener.calls)
 
@@ -176,7 +235,7 @@ def test_a_second_ensure_touches_nothing(monkeypatch):
 
 def test_only_the_missing_tool_is_fetched(monkeypatch):
     _no_own_ffmpeg(monkeypatch)
-    opener = _pin(monkeypatch, {"ffmpeg": _gz(b"a"), "ffprobe": _gz(b"b")})
+    opener = _pin(monkeypatch, _both(), kinds=ZIP)
     fm.ensure({"ytdl_local_downloads": True}, github_open=opener)
     fm.managed_path("ffprobe").unlink()
     opener.calls.clear()
@@ -201,6 +260,9 @@ def test_an_editors_own_ffmpeg_is_left_alone_and_nothing_is_downloaded(monkeypat
     own.parent.mkdir()
     own.write_bytes(b"theirs")
 
+    monkeypatch.setattr(fm.shutil, "which",
+                        lambda name, *a, **k: str(tmp_path / "deno") if name == "deno" else None)
+
     def _boom(*a, **k):
         pytest.fail("downloaded over an editor's own ffmpeg")
 
@@ -213,14 +275,15 @@ def test_an_editors_own_ffmpeg_is_left_alone_and_nothing_is_downloaded(monkeypat
 def test_a_download_ceiling_breach_leaves_no_file(monkeypatch):
     _no_own_ffmpeg(monkeypatch)
     huge = _gz(b"x" * 1024)
-    opener = _pin(monkeypatch, {"ffmpeg": huge, "ffprobe": _gz(b"b")})
+    opener = _pin(monkeypatch, _both({"ffmpeg": huge}), kinds=ZIP)
     monkeypatch.setattr(fm, "MAX_DOWNLOAD_BYTES", 16)
 
     status = fm.ensure({"ytdl_local_downloads": True}, github_open=opener)
 
     assert status["ok"] is False
     assert not fm.managed_path("ffmpeg").exists()
-    assert not any(p.name.startswith("ffmpeg") for p in ytdlp_mod.tools_dir().iterdir())
+    assert not any(p.name.startswith("ffmpeg-") or p.name == fm.binary_name("ffmpeg")
+                   for p in ytdlp_mod.tools_dir().iterdir())
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +296,7 @@ def test_ffmpeg_tools_falls_back_to_the_managed_binary_behind_path(monkeypatch):
     assert ffmpeg_tools._resolve_binary("ffmpeg") is None, "nothing yet"
 
     fm.ensure({"ytdl_local_downloads": True},
-              github_open=_pin(monkeypatch, {"ffmpeg": _gz(b"a"), "ffprobe": _gz(b"b")}))
+              github_open=_pin(monkeypatch, _both(), kinds=ZIP))
 
     assert ffmpeg_tools._resolve_binary("ffmpeg") == str(fm.managed_path("ffmpeg"))
     assert ffmpeg_tools._resolve_binary("ffprobe") == str(fm.managed_path("ffprobe"))
@@ -291,8 +354,7 @@ def test_capabilities_turn_ok_the_moment_the_managed_ffmpeg_lands(tmp_path, monk
     deps = make_deps(tmp_path, cfg=make_cfg(tmp_path, ffmpeg_path="ffmpeg"))
     assert ex.capabilities(deps)["reason"] == ex.REASON_NO_FFMPEG
 
-    fm.ensure(deps.cfg, github_open=_pin(monkeypatch, {"ffmpeg": _gz(b"a"),
-                                                       "ffprobe": _gz(b"b")}))
+    fm.ensure(deps.cfg, github_open=_pin(monkeypatch, _both(), kinds=ZIP))
 
     cap = ex.capabilities(deps)
     assert cap["ok"] is True and cap["reason"] is None
@@ -300,13 +362,13 @@ def test_capabilities_turn_ok_the_moment_the_managed_ffmpeg_lands(tmp_path, monk
         "and --ffmpeg-location will point at the tools dir"
 
 
-def test_the_daily_loop_runs_ffmpeg_after_yt_dlp(monkeypatch):
+def test_the_daily_loop_runs_the_sidecar_after_yt_dlp(monkeypatch):
     """One thread, one cadence, one opt-out (module docstring)."""
     order = []
     mgr = ytdlp_mod.YtDlpManager({"ytdl_local_downloads": True})
     monkeypatch.setattr(mgr, "ensure", lambda: order.append("ytdlp") or {"message": "m"})
     monkeypatch.setattr(fm, "ensure",
-                        lambda cfg, github_open=None: order.append("ffmpeg") or {"message": "f"})
+                        lambda cfg, github_open=None: order.append("sidecar") or {"message": "f"})
     monkeypatch.setattr(ytdlp_mod, "INITIAL_DELAY_SECONDS", 0)
     monkeypatch.setattr(ytdlp_mod, "CHECK_INTERVAL_SECONDS", 3600)
     # Let the loop run one iteration, then stop it via the wait.
@@ -315,7 +377,7 @@ def test_the_daily_loop_runs_ffmpeg_after_yt_dlp(monkeypatch):
 
     mgr._loop()
 
-    assert order == ["ytdlp", "ffmpeg"]
+    assert order == ["ytdlp", "sidecar"]
 
 
 def test_an_explicit_but_missing_ffmpeg_path_is_not_papered_over(monkeypatch, tmp_path):
@@ -324,6 +386,8 @@ def test_an_explicit_but_missing_ffmpeg_path_is_not_papered_over(monkeypatch, tm
     can use -- so nothing is downloaded and the honest answer stays
     capabilities()' REASON_NO_FFMPEG against the path they wrote."""
     _no_own_ffmpeg(monkeypatch)
+    monkeypatch.setattr(fm.shutil, "which",
+                        lambda name, *a, **k: str(tmp_path / "deno") if name == "deno" else None)
 
     def _boom(*a, **k):
         pytest.fail("downloaded for an explicit ffmpeg_path")

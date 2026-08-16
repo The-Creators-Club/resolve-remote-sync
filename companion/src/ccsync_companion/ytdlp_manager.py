@@ -870,16 +870,18 @@ class YtDlpManager:
             except Exception:
                 log.exception("ytdlp: the daily check failed")
             try:
-                # ffmpeg on the same thread and cadence (ffmpeg_manager, 2026-08-16):
-                # yt-dlp without a merger is a downloader that refuses every
-                # rung this fleet uses, and no editor machine had one. Its own
-                # try: a failed ffmpeg install must not be mistaken for a
-                # yt-dlp failure, and vice versa. Same opt-out, checked inside.
-                from . import ffmpeg_manager
-                status = ffmpeg_manager.ensure(self.cfg, github_open=self._github_open)
-                log.info("ffmpeg: %s", status.get("message"))
+                # ffmpeg + deno on the same thread and cadence (sidecar_tools,
+                # 2026-08-16): yt-dlp without a merger refuses every rung this
+                # fleet uses, and without a JS runtime it refuses every
+                # signed-in request -- and no editor machine had either. Its
+                # own try: a failed sidecar install must not be mistaken for
+                # a yt-dlp failure, and vice versa. Same opt-out, checked
+                # inside.
+                from . import sidecar_tools
+                status = sidecar_tools.ensure(self.cfg, github_open=self._github_open)
+                log.info("sidecar: %s", status.get("message"))
             except Exception:
-                log.exception("ffmpeg: the daily check failed")
+                log.exception("sidecar: the daily check failed")
             if self._stop_event.wait(CHECK_INTERVAL_SECONDS):
                 return
 

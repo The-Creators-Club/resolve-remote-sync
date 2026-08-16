@@ -67,7 +67,9 @@ from . import config as config_mod
 from . import ffmpeg_tools
 from . import resolve_bridge
 from . import upgrade as upgrade_mod
+from . import sidecar_tools
 from . import ytdl_common
+from . import ytdl_cookies
 from . import ytdlp_manager
 from .sync.repath import normalized_safe_rel
 
@@ -1530,6 +1532,27 @@ class DownloadJob:
         ffmpeg_dir = _ffmpeg_location(self.deps.cfg)
         if ffmpeg_dir:
             argv += ["--ffmpeg-location", ffmpeg_dir]
+        # A JavaScript runtime, when the sidecar installed one (COMP-YTDL,
+        # 2026-08-16). yt-dlp enables only deno by default and the official
+        # yt-dlp.exe bundles none, so WITHOUT this an anonymous download still
+        # works (yt-dlp's deprecated no-runtime path) but the moment cookies
+        # are supplied every format vanishes -- the signed-in web client makes
+        # yt-dlp solve a JS challenge it cannot without a runtime. `deno:<path>`
+        # because the binary is deliberately off PATH (the rclone_path
+        # precedent); the server's downloader.py enables both deno and node,
+        # but only deno is installed here.
+        deno = sidecar_tools.managed_deno()
+        if deno:
+            argv += ["--js-runtimes", f"deno:{deno}"]
+        # A signed-in cookies.txt, when the editor pointed us at one. This is
+        # what passes the bot check and unlocks age-gated clips on the
+        # requester's own machine; absent, the download is anonymous (public
+        # clips only) and an age-gated one is handed back to the server, whose
+        # own cookies.txt then does it. A cookie file that resolves but is
+        # stale is yt-dlp's problem to report, not ours to second-guess.
+        cookies = _cookies_file(self.deps.cfg)
+        if cookies:
+            argv += ["--cookies", cookies]
         argv.append(str(url))
         return argv
 
@@ -1570,6 +1593,21 @@ def _ffmpeg_location(cfg: dict[str, Any]) -> Optional[str]:
                                          config_mod.DEFAULTS.get("ffmpeg_path", "ffmpeg")) or "")
         resolved = ffmpeg_tools._resolve_binary(configured)
         return os.path.dirname(resolved) if resolved else None
+    except Exception:
+        return None
+
+
+def _cookies_file(cfg: dict[str, Any]) -> Optional[str]:
+    """The signed-in cookies file to send, or None. Never raises.
+
+    ytdl_cookies.resolve is the seam: the `ytdl_cookies_file` config key if
+    set and present, else the tray-written `~/.ccsync/youtube-cookies.txt`,
+    else None. A configured-but-absent path is None rather than an error --
+    yt-dlp aborts the whole run on a missing --cookies file, and an anonymous
+    attempt (which may still succeed, or fall back to the server) beats
+    refusing to try."""
+    try:
+        return ytdl_cookies.resolve(cfg)
     except Exception:
         return None
 

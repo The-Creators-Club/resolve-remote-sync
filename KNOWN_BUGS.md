@@ -123,12 +123,11 @@ chasing five symptoms he reported at once. What each turned out to be:
   but carries only the `__Secure-3P*` half of a session (no `SID`/`HSID`/
   `SSID`/`APISID`/`SAPISID`/`LOGIN_INFO`), and yt-dlp rewrites it on every
   run (mtime = job time). Whatever account it was exported from either is not
-  age-verified or the export was partial. **Operator task, not code:
-  re-export a full Netscape cookies.txt from a signed-in, age-verified
-  account and `install -o 3000 -g 3000 -m 600` it** (ytdl/web/DEPLOY.md).
-  The local executor passes no cookies at all (Chrome's app-bound encryption
-  defeats `--cookies-from-browser` on Windows), so age-gated clips fail
-  locally too and fall back to the same server. Still open.
+  age-verified or the export was partial. **FIXED both ways** (fix 7 + the
+  operator note below): the NAS cookies.txt was re-exported and reinstalled,
+  and the LOCAL executor now passes `--cookies` too (it used to pass none),
+  so an editor who runs "Sign in to YouTube" downloads age-gated clips on
+  their own machine — no server round trip.
 - **"Open in Explorer opens the default folder"** — real, and every clip:
   `Popen(list)` quotes any argument containing a space, every path in this
   tree has one, so Explorer got `"/select,F:\...\Season 1\clip.mp4"` — a
@@ -151,14 +150,16 @@ chasing five symptoms he reported at once. What each turned out to be:
   Left as-is; verify it self-healed after his lane B pass.
 
 FIXED, all in repo:
-1. **`ffmpeg_manager.py`** (companion 0.7.9): a *pinned* static ffmpeg +
-   ffprobe (eugeneware/ffmpeg-static `b6.1.1`, sha256 hardcoded per asset,
-   the Windows one verified against a real download and run) installed into
-   the same tools dir as yt-dlp, on the yt-dlp manager's daily thread, under
-   the same opt-out. `ffmpeg_tools._resolve_binary`/`ffmpeg_available` fall
-   back to it behind PATH for the bare default `ffmpeg_path` only — an
-   editor's own install, or an explicit path, is never touched. capabilities()
-   turns ok the moment it lands; no restart, no config edit. 22 tests.
+1. **`sidecar_tools.py`** (companion 0.7.9): a *pinned* static ffmpeg +
+   ffprobe (eugeneware/ffmpeg-static `b6.1.1`) AND a deno (denoland/deno
+   `v2.9.5`), each sha256 hardcoded per asset and verified against a real
+   download, installed into the same tools dir as yt-dlp on the yt-dlp
+   manager's daily thread, under the same opt-out. `ffmpeg_tools
+   ._resolve_binary`/`ffmpeg_available` fall back to the managed ffmpeg
+   behind PATH for the bare default `ffmpeg_path` only; the executor hands
+   yt-dlp the deno by path. An editor's own ffmpeg/deno, or an explicit
+   path, is never touched. capabilities() turns ok the moment ffmpeg lands;
+   no restart, no config edit.
 2. **`YTDL_LOCAL_DOWNLOAD=1`** set by `install_dashboard_app.py` and
    `dashboard/deploy/compose.yaml` (pinned equal by test_safety), so a
    redeploy can never drop it again.
@@ -180,11 +181,31 @@ FIXED, all in repo:
    (derived mount only, never a base rig, never another share).
 6. `_open_dashboard` logs the attempt, logs when no browser launched, and
    tells the editor the URL in a toast.
+7. **Signed-in LOCAL downloads (COMP-YTDL)**: measured that anonymous
+   downloads reach 1080p with no JS runtime but a `--cookies` file makes
+   every format vanish without one — hence the deno sidecar (fix 1). The
+   executor sends `--cookies` from `ytdl_cookies.resolve()`: the
+   `ytdl_cookies_file` config key, else the tray-written
+   `~/.ccsync/youtube-cookies.txt`, else nothing. The tray's **"Sign in to
+   YouTube (for downloads)…"** validates a browser-exported cookies.txt
+   (Netscape header + real youtube.com session cookies; the `__Secure-3P*`-
+   only logged-out shape is rejected — same shape as the NAS's own broken
+   file) and saves it 0600. Proven end-to-end: the real `build_argv`'s
+   command line passes the age gate (`Clay | 480p | age_limit=18`) with a
+   managed deno + a signed-in cookies.txt on this residential IP, no
+   PO-token provider. Deliberately a FILE not `--cookies-from-browser`
+   (Chrome app-bound encryption; reading a live profile rotates the session).
+
+Also this session, OPERATOR side (done, not code): the NAS `cookies.txt`
+was re-exported from a signed-in age-verified session and installed
+(uid 3000, 0600); `ggfhWx8h5Tg` — the clip that started this — now extracts
+in-container. The old partial file is `cookies.txt.bak-20260816`.
 
 Ship: `tools\ship.cmd` (dashboard deploy carries the flag; companion 0.7.9
-publishes ffmpeg + lane B + reveal + music). Ruskin's box gets ffmpeg
-~30 s after his tray takes 0.7.9 and his next YouTube job downloads locally.
-**Still open after the ship:** the NAS cookies re-export (above); Mac builds.
+publishes the sidecar + lane B + reveal + music + YouTube sign-in). Ruskin's
+box gets ffmpeg+deno ~30 s after his tray takes 0.7.9; his next YouTube job
+downloads locally, and age-gated clips work once he runs "Sign in to
+YouTube" with his own cookies.txt. **Still open after the ship:** Mac builds.
 
 ### R17 — ten clips whose proxies Resolve refuses, and R10 does not explain nine of them
 Found 2026-08-15 reading the base rig's `companion.log` after the 0.7.8 ship:

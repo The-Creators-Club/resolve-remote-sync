@@ -1,9 +1,15 @@
 # Requester-first downloads for the YouTube downloader
 
-Status: **phases 1 + 2 CODE-COMPLETE in repo 2026-08-14, unshipped** (approved
-and built the same day; five builder agents, orchestrator-reviewed). Companion
-target: **0.8.0**. Dashboard/ytdl-web target: the deploy after 0.8.0 publishes.
-SPEC.md gets a short section pointing here once deployed.
+Status: **phases 1 + 2 SHIPPED 2026-08-15** (commit `5ab221d`; approved and
+built 08-14 by five builder agents, orchestrator-reviewed). **It went out as
+companion 0.7.8 / installer 1.0.27, NOT the 0.8.0 this document was written
+against** — every "0.8.0" below means "the build that carries the local
+executor", which is 0.7.8 and later. The dashboard/ytdl-web half rode
+`ship.cmd` step 1 the same day, so both sides are live. SPEC.md still needs
+its short section pointing here.
+
+Windows editors get this when their tray takes the upgrade; **macOS editors
+do not have it at all** until the Mac builds run on a Mac.
 
 As-built deviations from the prose below, all deliberate and documented at the
 code site:
@@ -307,8 +313,12 @@ Sync interactions (all already in place, verified 2026-08-14):
   now the fallback, so it can afford to be slow and polite), express-lane
   fresh Youtube originals, consider retiring the cookies.txt hatch.
 - **Rollback** at any point: flag off (SPA stops dispatching), or
-  `mode_lock=server` per job, or simply never publish 0.8.0. No schema
-  rollback needed; additive columns idle harmlessly.
+  `mode_lock=server` per job. The third lever this list used to name — "simply
+  never publish 0.8.0" — is spent: the executor shipped inside **0.7.8** on
+  2026-08-15, so rollback now means the flag, the per-job lock, or republishing
+  an older companion as CURRENT (the upgrade channel's version-difference rule
+  makes that a first-class downgrade). No schema rollback needed; additive
+  columns idle harmlessly.
 
 ## 11. Failure modes
 

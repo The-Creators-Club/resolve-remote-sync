@@ -1,5 +1,18 @@
 # Known bugs
 
+**Status 2026-08-15: everything below that says "in repo, unshipped" IS NOW
+SHIPPED** — the 08-14 hunt pass, R14 and R15 all went out in one commit
+(`5ab221d`) as **companion 0.7.8 / installer 1.0.27**, together with phases
+1+2 of requester-first ytdl downloads. Base rig verified after the ship:
+`check_deploy_drift.ps1` clean, running build sha-identical to
+`companion/dist` and stamped with that commit, `ytdlp_manager` installed
+yt-dlp 2026.07.04 on first run. Note the version skew: `docs/
+YTDL_LOCAL_DOWNLOAD.md` was written against a **0.8.0** target and the
+feature actually shipped under **0.7.8**. Still owed, as ever: the **Mac
+builds** (not cross-buildable from Windows), a per-project
+`setup_syncthing_folder.py` re-run for the new `.part`/`.ytdl` ignores, and
+every editor accepting the tray upgrade.
+
 **Status 2026-08-11 (evening): the morning's 82-finding hunt is FIXED — same
 day, all of it, plus the 45-finding ytdl ledger and the delete-protection
 patch.** The full hunt text with per-entry resolutions and the deliberate
@@ -9,13 +22,10 @@ was eleven Opus agents over disjoint file territories, orchestrator-verified,
 ~125 files, +6.7k lines (about half of it tests). All ten suites green
 (`tools\run_all_tests.ps1` — which now genuinely runs all of them, OPS-6).
 
-**NOTHING IS DEPLOYED YET.** The working tree has the fixes; the fleet does
-not. Shipping this needs: a companion version bump (`config.py` +
-`pyproject.toml`), `tools\ship.cmd` (which now runs the companion+dashboard
-suites itself — expect step 2 to take longer), and the Mac builds on a Mac.
-The regenerated sprite sheets (2.4 GB) and the migrated b-roll DB reach the
-NAS with the next b-roll data push; dashboard-side migration 009 applies
-itself on next boot.
+That pass SHIPPED the same day as companion 0.7.0 / installer 1.0.22 /
+dashboard 0.4.0 (drift doctor clean, base rig upgraded, sprites and the
+migrated b-roll DB pushed to the NAS). Only the Mac builds were left behind,
+and they still are.
 
 This file is the ledger of what is STILL open.
 
@@ -23,8 +33,10 @@ This file is the ledger of what is STILL open.
 verifiers, every tracked source file, briefed on this ledger and both 08-11
 archives). It confirmed 94 NEW findings — 10 critical / 46 major / 38 minor —
 plus 7 uncertain. FIXED the same evening by an 11-agent Opus fix pass
-(disjoint file territories, orchestrator-reconciled; resolution header and
-per-finding outcomes in `docs/bug-hunt-2026-08-14.md`). All 10 criticals
+(disjoint file territories, orchestrator-reconciled; resolution header in
+`docs/bug-hunt-2026-08-14.md` — the per-finding OUTCOMES are not in that
+file, each fix cites its finding id and date at the code site instead, so
+`grep -rn COMP-GUARD-1` is how you find what was done about one). All 10 criticals
 fixed; all 10 suites green (`tools\run_all_tests.ps1`: 0 of 10 failed,
 ~+250 tests); eight findings deliberately NOT fixed — see R16. Two pieces
 of the pass already happened outside the repo: the base rig's
@@ -32,8 +44,8 @@ of the pass already happened outside the repo: the base rig's
 in-repo `watchdog.ps1` (still Disabled, ops half of BROLL-IDX-2), and the
 music UI's reveal now requires a companion carrying `POST /music/reveal` —
 one more entry in the "editors need a republished companion" column.
-NOTHING SHIPPED: same ship path as above (companion → 0.8.0 was already the
-target; this pass adds no new version spots).**
+SHIPPED 2026-08-15 as companion 0.7.8 / installer 1.0.27 (commit `5ab221d`)
+— NOT the 0.8.0 the ytdl plan names as its target.**
 
 ---
 
@@ -81,6 +93,51 @@ Also carried from the pass: `resolve_bridge.bridge_activity()` (COMP-MEDIA-9)
 is a new zero-I/O reader nothing surfaces yet — a tray status line or
 reporter field would make a wedged fusionscript call visible without log
 archaeology.
+
+### R17 — ten clips whose proxies Resolve refuses, and R10 does not explain nine of them
+Found 2026-08-15 reading the base rig's `companion.log` after the 0.7.8 ship:
+**1,357** `proxy relink: Resolve refused …` WARNINGs between 2026-08-11 13:10
+and 2026-08-15 07:05, over **10 distinct clips**, re-offered every ~120 s for
+as long as Resolve was open.
+
+**The retry loop itself is already closed** — COMP-MEDIA-5 (0.7.8) remembers
+each refusal against the proxy's `(mtime, size)`, demotes the per-clip line to
+DEBUG and prints one summary WARNING per pass. Those 1,357 lines are 0.7.7
+behaviour and will not recur. What is still open is *why these ten are
+refused*, because R10's answer does not cover nine of them.
+
+All ten proxies come from the same batch: the one-off Energy Transition driver
+run of 2026-08-11 13:10–14:04 (the archive one re-touched by the R10 sweep at
+08-12 01:02). Measured with ffprobe, 2026-08-15:
+
+- **Nine of ten** (the FF5 Energy Transition YouTube clips) have **no embedded
+  timecode on either side**, identical `r_frame_rate`, identical `nb_frames`,
+  matching duration, same `pix_fmt`, same stream layout — R10's "timecode-less
+  source, nothing to mismatch" class, which the sweep skipped on purpose
+  (2,152 of them). A **control** in the same tree is decisive: `…/typhoon
+  powercuts/…[SZqTalujBTc].mp4` has the identical shape (640x480, 30000/1001,
+  no timecode either side) and **links fine** — its proxy was written 08-14 by
+  the ordinary `proxy_gen`. Nor is it the CJK names: the same log holds 54
+  successful relinks, CJK ones among them. The only variable left standing is
+  which encoder run produced the file.
+- **One of ten** (`20250323_fx3_traffic_yu_ba_ba_1057.mp4`, ff3 archive) is a
+  real timecode mismatch: source `03:40:27:12` (colon), preview
+  `03:40:27;12` (semicolon) — the DF normalization R10's second half applies
+  at 59.94. This is the one case where that rule can be wrong: it cannot tell
+  "Sony printed a colon form for drop-frame material" (the case measured live
+  on 08-12) from a genuinely non-drop-frame recording, and at 3h40m the two
+  readings are thousands of frames apart. The sweep's "799 fixed, 0 failed"
+  counted successful remuxes, not Resolve acceptances.
+
+Two cheap experiments, both needing Resolve open on the rig, neither run yet:
+re-encode one of the nine with 0.7.8's `proxy_gen` and re-link (if it
+attaches, the 08-11 driver batch is the suspect and the repair is a re-encode
+sweep over those 438); and remux the ff3 preview with the **colon** form and
+re-link (if it attaches, `dropframe_normalized` needs a way to tell real NDF
+material from Sony's colon-printed DF, and the 799 swept previews need
+re-checking).
+
+Cost while open: those ten clips edit without a proxy. Nothing else.
 
 ## Open — residuals from the 2026-08-11 fix pass
 
@@ -300,7 +357,7 @@ Aftermath on that machine, worth knowing about:
   `upgrade.py`'s deliberate "different, not newer" rule means they will be
   offered an "Install v0.7.3" downgrade until the channel is bumped.
 
-### R15 — the empty Youtube folder: ytdl delivered json and corpses, never videos — FOUR FIXES in repo 2026-08-14, unshipped
+### R15 — the empty Youtube folder: ytdl delivered json and corpses, never videos — FOUR FIXES, SHIPPED 2026-08-15 in 0.7.8
 Investigated live on ruskin's machine 2026-08-13 23:2x → 2026-08-14 (full
 writeup: "The Empty Youtube Folder" artifact; hybrid redesign plan:
 docs/YTDL_LOCAL_DOWNLOAD.md). One editor-visible symptom — every
@@ -351,13 +408,16 @@ clicked. The LNG folders (~9 GB, 86 clips) were hand-pulled to his machine
 that night via his own rclone under schtasks; both folders verified equal
 to the NAS.
 
-Still owed: fixes 1–3 ride the next dashboard deploy + companion publish
-(fix 3 is INERT until both — the deployed collector strips the new ignore
-lines every provision cycle until it is redeployed); fix 4 rides 0.7.8;
-`setup_syncthing_folder.py` re-run per existing project (no --force) to
-push the new stignore; ruskin (and any other stale tray) onto ≥0.7.6.
+All four shipped 2026-08-15: the dashboard deploy is `ship.cmd` step 1 and
+the companion publish is step 2, so fix 3's two halves landed together (it
+was INERT until both — the deployed collector strips the new ignore lines
+every provision cycle until it is redeployed). **Still owed:**
+`setup_syncthing_folder.py` re-run per existing project (no --force) to push
+the new stignore to folders that already exist, and ruskin (plus any other
+stale tray) accepting the upgrade — the fix reaches a machine only when its
+companion does.
 
-### R14 — the BPG hand-off launched a generator that watched nothing, then never started it — FIXED in repo 2026-08-13, unshipped
+### R14 — the BPG hand-off launched a generator that watched nothing, then never started it — FIXED, SHIPPED 2026-08-15 in 0.7.8
 `bpg.py` opened the Blackmagic Proxy Generator whenever BRAW/R3D/CRM had no
 proxy and deliberately touched neither its watch list ("that config is
 yours") nor its window. Both halves were load-bearing, and on the base rig

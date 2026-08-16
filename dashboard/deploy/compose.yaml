@@ -156,6 +156,13 @@ services:
       # /.cache -- which uid 3000 cannot create, so the solver would be
       # re-fetched on every single call.
       YTDL_CACHE_DIR: "/ytdl-data/cache"
+      # Requester-first YouTube downloads ON (docs/YTDL_LOCAL_DOWNLOAD.md).
+      # The SPA-side switch: unset, the page never probes the requester's
+      # companion and every job takes the server path -- which is what the
+      # fleet silently ran on for two days after 0.7.8 shipped, because
+      # nothing set this (2026-08-16). Removing the line is the global
+      # rollback; per job it is the "download on the server instead" link.
+      YTDL_LOCAL_DOWNLOAD: "1"
       # Published companion builds (upgrade channel). Optional: defaults to
       # a "packages" dir next to DASH_DB_PATH, i.e. /data/packages -- which
       # is already persistent. Only set this to move them elsewhere.

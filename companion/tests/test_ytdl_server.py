@@ -28,6 +28,7 @@ import http.client
 import json
 import socket
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -64,6 +65,8 @@ class _NoSubprocess:
 
     DEVNULL = subprocess.DEVNULL
     CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # Pure string work, no process: windows_command_line() quotes with it.
+    list2cmdline = staticmethod(subprocess.list2cmdline)
 
     @staticmethod
     def Popen(*a, **kw):
@@ -340,14 +343,74 @@ def test_no_code_path_hands_anything_to_a_shell():
             assert "cmd.exe" not in node.value
 
 
-def test_spawn_uses_popen_with_a_list_and_no_shell(monkeypatch):
+# ---------------------------------------------------------------------------
+# The Windows command line: the quote goes AROUND THE PATH, never before /select
+# ---------------------------------------------------------------------------
+#
+# 2026-08-16, ruskin: every "open in Explorer" click opened Documents.
+# Popen(list) quotes any argument with a space, and every path in this tree
+# has one, so Explorer got `"/select,F:\...\Season 1\clip.mp4"` -- a token
+# that starts with a quote, which it does not recognise as a switch and
+# silently answers with the default folder. A window opened and the endpoint
+# said ok:true, so nothing looked wrong. The exact command line is therefore
+# pinned here, including the cases that hid it: a SPACE-FREE path is built
+# identically (so a convenient test path cannot pass by luck), a UNC path
+# keeps both leading backslashes, and a path containing `"` is refused rather
+# than escaped.
+
+
+@pytest.mark.parametrize("path", [
+    r"F:\Creators_Club\Projects\2026\CCT\Creator Profiles\Season 1\Youtube\a b [x].mp4",
+    r"C:\tmp\a.mp4",                                        # no spaces: same shape
+    r"\\192.168.0.102\TheCreatorsPool\Creators_Club\Projects\x y\clip.mp4",
+    r"C:\rock & roll & calc [xyz789].mp4",                  # MUSIC-2's metacharacters
+])
+def test_windows_select_line_is_bare_switch_then_quoted_path(path):
+    line = ytdl_server.windows_command_line(["explorer", f"/select,{path}"])
+    assert line == f'explorer /select,"{path}"'
+    assert not line.split(" ", 1)[1].startswith('"'), "the switch must not be inside the quotes"
+    assert line.count('"') == 2
+
+
+def test_windows_folder_open_is_a_plainly_quoted_path():
+    line = ytdl_server.windows_command_line(["explorer", r"F:\some folder\Season 1"])
+    assert line == r'explorer "F:\some folder\Season 1"'
+    line = ytdl_server.windows_command_line(["explorer", r"C:\nospaces"])
+    assert line == r"explorer C:\nospaces"
+
+
+def test_a_path_with_a_quote_is_refused_not_escaped():
+    with pytest.raises(ValueError):
+        ytdl_server.windows_command_line(["explorer", '/select,C:\\bad"name.mp4'])
+
+
+def test_the_reveal_answers_ok_false_when_the_command_line_is_refused(tree):
+    """...and that refusal reaches the page as an inline message, never a 500."""
+    root, clip = tree
+
+    def _refuse(argv):
+        raise ValueError("refusing to reveal a path containing a quote")
+
+    status, body = ytdl_server.build_reveal_response(
+        {"rel_path": REL}, _mounts(root), spawner=_refuse, platform="win32"
+    )
+    assert status == 200 and body["ok"] is False
+    assert "file manager" in body["message"]
+
+
+def test_spawn_uses_popen_with_no_shell(monkeypatch):
     """The one function that really launches something, driven with a
-    recorder in place of the subprocess module it reaches for."""
+    recorder in place of the subprocess module it reaches for.
+
+    On Windows the argument is the hand-built command LINE (a string
+    CreateProcess gets verbatim -- Popen(str) on win32 involves no shell);
+    elsewhere it is the argv list. Either way `&` in the path is data."""
     seen: dict = {}
 
     class _Recorder:
         DEVNULL = subprocess.DEVNULL
         CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        list2cmdline = staticmethod(subprocess.list2cmdline)
 
         @staticmethod
         def Popen(argv, **kwargs):
@@ -360,7 +423,10 @@ def test_spawn_uses_popen_with_a_list_and_no_shell(monkeypatch):
 
     REAL_SPAWN(["explorer", "/select,C:/x & y.mp4"])
 
-    assert seen["argv"] == ["explorer", "/select,C:/x & y.mp4"]
+    if sys.platform == "win32":
+        assert seen["argv"] == 'explorer /select,"C:/x & y.mp4"'
+    else:
+        assert seen["argv"] == ["explorer", "/select,C:/x & y.mp4"]
     assert not seen["kwargs"].get("shell")
     # PYTHONHOME is pinned at OUR _MEIPASS, which the bootloader deletes when
     # we exit -- and every app the editor launches from that Explorer window
@@ -441,7 +507,11 @@ def test_neither_the_file_nor_the_folder_spawns_nothing(tmp_path, spawned):
     )
 
     assert status == 200 and body["ok"] is False
-    assert "has it synced here yet?" in body["message"]
+    assert "is not on this machine" in body["message"]
+    # 2026-08-16: originals no longer sync down, so the message must not
+    # promise "has it synced here yet?" -- it says where the clip is instead.
+    assert "synced here yet" not in body["message"]
+    assert "stays on the NAS" in body["message"]
     assert spawned == []
 
 

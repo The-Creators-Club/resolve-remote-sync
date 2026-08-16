@@ -86,13 +86,12 @@ def test_filter_rules_down_allows_proxy_dir_and_contents_then_excludes_rest():
     # first-match-wins reason: they must beat `+ **/Proxy/**`, or Resolve's
     # `.<name>.tmp` / `.<name>.lock` render sidecars get pulled down (and
     # re-pulled every pass, since the .tmp changes between them).
-    # `/Youtube/` (root-anchored only, matching youtube_import's scan scope):
-    # the NAS-side ytdl worker downloads originals into Youtube/<term>/, and
-    # without this include no lane ever shipped them down -- editors received
-    # only the generated 540p previews under Proxy/ and imported THOSE into
-    # shared projects (the 2026-08-12 Energy Transition incident).
-    # `*.part`/`*.ytdl` are yt-dlp's in-flight/control files, newly reachable
-    # through the Youtube include.
+    # NO `/Youtube/` include (2026-08-16, owner's call): YouTube originals go
+    # UP only. The R12 include (2026-08-13) existed while the NAS was the only
+    # downloader; with requester-first downloads the original starts on the
+    # requester's disk and lane A carries it up, and pulling every editor's
+    # clips to every other editor was 58 GB of bandwidth on ruskin's first
+    # pass. `*.part`/`*.ytdl` stay excluded regardless (see the docstring).
     assert rules == [
         "- ._*",
         "- /.ccsync-trash/**",
@@ -100,11 +99,10 @@ def test_filter_rules_down_allows_proxy_dir_and_contents_then_excludes_rest():
         "- *.part", "- *.ytdl",
         "+ /Proxy/", "+ /Proxy/**",
         "+ **/Proxy/", "+ **/Proxy/**",
-        "+ /Youtube/", "+ /Youtube/**",
         "- **",
     ]
     assert rules.index("- *.tmp") < rules.index("+ **/Proxy/**")
-    assert rules.index("- *.part") < rules.index("+ /Youtube/**")
+    assert not any("Youtube" in r for r in rules),         "YouTube originals must never sync down (2026-08-16)"
 
 
 def test_filter_rules_up_excludes_root_level_proxy():
@@ -899,16 +897,16 @@ def test_lane_b_sync_pulls_only_proxy_contents_including_nested(rclone_binary, f
     ]
 
 
-def test_lane_b_sync_pulls_youtube_originals_but_not_download_debris(
+def test_lane_b_sync_leaves_youtube_originals_on_the_nas_and_alone_on_disk(
     rclone_binary, fixture_tree, tmp_path
 ):
-    """The 2026-08-12 Energy Transition fix: the NAS-side ytdl worker files
-    originals + .credits.json into Youtube/<term>/, and lane B must ship them
-    to editors (previously only the generated Proxy/ previews came down, so
-    editors imported 540p previews into shared projects). yt-dlp's in-flight
-    `.part` and `.ytdl` control files must NOT ride along, and a Youtube dir
-    NESTED deeper in the project (not the root-level tree the dashboard
-    writes) stays excluded."""
+    """2026-08-16: YouTube originals go UP only. The NAS's Youtube/<term>/
+    originals, sidecars and yt-dlp debris must NOT come down; the generated
+    Youtube/<term>/Proxy/ previews still do (they ride `**/Proxy/**`). And
+    the requester's OWN local original -- which the NAS may not have yet,
+    lane A is still uploading it -- must not be swept into `.ccsync-trash`
+    by this `sync`: an excluded path is invisible to rclone's delete pass,
+    which is the whole reason this is an exclude and not a `- *.mp4`."""
     yt = fixture_tree / "Youtube" / "solar farms"
     yt.mkdir(parents=True)
     (yt / "MARK M - Offshore [udIShWBpHrk].mp4").write_text("original")
@@ -918,13 +916,14 @@ def test_lane_b_sync_pulls_youtube_originals_but_not_download_debris(
     (yt / "stale [x].mp4.ytdl").write_text("control file")
     (yt / "Proxy").mkdir()
     (yt / "Proxy" / "MARK M - Offshore [udIShWBpHrk].mp4").write_text("540p preview")
-    nested = fixture_tree / "B-roll" / "Youtube"
-    nested.mkdir(parents=True)
-    (nested / "unrelated.mov").write_text("shares the name, not the tree")
     _age_past_the_lane_b_gate(fixture_tree)
 
     filter_file = write_filter_file(build_filter_rules_down(), tmp_path / "filter_down.txt")
     dst = tmp_path / "dst_down_yt"
+    # The requester downloaded this one locally; the NAS has never seen it.
+    local_only = dst / "Youtube" / "wind farms" / "MINE [abc123].mp4"
+    local_only.parent.mkdir(parents=True)
+    local_only.write_text("downloaded here, uploading via lane A")
     cmd = build_down_command(rclone_binary, str(dst), None, str(fixture_tree), filter_file)
     cmd[2] = str(fixture_tree)
     cmd[3] = str(dst)
@@ -932,16 +931,17 @@ def test_lane_b_sync_pulls_youtube_originals_but_not_download_debris(
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
 
-    copied = sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*") if p.is_file())
+    copied = sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*")
+                    if p.is_file() and ".ccsync-trash" not in p.parts)
     assert copied == [
         "B-roll/Proxy/clip1.mov",
         "Interviewees/Jane/Proxy/Nested/clip2.mov",
         "Proxy/clip_root.mov",
-        "Youtube/solar farms/MARK M - Offshore [udIShWBpHrk].credits.json",
-        "Youtube/solar farms/MARK M - Offshore [udIShWBpHrk].mp4",
         "Youtube/solar farms/Proxy/MARK M - Offshore [udIShWBpHrk].mp4",
-        "Youtube/solar farms/manifest.json",
+        "Youtube/wind farms/MINE [abc123].mp4",
     ]
+    assert local_only.read_text() == "downloaded here, uploading via lane A"
+    assert not (dst / ".ccsync-trash").exists(), "nothing was swept"
 
 
 def test_lane_b_sync_propagates_rename(rclone_binary, fixture_tree, tmp_path):

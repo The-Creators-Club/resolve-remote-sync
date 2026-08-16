@@ -246,11 +246,13 @@ proxy_notify_enabled = true
 # touches do survive -- or set false to be sure a machine never encodes.
 # proxy_gen_enabled = true
 
-# The ffmpeg binary. Nothing installs it for you and the companion does not
-# ship it (it would double the size of every upgrade), so a machine without
-# ffmpeg simply stays notifier-only and generates nothing. That is a config
-# WARNING, never an error: it does not stop syncing. Give an absolute path if
-# ffmpeg is installed off PATH.
+# The ffmpeg binary. The companion does not ship it (it would double the size
+# of every upgrade), but with local YouTube downloads on it installs a pinned
+# static ffmpeg+ffprobe beside yt-dlp on first run (2026-08-16), and the
+# default name below finds that copy when nothing on PATH answers. Give an
+# absolute path to use your own install instead; the companion never touches
+# that one. With neither, proxy generation stays notifier-only -- that is a
+# config choice, never a fault, and syncing is unaffected.
 ffmpeg_path = "ffmpeg"
 
 # How often (seconds) the tree is walked looking for originals with no proxy.

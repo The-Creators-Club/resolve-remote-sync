@@ -820,13 +820,29 @@ def _dashboard_url(app: "CompanionApp") -> str:
     return str(getattr(app, "config", {}).get("dashboard_url", "")).strip()
 
 
-def _open_dashboard(url: str) -> None:
+def _open_dashboard(url: str, app: Optional["CompanionApp"] = None) -> bool:
+    """Open the dashboard in the default browser. Returns whether it launched.
+
+    webbrowser.open() returns False -- no exception, no log line -- when no
+    browser could be launched, so until 2026-08-16 a click that did nothing
+    (ruskin: "Open dashboard isn't opening the dashboard") left NOTHING in
+    the log to distinguish "the browser opened a tab that then timed out"
+    from "nothing was launched at all". Now the attempt and its outcome are
+    logged, and a launch failure tells the editor instead of staying silent.
+    """
+    log.info("tray: opening dashboard %s", url)
     try:
         import webbrowser
 
-        webbrowser.open(url)
+        launched = bool(webbrowser.open(url))
     except Exception:
         log.exception("failed to open dashboard at %s", url)
+        launched = False
+    if not launched:
+        log.warning("tray: no browser could be launched for %s", url)
+        if app is not None:
+            _notify(app, f"Couldn't open a browser. The dashboard is at {url}")
+    return launched
 
 
 def _identity_status_label(app: "CompanionApp") -> str:
@@ -1840,7 +1856,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
 
     def on_open_dashboard(icon, item):
         url = snap["dashboard_url"]
-        _spawn(app, "Open dashboard", lambda: _open_dashboard(url))
+        _spawn(app, "Open dashboard", lambda: _open_dashboard(url, app))
 
     def on_open_log(icon, item):
         _spawn(app, "Open log", lambda: _open_log(app.log_path))

@@ -11,6 +11,38 @@ its short section pointing here.
 Windows editors get this when their tray takes the upgrade; **macOS editors
 do not have it at all** until the Mac builds run on a Mac.
 
+**2026-08-16 — it had never engaged, and two things had to change for it to.**
+Read on ruskin's box the morning after he took 0.7.8: every job still
+`download_mode: server`, `claimed_by: null`. Two independent blockers, both
+invisible because the server path is the designed fallback and kept working:
+
+1. **The flag was never set.** `YTDL_LOCAL_DOWNLOAD=1` was a deploy step in
+   the ship checklist that nothing performed; `/ytdl/api/health` said
+   `local_download: false`, so the SPA never probed the companion at all.
+   `install_dashboard_app.py` and `dashboard/deploy/compose.yaml` now set it
+   (the two are pinned equal by `server/tests/test_safety.py`).
+2. **No editor machine has ffmpeg.** `/ytdl/capabilities` on his box:
+   `ok:false — ffmpeg is not installed on this machine` (COMP-BROLL-5 refusing
+   correctly). Nothing had ever put one there — ffmpeg was the proxy
+   generator's optional dependency. Companion 0.7.9 adds `ffmpeg_manager.py`:
+   a **pinned** static ffmpeg+ffprobe (eugeneware/ffmpeg-static b6.1.1,
+   sha256 hardcoded per asset, verified against a real download) installed
+   into the same tools dir as yt-dlp on the yt-dlp manager's daily thread,
+   and `ffmpeg_tools._resolve_binary` falls back to it behind PATH for the
+   bare default `ffmpeg_path`. An editor's own install still wins.
+
+And a policy reversal in the same release: **lane B no longer pulls
+`/Youtube/**` down** (owner's call, 2026-08-16). The R12 include existed
+while the NAS was the only downloader; with requester-first downloads the
+original starts on the requester's disk and lane A carries it up, and pulling
+every editor's clips to every other editor was 58 GB of bandwidth on
+ruskin's first pass. YouTube originals go **up only**. Consequences accepted:
+a clip that fell back to the server path stays NAS-only (the history's
+reveal now says so instead of "has it synced here yet?"), and an editor-local
+original the NAS lacks is excluded rather than swept to `.ccsync-trash`
+(item 22's Youtube/ case is gone). `Youtube/<term>/Proxy/` previews still
+come down via `**/Proxy/**`.
+
 As-built deviations from the prose below, all deliberate and documented at the
 code site:
 
@@ -268,6 +300,8 @@ Sync interactions (all already in place, verified 2026-08-14):
   exactly the way the NAS's did.
 - Proxies: unchanged — base rig's proxy_gen sees the originals land on the
   NAS and generates `Youtube/<term>/Proxy/`, which lane B distributes.
+- Originals: since 2026-08-16 lane B does NOT distribute them (see the
+  status header). Up via lane A only.
 
 ## 8. Security
 
@@ -292,7 +326,8 @@ Sync interactions (all already in place, verified 2026-08-14):
 
 ## 10. Rollout
 
-- **Phase 0 — shipped or in tree now**: lane B `/Youtube/**` (0.7.6+),
+- **Phase 0 — shipped or in tree now**: lane B `/Youtube/**` (0.7.6+;
+  **reversed 2026-08-16 in 0.7.9** — originals go up only, see the header),
   stignore `*.part`/`*.ytdl` three ways, worker quality-rung fallback +
   corpse cleanup, project-select persistence. These stand alone and are
   worth shipping regardless.

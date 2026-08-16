@@ -135,14 +135,67 @@ def reveal_command(target: str, select: bool, platform: Optional[str] = None):
     return None
 
 
+SELECT_SWITCH = "/select,"
+
+# Why a ledgered clip can be absent here, in the editor's terms. YouTube
+# originals sync UP only (2026-08-16); the ones on the NAS that this machine
+# never downloaded stay there. Shared by both not-here branches so the two
+# never drift into telling different stories.
+NOT_HERE_WHY = ("YouTube originals only sync up, so a clip another editor "
+                "downloaded, or one the server downloaded, stays on the NAS "
+                "(P:\\ on the base rig).")
+
+
+def windows_command_line(argv: list) -> str:
+    """The exact command line Explorer gets, built by hand. Raises ValueError
+    for a path containing `"`.
+
+    Explorer parses its own command line instead of following argv rules, and
+    Popen(list) quotes any argument containing a space -- which is EVERY path
+    in this tree ("Creator Profiles", "Season 1", "Energy Transition"). The
+    quote then lands in front of the switch:
+
+        explorer "/select,F:\\...\\Season 1\\clip.mp4"    <- opens Documents
+        explorer /select,"F:\\...\\Season 1\\clip.mp4"    <- selects the clip
+
+    Explorer, handed the first form, does not error: it silently opens the
+    editor's default folder, so the endpoint reported ok:true and a window
+    really appeared -- for every clip, every time (ruskin, 2026-08-16; the
+    same one-character bug and the same fix as footage-sorter's revealArgs).
+    So on Windows the switch is written bare and the quotes wrap the path
+    ALONE. The path is refused rather than escaped when it contains `"`:
+    Windows filenames cannot, so such a path is a corrupt entry and there is
+    no correct thing to hand Explorer for it. Everything else goes through
+    list2cmdline one token at a time, which is exactly what Popen would have
+    done -- a plain folder open (`explorer "F:\\some folder"`) was never the
+    problem, only the switch-plus-path token was.
+    """
+    exe, *args = [str(a) for a in argv]
+    parts = [subprocess.list2cmdline([exe])]
+    for arg in args:
+        if arg.startswith(SELECT_SWITCH):
+            path = arg[len(SELECT_SWITCH):]
+            if '"' in path:
+                raise ValueError(f"refusing to reveal a path containing a quote: {path!r}")
+            parts.append(f'{SELECT_SWITCH}"{path}"')
+        else:
+            parts.append(subprocess.list2cmdline([arg]))
+    return " ".join(parts)
+
+
 def spawn(argv: list) -> None:
-    """Launch the file manager and forget about it. Raises OSError only.
+    """Launch the file manager and forget about it. Raises OSError only
+    (and ValueError for a Windows path no command line can carry).
 
     No shell=True, no COMSPEC, nothing that re-reads the argument (MUSIC-2).
-    The environment is sanitized for the reason music_server.call's child is:
-    PYTHONHOME/PYTHON3HOME are pinned process-wide at OUR _MEIPASS, which the
-    bootloader deletes when we exit, and Explorer/Finder is a process every
-    app the editor launches from that window inherits from.
+    On Windows the command line is built by windows_command_line() and handed
+    to CreateProcess as ONE string -- Popen(str) on win32 passes it verbatim,
+    no shell involved -- because Popen(list) would re-quote the /select token
+    and Explorer would open Documents (see there). The environment is
+    sanitized for the reason music_server.call's child is: PYTHONHOME/
+    PYTHON3HOME are pinned process-wide at OUR _MEIPASS, which the bootloader
+    deletes when we exit, and Explorer/Finder is a process every app the
+    editor launches from that window inherits from.
     """
     kwargs: dict[str, Any] = {
         "stdout": subprocess.DEVNULL,
@@ -151,6 +204,8 @@ def spawn(argv: list) -> None:
     }
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        subprocess.Popen(windows_command_line(argv), **kwargs)
+        return
     subprocess.Popen(argv, **kwargs)
 
 
@@ -195,17 +250,22 @@ def build_reveal_response(
         target, select = str(path), True
         message = f"Showing {path.name} in {folder}"
     elif dir_check(str(folder)):
-        # The row is in the dashboard's ledger and the file is not here: it is
-        # still syncing, or somebody moved it. The folder is the useful answer
-        # -- and it is what the editor clicked the row to look at.
+        # The row is in the dashboard's ledger and the file is not here. Since
+        # 2026-08-16 no lane brings YouTube ORIGINALS down (rclone_lane.
+        # build_filter_rules_down): a clip this machine did not download
+        # itself -- another editor's, or one that fell back to the server
+        # path -- lives on the NAS only, so "still syncing" is no longer the
+        # likely story and the message must not promise it. The folder is
+        # still the useful answer: it is what the editor clicked to look at.
         target, select = str(folder), False
-        message = f"{path.name} is not there — opened {folder} instead"
+        message = (f"{path.name} is not on this machine — opened {folder} instead. "
+                   f"{NOT_HERE_WHY}")
     else:
         # Nothing to point a file manager at. Spawning "explorer <missing>" here
         # would open the editor's Documents folder and look like a bug.
         return 200, {
             "ok": False,
-            "message": f"{path} is not on this machine — has it synced here yet?",
+            "message": f"{path} is not on this machine. {NOT_HERE_WHY}",
         }
 
     argv = reveal_command(target, select, platform)
@@ -219,7 +279,8 @@ def build_reveal_response(
     run = spawner if spawner is not None else spawn
     try:
         run(argv)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError: windows_command_line refused a `"` in the path.
         log.warning("ytdl: could not open the file manager (%s)", exc)
         return 200, {"ok": False, "message": f"could not open the file manager: {exc}"}
     return 200, {"ok": True, "message": message}

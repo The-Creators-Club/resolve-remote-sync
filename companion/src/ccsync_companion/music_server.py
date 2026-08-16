@@ -330,19 +330,59 @@ def build_reveal_response(
     run = spawner if spawner is not None else ytdl_server.spawn
     try:
         run(argv)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError: windows_command_line refused a `"` in the path.
         log.warning("music: could not open the file manager (%s)", exc)
         return 200, {"ok": False, "error": f"could not open the file manager: {exc}"}
     return 200, {"ok": True, "message": message}
 
 
+def fetchable_from_nas(share: str, mounts: dict, ccsync_cfg: Optional[dict]) -> bool:
+    """Is a missing track one the companion should pull down itself?
+
+    broll_server._fetchable_from_nas's rule, for the music share: only when
+    the effective mount is the DERIVED default under local_root (an explicit
+    ~/.broll-companion.json entry means the editor pointed the share
+    somewhere deliberate, and rclone writing into it behind their back is not
+    our call), and never on a base rig, whose local_root IS the NAS share.
+    """
+    if not ccsync_cfg or share != MUSIC_SHARE:
+        return False
+    if str(ccsync_cfg.get("mode", "editor")).strip().lower() == "base":
+        return False
+    derived = default_music_mount(ccsync_cfg)
+    root = (mounts or {}).get(MUSIC_SHARE)
+    if not derived or not isinstance(root, str):
+        return False
+    return os.path.normcase(os.path.normpath(root)) == os.path.normcase(
+        os.path.normpath(derived)
+    )
+
+
 def build_send_response(
-    body: dict, mounts: dict, caller: Optional[Callable[..., dict]] = None
+    body: dict, mounts: dict, caller: Optional[Callable[..., dict]] = None,
+    ccsync_cfg: Optional[dict] = None,
+    fetcher: Optional[Callable[..., dict]] = None,
 ) -> tuple[int, dict]:
     """POST /music/send. Returns (http_status, json_body).
 
     Body: {"action": "bin"|"under"|"insert", "share": ..., "rel_path": ...,
            "track": <optional int>}
+
+    A missing track is no longer terminal (2026-08-16): the music library is
+    not a synced folder any more than the b-roll archive is, so on every
+    remote editor's machine "+ Resolve" answered "file not found -- is the
+    share mounted?" and stopped (ruskin, 2026-08-16) -- the exact dead end
+    b-roll's /insert escaped on 2026-08-11. Same escape here: when the share
+    is the library at its derived place in the tree and this machine has a
+    working rclone remote, the companion pulls that ONE track down and
+    answers {"ok": false, "state": "downloading", "progress": {...}}; the web
+    UI re-POSTs the same body every ~1.5 s, and the poll that finds the file
+    in place falls through to the ordinary send. `ccsync_cfg` is None only
+    for callers that predate the feature (tests pinning the old contract);
+    the live handler always passes it. `fetcher` is broll_fetch.poll_fetch's
+    test seam. The error key stays "error" -- that is this route's contract
+    with the music page (b-roll's is "message").
     """
     run = caller if caller is not None else call
 
@@ -364,10 +404,44 @@ def build_send_response(
         return 200, {"ok": False, "error": str(exc)}
 
     if not os.path.isfile(local_path_str):
-        return 200, {
-            "ok": False,
-            "error": f"file not found at {local_path_str} — is the share mounted?",
-        }
+        if not fetchable_from_nas(share, mounts, ccsync_cfg):
+            return 200, {
+                "ok": False,
+                "error": f"file not found at {local_path_str} — is the share mounted?",
+            }
+        # Deferred for the reason local_path_for's is; the vetted components
+        # re-joined with forward slashes, never the raw client string.
+        from . import broll_fetch
+
+        clean_rel = "/".join(broll_server._split_components(rel_path))
+        fetch = (fetcher if fetcher is not None else broll_fetch.poll_fetch)(
+            ccsync_cfg, clean_rel, local_path_str,
+            remote_rel=broll_fetch.MUSIC_REMOTE_REL,
+        )
+        state = fetch.get("state")
+        if state == broll_fetch.STATE_DOWNLOADING:
+            progress = fetch.get("progress") or {}
+            percent = progress.get("percent")
+            message = (
+                f"syncing the track to this machine — {percent}%"
+                if isinstance(percent, int)
+                else "syncing the track to this machine…"
+            )
+            return 200, {"ok": False, "state": "downloading",
+                         "error": message, "progress": progress}
+        if state != broll_fetch.STATE_DONE:
+            return 200, {
+                "ok": False,
+                "error": "couldn't sync the track from the NAS: "
+                         f"{fetch.get('message') or 'the download failed'}",
+            }
+        if not os.path.isfile(local_path_str):
+            # "done" is only reported after an isfile() inside the job, so
+            # reaching here means the file vanished in between.
+            return 200, {
+                "ok": False,
+                "error": f"file not found at {local_path_str} — is the share mounted?",
+            }
 
     kw: dict[str, Any] = {"path": local_path_str}
     track = body.get("track")

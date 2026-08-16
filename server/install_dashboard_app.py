@@ -536,6 +536,19 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # the default lands on /.cache -- which uid 3000 cannot
                     # create, making it re-fetch the solver on EVERY call.
                     "YTDL_CACHE_DIR": "/ytdl-data/cache",
+                    # Requester-first downloads ON (docs/YTDL_LOCAL_DOWNLOAD.md).
+                    # This is the SPA-side switch: without it the page never
+                    # probes the requester's companion and every job takes the
+                    # server path -- which is exactly what happened for the
+                    # first two days after 0.7.8 shipped (2026-08-15/16): the
+                    # companion side was live on ruskin's box, the flag was
+                    # never set here, /ytdl/api/health said local_download:
+                    # false, and nobody noticed because the server path is the
+                    # designed fallback and it kept working. Set by the deploy
+                    # so a redeploy can never silently drop it again. Per-job
+                    # rollback is the "download on the server instead" link
+                    # (mode_lock=server); the global one is removing this line.
+                    "YTDL_LOCAL_DOWNLOAD": "1",
                     # DASH_PACKAGES_DIR intentionally unset: defaults to a
                     # "packages" dir next to DASH_DB_PATH (/data/packages),
                     # which is already the persistent volume.

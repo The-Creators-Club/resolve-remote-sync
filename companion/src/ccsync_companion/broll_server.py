@@ -712,7 +712,9 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "invalid JSON body"})
                 return
             mounts = self.server.companion_config.get(music_server.MOUNTS_KEY, {})
-            status, result = music_server.build_send_response(body, mounts)
+            status, result = music_server.build_send_response(
+                body, mounts, ccsync_cfg=getattr(self.server, "ccsync_cfg", None)
+            )
             self._send_json(status, result)
         elif path == "/music/reveal":
             # MUSIC-6 (2026-08-14): the music app's own /api/reveal drove

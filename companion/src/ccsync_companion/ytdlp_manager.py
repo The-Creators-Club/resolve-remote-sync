@@ -869,6 +869,17 @@ class YtDlpManager:
                 log.info("ytdlp: %s", status.get("message"))
             except Exception:
                 log.exception("ytdlp: the daily check failed")
+            try:
+                # ffmpeg on the same thread and cadence (ffmpeg_manager, 2026-08-16):
+                # yt-dlp without a merger is a downloader that refuses every
+                # rung this fleet uses, and no editor machine had one. Its own
+                # try: a failed ffmpeg install must not be mistaken for a
+                # yt-dlp failure, and vice versa. Same opt-out, checked inside.
+                from . import ffmpeg_manager
+                status = ffmpeg_manager.ensure(self.cfg, github_open=self._github_open)
+                log.info("ffmpeg: %s", status.get("message"))
+            except Exception:
+                log.exception("ffmpeg: the daily check failed")
             if self._stop_event.wait(CHECK_INTERVAL_SECONDS):
                 return
 

@@ -1058,3 +1058,157 @@ def test_a_non_string_share_is_a_400_on_the_music_route_too():
     )
     assert status == 400
     assert body["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# POST /music/send: a missing track is synced down from the NAS (2026-08-16)
+# ---------------------------------------------------------------------------
+#
+# The library is not a synced folder, so on every remote editor's machine
+# "+ Resolve" answered "file not found -- is the share mounted?" and stopped
+# (ruskin, 2026-08-16) -- the dead end the b-roll insert escaped on 2026-08-11.
+# Same escape, same gate (derived mount only, never a base rig, never another
+# share), same job registry (broll_fetch), one NAS-side folder parameter.
+
+
+def _editor_cfg(tmp_path):
+    return {
+        "local_root": str(tmp_path),
+        "mode": "editor",
+        "remote": "creators_club_sftp",
+        "remote_root": "/mnt/tank/creators_club",
+        "rclone_path": "rclone",
+    }
+
+
+def _send_body(rel="Ambient/cue.wav", action="under"):
+    return {"action": action, "share": "music", "rel_path": rel}
+
+
+def test_a_missing_track_starts_a_download_and_reports_progress(tmp_path):
+    cfg = _editor_cfg(tmp_path)
+    mounts = music_server.resolve_music_mounts({}, cfg)
+    calls = []
+
+    def fetcher(ccsync_cfg, rel_path, dest, remote_rel=None):
+        calls.append((ccsync_cfg, rel_path, dest, remote_rel))
+        return {"state": "downloading", "progress": {"percent": 12, "bytes": 12,
+                                                     "total_bytes": 100}}
+
+    status, body = music_server.build_send_response(
+        _send_body(), mounts, ccsync_cfg=cfg, fetcher=fetcher,
+        caller=lambda *a, **k: pytest.fail("the worker must not run before the file lands"))
+
+    assert status == 200
+    assert body["ok"] is False
+    assert body["state"] == "downloading"
+    assert "12%" in body["error"], "this route's message key is `error`"
+    assert body["progress"]["percent"] == 12
+    assert calls[0][1] == "Ambient/cue.wav"
+    assert calls[0][2] == str(tmp_path / "Assets" / "Music" / "Ambient" / "cue.wav")
+    from ccsync_companion import broll_fetch
+    assert calls[0][3] == broll_fetch.MUSIC_REMOTE_REL == "Assets/Music"
+
+
+def test_the_poll_that_finds_the_track_performs_the_send(tmp_path):
+    cfg = _editor_cfg(tmp_path)
+    mounts = music_server.resolve_music_mounts({}, cfg)
+    dest = tmp_path / "Assets" / "Music" / "Ambient" / "cue.wav"
+    seen = {}
+
+    def fetcher(ccsync_cfg, rel_path, d, remote_rel=None):
+        # The download finished between polls: the file is there now.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"RIFF")
+        return {"state": "done"}
+
+    def worker(action, **kw):
+        seen["action"], seen["kw"] = action, kw
+        return {"ok": True, "note": "placed"}
+
+    status, body = music_server.build_send_response(
+        _send_body(), mounts, ccsync_cfg=cfg, fetcher=fetcher, caller=worker)
+
+    assert status == 200 and body["ok"] is True
+    assert seen["action"] == "under"
+    assert Path(seen["kw"]["path"]) == dest
+
+
+def test_a_failed_download_says_so_in_the_error(tmp_path):
+    cfg = _editor_cfg(tmp_path)
+    mounts = music_server.resolve_music_mounts({}, cfg)
+
+    status, body = music_server.build_send_response(
+        _send_body(), mounts, ccsync_cfg=cfg,
+        fetcher=lambda *a, **k: {"state": "failed", "message": "sftp: connection refused"},
+        caller=lambda *a, **k: pytest.fail("no send on a failed fetch"))
+
+    assert status == 200 and body["ok"] is False
+    assert "couldn't sync the track" in body["error"]
+    assert "connection refused" in body["error"]
+
+
+def test_no_ccsync_cfg_keeps_the_old_not_found_message(tmp_path):
+    """The pre-fetch contract, pinned: without the companion's own config
+    there is no remote to fetch from."""
+    status, body = music_server.build_send_response(
+        _send_body(rel="cue.wav"), {"music": str(tmp_path)}, ccsync_cfg=None,
+        fetcher=lambda *a, **k: pytest.fail("must not fetch without a ccsync config"),
+        caller=lambda *a, **k: pytest.fail("no worker"))
+    assert status == 200
+    assert "is the share mounted?" in body["error"]
+
+
+def test_a_base_rig_does_not_fetch_a_track_from_itself(tmp_path):
+    cfg = dict(_editor_cfg(tmp_path), mode="base")
+    mounts = music_server.resolve_music_mounts({}, cfg)
+    status, body = music_server.build_send_response(
+        _send_body(), mounts, ccsync_cfg=cfg,
+        fetcher=lambda *a, **k: pytest.fail("a base rig must not fetch"),
+        caller=lambda *a, **k: pytest.fail("no worker"))
+    assert "is the share mounted?" in body["error"]
+
+
+def test_a_hand_overridden_music_mount_is_not_downloaded_into(tmp_path):
+    cfg = _editor_cfg(tmp_path)
+    mounts = {"music": "Y:/some/smb/mount"}
+    status, body = music_server.build_send_response(
+        _send_body(), mounts, ccsync_cfg=cfg,
+        fetcher=lambda *a, **k: pytest.fail("an overridden mount must not be fetched into"),
+        caller=lambda *a, **k: pytest.fail("no worker"))
+    assert "is the share mounted?" in body["error"]
+
+
+def test_the_downloading_state_travels_over_the_music_route(live_server, tmp_path, monkeypatch):
+    """The live handler passes the companion's own config through -- without
+    that the whole feature is inert, exactly as b-roll's was until wired."""
+    from ccsync_companion import broll_fetch
+    srv, client, _calls = live_server
+    cfg = _editor_cfg(tmp_path)
+    srv.ccsync_cfg = cfg
+    srv.companion_config[music_server.MOUNTS_KEY] = music_server.resolve_music_mounts({}, cfg)
+    monkeypatch.setattr(
+        broll_fetch, "poll_fetch",
+        lambda ccsync_cfg, rel_path, dest, remote_rel=None: {
+            "state": "downloading", "progress": {"percent": 40}},
+    )
+
+    status, _headers, body = client.post_json("/music/send", _send_body())
+
+    data = json.loads(body)
+    assert status == 200
+    assert data["ok"] is False
+    assert data["state"] == "downloading"
+    assert data["progress"]["percent"] == 40
+
+
+def test_the_fetch_command_targets_the_music_library_on_the_nas(tmp_path):
+    from ccsync_companion import broll_fetch
+    cfg = _editor_cfg(tmp_path)
+    cmd = broll_fetch.build_fetch_command(cfg, "Ambient/cue.wav", str(tmp_path / "cue.wav"),
+                                          remote_rel=broll_fetch.MUSIC_REMOTE_REL)
+    assert cmd[1] == "copyto"
+    assert cmd[2] == "creators_club_sftp:/mnt/tank/creators_club/Assets/Music/Ambient/cue.wav"
+    # ...and the archive default is untouched.
+    cmd = broll_fetch.build_fetch_command(cfg, "x/clip.mov", str(tmp_path / "clip.mov"))
+    assert cmd[2] == "creators_club_sftp:/mnt/tank/creators_club/Assets/B-roll Archive/x/clip.mov"

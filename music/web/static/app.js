@@ -257,11 +257,32 @@ async function sendToResolve(t, action, btn, msg) {
   msg.className = 'rmsg';
   msg.textContent = 'talking to Resolve…';
   try {
-    const r = await companion('/music/send', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action, share: t.share || 'music', rel_path: t.rel_path}),
-    });
+    const payload = {action, share: t.share || 'music', rel_path: t.rel_path};
+    let r;
+    // The library is not a synced folder, so on a remote editor's machine the
+    // track is usually NOT here yet: the companion pulls it down on demand and
+    // answers state:"downloading" with progress until it is (2026-08-16, the
+    // same contract as the b-roll insert). Re-POST the identical body every
+    // 1.5 s; the poll that finds the file in place performs the send.
+    let announced = false;
+    for (;;) {
+      r = await companion('/music/send', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      if (r && r.state === 'downloading') {
+        const pct = r.progress && Number.isInteger(r.progress.percent) ? r.progress.percent : null;
+        msg.className = 'rmsg';
+        msg.textContent = announced
+          ? (pct == null ? 'syncing the track to this machine…' : `syncing the track to this machine — ${pct}%`)
+          : 'track isn’t on this machine yet — syncing it down, then sending…';
+        announced = true;
+        await new Promise(res => setTimeout(res, 1500));
+        continue;
+      }
+      break;
+    }
     msg.className = 'rmsg ' + (r.ok ? 'ok' : 'err');
     msg.textContent = r.ok ? (r.note || 'done') : (r.error || 'failed');
   } catch (e) {

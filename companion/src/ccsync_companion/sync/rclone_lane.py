@@ -401,8 +401,7 @@ def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list
 
 
 def build_filter_rules_down() -> list[str]:
-    """Lane B: Proxy/ dirs at any depth (root included), plus the project's
-    root-level Youtube/ tree.
+    """Lane B: Proxy/ dirs at any depth (root included), and nothing else.
 
     The trash exclude comes FIRST (first-match-wins): the backup dir mirrors
     the source layout, so `.ccsync-trash/<ts>/Sub/Proxy/x.mov` matches
@@ -417,26 +416,26 @@ def build_filter_rules_down() -> list[str]:
     them (all three are `-` rules), but it MUST beat the includes, which
     match every byte under their dirs -- `._p.mov` included.
 
-    `/Youtube/` (project root only, where the dashboard downloader files
-    them): the NAS-side ytdl worker downloads originals into
-    `Youtube/<term>/` and the base rig generates their previews into
-    `Youtube/<term>/Proxy/` -- but no lane shipped the ORIGINALS down, so
-    the 540p previews were the only rendition an editor ever received, and
-    editors imported those into shared projects by hand (the 2026-08-12
-    "Energy Transition" incident: 158 preview clips in the pool). With the
-    originals synced down, youtube_import's documented flow works on editor
-    rigs too. Root-anchored, matching youtube_import's scan scope -- a
-    nested `**/Youtube/**` would drag along unrelated folders that merely
-    share the name. `*.part`/`*.ytdl` are yt-dlp's in-flight/control files
-    (min-age already keeps growing ones out; stale orphans on the NAS stay
-    out via these rules).
-
-    Known trade-off (tracked in KNOWN_BUGS carryover item 22): lane B is a
-    `sync`, so an editor-local file under Youtube/ that the NAS lacks is
-    swept to `.ccsync-trash` until its upload lands (videos via lane A,
-    everything else via lane C/Syncthing). The windows are the lanes' settle
-    intervals; the trash toast surfaces any sweep, and nothing is deleted
-    outright.
+    `/Youtube/` is deliberately NOT included (2026-08-16), reversing the
+    2026-08-13 R12 rule that pulled `+ /Youtube/**` down. That rule existed
+    because the NAS-side ytdl worker was the ONLY downloader and no lane
+    shipped its originals to editors, so they imported the 540p previews (the
+    "Energy Transition" incident). Requester-first downloads (0.7.8 + the
+    ffmpeg sidecar) put the original on the requester's disk FIRST and lane A
+    carries it up like any other video -- so pulling every editor's YouTube
+    originals down to every other editor is pure bandwidth: ruskin's first
+    pass after upgrading was 58 GB of other people's clips. Owner's call,
+    2026-08-16: YouTube originals go UP only, never down. Two consequences,
+    both accepted: (1) a clip that fell back to the server path (no local
+    capability, or a clip the requester's IP was bot-checked on and the
+    server's second-chance sweep fetched) stays NAS-only, and the download
+    history's reveal says so instead of "has it synced here yet?"; (2) an
+    editor-local original the NAS lacks is now EXCLUDED rather than swept to
+    `.ccsync-trash` by this `sync` (KNOWN_BUGS carryover item 22 no longer
+    applies to Youtube/). `Youtube/<term>/Proxy/` still comes down through
+    `**/Proxy/**` -- previews are small and the generator makes them on the
+    base rig. `*.part`/`*.ytdl` stay excluded: harmless without the include,
+    and load-bearing the day someone puts a Proxy dir under a download.
     """
     return [
         APPLEDOUBLE_EXCLUDE_RULE,
@@ -448,8 +447,6 @@ def build_filter_rules_down() -> list[str]:
         "+ /Proxy/**",
         "+ **/Proxy/",
         "+ **/Proxy/**",
-        "+ /Youtube/",
-        "+ /Youtube/**",
         "- **",
     ]
 

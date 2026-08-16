@@ -50,7 +50,7 @@ log = logging.getLogger("ccsync.config")
 # editor cannot see. Plus the R12 path-canon work reaching the fleet with a
 # warning attached to it: 0.7.6 shipped the classification, this ships the
 # thing that TELLS someone when the bridge those fixes depend on is dead.
-VERSION = "0.7.8"
+VERSION = "0.7.9"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -236,9 +236,13 @@ DEFAULTS: dict[str, Any] = {
     # lane B would sweep it away), true/false is obeyed verbatim. See
     # proxy_generation_enabled() for the whole reason.
     "proxy_gen_enabled": None,
-    # Never bundled with the companion (80-120 MB on every upgrade) and never
-    # installed by it: absent just means notifier-only. Absolute path if
-    # ffmpeg lives off PATH.
+    # Never bundled with the companion (80-120 MB on every upgrade). Since
+    # 2026-08-16 the ffmpeg sidecar (ffmpeg_manager) installs a pinned static
+    # ffmpeg+ffprobe into the tools dir when local YouTube downloads are on,
+    # and the bare default name falls back to it behind PATH -- so "ffmpeg"
+    # resolves on a fresh editor machine too. An explicit path is the
+    # editor's own install and is never touched. Absent everywhere just
+    # means notifier-only.
     "ffmpeg_path": "ffmpeg",
     # A SECOND full tree walk on top of manifest.ManifestCache's, hence a lazy
     # cadence; the tray's "make them now" forces one immediately.
@@ -700,10 +704,11 @@ proxy_notify_enabled = true
 # and note the notifier above runs either way.
 # proxy_gen_enabled = true
 
-# The ffmpeg binary. Nothing installs it for you and the companion does not
-# ship it (it would double the size of every upgrade), so a machine without
-# ffmpeg simply stays notifier-only and generates nothing. It never stops
-# syncing. Give an absolute path if ffmpeg is installed off PATH.
+# The ffmpeg binary. The companion does not ship it (it would double the size
+# of every upgrade), but with local YouTube downloads on it installs a pinned
+# static ffmpeg+ffprobe beside yt-dlp on first run and the default name below
+# finds that copy when nothing on PATH answers. Give an absolute path to use
+# your own install instead; the companion never touches that one.
 ffmpeg_path = "ffmpeg"
 
 # How often (seconds) the tree is walked looking for originals with no proxy.

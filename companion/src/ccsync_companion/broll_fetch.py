@@ -1,4 +1,4 @@
-"""On-demand download of ONE b-roll archive clip from the NAS.
+"""On-demand download of ONE b-roll archive clip -- or one music track -- from the NAS.
 
 Why this exists (2026-08-11): remote editors sync their ticked projects plus
 the shared asset folders (Luts, Stills) -- the b-roll archive is neither, so
@@ -8,9 +8,15 @@ the whole archive down would cost every editor hundreds of GB for a library
 they browse remotely; instead the companion pulls exactly the clip the editor
 just asked to insert, into the same place a full sync would have put it
 (<local_root>/Assets/B-roll Archive/<rel_path>), over the same rclone remote
-lanes A and B already use. broll_server.build_insert_response is the only
-caller: it answers {"state": "downloading"} responses the web UI polls, and
-performs the insert on the first poll that finds the file in place.
+lanes A and B already use. broll_server.build_insert_response was the only
+caller; since 2026-08-16 music_server.build_send_response is the second, for
+the identical reason -- the music library (Assets/Music) is not a synced
+folder either, so every "+ Resolve" on a remote editor's machine dead-ended
+at the same "is the share mounted?" (ruskin, 2026-08-16). Both answer
+{"state": "downloading"} responses the web UI polls, and perform the
+insert on the first poll that finds the file in place. The NAS-side folder
+is a parameter (`remote_rel`) so the two callers share one job registry,
+one rclone command shape and one shutdown kill.
 
 Jobs are keyed by destination path, so a re-click (or the UI's own 1.5 s
 poll) joins the running download instead of spawning a second rclone racing
@@ -43,6 +49,9 @@ log = logging.getLogger("ccsync.broll")
 # test_broll_fetch.py pins the pair together. A string, not a tuple: this
 # side is only ever joined into an rclone remote spec with forward slashes.
 ARCHIVE_REMOTE_REL = "Assets/B-roll Archive"
+# The music library's NAS-side folder; the local half is
+# music_server.MUSIC_LIBRARY_REL. Same pinning rule as the archive pair.
+MUSIC_REMOTE_REL = "Assets/Music"
 
 STATE_DOWNLOADING = "downloading"
 STATE_DONE = "done"
@@ -134,8 +143,9 @@ def prereq_error(ccsync_cfg: dict[str, Any]) -> Optional[str]:
     return None
 
 
-def build_fetch_command(ccsync_cfg: dict[str, Any], rel_path: str, dest: str) -> list[str]:
-    """The `rclone copyto` argv for one archive clip.
+def build_fetch_command(ccsync_cfg: dict[str, Any], rel_path: str, dest: str,
+                        remote_rel: str = ARCHIVE_REMOTE_REL) -> list[str]:
+    """The `rclone copyto` argv for one file under `remote_rel` on the NAS.
 
     `copyto`, not `copy` with a filter: one source file, one destination
     path, nothing to traverse. rclone writes dest as `<name>.partial` and
@@ -146,7 +156,7 @@ def build_fetch_command(ccsync_cfg: dict[str, Any], rel_path: str, dest: str) ->
     remote = str(ccsync_cfg.get("remote") or "").strip()
     remote_root = str(ccsync_cfg.get("remote_root") or "").strip()
     tuning = rclone_lane.RcloneTuning.from_cfg(ccsync_cfg)
-    src = f"{remote}:{remote_root.rstrip('/')}/{ARCHIVE_REMOTE_REL}/{rel_path}"
+    src = f"{remote}:{remote_root.rstrip('/')}/{remote_rel.strip('/')}/{rel_path}"
     return [
         rclone_path,
         "copyto",
@@ -249,8 +259,13 @@ def poll_fetch(
     rel_path: str,
     dest: str,
     runner: Optional[Any] = None,
+    remote_rel: str = ARCHIVE_REMOTE_REL,
 ) -> dict[str, Any]:
     """Start (or join) the download that puts `dest` in place; report state.
+
+    `remote_rel` is the NAS-side folder `rel_path` hangs off (the archive by
+    default, MUSIC_REMOTE_REL for the music route). Jobs are keyed by `dest`,
+    so the two callers can never race each other for one file.
 
     Returns one of:
       {"state": "downloading", "progress": {...}}
@@ -268,7 +283,7 @@ def poll_fetch(
             if err:
                 return {"state": STATE_FAILED, "message": err}
             job = FetchJob(dest, rel_path)
-            cmd = build_fetch_command(ccsync_cfg, rel_path, dest)
+            cmd = build_fetch_command(ccsync_cfg, rel_path, dest, remote_rel)
             _JOBS[key] = job
             if runner is not None:
                 runner(job, cmd)

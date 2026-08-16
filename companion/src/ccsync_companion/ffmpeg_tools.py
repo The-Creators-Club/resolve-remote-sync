@@ -96,11 +96,44 @@ def _win_creationflags() -> int:
 # locating the binaries
 # ---------------------------------------------------------------------------
 
-def _resolve_binary(path: str) -> Optional[str]:
-    """Absolute path to `path`, or None if it isn't there. Never raises."""
+def _managed_binary(name: str) -> Optional[str]:
+    """The companion-installed copy of a bare `ffmpeg`/`ffprobe`, or None.
+
+    ffmpeg_manager (2026-08-16) puts a pinned static ffmpeg + ffprobe into the
+    same tools dir yt-dlp lives in, because no editor machine had one and the
+    local YouTube downloader cannot merge without it. It is a FALLBACK behind
+    PATH on purpose: an editor's own install (`winget install Gyan.FFmpeg`,
+    brew) keeps winning, exactly as before, and this only answers when the
+    bare name resolves to nothing. Only the bare default names are mapped --
+    an explicit `ffmpeg_path` that does not exist stays not-found rather than
+    silently running a different binary. Deferred import: ffmpeg_manager
+    imports this module for the own-install check."""
+    stem = os.path.basename(name).lower()
+    for suffix in (".exe", ""):
+        if stem.endswith(suffix):
+            stem = stem[: len(stem) - len(suffix)] if suffix else stem
+            break
+    if stem not in ("ffmpeg", "ffprobe") or os.path.dirname(name):
+        return None
+    try:
+        from . import ffmpeg_manager
+        candidate = ffmpeg_manager.managed_path(stem)
+        return str(candidate) if candidate.is_file() else None
+    except Exception:
+        return None
+
+
+def _resolve_binary(path: str, managed_fallback: bool = True) -> Optional[str]:
+    """Absolute path to `path`, or None if it isn't there. Never raises.
+
+    A bare name goes through PATH first and then, unless `managed_fallback`
+    is off, the companion's own tools dir (_managed_binary)."""
     try:
         if not os.path.isabs(path):
-            return shutil.which(path)
+            found = shutil.which(path)
+            if found is None and managed_fallback:
+                found = _managed_binary(path)
+            return found
         return path if os.path.exists(path) else None
     except OSError:
         return None
@@ -164,7 +197,7 @@ def ffmpeg_available(ffmpeg_path: str, use_cache: bool = True) -> tuple[bool, st
 
     resolved = ffmpeg_path
     if not os.path.isabs(ffmpeg_path):
-        found = shutil.which(ffmpeg_path)
+        found = shutil.which(ffmpeg_path) or _managed_binary(ffmpeg_path)
         if found is None:
             return False, f"ffmpeg not found on PATH ('{ffmpeg_path}')"
         resolved = found

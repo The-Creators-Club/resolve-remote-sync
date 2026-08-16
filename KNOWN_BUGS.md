@@ -94,6 +94,98 @@ is a new zero-I/O reader nothing surfaces yet — a tray status line or
 reporter field would make a wedged fusionscript call visible without log
 archaeology.
 
+### R18 — requester-first downloads never engaged; the fleet ran the server path for two days without anyone noticing — FIXED in repo 2026-08-16 (companion 0.7.9 + dashboard env), unshipped
+Read live on ruskin's machine the morning after he took 0.7.8 (SSH,
+`companion.log`, `127.0.0.1:8899`, the dashboard's fleet + ytdl APIs), while
+chasing five symptoms he reported at once. What each turned out to be:
+
+- **"Syncing 48 GB of Creator Profiles he already has"** — lane B's first
+  pass after 0.7.4 → 0.7.8: 0.7.6's `+ /Youtube/**` pulling every YouTube
+  original in the project (58 GB) down to him. Working as designed, and the
+  design was wrong — see the fix below.
+- **"Not showing on the dashboard"** — his reporter timed out 10:43–11:16
+  (WinError 10060, around the upgrade/restart); it has reported cleanly since
+  11:20. Transient.
+- **"Videos land in F: not P:"** — on his machine P: *is* `\\localhost\CCSync_P`
+  = `F:\Creators_Club`; the reveal opens the local-root spelling by design
+  (a Mac has no drive letters). Not a defect.
+- **"Weren't downloads supposed to happen locally?"** — they never once did.
+  Every job `download_mode: server`, `claimed_by: null`, for **two
+  independent reasons**: (a) the NAS dashboard had no `YTDL_LOCAL_DOWNLOAD=1`
+  (`/ytdl/api/health` → `local_download: false`; the ship checklist named the
+  step, `install_dashboard_app.py` never performed it), so the SPA never
+  probed the companion; (b) his machine has **no ffmpeg** —
+  `/ytdl/capabilities` → `ok:false, "ffmpeg is not installed"` (COMP-BROLL-5
+  refusing correctly) — and nothing had ever shipped one to an editor.
+  Invisible because the server path is the designed fallback and kept working.
+- **Age-restricted clip fails ("Sign in to confirm your age")** — failed
+  *server-side* (job 34). The NAS `cookies.txt` is present (`cookies: true`)
+  but carries only the `__Secure-3P*` half of a session (no `SID`/`HSID`/
+  `SSID`/`APISID`/`SAPISID`/`LOGIN_INFO`), and yt-dlp rewrites it on every
+  run (mtime = job time). Whatever account it was exported from either is not
+  age-verified or the export was partial. **Operator task, not code:
+  re-export a full Netscape cookies.txt from a signed-in, age-verified
+  account and `install -o 3000 -g 3000 -m 600` it** (ytdl/web/DEPLOY.md).
+  The local executor passes no cookies at all (Chrome's app-bound encryption
+  defeats `--cookies-from-browser` on Windows), so age-gated clips fail
+  locally too and fall back to the same server. Still open.
+- **"Open in Explorer opens the default folder"** — real, and every clip:
+  `Popen(list)` quotes any argument containing a space, every path in this
+  tree has one, so Explorer got `"/select,F:\...\Season 1\clip.mp4"` — a
+  token starting with a quote, which it does not recognise as a switch and
+  silently answers with Documents. Endpoint said ok:true, a window opened.
+- **Music "+ Resolve" dead-ends "file not found — is the share mounted?"** —
+  the library is not a synced folder any more than the b-roll archive is, and
+  `music_server.build_send_response` had no on-demand fetch (b-roll's
+  `/insert` got one 2026-08-11).
+- **"Open dashboard" not opening** — `webbrowser.open()` returns False with
+  no log line, so nothing distinguished "a tab opened and timed out" (the
+  dashboard WAS unreachable from his box 10:43–11:16) from "nothing
+  launched". His log's three `TrackPopupMenuEx returned 0, GetLastError=0`
+  are `TPM_RETURNCMD` dismissals, not failures.
+- His three local Syncthing folders carry 23 of 29 ignore lines and the
+  sequencer's startup verify latched them "paused until a re-assert" — but
+  they were never paused (0.7.4 left them running), so the claim in the log
+  is wrong while the risk is nil (the six missing lines are the `.part`/
+  `.ytdl` set the NAS now filters at source; the lane C turn re-asserts).
+  Left as-is; verify it self-healed after his lane B pass.
+
+FIXED, all in repo:
+1. **`ffmpeg_manager.py`** (companion 0.7.9): a *pinned* static ffmpeg +
+   ffprobe (eugeneware/ffmpeg-static `b6.1.1`, sha256 hardcoded per asset,
+   the Windows one verified against a real download and run) installed into
+   the same tools dir as yt-dlp, on the yt-dlp manager's daily thread, under
+   the same opt-out. `ffmpeg_tools._resolve_binary`/`ffmpeg_available` fall
+   back to it behind PATH for the bare default `ffmpeg_path` only — an
+   editor's own install, or an explicit path, is never touched. capabilities()
+   turns ok the moment it lands; no restart, no config edit. 22 tests.
+2. **`YTDL_LOCAL_DOWNLOAD=1`** set by `install_dashboard_app.py` and
+   `dashboard/deploy/compose.yaml` (pinned equal by test_safety), so a
+   redeploy can never drop it again.
+3. **Lane B no longer pulls `/Youtube/**`** (owner's call: originals go UP
+   only, other editors' clips are bandwidth). Editor-local originals the NAS
+   lacks are now excluded rather than swept to trash (item 22's Youtube case
+   is gone). `Youtube/<term>/Proxy/` still comes down. The reveal's not-here
+   message says where the clip is instead of "has it synced here yet?".
+4. **Explorer reveal**: `ytdl_server.windows_command_line` builds
+   `explorer /select,"<path>"` by hand and `spawn()` hands Popen ONE string
+   on win32 (verbatim to CreateProcess, no shell). Verified live on the base
+   rig by reading the opened window's `Shell.Application` LocationURL, not
+   by "a window appeared". A path containing `"` is refused (Windows names
+   cannot), never escaped. Music's reveal shares the function.
+5. **Music on-demand fetch**: `broll_fetch` takes a `remote_rel`
+   (`Assets/Music`), `music_server.build_send_response` pulls the missing
+   track down and answers `state:"downloading"` with progress; the music UI
+   re-POSTs every 1.5 s until the send goes through. Same gate as b-roll
+   (derived mount only, never a base rig, never another share).
+6. `_open_dashboard` logs the attempt, logs when no browser launched, and
+   tells the editor the URL in a toast.
+
+Ship: `tools\ship.cmd` (dashboard deploy carries the flag; companion 0.7.9
+publishes ffmpeg + lane B + reveal + music). Ruskin's box gets ffmpeg
+~30 s after his tray takes 0.7.9 and his next YouTube job downloads locally.
+**Still open after the ship:** the NAS cookies re-export (above); Mac builds.
+
 ### R17 — ten clips whose proxies Resolve refuses, and R10 does not explain nine of them
 Found 2026-08-15 reading the base rig's `companion.log` after the 0.7.8 ship:
 **1,357** `proxy relink: Resolve refused …` WARNINGs between 2026-08-11 13:10

@@ -9,9 +9,9 @@ SHIPPED** — the 08-14 hunt pass, R14 and R15 all went out in one commit
 yt-dlp 2026.07.04 on first run. Note the version skew: `docs/
 YTDL_LOCAL_DOWNLOAD.md` was written against a **0.8.0** target and the
 feature actually shipped under **0.7.8**. Still owed, as ever: the **Mac
-builds** (not cross-buildable from Windows), a per-project
-`setup_syncthing_folder.py` re-run for the new `.part`/`.ytdl` ignores, and
-every editor accepting the tray upgrade.
+builds** (not cross-buildable from Windows) and every editor accepting the
+tray upgrade. The `setup_syncthing_folder.py` re-run this paragraph used to
+ask for is NOT owed — see R15.
 
 **Status 2026-08-11 (evening): the morning's 82-finding hunt is FIXED — same
 day, all of it, plus the 45-finding ytdl ledger and the delete-protection
@@ -411,10 +411,20 @@ to the NAS.
 All four shipped 2026-08-15: the dashboard deploy is `ship.cmd` step 1 and
 the companion publish is step 2, so fix 3's two halves landed together (it
 was INERT until both — the deployed collector strips the new ignore lines
-every provision cycle until it is redeployed). **Still owed:**
-`setup_syncthing_folder.py` re-run per existing project (no --force) to push
-the new stignore to folders that already exist, and ruskin (plus any other
-stale tray) accepting the upgrade — the fix reaches a machine only when its
+every provision cycle until it is redeployed).
+
+The NAS side needed no hand-work at all, and the "re-run
+`setup_syncthing_folder.py` per existing project" this entry used to list as
+owed was **never necessary**: the same exact-equality repair that would have
+stripped a server-only fix pushes the dashboard's list instead, on every
+existing folder, every provision cycle (`collector._ensure_ignores`).
+Verified read-only 2026-08-16 against the live NAS Syncthing config API — 7
+project folders, **0 missing** `(?i)**/*.part`, `(?i)**/*.part-Frag*` or
+`(?i)**/*.ytdl`. Re-running the server script by hand is now only for a
+folder the collector cannot see (no marker, or a project it refuses to
+provision). **Still owed:** ruskin (plus any other stale tray) accepting the
+upgrade — the editor half lives in the companion's own `STIGNORE_LINES`,
+re-asserted at startup and per turn, so it reaches a machine only when its
 companion does.
 
 ### R14 — the BPG hand-off launched a generator that watched nothing, then never started it — FIXED, SHIPPED 2026-08-15 in 0.7.8

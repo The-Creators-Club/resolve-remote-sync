@@ -39,12 +39,15 @@ page paths get a redirect to `/login`.
 **Open without any credential:**
 `/api/v1/login`, `/api/v1/logout`, `/api/v1/me`, `/api/v1/health`,
 `/api/v1/site`, `/api/v1/verify`, `/api/v1/report`, `/login`, `/favicon.ico`,
-`/static/*`, and the two OIDC legs `/auth/oidc/login` and
-`/auth/oidc/callback`.
+`/static/*`, `/setup`, `/api/v1/setup/*`, and the two OIDC legs
+`/auth/oidc/login` and `/auth/oidc/callback`.
 
 `/report` and `/verify` are "open" only in the sense that the *gate* lets them
 through — both authenticate inside, and `/report`'s token is checked **before
-the body is read**.
+the body is read**. `/setup` and `/api/v1/setup/*` are the same shape: open at
+the middleware, but every route (and `ui.page_setup`) re-checks via
+`setup_routes.require_setup_access`/`first_run_open`, which is fail-closed —
+see §5's "Setup wizard" for what that means today.
 
 **Open to a companion token instead of a session:**
 `/api/v1/selection/*`, `/api/v1/companion/package/*`, `/broll/api/ingest/*`
@@ -126,6 +129,12 @@ Rules a client can rely on:
 - `schema` is a monotonic integer, not the dashboard version. Unknown keys are
   additive; a client that cannot read `features` must behave as if the feature
   is **off**.
+- Since `ZERO_TOUCH_PLAN.md` WP D (2026-08-17): every field except
+  `video_extensions` is resolved **DB-first** (`site_settings` table, editable
+  from Settings) with the `DASH_SITE_*` environment value as the fallback —
+  see `CONFIG.md` §1.1. The response shape and every rule above is unchanged;
+  only where the value comes from can now be "an admin typed it in", not just
+  "the compose file said so".
 
 ### `POST /api/v1/login`
 
@@ -387,6 +396,46 @@ it *can* refuse a channel that has none.
 Staging uses a per-request `.part` file plus `os.replace`, so the served file
 is always complete and two concurrent publishes cannot write into each other's
 staging file.
+
+### Site settings
+
+`ZERO_TOUCH_PLAN.md` WP D, 2026-08-17 — the manifest as writable data
+(`CONFIG.md` §1.1, `ARCHITECTURE.md` §6).
+
+| Route | What |
+|---|---|
+| `GET /admin/site` | the resolved manifest (same shape `GET /api/v1/site` publishes, plus `auto_derived`: which keys are read-only in the UI right now because a live value exists) |
+| `PUT /admin/site` | `{"values": {"org_name": "…", "sftp_port": "2222", …}}` → the resolved manifest. **All-or-nothing**: every field is validated before any is written, so one bad field changes nothing. `422` names the field and why |
+| `GET /admin/site/export` | `site.toml`-shaped `text/plain`, section names matching `site.example.toml` |
+| `POST /admin/site/import` | `{"text": "…"}` — parses pasted `site.toml`-shaped text (stdlib `tomllib`) into the same validated write `PUT` uses. Unrecognised `[section]`s are ignored, not refused (an import is additive to what this store owns) |
+
+Values are always strings on the wire (`"1"`/`"0"` for the two boolean
+`features.*` keys, comma-joined for `template_folders` and
+`shared_asset_folders`) — `site_store.validate()` is the one place that
+decides a value is acceptable, so the API and the Settings page form can
+never disagree about what is valid.
+
+### Setup wizard
+
+Behind `/setup`. Unlike every other route in this section, these are reachable
+**without a session** in one narrow window: no local admin account exists yet
+and auth is not OIDC (reported by the identity module `ZERO_TOUCH_PLAN.md` WP
+C adds; until it lands, every route below is admin-only, fail-closed — see
+`setup_routes.require_setup_access`).
+
+| Route | What |
+|---|---|
+| `GET /setup/tasks` | every registered task: `id, title, description, optional, can_run, status, detail, at`, plus `outstanding_required` (task ids gating the wizard) |
+| `POST /setup/tasks/{id}/check` | re-inspect the world, save and return the new state. Runs off the event loop (`run_in_threadpool`) |
+| `POST /setup/tasks/{id}/run` | perform the task's action. `400` if it has none (e.g. `admin` — account creation is `POST /setup/admin`, WP C's route, not this one) |
+| `POST /setup/tasks/{id}/skip` | `400` unless the task is `optional` |
+| `GET /setup/eula` | `{"text": "…", "version": "1.0"}` — `""`/`null` if no EULA is shipped in this build |
+| `POST /setup/eula` | records acceptance of the current marker version |
+
+One task, one id, one lock: two concurrent `run` calls for the same task id
+serialise; different task ids never block each other. Every task's state
+survives a container restart (`setup_tasks` table) — the wizard resumes,
+never restarts.
 
 ---
 

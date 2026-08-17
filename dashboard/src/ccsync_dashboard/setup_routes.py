@@ -1,0 +1,241 @@
+"""HTTP surface for the SetupEngine and the site-manifest admin routes
+(ZERO_TOUCH_PLAN.md WP D / §3.2, §3.5, 2026-08-17).
+
+Two access rules, not one:
+
+* `/api/v1/admin/site*` -- exactly the same `_require_admin` gate every other
+  `/api/v1/admin/*` route in `api.py` uses. No first-run exception: by the
+  time the wizard's "Your studio" step runs, step 2 ("Create your admin
+  account") has already put a session in the browser.
+* `/api/v1/setup/*` -- a session-less window is required for the FIRST two
+  steps (Welcome/EULA, then creating that very admin account), so these
+  routes are in `app.py`'s open list and gate themselves via
+  `require_setup_access`, which allows either an authenticated admin OR an
+  anonymous caller during the narrow "no local account exists yet" window.
+  That window is reported by agent C's identity module (WP C), which does
+  not exist in this worktree -- `setup_engine.probe_admin_status` returns
+  `None` here, and `require_setup_access` treats an unknown status as
+  CLOSED, so every one of these routes requires an admin session in THIS
+  build. See `setup_engine.py`'s module docstring for the handoff.
+"""
+from __future__ import annotations
+
+import logging
+import sqlite3
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
+
+from . import auth, setup_engine, site_store
+from .api import get_conn
+
+router = APIRouter(prefix="/api/v1")
+log = logging.getLogger("ccsync.dashboard.setup_routes")
+
+
+def _ctx(request: Request, conn: sqlite3.Connection) -> setup_engine.SetupContext:
+    return setup_engine.SetupContext(
+        conn=conn, settings=request.app.state.settings, app=request.app
+    )
+
+
+def first_run_open(request: Request, conn: sqlite3.Connection) -> bool:
+    """True only in the narrow pre-admin-account window: no local account
+    exists yet (per the identity module's probe) and auth is not OIDC (SSO
+    break-glass rules stay break-glass -- see auth.py's `sso and not
+    is_admin` refusal in page_login_submit; the wizard must not become a
+    second, unauthenticated way in for an OIDC deployment).
+
+    Fails closed: `probe_admin_status` returning `None` (module absent, see
+    this module's docstring) means this is NEVER true here.
+    """
+    settings = request.app.state.settings
+    if str(getattr(settings, "auth_method", "") or "").strip().lower() == "oidc":
+        return False
+    status = setup_engine.probe_admin_status(_ctx(request, conn))
+    if status is None:
+        return False
+    return not bool(status.get("users_exist"))
+
+
+def require_setup_access(request: Request, conn: sqlite3.Connection) -> str | None:
+    """The admin username, or None for an anonymous first-run caller.
+    Raises 401/403 otherwise. Every route below calls this FIRST, before
+    touching setup_tasks or site_settings."""
+    settings = request.app.state.settings
+    user = auth.get_session_user(request)
+    if user is not None:
+        if not auth.is_admin(settings, user):
+            raise HTTPException(status_code=403, detail="admins only")
+        return user
+    if first_run_open(request, conn):
+        return None
+    raise HTTPException(status_code=401, detail="log in first")
+
+
+# ------------------------------------------------------------------ tasks
+
+@router.get("/setup/tasks")
+def api_setup_tasks(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    require_setup_access(request, conn)
+    states = setup_engine.list_states(conn)
+    return {
+        "tasks": [
+            {
+                "id": task.id,
+                "title": task.title,
+                "description": task.description,
+                "optional": task.optional,
+                "can_run": task.run is not None,
+                **states[task.id].as_dict(),
+            }
+            for task in setup_engine.TASKS
+        ],
+        "outstanding_required": setup_engine.outstanding_required(conn),
+    }
+
+
+def _known_task(task_id: str) -> setup_engine.Task:
+    task = setup_engine.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"unknown setup task {task_id!r}")
+    return task
+
+
+@router.post("/setup/tasks/{task_id}/check")
+async def api_setup_task_check(
+    task_id: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    require_setup_access(request, conn)
+    _known_task(task_id)
+    ctx = _ctx(request, conn)
+    state = await run_in_threadpool(setup_engine.run_check, ctx, task_id)
+    return state.as_dict()
+
+
+@router.post("/setup/tasks/{task_id}/run")
+async def api_setup_task_run(
+    task_id: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    require_setup_access(request, conn)
+    task = _known_task(task_id)
+    if task.run is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{task_id!r} has no automatic action -- see its description",
+        )
+    ctx = _ctx(request, conn)
+    state = await run_in_threadpool(setup_engine.run_do_it, ctx, task_id)
+    return state.as_dict()
+
+
+@router.post("/setup/tasks/{task_id}/skip")
+def api_setup_task_skip(
+    task_id: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    require_setup_access(request, conn)
+    task = _known_task(task_id)
+    if not task.optional:
+        raise HTTPException(status_code=400, detail=f"{task_id!r} is required and cannot be skipped")
+    ctx = _ctx(request, conn)
+    state = setup_engine.run_skip(ctx, task_id)
+    return state.as_dict()
+
+
+# ------------------------------------------------------------------- eula
+
+@router.get("/setup/eula")
+def api_setup_eula_get(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    require_setup_access(request, conn)
+    if not setup_engine.EULA_PATH.is_file():
+        return {"text": "", "version": None}
+    try:
+        text = setup_engine.EULA_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"could not read EULA: {exc}")
+    return {"text": text, "version": setup_engine.eula_marker_version(text)}
+
+
+@router.post("/setup/eula")
+def api_setup_eula_accept(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    require_setup_access(request, conn)
+    ctx = _ctx(request, conn)
+    state = setup_engine.run_do_it(ctx, "eula")
+    return state.as_dict()
+
+
+# ------------------------------------------------------------- admin/site
+
+def _require_admin(request: Request) -> str:
+    settings = request.app.state.settings
+    user = auth.get_session_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="log in first")
+    if not auth.is_admin(settings, user):
+        raise HTTPException(status_code=403, detail="admins only")
+    return user
+
+
+@router.get("/admin/site")
+def api_admin_site_get(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    _require_admin(request)
+    manifest = site_store.resolved_manifest(conn, request.app.state.settings)
+    manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
+    return manifest
+
+
+class SiteSettingsIn(BaseModel):
+    # Raw strings only -- site_store.validate() does the typed parsing (int/
+    # bool/csv) and is the ONE place that decides a value is acceptable, so
+    # the API and a future Settings-page form can never disagree about what
+    # is valid. Capped generously; nothing here is meant to hold a file.
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+@router.put("/admin/site")
+def api_admin_site_put(
+    payload: SiteSettingsIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    admin = _require_admin(request)
+    try:
+        site_store.set_many(conn, payload.values, updated_by=admin)
+    except site_store.SiteValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    conn.commit()
+    log.info("admin %r updated site settings: %s", admin, ", ".join(sorted(payload.values)))
+    manifest = site_store.resolved_manifest(conn, request.app.state.settings)
+    manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
+    return manifest
+
+
+@router.get("/admin/site/export")
+def api_admin_site_export(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    from fastapi.responses import PlainTextResponse
+
+    _require_admin(request)
+    text = site_store.export_toml(conn, request.app.state.settings)
+    return PlainTextResponse(text, media_type="text/plain")
+
+
+class SiteImportIn(BaseModel):
+    text: str = Field(max_length=65536)
+
+
+@router.post("/admin/site/import")
+def api_admin_site_import(
+    payload: SiteImportIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    admin = _require_admin(request)
+    try:
+        parsed = site_store.import_toml(payload.text)
+        if not parsed:
+            raise HTTPException(status_code=422, detail="no recognised [section] keys found in that text")
+        site_store.set_many(conn, parsed, updated_by=admin)
+    except site_store.SiteValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    conn.commit()
+    log.info("admin %r imported site settings: %s", admin, ", ".join(sorted(parsed)))
+    manifest = site_store.resolved_manifest(conn, request.app.state.settings)
+    manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
+    return manifest

@@ -17,7 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
-from . import api, auth, broll, crash_report, db, music, oidc, sessions, ui, ytdl
+from . import (
+    api, auth, broll, crash_report, db, music, oidc, secrets_boot, sessions, setup_routes,
+    site_store, ui, ytdl,
+)
 from .collector import Collector
 from .settings import Settings
 
@@ -43,7 +46,21 @@ _OPEN_EXACT = {
     # on the signed flow cookie plus a verified id_token, never on being
     # reachable.
     oidc.LOGIN_PATH, oidc.CALLBACK_PATH,
+    # The wizard page (ZERO_TOUCH_PLAN.md WP D, 2026-08-17). Open at the
+    # MIDDLEWARE level only -- ui.page_setup does its own admin-or-first-run
+    # gating and redirects to /login when neither applies (see
+    # setup_routes.require_setup_access for the same rule on the API side).
+    # This is what lets an appliance with no admin account yet land on
+    # Setup instead of a 401.
+    "/setup",
 }
+
+# The setup API prefix (ZERO_TOUCH_PLAN.md WP D). A prefix, not exact paths,
+# because /api/v1/setup/tasks/{id}/{action} is not enumerable here -- every
+# route under it gates itself via setup_routes.require_setup_access, which
+# fails closed exactly like every other route in this app when the
+# anonymous first-run window is not active (see that function's docstring).
+_SETUP_API_PREFIX = "/api/v1/setup/"
 
 # State-changing requests exempt from the CSRF check (COMMERCIAL_READINESS.md
 # item 15, 2026-08-17). Two classes only:
@@ -156,7 +173,18 @@ def _log_shared_token_migration(conn, settings: Settings) -> None:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or Settings.from_env()
+    if settings is None:
+        # Fills in any of the five secrets this deployment's environment does
+        # not already carry, from <data>/secrets/ or freshly generated
+        # (ZERO_TOUCH_PLAN.md WP D / secrets_boot.py, 2026-08-17) -- BEFORE
+        # Settings.from_env() reads them. Only reached on the real `run()`
+        # path: every test in this suite (and any caller with its own
+        # provisioning story) passes `settings` explicitly and never touches
+        # a filesystem here, which is what makes this a no-op for every
+        # deployment that already sets all five in its compose env (every
+        # deployment today) -- see secrets_boot.ensure_secrets' docstring.
+        secrets_boot.ensure_secrets()
+        settings = Settings.from_env()
 
     # Before the first thing that can refuse to start. Writes a JSON crash file
     # under /data for every unhandled exception -- the COLLECTOR THREAD above
@@ -232,6 +260,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # with every other schema change in flight.
         session_store.ensure_schema(conn)
         _log_shared_token_migration(conn, settings)
+        # One-time DASH_SITE_* -> site_settings copy (ZERO_TOUCH_PLAN.md WP D,
+        # 2026-08-17): a no-op after the first boot, and a no-op forever on a
+        # deployment with no DASH_SITE_* set at all (see
+        # site_store.seed_from_env_once's docstring for why that gate reads
+        # os.environ rather than `settings`).
+        try:
+            site_store.seed_from_env_once(conn, settings)
+        except Exception:  # noqa: BLE001 - never block boot over the manifest
+            log.exception("site_settings seed-from-env failed")
         conn.close()
         session_store.prune()
         session_store.prune_attempts()
@@ -512,6 +549,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # the companion executing a local download for a claimed job --
             # same fleet-token posture as the selection route above
             or (_ytdl_fleet_re.match(path) is not None and _companion_token_ok(request))
+            # the setup wizard's own API (ZERO_TOUCH_PLAN.md WP D). Open at
+            # THIS layer only -- every route under it re-checks via
+            # setup_routes.require_setup_access, which is the actual gate
+            # (admin session, or the narrow anonymous first-run window).
+            or path.startswith(_SETUP_API_PREFIX)
         ):
             return await call_next(request)
         if auth.get_session_user(request) is None:
@@ -578,6 +620,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse({"detail": "internal error"}, status_code=500)
 
     app.include_router(api.router)
+    # The SetupEngine's API (ZERO_TOUCH_PLAN.md WP D): wizard task state and
+    # the site-manifest admin routes. Its own module, its own router, one
+    # line here -- CLAUDE.md's "new logic in NEW modules" for shared files.
+    app.include_router(setup_routes.router)
     app.include_router(ui.router)
     # Always mounted, never active unless DASH_AUTH_METHOD=oidc: both routes
     # start by re-checking the OIDC settings and answer 503 with the

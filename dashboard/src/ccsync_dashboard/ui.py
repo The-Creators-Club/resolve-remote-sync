@@ -305,7 +305,28 @@ async def page_login_submit(request: Request):
         else:
             if verified:
                 auth.clear_login_failures(request, username)
-                response = RedirectResponse(next_path, status_code=303)
+                landing = next_path
+                # First-run steering (ZERO_TOUCH_PLAN.md WP D, 2026-08-17):
+                # an admin who did not ask for a specific page (no ?next=,
+                # so next_path fell back to "/") lands on /setup instead of
+                # the fleet grid while a required step is still outstanding
+                # -- "the login gate's post-login landing is /setup instead
+                # of the grid." Never for a non-admin (do not trap editors
+                # in a page they cannot act on), and best-effort: a DB that
+                # cannot be read must never block a login.
+                if landing == "/" and auth.is_admin(settings, username):
+                    try:
+                        conn = db.connect(settings.db_path)
+                        try:
+                            from . import setup_engine
+
+                            if setup_engine.outstanding_required(conn):
+                                landing = "/setup"
+                        finally:
+                            conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                response = RedirectResponse(landing, status_code=303)
                 # Mints the cookie AND the revocable server-side session row;
                 # see auth.start_session (cookie flags: Secure per
                 # auth.cookie_secure, HttpOnly, SameSite=Lax).
@@ -1485,4 +1506,44 @@ async def partial_admin_package_delete(
     return _render(request, "partials/admin_packages.html", {
         "packages": build_packages_view(conn, settings),
         "error": error,
+    })
+
+
+# ------------------------------------------------------------- setup wizard
+# ZERO_TOUCH_PLAN.md WP D / §3.5, 2026-08-17. The page is a thin shell --
+# every task's Check/Do it/Skip and the studio form post straight to
+# setup_routes.py's API (static/setup.js) -- so this route's only job is
+# deciding WHO may see it at all.
+
+@router.get("/setup")
+def page_setup(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    settings = request.app.state.settings
+    user = auth.get_session_user(request)
+    if user is not None and not auth.is_admin(settings, user):
+        # "do not trap non-admins" (the work package) -- an editor who
+        # follows a stale /setup link (or types it) goes to their own grid,
+        # not a page every control on which will 403 for them anyway.
+        return RedirectResponse("/", status_code=303)
+    if user is None:
+        from . import setup_routes
+
+        if not setup_routes.first_run_open(request, conn):
+            return RedirectResponse(f"/login?next={quote('/setup', safe='')}", status_code=303)
+    return _render(request, "setup.html", {})
+
+
+# --------------------------------------------------------------- settings
+
+@router.get("/admin/settings")
+def page_admin_settings(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    from . import site_store
+
+    settings = request.app.state.settings
+    manifest = site_store.resolved_manifest(conn, settings)
+    return _render(request, "admin_settings.html", {
+        **_sidebar_context(request, conn, None),
+        "manifest": manifest,
+        "auto_derived": sorted(site_store.AUTO_DERIVED_KEYS),
+        "from_db": set(manifest.get("_from_db", ())),
     })

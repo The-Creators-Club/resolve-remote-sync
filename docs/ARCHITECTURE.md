@@ -274,11 +274,27 @@ Two consumers:
 - **The server scripts** read the file directly (`server/common.py`
   `load_site()` / `site_value()`), search order `--site` → `$CCSYNC_SITE` →
   `<repo>/site.toml`.
-- **The dashboard** never reads the file. `install_dashboard_app.py` projects
-  the non-secret half into `DASH_SITE_*` environment variables, and the
-  container republishes them at **`GET /api/v1/site`** — an *open* route, on
-  the same terms as `/api/v1/health`, because the installer, the onboarding
-  wizard and the companion all read it before anyone has logged in.
+- **The dashboard never reads the file** — and, since `ZERO_TOUCH_PLAN.md` WP D
+  (2026-08-17), the manifest it serves is **DB-first**, not env-first. Every
+  deployment still starts the same way: `install_dashboard_app.py` (or a hand
+  edited compose) projects the non-secret half into `DASH_SITE_*` environment
+  variables. But `GET /api/v1/site` — still *open*, on the same terms as
+  `/api/v1/health`, for the same reason: the installer, the onboarding wizard
+  and the companion all read it before anyone has logged in — now resolves
+  each field through `site_store.resolved_manifest`: **a `site_settings`
+  table row wins if one exists, else the `DASH_SITE_*` value, else the
+  built-in default.** The table starts empty on every existing deployment, so
+  this is invisible until an admin visits **Settings**
+  (`/admin/settings`, `PUT /api/v1/admin/site`) — which is the point: an
+  appliance customer with no shell can now set the manifest from the browser,
+  survives a redeploy (it is `/data`, not compose env), and needs no
+  `--recreate`. A one-time seed copies `DASH_SITE_*` into the table on first
+  boot if the table is empty and the environment carries any of it, after
+  which **the database is authoritative** — a later env change is not picked
+  up automatically. `site.toml` itself is retired as a customer-facing
+  interface by this same plan (§5); it survives only as an **export format**
+  (Settings → Export produces `site.toml`-shaped text a NAS migration can
+  paste back in on the other side).
 
 Nothing secret may ever be added to that response. A Syncthing device ID is a
 public key; every other value is an address the client is about to be handed
@@ -288,6 +304,10 @@ on, while a wrong-tenant default is a support incident nobody can see.
 
 `schema` is a monotonic integer, not the dashboard version: clients across
 three OSes upgrade at their own pace and check the shape they know.
+
+The wizard behind this (`/setup`, task-driven, resumable across restarts) is
+`ZERO_TOUCH_PLAN.md` §3.2/§3.5; the config surface (`site_settings`,
+`secrets_boot.py`'s first-boot secret generation) is `CONFIG.md` §1.1.
 
 Full key reference: [`CONFIG.md`](CONFIG.md).
 

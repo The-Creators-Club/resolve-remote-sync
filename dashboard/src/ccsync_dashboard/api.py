@@ -824,15 +824,21 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
 SITE_SYNCTHING_ID_RETRY_SECONDS = 60.0
 
 
-def _nas_syncthing_id(request: Request) -> str:
+def _nas_syncthing_id(request: Request, conn: sqlite3.Connection) -> str:
     """The NAS's Syncthing device ID, live value preferred.
 
-    DASH_SITE_NAS_SYNCTHING_ID is the fallback, not the source of truth: the
-    dashboard already talks to that Syncthing, so asking it removes the one
-    way this manifest could hand every new editor a device ID that no longer
-    exists (a re-created Syncthing config regenerates it -- see the "stuck
-    lane C = regenerated device ID" incident). Fails soft to the env var, and
-    never blocks the route for longer than one short Syncthing timeout.
+    The site_settings row (if any) is the next fallback, then
+    DASH_SITE_NAS_SYNCTHING_ID -- the dashboard already talks to that
+    Syncthing, so asking it removes the one way this manifest could hand
+    every new editor a device ID that no longer exists (a re-created
+    Syncthing config regenerates it -- see the "stuck lane C = regenerated
+    device ID" incident). Fails soft, and never blocks the route for longer
+    than one short Syncthing timeout.
+
+    Precedence unchanged by WP D (ZERO_TOUCH_PLAN.md, 2026-08-17): the live
+    read still beats everything, including a value an admin or the
+    `syncthing` setup task wrote into the DB -- see site_store.py's own
+    "only fills a BLANK row" rule for how that value gets there.
     """
     settings = request.app.state.settings
     state = request.app.state
@@ -854,11 +860,13 @@ def _nas_syncthing_id(request: Request) -> str:
             if my_id:
                 state.site_nas_syncthing_id = my_id
                 return my_id
-    return settings.site_nas_syncthing_id
+    from . import site_store
+
+    return site_store.get_all(conn).get("nas_syncthing_id") or settings.site_nas_syncthing_id
 
 
 @router.get("/site")
-def api_site(request: Request) -> dict[str, Any]:
+def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     """This site's non-secret facts, for clients that need them BEFORE they
     have any credentials (SYNOLOGY_PORT_PLAN.md WP0 step 3).
 
@@ -876,47 +884,58 @@ def api_site(request: Request) -> dict[str, Any]:
 
     `schema` is a monotonic integer, not the dashboard version: clients across
     three OSes upgrade at their own pace, so they check the shape they know.
+
+    Since ZERO_TOUCH_PLAN.md WP D (2026-08-17): every field below except
+    `nas_syncthing_id` (its own precedence, above) and `video_extensions`
+    (never site data, see provision.py) is resolved through
+    `site_store.resolved_manifest` -- a `site_settings` DB row wins over the
+    `DASH_SITE_*` value, which is what lets the wizard's "Your studio" step
+    and the Settings page publish an answer with no container `--recreate`.
+    A deployment that has never touched Settings (every one running today)
+    has an EMPTY table, so `resolved_manifest` falls through to exactly the
+    `settings.site_*` value this route always served --
+    `tests/test_site.py` pins that response byte-for-byte.
     """
-    from . import provision
+    from . import provision, site_store
 
     settings = request.app.state.settings
+    site = site_store.resolved_manifest(conn, settings)
     return {
         "schema": 1,
-        "org_name": settings.site_org_name,
+        "org_name": site["org_name"],
         # BRAND INDIRECTION (2026-08-17, COMMERCIAL_READINESS.md item 10).
         # `org_short` is the customer's name where only a few characters fit
         # (topbar, tray tooltip); `product_name` is the VENDOR's, which is why
         # it alone has a non-blank default. Every consumer falls back
         # org_short -> org_name -> product_name, so an unbranded install shows
         # the product rather than another tenant's studio.
-        "org_short": settings.site_org_short or settings.site_org_name,
-        "product_name": settings.site_product_name or "CC Sync",
-        "tree_name": settings.site_tree_name,
-        "canonical_prefix": settings.site_canonical_prefix,
-        "remote_root": settings.site_remote_root,
+        "org_short": site["org_short"] or site["org_name"],
+        "product_name": site["product_name"] or "CC Sync",
+        "tree_name": site["tree_name"],
+        "canonical_prefix": site["canonical_prefix"],
+        "remote_root": site["remote_root"],
         # The companion reads this into server_p_unc instead of deriving it
         # from remote_root -- derive_server_unc() only knows /mnt/<pool>/<rest>
         # (WP5 / drive_swap.py).
-        "smb_unc": settings.site_smb_unc,
-        "sftp_host": settings.site_sftp_host,
-        "sftp_port": settings.site_sftp_port,
+        "smb_unc": site["smb_unc"],
+        "sftp_host": site["sftp_host"],
+        "sftp_port": site["sftp_port"],
         # See settings.site_sftp_chunk_size: the NAS's sshd decides the safe
         # rclone chunk size, so the server states it (2026-08-17).
-        "sftp_chunk_size": settings.site_sftp_chunk_size,
-        "sftp_concurrency": settings.site_sftp_concurrency,
-        "sftp_shell_type": settings.site_sftp_shell_type,
-        "rclone_remote": settings.site_rclone_remote,
-        "nas_syncthing_id": _nas_syncthing_id(request),
-        "dashboard_url": settings.site_dashboard_url,
-        # Shipped from provision.py so the tree an installer expects and the
-        # tree /project-setup creates cannot drift apart. server/common.py
-        # holds the same two lists and server/tests/test_cross_component.py
-        # pins them byte-identical.
-        "template_folders": list(provision.TEMPLATE_FOLDERS),
-        "shared_asset_folders": [
-            {"id": folder_id, "rel": rel, "label": label}
-            for folder_id, rel, label in provision.SHARED_ASSET_FOLDERS
-        ],
+        "sftp_chunk_size": site["sftp_chunk_size"],
+        "sftp_concurrency": site["sftp_concurrency"],
+        "sftp_shell_type": site["sftp_shell_type"],
+        "rclone_remote": site["rclone_remote"],
+        "nas_syncthing_id": _nas_syncthing_id(request, conn),
+        "dashboard_url": site["dashboard_url"],
+        # Shipped from provision.py (env-derived) UNLESS a site_settings row
+        # overrides it (site_store.resolved_manifest); either way the tree an
+        # installer expects and the tree /project-setup creates cannot drift
+        # apart. server/common.py holds the same two lists and
+        # server/tests/test_cross_component.py pins them byte-identical for
+        # the env-only shape.
+        "template_folders": site["template_folders"],
+        "shared_asset_folders": site["shared_asset_folders"],
         # READ-ONLY, and deliberately not configurable: which extensions are
         # "video" decides what travels by rclone (lanes A/B) instead of
         # Syncthing (lane C), so the three copies of this list must stay
@@ -925,20 +944,20 @@ def api_site(request: Request) -> dict[str, Any]:
         # canonical copy; publishing it lets a future client read it instead
         # of growing a fourth (2026-08-17, COMMERCIAL_READINESS.md item 11).
         "video_extensions": list(provision.VIDEO_EXTENSIONS),
-        "nas_kind": settings.nas_kind,
+        "nas_kind": site["nas_kind"],
         # Optional features this site has turned on. Additive to schema 1 on
         # purpose (companion/site.py reads unknown-to-it keys as absent), and
         # BOTH DEFAULT FALSE: a client that cannot read this key, or reaches a
         # dashboard too old to send it, must behave as if the feature is off
         # rather than as if it is on (COMMERCIAL_READINESS.md items 2 + 3).
         "features": {
-            "youtube_download": settings.site_feature_youtube_download,
+            "youtube_download": site["features"]["youtube_download"],
             # Never true on its own -- the unblock components only exist to
             # serve the downloader, and a site that answered
             # {download: false, unblock: true} would be telling companions to
             # install a JS challenge solver for a feature they cannot use.
-            "youtube_unblock": bool(settings.site_feature_youtube_download
-                                    and settings.site_feature_youtube_unblock),
+            "youtube_unblock": bool(site["features"]["youtube_download"]
+                                    and site["features"]["youtube_unblock"]),
         },
     }
 

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC: SETUP{% endblock %}
+{% block layout %}
+  <main class="main" id="setup-main" style="max-width:56rem">
+    <div class="side-head">[ SETUP ]
+      <span class="muted">First-run wizard -- every step here can be re-run later from Settings.</span>
+    </div>
+
+    <div id="setup-error" class="banner" style="display:none"></div>
+
+    {# ---------------------------------------------------------- EULA #}
+    <section class="card" style="margin-top:1rem">
+      <div class="side-head">[ 1. WELCOME, EULA ]</div>
+      <div id="setup-eula-text" class="mono-sm" style="max-height:14rem; overflow:auto; white-space:pre-wrap; margin:0.6rem 0"></div>
+      <label><input type="checkbox" id="setup-eula-checkbox"> I have read and accept this agreement.</label>
+      <button class="btn" id="setup-eula-accept" type="button" disabled>[ ACCEPT ]</button>
+      <span id="setup-eula-status" class="muted"></span>
+    </section>
+
+    {# ------------------------------------------------------ admin account #}
+    <section class="card" style="margin-top:1rem">
+      <div class="side-head">[ 2. CREATE YOUR ADMIN ACCOUNT ]</div>
+      <div id="setup-admin-body">
+        {# Filled by setup.js: either a username/password form posting to
+           POST /api/v1/setup/admin (agent C's route -- ZERO_TOUCH_PLAN.md
+           WP C), or "not available in this build" when a GET
+           /api/v1/setup/status probe 404s, i.e. that module is absent. #}
+        <span class="muted">checking...</span>
+      </div>
+    </section>
+
+    {# ------------------------------------------------------------ studio #}
+    <section class="card" style="margin-top:1rem">
+      <div class="side-head">[ 3. YOUR STUDIO ]</div>
+      <form id="setup-studio-form">
+        <label>ORG NAME<br><input type="text" name="org_name" placeholder="Your Studio"></label>
+        <label>SHORT NAME<br><input type="text" name="org_short" placeholder="optional -- falls back to org name"></label>
+        <label>TREE NAME<br><input type="text" name="tree_name" placeholder="e.g. Your_Studio"></label>
+        <label>DRIVE LETTER<br><input type="text" name="canonical_prefix" placeholder="P:\"></label>
+        <label>TEMPLATE FOLDERS (comma-separated)<br>
+          <input type="text" name="template_folders" placeholder="AE, Audio/Music, B-roll, ..."></label>
+        <button class="btn" type="submit">[ SAVE ]</button>
+        <span id="setup-studio-status" class="muted"></span>
+      </form>
+    </section>
+
+    {# ------------------------------------------------------- the checklist #}
+    <section style="margin-top:1rem">
+      <div class="side-head">[ CHECKLIST ]
+        <span class="muted">Every step is re-runnable; optional ones may be skipped.</span></div>
+      <table class="editors" id="setup-tasks-table">
+        <thead><tr><th>STEP</th><th>STATUS</th><th>DETAIL</th><th></th></tr></thead>
+        <tbody id="setup-tasks-body">
+          <tr><td colspan="4" class="muted">loading...</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+  <script src="/static/setup.js" defer></script>
+{% endblock %}

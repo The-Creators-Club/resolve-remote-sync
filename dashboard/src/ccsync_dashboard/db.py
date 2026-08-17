@@ -294,6 +294,39 @@ ALTER TABLE machine_state ADD COLUMN skipped_exists INTEGER;
 ALTER TABLE machine_state ADD COLUMN guard_at TEXT;
 """
 
+# v18: the site manifest as DATA, and the SetupEngine's task state
+# (ZERO_TOUCH_PLAN.md WP D, 2026-08-17). Owned by this work package only --
+# v17 and v19 are other agents' migrations, added in their own worktrees; do
+# not renumber this one to close the gap.
+#
+# site_settings is a plain key/value table (see site_store.py for the key
+# list, validation and the DB-over-env precedence rule): GET /api/v1/site
+# prefers a row here over the DASH_SITE_* environment variable it used to
+# publish unconditionally, which is what lets the wizard's "Your studio"
+# step (§3.5) and the Settings page write the manifest instead of requiring
+# a container --recreate.
+#
+# setup_tasks is the wizard's own state: one row per SetupEngine task
+# (`setup_engine.py`), so "which steps are done" survives a container
+# restart mid-wizard exactly like a migration step does (see migrate()'s own
+# resumability, above) -- a customer who closes the tab halfway through is
+# not sent back to "Welcome".
+SCHEMA_V18 = """
+CREATE TABLE IF NOT EXISTS site_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS setup_tasks (
+  id         TEXT PRIMARY KEY,
+  status     TEXT NOT NULL DEFAULT 'todo',
+  detail     TEXT NOT NULL DEFAULT '',
+  at         TEXT,
+  skipped    INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 # v14: the signed upgrade channel (COMMERCIAL_READINESS.md item 4,
 # 2026-08-17). Every published package now carries an offline Ed25519
 # signature over its whole record; the dashboard stores it and serves it
@@ -512,6 +545,12 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (15, SCHEMA_V15),
     (16, SCHEMA_V16),
     (17, SCHEMA_V17),
+    # 17 is another agent's migration (ZERO_TOUCH_PLAN.md WP C), landing in
+    # its own worktree -- this step list will gain that entry on merge. This
+    # worktree owns 18 only (see SCHEMA_V18's docstring); a DB that has not
+    # seen 17 yet simply runs 16 -> 18 directly, which migrate()'s per-step
+    # commit already tolerates (each target_version is independent DDL).
+    (18, SCHEMA_V18),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]

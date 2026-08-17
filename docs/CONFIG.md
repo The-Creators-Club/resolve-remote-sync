@@ -105,6 +105,66 @@ it stops and names it; that is the enforcement.
 | `editor_shell` | `sftp-only` | `sftp-only` (nologin + an sshd `Match Group` block with `ForceCommand internal-sftp` and no password auth) or `shell`. Changing it changes what the manifest publishes as `sftp_shell_type`; redeploy afterwards. Migration: `setup_editor_account.py --migrate-existing [--apply]` |
 | `project_acl` | `shared` | `shared` = one `editors` group, 2770 everywhere: **every editor can read, write and delete every other editor's project**. `per-project` adds a `proj-<slug>` group per project plus sticky bits. Read [`TENANCY.md`](TENANCY.md) first — it changes an existing tree. **This is not the multi-org switch** |
 
+### 1.1 Appliance mode (`ZERO_TOUCH_PLAN.md` WP D, 2026-08-17): the manifest moves into the database
+
+For a customer with no `site.toml` and no shell — the appliance bar §1 of
+that plan is judged against — two things in this section stop being true.
+
+**The site manifest is DB-first.** `GET /api/v1/site` used to republish
+`DASH_SITE_*` verbatim; it now reads a `site_settings` table (`db.py`
+migration v18) via `dashboard/src/ccsync_dashboard/site_store.py`, and per
+key the precedence is **the DB row if one exists, else the `DASH_SITE_*`
+value, else the built-in default**. The table starts empty, so this is
+invisible to every deployment that already sets `DASH_SITE_*` in its compose
+env (`tests/test_site.py` pins the response of an env-only app
+byte-for-byte). On first boot, if the table is empty AND the process
+environment carries any `DASH_SITE_*` variable, those values are copied into
+the table once (`site_store.seed_from_env_once`, called from `app.py`'s
+lifespan) — **after that the database is authoritative**: a later change to
+the container's `DASH_SITE_*` env is not picked up automatically, on purpose
+(the same "wrong-tenant support incident" this route already warns about,
+just moved from "another site's value" to "a stale value from six deploys
+ago"). Edit the manifest from **Settings** (`/admin/settings`,
+admin-only) instead, which calls `PUT /api/v1/admin/site` — no `--recreate`
+needed. **Settings → Export** produces `site.toml`-shaped text (same section
+names as `site.example.toml`) for a NAS migration or a backup; **Import**
+parses a pasted one back in. Which fields are auto-derived once WP B
+(Tailscale sidecar) and WP C (SFTP sidecar) land — `dashboard_url`,
+`sftp_host`, `nas_syncthing_id` — is `site_store.AUTO_DERIVED_KEYS`; the
+Settings page greys those out only when a live value is actually available,
+so a deployment without B/C never loses the ability to set them by hand.
+
+**Secrets are generated, not required.** `DASH_SESSION_SECRET`,
+`DASH_REPORT_TOKEN`, `BROLL_INGEST_TOKEN`, `SYNCTHING_API_KEY` and
+`CCSYNC_INTERNAL_TOKEN` are still read from the environment first (§2.1
+below is unchanged and still the right table for a hand-run deployment), but
+`dashboard/src/ccsync_dashboard/secrets_boot.py`'s `ensure_secrets()` now
+runs before `Settings.from_env()` on the real `run()` path: any of the five
+NOT already in the environment is loaded from
+`<DASH_DB_PATH's parent>/secrets/<lowercase name>`, or generated with
+`secrets.token_urlsafe(32)` and persisted there 0600 if no file exists
+either. **Env always wins over the file** — rotating a secret by setting the
+env var stays possible. It also writes `secrets/syncthing.env`
+(`STGUIAPIKEY=…`) and `secrets/sftp.env` (`CCSYNC_INTERNAL_TOKEN=…`,
+`APP_UID=…`, `APP_GID=…`) as `env_file:` targets for the `syncthing` and
+`sftp` sidecar services in agent A's compose (`ZERO_TOUCH_PLAN.md` §3.1) —
+neither of those images reads `DASH_*` variables or generates its own
+secret. This is a **no-op** for every deployment running today: it only
+runs when `create_app` is called with no explicit `Settings` (every test in
+this suite, and any hand-built deployment, passes one), and even then, a
+container whose compose already sets all five leaves every one of them
+untouched.
+
+**The wizard.** `dashboard/src/ccsync_dashboard/setup_engine.py` is a task
+registry (`GET /api/v1/setup/tasks`, `POST …/tasks/<id>/run|check|skip`,
+`GET`/`POST /api/v1/setup/eula`) behind `/setup`, persisted in `setup_tasks`
+(same migration). It is reachable with no session **only** in the narrow
+window before any local admin account exists (reported by the identity
+module `ZERO_TOUCH_PLAN.md` WP C adds — until it lands, every `/setup`
+route is admin-only, fail-closed) — see `setup_routes.py`'s module
+docstring. `docs/ZERO_TOUCH_PLAN.md` §3.2/§3.5 is the design; this
+subsection is the config surface it added.
+
 ---
 
 ## 2. Dashboard environment

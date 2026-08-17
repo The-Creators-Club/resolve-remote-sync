@@ -27,6 +27,15 @@
   {# Grid of every project x every known editor (2026-08-17) -- writes
      nothing of its own, see assignments.py's docstring. #}
   <a class="btn nav-link" href="/admin/assignments">[ ASSIGNMENTS ]</a>
+  {# ZERO_TOUCH_PLAN.md WP D, 2026-08-17: always in the admin nav, not just
+     while something is outstanding -- "after all non-optional tasks are ok,
+     /setup stays reachable ... as 'Setup'" (the work package). Adding a
+     live outstanding-count badge here would cost a setup_tasks read on
+     EVERY page render for every admin; page_login_submit already redirects
+     an admin here automatically while something is unfinished, which is
+     the moment that actually matters. #}
+  <a class="btn nav-link" href="/setup">[ SETUP ]</a>
+  <a class="btn nav-link" href="/admin/settings">[ SETTINGS ]</a>
 {% endif %}
 {% if broll_mounted %}
   <span class="dim">//</span>

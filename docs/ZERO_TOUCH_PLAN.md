@@ -321,6 +321,25 @@ through the node. Those three, plus the LocalAPI login/Serve client code
 itself, are WP B's first-day work — it has to land before C, D, or any of
 this reaches a real customer.
 
+**WP D status (2026-08-17):** the standalone core landed — task framework
+(`setup_engine.py`), `site_settings` (`db.py` migration v18) with the
+DB-row-wins/`DASH_SITE_*`-fallback precedence and a one-time env seed
+(`site_store.py`), the `/setup` page and Settings UI (Export/Import
+included), first-boot secrets generation (`secrets_boot.py`), and the six
+tasks this repo can implement without A/B/C: `eula`, `admin`\*, `studio`,
+`storage`, `secrets`, `syncthing`. **Still outstanding, exactly where the
+table says they depend on A/B/C:** `nas_connect`'s TrueNAS/DSM calls,
+snapshot scheduling, and the root-in-container tree-ownership helper (all
+registered as `optional=True` placeholders reporting "not implemented in
+this build" so the wizard's page shape is already complete). \*`admin` only
+*checks* for a local account today — account CREATION is WP C's identity
+module and its `POST /setup/admin` route; until that module exists,
+`setup_engine.probe_admin_status` returns `None` and every `/setup` /
+`/api/v1/setup/*` route requires an admin session (fail-closed), so the
+anonymous first-run window §3.5 describes does not open yet. Docs:
+`CONFIG.md` §1.1, `ARCHITECTURE.md` §6, `docs/API.md` §5 ("Site settings" /
+"Setup wizard").
+
 Critical path: **A → B → C → D**, ~7 weeks to a stack a stranger can install
 from a compose paste; E and F in parallel from week 2. Everything in
 `server/` except `common.py`'s pure helpers becomes vendor/dev tooling or is

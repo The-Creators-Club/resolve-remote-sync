@@ -1548,9 +1548,29 @@ class DownloadJob:
         finally:
             with self._lock:
                 self._proc = None
+        cookies_used = bool(_cookies_file(self.deps.cfg))
         if getattr(proc, "returncode", 1) == 0:
+            # A cookied download that worked is proof the session is alive;
+            # clear a stale mark so the tray warning goes away by itself once
+            # things are fine again (2026-08-17).
+            if cookies_used and self._cookie_health_stale:
+                self._cookie_health_stale = False
+                ytdl_cookies.mark_ok("a download succeeded with the signed-in session")
             return True, ""
-        return False, str(getattr(proc, "stderr", "") or "")
+        stderr = str(getattr(proc, "stderr", "") or "")
+        # The one thing worth reading out of a failure BEYOND the clip row:
+        # yt-dlp telling us the editor's YouTube session is dead (rotated or
+        # signed out). Recorded once, not per clip; the tray warns from the
+        # record until they sign in again (ytdl_cookies.health).
+        sig = ytdl_cookies.classify_failure(stderr, cookies_used)
+        if sig and not self._cookie_health_stale:
+            self._cookie_health_stale = True
+            ytdl_cookies.mark_stale(f"yt-dlp: {sig}")
+        return False, stderr
+
+    # Per-executor memo so a batch of 40 age-gated clips writes the status
+    # file once, not 40 times. Not authoritative -- the file is.
+    _cookie_health_stale = False
 
     def build_argv(self, url: Any, outdir: str, quality: str) -> list:
         """The yt-dlp command line. The NAMING half of it is the contract.

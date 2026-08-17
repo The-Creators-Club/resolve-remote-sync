@@ -37,6 +37,7 @@ from . import resolve_bridge
 from . import site as site_mod
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
+from . import ytdl_cookies
 from . import ytdlp_manager
 from .sync.base import STATE_ERROR, STATE_PAUSED, STATE_SYNCING, LaneStatus
 
@@ -837,6 +838,47 @@ def _on_sign_out(app: "CompanionApp") -> None:
         log.exception("sign_out() failed")
 
 
+def _youtube_sign_in(app: "CompanionApp", runner: Optional[Any] = None,
+                     finder: Optional[Any] = None) -> None:
+    """One click: a private browser window on Google's sign-in, and the
+    cookies file written for the editor when it completes.
+
+    2026-08-17: replaces "go export a cookies.txt and pick it" as the
+    primary path (why OAuth cannot do this, and why a fresh private profile
+    is the right shape, is ytdl_browser_login's docstring). The file picker
+    is still reachable -- as the fallback when no Chromium browser exists on
+    this machine, and under Advanced for the editor who manages their own
+    export. `runner`/`finder` are the test seams; the browser flow blocks
+    this tray worker thread for as long as the sign-in takes, which is fine:
+    _spawn gives every action its own thread and the tray keeps ticking."""
+    from . import ytdl_browser_login
+
+    find = finder or ytdl_browser_login.find_browser
+    try:
+        browser = find()
+    except Exception:  # noqa: BLE001
+        log.exception("ytdl sign-in: browser discovery failed")
+        browser = None
+    if browser is None:
+        _notify(app, "No Edge/Chrome found for the one-click sign-in — choose an exported "
+                     "cookies.txt instead")
+        _install_youtube_cookies(app)
+        return
+    _notify(app, f"{browser.name} is opening — sign in to YouTube in that window; "
+                 "it closes by itself when you're done")
+    run = runner or ytdl_browser_login.run
+    try:
+        outcome = run(browser=browser)
+    except Exception:  # noqa: BLE001 -- run() never raises, but the seam might
+        log.exception("ytdl sign-in: browser flow crashed")
+        _notify(app, "The sign-in window failed unexpectedly — see the log, or use "
+                     "Advanced → YouTube: use an exported cookies.txt…")
+        return
+    if outcome.ok:
+        log.info("ytdl sign-in: %d cookies written", outcome.cookies_written)
+    _notify(app, outcome.message)
+
+
 def _install_youtube_cookies(app: "CompanionApp", picker: Optional[Any] = None) -> None:
     """Ask for a cookies.txt and install it for the local YouTube downloader.
 
@@ -879,6 +921,35 @@ def _install_youtube_cookies(app: "CompanionApp", picker: Optional[Any] = None) 
         return  # cancelled
     ok, message = ytdl_cookies.install(chosen)
     _notify(app, message)
+
+
+def _youtube_warning_line(snap: dict) -> str:
+    """The disabled menu line for a dead YouTube session. One string so the
+    balloon and the menu never disagree."""
+    h = snap.get("ytdl_cookies_health") or {}
+    if h.get("status") == ytdl_cookies.STATUS_EXPIRED:
+        return "⚠ YouTube sign-in has expired — age-restricted clips will fall back to the server"
+    return "⚠ YouTube sign-in no longer works (Google rotated the session) — sign in again"
+
+
+def _maybe_warn_youtube_session(app: "CompanionApp", snap: dict) -> None:
+    """Balloon ONCE per transition into stale/expired; the menu line carries
+    it after that. Remembered on the app object, not on disk: a restart may
+    warn again, and that is fine -- the state is still true."""
+    status = (snap.get("ytdl_cookies_health") or {}).get("status")
+    bad = status in (ytdl_cookies.STATUS_STALE, ytdl_cookies.STATUS_EXPIRED)
+    last = getattr(app, "_yt_session_warned", None)
+    if bad and last != status:
+        try:
+            setattr(app, "_yt_session_warned", status)
+        except Exception:  # noqa: BLE001 -- a fake app without __dict__
+            pass
+        _notify(app, _youtube_warning_line(snap) + " (tray menu → Sign in to YouTube again…)")
+    elif not bad and last is not None:
+        try:
+            setattr(app, "_yt_session_warned", None)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _ytdl_attested(app: "CompanionApp") -> bool:
@@ -1692,6 +1763,16 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # editor -- one small file read, the same cost as every other line here.
     _get("ytdl_attested",
          lambda: _ytdl_attested(app), False)
+    # Is the editor's YouTube sign-in still working? Two small file reads
+    # (ytdl_cookies.health): the status the executor recorded from yt-dlp's
+    # own verdict, and the login cookies' expiry. "stale"/"expired" puts a
+    # warning line in the menu, relabels the sign-in item and balloons ONCE
+    # (2026-08-17, at the user's request: a rotated session used to fail
+    # silently into the server fallback).
+    _get("ytdl_cookies_health",
+         lambda: (ytdl_cookies.health(getattr(app, "config", {}))
+                  if snap.get("ytdl_youtube_signin") else {"status": "none"}),
+         {"status": "none"})
     _get("sequencer_line", lambda: _sequencer_line(app), None)
     _get("current_project_line", lambda: _current_project_line(app), None)
     # Cheap by construction: resolve_bridge records this on the way out of
@@ -1837,6 +1918,7 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # tick -- either can change without anything else in this tuple
         # moving (2026-08-17).
         snap.get("ytdl_youtube_signin"), snap.get("ytdl_attested"),
+        (snap.get("ytdl_cookies_health") or {}).get("status"),
         snap["color"],
         tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
         snap.get("p_swap_available"), snap.get("p_mode"),
@@ -2159,7 +2241,10 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         _spawn(app, "Sign in", lambda: _show_sign_in_dialog(app))
 
     def on_youtube_sign_in(icon, item):
-        _spawn(app, "Sign in to YouTube", lambda: _install_youtube_cookies(app))
+        _spawn(app, "Sign in to YouTube", lambda: _youtube_sign_in(app))
+
+    def on_youtube_cookies_file(icon, item):
+        _spawn(app, "YouTube cookies file", lambda: _install_youtube_cookies(app))
 
     def on_youtube_terms(icon, item):
         _spawn(app, "YouTube download terms",
@@ -2201,12 +2286,18 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     # the same kind of thing -- something the person, not the software, has to
     # do before a download runs here -- and the label carries a tick once it is
     # done so an editor can see the state without opening it.
+    yt_health = (snap.get("ytdl_cookies_health") or {}).get("status")
+    yt_bad = yt_health in (ytdl_cookies.STATUS_STALE, ytdl_cookies.STATUS_EXPIRED)
     youtube_items = (
         ([tray_backend.MenuItem(
             ("YouTube download terms ✓" if snap.get("ytdl_attested")
              else "YouTube download terms…"), on_youtube_terms)]
          if snap.get("ytdl_local_downloads") else [])
-        + ([tray_backend.MenuItem("Sign in to YouTube (for downloads)…", on_youtube_sign_in)]
+        + ([tray_backend.MenuItem(_youtube_warning_line(snap), None, enabled=False)]
+           if snap.get("ytdl_youtube_signin") and yt_bad else [])
+        + ([tray_backend.MenuItem(
+            ("Sign in to YouTube again (session expired)…" if yt_bad
+             else "Sign in to YouTube (for downloads)…"), on_youtube_sign_in)]
            if snap.get("ytdl_youtube_signin") else [])
     )
     # Present only while the open Resolve project has no server-side root
@@ -2413,6 +2504,12 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
             tray_backend.MenuItem(
                 "Undo the last clip-path change CCSync made…", on_undo_last_relink,
             ),
+            # The manual half of "Sign in to YouTube": an editor who keeps
+            # their own cookies.txt export can still install it by hand
+            # (2026-08-17). Same gate as the top-level item.
+            *([tray_backend.MenuItem("YouTube: use an exported cookies.txt…",
+                                     on_youtube_cookies_file)]
+              if snap.get("ytdl_youtube_signin") else []),
             *proxy_actions,
             *halt_stop_items,
             *([tray_backend.Menu.SEPARATOR] if snap.get("removable") else []),
@@ -2502,6 +2599,7 @@ def start_tray(
                     # Opened while we were gathering -- drop this tick.
                     time.sleep(0.25)
                     continue
+                _maybe_warn_youtube_session(app, snap)
                 pulsing = bool(snap.get("pulse"))
                 pulse_state = (snap["color"], pulsing)
                 if pulsing:

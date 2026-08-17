@@ -30,8 +30,10 @@ files and pass stale ones. It checks SHAPE, not liveness.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -156,13 +158,25 @@ def install(src_path: Any, dest: Optional[Path] = None) -> tuple[bool, str]:
     menu, and neither should end with a Google session on disk."""
     if not enabled():
         return False, OFF_MESSAGE
-    target = dest if dest is not None else default_cookies_path()
     try:
         with open(str(src_path), "r", encoding="utf-8", errors="replace") as fh:
             text = fh.read()
     except OSError as exc:
         return False, f"couldn't read that file ({exc})"
+    return install_text(text, dest)
 
+
+def install_text(text: Any, dest: Optional[Path] = None) -> tuple[bool, str]:
+    """Validate cookies.txt CONTENT and write it to the default path 0600.
+
+    The half of install() that does not involve a source file, split out on
+    2026-08-17 so the browser sign-in (ytdl_browser_login.py) -- which has
+    the cookies in memory, straight from the browser -- lands on exactly the
+    same validate + harden + tmp-then-replace path as a picked file. Same
+    (ok, message) contract, same site gate, never raises."""
+    if not enabled():
+        return False, OFF_MESSAGE
+    target = dest if dest is not None else default_cookies_path()
     ok, message = validate(text)
     if not ok:
         return False, message
@@ -188,4 +202,133 @@ def install(src_path: Any, dest: Optional[Path] = None) -> tuple[bool, str]:
     except OSError as exc:
         return False, f"couldn't save the cookies ({exc})"
     log.info("ytdl cookies: installed a signed-in session at %s", target)
+    mark_ok("fresh sign-in")
     return True, "YouTube sign-in saved — your downloads can now reach age-restricted clips"
+
+
+# ---------------------------------------------------------------- health
+# Cookies stop working in two ways and neither is announced: Google ROTATES
+# the session (the file is intact, the values are dead -- yt-dlp says "cookies
+# are no longer valid ... likely been rotated"), or the session cookies simply
+# EXPIRE. Either way the next age-gated clip quietly falls back to the server
+# and the editor never learns their sign-in is gone. So (2026-08-17, at the
+# user's request) the executor reports what yt-dlp told it, and the tray warns
+# from that record until the editor signs in again.
+STATUS_FILENAME = "ytdl-cookies-status.json"
+STATUS_OK = "ok"
+STATUS_STALE = "stale"          # yt-dlp refused the session on a real download
+STATUS_EXPIRED = "expired"      # the login cookies in the file are past their expiry
+STATUS_NONE = "none"            # no cookies file at all
+
+# yt-dlp stderr fragments that mean "the session you gave me does not work",
+# as opposed to a network blip or a private video. Lower-cased substring
+# matches; each is a phrase yt-dlp has used verbatim. Matched ONLY when a
+# cookies file was actually passed -- without one, "not a bot" is the plain
+# anonymous bot-check and says nothing about the editor's sign-in.
+STALE_SIGNATURES = (
+    "cookies are no longer valid",           # "The provided YouTube account cookies are no longer valid. They have likely been rotated..."
+    "sign in to confirm you're not a bot",   # bot check hit even though we sent a session
+    "sign in to confirm your age",           # age gate not lifted -> the session is not a signed-in one any more
+    "this video may be inappropriate for some users",
+    "please sign in to view this video",
+    "login required",
+)
+
+
+def status_path() -> Path:
+    return Path.home() / ".ccsync" / "state" / STATUS_FILENAME
+
+
+def _write_status(status: str, reason: str, path: Optional[Path] = None) -> None:
+    target = path or status_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".new")
+        tmp.write_text(json.dumps({"status": status, "reason": reason,
+                                   "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
+                       encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        log.debug("ytdl cookies: could not write status", exc_info=True)
+
+
+def mark_stale(reason: str, path: Optional[Path] = None) -> None:
+    """A real download with the editor's cookies was refused for a reason
+    that means the session is dead. Idempotent; never raises."""
+    log.warning("ytdl cookies: the signed-in session no longer works (%s)", reason)
+    _write_status(STATUS_STALE, str(reason or "")[:300], path)
+
+
+def mark_ok(reason: str = "", path: Optional[Path] = None) -> None:
+    """A cookied download succeeded, or a fresh sign-in was installed."""
+    _write_status(STATUS_OK, reason, path)
+
+
+def classify_failure(stderr: Any, cookies_used: bool) -> Optional[str]:
+    """The stale-signature that matched, or None. `cookies_used` False -> None
+    always (see STALE_SIGNATURES)."""
+    if not cookies_used:
+        return None
+    low = str(stderr or "").lower()
+    for sig in STALE_SIGNATURES:
+        if sig in low:
+            return sig
+    return None
+
+
+def _session_expiry(text: str) -> Optional[int]:
+    """The LATEST expiry among the login cookies in a Netscape file, or None
+    when there are none / all are session cookies (expiry 0)."""
+    latest = None
+    for line in str(text or "").splitlines():
+        if not line or "\t" not in line:
+            continue
+        fields = line.split("\t")
+        if len(fields) < 7:
+            continue
+        domain, expiry, name = fields[0], fields[4], fields[5]
+        if "youtube.com" not in domain or name not in _SESSION_COOKIE_NAMES:
+            continue
+        try:
+            exp = int(float(expiry))
+        except ValueError:
+            continue
+        if exp > 0 and (latest is None or exp > latest):
+            latest = exp
+    return latest
+
+
+def health(cfg: Optional[dict[str, Any]] = None, path: Optional[Path] = None,
+           now: Optional[float] = None) -> dict[str, Any]:
+    """{status, reason, at} for the tray. Never raises; cheap (two small
+    reads). Order of precedence: no file -> none; a recorded STALE (yt-dlp's
+    verdict beats anything we can infer); expired login cookies -> expired;
+    else ok."""
+    out = {"status": STATUS_NONE, "reason": "", "at": ""}
+    try:
+        cookies_file = resolve(cfg) if enabled() else None
+        if not cookies_file:
+            return out
+        target = path or status_path()
+        rec: dict[str, Any] = {}
+        if target.is_file():
+            try:
+                rec = json.loads(target.read_text(encoding="utf-8")) or {}
+            except (OSError, ValueError):
+                rec = {}
+        if rec.get("status") == STATUS_STALE:
+            return {"status": STATUS_STALE, "reason": str(rec.get("reason") or ""),
+                    "at": str(rec.get("at") or "")}
+        try:
+            text = Path(cookies_file).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return out
+        exp = _session_expiry(text)
+        if exp is not None and exp < (now if now is not None else time.time()):
+            return {"status": STATUS_EXPIRED, "reason": "the login cookies in the file have expired",
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp))}
+        return {"status": STATUS_OK, "reason": str(rec.get("reason") or ""),
+                "at": str(rec.get("at") or "")}
+    except Exception:  # noqa: BLE001 -- a tray line must never take the tray down
+        log.debug("ytdl cookies: health unreadable", exc_info=True)
+        return out

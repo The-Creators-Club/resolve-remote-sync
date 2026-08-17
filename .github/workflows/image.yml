@@ -63,6 +63,18 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+  # TEMPORARY, for the PR that first introduces this workflow only: GitHub
+  # will not let `workflow_dispatch`/the API target a branch until the
+  # workflow file has been registered by existing on the default branch at
+  # least once, so `pull_request` is the only way to prove this file builds
+  # BEFORE it merges. Removed in the same PR once the run is green -- see
+  # that PR's description.
+  pull_request:
+    paths:
+      - "dashboard/deploy/Dockerfile"
+      - "dashboard/deploy/sftp/**"
+      - "dashboard/deploy/requirements.lock"
+      - ".github/workflows/image.yml"
 
 concurrency:
   group: image-${{ github.ref }}

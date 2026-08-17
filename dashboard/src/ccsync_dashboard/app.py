@@ -19,7 +19,8 @@ from starlette.requests import ClientDisconnect
 
 from . import (
     api, assignments, auth, broll, crash_report, db, internal_sftp, local_users, music,
-    oidc, secrets_boot, sessions, setup_api, setup_routes, site_store, ui, ytdl,
+    oidc, release_feed, secrets_boot, sessions, setup_api, setup_routes, site_store,
+    ui, ytdl,
 )
 from .collector import Collector
 from .settings import Settings
@@ -303,11 +304,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         collector = Collector(settings)
         collector.start()
         app.state.collector = collector
+        # The vendor release feed's poller (ZERO_TOUCH_PLAN.md WP E,
+        # 2026-08-17): gated on release_feed_url being set, so an
+        # unconfigured feed adds no thread, no DNS lookup, no log line --
+        # release_feed.py's own module docstring is the design writeup.
+        feed_poller = None
+        if settings.release_feed_url:
+            feed_poller = release_feed.FeedPoller(settings, app.state)
+            feed_poller.start()
+        app.state.feed_poller = feed_poller
         try:
             yield
         finally:
             if collector is not None:
                 collector.stop()
+            if feed_poller is not None:
+                feed_poller.stop()
 
     # No interactive docs, matching both mounts (broll.BLOCKED_PATHS /
     # music.BLOCKED_PATHS 404 theirs). FastAPI's defaults published the whole
@@ -655,6 +667,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # the site-manifest admin routes. Its own module, its own router, one
     # line here -- CLAUDE.md's "new logic in NEW modules" for shared files.
     app.include_router(setup_routes.router)
+    app.include_router(release_feed.router)
     app.include_router(ui.router)
     # The admin project<->editor assignment matrix (2026-08-17): one page,
     # /admin/assignments, that writes nothing itself -- it calls the selection

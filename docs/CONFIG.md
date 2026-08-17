@@ -223,6 +223,16 @@ The full annotated table, including the Synology-only rows, is in
 | `DASH_DEV_INSECURE` | `""` | **Lab/test only, and the only escape hatch there is.** Bypasses the boot secret floor, the server-side session rule and CSRF. Logged loudly at every boot; it must never be set on a deployment |
 | `DASH_REPORT_TOKEN_OPTIONAL` | `""` | **No longer a shipped code path.** Ignored, with an error line, unless `DASH_DEV_INSECURE=1` is also set |
 
+### 2.3a Release feed (`ZERO_TOUCH_PLAN.md` WP E, 2026-08-17)
+
+Full writeup: [`RELEASE_FEED.md`](RELEASE_FEED.md).
+
+| Var | Default | Notes |
+|---|---|---|
+| `DASH_RELEASE_FEED_URL` | `""` | absolute `https://` URL of `channel.json`. **Empty = the feed is entirely off** — no background thread, no network call, no admin-page section beyond "how to configure it" |
+| `DASH_RELEASE_FEED_POLICY` | `manual` | `manual` \| `stage` \| `current`. An unrecognised value falls back to `manual`, never upward. Editable at runtime (`POST /api/v1/admin/feed/policy`), which overrides this default until cleared |
+| `DASH_RELEASE_FEED_INTERVAL` | `86400` | seconds between background checks (floored at 60s) |
+
 ### 2.4 NAS backend
 
 | Var | Default | Notes |

@@ -416,6 +416,15 @@ That is deliberate: a dashboard that would accept an unsigned build is one
 compromise away from owning every editor's machine. A customer running their
 own dashboard pins the **vendor's** key here.
 
+**Beyond one dashboard:** everything above is "one build reaches one
+dashboard because someone PUT it there." For N customers there is also the
+**release feed** (`docs/RELEASE_FEED.md`, `docs/ZERO_TOUCH_PLAN.md` WP E) —
+publish the signed record once to a static host, and every dashboard that
+has `DASH_RELEASE_FEED_URL` set pulls it and offers (or, on policy
+`stage`/`current`, auto-applies) the same PUT this section describes,
+through the exact same signature check. `DASH_RELEASE_FEED_URL` unset (the
+default) means nothing here changes.
+
 ---
 
 ## The downgrade floor (`min_version`)

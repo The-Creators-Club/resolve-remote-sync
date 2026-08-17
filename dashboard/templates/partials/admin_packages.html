@@ -82,4 +82,92 @@
     <span class="mono-sm">.\build_editor_package.ps1 -RebuildExe -RebuildOnboard -Publish [-MakeCurrent]</span>
     uploads both the companion and the installer. Each machine's tray then shows “Update now”.
   </div>
+
+  {# The vendor release feed (ZERO_TOUCH_PLAN.md WP E, 2026-08-17): "we
+     publish once, every dashboard pulls". `feed` comes from
+     ui._packages_and_feed on every route that re-renders this partial, so
+     this section is always as fresh as the packages table above it. #}
+  <div class="side-head" style="margin-top:1.6rem">[ AVAILABLE FROM THE VENDOR ]</div>
+  {% if not feed.configured %}
+    <div class="muted">
+      not configured. Set <span class="mono-sm">DASH_RELEASE_FEED_URL</span> to the vendor's
+      channel (e.g. <span class="mono-sm">https://releases.ccsync.app/v1/channel.json</span>)
+      and redeploy to enable one-click updates from here — see docs/RELEASE_FEED.md.
+    </div>
+  {% else %}
+    <div class="muted">
+      feed: <span class="mono-sm">{{ feed.feed_url }}</span>
+      · last checked {{ feed.last_checked_at | ago if feed.last_checked_at else "never" }}
+      {% if feed.last_error %}<span class="chip red" title="{{ feed.last_error }}">[ LAST CHECK FAILED ]</span>{% endif %}
+    </div>
+    <form class="inline-form" hx-post="/partials/admin/feed/check"
+          hx-target="closest .admin-packages-box" hx-swap="outerHTML" style="margin:0.4rem 0">
+      <button class="btn" type="submit">[ CHECK NOW ]</button>
+    </form>
+
+    <div class="muted" style="margin-top:0.4rem">
+      policy:
+      <form class="inline-form" hx-post="/partials/admin/feed/policy"
+            hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+        <select name="policy" onchange="this.form.requestSubmit()">
+          <option value="manual" {% if feed.policy == "manual" %}selected{% endif %}>manual — Check now / Publish only</option>
+          <option value="stage" {% if feed.policy == "stage" %}selected{% endif %}>stage — auto-publish, not current</option>
+          <option value="current" {% if feed.policy == "current" %}selected{% endif %}>current — auto-publish + make current</option>
+        </select>
+      </form>
+    </div>
+
+    {% if feed.available %}
+      <table class="editors" style="margin-top:0.6rem">
+        <thead><tr><th>KIND</th><th>VERSION</th><th>PLATFORM</th><th>SIZE</th><th>NOTES</th><th></th><th></th></tr></thead>
+        <tbody>
+        {% for p in feed.available %}
+          <tr class="editor-row">
+            <td class="mono-sm muted">{{ p.kind }}</td>
+            <td class="mono-sm">{{ p.version }}</td>
+            <td class="mono-sm muted">{{ p.platform }}</td>
+            <td class="mono-sm">{{ p.size_bytes | human_bytes }}</td>
+            <td class="muted">{{ p.notes }}</td>
+            <td>
+              <form class="inline-form" hx-post="/partials/admin/feed/publish"
+                    hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                <input type="hidden" name="kind" value="{{ p.kind }}">
+                <input type="hidden" name="platform" value="{{ p.platform }}">
+                <input type="hidden" name="version" value="{{ p.version }}">
+                <button class="btn" type="submit">[ PUBLISH ]</button>
+              </form>
+            </td>
+            <td>
+              <form class="inline-form" hx-post="/partials/admin/feed/publish"
+                    hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                <input type="hidden" name="kind" value="{{ p.kind }}">
+                <input type="hidden" name="platform" value="{{ p.platform }}">
+                <input type="hidden" name="version" value="{{ p.version }}">
+                <input type="hidden" name="make_current" value="1">
+                <button class="btn" type="submit">[ PUBLISH + MAKE CURRENT ]</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="muted">nothing new — the fleet's packages already cover everything the vendor feed offers</div>
+    {% endif %}
+
+    {% if feed.image.tag %}
+      {% if nas_kind == "synology" %}
+        {% set nas_hint = "Container Manager → Project ccsync → Build" %}
+      {% elif nas_kind == "truenas" %}
+        {% set nas_hint = "Apps → ccsync → Update" %}
+      {% else %}
+        {% set nas_hint = "your NAS's app/container manager's Update action" %}
+      {% endif %}
+      <div class="muted" style="margin-top:0.6rem">
+        image <span class="mono-sm">{{ feed.image.tag }}</span> available
+        (running <span class="mono-sm">{{ feed.image.current_running_version }}</span>)
+        — update in your NAS UI: <span class="mono-sm">{{ nas_hint }}</span>
+      </div>
+    {% endif %}
+  {% endif %}
 </div>

@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
-import os
 import re
 import secrets
 import sqlite3
@@ -26,7 +25,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from . import VERSION, auth, db, health, local_users, release_trust
+from . import VERSION, auth, db, health, local_users, package_store, release_trust
 from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
 from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -2779,59 +2778,25 @@ async def api_publish_package(
 
     # Verify the release signature over the record the SERVER assembled --
     # server-chosen filename, server-counted size, server-computed digest --
-    # not over anything the uploader asserted. A mismatch anywhere (a
-    # re-labelled kind/platform, a swapped artifact, a record signed for a
-    # different version) fails here with the staging file still unpublished
-    # (item 4, 2026-08-17).
-    record = {
-        "kind": kind,
-        "platform": platform,
-        "version": version,
-        "filename": filename,
-        "sha256": sha,
-        "size_bytes": size,
-        "min_version": min_version,
-        "published_at": published_at,
-        "signed_binary": bool(signed_binary),
-    }
-    ok, detail = release_trust.verify_record(record, signature, settings.release_pubkeys)
-    if not ok:
-        part.unlink(missing_ok=True)
-        log.warning("REFUSED an unverifiable publish of %s %s %s by %s: %s",
-                    kind, platform, version, user, detail)
-        raise HTTPException(
-            status_code=400,
-            detail=f"release signature REJECTED ({detail}) -- nothing was published. "
-                   f"The signature must cover this exact record: kind={kind}, "
-                   f"platform={platform}, version={version}, filename={filename}, "
-                   f"sha256={sha}, size_bytes={size}, min_version={min_version}, "
-                   f"published_at={published_at}, signed_binary={bool(signed_binary)}.",
+    # not over anything the uploader asserted, then place the file and write
+    # the row. This tail is SHARED with the vendor release feed's unattended
+    # publisher (ZERO_TOUCH_PLAN.md WP E, 2026-08-17): package_store is the
+    # only writer of a `companion_packages` row, so a PUT here and a feed
+    # auto-publish can never disagree about what "published" means. See
+    # package_store.store_verified_package's docstring for what it does and
+    # why it raises PackageStoreError rather than HTTPException directly.
+    try:
+        await run_in_threadpool(
+            package_store.store_verified_package,
+            conn, settings,
+            kind=kind, platform=platform, version=version, filename=filename,
+            sha256=sha, size_bytes=size, min_version=min_version,
+            published_at=published_at, signed_binary=bool(signed_binary),
+            signature=signature, pubkey_id=pubkey_id, published_by=user,
+            make_current=bool(make_current), prune=bool(prune), part_path=part,
         )
-    if pubkey_id and pubkey_id != detail:
-        # Advisory only: `detail` is the id of the key that ACTUALLY verified,
-        # and that is what gets stored. A disagreement means the publisher
-        # thinks it signed with a different key than the one this dashboard
-        # trusts -- worth a log line during a rotation, never a refusal.
-        log.info("publish declared pubkey_id %s but %s is what verified it",
-                 pubkey_id, detail)
-
-    await run_in_threadpool(os.replace, part, dest_dir / filename)
-
-    db.insert_companion_package(
-        conn, version=version, platform=platform, filename=filename,
-        sha256=sha, size_bytes=size, published_by=user, now=published_at,
-        kind=kind, signature=signature, pubkey_id=detail,
-        min_version=min_version, signed_binary=bool(signed_binary),
-    )
-    if make_current:
-        db.set_current_package(conn, platform, version, kind)
-    pruned = db.prune_companion_packages(conn, platform, kind=kind) if prune else []
-    # Commit BEFORE unlinking: the old order deleted the exe first, so a
-    # failed commit left the file gone while the row survived ([ FILE
-    # MISSING ] in the UI, 404 for any companion pointed at it).
-    conn.commit()
-    for row in pruned:
-        _unlink_package_file(settings, row)
+    except package_store.PackageStoreError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     return {"ok": True, "view": build_packages_view(conn, settings)}
 
 

@@ -345,6 +345,17 @@ from a compose paste; E and F in parallel from week 2. Everything in
 `server/` except `common.py`'s pure helpers becomes vendor/dev tooling or is
 deleted once H is through.
 
+**WP E status (2026-08-17): IMPLEMENTED**, committed on its own branch
+(`docs/RELEASE_FEED.md` is the schema + threat model; `tools/publish_feed.py`
+is the offline signer/builder; `dashboard/src/ccsync_dashboard/release_feed.py`
+is the fetch/verify/diff/publish client + admin UI; `package_store.py` is the
+shared write path with the existing PUT route; migration v19 is `feed_state`).
+Not yet done from this work package's row: `tools/release.cmd` (still
+`ship.cmd` today), the air-gapped bundle upload path, and actually standing
+up `https://releases.ccsync.app/v1/channel.json` -- `DASH_RELEASE_FEED_URL`
+defaults to `""` (feed disabled) until that hosting exists, so nothing here
+changes what the current fleet does (§8's promise holds).
+
 ## 5. Decisions taken here, and what they cost
 
 - **SFTP inside the stack, single service uid.** Cost: per-editor file

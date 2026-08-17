@@ -324,6 +324,38 @@ CREATE TABLE IF NOT EXISTS setup_tasks (
   detail     TEXT NOT NULL DEFAULT '',
   at         TEXT,
   skipped    INTEGER NOT NULL DEFAULT 0
+# v19: the vendor release feed's client-side state (ZERO_TOUCH_PLAN.md WP E,
+# 2026-08-17). "we publish once, every dashboard pulls" needs somewhere to
+# remember the last poll -- otherwise a restart forgets whether the feed was
+# ever reachable and the admin page has nothing to show before the first
+# click. Singleton row (id=1, CHECK-enforced) rather than a `meta` key: this
+# is a small, typed, frequently-read shape, not a scalar.
+#
+#   last_checked_at            when check_now() last ran (success OR failure)
+#   last_error                 '' on success; the refusal reason otherwise --
+#                               never surfaced to anyone but an admin, and
+#                               NEVER a reason to serve unverified content
+#   last_channel_generated_at  the feed's own `generated_at`, for "is this
+#                               stale" without re-fetching
+#   etag                       reserved for a future conditional GET; unused
+#                               today (release_feed.py has no server to
+#                               support If-None-Match against yet)
+#   policy_override             '' = use DASH_RELEASE_FEED_POLICY; otherwise
+#                               one of manual/stage/current, set from the
+#                               admin page without a redeploy
+#
+# Numbered v19 deliberately, not v17: this migration is owned by one agent of
+# a parallel commercial-readiness pass (agents C/D own v17/v18 in their own
+# worktrees) -- see ZERO_TOUCH_PLAN.md WP E's brief. Do not renumber this on
+# merge; insert the missing steps between v16 and v19 instead.
+SCHEMA_V19 = """
+CREATE TABLE IF NOT EXISTS feed_state (
+  id                         INTEGER PRIMARY KEY CHECK (id = 1),
+  last_checked_at            TEXT,
+  last_error                 TEXT,
+  last_channel_generated_at  TEXT,
+  etag                       TEXT,
+  policy_override            TEXT
 );
 """
 
@@ -544,13 +576,12 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (14, SCHEMA_V14),
     (15, SCHEMA_V15),
     (16, SCHEMA_V16),
+    # 17-19 landed together on 2026-08-17 from three parallel work packages
+    # (ZERO_TOUCH_PLAN.md WP C / D / E), each written in its own worktree
+    # with its number fixed in advance so they could merge without renumbering.
     (17, SCHEMA_V17),
-    # 17 is another agent's migration (ZERO_TOUCH_PLAN.md WP C), landing in
-    # its own worktree -- this step list will gain that entry on merge. This
-    # worktree owns 18 only (see SCHEMA_V18's docstring); a DB that has not
-    # seen 17 yet simply runs 16 -> 18 directly, which migrate()'s per-step
-    # commit already tolerates (each target_version is independent DDL).
     (18, SCHEMA_V18),
+    (19, SCHEMA_V19),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1295,6 +1326,48 @@ def prune_companion_packages(
     for row in victims:
         conn.execute("DELETE FROM companion_packages WHERE id=?", (row["id"],))
     return victims
+
+
+_FEED_STATE_DEFAULT = {
+    "last_checked_at": None, "last_error": None,
+    "last_channel_generated_at": None, "etag": None, "policy_override": None,
+}
+
+
+def get_feed_state(conn: sqlite3.Connection) -> dict[str, Any]:
+    """The singleton feed_state row, or the all-None default before the
+    first check ever ran (COMMERCIAL_READINESS.md v19, ZERO_TOUCH_PLAN.md
+    WP E, 2026-08-17)."""
+    row = conn.execute(
+        "SELECT last_checked_at, last_error, last_channel_generated_at, etag, "
+        "policy_override FROM feed_state WHERE id=1"
+    ).fetchone()
+    if row is None:
+        return dict(_FEED_STATE_DEFAULT)
+    return dict(row)
+
+
+def set_feed_state(conn: sqlite3.Connection, **fields: Any) -> None:
+    """Upsert the singleton row. Unknown keys are ignored (a caller passing
+    a typo'd field silently does nothing rather than raising mid-poll, which
+    would take the whole feed thread down over a spelling mistake); omitted
+    keys keep their current value -- this is a partial update, not a
+    replace."""
+    current = get_feed_state(conn)
+    current.update({k: v for k, v in fields.items() if k in current})
+    conn.execute(
+        """INSERT INTO feed_state
+             (id, last_checked_at, last_error, last_channel_generated_at, etag, policy_override)
+           VALUES (1, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             last_checked_at=excluded.last_checked_at,
+             last_error=excluded.last_error,
+             last_channel_generated_at=excluded.last_channel_generated_at,
+             etag=excluded.etag,
+             policy_override=excluded.policy_override""",
+        (current["last_checked_at"], current["last_error"],
+         current["last_channel_generated_at"], current["etag"], current["policy_override"]),
+    )
 
 
 def add_selection(

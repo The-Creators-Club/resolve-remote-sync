@@ -15,7 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import auth, db, local_users, oidc, provision
+from . import auth, db, local_users, oidc, package_store, provision, release_feed
 from .api import (
     build_admin_users_view, build_editors_view, build_packages_view, build_presence_view,
     build_project_view, build_projects_view, build_queue_view, build_report_tokens_view,
@@ -1447,12 +1447,25 @@ def page_download_platform(
 
 # --------------------------------------------------------- admin packages
 
+# "Available from the vendor" is the release feed's own section on this same
+# partial (ZERO_TOUCH_PLAN.md WP E, 2026-08-17) -- one context builder shared
+# by every route below that re-renders admin_packages.html, so a Check now /
+# Publish / policy change never leaves the packages table and the feed
+# section disagreeing about what is on this dashboard.
+def _packages_and_feed(conn, request: Request, error: str | None = None) -> dict:
+    settings = request.app.state.settings
+    return {
+        "packages": build_packages_view(conn, settings),
+        "feed": release_feed.build_feed_view(conn, settings, request.app.state),
+        "nas_kind": getattr(settings, "nas_kind", ""),
+        "error": error,
+    }
+
+
 @router.get("/partials/admin/packages")
 def partial_admin_packages(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     _require_admin_page(request)
-    return _render(request, "partials/admin_packages.html", {
-        "packages": build_packages_view(conn, request.app.state.settings),
-    })
+    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request))
 
 
 @router.post("/partials/admin/packages/current")
@@ -1460,7 +1473,6 @@ async def partial_admin_package_current(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ):
     _require_admin_page(request)
-    settings = request.app.state.settings
     form = await _form(request)
     platform = form.get("platform", "").strip().lower()
     version = form.get("version", "").strip()
@@ -1472,10 +1484,7 @@ async def partial_admin_package_current(
     else:
         conn.commit()
 
-    return _render(request, "partials/admin_packages.html", {
-        "packages": build_packages_view(conn, settings),
-        "error": error,
-    })
+    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
 
 
 @router.post("/partials/admin/packages/delete")
@@ -1547,3 +1556,68 @@ def page_admin_settings(request: Request, conn: sqlite3.Connection = Depends(get
         "auto_derived": sorted(site_store.AUTO_DERIVED_KEYS),
         "from_db": set(manifest.get("_from_db", ())),
     })
+    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
+
+
+# ------------------------------------------------- admin packages: release feed
+# HTML twins of the JSON routes in release_feed.router (/api/v1/admin/feed*):
+# same underlying functions, so "Check now"/"Publish"/policy behave IDENTICALLY
+# whether driven from this page or from a script -- these routes are only the
+# htmx glue (admin auth, form parsing, re-rendering the partial), matching
+# every other route on this page. See release_feed.py for the actual logic.
+
+@router.post("/partials/admin/feed/check")
+def partial_admin_feed_check(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    settings = request.app.state.settings
+    error = None
+    if not settings.release_feed_url:
+        error = "DASH_RELEASE_FEED_URL is not configured"
+    else:
+        result = release_feed.check_now(conn, settings, request.app.state)
+        if not result["ok"]:
+            error = f"feed check failed: {result.get('error')}"
+
+    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
+
+
+@router.post("/partials/admin/feed/publish")
+async def partial_admin_feed_publish(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    user = _require_admin_page(request)
+    settings = request.app.state.settings
+    form = await _form(request)
+    kind = form.get("kind", "companion").strip().lower()
+    platform = form.get("platform", "").strip().lower()
+    version = form.get("version", "").strip()
+    make_current = form.get("make_current", "") == "1"
+
+    error = None
+    if not settings.release_feed_url:
+        error = "DASH_RELEASE_FEED_URL is not configured"
+    else:
+        try:
+            release_feed.publish_from_feed(
+                conn, settings, request.app.state, kind=kind, platform=platform, version=version,
+                make_current=make_current, published_by=user,
+            )
+        except package_store.PackageStoreError as exc:
+            error = exc.detail
+
+    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
+
+
+@router.post("/partials/admin/feed/policy")
+async def partial_admin_feed_policy(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    _require_admin_page(request)
+    form = await _form(request)
+    error = None
+    try:
+        release_feed.set_policy(conn, form.get("policy", ""))
+    except ValueError as exc:
+        error = str(exc)
+
+    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))

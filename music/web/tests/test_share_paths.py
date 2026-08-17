@@ -126,6 +126,40 @@ def test_the_editor_root_is_the_canonical_prefix_plus_the_fixed_leaf():
     assert not hasattr(config, 'BASE_RIG_ROOT')
 
 
+def test_the_canonical_join_is_windows_spelled_even_on_a_posix_host(monkeypatch):
+    """MUSIC-web bug (first hosted CI run, 2026-08-17): pathlib.Path is
+    native-flavoured, so on the dashboard's Linux container `Path('P:\\')`
+    does not split on backslash and joining it against Assets/Music produced
+    the corrupted 'P:\\/Assets/Music' rather than 'P:\\Assets\\Music'. This
+    forces the POSIX branch of _join_canonical regardless of what host pytest
+    is actually running on, so the regression is caught here too."""
+    monkeypatch.setattr(config.os, 'name', 'posix')
+    got = config._join_canonical('P:\\', config.LIBRARY_REL)
+    assert str(got) == r'P:\Assets\Music'
+    assert isinstance(got, config.PureWindowsPath)
+
+
+def test_a_posix_shaped_prefix_is_never_forced_through_purewindowspath():
+    """A Mac base rig's canonical_prefix is a real local mount
+    (/Volumes/T7/Creators_Club, canon.py), not a Windows drive spelling, so it
+    must keep native pathlib joining -- POSIX-style on the Mac that actually
+    sets it -- rather than being forced through the Windows-spelled branch
+    _DRIVE_STYLE_RE exists to isolate. (This can't force os.name to 'posix'
+    and check the join itself: Python 3.12's pathlib refuses to instantiate a
+    concrete PosixPath at all on Windows -- 'cannot instantiate PosixPath on
+    your system', even with os.name patched -- so what is pinned here is the
+    branch choice, the same thing that broke: only a drive-style prefix is
+    routed to PureWindowsPath.)"""
+    assert not config._DRIVE_STYLE_RE.match('/Volumes/T7/Creators_Club')
+    got = config._join_canonical('/Volumes/T7/Creators_Club', config.LIBRARY_REL)
+    # A real, filesystem-operable Path -- not merely Pure (WindowsPath IS-A
+    # PureWindowsPath, so the exact type is what distinguishes the forced
+    # symbolic branch from ordinary native joining).
+    assert isinstance(got, config.Path)
+    assert type(got) is not config.PureWindowsPath
+    assert got.parts[-2:] == ('Assets', 'Music')
+
+
 def test_an_indexing_host_names_its_own_mount(tmp_path, monkeypatch):
     monkeypatch.delenv('MUSIC_SHARE_ROOT', raising=False)
     monkeypatch.delenv('MUSIC_ROOT', raising=False)

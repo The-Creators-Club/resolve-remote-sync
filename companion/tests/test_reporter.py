@@ -411,7 +411,22 @@ def test_select_interval_get_statuses_failure_falls_back_to_normal():
 def test_report_loop_throttles_heavy_payload_during_active_ticks(monkeypatch):
     """First tick is always heavy; subsequent fast (active-interval) ticks
     stay light until a full report_interval has elapsed since the last
-    heavy post, at which point a heavy tick recurs."""
+    heavy post, at which point a heavy tick recurs.
+
+    This used to drive _report_loop's real background thread through real
+    wall-clock sleeps (dashboard_report_interval=0.15s /
+    dashboard_report_interval_active=0.03s) and poll for 6 calls within a 3s
+    deadline -- a flake on a loaded/slow CI runner (companion/tests owns this
+    file; reporter.py's threading/timing shape is out of scope here, hence a
+    test-side clock rather than a source seam). _report_loop has exactly two
+    real-time dependencies, both reached through attributes this test can
+    replace without changing reporter.py: `time.monotonic()` (module-level
+    `import time`, so the same object process-wide) and
+    `self._stop_event.wait(interval)`. Faking both turns "a heavy tick
+    recurs after report_interval of elapsed simulated time" into an exact,
+    non-timing-dependent count of ticks instead of a race against the
+    scheduler.
+    """
     monkeypatch.setattr(reporter_mod, "INITIAL_DELAY_SECONDS", 0.0)
     statuses = [LaneStatus(name="lane_a_video_up", state=STATE_SYNCING)]
     reporter = DashboardReporter(
@@ -428,18 +443,51 @@ def test_report_loop_throttles_heavy_payload_during_active_ticks(monkeypatch):
 
     reporter.post_once = spy_post_once
 
+    # A fake monotonic clock, seeded well above report_interval so the first
+    # tick's `(now - self._last_heavy_at=0.0) < report_interval` reads False
+    # (heavy) exactly as it does against a real monotonic clock, whose value
+    # is always some large process-uptime figure rather than 0 -- starting
+    # this fake at 0.0 would make tick 0 read as a (wrong) light tick.
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+
+    # _stop_event.wait(interval) normally blocks for `interval` real seconds;
+    # here it advances the fake clock by that amount and returns instantly,
+    # still honouring a real .stop() (event.is_set()) so the loop still ends
+    # the moment this test is done collecting.
+    event = reporter._stop_event
+
+    def fake_wait(timeout=None):
+        if timeout:
+            clock["t"] += timeout
+        return event.is_set()
+
+    monkeypatch.setattr(event, "wait", fake_wait)
+
+    # Collect a healthy run of ticks -- not just enough for the recurrence to
+    # land exactly at some pinned index. 5 * 0.03 == 0.15 in exact decimal
+    # arithmetic but not in float (repeated += leaves it a hair under 0.15,
+    # so the recurrence actually lands on the 7th tick, not the 6th); the
+    # point of this test is "a heavy tick recurs at all", not which index it
+    # lands on, so it is asserted the same loose way the original real-time
+    # version did.
+    TICKS = 12
     reporter.start()
     try:
-        deadline = time.monotonic() + 3.0
-        while len(light_calls) < 6 and time.monotonic() < deadline:
-            time.sleep(0.01)
+        # No sleeping needed: with both time sources faked, the loop runs at
+        # CPU speed, so the thread reaches TICKS calls in well under a second.
+        deadline = time.time() + 5.0
+        while len(light_calls) < TICKS and time.time() < deadline:
+            pass
     finally:
         reporter.stop()
+        reporter._thread.join(timeout=2.0)
 
-    assert len(light_calls) >= 6
+    assert len(light_calls) >= TICKS
     assert light_calls[0] is False  # first tick always heavy
     assert any(v is True for v in light_calls), "fast ticks should mostly be light"
-    assert any(v is False for v in light_calls[1:]), "a heavy tick should recur at report_interval cadence"
+    assert any(v is False for v in light_calls[1:]), \
+        "a heavy tick should recur at report_interval cadence"
 
 
 def test_post_once_empty_lanes_list():

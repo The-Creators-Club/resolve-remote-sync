@@ -388,8 +388,18 @@ def safe_upload_name(name):
     Basename only, and every character Windows forbids in a name replaced --
     including the separators, so nothing that arrives here can still be read as
     a path. `unique_dest` re-validates through safe_join regardless.
+
+    The basename split is done on BOTH separators regardless of host OS, not
+    with os.path.basename: this app is mounted in the dashboard's Linux
+    container, but the browser supplying the filename is very often on
+    Windows (CLAUDE.md: "POSIX behaviour is the deployed reality"), so a
+    dropped '..\\..\\evil.wav' has no '/' in it at all -- os.path.basename on
+    POSIX does not treat backslash as a separator and returns the string
+    unchanged, and the char-replace below then turned each backslash into an
+    underscore ('.._.._evil.wav') instead of stripping the traversal like it
+    does on Windows.
     """
-    name = os.path.basename(name or 'untitled')
+    name = re.split(r'[\\/]+', str(name or 'untitled'))[-1]
     name = ''.join('_' if c in '<>:"/\\|?*' else c for c in name).strip()
     return name or 'untitled'
 

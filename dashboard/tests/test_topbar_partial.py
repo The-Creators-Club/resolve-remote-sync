@@ -14,6 +14,10 @@ headers. What the SPAs' loadDashboardTopbar() depends on is pinned here:
 """
 from __future__ import annotations
 
+import builtins
+import sys
+
+import pytest
 from fastapi.testclient import TestClient
 
 from ccsync_dashboard import auth
@@ -21,6 +25,33 @@ from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
 SECRET = "s" * 32
+
+
+@pytest.fixture(autouse=True)
+def _no_music_mount(monkeypatch):
+    """Force mount_music() to ABSENT, whatever this machine's venv holds.
+
+    mount_music takes no flag (music.py) -- its dev fallback puts the in-repo
+    music/web on sys.path and MOUNTED/ABSENT then depends on whether numpy
+    happens to be importable in THIS venv. The dashboard's own venv lacks it
+    (deliberately no torch/numpy) so this file passed locally, but the first
+    hosted CI run installs numpy for other reasons and the mount went live --
+    the same false pass-for-a-wrong-reason test_music_mount.py's `no_musicweb`
+    fixture exists to prevent (see that file's docstring). This module's tests
+    assert "nothing is mounted here" as their premise, so the premise has to be
+    made true rather than hoped true.
+    """
+    real_import = builtins.__import__
+
+    def fail_on_musicweb(name, *a, **kw):
+        if name == "musicweb" or name.startswith("musicweb."):
+            raise ImportError("simulated: the music tree is not deployed here")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fail_on_musicweb)
+    for name in [n for n in sys.modules if n == "musicweb" or n.startswith("musicweb.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    yield
 
 
 def _client(tmp_path) -> TestClient:

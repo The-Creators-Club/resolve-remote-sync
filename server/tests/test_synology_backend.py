@@ -260,7 +260,13 @@ def test_the_sftp_view_is_not_the_filesystem():
     assert obj.sftp_path("/tmp/x") == "/tmp/x"      # unchanged, and unreachable
 
 
-def test_the_stack_files_are_uploaded_not_heredocd_and_the_env_is_root_only():
+def test_the_stack_files_are_uploaded_not_heredocd_and_the_env_is_root_only(monkeypatch):
+    # deploy_stack(dry_run=False) reads the NAS admin password through
+    # common.truenas_conn_params -> nas_admin_password, which requires
+    # TRUENAS_PW (or SYNO_PW). This passed locally by accident: the base rig
+    # carries TRUENAS_PW in its real environment (CLAUDE.md); a hosted
+    # runner does not.
+    monkeypatch.setenv("TRUENAS_PW", "pw")
     ssh, put = FakeSsh(), FakePutText()
     rc = backend(ssh=ssh, put=put).deploy_stack(
         "ccsync-dashboard", {}, 8480, dry_run=False,
@@ -280,7 +286,10 @@ def test_the_stack_files_are_uploaded_not_heredocd_and_the_env_is_root_only():
     assert "install -o root -g root -m 0644" in ssh.text
 
 
-def test_the_stack_comes_up_with_the_syncthing_profile_and_its_own_env_file():
+def test_the_stack_comes_up_with_the_syncthing_profile_and_its_own_env_file(monkeypatch):
+    # Same TRUENAS_PW dependency as the test above -- dry_run=False reads it
+    # through nas_admin_password before it ever touches FakeSsh.
+    monkeypatch.setenv("TRUENAS_PW", "pw")
     ssh = FakeSsh()
     backend(ssh=ssh).deploy_stack("ccsync-dashboard", {}, 8480, dry_run=False,
                                   compose_yaml="services: {}\n", env={"A": "b"})

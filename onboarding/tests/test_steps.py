@@ -17,6 +17,7 @@ convention exists to prevent."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -952,7 +953,26 @@ def test_find_companion_exe_explicit(tmp_path):
 def test_find_companion_exe_falls_back_to_dev_dist():
     # In the dev tree the built companion exe lives at companion/dist/;
     # find_companion_exe should locate it when no explicit path is given.
-    found = steps.find_companion_exe()
+    #
+    # A hosted CI runner has never run tools/release.ps1 (or PyInstaller
+    # directly), so companion/dist/ccsync-companion.exe does not exist there
+    # -- this is a dev-loop sanity check, not the release gate: the real gate
+    # is build_editor_package.ps1 actually invoking PyInstaller and failing
+    # for real if it produces nothing (see test_release_gates.py). Skip
+    # rather than fail when the artifact is simply absent, same shape as
+    # companion/tests/conftest.py::rclone_binary -- CCSYNC_REQUIRE_BUILT_EXE=1
+    # turns the skip into a hard failure for anyone who wants this asserted.
+    try:
+        found = steps.find_companion_exe()
+    except FileNotFoundError as exc:
+        if os.environ.get("CCSYNC_REQUIRE_BUILT_EXE") == "1":
+            pytest.fail(
+                f"{exc}\n\nCCSYNC_REQUIRE_BUILT_EXE=1 is set, so a missing "
+                "companion/dist/ccsync-companion.exe is a failure rather than "
+                "a skip."
+            )
+        pytest.skip(str(exc))
+        return
     assert found.name == "ccsync-companion.exe" and found.exists()
 
 

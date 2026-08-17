@@ -175,6 +175,25 @@ def test_a_dangerous_upload_name_cannot_escape_the_share(client, probe, name, la
     assert config.resolve_path('music', got['rel_path']).parent == config.share_root()
 
 
+@pytest.mark.parametrize('name, landed', [
+    ('../../evil.wav', 'evil.wav'),
+    (r'..\..\evil.wav', 'evil.wav'),
+    (r'C:\Windows\evil.wav', 'evil.wav'),
+    ('sub/dir/evil.wav', 'evil.wav'),
+    (r'sub\dir\evil.wav', 'evil.wav'),
+    (r'sub/dir\evil.wav', 'evil.wav'),
+])
+def test_safe_upload_name_strips_both_separators_regardless_of_host(name, landed):
+    """First hosted CI run (2026-08-17): the container is Linux, and
+    os.path.basename does not treat backslash as a separator there, so a
+    Windows browser's '..\\..\\evil.wav' came back as '.._.._evil.wav'
+    instead of 'evil.wav'. The fix (splitting on both separators with `re`
+    instead of os.path.basename) is host-independent by construction, so
+    this pins the behaviour directly rather than by forcing posixpath --
+    there is no more os.path call in safe_upload_name left to force."""
+    assert db.safe_upload_name(name) == landed
+
+
 # --------------------------------------------------------------- the ogg case
 def test_an_ogg_is_transcoded_to_mp3_before_it_is_queued(client, probe, transcode):
     probe(41.0)

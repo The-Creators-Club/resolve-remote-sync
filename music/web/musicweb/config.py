@@ -9,7 +9,7 @@ database is.
 import os
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 PKG_DIR = Path(__file__).resolve().parent        # music/web/musicweb
 WEB_DIR = PKG_DIR.parent                         # music/web
@@ -37,7 +37,40 @@ MIGRATIONS_DIR = WEB_DIR / 'migrations'
 SHARE = 'music'
 LIBRARY_REL = Path('Assets') / 'Music'
 CANONICAL_PREFIX = os.environ.get('CCSYNC_CANONICAL_PREFIX', '').strip() or 'P:\\'
-EDITOR_ROOT = Path(CANONICAL_PREFIX) / LIBRARY_REL
+# "P:", "P:\", "P:/" -- a bare drive root, mirroring
+# ccsync_companion/canon.py's is_drive_style() (that module is the canon for
+# this rule; it is not importable from here, the web app ships without the
+# companion checked out, so the regex is duplicated rather than shared).
+_DRIVE_STYLE_RE = re.compile(r'^[A-Za-z]:[\\/]?$')
+
+
+def _join_canonical(prefix, rel):
+    """prefix / rel, joined in the PREFIX's own spelling -- never the host's.
+
+    pathlib.Path is native-flavoured: on a POSIX host (the dashboard
+    container in production) `Path('P:\\')` does not split on backslash, so
+    joining it against Assets/Music produced the corrupted
+    'P:\\/Assets/Music' instead of 'P:\\Assets\\Music' -- every site whose
+    canonical_prefix is a drive letter got a broken editor-facing path
+    the moment this ran somewhere other than Windows.
+
+    canon.py calls a drive-spelled canonical string exactly this: "a
+    fleet-portable STRING in WINDOWS spelling that must never be handed to
+    the local filesystem" on a host it isn't native to. So a drive-style
+    prefix is always joined with PureWindowsPath when the host isn't Windows
+    -- which also means the result is symbolic there (no .mkdir()/.exists()),
+    correctly so: there is no real P:\\ to operate on outside Windows either
+    way. A POSIX-shaped prefix (a Mac base rig's /Volumes/... mount) and a
+    drive-style prefix running on the Windows host it is actually native to
+    both keep plain pathlib.Path, which already joins them correctly and
+    stays a real, operable path.
+    """
+    if _DRIVE_STYLE_RE.match(str(prefix).strip()) and os.name != 'nt':
+        return PureWindowsPath(prefix) / rel
+    return Path(prefix) / rel
+
+
+EDITOR_ROOT = _join_canonical(CANONICAL_PREFIX, LIBRARY_REL)
 
 
 def _default_share_root():

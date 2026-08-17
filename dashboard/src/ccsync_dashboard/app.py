@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
-from . import api, auth, broll, crash_report, db, music, oidc, sessions, ui, ytdl
+from . import api, auth, broll, crash_report, db, music, oidc, release_feed, sessions, ui, ytdl
 from .collector import Collector
 from .settings import Settings
 
@@ -243,11 +243,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         collector = Collector(settings)
         collector.start()
         app.state.collector = collector
+        # The vendor release feed's poller (ZERO_TOUCH_PLAN.md WP E,
+        # 2026-08-17): gated on release_feed_url being set, so an
+        # unconfigured feed adds no thread, no DNS lookup, no log line --
+        # release_feed.py's own module docstring is the design writeup.
+        feed_poller = None
+        if settings.release_feed_url:
+            feed_poller = release_feed.FeedPoller(settings, app.state)
+            feed_poller.start()
+        app.state.feed_poller = feed_poller
         try:
             yield
         finally:
             if collector is not None:
                 collector.stop()
+            if feed_poller is not None:
+                feed_poller.stop()
 
     # No interactive docs, matching both mounts (broll.BLOCKED_PATHS /
     # music.BLOCKED_PATHS 404 theirs). FastAPI's defaults published the whole
@@ -578,6 +589,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse({"detail": "internal error"}, status_code=500)
 
     app.include_router(api.router)
+    app.include_router(release_feed.router)
     app.include_router(ui.router)
     # Always mounted, never active unless DASH_AUTH_METHOD=oidc: both routes
     # start by re-checking the OIDC settings and answer 503 with the

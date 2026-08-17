@@ -257,6 +257,30 @@ class Settings:
     # rotating a key lists both for the overlap release.
     release_pubkeys: tuple[str, ...] = ()
 
+    # The vendor-hosted signed feed (ZERO_TOUCH_PLAN.md WP E, 2026-08-17):
+    # "we publish once, every dashboard pulls". Empty = the feed is DISABLED
+    # and the dashboard behaves exactly as it did before this existed -- no
+    # background thread, no network call, no admin section beyond "how to
+    # configure it". Must be https (release_feed.py refuses anything else at
+    # fetch time, same as the no-redirect rule the companion's own upgrade
+    # client already enforces against the dashboard itself).
+    release_feed_url: str = ""
+    # manual   = "Check now" / "Publish" are the only ways a feed build ever
+    #            reaches this dashboard's packages -- the default, because an
+    #            unattended write to the upgrade channel is not something a
+    #            fresh install should opt into by omission.
+    # stage    = new feed records are auto-published but never made current
+    #            (an admin still flips [ MAKE CURRENT ]).
+    # current  = auto-published AND made current -- full hands-off. An
+    #            invalid value falls back to "manual" with a boot warning
+    #            (see __post_init__) rather than silently picking a stronger
+    #            posture than asked for.
+    release_feed_policy: str = "manual"
+    # Poll cadence in seconds for the background thread started in app.py's
+    # lifespan (guarded by release_feed_url being set). Default matches "we
+    # check daily, and on demand" from the plan.
+    release_feed_interval: float = 86400.0
+
     # Serve the b-roll search UI at /broll from inside this process, so editors
     # get one URL and one login instead of a second service to reach and sign
     # in to. Off by default: the dashboard must not depend on the b-roll code
@@ -377,6 +401,16 @@ class Settings:
         # 2026-08-17 Synology bring-up; also true for the TrueNAS redeploy).
         if not self.smb_host and self.nas_host:
             object.__setattr__(self, "smb_host", self.nas_host)
+        # An unrecognised DASH_RELEASE_FEED_POLICY falls back to the safest
+        # posture ("manual") rather than being coerced upward -- a typo must
+        # never turn into unattended auto-current (ZERO_TOUCH_PLAN.md WP E,
+        # 2026-08-17).
+        if self.release_feed_policy not in ("manual", "stage", "current"):
+            log.warning(
+                "DASH_RELEASE_FEED_POLICY=%r is not one of manual/stage/current -- "
+                "using manual", self.release_feed_policy,
+            )
+            object.__setattr__(self, "release_feed_policy", "manual")
 
     def packages_path(self) -> Path:
         return Path(self.packages_dir) if self.packages_dir else Path(self.db_path).parent / "packages"
@@ -490,6 +524,9 @@ class Settings:
                     for part in env.get("DASH_RELEASE_PUBKEYS", "").replace(",", " ").split()
                 ) if _looks_like_ed25519_pubkey(k)
             ),
+            release_feed_url=env.get("DASH_RELEASE_FEED_URL", "").strip(),
+            release_feed_policy=(env.get("DASH_RELEASE_FEED_POLICY", "").strip().lower() or "manual"),
+            release_feed_interval=num("DASH_RELEASE_FEED_INTERVAL", 86400.0),
             projects_dir=env.get("DASH_PROJECTS_DIR", ""),
             syncthing_data_prefix=env.get("DASH_SYNCTHING_DATA_PREFIX", "/data/Projects"),
             syncthing_assets_prefix=env.get("DASH_SYNCTHING_ASSETS_PREFIX", "/data/Assets"),

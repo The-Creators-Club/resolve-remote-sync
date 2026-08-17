@@ -39,8 +39,11 @@ ALLOW_DIRTY=0
 DRY_RUN=0
 PUBLISH=0
 MAKE_CURRENT=0
-DASHBOARD_URL="http://100.71.216.3:8480"
-ADMIN_USER="alex"
+# No defaults since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md): these used
+# to name one deployment's dashboard and one person's account. --publish
+# refuses without them; the environment is the setx-once equivalent here.
+DASHBOARD_URL="${CCSYNC_DASHBOARD_URL:-}"
+ADMIN_USER="${CCSYNC_ADMIN_USER:-}"
 
 usage() {
     echo "Usage: $0 [--skip-tests] [--allow-dirty] [--dry-run]"
@@ -55,8 +58,8 @@ usage() {
     echo "  --publish         upload the built binary to the dashboard upgrade"
     echo "                    channel (prompts for your dashboard password)"
     echo "  --make-current    with --publish: offer it to the fleet immediately"
-    echo "  --dashboard-url   default: $DASHBOARD_URL"
-    echo "  --admin-user      dashboard admin for --publish (default: $ADMIN_USER)"
+    echo "  --dashboard-url   REQUIRED with --publish (or CCSYNC_DASHBOARD_URL)"
+    echo "  --admin-user      REQUIRED with --publish (or CCSYNC_ADMIN_USER)"
     exit 1
 }
 
@@ -85,6 +88,14 @@ fail() {
 }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# WHERE this publishes to, and AS WHOM -- refused before the build, not after
+# it (2026-08-17, WP0). Neither has a compiled-in default any more.
+if [ "$PUBLISH" = 1 ]; then
+    [ -n "$DASHBOARD_URL" ] || fail "--publish needs --dashboard-url (or CCSYNC_DASHBOARD_URL) -- there is no default dashboard compiled in"
+    [ -n "$ADMIN_USER" ] || fail "--publish needs --admin-user (or CCSYNC_ADMIN_USER) -- there is no default admin account compiled in"
+fi
+DASHBOARD_URL="${DASHBOARD_URL%/}"
 
 # ---CCSYNC-PASSWORD-HYGIENE-BEGIN---
 # Everything between these two sentinels is COPY-SHARED, byte for byte, with

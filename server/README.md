@@ -59,13 +59,57 @@ deliberately does NOT touch folder shares (step 7's old folder-sharing
 behavior) -- see "Workflow change" in `../docs/SERVER.md`: sharing is decided
 by the dashboard's per-editor selections, not by device approval.
 
+## site.toml -- the NAS's identity (2026-08-17)
+
+Host, admin user, pool, tree name, app root, bind addresses, Syncthing GUI:
+all of it comes from ONE manifest now, not from literals in `common.py`. Copy
+`site.example.toml` (repo root) to `site.toml`, fill it in, and every script
+here picks it up. Precedence is unchanged -- a flag beats an env var beats
+`site.toml` -- but the bottom of the chain is now BLANK: a script that cannot
+find a value it needs stops and names the key, instead of silently aiming at
+the NAS this code was written against. `docs/SERVER.md` has this fleet's
+values ready to paste.
+
+Every script takes `--site <path>` (also `$CCSYNC_SITE`; otherwise
+`<repo>/site.toml`) and `--nas-kind truenas|synology` (also
+`$CCSYNC_NAS_KIND`, or `[nas] kind`).
+
+## Backends -- one platform per module (`backends/`)
+
+Everything platform-specific lives on a backend object built by
+`common.get_backend()`: creating and restarting the container stack,
+installing Syncthing, the group and `/user` calls, `filesystem.setperm`,
+owning the tree, asking Tailscale for its status.
+
+- `backends/base.py` -- the `ServerBackend` Protocol, and what each method
+  owes its caller (`--dry-run` touches nothing; say what happened; refuse
+  rather than guess).
+- `backends/truenas.py` -- this deployment. The bodies moved here from the
+  scripts unchanged on 2026-08-17; the scripts kept their CLI, their output
+  text and their `--dry-run` semantics, and several keep a same-named
+  re-export so nothing that called them had to move.
+- `backends/synology.py` -- DSM 7.2+, implemented and brought up against a
+  live DS423+ on 2026-08-17. `docs/SERVER-SYNOLOGY.md` is its runbook and
+  `docs/synology-spikes-2026-08-17.md` is the measured record every method
+  cites. Two channels: SSH as an administrators-group account (`sudo -S`,
+  password on stdin, PATH export first -- the Synology CLIs are not on sudo's
+  PATH) and the DSM Web API on :5001. **Its first rule: nothing under the tree
+  share is ever chmod'd or chown'd** -- a chmod DESTROYS a Synology path's ACL,
+  which is the only thing granting the editors group write.
+
+Backends reach the NAS through `common.ScriptCalls`, which resolves
+`truenas_api` / `synology_api` / `run_ssh` / `sftp_put_text` / `wait_for_job`
+on the CALLING SCRIPT's module -- that is what keeps the offline test suite
+able to intercept them.
+
 ## Env vars
 
 | Var | Required | Default | Used by |
 |---|---|---|---|
-| `TRUENAS_PW` | yes | -- | every script that talks to TrueNAS (SSH password + REST API basic auth); `setup_syncthing_folder.py` also uses it to read the project's `.ccsync-project` marker over SSH when deriving the folder id (skip with `--slug` or `--no-marker-read`) |
-| `TRUENAS_HOST` | no | `192.168.0.102` | same |
-| `TRUENAS_USER` | no | `truenas_admin` | same |
+| `TRUENAS_PW` | yes | -- | every script that talks to the NAS (SSH password + REST API basic auth); `setup_syncthing_folder.py` also uses it to read the project's `.ccsync-project` marker over SSH when deriving the folder id (skip with `--slug` or `--no-marker-read`) |
+| `SYNO_PW` | on a Synology site | -- | the same password under the name a DSM site uses. Whichever matches `[nas] kind` wins; the other is accepted with a one-time note, so a workstation that administers both NASes can keep both set. |
+| `TRUENAS_HOST` | no | `[nas] host` in `site.toml` (no built-in default -- blank refuses) | same |
+| `TRUENAS_USER` | no | `[nas] admin_user` in `site.toml` (same) | same |
 | `SYNCTHING_GUI_URL` | no (or pass `--gui-url`) | -- | `setup_syncthing_folder.py`, `accept_device.py`, `check_health.py` |
 | `SYNCTHING_API_KEY` | no (or pass `--api-key`) | -- | same, plus `install_dashboard_app.py` (required there) |
 | `DASH_REPORT_TOKEN` | yes, for `install_dashboard_app.py` | -- | the shared secret companions present when POSTing status; same value goes in each editor's `dashboard_token` |

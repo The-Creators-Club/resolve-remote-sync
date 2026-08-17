@@ -30,29 +30,34 @@ local_root = "C:\\Creators_Club"
 canonical_prefix = "P:\\"
 
 # OPTIONAL override for the tray's "Grade from server originals" P: swap.
-# By default the server tree's SMB path is derived automatically: host from
-# dashboard_url below, share path from remote_root's part after /mnt/<pool>/
-# (TrueNAS shares datasets under their own names). So the feature just works
-# on every install with no extra setup. Set an explicit UNC here, e.g.
-# "\\\\100.65.15.123\\TheCreatorsPool\\Creators_Club", to override the
-# derivation, or "off" to hide the feature on this machine. Syncing is
-# unaffected either way (the lanes use local_root directly).
+# By default the server tree's SMB path comes from the dashboard's site
+# manifest (GET /api/v1/site -> smb_unc); failing that it is derived: host
+# from dashboard_url below, share path from remote_root's part after the
+# pool/volume component (TrueNAS shares datasets under their own names,
+# Synology's shared folder is the first component under /volumeN). So the
+# feature works on every install with no extra setup. Set an explicit UNC
+# here, e.g. "\\\\<nas-host>\\<share>\\<tree>", to override both, or "off" to
+# hide the feature on this machine. Syncing is unaffected either way (the
+# lanes use local_root directly).
 # server_p_unc = ""
 
 # Name of the rclone remote pointing at the NAS. Must match a stanza in
-# rclone.conf. The bootstrap installers create one called
-# "creators_club_sftp". ccsync-companion does not configure rclone remotes
-# for you.
-remote = "creators_club_sftp"
+# rclone.conf. The bootstrap installers name it after the dashboard's site
+# manifest (GET /api/v1/site -> rclone_remote) and fall back to "ccsync_sftp"
+# when the dashboard publishes no name -- so this value is whatever your
+# admin's site says, and "ccsync_sftp" on a stock install. ccsync-companion
+# does not configure rclone remotes for you.
+remote = "ccsync_sftp"
 
 # ABSOLUTE path on the NAS under which project trees live.
 #
 # This MUST be absolute. An SFTP session starts in your home directory on the
-# NAS (/mnt/tank/TheCreatorsPool/homes/<you>), so a relative value like
+# NAS (/mnt/<pool>/<share>/homes/<you>), so a relative value like
 # "Creators_Club" resolves to ~/Creators_Club (a path that doesn't exist),
 # and lane A would upload into your home directory instead of the shared
-# tree, with no error to show for it.
-remote_root = "/mnt/tank/TheCreatorsPool/Creators_Club"
+# tree, with no error to show for it. TrueNAS: /mnt/<pool>/<share>/<tree>;
+# Synology: /volume1/<share>/<tree>.
+remote_root = "/mnt/<pool>/<share>/Creators_Club"
 
 # NEITHER OF THESE SCOPES WHAT SYNCS, and neither does the whole tree.
 # With dashboard_url set (the default), the DASHBOARD decides: only the
@@ -163,12 +168,13 @@ log_path = "~/.ccsync/companion.log"
 log_level = "INFO"
 
 # Dashboard reporter: periodically POSTs lane statuses to a server-side
-# dashboard so an admin can see editor health without remoting in. Defaults
-# to the dashboard's tailnet address (right for remote editors; the base rig
-# overrides with the LAN address). Set to "" to disable entirely -- the
-# reporter thread isn't even started. dashboard_token is sent as the
-# X-CCSync-Token header; ask the admin for the value.
-dashboard_url = "http://100.71.216.3:8480"
+# dashboard so an admin can see editor health without remoting in. There is
+# NO default (2026-08-17): the installer writes your admin's URL here --
+# remote editors get the tailnet address, a machine on the same LAN can use
+# the LAN one. Blank disables reporting, managed sync and the tray's "Open
+# dashboard" link entirely -- the reporter thread isn't even started.
+# dashboard_token is sent as the X-CCSync-Token header; ask the admin for it.
+dashboard_url = "http://<your-dashboard-host>:8480"
 dashboard_token = ""
 # Login gate: when true, the companion will not start sync lanes/the
 # sequencer, nor report under an identity, until the editor signs in via the

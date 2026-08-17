@@ -294,6 +294,36 @@ def test_sibling_project_does_not_block(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Readiness item 9 -- project_path must refuse `..` like project_path_rel does
+# --------------------------------------------------------------------------
+
+def test_project_path_refuses_dot_dot_and_empty_segments():
+    """--series .. walked one level OUT of the projects root, and everything
+    downstream (mkdir -p, chown -R, the marker write) then ran as root wherever
+    it landed. project_path_rel has always rejected the shape; the
+    --year/--series/--project entry point only refused separators until
+    2026-08-17 (COMMERCIAL_READINESS.md item 9)."""
+    for year, series, project in (
+        ("2026", "..", "Nuclear"),
+        ("..", "FF4", "Nuclear"),
+        ("2026", "FF4", ".."),
+        ("2026", "FF4", "..hidden"),
+        ("2026", ".ccsync", "Nuclear"),
+        ("2026", "  ", "Nuclear"),
+        ("2026", "", "Nuclear"),
+        ("2026", "a..b", "Nuclear"),
+    ):
+        with pytest.raises(ValueError):
+            common.project_path("/p", year, series, project)
+
+
+def test_project_path_still_accepts_the_names_this_fleet_uses():
+    assert common.project_path("/p", "2026", "CCT", "Creator Profiles") ==         "/p/2026/CCT/Creator Profiles"
+    # ...and agrees with the rel-path entry point, which is the other way in
+    assert common.project_path("/p/", "2025", "FF4", "Nuclear") ==         common.project_path_rel("/p", "2025/FF4/Nuclear")
+
+
+# --------------------------------------------------------------------------
 # SEC-8 -- free-text names must not be substituted by the root-run shell
 # --------------------------------------------------------------------------
 
@@ -1217,7 +1247,15 @@ COMPOSE_YAML = (Path(__file__).resolve().parents[2] / "dashboard" / "deploy"
 
 
 def _compose_text() -> str:
-    return COMPOSE_YAML.read_text(encoding="utf-8")
+    """compose.yaml RENDERED for this site.
+
+    The file is a TEMPLATE since 2026-08-17 (WP0 step 2): the drift checks
+    below compare two descriptions of the same deployment, so they have to read
+    the rendered one. What the template itself must contain -- and that
+    rendering it with this site's values reproduces the pre-templating file
+    exactly -- is test_compose_template.py's job.
+    """
+    return install_dashboard_app.render_compose_yaml()
 
 
 def _dashboard_service() -> dict:
@@ -1502,7 +1540,10 @@ def test_no_server_script_reintroduces_the_filtered_app_query():
     # Same defect, same fix -- keep every /app caller in step. Comments may
     # mention query-filters (they explain why it is gone); code may not.
     server_dir = Path(__file__).resolve().parents[1]
-    for name in ("install_syncthing_app.py", "install_dashboard_app.py"):
+    # backends/truenas.py joined the list on 2026-08-17: both /app callers
+    # moved their bodies there (WP3), and the defect would move with them.
+    for name in ("install_syncthing_app.py", "install_dashboard_app.py",
+                 "backends/truenas.py"):
         for lineno, line in enumerate((server_dir / name).read_text(encoding="utf-8").splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue

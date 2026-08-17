@@ -199,7 +199,7 @@ def test_dashboard_reachable_false_when_blank_url():
 
 
 def test_dashboard_host_strips_scheme_and_port():
-    assert steps.dashboard_host("http://100.71.216.3:8480") == "100.71.216.3"
+    assert steps.dashboard_host("http://10.0.0.5:8480") == "10.0.0.5"
 
 
 def test_dashboard_host_https_no_port():
@@ -207,7 +207,7 @@ def test_dashboard_host_https_no_port():
 
 
 def test_dashboard_host_bare_hostname_fallback():
-    assert steps.dashboard_host("100.71.216.3") == "100.71.216.3"
+    assert steps.dashboard_host("10.0.0.5") == "10.0.0.5"
 
 
 # -- parse_device_id ------------------------------------------------------
@@ -716,9 +716,9 @@ def test_run_bootstrap_builds_expected_powershell_command(tmp_path):
     exit_code, output = steps.run_bootstrap(
         editor_name="jsmith",
         dashboard_token="report-secret",
-        tailnet_host="100.71.216.3",
+        tailnet_host="10.0.0.5",
         local_root=r"F:\Creators_Club",
-        dashboard_url="http://100.71.216.3:8480",
+        dashboard_url="http://10.0.0.5:8480",
         run=fake_run,
         script_path=script,
         platform="win32",
@@ -730,9 +730,9 @@ def test_run_bootstrap_builds_expected_powershell_command(tmp_path):
     assert cmd[0] == "powershell"
     assert "-ExecutionPolicy" in cmd and "Bypass" in cmd
     assert "-File" in cmd and str(script) in cmd
-    assert "-TailnetHost" in cmd and "100.71.216.3" in cmd
+    assert "-TailnetHost" in cmd and "10.0.0.5" in cmd
     assert "-EditorName" in cmd and "jsmith" in cmd
-    assert "-DashboardUrl" in cmd and "http://100.71.216.3:8480" in cmd
+    assert "-DashboardUrl" in cmd and "http://10.0.0.5:8480" in cmd
     assert "-LocalRoot" in cmd and r"F:\Creators_Club" in cmd
     # The fleet token travels in the environment, NEVER on argv: a native
     # process's command line is readable by any unprivileged process via
@@ -776,7 +776,7 @@ def test_run_bootstrap_omits_local_root_when_not_given(tmp_path):
     steps.run_bootstrap(
         editor_name="jsmith",
         dashboard_token="report-secret",
-        tailnet_host="100.71.216.3",
+        tailnet_host="10.0.0.5",
         run=fake_run,
         script_path=script,
         platform="win32",
@@ -798,7 +798,7 @@ def test_run_bootstrap_passes_companion_exe_source_when_given(tmp_path):
     steps.run_bootstrap(
         editor_name="jsmith",
         dashboard_token="report-secret",
-        tailnet_host="100.71.216.3",
+        tailnet_host="10.0.0.5",
         companion_exe_source=companion,
         run=fake_run,
         script_path=script,
@@ -817,7 +817,7 @@ def test_run_bootstrap_omits_companion_exe_source_when_not_given(tmp_path):
         return _FakeResult(returncode=0, stdout="")
 
     steps.run_bootstrap(
-        editor_name="jsmith", dashboard_token="x", tailnet_host="100.71.216.3",
+        editor_name="jsmith", dashboard_token="x", tailnet_host="10.0.0.5",
         run=fake_run, script_path=script, platform="win32",
     )
     assert "-CompanionExeSource" not in captured["cmd"]
@@ -833,7 +833,7 @@ def test_run_bootstrap_propagates_nonzero_exit_code(tmp_path):
     exit_code, output = steps.run_bootstrap(
         editor_name="jsmith",
         dashboard_token="x",
-        tailnet_host="100.71.216.3",
+        tailnet_host="10.0.0.5",
         run=fake_run,
         script_path=script,
     )
@@ -851,7 +851,7 @@ def test_run_bootstrap_passes_timeout_to_run(tmp_path):
         return _FakeResult(returncode=0, stdout="")
 
     steps.run_bootstrap(
-        editor_name="jsmith", dashboard_token="x", tailnet_host="100.71.216.3",
+        editor_name="jsmith", dashboard_token="x", tailnet_host="10.0.0.5",
         run=fake_run, script_path=script,
     )
     assert captured["kwargs"]["timeout"] == steps.BOOTSTRAP_TIMEOUT_SECONDS
@@ -866,7 +866,7 @@ def test_run_bootstrap_timeout_becomes_failed_install_result(tmp_path):
                                          output="partial output so far", stderr="")
 
     exit_code, output = steps.run_bootstrap(
-        editor_name="jsmith", dashboard_token="x", tailnet_host="100.71.216.3",
+        editor_name="jsmith", dashboard_token="x", tailnet_host="10.0.0.5",
         run=fake_run, script_path=script,
     )
     assert exit_code != 0
@@ -905,7 +905,7 @@ def test_finalize_config_identity_rewrites_mismatched_editor_name(tmp_path):
     config_path.write_text(
         'editor_name = "someoneelse"\n'
         'local_root = ""\n'
-        'remote = "creators_club_sftp"\n'
+        'remote = "acme_sftp"\n'
         'remote_root = ""\n'
     )
     steps.finalize_config_identity("jsmith", config_path=config_path)
@@ -918,7 +918,7 @@ def test_finalize_config_identity_noop_when_already_matching(tmp_path):
     original = (
         'editor_name = "jsmith"\n'
         'local_root = ""\n'
-        'remote = "creators_club_sftp"\n'
+        'remote = "acme_sftp"\n'
         'remote_root = ""\n'
     )
     config_path.write_text(original)

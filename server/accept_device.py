@@ -2,7 +2,7 @@
 """Approve (accept + name) a pending editor Syncthing device.
 
     python accept_device.py --device-id ABCD1234-... --device-name jsmith \\
-        --gui-url http://192.168.0.102:8384 --api-key XXXX [--dry-run]
+        --gui-url http://<nas>:8384 --api-key XXXX [--dry-run]
 
 Run this once per new editor device. The editor's device ID is printed by
 their bootstrap script (installer/windows_bootstrap.ps1 or macos_bootstrap.sh)
@@ -39,7 +39,7 @@ import os
 import re
 import sys
 
-from common import ok, syncthing_api
+from common import add_site_arg, cli, ok, syncthing_api
 
 # A Syncthing device ID is 8 dash-separated groups of 7 base32 characters
 # (RFC 4648 alphabet minus 0/1/8/9, i.e. A-Z and 2-7), e.g.
@@ -117,6 +117,7 @@ def main():
                          "device unmapped.")
     ap.add_argument("--gui-url", default=os.environ.get("SYNCTHING_GUI_URL"))
     ap.add_argument("--api-key", default=os.environ.get("SYNCTHING_API_KEY"))
+    add_site_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -231,4 +232,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli(main))

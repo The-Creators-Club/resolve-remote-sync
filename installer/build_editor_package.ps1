@@ -19,7 +19,7 @@
 .PARAMETER Destination
     Where to assemble the package. Defaults to the canonical location on the
     NAS, P:\Assets\Software\CC_Sync (the base rig's P: maps to
-    \\<nas>\TheCreatorsPool\Creators_Club since 2026-07-26) -- the single
+    \\<nas>\<share>\<tree> since 2026-07-26) -- the single
     source of truth for editor packages, so every update lands there and
     there is only ever one copy to reason about. An existing folder is
     overwritten file-by-file, not deleted.
@@ -28,7 +28,7 @@
     brings down Proxy/ contents, and the Syncthing folders are scoped to
     individual projects under Projects/, so Assets/ never leaves the NAS on
     its own. Editors get the package by being pointed at the share (or sent
-    a copy) -- it will not appear in their Creators_Club folder by magic.
+    a copy) -- it will not appear in their own tree folder by magic.
 
 .PARAMETER RebuildExe
     Run PyInstaller against companion/build.spec before assembling. Needed
@@ -75,11 +75,16 @@
     on the dashboard's admin page when ready.
 
 .PARAMETER DashboardUrl
-    Dashboard base URL for -Publish. Defaults to the tailnet address; on the
-    base rig's LAN use http://192.168.0.102:8480.
+    Dashboard base URL. REQUIRED with -Publish -- there is no default any
+    more (it used to be one deployment's tailnet address).
+    $env:CCSYNC_DASHBOARD_URL is used when the flag is absent. Pass whichever
+    address this machine reaches the dashboard on: the tailnet one remotely,
+    the LAN one in the studio.
 
 .PARAMETER AdminUser
     Dashboard admin username for -Publish (must be in DASH_ADMIN_USERS).
+    REQUIRED with -Publish; $env:CCSYNC_ADMIN_USER when the flag is absent.
+    No default -- it used to name one person's account.
 
 .EXAMPLE
     .\build_editor_package.ps1 -RebuildExe
@@ -100,8 +105,12 @@ param(
     [switch]$DryRun,
     [switch]$Publish,
     [switch]$MakeCurrent,
-    [string]$DashboardUrl = "http://100.71.216.3:8480",
-    [string]$AdminUser = "alex"
+    # Both REQUIRED for -Publish, and both without a default since 2026-08-17
+    # (WP0): they used to name one deployment's dashboard and one person's
+    # account. $env:CCSYNC_DASHBOARD_URL / $env:CCSYNC_ADMIN_USER are the
+    # scripted-run route (tools\ship.ps1 passes them explicitly).
+    [string]$DashboardUrl = "",
+    [string]$AdminUser = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -109,6 +118,26 @@ $ErrorActionPreference = "Stop"
 function Write-Step { param([string]$m) Write-Host "[pkg] $m" }
 function Write-Warn2 { param([string]$m) Write-Host "[pkg] WARNING: $m" -ForegroundColor Yellow }
 function Write-Skip2 { param([string]$m) Write-Host "[pkg] (skip) $m" -ForegroundColor DarkGray }
+
+# -Publish needs to know WHERE and AS WHOM, and neither has a default any
+# more. Refused here, before PyInstaller runs and before anything is copied
+# to the destination -- the same "fail before anything moves" rule
+# tools\ship.ps1 applies to its secrets.
+if (-not $DashboardUrl -and $env:CCSYNC_DASHBOARD_URL) { $DashboardUrl = $env:CCSYNC_DASHBOARD_URL }
+if (-not $AdminUser -and $env:CCSYNC_ADMIN_USER) { $AdminUser = $env:CCSYNC_ADMIN_USER }
+if ($DashboardUrl) { $DashboardUrl = $DashboardUrl.TrimEnd("/") }
+# Deliberately NOT written as a plain -Publish block:
+# onboarding/tests/test_release_gates.py locates the REAL publish block by the
+# exact text of its opening line, to prove the macOS bootstrap's CR byte-scan
+# runs outside it (SHIP-8) -- a second block of that shape earlier in the file
+# would make the test find this one instead.
+$missingPublishArgs = @()
+if (-not $DashboardUrl) { $missingPublishArgs += "-DashboardUrl (or CCSYNC_DASHBOARD_URL)" }
+if (-not $AdminUser) { $missingPublishArgs += "-AdminUser (or CCSYNC_ADMIN_USER)" }
+if ($Publish -and $missingPublishArgs.Count -gt 0) {
+    Write-Warn2 "-Publish needs $($missingPublishArgs -join ' and ') -- there is no default dashboard or admin account compiled in."
+    exit 1
+}
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $CompanionDir = Join-Path $RepoRoot "companion"

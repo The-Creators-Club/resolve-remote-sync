@@ -451,21 +451,38 @@ class TestEnsureConfig:
         assert 'mode = "editor"' in text
         assert 'local_root = "D:\\\\CC"' in text
         assert 'canonical_prefix = "P:\\\\"' in text
-        assert 'remote = "creators_club_sftp"' in text
+        # No site manifest -> the NEUTRAL remote name, which is also what both
+        # bootstraps name their rclone stanza when the dashboard publishes no
+        # name (2026-08-17, WP0). It used to be one customer's remote.
+        assert 'remote = "ccsync_sftp"' in text
 
-    def test_editor_role_forces_nonblank_remote_root(self, tmp_path):
-        # S-1: a fresh editor config must never ship a blank remote_root --
-        # rclone would otherwise target the bare SFTP home directory.
+    def test_the_site_manifest_names_the_remote_and_the_tree(self, tmp_path):
+        """WP0: everything tenant-shaped comes from GET /api/v1/site."""
+        path = tmp_path / "config.toml"
+        steps.ensure_config(
+            "editor", editor_name="ruskin", dashboard_url="http://tail:8480",
+            dashboard_token="tok", local_root="D:\\CC", config_path=path,
+            site={"rclone_remote": "acme_sftp", "remote_root": "/volume1/Media/Tree"},
+        )
+        text = path.read_text(encoding="utf-8")
+        assert 'remote = "acme_sftp"' in text
+        assert 'remote_root = "/volume1/Media/Tree"' in text
+
+    def test_a_site_with_no_tree_root_writes_no_tree_root(self, tmp_path):
+        # S-1 says a BLANK remote_root must never survive -- rclone would
+        # target the bare SFTP home directory. Writing `remote_root = ""` is
+        # the one thing worse than writing nothing: it looks like a deliberate
+        # answer to the companion and to the next re-run. So an unknown tree
+        # root leaves the key untouched, and validate_config complains about
+        # it by name at startup.
         path = tmp_path / "config.toml"
         steps.ensure_config(
             "editor", editor_name="ruskin", dashboard_url="http://tail:8480",
             dashboard_token="tok", local_root="D:\\CC", config_path=path,
         )
         text = path.read_text(encoding="utf-8")
-        match = re.search(r'(?m)^remote_root\s*=\s*"(.*)"\s*$', text)
-        assert match is not None
-        assert match.group(1).strip() != ""
-        assert match.group(1) == steps.DEFAULT_REMOTE_ROOT
+        # the template's own blank line survives; nothing was seeded over it
+        assert not re.search(r'(?m)^remote_root\s*=\s*"[^"]', text)
 
     def test_existing_file_merged_not_replaced(self, tmp_path):
         path = tmp_path / "config.toml"
@@ -547,15 +564,15 @@ class TestEnsureConfig:
         # §7 new-defect 7: remote_root moved from forced to seeded, so an
         # admin who pointed this editor at a different pool path keeps it.
         path = tmp_path / "config.toml"
-        path.write_text('remote_root = "/mnt/tank/OtherPool/Creators_Club"\n',
+        path.write_text('remote_root = "/mnt/tank/OtherPool/Tree"\n',
                         encoding="utf-8")
         steps.ensure_config(
             "editor", editor_name="e", dashboard_url="u", dashboard_token="t",
-            config_path=path,
+            config_path=path, site={"remote_root": "/mnt/tank/SitePool/Tree"},
         )
         text = path.read_text(encoding="utf-8")
-        assert 'remote_root = "/mnt/tank/OtherPool/Creators_Club"' in text
-        assert steps.DEFAULT_REMOTE_ROOT not in text
+        assert 'remote_root = "/mnt/tank/OtherPool/Tree"' in text
+        assert "SitePool" not in text
 
     def test_blank_remote_root_is_still_repaired(self, tmp_path):
         # ...but a blank one must never survive: S-1's whole point.
@@ -563,9 +580,9 @@ class TestEnsureConfig:
         path.write_text('remote_root = ""\n', encoding="utf-8")
         steps.ensure_config(
             "editor", editor_name="e", dashboard_url="u", dashboard_token="t",
-            config_path=path,
+            config_path=path, site={"remote_root": "/volume1/Media/Tree"},
         )
-        assert f'remote_root = "{steps.DEFAULT_REMOTE_ROOT}"' in path.read_text(encoding="utf-8")
+        assert 'remote_root = "/volume1/Media/Tree"' in path.read_text(encoding="utf-8")
 
     def test_local_root_and_editor_name_are_still_forced(self, tmp_path):
         # These the installer DOES own -- a stale one is what makes reports
@@ -634,7 +651,7 @@ def test_installer_on_forbidden_drive_only_when_frozen(monkeypatch):
     monkeypatch.setattr(steps.sys, "frozen", True, raising=False)
     monkeypatch.setattr(steps.sys, "executable", "P:\\onboard.exe")
     assert steps.installer_on_forbidden_drive() is True
-    monkeypatch.setattr(steps.sys, "executable", "\\\\192.168.0.102\\share\\onboard.exe")
+    monkeypatch.setattr(steps.sys, "executable", "\\\\10.0.0.6\\share\\onboard.exe")
     assert steps.installer_on_forbidden_drive() is True
     monkeypatch.setattr(steps.sys, "executable", "C:\\Users\\x\\Desktop\\onboard.exe")
     assert steps.installer_on_forbidden_drive() is False

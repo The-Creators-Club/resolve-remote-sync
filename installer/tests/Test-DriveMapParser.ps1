@@ -27,8 +27,8 @@ $end = $src.IndexOf('# Reads the CURRENT USER''s DOS device map')
 Invoke-Expression $src.Substring($start, $end - $start)
 
 $UNC1 = [char]92 + [char]92 + 'localhost' + [char]92 + 'CCSync_P'
-$UNC2 = [char]92 + [char]92 + 'nas' + [char]92 + 'TheCreatorsPool'
-$UNC3 = [char]92 + [char]92 + '192.168.0.102' + [char]92 + 'pool'
+$UNC2 = [char]92 + [char]92 + 'nas' + [char]92 + 'Media'
+$UNC3 = [char]92 + [char]92 + '10.0.0.5' + [char]92 + 'pool'
 $UNC4 = [char]92 + [char]92 + 'nas' + [char]92 + 'share'
 
 $cases = @(

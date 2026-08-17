@@ -9,3 +9,7 @@ __pycache__/
 dist/
 build/
 *.spec.bak
+
+# Per-site manifest (tenant identity, no secrets). The example stays tracked;
+# the real one is local to each admin machine (2026-08-17, SYNOLOGY_PORT_PLAN WP0).
+site.toml

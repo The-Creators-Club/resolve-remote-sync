@@ -2,7 +2,7 @@
 """Create (or update) one Syncthing folder for a project, lane C only.
 
     python setup_syncthing_folder.py --project-rel-path 2025/FF4/Nuclear \\
-        --gui-url http://192.168.0.102:8384 --api-key XXXX [--dry-run]
+        --gui-url http://<nas>:8384 --api-key XXXX [--dry-run]
 
 `--project-rel-path` is relative to Creators_Club/Projects on the mount
 (e.g. "2025/FF4/Nuclear"), matching the args passed to setup_tree.py's
@@ -96,6 +96,9 @@ import sys
 from common import (
     DEFAULT_PROJECTS_ROOT,
     MARKER_FILENAME,
+    add_site_arg,
+    cli,
+    require_site_value,
     add_host_key_arg,
     build_marker_read_cmd,
     build_stignore_lines,
@@ -324,7 +327,7 @@ def main():
     ap.add_argument("--project-rel-path", required=True,
                      help='e.g. 2025/FF4/Nuclear or "2026/Creator Profiles/Season 1"')
     ap.add_argument("--gui-url", default=os.environ.get("SYNCTHING_GUI_URL"),
-                     help="e.g. http://192.168.0.102:8384 (or SYNCTHING_GUI_URL env var)")
+                     help="e.g. http://<nas>:8384 (or SYNCTHING_GUI_URL env var)")
     ap.add_argument("--api-key", default=os.environ.get("SYNCTHING_API_KEY"),
                      help="Syncthing API key (or SYNCTHING_API_KEY env var)")
     ap.add_argument("--container-mount", default=CONTAINER_MOUNT_DEFAULT,
@@ -344,9 +347,12 @@ def main():
                           "--project-rel-path. Correct ONLY for a project that has never "
                           "moved")
     add_host_key_arg(ap)
+    add_site_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     set_host_key_pin(args.host_key)
+    args.projects_root = require_site_value(
+        args.projects_root, "[tree] pool_root/tree_name", "--projects-root")
 
     if not args.dry_run and not args.gui_url:
         print("FAILED: --gui-url is required (or set SYNCTHING_GUI_URL)", file=sys.stderr)
@@ -501,4 +507,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli(main))

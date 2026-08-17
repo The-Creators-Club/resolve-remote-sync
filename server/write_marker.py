@@ -33,6 +33,9 @@ import sys
 from common import (
     DEFAULT_PROJECTS_ROOT,
     MARKER_FILENAME,
+    add_site_arg,
+    cli,
+    require_site_value,
     add_host_key_arg,
     build_marker_read_cmd,
     build_marker_write_cmd,
@@ -111,9 +114,12 @@ def main():
                      help="required to CHANGE an existing marker's slug (writing a "
                           "marker where there is none never needs it)")
     add_host_key_arg(ap)
+    add_site_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     set_host_key_pin(args.host_key)
+    args.projects_root = require_site_value(
+        args.projects_root, "[tree] pool_root/tree_name", "--projects-root")
 
     rel = args.project_rel_path.strip().strip("/")
     base = project_path_rel(args.projects_root, rel)
@@ -176,4 +182,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli(main))

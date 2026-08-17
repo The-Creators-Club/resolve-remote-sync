@@ -45,11 +45,13 @@ class TestSelectors:
         assert steps.default_local_root("win32") == r"C:\Creators_Club"
 
     def test_default_base_local_root(self):
-        # Windows base: P:\ IS the NAS share mapping. macOS base: the same
-        # share mounted over SMB lands under /Volumes/<ShareName>, tree one
-        # level in.
+        # Windows base: P:\ IS the NAS share mapping, and that is true of
+        # every deployment. macOS base: the same share mounted over SMB lands
+        # under /Volumes/<ShareName> with the tree one level in -- and only
+        # the site knows those two names, so since 2026-08-17 (WP0) there is
+        # no default to guess with. The wizard asks.
         assert steps.default_base_local_root("win32") == "P:\\"
-        assert steps.default_base_local_root("darwin") == "/Volumes/TheCreatorsPool/Creators_Club"
+        assert steps.default_base_local_root("darwin") == ""
 
     def test_companion_bin_dir(self):
         assert steps.companion_bin_dir("darwin") == Path.home() / ".local" / "ccsync" / "bin"
@@ -151,8 +153,8 @@ class TestRunBootstrapMac:
         defaults = dict(
             editor_name="leso",
             dashboard_token="report-secret",
-            tailnet_host="100.71.216.3",
-            dashboard_url="http://100.71.216.3:8480",
+            tailnet_host="10.0.0.5",
+            dashboard_url="http://10.0.0.5:8480",
             run=fake_run,
             script_path=script,
             platform="darwin",
@@ -178,7 +180,7 @@ class TestRunBootstrapMac:
         assert exit_code == 0
         cmd = captured["cmd"]
         assert cmd[0] == "bash" and str(script) in cmd
-        assert "--tailnet-host" in cmd and "100.71.216.3" in cmd
+        assert "--tailnet-host" in cmd and "10.0.0.5" in cmd
         assert "--editor-name" in cmd and "leso" in cmd
         assert "--local-root" in cmd and "/Volumes/T7/Creators_Club" in cmd
         assert "--companion-file" in cmd and str(companion) in cmd
@@ -200,7 +202,7 @@ class TestRunBootstrapMac:
         # (it has no flags for either) -- see its "Overridable from the
         # environment" block.
         assert env["DASHBOARD_TOKEN"] == "report-secret"
-        assert env["DASHBOARD_URL"] == "http://100.71.216.3:8480"
+        assert env["DASHBOARD_URL"] == "http://10.0.0.5:8480"
 
     def test_omits_optional_flags_when_not_given(self, tmp_path):
         captured = {}
@@ -427,7 +429,7 @@ class TestValidateLocalRootMac:
                               mounted=True) is None
 
     def test_base_unmounted_share_message_talks_about_the_nas(self):
-        problem = self._validate("/Volumes/TheCreatorsPool/Creators_Club",
+        problem = self._validate("/Volumes/Media/Creators_Club",
                                  role="base", mounted=False)
         assert problem and "NAS" in problem
         # ...and never tells a base rig to plug in an SSD.
@@ -493,18 +495,21 @@ class TestEnsureConfigMac:
         assert 'canonical_prefix = "P:\\\\"' in text
         assert 'mode = "editor"' in text
 
-    def test_base_mode_defaults_to_the_mac_nas_mount(self, tmp_path):
+    def test_base_mode_takes_the_mac_nas_mount_it_was_given(self, tmp_path):
+        # There is no compiled-in /Volumes default any more (WP0), so the
+        # path the wizard collected is the whole answer -- and it still sets
+        # BOTH keys from it.
         path = tmp_path / "config.toml"
         steps.ensure_config(
             "base", editor_name="alex", dashboard_url="http://x:8480",
-            dashboard_token="tok", local_root=None, config_path=path,
-            platform="darwin",
+            dashboard_token="tok", local_root="/Volumes/Media/Tree",
+            config_path=path, platform="darwin",
         )
         text = path.read_text(encoding="utf-8")
-        assert 'local_root = "/Volumes/TheCreatorsPool/Creators_Club"' in text
+        assert 'local_root = "/Volumes/Media/Tree"' in text
         # Base mode: everything on the volume outside the tree counts as
         # out-of-tree, so the prefix IS the root (same rule as Windows base).
-        assert 'canonical_prefix = "/Volumes/TheCreatorsPool/Creators_Club"' in text
+        assert 'canonical_prefix = "/Volumes/Media/Tree"' in text
         assert 'mode = "base"' in text
 
 

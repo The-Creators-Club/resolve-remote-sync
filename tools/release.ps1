@@ -66,6 +66,9 @@
 
 .PARAMETER DashboardUrl
     Only used to render the publish command in the "what to do next" block.
+    No default since 2026-08-17 (WP0): it used to be one deployment's tailnet
+    address. $env:CCSYNC_DASHBOARD_URL is used when the flag is absent, and
+    with neither the block prints a placeholder instead of somebody's URL.
 
 .EXAMPLE
     .\tools\release.ps1
@@ -79,8 +82,11 @@ param(
     [switch]$SkipTests,
     [switch]$AllowDirty,
     [switch]$DryRun,
-    [string]$DashboardUrl = "http://100.71.216.3:8480"
+    [string]$DashboardUrl = ""
 )
+
+if (-not $DashboardUrl -and $env:CCSYNC_DASHBOARD_URL) { $DashboardUrl = $env:CCSYNC_DASHBOARD_URL }
+if (-not $DashboardUrl) { $DashboardUrl = "<your-dashboard-url>" }
 
 $ErrorActionPreference = "Stop"
 

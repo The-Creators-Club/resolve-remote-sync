@@ -1,0 +1,140 @@
+# CC Sync site manifest -- WHO THIS DEPLOYMENT IS.
+#
+# Copy to `site.toml` at the repo root (or anywhere, and point at it with
+# --site / $CCSYNC_SITE) and fill it in. Every server/ script reads it:
+#
+#     cp site.example.toml site.toml
+#     python server/check_health.py --dry-run
+#
+# Search order for the file: `--site <path>`, then $CCSYNC_SITE, then
+# <repo>/site.toml. Search order for a VALUE: the script's own flag, then its
+# env var, then this file, then nothing -- and "nothing" is a refusal naming
+# the key, never a fallback to some other site's NAS. Before 2026-08-17 these
+# were literals in server/common.py, which made a second deployment a fork
+# rather than a config change (docs/COMMERCIAL_READINESS.md item 10).
+#
+# NO SECRETS IN HERE. Passwords, API keys and tokens stay in the environment:
+#   TRUENAS_PW           the NAS admin password (SSH sudo + REST)
+#   SYNCTHING_API_KEY    Syncthing's GUI API key
+#   DASH_REPORT_TOKEN    the fleet report token the companions send
+#   DASH_SESSION_SECRET  dashboard login sessions
+#   BROLL_INGEST_TOKEN   the b-roll ingest write path
+# This file is meant to be readable, diffable and (if you like) committed;
+# those are not.
+#
+# Every key below is OPTIONAL in the sense that a flag or env var can supply
+# it instead -- but a script that needs one and finds it nowhere stops.
+
+[nas]
+# "truenas" or "synology" -- both implemented (docs/SERVER.md,
+# docs/SERVER-SYNOLOGY.md). Overridden by --nas-kind / $CCSYNC_NAS_KIND.
+kind = "truenas"
+# LAN or tailnet address of the NAS. Env: TRUENAS_HOST.
+host = "192.168.0.10"
+# The admin account the scripts SSH in as and call the REST API with. On
+# TrueNAS this is truenas_admin; on DSM it must be a member of
+# `administrators` (SSH is admin-only there) with 2FA off. Env: TRUENAS_USER.
+# Its password is TRUENAS_PW, or SYNO_PW on a Synology site.
+admin_user = "truenas_admin"
+# Verify the NAS's TLS certificate on API calls. "0" trusts a self-signed one,
+# which is the out-of-the-box state of both platforms.
+verify_ssl = "0"
+# Optional SSH host-key pin, in known_hosts form -- get it with
+#   ssh-keyscan -t ed25519 <host>
+# Unset means the key is accepted unverified on first use (a warning is
+# printed). Also settable as --host-key / $CCSYNC_SSH_HOSTKEY.
+# ssh_hostkey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."
+
+[tree]
+# The dataset / shared folder the tree lives in, and the tree's own directory
+# name. Together they are the tree root -- what an editor sees as P:\.
+# TrueNAS: /mnt/<pool>/<dataset>.  Synology: /volume<N>/<share>.
+pool_root = "/mnt/tank/YourPool"
+tree_name = "Creators_Club"
+# The subdirectory under the tree root that holds projects. Everything else
+# (Assets/Luts, Assets/Stills, Assets/B-roll Archive, Assets/Music) is fixed
+# by the product: the companion, the dashboard and the b-roll/music mounts all
+# agree on those names.
+projects_dir = "Projects"
+# Where editor home directories live -- the PARENT, never one editor's home.
+# Defaults to <pool_root>/homes, which is what TrueNAS creates. DSM's User Home
+# service puts them at /var/services/homes (= /volume1/homes), so set it there.
+# sshd's StrictModes decides whether an editor's key works at all, so this path
+# is not cosmetic: see server/README.md's "home directory trap".
+# homes_parent = "/mnt/tank/YourPool/homes"
+# The SMB share name and the UNC path editors map as P:. Serve it from here
+# rather than deriving it from the pool path -- the derivation only works on
+# TrueNAS (companion/drive_swap.py, config key server_p_unc).
+share_name = "Creators_Club"
+smb_unc = "\\\\nas\\Creators_Club"
+
+[apps]
+# Where the dashboard app's own host tree lives (code, venv, data, the
+# read-only artefact mounts). Everything under <root>/app is REPLACED as root
+# on every deploy, so the backend refuses a root that does not match its shape:
+#   TrueNAS   /mnt/<pool>/apps/ccsync-dashboard
+#   Synology  /volume<N>/<share>/ccsync
+root = "/mnt/tank/apps/ccsync-dashboard"
+
+[net]
+# Where editors reach the dashboard (check_health.py checks this URL, and it
+# is what goes in each editor's ~/.ccsync/config.toml).
+dashboard_url = "http://100.64.0.1:8480"
+# The interfaces the dashboard container publishes on. NEVER 0.0.0.0: a new
+# NAS interface must not silently expose it. Both must be addresses the NAS
+# actually has, or Docker refuses to start the app with "cannot assign
+# requested address" -- asynchronously, long after the deploy returns.
+# On Synology leave these unset: the stack binds 127.0.0.1 and `tailscale
+# serve` publishes it (docs/SYNOLOGY_PORT_PLAN.md decision 5).
+bind_lan = "192.168.0.10"
+bind_tailnet = "100.64.0.1"
+# SSH/SFTP port for lanes A and B. 22 unless DSM has been moved off it.
+sftp_port = "22"
+# rclone's SFTP window for lanes A/B: chunk size x concurrency.
+#
+# 255Ki x 64 is what the companion has always used, and it is deliberate -- a
+# big window is what keeps a 150 ms tailnet link full. It is also NOT SAFE
+# EVERYWHERE: measured on DSM 7.2.1 (OpenSSH 8.2p1) on 2026-08-17, a download
+# at 255Ki TRUNCATES at 539,000,832 bytes and rclone reports success. The
+# server has no `limits@openssh.com` extension, so the client never learns the
+# real cap; anything under OpenSSH 8.5 has the same hole. 64Ki is measured
+# good (112 MiB/s down on 1 GbE) and is the required value for a Synology
+# site. See docs/synology-spikes-2026-08-17.md spike 6.
+sftp_chunk_size = "255Ki"      # Synology MUST set "64Ki"
+sftp_concurrency = 64          # Synology: 16
+# Where editors point lanes A/B. Defaults to [nas] host; set it when they
+# reach the NAS by a different name than this admin machine does.
+# sftp_host = "100.64.0.1"
+# The remote NAME in each editor's rclone.conf. Served by GET /api/v1/site.
+rclone_remote = "ccsync_sftp"
+# rclone's `shell_type`. "unix" lets it run md5sum over SSH for checksums;
+# DSM editors have /sbin/nologin as their shell, so a Synology site needs
+# "none" or every checksum call fails.
+shell_type = "unix"            # Synology: "none"
+
+[syncthing]
+# Syncthing's GUI, as seen FROM THE DASHBOARD CONTAINER (the NAS's own LAN
+# address works; localhost does not).
+gui_url = "http://192.168.0.10:8384"
+# The NAS's Syncthing device ID -- what an editor's companion pairs with.
+# Read it from the Syncthing GUI (Actions > Show ID) after the first install.
+device_id = ""
+
+[site]
+# Cosmetic identity, served by GET /api/v1/site to clients that have no
+# credentials yet (the installer, the wizard, the companion).
+org_name = "Your Studio"
+# The drive letter editors map the tree as. Hardcoded to P: by decision
+# (2026-07-26); it is served so no client has to assume it.
+# canonical_prefix = "P:\\"
+
+[stack]
+# The uid:gid the dashboard container runs as: the service account that owns
+# the tree, and the editors group. 3000:3001 is broll:editors on a TrueNAS
+# built by server/README.md's recipe. DSM assigns >= 1026, so read the real
+# values with `id <user>` there rather than assuming these.
+uid = "3000"
+gid = "3001"
+# Their names, used for `chown -R <owner>:<group>` on the project tree.
+owner = "broll"
+group = "editors"

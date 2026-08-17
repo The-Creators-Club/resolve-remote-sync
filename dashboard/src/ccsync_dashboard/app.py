@@ -28,6 +28,11 @@ STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 _OPEN_EXACT = {
     "/login", "/api/v1/login", "/api/v1/logout", "/api/v1/me",
     "/api/v1/health", "/api/v1/report", "/api/v1/verify", "/favicon.ico",
+    # The site manifest, on the same terms as /api/v1/health: an installer,
+    # the onboarding wizard and the companion all read it BEFORE anyone has
+    # logged in, and it carries no secret (SYNOLOGY_PORT_PLAN.md WP0 step 3;
+    # see api.api_site for what may never be added to it).
+    "/api/v1/site",
 }
 
 # Hard ceiling on a companion report body, enforced from Content-Length BEFORE

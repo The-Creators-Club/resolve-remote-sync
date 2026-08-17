@@ -20,7 +20,7 @@ end shows you two values — your **Syncthing device ID** and **SSH public
 key** — to send to your admin so they can approve you.
 
 "Cleans out" only means the old app files are replaced. Nothing you've
-synced is touched — your Creators_Club folder, proxies, sign-in, Syncthing
+synced is touched — your project tree folder, proxies, sign-in, Syncthing
 identity and SSH key all stay exactly as they are, so there's nothing to
 re-approve. Re-running the wizard any time is safe. Once installed, the
 companion updates itself: when your admin publishes a new version, the tray shows
@@ -63,7 +63,7 @@ so think in hundreds of GB rather than tens. It does **not** have to be your
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\windows_bootstrap.ps1 -TailnetHost 100.71.216.3 -EditorName <yourname> -DashboardToken <token-from-your-admin>
+.\windows_bootstrap.ps1 -TailnetHost <nas-host> -DashboardUrl <your-dashboard-url> -EditorName <yourname> -DashboardToken <token-from-your-admin>
 ```
 
 The script asks for admin rights by itself, once, for the one step that
@@ -80,7 +80,7 @@ ticks.
 To put the sync folder on a different drive, add `-LocalRoot`:
 
 ```powershell
-.\windows_bootstrap.ps1 -TailnetHost 100.71.216.3 -EditorName <yourname> -LocalRoot F:\Creators_Club
+.\windows_bootstrap.ps1 -TailnetHost <nas-host> -DashboardUrl <your-dashboard-url> -EditorName <yourname> -LocalRoot F:\<tree>
 ```
 
 **macOS** — download the script from the dashboard (`[ INSTALLER ]` in the
@@ -90,13 +90,13 @@ header), then, in Terminal:
 cd ~/Downloads
 chmod +x ccsync-onboard-*.sh
 DASHBOARD_TOKEN=<token-from-your-admin> ./ccsync-onboard-*.sh \
-    --tailnet-host 100.71.216.3 --editor-name <yourname> \
-    --local-root "/Volumes/<YourSSD>/Creators_Club"
+    --tailnet-host <nas-host> --editor-name <yourname> \
+    --local-root "/Volumes/<YourSSD>/<tree>"
 ```
 
 Use the flags your admin gives you. `--local-root` should point at the
 external drive you edit from; leave it out and everything lands in
-`~/Creators_Club` on your internal disk. `DASHBOARD_TOKEN` is what lets the
+your home folder on the internal disk. `DASHBOARD_TOKEN` is what lets the
 script install the sync app — without it the script says, loudly, that
 nothing on this Mac will sync.
 
@@ -112,7 +112,7 @@ or skip the `chmod` and start it with `bash` instead — handing the file to
 `bash` as an argument isn't affected by the tag:
 
 ```bash
-DASHBOARD_TOKEN=<token> bash ccsync-onboard-*.sh --tailnet-host 100.71.216.3 --editor-name <yourname> --local-root "/Volumes/<YourSSD>/Creators_Club"
+DASHBOARD_TOKEN=<token> bash ccsync-onboard-*.sh --tailnet-host <nas-host> --editor-name <yourname> --local-root "/Volumes/<YourSSD>/<tree>"
 ```
 
 Re-running the script is safe — it checks everything before it changes
@@ -145,7 +145,7 @@ they've added both. It only takes them a minute.
 `net use`, no "Map network drive", no mounting the NAS over SMB on a Mac.
 
 On Windows, `P:` is created for you and is the only one you need. In Explorer
-it shows up as **TheCreatorsClub** so you can tell it apart from your own
+it shows up under your studio's tree name so you can tell it apart from your own
 drives — only project material goes in there. On a Mac there is no `P:`
 drive at all: Resolve's **Mapped Mount** setting does that job, and the setup
 script fills it in for you (see EDITOR_SETUP.md step 6).
@@ -164,7 +164,7 @@ Easiest: let the setup script do it, by pointing it at the exe in this
 folder — it copies the app into place *and* registers auto-start:
 
 ```powershell
-.\windows_bootstrap.ps1 -TailnetHost 100.71.216.3 -EditorName <yourname> -CompanionExeSource .\ccsync-companion.exe
+.\windows_bootstrap.ps1 -TailnetHost <nas-host> -DashboardUrl <your-dashboard-url> -EditorName <yourname> -CompanionExeSource .\ccsync-companion.exe
 ```
 
 By hand instead: copy `ccsync-companion.exe` into
@@ -174,7 +174,7 @@ By hand instead: copy `ccsync-companion.exe` into
 ```
 
 (paste that into Explorer's address bar; create the `bin` folder if it isn't
-there) and run it from there. **Don't** keep it in your `Creators_Club`
+there) and run it from there. **Don't** keep it in your project tree
 folder, on the Desktop, or anywhere else — that's the one location the setup
 script starts at logon, and stray copies elsewhere cause problems later.
 Re-running the setup script will *not* find a copy you put somewhere else.
@@ -211,7 +211,7 @@ script with it, or the app can't report status or follow your ticks.)
 
 1. Resolve → Project Manager → ⋮ (or the network/globe icon) → **Add Project Library**
 2. Type: **Network / PostgreSQL**, and enter:
-   - Host: `100.71.216.3`
+   - Host: `<nas-host>`
    - Username: `postgres`
    - Password: *(your admin sends this separately)*
 3. Open the shared project. Set **Playback → Proxy Handling → Prefer Proxies**.
@@ -219,7 +219,7 @@ script with it, or the app can't report status or follow your ticks.)
    (`P:\` → your sync folder) for you. Check it under Preferences → Media
    Storage. If step 2 said it couldn't — because Resolve was open, or had
    never been launched on this Mac — quit Resolve, then run
-   `./ccsync-onboard-*.sh --resolve-mapping-only --local-root "/Volumes/<YourSSD>/Creators_Club"`.
+   `./ccsync-onboard-*.sh --resolve-mapping-only --local-root "/Volumes/<YourSSD>/<tree>"`.
    EDITOR_SETUP.md step 6 has both that and the by-hand walkthrough.
 
 ## How it works (the 30-second version)
@@ -231,7 +231,7 @@ script with it, or the app can't report status or follow your ticks.)
 - **Proxies download to you**, camera originals stay on the server. You edit
   proxies; Resolve handles the swap at export time on the studio base rig.
 - **Anything you add** (music, graphics, your own footage) **uploads
-  automatically** — as long as it lives inside your `Creators_Club` folder. The
+  automatically** — as long as it lives inside your project tree folder. The
   popup keeps you honest here; use tray → **Scan whole project** to check media
   you imported but haven't cut in yet.
 - **Starting from a project you already had?** Tray → **Consolidate
@@ -253,7 +253,7 @@ script with it, or the app can't report status or follow your ticks.)
   identity so a reinstall is painless. `.\windows_uninstall.ps1 -Full` also
   removes your saved sign-in and Syncthing identity (a reinstall then needs
   your admin to re-approve you). Neither mode ever deletes your synced media in
-  `C:\Creators_Club`.
+  `<tree root>` (e.g. `C:\CCSync`).
 - **On a Mac:** updates arrive the same way (menu bar → **Update now**), and
   removal is `./macos_uninstall.sh` — same two modes, `--full` for the
   thorough one, `--dry-run` to see what it would do first. It never touches

@@ -7,8 +7,9 @@
 # modes. The macOS counterpart of installer/windows_uninstall.ps1.
 #
 #   (default) -- stop and remove the companion + Syncthing this installer
-#     put in ~/.local/ccsync, remove both LaunchAgents, and drop the
-#     [creators_club_sftp] stanza from ~/.config/rclone/rclone.conf. Your
+#     put in ~/.local/ccsync, remove both LaunchAgents, and drop this
+#     install's own rclone stanza (the one config.toml's `remote` names) from
+#     ~/.config/rclone/rclone.conf -- and only that one. Your
 #     sign-in and settings in ~/.ccsync are kept.
 #
 #   --full -- also remove your sign-in and settings (~/.ccsync), except
@@ -67,7 +68,13 @@ LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 COMPANION_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.companion.plist"
 SYNCTHING_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.syncthing.plist"
 RCLONE_CONF_PATH="$HOME/.config/rclone/rclone.conf"
-REMOTE_NAME="creators_club_sftp"
+# Resolved from THIS machine's config.toml below (see LOCAL_ROOT). The name
+# stopped being a constant on 2026-08-17 (WP0): the bootstrap takes it from
+# the dashboard's site manifest and falls back to "ccsync_sftp", so an
+# uninstaller with a hardcoded name would silently leave the stanza behind on
+# any site that names its remote something else -- and on every install made
+# before that, whose config.toml still names the old one.
+REMOTE_NAME="ccsync_sftp"
 CANONICAL_PREFIX='P:\'
 
 LOCAL_ROOT=""
@@ -76,6 +83,9 @@ if [ -f "$CCSYNC_PROFILE/config.toml" ]; then
     # is reported the way the editor typed it rather than as P:\\.
     LOCAL_ROOT="$(sed -n 's/^[[:space:]]*local_root[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' \
         "$CCSYNC_PROFILE/config.toml" | head -n 1 | sed 's/\\\\/\\/g')"
+    CONFIGURED_REMOTE="$(sed -n 's/^[[:space:]]*remote[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$CCSYNC_PROFILE/config.toml" | head -n 1)"
+    [ -n "$CONFIGURED_REMOTE" ] && REMOTE_NAME="$CONFIGURED_REMOTE"
 fi
 
 if [ "$FULL" = 1 ]; then

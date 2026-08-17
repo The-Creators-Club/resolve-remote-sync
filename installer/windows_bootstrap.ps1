@@ -8,7 +8,9 @@
       - Tailscale (winget, else prints download URL and exits)
       - rclone   (winget, else scoop, else direct zip to %LOCALAPPDATA%\ccsync\bin)
       - Syncthing (winget, else direct zip to the same bin folder)
-      - the local sync root (-LocalRoot, default C:\Creators_Club)
+      - the local sync root (-LocalRoot; defaults to your existing
+        config.toml's local_root, else %SystemDrive%\<tree name from the
+        dashboard's site manifest>)
       - a logon task that runs `subst P: <LocalRoot>`, run once now too
       - the Syncthing daemon: started now AND registered for autostart
       - an rclone remote config stanza template in %APPDATA%\rclone\rclone.conf
@@ -41,7 +43,7 @@
     integrity level, and warns loudly if even that fails.
 
 .PARAMETER TailnetHost
-    Tailnet hostname or IP of the NAS, e.g. "truenas.tailXXXX.ts.net" or a
+    Tailnet hostname or IP of the NAS, e.g. "nas.tailXXXX.ts.net" or a
     100.x.y.z address. Written into the rclone remote config stanza.
 
 .PARAMETER EditorName
@@ -51,18 +53,23 @@
     SSH auth error rather than anything pointing back at the typo.
 
 .PARAMETER LocalRoot
-    Local sync root. Defaults to C:\Creators_Club. Point this at a volume
-    with plenty of headroom (video originals and proxies land here) -- see
-    the free-space guidance in the onboarding docs.
+    Local sync root. Defaults to whatever your existing config.toml already
+    says, else %SystemDrive%\<tree name>, where the tree name comes from the
+    dashboard's site manifest. Point this at a volume with plenty of headroom
+    (video originals and proxies land here) -- see the free-space guidance in
+    the onboarding docs.
 
 .PARAMETER RemoteRoot
     Absolute path on the NAS under which project trees live. Must be
     absolute: the SFTP session lands in the editor's home directory, so a
     relative path would resolve under ~/ and silently miss the real tree.
+    Omitted, it comes from the dashboard's site manifest; if that has none
+    either, the run reports a capability miss rather than syncing anywhere.
 
 .PARAMETER DriveLabel
-    Explorer display name for the P: drive, default "TheCreatorsClub", so
-    editors can tell it apart from their own drives at a glance. Set via the
+    Explorer display name for the P: drive -- by default the tree name from
+    the site manifest (else "CCSync") -- so editors can tell it apart from
+    their own drives at a glance. Set via the
     per-user DriveIcons registry key rather than `label`: P: is a subst
     drive, which has no volume label of its own, so `label P:` would rename
     the whole underlying volume (e.g. all of F:) instead.
@@ -88,18 +95,32 @@
 .PARAMETER NasSyncthingId
     The NAS Syncthing's device ID, seeded into this machine's Syncthing via
     REST once the daemon is up -- a fresh config knows no devices and drops
-    every NAS connection as "unknown device" otherwise. The default is the
-    production NAS; pass "" to skip seeding.
+    every NAS connection as "unknown device" otherwise. Omitted, it comes
+    from $env:CCSYNC_NAS_SYNCTHING_ID and then from the dashboard's site
+    manifest; with none of the three, lane C is reported as a capability
+    miss rather than silently skipped.
+
+.PARAMETER DashboardUrl
+    REQUIRED. Your admin's dashboard URL -- also where this script reads the
+    site manifest (GET /api/v1/site) that supplies the NAS device ID, tree
+    path, rclone remote name and SSH port. $env:CCSYNC_DASHBOARD_URL is
+    honoured when the flag is absent; with neither, the script refuses to run.
+
+.PARAMETER SftpPort
+    SSH port for the rclone SFTP remote. 0 (the default) means "whatever the
+    site manifest says, else 22".
 
 .PARAMETER DryRun
     Print what would happen without installing anything or touching the
     filesystem/registry/scheduled tasks.
 
 .EXAMPLE
-    .\windows_bootstrap.ps1 -TailnetHost truenas.tailnet.ts.net -EditorName jsmith
+    .\windows_bootstrap.ps1 -TailnetHost nas.tailnet.ts.net -EditorName jsmith `
+        -DashboardUrl http://nas.tailnet.ts.net:8480
 
 .EXAMPLE
-    .\windows_bootstrap.ps1 -TailnetHost 100.71.216.3 -EditorName jsmith -LocalRoot F:\Creators_Club
+    .\windows_bootstrap.ps1 -TailnetHost nas.tailnet.ts.net -EditorName jsmith `
+        -DashboardUrl http://nas.tailnet.ts.net:8480 -LocalRoot F:\CCSync
 #>
 [CmdletBinding()]
 param(
@@ -109,11 +130,18 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EditorName,
 
-    [string]$LocalRoot = "C:\Creators_Club",
+    # ALL FOUR OF THESE ARE UNSET BY DEFAULT since 2026-08-17 (WP0,
+    # docs/SYNOLOGY_PORT_PLAN.md). They used to carry one deployment's tree
+    # name, pool path, Explorer label and NAS device ID -- a compiled-in
+    # tenant identity that made a second customer a fork of this installer.
+    # Each is now resolved, in order: this flag -> the dashboard's site
+    # manifest (GET $DashboardUrl/api/v1/site) -> a neutral fallback, or a
+    # loud refusal where there is no safe fallback. See "site manifest" below.
+    [string]$LocalRoot = "",
 
-    [string]$RemoteRoot = "/mnt/tank/TheCreatorsPool/Creators_Club",
+    [string]$RemoteRoot = "",
 
-    [string]$DriveLabel = "TheCreatorsClub",
+    [string]$DriveLabel = "",
 
     [string]$CompanionExePath = "$env:LOCALAPPDATA\ccsync\bin\ccsync-companion.exe",
     [string]$CompanionExeSource = "",
@@ -124,18 +152,30 @@ param(
     # wait entirely (the companion applies them later either way).
     [int]$ResolvePrefsWaitSeconds = 180,
 
-    # Sync dashboard (tailnet address is right for remote editors). The token
-    # comes from the admin; without it reports/selection are rejected.
-    [string]$DashboardUrl = "http://100.71.216.3:8480",
+    # Sync dashboard: REQUIRED. Your admin's URL -- the tailnet address for a
+    # remote editor, the LAN one for a machine in the studio. There is no
+    # default any more (it used to be one deployment's tailnet IP): this
+    # script refuses to run without it, because it is also where the site
+    # manifest that supplies every value above comes from.
+    # $env:CCSYNC_DASHBOARD_URL is honoured for scripted runs. The token comes
+    # from the admin; without it reports/selection are rejected.
+    [string]$DashboardUrl = "",
     [string]$DashboardToken = "",
+
+    # SSH port for the rclone SFTP remote. 0 = "ask the site manifest, else
+    # 22". DSM commonly moves sshd off 22; TrueNAS does not.
+    [int]$SftpPort = 0,
 
     # The NAS Syncthing's device ID, seeded into this machine's Syncthing so
     # the two can pair without a human accepting anything in either GUI. A
     # fresh `syncthing generate` config knows NO devices, so the NAS's
     # connection attempts are dropped as "unknown device" 1 second after
-    # hello -- the alex_laptop reinstall flapping of 2026-07-26. Empty
-    # string skips the seeding entirely.
-    [string]$NasSyncthingId = "CPGHYGU-KI5UFOR-GPOGIEP-5EW6BIP-ZNJNVY3-Q5GI5PN-TGI346D-MTKBSQR",
+    # hello -- the alex_laptop reinstall flapping of 2026-07-26.
+    # No default: it is fetched from the site manifest (or
+    # $env:CCSYNC_NAS_SYNCTHING_ID), and when neither has one the seeding is
+    # a NAMED capability miss rather than a silent skip -- lane C never
+    # syncing is exactly the failure that used to go unnoticed.
+    [string]$NasSyncthingId = "",
 
     [switch]$DryRun
 )
@@ -338,7 +378,7 @@ function Invoke-MappingCommand {
 #
 #   subst   -> "P:\: => C:\Creators_Club"
 #   net use -> "OK           P:        \\localhost\CCSync_P   Microsoft Windows Network"
-#              "Unavailable  P:        \\nas\TheCreatorsPool  Microsoft Windows Network"
+#              "Unavailable  P:        \\nas\Share  Microsoft Windows Network"
 #
 # The `net use` status column is localised and is sometimes blank, so it is
 # deliberately not matched -- the letter followed by a UNC path is the signal,
@@ -510,6 +550,90 @@ catch {
 # --------------------------------------------------------------------
 # 0. Normalize / echo inputs
 # --------------------------------------------------------------------
+# WHO IS THIS DEPLOYMENT? (2026-08-17, WP0 of docs/SYNOLOGY_PORT_PLAN.md)
+#
+# Every tenant-shaped value this script used to have compiled in -- the NAS
+# Syncthing device ID, the pool path, the tree folder name, the Explorer
+# label, the dashboard address -- now comes from the dashboard itself:
+#
+#     GET $DashboardUrl/api/v1/site   (unauthenticated, no secrets, schema 1)
+#
+# Resolution order for each, and it matters: an explicit FLAG always wins (a
+# hand-run, or the wizard passing what it already fetched), then the
+# manifest, then a neutral fallback -- or a refusal where guessing would put
+# terabytes in the wrong place. A dashboard older than the manifest answers
+# 404 and this whole block is a no-op, which is why every flag still exists.
+if (-not $DashboardUrl -and $env:CCSYNC_DASHBOARD_URL) {
+    $DashboardUrl = $env:CCSYNC_DASHBOARD_URL
+}
+if (-not $DashboardUrl) {
+    Write-Host "[ccsync] ERROR: no -DashboardUrl." -ForegroundColor Red
+    Write-Host "[ccsync] This installer no longer has one compiled in -- ask your admin for the dashboard URL"
+    Write-Host "[ccsync] (e.g. http://nas.your-tailnet.ts.net:8480) and pass it as -DashboardUrl, or set"
+    Write-Host "[ccsync] CCSYNC_DASHBOARD_URL. Without it there is no reporting, no managed sync, no upgrade"
+    Write-Host "[ccsync] channel -- and no way to look up this site's NAS settings."
+    exit 2
+}
+$DashboardUrl = $DashboardUrl.TrimEnd("/")
+
+$Site = $null
+try {
+    $Site = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/site" -TimeoutSec 8
+    Write-Step "site manifest: $DashboardUrl/api/v1/site"
+}
+catch {
+    # 404 = a dashboard older than the manifest; anything else = not reachable
+    # yet (Tailscale is installed further down). Neither is fatal on its own.
+    Write-Warn2 "no site manifest from $DashboardUrl ($($_.Exception.Message)) -- using the values passed on the command line"
+}
+
+function Get-SiteValue {
+    param([string]$Name)
+    if ($null -eq $Site) { return "" }
+    $prop = $Site.PSObject.Properties[$Name]
+    if (-not $prop) { return "" }
+    return "$($prop.Value)".Trim()
+}
+
+if (-not $RemoteRoot) { $RemoteRoot = Get-SiteValue "remote_root" }
+if (-not $NasSyncthingId -and $env:CCSYNC_NAS_SYNCTHING_ID) {
+    $NasSyncthingId = $env:CCSYNC_NAS_SYNCTHING_ID
+}
+if (-not $NasSyncthingId) { $NasSyncthingId = Get-SiteValue "nas_syncthing_id" }
+if ($SftpPort -le 0) {
+    $sitePort = Get-SiteValue "sftp_port"
+    if ($sitePort -match '^\d+$') { $SftpPort = [int]$sitePort }
+}
+if ($SftpPort -le 0) { $SftpPort = 22 }
+
+# The tree's own name, used for BOTH neutral fallbacks below so a machine
+# ends up with C:\<tree> and an Explorer label an editor recognises. Nothing
+# tenant-specific survives when the manifest has none: "CCSync" does.
+$TreeName = Get-SiteValue "tree_name"
+if (-not $TreeName) { $TreeName = "CCSync" }
+
+# -LocalRoot resolves against the EXISTING install before any fallback: a
+# re-run that quietly picked a different folder would subst P: at an empty
+# directory and leave the real tree stranded, which is worse than any
+# default could be.
+if (-not $LocalRoot) {
+    $existingConfig = "$env:USERPROFILE\.ccsync\config.toml"
+    if (Test-Path -LiteralPath $existingConfig) {
+        $m = Select-String -Path $existingConfig -Pattern '^\s*local_root\s*=\s*"(.+)"' |
+            Select-Object -First 1
+        if ($m) {
+            # config.toml is TOML: "C:\\Tree" on disk is C:\Tree as a path.
+            $LocalRoot = $m.Matches[0].Groups[1].Value -replace '\\\\', '\'
+            Write-Step "local root from your existing config.toml: $LocalRoot"
+        }
+    }
+}
+if (-not $LocalRoot) {
+    $LocalRoot = "$env:SystemDrive\$TreeName"
+    Write-Step "no -LocalRoot given -- using $LocalRoot (pass -LocalRoot to put the tree on another volume)"
+}
+if (-not $DriveLabel) { $DriveLabel = $TreeName }
+
 # A double quote in -LocalRoot cannot survive the `cmd /c subst P: "<root>"`
 # command line the logon remap runs through, and there is no escaping that
 # fixes it -- so refuse up front rather than install a machine whose P: never
@@ -527,7 +651,14 @@ if ($EditorName -cne $EditorNameRaw) {
     Write-Warn2 "normalized -EditorName '$EditorNameRaw' -> '$EditorName' (unix usernames are case-sensitive; a mismatch shows up later only as a generic SSH auth failure)"
 }
 
-if (-not $RemoteRoot.StartsWith("/")) {
+if (-not $RemoteRoot) {
+    # A NAMED miss, not a silent blank: with no remote_root, lane A uploads an
+    # editor's originals into their bare SFTP home directory instead of the
+    # project tree, and nothing anywhere says so (S-1). The config seeding
+    # below leaves the key unwritten for the same reason.
+    Add-CapabilityMiss "the NAS project-tree path is not known: no -RemoteRoot was given and $DashboardUrl/api/v1/site does not publish one. Lanes A and B have nowhere to sync to -- ask your admin for the absolute NAS path (e.g. /mnt/<pool>/<share>/<tree> or /volume1/<share>/<tree>) and re-run with -RemoteRoot."
+}
+elseif (-not $RemoteRoot.StartsWith("/")) {
     Write-Warn2 "-RemoteRoot '$RemoteRoot' is not absolute. The SFTP session starts in your home directory on the NAS, so a relative path resolves under ~/ and will not find the project tree. Prefix it with '/'."
 }
 
@@ -1302,7 +1433,10 @@ function Ensure-NasSyncthingDevice {
         }
         $body = @{
             deviceID          = $DeviceId
-            name              = "truenas"
+            # Display name only, and NOT a vendor name any more (2026-08-17):
+            # the peer may be a TrueNAS, a Synology or anything else running
+            # Syncthing. The editor sees this in their Syncthing UI.
+            name              = "ccsync-nas"
             addresses         = @("tcp://${NasHost}:22000", "dynamic")
             compression       = "metadata"
             introducer        = $false
@@ -1413,6 +1547,13 @@ else {
         Ensure-NasSyncthingDevice -ConfigXmlPath "$SyncthingHome\config.xml" `
             -DeviceId $NasSyncthingId -NasHost $TailnetHost
     }
+    else {
+        # Used to be a compiled-in production device ID, so this branch could
+        # not happen; now that the ID comes from the site it can, and a
+        # Syncthing that knows no devices drops every NAS connection as
+        # "unknown device" one second after hello, forever (2026-07-26).
+        Add-CapabilityMiss "the NAS Syncthing device ID is not known: no -NasSyncthingId was given and $DashboardUrl/api/v1/site does not publish one. Lane C (audio, After Effects projects, graphics, subtitles, .drp project files, docs) will never connect -- ask your admin for the NAS device ID and re-run with -NasSyncthingId."
+    }
 }
 
 # --------------------------------------------------------------------
@@ -1422,16 +1563,29 @@ $RcloneConfDir = "$env:APPDATA\rclone"
 $RcloneConfPath = "$RcloneConfDir\rclone.conf"
 Ensure-Dir $RcloneConfDir
 
-$RemoteName = "creators_club_sftp"
+# The remote's NAME is a site decision (the companion's config.toml `remote`
+# must match this stanza exactly, and onboarding/steps.py writes it from the
+# same manifest key). "ccsync_sftp" is the neutral fallback both halves share
+# -- it used to be one customer's name, compiled into three files (WP0).
+$RemoteName = Get-SiteValue "rclone_remote"
+if (-not $RemoteName) { $RemoteName = "ccsync_sftp" }
 $KeyFilePath = "$env:USERPROFILE\.ssh\ccsync_ed25519"
+# shell_type: "unix" lets rclone verify a transfer by running `md5sum` over
+# SSH -- which needs a shell. A DSM editor's shell is /sbin/nologin, so every
+# hash check fails there and the site publishes "none" instead (Synology
+# spike 6, 2026-08-17).
+$ShellType = Get-SiteValue "sftp_shell_type"
+if (-not $ShellType) { $ShellType = "unix" }
+# port: 22 unless the site says otherwise. DSM commonly runs sshd elsewhere,
+# and rclone's sftp backend silently assumes 22 when the key is absent.
 $Stanza = @"
 [$RemoteName]
 type = sftp
 host = $TailnetHost
 user = $EditorName
-port = 22
+port = $SftpPort
 key_file = $KeyFilePath
-shell_type = unix
+shell_type = $ShellType
 "@
 
 $hasSection = $false
@@ -1443,7 +1597,7 @@ if (Test-Path -LiteralPath $RcloneConfPath) {
     # no-BOM UTF-8 (below), and Get-Content with no -Encoding falls back to
     # the system ANSI codepage for a BOM-less file. A non-ASCII value then
     # reads back mangled, the -match duplicate detection misses, and a
-    # SECOND [creators_club_sftp] block gets appended (INST-3).
+    # SECOND [<remote>] block gets appended (INST-3).
     $existingConf = Get-Content -LiteralPath $RcloneConfPath -Raw -Encoding UTF8
     if ($null -eq $existingConf) { $existingConf = "" }
     if ($existingConf -match [Regex]::Escape("[$RemoteName]")) {
@@ -1525,6 +1679,15 @@ if (-not (Test-Path -LiteralPath $KeyFilePath)) {
 $CCSyncConfigDir = "$env:USERPROFILE\.ccsync"
 $CCSyncConfigPath = "$CCSyncConfigDir\config.toml"
 $LocalRootToml = $CCRoot -replace '\\', '\\'
+# A blank remote_root written as `remote_root = ""` looks like a deliberate
+# answer -- to the companion, and to the next re-run of this script. Leaving
+# the key out entirely is what makes validate_config name it as missing (S-1).
+if ($RemoteRoot) {
+    $RemoteRootToml = "remote_root = `"$RemoteRoot`""
+}
+else {
+    $RemoteRootToml = "# remote_root NOT SET -- ask your admin for the absolute NAS tree path"
+}
 
 if (Test-Path -LiteralPath $CCSyncConfigPath) {
     Write-Skip "companion config already exists: $CCSyncConfigPath"
@@ -1553,7 +1716,7 @@ remote = "$RemoteName"
 
 # ABSOLUTE path on the NAS. The SFTP session starts in your home directory,
 # so a relative value here would resolve under ~/ and miss the real tree.
-remote_root = "$RemoteRoot"
+$RemoteRootToml
 
 # OPTIONAL. Lanes A and B replicate the whole local_root <-> remote_root
 # tree, so every Projects/<year>/<series>/<project> folder syncs whatever

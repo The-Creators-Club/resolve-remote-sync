@@ -42,6 +42,7 @@ from . import shutdown_guard as shutdown_guard_mod
 from . import stills as stills_mod
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
+from . import site as site_mod
 from . import youtube_import as youtube_import_mod
 from . import ytdl_executor as ytdl_executor_mod
 from . import ytdlp_manager as ytdlp_mod
@@ -3692,6 +3693,21 @@ class CompanionApp:
             self._identity_thread.start()
         except Exception:
             log.exception("failed to start identity expiry watcher")
+        # Refresh the site manifest (~/.ccsync/state/site.json) once per start,
+        # off the main thread: the installer wrote it on install day, and it
+        # goes stale when the admin re-provisions (SMB UNC, NAS Syncthing ID,
+        # rclone SFTP tuning). refresh_site() falls back to the cache on any
+        # failure, so a dashboard that predates /api/v1/site or is unreachable
+        # costs one debug line (2026-08-17, SYNOLOGY_PORT_PLAN WP0/WP5).
+        dashboard_url = str(self.config.get("dashboard_url", "") or "").strip()
+        if dashboard_url:
+            try:
+                threading.Thread(
+                    target=site_mod.refresh_site, args=(dashboard_url,),
+                    name="ccsync-site-refresh", daemon=True,
+                ).start()
+            except Exception:
+                log.exception("failed to start site manifest refresh")
         self._stop_event.clear()
         self._watcher_thread = threading.Thread(
             target=self.watcher.run, args=(self._stop_event,), name="ccsync-watcher", daemon=True

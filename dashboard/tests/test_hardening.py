@@ -616,7 +616,12 @@ def test_deploy_requirements_match_pyproject_dependencies():
     # Every group whose packages are imported by an app this container mounts
     # in-process rather than by ccsync_dashboard itself. Add the group here
     # when a new one is mounted, or its deps read as "unaccounted-for".
-    for group in ("broll", "music", "ytdl"):
+    # `synology` joins them 2026-08-17: paramiko is not imported by
+    # ccsync_dashboard either, but the Synology NasBackend needs it for the one
+    # thing DSM has no API for (~/.ssh/authorized_keys), and the container is
+    # where that backend runs. Harmless on a TrueNAS site -- an installed
+    # package nothing imports.
+    for group in ("broll", "music", "ytdl", "synology"):
         declared.update({
             _requirement_name(d): d.strip()
             for d in pyproject["project"].get("optional-dependencies", {}).get(group, [])
@@ -690,13 +695,31 @@ def test_the_venv_is_not_inside_the_editor_reachable_data_volume():
     assert "umask 077" in code
 
 
-def test_compose_binds_are_env_driven_and_image_is_pinned():
+def test_compose_binds_are_site_driven_and_image_is_pinned():
     """Two hardcoded IPs in the port bindings made a NAS DHCP change or a
     tailnet IP rotation a hard outage ('cannot assign requested address'),
-    and an unpinned base image changes underneath a redeploy."""
+    and an unpinned base image changes underneath a redeploy.
+
+    Since 2026-08-17 (WP0 step 2 of docs/SYNOLOGY_PORT_PLAN.md) compose.yaml is
+    a TEMPLATE: the bindings are rendered from site.toml by
+    server/install_dashboard_app.render_compose_yaml(), which still emits
+    compose's own `${DASH_BIND_LAN:-<site value>}` indirection -- so the escape
+    hatch survives AND the file no longer names one fleet's addresses. That
+    render is diffed against the pre-templating file, byte for byte, by
+    server/tests/test_compose_template.py; this test guards the template.
+    """
     compose = (DASHBOARD_ROOT / "deploy" / "compose.yaml").read_text(encoding="utf-8")
-    assert "${DASH_BIND_LAN:-192.168.0.102}:8480:8480" in compose
-    assert "${DASH_BIND_TAILNET:-100.71.216.3}:8480:8480" in compose
+    assert "{{DASH_PORT_BINDS}}" in compose, (
+        "the published interfaces must come from the site manifest, not from a "
+        "literal in this file"
+    )
+    # 127.0.0.1 is not an identity -- the optional Syncthing GUI is bound there
+    # ON PURPOSE. Any other literal address is one site's, in a file every site
+    # renders.
+    literal = [line for line in compose.splitlines()
+               if re.match(r"^\s*-\s*\"?\d+\.\d+\.\d+\.\d+:", line)
+               and "127.0.0.1:" not in line]
+    assert literal == [], f"a literal IP is back in the port bindings: {literal}"
     assert re.search(r"image: python:3\.12\.\d+-slim", compose)
     assert "healthcheck:" in compose and "/api/v1/health" in compose
 

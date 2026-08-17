@@ -141,7 +141,8 @@ def test_the_music_share_is_the_library_not_a_private_copy():
 def test_compose_yaml_carries_the_same_music_mounts():
     """test_safety.py already asserts the whole volume list matches; this says
     which lines matter, so a drift failure names the feature that broke."""
-    text = COMPOSE_YAML.read_text(encoding="utf-8")
+    # Rendered: compose.yaml is a template since 2026-08-17 (WP0 step 2).
+    text = ida.render_compose_yaml()
     vol_block = text.split("\n    volumes:", 1)[1].split("\n    restart:", 1)[0]
     yaml_vols = [line.strip().lstrip("- ").strip().strip('"').strip("'")
                  for line in vol_block.splitlines()

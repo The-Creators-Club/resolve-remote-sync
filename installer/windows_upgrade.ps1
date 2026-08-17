@@ -48,6 +48,12 @@
 param(
     [string]$CompanionExe = "",
     [string]$DashboardToken = "",
+    # Only used when config.toml has no dashboard_url yet (a machine that
+    # predates the wizard). There is no compiled-in default any more -- it
+    # used to be one deployment's tailnet IP (WP0, 2026-08-17) -- so with
+    # neither this flag, $env:CCSYNC_DASHBOARD_URL, nor a URL already in the
+    # file, the key is left absent and said out loud rather than invented.
+    [string]$DashboardUrl = "",
     [switch]$DryRun
 )
 
@@ -61,7 +67,10 @@ $RunKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $BinDir = "$env:LOCALAPPDATA\ccsync\bin"
 $CompanionExePath = "$BinDir\ccsync-companion.exe"
 $ConfigPath = "$env:USERPROFILE\.ccsync\config.toml"
-$DefaultDashboardUrl = "http://100.71.216.3:8480"
+$DefaultDashboardUrl = $DashboardUrl
+if (-not $DefaultDashboardUrl -and $env:CCSYNC_DASHBOARD_URL) {
+    $DefaultDashboardUrl = $env:CCSYNC_DASHBOARD_URL
+}
 
 # --- locate the new exe ---------------------------------------------------
 if (-not $CompanionExe) {
@@ -244,8 +253,16 @@ else {
     }
 
     if (-not (Test-Key "dashboard_url")) {
-        Add-TopLevelKey "dashboard_url = `"$DefaultDashboardUrl`""
-        $added += "dashboard_url (default $DefaultDashboardUrl)"
+        if ($DefaultDashboardUrl) {
+            Add-TopLevelKey "dashboard_url = `"$DefaultDashboardUrl`""
+            $added += "dashboard_url ($DefaultDashboardUrl)"
+        }
+        else {
+            # Naming it beats inventing it: an upgrade that silently wrote
+            # somebody else's dashboard URL into this file would point a
+            # machine at a deployment it has no account on.
+            Write-Warn2 "config.toml has no dashboard_url and none was given (-DashboardUrl / CCSYNC_DASHBOARD_URL) -- this companion will not report, will not take managed sync selections, and will never be offered another upgrade. Ask your admin for the URL and add it."
+        }
     }
     if ($DashboardToken) {
         # set/replace the token line explicitly

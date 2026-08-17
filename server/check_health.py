@@ -2,7 +2,7 @@
 """One command to validate the whole server side. Plain PASS/FAIL lines,
 exit code = number of failed checks (0 = all good).
 
-    python check_health.py [--gui-url http://192.168.0.102:8384 --api-key XXXX] [--dry-run]
+    python check_health.py [--gui-url http://<nas>:8384 --api-key XXXX] [--dry-run]
 
 Checks:
   1. Postgres reachable on :5432 (raw TCP connect -- proves resolve-
@@ -27,8 +27,8 @@ Checks:
 calls) without opening any connection, same convention as every other
 script in this package.
 
-Env vars: TRUENAS_HOST (default 192.168.0.102), TRUENAS_USER (default
-truenas_admin), TRUENAS_PW (required). SYNCTHING_GUI_URL / SYNCTHING_API_KEY
+Env vars: TRUENAS_HOST / TRUENAS_USER (no defaults -- they come from [nas]
+host / admin_user in site.toml, see docs/SERVER.md), TRUENAS_PW (required). SYNCTHING_GUI_URL / SYNCTHING_API_KEY
 used as fallback defaults for --gui-url / --api-key; DASHBOARD_URL for
 --dashboard-url. DASH_REPORT_TOKEN (optional) unlocks the dashboard's
 detailed /api/v1/health body -- without it check 7 reports liveness only.
@@ -42,27 +42,58 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
-from common import (
+from common import (  # noqa: F401 - synology_api/truenas_api/run_ssh are also
+    # the names ScriptCalls resolves the backend's NAS access through, and the
+    # offline suite patches them HERE (see common.ScriptCalls).
     DEFAULT_PROJECTS_ROOT,
     DEFAULT_TRUENAS_HOST,
     EDITORS_GROUP,
+    ScriptCalls,
     add_host_key_arg,
+    add_nas_kind_arg,
+    add_site_arg,
+    cli,
+    get_backend,
     ok,
+    require_site_value,
     run_ssh,
     set_host_key_pin,
     shell_quote,
+    site_bool,
+    site_value,
     syncthing_api,
+    synology_api,
     truenas_api,
     truenas_conn_params,
 )
 
+# Which NAS this is. check_tailscale() is called with no backend argument (by
+# main and by server/tests alike), so the choice lives on the module: main()
+# sets it from --nas-kind, and anything calling in directly gets the kind from
+# $CCSYNC_NAS_KIND / site.toml. ScriptCalls binds it to THIS module's run_ssh,
+# which is what the offline tailscale tests patch (2026-08-17).
+_ARGS = None
+_BACKEND = None
+
+
+def backend():
+    global _BACKEND
+    if _BACKEND is None:
+        _BACKEND = get_backend(_ARGS, calls=ScriptCalls(sys.modules[__name__]))
+    return _BACKEND
+
 # Where the companions are pointed by default (companion/config.example.toml
 # and the installer both use the tailnet address).
-DEFAULT_DASHBOARD_URL = "http://100.71.216.3:8480"
+# Blank when the site does not say (2026-08-17): it used to be this fleet's own
+# tailnet address, so a fresh checkout health-checked someone else's dashboard.
+DEFAULT_DASHBOARD_URL = site_value("net", "dashboard_url")
 
-# Hostname the NAS registers on the tailnet, used as a fallback peer hint
-# when the dashboard URL isn't a tailnet address.
-DEFAULT_NAS_TAILNET_NAME = "truenas"
+# Hostname the NAS registers on the tailnet, used as a fallback peer hint when
+# the dashboard URL is not a tailnet address (a Synology site publishes on
+# loopback, so it never is). "truenas" is this fleet's own machine name and a
+# poor guess anywhere else -- [net] tailnet_name says what the box is really
+# called, and a wrong hint only costs a skipped WARNING.
+DEFAULT_NAS_TAILNET_NAME = site_value("net", "tailnet_name") or "truenas"
 
 RESULTS = []  # list of (bool_passed, str_message)
 WARNINGS = []  # non-fatal: printed, never counted in the exit code
@@ -185,6 +216,20 @@ def relay_advice(who: str, relay: str) -> str:
 
 
 def check_postgres(dry_run: bool):
+    """The Resolve Project Server, TCP-probed.
+
+    Opt-out since 2026-08-17 ([stack] project_server = false): a Synology site
+    carries Postgres as a compose PROFILE that is off unless asked for, and a
+    site that never deployed one should not have a permanent FAIL in the one
+    command whose whole contract is its exit code. Default is true, so nothing
+    changes for a site that says nothing.
+    """
+    if not site_bool("stack", "project_server", True):
+        info("postgres: not part of this site ([stack] project_server = false) -- "
+             "skipped. Resolve project sharing needs one; deploy it with "
+             "`docker compose --profile project-server up -d` (Synology) or as its "
+             "own app (TrueNAS).")
+        return
     host, _, _ = truenas_conn_params(dry_run=dry_run)
     port = 5432
     if dry_run:
@@ -198,8 +243,10 @@ def check_postgres(dry_run: bool):
 
 
 def check_tailscale(dry_run: bool):
-    cmd = 'echo "$SUDO_PW" | sudo -S -p "" docker exec tailscale tailscale status --json'
-    rc, out, err = run_ssh(cmd, dry_run=dry_run)
+    # HOW tailscale is reached is the backend's business (a container on
+    # TrueNAS, the DSM package on Synology); the parsing and the reporting
+    # below are not, and stay here (2026-08-17).
+    rc, out, err = backend().tailscale_status_json(dry_run)
     if dry_run:
         return
     if rc != 0:
@@ -303,7 +350,18 @@ def check_syncthing_app(gui_url, api_key, dry_run: bool):
             report(False, "syncthing GUI/API check skipped -- pass --gui-url/--api-key "
                            "or set SYNCTHING_GUI_URL/SYNCTHING_API_KEY")
         return
-    resp = syncthing_api("GET", gui_url, "/rest/system/ping", api_key, dry_run=dry_run)
+    # A health CHECK must not crash on the thing it is checking (2026-08-17):
+    # this raised requests.ConnectionError straight out of main() when the GUI
+    # was unreachable -- which is the single most likely state for it to be in,
+    # and the one a run is asking about. It is also the normal state on
+    # Synology, where the GUI is published on 127.0.0.1 of the NAS and this
+    # script runs on an admin workstation (tunnel it: ssh -L 8384:127.0.0.1:8384).
+    try:
+        resp = syncthing_api("GET", gui_url, "/rest/system/ping", api_key, dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001 - any transport failure is one answer
+        report(False, f"syncthing app NOT reachable at {gui_url} "
+                      f"({type(exc).__name__}: {str(exc)[:160]})")
+        return
     if dry_run:
         return
     if ok(resp):
@@ -313,7 +371,12 @@ def check_syncthing_app(gui_url, api_key, dry_run: bool):
         report(False, f"syncthing app NOT reachable at {gui_url} (HTTP {code})")
         return
 
-    resp = syncthing_api("GET", gui_url, "/rest/config/folders", api_key, dry_run=dry_run)
+    try:
+        resp = syncthing_api("GET", gui_url, "/rest/config/folders", api_key,
+                             dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001
+        report(False, f"could not list syncthing folders ({type(exc).__name__})")
+        return
     if ok(resp):
         folders = resp.json()
         ids = [f.get("id") for f in folders]
@@ -334,9 +397,43 @@ def check_tree(projects_root: str, dry_run: bool):
         report(True, f"project tree root exists: {projects_root}")
     else:
         report(False, f"project tree root MISSING: {projects_root}")
+        return
+
+    # Platform-specific follow-up: on Synology, "the directory is there" says
+    # nothing about whether editors can WRITE to it -- group write is pure ACE
+    # and a single chmod destroys it silently (docs/synology-spikes-2026-08-17
+    # spike 1). Capability-probed rather than branched on kind, so a backend
+    # that has no such question simply does not answer it.
+    check_acl = getattr(backend(), "check_tree_acl", None)
+    if check_acl is None:
+        return
+    ok_acl, message = check_acl(projects_root, EDITORS_GROUP, dry_run)
+    if ok_acl is None:
+        if message:
+            warn(f"tree ACL: {message}")
+    else:
+        report(ok_acl, message)
 
 
 def check_editor_accounts(dry_run: bool):
+    # A backend that can answer this itself does (Synology: two DSM calls);
+    # the TrueNAS path below is the original two REST calls, unchanged, and
+    # stays here because its SERVER-3 subtlety is about TrueNAS's own schema.
+    lister = getattr(backend(), "list_group_members", None)
+    if lister is not None:
+        found, members, detail = lister(EDITORS_GROUP, dry_run)
+        if dry_run:
+            return
+        if found is None:
+            report(False, f"could not list members of group {EDITORS_GROUP!r}: {detail}")
+        elif not found:
+            report(False, detail or f"group {EDITORS_GROUP!r} does not exist")
+        elif members:
+            report(True, f"editor accounts found in group {EDITORS_GROUP!r}: {members}")
+        else:
+            report(False, f"group {EDITORS_GROUP!r} exists but has no members yet")
+        return
+
     resp = truenas_api("GET", "/group", params={"group": EDITORS_GROUP}, dry_run=dry_run)
     if dry_run:
         print(f"[dry-run] would also GET /user and cross-reference group membership for {EDITORS_GROUP!r}")
@@ -470,9 +567,17 @@ def main():
                          "direct-vs-DERP check (default: the dashboard URL's host "
                          f"if it is a tailnet address, else {DEFAULT_NAS_TAILNET_NAME!r})")
     add_host_key_arg(ap)
+    add_site_arg(ap)
+    add_nas_kind_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     set_host_key_pin(args.host_key)
+    global _ARGS
+    _ARGS = args
+    args.projects_root = require_site_value(
+        args.projects_root, "[tree] pool_root/tree_name", "--projects-root")
+    args.dashboard_url = require_site_value(
+        args.dashboard_url, "[net] dashboard_url", "--dashboard-url")
 
     print(f"Checking Creators Club sync server ({os.environ.get('TRUENAS_HOST', DEFAULT_TRUENAS_HOST)})...\n")
 
@@ -501,4 +606,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli(main))

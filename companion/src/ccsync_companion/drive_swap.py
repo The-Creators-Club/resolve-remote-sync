@@ -12,9 +12,9 @@ Mechanics mirror windows_bootstrap.ps1's own mapping:
            or the legacy `subst P: <local_root>` fallback
   server = WNetAddConnection2W(P:, <server unc>) -- the API `net use` itself
            calls, because this one carries the editor's password (R1 below);
-           the UNC comes from derive_server_unc() or the server_p_unc config
-           override, e.g. \\\\100.65.15.123\\TheCreatorsPool\\Creators_Club
-           over the tailnet
+           the UNC comes from the server_p_unc config override, else the
+           site manifest's smb_unc, else derive_server_unc() -- e.g.
+           \\\\<nas-host>\\<share>\\<tree> over the tailnet
 
 Sync is UNAFFECTED by the swap: every lane works on the physical
 local_root, never through P:. Only Resolve's view changes. The companion
@@ -467,26 +467,52 @@ def swap_to_local(local_root: str, run_fn: RunFn = _default_run) -> tuple[bool, 
     return True, "P: is back to your local copy (proxies, via subst)"
 
 
+# How a NAS's SFTP path maps onto its SMB namespace. The two vendors put the
+# share boundary in different places, and there is no way to tell from the
+# path alone which one you are looking at -- so both shapes are matched, and
+# the one that matches wins (2026-08-17, docs/SYNOLOGY_PORT_PLAN.md WP5):
+#
+#   TrueNAS   /mnt/<pool>/<dataset>/<rest>   shares a DATASET under its own
+#             name, and the dataset can be nested -- everything past the pool
+#             is the SMB path (\\host\<dataset>\<rest>).
+#   Synology  /volume<N>/<share>/<rest>      the shared folder is exactly the
+#             FIRST component under /volumeN; everything past the pool is
+#             again the SMB path, so the same rule produces the right answer
+#             (\\host\<share>\<rest>).
+#
+# Neither is authoritative -- an admin who renamed the share, or exported it
+# somewhere else entirely, is why the dashboard publishes `smb_unc` and why
+# config.py prefers it (_apply_site_manifest). This is the fallback.
+_REMOTE_ROOT_SHARE_RES = (
+    re.compile(r"^/mnt/[^/]+/(.+)$"),
+    re.compile(r"^/volume\d+/(.+)$"),
+)
+
+
 def derive_server_unc(dashboard_url: str, remote_root: str) -> str:
     """The server tree's SMB path, derived from config every machine
     already has -- so the grade-swap needs NO per-machine setup:
 
       host  = dashboard_url's host (whichever address THIS machine uses to
               reach the server: LAN for local editors, tailnet for remote)
-      share = remote_root beyond /mnt/<pool>/ (TrueNAS shares a dataset
-              under its own name: /mnt/tank/TheCreatorsPool/Creators_Club
-              serves as \\\\host\\TheCreatorsPool\\Creators_Club)
+      share = remote_root beyond the pool/volume component -- see
+              _REMOTE_ROOT_SHARE_RES above for the two NAS conventions
 
-    Returns "" when either part can't be derived."""
+    Returns "" when either part can't be derived. NOTE this is the LAST
+    resort: config.toml's server_p_unc and the site manifest's smb_unc both
+    beat it (config._apply_site_manifest, app._server_p_unc)."""
     try:
         from urllib.parse import urlparse
 
         host = (urlparse(str(dashboard_url or "")).hostname or "").strip()
-        m = re.match(r"^/mnt/[^/]+/(.+)$", str(remote_root or "").strip().rstrip("/"))
-        if not host or not m:
+        root = str(remote_root or "").strip().rstrip("/")
+        if not host:
             return ""
-        share_path = m.group(1).replace("/", "\\")
-        return "\\\\" + host + "\\" + share_path
+        for pattern in _REMOTE_ROOT_SHARE_RES:
+            m = pattern.match(root)
+            if m:
+                return "\\\\" + host + "\\" + m.group(1).replace("/", "\\")
+        return ""
     except Exception:
         return ""
 

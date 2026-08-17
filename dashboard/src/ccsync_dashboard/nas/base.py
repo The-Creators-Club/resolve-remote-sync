@@ -1,0 +1,101 @@
+"""Backend-neutral half of the NAS seam: the Protocol every backend answers,
+the one error type callers catch, and the shape checks that are about OUR
+conventions rather than any NAS's API.
+
+Why a Protocol and not a base class: the TrueNAS client is a dataclass with
+its own `requests.Session` field and the Synology one will carry a DSM sid and
+an SSH channel (SYNOLOGY_PORT_PLAN.md WP2) -- they share a surface, not an
+implementation. Callers depend on the surface only.
+"""
+from __future__ import annotations
+
+import re
+from typing import Any, Protocol, runtime_checkable
+
+# The Unix group that defines "is a member of this fleet" on every backend.
+# Named the same on TrueNAS and DSM on purpose: server/, the companion and
+# check_health.py all speak it, and a per-backend spelling would mean an
+# editor is in the fleet on one NAS and not the other.
+EDITORS_GROUP = "editors"
+
+# Mirrors ccsync_dashboard.db._USERNAME_RE exactly -- an account created here
+# must be mappable by resolve_editor_username(), or it'll show as unmapped.
+USERNAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
+SSH_KEY_PREFIXES = (
+    "ssh-ed25519", "ssh-rsa", "ssh-dss",
+    "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+)
+
+
+class NasError(Exception):
+    """Anything the NAS could not be made to do: unreachable, refused, or
+    answering a shape we will not guess at. Every call site catches THIS --
+    a backend-specific subclass (TrueNASError) is still one of these."""
+
+
+def is_valid_username(name: str) -> bool:
+    return bool(USERNAME_RE.match(name))
+
+
+def looks_like_ssh_pubkey(text: str) -> bool:
+    text = text.strip()
+    if not text:
+        return False
+    return text.split(" ", 1)[0] in SSH_KEY_PREFIXES
+
+
+@runtime_checkable
+class NasBackend(Protocol):
+    """What the dashboard asks of a NAS. Exactly the surface api.py and ui.py
+    call today, no more: a backend that answers these six questions can run
+    the admin Users section and the companion's fleet-membership check.
+
+    Deliberately NOT on here: home-directory permission fixing. TrueNAS does
+    it inside create_or_update_editor via `filesystem.setperm`; DSM will do it
+    over SSH with chmod (SYNOLOGY_PORT_PLAN.md's "home directory trap" row).
+    It is one backend's private business either way, and no caller sequences
+    it -- they read `home_ok` out of the summary dict instead. Nor is
+    TrueNASClient.set_password, which exists only to raise NotImplementedError
+    and point at set_known_password: a new backend should not have to carry a
+    method whose whole job is to refuse.
+    """
+
+    def ping(self) -> None:
+        """Cheap reachability check. Raises NasError when the NAS cannot be
+        reached or refuses the credentials; returns None on success."""
+
+    def find_group(self, name: str) -> dict[str, Any] | None:
+        ...
+
+    def ensure_editors_group(self) -> tuple[int, int]:
+        """(db_id, unix_gid) for EDITORS_GROUP, creating it if missing. The
+        first element is whatever id the backend's user records reference
+        (TrueNAS' group db id); the second is the POSIX gid."""
+
+    def find_user(self, username: str) -> dict[str, Any] | None:
+        ...
+
+    def list_editors(self) -> list[dict[str, Any]]:
+        """Every account in EDITORS_GROUP. Rows carry at least: username, uid,
+        full_name, smb, sshpubkey, home, locked -- build_admin_users_view
+        renders those and treats the rest as backend detail."""
+
+    def is_editor(self, username: str) -> bool:
+        """True when `username` exists and is in EDITORS_GROUP. Raises
+        NasError if the NAS can't be asked -- callers must NOT read that as
+        'not an editor' (that is what makes /api/v1/verify fail closed but
+        retryable rather than open)."""
+
+    def create_or_update_editor(self, username: str, ssh_pubkey: str,
+                                full_name: str | None = None) -> dict[str, Any]:
+        """Create (or update in place) an editor account. Returns
+        {"created": bool, "username": str, "home_ok": bool, "warnings": [...]}.
+
+        Every backend MUST carry the same refusals: never a system/builtin
+        account, never an existing account that isn't already in
+        EDITORS_GROUP. They are what stops a free-text username in the admin
+        UI from becoming a NAS takeover.
+        """
+
+    def set_known_password(self, username: str, password: str) -> None:
+        """Set an EDITOR's password, with create_or_update_editor's refusals."""

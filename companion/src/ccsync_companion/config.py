@@ -61,6 +61,13 @@ VERSION = "0.7.10"
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 
+# The rclone remote name to use when nothing else supplies one -- NOT a
+# tenant's name. The installers prefer the site manifest's `rclone_remote`
+# (site.py) and only fall back to this, so a customer whose dashboard names
+# the remote gets theirs and everybody else gets one neutral, predictable
+# name instead of the studio's (2026-08-17).
+NEUTRAL_REMOTE_NAME = "ccsync_sftp"
+
 # Keys marked "addition" in the docstring/README are small, clearly-scoped
 # extensions beyond SPEC.md's literal config list — see README.md's "SPEC
 # deviations" section for the why on each.
@@ -69,12 +76,17 @@ DEFAULTS: dict[str, Any] = {
     "local_root": "",
     "canonical_prefix": "P:\\",
     # Must match the remote name the bootstrap installers write into
-    # rclone.conf ($RemoteName / $REMOTE_NAME). This used to default to "nas",
-    # which silently gave every fresh install a non-existent rclone remote.
-    "remote": "creators_club_sftp",
+    # rclone.conf ($RemoteName / $REMOTE_NAME). It used to default to "nas",
+    # which silently gave every fresh install a non-existent rclone remote,
+    # and then to one customer's literal remote name -- a compiled-in tenant
+    # identity (2026-08-17, docs/SYNOLOGY_PORT_PLAN.md WP0). BLANK now: the
+    # installer/wizard writes it from the site manifest's `rclone_remote`,
+    # falling back to NEUTRAL_REMOTE_NAME when the dashboard has none, and
+    # validate_config() below refuses a blank one loudly.
+    "remote": "",
     # ABSOLUTE path on the NAS. An SFTP session lands in the editor's home
     # directory, so a relative value resolves under ~/ (e.g.
-    # /mnt/tank/TheCreatorsPool/homes/<editor>/Creators_Club) and silently
+    # /var/services/homes/<editor>/<tree> on a Synology) and silently
     # misses the real project tree. Left blank so a fresh install trips
     # validate_config() instead of quietly syncing into the wrong place.
     "remote_root": "",
@@ -107,6 +119,13 @@ DEFAULTS: dict[str, Any] = {
     # is 2 MiB, i.e. a hard per-file ceiling of window/RTT -- ~14 MB/s at
     # 150 ms, which is the ~60 mb/s class ceiling this project exists to
     # beat. 255Ki x 64 is a 16.3 MiB window (AUDIT_2 P1).
+    #
+    # THE SITE CAN OVERRIDE THIS, and on some NAS platforms it must
+    # (_SITE_CONFIG_KEYS): a chunk above 64Ki needs the limits@openssh.com
+    # extension, which DSM 7.2's OpenSSH 8.2p1 does not have -- 255Ki there
+    # truncates every download at 539,000,832 bytes rather than failing
+    # (Synology spike 6, 2026-08-17). An explicit value in config.toml still
+    # wins over the site's.
     "sftp_chunk_size": "255Ki",
     "sftp_concurrency": 64,
     "sftp_connections": 16,
@@ -155,9 +174,10 @@ DEFAULTS: dict[str, Any] = {
     "syncthing_url": "http://127.0.0.1:8384",
     "syncthing_api_key": "",
     # The server tree's SMB path for the tray's "Grade from server
-    # originals" P: swap (drive_swap.py). Empty = derive it from
+    # originals" P: swap (drive_swap.py). Empty = take it from the cached
+    # site manifest's smb_unc (_apply_site_manifest), else derive it from
     # dashboard_url + remote_root (app._server_p_unc), so the feature is on
-    # fleet-wide by default; set a UNC to override, "off" to disable.
+    # fleet-wide by default; set a UNC to override both, "off" to disable.
     "server_p_unc": "",
     # Expected Syncthing folder ID per entry in `projects` (addition; needed
     # to fulfil "verify the expected folder ID ... is configured + shared").
@@ -168,11 +188,15 @@ DEFAULTS: dict[str, Any] = {
     "log_level": "INFO",
     # Dashboard reporter (addition; not in SPEC.md's config list) -- posts
     # lane statuses to a server-side dashboard so an admin can see editor
-    # health without remoting in. Defaults to the dashboard's tailnet
-    # address so remote editors get reporting, managed sync, and the tray's
-    # "Open dashboard" link out of the box. Set to "" to disable entirely
-    # (reporter thread isn't even started).
-    "dashboard_url": "http://100.71.216.3:8480",
+    # health without remoting in. It used to default to ONE deployment's
+    # tailnet address, which meant a companion nobody had configured tried to
+    # phone that home (2026-08-17, docs/SYNOLOGY_PORT_PLAN.md WP0). BLANK now:
+    # a companion with no dashboard_url talks to nothing at all, and the
+    # installer/wizard writes the site's own URL here. "" also stays the
+    # documented way to disable reporting entirely (the reporter thread isn't
+    # even started) -- see validate_config, which says so out loud when
+    # require_login is on.
+    "dashboard_url": "",
     "dashboard_token": "",
     # Login gate (addition; see identity.py): when true, the companion will
     # not start sync lanes/the sequencer, nor report under an identity,
@@ -535,21 +559,26 @@ canonical_prefix = "P:\\\\"
 # OPTIONAL override for the tray's "Grade from server originals" P: swap.
 # WINDOWS ONLY -- macOS has no drive namespace to remap, so this key does
 # nothing there and the tray item does not appear.
-# By default the server tree's SMB path is derived automatically from
-# dashboard_url's host + remote_root's path (so the feature just works on
-# every install). Set an explicit UNC here to override the derivation, or
-# "off" to hide the feature on this machine.
+# By default the server tree's SMB path comes from the dashboard's site
+# manifest (GET /api/v1/site -> smb_unc), and failing that is derived from
+# dashboard_url's host + remote_root's path -- so the feature just works on
+# every install. Set an explicit UNC here to override both, or "off" to hide
+# the feature on this machine.
 # server_p_unc = ""
 
 # Name of the rclone remote pointing at the NAS. Must match the stanza the
 # bootstrap installer wrote into rclone.conf. ccsync-companion does not
-# configure rclone remotes for you.
-remote = "creators_club_sftp"
+# configure rclone remotes for you. The installer takes this name from the
+# dashboard's site manifest (GET /api/v1/site -> rclone_remote) and falls
+# back to "ccsync_sftp" when the dashboard doesn't publish one; blank here
+# means nothing syncs and the companion says so at startup.
+remote = ""
 
 # ABSOLUTE path on the NAS under which project trees live, e.g.
-# "/mnt/tank/TheCreatorsPool/Creators_Club". It must be absolute: the SFTP
-# session starts in your home directory on the NAS, so a relative value
-# resolves under ~/ and will not find the project tree.
+# "/mnt/<pool>/<share>/<tree>" (TrueNAS) or "/volume1/<share>/<tree>"
+# (Synology). It must be absolute: the SFTP session starts in your home
+# directory on the NAS, so a relative value resolves under ~/ and will not
+# find the project tree.
 remote_root = ""
 
 # WHICH PROJECTS SYNC is decided on the dashboard, by your ticks -- not
@@ -643,12 +672,13 @@ log_path = "~/.ccsync/companion.log"
 log_level = "INFO"
 
 # Dashboard reporter: periodically POSTs lane statuses to a server-side
-# dashboard so an admin can see editor health without remoting in. Defaults
-# to the dashboard's tailnet address (right for remote editors; the base rig
-# overrides with the LAN address). Set to "" to disable entirely -- the
-# reporter thread isn't even started. dashboard_token is sent as the
-# X-CCSync-Token header; ask the admin for the value.
-dashboard_url = "http://100.71.216.3:8480"
+# dashboard so an admin can see editor health without remoting in. Your
+# admin's dashboard URL (the installer writes it here; remote editors use
+# the tailnet address, a machine on the same LAN can use the LAN one). Left
+# blank it disables reporting, managed sync and the tray's "Open dashboard"
+# link entirely -- the reporter thread isn't even started. dashboard_token
+# is sent as the X-CCSync-Token header; ask the admin for the value.
+dashboard_url = ""
 dashboard_token = ""
 # Login gate: when true, the companion will not start sync lanes/the
 # sequencer, nor report under an identity, until the editor signs in via the
@@ -1015,7 +1045,77 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     if not isinstance(merged.get("ignored_resolve_projects"), list):
         merged["ignored_resolve_projects"] = list(DEFAULTS["ignored_resolve_projects"])
 
+    _apply_site_manifest(merged, data)
+
     return merged
+
+
+# What the SERVER is allowed to fill in, and under what name it publishes it:
+#   config key -> (manifest key, "how do we know the file didn't set it")
+#
+# "absent"  -- the key is not in config.toml at all. Used where a blank/zero
+#              value in the file is itself a MEANINGFUL setting: the transport
+#              knobs disable their rclone flag when set to "" or 0 (see
+#              DEFAULTS above), so "" from a user is not the same as "unset".
+# "blank"   -- the key is absent OR blank. Used for server_p_unc, where ""
+#              already means "work it out for me" and "off" is the kill
+#              switch that must survive.
+_SITE_CONFIG_KEYS: dict[str, tuple[str, str]] = {
+    # The grade swap's SMB target. It was derived from dashboard_url's host
+    # plus remote_root's tail (drive_swap.derive_server_unc) -- a derivation
+    # that only holds where the NAS shares a dataset under its own name, i.e.
+    # TrueNAS. A Synology serves /volume1/<share>/<tree> as
+    # \\host\<share>\<tree>, and a NAS whose SMB name differs from its SFTP
+    # path cannot be derived at all (WP0 step 3, 2026-08-17).
+    "server_p_unc": ("smb_unc", "blank"),
+    # NOT a preference -- a property of the NAS's sshd, which no client can
+    # discover. DSM 7.2's OpenSSH 8.2p1 has no limits@openssh.com, and the
+    # fleet's measured-good 255Ki silently TRUNCATES every download at
+    # 539,000,832 bytes against it; 64Ki is that box's ceiling, 255Ki stays
+    # right for TrueNAS (Synology spike 6, 2026-08-17).
+    "sftp_chunk_size": ("sftp_chunk_size", "absent"),
+    "sftp_concurrency": ("sftp_concurrency", "absent"),
+}
+
+
+def _apply_site_manifest(merged: dict[str, Any], data: Any) -> None:
+    """Fill in what only the SERVER knows, from the cached site manifest.
+
+    Precedence, deliberately: an explicit value in config.toml wins over the
+    manifest, the manifest wins over the built-in default, and the built-in
+    default still applies when neither exists -- so a TrueNAS install that
+    has never seen a manifest behaves exactly as it did before this existed.
+
+    The CACHE is read, never the network: this runs at startup, on the path
+    that must work offline. site.py's fetch is the installers' job.
+    """
+    try:
+        from . import site as site_mod
+
+        file_keys = data if isinstance(data, dict) else {}
+        wanted = {}
+        for key, (site_key, rule) in _SITE_CONFIG_KEYS.items():
+            if key in file_keys and (rule == "absent" or str(file_keys[key]).strip()):
+                continue
+            wanted[key] = site_key
+        if not wanted:
+            return
+
+        site = site_mod.cached_site()
+        if not site:
+            return
+        for key, site_key in wanted.items():
+            value = site.get(site_key)
+            # "" / 0 from the manifest means "the server didn't say", never
+            # "switch this off" -- the server has no business disabling an
+            # editor's transport tuning.
+            if value in ("", 0, None):
+                continue
+            merged[key] = value
+    except Exception:
+        # Never fatal: every key here has a working built-in fallback, and
+        # nothing about a missing manifest may stop a config load.
+        log.debug("site manifest not applied to config", exc_info=True)
 
 
 def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -1081,8 +1181,9 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
         errors.append(
             "remote_root is blank -- rclone would target the remote's default "
             "directory, which for SFTP is your home directory on the NAS, not "
-            "the project tree. Set the absolute NAS path, e.g. "
-            "/mnt/tank/TheCreatorsPool/Creators_Club"
+            "the project tree. Set the absolute NAS path your admin gave you, "
+            "e.g. /mnt/<pool>/<share>/<tree> (TrueNAS) or "
+            "/volume1/<share>/<tree> (Synology)"
         )
     elif not remote_root.startswith("/"):
         errors.append(
@@ -1130,7 +1231,34 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
         )
 
     dashboard_url = str(cfg.get("dashboard_url", "")).strip()
-    if dashboard_url:
+    if not dashboard_url:
+        # Since 2026-08-17 this key has no default at all -- it used to carry
+        # one deployment's tailnet IP, i.e. a compiled-in tenant identity, and
+        # a companion nobody had configured phoned that home (WP0,
+        # docs/SYNOLOGY_PORT_PLAN.md). So "blank" now means "nobody has
+        # pointed this install at a dashboard" as often as it means "the admin
+        # switched reporting off", and the difference has to be SAID.
+        #
+        # A WARNING, not an error, on purpose: errors here stop the lanes
+        # outright (DEL-3), and a blank dashboard_url breaks nothing the lanes
+        # themselves do -- it breaks SIGN-IN, which app.py already gates on and
+        # already names ("sign-in required (require_login=true) -- sync lanes/
+        # sequencer will not start"). Two gates for one fault would have made
+        # every legacy non-managed install unstartable for a reason it does not
+        # have.
+        message = (
+            "dashboard_url is blank -- this companion is not pointed at any "
+            "dashboard, so there is no reporting, no managed sync selection, "
+            "no upgrade channel and no site manifest. Set it to the URL your "
+            "admin gave you (the installer normally writes it)"
+        )
+        if bool(cfg.get("require_login", DEFAULTS["require_login"])):
+            message += (
+                " -- and require_login is on, so nobody can sign in and NO "
+                "SYNC LANE WILL EVER START until it is set"
+            )
+        warnings.append(message)
+    else:
         if not (dashboard_url.startswith("http://") or dashboard_url.startswith("https://")):
             warnings.append(
                 f"dashboard_url is set but doesn't start with http:// or https://: "

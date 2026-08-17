@@ -8,7 +8,8 @@ Any year/series/project is valid; names with spaces work as long as they are
 quoted (they are shell-quoted before being sent to the NAS).
 
 Creates:
-    /mnt/tank/TheCreatorsPool/Creators_Club/Projects/<year>/<series>/<project>/
+    <tree root>/Projects/<year>/<series>/<project>/     # e.g.
+    #   /mnt/<pool>/<dataset>/Creators_Club/Projects/2025/FF4/Nuclear
         AE/
         Audio/Music/
         Audio/Voiceover/
@@ -18,9 +19,12 @@ Creates:
         Subs/
         Youtube/
 
-Then sets ownership to <dataset owner>:editors and mode 2770 (setgid, so
-files/dirs created later by any editors-group member inherit the group and
-stay group-rwx) recursively on the whole project directory. Proxy/
+Then makes the tree group-writable the way this NAS does it -- on TrueNAS,
+ownership <dataset owner>:editors and mode 2770 (setgid, so files/dirs created
+later by any editors-group member inherit the group and stay group-rwx),
+recursively on the whole project directory; the step comes from the backend
+(server/backends/), because a Synology shared folder's Windows-style ACLs
+override mode bits and need an inheritable ACE instead. Proxy/
 subfolders are NOT created here -- the Blackmagic Proxy Generator creates
 them on demand next to media.
 
@@ -41,8 +45,8 @@ Identity-safe, by design:
     target already contains one. Discovery prunes at markers, so marking a
     container directory would hide every real project underneath it.
 
-Env vars: TRUENAS_HOST (default 192.168.0.102), TRUENAS_USER (default
-truenas_admin), TRUENAS_PW (required). See server/README.md.
+Env vars: TRUENAS_HOST / TRUENAS_USER (no defaults -- they come from [nas]
+host / admin_user in site.toml, see docs/SERVER.md), TRUENAS_PW (required). See server/README.md.
 """
 import argparse
 import sys
@@ -54,10 +58,15 @@ from common import (
     MARKER_FILENAME,
     TEMPLATE_FOLDERS,
     add_host_key_arg,
+    add_nas_kind_arg,
+    add_site_arg,
     build_marker_write_cmd,
+    cli,
+    get_backend,
     project_path,
     project_path_rel,
     project_relative_dirs,
+    require_site_value,
     run_ssh,
     set_host_key_pin,
     shell_quote,
@@ -89,7 +98,7 @@ def ancestor_dirs(projects_root: str, base: str) -> list[str]:
 
 
 def build_remote_script(base: str, owner: str, group: str, slug: str = "",
-                        projects_root: str = "") -> str:
+                        projects_root: str = "", backend=None) -> str:
     """Bash snippet run on the NAS. Prints one line per folder: created or
     already-existed, then (re-)applies ownership/permissions and reports
     that too. Runs as root via sudo -S so it works regardless of what
@@ -164,20 +173,12 @@ def build_remote_script(base: str, owner: str, group: str, slug: str = "",
     if slug:
         lines.append(build_marker_write_cmd(base, slug, only_if_absent=True))
 
-    owner_group = shell_quote(f"{owner}:{group}")
-    lines.append(
-        f'echo "$SUDO_PW" | sudo -S -p "" chown -R {owner_group} {base_q} '
-        f"&& echo {shell_quote(f'ownership set: {owner}:{group} on {base}')}"
-    )
-    # Non-fatal: some datasets have ZFS aclmode=restricted, which blocks
-    # chmod outright (even for root). Ownership above still applies fine in
-    # that case; only the setgid bit is missing. `if` conditions are exempt
-    # from `set -e`, so this can't abort the rest of the script.
-    lines.append(
-        f'if echo "$SUDO_PW" | sudo -S -p "" find {base_q} -type d -exec chmod 2770 {{}} + >/dev/null 2>&1; then '
-        f"echo {shell_quote(f'permissions set: 2770 (setgid) on all directories under {base}')}; "
-        f"else echo {shell_quote('permissions NOT set: chmod blocked on this dataset (likely ZFS aclmode=restricted) -- ownership above is still correct, only the setgid bit is missing')}; fi"
-    )
+    # Group-write, the platform's way: `chown -R` + `chmod 2770` on ZFS,
+    # inheritable ACEs on a Synology shared folder (whose Windows-style ACLs
+    # override mode bits outright). Backend-supplied lines rather than an
+    # executed step, because this script sends ONE script down ONE ssh session
+    # and server/tests runs that script under a stub sudo (2026-08-17).
+    lines.extend((backend or get_backend()).set_tree_acl(base, owner, group))
     return "\n".join(lines)
 
 
@@ -194,9 +195,14 @@ def main():
     ap.add_argument("--owner", default=DEFAULT_DATASET_OWNER, help=f"default: {DEFAULT_DATASET_OWNER}")
     ap.add_argument("--group", default=EDITORS_GROUP, help=f"default: {EDITORS_GROUP}")
     add_host_key_arg(ap)
+    add_site_arg(ap)
+    add_nas_kind_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     set_host_key_pin(args.host_key)
+    backend = get_backend(args)
+    args.projects_root = require_site_value(
+        args.projects_root, "[tree] pool_root/tree_name", "--projects-root")
 
     if args.project_rel_path:
         if args.year or args.series or args.project:
@@ -219,7 +225,7 @@ def main():
     print(f"Template folders ({len(TEMPLATE_FOLDERS)}): {', '.join(TEMPLATE_FOLDERS)}")
 
     script = build_remote_script(base, args.owner, args.group, slug=slug,
-                                 projects_root=args.projects_root)
+                                 projects_root=args.projects_root, backend=backend)
     rc, out, err = run_ssh(script, dry_run=args.dry_run)
 
     if args.dry_run:
@@ -246,4 +252,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli(main))

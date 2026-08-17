@@ -98,7 +98,7 @@ The folder handed to a new editor lives at one canonical location:
 P:\Assets\Software\CC_Sync
 ```
 
-(on the NAS at `/mnt/tank/TheCreatorsPool/Creators_Club/Assets/Software/CC_Sync`)
+(on the NAS at `<remote_root>/Assets/Software/CC_Sync`)
 
 Rebuild it with `build_editor_package.ps1`, which copies every file from this
 repo so the package can't silently drift:
@@ -211,12 +211,12 @@ scheduled task. No step aborts the run.
 |---|---|---|
 | `-TailnetHost` | *(required)* | Tailnet hostname or `100.x.y.z` of the NAS. |
 | `-EditorName` | *(required)* | TrueNAS username. Lowercased automatically. |
-| `-LocalRoot` | `C:\Creators_Club` | Point at a volume with room for originals + proxies. |
-| `-RemoteRoot` | `/mnt/tank/TheCreatorsPool/Creators_Club` | Must be absolute -- see below. |
-| `-DriveLabel` | `TheCreatorsClub` | Explorer display name for `P:`. |
+| `-LocalRoot` | *(existing `config.toml`, else `%SystemDrive%\<tree name from the site manifest>`)* | Point at a volume with room for originals + proxies. |
+| `-RemoteRoot` | *(the site manifest's `remote_root`)* | Must be absolute -- see below. A capability miss when neither is set. |
+| `-DriveLabel` | *(the site manifest's tree name, else `CCSync`)* | Explorer display name for `P:`. |
 | `-CompanionExePath` | `%LOCALAPPDATA%\ccsync\bin\ccsync-companion.exe` | Where the companion is expected to live and what gets autostarted. Skipped with a note if absent. |
 | `-CompanionExeSource` | *(none)* | Path to the exe in the package; copies it to `-CompanionExePath` if missing/older, then registers autostart. Without it the editor has to place the exe there by hand. |
-| `-DashboardUrl` | `http://100.71.216.3:8480` | Written to the seeded `config.toml` as `dashboard_url`. |
+| `-DashboardUrl` | *(required; or `$env:CCSYNC_DASHBOARD_URL`)* | Written to the seeded `config.toml` as `dashboard_url`, and where the site manifest (`GET /api/v1/site`) is read from. The script refuses to run without it. |
 | `-DashboardToken` | *(empty)* | Written as `dashboard_token`. **Required for a reporting (managed) install** -- with it blank the companion never reports and never receives the editor's project ticks, i.e. a silently unmanaged machine. |
 | `-DryRun` | off | Prints every action, touches nothing. |
 
@@ -251,7 +251,7 @@ Steps (each idempotent, each prints what it did/skipped):
    underlying volume.
 7. Generates the Syncthing config, registers `syncthing serve` for autostart,
    and **starts the daemon now**.
-8. Writes a `[creators_club_sftp]` stanza into
+8. Writes an rclone stanza (named by the site manifest's `rclone_remote`, else `ccsync_sftp`) into
    `%APPDATA%\rclone\rclone.conf` (skipped if that section already exists).
    Warns if the referenced SSH private key
    (`%USERPROFILE%\.ssh\ccsync_ed25519`) doesn't exist yet -- generating it
@@ -270,8 +270,8 @@ Steps (each idempotent, each prints what it did/skipped):
 
 ```bash
 DASHBOARD_TOKEN=<token> ./macos_bootstrap.sh \
-    --tailnet-host truenas.tailnet.ts.net --editor-name jsmith \
-    --local-root "/Volumes/RigSSD/Creators_Club"
+    --tailnet-host nas.tailnet.ts.net --editor-name jsmith \
+    --local-root "/Volumes/RigSSD/<tree>"
 ```
 
 The same steps as the Windows script, using `brew` where available and
@@ -285,8 +285,8 @@ those stay interactive one-time steps.
 |---|---|---|
 | `--tailnet-host` | *(required)* | Tailnet hostname or `100.x.y.z` of the NAS. |
 | `--editor-name` | *(required)* | TrueNAS username. Lowercased automatically. |
-| `--local-root` | `$HOME/Creators_Club` | Normally the editing SSD: `/Volumes/<Name>/Creators_Club`. See the external-volume rules below. |
-| `--remote-root` | `/mnt/tank/TheCreatorsPool/Creators_Club` | Must be absolute -- SFTP lands in the editor's NAS home directory. |
+| `--local-root` | `$HOME/Creators_Club` | Normally the editing SSD: `/Volumes/<Name>/<tree>`. See the external-volume rules below. |
+| `--remote-root` | *(the site manifest's `remote_root`)* | Must be absolute -- SFTP lands in the editor's NAS home directory. A capability miss when neither is set. |
 | `--companion-file` | *(none)* | Install the companion from a local file instead of downloading it (no `DASHBOARD_TOKEN` needed). The supervised-first-install path. |
 | `--companion-version` | `current` | Published version to fetch. |
 | `--companion-path` | `$HOME/.local/ccsync/bin/ccsync-companion` | Where the binary lives and what the LaunchAgent runs. |
@@ -362,7 +362,7 @@ exactly as it is in both modes, and the closing summary says so by path.
 Default mode stops and removes what this installer put in
 `~/.local/ccsync` (companion + Syncthing binaries and the Syncthing
 identity), removes both LaunchAgents (booting them out *before* deleting the
-plists), and drops only the `[creators_club_sftp]` stanza from
+plists), and drops only this deployment's rclone stanza from
 `~/.config/rclone/rclone.conf`. `--full` also removes `~/.ccsync` --
 except `~/.ccsync/state`, which holds the prompts this machine has already
 answered once and for all; deleting it makes every dismissed prompt come
@@ -435,10 +435,10 @@ on a new editor's machine. Recorded here because most of these fail
    loads the LaunchAgent it writes and then confirms the process is running.
 5. **The companion's config defaults were wrong.** `remote` defaulted to
    `"nas"`, which matches no rclone remote the installers ever create
-   (`creators_club_sftp`). Fixed at the source, and both installers now seed
+   (the rclone remote name). Fixed at the source, and both installers now seed
    the config file directly. The companion also validates its config at
    startup and logs a specific complaint per missing value.
-6. **The local sync root was hardcoded** to `C:\Creators_Club`. Now
+6. **The local sync root was hardcoded** to a fixed path. Now
    `-LocalRoot` / `--local-root`, flowing through to the `subst` target and
    the companion's `local_root`.
 7. **`-EditorName` wasn't normalized.** A case mismatch (`Ruskin` vs the real

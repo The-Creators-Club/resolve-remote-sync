@@ -19,8 +19,9 @@ from .api import (
     build_project_view, build_projects_view, build_queue_view, build_transfers_view, get_conn,
     normalize_device_id,
 )
+from .nas import NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
+from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
-from .truenas_client import TrueNASClient, TrueNASError, is_valid_username, looks_like_ssh_pubkey
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
 
@@ -844,14 +845,15 @@ def partial_admin_users(request: Request):
 
 
 def _create_or_update_editor_sync(
-    truenas: TrueNASClient, username: str, ssh_pubkey: str,
+    nas: NasBackend, username: str, ssh_pubkey: str,
     full_name: str | None, password: str | None,
 ) -> dict:
-    """Runs on a threadpool worker -- see partial_admin_create_user. TrueNAS
-    job polling (_wait_for_job) blocks on time.sleep() for up to ~2 minutes."""
-    result = truenas.create_or_update_editor(username, ssh_pubkey, full_name)
+    """Runs on a threadpool worker -- see partial_admin_create_user. The
+    TrueNAS backend's job polling (_wait_for_job) blocks on time.sleep() for
+    up to ~2 minutes."""
+    result = nas.create_or_update_editor(username, ssh_pubkey, full_name)
     if password:
-        truenas.set_known_password(username, password)
+        nas.set_known_password(username, password)
     return result
 
 
@@ -868,24 +870,22 @@ async def partial_admin_create_user(
     password = form.get("password", "").strip() or None
 
     error = None
-    if not settings.truenas_pw:
-        error = "TRUENAS_PW is not configured on the dashboard"
+    if not nas_factory.nas_configured(settings):
+        error = "DASH_NAS_PW is not configured on the dashboard"
     elif not is_valid_username(username):
         error = ("username must start with a letter and contain only lowercase letters, "
                  "digits, '.', '_', '-'")
     elif not looks_like_ssh_pubkey(ssh_pubkey):
         error = "does not look like an OpenSSH public key"
     else:
-        truenas = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
-                                 base_url=settings.truenas_base_url or None,
-                                 verify_ssl=settings.truenas_verify_ssl)
         try:
-            # Blocking TrueNAS REST calls + job polling -- push off the event
-            # loop so a slow TrueNAS response can't stall every other
+            nas = nas_factory.make_nas_client(settings)
+            # Blocking NAS REST calls + job polling -- push off the event
+            # loop so a slow NAS response can't stall every other
             # request for up to ~2 minutes (see the ui.py blocking-handlers
             # finding).
             result = await run_in_threadpool(
-                _create_or_update_editor_sync, truenas, username, ssh_pubkey, full_name, password
+                _create_or_update_editor_sync, nas, username, ssh_pubkey, full_name, password
             )
             # The account provably exists now -- record it so a device named
             # after it is treated as an editor rather than as an unmapped
@@ -897,7 +897,7 @@ async def partial_admin_create_user(
             conn.commit()
             if result["warnings"]:
                 error = f"{username}: created with warnings ({'; '.join(result['warnings'])})"
-        except TrueNASError as exc:
+        except NasError as exc:
             error = str(exc)
 
     return _render(request, "partials/admin_users.html", {
@@ -915,25 +915,23 @@ async def partial_admin_set_password(request: Request):
     password = form.get("password", "").strip()
 
     error = None
-    if not settings.truenas_pw:
-        error = "TRUENAS_PW is not configured on the dashboard"
+    if not nas_factory.nas_configured(settings):
+        error = "DASH_NAS_PW is not configured on the dashboard"
     elif not is_valid_username(username):
         # Same charset gate as the create form: a typo (or a hand-posted
-        # "root") must never reach TrueNAS. set_known_password refuses system
+        # "root") must never reach the NAS. set_known_password refuses system
         # and non-editor accounts too -- this is the cheap first pass.
         error = ("username must start with a letter and contain only lowercase letters, "
                  "digits, '.', '_', '-'")
     elif not password:
         error = "password required"
     else:
-        truenas = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
-                                 base_url=settings.truenas_base_url or None,
-                                 verify_ssl=settings.truenas_verify_ssl)
         try:
-            # See the ui.py blocking-handlers finding: blocking TrueNAS call
+            nas = nas_factory.make_nas_client(settings)
+            # See the ui.py blocking-handlers finding: blocking NAS call
             # off the event loop.
-            await run_in_threadpool(truenas.set_known_password, username, password)
-        except TrueNASError as exc:
+            await run_in_threadpool(nas.set_known_password, username, password)
+        except NasError as exc:
             error = str(exc)
 
     return _render(request, "partials/admin_users.html", {

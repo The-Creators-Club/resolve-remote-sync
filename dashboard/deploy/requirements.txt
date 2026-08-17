@@ -69,3 +69,16 @@ yt-dlp>=2026.6.9
 # server it talks to are one component in two processes and the project
 # ships them as a pair. Bump both together or neither.
 bgutil-ytdlp-pot-provider==1.3.1
+
+# --- the Synology NAS backend (DASH_NAS_KIND=synology) ----------------------
+# DSM exposes NO API for writing an editor's ~/.ssh/authorized_keys, and a file
+# written through FileStation is owned by the admin -- sshd's StrictModes then
+# refuses the key while logging NOTHING, so the editor sees only
+# "Authentication failed" (docs/synology-spikes-2026-08-17.md spike 2). The
+# backend therefore opens its own SSH session, which needs paramiko.
+#
+# Installed on every site, TrueNAS included: this file is ONE file for one
+# image, run.sh only re-runs pip when its hash changes, and an installed
+# package nothing imports costs a few hundred KB. LGPL-2.1 -- it belongs in
+# the NOTICE file (COMMERCIAL_READINESS item 1).
+paramiko>=3.4

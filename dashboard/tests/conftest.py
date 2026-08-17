@@ -11,6 +11,100 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from ccsync_dashboard import db as dbmod  # noqa: E402
 
 
+class NasCase:
+    """One backend the admin-user call sites must work through.
+
+    `kwargs` go into Settings; `provisions` says whether this backend can
+    actually create accounts (a backend that cannot must answer with a banner
+    or a 502 -- never a traceback, and never a silent success). `seed_editor`
+    exists because "an editor already on the NAS" is spelled differently in
+    each fake's state, and no test should have to know which.
+    """
+
+    def __init__(self, kind: str, kwargs: dict, fake=None, provisions: bool = True,
+                 error_fragment: str = "", seed=None):
+        self.kind = kind
+        self.kwargs = kwargs
+        self.fake = fake
+        self.provisions = provisions
+        self.error_fragment = error_fragment
+        self._seed = seed
+
+    def seed_editor(self, username: str = "jsmith", uid: int = 3010) -> None:
+        """Put an existing editor account into the fake NAS."""
+        if self._seed is not None:
+            self._seed(username, uid)
+
+    def __repr__(self) -> str:                      # readable -k selection
+        return f"<NasCase {self.kind}>"
+
+
+@pytest.fixture(params=("truenas", "synology"))
+def nas_case(request, monkeypatch):
+    """Parametrises a test over every NAS backend the dashboard can be
+    configured with (SYNOLOGY_PORT_PLAN.md WP1/WP2). Kept in conftest so
+    test_nas_backend.py and any future admin-user test share one definition of
+    "every backend"; a third backend is a third param here.
+
+    Both cases drive the REAL client against an HTTP fake of the NAS's API,
+    reached through Settings.nas_base_url -- so the factory, the settings and
+    the client are all in the path, not just the Protocol.
+    """
+    if request.param == "truenas":
+        from fake_truenas import FakeTrueNAS
+
+        fake = FakeTrueNAS().start()
+
+        def seed(username: str, uid: int) -> None:
+            if not any(g["group"] == "editors" for g in fake.state["groups"]):
+                fake.state["groups"].append({"id": 111, "group": "editors", "gid": 3001})
+            fake.state["users"].append({
+                "id": len(fake.state["users"]) + 5, "uid": uid, "username": username,
+                "full_name": username, "home": f"/h/{username}", "group": {"id": 111},
+                "groups": [111], "sshpubkey": "ssh-ed25519 AAAA", "smb": True,
+                "locked": False, "password_disabled": False,
+            })
+
+        try:
+            yield NasCase(
+                "truenas",
+                {"nas_kind": "truenas", "nas_user": "truenas_admin", "nas_pw": "fake-pw",
+                 "nas_base_url": fake.base_url},
+                fake=fake, seed=seed,
+            )
+        finally:
+            fake.stop()
+        return
+
+    from fake_synology import FakeDSM
+    from ccsync_dashboard.nas.synology import SynologyClient
+
+    fake = FakeDSM().start()
+    # The SSH half has no Settings knob to point at a fake (it is paramiko, not
+    # a URL), so the client's one SSH seam is redirected for the whole case.
+    monkeypatch.setattr(SynologyClient, "_paramiko_run",
+                        lambda self, command, stdin_text: fake.ssh(command, stdin_text))
+
+    def seed(username: str, uid: int) -> None:
+        if not any(g["name"] == "editors" for g in fake.state["groups"]):
+            fake.state["groups"].append({"name": "editors", "gid": 65536})
+        fake.state["users"].append({"name": username, "uid": uid, "description": username,
+                                    "email": "", "expired": "normal"})
+        fake.state["members"].setdefault("editors", []).append(username)
+        fake.state["members"].setdefault("users", []).append(username)
+        fake.state["authorized_keys"][username] = "ssh-ed25519 AAAA"
+
+    try:
+        yield NasCase(
+            "synology",
+            {"nas_kind": "synology", "nas_host": "dsm.example", "nas_user": "ccsync",
+             "nas_pw": "fake-pw", "nas_base_url": fake.base_url},
+            fake=fake, seed=seed,
+        )
+    finally:
+        fake.stop()
+
+
 @pytest.fixture
 def conn(tmp_path):
     connection = dbmod.connect(tmp_path / "test.db")

@@ -1,0 +1,69 @@
+# A Synology site, as a TEST FIXTURE -- the anonymised twin of the live
+# port-test manifest used to bring the stack up on a real DS423+ on
+# 2026-08-17 (docs/SERVER-SYNOLOGY.md is written from that run).
+#
+# Only the identity is anonymised. Every value whose SHAPE matters is exactly
+# what the live site uses, and three of them are load-bearing:
+#
+#   [net] sftp_chunk_size = "64Ki"   DSM 7.2's OpenSSH 8.2 has no
+#       `limits@openssh.com`, so a lane-B download at the fleet's 255Ki
+#       TRUNCATES at 539,000,832 bytes and rclone reports a size mismatch that
+#       reads like a network fault (synology-spikes spike 6). This is the one
+#       setting on this page that loses footage.
+#   [net] shell_type = "none"        DSM editors have /sbin/nologin, so
+#       rclone cannot run md5sum over SSH; `unix` fails every checksum.
+#   [apps] root = "/volume<N>/<share>/ccsync"   the backend REFUSES anything
+#       else (host_root_re) -- the install replaces everything under
+#       <root>/app as root.
+#
+# [stack] carries no uid/gid on purpose: DSM allocates local users from 1024
+# and local groups from 65536, so they are read from the live box at every
+# deploy (spike 7) and a hardcoded pair would be wrong on every unit.
+
+[nas]
+kind = "synology"
+host = "192.0.2.10"
+admin_user = "dsmadmin"
+verify_ssl = "0"
+
+[tree]
+pool_root = "/volume1/CCSyncTest"
+tree_name = "Creators_Club"
+projects_dir = "Projects"
+share_name = "CCSyncTest"
+smb_unc = "\\\\192.0.2.10\\CCSyncTest\\Creators_Club"
+# DSM's User Home service; /var/services/homes is the volume-independent
+# spelling of <location>/homes.
+homes_parent = "/var/services/homes"
+
+[apps]
+root = "/volume1/docker/ccsync"
+
+[net]
+dashboard_url = "http://192.0.2.10:8480"
+# Loopback: the stack publishes on 127.0.0.1 and `tailscale serve` or DSM's
+# reverse proxy is what editors reach (DSM's own nginx owns :443/:5001).
+bind_lan = "127.0.0.1"
+sftp_port = "22"
+sftp_chunk_size = "64Ki"
+sftp_concurrency = 16
+shell_type = "none"
+rclone_remote = "ccsync_sftp"
+
+[syncthing]
+# The compose service name: Syncthing is a service in OUR stack on DSM
+# (profile "bundled-syncthing"), so the dashboard reaches it over the compose
+# network rather than at a host address.
+gui_url = "http://syncthing:8384"
+device_id = ""
+
+[site]
+org_name = "CC Sync Synology port test"
+
+[stack]
+owner = "ccsync-svc"
+group = "editors"
+# No Resolve project server in this stack (it is a compose profile that is off
+# unless asked for), so check_health.py skips the Postgres probe instead of
+# failing forever.
+project_server = "false"

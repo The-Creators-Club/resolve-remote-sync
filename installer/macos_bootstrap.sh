@@ -34,7 +34,7 @@
 # research, not from a live run. Treat the first install as a supervised one.
 #
 # Usage:
-#   ./macos_bootstrap.sh --tailnet-host truenas.tailnet.ts.net --editor-name jsmith [--dry-run]
+#   ./macos_bootstrap.sh --tailnet-host nas.tailnet.ts.net --editor-name jsmith [--dry-run]
 #   ./macos_bootstrap.sh --resolve-mapping-only [--local-root /Volumes/Rig/Creators_Club]
 #
 # CONTRACT WITH THE ONBOARDING WIZARD (onboarding/steps.py, since 1.0.17).
@@ -58,8 +58,14 @@ EDITOR_NAME=""
 LOCAL_ROOT="$HOME/Creators_Club"
 # Absolute on purpose: the SFTP session lands in the editor's home directory
 # on the NAS, so a relative remote root resolves under ~/ and silently misses
-# the real project tree.
-REMOTE_ROOT="/mnt/tank/TheCreatorsPool/Creators_Club"
+# the real project tree. NO DEFAULT since 2026-08-17 (WP0,
+# docs/SYNOLOGY_PORT_PLAN.md): it used to be one deployment's pool path
+# compiled into this script. It comes from --remote-root, else the
+# dashboard's site manifest; with neither it is a named capability miss.
+REMOTE_ROOT=""
+# SSH port for the rclone remote. 0 = "ask the site manifest, else 22" --
+# DSM commonly moves sshd off 22, TrueNAS does not.
+SFTP_PORT=0
 COMPANION_PATH="$HOME/.local/ccsync/bin/ccsync-companion"
 COMPANION_FILE=""
 COMPANION_VERSION="current"
@@ -68,12 +74,15 @@ RESOLVE_MAPPING_ONLY=0
 
 # Overridable from the environment (the admin's onboarding tooling sets both);
 # defaulted here so `set -u` never trips on them.
-DASHBOARD_URL="${DASHBOARD_URL:-http://100.71.216.3:8480}"
+# REQUIRED (no compiled-in default since 2026-08-17): the admin's dashboard
+# URL, which is also where the site manifest comes from. CCSYNC_DASHBOARD_URL
+# is accepted as well, so both platforms' installers read the same name.
+DASHBOARD_URL="${DASHBOARD_URL:-${CCSYNC_DASHBOARD_URL:-}}"
 DASHBOARD_TOKEN="${DASHBOARD_TOKEN:-}"
 
 usage() {
     echo "Usage: $0 --tailnet-host <host> --editor-name <name> [--local-root <path>]"
-    echo "          [--remote-root <abs-path>] [--companion-file <path>]"
+    echo "          [--remote-root <abs-path>] [--sftp-port <n>] [--companion-file <path>]"
     echo "          [--companion-version <x.y.z|current>] [--companion-path <path>]"
     echo "          [--skip-resolve-mapping] [--dry-run]"
     echo "       $0 --resolve-mapping-only [--local-root <path>] [--dry-run]"
@@ -98,6 +107,8 @@ while [ $# -gt 0 ]; do
             LOCAL_ROOT="$2"; shift 2 ;;
         --remote-root)
             REMOTE_ROOT="$2"; shift 2 ;;
+        --sftp-port)
+            SFTP_PORT="$2"; shift 2 ;;
         --companion-file)
             COMPANION_FILE="$2"; shift 2 ;;
         --companion-version)
@@ -147,6 +158,67 @@ capability_miss() {
     echo "[ccsync] WARNING: CAPABILITY MISSING: $1" >&2
 }
 
+# ----------------------------------------------------------------------
+# WHO IS THIS DEPLOYMENT? (2026-08-17, WP0 of docs/SYNOLOGY_PORT_PLAN.md)
+#
+# Every tenant-shaped value this script used to have compiled in -- the NAS
+# Syncthing device ID, the pool path, the rclone remote name -- now comes
+# from the dashboard:
+#
+#     GET $DASHBOARD_URL/api/v1/site   (unauthenticated, no secrets, schema 1)
+#
+# A FLAG always wins (a hand-run, or the wizard passing what it already
+# fetched), then the manifest, then a neutral fallback -- or a named
+# capability miss where guessing would put terabytes in the wrong place. A
+# dashboard older than the manifest answers 404 and this is a no-op, which is
+# why every flag still exists.
+SITE_JSON=""
+SITE_NAS_SYNCTHING_ID=""
+if [ "$RESOLVE_MAPPING_ONLY" != 1 ]; then
+    if [ -z "$DASHBOARD_URL" ]; then
+        echo "[ccsync] ERROR: no dashboard URL." >&2
+        echo "[ccsync] This installer no longer has one compiled in -- ask your admin for it and re-run with" >&2
+        echo "[ccsync]     DASHBOARD_URL=http://nas.your-tailnet.ts.net:8480 ./macos_bootstrap.sh ..." >&2
+        echo "[ccsync] Without it there is no reporting, no managed sync, no upgrade channel -- and no way to" >&2
+        echo "[ccsync] look up this site's NAS settings." >&2
+        exit 2
+    fi
+    DASHBOARD_URL="${DASHBOARD_URL%/}"
+    SITE_JSON="$(curl -fsS --max-time 8 "$DASHBOARD_URL/api/v1/site" 2>/dev/null || true)"
+    if [ -n "$SITE_JSON" ]; then
+        step "site manifest: $DASHBOARD_URL/api/v1/site"
+    else
+        warn "no site manifest from $DASHBOARD_URL (an older dashboard, or not reachable yet) -- using the values passed on the command line"
+    fi
+fi
+
+# Flat-JSON field reader. sed, not a JSON parser: macOS ships neither jq nor
+# a guaranteed python3, the manifest is one flat object by contract, and the
+# only cost of a miss is falling back to the flag -- which is the behaviour
+# this whole block degrades to anyway.
+site_value() {
+    [ -n "$SITE_JSON" ] || return 0
+    printf '%s' "$SITE_JSON" |
+        sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" |
+        head -n 1
+}
+site_number() {
+    [ -n "$SITE_JSON" ] || return 0
+    printf '%s' "$SITE_JSON" |
+        sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" |
+        head -n 1
+}
+
+[ -n "$REMOTE_ROOT" ] || REMOTE_ROOT="$(site_value remote_root)"
+SITE_NAS_SYNCTHING_ID="$(site_value nas_syncthing_id)"
+if [ "$SFTP_PORT" -le 0 ] 2>/dev/null; then
+    SFTP_PORT="$(site_number sftp_port)"
+fi
+case "$SFTP_PORT" in
+    ''|*[!0-9]*) SFTP_PORT=22 ;;
+    0) SFTP_PORT=22 ;;
+esac
+
 # Unix usernames are case-sensitive; a case mismatch produces a
 # working-looking rclone.conf that fails later with a generic SSH auth error
 # giving no hint that the username was the problem.
@@ -157,6 +229,12 @@ if [ "$EDITOR_NAME" != "$EDITOR_NAME_RAW" ]; then
 fi
 
 case "$REMOTE_ROOT" in
+    # A NAMED miss, not a silent blank: with no remote_root, lane A uploads an
+    # editor's originals into their bare SFTP home directory instead of the
+    # project tree, and nothing anywhere says so (S-1).
+    "") if [ "$RESOLVE_MAPPING_ONLY" != 1 ]; then
+            capability_miss "the NAS project-tree path is not known: no --remote-root was given and $DASHBOARD_URL/api/v1/site does not publish one. Lanes A and B have nowhere to sync to -- ask your admin for the absolute NAS path (e.g. /mnt/<pool>/<share>/<tree> or /volume1/<share>/<tree>) and re-run with --remote-root."
+        fi ;;
     /*) ;;
     *) warn "--remote-root '$REMOTE_ROOT' is not absolute. The SFTP session starts in your home directory on the NAS, so a relative path resolves under ~/ and will not find the project tree. Prefix it with '/'." ;;
 esac
@@ -168,7 +246,13 @@ RCLONE_CONF_DIR="$HOME/.config/rclone"
 RCLONE_CONF_PATH="$RCLONE_CONF_DIR/rclone.conf"
 SYNCTHING_HOME="$HOME/.local/ccsync/syncthing-config"
 KEY_FILE_PATH="$HOME/.ssh/ccsync_ed25519"
-REMOTE_NAME="creators_club_sftp"
+# The rclone remote's NAME is a site decision -- the companion's config.toml
+# `remote` must match this stanza exactly, and onboarding/steps.py writes it
+# from the same manifest key. Overwritten from the site manifest below;
+# "ccsync_sftp" is the neutral fallback both halves share (it used to be one
+# customer's name, compiled into three files -- WP0, 2026-08-17).
+REMOTE_NAME="$(site_value rclone_remote)"
+[ -n "$REMOTE_NAME" ] || REMOTE_NAME="ccsync_sftp"
 CCSYNC_CONFIG_DIR="$HOME/.ccsync"
 CCSYNC_CONFIG_PATH="$CCSYNC_CONFIG_DIR/config.toml"
 VOLUME_JSON_PATH="$CCSYNC_CONFIG_DIR/volume.json"
@@ -1634,7 +1718,10 @@ fi
 # autoAcceptFolders stays false on purpose: the companion's sequencer accepts
 # folder offers at the CORRECT local path, while Syncthing's own auto-accept
 # mangles this deployment's slash-labelled folders into flat directories.
-NAS_SYNCTHING_ID="${CCSYNC_NAS_SYNCTHING_ID:-CPGHYGU-KI5UFOR-GPOGIEP-5EW6BIP-ZNJNVY3-Q5GI5PN-TGI346D-MTKBSQR}"
+# From the environment, else the site manifest (fetched near the top). The
+# production device ID used to be compiled in here, which made this script one
+# deployment's (WP0, 2026-08-17).
+NAS_SYNCTHING_ID="${CCSYNC_NAS_SYNCTHING_ID:-$SITE_NAS_SYNCTHING_ID}"
 if [ "$DRY_RUN" = 1 ]; then
     dry "would seed the NAS device $NAS_SYNCTHING_ID (addresses tcp://$TAILNET_HOST:22000, dynamic) into the running Syncthing via REST"
 elif [ -n "$NAS_SYNCTHING_ID" ] && [ -f "$SYNCTHING_HOME/config.xml" ]; then
@@ -1660,7 +1747,7 @@ elif [ -n "$NAS_SYNCTHING_ID" ] && [ -f "$SYNCTHING_HOME/config.xml" ]; then
             else
                 st_seed_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
                     -H "X-API-Key: $ST_API_KEY" -H "Content-Type: application/json" \
-                    -d "{\"deviceID\":\"$NAS_SYNCTHING_ID\",\"name\":\"truenas\",\"addresses\":[\"tcp://$TAILNET_HOST:22000\",\"dynamic\"],\"compression\":\"metadata\",\"introducer\":false,\"paused\":false,\"autoAcceptFolders\":false}" \
+                    -d "{\"deviceID\":\"$NAS_SYNCTHING_ID\",\"name\":\"ccsync-nas\",\"addresses\":[\"tcp://$TAILNET_HOST:22000\",\"dynamic\"],\"compression\":\"metadata\",\"introducer\":false,\"paused\":false,\"autoAcceptFolders\":false}" \
                     http://127.0.0.1:8384/rest/config/devices 2>/dev/null || true)"
                 if [ "$st_seed_code" = "200" ]; then
                     step "seeded the NAS device into Syncthing -- pairing needs no GUI clicks on either side"
@@ -1672,6 +1759,12 @@ elif [ -n "$NAS_SYNCTHING_ID" ] && [ -f "$SYNCTHING_HOME/config.xml" ]; then
             warn "Syncthing REST at 127.0.0.1:8384 did not come up -- NOT seeding the NAS device (re-run this script once it is running)"
         fi
     fi
+elif [ -z "$NAS_SYNCTHING_ID" ]; then
+    # Used to be a compiled-in production device ID, so this branch could not
+    # happen; now that the ID comes from the site it can, and a Syncthing that
+    # knows no devices drops every NAS connection as "unknown device" one
+    # second after hello, forever (2026-07-26).
+    capability_miss "the NAS Syncthing device ID is not known: CCSYNC_NAS_SYNCTHING_ID is unset and $DASHBOARD_URL/api/v1/site does not publish one. Lane C (audio, After Effects projects, graphics, subtitles, .drp project files, docs) will never connect -- ask your admin for the NAS device ID and re-run with CCSYNC_NAS_SYNCTHING_ID set."
 fi
 
 # ----------------------------------------------------------------------
@@ -1829,13 +1922,20 @@ ensure_dir "$CC_ROOT"
 # ----------------------------------------------------------------------
 ensure_dir "$RCLONE_CONF_DIR"
 
+# shell_type: "unix" lets rclone verify a transfer by running `md5sum` over
+# SSH -- which needs a shell. A DSM editor's shell is /sbin/nologin, so every
+# hash check fails there and the site publishes "none" instead (Synology
+# spike 6, 2026-08-17).
+SHELL_TYPE="$(site_value sftp_shell_type)"
+[ -n "$SHELL_TYPE" ] || SHELL_TYPE="unix"
+
 STANZA="[$REMOTE_NAME]
 type = sftp
 host = $TAILNET_HOST
 user = $EDITOR_NAME
-port = 22
+port = $SFTP_PORT
 key_file = $KEY_FILE_PATH
-shell_type = unix
+shell_type = $SHELL_TYPE
 "
 
 has_section=0
@@ -2166,6 +2266,14 @@ elif [ "$DRY_RUN" = 1 ]; then
     dry "would write seeded companion config to $CCSYNC_CONFIG_PATH"
 else
     ensure_dir "$CCSYNC_CONFIG_DIR"
+    # A blank remote_root written as `remote_root = ""` looks like a
+    # deliberate answer -- to the companion, and to the next re-run of this
+    # script. Leaving the key out is what makes validate_config name it (S-1).
+    if [ -n "$REMOTE_ROOT" ]; then
+        REMOTE_ROOT_TOML="remote_root = \"$REMOTE_ROOT\""
+    else
+        REMOTE_ROOT_TOML="# remote_root NOT SET -- ask your admin for the absolute NAS tree path"
+    fi
     cat > "$CCSYNC_CONFIG_PATH" <<TOML
 # ccsync-companion config -- seeded by macos_bootstrap.sh.
 # See companion/README.md for the full reference. Restart the companion
@@ -2185,7 +2293,7 @@ remote = "$REMOTE_NAME"
 
 # ABSOLUTE path on the NAS. The SFTP session starts in your home directory,
 # so a relative value here would resolve under ~/ and miss the real tree.
-remote_root = "$REMOTE_ROOT"
+$REMOTE_ROOT_TOML
 
 # OPTIONAL. Lanes A and B replicate the whole local_root <-> remote_root
 # tree, so every Projects/<year>/<series>/<project> folder syncs whatever

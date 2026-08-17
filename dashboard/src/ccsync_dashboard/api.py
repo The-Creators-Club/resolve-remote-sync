@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterator, Literal
@@ -21,10 +22,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import VERSION, auth, db, health
+from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
+from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
-from .truenas_client import (
-    EDITORS_GROUP, TrueNASClient, TrueNASError, is_valid_username, looks_like_ssh_pubkey,
-)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -641,6 +641,103 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
     }
 
 
+# How often a failed live-myID read is retried. The site route is open, so an
+# unreachable Syncthing must not cost every caller a request timeout; a
+# successful read is cached for the life of the process instead (a Syncthing
+# instance's device ID is its public key -- it does not change without a
+# restart of Syncthing, and a dashboard restart re-reads it anyway).
+SITE_SYNCTHING_ID_RETRY_SECONDS = 60.0
+
+
+def _nas_syncthing_id(request: Request) -> str:
+    """The NAS's Syncthing device ID, live value preferred.
+
+    DASH_SITE_NAS_SYNCTHING_ID is the fallback, not the source of truth: the
+    dashboard already talks to that Syncthing, so asking it removes the one
+    way this manifest could hand every new editor a device ID that no longer
+    exists (a re-created Syncthing config regenerates it -- see the "stuck
+    lane C = regenerated device ID" incident). Fails soft to the env var, and
+    never blocks the route for longer than one short Syncthing timeout.
+    """
+    settings = request.app.state.settings
+    state = request.app.state
+    cached = getattr(state, "site_nas_syncthing_id", "")
+    if cached:
+        return cached
+    if settings.syncthing_url:
+        last_try = getattr(state, "site_nas_syncthing_id_last_try", 0.0)
+        now = time.monotonic()
+        if now - last_try >= SITE_SYNCTHING_ID_RETRY_SECONDS:
+            state.site_nas_syncthing_id_last_try = now
+            try:
+                client = SyncthingClient.from_settings(settings)
+                client.timeout = min(client.timeout, 5.0)
+                my_id = str(client.system_status().get("myID", "") or "")
+            except SyncthingError as exc:
+                log.warning("site manifest: could not read Syncthing's myID (%s)", exc)
+                my_id = ""
+            if my_id:
+                state.site_nas_syncthing_id = my_id
+                return my_id
+    return settings.site_nas_syncthing_id
+
+
+@router.get("/site")
+def api_site(request: Request) -> dict[str, Any]:
+    """This site's non-secret facts, for clients that need them BEFORE they
+    have any credentials (SYNOLOGY_PORT_PLAN.md WP0 step 3).
+
+    Open by design -- it is in app.py's _OPEN_EXACT beside /api/v1/health, and
+    for the same reason: the installer, the onboarding wizard and the
+    companion all read it before (or without) a login. Nothing in here is a
+    secret. A Syncthing device ID is a public key, and every other value is an
+    address an editor is about to be handed anyway; no user, project, path
+    inventory or token may ever be added to this response.
+
+    Every string defaults to "" rather than to this fleet's own values: a
+    blank field means "this deployment has not been told", which a client can
+    fall back on, while a wrong-tenant default is a support incident nobody
+    can see (COMMERCIAL_READINESS.md item 10).
+
+    `schema` is a monotonic integer, not the dashboard version: clients across
+    three OSes upgrade at their own pace, so they check the shape they know.
+    """
+    from . import provision
+
+    settings = request.app.state.settings
+    return {
+        "schema": 1,
+        "org_name": settings.site_org_name,
+        "tree_name": settings.site_tree_name,
+        "canonical_prefix": settings.site_canonical_prefix,
+        "remote_root": settings.site_remote_root,
+        # The companion reads this into server_p_unc instead of deriving it
+        # from remote_root -- derive_server_unc() only knows /mnt/<pool>/<rest>
+        # (WP5 / drive_swap.py).
+        "smb_unc": settings.site_smb_unc,
+        "sftp_host": settings.site_sftp_host,
+        "sftp_port": settings.site_sftp_port,
+        # See settings.site_sftp_chunk_size: the NAS's sshd decides the safe
+        # rclone chunk size, so the server states it (2026-08-17).
+        "sftp_chunk_size": settings.site_sftp_chunk_size,
+        "sftp_concurrency": settings.site_sftp_concurrency,
+        "sftp_shell_type": settings.site_sftp_shell_type,
+        "rclone_remote": settings.site_rclone_remote,
+        "nas_syncthing_id": _nas_syncthing_id(request),
+        "dashboard_url": settings.site_dashboard_url,
+        # Shipped from provision.py so the tree an installer expects and the
+        # tree /project-setup creates cannot drift apart. server/common.py
+        # holds the same two lists and server/tests/test_cross_component.py
+        # pins them byte-identical.
+        "template_folders": list(provision.TEMPLATE_FOLDERS),
+        "shared_asset_folders": [
+            {"id": folder_id, "rel": rel, "label": label}
+            for folder_id, rel, label in provision.SHARED_ASSET_FOLDERS
+        ],
+        "nas_kind": settings.nas_kind,
+    }
+
+
 @router.get("/projects")
 def api_projects(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     return build_projects_view(conn)
@@ -826,24 +923,22 @@ def _require_fleet_member(settings, username: str) -> None:
     Membership of the `editors` group (or DASH_ADMIN_USERS) is the same
     fleet definition create_or_update_editor already enforces.
 
-    Degrades the way build_admin_users_view does: with no TRUENAS_PW there is
-    nothing to check against, so the check is skipped (and logged) rather than
-    locking every companion out of a TrueNAS-less deployment. A TrueNAS that
-    is configured but unreachable answers 503 -- retryable, never open.
+    Degrades the way build_admin_users_view does: with no NAS credentials
+    there is nothing to check against, so the check is skipped (and logged)
+    rather than locking every companion out of a NAS-less deployment. A NAS
+    that is configured but unreachable answers 503 -- retryable, never open.
     """
     if auth.is_admin(settings, username):
         return
-    if not settings.truenas_pw:
+    if not nas_factory.nas_configured(settings):
         log.warning(
-            "minting an identity for %r without an editors-group check: TRUENAS_PW is not "
+            "minting an identity for %r without an editors-group check: DASH_NAS_PW is not "
             "configured on the dashboard", username)
         return
-    client = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
-                           base_url=settings.truenas_base_url or None,
-                           verify_ssl=settings.truenas_verify_ssl)
     try:
+        client = nas_factory.make_nas_client(settings)
         allowed = client.is_editor(username)
-    except TrueNASError as exc:
+    except NasError as exc:
         raise HTTPException(
             status_code=503,
             detail=f"cannot confirm fleet membership right now ({exc}) -- try again",
@@ -1492,7 +1587,7 @@ def api_link_folder(
 
 def build_admin_users_view(settings) -> dict[str, Any]:
     """Everything the admin 'Users' section needs: existing editor accounts
-    (from TrueNAS) plus devices that still need approving/naming (Syncthing
+    (from the NAS backend) plus devices that still need approving/naming (Syncthing
     devices that are either truly pending, or already configured but with a
     name that doesn't resolve to a username -- see db.resolve_editor_username).
 
@@ -1500,27 +1595,28 @@ def build_admin_users_view(settings) -> dict[str, Any]:
     unreachable, mirroring the rest of the dashboard's "stale banner, don't
     crash the page" convention.
 
-    The two backends fail INDEPENDENTLY (DASH-7, 2026-08-14). A TrueNAS blip
+    The two backends fail INDEPENDENTLY (DASH-7, 2026-08-14). A NAS blip
     used to return early with pending_devices=[] as well, so the panel's
     Syncthing half -- the device-approval table, which is the whole reason an
     admin has this page open while somebody's machine is being onboarded --
     vanished behind a banner about an unrelated backend. `truenas_error` and
     `syncthing_error` say WHICH half is missing so the template can avoid
     reporting an unreachable backend as "none pending".
+
+    The `truenas_*` key names outlive the TrueNAS-only era on purpose: the
+    admin_users template, the JSON API and this suite all read them, and
+    renaming a published response shape is not what WP1 is for.
     """
-    if not settings.truenas_pw:
+    if not nas_factory.nas_configured(settings):
         return {"truenas_configured": False, "editors": [], "pending_devices": [],
                 "error": None, "truenas_error": None, "syncthing_error": None}
 
-    truenas = TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
-                              base_url=settings.truenas_base_url or None,
-                              verify_ssl=settings.truenas_verify_ssl)
     truenas_error: str | None = None
     editors: list[dict[str, Any]] = []
     try:
-        editors = truenas.list_editors()
-    except TrueNASError as exc:
-        truenas_error = f"truenas: {exc}"
+        editors = nas_factory.make_nas_client(settings).list_editors()
+    except NasError as exc:
+        truenas_error = f"{settings.nas_kind}: {exc}"
 
     editor_rows = [{
         "username": u["username"],
@@ -1573,13 +1669,25 @@ def build_admin_users_view(settings) -> dict[str, Any]:
     }
 
 
-def _truenas_client_or_503(request: Request) -> TrueNASClient:
+def _nas_client_or_503(request: Request) -> NasBackend:
+    """The admin section's client, or a 503 saying it isn't configured.
+
+    503 rather than 500: "this deployment has no NAS credentials" is a
+    configuration state the rest of the dashboard runs happily in, and a
+    caller should be told to try later/elsewhere, not that we crashed.
+    """
     settings = request.app.state.settings
-    if not settings.truenas_pw:
-        raise HTTPException(status_code=503, detail="TRUENAS_PW is not configured on the dashboard")
-    return TrueNASClient(settings.truenas_host, settings.truenas_user, settings.truenas_pw,
-                              base_url=settings.truenas_base_url or None,
-                              verify_ssl=settings.truenas_verify_ssl)
+    if not nas_factory.nas_configured(settings):
+        raise HTTPException(status_code=503, detail="DASH_NAS_PW is not configured on the dashboard")
+    try:
+        return nas_factory.make_nas_client(settings)
+    except NasError as exc:
+        # An unknown DASH_NAS_KIND: a misconfiguration, not a request error.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+# WP1 transition alias (2026-08-17): the name six months of this file used.
+_truenas_client_or_503 = _nas_client_or_503
 
 
 class CreateEditorIn(BaseModel):
@@ -1637,7 +1745,7 @@ def api_admin_create_user(
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     _require_admin(request)
-    truenas = _truenas_client_or_503(request)
+    nas = _nas_client_or_503(request)
     username = payload.username.strip().lower()
     if not is_valid_username(username):
         raise HTTPException(
@@ -1649,11 +1757,11 @@ def api_admin_create_user(
     if not looks_like_ssh_pubkey(ssh_pubkey):
         raise HTTPException(status_code=422, detail="does not look like an OpenSSH public key")
     try:
-        result = truenas.create_or_update_editor(username, ssh_pubkey, payload.full_name)
+        result = nas.create_or_update_editor(username, ssh_pubkey, payload.full_name)
         if payload.password:
-            truenas.set_known_password(username, payload.password)
+            nas.set_known_password(username, payload.password)
             result["password_set"] = True
-    except TrueNASError as exc:
+    except NasError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     # The account provably exists now -- record it so a device named after it
     # is treated as an editor rather than as an unmapped machine (B16).
@@ -1668,9 +1776,9 @@ def api_admin_set_password(username: str, payload: SetPasswordIn, request: Reque
 
     The charset check is here as well as inside set_known_password: an
     admin's typo (or a URL-encoded 'root') must be a 422 from the dashboard,
-    not a TrueNAS round-trip that changes a system account's password. The
+    not a NAS round-trip that changes a system account's password. The
     refusals that actually matter -- uid < 1000, not in the editors group --
-    live in truenas_client.set_known_password so every caller gets them."""
+    live in each backend's set_known_password so every caller gets them."""
     _require_admin(request)
     username = username.strip().lower()
     if not is_valid_username(username):
@@ -1679,10 +1787,10 @@ def api_admin_set_password(username: str, payload: SetPasswordIn, request: Reque
             detail="username must start with a letter and contain only lowercase letters, "
                    "digits, '.', '_', '-'",
         )
-    truenas = _truenas_client_or_503(request)
+    nas = _nas_client_or_503(request)
     try:
-        truenas.set_known_password(username, payload.password)
-    except TrueNASError as exc:
+        nas.set_known_password(username, payload.password)
+    except NasError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"ok": True}
 

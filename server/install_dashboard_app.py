@@ -34,7 +34,7 @@ Steps (each idempotent, one line printed per action):
                              TRUENAS_USER, mode 700. Optional: /tmp is still
                              the fallback, and the small code trees use it.
      ...and, when the b-roll UI is enabled, the b-roll DATA root -- which is
-     the shared archive itself, /mnt/tank/.../Assets/B-roll Archive -- as
+     the shared archive itself, <tree root>/Assets/B-roll Archive -- as
      broll:editors 2770 (setgid), the same posture setup_tree.py gives
      Projects/. Deliberately NOT 770/group-3000: editors browse that tree
      over SMB as P:\\Assets\\B-roll Archive and must not be locked out of it.
@@ -124,8 +124,9 @@ Steps (each idempotent, one line printed per action):
      so the freshly-uploaded code is picked up (also an assumed shape, same
      fallback: restart the app from the TrueNAS UI).
 
-Env vars: TRUENAS_HOST (default 192.168.0.102), TRUENAS_USER (default
-truenas_admin), TRUENAS_PW (required), SYNCTHING_API_KEY (required),
+Env vars: TRUENAS_HOST / TRUENAS_USER (no defaults -- they come from [nas]
+host / admin_user in site.toml, see docs/SERVER.md), TRUENAS_PW (required),
+SYNCTHING_API_KEY (required),
 DASH_REPORT_TOKEN (required -- companions must present this to POST
 status reports; generate one with e.g. `openssl rand -hex 24` and put the
 same value in each editor's ~/.ccsync/config.toml as dashboard_token),
@@ -133,12 +134,14 @@ DASH_SESSION_SECRET (required -- signs editor/admin session cookies;
 generate the same way. It must stay STABLE across deploys: a fresh value
 logs every editor out, so store it alongside DASH_REPORT_TOKEN and pass
 both again on --recreate).
-Optional: DASH_ADMIN_USERS (default truenas_admin), SYNCTHING_GUI_URL,
+Optional: DASH_ADMIN_USERS (defaults to the NAS admin account this deploy
+signs in as -- [nas] admin_user), SYNCTHING_GUI_URL,
 CCSYNC_SSH_HOSTKEY (pin the NAS SSH host key; see --host-key),
 DASH_BIND_LAN / DASH_BIND_TAILNET (the two addresses the dashboard is
-published on, defaults 192.168.0.102 / 100.71.216.3 -- change these when the
-NAS's DHCP lease or tailnet IP moves, or Docker refuses to start the app
-with "cannot assign requested address"), DASH_IMAGE (pinned base image),
+published on; they default to [net] bind_lan / bind_tailnet in site.toml and
+a blank one is REFUSED, never guessed -- change them when the NAS's DHCP
+lease or tailnet IP moves, or Docker refuses to start the app with "cannot
+assign requested address"), DASH_IMAGE (pinned base image),
 TRUENAS_VERIFY_SSL (default "0" = trust the NAS's self-signed cert),
 DASH_BROLL_ENABLED (default "1"; "0" deploys without the b-roll UI),
 BROLL_INGEST_TOKEN (REQUIRED when DASH_BROLL_ENABLED=1 -- it guards a write
@@ -186,21 +189,30 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from common import (
-    DEFAULT_BROLL_ARCHIVE_ROOT, DEFAULT_CC_ROOT, DEFAULT_PROJECTS_ROOT,
-    add_host_key_arg, ok,
-    require_env, run_ssh,
-    set_host_key_pin, shell_quote, ssh_client, truenas_api,
-    truenas_conn_params, wait_for_job,
+from common import (  # noqa: F401 - truenas_api/run_ssh/wait_for_job/ok are also
+    # the names ScriptCalls resolves the backend's NAS access through; the
+    # offline suite patches them HERE (see common.ScriptCalls).
+    DEFAULT_APPS_ROOT, DEFAULT_BROLL_ARCHIVE_ROOT, DEFAULT_CC_ROOT, DEFAULT_DATASET_OWNER,
+    DEFAULT_HOMES_PARENT, DEFAULT_TRUENAS_HOST, DEFAULT_TRUENAS_USER, EDITORS_GROUP, EnvError,
+    DEFAULT_PROJECTS_ROOT, PROJECTS_DIRNAME, ScriptCalls, add_host_key_arg, add_nas_kind_arg,
+    add_site_arg, cli, get_backend, nas_admin_password, ok, require_env, require_site_value,
+    run_ssh, set_host_key_pin, sftp_put_text, shell_quote, site_int, site_value, ssh_client,
+    synology_api, truenas_api, truenas_conn_params, wait_for_job,
 )
+from backends import truenas as truenas_backend
 
 APP_NAME = "ccsync-dashboard"
-DEFAULT_HOST_ROOT = "/mnt/tank/apps/ccsync-dashboard"
+# Blank when site.toml does not say (2026-08-17). It was /mnt/tank/apps/
+# ccsync-dashboard -- this fleet's pool -- and main() refuses rather than
+# guessing, because everything under <host-root>/app is REPLACED as root.
+DEFAULT_HOST_ROOT = DEFAULT_APPS_ROOT
 # The install replaces everything under <host-root>/app, as root. Bound that
 # to the one location this app is ever deployed to, so a mistyped --host-root
-# cannot point the replace at a project tree (AUDIT DEL-9).
-HOST_ROOT_RE = re.compile(r"^/mnt/[^/]+/apps/ccsync-dashboard(/[^/]+)*$")
-DEFAULT_SYNCTHING_GUI_URL = "http://192.168.0.102:8384"
+# cannot point the replace at a project tree (AUDIT DEL-9). Re-exported from
+# backends/truenas.py, which owns the platform's shape; the RUN uses
+# backend.host_root_re, so --nas-kind synology gets the /volume<N>/ one.
+HOST_ROOT_RE = truenas_backend.HOST_ROOT_RE
+DEFAULT_SYNCTHING_GUI_URL = site_value("syncthing", "gui_url")
 EXCLUDE_DIRS = {".venv", "__pycache__", ".pytest_cache"}
 # How long a tree-sized remote step may run before run_ssh gives up on the
 # channel (OPS-3). The floor covers the small code trees; the rate covers the
@@ -399,8 +411,12 @@ DEFAULT_IMAGE = "python:3.12.7-slim"
 # and this script takes --bind-lan/--bind-tailnet (same env names), because a
 # NAS DHCP change or a tailnet IP rotation otherwise makes Docker fail with
 # "cannot assign requested address" and the app never starts.
-LAN_BIND_IP = "192.168.0.102"
-TAILNET_BIND_IP = "100.71.216.3"
+#
+# They come from site.toml ([net] bind_lan / bind_tailnet) via the backend
+# since 2026-08-17 and are blank when it does not say -- blank is refused by
+# backend.dash_binds(), never defaulted to this fleet's addresses.
+LAN_BIND_IP = truenas_backend.DEFAULT_LAN_BIND
+TAILNET_BIND_IP = truenas_backend.DEFAULT_TAILNET_BIND
 
 
 # yt-dlp's PO-token provider, run as a sidecar. The tag is pinned and MUST be
@@ -442,30 +458,145 @@ def healthcheck_config(port: int) -> dict:
     }
 
 
+# The uid:gid the container runs as. 3000:3001 is broll:editors on THIS NAS --
+# the pair setup_tree.py chowns the tree to, which is what lets the dashboard
+# create project folders an editor can then write to. Site-supplied since
+# 2026-08-17 ([stack] uid/gid) because DSM hands out >= 1026 and a Synology
+# deploy has to template these from the live values (plan spike 7).
+APP_UID = site_int("stack", "uid", 3000)
+APP_GID = site_int("stack", "gid", 3001)
+
+
+def deploy_nas_kind() -> str:
+    """Which platform this deploy targets: --nas-kind, else $CCSYNC_NAS_KIND,
+    else [nas] kind. Imported locally because `nas_kind` is also a parameter
+    name in compose_variables/compose_config, and shadowing a module-level
+    import inside them is how the wrong one gets called."""
+    from common import nas_kind as _kind  # noqa: PLC0415
+
+    try:
+        return _kind(_ARGS)
+    except EnvError:
+        return "truenas"
+
+
+def cookie_secure_for(dashboard_url: str) -> str:
+    """DASH_COOKIE_SECURE for a site published at `dashboard_url`.
+
+    "auto" (the dashboard's own default) honours X-Forwarded-Proto, which is
+    what `tailscale serve` and DSM's reverse proxy set -- so it is right for
+    both a plain-http LAN deployment and a proxied https one. An https URL in
+    the manifest is an explicit statement, and pins it (WP4).
+    """
+    return "1" if str(dashboard_url or "").strip().lower().startswith("https://") else "auto"
+
+
+def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
+             dashboard_url: str = "") -> dict:
+    """The DASH_SITE_* block: what GET /api/v1/site serves.
+
+    Added 2026-08-17. Until then nothing in the deploy set any of them, so a
+    deployed dashboard answered that route with blanks and every client
+    (companion `server_p_unc`, both installers' `nas_syncthing_id`, the
+    wizard's rclone stanza) fell back to flags -- which is the "second site is
+    a fork" failure the route was added to end (WP0 step 3).
+
+    Every value comes from site.toml. Two of them are not cosmetic:
+
+      * SFTP_CHUNK_SIZE -- 255Ki is right on TrueNAS and LOSES FOOTAGE on
+        DSM 7.2, whose OpenSSH 8.2 truncates a lane-B download at 539,000,832
+        bytes with no error the client can distinguish from a network fault
+        (docs/synology-spikes-2026-08-17.md spike 6). A Synology site sets
+        "64Ki" and this is how each editor learns it.
+      * SFTP_SHELL_TYPE -- DSM editors have /sbin/nologin, so rclone's
+        `shell_type = unix` cannot run md5sum over SSH and every checksum
+        fails. "none" there, "unix" on TrueNAS.
+    """
+    tree_root = (tree_root or DEFAULT_CC_ROOT).rstrip("/")
+    nas_host = nas_host or os.environ.get("TRUENAS_HOST", "") or DEFAULT_TRUENAS_HOST
+    return {
+        "DASH_SITE_ORG_NAME": site_value("site", "org_name"),
+        "DASH_SITE_TREE_NAME": site_value("tree", "tree_name"),
+        # The editor drive letter is hardcoded by decision (2026-07-26); it is
+        # served anyway so a client never has to assume it.
+        "DASH_SITE_CANONICAL_PREFIX": site_value("site", "canonical_prefix") or "P:\\",
+        "DASH_SITE_REMOTE_ROOT": tree_root,
+        "DASH_SITE_SMB_UNC": site_value("tree", "smb_unc"),
+        "DASH_SITE_SFTP_HOST": site_value("net", "sftp_host") or nas_host,
+        "DASH_SITE_SFTP_PORT": site_value("net", "sftp_port") or "22",
+        "DASH_SITE_SFTP_CHUNK_SIZE": site_value("net", "sftp_chunk_size"),
+        "DASH_SITE_SFTP_CONCURRENCY": site_value("net", "sftp_concurrency"),
+        "DASH_SITE_SFTP_SHELL_TYPE": site_value("net", "shell_type"),
+        "DASH_SITE_RCLONE_REMOTE": site_value("net", "rclone_remote") or "ccsync_sftp",
+        # A fallback only: the dashboard prefers Syncthing's live myID, so a
+        # blank here is not a problem and a stale one cannot win.
+        "DASH_SITE_NAS_SYNCTHING_ID": site_value("syncthing", "device_id"),
+        "DASH_SITE_DASHBOARD_URL": (dashboard_url or site_value("net", "dashboard_url")),
+    }
+
+
 def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token: str,
-                   session_secret: str = "", admin_users: str = "truenas_admin",
+                   session_secret: str = "", admin_users: str = "",
                    truenas_host: str = "", truenas_user: str = "", truenas_pw: str = "",
                    truenas_verify_ssl: str = "0",
                    bind_lan: str = LAN_BIND_IP, bind_tailnet: str = TAILNET_BIND_IP,
                    image: str = DEFAULT_IMAGE,
                    broll_enabled: str = "1", broll_ingest_token: str = "",
-                   broll_creators_shares: str = "mofa-disaster") -> dict:
-    # Mirrors dashboard/deploy/compose.yaml -- keep the two in sync. The ${VAR}
-    # substitutions there are resolved here in Python instead: the TrueNAS
-    # middleware stores this dict verbatim, so an unresolved ${...} would end
-    # up as a literal bind address.
+                   broll_creators_shares: str = "mofa-disaster",
+                   tree_root: str = "", app_uid: int = 0, app_gid: int = 0,
+                   binds=None, nas_kind: str = "truenas", ssh_port: str = "22",
+                   ssh_hostkey: str = "", ssh_key_probe: str = "1",
+                   dashboard_url: str = "") -> dict:
+    """The compose body, as the dict the TrueNAS middleware stores verbatim.
+
+    Rendered from the same five variables dashboard/deploy/compose.yaml is --
+    NAS_APPS_ROOT (`host_root`), NAS_TREE_ROOT, APP_UID/APP_GID, the bind list
+    and SYNCTHING_URL -- so the file and this dict cannot describe different
+    deployments (server/tests/test_safety.py diffs them, and
+    test_compose_template.py diffs the render against the pre-templating
+    golden). The ${VAR} substitutions the YAML leaves for compose are resolved
+    here in Python: the middleware stores this dict as-is, so an unresolved
+    ${...} would end up as a literal bind address.
+    """
+    tree_root = require_site_value(tree_root or DEFAULT_CC_ROOT,
+                                   "[tree] pool_root/tree_name").rstrip("/")
+    # Where editors reach this dashboard: what /api/v1/site serves, and what
+    # decides whether the session cookie is pinned Secure.
+    dashboard_url = dashboard_url or site_value("net", "dashboard_url")
+    projects_root = f"{tree_root}/{PROJECTS_DIRNAME}"
+    broll_archive_root = f"{tree_root}/Assets/B-roll Archive"
+    music_library_root = f"{tree_root}/Assets/Music"
+    uid = app_uid or APP_UID
+    gid = app_gid or APP_GID
+    if binds is None:
+        binds = [
+            ("DASH_BIND_LAN", require_site_value(bind_lan, "[net] bind_lan", "--bind-lan")),
+            ("DASH_BIND_TAILNET", require_site_value(bind_tailnet, "[net] bind_tailnet",
+                                                     "--bind-tailnet")),
+        ]
     return {
         "services": {
             "dashboard": {
                 "image": image,
-                "user": "3000:3001",
+                "user": f"{uid}:{gid}",
                 "command": ["/bin/sh", "/app/deploy/run.sh"],
                 "environment": {
                     "SYNCTHING_GUI_URL": gui_url,
                     "SYNCTHING_API_KEY": api_key,
                     "DASH_REPORT_TOKEN": token,
                     "DASH_SESSION_SECRET": session_secret,
-                    "DASH_ADMIN_USERS": admin_users,
+                    # Blank would be an admin list naming nobody: every /admin
+                    # route 403s, for everyone. Falls back to the account this
+                    # deploy authenticates as.
+                    "DASH_ADMIN_USERS": admin_users or truenas_user,
+                    # The host the editor-login SMB probe authenticates
+                    # against. Unset, the dashboard boots and then refuses
+                    # every editor login -- nothing set it between WP0's
+                    # de-tenanting and 2026-08-17.
+                    "DASH_SMB_HOST": site_value("net", "smb_host") or truenas_host,
+                    # "auto" honours X-Forwarded-Proto, which both `tailscale
+                    # serve` and DSM's reverse proxy set; an https site pins it.
+                    "DASH_COOKIE_SECURE": cookie_secure_for(dashboard_url),
                     "DASH_DB_PATH": "/data/dashboard.db",
                     "DASH_PORT": str(port),
                     "DASH_PROJECTS_DIR": "/projects",
@@ -564,16 +695,42 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     "TRUENAS_HOST": truenas_host,
                     "TRUENAS_USER": truenas_user,
                     "TRUENAS_PW": truenas_pw,
+                    # Which NAS the dashboard's runtime backend talks to
+                    # (ccsync_dashboard.nas.factory). "truenas" is what it
+                    # defaults to anyway -- set explicitly so a deployment
+                    # says what it is (SYNOLOGY_PORT_PLAN WP1/WP2).
+                    "DASH_NAS_KIND": nas_kind,
+                    # The backend-neutral names the dashboard's settings PREFER
+                    # (DASH_NAS_* wins over TRUENAS_*). Both are set, with the
+                    # same values: a rollback to a container image older than
+                    # 2026-08-17 still reads the TRUENAS_* trio, and a Synology
+                    # site should not have to spell its password TRUENAS_PW.
+                    "DASH_NAS_HOST": truenas_host,
+                    "DASH_NAS_USER": truenas_user,
+                    "DASH_NAS_PW": truenas_pw,
+                    # The Synology backend does over SSH what DSM has no API
+                    # for -- writing an editor's ~/.ssh/authorized_keys. Unset
+                    # DASH_NAS_SSH_HOSTKEY means trust-on-first-use, which the
+                    # dashboard WARNS about on every connect: the channel
+                    # carries the NAS admin password (COMMERCIAL_READINESS H2),
+                    # so pin it from site.toml [nas] ssh_hostkey.
+                    "DASH_NAS_SSH_PORT": str(ssh_port or "22"),
+                    "DASH_NAS_SSH_HOSTKEY": ssh_hostkey,
+                    # "0" stops the admin Users page opening an SSH session per
+                    # render to ask which editors have a key installed.
+                    "DASH_NAS_SSH_KEY_PROBE": str(ssh_key_probe or "1"),
+                    # site.toml [tree] homes_parent -> the dashboard's account
+                    # creation (was a literal in its TrueNAS client, 2026-08-17).
+                    "DASH_NAS_HOMES_PARENT": DEFAULT_HOMES_PARENT,
                     # TLS verification for those TrueNAS API calls (they carry
                     # TRUENAS_PW). "0" = trust the NAS's self-signed cert, as
                     # before; "1" or a CA bundle path inside the container
                     # once the NAS has a trusted cert.
                     "TRUENAS_VERIFY_SSL": truenas_verify_ssl,
+                    # --- what GET /api/v1/site serves (see site_env) ---------
+                    **site_env(port, tree_root, truenas_host, dashboard_url),
                 },
-                "ports": [
-                    f"{bind_lan}:{port}:{port}",
-                    f"{bind_tailnet}:{port}:{port}",
-                ],
+                "ports": [f"{addr}:{port}:{port}" for _env, addr in binds],
                 "volumes": [
                     # ro: the command: line executes /app/deploy/run.sh, so a
                     # writable /app is code execution in a container holding
@@ -588,13 +745,13 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     f"{host_root}/data:/data",
                     # rw for the /project-setup create flow; container runs
                     # as broll:editors, matching setup_tree.py's ownership.
-                    f"{DEFAULT_PROJECTS_ROOT}:/projects:rw",
+                    f"{projects_root}:/projects:rw",
                     # b-roll: code read-only (same posture as /app), data rw.
                     f"{host_root}/broll-web:/broll-app:ro",
                     # DATA_ROOT is the shared archive itself (beside Projects/
                     # under Creators_Club), not a private copy -- one set of
                     # media serves both the search UI and editors' timelines.
-                    f"{DEFAULT_BROLL_ARCHIVE_ROOT}:/broll-data:rw",
+                    f"{broll_archive_root}:/broll-data:rw",
                     # music: code read-only (same posture as /app and
                     # /broll-app), and its data split by what has to be
                     # writable rather than by what happens to be big.
@@ -614,7 +771,7 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # The music library itself, beside Projects/ and the b-roll
                     # archive. rw: queued ingest moves the accepted upload into
                     # the share.
-                    f"{DEFAULT_MUSIC_LIBRARY_ROOT}:/music-share:rw",
+                    f"{music_library_root}:/music-share:rw",
                     # Static ffmpeg/ffprobe for /api/ingest. There is no image
                     # build in this deployment and the container is unprivileged,
                     # so the binaries are provisioned onto the host by this
@@ -677,6 +834,118 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
     }
 
 
+# --------------------------------------------------------------------------
+# dashboard/deploy/compose.yaml as a template (WP0 step 2, 2026-08-17)
+# --------------------------------------------------------------------------
+#
+# That file used to hardcode 17 /mnt/tank bind mounts, user "3000:3001" and
+# this fleet's two bind addresses, which made it useless to any other site --
+# and it is the documented manual fallback ("Install via YAML"), so it has to
+# be right. It is a template now, filled in from exactly the values
+# compose_config() uses.
+#
+# `{{NAME}}` deliberately, NOT `${NAME}`: compose has its own ${...}
+# substitution at run time (DASH_BIND_LAN, SYNCTHING_API_KEY, DASH_PG_PORT),
+# and those must survive rendering untouched.
+COMPOSE_TEMPLATE = LOCAL_DASHBOARD_DIR / "deploy" / "compose.yaml"
+_COMPOSE_VAR_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
+
+
+def compose_bind_lines(binds, port: int, indent: str = "      ") -> str:
+    """The `ports:` list for the template: one line per published interface.
+
+    An (env-var, address) pair renders as compose's own `${VAR:-addr}` so the
+    published file keeps its escape hatch -- a NAS DHCP change or a tailnet IP
+    rotation stays a variable edit rather than a file edit, which is why those
+    defaults were written that way in the first place.
+    """
+    lines = []
+    for env_name, address in binds:
+        value = f"${{{env_name}:-{address}}}" if env_name else address
+        lines.append(f'{indent}- "{value}:{port}:{port}"')
+    return "\n".join(lines)
+
+
+def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = "",
+                      app_uid: int = 0, app_gid: int = 0, binds=None,
+                      syncthing_url: str = "", nas_host: str = "",
+                      nas_user: str = "", admin_users: str = "",
+                      homes_parent: str = "", nas_kind: str = "",
+                      dashboard_url: str = "", broll_enabled: str = "1") -> dict:
+    """Every {{NAME}} the compose template takes, defaulted from site.toml."""
+    host_root = require_site_value(host_root or DEFAULT_HOST_ROOT, "[apps] root",
+                                   "--host-root").rstrip("/")
+    tree_root = require_site_value(tree_root or DEFAULT_CC_ROOT,
+                                   "[tree] pool_root/tree_name").rstrip("/")
+    nas_host = nas_host or os.environ.get("TRUENAS_HOST", "") or DEFAULT_TRUENAS_HOST
+    nas_user = nas_user or os.environ.get("TRUENAS_USER", "") or DEFAULT_TRUENAS_USER
+    if binds is None:
+        binds = get_backend(_ARGS).dash_binds(port)
+    # The DASH_SITE_* block, under the template's shorter names. Kept in ONE
+    # place (site_env) so the file an operator pastes and the dict the TrueNAS
+    # middleware stores cannot describe different sites.
+    site = {name.replace("DASH_", "", 1): value
+            for name, value in site_env(port, tree_root, nas_host, dashboard_url).items()}
+    return {
+        # Which runtime NAS backend the container builds (nas/factory.py).
+        "NAS_KIND": nas_kind or deploy_nas_kind(),
+        # The SSH half of the Synology runtime backend (authorized_keys).
+        "NAS_SSH_PORT": site_value("net", "sftp_port") or "22",
+        "NAS_SSH_HOSTKEY": site_value("nas", "ssh_hostkey"),
+        "NAS_SSH_KEY_PROBE": site_value("nas", "ssh_key_probe") or "1",
+        "SMB_HOST": site_value("net", "smb_host") or nas_host,
+        "DASH_COOKIE_SECURE": cookie_secure_for(
+            dashboard_url or site_value("net", "dashboard_url")),
+        # Deliberately a PARAMETER, not $DASH_BROLL_ENABLED: the template is
+        # the file an operator pastes, and it must not silently inherit
+        # whichever value happened to be exported in the shell that rendered
+        # it (the same rule NAS_ADMIN_USERS follows below). main() passes the
+        # real one when it renders for a deploy.
+        "DASH_BROLL_ENABLED": broll_enabled or "1",
+        **site,
+        "NAS_APPS_ROOT": host_root,
+        "NAS_TREE_ROOT": tree_root,
+        "APP_UID": str(app_uid or APP_UID),
+        "APP_GID": str(app_gid or APP_GID),
+        "DASH_PORT": str(port),
+        "DASH_PORT_BINDS": compose_bind_lines(binds, port),
+        "SYNCTHING_URL": (syncthing_url or DEFAULT_SYNCTHING_GUI_URL),
+        "NAS_HOST": nas_host,
+        "NAS_USER": nas_user,
+        "NAS_HOMES_PARENT": homes_parent or DEFAULT_HOMES_PARENT,
+        # NOT read from $DASH_ADMIN_USERS here: the template is the FILE an
+        # operator pastes, and it must not silently inherit whichever admin
+        # list happened to be exported in the shell that rendered it. main()
+        # passes the real value when it renders for a deploy.
+        "NAS_ADMIN_USERS": admin_users or nas_user,
+    }
+
+
+def render_compose_yaml(variables: dict | None = None,
+                        template: Path = COMPOSE_TEMPLATE) -> str:
+    """The compose file for THIS site, as text.
+
+    What the Synology backend uploads and `docker compose up -d` reads (the
+    TrueNAS one POSTs compose_config()'s dict instead, because its middleware
+    stores a dict). An unknown placeholder is a hard error: a silently empty
+    bind mount is a container that starts and serves nothing.
+    """
+    text = template.read_text(encoding="utf-8")
+    values = variables if variables is not None else compose_variables()
+
+    def sub(match):
+        name = match.group(1)
+        if name not in values:
+            raise EnvError(
+                f"{template} uses {{{{{name}}}}}, which compose_variables() does not "
+                f"provide -- add it there (and to compose_config, if the dict needs "
+                f"it too) rather than leaving the placeholder in the deployed file."
+            )
+        return str(values[name])
+
+    return _COMPOSE_VAR_RE.sub(sub, text)
+
+
 # Every environment variable whose VALUE is a credential and which ends up in
 # the compose body this script prints. --dry-run prints that body in full, on
 # purpose (the admin needs to eyeball paths, ports, mounts and bind addresses
@@ -691,6 +960,12 @@ SECRET_ENV_VARS = (
     "BROLL_INGEST_TOKEN",
     "TRUENAS_PW",
 )
+
+# The same secrets as they appear in the compose FILE (the Synology path):
+# every one is a `KEY: "REPLACE_ME"` line that becomes a ${KEY} reference into
+# the 0600 .env. DASH_NAS_PW is the sixth because the template sets both names
+# for the NAS password (see compose_config).
+STACK_ENV_SECRETS = SECRET_ENV_VARS + ("DASH_NAS_PW",)
 
 
 def dry_run_mask(name: str, value: str) -> str:
@@ -731,7 +1006,10 @@ def resolve_compose_secrets(dry_run: bool, broll_ingest_token: str) -> dict:
         # Already validated by weak_ingest_token when the b-roll UI is on, and
         # legitimately blank when it is off.
         "BROLL_INGEST_TOKEN": broll_ingest_token,
-        "TRUENAS_PW": require_env("TRUENAS_PW"),
+        # TRUENAS_PW or SYNO_PW, whichever this site uses (nas_admin_password).
+        # The compose key keeps the TRUENAS_ name because the container reads
+        # both and an older image reads only that one.
+        "TRUENAS_PW": nas_admin_password(),
     }
 
 
@@ -1819,13 +2097,19 @@ def upload_tree(staging_dir: str, dry_run: bool, base: Path = LOCAL_DASHBOARD_DI
         return len(files)
 
     host, user, pw = truenas_conn_params()
+    # The SFTP channel's own namespace, which is not always the filesystem's:
+    # DSM chroots EVERY account -- the admin included -- to its share view, so
+    # /volume1/docker/ccsync/staging is `/docker/ccsync/staging` there (and
+    # /tmp does not exist at all, which is why the staging parent moved).
+    # Identity on TrueNAS.
+    sftp_root = backend().sftp_path(staging_dir)
     try:
         client = ssh_client(host, user, pw)
         try:
             sftp = client.open_sftp()
             made: set[str] = set()
             for local, rel in files:
-                remote = posixpath.join(staging_dir, rel)
+                remote = posixpath.join(sftp_root, rel)
                 parent = posixpath.dirname(remote)
                 parts = parent.split("/")
                 for i in range(2, len(parts) + 1):
@@ -2047,22 +2331,136 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
     return True
 
 
-def restart_dashboard_container(dry_run: bool) -> tuple[bool, str]:
-    """`docker restart` the dashboard container. Returns (ok, stderr).
+# --------------------------------------------------------------------------
+# The Synology deploy path (docs/SYNOLOGY_PORT_PLAN.md WP3, 2026-08-17)
+# --------------------------------------------------------------------------
+#
+# Everything below exists because DSM's filesystem rules are not TrueNAS's:
+#
+#   * NOTHING under the tree share may be chmod'd or chown'd. A single chmod
+#     DESTROYS that path's Synology ACL, and DSM's `internal-sftp -u 000` then
+#     leaves every file created below it world-writable (spike 1). So the
+#     b-roll archive and the music library are only ever `mkdir -p`'d here --
+#     the share's inheritable `editors` ACE is what makes them writable, and it
+#     is already there.
+#   * INSIDE the apps root the opposite holds: <apps root>/ccsync is our own
+#     private directory that no editor browses, and mode bits are the only way
+#     to make a .env root-only. That is the one deliberate exception.
+#   * DSM local users have primary group `users` (gid 100) and every account is
+#     in it, so TrueNAS's "group 3000, mode 770" posture would hand /data to
+#     every DSM user. The private dirs are 0700 owned by the service uid
+#     instead -- strictly tighter, and the container runs as that uid.
 
-    /app/redeploy was observed NOT restarting the container on TrueNAS 25.10
-    (2026-07-24: a stale process kept serving old in-memory code), so the
-    restart is done directly. Compose name convention: ix-<app_name>-<service>-1.
+# Where the code trees stage on DSM. NOT /tmp: the SFTP channel is chrooted to
+# the share view even for an administrator, so /tmp is not reachable over SFTP
+# at all (measured during the 2026-08-17 bring-up).
+SYNOLOGY_STAGING_DIRNAME = "staging"
+
+# Host dirs the container mounts. (name, posture): "code" = root:root 0755,
+# mounted :ro; "private" = <uid> 0700, the container's own writable state.
+SYNOLOGY_HOST_DIRS = (
+    ("app", "code"), ("broll-web", "code"), ("music-web", "code"),
+    ("music-encoder", "code"), ("music-proxies", "code"), ("ffmpeg", "code"),
+    ("ytdl-web", "code"), ("claude-bin", "code"), ("deno", "code"),
+    ("venv", "private"), ("data", "private"), ("music-data", "private"),
+    ("ytdl-data", "private"), ("claude-home", "private"),
+    ("syncthing-config", "private"),
+)
+
+
+def build_synology_host_dirs(root: str, uid: int, ssh_user: str) -> str:
+    """The step-1 shell for a DSM box. See the section comment above.
+
+    Deliberately NOT the TrueNAS chain with different numbers in it: that one
+    chowns to group 3000 and 3001 by name-independent literals, and on DSM
+    both would be wrong (gid 3000 does not exist; `editors` is 65536). Every
+    private dir here is 0700 owned by the service uid -- the container runs as
+    that uid, and nothing else needs in.
     """
-    container = f"ix-{APP_NAME}-dashboard-1"
-    # SERVER-1: guarded because fail_after_app_swap calls this ON a failure
-    # path -- a transport error raising out of the restart would turn the fix
-    # for OPS-2 back into the traceback OPS-2 was.
-    rc, _out, err = run_ssh_guarded(
-        f'echo "$SUDO_PW" | sudo -S docker restart {shell_quote(container)}',
-        dry_run, 120,
+    root_q = shell_quote(root)
+    code = [f"{root}/{name}" for name, kind in SYNOLOGY_HOST_DIRS if kind == "code"]
+    private = [f"{root}/{name}" for name, kind in SYNOLOGY_HOST_DIRS if kind == "private"]
+    staging = f"{root}/{SYNOLOGY_STAGING_DIRNAME}"
+    code_q = " ".join(shell_quote(d) for d in code)
+    private_q = " ".join(shell_quote(d) for d in private)
+    return (
+        f"set -e; "
+        f"mkdir -p {root_q} {code_q} {private_q} {shell_quote(staging)}; "
+        f"chown root:root {root_q} {code_q}; chmod 755 {root_q} {code_q}; "
+        # Create-only for the private dirs' CONTENTS: dashboard.db, ytdl.db and
+        # the claude credentials live in them and are never touched by a
+        # redeploy. Only the directory itself is re-owned, non-recursively.
+        f"chown {uid} {private_q}; chmod 700 {private_q}; "
+        # Staging belongs to the SSH user: SFTP writes as them, and the files
+        # are then INSTALLED into place as root.
+        f"chown {shell_quote(ssh_user)} {shell_quote(staging)}; "
+        f"chmod 700 {shell_quote(staging)}"
     )
-    return (dry_run or rc == 0), err
+
+
+def build_synology_tree_dirs(dirs) -> str:
+    """mkdir -p for tree-side directories (the b-roll archive, the music
+    library) -- and NOTHING else.
+
+    No chown, no chmod, on purpose and permanently: these live inside the tree
+    share, whose inheritable `editors` ACE is what makes them writable by the
+    container AND by every editor browsing over SMB. A chmod here would delete
+    that ACE from the archive root (spike 1), which is exactly the
+    "editors locked out of their own archive" failure the TrueNAS code's
+    2770 comment warns about, arrived at from the opposite direction.
+    """
+    quoted = " ".join(shell_quote(d) for d in dirs)
+    return f"mkdir -p {quoted}"
+
+
+def secrets_as_env_refs(text: str, names) -> str:
+    """Replace `KEY: "REPLACE_ME"` with a compose ${KEY} reference.
+
+    The rendered compose.yaml is a FILE on the NAS, world-readable at 0644 so
+    docker can read it; the secrets go in a 0600 .env beside it instead. Every
+    name must be found -- an unreplaced REPLACE_ME would deploy a dashboard
+    whose session secret is the literal string "REPLACE_ME" (and, for
+    BROLL_INGEST_TOKEN, a container that refuses to start).
+    """
+    for name in names:
+        pattern = re.compile(rf'^(\s*){re.escape(name)}:\s*"REPLACE_ME"\s*$', re.M)
+        replacement = rf'\g<1>{name}: "${{{name}:?set {name} in .env}}"'
+        text, count = pattern.subn(replacement, text)
+        if count != 1:
+            raise EnvError(
+                f"expected exactly one `{name}: \"REPLACE_ME\"` line in the rendered "
+                f"compose file, found {count}. dashboard/deploy/compose.yaml and this "
+                f"script have drifted -- refusing to deploy a stack whose secrets may be "
+                f"the literal REPLACE_ME.")
+    return text
+
+
+_ARGS = None   # set by main(); None means "kind from $CCSYNC_NAS_KIND/site.toml"
+_BACKEND = None
+
+
+def backend():
+    """The ServerBackend for this deploy, built once.
+
+    ScriptCalls binds it to THIS module's truenas_api / run_ssh /
+    run_ssh_guarded / wait_for_job names, which is what keeps the offline
+    resilience suite (which patches exactly those) seeing every call.
+    """
+    global _BACKEND
+    if _BACKEND is None:
+        _BACKEND = get_backend(_ARGS, calls=ScriptCalls(sys.modules[__name__]))
+    return _BACKEND
+
+
+def restart_dashboard_container(dry_run: bool) -> tuple[bool, str]:
+    """Restart the dashboard container onto new code. Returns (ok, stderr).
+
+    Re-export: the platform half moved to backends/<kind>.py on 2026-08-17
+    (WP3). /app/redeploy was observed NOT restarting the container on TrueNAS
+    25.10 (2026-07-24: a stale process kept serving old in-memory code), which
+    is why this is a direct `docker restart` there.
+    """
+    return backend().restart_stack(dry_run)
 
 
 def fail_after_app_swap(dry_run: bool) -> int:
@@ -2101,18 +2499,10 @@ def app_installed(dry_run: bool) -> bool | None:
     it runs in step 3 -- after the `app` swap -- so that exit skipped
     fail_after_app_swap's restart and left the container on app.old.<ts>.
     The tri-state lets main() route it like every other post-swap failure.
+
+    Re-export; body in backends/<kind>.py since 2026-08-17.
     """
-    # No query-filters param: the 25.10 middleware was observed returning []
-    # for a filtered GET /app even when the app exists (2026-07-24 live run),
-    # so fetch the full list and filter client-side.
-    resp = truenas_api("GET", "/app", dry_run=dry_run)
-    if dry_run:
-        return False
-    if not ok(resp):
-        print(f"FAILED to query installed apps: HTTP {resp.status_code} {resp.text}",
-              file=sys.stderr)
-        return None
-    return any(a.get("name") == APP_NAME for a in resp.json())
+    return backend().app_installed(APP_NAME, dry_run)
 
 
 def main():
@@ -2165,14 +2555,46 @@ def main():
     ap.add_argument("--recreate", action="store_true",
                     help="delete and re-create the app so compose changes (env vars, "
                          "mounts, ports) take effect; host app/ and data/ dirs survive")
+    ap.add_argument("--with-host-binaries", action="store_true",
+                    help="Synology only: also push the ~1.4 GB of music DATA and the "
+                         "ffmpeg/Claude/deno binaries. They are SKIPPED by default on "
+                         "DSM -- the tested unit had 60 GB free and none of /music, "
+                         "/ytdl's transcode or the Claude CLI is needed to run the "
+                         "dashboard, b-roll or the three sync lanes. On TrueNAS they "
+                         "are pushed as always (--no-ffmpeg / --no-ytdl-bins / "
+                         "--music-data none opt out there).")
     ap.add_argument("--allow-any-host-root", action="store_true",
                     help="allow a --host-root outside /mnt/<pool>/apps/ccsync-dashboard. "
                          "The install REPLACES everything under <host-root>/app as root; "
                          "this flag exists so that can never happen by typo.")
     add_host_key_arg(ap)
+    add_site_arg(ap)
+    add_nas_kind_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     set_host_key_pin(args.host_key)
+    global _ARGS
+    _ARGS = args
+    # Which addresses this dashboard publishes on is the platform's answer
+    # (LAN + tailnet on TrueNAS; loopback plus `tailscale serve` on DSM, whose
+    # userspace-mode tailscaled has no interface to bind). Resolved here so a
+    # blank or unknown one refuses BEFORE anything is uploaded (2026-08-17).
+    binds = backend().dash_binds(args.port, args.bind_lan, args.bind_tailnet)
+    # Which platform this is decides four things below: how the host dirs are
+    # owned, whether the tree-side dirs may be chown'd at ALL (they may not on
+    # DSM -- spike 1), where code stages (DSM's SFTP cannot see /tmp), and
+    # whether the ~1.4 GB of optional artefacts are pushed by default.
+    synology = backend().kind == "synology"
+    # ...and the 1.4 GB of music data + host binaries are opt-in there.
+    if synology and not args.with_host_binaries:
+        args.no_ffmpeg = True
+        args.no_ytdl_bins = True
+        args.music_data = "none"
+    # The tree root is not optional either: step 2 mkdir -ps the b-roll archive
+    # and the music library under it as root, and step 3 bind-mounts both. A
+    # blank one would make those "/Assets/B-roll Archive" -- an absolute path on
+    # the NAS's root filesystem. Refuse here, with everything still untouched.
+    require_site_value(DEFAULT_CC_ROOT, "[tree] pool_root/tree_name")
 
     if not LOCAL_DASHBOARD_DIR.is_dir():
         print(f"FAILED: {LOCAL_DASHBOARD_DIR} not found -- run from the repo", file=sys.stderr)
@@ -2270,7 +2692,6 @@ def main():
     session_secret = secrets["DASH_SESSION_SECRET"]
     broll_ingest_token = secrets["BROLL_INGEST_TOKEN"]
     truenas_pw = secrets["TRUENAS_PW"]
-    admin_users = os.environ.get("DASH_ADMIN_USERS", "truenas_admin")
     # "0" keeps today's behaviour (self-signed NAS cert trusted); the dashboard
     # reads the same var (truenas_client._verify_setting).
     truenas_verify_ssl = os.environ.get("TRUENAS_VERIFY_SSL", "0").strip() or "0"
@@ -2278,13 +2699,20 @@ def main():
     # ssh lines anyway. The password for the compose body comes from `secrets`;
     # run_ssh and truenas_api re-read TRUENAS_PW themselves for their own calls.
     truenas_host, truenas_user, _ = truenas_conn_params(dry_run=args.dry_run)
+    # Who may reach the admin sections. Defaults to the NAS admin account this
+    # deploy already authenticates as -- NOT the literal "truenas_admin", which
+    # was this fleet's own username and, on any other site, an admin list
+    # naming NOBODY: every /admin route then answers 403 to everyone, including
+    # the person who just installed it (found on the 2026-08-17 Synology
+    # bring-up, where the account is `Cablewrap`).
+    admin_users = os.environ.get("DASH_ADMIN_USERS", "").strip() or truenas_user
 
-    root = args.host_root.rstrip("/")
-    if not HOST_ROOT_RE.match(root):
+    root = require_site_value(args.host_root, "[apps] root", "--host-root").rstrip("/")
+    if not backend().host_root_re.match(root):
         if not args.allow_any_host_root:
             print(
-                f"REFUSING --host-root {root!r}: it is not under "
-                f"/mnt/<pool>/apps/ccsync-dashboard.\n"
+                f"REFUSING --host-root {root!r}: it does not match this NAS's app "
+                f"root shape ({backend().host_root_re.pattern}).\n"
                 f"  This install replaces EVERYTHING under {root}/app as root, so a "
                 f"mistyped root (a project tree, a share) would take its contents with "
                 f"it.\n"
@@ -2295,6 +2723,78 @@ def main():
         print(f"WARNING: --allow-any-host-root given. {root}/app will be REPLACED "
               f"wholesale (its current contents are moved aside to {root}/app.old.<ts>, "
               f"not deleted); {root}/data is left untouched.", file=sys.stderr)
+
+    # ---- Synology step 0: the share, the SFTP service, and the live ids ----
+    app_uid, app_gid = APP_UID, APP_GID
+    code_staging_parent = "/tmp"
+    if synology:
+        # Every compose command is `-p ccsync -f <root>/compose.yaml`, so the
+        # backend has to be told which root the operator named.
+        backend().use_project_dir(root)
+        code_staging_parent = f"{root}/{SYNOLOGY_STAGING_DIRNAME}"
+        share_name = site_value("tree", "share_name")
+        pool_root = site_value("tree", "pool_root")
+        if share_name and pool_root:
+            if not backend().ensure_share(share_name, pool_root, EDITORS_GROUP,
+                                          args.dry_run):
+                print(f"FAILED: the tree share {share_name!r} is not usable -- everything "
+                      f"below depends on it.", file=sys.stderr)
+                return 1
+        else:
+            print("NOTE: [tree] share_name / pool_root are not both set, so the shared "
+                  "folder was not checked. On DSM the share's permission list is what "
+                  "installs the inheritable `editors` ACE -- without it editors cannot "
+                  "write to the tree.", file=sys.stderr)
+        # Lanes A and B are rclone over SFTP, and with DSM's SFTP service off
+        # key auth SUCCEEDS and the channel is then closed with nothing in any
+        # log (spike 2) -- worth a warning, not a failed deploy.
+        if not backend().grant_sftp(EDITORS_GROUP, args.dry_run):
+            print("WARNING: SFTP is not usable for the editors group -- lanes A and B "
+                  "will fail with 'channel closed'. The dashboard deploy continues.",
+                  file=sys.stderr)
+        # The tree skeleton. On TrueNAS the dataset and its Projects/ dir are
+        # created by hand when the pool is built (server/README.md); on DSM the
+        # share is ours to create (ensure_share above), so its inside is too --
+        # and compose BIND-MOUNTS <tree>/Projects, which docker refuses to
+        # auto-create for a mount source, failing the whole `up` with
+        # "Bind mount failed: ... does not exist" (measured 2026-08-17).
+        # mkdir only: everything under the share inherits the editors ACE.
+        #
+        # ALL of the tree-side bind sources, not just Projects/: the compose
+        # file mounts the b-roll archive and the music library unconditionally
+        # (they are volumes, not features), so a deploy with the b-roll UI off
+        # still needs the directory to exist or the whole `up` fails the same
+        # way. Both are then given their contents by the blocks further down
+        # when the corresponding UI is being shipped.
+        rc_tree, _, tree_err = run_ssh(
+            backend().root_cmd(build_synology_tree_dirs(
+                [DEFAULT_CC_ROOT, DEFAULT_PROJECTS_ROOT,
+                 DEFAULT_BROLL_ARCHIVE_ROOT, DEFAULT_MUSIC_LIBRARY_ROOT])),
+            dry_run=args.dry_run)
+        if not args.dry_run and rc_tree != 0:
+            print(f"FAILED to create the tree root {DEFAULT_CC_ROOT}: "
+                  f"{tree_err.strip()[:300]}", file=sys.stderr)
+            return 1
+        print(f"tree ready: {DEFAULT_PROJECTS_ROOT} (ACL inherited from the share)")
+
+        # uid/gid from the LIVE box: DSM allocates users from 1024 and groups
+        # from 65536, so the fleet's 3000:3001 is wrong on every DSM unit and a
+        # container that ran as it would write files nobody can edit (spike 7).
+        _gid_id, unix_gid = backend().ensure_group(EDITORS_GROUP, args.dry_run)
+        service_uid = backend().ensure_service_user(DEFAULT_DATASET_OWNER, EDITORS_GROUP,
+                                                    args.dry_run)
+        if service_uid > 0:
+            app_uid = service_uid
+        if unix_gid > 0:
+            app_gid = unix_gid
+        if args.dry_run:
+            print(f"[dry-run] the container's uid:gid are read from the NAS at deploy "
+                  f"time ({DEFAULT_DATASET_OWNER}:{EDITORS_GROUP}); site.toml's "
+                  f"[stack] uid/gid ({APP_UID}:{APP_GID}) is only the fallback this "
+                  f"dry-run renders with")
+        else:
+            print(f"stack identity: the container will run as {app_uid}:{app_gid} "
+                  f"({DEFAULT_DATASET_OWNER}:{EDITORS_GROUP}), read from the NAS")
 
     # Step 1: host dirs. app/ is root-owned and world-readable but NOT
     # group-writable -- editors have shell accounts in group 3001, and a
@@ -2310,7 +2810,13 @@ def main():
     # execution as the dashboard user, in a container holding TRUENAS_PW.
     # The venv now has its own volume at 700, and dashboard.db + packages/
     # sit under a /data no editor can traverse.
+    #
+    # DSM takes the same posture by a different route (build_synology_host_dirs):
+    # 0700 owned by the service uid rather than 0770 group-3000, because every
+    # DSM local user is in the only group a local account can have.
     rc, _, err = run_ssh(
+        backend().root_cmd(build_synology_host_dirs(
+            root, app_uid, truenas_user)) if synology else
         'echo "$SUDO_PW" | sudo -S sh -c '
         + shell_quote(
             f"mkdir -p {shell_quote(root + '/app')} {shell_quote(root + '/data')} "
@@ -2399,8 +2905,13 @@ def main():
     # ENTIRELY OPTIONAL: this is its own non-fatal call rather than another
     # `&&` in the chain above, and /tmp remains the fallback -- a deploy must
     # not fail over where it puts a temporary directory.
-    music_staging_parent = "/tmp"
-    if ship_music and music_data_mode != "none":
+    #
+    # On DSM this is not an optimisation but a requirement, and it applies to
+    # the CODE trees too (code_staging_parent above): the SFTP channel is
+    # chrooted to the share view even for an administrator, so /tmp cannot be
+    # written over SFTP at all. build_synology_host_dirs created it.
+    music_staging_parent = code_staging_parent
+    if not synology and ship_music and music_data_mode != "none":
         staging_root = f"{root}/staging"
         rc_stage, _, stage_err = run_ssh(
             'echo "$SUDO_PW" | sudo -S sh -c '
@@ -2461,6 +2972,12 @@ def main():
         ]
         quoted = " ".join(shell_quote(d) for d in archive_dirs)
         rc, _, err = run_ssh(
+            # DSM: mkdir ONLY. These are inside the tree share, and a chmod or
+            # chown there DELETES the inheritable `editors` ACE that is the
+            # only thing making them writable -- by the container AND by the
+            # editors browsing over SMB (spike 1). Same outcome as the 2770
+            # below, arrived at by not touching anything.
+            backend().root_cmd(build_synology_tree_dirs(archive_dirs)) if synology else
             'echo "$SUDO_PW" | sudo -S sh -c '
             + shell_quote(
                 f"mkdir -p {quoted} && chown 3000:3001 {quoted} && "
@@ -2475,7 +2992,8 @@ def main():
                   f"{DEFAULT_BROLL_ARCHIVE_ROOT}: {err}", file=sys.stderr)
             return 1
         print(f"b-roll data root ready: {DEFAULT_BROLL_ARCHIVE_ROOT} "
-              f"(broll:editors 2770, same as Projects/)")
+              + ("(ACL inherited from the tree share -- no chmod/chown was run)"
+                 if synology else "(broll:editors 2770, same as Projects/)"))
 
     # The music library: the same shape of thing as the b-roll archive, and
     # prepared the same way. It is the SHARE ITSELF (P:\Assets\Music to an
@@ -2493,6 +3011,9 @@ def main():
     if ship_music:
         lib_q = shell_quote(DEFAULT_MUSIC_LIBRARY_ROOT)
         rc, _, err = run_ssh(
+            # DSM: mkdir only, for the b-roll archive's reason above.
+            backend().root_cmd(
+                build_synology_tree_dirs([DEFAULT_MUSIC_LIBRARY_ROOT])) if synology else
             'echo "$SUDO_PW" | sudo -S sh -c '
             + shell_quote(
                 f"mkdir -p {lib_q} && chown 3000:3001 {lib_q} && "
@@ -2507,7 +3028,8 @@ def main():
                   f"{DEFAULT_MUSIC_LIBRARY_ROOT}: {err}", file=sys.stderr)
             return 1
         print(f"music library root ready: {DEFAULT_MUSIC_LIBRARY_ROOT} "
-              f"(broll:editors 2770, same as Projects/)")
+              + ("(ACL inherited from the tree share -- no chmod/chown was run)"
+                 if synology else "(broll:editors 2770, same as Projects/)"))
 
     # ffmpeg/ffprobe for /music's queued ingest. NON-FATAL by design, and by
     # default fetched HERE and pushed over the LAN rather than downloaded by the
@@ -2545,7 +3067,8 @@ def main():
         return 1
 
     # Step 2: ship the dashboard code (see install_tree for the guarantees).
-    if not install_tree(root, "app", LOCAL_DASHBOARD_DIR, args.dry_run):
+    if not install_tree(root, "app", LOCAL_DASHBOARD_DIR, args.dry_run,
+                        staging_parent=code_staging_parent):
         return 1
 
     # Step 2b: ship the b-roll web/ tree into broll-web. Without this the
@@ -2555,7 +3078,8 @@ def main():
     if ship_broll:
         if not install_tree(root, "broll-web", broll_src, args.dry_run,
                             excludes=BROLL_EXCLUDE_DIRS,
-                            staging_slug="ccsync-brollweb-upload"):
+                            staging_slug="ccsync-brollweb-upload",
+                            staging_parent=code_staging_parent):
             return fail_after_app_swap(args.dry_run)
 
     # Step 2c: ship the music web/ tree into music-web, the same staged-verify-
@@ -2566,7 +3090,8 @@ def main():
     if ship_music:
         if not install_tree(root, "music-web", music_src, args.dry_run,
                             excludes=MUSIC_EXCLUDE_DIRS,
-                            staging_slug="ccsync-musicweb-upload"):
+                            staging_slug="ccsync-musicweb-upload",
+                            staging_parent=code_staging_parent):
             return fail_after_app_swap(args.dry_run)
 
     # Step 2d: the music DATA artefacts -- the index, the text-encoder model and
@@ -2625,7 +3150,8 @@ def main():
     if ship_ytdl:
         if not install_tree(root, "ytdl-web", ytdl_src, args.dry_run,
                             excludes=YTDL_EXCLUDE_DIRS,
-                            staging_slug="ccsync-ytdlweb-upload"):
+                            staging_slug="ccsync-ytdlweb-upload",
+                            staging_parent=code_staging_parent):
             return fail_after_app_swap(args.dry_run)
 
     # Step 3: create or redeploy the custom app.
@@ -2636,31 +3162,20 @@ def main():
     if recreate_installed is None:
         return fail_after_app_swap(args.dry_run)
     if args.recreate and recreate_installed:
-        resp = truenas_api("DELETE", f"/app/id/{APP_NAME}",
-                           json_body={"remove_ix_volumes": False}, dry_run=args.dry_run)
+        deleted, delete_err = backend().delete_app(APP_NAME, args.dry_run)
         if args.dry_run:
             print(f"[dry-run] would delete app {APP_NAME} and re-create it")
-        elif not ok(resp):
-            print(f"FAILED to delete app for --recreate: HTTP {resp.status_code} {resp.text}",
-                  file=sys.stderr)
+        elif not deleted:
+            print(delete_err, file=sys.stderr)
             return 1
         else:
-            try:
-                job_id = resp.json()
-            except ValueError:
-                job_id = None
-            if isinstance(job_id, int):
-                state, job_err = wait_for_job(job_id, timeout=180)
-                if state != "SUCCESS":
-                    print(f"FAILED: app delete job ended {state}: {job_err}", file=sys.stderr)
-                    return 1
             print(f"deleted app for re-create: {APP_NAME}")
 
     installed = app_installed(args.dry_run)
     if installed is None:
         return fail_after_app_swap(args.dry_run)
     if installed:
-        container = f"ix-{APP_NAME}-dashboard-1"
+        container = backend().dashboard_container
         restarted, err = restart_dashboard_container(args.dry_run)
         if restarted:
             print(f"restarted container: {container}")
@@ -2673,69 +3188,67 @@ def main():
                   f"{APP_NAME!r} app from the TrueNAS UI to pick up the new code.")
         return 0
 
-    body = {
-        "custom_app": True,
-        "app_name": APP_NAME,
-        "custom_compose_config": compose_config(
-            args.port, root, args.syncthing_gui_url, api_key, token,
-            session_secret, admin_users, truenas_host, truenas_user, truenas_pw,
-            truenas_verify_ssl=truenas_verify_ssl,
-            bind_lan=args.bind_lan, bind_tailnet=args.bind_tailnet,
-            image=args.image,
-            broll_enabled=broll_enabled,
-            # Validated in the pre-flight above (weak_ingest_token) against the
-            # REAL value, and masked afterwards for --dry-run only: the
-            # dashboard refuses to START with a blank, placeholder or short
-            # one, because this guards a write path no session protects.
-            broll_ingest_token=broll_ingest_token,
-            broll_creators_shares=os.environ.get(
-                "BROLL_CREATORS_SHARES", "mofa-disaster"),
-        ),
-    }
-    resp = truenas_api("POST", "/app", json_body=body, dry_run=args.dry_run)
-    if args.dry_run:
-        print(f"[dry-run] would create custom app {APP_NAME} on port {args.port}")
-        return 0
-    if not ok(resp):
-        print(f"FAILED to create custom app: HTTP {resp.status_code} {resp.text}",
-              file=sys.stderr)
-        print("Manual fallback: TrueNAS UI > Apps > Discover Apps > (...) > Install via "
-              "YAML, paste dashboard/deploy/compose.yaml and fill in SYNCTHING_API_KEY "
-              "and DASH_REPORT_TOKEN.", file=sys.stderr)
-        return 1
+    # The create itself is the backend's: a custom_app POST on TrueNAS Apps,
+    # `docker compose up -d` over SSH on DSM. Its printed lines -- including
+    # the manual-YAML fallback and the SERVER-2 job wait -- moved with it
+    # (2026-08-17).
+    compose_body = compose_config(
+        args.port, root, args.syncthing_gui_url, api_key, token,
+        session_secret, admin_users, truenas_host, truenas_user, truenas_pw,
+        truenas_verify_ssl=truenas_verify_ssl,
+        image=args.image,
+        broll_enabled=broll_enabled,
+        # Validated in the pre-flight above (weak_ingest_token) against the
+        # REAL value, and masked afterwards for --dry-run only: the
+        # dashboard refuses to START with a blank, placeholder or short
+        # one, because this guards a write path no session protects.
+        broll_ingest_token=broll_ingest_token,
+        broll_creators_shares=os.environ.get(
+            "BROLL_CREATORS_SHARES", "mofa-disaster"),
+        binds=binds,
+        nas_kind=backend().kind,
+        ssh_hostkey=site_value("nas", "ssh_hostkey"),
+        ssh_port=site_value("net", "sftp_port") or "22",
+        ssh_key_probe=site_value("nas", "ssh_key_probe") or "1",
+    )
+    # A compose FILE for a platform that reads one. Rendered from exactly the
+    # variables the dict above is built from, with the five secrets turned into
+    # ${...} references so the world-readable compose.yaml on the NAS carries
+    # none of them -- they go in a 0600 root-owned .env beside it.
+    compose_yaml, env_file = "", {}
+    if synology:
+        compose_yaml = secrets_as_env_refs(
+            render_compose_yaml(compose_variables(
+                port=args.port, host_root=root, tree_root=DEFAULT_CC_ROOT,
+                app_uid=app_uid, app_gid=app_gid, binds=binds,
+                syncthing_url=args.syncthing_gui_url, nas_host=truenas_host,
+                nas_user=truenas_user, admin_users=admin_users,
+                homes_parent=DEFAULT_HOMES_PARENT, nas_kind=backend().kind,
+                broll_enabled=broll_enabled,
+            )),
+            STACK_ENV_SECRETS)
+        env_file = {
+            "SYNCTHING_API_KEY": api_key,
+            "DASH_REPORT_TOKEN": token,
+            "DASH_SESSION_SECRET": session_secret,
+            "BROLL_INGEST_TOKEN": broll_ingest_token,
+            "TRUENAS_PW": truenas_pw,
+            "DASH_NAS_PW": truenas_pw,
+        }
+        if args.dry_run:
+            print(f"[dry-run] the .env would carry: "
+                  f"{', '.join(sorted(env_file))} (values not shown)")
 
-    # SERVER-2 (2026-08-14): a 2xx here only means the create job was ACCEPTED --
-    # /app returns a job id and brings the compose up asynchronously (AUDIT
-    # INST-24, and the --recreate DELETE above already waits the same way). The
-    # failures this hides are the ones this script's own docstring names: a
-    # stale --bind-lan/--bind-tailnet makes Docker refuse to start the app with
-    # "cannot assign requested address", and the image pull can fail. Printing
-    # "installed custom app" and exiting 0 for either is the exit-code-lies class
-    # of OPS-4.
-    try:
-        job_id = resp.json()
-    except ValueError:
-        job_id = None
-    if isinstance(job_id, int):
-        print(f"app create job {job_id} accepted; waiting for it to finish "
-              f"(the image pull can take a few minutes)...")
-        state, job_err = wait_for_job(job_id, timeout=900, poll=5)
-        if state != "SUCCESS":
-            print(f"FAILED: app create job {job_id} ended {state}: {job_err}",
-                  file=sys.stderr)
-            print(f"A bind address the NAS does not have (--bind-lan/--bind-tailnet) "
-                  f"fails HERE, not on the POST: Docker refuses to start the app with "
-                  f"'cannot assign requested address'. Check Apps > {APP_NAME} in the "
-                  f"TrueNAS UI -- a partially created app may need deleting before "
-                  f"re-running this script.", file=sys.stderr)
-            print("Manual fallback: TrueNAS UI > Apps > Discover Apps > (...) > Install "
-                  "via YAML, paste dashboard/deploy/compose.yaml and fill in "
-                  "SYNCTHING_API_KEY and DASH_REPORT_TOKEN.", file=sys.stderr)
-            return 1
-    else:
-        print(f"NOTE: POST /app returned {job_id!r} rather than a job id, so the install "
-              f"could not be waited on -- confirm {APP_NAME} is actually running in the "
-              f"TrueNAS UI before continuing.", file=sys.stderr)
+    rc_deploy = backend().deploy_stack(
+        APP_NAME,
+        compose_body,
+        args.port,
+        args.dry_run,
+        compose_yaml=compose_yaml,
+        env=env_file,
+    )
+    if rc_deploy != 0 or args.dry_run:
+        return rc_deploy
 
     print(f"installed custom app: {APP_NAME} on port {args.port}")
     print(f"Next: open http://<tailnet-ip>:{args.port}/ and check /api/v1/health; then set "
@@ -2744,4 +3257,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli(main))

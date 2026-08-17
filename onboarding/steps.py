@@ -43,6 +43,7 @@ from urllib.parse import urlparse
 # companion/src importable; see tests/conftest.py and build_onboard.spec.
 from ccsync_companion import config as config_mod
 from ccsync_companion import identity as identity_mod
+from ccsync_companion import site as site_mod
 
 # -- constants ---------------------------------------------------------------
 
@@ -101,9 +102,17 @@ from ccsync_companion import identity as identity_mod
 # must ship as a pair, same as the .ps1.
 INSTALLER_VERSION = "1.0.28"
 
-DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "http://100.71.216.3:8480")
-# Base rig talks to the dashboard over the LAN, not the tailnet.
-DEFAULT_BASE_DASHBOARD_URL = "http://192.168.0.102:8480"
+# NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
+# to be one deployment's tailnet and LAN addresses compiled into every
+# installer -- which made a second customer a fork, and made a wizard nobody
+# had configured talk to that deployment. The URL now comes from the admin
+# (the wizard's own field, or CCSYNC_DASHBOARD_URL for a scripted run), and
+# every consumer refuses to continue while it is blank rather than guessing.
+DEFAULT_DASHBOARD_URL = os.environ.get("CCSYNC_DASHBOARD_URL", "")
+# A base rig usually reaches the dashboard over the LAN rather than the
+# tailnet, so it gets its own seed -- also unset, and also from the
+# environment when a scripted install has one.
+DEFAULT_BASE_DASHBOARD_URL = os.environ.get("CCSYNC_BASE_DASHBOARD_URL", "")
 SSH_KEY_NAME = "ccsync_ed25519"
 DEFAULT_SSH_DIR = Path.home() / ".ssh"
 DEFAULT_LOCAL_ROOT = r"C:\Creators_Club"
@@ -126,16 +135,23 @@ def _is_mac(platform: Optional[str] = None) -> bool:
 # the home directory, exactly like the bootstrap.
 DEFAULT_LOCAL_ROOT_MACOS = str(Path.home() / "Creators_Club")
 # A macOS base rig works directly off the NAS share, mounted over SMB. The
-# Windows base default is P:\ (the mapping of \\<nas>\TheCreatorsPool\
-# Creators_Club); macOS mounts the SHARE at /Volumes/<ShareName>, so the
-# same tree sits one level in. Today's studio base rig is Windows -- this
-# default exists for the commercial case where a customer's base rig is a
-# Mac, and like every base default it is just a seed for the field.
-DEFAULT_BASE_LOCAL_ROOT_MACOS = "/Volumes/TheCreatorsPool/Creators_Club"
+# Windows base default is P:\ (the mapping of \\<nas>\<share>\<tree>); macOS
+# mounts the SHARE at /Volumes/<ShareName>, so the same tree sits one level
+# in -- and only the site knows what that share and tree are called. This
+# used to name one customer's pool and tree (WP0, 2026-08-17): blank now, so
+# a macOS base install asks for the path instead of seeding a plausible one
+# that exists on nobody's machine. Today's studio base rig is Windows.
+DEFAULT_BASE_LOCAL_ROOT_MACOS = ""
 # Where macos_bootstrap.sh puts everything ($BIN_DIR) and where the two
 # LaunchAgents live -- shared constants with macos_uninstall.sh.
 COMPANION_BIN_DIR_MACOS = Path.home() / ".local" / "ccsync" / "bin"
 LAUNCH_AGENTS_DIR_MACOS = Path.home() / "Library" / "LaunchAgents"
+# TODO(2026-08-17, COMMERCIAL_READINESS.md item 10): these reverse-DNS labels
+# still carry one tenant's name. Renaming them is a MIGRATION, not an edit --
+# an installed Mac has the old label loaded in launchd and both uninstallers
+# (macos_uninstall.sh, build_cleanup_plan_macos) enumerate it by name, so the
+# new build must unload/remove the old pair before writing the new one or the
+# editor ends up running two companions. Left as-is until that is written.
 COMPANION_PLIST_NAME = "com.creatorsclub.ccsync.companion.plist"
 SYNCTHING_PLIST_NAME = "com.creatorsclub.ccsync.syncthing.plist"
 # Tailscale's CLI on macOS lives inside the .app and is normally NOT on
@@ -155,19 +171,24 @@ def default_base_local_root(platform: Optional[str] = None) -> str:
 def companion_bin_dir(platform: Optional[str] = None) -> Path:
     return COMPANION_BIN_DIR_MACOS if _is_mac(platform) else COMPANION_BIN_DIR
 # Base rig works directly off the NAS share mapping. Since 2026-07-26 the
-# base rig maps P: to \\<nas>\TheCreatorsPool\Creators_Club -- the SAME
-# P:\Projects\... path canon remote editors see (their P: maps to the local
-# copy instead), so Resolve-stored clip paths are identical fleet-wide.
+# base rig maps P: to \\<nas>\<share>\<tree> -- the SAME P:\Projects\... path
+# canon remote editors see (their P: maps to the local copy instead), so
+# Resolve-stored clip paths are identical fleet-wide.
 # local_root AND canonical_prefix both point at that drive root (see the
 # base-rig comments in companion config.example.toml).
 DEFAULT_BASE_LOCAL_ROOT = "P:\\"
-# Same default windows_bootstrap.ps1's -RemoteRoot parameter ships (see
-# BOOTSTRAP_SCRIPT_NAME). ensure_config must force this too: the bootstrap's
-# own config-seeding step is skipped whenever config.toml already exists
-# (which it always does by the time run_bootstrap() runs -- ensure_config
-# runs first), so a blank remote_root here means an editor's originals get
-# uploaded to their bare SFTP home directory instead of the project tree.
-DEFAULT_REMOTE_ROOT = "/mnt/tank/TheCreatorsPool/Creators_Club"
+# The NAS-side tree root. ensure_config must seed this: the bootstrap's own
+# config-seeding step is skipped whenever config.toml already exists (which
+# it always does by the time run_bootstrap() runs -- ensure_config runs
+# first), so a blank remote_root means an editor's originals get uploaded to
+# their bare SFTP home directory instead of the project tree (S-1).
+#
+# It used to be one customer's pool path, compiled in (WP0, 2026-08-17). It
+# now comes from the dashboard's site manifest (GET /api/v1/site ->
+# remote_root, fetch_site below); this constant is the last-resort seed and
+# is deliberately EMPTY, so a site that publishes no remote_root produces a
+# named, visible problem rather than a silent upload into a home directory.
+DEFAULT_REMOTE_ROOT = ""
 # subprocess timeout for the bootstrap script (winget prompts, a stalled
 # Invoke-WebRequest, or a hung `subst` would otherwise block the worker
 # thread forever -- see run_bootstrap).
@@ -464,6 +485,38 @@ def dashboard_reachable(
         return False
 
 
+def fetch_site(
+    dashboard_url: str,
+    http_get: HttpGetFn = default_http_get,
+    timeout: float = 5,
+    cache: bool = True,
+) -> dict[str, Any]:
+    """GET {dashboard_url}/api/v1/site -- who this deployment IS.
+
+    Everything the wizard used to have compiled in comes from here since
+    2026-08-17 (WP0): the NAS Syncthing device ID, the rclone remote name and
+    port, the NAS-side tree root. Returns {} rather than None on ANY failure
+    -- including the 404 every dashboard older than the manifest answers --
+    so callers write `site.get("rclone_remote") or <fallback>` and no branch
+    of the install depends on the manifest existing.
+
+    The answer is cached to ~/.ccsync/state/site.json (companion site.py) on
+    the way past: the companion reads it offline, and the wizard is the one
+    process here guaranteed to have just talked to the dashboard."""
+    url = site_mod.site_url(str(dashboard_url or "").strip())
+    if not url:
+        return {}
+    try:
+        site = site_mod.normalise(http_get(url, timeout))
+    except Exception:
+        return {}
+    if not site:
+        return {}
+    if cache:
+        site_mod.save_site(site)
+    return site
+
+
 def dashboard_host(dashboard_url: str) -> str:
     """Extract just the host (no scheme/port) from a dashboard_url, for use
     as windows_bootstrap.ps1's -TailnetHost. Falls back to the raw string if
@@ -663,6 +716,7 @@ def run_bootstrap(
     run: RunFn = subprocess.run,
     script_path: Optional[Path] = None,
     platform: Optional[str] = None,
+    site: Optional[dict[str, Any]] = None,
 ) -> tuple[int, str]:
     """Invoke the platform's bootstrap with the verified editor's identity:
     `powershell -ExecutionPolicy Bypass -File windows_bootstrap.ps1 ...` on
@@ -685,13 +739,33 @@ def run_bootstrap(
     _clean_slate has already run by the time callers get here and the
     wizard needs a normal failed-install result, not an exception."""
     script = find_bootstrap_script(script_path, platform=platform)
+    site = site or {}
+    # The manifest values the bootstrap has its own flags for. Passing them
+    # explicitly (rather than letting the script fetch them itself) keeps ONE
+    # fetch per install and makes the wizard's log show exactly what the
+    # bootstrap was told -- the scripts still fetch for their own hand-runs.
+    remote_root = str(site.get("remote_root") or "").strip()
+    nas_device_id = str(site.get("nas_syncthing_id") or "").strip()
+    sftp_host = str(site.get("sftp_host") or "").strip()
+    try:
+        sftp_port = int(site.get("sftp_port") or 22)
+    except (TypeError, ValueError):
+        sftp_port = 22
+    # The SFTP host is the site's own answer; tailnet_host (derived from the
+    # dashboard URL) is what this machine can actually reach, so it stays the
+    # fallback rather than the other way round.
+    nas_host = sftp_host or tailnet_host
 
     if _is_mac(platform):
         cmd = [
             "bash", str(script),
-            "--tailnet-host", tailnet_host,
+            "--tailnet-host", nas_host,
             "--editor-name", editor_name,
         ]
+        if remote_root:
+            cmd += ["--remote-root", remote_root]
+        if sftp_port and sftp_port != 22:
+            cmd += ["--sftp-port", str(sftp_port)]
         if local_root:
             cmd += ["--local-root", str(local_root)]
         if companion_exe_source:
@@ -708,10 +782,16 @@ def run_bootstrap(
             "-NoProfile", "-NonInteractive",
             "-ExecutionPolicy", "Bypass",
             "-File", str(script),
-            "-TailnetHost", tailnet_host,
+            "-TailnetHost", nas_host,
             "-EditorName", editor_name,
             "-DashboardUrl", dashboard_url,
         ]
+        if remote_root:
+            cmd += ["-RemoteRoot", remote_root]
+        if nas_device_id:
+            cmd += ["-NasSyncthingId", nas_device_id]
+        if sftp_port and sftp_port != 22:
+            cmd += ["-SftpPort", str(sftp_port)]
         if local_root:
             cmd += ["-LocalRoot", str(local_root)]
         if companion_exe_source:
@@ -731,6 +811,11 @@ def run_bootstrap(
     # can never be mismatched here.
     child_env = dict(os.environ)
     child_env["CCSYNC_DASHBOARD_TOKEN"] = str(dashboard_token or "")
+    if nas_device_id:
+        # macos_bootstrap.sh has no flag for it (it reads
+        # CCSYNC_NAS_SYNCTHING_ID); the .ps1 takes -NasSyncthingId above and
+        # is given it here too so a hand-edited script sees the same value.
+        child_env["CCSYNC_NAS_SYNCTHING_ID"] = nas_device_id
     if _is_mac(platform):
         child_env["DASHBOARD_TOKEN"] = str(dashboard_token or "")
         child_env["DASHBOARD_URL"] = str(dashboard_url or "")
@@ -1021,8 +1106,8 @@ def _validate_local_root_macos(
     role = str(role or "").strip().lower()
     raw = str(value or "")
     if not raw.strip():
-        example = ("/Volumes/TheCreatorsPool/Creators_Club" if role == "base"
-                   else "/Volumes/YourSSD/Creators_Club")
+        example = ("/Volumes/<ShareName>/<tree>" if role == "base"
+                   else "/Volumes/YourSSD/<tree>")
         return f"enter a folder for the project tree, e.g. {example}"
     if raw != raw.strip():
         return (
@@ -1709,6 +1794,7 @@ def ensure_config(
     local_root: Optional[str] = None,
     config_path: Optional[Path] = None,
     platform: Optional[str] = None,
+    site: Optional[dict[str, Any]] = None,
 ) -> Path:
     """Write or refresh ~/.ccsync/config.toml BEFORE anything launches the
     companion. An existing file is merged (user tweaks survive; the keys the
@@ -1720,7 +1806,14 @@ def ensure_config(
     seeding never runs in the wizard flow -- which is what makes the
     bootstrap's existing-config rclone_path repair (1.0.17) load-bearing:
     DEFAULT_TOML_TEXT ships rclone_path = "rclone", and launchd's PATH can
-    never resolve a bare name (INST-7)."""
+    never resolve a bare name (INST-7).
+
+    `site` is the dashboard's site manifest (fetch_site); since 2026-08-17 it
+    is where `remote` and `remote_root` come from, because nothing about this
+    machine knows the answer and a compiled-in one belonged to one customer
+    (WP0). Absent/empty -- an older dashboard, an offline install -- falls
+    back to the neutral rclone remote name and leaves remote_root to whatever
+    is already in the file."""
     role = str(role or "").strip().lower()
     path = Path(config_path) if config_path is not None else config_mod.CONFIG_PATH
 
@@ -1765,14 +1858,28 @@ def ensure_config(
         # out-of-tree on a base rig (see config.example.toml).
         forced["canonical_prefix"] = _toml_string(root)
     else:
+        site = site or {}
         forced["local_root"] = _toml_string(local_root or default_local_root(platform))
-        forced["canonical_prefix"] = _toml_string("P:\\")
-        forced["remote"] = _toml_string("creators_club_sftp")
+        # The site's own canonical prefix when it publishes one -- every
+        # Resolve project in a fleet stores this string, so it is a
+        # deployment-wide decision, not a per-machine one.
+        forced["canonical_prefix"] = _toml_string(site.get("canonical_prefix") or "P:\\")
+        # OWNED, because it must match the stanza the bootstrap wrote into
+        # rclone.conf, and the bootstrap names that stanza from the same
+        # manifest key. Neither may guess the other's fallback: both use
+        # config_mod.NEUTRAL_REMOTE_NAME.
+        forced["remote"] = _toml_string(
+            site.get("rclone_remote") or config_mod.NEUTRAL_REMOTE_NAME)
         # SEEDED, not owned: a blank remote_root uploads an editor's
         # originals into their bare SFTP home instead of the project tree
         # (S-1), so it must never stay blank -- but an admin who pointed this
-        # editor at a different pool path keeps it across re-runs.
-        defaults["remote_root"] = _toml_string(DEFAULT_REMOTE_ROOT)
+        # editor at a different pool path keeps it across re-runs. Writing a
+        # BLANK seed would be worse than writing nothing (it would look like
+        # a deliberate answer to the companion and to the next re-run), so a
+        # site with no remote_root leaves the key alone entirely.
+        remote_root = str(site.get("remote_root") or DEFAULT_REMOTE_ROOT).strip()
+        if remote_root:
+            defaults["remote_root"] = _toml_string(remote_root)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(merge_config_text(text, forced, defaults), encoding="utf-8")

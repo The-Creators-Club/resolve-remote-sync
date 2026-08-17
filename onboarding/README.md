@@ -53,10 +53,14 @@ theme.py) and invokes `installer/windows_bootstrap.ps1` (or
 
 1. **Welcome** — what this does + installer/bundled-companion versions.
 2. **Role** — REMOTE EDITOR or BASE rig, both platforms. Sets the
-   dashboard-URL default (editor: tailnet `http://100.71.216.3:8480`,
-   base: LAN `http://192.168.0.102:8480`; also settable via
-   `CCSYNC_DASHBOARD_URL` or the on-page field), the local-root default
-   (base on macOS: the NAS share mount under `/Volumes`) and which pages
+   dashboard URL, which since 2026-08-17 has NO compiled-in default at all
+   (WP0 -- it used to be this deployment's tailnet and LAN addresses):
+   the editor types it, or `CCSYNC_DASHBOARD_URL` /
+   `CCSYNC_BASE_DASHBOARD_URL` supply it for a scripted run, and the wizard
+   refuses to leave the page while it is blank. Everything else
+   deployment-specific (NAS Syncthing device ID, rclone remote name, SSH
+   port, NAS tree root) is fetched from `GET {dashboard_url}/api/v1/site`
+   right after sign-in. Also sets the local-root default and which pages
    follow.
 3. **Tailscale** *(editor only)* — checks whether Tailscale is installed;
    offers a winget install (Windows) or the download page. "Check

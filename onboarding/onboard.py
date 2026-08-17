@@ -129,6 +129,13 @@ class OnboardWizard:
         # the install page can explain the switch (see show_install / B20).
         self.picked_role: Optional[str] = None
         self.report_token: str = ""
+        # The dashboard's site manifest (GET /api/v1/site), fetched once the
+        # sign-in proves we can reach it. Everything tenant-shaped this
+        # installer used to have compiled in -- the NAS Syncthing device ID,
+        # the rclone remote name and SSH port, the NAS-side tree root -- comes
+        # from here since 2026-08-17 (WP0). {} against an older dashboard,
+        # and every consumer falls back rather than failing.
+        self.site: dict = {}
         self.bootstrap_output: str = ""
         self.device_id: Optional[str] = None
         self.pub_key: str = ""
@@ -304,9 +311,14 @@ class OnboardWizard:
 
         adv = tk.Frame(frame, bg=theme.BG)
         adv.pack(anchor="w", pady=(8, 8))
-        _label(adv, "dashboard url (advanced, leave default unless told otherwise):",
+        # REQUIRED since 2026-08-17: there is no compiled-in dashboard
+        # address any more (WP0), so this is the one thing an editor must be
+        # given by their admin besides their account.
+        _label(adv, "dashboard url (REQUIRED -- your admin gives you this):",
                fg=theme.MUTED, font=theme.mono(9)).pack(anchor="w")
         _entry(adv, self.dashboard_url_var, width=44).pack(anchor="w", pady=(4, 0))
+        self.role_status_lbl = _label(frame, "", fg=theme.RED, wraplength=560)
+        self.role_status_lbl.pack(anchor="w", pady=(6, 0))
 
         self._nav_bar(frame, back=self.show_welcome, next_=self._on_role_next, next_label="NEXT")
 
@@ -328,6 +340,15 @@ class OnboardWizard:
 
     def _on_role_next(self) -> None:
         self._on_role_changed()  # ensure defaults match the final choice
+        if not self.dashboard_url_var.get().strip():
+            # Refuse here rather than three pages later on an opaque
+            # "dashboard isn't reachable": nothing in this installer knows
+            # the address any more, and saying so by name is the whole point
+            # of removing the default (WP0, 2026-08-17).
+            self.role_status_lbl.config(
+                text="dashboard url is required -- ask your admin for it "
+                     "(e.g. http://<your-dashboard>:8480)")
+            return
         if self.role_var.get() == "base":
             self.show_signin()
         else:
@@ -388,6 +409,11 @@ class OnboardWizard:
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_check_connection(self) -> None:
+        if not self.dashboard_url_var.get().strip():
+            self.conn_status_lbl.config(
+                text="no dashboard url set -- go Back and enter the one your admin gave you",
+                fg=theme.RED)
+            return
         self.conn_status_lbl.config(text="checking…", fg=theme.MUTED)
 
         def _worker():
@@ -442,10 +468,21 @@ class OnboardWizard:
         if not username or not password:
             self.signin_status_lbl.config(text="username and password are both required")
             return
+        if not self.dashboard_url_var.get().strip():
+            self.signin_status_lbl.config(
+                text="no dashboard url set -- go Back to the role page and enter "
+                     "the one your admin gave you; nothing can be verified without it")
+            return
         self.signin_status_lbl.config(text="verifying against the dashboard…", fg=theme.MUTED)
 
         def _worker():
             result = steps.verify_account(self.dashboard_url_var.get(), username, password)
+            # The one moment this process is known to be able to reach the
+            # dashboard, and still on a worker thread: take the site manifest
+            # now so the install has it (and the companion gets its cached
+            # copy) without a second round trip. Never fatal -- {} means an
+            # older dashboard, and every consumer has a fallback.
+            site = steps.fetch_site(self.dashboard_url_var.get()) if result.get("ok") else {}
 
             def _ui():
                 if not result.get("ok"):
@@ -457,6 +494,7 @@ class OnboardWizard:
                 self.identity_token = result.get("token")
                 self.verified_role = result.get("role")
                 self.report_token = result.get("report_token") or ""
+                self.site = site or {}
                 # B20: the account's role -- not the radio button -- decides
                 # which install runs, because only one of them is destructive.
                 # Snap the radio to it here, BEFORE the install page renders,
@@ -654,6 +692,7 @@ class OnboardWizard:
             dashboard_url=self.dashboard_url_var.get().strip(),
             dashboard_token=self.report_token,
             local_root=self.local_root_var.get().strip() or None,
+            site=self.site,
         )
         self._append_log(f"config written (mode={role}).")
         if self.identity_token:
@@ -714,6 +753,7 @@ class OnboardWizard:
                 local_root=self.local_root_var.get().strip() or None,
                 dashboard_url=self.dashboard_url_var.get(),
                 companion_exe_source=companion_src,
+                site=self.site,
             )
             self.bootstrap_output = output
             self._append_log(output)

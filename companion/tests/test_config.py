@@ -318,11 +318,16 @@ def test_config_example_parses_as_toml_and_loads():
 
 
 def _good_cfg(tmp_path, **overrides):
+    # "Fully configured" gained dashboard_url + dashboard_token on 2026-08-17:
+    # with no compiled-in dashboard default left, an install that names no
+    # dashboard is an install nobody finished, and validate_config says so.
     cfg = {
         "editor_name": "ruskin",
         "local_root": str(tmp_path),
-        "remote": "creators_club_sftp",
-        "remote_root": "/mnt/tank/TheCreatorsPool/Creators_Club",
+        "remote": "ccsync_sftp",
+        "remote_root": "/mnt/pool/share/Tree",
+        "dashboard_url": "http://dash.example:8480",
+        "dashboard_token": "tok",
         "projects": ["Projects/2026/Creator Profiles/Season 1"],
         "active_project": "Projects/2026/Creator Profiles/Season 1",
     }
@@ -410,9 +415,25 @@ def test_validate_config_warns_on_blank_dashboard_token(tmp_path):
     assert any("dashboard_token is blank" in w for w in warnings)
 
 
-def test_validate_config_no_dashboard_warnings_when_url_blank(tmp_path):
-    _, warnings = config_mod.validate_config(_good_cfg(tmp_path, dashboard_url=""))
-    assert not any("dashboard" in w for w in warnings)
+def test_a_blank_dashboard_url_is_named_but_never_stops_the_lanes(tmp_path):
+    """Inverted on 2026-08-17 (WP0). Blank used to mean "the admin turned
+    reporting off", so nagging about it was noise; with the compiled-in
+    default gone it much more often means "nobody pointed this install at a
+    dashboard", and with require_login on that is an install where no lane
+    will ever start. It stays a WARNING: app.py already refuses to start on
+    config errors, and the lanes themselves work fine without a dashboard."""
+    errors, warnings = config_mod.validate_config(_good_cfg(tmp_path, dashboard_url=""))
+    assert errors == []
+    blank = [w for w in warnings if "dashboard_url is blank" in w]
+    assert len(blank) == 1
+    assert "require_login" in blank[0]
+    # and NOT the token/scheme nags, which only make sense once a URL is set
+    assert not any("dashboard_token is blank" in w for w in warnings)
+
+    off = config_mod.validate_config(
+        _good_cfg(tmp_path, dashboard_url="", require_login=False))[1]
+    assert any("dashboard_url is blank" in w for w in off)
+    assert not any("require_login" in w for w in off if "dashboard_url is blank" in w)
 
 
 def test_validate_config_flags_non_positive_dashboard_report_interval(tmp_path):
@@ -426,16 +447,22 @@ def test_validate_config_flags_non_numeric_dashboard_report_interval(tmp_path):
 
 
 def test_default_remote_matches_installer_remote_name():
-    # Both bootstrap scripts write an rclone stanza named creators_club_sftp;
-    # if the default here drifts, lane A/B point at a nonexistent remote.
+    # This used to pin one customer's rclone remote name in three files at
+    # once. Since 2026-08-17 (WP0) the name comes from the dashboard's site
+    # manifest, and the thing that must not drift is the FALLBACK the three
+    # of them share when the manifest has none -- a lane pointed at a
+    # nonexistent remote is still the failure being prevented.
     from pathlib import Path
 
     installer_dir = Path(__file__).resolve().parents[2] / "installer"
     ps1 = (installer_dir / "windows_bootstrap.ps1").read_text(encoding="utf-8")
     sh = (installer_dir / "macos_bootstrap.sh").read_text(encoding="utf-8")
-    assert '$RemoteName = "creators_club_sftp"' in ps1
-    assert 'REMOTE_NAME="creators_club_sftp"' in sh
-    assert config_mod.DEFAULTS["remote"] == "creators_club_sftp"
+    assert config_mod.NEUTRAL_REMOTE_NAME == "ccsync_sftp"
+    assert f'$RemoteName = "{config_mod.NEUTRAL_REMOTE_NAME}"' in ps1
+    assert f'REMOTE_NAME="{config_mod.NEUTRAL_REMOTE_NAME}"' in sh
+    # ...and the compiled-in default is blank: a companion that nobody
+    # configured must name no tenant at all.
+    assert config_mod.DEFAULTS["remote"] == ""
 
 
 def test_config_example_toml_matches_default_keys():

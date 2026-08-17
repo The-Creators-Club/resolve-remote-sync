@@ -48,8 +48,10 @@
     network calls are GETs (plus a login POST if you pass -AdminUser).
 
 .PARAMETER DashboardUrl
-    Defaults to dashboard_url from ~/.ccsync/config.toml, else the tailnet
-    address.
+    Defaults to dashboard_url from ~/.ccsync/config.toml, else
+    $env:CCSYNC_DASHBOARD_URL. There is no compiled-in address any more (WP0,
+    2026-08-17); with none of the three, the DASHBOARD section says so and
+    checks nothing rather than reporting on somebody else's deployment.
 
 .PARAMETER AdminUser
     Optionally log in as this dashboard admin to also report the published /
@@ -62,7 +64,7 @@
     .\tools\check_deploy_drift.ps1
 
 .EXAMPLE
-    .\tools\check_deploy_drift.ps1 -AdminUser alex
+    .\tools\check_deploy_drift.ps1 -AdminUser <your-dashboard-admin>
 #>
 [CmdletBinding()]
 param(
@@ -341,12 +343,39 @@ if (-not $DashboardUrl) {
 else {
     Write-Row "url" $DashboardUrl
 }
+if (-not $DashboardUrl -and $env:CCSYNC_DASHBOARD_URL) {
+    $DashboardUrl = $env:CCSYNC_DASHBOARD_URL
+    Write-Row "url (CCSYNC_DASHBOARD_URL)" $DashboardUrl
+}
 if (-not $DashboardUrl) {
-    $DashboardUrl = "http://100.71.216.3:8480"
-    Write-Row "url (default)" $DashboardUrl
+    # No compiled-in address since 2026-08-17 (WP0) -- a doctor that quietly
+    # health-checked somebody else's dashboard would report on the wrong
+    # deployment. Say what is missing; check nothing.
+    Write-Unknown "no dashboard url: pass -DashboardUrl, set CCSYNC_DASHBOARD_URL, or put dashboard_url in $ConfigToml"
+}
+
+# What the LIVE deployment says it is. The container name differs per NAS
+# platform (TrueNAS's app runtime prefixes ix-; a Synology compose stack does
+# not), so it is reported from the manifest rather than assumed -- WP5.
+if ($DashboardUrl) {
+    try {
+        $site = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/site" -TimeoutSec 8
+        $nasKind = "$($site.nas_kind)".Trim()
+        if (-not $nasKind) { $nasKind = "unknown" }
+        $expectedContainer = "ccsync-dashboard-1"
+        if ($nasKind -eq "truenas") { $expectedContainer = "ix-ccsync-dashboard-1" }
+        Write-Row "nas kind (/api/v1/site)" $nasKind
+        Write-Row "expected container" $expectedContainer
+        if ("$($site.org_name)".Trim()) { Write-Row "site" "$($site.org_name)" }
+    }
+    catch {
+        # 404 = a dashboard older than the site manifest. Not drift by itself.
+        Write-Unknown "no site manifest at $DashboardUrl/api/v1/site ($($_.Exception.Message)) -- container name unknown"
+    }
 }
 
 $liveDashVersion = ""
+if ($DashboardUrl) {
 try {
     $health = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/health" -TimeoutSec 8
     $liveDashVersion = "$($health.version)"
@@ -361,6 +390,7 @@ try {
 catch {
     Write-Unknown "dashboard unreachable at $DashboardUrl ($($_.Exception.Message))"
 }
+}  # if ($DashboardUrl)
 
 if ($liveDashVersion -and $DashRepoVersion) {
     if ($liveDashVersion -eq $DashRepoVersion) {
@@ -371,7 +401,7 @@ if ($liveDashVersion -and $DashRepoVersion) {
     }
 }
 
-if ($AdminUser) {
+if ($AdminUser -and $DashboardUrl) {
     try {
         $securePw = Read-Host "dashboard password for '$AdminUser'" -AsSecureString
         $pw = [Runtime.InteropServices.Marshal]::PtrToStringAuto(

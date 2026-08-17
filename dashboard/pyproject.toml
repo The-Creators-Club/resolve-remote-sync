@@ -76,6 +76,23 @@ ytdl = [
     "bgutil-ytdlp-pot-provider==1.3.1",
 ]
 
+# The SSH half of the Synology NAS backend (nas/synology.py). DSM exposes no
+# API for ~/.ssh/authorized_keys, and a file written through FileStation is
+# owned by the admin -- sshd's StrictModes then refuses the key while logging
+# nothing (docs/synology-spikes-2026-08-17.md, spike 2). So a DSM site needs
+# paramiko; a TrueNAS site must not.
+#
+# Deliberately NOT in [project.dependencies], and deliberately not in the
+# `broll`/`music`/`ytdl` group list in test_hardening's requirements check:
+# those groups are "things the container always mounts", this one is
+# per-site. A DSM deployment adds paramiko to deploy/requirements.txt (and
+# `synology` to that test's group tuple) at the same time.
+#
+# LGPL-2.1 -- it belongs in the NOTICE file when readiness item 1 gets done.
+synology = [
+    "paramiko>=3.4",
+]
+
 dev = [
     "pytest>=7.4",
     "httpx>=0.27",

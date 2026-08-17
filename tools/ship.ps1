@@ -40,9 +40,21 @@
     Secrets come from user environment variables (set once with setx):
     TRUENAS_PW, DASH_REPORT_TOKEN, DASH_SESSION_SECRET, SYNCTHING_API_KEY.
     The script refuses to start with any of them missing rather than let
-    install_dashboard_app.py fail halfway.
+    install_dashboard_app.py fail halfway. Since 2026-08-17 it refuses on a
+    missing dashboard URL / admin user the same way -- see -DashboardUrl.
 
     Run it via tools\ship.cmd to skip the execution-policy dance.
+
+.PARAMETER DashboardUrl
+    REQUIRED (or $env:CCSYNC_DASHBOARD_URL). The dashboard this ship
+    publishes to and health-checks: the address THIS machine reaches it on.
+    There is no default any more -- it used to be one deployment's LAN
+    address hardcoded at four call sites (WP0, docs/SYNOLOGY_PORT_PLAN.md).
+
+.PARAMETER AdminUser
+    REQUIRED unless -DashboardOnly (or $env:CCSYNC_ADMIN_USER). The dashboard
+    admin account the package publish authenticates as; the password is still
+    prompted for, once, by build_editor_package.ps1.
 
 .PARAMETER DashboardOnly
     Stop after step 1 (server-side template/API changes only).
@@ -69,6 +81,13 @@
 #>
 [CmdletBinding()]
 param(
+    # WHERE this ships to, and AS WHOM. Neither has a default since
+    # 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md): the four publish/health
+    # URLs below used to be one deployment's LAN address, compiled into the
+    # ship command itself. $env:CCSYNC_DASHBOARD_URL / $env:CCSYNC_ADMIN_USER
+    # are the setx-once route, exactly like the secrets gate below.
+    [string]$DashboardUrl = "",
+    [string]$AdminUser = "",
     [switch]$DashboardOnly,
     [switch]$SkipLocalUpgrade,
     [switch]$SkipTests,
@@ -126,6 +145,25 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
+# --- who are we shipping TO? ------------------------------------------------
+# Same rule as the secrets above: refuse before anything moves. A wrong (or
+# guessed) dashboard here would deploy to, and publish a companion for, the
+# wrong deployment entirely.
+if (-not $DashboardUrl -and $env:CCSYNC_DASHBOARD_URL) { $DashboardUrl = $env:CCSYNC_DASHBOARD_URL }
+if (-not $AdminUser -and $env:CCSYNC_ADMIN_USER) { $AdminUser = $env:CCSYNC_ADMIN_USER }
+if ($DashboardUrl) { $DashboardUrl = $DashboardUrl.TrimEnd("/") }
+$missingSite = @()
+if (-not $DashboardUrl) { $missingSite += "-DashboardUrl (or CCSYNC_DASHBOARD_URL)" }
+if (-not $AdminUser -and -not $DashboardOnly) { $missingSite += "-AdminUser (or CCSYNC_ADMIN_USER)" }
+if ($missingSite.Count -gt 0) {
+    Write-Fail "missing: $($missingSite -join ', ')"
+    Write-Step "this repo no longer has a dashboard address or an admin account compiled in --"
+    Write-Step "pass them, or setx CCSYNC_DASHBOARD_URL `"http://<your-dashboard>:8480`" and"
+    Write-Step "setx CCSYNC_ADMIN_USER `"<your-dashboard-admin>`", then open a NEW window."
+    exit 1
+}
+Write-Step "shipping to: $DashboardUrl (admin: $(if ($AdminUser) { $AdminUser } else { 'n/a' }))"
+
 # --- working tree clean? (only matters if we are going to publish) ----------
 # release.ps1 stamps a dirty build "<version>+dirty" and warns -- but it warns
 # in step 2, after step 1 has already deployed, and it does not stop. Nobody can
@@ -158,7 +196,7 @@ Write-Step "repo says: dashboard v$DashVersion, companion v$CompanionVersion"
 # answers with the shared token, so check FIRST.
 if (-not $DashboardOnly) {
     $pubCode = Invoke-CurlWithToken `
-        -Uri "http://192.168.0.102:8480/api/v1/companion/package/windows/$CompanionVersion" `
+        -Uri "$DashboardUrl/api/v1/companion/package/windows/$CompanionVersion" `
         -Token $env:DASH_REPORT_TOKEN `
         -ExtraArgs @("-o", "NUL", "-w", "%{http_code}")
     if ($pubCode -eq "200") {
@@ -191,7 +229,7 @@ if (-not $DashboardOnly) {
     # the route honours Range with a 206 (measured against the live dashboard,
     # 2026-08-14) -- so this costs one byte, not a whole onboard.exe.
     $ivCode = Invoke-CurlWithToken `
-        -Uri "http://192.168.0.102:8480/api/v1/companion/package/windows/${InstallerVersion}?kind=onboard" `
+        -Uri "$DashboardUrl/api/v1/companion/package/windows/${InstallerVersion}?kind=onboard" `
         -Token $env:DASH_REPORT_TOKEN `
         -ExtraArgs @("-o", "NUL", "-r", "0-0", "--max-time", "20", "-w", "%{http_code}")
     if ($ivCode -eq "200" -or $ivCode -eq "206") {
@@ -326,7 +364,7 @@ $reported = $false
 while ($true) {
     Start-Sleep -Seconds 3
     try {
-        $health = Invoke-CurlWithToken -Uri "http://192.168.0.102:8480/api/v1/health" `
+        $health = Invoke-CurlWithToken -Uri "$DashboardUrl/api/v1/health" `
             -Token $env:DASH_REPORT_TOKEN | ConvertFrom-Json
         $live = "$($health.version)"
     }
@@ -363,7 +401,8 @@ if ($DashboardOnly) {
 # windows_upgrade.ps1 and check_deploy_drift.ps1 read afterwards.
 Write-Host ""
 Write-Step "--- step 2a: build companion (release.ps1: parity, editable install, companion + dashboard suites, PyInstaller, manifest) ---"
-$releaseArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\release.ps1")
+$releaseArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\release.ps1",
+                 "-DashboardUrl", $DashboardUrl)
 if ($AllowDirty) { $releaseArgs += "-AllowDirty" }
 & powershell @releaseArgs
 if ($LASTEXITCODE -ne 0) {
@@ -379,7 +418,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Step "--- step 2b: package + publish (password prompt is your DASHBOARD login) ---"
 & powershell -NoProfile -ExecutionPolicy Bypass -File "installer\build_editor_package.ps1" `
-    -RebuildOnboard -Publish -MakeCurrent
+    -RebuildOnboard -Publish -MakeCurrent -DashboardUrl $DashboardUrl -AdminUser $AdminUser
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "build_editor_package.ps1 exited $LASTEXITCODE -- stopping before the local upgrade"
     exit 1
@@ -401,7 +440,7 @@ if ($LASTEXITCODE -ne 0) {
 $macHeaders = ""
 try {
     $macHeaders = Invoke-CurlWithToken `
-        -Uri "http://192.168.0.102:8480/api/v1/companion/package/macos/current" `
+        -Uri "$DashboardUrl/api/v1/companion/package/macos/current" `
         -Token $env:DASH_REPORT_TOKEN `
         -ExtraArgs @("-D", "-", "-o", "NUL", "-r", "0-0", "--max-time", "15")
 }
@@ -457,7 +496,8 @@ if ($LASTEXITCODE -ne 0) {
 # LOCAL-state drift lines gate: the macos-lagging and other-machines-behind
 # lines are advisory by design and fire on a perfectly good Windows ship.
 # Colour is lost by capturing a child powershell's output; the text is not.
-$driftLines = @(& powershell -NoProfile -ExecutionPolicy Bypass -File "tools\check_deploy_drift.ps1" 2>&1 |
+$driftLines = @(& powershell -NoProfile -ExecutionPolicy Bypass -File "tools\check_deploy_drift.ps1" `
+    -DashboardUrl $DashboardUrl 2>&1 |
     ForEach-Object { $line = "$_"; Write-Host $line; $line })
 $localDrift = @($driftLines | Where-Object {
     $_ -match '^\s*DRIFT\s+(installed companion is v|no ccsync-companion process is running|the running process is |the exe on disk is NEWER)'

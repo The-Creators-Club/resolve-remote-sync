@@ -24,6 +24,9 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tomllib
+from pathlib import Path
+
 import urllib3
 
 # TrueNAS uses a self-signed cert by default; suppress the noisy warning
@@ -31,21 +34,185 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+class EnvError(RuntimeError):
+    """A configuration refusal: a required env var, flag or site.toml key is
+    missing. Defined up here (it used to live beside require_env, further
+    down) because the site loader below runs at IMPORT time and raises it."""
+
+
+# --------------------------------------------------------------------------
+# site.toml -- who this deployment is (WP0 step 4, 2026-08-17)
+# --------------------------------------------------------------------------
+#
+# Until 2026-08-17 every one of the constants below was a literal from THIS
+# fleet's NAS (192.168.0.102, /mnt/tank/TheCreatorsPool, ...). That is a fork
+# waiting to happen the moment a second site exists -- see
+# docs/COMMERCIAL_READINESS.md item 10 and docs/SYNOLOGY_PORT_PLAN.md WP0 --
+# so the identity moved OUT of the code and into one file, and the shipped
+# defaults are blank.
+#
+# Precedence is unchanged where it already existed: a --flag beats an env var
+# beats site.toml beats blank. Blank is a REFUSAL, not a fallback: a script
+# that cannot name the tree it is about to chown -R must stop, and say which
+# key it wanted (require_site_value).
+#
+# SECRETS ARE NOT IN HERE. TRUENAS_PW / SYNCTHING_API_KEY / DASH_* stay in the
+# environment; site.toml is meant to be readable, diffable and (if a site
+# wants) committed.
+SITE_ENV_VAR = "CCSYNC_SITE"
+SITE_FILENAME = "site.toml"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+_SITE: dict | None = None
+_SITE_PATH = ""
+
+
+def site_path_from_argv(argv=None) -> str:
+    """The `--site <path>` value on the command line, or "".
+
+    Read from argv at IMPORT time rather than after argparse, because the
+    constants below are argparse DEFAULTS: by the time a parser exists they
+    have already been baked into it. Every script also accepts --site through
+    add_site_arg() so that `--help` documents it and a typo is caught.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for i, tok in enumerate(argv):
+        if tok == "--site" and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith("--site="):
+            return tok.split("=", 1)[1]
+    return ""
+
+
+def load_site(path: str | Path | None = None, reload: bool = False) -> dict:
+    """Load the site manifest. Search order: `path` / --site, $CCSYNC_SITE,
+    <repo>/site.toml, else {} (every value falls back to blank).
+
+    A named-but-missing file is an error -- an operator who passed --site meant
+    it. An absent <repo>/site.toml is not: that is the un-configured state, and
+    the refusal the caller gets later names the key it needed.
+    """
+    global _SITE, _SITE_PATH
+    if _SITE is not None and not reload and path is None:
+        return _SITE
+
+    candidate = str(path or "").strip() or site_path_from_argv() or \
+        os.environ.get(SITE_ENV_VAR, "").strip()
+    explicit = bool(candidate)
+    if not candidate:
+        candidate = str(REPO_ROOT / SITE_FILENAME)
+
+    data: dict = {}
+    p = Path(candidate)
+    if p.is_file():
+        with p.open("rb") as fh:
+            data = tomllib.load(fh)
+        _SITE_PATH = str(p)
+    elif explicit:
+        raise EnvError(f"--site/{SITE_ENV_VAR} points at {candidate!r}, which is not a file")
+    else:
+        _SITE_PATH = ""
+    _SITE = data
+    return data
+
+
+def site_file() -> str:
+    """Path of the site.toml that was loaded, or "" if there was none."""
+    load_site()
+    return _SITE_PATH
+
+
+def site_value(section: str, key: str, default: str = "") -> str:
+    """One string from site.toml, or `default`. Never raises for absence."""
+    table = load_site().get(section) or {}
+    if not isinstance(table, dict):
+        return default
+    value = table.get(key, default)
+    return "" if value is None else str(value).strip()
+
+
+def site_int(section: str, key: str, default: int) -> int:
+    raw = site_value(section, key)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def site_bool(section: str, key: str, default: bool = False) -> bool:
+    raw = site_value(section, key).lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def add_site_arg(ap) -> None:
+    """Add the shared --site flag (see site_path_from_argv for why the value
+    is also read straight out of argv at import time)."""
+    ap.add_argument("--site", default="",
+                    help=f"path to the site manifest ({SITE_FILENAME}); defaults to "
+                         f"${SITE_ENV_VAR} or <repo>/{SITE_FILENAME}. It carries the "
+                         f"NAS host, tree root and app paths -- never secrets. "
+                         f"Start from site.example.toml.")
+
+
+def require_site_value(value: str, key: str, flag: str = "") -> str:
+    """Return `value`, or refuse naming the site.toml key that would set it.
+
+    The refusal exists because the alternative -- a default pointing at the
+    Creators Club NAS -- silently aims someone else's deploy at this fleet's
+    IP and pool names (COMMERCIAL_READINESS.md item 10).
+    """
+    value = str(value or "").strip()
+    if value:
+        return value
+    where = site_file() or f"<repo>/{SITE_FILENAME}"
+    raise EnvError(
+        f"{key} is not configured. Set it in {where}"
+        + (f", or pass {flag}" if flag else "")
+        + f". Copy site.example.toml to {SITE_FILENAME} and fill it in -- there are "
+        f"deliberately no built-in defaults for site identity (host, pool, tree)."
+    )
+
+
 # --------------------------------------------------------------------------
 # Constants shared by more than one script
 # --------------------------------------------------------------------------
+#
+# Every one of these is "" when site.toml does not say. That blank is the
+# whole point: see require_site_value.
 
-DEFAULT_TRUENAS_HOST = "192.168.0.102"
-DEFAULT_TRUENAS_USER = "truenas_admin"
-DEFAULT_DATASET_ROOT = "/mnt/tank/TheCreatorsPool"
-DEFAULT_CC_ROOT = DEFAULT_DATASET_ROOT + "/Creators_Club"
-DEFAULT_PROJECTS_ROOT = DEFAULT_CC_ROOT + "/Projects"
+DEFAULT_NAS_KIND = site_value("nas", "kind") or "truenas"
+DEFAULT_TRUENAS_HOST = site_value("nas", "host")
+DEFAULT_TRUENAS_USER = site_value("nas", "admin_user")
+# <pool_root>/<tree_name> -- e.g. /mnt/tank/TheCreatorsPool + Creators_Club.
+# BOTH are required: half of a path is not a path, so a site that names only
+# the pool gets the same refusal as one that names neither.
+DEFAULT_DATASET_ROOT = site_value("tree", "pool_root")
+TREE_NAME = site_value("tree", "tree_name")
+DEFAULT_CC_ROOT = (f"{DEFAULT_DATASET_ROOT.rstrip('/')}/{TREE_NAME}"
+                   if DEFAULT_DATASET_ROOT and TREE_NAME else "")
+PROJECTS_DIRNAME = site_value("tree", "projects_dir") or "Projects"
+DEFAULT_PROJECTS_ROOT = f"{DEFAULT_CC_ROOT}/{PROJECTS_DIRNAME}" if DEFAULT_CC_ROOT else ""
 # The shared b-roll archive: browsable proxies editors link against, plus
-# the search index that serves them. Beside Projects/ under Creators_Club,
+# the search index that serves them. Beside Projects/ under the tree root,
 # which is what makes it P:\Assets\B-roll Archive on an editor's machine.
-DEFAULT_BROLL_ARCHIVE_ROOT = DEFAULT_CC_ROOT + "/Assets/B-roll Archive"
-DEFAULT_DATASET_OWNER = "broll"
-EDITORS_GROUP = "editors"
+DEFAULT_BROLL_ARCHIVE_ROOT = f"{DEFAULT_CC_ROOT}/Assets/B-roll Archive" if DEFAULT_CC_ROOT else ""
+# Where editor home directories are created (the PARENT, never a home).
+# <pool_root>/homes on TrueNAS; DSM's User Home service puts them at
+# /var/services/homes, so a site there sets [tree] homes_parent explicitly.
+# The dashboard's own copy of this constant
+# (dashboard/src/ccsync_dashboard/nas/truenas.py HOME_PARENT) is the same value
+# arrived at separately -- the container cannot import this module.
+DEFAULT_HOMES_PARENT = site_value("tree", "homes_parent") or (
+    f"{DEFAULT_DATASET_ROOT.rstrip('/')}/homes" if DEFAULT_DATASET_ROOT else "")
+# Where the dashboard app's own host tree lives (code, venv, data, the
+# read-only artefact mounts). TrueNAS: /mnt/<pool>/apps/ccsync-dashboard.
+DEFAULT_APPS_ROOT = site_value("apps", "root")
+DEFAULT_DATASET_OWNER = site_value("stack", "owner") or "broll"
+EDITORS_GROUP = site_value("stack", "group") or "editors"
 
 # --------------------------------------------------------------------------
 # Shared asset folders (added 2026-08-05)
@@ -262,11 +429,23 @@ def project_relative_dirs(base: str = "") -> list[str]:
 
 
 def project_path(projects_root: str, year: str, series: str, project: str) -> str:
-    """Build the absolute NAS path for a project, posix-style, no trailing slash."""
+    """Build the absolute NAS path for a project, posix-style, no trailing slash.
+
+    Rejects the same shapes project_path_rel() does -- `..`, a leading dot, an
+    empty segment -- and not only the separators. Until 2026-08-17 only "/" and
+    "\\" were refused here, so `--series ..` walked one level OUT of the
+    projects root and everything downstream (mkdir -p, chown -R, the marker
+    write) then ran as root against whatever was there
+    (COMMERCIAL_READINESS.md item 9). project_path_rel has always checked this;
+    the two entry points now agree.
+    """
+    cleaned = []
     for part, name in ((year, "year"), (series, "series"), (project, "project")):
-        if not part or "/" in part or "\\" in part:
+        value = str(part or "").strip()
+        if not value or "/" in value or "\\" in value or value.startswith(".") or ".." in value:
             raise ValueError(f"invalid --{name} value: {part!r}")
-    return f"{projects_root.rstrip('/')}/{year}/{series}/{project}"
+        cleaned.append(value)
+    return f"{projects_root.rstrip('/')}/" + "/".join(cleaned)
 
 
 def project_path_rel(projects_root: str, rel: str) -> str:
@@ -409,8 +588,8 @@ def shell_quote(value: str) -> str:
 # Env var loading
 # --------------------------------------------------------------------------
 
-class EnvError(RuntimeError):
-    pass
+# EnvError itself is defined at the top of this module (the site loader needs
+# it at import time); this section keeps the loaders that raise it.
 
 
 def require_env(name: str) -> str:
@@ -423,20 +602,75 @@ def require_env(name: str) -> str:
     return val
 
 
-def truenas_conn_params(dry_run: bool = False):
-    """host/user/pw for both SSH and REST API against TrueNAS.
+# The NAS admin password, under either platform's name. TRUENAS_PW is what
+# every runbook, tools\ship.cmd and this repo's history export; SYNO_PW is what
+# a Synology site sets (docs/SERVER-SYNOLOGY.md), because "TRUENAS_PW" for a
+# DSM box reads like a copy-paste mistake and a workstation that administers
+# both NASes needs two names anyway. Whichever matches [nas] kind wins; the
+# other is accepted with a one-time warning rather than refused, since it is
+# nearly always the right password typed under the other platform's name.
+NAS_PW_ENV = {"truenas": "TRUENAS_PW", "synology": "SYNO_PW"}
+_NAS_PW_ALIAS_WARNED = False
 
-    In dry-run mode, TRUENAS_PW is not required -- callers only need
+
+def nas_admin_password(dry_run: bool = False, kind: str = "") -> str:
+    """The admin password for SSH `sudo -S` and the platform's API.
+
+    In dry-run mode nothing is required -- callers only need host/user to
+    print what they would do -- and a placeholder is returned so a local
+    `--dry-run` works on a machine with no secret configured at all.
+    """
+    global _NAS_PW_ALIAS_WARNED
+    try:
+        chosen = (kind or "").strip().lower() or nas_kind()
+    except EnvError:
+        chosen = "truenas"
+    primary = NAS_PW_ENV.get(chosen, "TRUENAS_PW")
+    alias = "SYNO_PW" if primary == "TRUENAS_PW" else "TRUENAS_PW"
+
+    value = os.environ.get(primary, "").strip()
+    if value:
+        return value
+    fallback = os.environ.get(alias, "").strip()
+    if fallback:
+        if not _NAS_PW_ALIAS_WARNED:
+            print(f"NOTE: {primary} is not set; using {alias} instead (this site's "
+                  f"[nas] kind is {chosen!r}). Set {primary} to make the intent explicit.",
+                  file=sys.stderr)
+            _NAS_PW_ALIAS_WARNED = True
+        return fallback
+    if dry_run:
+        return f"<{primary}-unset-dry-run>"
+    raise EnvError(
+        f"Required environment variable {primary} is not set. "
+        f"See server/README.md for the full list of env vars this script needs."
+    )
+
+
+def truenas_conn_params(dry_run: bool = False):
+    """host/user/pw for both SSH and REST API against the NAS.
+
+    Named for TrueNAS because that is what every call site has said since
+    2026-07; it serves both platforms (DSM's SSH channel is the same
+    `sudo -S` shape, and its Web API takes the same admin account), and the
+    password comes from whichever of TRUENAS_PW / SYNO_PW this site uses.
+
+    In dry-run mode the password is not required -- callers only need
     host/user to print what they'd do, and a placeholder is used for pw so
     local `--dry-run` verification works without any secret configured.
+
+    host/user ARE required in both modes since 2026-08-17: they used to default
+    to this fleet's own NAS, so a fresh checkout with no configuration aimed
+    every script at 192.168.0.102 as truenas_admin (COMMERCIAL_READINESS.md
+    item 10). Blank now refuses and names the key.
     """
-    host = os.environ.get("TRUENAS_HOST", DEFAULT_TRUENAS_HOST)
-    user = os.environ.get("TRUENAS_USER", DEFAULT_TRUENAS_USER)
-    if dry_run:
-        pw = os.environ.get("TRUENAS_PW", "<TRUENAS_PW-unset-dry-run>")
-    else:
-        pw = require_env("TRUENAS_PW")
-    return host, user, pw
+    host = require_site_value(
+        os.environ.get("SYNO_HOST", "") or os.environ.get("TRUENAS_HOST", DEFAULT_TRUENAS_HOST),
+        "[nas] host", "TRUENAS_HOST")
+    user = require_site_value(
+        os.environ.get("SYNO_USER", "") or os.environ.get("TRUENAS_USER", DEFAULT_TRUENAS_USER),
+        "[nas] admin_user", "TRUENAS_USER")
+    return host, user, nas_admin_password(dry_run=dry_run)
 
 
 # --------------------------------------------------------------------------
@@ -590,6 +824,46 @@ def run_ssh(cmd: str, dry_run: bool = False, timeout: int = 120):
         client.close()
 
 
+def sftp_put_text(remote_dir: str, files: dict, dry_run: bool = False) -> bool:
+    """Write small TEXT files into `remote_dir` over SFTP. True on success.
+
+    For the compose.yaml + .env pair the Synology deploy installs. Deliberately
+    not a heredoc through `sh -c`: the quoting eats a compose file (spike 5),
+    and a .env carrying five secrets must never appear in a remote command line
+    at all (AUDIT SEC-2 is about argv, and argv is what a heredoc becomes).
+
+    `remote_dir` is in the SFTP channel's own namespace -- on DSM that is the
+    share view, not the filesystem (backend.sftp_path does the translation).
+    Existing files are replaced; nothing is deleted.
+    """
+    if dry_run:
+        for name, body in files.items():
+            print(f"[dry-run] would SFTP {len(body.encode('utf-8'))} bytes to "
+                  f"{remote_dir}/{name}")
+        return True
+    host, user, pw = truenas_conn_params()
+    try:
+        client = ssh_client(host, user, pw)
+        try:
+            sftp = client.open_sftp()
+            try:
+                for name, body in files.items():
+                    target = f"{remote_dir.rstrip('/')}/{name}"
+                    with sftp.file(target, "w") as fh:
+                        fh.write(body)
+                    print(f"uploaded {len(body.encode('utf-8'))} bytes to {target} "
+                          f"(SFTP view)")
+            finally:
+                sftp.close()
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 - any transport failure is one answer
+        print(f"FAILED: SFTP write to {remote_dir} did not finish "
+              f"({type(exc).__name__}: {exc})", file=sys.stderr)
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------
 # TrueNAS REST API (requests)
 # --------------------------------------------------------------------------
@@ -614,6 +888,269 @@ def truenas_api(method: str, path: str, json_body=None, dry_run: bool = False,
         auth=(user, pw), verify=False, timeout=30,
     )
     return resp
+
+
+# --------------------------------------------------------------------------
+# Synology DSM Web API (requests) -- docs/synology-spikes-2026-08-17.md
+# --------------------------------------------------------------------------
+#
+# The install-time twin of dashboard/src/ccsync_dashboard/nas/synology.py's
+# client. Deliberately a separate implementation rather than a shared module:
+# server/ runs on the admin's workstation off `python server/<script>.py` and
+# the dashboard runs in a container that cannot import this package -- the same
+# split the TrueNAS half has always had. What must NOT diverge is the recorded
+# SHAPES; both files cite the same spike document, and both carry the same
+# three traps:
+#
+#   1. SYNO.API.Auth must be VERSION 7. A lower version hands back a sid that
+#      reads fine and is refused on every mutation with 105 -- for a full
+#      administrators-group account (spike 3.1).
+#   2. Every parameter is JSON. A Python `False` reaches DSM as "False" and
+#      comes back as error 3103 naming nothing. _dsm_param() is the only way a
+#      value is allowed to reach the wire.
+#   3. SYNO.Core.Group.Member add returns success whatever you send it and
+#      reads `name`, not `members`. Callers read membership back.
+#
+# Nothing here runs at import time, and --dry-run opens no socket.
+
+SYNO_LOGIN_VERSION = 7
+# A NAMED session: DSM tracks sids per session name, so logging this one out
+# cannot take the operator's own DSM browser session with it.
+SYNO_SESSION_NAME = "ccsync"
+SYNO_DEFAULT_PORT = 5001
+
+# Every API/version pair the Synology backend calls, checked against
+# SYNO.API.Info before the first login. A DSM that does not offer one of these
+# at the version we call is a REFUSAL, not a "try something else": half a
+# provisioning run is worse than none (the install_syncthing_app.py pattern,
+# 2026-07-22).
+SYNO_REQUIRED_APIS = {
+    "SYNO.API.Auth": SYNO_LOGIN_VERSION,
+    "SYNO.Core.User": 1,
+    "SYNO.Core.Group": 1,
+    "SYNO.Core.Group.Member": 1,
+    "SYNO.Core.User.Group": 1,
+    "SYNO.Core.AppPriv.Rule": 1,
+    "SYNO.Core.FileServ.FTP.SFTP": 1,
+    "SYNO.Core.Share": 1,
+    "SYNO.Core.Share.Permission": 1,
+    "SYNO.Core.Share.Snapshot": 1,
+}
+
+# Codes seen on the wire during the spikes. The text says what to DO, because
+# DSM's own message for most of these is the number.
+DSM_ERRORS = {
+    103: "no such method (this DSM does not implement the call)",
+    105: (f"the session has no privilege for this call -- almost always a sid minted with "
+          f"SYNO.API.Auth < {SYNO_LOGIN_VERSION}, which DSM refuses on every mutation"),
+    119: "the session id expired",
+    400: "invalid account or password",
+    402: "the account has no permission to log in to DSM",
+    403: ("the account needs a 2-factor code, or the feature is not installed "
+          "(Share.Snapshot scheduling needs the Snapshot Replication package)"),
+    3101: "bad argument (a name that had to be a JSON array was sent as a string)",
+    3103: 'invalid parameter -- classically a Python bool serialised as "True"/"False"',
+    3106: "no such user",
+    3107: "that user already exists",
+    3117: "the password does not satisfy this DSM's password policy",
+    3201: "bad group argument",
+    3205: "no such group",
+    3206: "that group already exists",
+    3400: "bad/missing parameters (AppPriv.Rule get answers this to everything -- use list)",
+}
+
+
+class DsmError(RuntimeError):
+    """A DSM call that answered success:false. Carries the numeric code so a
+    caller can branch on the handful that mean something specific (3205 no such
+    group, 3107 user exists) without matching on text."""
+
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def dsm_message(code: int) -> str:
+    return DSM_ERRORS.get(code, f"DSM error {code}")
+
+
+def _dsm_param(value) -> str:
+    """The ONE place a value becomes a DSM parameter (trap 2 above)."""
+    import json as _json
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple, dict)):
+        return _json.dumps(list(value) if isinstance(value, tuple) else value)
+    return str(value)
+
+
+def synology_verify_ssl():
+    """False (trust the self-signed DSM cert, the out-of-the-box state), True,
+    or a CA bundle path -- from SYNO_VERIFY_SSL / TRUENAS_VERIFY_SSL / [nas]
+    verify_ssl, in that order."""
+    raw = (os.environ.get("SYNO_VERIFY_SSL", "").strip()
+           or os.environ.get("TRUENAS_VERIFY_SSL", "").strip()
+           or site_value("nas", "verify_ssl"))
+    if raw in ("", "0", "false", "no"):
+        return False
+    if raw in ("1", "true", "yes"):
+        return True
+    return raw
+
+
+def synology_port() -> int:
+    return site_int("nas", "dsm_port", SYNO_DEFAULT_PORT)
+
+
+# (host, user) -> {"sid", "token", "paths"}. Module-level so a script making
+# twenty calls logs in once; keyed by identity so a test that switches host
+# does not inherit a stale sid.
+_DSM_SESSIONS: dict = {}
+_DSM_REDACT = ("passwd", "password")
+
+
+def dsm_reset_session() -> None:
+    """Forget every cached sid (tests, and the retry after a 119)."""
+    _DSM_SESSIONS.clear()
+
+
+def _dsm_url(host: str, cgi: str) -> str:
+    return f"https://{host}:{synology_port()}/webapi/{cgi}"
+
+
+def _dsm_http(host: str, cgi: str, params: dict, post: bool, token: str = ""):
+    import requests
+
+    url = _dsm_url(host, cgi)
+    headers = {"X-SYNO-TOKEN": token} if token else {}
+    if post:
+        return requests.post(url, data=params, headers=headers,
+                             verify=synology_verify_ssl(), timeout=30)
+    return requests.get(url, params=params, headers=headers,
+                        verify=synology_verify_ssl(), timeout=30)
+
+
+def _dsm_body(resp, what: str) -> dict:
+    """resp.json() that cannot raise something unrelated: a 2xx carrying HTML
+    (a reverse proxy's error page, DSM's login redirect) would otherwise come
+    back as a JSONDecodeError traceback halfway through an install."""
+    if not 200 <= resp.status_code < 300:
+        raise DsmError(0, f"{what}: DSM answered HTTP {resp.status_code}")
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise DsmError(0, f"{what}: response was not JSON ({resp.text[:120]!r})") from exc
+    if not isinstance(body, dict):
+        raise DsmError(0, f"{what}: response was not a JSON object ({resp.text[:120]!r})")
+    return body
+
+
+def _dsm_check_shapes(host: str) -> dict:
+    """SYNO.API.Info for every API this repo calls. Returns {api: cgi path}.
+
+    Refuse rather than guess: a DSM that offers Auth <= 6 is not "slightly
+    older", it is a box where every mutation answers 105 and an install would
+    half-create the tree, the group and the accounts before anyone noticed
+    (spike 3.1).
+    """
+    params = {"api": "SYNO.API.Info", "version": "1", "method": "query",
+              "query": ",".join(sorted(SYNO_REQUIRED_APIS))}
+    body = _dsm_body(_dsm_http(host, "query.cgi", params, post=False),
+                     "SYNO.API.Info.query")
+    if not body.get("success"):
+        raise DsmError(0, f"the DSM web API at {host}:{synology_port()} refused "
+                          f"SYNO.API.Info -- this does not look like a DSM 7 box")
+    info = body.get("data") or {}
+    paths, problems = {}, []
+    for api, want in sorted(SYNO_REQUIRED_APIS.items()):
+        entry = info.get(api)
+        if not isinstance(entry, dict):
+            problems.append(f"{api}: not offered by this DSM")
+            continue
+        paths[api] = str(entry.get("path") or "entry.cgi")
+        low = int(entry.get("minVersion") or 1)
+        high = int(entry.get("maxVersion") or 0)
+        if not low <= want <= high:
+            problems.append(f"{api}: need version {want}, this DSM offers {low}-{high}")
+    if problems:
+        raise DsmError(0,
+                       "this DSM does not offer the web API shapes CC Sync installs with: "
+                       + "; ".join(problems)
+                       + ". Refusing to guess a different shape -- a half-provisioned NAS "
+                         "is worse than an unprovisioned one. See "
+                         "docs/synology-spikes-2026-08-17.md spike 3.")
+    return paths
+
+
+def _dsm_session(host: str, user: str, pw: str) -> dict:
+    """Log in (version 7, format=sid) and cache the sid + SynoToken."""
+    cached = _DSM_SESSIONS.get((host, user))
+    if cached:
+        return cached
+    paths = _dsm_check_shapes(host)
+    params = {
+        "api": "SYNO.API.Auth", "method": "login",
+        "version": str(SYNO_LOGIN_VERSION),
+        "account": user, "passwd": pw, "session": SYNO_SESSION_NAME,
+        "format": "sid", "enable_syno_token": "yes",
+    }
+    # POSTed, so the password is not in a request line DSM writes to its own
+    # log -- the same reason its own UI posts the login.
+    body = _dsm_body(_dsm_http(host, paths.get("SYNO.API.Auth", "auth.cgi"), params, post=True),
+                     "SYNO.API.Auth.login")
+    if not body.get("success"):
+        code = int((body.get("error") or {}).get("code") or 0)
+        raise DsmError(code, f"DSM login for {user!r} failed: error {code} -- {dsm_message(code)}")
+    data = body.get("data") or {}
+    sid = data.get("sid")
+    if not sid:
+        raise DsmError(0, "DSM login succeeded but returned no sid (format=sid was ignored)")
+    session = {"sid": str(sid), "token": str(data.get("synotoken") or ""), "paths": paths}
+    _DSM_SESSIONS[(host, user)] = session
+    return session
+
+
+def synology_api(api: str, method: str, version: int = 1, post: bool = False,
+                 dry_run: bool = False, **params) -> dict:
+    """One DSM Web API call. Returns the `data` object; raises DsmError.
+
+    `post=True` for anything that changes state (DSM accepts either, but a GET
+    that mutates ends up in access logs with its parameters).
+
+    In dry-run mode nothing is connected: the call is printed, secrets
+    redacted, and {} is returned -- the same contract truenas_api() has.
+    """
+    host, user, pw = truenas_conn_params(dry_run=dry_run)
+    if dry_run:
+        shown = {k: ("<redacted>" if k in _DSM_REDACT else v) for k, v in params.items()}
+        print(f"[dry-run] DSM {api}.{method} v{version} on {host}: {shown}")
+        return {}
+
+    for attempt in (1, 2):
+        session = _dsm_session(host, user, pw)
+        call = {"api": api, "method": method, "version": _dsm_param(version)}
+        call.update({k: _dsm_param(v) for k, v in params.items() if v is not None})
+        call["_sid"] = session["sid"]
+        if session["token"]:
+            call["SynoToken"] = session["token"]
+        what = f"{api}.{method}"
+        body = _dsm_body(
+            _dsm_http(host, session["paths"].get(api, "entry.cgi"), call, post,
+                      token=session["token"]),
+            what)
+        if body.get("success"):
+            data = body.get("data")
+            return data if isinstance(data, dict) else {"data": data}
+        code = int((body.get("error") or {}).get("code") or 0)
+        # 119 = the sid aged out, which is expected on a long install. Anything
+        # else is reported as-is -- 105 in particular must NOT be retried: it
+        # means the login version was wrong and a retry only doubles the wait.
+        if code == 119 and attempt == 1:
+            _DSM_SESSIONS.pop((host, user), None)
+            continue
+        raise DsmError(code, f"{what} failed: DSM error {code} -- {dsm_message(code)}")
+    raise DsmError(119, f"{api}.{method} kept losing its DSM session")
 
 
 # --------------------------------------------------------------------------
@@ -667,3 +1204,131 @@ def wait_for_job(job_id: int, timeout: float = 120.0, poll: float = 2.0):
         if state in ("SUCCESS", "FAILED", "ABORTED"):
             return state, job.get("error")
     return "TIMEOUT", f"job {job_id} did not finish within {timeout}s"
+
+
+# --------------------------------------------------------------------------
+# Backend selection (docs/SYNOLOGY_PORT_PLAN.md WP3, 2026-08-17)
+# --------------------------------------------------------------------------
+#
+# Everything platform-specific a server script does -- create the app/stack,
+# restart it, create the editors group and the editor account, fix a home
+# directory sshd will accept, own the tree, ask tailscale for its status --
+# lives on a backend object now. `server/backends/truenas.py` is the code that
+# used to sit inline in these scripts, moved unchanged;
+# `server/backends/synology.py` is the stub the DSM port fills in.
+#
+# The scripts keep their CLI, their --dry-run semantics and their output text:
+# a backend method is a lift, not a redesign.
+
+NAS_KIND_ENV = "CCSYNC_NAS_KIND"
+NAS_KINDS = ("truenas", "synology")
+
+
+def add_nas_kind_arg(ap) -> None:
+    ap.add_argument("--nas-kind", choices=NAS_KINDS, default="",
+                    help=f"which NAS platform this site runs on; defaults to "
+                         f"${NAS_KIND_ENV}, else [nas] kind in {SITE_FILENAME}, "
+                         f"else {DEFAULT_NAS_KIND!r}.")
+
+
+def nas_kind(args=None) -> str:
+    """--nas-kind, else $CCSYNC_NAS_KIND, else site.toml, else 'truenas'."""
+    flag = str(getattr(args, "nas_kind", "") or "").strip().lower()
+    env = os.environ.get(NAS_KIND_ENV, "").strip().lower()
+    kind = flag or env or DEFAULT_NAS_KIND
+    if kind not in NAS_KINDS:
+        raise EnvError(f"unknown NAS kind {kind!r}: expected one of {', '.join(NAS_KINDS)}")
+    return kind
+
+
+class ScriptCalls:
+    """How a backend reaches the NAS: through the CALLING SCRIPT's own names.
+
+    Not decoration. server/tests patches `install_dashboard_app.truenas_api`,
+    `check_health.run_ssh` and friends on the SCRIPT module to run the whole
+    suite offline; a backend that imported common.truenas_api directly would
+    sail straight past those patches and the tests would silently stop testing
+    anything (2026-08-17, when the bodies moved into backends/). Attribute
+    lookup happens per call, so a monkeypatch applied after the backend was
+    built still takes effect.
+    """
+
+    def __init__(self, module=None):
+        self._module = module
+
+    def _resolve(self, name):
+        return getattr(self._module, name, None) or globals()[name]
+
+    def api(self, *a, **kw):
+        return self._resolve("truenas_api")(*a, **kw)
+
+    def ssh(self, *a, **kw):
+        return self._resolve("run_ssh")(*a, **kw)
+
+    def ssh_guarded(self, cmd, dry_run, timeout):
+        """The caller's run_ssh_guarded if it has one, else plain ssh.
+
+        Only install_dashboard_app.py has a guarded variant (OPS-3: a dropped
+        transport is an error RESULT, not a traceback, because the caller may
+        be on the post-swap failure path). Resolving it here keeps the restart
+        exactly as guarded as it was before the body moved (2026-08-17).
+        """
+        guarded = getattr(self._module, "run_ssh_guarded", None)
+        if guarded is not None:
+            return guarded(cmd, dry_run, timeout)
+        return self.ssh(cmd, dry_run=dry_run, timeout=timeout)
+
+    def put_text(self, *a, **kw):
+        """SFTP a few small text files (the Synology stack's compose.yaml and
+        .env), resolved through the calling script for the same reason."""
+        return self._resolve("sftp_put_text")(*a, **kw)
+
+    def dsm(self, *a, **kw):
+        """The DSM Web API, resolved the same way -- server/tests patches
+        `install_dashboard_app.synology_api` to run the Synology suite offline
+        against a fake DSM, exactly as it patches truenas_api."""
+        return self._resolve("synology_api")(*a, **kw)
+
+    def wait_for_job(self, *a, **kw):
+        return self._resolve("wait_for_job")(*a, **kw)
+
+    def ok(self, resp):
+        return self._resolve("ok")(resp)
+
+
+def get_backend(args=None, kind: str = "", calls: ScriptCalls | None = None):
+    """The ServerBackend for this site. `args` supplies --nas-kind if present.
+
+    Selecting an unimplemented backend fails HERE, before a single connection
+    is opened -- the Synology stub is importable on purpose, so that `--nas-kind
+    synology` is a clear "not yet", not an ImportError.
+    """
+    chosen = (kind or "").strip().lower() or nas_kind(args)
+    calls = calls or ScriptCalls()
+    if chosen == "truenas":
+        from backends.truenas import TrueNASBackend  # noqa: PLC0415 - avoid an import cycle
+        return TrueNASBackend(calls=calls)
+    from backends.synology import SynologyBackend  # noqa: PLC0415
+    backend = SynologyBackend(calls=calls)
+    if not getattr(backend, "ready", False):
+        from backends.synology import PENDING  # noqa: PLC0415
+        raise NotImplementedError(PENDING)
+    return backend
+
+
+def cli(main_fn) -> int:
+    """Run a script's main(), turning a configuration refusal into one line.
+
+    EnvError (a missing TRUENAS_PW, an unset [tree] pool_root) and a backend
+    that is not written yet are ANSWERS, not crashes: an admin running
+    setup_tree.py on a fresh checkout should read "here is the key you have not
+    set", not a traceback ending in KeyError (2026-08-17).
+    """
+    try:
+        return main_fn()
+    except EnvError as e:
+        print(f"FAILED: {e}", file=sys.stderr)
+        return 2
+    except NotImplementedError as e:
+        print(f"FAILED: {e}", file=sys.stderr)
+        return 2

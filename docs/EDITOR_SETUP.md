@@ -50,7 +50,7 @@ side by side).
 **Windows** -- open a **normal** PowerShell window. Do **not** use *Run as
 Administrator*:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\windows_bootstrap.ps1 -TailnetHost <tailnet-host> -EditorName <your-username> -DashboardToken <token-from-admin>
+powershell -ExecutionPolicy Bypass -File .\windows_bootstrap.ps1 -TailnetHost <tailnet-host> -DashboardUrl <your-dashboard-url> -EditorName <your-username> -DashboardToken <token-from-admin>
 ```
 
 The script asks for admin rights itself, once, for the one step that needs
@@ -60,7 +60,7 @@ invisible to your normal session, so Resolve sees no `P:` until you log off
 and back on. If you already ran it elevated, log off and on before opening
 Resolve.
 
-Add `-LocalRoot F:\Creators_Club` (any drive you like) if your system drive
+Add `-LocalRoot F:\<tree root>` (any drive you like) if your system drive
 is short on space. Add `-CompanionExeSource .\ccsync-companion.exe` to have
 it install the companion (the tray app) for you -- otherwise you'd copy
 `ccsync-companion.exe` into `%LOCALAPPDATA%\ccsync\bin\` yourself and run it
@@ -73,12 +73,12 @@ a Mac browser. Then, in Terminal:
 ```bash
 cd ~/Downloads
 chmod +x ccsync-onboard-*.sh
-./ccsync-onboard-*.sh --tailnet-host <tailnet-host> --editor-name <your-username> --local-root "/Volumes/<YourSSD>/Creators_Club"
+./ccsync-onboard-*.sh --tailnet-host <tailnet-host> --editor-name <your-username> --local-root "/Volumes/<YourSSD>/<tree root>"
 ```
 
 `--local-root` is the one flag worth getting right: point it at the external
 SSD you edit from (see section 6.2). Leave it off and everything lands in
-`~/Creators_Club` on your internal disk. `DASHBOARD_TOKEN=<token-from-admin>`
+your home folder on the internal disk. `DASHBOARD_TOKEN=<token-from-admin>`
 in front of the command is what lets it download and install the companion
 app; without it the script sets everything else up and tells you, loudly,
 that nothing on the Mac will sync by itself.
@@ -101,7 +101,7 @@ skipped, so re-running it is safe and is the normal way to fix a typo'd
 flag. A dry run (`-DryRun` on Windows, `--dry-run` on the Mac) prints what it
 would do and touches nothing.
 
-On Windows, `P:` shows up in Explorer as **TheCreatorsClub** so you can tell
+On Windows, `P:` shows up in Explorer under your studio's tree name so you can tell
 it apart from your own drives at a glance. Only project material belongs in
 there. (The name is cosmetic and per-user; Explorer may need a restart to
 show it.)
@@ -169,7 +169,7 @@ Project folders on the server look like this, and you don't need to know or
 configure any of it:
 
 ```
-Creators_Club/Projects/<year>/<series>/<project>/...
+<tree root>/Projects/<year>/<series>/<project>/...
 ```
 
 for example `Projects/2026/Creator Profiles/Season 1` alongside
@@ -185,16 +185,16 @@ Two optional keys exist and are easy to misread:
 | `projects` | Only pairs positionally with `syncthing_folder_ids` for lane C's folder-ID check. Nothing to do with what syncs. |
 
 One value worth understanding if you ever hand-edit it: `remote_root` must be
-an **absolute** NAS path (`/mnt/tank/TheCreatorsPool/Creators_Club`). SFTP
+an **absolute** NAS path (`/mnt/<pool>/<share>/<tree>` on TrueNAS, `/volume1/<share>/<tree>` on Synology). SFTP
 sessions start in your home directory on the NAS, so a relative value like
-`Creators_Club` quietly means `~/Creators_Club` -- a directory that doesn't
+`<tree>` quietly means `~/<tree>` -- a directory that doesn't
 exist -- rather than the shared tree.
 
 The companion validates its config at startup and writes anything wrong to
 `~/.ccsync/companion.log`, separating problems that stop syncing from ones
 that merely degrade the popup. If something isn't syncing, read that first.
 
-Two more values matter here: `dashboard_url` (e.g.
+Two more values matter here: `dashboard_url` (REQUIRED -- your admin's, e.g.
 `http://<tailnet-ip>:8480`) and `dashboard_token`. The bootstrap script
 writes both if you passed `-DashboardToken` in step 2; otherwise ask the
 admin for the token and either re-run the script with it or add the line by
@@ -254,7 +254,7 @@ opposite way (prefers camera originals) since it holds everything locally.
 All paths in the shared database are stored in the **Windows-style form**
 `P:\Projects\<year>\<series>\<project>\...` (since that's the host's path
 convention). On your Mac, the same files live under your local root (e.g.
-`/Volumes/<YourSSD>/Creators_Club/...`). Resolve's **Mapped Mount** feature
+`/Volumes/<YourSSD>/<tree root>/...`). Resolve's **Mapped Mount** feature
 is what lets a Mac resolve `P:\...` paths to that folder. There is no `P:`
 drive on a Mac and there never will be -- the Mapped Mount does that job.
 
@@ -272,7 +272,7 @@ end of the run instead:
   it quits, so an edit made while it is open would be thrown away. Quit
   Resolve completely, then re-run just that step:
   ```bash
-  ./ccsync-onboard-*.sh --resolve-mapping-only --local-root "/Volumes/<YourSSD>/Creators_Club"
+  ./ccsync-onboard-*.sh --resolve-mapping-only --local-root "/Volumes/<YourSSD>/<tree root>"
   ```
 - *"NOT DONE -- Resolve has never been launched on this Mac."* Resolve
   writes its preference files on its own first run and the installer will
@@ -299,7 +299,7 @@ mapping tool is embedded in the bootstrap script; extract and ask it:
 ```bash
 sed -n '/^# ---CCSYNC-MAPPING-HELPER-BEGIN---$/,/^# ---CCSYNC-MAPPING-HELPER-END---$/p' \
     ccsync-onboard-*.sh > /tmp/ccsync_mapping.py
-python3 /tmp/ccsync_mapping.py verify --local-root "/Volumes/<YourSSD>/Creators_Club"
+python3 /tmp/ccsync_mapping.py verify --local-root "/Volumes/<YourSSD>/<tree root>"
 ```
 
 Exit `0` = mapped correctly, `6` = no `P:\` mapping at all, `7` = mapped
@@ -319,7 +319,7 @@ another; that's it):
 1. Click **Add Mount** (or the `+` under that table).
 2. **Local Path** (or "Actual Path" -- whatever the left/first column is
    called): browse to your local root, e.g.
-   `/Volumes/<YourSSD>/Creators_Club`.
+   `/Volumes/<YourSSD>/<tree root>`.
 3. **Mapped Path** (or "Remote Path" -- the right/second column): enter it
    in the Windows-style form the database uses: `P:\`
 4. Save / close Preferences.
@@ -336,7 +336,7 @@ Resolve later dropped as well as one that was never set.
 ### 6.2 Mac only: the sync drive, and unplugging it
 
 Your local root normally lives on the external SSD you edit from
-(`--local-root "/Volumes/<YourSSD>/Creators_Club"`). Remember there is no
+(`--local-root "/Volumes/<YourSSD>/<tree root>"`). Remember there is no
 `P:` drive on a Mac -- Resolve's Mapped Mount (section 6) is what stands in
 for it. Three things follow from the SSD.
 

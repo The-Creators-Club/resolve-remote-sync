@@ -1,0 +1,3 @@
+# Deliberately empty: the "unconfigured checkout" state for tests. A real
+# <repo>/site.toml may exist on the developer machine (tools\ship.cmd needs
+# one), so tests point $CCSYNC_SITE here instead of relying on absence.

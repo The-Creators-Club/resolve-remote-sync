@@ -9,6 +9,92 @@ When something breaks rather than needs doing, start at
 replacing secrets with defaults, sudo-only Docker, and why `truenas_admin`
 cannot log in to the dashboard.
 
+## site.toml -- who this deployment is (READ THIS FIRST, 2026-08-17)
+
+Every `server/` script reads one manifest for the NAS's identity: its address,
+the admin account, the pool and tree it owns, where the app lives, which
+addresses the dashboard publishes on. Until 2026-08-17 those were literals in
+`server/common.py` and `dashboard/deploy/compose.yaml`; they are now **blank by
+default**, and a script that needs one and cannot find it stops with the key it
+wanted rather than aiming at whichever NAS the code was written against
+(`docs/COMMERCIAL_READINESS.md` item 10).
+
+**One-time setup on the admin machine** (do this before the next
+`tools\ship.cmd`, or the deploy refuses):
+
+```powershell
+copy site.example.toml site.toml     # then edit it
+```
+
+`site.example.toml` documents every key. For this fleet:
+
+```toml
+[nas]
+kind = "truenas"            # or "synology" (docs/SERVER-SYNOLOGY.md)
+host = "192.168.0.102"
+admin_user = "truenas_admin"
+verify_ssl = "0"
+
+[tree]
+pool_root = "/mnt/tank/TheCreatorsPool"
+tree_name = "Creators_Club"
+projects_dir = "Projects"
+share_name = "Creators_Club"
+smb_unc = '\\192.168.0.102\Creators_Club'   # single quotes: a TOML literal
+                                           # string, so backslashes stay as-is
+
+[apps]
+root = "/mnt/tank/apps/ccsync-dashboard"
+
+[net]
+dashboard_url = "http://100.71.216.3:8480"
+bind_lan = "192.168.0.102"
+bind_tailnet = "100.71.216.3"
+sftp_port = "22"
+sftp_chunk_size = "255Ki"   # a Synology site MUST use "64Ki" --
+sftp_concurrency = 64       # see docs/synology-spikes-2026-08-17.md spike 6
+shell_type = "unix"         # rclone's; "none" where editors are /sbin/nologin
+rclone_remote = "creators_club_sftp"   # the remote name in rclone.conf
+sftp_host = "192.168.0.102" # what editors point lanes A/B at
+
+[syncthing]
+gui_url = "http://192.168.0.102:8384"
+
+[site]
+org_name = "Creators Club"  # cosmetic; served by GET /api/v1/site
+
+[stack]
+uid = "3000"                # broll
+gid = "3001"                # editors
+owner = "broll"
+group = "editors"
+```
+
+Rules:
+
+- **No secrets in it.** `TRUENAS_PW`, `SYNCTHING_API_KEY`, `DASH_REPORT_TOKEN`,
+  `DASH_SESSION_SECRET` and `BROLL_INGEST_TOKEN` stay in the environment, as
+  they always have. This file is meant to be readable and diffable.
+- Precedence is unchanged: a script's own flag beats its env var beats
+  `site.toml`. Nothing that worked from flags or `TRUENAS_HOST`/`TRUENAS_USER`
+  stopped working.
+- Search order for the file: `--site <path>`, then `$CCSYNC_SITE`, then
+  `<repo>/site.toml`. Every script takes `--site`.
+- `--nas-kind truenas|synology` (env `CCSYNC_NAS_KIND`, or `[nas] kind`) picks
+  the install-time backend. Both are implemented; the Synology runbook is
+  `docs/SERVER-SYNOLOGY.md` (and its password variable is `SYNO_PW`).
+- The `[net]`/`[site]` keys above are also what the deployed dashboard serves
+  from `GET /api/v1/site` -- the companion reads `smb_unc` into
+  `server_p_unc`, the installers read `nas_syncthing_id`, and the wizard
+  builds its rclone remote from the four SFTP values. Nothing in the deploy
+  set them until 2026-08-17, so a dashboard deployed before then answers that
+  route with blanks; a redeploy fixes it.
+- `dashboard/deploy/compose.yaml` is a **template** rendered from the same
+  values (`install_dashboard_app.render_compose_yaml()`); the manual
+  "Install via YAML" fallback means rendering it first. Rendered against this
+  site it is byte-for-byte the file it has always been, and
+  `server/tests/test_compose_template.py` holds it to that.
+
 ## Onboarding a new editor, end to end
 
 1. Get their SSH public key (`.pub` file -- they generate the keypair
@@ -250,8 +336,8 @@ Optional flags, each with an env-var equivalent:
 
 | Flag | Env var | Default | What it's for |
 |---|---|---|---|
-| `--bind-lan` | `DASH_BIND_LAN` | `192.168.0.102` | The LAN address the dashboard is published on (the base rig reaches it here). |
-| `--bind-tailnet` | `DASH_BIND_TAILNET` | `100.71.216.3` | The tailnet address remote editors reach it on. |
+| `--bind-lan` | `DASH_BIND_LAN` | `[net] bind_lan` | The LAN address the dashboard is published on (the base rig reaches it here). Blank refuses. |
+| `--bind-tailnet` | `DASH_BIND_TAILNET` | `[net] bind_tailnet` | The tailnet address remote editors reach it on. Blank refuses. |
 | `--image` | `DASH_IMAGE` | `python:3.12.7-slim` | Pinned base image for the container. |
 | -- | `TRUENAS_VERIFY_SSL` | `0` | See above. |
 

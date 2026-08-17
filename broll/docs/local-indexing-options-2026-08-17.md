@@ -365,6 +365,21 @@ the flagged clips to Claude. Order of work:
    agreed up front: 8B-with-frames within ~15 % of Haiku on segment/objects
    recall and ≤ 2 % invalid → ship `local` as default; otherwise ship it as an
    opt-in "no-key" tier and keep `anthropic` the default.
+
+   *Implemented 2026-08-18 as `broll/eval/local_vlm/` (see its README): 100
+   clips stratified text/multishot/simple/random with the Haiku baseline in
+   `clips.json`; arm A = frames at 960x540 + a compact one-line-per-shot
+   format under a GBNF grammar (F ids limited to the window, ≤ n shot lines,
+   one theme line, then EOS — this is what ends the loops seen above), arm B
+   = no grammar, arm C = the sheets + v6 JSON path for reference. Timecodes
+   are looked up from the frame table, category is nearest-neighbour in the
+   indexer's own fastembed space, exposure flags come from pixel stats. The
+   same bundle runs on an Apple Silicon Mac with the 8B / 30B-A3B / 32B GGUFs
+   (`run_mac.sh`); `score.py` measures agreement with Haiku and lists the 20
+   largest disagreements for a human, `compare.py` puts the runs side by side.
+   Smoke test on the 3080: ~11 s per 9-frame call, every window grammar-valid,
+   6.1 GB VRAM. Results land in the git-ignored `results*/` dirs; copy the
+   reports here when the numbers are in.*
 2. **The seam (≈ 3–4 days).** New `broll_index/local_client.py` implementing
    the same `InvokeFn` shape and returning the same envelope
    (`{"text": …, "usage": {...}, "duration_ms": …}`), so

@@ -1,0 +1,312 @@
+# ccsync -- the customer-facing appliance stack. ZERO_TOUCH_PLAN.md section
+# 3.6: "Container Manager -> Project -> Create -> paste this -> Build. Open
+# http://<nas>:8480. Wizard." That is the entire install; everything else in
+# this repo's docs/INSTALL.md, SERVER.md and RELEASE.md is what THIS file
+# replaces (docs/APPLIANCE_INSTALL.md walks the paste-and-click path end to
+# end; docs/DOCKER.md explains where the images come from).
+#
+# THERE ARE EXACTLY TWO THINGS TO FILL IN. Paste this file, then before
+# `docker compose up` (Container Manager's "Environment" tab, or a plain
+# `.env` beside this file on TrueNAS's "Install via YAML"):
+#
+#   CCSYNC_TREE=/volume1/Projects          # the shared folder that holds
+#                                           #   Projects/, Assets/B-roll
+#                                           #   Archive/, Assets/Music/ --
+#                                           #   whatever the customer already
+#                                           #   calls it. If it does not
+#                                           #   have those subfolders yet,
+#                                           #   the wizard's "Storage check"
+#                                           #   step (ZERO_TOUCH_PLAN.md 3.5
+#                                           #   step 5) creates them.
+#   CCSYNC_DATA=/volume1/docker/ccsync     # where the stack keeps its OWN
+#                                           #   state -- the dashboard's
+#                                           #   database, generated secrets,
+#                                           #   Syncthing's config, the sftp
+#                                           #   sidecar's host keys, and the
+#                                           #   tailnet node's own identity.
+#                                           #   Never shared with any other
+#                                           #   app on the NAS.
+#
+# `${CCSYNC_TREE:?...}` / `${CCSYNC_DATA:?...}` below make `docker compose
+# up` refuse to start -- with a message naming exactly what is missing --
+# rather than silently creating `./null` on the host, which is what an
+# unset compose variable used to do here before this file existed.
+#
+# NOTHING ELSE ON THIS FILE IS A SECRET, AND NONE OF IT SHOULD BE EDITED.
+# `DASH_RELEASE_PUBKEYS`, `SYNCTHING_API_KEY`, `CCSYNC_INTERNAL_TOKEN` and
+# every other credential `dashboard/deploy/compose.yaml` still asks an
+# operator to type by hand (as `REPLACE_ME`) do not appear here at all: the
+# dashboard generates them into `${CCSYNC_DATA}/data/secrets/` the first time
+# it boots (ZERO_TOUCH_PLAN.md 3.2's SetupEngine, WP D -- not yet built; see
+# "secrets-init" below for what stands in for that generation TODAY, in
+# WP A). The customer never sees one.
+#
+# WHAT COMPOSE VERSION THIS TARGETS. Synology's Container Manager on the
+# DS423+ this was verified against ships Docker Compose v2.20.1
+# (`docs/synology-spikes-2026-08-17.md`), which vendors compose-go v1.16.0 --
+# confirmed by reading that exact tag's `types/types.go` -- and that release
+# predates BOTH the long-form `env_file: [{path:, required: false}]` syntax
+# (compose-spec PR #448, merged 2023-12-20, is not in v1.16.0's schema at
+# all: `EnvFile` there is a plain string list) AND, separately, whatever a
+# customer's own DSM/SCALE build happens to have shipped since. Every
+# `env_file:` below is therefore the OLD plain-string-list form, on purpose,
+# and "secrets-init" (not a `required: false` env_file) is what guarantees
+# the files it points at exist before anything that needs them starts.
+# `depends_on: condition: service_completed_successfully`, which that
+# guarantee rests on, WAS already in v1.16.0 (same file, `types.go`'s
+# `ServiceConditionCompletedSuccessfully` constant) -- so this works on the
+# oldest compose this plan has actually measured, with no "run `up` twice"
+# caveat for anyone to hit.
+#
+# SERVICES: dashboard (the app), syncthing (lane C, bundled+always-on here,
+# never the customer's own catalog app), sftp (lanes A/B, chrooted
+# internal-sftp -- dashboard/deploy/sftp/README.md), tailscale (the stack's
+# OWN tailnet node -- syncthing and sftp share its network namespace, so
+# :22000 and :22 are reachable on the node's tailnet IP with no host port
+# published for either), and secrets-init (this file's own answer to "how do
+# Syncthing and the sftp sidecar -- neither of which can read
+# `${CCSYNC_DATA}/data/secrets/*.json` themselves -- get a `.env` file that
+# is guaranteed to exist", above).
+#
+# uid:gid. `${APP_UID:-3000}:${APP_GID:-3001}` is this fleet's existing
+# convention (`broll:editors` on the current TrueNAS site) and works
+# unchanged on TrueNAS SCALE. On Synology, DSM assigns uids >= 1026 and will
+# not let an app pick 3000 -- the wizard's "Your studio" step reads the
+# REAL uid/gid of the account Container Manager actually used and writes it
+# back as `APP_UID`/`APP_GID` (compose environment or the same `.env`), which
+# is why every `user:` line below is a variable, never a literal. Until the
+# wizard exists (WP D), set them by hand from `id <the DSM account>` before
+# the first `up` on Synology; TrueNAS SCALE's default is already right.
+
+services:
+  # --- one-shot: makes sure syncthing/sftp have a real .env before they
+  # need one (see the compose-version note above for why this exists instead
+  # of `env_file: required: false`). Reuses the dashboard image purely as a
+  # convenient shell+python -- it never runs the app itself (entrypoint is
+  # overridden), so no extra image has to be pulled just for this.
+  secrets-init:
+    image: "${CCSYNC_IMAGE:-ghcr.io/the-creators-club/ccsync}:1"
+    # Root, not APP_UID: `${CCSYNC_DATA}/data` does not exist on a customer's
+    # NAS before the very first `up`, and Docker creates a missing bind-mount
+    # SOURCE directory as root:root mode 755 -- which APP_UID could not then
+    # write into. This is the one place in the whole stack that is
+    # deliberately root, and its ONLY job is to create/own two small files
+    # and hand `/data` itself to APP_UID so every other service never needs
+    # to be root at all (mirrors the "small root-in-container helper for
+    # tree ownership repair" ZERO_TOUCH_PLAN.md 3.1 already names -- this is
+    # that helper's secrets-directory sibling, landed here because WP D's
+    # SetupEngine does not exist yet).
+    user: "root"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mkdir -p /data/secrets
+        if [ ! -f /data/secrets/syncthing.env ]; then
+          key="$$(python -c 'import secrets; print(secrets.token_hex(16))')"
+          printf 'STGUIAPIKEY=%s\n' "$$key" > /data/secrets/syncthing.env
+          echo "secrets-init: generated Syncthing's STGUIAPIKEY"
+        fi
+        if [ ! -f /data/secrets/internal.env ]; then
+          tok="$$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          printf 'CCSYNC_INTERNAL_TOKEN=%s\n' "$$tok" > /data/secrets/internal.env
+          echo "secrets-init: generated the sftp sidecar's CCSYNC_INTERNAL_TOKEN"
+        fi
+        chown -R ${APP_UID:-3000}:${APP_GID:-3001} /data/secrets
+        chmod 700 /data/secrets
+        chmod 600 /data/secrets/syncthing.env /data/secrets/internal.env
+        # /data itself, NOT recursive -- everything the dashboard creates
+        # under it afterwards is its own job (and, once the fleet is large,
+        # `chown -R` over a multi-GB /data on every single `docker compose
+        # up` would be slow for no reason). Docker made /data root:root 755
+        # on the very first `up`; this is what lets APP_UID create anything
+        # in it at all.
+        chown ${APP_UID:-3000}:${APP_GID:-3001} /data
+        chmod 750 /data
+        echo "secrets-init: done"
+    volumes:
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/data:/data
+    restart: "no"
+
+  dashboard:
+    image: "${CCSYNC_IMAGE:-ghcr.io/the-creators-club/ccsync}:1"
+    user: "${APP_UID:-3000}:${APP_GID:-3001}"
+    command: ["/bin/sh", "/app/deploy/run.sh"]
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+    environment:
+      APP_UID: "${APP_UID:-3000}"
+      APP_GID: "${APP_GID:-3001}"
+      DASH_DB_PATH: "/data/dashboard.db"
+      DASH_PORT: "8480"
+      DASH_PROJECTS_DIR: "/projects"
+      DASH_CRASH_DIR: "/data/crashes"
+      # site.toml stops being a customer artefact on this path
+      # (ZERO_TOUCH_PLAN.md 3.2): everything that used to be a `{{ }}`
+      # template value here -- org name, tree name, NAS kind, the SFTP/
+      # Syncthing facts `GET /api/v1/site` publishes -- is a row in the
+      # dashboard's own DB, written by the wizard (WP D). Nothing about the
+      # site is baked into this file, and DASH_NAS_KIND is left UNSET on
+      # purpose: an unset value is how the dashboard knows the wizard has
+      # not run yet, not a value meaning "TrueNAS" or "Synology".
+      #
+      # No REPLACE_ME anywhere below this line, and none of
+      # SYNCTHING_API_KEY / DASH_REPORT_TOKEN / DASH_SESSION_SECRET /
+      # BROLL_INGEST_TOKEN / DASH_RELEASE_PUBKEYS / TRUENAS_PW appear at
+      # all: those are generated into ${CCSYNC_DATA}/data/secrets/ on first
+      # boot (WP D) and read from there, not from compose environment.
+    volumes:
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/data:/data
+      # ${CCSYNC_TREE} is the ROOT that holds Projects/, Assets/B-roll
+      # Archive/ and Assets/Music/ -- the same NAS_TREE_ROOT shape
+      # dashboard/deploy/compose.yaml already documents, not a folder named
+      # literally "Projects". Each subfolder gets its own scoped mount
+      # (least privilege, same posture as compose.yaml/compose.image.yaml)
+      # rather than handing the dashboard the whole tree.
+      - ${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}/Projects:/projects:rw
+      - "${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}/Assets/B-roll Archive:/broll-data:rw"
+      - "${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}/Assets/Music:/music-share:rw"
+      # Where the dashboard (WP B/D, not yet built) writes
+      # `tailscale-config/serve.json` and reads the tailnet node's own
+      # LocalAPI state -- see the `tailscale` service below for who OWNS
+      # each path. Same host directories, different mount points, because
+      # tailscaled and the dashboard have no reason to agree on a path name.
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/tailscale-config:/tailscale-config
+      - tailscale-sock:/var/run/tailscale
+    # 127.0.0.1 ONLY -- everything a customer or an editor actually reaches
+    # goes through the `tailscale` service's Serve config
+    # (`https://ccsync-<studio>.<tailnet>.ts.net` -> this container, over
+    # the compose network, not this port). This loopback bind exists purely
+    # so the NAS's own admin can reach the wizard from the NAS host itself
+    # (an SSH tunnel, or the box's own browser) before the tailnet node has
+    # even been signed in -- there is no other way in until it has been.
+    ports:
+      - "127.0.0.1:8480:8480"
+    restart: unless-stopped
+    # Identical to dashboard/deploy/compose.yaml's own healthcheck --
+    # server/tests/test_safety.py holds compose.yaml and compose.image.yaml
+    # to matching text; keep this one in the same shape by hand until this
+    # file gets a render path of its own (it has none today -- see
+    # docs/DOCKER.md's "Not done here").
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import json,urllib.request,sys; sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8480/api/v1/health', timeout=5)).get('ok') else 1)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # Always on -- there is no `bundled-syncthing` PROFILE here the way
+  # compose.yaml carries one (that profile exists so a live TrueNAS site can
+  # opt in without disturbing its existing catalog-app Syncthing;
+  # the appliance has no such history to protect, so lane C is simply always
+  # this container). SYNOLOGY_PORT_PLAN's decision 3, unconditionally.
+  syncthing:
+    image: syncthing/syncthing:1.30.0
+    user: "${APP_UID:-3000}:${APP_GID:-3001}"
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+    # The plain string-list form -- see the compose-version note at the top
+    # of this file for why this is NOT `env_file: [{path:, required:
+    # false}]`. secrets-init guarantees this file exists before compose ever
+    # tries to start this container.
+    env_file:
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/data/secrets/syncthing.env
+    environment:
+      STGUIADDRESS: "0.0.0.0:8384"
+    volumes:
+      - ${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}:/data
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/syncthing-config:/var/syncthing/config
+    # Shares the tailnet node's network namespace -- :22000 (sync protocol)
+    # and :21027 (local discovery) become reachable on the NODE's tailnet
+    # IP, with NOTHING published on the NAS host at all. The GUI
+    # (STGUIADDRESS above) is deliberately never exposed anywhere outside
+    # this namespace -- the dashboard is Syncthing's only admin surface,
+    # same posture as compose.yaml's own bundled-syncthing profile.
+    network_mode: service:tailscale
+    restart: unless-stopped
+
+  sftp:
+    image: "${CCSYNC_SFTP_IMAGE:-ghcr.io/the-creators-club/ccsync-sftp}:1"
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+    env_file:
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/data/secrets/internal.env
+    environment:
+      APP_UID: "${APP_UID:-3000}"
+      APP_GID: "${APP_GID:-3001}"
+    volumes:
+      # The WHOLE tree root, unlike the dashboard's three scoped mounts --
+      # an editor's rclone needs to see Projects/ AND both Assets/ shares
+      # under one sftp root, exactly as it does against the NAS host's own
+      # sshd today (dashboard/deploy/sftp/README.md "chroot layout").
+      - ${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}:/jail/tree:rw
+      # Host keys PERSIST here. Never wiped between `up`s, never
+      # regenerated once present -- a changed host key makes every editor's
+      # rclone refuse the NAS on its next connection
+      # (dashboard/deploy/sftp/README.md "host keys persist, deliberately").
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/sftp-hostkeys:/etc/ssh/keys
+    # :22 becomes reachable on the tailnet node's own IP, same as
+    # Syncthing's :22000 above -- no host port for this either.
+    network_mode: service:tailscale
+    restart: unless-stopped
+
+  tailscale:
+    # Pinned to a real release the same way syncthing/postgres already are
+    # in compose.yaml -- an unpinned `latest`/`stable` tag changes protocol
+    # behaviour and Serve's own config schema underneath a redeploy, and
+    # this is the ONE node every editor's reachability depends on.
+    image: tailscale/tailscale:v1.102.2
+    hostname: ccsync
+    environment:
+      TS_HOSTNAME: "ccsync"
+      # Userspace networking: no `/dev/net/tun`, no `NET_ADMIN` -- works
+      # in Container Manager and TrueNAS Apps exactly as pulled, which is
+      # the whole point of a paste-and-click install (ZERO_TOUCH_PLAN.md
+      # 3.1). The trade is throughput (kernel mode is faster) and an
+      # ASSUMPTION this file has not yet been measured against real
+      # hardware: that an inbound connection to this node's tailnet IP
+      # actually reaches a container SHARING its netns (syncthing/sftp
+      # above) the same way it would reach tailscaled itself. That is spike
+      # S1 (ZERO_TOUCH_PLAN.md section 7) -- do it before this file ships to
+      # a real customer, not after.
+      TS_USERSPACE: "true"
+      TS_STATE_DIR: "/var/lib/tailscale"
+      TS_SOCKET: "/var/run/tailscale/tailscaled.sock"
+      # The dashboard (WP B) writes this after the wizard's "Connect to your
+      # tailnet" step decides what to serve; until then tailscaled just has
+      # no Serve config and answers on its tailnet IP with nothing.
+      TS_SERVE_CONFIG: "/config/serve.json"
+      # Sign in once, then never ask again on a restart -- an appliance that
+      # re-prompted for a login link on every reboot would defeat the whole
+      # "paste it and forget it" promise. Re-authenticating after this is a
+      # deliberate admin action (Settings, once WP D exists), not automatic.
+      TS_AUTH_ONCE: "true"
+    volumes:
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/tailscale:/var/lib/tailscale
+      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/tailscale-config:/config
+      - tailscale-sock:/var/run/tailscale
+    # NO PORTS. Serve is what makes this node reachable at all
+    # (https:443 -> http://dashboard:8480 on the compose network, once the
+    # dashboard has written serve.json) -- there is nothing to publish on
+    # the NAS host for this service, ever.
+    #
+    # KERNEL-MODE OPT-IN (throughput, once S1 has actually measured the
+    # userspace number against it) -- uncomment together, never one alone:
+    #   devices:
+    #     - /dev/net/tun
+    #   cap_add:
+    #     - NET_ADMIN
+    # and flip TS_USERSPACE to "false" above.
+    restart: unless-stopped
+
+# tailscale-sock: how the dashboard (no shared network namespace with
+# tailscale) still reaches tailscaled's LocalAPI over the unix socket file --
+# a network namespace only matters for TCP/UDP, not for a socket FILE two
+# containers both have mounted. syncthing/sftp get the same socket via their
+# `network_mode: service:tailscale` instead; they do not need this volume
+# listed separately.
+volumes:
+  tailscale-sock:

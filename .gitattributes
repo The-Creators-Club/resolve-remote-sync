@@ -43,6 +43,10 @@ Dockerfile.*    text eol=lf
 # The compose files and run.sh the NAS reads (run.sh is covered by *.sh above;
 # these are the YAML beside it).
 dashboard/deploy/*.yaml  text eol=lf
+# sshd reads this directly, same failure mode as run.sh's -- no .sh
+# extension to catch it under the pattern above, so it needs its own line
+# (added with the ccsync-sftp sidecar, ZERO_TOUCH_PLAN.md WP A).
+dashboard/deploy/sftp/sshd_config text eol=lf
 
 # Windows-side scripts: CRLF is fine and matches what editors see.
 *.ps1  text eol=crlf

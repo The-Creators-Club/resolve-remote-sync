@@ -288,6 +288,25 @@ arrows. Nothing here changes what the current fleet runs until §6.
 | **I. Native packages** | SPK (`INFO`, `preinst`, `install_uifile.sh` asking one question, `postinst` = compose up, `postupgrade` = pull, DSM icon); TrueNAS catalog entry. Trust-level toggle until signed. | A–E shipped | 2 wk |
 | **J. Docs** | `INSTALL.md` → one page per platform with screenshots; `EDITOR_SETUP.md` → one page; `RELEASE.md` → vendor-only; delete `SERVER*.md` runbook steps that no longer exist; `ARCHITECTURE.md` §12 platform envelope updated. | as each WP lands | ongoing |
 
+**Status, WP A (2026-08-17):** done for the registry half, not for the
+"`compose.image.yaml` becomes *the* compose" rename. `.github/workflows/image.yml`
+builds, keylessly signs and SBOMs both `ccsync` (the dashboard) and the new
+`ccsync-sftp` (the chrooted internal-sftp sidecar, `dashboard/deploy/sftp/`)
+on push-to-`main`, on a `v*` tag, and on `workflow_dispatch`, published to
+GHCR under the repo owner — no manylinux-wheel gap was found; every package
+already pinned in `dashboard/deploy/requirements.lock` had one.
+`dashboard/deploy/compose.appliance.yaml` is the new, fully-hands-off compose
+a customer actually pastes (`docs/APPLIANCE_INSTALL.md`,
+`docs/DOCKER.md` "Published images (CI)") — it is **additive**, not the
+rename this row originally described: `compose.yaml`/`compose.image.yaml`
+are untouched and still what every live site runs. `ccsync-ffmpeg` was
+deliberately **not** built (ffmpeg stays a mount, per section 3.1's own
+GPLv3 reasoning — nothing here changed that call). Still open, in dependency
+order: WP B (the tailscale sidecar `compose.appliance.yaml` already shapes
+around, including spike S1, unverified against real hardware — see that
+file's own comment) has to land before C, D, or any of this reaches a real
+customer.
+
 Critical path: **A → B → C → D**, ~7 weeks to a stack a stranger can install
 from a compose paste; E and F in parallel from week 2. Everything in
 `server/` except `common.py`'s pure helpers becomes vendor/dev tooling or is

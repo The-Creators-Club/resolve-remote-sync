@@ -1,0 +1,11 @@
+{
+ "_comment": "Apple Silicon leg (leso's MacBook Pro, M4 Max, 36 GB unified). run_mac.sh installs llama.cpp b10470 (same tag as the base rig's CUDA build) into ~/.cache/ccsync-eval and passes --model/--mmproj/--model-label/--ctx per model; this file only carries the host-level knobs. LLAMA_SERVER env or --llama-server overrides the binary path.",
+ "host_label": "MacBook Pro M4 Max, 36 GB unified memory (Metal)",
+ "runtime_label": "llama.cpp b10470 llama-server (Metal, macOS arm64 release)",
+ "llama_server": "~/.cache/ccsync-eval/llama.cpp-b10470/llama-server",
+ "port": 8931,
+ "ctx": 16384,
+ "image_min_tokens": 1024,
+ "ngl": 99,
+ "server_args": []
+}

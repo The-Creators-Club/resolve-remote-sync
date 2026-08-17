@@ -1,0 +1,9 @@
+# eval outputs and the portable input bundle stay out of git (100 MB of frames,
+# tens of MB of JSONL raw model text); commit reports by copying them into docs/.
+results/
+results-*/
+bundle/
+bundle-mac/
+bundle.zip
+*.log
+__pycache__/

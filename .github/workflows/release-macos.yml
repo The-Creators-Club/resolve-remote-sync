@@ -31,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       skip_tests:
-        description: "Skip the companion suite (the release script runs it by default)"
+        description: "Emergency valve: skip the companion suite (the release script runs it by default, CCSYNC_REQUIRE_RCLONE=1). Use when a suite-only failure (e.g. a test fix mid-flight) must not block getting a build to Mac editors -- the exe/app itself is unaffected either way."
         type: boolean
         default: false
       allow_dirty:
@@ -64,6 +64,42 @@ jobs:
           python -m venv companion/.venv
           companion/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
           companion/.venv/bin/python -m pip install --disable-pip-version-check "pyinstaller==6.21.0"
+
+      # This script sets CCSYNC_REQUIRE_RCLONE=1 before running the suite (see
+      # its own comment: pytest exits 0 when tests SKIP, so a missing rclone
+      # would silently drop 24 lane-direction tests from a release), which
+      # turns "no rclone on this runner" from a skip into a hard failure --
+      # exactly what happened on run 32036993646, the first time this workflow
+      # ran (31 errors, "rclone not found. Searched: PATH,
+      # companion/.tools/rclone, ~/.local/ccsync/bin/rclone"). Same pin
+      # macos_bootstrap.sh ships to every editor Mac
+      # (RCLONE_VERSION/RCLONE_SHA256_ARM64), verified before extraction, same
+      # as the installer does. macos-latest is Apple Silicon, hence osx-arm64.
+      - name: install pinned rclone (the companion suite requires a real binary)
+        run: |
+          set -euo pipefail
+          version="v1.75.0"
+          sha256="35e8f2a666ce789b29111db0dd843ddabc0d59c6b609d07bcaae5d1a07cba6f8"
+          url="https://downloads.rclone.org/$version/rclone-$version-osx-arm64.zip"
+          zip="$RUNNER_TEMP/rclone.zip"
+          curl -fsSL "$url" -o "$zip"
+          actual="$(shasum -a 256 "$zip" | awk '{print $1}')"
+          if [ "$actual" != "$sha256" ]; then
+            echo "rclone download hash mismatch: expected $sha256, got $actual" >&2
+            exit 1
+          fi
+          extract_dir="$RUNNER_TEMP/rclone-extract"
+          rm -rf "$extract_dir"
+          mkdir -p "$extract_dir"
+          unzip -q -o "$zip" -d "$extract_dir"
+          found="$(find "$extract_dir" -name rclone -type f | head -n 1)"
+          if [ -z "$found" ]; then
+            echo "could not find rclone binary inside the downloaded zip" >&2
+            exit 1
+          fi
+          mkdir -p companion/.tools
+          cp "$found" companion/.tools/rclone
+          chmod +x companion/.tools/rclone
 
       - name: build
         env:

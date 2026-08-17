@@ -59,6 +59,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # test_publish_password_hygiene.py and test_rclone_stanza_rewrite.py find
+      # bash with `shutil.which("bash")`, i.e. whatever PATH says first -- and
+      # windows-latest carries BOTH Git's bash (a real POSIX shell) and
+      # `C:\Windows\System32\bash.exe` (the WSL launcher stub), with WSL
+      # winning by default PATH order. WSL's bash.exe answers on stdout in
+      # UTF-16 ("W<NUL>i<NUL>n<NUL>d<NUL>o<NUL>w<NUL>s..."), which reads as
+      # every assertion about the script's stdout failing at once rather than
+      # as "wrong interpreter". `GITHUB_PATH` entries are PREPENDED to PATH for
+      # every later step (GitHub's own semantics), so this only has to run
+      # once, before anything installs or tests.
+      - name: put Git's bash ahead of WSL's on PATH
+        # `C:\Program Files\Git\bin` is where the windows-latest runner image
+        # actually puts bash.exe (git.exe itself lives in the sibling `cmd`
+        # dir, which has no bash at all -- `$(git --exec-path)` resolves to
+        # git's internal helper dir and is no use here either). Hardcoded
+        # because it is the documented, stable layout of GitHub's own image,
+        # not a guess.
+        run: "'C:\\Program Files\\Git\\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append"
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -73,32 +92,71 @@ jobs:
       # the bench environment.
       - name: companion -- install
         run: |
-          python -m venv companion/.venv-ci
-          companion/.venv-ci/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
+          python -m venv companion/.venv
+          companion/.venv/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
+
+      # sidecar_tools.py / conftest.py's rclone_binary fixture looks on PATH
+      # first, then companion/.tools/rclone.exe -- and windows-latest carries
+      # no rclone at all, so every real-rclone lane-direction test (lane A
+      # carries video UP only, lane B carries **/Proxy/** DOWN only -- the most
+      # destructive thing in the system to get backwards) silently SKIPPED
+      # rather than ran. Same pin `installer/windows_bootstrap.ps1` ships to
+      # every editor ($RcloneVersion/$RcloneZipSha256), so the suite exercises
+      # the exact build the fleet gets, not whatever `winget`/`choco` resolves
+      # to today. Verified BEFORE extraction, same as the installer does.
+      - name: install pinned rclone (companion suite needs a real binary)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $version = "v1.75.0"
+          $sha256  = "203581f0a7baeae873f2347483a798c79e2eaf5c384a4e9d866aa374f1c89ac0"
+          $url     = "https://downloads.rclone.org/$version/rclone-$version-windows-amd64.zip"
+          $zip     = Join-Path $env:RUNNER_TEMP "rclone.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 600
+          $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $sha256) {
+            throw "rclone download hash mismatch: expected $sha256, got $actual"
+          }
+          $extractDir = Join-Path $env:RUNNER_TEMP "rclone-extract"
+          Expand-Archive -Path $zip -DestinationPath $extractDir -Force
+          New-Item -ItemType Directory -Force -Path companion/.tools | Out-Null
+          $exe = Get-ChildItem -Path $extractDir -Filter "rclone.exe" -Recurse | Select-Object -First 1
+          if ($null -eq $exe) { throw "could not find rclone.exe inside the downloaded zip" }
+          Copy-Item $exe.FullName "companion/.tools/rclone.exe" -Force
+
       - name: companion -- pytest
         if: ${{ !cancelled() }}
         working-directory: companion
-        run: .venv-ci/Scripts/python -m pytest tests -q --junitxml=../junit-companion.xml
+        run: .venv/Scripts/python -m pytest tests -q --junitxml=../junit-companion.xml
+
+      # --platform win32: the Windows half of the companion target's split
+      # licence check (see the linux job's licence-gate comment and
+      # tools/check_licenses.py's check() docstring). Never both halves in one
+      # job -- pyobjc-core/-framework-cocoa's `sys_platform == 'darwin'`
+      # marker means pip will never install them here no matter what.
+      - name: licence gate (companion, win32)
+        if: ${{ !cancelled() }}
+        run: companion/.venv/Scripts/python.exe tools/check_licenses.py --strict --only companion --platform win32
 
       - name: onboarding -- install
         if: ${{ !cancelled() }}
         run: |
-          python -m venv onboarding/.venv-ci
-          onboarding/.venv-ci/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r onboarding/requirements.lock
+          python -m venv onboarding/.venv
+          onboarding/.venv/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r onboarding/requirements.lock
       - name: onboarding -- pytest
         if: ${{ !cancelled() }}
         working-directory: onboarding
-        run: .venv-ci/Scripts/python -m pytest tests -q --junitxml=../junit-onboarding.xml
+        run: .venv/Scripts/python -m pytest tests -q --junitxml=../junit-onboarding.xml
 
       - name: bench -- install
         if: ${{ !cancelled() }}
         run: |
-          python -m venv bench/.venv-ci
-          bench/.venv-ci/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r bench/requirements.lock
+          python -m venv bench/.venv
+          bench/.venv/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r bench/requirements.lock
       - name: bench -- pytest
         if: ${{ !cancelled() }}
         working-directory: bench
-        run: .venv-ci/Scripts/python -m pytest tests -q --junitxml=../junit-bench.xml
+        run: .venv/Scripts/python -m pytest tests -q --junitxml=../junit-bench.xml
 
       # The drive-map parser is the piece that decides whether P: gets torn down
       # and remounted on an editor's machine, and it has no Python test.
@@ -181,8 +239,8 @@ jobs:
       - name: dashboard -- install
         if: ${{ !cancelled() }}
         run: |
-          python -m venv dashboard/.venv-ci
-          dashboard/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r dashboard/requirements.lock
+          python -m venv dashboard/.venv
+          dashboard/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r dashboard/requirements.lock
       - name: dashboard -- pytest
         if: ${{ !cancelled() }}
         working-directory: dashboard
@@ -191,7 +249,7 @@ jobs:
         # It is also what deploy/run.sh does in production.
         env:
           PYTHONPATH: src
-        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../junit-dashboard.xml
+        run: .venv/bin/python -m pytest tests -q --junitxml=../junit-dashboard.xml
 
       # THROUGH BASH, and reusing the dashboard venv exactly as CLAUDE.md says:
       # server/ has no venv of its own. This is the suite `ship` already gates
@@ -200,39 +258,39 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         working-directory: server
-        run: ../dashboard/.venv-ci/bin/python -m pytest tests -q --junitxml=../junit-server.xml
+        run: ../dashboard/.venv/bin/python -m pytest tests -q --junitxml=../junit-server.xml
 
       - name: broll/web -- install
         if: ${{ !cancelled() }}
         run: |
-          python -m venv broll/web/.venv-ci
-          broll/web/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r broll/web/requirements.lock
+          python -m venv broll/web/.venv
+          broll/web/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r broll/web/requirements.lock
       - name: broll/web -- pytest
         if: ${{ !cancelled() }}
         working-directory: broll/web
         # test_mounted_prefix.py pins the document-relative URLs the /broll
         # mount depends on; CLAUDE.md calls it load-bearing.
-        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-broll-web.xml
+        run: .venv/bin/python -m pytest tests -q --junitxml=../../junit-broll-web.xml
 
       - name: music/web -- install
         if: ${{ !cancelled() }}
         run: |
-          python -m venv music/web/.venv-ci
-          music/web/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r music/web/requirements.lock
+          python -m venv music/web/.venv
+          music/web/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r music/web/requirements.lock
       - name: music/web -- pytest
         if: ${{ !cancelled() }}
         working-directory: music/web
-        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-music-web.xml
+        run: .venv/bin/python -m pytest tests -q --junitxml=../../junit-music-web.xml
 
       - name: ytdl/web -- install
         if: ${{ !cancelled() }}
         run: |
-          python -m venv ytdl/web/.venv-ci
-          ytdl/web/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r ytdl/web/requirements.lock
+          python -m venv ytdl/web/.venv
+          ytdl/web/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r ytdl/web/requirements.lock
       - name: ytdl/web -- pytest
         if: ${{ !cancelled() }}
         working-directory: ytdl/web
-        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-ytdl-web.xml
+        run: .venv/bin/python -m pytest tests -q --junitxml=../../junit-ytdl-web.xml
 
       # CPU only. The `embeddings` extra (fastembed) is not installed and the
       # slow marker's tests skip themselves when the model is not cached, so
@@ -242,12 +300,30 @@ jobs:
       - name: broll/indexer -- install
         if: ${{ !cancelled() }}
         run: |
-          python -m venv broll/indexer/.venv-ci
-          broll/indexer/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r broll/indexer/requirements.lock
+          python -m venv broll/indexer/.venv
+          broll/indexer/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r broll/indexer/requirements.lock
+          # broll_index/embed.py imports numpy UNCONDITIONALLY (its own
+          # docstring: "fastembed is an OPTIONAL import" -- true of fastembed,
+          # not of the numpy import three lines above the try/except that
+          # guards it), so every test that reaches broll_index.pipeline dies
+          # at collection without it. requirements.lock was compiled with only
+          # `--extra dev` (see its own header comment) and has never carried
+          # numpy or fastembed; the `embeddings` extra (pyproject.toml) is
+          # what would pull both in, and stays OUT here on purpose -- fastembed
+          # is the ONNX runtime, this job needs numpy importable, nothing more,
+          # and the suite's own model-dependent tests already skip themselves
+          # when nothing is cached. Pinned to the SAME version broll/web and
+          # music/web already hash-lock (numpy==2.5.2), so this is not a
+          # floating dependency -- just installed without --require-hashes,
+          # because the indexer is not a conveyed artefact
+          # (tools/check_licenses.py's own docstring: only companion and the
+          # dashboard container are) and this is a test-time import only. Do
+          # NOT regenerate broll/indexer/requirements.lock for this.
+          broll/indexer/.venv/bin/python -m pip install --disable-pip-version-check "numpy==2.5.2"
       - name: broll/indexer -- pytest
         if: ${{ !cancelled() }}
         working-directory: broll/indexer
-        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-broll-indexer.xml
+        run: .venv/bin/python -m pytest tests -q --junitxml=../../junit-broll-indexer.xml
 
       # music/indexer's DEPENDENCY SET is torch + the CUDA wheels and stays out
       # of CI (see above) -- but its SUITE is deliberately torch-free
@@ -260,12 +336,12 @@ jobs:
       - name: music/indexer -- pytest (no torch; the suite is the path/config half)
         if: ${{ !cancelled() }}
         working-directory: music/indexer
-        run: ../../dashboard/.venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-music-indexer.xml
+        run: ../../dashboard/.venv/bin/python -m pytest tests -q --junitxml=../../junit-music-indexer.xml
 
       - name: tools -- pytest
         if: ${{ !cancelled() }}
         working-directory: tools
-        run: ../dashboard/.venv-ci/bin/python -m pytest tests -q --junitxml=../junit-tools.xml
+        run: ../dashboard/.venv/bin/python -m pytest tests -q --junitxml=../junit-tools.xml
 
       # The macOS bootstrap's string helpers -- the site-manifest reader, the
       # canonical_prefix -> drive-letter rule, the pinned-download verifier and
@@ -277,13 +353,19 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash installer/tests/test_macos_site_values.sh
 
-      # --strict: every lock above has been installed by now, so a package whose
-      # licence could not be read is a real gap rather than "not on this
-      # developer's machine". Fails on GPL/AGPL/SSPL/unknown in anything we
-      # convey, unless tools/license_allowlist.toml says why.
-      - name: licence gate
+      # --strict --only dashboard-container --platform linux: every lock this
+      # target needs (dashboard, music/web, ytdl/web) has been installed above
+      # into dashboard-container's own venv list, so an UNSCANNED package here
+      # is a real gap. NOT the companion target: its lock is win32+darwin, and
+      # nothing a Linux runner installs will ever satisfy either half -- that
+      # half of the gate runs on the windows and macos jobs instead, each with
+      # --only companion --platform <its own OS>, so the two OS-specific
+      # strict runs together cover companion's full closure without either job
+      # reporting the OTHER OS's packages as an unscannable failure it could
+      # never fix (tools/check_licenses.py's check() docstring, 2026-08-17).
+      - name: licence gate (dashboard-container)
         if: ${{ !cancelled() }}
-        run: dashboard/.venv-ci/bin/python tools/check_licenses.py --strict
+        run: dashboard/.venv/bin/python tools/check_licenses.py --strict --only dashboard-container --platform linux
 
       - name: upload junit
         if: ${{ !cancelled() }}
@@ -313,8 +395,39 @@ jobs:
 
       - name: companion -- install
         run: |
-          python -m venv companion/.venv-ci
-          companion/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
+          python -m venv companion/.venv
+          companion/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
+
+      # Same reasoning as the windows job's rclone step: without a real
+      # binary, every lane A/B direction test silently SKIPS instead of
+      # running. macos-latest is Apple Silicon, hence osx-arm64; same pin
+      # macos_bootstrap.sh ships to every editor Mac.
+      - name: install pinned rclone (companion suite needs a real binary)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          version="v1.75.0"
+          sha256="35e8f2a666ce789b29111db0dd843ddabc0d59c6b609d07bcaae5d1a07cba6f8"
+          url="https://downloads.rclone.org/$version/rclone-$version-osx-arm64.zip"
+          zip="$RUNNER_TEMP/rclone.zip"
+          curl -fsSL "$url" -o "$zip"
+          actual="$(shasum -a 256 "$zip" | awk '{print $1}')"
+          if [ "$actual" != "$sha256" ]; then
+            echo "rclone download hash mismatch: expected $sha256, got $actual" >&2
+            exit 1
+          fi
+          extract_dir="$RUNNER_TEMP/rclone-extract"
+          rm -rf "$extract_dir"
+          mkdir -p "$extract_dir"
+          unzip -q -o "$zip" -d "$extract_dir"
+          found="$(find "$extract_dir" -name rclone -type f | head -n 1)"
+          if [ -z "$found" ]; then
+            echo "could not find rclone binary inside the downloaded zip" >&2
+            exit 1
+          fi
+          mkdir -p companion/.tools
+          cp "$found" companion/.tools/rclone
+          chmod +x companion/.tools/rclone
 
       # The suite spawns REAL Tk dialogs if a fixture is bypassed (CLAUDE.md).
       # A macOS runner has no window server for a login session, so a stray
@@ -323,7 +436,14 @@ jobs:
       - name: companion -- pytest
         if: ${{ !cancelled() }}
         working-directory: companion
-        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../junit-companion-macos.xml
+        run: .venv/bin/python -m pytest tests -q --junitxml=../junit-companion-macos.xml
+
+      # --platform darwin: the macOS half of companion's split licence check
+      # (see the linux job's licence-gate comment). colorama's `sys_platform
+      # == 'win32'` marker means pip will never install it here.
+      - name: licence gate (companion, darwin)
+        if: ${{ !cancelled() }}
+        run: companion/.venv/bin/python tools/check_licenses.py --strict --only companion --platform darwin
 
       # Inspection only: prints every step, builds nothing, publishes nothing,
       # and needs neither the dashboard nor an admin account.

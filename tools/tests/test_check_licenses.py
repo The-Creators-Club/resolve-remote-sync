@@ -110,6 +110,70 @@ def test_allowlist_entries_all_carry_a_reason():
         assert entry.get("license", "").strip(), f"{name}: allowlist entry has no license"
 
 
+def _fake_target(label: str, lock: Path, platforms: list[str]) -> "check_licenses.Target":
+    # venvs=[] rather than a real path: scan_venvs() must not touch anything on
+    # disk for these tests (module docstring) -- an empty list of venvs skips
+    # straight to "every wanted package is UNSCANNED", which is exactly the
+    # shape --only/--platform need to prove without pip-licenses or a venv.
+    return check_licenses.Target(label=label, lock=lock, platforms=platforms,
+                                 venvs=[], why="test fixture")
+
+
+def test_only_skips_targets_entirely(tmp_path, monkeypatch):
+    """A target excluded by --only must not even have its lock existence
+    checked -- that is what lets the Linux job ask only for dashboard-container
+    without a warning about companion/requirements.lock, which it never
+    installed and has no reason to open."""
+    lock_a = _lock(tmp_path)
+    missing_lock_b = tmp_path / "does-not-exist.lock"
+    targets = [
+        _fake_target("a", lock_a, ["win32"]),
+        _fake_target("b", missing_lock_b, ["win32"]),
+    ]
+    monkeypatch.setattr(check_licenses, "TARGETS", targets)
+
+    findings, warnings = check_licenses.check(only=["a"])
+
+    assert all(f.target == "a" for f in findings)
+    assert not any("b" in w and "does not exist" in w for w in warnings)
+
+
+def test_platform_restricts_which_packages_a_target_needs(tmp_path, monkeypatch):
+    """companion's lock feeds both a win32 and a darwin build; a single CI job
+    can only ever install one of those. --platform is what lets the Windows
+    job assert colorama/watchdog without also demanding pyobjc, which no
+    Windows venv can ever contain."""
+    lock = _lock(tmp_path)
+    target = _fake_target("companion", lock, ["win32", "darwin"])
+    monkeypatch.setattr(check_licenses, "TARGETS", [target])
+
+    findings, _ = check_licenses.check(platforms=["win32"])
+    packages = {f.package for f in findings}
+    assert packages == {"colorama", "watchdog"}
+
+    # A fresh Target: check() mutates `.names` in place, and re-using the same
+    # instance across two check() calls would union this run's packages onto
+    # the first's rather than proving --platform's filter actually narrowed it.
+    target2 = _fake_target("companion", lock, ["win32", "darwin"])
+    monkeypatch.setattr(check_licenses, "TARGETS", [target2])
+    findings, _ = check_licenses.check(platforms=["darwin"])
+    packages = {f.package for f in findings}
+    assert packages == {"pyobjc-core", "pyobjc-framework-cocoa", "watchdog"}
+
+
+def test_platform_with_no_overlap_warns_instead_of_silently_passing(tmp_path, monkeypatch):
+    """Asking for a platform a target does not ship on at all (e.g. `--platform
+    linux` against companion) must not look identical to 'checked, found
+    nothing wrong' -- that is a misconfigured CI step, not a clean target."""
+    lock = _lock(tmp_path)
+    target = _fake_target("companion", lock, ["win32", "darwin"])
+    monkeypatch.setattr(check_licenses, "TARGETS", [target])
+
+    findings, warnings = check_licenses.check(platforms=["linux"])
+    assert findings == []
+    assert any("nothing checked" in w for w in warnings)
+
+
 def test_pystray_is_gone_and_stays_gone():
     """COMMERCIAL_READINESS.md item 3, verified 2026-08-17.
 

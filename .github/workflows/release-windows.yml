@@ -32,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       skip_tests:
-        description: "Skip the companion suite (the release script runs it by default)"
+        description: "Emergency valve: skip the companion suite (the release script runs it by default, CCSYNC_REQUIRE_RCLONE=1). Use when a suite-only failure must not block getting a build shipped -- the exe itself is unaffected either way."
         type: boolean
         default: false
       allow_dirty:
@@ -72,6 +72,34 @@ jobs:
           python -m venv companion/.venv
           companion/.venv/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
           companion/.venv/Scripts/python -m pip install --disable-pip-version-check "pyinstaller==6.21.0"
+
+      # release.ps1 runs the companion suite with CCSYNC_REQUIRE_RCLONE=1 (its
+      # own comment: "pytest exits 0 when tests SKIP, so a missing rclone would
+      # silently drop 24 lane-direction tests from a release"), which turns a
+      # missing binary from a skip into a hard failure -- and a bare
+      # windows-latest runner has no rclone at all. Same pin
+      # installer/windows_bootstrap.ps1 ships to every editor
+      # ($RcloneVersion/$RcloneZipSha256), verified before extraction, same as
+      # the installer does, so the release build's own test run exercises the
+      # exact binary the fleet gets.
+      - name: install pinned rclone (the companion suite requires a real binary)
+        shell: pwsh
+        run: |
+          $version = "v1.75.0"
+          $sha256  = "203581f0a7baeae873f2347483a798c79e2eaf5c384a4e9d866aa374f1c89ac0"
+          $url     = "https://downloads.rclone.org/$version/rclone-$version-windows-amd64.zip"
+          $zip     = Join-Path $env:RUNNER_TEMP "rclone.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 600
+          $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $sha256) {
+            throw "rclone download hash mismatch: expected $sha256, got $actual"
+          }
+          $extractDir = Join-Path $env:RUNNER_TEMP "rclone-extract"
+          Expand-Archive -Path $zip -DestinationPath $extractDir -Force
+          New-Item -ItemType Directory -Force -Path companion/.tools | Out-Null
+          $exe = Get-ChildItem -Path $extractDir -Filter "rclone.exe" -Recurse | Select-Object -First 1
+          if ($null -eq $exe) { throw "could not find rclone.exe inside the downloaded zip" }
+          Copy-Item $exe.FullName "companion/.tools/rclone.exe" -Force
 
       # The secret is lifted into `env` first and the condition reads THAT: the
       # `secrets` context is not available in a step-level `if`, and a condition

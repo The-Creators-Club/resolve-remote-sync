@@ -240,18 +240,50 @@ class Finding:
     detail: str = ""
 
 
-def check(strict: bool = False) -> tuple[list[Finding], list[str]]:
+def check(strict: bool = False, only: list[str] | None = None,
+          platforms: list[str] | None = None) -> tuple[list[Finding], list[str]]:
+    """`only` restricts which TARGETS run at all; `platforms` restricts which of
+    a running target's OWN declared platforms are required on THIS host.
+
+    Added 2026-08-17 (first hosted CI run): a GitHub Actions job is one OS, one
+    filesystem, one set of installed venvs -- it can never itself satisfy a
+    target like companion, whose lock is `platforms=["win32", "darwin"]`
+    because ONE lock feeds two frozen builds nobody builds on the same
+    machine. Before these existed, `--strict` on any single host reported
+    every package unbuildable there (colorama on a Mac, pyobjc on Windows) as
+    a FAILURE it could never fix by installing anything. `--platform` makes a
+    job assert only the slice IT can actually install; `--only` lets a job
+    that has not installed a target's lock at all (a Linux runner and
+    companion, which nothing in this job's venvs will ever satisfy) skip that
+    target rather than report every one of its packages UNSCANNED. Each
+    target's FULL platform closure still gets asserted -- CI just now runs it
+    split across the three jobs that can each cover their own slice, instead
+    of demanding one job cover all of it.
+    """
     allow = load_allowlist(ALLOWLIST_PATH)
     findings: list[Finding] = []
     warnings: list[str] = []
 
     for target in TARGETS:
+        if only and target.label not in only:
+            continue
         if not target.lock.exists():
             warnings.append(
                 f"{target.label}: {target.lock.relative_to(REPO)} does not exist -- "
                 f"regenerate it (docs/RELEASE.md, 'refreshing the lockfiles')")
             continue
-        for platform in target.platforms:
+        wanted_platforms = [p for p in target.platforms
+                            if platforms is None or p in platforms]
+        if not wanted_platforms:
+            # Asked for a platform this target does not ship on at all (e.g.
+            # --platform linux against companion) -- nothing to check, and
+            # silently checking zero packages would look identical to a
+            # target that is fully clean. Say so.
+            warnings.append(
+                f"{target.label}: none of {platforms} is in its own "
+                f"{target.platforms} -- nothing checked for it on this run")
+            continue
+        for platform in wanted_platforms:
             target.names |= parse_lock(target.lock, platform)
 
         rows, venv_warnings = scan_venvs(target.venvs)
@@ -322,9 +354,24 @@ def main(argv: list[str] | None = None) -> int:
                     help="treat a package we could not scan as a failure (what CI "
                          "runs, after installing every requirements.lock)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--only", action="append", metavar="LABEL",
+                    choices=[t.label for t in TARGETS],
+                    help="check only this target (repeatable). For a CI job that "
+                         "has not installed every target's lock -- e.g. the Linux "
+                         "job never installs companion/requirements.lock, whose "
+                         "win32/darwin packages it could not satisfy no matter "
+                         "what it installs.")
+    ap.add_argument("--platform", action="append", dest="platform",
+                    metavar="PLATFORM", choices=sorted(PLATFORM_ENVS),
+                    help="require only this platform slice of a target's own "
+                         "declared platforms (repeatable). companion ships "
+                         "win32+darwin from one lock that no single OS can "
+                         "install both halves of; run this once per OS with "
+                         "--platform set to that OS, so each job's --strict "
+                         "asserts only what it could have installed.")
     args = ap.parse_args(argv)
 
-    findings, warnings = check(strict=args.strict)
+    findings, warnings = check(strict=args.strict, only=args.only, platforms=args.platform)
     failures = [f for f in findings if f.status == "FAIL"]
 
     if args.json:
@@ -335,7 +382,8 @@ def main(argv: list[str] | None = None) -> int:
         }, indent=2))
         return 1 if failures else 0
 
-    for target in TARGETS:
+    shown_targets = [t for t in TARGETS if not args.only or t.label in args.only]
+    for target in shown_targets:
         rows = [f for f in findings if f.target == target.label]
         print(f"\n=== {target.label} ===")
         print(f"    {target.why}")

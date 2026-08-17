@@ -201,9 +201,14 @@ Its Synology arm additionally asserts that the tree still has its ACL (not
 The stack binds **127.0.0.1:8480** and nothing else. That is deliberate: DSM's
 own nginx already owns `0.0.0.0:80/443/5000/5001`, so the dashboard cannot have
 :443, and a NAS that gains an interface must not silently publish the fleet
-dashboard on it. Three ways to reach it, in the order they are worth trying:
+dashboard on it. **Editors reach it over Tailscale, and only over Tailscale**
+-- product decision 2026-08-17: no DSM reverse proxy, no DDNS/QuickConnect, no
+LAN bind for customers. The dashboard's login is the only gate it has, and the
+Syncthing GUI beside it is admin over every folder in the fleet; neither
+belongs on the public internet.
 
-**(a) Tailscale Serve** -- the design, and the one that also gives HTTPS:
+**Tailscale Serve** publishes it with HTTPS and a valid certificate, tailnet
+only:
 
 ```sh
 sudo /var/packages/Tailscale/target/bin/tailscale serve --bg --yes --https=443 \
@@ -211,59 +216,34 @@ sudo /var/packages/Tailscale/target/bin/tailscale serve --bg --yes --https=443 \
 ```
 
 `--yes` matters: without it the command blocks on a prompt. **Serve is gated at
-the TAILNET level**, not the node: on a tenant that has not enabled it the
-command prints
+the TAILNET level**, not the node. On a tailnet that has not enabled HTTPS
+certificates the command prints
 
 ```
 Serve is not enabled on your tailnet.
 To enable, visit: https://login.tailscale.com/f/serve?node=...
 ```
 
-which is a one-time click in the Tailscale admin console (it also turns on
-HTTPS certificates tailnet-wide). Treat that string as a failure, not as
-success -- it was not enabled on the tenant this was validated against, so
-Serve itself is **unverified here**; what is verified is that 1.58.2 supports
-the flags and that inbound over the tailnet works (direct, not DERP).
+which is a one-time click in the Tailscale admin console (DNS -> "Enable
+HTTPS"). Most freshly created tailnets are in this state, so treat the string as
+an expected first-run condition, show the click, and re-run -- never as
+success. VERIFIED 2026-08-17 on the DS423+ after that click: `serve status`
+reports `https://nas.tail26290e.ts.net (tailnet only) |-- / proxy
+http://127.0.0.1:8480`; from a tailnet peer, `curl` verifies the certificate
+(`ssl_verify_result 0`), `/` 303s to the login page, `/api/v1/health` answers,
+and the container has `DASH_COOKIE_SECURE=1`. It works with DSM's nginx
+holding host :443 -- tailscaled answers the tailnet address itself.
 
-**(b) DSM's reverse proxy** -- Control Panel → Login Portal → Advanced →
-Reverse Proxy → Create:
+Then set `[net] dashboard_url = "https://<nas>.<tailnet>.ts.net"` and
+`--recreate` (that is what pins `DASH_COOKIE_SECURE=1`; a plain redeploy only
+swaps code). Serve config survives tailscaled and NAS restarts; `tailscale
+serve --https=443 off` removes it.
 
-| Field | Value |
-|---|---|
-| Description | `ccsync-dashboard` |
-| Source protocol / hostname / port | HTTPS / `*` (or the NAS's FQDN) / `8443` |
-| Destination protocol / hostname / port | HTTP / `localhost` / `8480` |
-
-Then set `[net] dashboard_url = "https://<nas>:8443"` and redeploy, which pins
-`DASH_COOKIE_SECURE=1` (the app already honours `X-Forwarded-Proto`).
-
-This step is **manual on purpose**. `SYNO.Core.AppPortal.ReverseProxy` v1 was
-probed on the device (2026-08-17): `list` returns
-`data.entries[]` with the shape
-
-```json
-{"UUID": "...", "_key": "...", "description": "Jellyseerr",
- "frontend": {"fqdn": "requests.example.com", "port": 443, "protocol": 1,
-              "https": {"hsts": true}, "acl": null},
- "backend": {"fqdn": "localhost", "port": 8072, "protocol": 0},
- "customize_headers": [], "proxy_connect_timeout": 60, "proxy_http_version": 1,
- "proxy_intercept_errors": false, "proxy_read_timeout": 60,
- "proxy_send_timeout": 60}
-```
-
-but `create` with `entries=[<that shape>]` answers **error 4151** with an empty
-`errors.index` for every variant tried (`fqdn` blank, `*`, a real FQDN, an
-http frontend, with and without a client-generated `UUID`/`_key`). Something
-in the payload is still unknown, and this repo does not guess at API shapes it
-cannot pin -- so the rule is created by hand until someone captures the DSM
-UI's own call. Nothing was left behind by the probing: `list` shows no ccsync
-entry.
-
-**(c) LAN, bluntly.** Set `[net] bind_lan = "192.0.2.10"` and the stack
-publishes there directly. Do this only on a trusted LAN: the dashboard's login
-is the only gate, and the Syncthing GUI beside it is unauthenticated-by-default
-admin over every folder in the fleet (which is why *its* port stays loopback in
-every configuration).
+For the record, so nobody re-spends the day: DSM's reverse proxy
+(`SYNO.Core.AppPortal.ReverseProxy` v1) was probed -- `list` works, `create`
+answers error 4151 for every payload variant tried -- and a raw LAN bind
+(`[net] bind_lan`) works mechanically. Both are deliberately unsupported for
+customers; `bind_lan` remains only for a lab.
 
 The DSM firewall is not touched by any of this. If it is on, the ports editors
 need are 22 (SFTP), 445 (SMB), 22000/tcp+udp and 21027/udp (Syncthing), plus
@@ -336,8 +316,8 @@ is invisible to DSM's own list, which keys off `@<share>.meta`.
 - **uid/gid stability across a DSM update** is untested for the same reason.
   The risk shape is a new *package* claiming a uid (packages live at
   170000+), not an update renumbering local accounts.
-- **`tailscale serve`** is unverified (tenant-level gate, see above).
-- **The reverse-proxy API** is unpinned (error 4151, see above).
+- **`tailscale serve`** VERIFIED 2026-08-17 (see Access) -- after the tenant's
+  one-time "Enable HTTPS" click.
 - **Throughput** on the tested unit: SFTP up 90 MiB/s, SMB up 102-104 MiB/s,
   both down ~112 MiB/s -- i.e. 1 GbE line rate, and SFTP is ~12 % *slower* than
   SMB on upload. Lanes A/B do not need to change, but on a ≥2.5 GbE unit the

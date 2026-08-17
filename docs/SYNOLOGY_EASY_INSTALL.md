@@ -42,7 +42,9 @@ needs on the host and that a container cannot do by itself:
    existing shared folders in a dropdown, pre-fill the free-space figure, and
    detect whether Tailscale is installed. Fields it needs: studio name, tree
    share (existing or "create new"), drive letter (default `P:`), and access
-   mode (Tailscale / Synology HTTPS). Everything else is derived.
+   mode is not a question at all -- Tailscale is the only supported way
+   editors reach the dashboard (decision 2026-08-17). Everything else is
+   derived.
 3. **Lifecycle** — Package Center handles update (new SPK = new pinned image
    tag; `postupgrade` pulls and recreates), stop/start, uninstall (data kept
    unless the user ticks the box), and shows an icon in DSM's app menu that
@@ -76,7 +78,8 @@ plain-English reason.
 `install_uifile.sh` (wizard): studio name; tree share (dropdown of existing
 shares + "create `<Studio>_Projects`"); drive letter; access mode
 ("Private network via Tailscale — recommended" if the Tailscale package is
-detected, else "Synology HTTPS (QuickConnect/DDNS)"); "Also host the DaVinci
+detected, else the two screenshots that get it installed and logged in);
+"Also host the DaVinci
 Resolve project library on this NAS" checkbox.
 
 `postinst` (root, = `ServerBackend.synology` locally):
@@ -96,11 +99,12 @@ Resolve project library on this NAS" checkbox.
    docker/ccsync`, `NAS_TREE_ROOT=/volume1/<share>/<tree>`, `DASH_BINDS=
    127.0.0.1`, profiles `bundled-syncthing` (+ `project-server` if ticked);
    `docker compose up -d`.
-7. Access: Tailscale mode → `tailscale serve --bg --https=443 http://127.0.0.1:8480`
-   and record `https://<nas>.<tailnet>.ts.net` as `dashboard_url`; HTTPS mode →
-   create a DSM reverse-proxy rule via `SYNO.Core.AppPortal.ReverseProxy` to
-   127.0.0.1:8480 on the DSM certificate, and record the DDNS URL. Both write
-   `DASH_COOKIE_SECURE=1`.
+7. Access: `tailscale serve --bg --yes --https=443 http://127.0.0.1:8480`
+   and record `https://<nas>.<tailnet>.ts.net` as `dashboard_url`, with
+   `DASH_COOKIE_SECURE=1`. If Serve is gated ("Serve is not enabled on your
+   tailnet" -- the normal state of a fresh tailnet), the checklist shows the
+   one admin-console click ("Enable HTTPS") and retries; there is no other
+   publish path (decision 2026-08-17: Tailscale only, verified on the DS423+).
 8. Snapshots: create a DSM Task Scheduler entry (`SYNO.Core.TaskScheduler`) —
    or Snapshot Replication schedule if that package is present — hourly/daily
    Btrfs snapshots of the tree share and `/volume1/docker/ccsync/data`.
@@ -169,12 +173,13 @@ shrinks to a page.
 ## What still cannot be hidden, and how to make it painless
 
 - **Tailscale.** Non-technical owners will not run a tailnet on their own,
-  but the pieces are all GUI: Package Center → Tailscale → "Log in"; editors
-  install Tailscale and accept the admin's invite email. The setup checklist
-  detects the package and shows the two screenshots. The alternative (DSM
-  DDNS + HTTPS) exposes the dashboard to the internet and is only acceptable
-  after readiness items 6/15 (TLS is then given; rate-limiting, CSRF, per-IP
-  throttling are not yet). Offer it as "advanced".
+  but the pieces are all GUI: Package Center → Tailscale → "Log in"; admin
+  console → DNS → "Enable HTTPS" (once); editors install Tailscale and accept
+  the admin's invite email. The setup checklist detects the three states
+  (package missing / logged out / HTTPS not enabled) and shows the click for
+  each. There is deliberately **no** DDNS/QuickConnect/reverse-proxy option:
+  the dashboard and the Syncthing GUI beside it never go on the public
+  internet (decision 2026-08-17).
 - **DaVinci Resolve Studio + external scripting.** Per seat, by hand
   (Preferences → System → General → External scripting: Local). The editor
   wizard already checks for Resolve; add a check for the scripting
@@ -200,8 +205,8 @@ shrinks to a page.
 - Invite tokens (new): a signed, single-use, expiring token minted by the
   dashboard; redemption endpoint returns account + fleet token; wizard changes
   in `onboarding/steps.py`.
-- TLS by default (readiness item 6) — Serve gives it; the DSM reverse-proxy
-  path gives it; the LAN-http path goes away for new installs.
+- TLS by default (readiness item 6) — Serve gives it; the LAN-http path goes
+  away for new installs.
 - Signing the SPK and the client binaries (readiness item 4).
 
 ## Suggested sequencing

@@ -70,8 +70,11 @@ not a port — that is WP0.
    package runs in userspace mode by default, so there is no tailnet interface
    IP for compose to bind (`compose.yaml:191-192` today). Bind
    `127.0.0.1:8480` and expose with `tailscale serve` — which also gives HTTPS
-   (readiness item 6). LAN access via the DSM reverse proxy + DSM firewall, or
-   not at all.
+   (readiness item 6). Tailscale is the ONLY publish path for customers
+   (decision 2026-08-17; verified same day after the tenant's "Enable HTTPS"
+   click) -- no DSM reverse proxy, no DDNS. Note the spike found the package
+   in TUN mode, so a tailnet-IP bind is also possible; Serve is still the
+   answer because it brings the certificate.
 6. **Btrfs + Snapshot Replication as a stated requirement.** The install path
    creates a scheduled snapshot task on the tree share and the apps share —
    closes readiness item 8 on Synology from day one.

@@ -40,7 +40,7 @@ pool_root = "/mnt/tank/TheCreatorsPool"
 tree_name = "Creators_Club"
 projects_dir = "Projects"
 share_name = "Creators_Club"
-smb_unc = '\\192.168.0.102\Creators_Club'   # single quotes: a TOML literal
+smb_unc = '\\192.168.0.102\TheCreatorsPool\Creators_Club'   # single quotes: a TOML literal
                                            # string, so backslashes stay as-is
 
 [apps]
@@ -55,7 +55,8 @@ sftp_chunk_size = "255Ki"   # a Synology site MUST use "64Ki" --
 sftp_concurrency = 64       # see docs/synology-spikes-2026-08-17.md spike 6
 shell_type = "unix"         # rclone's; "none" where editors are /sbin/nologin
 rclone_remote = "creators_club_sftp"   # the remote name in rclone.conf
-sftp_host = "192.168.0.102" # what editors point lanes A/B at
+# sftp_host unset on purpose: dual-homed (LAN / tailnet); the wizard derives
+# it from the dashboard URL the editor used. Only set a name reachable from both.
 
 [syncthing]
 gui_url = "http://192.168.0.102:8384"

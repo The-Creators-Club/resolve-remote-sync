@@ -56,6 +56,13 @@
     admin account the package publish authenticates as; the password is still
     prompted for, once, by build_editor_package.ps1.
 
+.PARAMETER Recreate
+    Pass --recreate to install_dashboard_app.py: delete and re-create the
+    dashboard app so COMPOSE-LEVEL changes (env vars, binds, image, healthcheck)
+    take effect. A plain deploy only swaps the code and restarts the container,
+    which keeps the OLD env -- required the first time after 2026-08-17 (the
+    DASH_SITE_* / DASH_NAS_* / DASH_SMB_HOST block was added then). Brief
+    downtime; data lives on bind mounts and survives.
 .PARAMETER DashboardOnly
     Stop after step 1 (server-side template/API changes only).
 
@@ -89,6 +96,7 @@ param(
     [string]$DashboardUrl = "",
     [string]$AdminUser = "",
     [switch]$DashboardOnly,
+    [switch]$Recreate,
     [switch]$SkipLocalUpgrade,
     [switch]$SkipTests,
     [switch]$AllowDirty
@@ -346,7 +354,9 @@ else {
 # --- 1. dashboard -----------------------------------------------------------
 Write-Host ""
 Write-Step "--- step 1: deploy dashboard ---"
-python server\install_dashboard_app.py
+$deployArgs = @()
+if ($Recreate) { $deployArgs += "--recreate"; Write-Step "(--recreate: compose-level changes will take effect)" }
+python server\install_dashboard_app.py @deployArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "install_dashboard_app.py exited $LASTEXITCODE -- stopping"
     exit 1

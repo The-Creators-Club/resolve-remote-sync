@@ -66,7 +66,7 @@ projects_dir = "Projects"
 # rather than deriving it from the pool path -- the derivation only works on
 # TrueNAS (companion/drive_swap.py, config key server_p_unc).
 share_name = "Creators_Club"
-smb_unc = "\\\\nas\\Creators_Club"
+smb_unc = "\\\\nas\\YourPool\\Creators_Club"   # TrueNAS shares a dataset under its own name: \\host\<pool-share>\<tree>
 
 [apps]
 # Where the dashboard app's own host tree lives (code, venv, data, the
@@ -102,9 +102,11 @@ sftp_port = "22"
 # site. See docs/synology-spikes-2026-08-17.md spike 6.
 sftp_chunk_size = "255Ki"      # Synology MUST set "64Ki"
 sftp_concurrency = 64          # Synology: 16
-# Where editors point lanes A/B. Defaults to [nas] host; set it when they
-# reach the NAS by a different name than this admin machine does.
-# sftp_host = "100.64.0.1"
+# Where editors point lanes A/B. LEAVE UNSET on a dual-homed site (LAN +
+# tailnet): the wizard then uses the host of whichever dashboard URL the
+# editor reached the NAS by. Set it only to a name reachable from everywhere
+# (MagicDNS / DNS), never a LAN IP.
+# sftp_host = "nas.example.ts.net"
 # The remote NAME in each editor's rclone.conf. Served by GET /api/v1/site.
 rclone_remote = "ccsync_sftp"
 # rclone's `shell_type`. "unix" lets it run md5sum over SSH for checksums;

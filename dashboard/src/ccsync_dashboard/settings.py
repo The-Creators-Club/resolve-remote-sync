@@ -43,9 +43,11 @@ class Settings:
     # setup on :445 is the only credential check that works for non-admin
     # TrueNAS users on 25.10 (middleware auth rejects them outright).
     auth_method: str = "smb"
-    # No default: see _SITE_IDENTITY_ENV. Blank means the SMB probe has
-    # nowhere to go, so every login fails with the NAS's own error -- loud,
-    # and only for the deployment that forgot to set it.
+    # No tenant default: see _SITE_IDENTITY_ENV. Blank falls back to nas_host
+    # in __post_init__ (the SMB server IS the NAS on both TrueNAS and DSM), so
+    # a container whose env predates DASH_SMB_HOST -- every TrueNAS deploy
+    # before 2026-08-17, until it is --recreate'd -- keeps logging editors in.
+    # Only a deployment with NEITHER set fails, loudly, with the NAS's error.
     smb_host: str = ""
     session_secret: str = ""            # required for login; stable across deploys
     admin_users: frozenset[str] = frozenset()  # lowercase usernames
@@ -232,6 +234,12 @@ class Settings:
             effective = new_value if new_value else old_value
             object.__setattr__(self, neutral, effective)
             object.__setattr__(self, legacy, effective)
+        # See smb_host: the SMB probe target defaults to the NAS itself. A
+        # deploy that ran before DASH_SMB_HOST existed in the compose env would
+        # otherwise refuse every login the moment this code lands (found by the
+        # 2026-08-17 Synology bring-up; also true for the TrueNAS redeploy).
+        if not self.smb_host and self.nas_host:
+            object.__setattr__(self, "smb_host", self.nas_host)
 
     def packages_path(self) -> Path:
         return Path(self.packages_dir) if self.packages_dir else Path(self.db_path).parent / "packages"

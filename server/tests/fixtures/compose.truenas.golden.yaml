@@ -260,8 +260,8 @@ services:
       # backslash in a DOUBLE-quoted YAML scalar is an escape character.
       DASH_SITE_CANONICAL_PREFIX: 'P:\'
       DASH_SITE_REMOTE_ROOT: "/mnt/tank/TheCreatorsPool/Creators_Club"
-      DASH_SITE_SMB_UNC: '\\192.168.0.102\Creators_Club'
-      DASH_SITE_SFTP_HOST: "192.168.0.102"
+      DASH_SITE_SMB_UNC: '\\192.168.0.102\TheCreatorsPool\Creators_Club'
+      DASH_SITE_SFTP_HOST: ""
       DASH_SITE_SFTP_PORT: "22"
       DASH_SITE_SFTP_CHUNK_SIZE: "255Ki"
       DASH_SITE_SFTP_CONCURRENCY: "64"

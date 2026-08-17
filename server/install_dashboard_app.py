@@ -522,7 +522,13 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
         "DASH_SITE_CANONICAL_PREFIX": site_value("site", "canonical_prefix") or "P:\\",
         "DASH_SITE_REMOTE_ROOT": tree_root,
         "DASH_SITE_SMB_UNC": site_value("tree", "smb_unc"),
-        "DASH_SITE_SFTP_HOST": site_value("net", "sftp_host") or nas_host,
+        # NO fallback to [nas] host: a dual-homed site (LAN for the base rig,
+        # tailnet for remote editors) has no single SFTP address, and the
+        # wizard/bootstraps derive it from whichever dashboard URL the editor
+        # reached the NAS by. Serve one only when it is reachable from
+        # everywhere (a MagicDNS/DNS name). Caught in the 2026-08-17 TrueNAS
+        # dry run: the LAN IP would have gone into remote editors' rclone.conf.
+        "DASH_SITE_SFTP_HOST": site_value("net", "sftp_host"),
         "DASH_SITE_SFTP_PORT": site_value("net", "sftp_port") or "22",
         "DASH_SITE_SFTP_CHUNK_SIZE": site_value("net", "sftp_chunk_size"),
         "DASH_SITE_SFTP_CONCURRENCY": site_value("net", "sftp_concurrency"),

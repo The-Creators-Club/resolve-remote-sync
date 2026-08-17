@@ -137,3 +137,15 @@ def test_site_carries_no_credential_and_no_fleet_inventory(tmp_path):
     for secret in ("super-secret-token", "nas-password", "ingest-secret"):
         assert secret not in resp.text
     assert set(resp.json()) == EXPECTED_KEYS
+
+
+def test_smb_host_falls_back_to_the_nas_host_for_pre_manifest_containers():
+    """A TrueNAS container deployed before 2026-08-17 has TRUENAS_HOST in its
+    env but no DASH_SMB_HOST (that used to be a code default). Landing this
+    code there without --recreate must not refuse every login."""
+    fallback = Settings.from_env({"TRUENAS_HOST": "192.0.2.10", "TRUENAS_PW": "x"})
+    assert fallback.smb_host == "192.0.2.10"
+    explicit = Settings.from_env({"TRUENAS_HOST": "192.0.2.10", "DASH_SMB_HOST": "smb.example"})
+    assert explicit.smb_host == "smb.example"
+    neither = Settings.from_env({})
+    assert neither.smb_host == ""

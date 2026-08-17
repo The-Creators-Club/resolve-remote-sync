@@ -24,6 +24,9 @@
 <a class="btn nav-link" href="/transfers">[ TRANSFERS ]</a>
 {% if session_is_admin %}
   <a class="btn nav-link" href="/admin/users">[ USERS ]</a>
+  {# Grid of every project x every known editor (2026-08-17) -- writes
+     nothing of its own, see assignments.py's docstring. #}
+  <a class="btn nav-link" href="/admin/assignments">[ ASSIGNMENTS ]</a>
 {% endif %}
 {% if broll_mounted %}
   <span class="dim">//</span>

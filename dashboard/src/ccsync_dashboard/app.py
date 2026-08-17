@@ -18,8 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from . import (
-    api, auth, broll, crash_report, db, internal_sftp, local_users, music, oidc,
-    sessions, setup_api, ui, ytdl,
+    api, assignments, auth, broll, crash_report, db, internal_sftp, local_users, music,
+    oidc, sessions, setup_api, ui, ytdl,
 )
 from .collector import Collector
 from .settings import Settings
@@ -613,6 +613,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(setup_api.router)
     app.include_router(internal_sftp.router)
     app.include_router(ui.router)
+    # The admin project<->editor assignment matrix (2026-08-17): one page,
+    # /admin/assignments, that writes nothing itself -- it calls the selection
+    # routes api.router already registered above (see assignments.py).
+    app.include_router(assignments.router)
     # Always mounted, never active unless DASH_AUTH_METHOD=oidc: both routes
     # start by re-checking the OIDC settings and answer 503 with the
     # break-glass URL when they are absent. Mounting it conditionally would

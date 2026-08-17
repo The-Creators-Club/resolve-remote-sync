@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC: ASSIGNMENTS{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    <div class="detail-head"><h1>[ ASSIGNMENTS ]</h1></div>
+    <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
+      tick a project onto an editor's machine, or pull it back. Every cell
+      here is the same write the editor switcher's checkboxes make (lane C
+      shares, lane A/B scope, the enforce cycle) -- there is no second
+      selection store.
+    </p>
+    <div class="assign-toolbar">
+      <input class="assign-filter" type="search" id="assign-filter"
+             placeholder="filter projects…" aria-label="filter projects">
+      <span class="muted mono-sm">
+        {{ assignments.projects | length }} project(s) &times; {{ assignments.editors | length }} editor(s)
+      </span>
+    </div>
+    {% if not assignments.editors %}
+      <div class="muted">no known editors yet -- one appears here once they
+        sign in, tick a project of their own, or their companion reports.</div>
+    {% elif not assignments.projects %}
+      <div class="muted">no active projects yet.</div>
+    {% else %}
+    <div class="assign-scroll">
+      <table class="assign-grid" id="assign-grid">
+        <thead>
+          <tr>
+            <th class="assign-project-head">PROJECT</th>
+            {% for e in assignments.editors %}
+            <th>
+              <div class="assign-editor-head">
+                <span class="name">{{ e }}</span>
+                <span class="dot {{ assignments.presence.get(e, '') }}"
+                      title="companion presence for {{ e }}">&#9679;</span>
+                <span class="assign-colbtns">
+                  <button type="button" class="btn" data-col-all="{{ e }}"
+                          title="tick every project for {{ e }}">[ ALL ]</button>
+                  <button type="button" class="btn" data-col-none="{{ e }}"
+                          title="untick every project for {{ e }}">[ NONE ]</button>
+                </span>
+              </div>
+            </th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in assignments.projects %}
+          <tr data-project-label="{{ p.label | lower }}">
+            <td class="assign-project" title="{{ p.label }}">{{ p.label }}</td>
+            {% for e in assignments.editors %}
+            <td class="assign-cell">
+              <input type="checkbox" class="proj-check matrix-check"
+                     data-slug="{{ p.slug }}" data-editor="{{ e }}"
+                     {{ 'checked' if (p.slug, e) in assignments.ticked_pairs }}
+                     title="sync &quot;{{ p.label }}&quot; to {{ e }}"
+                     aria-label="sync {{ p.label }} to {{ e }}">
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {# aria-live region for toasts (rollback / bulk-column results) -- kept
+       outside the scrollable grid so it never scrolls out of view. #}
+    <div id="assign-toast" class="toast-host" aria-live="polite"></div>
+    <script src="/static/assignments.js" defer></script>
+  </main>
+{% endblock %}

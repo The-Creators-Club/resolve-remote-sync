@@ -367,6 +367,27 @@ companion on its next report reply, so it survives a dashboard restart *and*
 reaches a machine that was offline when it was set. The companion refuses a
 *local* release of a fleet halt, so one editor cannot opt out.
 
+### Assignment matrix
+
+| Route | What |
+|---|---|
+| `GET /admin/assignments` | every active project x every known editor, one page |
+
+Not a new write surface: each cell is a plain browser `fetch` straight at
+**§4's** `PUT`/`DELETE /selection/{editor}/{slug}`, acting as the editor named
+in that cell's column rather than through `?as=`. `auth.can_manage` already
+lets an admin session write any editor's selection either way, so a tick made
+here is the identical row-level write the `?as=` editor switcher's checkboxes
+make — same `created_by`, same collector nudge, same lane C share / lane A-B
+scope / enforce-cycle consequences. There is no bulk-tick endpoint either:
+"tick all" / "untick all" for a column replay that one write per project,
+client-side.
+
+`editors[]` on this page comes from `db.known_editor_usernames` — the same
+evidence-based roster the `?as=` switcher uses (a known-editors row, a tick,
+a stored pref, or a companion report) — never a guess, and never the admin's
+own name unless the admin independently satisfies one of those.
+
 ### Packages (the upgrade channel)
 
 | Route | What |

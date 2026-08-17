@@ -9,7 +9,12 @@ must still produce a working install, with the flags/fallbacks it always had.
 
 from __future__ import annotations
 
+import ast
+import os
+import subprocess
+import sys
 import urllib.error
+from pathlib import Path
 
 import steps
 from ccsync_companion import site as site_mod
@@ -172,12 +177,33 @@ def test_a_junk_port_in_the_manifest_does_not_reach_the_installer(tmp_path):
 
 def test_no_dashboard_address_is_compiled_in():
     """The grep gate in prose: a fresh checkout of this installer names no
-    deployment at all (WP0). CCSYNC_DASHBOARD_URL is the scripted-install
-    escape hatch, and this process was not given one."""
-    assert steps.DEFAULT_DASHBOARD_URL == ""
-    assert steps.DEFAULT_BASE_DASHBOARD_URL == ""
-    assert steps.DEFAULT_REMOTE_ROOT == ""
-    assert steps.DEFAULT_BASE_LOCAL_ROOT_MACOS == ""
+    deployment at all (WP0).
+
+    Asserted in a CHILD PROCESS with the two escape-hatch variables
+    stripped, not by reading steps.* in this one. DEFAULT_DASHBOARD_URL and
+    DEFAULT_BASE_DASHBOARD_URL are `os.environ.get(...)` evaluated at import
+    time, so in-process they hold whatever the operator's environment says --
+    which made this test assert a property of the machine rather than of the
+    checkout. It failed for exactly the person who followed ship.ps1's own
+    "set CCSYNC_DASHBOARD_URL / CCSYNC_ADMIN_USER in your environment"
+    advice, and the ship gates on this suite: a catch-22 measured
+    2026-08-17. The child inherits sys.path (steps imports ccsync_companion,
+    which pytest put there, not the interpreter).
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CCSYNC_DASHBOARD_URL", "CCSYNC_BASE_DASHBOARD_URL")}
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    probe = (
+        "import steps; print(repr(["
+        "steps.DEFAULT_DASHBOARD_URL, steps.DEFAULT_BASE_DASHBOARD_URL,"
+        "steps.DEFAULT_REMOTE_ROOT, steps.DEFAULT_BASE_LOCAL_ROOT_MACOS]))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(Path(steps.__file__).resolve().parent),
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert ast.literal_eval(out.stdout.strip()) == ["", "", "", ""]
 
 
 # -- the rclone remote NAME (2026-08-17, COMMERCIAL_READINESS.md item 11) ----

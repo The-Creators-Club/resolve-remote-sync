@@ -125,6 +125,7 @@ The full annotated table, including the Synology-only rows, is in
 | `DASH_NAS_PW` / `TRUENAS_PW` | **S** | Only `/admin/users` needs it. Unset = that section is 503, everything else works |
 | `DASH_NAS_API_KEY` / `TRUENAS_API_KEY` | **S** | A **scoped** TrueNAS API key, **preferred over the password when both are set**. The password in the container is root-equivalent and readable with `docker inspect`; this UI only ever calls user/group/`sharing.smb`. Mint with `server/create_api_key.py`. TrueNAS only |
 | `DASH_OIDC_CLIENT_SECRET` | **S F** | The confidential client's secret |
+| `CCSYNC_INTERNAL_TOKEN` | **S** | Bearer token guarding `/internal/sftp/*` (WP C) — what the sftp sidecar's `AuthorizedKeysCommand` presents. Unset falls back to a file at `<db dir>/secrets/internal_token` (agent D's SetupEngine writes it at first boot; this dashboard only ever reads it). Neither configured = both routes answer `503`, never authenticate everyone |
 
 ### 2.2 Core
 
@@ -144,7 +145,7 @@ The full annotated table, including the Synology-only rows, is in
 
 | Var | Default | Notes |
 |---|---|---|
-| `DASH_AUTH_METHOD` | `smb` | `smb` or `oidc` |
+| `DASH_AUTH_METHOD` | `smb` | `smb`, `oidc`, or `local` (WP C, `docs/ZERO_TOUCH_PLAN.md` §3.3, 2026-08-17) — the dashboard's own accounts (`users`/`user_ssh_keys` tables), no NAS credential of any kind. `smb` stays the default until a fleet migrates (`ZERO_TOUCH_PLAN.md` §6); `local` is the appliance shape. The first local admin is created by the Setup wizard (`POST /api/v1/setup/admin`), not this env var — `DASH_ADMIN_USERS` still works additively as break-glass |
 | `DASH_SMB_HOST` | `""` → NAS host | The SMB probe target. No tenant default since 2026-08-17 |
 | `DASH_ADMIN_USERS` | `""` | csv, lowercase. Grants dashboard admin **and** decides who is `role: base` at `/api/v1/verify` |
 | `DASH_SHARED_REPORT_TOKEN_ENABLED` | `1` | Whether the one shared `DASH_REPORT_TOKEN` is still accepted alongside per-editor tokens. **Only an explicit `"0"` turns it off** — a typo must not disconnect the fleet. Turn it off once Admin ▸ Users stops naming machines on the shared credential |

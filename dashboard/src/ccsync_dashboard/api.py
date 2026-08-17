@@ -14,6 +14,7 @@ import hmac
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import time
 import uuid
@@ -25,7 +26,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from . import VERSION, auth, db, health, release_trust
+from . import VERSION, auth, db, health, local_users, release_trust
 from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
 from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -1833,11 +1834,13 @@ def api_link_folder(
 
 # ------------------------------------------------------------- admin users
 
-def build_admin_users_view(settings) -> dict[str, Any]:
-    """Everything the admin 'Users' section needs: existing editor accounts
-    (from the NAS backend) plus devices that still need approving/naming (Syncthing
-    devices that are either truly pending, or already configured but with a
-    name that doesn't resolve to a username -- see db.resolve_editor_username).
+def build_admin_users_view(settings, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Everything the admin 'Users' section needs: local accounts (WP C,
+    docs/ZERO_TOUCH_PLAN.md §3.3, 2026-08-17) when this site is
+    DASH_AUTH_METHOD=local, existing NAS editor accounts, plus devices that
+    still need approving/naming (Syncthing devices that are either truly
+    pending, or already configured but with a name that doesn't resolve to a
+    username -- see db.resolve_editor_username).
 
     Returns {"error": <str>} instead of raising when a backend is
     unreachable, mirroring the rest of the dashboard's "stale banner, don't
@@ -1854,10 +1857,31 @@ def build_admin_users_view(settings) -> dict[str, Any]:
     The `truenas_*` key names outlive the TrueNAS-only era on purpose: the
     admin_users template, the JSON API and this suite all read them, and
     renaming a published response shape is not what WP1 is for.
+
+    `conn` is optional: most callers already hold one (Depends(get_conn));
+    when absent, a short-lived one is opened here -- local accounts exist
+    independently of any NAS credential, so this half must never wait on one.
     """
+    method = str(getattr(settings, "auth_method", "") or "smb").strip().lower()
+    result: dict[str, Any] = {"auth_method": method, "local_users": None}
+    if method == "local":
+        owned = conn is None
+        c = conn if conn is not None else db.connect(settings.db_path)
+        try:
+            result["local_users"] = local_users.list_users(c)
+        finally:
+            if owned:
+                c.close()
+
     if not nas_factory.nas_configured(settings):
-        return {"truenas_configured": False, "editors": [], "pending_devices": [],
-                "error": None, "truenas_error": None, "syncthing_error": None}
+        # No NAS credential: the appliance's default shape (ZERO_TOUCH_PLAN.md
+        # §5, "the customer's NAS admin credential is optional"). This is no
+        # longer a reason to 503 or hide the whole page -- local_users above
+        # already answered the identity question; the NAS section (editor
+        # accounts, device approval) simply has nothing to show.
+        result.update({"truenas_configured": False, "editors": [], "pending_devices": [],
+                       "error": None, "truenas_error": None, "syncthing_error": None})
+        return result
 
     truenas_error: str | None = None
     editors: list[dict[str, Any]] = []
@@ -1913,7 +1937,7 @@ def build_admin_users_view(settings) -> dict[str, Any]:
             syncthing_error = f"syncthing: {exc}"
             pending = []
 
-    return {
+    result.update({
         "truenas_configured": True,
         "editors": editor_rows,
         "pending_devices": pending,
@@ -1922,7 +1946,8 @@ def build_admin_users_view(settings) -> dict[str, Any]:
         "error": "; ".join(e for e in (truenas_error, syncthing_error) if e) or None,
         "truenas_error": truenas_error,
         "syncthing_error": syncthing_error,
-    }
+    })
+    return result
 
 
 def _nas_client_or_503(request: Request) -> NasBackend:
@@ -1948,11 +1973,19 @@ _truenas_client_or_503 = _nas_client_or_503
 
 class CreateEditorIn(BaseModel):
     username: str = Field(min_length=1, max_length=32)
-    ssh_pubkey: str = Field(min_length=1)
+    # Required for a NAS account, optional for a local one (WP C): a local
+    # account's dashboard/SFTP login is the password below, and an SSH key --
+    # if given here -- is added the same way local.add_ssh_key would. The
+    # looks_like_ssh_pubkey check runs inside whichever branch uses it.
+    ssh_pubkey: str | None = None
     full_name: str | None = None
     # Optional: absent still means "randomise it, no dashboard login". Present
     # means it must clear the same floor as SetPasswordIn.
     password: str | None = Field(default=None, min_length=auth.MIN_PASSWORD_CHARS)
+    # Local accounts only: "admin" or "editor" (local_users.ROLES), default
+    # editor. Ignored by the NAS branch -- role there is "in the editors
+    # group", which create_or_update_editor always grants.
+    role: str | None = None
 
 
 class SetPasswordIn(BaseModel):
@@ -1997,10 +2030,14 @@ def normalize_device_id(device_id: str) -> str:
     return cleaned
 
 
+def _local_mode(settings) -> bool:
+    return str(getattr(settings, "auth_method", "") or "smb").strip().lower() == "local"
+
+
 @router.get("/admin/users")
-def api_admin_users(request: Request) -> dict[str, Any]:
+def api_admin_users(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     _require_admin(request)
-    return build_admin_users_view(request.app.state.settings)
+    return build_admin_users_view(request.app.state.settings, conn)
 
 
 @router.post("/admin/users")
@@ -2008,16 +2045,42 @@ def api_admin_create_user(
     payload: CreateEditorIn, request: Request,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    _require_admin(request)
-    nas = _nas_client_or_503(request)
+    admin = _require_admin(request)
+    settings = request.app.state.settings
     username = payload.username.strip().lower()
+
+    if _local_mode(settings):
+        # No NAS account of any kind (WP C, docs/ZERO_TOUCH_PLAN.md §3.3,
+        # 2026-08-17): create a row in the local `users` table instead. A
+        # blank password generates a one-time one, returned ONCE in this
+        # response and never stored anywhere the dashboard could show again.
+        role = (payload.role or "editor").strip().lower()
+        generated_password: str | None = None
+        password = payload.password
+        if not password:
+            generated_password = secrets.token_urlsafe(15)
+            password = generated_password
+        try:
+            result = local_users.create_user(conn, username, password, role, created_by=admin)
+            if payload.ssh_pubkey:
+                local_users.add_ssh_key(conn, username, payload.ssh_pubkey.strip())
+        except local_users.LocalUserError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        db.record_known_editor(conn, username, "admin")
+        conn.commit()
+        response = {"ok": True, "result": result, "view": build_admin_users_view(settings, conn)}
+        if generated_password:
+            response["generated_password"] = generated_password
+        return response
+
+    nas = _nas_client_or_503(request)
     if not is_valid_username(username):
         raise HTTPException(
             status_code=422,
             detail="username must start with a letter and contain only lowercase letters, "
                    "digits, '.', '_', '-'",
         )
-    ssh_pubkey = payload.ssh_pubkey.strip()
+    ssh_pubkey = (payload.ssh_pubkey or "").strip()
     if not looks_like_ssh_pubkey(ssh_pubkey):
         raise HTTPException(status_code=422, detail="does not look like an OpenSSH public key")
     try:
@@ -2031,11 +2094,14 @@ def api_admin_create_user(
     # is treated as an editor rather than as an unmapped machine (B16).
     db.record_known_editor(conn, username, "admin")
     conn.commit()
-    return {"ok": True, "result": result, "view": build_admin_users_view(request.app.state.settings)}
+    return {"ok": True, "result": result, "view": build_admin_users_view(settings, conn)}
 
 
 @router.post("/admin/users/{username}/password")
-def api_admin_set_password(username: str, payload: SetPasswordIn, request: Request) -> dict[str, Any]:
+def api_admin_set_password(
+    username: str, payload: SetPasswordIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
     """Set a known password for an EDITOR account.
 
     The charset check is here as well as inside set_known_password: an
@@ -2045,6 +2111,16 @@ def api_admin_set_password(username: str, payload: SetPasswordIn, request: Reque
     live in each backend's set_known_password so every caller gets them."""
     _require_admin(request)
     username = username.strip().lower()
+    settings = request.app.state.settings
+
+    if _local_mode(settings):
+        try:
+            local_users.set_password(conn, username, payload.password)
+        except local_users.LocalUserError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        conn.commit()
+        return {"ok": True}
+
     if not is_valid_username(username):
         raise HTTPException(
             status_code=422,
@@ -2057,6 +2133,76 @@ def api_admin_set_password(username: str, payload: SetPasswordIn, request: Reque
     except NasError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"ok": True}
+
+
+def _require_local_mode(request: Request) -> None:
+    if not _local_mode(request.app.state.settings):
+        raise HTTPException(
+            status_code=400,
+            detail="this action is only available with DASH_AUTH_METHOD=local",
+        )
+
+
+class SetDisabledIn(BaseModel):
+    disabled: bool = True
+
+
+@router.post("/admin/users/{username}/disable")
+def api_admin_disable_user(
+    username: str, payload: SetDisabledIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Disable (or re-enable) a LOCAL account -- there is no NAS twin of this
+    action in scope here (docs/ZERO_TOUCH_PLAN.md §5's TrueNAS/DSM `locked`
+    field has no toggle on the NasBackend Protocol)."""
+    _require_admin(request)
+    _require_local_mode(request)
+    settings = request.app.state.settings
+    username = username.strip().lower()
+    try:
+        local_users.disable_user(conn, username, payload.disabled)
+    except local_users.LocalUserError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    conn.commit()
+    return {"ok": True, "view": build_admin_users_view(settings, conn)}
+
+
+class AddSshKeyIn(BaseModel):
+    key_text: str = Field(min_length=1)
+    label: str = ""
+
+
+@router.post("/admin/users/{username}/keys")
+def api_admin_add_ssh_key(
+    username: str, payload: AddSshKeyIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Add a key to a LOCAL account -- what the sftp sidecar's
+    AuthorizedKeysCommand will serve for them (internal_sftp.py)."""
+    _require_admin(request)
+    _require_local_mode(request)
+    settings = request.app.state.settings
+    username = username.strip().lower()
+    try:
+        key = local_users.add_ssh_key(conn, username, payload.key_text, label=payload.label)
+    except local_users.LocalUserError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    conn.commit()
+    return {"ok": True, "key": key, "view": build_admin_users_view(settings, conn)}
+
+
+@router.delete("/admin/users/{username}/keys/{fingerprint}")
+def api_admin_remove_ssh_key(
+    username: str, fingerprint: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    _require_admin(request)
+    _require_local_mode(request)
+    settings = request.app.state.settings
+    username = username.strip().lower()
+    removed = local_users.remove_ssh_key(conn, username, fingerprint)
+    conn.commit()
+    return {"ok": True, "removed": removed, "view": build_admin_users_view(settings, conn)}
 
 
 # The JSON twin of the Users page's SIGNED-IN BROWSERS panel
@@ -2247,7 +2393,7 @@ def api_admin_approve_device(
     # cycle is allowed to manage the device's shares (B16).
     db.record_known_editor(conn, username, "admin")
     conn.commit()
-    return {"ok": True, "view": build_admin_users_view(settings)}
+    return {"ok": True, "view": build_admin_users_view(settings, conn)}
 
 
 # ------------------------------------------- companion packages (upgrade channel)

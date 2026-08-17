@@ -124,6 +124,22 @@ class Settings:
     # anything that rewrites Host -- so it is settable.
     oidc_redirect_url: str = ""
 
+    # ------------------------------------------------------- local accounts
+    # DASH_AUTH_METHOD=local (WP C, docs/ZERO_TOUCH_PLAN.md §3.3, 2026-08-17):
+    # local_users.py is the identity provider instead of an SMB probe against
+    # a NAS -- see auth.verify_credentials/is_admin. Nothing else is needed
+    # here; the tables live in the same dashboard.db every other migration
+    # already writes.
+
+    # The bearer token internal_sftp.py's two routes require (CCSYNC_INTERNAL_TOKEN).
+    # Blank is a valid, common state: a deployment with no sftp sidecar yet
+    # (every fleet before WP C ships) needs neither route, and the routes
+    # themselves answer 503 rather than authenticating everyone when this is
+    # unset -- see internal_sftp._configured_token, which also tries a file
+    # under <data dir>/secrets/ (agent D's wizard-generated secret) before
+    # giving up.
+    internal_token: str = ""
+
     # NAS API access for the admin "add/approve users" section (creating
     # editor accounts, setting known passwords). Optional: that section is
     # simply unavailable (503) if nas_pw is blank, same convention as
@@ -381,6 +397,12 @@ class Settings:
     def packages_path(self) -> Path:
         return Path(self.packages_dir) if self.packages_dir else Path(self.db_path).parent / "packages"
 
+    def secrets_path(self, name: str) -> Path:
+        """<data dir>/secrets/<name> -- the directory agent D's SetupEngine
+        generates first-boot secrets into (docs/ZERO_TOUCH_PLAN.md §3.2's
+        "openssl rand x5" row); this dashboard only ever READS from it."""
+        return Path(self.db_path).parent / "secrets" / name
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         env = os.environ if env is None else env
@@ -447,6 +469,7 @@ class Settings:
                 if v.strip()
             ),
             oidc_redirect_url=env.get("DASH_OIDC_REDIRECT_URL", "").strip(),
+            internal_token=env.get("CCSYNC_INTERNAL_TOKEN", "").strip(),
             nas_kind=(env.get("DASH_NAS_KIND", "").strip().lower() or "truenas"),
             nas_host=first("DASH_NAS_HOST", "TRUENAS_HOST"),
             nas_user=first("DASH_NAS_USER", "TRUENAS_USER"),

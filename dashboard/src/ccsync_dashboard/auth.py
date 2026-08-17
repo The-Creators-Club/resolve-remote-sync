@@ -44,13 +44,14 @@ import hashlib
 import hmac
 import ipaddress
 import logging
+import sqlite3
 import threading
 import time
 import uuid
 
 from fastapi import Request, Response
 
-from . import broll, sessions
+from . import broll, db, local_users, sessions
 from .settings import Settings
 
 log = logging.getLogger("ccsync.dashboard.auth")
@@ -142,8 +143,36 @@ def verify_credentials(settings: Settings, username: str, password: str) -> bool
             return _verify_smb(settings.smb_host, username, password)
         finally:
             _probe_slots.release()
+    if settings.auth_method == "local":
+        # No NAS credential of any kind (WP C, docs/ZERO_TOUCH_PLAN.md §3.3,
+        # 2026-08-17): the password check is a local scrypt compare against
+        # local_users.py's own table, opened here rather than threaded in
+        # because /login, /api/v1/verify and the login throttle all call this
+        # with only a Settings in hand.
+        conn = _open_local_conn(settings)
+        if conn is None:
+            return False
+        try:
+            return local_users.verify_password(conn, username, password)
+        finally:
+            conn.close()
     log.error("unknown DASH_AUTH_METHOD %r -- rejecting all logins", settings.auth_method)
     return False
+
+
+def _open_local_conn(settings: Settings) -> sqlite3.Connection | None:
+    """A short-lived connection for the local-accounts checks (verify_credentials,
+    is_admin). There is no per-request connection to reuse at either call
+    site: the login throttle path and /api/v1/verify both run before any
+    route has opened one, and is_admin is called from ~15 places across
+    api.py/ui.py that were never given one either (see is_admin's own note).
+    Never raises -- a database that cannot be opened is a refusal, not a 500,
+    on a path that is reachable by anyone with a guessed username."""
+    try:
+        return db.connect(settings.db_path)
+    except Exception:  # noqa: BLE001
+        log.exception("local accounts: could not open %s", settings.db_path)
+        return None
 
 
 # --------------------------------------------------------- login throttle
@@ -571,8 +600,11 @@ def check_boot_secrets(settings: Settings) -> list[str]:
             "Tailscale Serve (docs/SERVER-SYNOLOGY.md) and set DASH_SITE_DASHBOARD_URL to "
             "its https URL, or leave DASH_COOKIE_SECURE=auto"
         )
-    if str(settings.auth_method or "").strip().lower() == "oidc":
+    method = str(settings.auth_method or "").strip().lower()
+    if method == "oidc":
         problems.extend(check_oidc_settings(settings))
+    elif method == "local":
+        problems.extend(check_local_settings(settings))
     return problems
 
 
@@ -624,6 +656,18 @@ def check_oidc_settings(settings: Settings) -> list[str]:
     return []
 
 
+def check_local_settings(settings: Settings) -> list[str]:
+    """DASH_AUTH_METHOD=local needs nothing a fresh appliance doesn't already
+    have -- no NAS credential, no issuer, not even DASH_ADMIN_USERS (the
+    wizard's first-admin bootstrap, setup_api.setup_admin, is how the very
+    first account gets in). The one thing it does need is the same secret
+    every auth method needs to mint a session at all."""
+    if not settings.session_secret:
+        return ["DASH_AUTH_METHOD=local needs DASH_SESSION_SECRET (it signs the "
+                "session cookie for local accounts the same as every other method)"]
+    return []
+
+
 def check_password(password: str) -> str | None:
     """None if this password may be SET, else why not. Set/change only."""
     if len(password or "") < MIN_PASSWORD_CHARS:
@@ -667,10 +711,36 @@ def describe_auth(settings: Settings) -> str:
             f"trusted proxies={settings.trusted_proxies or '-'}")
 
 
-def is_admin(settings: Settings, username: str | None) -> bool:
+def is_admin(settings: Settings, username: str | None,
+            conn: sqlite3.Connection | None = None) -> bool:
+    """DASH_ADMIN_USERS is checked FIRST and needs no database: it is the
+    break-glass list on every auth method, smb/oidc/local alike, and must
+    keep working even when the local-accounts table cannot be read.
+
+    In DASH_AUTH_METHOD=local, a name NOT in that list may still be an admin
+    -- role='admin' in the local `users` table (WP C, docs/ZERO_TOUCH_PLAN.md
+    §3.3, 2026-08-17). `conn` is optional because most of this function's ~15
+    call sites across api.py/ui.py were written for the settings-only smb/oidc
+    world and were never handed one; when absent, a short-lived connection is
+    opened here instead (see auth._open_local_conn) rather than pushing a
+    conn parameter through every caller for a check that is a handful of
+    milliseconds either way."""
     if not username:
         return False
-    return username.lower() in settings.admin_users
+    username = username.lower()
+    if username in settings.admin_users:
+        return True
+    if str(getattr(settings, "auth_method", "") or "smb").strip().lower() != "local":
+        return False
+    if conn is not None:
+        return local_users.is_local_admin(conn, username)
+    opened = _open_local_conn(settings)
+    if opened is None:
+        return False
+    try:
+        return local_users.is_local_admin(opened, username)
+    finally:
+        opened.close()
 
 
 def can_manage(settings: Settings, session_user: str | None, editor: str) -> bool:

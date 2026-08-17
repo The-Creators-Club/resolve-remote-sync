@@ -17,7 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
-from . import api, auth, broll, crash_report, db, music, oidc, sessions, ui, ytdl
+from . import (
+    api, auth, broll, crash_report, db, internal_sftp, local_users, music, oidc,
+    sessions, setup_api, ui, ytdl,
+)
 from .collector import Collector
 from .settings import Settings
 
@@ -43,6 +46,13 @@ _OPEN_EXACT = {
     # on the signed flow cookie plus a verified id_token, never on being
     # reachable.
     oidc.LOGIN_PATH, oidc.CALLBACK_PATH,
+    # First-admin bootstrap (WP C, docs/ZERO_TOUCH_PLAN.md §3.3/§3.5, 2026-08-17):
+    # necessarily open, same reasoning as the OIDC pair above -- nobody has a
+    # session before the wizard creates the first one. setup_api.setup_admin
+    # enforces its own "no users yet" gate INSIDE the handler, so being open
+    # here only ever matters for the single-admin bootstrap window; every
+    # later call is a 409. See setup_api.py.
+    "/api/v1/setup/status", "/api/v1/setup/admin",
 }
 
 # State-changing requests exempt from the CSRF check (COMMERCIAL_READINESS.md
@@ -64,8 +74,15 @@ _OPEN_EXACT = {
 # a forged one achieves is signing the victim OUT, and it is the JSON twin the
 # onboarding flow may call without a page to read a token from; the UI's own
 # /logout is NOT exempt and carries a hidden field.
+#
+# /api/v1/setup/admin is exempt for the same reason as /login: the FIRST call
+# has no session to carry a token, and it is the call that matters -- every
+# later one is a 409 regardless of CSRF (setup_api.setup_admin's own "no
+# users yet" gate). Exempting it means the wizard's second retry (or a
+# double-click) after the first call already minted a cookie is a clean 409,
+# not a confusing 403 that reads like the wrong failure.
 _CSRF_EXEMPT_EXACT = {"/login", "/api/v1/login", "/api/v1/logout", "/api/v1/report",
-                      "/api/v1/verify"}
+                      "/api/v1/verify", "/api/v1/setup/admin"}
 _CSRF_EXEMPT_PREFIXES = ("/api/v1/selection/", "/api/v1/admin/packages/",
                          "/broll/", "/music/", "/ytdl/")
 _CSRF_METHODS = ("POST", "PUT", "PATCH", "DELETE")
@@ -232,6 +249,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # with every other schema change in flight.
         session_store.ensure_schema(conn)
         _log_shared_token_migration(conn, settings)
+        if str(settings.auth_method or "smb").strip().lower() == "local":
+            # DASH_ADMIN_USERS names with no matching local account (break-
+            # glass entries left over from an smb-mode deployment, or a typo)
+            # -- one WARNING at boot rather than a silent no-op forever (see
+            # local_users.warn_missing_admin_users).
+            try:
+                local_users.warn_missing_admin_users(conn, settings.admin_users)
+            except Exception:  # noqa: BLE001 - a boot-time nicety, never fatal
+                log.exception("could not check DASH_ADMIN_USERS against local accounts")
         conn.close()
         session_store.prune()
         session_store.prune_attempts()
@@ -497,6 +523,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if (
             path in _OPEN_EXACT
             or path.startswith("/static/")
+            # internal_sftp.py's own routes: no cookie jar on the other end (a
+            # sidecar container), gated on a bearer token instead -- see
+            # internal_sftp._require_internal_token. Never session-reachable
+            # either way (it is a plain-text authorized_keys dump), so this
+            # is not a login bypass for a browser, only for that one bearer.
+            or path.startswith("/internal/sftp/")
             # companion reads its selection with the shared token (the route
             # itself additionally demands a matching X-CCSync-Identity)
             or (path.startswith("/api/v1/selection/") and _companion_token_ok(request))
@@ -578,6 +610,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse({"detail": "internal error"}, status_code=500)
 
     app.include_router(api.router)
+    app.include_router(setup_api.router)
+    app.include_router(internal_sftp.router)
     app.include_router(ui.router)
     # Always mounted, never active unless DASH_AUTH_METHOD=oidc: both routes
     # start by re-checking the OIDC settings and answer 503 with the

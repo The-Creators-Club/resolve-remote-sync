@@ -394,6 +394,44 @@ ALTER TABLE lane_report_current ADD COLUMN speed_bps REAL;
 ALTER TABLE lane_report_current ADD COLUMN eta_seconds REAL;
 """
 
+# v17: local accounts, the dashboard-native identity provider (WP C,
+# docs/ZERO_TOUCH_PLAN.md §3.3, 2026-08-17). DASH_AUTH_METHOD=local reads and
+# writes these two tables through local_users.py instead of probing a NAS's
+# SMB service -- the appliance shape has no NAS credential by default at all.
+#
+#   users          one row per local account. password_hash is a stdlib
+#                  hashlib.scrypt digest in the self-describing
+#                  "scrypt$n$r$p$salt_b64$hash_b64" shape, never argon2/bcrypt
+#                  -- a new dependency would need a requirements.lock bump and
+#                  a tools/check_licenses.py pass this migration does not need
+#                  to wait on. `role` gates auth.is_admin the same way
+#                  DASH_ADMIN_USERS always has; `must_change_password` is
+#                  read (not yet enforced anywhere) so a one-time generated
+#                  password can be flagged for a future forced-reset prompt.
+#   user_ssh_keys  the pubkeys the sftp sidecar's AuthorizedKeysCommand
+#                  serves (internal_sftp.py). A user may hold more than one
+#                  key (a laptop and a desktop); fingerprint is the primary
+#                  handle an admin revokes by, so it is part of the key.
+SCHEMA_V17 = """
+CREATE TABLE IF NOT EXISTS users (
+  username              TEXT PRIMARY KEY,
+  password_hash         TEXT NOT NULL,
+  role                  TEXT NOT NULL CHECK(role IN ('admin','editor')),
+  created_at            TEXT NOT NULL,
+  disabled              INTEGER NOT NULL DEFAULT 0,
+  must_change_password  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS user_ssh_keys (
+  username    TEXT NOT NULL REFERENCES users(username),
+  key_text    TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  added_at    TEXT NOT NULL,
+  label       TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (username, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS ix_user_ssh_keys_username ON user_ssh_keys(username);
+"""
+
 # A collector poll finished longer ago than this means the collector thread is
 # dead or wedged -- "the last poll succeeded" then says nothing about NOW.
 # 3x the slowest frequently-run cadence (remoteneed/enforce, 60s); connections
@@ -473,6 +511,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (14, SCHEMA_V14),
     (15, SCHEMA_V15),
     (16, SCHEMA_V16),
+    (17, SCHEMA_V17),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]

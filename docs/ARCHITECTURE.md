@@ -187,8 +187,23 @@ flowchart LR
     P[web page in editor's browser] -- "allow-listed Origin<br/>or X-CCSync-Loopback" --> LB[companion loopback :8899]
 ```
 
-**Browser sessions.** Sign-in verifies a NAS password by SMB session setup on
-:445 (`DASH_AUTH_METHOD=smb`) or via OIDC. The cookie is a versioned HMAC
+**Browser sessions.** Sign-in verifies a password one of three ways, picked by
+`DASH_AUTH_METHOD`: SMB session setup on :445 against the NAS (`smb`, the
+default — kept for the migration window, `docs/ZERO_TOUCH_PLAN.md` §6), an
+external IdP (`oidc`), or —
+**local** (WP C, `docs/ZERO_TOUCH_PLAN.md` §3.3, 2026-08-17) — a scrypt hash
+in the dashboard's own `users` table, no NAS credential of any kind. `local`
+is the appliance shape: the SMB probe exists only because editors *had* to be
+NAS accounts, and once SFTP moves into the stack as its own sidecar (§8's
+sibling, the sftp sidecar) they no longer do. The very first local admin is
+created by the Setup wizard (`POST /api/v1/setup/admin`, open only until one
+account exists — a 409 after that) rather than an env var, so there is no
+`DASH_ADMIN_USERS` dependency to bootstrap a fresh appliance at all. Sessions,
+throttling, CSRF and scoping are identical across all three methods — only
+`auth.verify_credentials` and `auth.is_admin` branch on the method; the
+latter still checks `DASH_ADMIN_USERS` FIRST on every method, so it stays a
+working break-glass list even when the local-accounts table cannot be read.
+The cookie is a versioned HMAC
 token *and* has a server-side row keyed by `HMAC(secret, cookie)` — a cookie
 with no row is not a session, which is what makes logout, "log out everywhere"
 and an admin's revoke button mean anything. `HttpOnly`, `SameSite=Lax`,
@@ -221,7 +236,21 @@ one route that answers actual file paths — "what is missing from *this*
 person's machine" — answers **404, not 403**, to a caller outside its scope.
 
 **Admins** come from `DASH_ADMIN_USERS`. Under OIDC, `DASH_OIDC_ADMIN_CLAIM` is
-logged, not obeyed.
+logged, not obeyed. Under `local`, a name in `DASH_ADMIN_USERS` is still
+honoured (break-glass), additively with `role='admin'` rows in the local
+`users` table — the normal way an admin is made once the wizard's first one
+exists.
+
+**SFTP identity (WP C).** Once the sftp sidecar is in the stack
+(`docs/ZERO_TOUCH_PLAN.md` §3.1/§3.3), it authenticates editors by pubkey
+only — password auth on that sshd is off, permanently. Its
+`AuthorizedKeysCommand` calls the dashboard's `GET
+/internal/sftp/keys/<user>` (`internal_sftp.py`, prefix `/internal/sftp`, on
+the compose network, gated on a bearer token — `CCSYNC_INTERNAL_TOKEN` or a
+file at `<data dir>/secrets/internal_token` — never the session): revoking an
+editor's SFTP access is one row in `user_ssh_keys`. Every editor's files land
+owned by the sidecar's own service uid — SFTP is a single service account,
+not per-editor NAS accounts (`ZERO_TOUCH_PLAN.md` §5).
 
 ---
 

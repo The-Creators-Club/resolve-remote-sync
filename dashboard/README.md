@@ -59,7 +59,8 @@ Devices not named after a username render as `[ UNMAPPED ]`.
 | `DASH_SYNCTHING_DATA_PREFIX` | `/data/Projects` | where the *Syncthing app* sees the same tree (folder `path` prefix for created folders) |
 | `DASH_SESSION_SECRET` | `""` (login off) | HMAC secret for session cookies; keep stable across deploys. **≥ 24 chars, checked at boot** |
 | `DASH_ADMIN_USERS` | `""` | csv usernames who may manage anyone's project ticks (must be SMB-authable accounts) |
-| `DASH_AUTH_METHOD` | `smb` | credential verification method; `smb` = SMB session probe on :445 (only method 25.10 allows for non-admin users), `oidc` = single sign-on (see "Authentication") |
+| `DASH_AUTH_METHOD` | `smb` | credential verification method; `smb` = SMB session probe on :445 (only method 25.10 allows for non-admin users), `oidc` = single sign-on (see "Authentication"), `local` = the dashboard's own accounts (`local_users.py`), no NAS credential at all -- WP C, `docs/ZERO_TOUCH_PLAN.md` §3.3 |
+| `CCSYNC_INTERNAL_TOKEN` | `""` | bearer token for `/internal/sftp/*` (the sftp sidecar's `AuthorizedKeysCommand`); falls back to `<db dir>/secrets/internal_token` when unset |
 | `DASH_SMB_HOST` | `""` | host for the SMB auth probe. **No default since 2026-08-17** -- see "Site identity" below |
 | `DASH_COOKIE_SECURE` | `auto` | `Secure` on the session cookie: `auto` = on for https, `1`/`0` force it. `1` also refuses to serve login over plain http |
 | `DASH_TRUSTED_PROXIES` | `127.0.0.1,::1` | csv IPs/CIDRs whose `X-Forwarded-Proto` is believed. Tailscale Serve and a compose sidecar arrive over loopback; a proxy on the *docker host* arrives from the bridge gateway (e.g. `172.17.0.0/16`) |

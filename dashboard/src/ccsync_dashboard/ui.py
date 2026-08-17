@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import secrets
 import sqlite3
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import auth, db, oidc, provision
+from . import auth, db, local_users, oidc, provision
 from .api import (
     build_admin_users_view, build_editors_view, build_packages_view, build_presence_view,
     build_project_view, build_projects_view, build_queue_view, build_report_tokens_view,
@@ -927,16 +928,16 @@ def page_admin_users(request: Request, conn: sqlite3.Connection = Depends(get_co
     _require_admin_page(request)
     return _render(request, "admin_users.html", {
         **_sidebar_context(request, conn, None),
-        "admin_users": build_admin_users_view(request.app.state.settings),
+        "admin_users": build_admin_users_view(request.app.state.settings, conn),
         "packages": build_packages_view(conn, request.app.state.settings),
     })
 
 
 @router.get("/partials/admin/users")
-def partial_admin_users(request: Request):
+def partial_admin_users(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     _require_admin_page(request)
     return _render(request, "partials/admin_users.html", {
-        "admin_users": build_admin_users_view(request.app.state.settings),
+        "admin_users": build_admin_users_view(request.app.state.settings, conn),
     })
 
 
@@ -1004,13 +1005,41 @@ def _create_or_update_editor_sync(
 async def partial_admin_create_user(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ):
-    _require_admin_page(request)
+    admin = _require_admin_page(request)
     settings = request.app.state.settings
     form = await _form(request)
     username = form.get("username", "").strip().lower()
     ssh_pubkey = form.get("ssh_pubkey", "").strip()
     full_name = form.get("full_name", "").strip() or None
     password = form.get("password", "").strip() or None
+
+    if str(settings.auth_method or "smb").strip().lower() == "local":
+        # No NAS account of any kind (WP C, docs/ZERO_TOUCH_PLAN.md §3.3,
+        # 2026-08-17): the same form posts here, but username/password/role
+        # go into the local `users` table instead. A blank password field
+        # generates a one-time one, shown back to the admin exactly once.
+        role = form.get("role", "editor").strip().lower() or "editor"
+        generated = None
+        minted = password
+        if not minted:
+            minted = secrets.token_urlsafe(15)
+            generated = minted
+        error = None
+        try:
+            local_users.create_user(conn, username, minted, role, created_by=admin)
+            if ssh_pubkey:
+                local_users.add_ssh_key(conn, username, ssh_pubkey)
+        except local_users.LocalUserError as exc:
+            error = str(exc)
+        else:
+            db.record_known_editor(conn, username, "admin")
+            conn.commit()
+            if generated:
+                error = f"{username}: created with a generated password: {generated}"
+        return _render(request, "partials/admin_users.html", {
+            "admin_users": build_admin_users_view(settings, conn),
+            "error": error,
+        })
 
     error = None
     if not nas_factory.nas_configured(settings):
@@ -1048,18 +1077,34 @@ async def partial_admin_create_user(
             error = str(exc)
 
     return _render(request, "partials/admin_users.html", {
-        "admin_users": build_admin_users_view(settings),
+        "admin_users": build_admin_users_view(settings, conn),
         "error": error,
     })
 
 
 @router.post("/partials/admin/users/password")
-async def partial_admin_set_password(request: Request):
+async def partial_admin_set_password(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     _require_admin_page(request)
     settings = request.app.state.settings
     form = await _form(request)
     username = form.get("username", "").strip().lower()
     password = form.get("password", "").strip()
+
+    if str(settings.auth_method or "smb").strip().lower() == "local":
+        error = None
+        if not password:
+            error = "password required"
+        else:
+            try:
+                local_users.set_password(conn, username, password)
+            except local_users.LocalUserError as exc:
+                error = str(exc)
+            else:
+                conn.commit()
+        return _render(request, "partials/admin_users.html", {
+            "admin_users": build_admin_users_view(settings, conn),
+            "error": error,
+        })
 
     error = None
     if not nas_factory.nas_configured(settings):
@@ -1090,7 +1135,7 @@ async def partial_admin_set_password(request: Request):
             error = str(exc)
 
     return _render(request, "partials/admin_users.html", {
-        "admin_users": build_admin_users_view(settings),
+        "admin_users": build_admin_users_view(settings, conn),
         "error": error,
     })
 
@@ -1132,7 +1177,81 @@ async def partial_admin_approve_device(
             error = str(exc)
 
     return _render(request, "partials/admin_users.html", {
-        "admin_users": build_admin_users_view(settings),
+        "admin_users": build_admin_users_view(settings, conn),
+        "error": error,
+    })
+
+
+@router.post("/partials/admin/users/disable")
+async def partial_admin_disable_user(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """Disable (or re-enable) a LOCAL account -- there is no NAS twin of this
+    in scope here, same carve-out as api.api_admin_disable_user."""
+    _require_admin_page(request)
+    settings = request.app.state.settings
+    form = await _form(request)
+    username = form.get("username", "").strip().lower()
+    disabled = form.get("disabled", "1").strip() != "0"
+
+    error = None
+    if str(settings.auth_method or "smb").strip().lower() != "local":
+        error = "this action is only available with DASH_AUTH_METHOD=local"
+    else:
+        try:
+            local_users.disable_user(conn, username, disabled)
+        except local_users.LocalUserError as exc:
+            error = str(exc)
+        else:
+            conn.commit()
+
+    return _render(request, "partials/admin_users.html", {
+        "admin_users": build_admin_users_view(settings, conn),
+        "error": error,
+    })
+
+
+@router.post("/partials/admin/users/keys/add")
+async def partial_admin_add_ssh_key(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    settings = request.app.state.settings
+    form = await _form(request)
+    username = form.get("username", "").strip().lower()
+    key_text = form.get("key_text", "").strip()
+    label = form.get("label", "").strip()
+
+    error = None
+    if str(settings.auth_method or "smb").strip().lower() != "local":
+        error = "this action is only available with DASH_AUTH_METHOD=local"
+    else:
+        try:
+            local_users.add_ssh_key(conn, username, key_text, label=label)
+        except local_users.LocalUserError as exc:
+            error = str(exc)
+        else:
+            conn.commit()
+
+    return _render(request, "partials/admin_users.html", {
+        "admin_users": build_admin_users_view(settings, conn),
+        "error": error,
+    })
+
+
+@router.post("/partials/admin/users/keys/remove")
+async def partial_admin_remove_ssh_key(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    settings = request.app.state.settings
+    form = await _form(request)
+    username = form.get("username", "").strip().lower()
+    fingerprint = form.get("fingerprint", "").strip()
+
+    error = None
+    if str(settings.auth_method or "smb").strip().lower() != "local":
+        error = "this action is only available with DASH_AUTH_METHOD=local"
+    else:
+        local_users.remove_ssh_key(conn, username, fingerprint)
+        conn.commit()
+
+    return _render(request, "partials/admin_users.html", {
+        "admin_users": build_admin_users_view(settings, conn),
         "error": error,
     })
 

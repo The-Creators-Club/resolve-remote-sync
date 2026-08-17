@@ -6,9 +6,89 @@
     <div class="banner">▲ {{ error }}</div>
   {% endif %}
 
+  {% if admin_users.auth_method == 'local' %}
+  {# Local accounts (WP C, docs/ZERO_TOUCH_PLAN.md §3.3, 2026-08-17): the
+     dashboard's own identity provider -- no NAS credential involved at all.
+     Shown whenever DASH_AUTH_METHOD=local, regardless of whether a NAS
+     backend is configured underneath (see build_admin_users_view). #}
+  <div class="side-head" style="margin-top:0.8rem">[ LOCAL ACCOUNTS ]</div>
+  {% if admin_users.local_users %}
+    <table class="editors">
+      <thead><tr><th>USERNAME</th><th>ROLE</th><th>STATUS</th><th>SSH KEYS</th><th>SET PASSWORD</th><th></th></tr></thead>
+      <tbody>
+      {% for u in admin_users.local_users %}
+        <tr class="editor-row">
+          <td class="who">{{ u.username }}</td>
+          <td class="mono-sm">{{ u.role }}</td>
+          <td>{% if u.disabled %}<span class="chip red">[ DISABLED ]</span>{% else %}<span class="chip green">[ ACTIVE ]</span>{% endif %}</td>
+          <td class="mono-sm">
+            {% if u.ssh_keys %}
+              {% for k in u.ssh_keys %}
+                <div>{{ k.fingerprint }}{% if k.label %} ({{ k.label }}){% endif %}
+                  <form class="inline-form" hx-post="/partials/admin/users/keys/remove"
+                        hx-target="closest .admin-users-box" hx-swap="outerHTML" style="display:inline">
+                    <input type="hidden" name="username" value="{{ u.username }}">
+                    <input type="hidden" name="fingerprint" value="{{ k.fingerprint }}">
+                    <button class="btn" type="submit">[ REVOKE ]</button>
+                  </form>
+                </div>
+              {% endfor %}
+            {% else %}
+              <span class="muted">none</span>
+            {% endif %}
+            <form class="inline-form" hx-post="/partials/admin/users/keys/add"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <input type="text" name="key_text" placeholder="ssh-ed25519 AAAA... (add key)" size="28">
+              <button class="btn" type="submit">[ ADD ]</button>
+            </form>
+          </td>
+          <td>
+            <form class="inline-form" hx-post="/partials/admin/users/password"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <input type="password" name="password" placeholder="new password" required>
+              <button class="btn" type="submit">[ SET ]</button>
+            </form>
+          </td>
+          <td>
+            <form class="inline-form" hx-post="/partials/admin/users/disable"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <input type="hidden" name="disabled" value="{{ '0' if u.disabled else '1' }}">
+              <button class="btn" type="submit">{% if u.disabled %}[ ENABLE ]{% else %}[ DISABLE ]{% endif %}</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">no local accounts yet</div>
+  {% endif %}
+
+  <div class="side-head" style="margin-top:1.2rem">[ CREATE LOCAL ACCOUNT ]</div>
+  <form hx-post="/partials/admin/users/create" hx-target="closest .admin-users-box" hx-swap="outerHTML">
+    <input type="text" name="username" placeholder="username (e.g. jsmith)" required
+           style="display:block;margin:0.3rem 0;width:260px">
+    <select name="role" style="display:block;margin:0.3rem 0;width:260px">
+      <option value="editor" selected>editor</option>
+      <option value="admin">admin</option>
+    </select>
+    <textarea name="ssh_pubkey" placeholder="ssh-ed25519 AAAA... user@host (optional, for SFTP)" rows="2"
+              style="display:block;margin:0.3rem 0;width:100%;max-width:520px"></textarea>
+    <input type="password" name="password"
+           placeholder="password (optional; blank generates a one-time password shown once)"
+           style="display:block;margin:0.3rem 0;width:420px">
+    <button class="btn" type="submit">[ CREATE ]</button>
+  </form>
+  {% endif %}
+
   {% if not admin_users.truenas_configured %}
+    {% if admin_users.auth_method != 'local' %}
     <div class="muted">TRUENAS_PW is not configured on the dashboard, so this section is unavailable.
       Set TRUENAS_HOST / TRUENAS_USER / TRUENAS_PW on the app and redeploy.</div>
+    {% endif %}
   {% else %}
 
   {# One unreachable backend used to replace the WHOLE panel, so a TrueNAS
@@ -47,6 +127,12 @@
     <div class="muted">none pending</div>
   {% endif %}
 
+  {% if admin_users.auth_method != 'local' %}
+  {# Editor identity lives in local accounts once DASH_AUTH_METHOD=local (WP
+     C) -- this NAS-account section is for smb/oidc sites only. A NAS
+     connected ALONGSIDE local accounts (docs/ZERO_TOUCH_PLAN.md §3.5 step 6,
+     "optional") is for snapshots and SMB browsing, not editor identity, so
+     it has nothing to show here. #}
   <div class="side-head" style="margin-top:1.2rem">[ EDITOR ACCOUNTS ]</div>
   {% if admin_users.truenas_error %}
     <div class="muted">account list unavailable -- {{ admin_users.truenas_error }}</div>
@@ -90,6 +176,7 @@
            style="display:block;margin:0.3rem 0;width:420px">
     <button class="btn" type="submit">[ CREATE ]</button>
   </form>
+  {% endif %}
 
   {% endif %}
 </div>

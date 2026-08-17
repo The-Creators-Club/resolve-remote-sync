@@ -25,6 +25,7 @@ blocked, on the dashboard and on both mounted SPAs.
 | **CSRF** | `X-CSRF-Token` header or a `csrf` form field | browsers | required on cookie-authenticated `POST/PUT/PATCH/DELETE` |
 | **Ingest** | `X-Ingest-Token` | the b-roll indexer | guards `/broll/api/ingest/*` only |
 | **Loopback** | `X-CCSync-Loopback` | non-browser callers of the tray | see [`LOOPBACK_API.md`](LOOPBACK_API.md) |
+| **Internal bearer** | `Authorization: Bearer …` | the sftp sidecar | `CCSYNC_INTERNAL_TOKEN`, guards `/internal/sftp/*` only (§5b) |
 
 A shape note that matters when you are debugging a 401: a per-editor token is
 recognised **by shape first** and is never compared against the shared secret,
@@ -39,8 +40,11 @@ page paths get a redirect to `/login`.
 **Open without any credential:**
 `/api/v1/login`, `/api/v1/logout`, `/api/v1/me`, `/api/v1/health`,
 `/api/v1/site`, `/api/v1/verify`, `/api/v1/report`, `/login`, `/favicon.ico`,
-`/static/*`, and the two OIDC legs `/auth/oidc/login` and
-`/auth/oidc/callback`.
+`/static/*`, the two OIDC legs `/auth/oidc/login` and `/auth/oidc/callback`,
+and the two first-admin bootstrap routes `/api/v1/setup/status` and
+`/api/v1/setup/admin` (§5a). `/internal/sftp/*` (§5b) is open on a different
+basis entirely — it is not reachable by a browser at all in practice, gated
+on its own bearer token rather than the session.
 
 `/report` and `/verify` are "open" only in the sense that the *gate* lets them
 through — both authenticate inside, and `/report`'s token is checked **before
@@ -305,14 +309,30 @@ Every route here requires a session belonging to a user in `DASH_ADMIN_USERS`
 
 | Route | What |
 |---|---|
-| `GET /admin/users` | editors, their devices, key status. The stack's own service account is filtered out |
-| `POST /admin/users` | create/update a NAS editor account: `{username, ssh_pubkey, full_name, password?}` |
-| `POST /admin/users/{username}/password` | set a known password (≥ 12 chars; refusals for uid < 1000 or non-`editors` live in the NAS backend) |
-| `POST /admin/devices/approve` | approve a pending Syncthing device: `{username, device_id}` |
+| `GET /admin/users` | editors, their devices, key status. The stack's own service account is filtered out. Response gains `auth_method` and `local_users` (WP C, below) |
+| `POST /admin/users` | `DASH_AUTH_METHOD=local`: create a **local account** — `{username, password?, role?, ssh_pubkey?}`. Otherwise: create/update a NAS editor account — `{username, ssh_pubkey, full_name, password?}` |
+| `POST /admin/users/{username}/password` | local mode: `{password}` sets it directly. Otherwise: set a known NAS password (≥ 12 chars; refusals for uid < 1000 or non-`editors` live in the NAS backend) |
+| `POST /admin/users/{username}/disable` | **local mode only** (`400` otherwise): `{disabled: bool}` |
+| `POST /admin/users/{username}/keys` | **local mode only**: add an SSH key — `{key_text, label?}` → `{"fingerprint": "SHA256:…"}` |
+| `DELETE /admin/users/{username}/keys/{fingerprint}` | **local mode only**: revoke a key |
+| `POST /admin/devices/approve` | approve a pending Syncthing device: `{username, device_id}` — unchanged, Syncthing device approval is independent of which auth method identifies editors |
 
-These need NAS credentials in the container (`DASH_NAS_PW`, or preferably
-`DASH_NAS_API_KEY`). Without them this section — **and only this section** —
-answers `503`. `502` means the NAS itself refused.
+The NAS-account rows above need NAS credentials in the container
+(`DASH_NAS_PW`, or preferably `DASH_NAS_API_KEY`); without them the NAS half
+of this section answers `truenas_configured: false` (no longer a `503` — see
+below). `502` means the NAS itself refused.
+
+**Local accounts (WP C, `docs/ZERO_TOUCH_PLAN.md` §3.3, 2026-08-17).**
+`DASH_AUTH_METHOD=local` moves editor identity into the dashboard's own
+`users`/`user_ssh_keys` tables — no NAS credential of any kind. `GET
+/admin/users` always includes `"auth_method"` and, in local mode,
+`"local_users": [{"username", "role", "created_at", "disabled",
+"must_change_password", "ssh_keys": [{"fingerprint", "label", "added_at"}]}]`
+— this is populated **even when no NAS backend is configured at all**, which
+is the appliance's default shape. Creating a local user with no `password`
+generates a one-time one, returned exactly once as `"generated_password"` in
+the create response — nothing stores the plaintext anywhere it could be shown
+again.
 
 ### Sessions
 
@@ -387,6 +407,48 @@ it *can* refuse a channel that has none.
 Staging uses a per-request `.part` file plus `os.replace`, so the served file
 is always complete and two concurrent publishes cannot write into each other's
 staging file.
+
+---
+
+## 5a. First-admin setup (WP C, `docs/ZERO_TOUCH_PLAN.md` §3.3/§3.5)
+
+Two routes, `setup_api.py`, both in `app.py`'s open list (no session needed —
+that is the whole point of a first-run wizard):
+
+| Route | What |
+|---|---|
+| `GET /api/v1/setup/status` | `{"auth_method": "…", "users_exist": bool}`. Non-`local` methods always report `users_exist: true` (there is no local-admin step to show) |
+| `POST /api/v1/setup/admin` | `{username, password}` → creates the **first** local admin and logs it in (same cookie as `/login`) |
+
+`POST /api/v1/setup/admin` is safe to leave open: it refuses `403` outside
+`DASH_AUTH_METHOD=local`, and `409` the instant one local account exists —
+checked inside an explicit transaction so two concurrent submits cannot both
+win. This is the exact contract the Setup wizard calls; do not change the
+path or body shape without updating it.
+
+## 5b. Internal SFTP identity (WP C)
+
+`internal_sftp.py`, prefix `/internal/sftp` — **not** under `/api/v1` and
+**not** behind the session. This is what the sftp sidecar's
+`AuthorizedKeysCommand` and user-listing step call; the sidecar is a separate
+container with no cookie jar, so the gate is a bearer token instead of a
+login:
+
+| Route | What |
+|---|---|
+| `GET /internal/sftp/users` | `{"users": [{"username", "uid", "gid"}, …]}` — every enabled local account (role `admin` or `editor`) that holds at least one SSH key. `uid`/`gid` are this process's own ids (or `APP_UID`/`APP_GID` if set) — SFTP is a **single service account**, not per-editor NAS accounts |
+| `GET /internal/sftp/keys/{username}` | `text/plain`, one `authorized_keys` line per key. `404` for an unknown or disabled user |
+
+**Auth:** `Authorization: Bearer <token>`, compared with `hmac.compare_digest`.
+The token is `CCSYNC_INTERNAL_TOKEN`, or — when that is unset — the file
+agent D's SetupEngine generates at `<data dir>/secrets/internal_token` (read
+fresh on every call, never cached, never written by this module). Neither
+configured → `503 "internal token not configured"`. Every refusal is logged
+with the caller's peer address. sshd's own `Match`/chroot block is what
+restricts the resulting session — this endpoint does not prefix keys with
+`restrict,`/`command=`, since that would be the dashboard silently
+overriding the sidecar's own `sshd_config` rather than the sidecar owning
+its policy.
 
 ---
 

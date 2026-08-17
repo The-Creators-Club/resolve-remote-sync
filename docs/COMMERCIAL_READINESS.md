@@ -513,6 +513,22 @@ Automation, Windows-only.
   image or search-only v1). v2 candidates: `ServerBackend` abstraction
   (`SYNOLOGY_PORT_PLAN.md`), in-instance multi-tenancy, Linux client.
 
+### 16. Zero-touch install: the customer installs Tailscale and one container, only we build — quarter
+
+Added 2026-08-17 after items 1–15 landed. Everything above still leaves the
+customer as tenant, release engineer and signing authority on a Windows
+"base rig" with a git checkout: 41 manual steps, `PyInstaller` per release,
+their own release key, `--recreate` from a shell for any site change, no
+vendor feed and no dashboard self-update. The answer is an appliance — one
+vendor-built image, Syncthing + SFTP + Tailscale as sidecars in the same
+stack, a browser setup wizard, dashboard-local identity, invites, and a
+signed release feed every dashboard pulls. Full design, work packages and
+spikes: [`ZERO_TOUCH_PLAN.md`](ZERO_TOUCH_PLAN.md).
+
+**Status 2026-08-17 — PLANNED, nothing built.** Depends on item 12's image
+(never yet `docker build`-ed) and reuses `SYNOLOGY_EASY_INSTALL.md`'s
+checklist and invite designs.
+
 ## What the operator does next (consolidated, 2026-08-17)
 
 Ordered so that nothing breaks the fleet that is currently on 0.7.11.

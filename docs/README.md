@@ -18,6 +18,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`SERVER.md`](SERVER.md) | The TrueNAS SCALE runbook |
 | [`SERVER-SYNOLOGY.md`](SERVER-SYNOLOGY.md) | The Synology DSM runbook, including Tailscale Serve as the publish path |
 | [`SYNOLOGY_EASY_INSTALL.md`](SYNOLOGY_EASY_INSTALL.md) | Design for a packaged (SPK) install a non-technical studio owner can run |
+| [`ZERO_TOUCH_PLAN.md`](ZERO_TOUCH_PLAN.md) | The appliance plan: customer installs Tailscale + one container, browser wizard does the rest, only the vendor builds (item 16) |
 | [`EDITOR_SETUP.md`](EDITOR_SETUP.md) | Onboarding one editor, from the operator's side |
 | [`../installer/START_HERE.md`](../installer/START_HERE.md) | The same thing written *for* the editor |
 

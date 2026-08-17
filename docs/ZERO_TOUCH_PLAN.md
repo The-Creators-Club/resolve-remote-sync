@@ -351,6 +351,24 @@ until step 5.
 
 ## 7. Spikes before committing code
 
+**Results 2026-08-17** (`docs/spikes/zero-touch-spikes-2026-08-17.md`, on the
+DS423+): **S5** everything works under DSM's compose 2.20.1 (one semantic to
+design around: when the netns-owning `tailscale` service restarts, its
+`network_mode: service:` siblings keep an orphaned netns until they restart
+too). **S1** the stock `tailscale/tailscale` entrypoint gives up on
+interactive login after 60 s and crash-loops, minting a new AuthURL each
+time — so the sidecar runs `tailscaled` directly and the dashboard drives
+login over LocalAPI (`PATCH prefs` → `POST login-interactive` → poll
+`status`) and sets Serve only after `Running`; kernel mode works on DSM.
+Inbound/Serve/throughput measurements still owed (need a login) — WP B day
+1. **S2** ship as designed: OpenSSH 9.6p1 in alpine, chroot `/jail`,
+`AuthorizedKeysCommand`, shared uid; rclone at LAN line-rate and **255Ki
+chunks are fine** (9.6p1 advertises `limits@openssh.com`; the 64Ki rule was
+DSM's own sshd). **S3** per-project bind views work with
+`security_opt: apparmor=unconfined` + `SYS_ADMIN` on the sftp sidecar only —
+per-project SFTP isolation ships in WP C. **S4** — see WP A's CI job.
+
+
 - **S1 (day 1):** tailscale sidecar in userspace mode on the DS423+ and on
   TrueNAS: does an inbound connection to the node's tailnet IP:22000 reach a
   container sharing its netns? Serve `https:443 → 127.0.0.1:8480` from

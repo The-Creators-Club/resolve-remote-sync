@@ -52,10 +52,18 @@ address and a username. `setx` is fine for those two, and convenient.
 ### The three-line route (no extra software)
 
 ```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force   # this window only, no admin
 .\tools\load_secrets.ps1 -Save     # prompts once per secret, never echoes
 . .\tools\load_secrets.ps1         # note the leading dot: loads THIS window
 .\tools\ship.cmd
 ```
+
+The first line is needed on a stock Windows install: the default execution
+policy is `Restricted`, so dot-sourcing a `.ps1` fails with "running scripts
+is disabled on this system" (hit 2026-08-17). `ship.cmd` bypasses the policy
+for *itself*, but the secrets have to be loaded in the calling window, so the
+bypass has to be there too. `-Scope Process` dies with the window and needs
+no elevation.
 
 `-Save` prompts with `Read-Host -AsSecureString` (so nothing is echoed and
 nothing enters the PSReadLine history file) and writes

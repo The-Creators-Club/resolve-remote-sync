@@ -165,6 +165,7 @@ foreach ($name in @("TRUENAS_PW", "DASH_REPORT_TOKEN", "DASH_SESSION_SECRET", "S
 if ($missing.Count -gt 0) {
     Write-Fail "missing environment variable(s): $($missing -join ', ')"
     Write-Step "load them into THIS window:  . .\tools\load_secrets.ps1"
+    Write-Step "(if that says 'running scripts is disabled', first:  Set-ExecutionPolicy -Scope Process Bypass -Force)"
     Write-Step "(first time: .\tools\load_secrets.ps1 -Save, which stores them DPAPI-encrypted"
     Write-Step " under %LOCALAPPDATA%\ccsync\secrets -- see docs\SECRETS.md.)"
     Write-Step "Do NOT use setx: it puts them in clear text in HKCU\Environment for good."

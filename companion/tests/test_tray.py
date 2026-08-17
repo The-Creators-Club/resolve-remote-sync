@@ -2018,11 +2018,21 @@ def test_the_falling_edge_frame_waits_for_the_menu_to_close(monkeypatch):
 # (tray.py:78-85's stance on what the mark is allowed to mean).
 
 
-def _proxy_app(missing=0, braw=0, left=0, encoding=False, can_generate=True):
+def _proxy_app(missing=0, braw=0, left=0, encoding=False, can_generate=True,
+               made=0, failed=0, src_bytes=0, proxy_bytes=0, eta=None,
+               detail=None, last_at=""):
     app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
     app.proxy_gap = lambda: {
         "missing": missing, "braw": braw, "left": left, "encoding": encoding,
         "can_generate": can_generate, "state": "running" if encoding else "user-active",
+        "encoding_detail": detail or [],
+        "history": {
+            "today": {"done": made, "failed": failed,
+                      "src_bytes": src_bytes, "proxy_bytes": proxy_bytes},
+            "lifetime": {"done": made, "failed": failed},
+            "eta_seconds": eta,
+            "last_at": last_at or ("2026-08-17T02:59:05+00:00" if made else ""),
+        },
     }
     return app
 
@@ -2071,11 +2081,20 @@ def test_braw_is_named_because_only_the_editor_can_fix_it():
 
 
 def test_no_proxy_lines_at_all_when_there_is_no_gap():
+    """No ADVISORY line: nothing is missing, nothing is encoding and nothing
+    was made today, so there is nothing to say. The "Proxies this machine has
+    made…" action is not one of these -- it is an action, it lives under
+    Advanced, and it is deliberately offered when the gap is zero (that is
+    exactly when "what did it do overnight?" gets asked)."""
     from ccsync_companion.tray import _build_menu, _tray_snapshot
 
     app = _proxy_app()
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert not any("proxy" in label.lower() for label in labels)
+    labels = [
+        label for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+        if label != "Proxies this machine has made…"
+    ]
+    assert not any("proxy" in label.lower() or "proxies" in label.lower()
+                   for label in labels)
 
 
 def test_the_actions_live_under_advanced():
@@ -2149,6 +2168,174 @@ def test_the_fingerprint_moves_on_the_gap_but_never_on_the_live_count():
     assert _menu_fingerprint(_tray_snapshot(_proxy_app(missing=12, left=9))) != encoding
     assert _menu_fingerprint(_tray_snapshot(
         _proxy_app(missing=12, left=9, encoding=True, can_generate=False))) != encoding
+
+
+# -- what this machine has MADE (proxy_history.py) --------------------------
+#
+# The ledger's numbers, on the same split as everything else here: coarse
+# enough for the menu, live in the tooltip.
+
+
+def test_the_menu_says_what_was_made_today():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(made=528, src_bytes=1_320_000_000_000, proxy_bytes=44_000_000_000)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "Made 528 proxies today · 1.2 TB → 41.0 GB" in labels
+
+
+def test_a_single_proxy_is_singular_and_a_quiet_day_says_nothing():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(made=1)
+    assert any("Made 1 proxy today" in label
+               for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
+
+    app = _proxy_app()
+    assert not any("Made" in label and "today" in label
+                   for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
+
+
+def test_failures_are_named_on_the_made_line():
+    """A failure the editor never hears about is one nobody re-shoots,
+    re-downloads or reports."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(made=10, failed=2)
+    assert any("2 failed" in label
+               for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
+    # ...and it is the whole line on a day where everything failed.
+    app = _proxy_app(made=0, failed=3)
+    assert any("Made 0 proxies today · 3 failed" in label
+               for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
+
+
+def test_the_eta_line_appears_only_while_encoding_and_only_once_known():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(missing=300, left=214, encoding=True, eta=9612)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "About 2h 40m to go at this rate" in labels
+
+    # No rate yet (the first clips of a drain): the line is simply absent
+    # rather than promising something it cannot measure.
+    app = _proxy_app(missing=300, left=214, encoding=True, eta=None)
+    assert not any("to go at this rate" in label
+                   for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
+
+
+def test_the_made_count_moves_the_fingerprint_in_buckets_not_per_clip():
+    """Same trade as _progress_bucket: visible progress on a run of hundreds,
+    ~20 rebuilds a night instead of 500."""
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    base = _menu_fingerprint(_tray_snapshot(_proxy_app(made=100, encoding=True, left=9)))
+    nudged = _menu_fingerprint(_tray_snapshot(_proxy_app(made=101, encoding=True, left=9)))
+    jumped = _menu_fingerprint(_tray_snapshot(_proxy_app(made=130, encoding=True, left=9)))
+    assert base == nudged
+    assert base != jumped
+
+    # A failure is NEVER bucketed: the first one of a night is the point.
+    assert _menu_fingerprint(
+        _tray_snapshot(_proxy_app(made=100, failed=1, encoding=True, left=9))) != base
+
+
+def test_the_eta_moves_the_fingerprint_only_in_quarter_hours():
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    def _fp(eta):
+        return _menu_fingerprint(
+            _tray_snapshot(_proxy_app(missing=300, left=214, encoding=True, eta=eta)))
+
+    assert _fp(9612) == _fp(9700)
+    assert _fp(9612) != _fp(3600)
+
+
+def test_the_history_item_is_offered_even_with_nothing_missing():
+    """"What did it make overnight?" is asked precisely when the gap is zero
+    and the menu has nothing else to say."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(made=528)
+    menu = _build_menu(app, _tray_snapshot(app))
+    assert "Proxies this machine has made…" in _all_menu_labels(menu)
+    # Under Advanced with the other proxy actions, not on the top level.
+    assert "Proxies this machine has made…" not in _menu_labels(menu)
+
+
+def test_the_history_item_opens_what_the_app_rendered(monkeypatch):
+    from ccsync_companion import tray as tray_mod
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _proxy_app(made=1)
+    app.proxy_history_report = lambda: "C:\\state\\proxy_history.txt"
+    opened: list[str] = []
+    monkeypatch.setattr(tray_mod, "_open_log", lambda path: opened.append(str(path)))
+    spawned: list[str] = []
+    monkeypatch.setattr(tray_mod, "_spawn",
+                        lambda a, label, fn: spawned.append(label) or fn())
+
+    for item in _build_menu(app, _tray_snapshot(app)).items:
+        submenu = getattr(item, "submenu", None)
+        if submenu is None:
+            continue
+        for sub in submenu.items:
+            if "Proxies this machine has made" in str(sub.text):
+                sub(None)
+    assert opened == ["C:\\state\\proxy_history.txt"]
+    assert spawned == ["Proxy history"]
+
+
+def test_an_older_generator_with_no_history_block_renders_normally():
+    """A companion whose generator predates the ledger, or whose ledger
+    failed to open, sends no "history" key at all."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app.proxy_gap = lambda: {"missing": 12, "braw": 0, "left": 0,
+                             "encoding": False, "can_generate": True}
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+    assert "12 clips have no proxy — other editors can't see them" in labels
+    assert not any("Made" in label and "today" in label for label in labels)
+
+
+# -- the live percentage lives in the TOOLTIP, never the menu ---------------
+
+
+def test_the_tooltip_shows_the_leading_clip_percentage():
+    """One number, not four: the drain runs up to 4 wide, the tooltip has
+    ~120 characters for everything, and "the next one lands soon" is what an
+    editor watching this wants to know."""
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _proxy_app(missing=300, left=214, encoding=True, detail=[
+        {"name": "a.mp4", "percent": 12, "eta_seconds": 400.0},
+        {"name": "b.mp4", "percent": 62, "eta_seconds": 200.0},
+    ])
+    assert "next at 62%" in _tooltip_text(_tray_snapshot(app))
+
+
+def test_the_tooltip_omits_a_percentage_it_cannot_measure():
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _proxy_app(missing=300, left=214, encoding=True, detail=[
+        {"name": "a.mp4", "percent": None, "eta_seconds": None},
+    ])
+    text = _tooltip_text(_tray_snapshot(app))
+    assert "making 214 proxy file(s)" in text and "next at" not in text
+
+
+def test_the_percentage_never_reaches_the_menu_fingerprint():
+    """It changes every second. Hashing it would rebuild the menu every
+    second, which is the freeze this whole split exists to avoid."""
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    def _fp(percent):
+        return _menu_fingerprint(_tray_snapshot(_proxy_app(
+            missing=300, left=214, encoding=True,
+            detail=[{"name": "a.mp4", "percent": percent, "eta_seconds": 1.0}])))
+
+    assert _fp(1) == _fp(2) == _fp(99)
 
 
 def test_the_tooltip_carries_the_live_number():

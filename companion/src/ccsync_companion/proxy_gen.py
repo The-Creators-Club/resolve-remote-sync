@@ -66,7 +66,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
-from . import ffmpeg_tools, proxy_scan
+from . import ffmpeg_tools, proxy_history, proxy_scan
 
 # "ccsync.proxy_gen", NOT __name__ -- setup_logging() only attaches handlers
 # to the "ccsync" logger, and in the windowed build sys.stderr is None, so a
@@ -142,6 +142,12 @@ ENCODE_NICE = 10
 # of companion state (project_prompts.json's neighbour).
 NOTIFY_STATE_FILENAME = "proxy_notify.json"
 
+# How often a running encode's progress line is published for the tray.
+# ffmpeg emits a -progress block per output packet -- hundreds a second on a
+# short clip -- and every one of them would take the lock gap() is read
+# under. 1 s is finer than the tray's own 2 s refresh, so nothing is lost.
+PROGRESS_PUBLISH_SECONDS = 1.0
+
 # Gate answers, published verbatim as coverage()["state"]. Strings rather
 # than an enum because they cross into the report payload and a dashboard
 # reading them must not need this module.
@@ -188,6 +194,19 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def wants_progress(cmd: Any) -> bool:
+    """Does this argv ask ffmpeg to write a -progress stream to stdout?
+
+    The encode does (see _build_cmd) and the verification decode does not,
+    and they share one runner and one Popen helper -- so this is the single
+    question both ask rather than two flags threaded through the call.
+    """
+    try:
+        return "-progress" in list(cmd)
+    except TypeError:
+        return False
+
+
 def _default_popen(cmd: list[str]) -> Any:
     """Spawn ffmpeg: no console window, below-normal priority, stderr piped.
 
@@ -197,9 +216,14 @@ def _default_popen(cmd: list[str]) -> Any:
     it fires. Windows takes it as a creation flag; POSIX has no equivalent,
     so it is renice-after-spawn (NOT preexec_fn, which runs between fork and
     exec in a multithreaded process and is documented as unsafe there).
+
+    stdout is a PIPE only when the argv asked for `-progress pipe:1`, and it
+    is then DRAINED on its own thread exactly like stderr: an undrained pipe
+    fills its ~64 KB OS buffer and blocks the encoder for ever, which is the
+    same classic deadlock STDERR_KEEP_LINES exists to avoid.
     """
     kwargs: dict[str, Any] = {
-        "stdout": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE if wants_progress(cmd) else subprocess.DEVNULL,
         # ffmpeg reads stdin for its interactive keys and would consume the
         # parent's if it had one -- and in the frozen windowed build there is
         # no console stdin to consume, which makes it an error rather than a
@@ -256,6 +280,60 @@ def _drain(stream: Any, sink: Any) -> None:
             stream.close()
         except Exception:
             pass
+
+
+def _drain_progress(stream: Any, on_value: Callable[[str, str], None]) -> None:
+    """Read ffmpeg's `-progress` stream to EOF, one `key=value` per line.
+
+    The format is deliberately machine-readable and stable: repeating blocks
+    of `out_time_us=`, `total_size=`, `speed=` and friends, terminated by
+    `progress=continue` (or `end`). Anything unparseable is skipped rather
+    than raised on -- this runs on its own thread, where an exception would
+    go to a stderr the windowed build does not have.
+    """
+    try:
+        for line in iter(stream.readline, ""):
+            if not line:
+                break
+            key, sep, value = line.strip().partition("=")
+            if sep:
+                try:
+                    on_value(key, value)
+                except Exception:
+                    log.debug("proxy gen: progress sink raised", exc_info=True)
+    except Exception:
+        log.debug("proxy gen: progress reader stopped early", exc_info=True)
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def parse_progress(key: str, value: str) -> Optional[tuple[str, float]]:
+    """One ffmpeg progress pair as ("seconds"|"speed", number), or None.
+
+    `out_time_us` is microseconds of OUTPUT written, which is what makes it
+    a percentage when divided by the source duration -- `frame=` would need
+    a frame count nothing probes, and `out_time=` is a formatted string.
+    Older builds emit `out_time_ms`, which is confusingly ALSO microseconds
+    (an ffmpeg quirk, not a typo here) -- both are read, both scaled the
+    same way. Every other key, including `total_size`, is ignored: the
+    finished proxy is measured off the disk where it cannot be wrong.
+    Never raises.
+    """
+    try:
+        text = str(value or "").strip()
+        if not text or text == "N/A":
+            return None
+        if key in ("out_time_us", "out_time_ms"):
+            return ("seconds", float(text) / 1_000_000.0)
+        if key == "speed":
+            # "1.23x" -- the multiple of real time ffmpeg is achieving.
+            return ("speed", float(text.rstrip("xX")))
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def sweep_stale_partials(
@@ -339,6 +417,18 @@ class ProxyGenerator:
         self.cfg = cfg
         self.local_root = str(cfg.get("local_root", "") or "")
         self.state_path = Path(state_dir) / NOTIFY_STATE_FILENAME
+        # The ledger of what this machine has actually made (proxy_history.py).
+        # Behind its own try for the same reason app.py builds the generator
+        # behind one: bookkeeping must never be why a companion cannot
+        # construct. None means "no history on this machine", and every call
+        # site tests for it.
+        self.history: Any = None
+        try:
+            self.history = proxy_history.ProxyHistory(
+                state_dir, wall_clock=wall_clock
+            )
+        except Exception:
+            log.exception("proxy gen: could not open the proxy history")
 
         # -- injected seams. Everything that touches the world is here, which
         # is what lets the state machine be tested with no ffmpeg anywhere.
@@ -398,6 +488,11 @@ class ProxyGenerator:
         # registered exactly like a worker's; insertion order is start order,
         # which is what makes _current deterministic.
         self._encoding: dict[int, str] = {}
+        # {thread ident: {"path", "duration_s", "started", "out_s", "speed"}} --
+        # the LIVE progress of those same encodes, kept beside _encoding rather
+        # than inside it because every consumer written before 2026-08-17 reads
+        # _encoding.values() as a list of paths and must keep doing so.
+        self._progress: dict[int, dict[str, Any]] = {}
         # The `.partial` paths those encodes are WRITING, normcased. Keyed on
         # the output rather than the source because that is what rule 2 is
         # about, and two sources can share one output (COMP-MEDIA-2,
@@ -535,13 +630,101 @@ class ProxyGenerator:
         with self._lock:
             self._partials.discard(self._partial_key(partial))
 
-    def _mark_encoding(self, path: str) -> None:
+    def _mark_encoding(self, path: str, duration_s: Any = None) -> None:
+        """Register this thread's encode. `duration_s` (from the probe) is
+        what turns ffmpeg's out_time into a percentage; None simply means the
+        tray shows elapsed time instead of a bar, which is also what every
+        pre-2026-08-17 caller passing one argument gets."""
+        try:
+            total = float(duration_s) if duration_s else 0.0
+        except (TypeError, ValueError):
+            total = 0.0
+        ident = threading.get_ident()
         with self._lock:
-            self._encoding[threading.get_ident()] = path
+            self._encoding[ident] = path
+            self._progress[ident] = {
+                "path": path,
+                "name": os.path.basename(str(path or "")),
+                "duration_s": total,
+                "started": self._clock(),
+                "out_s": 0.0,
+                "speed": None,
+                # None, not 0.0: the FIRST block must always publish, and a
+                # zero here would make it "too soon" for any clock that
+                # starts near zero -- which time.monotonic does on some
+                # platforms and every injected test clock does.
+                "published": None,
+            }
 
     def _clear_encoding(self) -> None:
+        ident = threading.get_ident()
         with self._lock:
-            self._encoding.pop(threading.get_ident(), None)
+            self._encoding.pop(ident, None)
+            self._progress.pop(ident, None)
+
+    def _note_progress_for(self, ident: int, key: str, value: str) -> None:
+        """Sink for one ffmpeg -progress pair, called from the reader thread.
+
+        `ident` is the ENCODING thread's, passed in because the reader runs
+        on its own and its get_ident() would key an entry nothing reads.
+
+        Rate-limited to PROGRESS_PUBLISH_SECONDS: ffmpeg emits a block per
+        output packet, and taking the lock gap() is read under hundreds of
+        times a second would stall the tray's refresh thread -- the exact
+        cost gap() is documented to avoid.
+        """
+        parsed = parse_progress(key, value)
+        if parsed is None:
+            return
+        field, number = parsed
+        now = self._clock()
+        with self._lock:
+            entry = self._progress.get(ident)
+            if entry is None:
+                # The encode was cleared (killed, finished) while its reader
+                # was still draining a bufferful. Nothing to update.
+                return
+            if field == "seconds":
+                last = entry.get("published")
+                if last is not None and (now - float(last)) < PROGRESS_PUBLISH_SECONDS:
+                    return
+                entry["published"] = now
+                entry["out_s"] = number
+            elif field == "speed":
+                entry["speed"] = number
+
+    def _encoding_detail(self) -> list[dict[str, Any]]:
+        """Per-clip live progress for the tray. CALLER HOLDS THE LOCK.
+
+        Percent is out_time/duration, clamped: a VFR source can report a
+        few frames past its probed duration and "103%" reads as a bug. ETA
+        comes from ffmpeg's own `speed` where it has one, because that is
+        measured against this clip on this GPU right now -- the ledger's
+        clips-per-hour is the queue-wide answer and lives in gap()["history"].
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in self._progress.values():
+            total = float(entry.get("duration_s") or 0.0)
+            out = float(entry.get("out_s") or 0.0)
+            percent: Optional[int] = None
+            eta: Optional[float] = None
+            if total > 0 and out > 0:
+                percent = int(max(0.0, min(1.0, out / total)) * 100)
+                speed = entry.get("speed")
+                try:
+                    speed = float(speed) if speed else 0.0
+                except (TypeError, ValueError):
+                    speed = 0.0
+                if speed > 0:
+                    eta = max(0.0, (total - out) / speed)
+            rows.append({
+                "path": entry.get("path") or "",
+                "name": entry.get("name") or "",
+                "percent": percent,
+                "eta_seconds": eta,
+                "elapsed_s": max(0.0, self._clock() - float(entry.get("started") or 0.0)),
+            })
+        return rows
 
     @property
     def _current(self) -> Optional[str]:
@@ -709,6 +892,14 @@ class ProxyGenerator:
         """
         with self._lock:
             in_flight = list(self._encoding.values())
+            left = len(self._queue) + len(in_flight)
+            detail = self._encoding_detail()
+        # OUTSIDE the lock, and its own: ProxyHistory keeps its rollup in
+        # memory for exactly this call, so it is arithmetic and no I/O --
+        # but taking two locks in one nesting order here and the other order
+        # anywhere else is how a tray thread deadlocks a drain.
+        history = self._history_snapshot(left)
+        with self._lock:
             return {
                 "missing": int(self._totals.get("missing", 0)),
                 "braw": int(self._totals.get("braw", 0)),
@@ -717,21 +908,45 @@ class ProxyGenerator:
                 # drain "left" without them would count down to 0 while four
                 # encodes were still running -- and this number is what the
                 # tray tooltip and menu line show the editor (2026-08-11).
-                "left": len(self._queue) + len(in_flight),
+                "left": left,
                 # Still a BOOL: the tray renders it as one and _menu_fingerprint
                 # hashes it, so the LINES of the menu must not change every time
                 # a different clip starts. The detail is in the two keys below.
                 "encoding": bool(in_flight),
                 "encoding_now": in_flight,
                 "encoding_count": len(in_flight),
+                # Per-clip percent/ETA. TOOLTIP MATERIAL ONLY: it changes every
+                # second, and anything the menu fingerprint hashes must not
+                # (tray._proxy_fingerprint).
+                "encoding_detail": detail,
                 "can_generate": bool(self.generation_enabled and self._ffmpeg_ok),
                 "state": self._state,
+                # This SESSION's counters, unchanged. The numbers that survive
+                # a restart are in "history" -- both are here because "since
+                # the companion started" is the honest answer to "is it
+                # working right now" and the ledger is the answer to "what has
+                # it made".
                 "generated": self._generated,
                 "failed": self._failed,
+                "history": history,
             }
+
+    def _history_snapshot(self, remaining: int = 0) -> dict[str, Any]:
+        """The ledger's rollup, or an empty one. Never raises, never blocks:
+        ProxyHistory answers this from memory precisely so gap() can."""
+        if self.history is None:
+            return {}
+        try:
+            return self.history.snapshot(remaining)
+        except Exception:
+            log.debug("proxy gen: the history snapshot failed", exc_info=True)
+            return {}
 
     def coverage(self) -> dict[str, Any]:
         """What the REPORTER sends. Same rules as gap(): cached, no I/O."""
+        with self._lock:
+            queued = len(self._queue) + len(self._encoding)
+        history = self._history_snapshot(queued)
         with self._lock:
             projects = {
                 rel: {
@@ -761,6 +976,12 @@ class ProxyGenerator:
                 "nvenc": bool(self._nvenc),
                 "scanned_at": self._scanned_at,
                 "projects": projects,
+                # SCALARS ONLY (proxy_history.snapshot's contract): the
+                # reporter's size guard drops the per-project map when a
+                # payload gets big, and this must never be the reason it has
+                # to. It is what lets the dashboard say what a machine has
+                # made without a second endpoint.
+                "history": history,
             }
 
     def block_reason(self) -> Optional[str]:
@@ -1237,6 +1458,26 @@ class ProxyGenerator:
         )
         reader.start()
 
+        # The -progress stream, when this argv asked for one. The sink is
+        # bound to THIS thread's ident here, on the encoding thread, and not
+        # inside the reader -- get_ident() there would be the reader's own.
+        # Daemon and never joined for progress' sake: the wait below is on the
+        # process, and a reader blocked on a pipe of a child that will not die
+        # must not hold the drain.
+        progress_reader: Optional[threading.Thread] = None
+        # getattr, not proc.stdout: an injected popen (every test's, and any
+        # future one) is only contracted to offer poll/kill/wait/stderr, and
+        # a missing attribute here would be an AttributeError out of the one
+        # function whose contract is that it never raises.
+        if getattr(proc, "stdout", None) is not None:
+            ident = threading.get_ident()
+            progress_reader = threading.Thread(
+                target=_drain_progress,
+                args=(proc.stdout, lambda k, v: self._note_progress_for(ident, k, v)),
+                name="ccsync-proxy-gen-progress", daemon=True,
+            )
+            progress_reader.start()
+
         started = self._clock()
         while True:
             if proc.poll() is not None:
@@ -1258,6 +1499,14 @@ class ProxyGenerator:
             reader.join(timeout=5.0)
         except Exception:
             log.debug("proxy gen: stderr reader would not join", exc_info=True)
+        if progress_reader is not None:
+            try:
+                # Bounded like the stderr join, and for the same reason: a
+                # child that survived _kill leaves this thread blocked on a
+                # pipe that never closes, and the drain must still return.
+                progress_reader.join(timeout=5.0)
+            except Exception:
+                log.debug("proxy gen: progress reader would not join", exc_info=True)
         result["returncode"] = proc.poll()
         # SNAPSHOT, inside a try: that join can time out (a _kill that failed
         # to reap the child leaves the reader appending), and iterating a deque
@@ -1386,16 +1635,35 @@ class ProxyGenerator:
         if kind == proxy_scan.KIND_PREVIEW:
             # The b-roll 540p spec verbatim, so a proxy made for a YouTube
             # download doubles as its b-roll preview.
-            return ffmpeg_tools.preview_proxy_cmd(
+            cmd = ffmpeg_tools.preview_proxy_cmd(
                 self.ffmpeg_path, path, partial, nvenc=nvenc
             )
-        return ffmpeg_tools.own_proxy_cmd(
-            self.ffmpeg_path, path, partial, nvenc=nvenc,
-            max_height=self.max_height, bitrate=self.bitrate,
-            # The ship-blocker: Resolve's LinkProxyMedia refuses a proxy whose
-            # timecode does not match the original (proxy_relink.py:35-37).
-            timecode=info.get("timecode"),
-        )
+        else:
+            cmd = ffmpeg_tools.own_proxy_cmd(
+                self.ffmpeg_path, path, partial, nvenc=nvenc,
+                max_height=self.max_height, bitrate=self.bitrate,
+                # The ship-blocker: Resolve's LinkProxyMedia refuses a proxy
+                # whose timecode does not match the original
+                # (proxy_relink.py:35-37).
+                timecode=info.get("timecode"),
+            )
+        return self._with_progress(cmd)
+
+    @staticmethod
+    def _with_progress(cmd: list[str]) -> list[str]:
+        """Ask ffmpeg for a machine-readable progress stream on stdout.
+
+        Added HERE rather than in ffmpeg_tools' builders because those two
+        argvs are the shared spec for what a Creators Club proxy IS -- the
+        b-roll indexer builds the same files from the same functions -- and
+        how one caller watches its own encode is not part of that. Position
+        1 because `-progress` is a global option and everything after the
+        output path would be a different (and rejected) argv; the output
+        stays LAST, which several callers rely on.
+        """
+        if not cmd or wants_progress(cmd):
+            return list(cmd)
+        return [cmd[0], "-progress", "pipe:1"] + list(cmd[1:])
 
     def encode_once(self, clip: Optional[dict[str, Any]] = None) -> str:
         """Take one clip off the front of the queue and make its proxy.
@@ -1439,7 +1707,9 @@ class ProxyGenerator:
             try:
                 os.makedirs(os.path.dirname(partial), exist_ok=True)
             except OSError as exc:
-                self._record_failure(clip, f"the Proxy folder could not be made ({exc})")
+                why = f"the Proxy folder could not be made ({exc})"
+                self._record_failure(clip, why)
+                self._record_history(proxy_history.RESULT_FAILED, clip, error=why)
                 return RESULT_FAILED
 
             try:
@@ -1448,9 +1718,16 @@ class ProxyGenerator:
                 # Not transient: a file with no moov atom will never grow one.
                 # Counted like any other failure so the cap eventually silences it.
                 self._record_failure(clip, str(exc))
+                # Recorded like any other failure, and the one an editor is
+                # most likely to go looking for: a truncated download is the
+                # usual cause, and the ledger is where "which clips never made
+                # it?" gets answered after the log has rotated.
+                self._record_history(proxy_history.RESULT_FAILED, clip, error=str(exc))
                 return RESULT_FAILED
             except Exception as exc:
-                self._record_failure(clip, f"could not be probed ({exc})")
+                why = f"could not be probed ({exc})"
+                self._record_failure(clip, why)
+                self._record_history(proxy_history.RESULT_FAILED, clip, error=why)
                 return RESULT_FAILED
 
             duration = info.get("duration_s")
@@ -1461,7 +1738,10 @@ class ProxyGenerator:
             except (TypeError, ValueError):
                 ceiling = STUCK_FLOOR_SECONDS
 
-            self._mark_encoding(path)
+            # The probed duration goes in with the path: it is the denominator
+            # of every percentage the tray shows, and this is the one place
+            # that has it.
+            self._mark_encoding(path, duration)
             try:
                 return self._encode_clip(clip, info, partial, ceiling, forced)
             finally:
@@ -1469,9 +1749,55 @@ class ProxyGenerator:
         finally:
             self._release_partial(partial)
 
+    @staticmethod
+    def _encoder_name(cmd: Any) -> str:
+        """The `-c:v` value from an argv -- "hevc_nvenc", "libx265", "h264".
+
+        Read off the command rather than passed down from the nvenc flag,
+        because the flag says which ATTEMPT this is and the ledger should
+        record what actually ran: the CPU retry after a failed GPU encode is
+        the case where the two disagree, and it is the interesting one.
+        """
+        try:
+            argv = list(cmd)
+            return str(argv[argv.index("-c:v") + 1])
+        except (ValueError, IndexError, TypeError):
+            return ""
+
+    def _record_history(self, result: str, clip: dict[str, Any], *,
+                        info: Optional[dict[str, Any]] = None,
+                        encoder: str = "", proxy_bytes: int = 0,
+                        encode_s: float = 0.0, error: str = "") -> None:
+        """Append one finished clip to the ledger. Never raises, never blocks
+        an outcome: proxy_history swallows its own I/O errors and this only
+        adds the "no history on this machine" case around them."""
+        if self.history is None:
+            return
+        try:
+            self.history.record(
+                result,
+                clip.get("path"),
+                project=str(clip.get("project") or ""),
+                kind=str(clip.get("kind") or ""),
+                encoder=encoder,
+                src_bytes=clip.get("size") or 0,
+                proxy_bytes=proxy_bytes,
+                duration_s=(info or {}).get("duration_s") or 0.0,
+                encode_s=encode_s,
+                error=error,
+            )
+        except Exception:
+            log.debug("proxy gen: could not record history for %r",
+                      clip.get("path"), exc_info=True)
+
     def _encode_clip(self, clip: dict[str, Any], info: dict[str, Any], partial: str,
                      ceiling: float, forced: bool) -> str:
         path = str(clip.get("path") or "")
+        # Wall time for the WHOLE clip -- encode, verification decode and
+        # publish. That is what "how long did this clip cost" means to
+        # somebody reading the ledger, and the verify is a full decode of the
+        # file we just wrote, so it is a real share of the cost.
+        clip_started = self._clock()
         with self._lock:
             nvenc = self._nvenc
         # NVENC first when the build has it, then EXACTLY ONE CPU retry --
@@ -1505,8 +1831,12 @@ class ProxyGenerator:
                 return RESULT_INTERRUPTED
             if outcome.get("timed_out"):
                 self._discard(partial)
-                self._record_failure(
-                    clip, f"the encode was still running after {ceiling / 60:.0f} minutes",
+                why = f"the encode was still running after {ceiling / 60:.0f} minutes"
+                self._record_failure(clip, why)
+                self._record_history(
+                    proxy_history.RESULT_FAILED, clip, info=info,
+                    encoder=self._encoder_name(cmd), error=why,
+                    encode_s=self._clock() - clip_started,
                 )
                 return RESULT_FAILED
 
@@ -1531,7 +1861,23 @@ class ProxyGenerator:
                 published = self._publish(path, partial)
                 if published is not None:
                     self._record_failure(clip, published)
+                    self._record_history(
+                        proxy_history.RESULT_FAILED, clip, info=info,
+                        encoder=self._encoder_name(cmd), error=published,
+                        encode_s=self._clock() - clip_started,
+                    )
                     return RESULT_FAILED
+                self._record_history(
+                    proxy_history.RESULT_DONE, clip, info=info,
+                    encoder=self._encoder_name(cmd),
+                    # Stat the file we just put in place. 0 when _publish
+                    # discarded ours because a proxy arrived under the OTHER
+                    # extension while we encoded -- the clip really is covered,
+                    # which is why this is still a "done", and the bytes we
+                    # wrote really are gone.
+                    proxy_bytes=self._published_size(partial),
+                    encode_s=self._clock() - clip_started,
+                )
                 with self._lock:
                     self._generated += 1
                     # The gap shrinks as the queue drains: the tray would
@@ -1549,10 +1895,26 @@ class ProxyGenerator:
                     "proxy gen: the GPU encode of %s failed (%s) -- retrying once on "
                     "the CPU", os.path.basename(path), failure,
                 )
+                # NOT recorded: the CPU retry is about to run and one clip is
+                # one ledger line. A GPU attempt that the retry rescues is a
+                # log detail, not a failure the editor should count.
                 continue
             self._record_failure(clip, failure)
+            self._record_history(
+                proxy_history.RESULT_FAILED, clip, info=info,
+                encoder=self._encoder_name(cmd), error=failure,
+                encode_s=self._clock() - clip_started,
+            )
             return RESULT_FAILED
         return RESULT_FAILED
+
+    @staticmethod
+    def _published_size(partial: str) -> int:
+        """Bytes of the proxy that `partial` became, or 0 if it is not there."""
+        try:
+            return int(os.path.getsize(partial[: -len(proxy_scan.PARTIAL_SUFFIX)]))
+        except OSError:
+            return 0
 
     def _requeue_front(self, clip: dict[str, Any]) -> None:
         # Several workers can requeue in the same second now (the user comes

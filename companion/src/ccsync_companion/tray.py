@@ -25,6 +25,7 @@ import pystray  # noqa: F401  (raises ImportError here if missing — by design)
 from PIL import Image, ImageDraw
 
 from . import config as config_mod
+from . import proxy_history
 from . import resolve_bridge
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
@@ -1775,6 +1776,54 @@ def _menu_fingerprint(snap: dict) -> tuple:
     )
 
 
+# How coarsely the two history-driven menu lines are allowed to move. Same
+# trade _progress_bucket() makes: a rebuild is a small risk to a menu the
+# user may have open, so "made today" steps in 25s (visible progress on a run
+# of hundreds, ~20 rebuilds a night instead of 500) and the ETA in 15-minute
+# steps (below that it is noise anyway -- one long clip moves it further).
+MADE_TODAY_BUCKET = 25
+ETA_BUCKET_SECONDS = 900
+
+
+def _proxy_history(gap: Optional[dict]) -> dict:
+    """The ledger block off a proxy gap, or {}. Never raises: an older
+    generator (or one whose history failed to open) has no such key."""
+    if not isinstance(gap, dict):
+        return {}
+    history = gap.get("history")
+    return history if isinstance(history, dict) else {}
+
+
+def _proxy_made_line(gap: Optional[dict]) -> str:
+    """"Made 528 proxies today · 1.2 TB → 41 GB", or "" on a quiet day."""
+    today = (_proxy_history(gap).get("today") or {})
+    try:
+        done = int(today.get("done") or 0)
+        failed = int(today.get("failed") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not done and not failed:
+        return ""
+    text = f"Made {done} proxies today" if done != 1 else "Made 1 proxy today"
+    src, proxy = today.get("src_bytes") or 0, today.get("proxy_bytes") or 0
+    if done and src and proxy:
+        text += (f" · {proxy_history.human_bytes(src)} → "
+                 f"{proxy_history.human_bytes(proxy)}")
+    if failed:
+        # Named, not hidden: a failure the editor never hears about is one
+        # nobody re-shoots, re-downloads or reports.
+        text += f" · {failed} failed" if failed != 1 else " · 1 failed"
+    return text
+
+
+def _proxy_eta_line(gap: Optional[dict]) -> str:
+    """"About 2h 40m to go at this rate", or "" until the rate is known."""
+    eta = _proxy_history(gap).get("eta_seconds")
+    if not eta:
+        return ""
+    return f"About {proxy_history.human_duration(eta)} to go at this rate"
+
+
 def _proxy_fingerprint(gap: Optional[dict]) -> tuple:
     """The parts of the proxy gap that change which LINES the menu has.
 
@@ -1785,14 +1834,39 @@ def _proxy_fingerprint(gap: Optional[dict]) -> tuple:
     new callback list (wrong action). The live number goes in the TOOLTIP,
     which is a plain NIM_MODIFY and safe at any time -- the same split
     _progress_bucket() makes for transfer progress.
+
+    The two history lines are here BUCKETED, for exactly that reason: they
+    are worth showing (a run of hundreds that never updates reads as a stuck
+    companion) and not worth a rebuild per clip.
     """
     if not isinstance(gap, dict):
         return ()
+    today = (_proxy_history(gap).get("today") or {})
+    try:
+        made = int(today.get("done") or 0) // MADE_TODAY_BUCKET
+        failed = int(today.get("failed") or 0)
+    except (TypeError, ValueError):
+        made, failed = 0, 0
+    eta = _proxy_history(gap).get("eta_seconds")
+    try:
+        eta_bucket = int(float(eta) // ETA_BUCKET_SECONDS) if eta else None
+    except (TypeError, ValueError):
+        eta_bucket = None
     return (
         int(gap.get("missing") or 0),
         int(gap.get("braw") or 0),
         bool(gap.get("encoding")),
         bool(gap.get("can_generate")),
+        made,
+        # NOT bucketed: failures are rare, and the first one of a night is
+        # the whole point of the line.
+        failed,
+        eta_bucket,
+        # Whether the ledger has anything in it at all: on a machine that
+        # cannot generate, that is what decides whether the "Proxies this
+        # machine has made…" item EXISTS, and a structural change nothing
+        # hashes is an item that never appears (UI-3's family).
+        bool(_proxy_history(gap).get("last_at")),
     )
 
 
@@ -1801,6 +1875,32 @@ def _proxy_fingerprint(gap: Optional[dict]) -> tuple:
 # half-eaten "· 12 need pro" reads like a bug, and this line is the LEAST
 # important thing the tooltip can say.
 TOOLTIP_LIMIT = 120
+
+
+def _leading_percent(gap: Optional[dict]) -> Optional[int]:
+    """The highest per-clip percentage among the encodes in flight, or None.
+
+    None covers every "cannot say yet" -- an ffmpeg that has not emitted a
+    progress block, a source with no probed duration, an older generator
+    with no `encoding_detail` at all -- and the tooltip then simply omits it
+    rather than showing a 0% that never moves.
+    """
+    if not isinstance(gap, dict):
+        return None
+    best: Optional[int] = None
+    for entry in gap.get("encoding_detail") or ():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            percent = entry.get("percent")
+            if percent is None:
+                continue
+            value = int(percent)
+        except (TypeError, ValueError):
+            continue
+        if best is None or value > best:
+            best = value
+    return best
 
 
 def _with_proxy_suffix(text: str, snap: dict) -> str:
@@ -1817,6 +1917,13 @@ def _with_proxy_suffix(text: str, snap: dict) -> str:
     if gap.get("encoding"):
         count = int(gap.get("left") or 0)
         suffix = f" · making {count} proxy file(s)" if count else " · making proxies"
+        # The percentage of the clip that is FURTHEST ALONG. One number, not
+        # four: the drain runs up to 4 wide and the tooltip has ~120
+        # characters for everything, and "the next one lands soon" is what an
+        # editor watching this actually wants to know.
+        percent = _leading_percent(gap)
+        if percent is not None:
+            suffix += f", next at {percent}%"
     else:
         count = int(gap.get("missing") or 0)
         if count <= 0:
@@ -1897,6 +2004,15 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     def on_stop_proxies(icon, item):
         _spawn(app, "Stop making proxies",
                getattr(app, "stop_proxy_generation", None) or (lambda: None))
+
+    def on_proxy_history(icon, item):
+        # Rendering the report reads the ledger off disk, so it goes through
+        # _spawn like every other action rather than running on the message
+        # loop, and _open_log does the platform launch (and the sanitized
+        # child env) exactly as it does for the log itself.
+        _spawn(app, "Proxy history", lambda: _open_log(
+            (getattr(app, "proxy_history_report", None) or (lambda: ""))()
+        ))
 
     def on_toggle_pause(icon, item):
         # _spawn, not _guarded: menu callbacks run ON the tray's message
@@ -2012,6 +2128,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         # my machine is busy?"). The count is a bucketed rebuild, not a live
         # ticker -- see _proxy_fingerprint.
         proxy_lines.append(f"Making proxies… {proxy_left} left (stops when you're back)")
+        eta = _proxy_eta_line(proxy_gap)
+        if eta:
+            proxy_lines.append(eta)
     elif proxy_missing:
         proxy_lines.append(
             f"{proxy_missing} clips have no proxy — other editors can't see them"
@@ -2027,6 +2146,13 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
             if proxy_braw != 1 else
             "1 BRAW clip needs the Blackmagic Proxy Generator"
         )
+    # What this machine has MADE, from the ledger that survives restarts
+    # (proxy_history.py). Last of the advisory lines because it is the only
+    # one that is not asking for anything: everything above is a gap, this is
+    # the work already done.
+    proxy_made = _proxy_made_line(proxy_gap)
+    if proxy_made:
+        proxy_lines.append(proxy_made)
     proxy_items = [pystray.MenuItem(line, None, enabled=False) for line in proxy_lines]
     # The two ACTIONS live under Advanced: "make them now" costs a full tree
     # walk plus hours of encoding, and neither is something to hit by accident
@@ -2037,6 +2163,14 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     elif proxy_missing and proxy_gap.get("can_generate"):
         proxy_actions.append(pystray.MenuItem(
             "Make the missing proxies now (don't wait until I'm away)", on_make_proxies,
+        ))
+    # Always offered where this machine can generate at all, gap or no gap:
+    # the question it answers ("what did it make overnight?") is asked
+    # precisely when there is nothing left to do and the menu says nothing.
+    # A STABLE LABEL, so it never moves the menu fingerprint.
+    if proxy_gap.get("can_generate") or _proxy_history(proxy_gap).get("last_at"):
+        proxy_actions.append(pystray.MenuItem(
+            "Proxies this machine has made…", on_proxy_history,
         ))
 
     # "nothing syncs until you do" is only TRUE when login is required. With

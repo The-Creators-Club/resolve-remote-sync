@@ -3919,6 +3919,29 @@ class CompanionApp:
         self.proxy_generator.cancel_run()
         self._notify_tray("Stopped making proxies.", "ccsync-companion")
 
+    def proxy_history_report(self) -> str:
+        """Render the ledger as text and return the file's path ("" if none).
+
+        The tray opens what this returns with its own _open_log(), which is
+        the one place that knows to strip PYTHONHOME/PYTHON3HOME from a
+        child's environment (AUDIT_2 CORE-M6) -- so this writes and does not
+        launch. Rendered fresh on every call: proxy_history.jsonl is the
+        store, the .txt is a view of it.
+        """
+        history = getattr(self.proxy_generator, "history", None)
+        if history is None:
+            self._notify_tray("Proxy generation is not set up on this machine.")
+            return ""
+        try:
+            path = history.write_report()
+        except Exception:
+            log.exception("could not write the proxy history report")
+            path = None
+        if not path:
+            self._notify_tray("The proxy history could not be written.")
+            return ""
+        return str(path)
+
     def share_stray_luts(self) -> None:
         """Tray action: copy this machine's unshared LUTs into the library.
 

@@ -666,3 +666,29 @@ refuses a proxy whose timecode does not match the original
 00:00:00:00 -- i.e. every generated proxy would be rejected, silently, by
 the relinker that is supposed to attach it. A source with no timecode gets
 no `-timecode` flag at all: writing a zero onto it is a mismatch of its own.
+
+### `-progress`: `out_time_ms` is microseconds, and an unread pipe hangs the encode
+
+Added 2026-08-17 with the proxy ledger (`proxy_history.py`), which is where
+the tray's per-clip percentage comes from.
+
+`ffmpeg -progress pipe:1` writes repeating `key=value` blocks, and the one
+worth reading is `out_time_us` -- output written, so dividing by the probed
+source duration is the percentage. Older builds emit **`out_time_ms`, which
+also holds MICROSECONDS**: it is a long-standing ffmpeg misnaming, not a
+typo, and treating it as milliseconds puts every encode at 0% for ever.
+`parse_progress` scales both the same way.
+
+The pipe itself is the sharper edge. Asking for `pipe:1` means the child now
+writes to a pipe whose OS buffer is ~64 KB, and a full pipe **blocks the
+encoder**, permanently -- the classic `Popen` deadlock the bounded stderr
+deque already exists to avoid. So `_default_popen` opens stdout as a PIPE
+only when the argv asked for `-progress` (`wants_progress`), and `_run_ffmpeg`
+starts a drain thread for it in the same breath. If you ever add `-progress`
+to an argv that some other code path runs, make sure that path drains it.
+
+Two smaller ones. The `-progress` flag is a **global** option: it goes right
+after the binary, never after the output path, and the output must stay last
+because several callers index `cmd[-1]`. And publish at most once a second --
+ffmpeg emits a block per output packet, hundreds a second, and each one takes
+the lock the tray's refresh thread reads `gap()` under.

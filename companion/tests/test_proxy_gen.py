@@ -1861,3 +1861,258 @@ def test_a_failed_renice_is_a_slower_machine_not_a_failed_encode(monkeypatch):
     monkeypatch.setattr(os, "setpriority", _boom, raising=False)
     monkeypatch.setattr(os, "PRIO_PROCESS", 0, raising=False)
     assert proxy_gen._default_popen(["ffmpeg"]) is not None
+
+
+# -- the ledger: what this machine has made (proxy_history.py) ---------------
+#
+# The generator's own `_generated`/`_failed` are SESSION counters and reset
+# with the process; these are the wiring that makes the answer survive a
+# restart, plus the live progress the tray reads while a drain is running.
+
+
+def test_a_finished_clip_is_written_to_the_ledger(tmp_path):
+    src = _original(tmp_path, size=4000)
+    gen = _make_gen(tmp_path)
+    clip = _clip(src)
+    clip["project"] = "2026/FF5/Nuclear"
+    gen._queue = [clip]
+
+    assert gen.encode_once() == proxy_gen.RESULT_DONE
+
+    rows = gen.history.recent()
+    assert len(rows) == 1
+    entry = rows[0]
+    assert entry["result"] == "done"
+    assert entry["name"] == "A001.mp4"
+    assert entry["project"] == "2026/FF5/Nuclear"
+    assert entry["src_bytes"] == 4000
+    # The size of the file that was actually put in place, not the partial's.
+    assert entry["proxy_bytes"] == len(_FakeFfmpeg().written_bytes)
+    assert entry["duration_s"] == 60.0          # from the probe
+    assert entry["encoder"] == "libx265"        # the CPU path this fake takes
+
+
+def test_a_failed_clip_is_written_to_the_ledger_with_its_reason(tmp_path):
+    src = _original(tmp_path)
+    ffmpeg = _FakeFfmpeg()
+    ffmpeg.encode_returncode = 1
+    ffmpeg.encode_stderr = "Error initializing the muxer"
+    gen = _make_gen(tmp_path, encode_fn=ffmpeg)
+    gen._queue = [_clip(src)]
+
+    assert gen.encode_once() == proxy_gen.RESULT_FAILED
+    entry = gen.history.recent()[0]
+    assert entry["result"] == "failed"
+    assert "Error initializing the muxer" in entry["error"]
+
+
+def test_an_unreadable_original_is_recorded_too(tmp_path):
+    """The failure an editor is most likely to go hunting for -- a truncated
+    download -- and the log it used to live in only rotates."""
+    src = _original(tmp_path)
+
+    def _boom(ffmpeg_path, path):
+        raise proxy_gen.ffmpeg_tools.UnreadableMediaError("no moov atom")
+
+    gen = _make_gen(tmp_path, probe_fn=_boom)
+    gen._queue = [_clip(src)]
+
+    assert gen.encode_once() == proxy_gen.RESULT_FAILED
+    assert "no moov atom" in gen.history.recent()[0]["error"]
+
+
+def test_a_gpu_attempt_the_cpu_retry_rescues_is_one_ledger_line(tmp_path):
+    """One clip is one record. A GPU failure the retry fixes is a log detail,
+    not a failure the editor should count."""
+    src = _original(tmp_path)
+    ffmpeg = _FakeFfmpeg()
+    ffmpeg.nvenc_fails = True
+    gen = _make_gen(tmp_path, encode_fn=ffmpeg,
+                    encoders_fn=lambda path: frozenset({"hevc_nvenc"}))
+    gen.scan_once()                              # probes for NVENC
+    gen._queue = [_clip(src)]
+
+    assert gen.encode_once() == proxy_gen.RESULT_DONE
+    rows = gen.history.recent()
+    assert len(rows) == 1 and rows[0]["result"] == "done"
+    # ...and it records the encoder that actually produced the file.
+    assert rows[0]["encoder"] == "libx265"
+
+
+def test_skipped_and_interrupted_clips_are_not_recorded(tmp_path):
+    """Both mean "no work happened", both are routine (lane B delivered the
+    proxy first; the editor came back), and a ledger full of them buries the
+    lines that matter."""
+    src = _original(tmp_path)
+    proxy_dir = src.parent / "Proxy"
+    proxy_dir.mkdir()
+    (proxy_dir / "A001.mov").write_bytes(b"lane B got there first")
+    gen = _make_gen(tmp_path)
+    gen._queue = [_clip(src)]
+    assert gen.encode_once() == proxy_gen.RESULT_SKIPPED
+
+    other = _original(tmp_path, name="A002.mp4")
+    gen2 = _make_gen(tmp_path, idle_probe=_Idle(None))   # cannot tell = not away
+    gen2._queue = [_clip(other)]
+    assert gen2.encode_once() == proxy_gen.RESULT_INTERRUPTED
+
+    assert gen.history.recent() == []
+    assert gen2.history.recent() == []
+
+
+def test_the_gap_carries_the_ledger_for_the_tray(tmp_path):
+    src = _original(tmp_path)
+    gen = _make_gen(tmp_path)
+    gen._queue = [_clip(src)]
+    gen.encode_once()
+
+    history = gen.gap()["history"]
+    assert history["today"]["done"] == 1
+    assert history["lifetime"]["done"] == 1
+    # coverage() carries the same block, so the dashboard can say it too.
+    assert gen.coverage()["history"]["lifetime"]["done"] == 1
+
+
+def test_the_ledger_survives_a_restart_but_the_session_counter_does_not(tmp_path):
+    src = _original(tmp_path)
+    gen = _make_gen(tmp_path)
+    gen._queue = [_clip(src)]
+    gen.encode_once()
+    assert gen.gap()["generated"] == 1
+
+    restarted = _make_gen(tmp_path)              # a new companion process
+    assert restarted.gap()["generated"] == 0
+    assert restarted.gap()["history"]["lifetime"]["done"] == 1
+
+
+def test_a_generator_with_no_history_still_answers(tmp_path):
+    """The ledger is allowed to fail to open (proxy_gen's rule 3); every
+    reader has to survive it."""
+    gen = _make_gen(tmp_path)
+    gen.history = None
+    assert gen.gap()["history"] == {}
+    assert gen.coverage()["history"] == {}
+    # ...and an encode still completes and is still counted in the session.
+    gen._queue = [_clip(_original(tmp_path))]
+    assert gen.encode_once() == proxy_gen.RESULT_DONE
+    assert gen.gap()["generated"] == 1
+
+
+# -- live progress ------------------------------------------------------------
+
+
+def test_the_encode_asks_ffmpeg_for_a_progress_stream(tmp_path):
+    src = _original(tmp_path)
+    ffmpeg = _FakeFfmpeg()
+    gen = _make_gen(tmp_path, encode_fn=ffmpeg)
+    gen._queue = [_clip(src)]
+    gen.encode_once()
+
+    encode_cmd = ffmpeg.calls[0]
+    assert encode_cmd[1:3] == ["-progress", "pipe:1"]
+    # The output path stays LAST -- several callers index it that way.
+    assert encode_cmd[-1].endswith(".mp4.partial")
+    # The verification decode does NOT ask for one: nothing watches it.
+    verify = next(cmd for cmd in ffmpeg.calls if _FakeFfmpeg._is_verify(cmd))
+    assert "-progress" not in verify
+
+
+def test_stdout_is_piped_only_when_progress_was_asked_for(monkeypatch):
+    """An undrained pipe fills its ~64 KB buffer and blocks the encoder for
+    ever -- so a pipe is opened only where a reader is started for it."""
+    import subprocess as sp
+
+    captured: dict = {}
+
+    def _popen(cmd, **kwargs):
+        captured[tuple(cmd)] = kwargs
+        return type("P", (), {"pid": 1})()
+
+    monkeypatch.setattr(sp, "Popen", _popen)
+    proxy_gen._default_popen(["ffmpeg", "-progress", "pipe:1", "-i", "x"])
+    proxy_gen._default_popen(["ffmpeg", "-i", "x"])
+
+    assert captured[("ffmpeg", "-progress", "pipe:1", "-i", "x")]["stdout"] is sp.PIPE
+    assert captured[("ffmpeg", "-i", "x")]["stdout"] is sp.DEVNULL
+
+
+def test_progress_pairs_become_a_percentage_and_an_eta(tmp_path):
+    gen = _make_gen(tmp_path)
+    ident = threading.get_ident()
+    gen._mark_encoding("A001.mp4", duration_s=100.0)
+
+    gen._note_progress_for(ident, "out_time_us", "25000000")   # 25 s of 100
+    gen._note_progress_for(ident, "speed", "2.0x")
+
+    detail = gen.gap()["encoding_detail"]
+    assert len(detail) == 1
+    assert detail[0]["name"] == "A001.mp4"
+    assert detail[0]["percent"] == 25
+    # 75 s of source left, encoding at 2x real time.
+    assert detail[0]["eta_seconds"] == pytest.approx(37.5)
+
+
+def test_progress_says_nothing_rather_than_zero_when_it_cannot_tell(tmp_path):
+    """A source with no probed duration, or an ffmpeg that has not emitted a
+    block yet: the tray omits the number rather than showing a 0% that never
+    moves."""
+    gen = _make_gen(tmp_path)
+    gen._mark_encoding("A001.mp4")                # no duration
+    gen._note_progress_for(threading.get_ident(), "out_time_us", "25000000")
+    assert gen.gap()["encoding_detail"][0]["percent"] is None
+
+    gen2 = _make_gen(tmp_path)
+    gen2._mark_encoding("A002.mp4", duration_s=100.0)   # duration, no progress yet
+    assert gen2.gap()["encoding_detail"][0]["percent"] is None
+
+
+def test_a_vfr_source_running_past_its_duration_does_not_report_over_100(tmp_path):
+    gen = _make_gen(tmp_path)
+    gen._mark_encoding("A001.mp4", duration_s=10.0)
+    gen._note_progress_for(threading.get_ident(), "out_time_us", "11000000")
+    assert gen.gap()["encoding_detail"][0]["percent"] == 100
+
+
+def test_progress_for_a_cleared_encode_is_dropped(tmp_path):
+    """A reader can still be draining a bufferful after its encode was killed
+    -- there is nothing left to update, and inventing an entry would leave a
+    clip on the tray for ever."""
+    gen = _make_gen(tmp_path)
+    gen._mark_encoding("A001.mp4", duration_s=10.0)
+    gen._clear_encoding()
+    gen._note_progress_for(threading.get_ident(), "out_time_us", "5000000")
+    assert gen.gap()["encoding_detail"] == []
+
+
+def test_progress_publishing_is_rate_limited(tmp_path):
+    """ffmpeg emits a block per output packet -- hundreds a second -- and
+    every one would take the lock the tray's refresh thread reads gap()
+    under."""
+    ticks = iter([0.0, 0.0, 0.1, 0.2])
+    gen = _make_gen(tmp_path, clock=lambda: next(ticks, 99.0))
+    ident = threading.get_ident()
+    gen._mark_encoding("A001.mp4", duration_s=100.0)
+
+    gen._note_progress_for(ident, "out_time_us", "10000000")   # published
+    gen._note_progress_for(ident, "out_time_us", "20000000")   # too soon
+    gen._note_progress_for(ident, "out_time_us", "30000000")   # too soon
+    assert gen.gap()["encoding_detail"][0]["percent"] == 10
+
+
+def test_the_progress_parser_ignores_everything_it_does_not_know():
+    assert proxy_gen.parse_progress("out_time_us", "22022000") == ("seconds", 22.022)
+    # Older builds call microseconds "ms". An ffmpeg quirk, not a typo here.
+    assert proxy_gen.parse_progress("out_time_ms", "22022000") == ("seconds", 22.022)
+    assert proxy_gen.parse_progress("speed", "1.23x") == ("speed", 1.23)
+    assert proxy_gen.parse_progress("frame", "120") is None
+    assert proxy_gen.parse_progress("out_time_us", "N/A") is None
+    assert proxy_gen.parse_progress("speed", "") is None
+    assert proxy_gen.parse_progress("out_time_us", "nonsense") is None
+
+
+def test_the_encoding_now_list_is_still_a_list_of_paths(tmp_path):
+    """Every consumer written before the progress block reads it that way."""
+    gen = _make_gen(tmp_path)
+    gen._mark_encoding("A001.mp4", duration_s=10.0)
+    assert gen.gap()["encoding_now"] == ["A001.mp4"]
+    assert gen.gap()["encoding_count"] == 1

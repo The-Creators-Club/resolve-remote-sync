@@ -50,7 +50,13 @@ log = logging.getLogger("ccsync.config")
 # editor cannot see. Plus the R12 path-canon work reaching the fleet with a
 # warning attached to it: 0.7.6 shipped the classification, this ships the
 # thing that TELLS someone when the bridge those fixes depend on is dead.
-VERSION = "0.7.9"
+# 0.7.10: the proxy ledger (proxy_history.py) -- a durable record of every
+# proxy this machine has made, surviving restarts and upgrades that the
+# in-process counters never did, plus per-clip percent/ETA parsed from
+# ffmpeg -progress. Carries the 0.7.9 work too (requester-first ytdl, the
+# pinned ffmpeg/deno sidecars, signed-in downloads), which was bumped but
+# never built: the fleet goes 0.7.8 -> 0.7.10 and skips 0.7.9 entirely.
+VERSION = "0.7.10"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

@@ -274,10 +274,100 @@ tr.current-row { background: var(--field); }
   padding: 0.8rem 1rem 1rem;
 }
 
+/* ---------------- checkboxes (2026-08-17) ----------------------------
+   ONE themed control for every checkbox in the dashboard: the sidebar's
+   `.proj-check` (an editor ticking their own queue, or an admin ticking
+   under `?as=`) and the assignments matrix's `.matrix-check` (one admin
+   page, every editor's column) share this base. The element stays a real
+   `<input type="checkbox">` -- `appearance: none` only removes the UA
+   chrome, so existing markup/tests that assert on `type="checkbox"` and
+   `.checked`/`.checked` still hold; only the paint changes.
+
+   States:
+     unchecked      -- field-coloured box, dim red border
+     checked        -- red border + glow, a check mark drawn with an
+                       inline SVG data-URI mask (no external asset --
+                       nothing here may reach off-box, see loopback CSP
+                       note in CLAUDE.md)
+     :hover         -- border brightens to red-hot
+     :focus-visible -- amber outline ring, reachable by Tab + Space
+     :disabled      -- dimmed, default cursor; used while a write is
+                       in flight in an ALTERNATE way, see .is-saving below
+     :indeterminate -- amber dash instead of a check (not wired to any
+                       control yet; a "some but not all" column header
+                       would use it)
+     .is-saving     -- JS-applied for the round trip of a matrix write
+                       (assignments.js): a slow opacity pulse, so a click
+                       mid-request reads as "in progress", not "ignored"
+   ----------------------------------------------------------------------- */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1em;
+  height: 1em;
+  min-width: 1em;
+  border: 1px solid var(--red-dim);
+  border-radius: 2px;
+  background: var(--field);
+  cursor: pointer;
+  position: relative;
+  vertical-align: middle;
+  flex-shrink: 0;
+  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+input[type="checkbox"]:hover:not(:disabled) { border-color: var(--red-hot); }
+input[type="checkbox"]:checked {
+  border-color: var(--red);
+  background: var(--red-dim);
+  box-shadow: 0 0 6px rgba(255, 33, 64, 0.55);
+}
+/* Inline data URI, not a static asset: a checkmark glyph would need a font
+   pass to size/align, and an <img> would be a second element to keep in
+   sync with :checked. mask-image lets the SAME shape be tinted with
+   `background`, so a checked-but-disabled box dims correctly for free. */
+input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: var(--text);
+  -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 8.5l3.8 3.8L14 4" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>') center / contain no-repeat;
+  mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 8.5l3.8 3.8L14 4" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>') center / contain no-repeat;
+}
+input[type="checkbox"]:indeterminate {
+  border-color: var(--amber);
+}
+input[type="checkbox"]:indeterminate::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: calc(50% - 1px);
+  height: 2px;
+  background: var(--amber);
+}
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+input[type="checkbox"]:disabled {
+  opacity: 0.4;
+  cursor: default;
+  border-color: #3a3a42;
+}
+/* .is-saving can coexist with :disabled (assignments.js sets both while a
+   write is in flight) -- the animation still needs to win over the plain
+   disabled dimming, so it is not scoped with :not(.is-saving) anywhere. */
+input[type="checkbox"].is-saving {
+  animation: cb-saving-pulse 0.9s ease-in-out infinite;
+}
+@keyframes cb-saving-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 /* ---------------- sidebar checkbox ---------------- */
 .project-link { display: flex; align-items: baseline; gap: 0.4rem; }
 .proj-check {
-  accent-color: var(--red);
   cursor: pointer;
   flex-shrink: 0;
 }
@@ -372,6 +462,103 @@ details.bin[open] > summary { color: var(--red-hot); }
 .clip-list { list-style: none; margin: 0.2rem 0 0.4rem 1.4rem; }
 .clip-list li { display: flex; align-items: baseline; gap: 0.4rem; padding: 0.05rem 0; }
 .clip-list .clip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------------- admin: assignment matrix (2026-08-17) ---------------- */
+.assign-toolbar {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+.assign-filter {
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 0.3rem 0.5rem;
+  min-width: 220px;
+}
+.assign-filter:focus { outline: none; border-color: var(--red); }
+/* Fleets run 5-15 editors x 20-100 projects -- both dimensions can outgrow
+   the viewport, so the grid gets its own scroller with both axes sticky
+   (project name pinned left, editor header pinned top) rather than letting
+   the whole page scroll and lose either axis. */
+.assign-scroll {
+  max-height: calc(100vh - 13rem);
+  overflow: auto;
+  border: 1px solid var(--red-dim);
+}
+table.assign-grid {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+}
+table.assign-grid th, table.assign-grid td {
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px dotted #2a2a31;
+  border-right: 1px dotted #2a2a31;
+  white-space: nowrap;
+}
+table.assign-grid thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-weight: normal;
+  letter-spacing: 0.04em;
+  z-index: 2;
+}
+table.assign-grid td.assign-project, table.assign-grid th.assign-project-head {
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  text-align: left;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 1;
+}
+/* The one cell that is sticky on BOTH axes needs the higher stack order,
+   or the column header (z-index 2) would draw over its own top-left
+   corner while the page is mid-scroll. */
+table.assign-grid thead th.assign-project-head { z-index: 3; }
+table.assign-grid td.assign-cell { text-align: center; }
+.assign-editor-head { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; }
+.assign-editor-head .name { color: var(--text); font-size: 12px; }
+.assign-colbtns { display: flex; gap: 0.4rem; font-size: 10px; }
+
+/* ---------------- toasts ---------------- */
+/* Used by assignments.js for a rollback notice or a "tick all" summary --
+   nothing here is load-bearing state, so a toast is fire-and-forget and
+   never blocks the grid underneath it. */
+.toast-host {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  z-index: 50;
+  pointer-events: none;
+}
+.toast {
+  background: var(--panel);
+  border: 1px solid var(--red-dim);
+  border-left: 3px solid var(--red);
+  padding: 0.5rem 0.9rem;
+  font-size: 12px;
+  max-width: 340px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  animation: toast-in 0.15s ease-out;
+}
+.toast.ok { border-left-color: var(--green); }
+.toast.err { border-left-color: var(--red); color: var(--red-hot); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 @media (max-width: 900px) {
   .layout { flex-direction: column; }

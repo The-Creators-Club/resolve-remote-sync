@@ -219,6 +219,12 @@ their own editor identity across projects, transfers, editors and presence
 views; admins see the fleet and may focus one editor with `?as=<editor>`. The
 one route that answers actual file paths — "what is missing from *this*
 person's machine" — answers **404, not 403**, to a caller outside its scope.
+The `/admin/assignments` grid (2026-08-17, `assignments.py`) is the same
+admin scope taken to its edge: instead of focusing one editor via `?as=`, it
+writes every editor's selection at once, one cell at a time, straight at the
+`PUT`/`DELETE /selection/{editor}/{slug}` routes `can_manage` already lets an
+admin call for anyone — no second selection store, no route that widens what
+an admin session could already do.
 
 **Admins** come from `DASH_ADMIN_USERS`. Under OIDC, `DASH_OIDC_ADMIN_CLAIM` is
 logged, not obeyed.

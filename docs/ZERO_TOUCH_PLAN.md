@@ -301,11 +301,25 @@ a customer actually pastes (`docs/APPLIANCE_INSTALL.md`,
 rename this row originally described: `compose.yaml`/`compose.image.yaml`
 are untouched and still what every live site runs. `ccsync-ffmpeg` was
 deliberately **not** built (ffmpeg stays a mount, per section 3.1's own
-GPLv3 reasoning — nothing here changed that call). Still open, in dependency
-order: WP B (the tailscale sidecar `compose.appliance.yaml` already shapes
-around, including spike S1, unverified against real hardware — see that
-file's own comment) has to land before C, D, or any of this reaches a real
-customer.
+GPLv3 reasoning — nothing here changed that call).
+
+**Spikes S1/S2/S5 ran the same day** (`docs/spikes/zero-touch-spikes-2026-08-17.md`,
+on the DS423+) and `compose.appliance.yaml`/`dashboard/deploy/sftp/` were
+updated against their findings before this row closed: the `tailscale`
+service runs bare `tailscaled` (`entrypoint:` override, no containerboot —
+its own `tailscale up` crash-loops and mints a new AuthURL every ~66s if
+nobody has logged in within 60s) pinned to the exact digest the spike
+resolved; `sftp` carries the `cap_add`/`security_opt` pair S3 proved makes
+per-project bind views possible (unused until WP C); the sftp image gained
+`openssh-sftp-server`, a dedicated `sftpkeys` account, `useradd -p '*'` (a
+default `!` shadow field is LOCKED even for pubkey auth) and `-u 002`. Still
+NOT measured, because it needs a real tailnet login the spike was not
+authorised to create: Serve actually terminating TLS and reaching the
+dashboard; an inbound tailnet-IP connection reaching a
+`network_mode: service:tailscale` sibling; userspace vs kernel throughput
+through the node. Those three, plus the LocalAPI login/Serve client code
+itself, are WP B's first-day work — it has to land before C, D, or any of
+this reaches a real customer.
 
 Critical path: **A → B → C → D**, ~7 weeks to a stack a stranger can install
 from a compose paste; E and F in parallel from week 2. Everything in

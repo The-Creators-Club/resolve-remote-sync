@@ -60,7 +60,15 @@ echo "$body" | jq -r '.users[]? | [.username, .uid] | @tsv' | while IFS="$(print
     # -s /sbin/nologin: this account can NEVER get an interactive shell,
     #   even if ForceCommand were ever misconfigured -- belt and braces
     #   with sshd_config's own ForceCommand line.
-    if useradd -o -M -g editors -u "$uid" -s /sbin/nologin -d /tree "$name" 2>/tmp/ccsync-users.err; then
+    # -p '*': NOT the shadow default. `useradd` with no `-p` leaves the
+    #   password field `!` (locked), and sshd refuses PUBKEY auth too for a
+    #   locked account -- "User … not allowed because account is locked",
+    #   measured directly against this same image
+    #   (docs/spikes/zero-touch-spikes-2026-08-17.md S2, the `nobody` probe
+    #   that hit exactly this). `*` means "no password will ever match" --
+    #   correct for an account that only ever authenticates by key -- without
+    #   also meaning "locked" the way `!`/`!!` do.
+    if useradd -o -M -g editors -u "$uid" -p '*' -s /sbin/nologin -d /tree "$name" 2>/tmp/ccsync-users.err; then
         echo "ccsync-users: created $name (uid $uid, group editors)"
     else
         echo "ccsync-users: FAILED to create $name: $(cat /tmp/ccsync-users.err 2>/dev/null)" >&2

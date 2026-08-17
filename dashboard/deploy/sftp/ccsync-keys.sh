@@ -1,10 +1,14 @@
 #!/bin/sh
 # ccsync-keys -- sshd_config's `AuthorizedKeysCommand /usr/local/bin/ccsync-keys %u`.
 #
-# Runs as `AuthorizedKeysCommandUser nobody`, once PER CONNECTION ATTEMPT,
-# with an environment sshd itself sanitizes (it does NOT inherit this
-# container's own env vars -- see entrypoint.sh's comment on why the token
-# lives in a file instead). Deliberately has NO `set -e`: every failure mode
+# Runs as `AuthorizedKeysCommandUser sftpkeys` -- a dedicated, otherwise-empty
+# account (NOT `nobody`: the token file below is `0440 root:sftpkeys`, and
+# `nobody` would make it readable by every unprivileged process in the
+# container, not just this one -- docs/spikes/zero-touch-spikes-2026-08-17.md
+# S2's own recommendation) -- once PER CONNECTION ATTEMPT, with an
+# environment sshd itself sanitizes (it does NOT inherit this container's own
+# env vars -- see entrypoint.sh's comment on why the token lives in a file
+# instead). Deliberately has NO `set -e`: every failure mode
 # here must fall through to "print nothing, exit 0" rather than abort,
 # because sshd treats a nonzero exit or noisy stderr as a LOGGED WARNING on
 # every single connection attempt, and a flaky dashboard must not turn into

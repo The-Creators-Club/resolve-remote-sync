@@ -167,12 +167,15 @@ services:
       - ${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}/Projects:/projects:rw
       - "${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}/Assets/B-roll Archive:/broll-data:rw"
       - "${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}/Assets/Music:/music-share:rw"
-      # Where the dashboard (WP B/D, not yet built) writes
-      # `tailscale-config/serve.json` and reads the tailnet node's own
-      # LocalAPI state -- see the `tailscale` service below for who OWNS
-      # each path. Same host directories, different mount points, because
-      # tailscaled and the dashboard have no reason to agree on a path name.
-      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/tailscale-config:/tailscale-config
+      # How the dashboard (WP B, not yet built) drives the tailnet login AND
+      # sets Serve -- NOT a config file. `docs/spikes/zero-touch-spikes-2026-08-17.md`
+      # S1c proved a second, unrelated container can open this same socket
+      # with nothing but Python's stdlib and get real answers from `PATCH
+      # /localapi/v0/prefs`, `POST /localapi/v0/login-interactive`, `GET
+      # /localapi/v0/status` and (once `BackendState=="Running"`) `POST
+      # /localapi/v0/serve-config` -- see the `tailscale` service below for
+      # why containerboot's `TS_SERVE_CONFIG` file was dropped in favour of
+      # this.
       - tailscale-sock:/var/run/tailscale
     # 127.0.0.1 ONLY -- everything a customer or an editor actually reaches
     # goes through the `tailscale` service's Serve config
@@ -207,6 +210,22 @@ services:
     depends_on:
       secrets-init:
         condition: service_completed_successfully
+      # NOT just "the tailscale container exists" -- `condition:
+      # service_started` (compose's default anyway, spelled out here on
+      # purpose) orders this AFTER tailscale on every deliberate `up`/
+      # `restart`, which is what re-attaches this service to a FRESH
+      # network namespace when tailscale's own container is recreated.
+      # `docs/spikes/zero-touch-spikes-2026-08-17.md` S5 measured the thing
+      # this does NOT cover: if `tailscaled` itself crashes and Docker
+      # restarts JUST the tailscale container (no compose command run),
+      # this service is left attached to the OLD, now-orphaned netns and
+      # goes unreachable on the tailnet until an admin runs `docker compose
+      # up` (or restarts this service too) by hand. A healthcheck-driven
+      # auto-restart of the dependents is real, not-yet-built follow-up
+      # work; today it is a manual recovery step, worth knowing about
+      # before ANY of this reaches a customer.
+      tailscale:
+        condition: service_started
     # The plain string-list form -- see the compose-version note at the top
     # of this file for why this is NOT `env_file: [{path:, required:
     # false}]`. secrets-init guarantees this file exists before compose ever
@@ -224,6 +243,10 @@ services:
     # (STGUIADDRESS above) is deliberately never exposed anywhere outside
     # this namespace -- the dashboard is Syncthing's only admin surface,
     # same posture as compose.yaml's own bundled-syncthing profile.
+    # CONFIRMED on this same box (S5): the two containers share one eth0 and
+    # :8480 on 127.0.0.1 inside tailscale's netns reached a service in this
+    # position; the orphaned-netns caveat above is the ONE thing that does
+    # not just work.
     network_mode: service:tailscale
     restart: unless-stopped
 
@@ -232,11 +255,30 @@ services:
     depends_on:
       secrets-init:
         condition: service_completed_successfully
+      # See syncthing's own comment on this same key -- identical reasoning,
+      # identical caveat.
+      tailscale:
+        condition: service_started
     env_file:
       - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/data/secrets/internal.env
     environment:
       APP_UID: "${APP_UID:-3000}"
       APP_GID: "${APP_GID:-3001}"
+    # Per-project bind views (dashboard/deploy/sftp/README.md "per-project
+    # bind views are proven, not built") -- spike S3
+    # (docs/spikes/zero-touch-spikes-2026-08-17.md) proved a root process
+    # INSIDE this one service can `mount --bind` a single project directory
+    # into a second chroot and have sshd see it immediately, with NO other
+    # service in this stack needing either line. WP C is the code that
+    # would actually issue those mounts from the dashboard's per-editor
+    # project selection; until it exists these two lines are inert (nothing
+    # in this image calls `mount` today) but landing them now means WP C is
+    # a code change, not a second edit to every customer's already-running
+    # compose file.
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - "apparmor=unconfined"
     volumes:
       # The WHOLE tree root, unlike the dashboard's three scoped mounts --
       # an editor's rclone needs to see Projects/ AND both Assets/ shares
@@ -254,59 +296,75 @@ services:
     restart: unless-stopped
 
   tailscale:
-    # Pinned to a real release the same way syncthing/postgres already are
-    # in compose.yaml -- an unpinned `latest`/`stable` tag changes protocol
-    # behaviour and Serve's own config schema underneath a redeploy, and
-    # this is the ONE node every editor's reachability depends on.
-    image: tailscale/tailscale:v1.102.2
+    # Pinned to the EXACT digest the spike resolved and ran
+    # (docs/spikes/zero-touch-spikes-2026-08-17.md S1: `v1.102.2-teb67e5dcb`,
+    # built 2026-07-31) -- not just the `v1.102.2` tag, for the same reason
+    # every other pin in this repo goes by digest where the target is a
+    # security-sensitive edge (dashboard/deploy/Dockerfile's own comment).
+    image: "tailscale/tailscale:v1.102.2@sha256:321ce041508c19079b57a28b6666c8d81ab0b08accc0a2585b3ab663d557ac24"
     hostname: ccsync
-    environment:
-      TS_HOSTNAME: "ccsync"
-      # Userspace networking: no `/dev/net/tun`, no `NET_ADMIN` -- works
-      # in Container Manager and TrueNAS Apps exactly as pulled, which is
-      # the whole point of a paste-and-click install (ZERO_TOUCH_PLAN.md
-      # 3.1). The trade is throughput (kernel mode is faster) and an
-      # ASSUMPTION this file has not yet been measured against real
-      # hardware: that an inbound connection to this node's tailnet IP
-      # actually reaches a container SHARING its netns (syncthing/sftp
-      # above) the same way it would reach tailscaled itself. That is spike
-      # S1 (ZERO_TOUCH_PLAN.md section 7) -- do it before this file ships to
-      # a real customer, not after.
-      TS_USERSPACE: "true"
-      TS_STATE_DIR: "/var/lib/tailscale"
-      TS_SOCKET: "/var/run/tailscale/tailscaled.sock"
-      # The dashboard (WP B) writes this after the wizard's "Connect to your
-      # tailnet" step decides what to serve; until then tailscaled just has
-      # no Serve config and answers on its tailnet IP with nothing.
-      TS_SERVE_CONFIG: "/config/serve.json"
-      # Sign in once, then never ask again on a restart -- an appliance that
-      # re-prompted for a login link on every reboot would defeat the whole
-      # "paste it and forget it" promise. Re-authenticating after this is a
-      # deliberate admin action (Settings, once WP D exists), not automatic.
-      TS_AUTH_ONCE: "true"
+    # NO containerboot. The stock entrypoint's `tailscale up` gives up after
+    # 60 SECONDS if nobody has visited the login link yet, SIGTERMs
+    # tailscaled and exits -- with `restart: unless-stopped` that is a
+    # crash-loop that mints a BRAND NEW AuthURL every ~66s (measured: four
+    # different codes in five minutes), so a wizard reading "the" login link
+    # would show a dead one almost immediately
+    # (docs/spikes/zero-touch-spikes-2026-08-17.md S1b). Running `tailscaled`
+    # directly instead sat in `NeedsLogin` with ZERO restarts for the rest of
+    # that spike (12+ minutes) -- this is the shape the dashboard's own login
+    # flow (WP B) is built against: `PATCH /localapi/v0/prefs` ->
+    # `POST /localapi/v0/login-interactive` -> poll `GET /localapi/v0/status`
+    # for `AuthURL`, then `BackendState=="Running"` -- all three calls proven
+    # from a second, unrelated container reading the SAME shared socket
+    # volume below (S1c). No `TS_AUTHKEY` anywhere: minting one means the
+    # customer visits their own admin console, which is precisely the step
+    # this whole design exists to remove.
+    entrypoint:
+      - "tailscaled"
+      - "--socket=/var/run/tailscale/tailscaled.sock"
+      - "--statedir=/var/lib/tailscale"
+      - "--tun=userspace-networking"
+    # NO `environment:` block. Every `TS_*` var (TS_STATE_DIR, TS_SOCKET,
+    # TS_HOSTNAME, TS_SERVE_CONFIG, TS_AUTH_ONCE, TS_USERSPACE...) is
+    # containerboot's OWN vocabulary -- bare `tailscaled` above reads none of
+    # them; the three flags on the entrypoint line are the whole
+    # configuration. `TS_SERVE_CONFIG` in particular could not have worked
+    # here even with containerboot: `POST /localapi/v0/serve-config` 500s
+    # "netMap is nil" until the node is actually logged in
+    # (docs/spikes/zero-touch-spikes-2026-08-17.md S1c), so Serve is
+    # something the dashboard (WP B) sets ONLY AFTER `BackendState=="Running"`,
+    # over the same LocalAPI socket -- never a file for containerboot to
+    # apply at boot.
     volumes:
       - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/tailscale:/var/lib/tailscale
-      - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/tailscale-config:/config
       - tailscale-sock:/var/run/tailscale
     # NO PORTS. Serve is what makes this node reachable at all
     # (https:443 -> http://dashboard:8480 on the compose network, once the
-    # dashboard has written serve.json) -- there is nothing to publish on
-    # the NAS host for this service, ever.
+    # dashboard has driven the login above and then set Serve) -- there is
+    # nothing to publish on the NAS host for this service, ever.
     #
-    # KERNEL-MODE OPT-IN (throughput, once S1 has actually measured the
-    # userspace number against it) -- uncomment together, never one alone:
+    # KERNEL-MODE OPT-IN (throughput; userspace vs kernel SFTP/sync
+    # throughput through this node specifically still needs a real tailnet
+    # login to measure -- S1's own "still owed" list) -- CONFIRMED to work on
+    # this box otherwise (S1 "Kernel mode on this box": `ip -o link` showed a
+    # real `tailscale0` interface with both lines present, refused without
+    # `--device`). Uncomment together, never one alone:
     #   devices:
     #     - /dev/net/tun
     #   cap_add:
     #     - NET_ADMIN
-    # and flip TS_USERSPACE to "false" above.
+    # and add `--tun=tailscale0` in place of `--tun=userspace-networking`
+    # above (bare `tailscaled`, no containerboot, so there is no separate
+    # TS_USERSPACE switch to flip -- the flag on the entrypoint line IS the
+    # switch).
     restart: unless-stopped
 
 # tailscale-sock: how the dashboard (no shared network namespace with
 # tailscale) still reaches tailscaled's LocalAPI over the unix socket file --
 # a network namespace only matters for TCP/UDP, not for a socket FILE two
-# containers both have mounted. syncthing/sftp get the same socket via their
-# `network_mode: service:tailscale` instead; they do not need this volume
-# listed separately.
+# containers both have mounted (proven with a THIRD, unrelated image reading
+# it in docs/spikes/zero-touch-spikes-2026-08-17.md S1c). syncthing/sftp get
+# the same socket via their `network_mode: service:tailscale` instead; they
+# do not need this volume listed separately.
 volumes:
   tailscale-sock:

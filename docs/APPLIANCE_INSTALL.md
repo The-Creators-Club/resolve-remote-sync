@@ -72,13 +72,29 @@ from the NAS itself) rather than "click through setup".
 ### 4. Connect to your tailnet
 
 **NOT YET TRUE.** The plan (`ZERO_TOUCH_PLAN.md` 3.5 step 4, WP B) is: the
-wizard shows the sign-in link `tailscaled` prints, you click it, and the
-dashboard then *derives* its own public URL
-(`https://ccsync-<studio>.<tailnet>.ts.net`) from the node's own LocalAPI —
-no URL to type anywhere. Today, reaching that link requires an operator to
-read the `tailscale` service's container logs by hand
-(`docker compose logs tailscale`) and complete the login manually; nothing
-in the dashboard surfaces it yet.
+wizard drives the login itself over the tailnet node's LocalAPI and shows
+the sign-in link, you click it, and the dashboard then *derives* its own
+public URL (`https://ccsync-<studio>.<tailnet>.ts.net`) from the same
+socket — no URL to type anywhere, and no admin console visit to mint a key.
+
+Today (WP A only, no WP B) the `tailscale` service runs bare `tailscaled`
+with no login attempted automatically — the stock image's own `tailscale
+up` was measured to give up after 60 seconds and crash-loop otherwise
+(`docs/spikes/zero-touch-spikes-2026-08-17.md` S1), so this stack
+deliberately does not run it. Until WP B exists, an operator has to trigger
+the login by hand:
+
+```
+docker compose exec tailscale tailscale --socket=/var/run/tailscale/tailscaled.sock up
+```
+
+then either read the URL that command prints directly, or
+`docker compose logs tailscale` afterward for the `AuthURL is …` line.
+**Nothing sets Serve yet either** — `POST /localapi/v0/serve-config` refuses
+until the node is logged in (`netMap is nil`), so even after this step the
+dashboard is reachable only on its loopback bind
+(`127.0.0.1:8480`), not on the tailnet, until WP B's Serve-setting code
+exists.
 
 ### 5. Editors, software, protection
 
@@ -106,6 +122,14 @@ stack itself comes up, not yet a product a customer can run their fleet on.
   an operator: `secrets-init` generates Syncthing's `STGUIAPIKEY` and the
   sftp sidecar's `CCSYNC_INTERNAL_TOKEN` into
   `${CCSYNC_DATA}/data/secrets/` on the very first `up`.
+- `syncthing`/`sftp` wait for `tailscale` to have STARTED before they do
+  (`depends_on: tailscale: condition: service_started`), which covers a
+  deliberate `docker compose up`/`restart`. It does **not** cover
+  `tailscaled` crashing and Docker restarting just that one container on
+  its own — the netns those two services attached to goes with it, and they
+  need a manual restart too until a later work package makes that
+  automatic (`docs/spikes/zero-touch-spikes-2026-08-17.md` S5; see
+  `compose.appliance.yaml`'s own comment on this).
 
 ## Troubleshooting (today's reality, not the wizard's)
 

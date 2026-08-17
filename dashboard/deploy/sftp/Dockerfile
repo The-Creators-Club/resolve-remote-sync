@@ -18,10 +18,11 @@
 #
 # Pinned BY DIGEST, matching dashboard/deploy/Dockerfile's own reasoning: a
 # bare `alpine:3.20` tag is mutable, and this image is the thing that holds
-# `AuthorizedKeysCommandUser nobody` and the tree mount, i.e. the thing a
+# every editor's pubkey verification and the tree mount, i.e. the thing a
 # customer's security review reads first. Resolved 2026-08-17 against
 # registry-1.docker.io; the index digest below covers both amd64 (TrueNAS,
-# the DS423+) and arm64.
+# the DS423+) and arm64. `docs/spikes/zero-touch-spikes-2026-08-17.md` S2
+# spiked this same design on 3.19 and calls 3.20 an equally fine pin.
 #
 # Bump it deliberately, together with dashboard/deploy/Dockerfile's own pin,
 # and re-run this image through a build before shipping either.
@@ -40,13 +41,18 @@ LABEL org.opencontainers.image.title="ccsync-sftp" \
 #   ever shipped already carries it -- this is not the ffmpeg situation,
 #   which is a GPLv3 build we chose not to bake in at all, see
 #   dashboard/deploy/Dockerfile and COMMERCIAL_READINESS.md item 3).
+# openssh-sftp-server: Alpine SPLITS this out of openssh-server -- the spike
+#   that validated this whole image installed it explicitly
+#   (docs/spikes/zero-touch-spikes-2026-08-17.md S2) and this Dockerfile
+#   matches that exact, proven package list rather than assume
+#   `internal-sftp` works without it.
 # shadow: gives us `useradd -o` (a non-unique uid). BusyBox's own `adduser`
 #   REFUSES a shared uid, and every editor is the same service uid today
 #   (ZERO_TOUCH_PLAN.md section 5 -- per-project uids are spike S3, not yet
 #   built). shadow's own licence is BSD-3-Clause since its 4.9 release.
 # curl: the two helper scripts below talk to the dashboard's internal API.
 # jq: parses `GET /internal/sftp/users`' JSON in ccsync-users (MIT).
-RUN apk add --no-cache openssh-server shadow curl jq \
+RUN apk add --no-cache openssh-server openssh-sftp-server shadow curl jq \
     && rm -rf /var/cache/apk/*
 
 COPY dashboard/deploy/sftp/sshd_config /etc/ssh/sshd_config
@@ -61,10 +67,20 @@ COPY dashboard/deploy/sftp/ccsync-users.sh /usr/local/bin/ccsync-users
 # (rclone just sees "Connection reset").  /jail/tree is the tree BIND MOUNT
 # (compose's job, not this image's -- an empty /jail/tree here is normal,
 # it means nobody has attached the volume yet).
+#
+# `sftpkeys`: a dedicated, otherwise-empty account for `AuthorizedKeysCommandUser`
+# -- NOT `nobody`. ccsync-keys.sh reads the internal API token from a file;
+# `nobody` reading it would mean every unprivileged process in the container
+# is equally entitled to it, which is a strictly bigger exposure than one
+# named, single-purpose account (spike recommendation,
+# docs/spikes/zero-touch-spikes-2026-08-17.md S2 verdict). `-D`: no password
+# set at all -- this account is never logged into, only exec'd BY sshd as a
+# fixed, already-known uid.
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/ccsync-keys /usr/local/bin/ccsync-users \
     && mkdir -p /jail/tree /etc/ccsync \
     && chown root:root /jail \
-    && chmod 755 /jail
+    && chmod 755 /jail \
+    && adduser -D -H -s /sbin/nologin sftpkeys
 
 # Stays root. sshd needs it (privilege separation drops to the target user
 # post-auth, but the listener and the pre-fork are root), and so does

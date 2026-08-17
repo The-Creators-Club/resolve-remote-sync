@@ -237,12 +237,26 @@ service in that compose file rather than the dashboard's own first-boot code.
   the SetupEngine and wizard that would make `compose.appliance.yaml`
   actually self-configuring (WP D), the release feed (WP E) — none of that
   is here. `docs/APPLIANCE_INSTALL.md` marks each gap explicitly.
-- **Spike S1 has not been run against real hardware.** `TS_USERSPACE=true`
-  in `compose.appliance.yaml` is currently an ASSUMPTION that an inbound
-  connection to the tailnet node's own IP reaches a container sharing its
-  network namespace (`syncthing`/`sftp`) the same way it reaches `tailscaled`
-  itself. Confirm this on the DS423+ and a TrueNAS SCALE box before that file
-  reaches a real customer (`ZERO_TOUCH_PLAN.md` section 7).
+- **Spikes S1/S2/S5 ran on a real DS423+** (`docs/spikes/zero-touch-spikes-2026-08-17.md`,
+  2026-08-17) and `compose.appliance.yaml` was updated against their
+  findings: `tailscale` runs bare `tailscaled` (an `entrypoint:` override,
+  no containerboot — the stock image's own `tailscale up` gives up after 60s
+  with nobody having clicked the login link yet and crash-loops, minting a
+  new AuthURL every cycle), pinned to the exact digest the spike resolved;
+  `sftp` carries the `cap_add`/`security_opt` pair spike S3 proved makes
+  per-project bind views possible (not yet wired to anything — that is WP
+  C); the `ccsync-sftp` image itself picked up `openssh-sftp-server` (a
+  package Alpine splits out), a dedicated `sftpkeys` account instead of
+  `nobody`, `-p '*'` on every account `useradd` creates (a default-`!`
+  shadow field is treated as LOCKED by sshd even for pubkey auth — measured
+  directly), and `-u 002` on `ForceCommand internal-sftp`. **What the spike
+  explicitly did NOT measure, because it needs a real tailnet login it was
+  not authorised to create**: Serve actually terminating TLS on `:443` and
+  proxying to the dashboard; an inbound connection to the node's own tailnet
+  IP reaching a `network_mode: service:tailscale` sibling; userspace vs
+  kernel SFTP/sync throughput through the node. Those three are WP B's
+  first-day work, with a throwaway tailnet, before `compose.appliance.yaml`
+  reaches a real customer.
 - **`ccsync-ffmpeg` does not exist yet.** `compose.appliance.yaml` does not
   mount `/opt/ffmpeg` at all — music ingest transcoding is simply unwired on
   the appliance path for now (`ZERO_TOUCH_PLAN.md` 3.1's "pragmatic answer" —

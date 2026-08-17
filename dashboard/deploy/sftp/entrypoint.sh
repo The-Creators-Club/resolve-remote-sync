@@ -15,13 +15,19 @@ set -eu
 # explains why env_file rather than a literal value).
 #
 # Written to a FILE under /etc/ccsync rather than left in this process's own
-# environment: `AuthorizedKeysCommand` runs with a environment sshd itself
+# environment: `AuthorizedKeysCommand` runs with an environment sshd itself
 # sanitizes -- it does NOT inherit this process's env vars -- so
-# ccsync-keys.sh (run as `AuthorizedKeysCommandUser nobody`) has to read the
-# token from somewhere that survives that sanitisation. A world-readable
-# file under a directory only this image writes to is that somewhere; there
-# is no secret in this file an unauthenticated party can reach without
-# already being a process inside this container.
+# ccsync-keys.sh (run as `AuthorizedKeysCommandUser sftpkeys`) has to read
+# the token from somewhere that survives that sanitisation.
+#
+# `0440 root:sftpkeys`, NOT world-readable: an earlier draft of this file
+# made the token file `644` and ran the command as `nobody`, which means
+# EVERY unprivileged process in the container -- not just this one script --
+# could read it. `sftpkeys` (created in the Dockerfile) is a dedicated
+# account that exists for nothing else, matching the spike's own verdict
+# (docs/spikes/zero-touch-spikes-2026-08-17.md S2: "give the sidecar a
+# dedicated `sftpkeys` user rather than `nobody`, and mount the token
+# `0440 root:sftpkeys`").
 TOKEN=""
 if [ -n "${CCSYNC_INTERNAL_TOKEN_FILE:-}" ] && [ -f "$CCSYNC_INTERNAL_TOKEN_FILE" ]; then
     TOKEN="$(cat "$CCSYNC_INTERNAL_TOKEN_FILE")"
@@ -36,7 +42,8 @@ if [ -z "$TOKEN" ]; then
 fi
 mkdir -p /etc/ccsync
 printf '%s' "$TOKEN" > /etc/ccsync/internal-token
-chmod 644 /etc/ccsync/internal-token
+chown root:sftpkeys /etc/ccsync/internal-token
+chmod 440 /etc/ccsync/internal-token
 
 # --- host keys: generate once, persist forever ------------------------
 # /etc/ssh/keys is the volume (compose:

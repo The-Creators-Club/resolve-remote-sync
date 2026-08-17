@@ -58,12 +58,19 @@ section 5 costs out: per-editor file ownership on the NAS host is gone, and
 per-project *authorisation* moves into the dashboard's own selection rows
 instead of POSIX permissions.
 
-**Per-project bind views are a follow-up, not this file.** `ZERO_TOUCH_PLAN.md`
-section 7 (spike S3) is where per-editor chroots with one bind mount per
-ticked project get decided — it needs `SYS_ADMIN` inside this sidecar for
-mount propagation from a compose service, which is a real increase in this
-container's own privilege and deliberately not taken on here. Today every
-editor who can authenticate sees the whole tree, which is the same posture
+**Per-project bind views are proven, not built.** Spike S3
+(`docs/spikes/zero-touch-spikes-2026-08-17.md`) answered the open question:
+with `cap_add: [SYS_ADMIN]` and `security_opt: ["apparmor=unconfined"]` on
+this one service, a root process inside the sidecar can
+`mount --bind <tree>/ProjectA <second-jail>/tree/ProjectA` (even read-only,
+via `remount,bind,ro`) and sshd's own `ChrootDirectory` sees it immediately
+— no host involvement, no `docker exec`. `compose.appliance.yaml` already
+carries both lines on the `sftp` service, commented, citing this file and
+the spike — what does NOT exist yet is the WP C code that would read the
+dashboard's per-editor project selection and actually issue those mounts (a
+small root loop inside this sidecar reading a `views.json` written to
+`/data`, per the spike's own recommendation). Until that lands, every editor
+who can authenticate sees the whole tree, which is the same posture
 (`project_acl = "shared"`) every live site already runs
 (`docs/TENANCY.md`).
 
@@ -107,6 +114,43 @@ an upgrade or a "start fresh" troubleshooting step; if the host keys are
 ever genuinely lost, every editor has to manually clear the stale entry
 from their own `known_hosts` (or rclone's own host-key store) before they
 can sync again.
+
+## Measured against a real DSM box, not just designed
+
+`docs/spikes/zero-touch-spikes-2026-08-17.md` (S2, with the bonus S3) built
+and exercised this exact design on a DS423+ before any of it was code, and
+several details in this directory exist ONLY because that spike found them:
+
+- **`openssh-sftp-server` is a separate Alpine package** from
+  `openssh-server` — the Dockerfile installs both; the spike's own build did
+  and this one matches it rather than assume `internal-sftp` works without it.
+- **`AuthorizedKeysCommandUser` is `sftpkeys`, a dedicated account, not
+  `nobody`.** The token file `ccsync-keys.sh` reads is `0440 root:sftpkeys`;
+  `nobody` would make it readable by every unprivileged process in the
+  container.
+- **Every account's shadow password field is set to `*` at creation
+  (`useradd -p '*'`), never left at the default.** `useradd` with no `-p`
+  leaves it `!`, and sshd refuses PUBKEY auth (not just password auth) for an
+  account it considers locked — the spike hit this exact message
+  (`User … not allowed because account is locked`) probing with a key-less
+  `nobody` account, and it is just as fatal for a real editor account nobody
+  remembered to unlock.
+- **`-u 002` on `ForceCommand internal-sftp`** is what makes an editor's
+  writes land `664`/`2775` rather than the default umask's `644`/`2755` —
+  measured end to end (upload, download, `ls -ln`) against the sidecar's
+  actual Alpine OpenSSH build, not assumed from the flag's manpage
+  description.
+- **255Ki is a safe `sftp_chunk_size` default for this sidecar specifically**
+  — a 768 MiB file (deliberately past the 539,000,832-byte point DSM's own
+  `OpenSSH 8.2p1` truncates at) round-tripped with a matching sha256 at
+  255Ki both directions. That truncation was **DSM's sshd's limitation, not
+  a chunk-size limitation** — this sidecar's OpenSSH 9.6p1 advertises
+  `limits@openssh.com`, which rclone reads and sizes around; the 64Ki rule
+  in the companion's own `_SITE_CONFIG_KEYS` comment stays true only for
+  `sftp_host` pointed at a NAS's own (older) sshd.
+- **`sshd_config` has no `UsePAM` line** — Alpine's OpenSSH build has no PAM
+  support at all, and the directive is simply unrecognised (a harmless but
+  permanent warning on every boot if left in).
 
 ## What this image deliberately does NOT do
 

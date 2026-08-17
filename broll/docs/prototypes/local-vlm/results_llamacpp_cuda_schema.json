@@ -1,0 +1,67 @@
+{
+ "runtime": "llama.cpp b10470 llama-server",
+ "model": "Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+ "mmproj": "mmproj-Qwen3VL-4B-Instruct-F16.gguf",
+ "ngl": 99,
+ "threads": 22,
+ "schema_constrained": true,
+ "load_s": 50.21462535858154,
+ "clips": {
+  "13454": {
+   "sheets": [
+    "E:\\broll-queue\\sheets\\13454\\sheet_0001.jpg",
+    "E:\\broll-queue\\sheets\\13454\\sheet_0002.jpg"
+   ],
+   "n_sheets": 2,
+   "input_tokens": 3877,
+   "output_tokens": 33,
+   "gen_s": 13.6,
+   "timings": {
+    "cache_n": 0,
+    "prompt_n": 3877,
+    "prompt_ms": 13270.915,
+    "prompt_per_token_ms": 3.4229855558421463,
+    "prompt_per_second": 292.14262920077476,
+    "predicted_n": 33,
+    "predicted_ms": 228.539,
+    "predicted_per_token_ms": 7.14184375,
+    "predicted_per_second": 140.01986531839205
+   },
+   "valid_contract": true,
+   "contract_error": "",
+   "raw": "{\n  \"themes\": [],\n  \"category_hint\": \"general/unsorted\",\n  \"quality_flags\": [],\n  \"segments\": []\n}",
+   "parsed": {
+    "themes": [],
+    "category_hint": "general/unsorted",
+    "quality_flags": [],
+    "segments": []
+   }
+  },
+  "5495": {
+   "sheets": [
+    "E:\\broll-queue\\sheets\\5495\\sheet_0001.jpg",
+    "E:\\broll-queue\\sheets\\5495\\sheet_0002.jpg",
+    "E:\\broll-queue\\sheets\\5495\\sheet_0003.jpg"
+   ],
+   "n_sheets": 3,
+   "input_tokens": 4392,
+   "output_tokens": 1200,
+   "gen_s": 15.1,
+   "timings": {
+    "cache_n": 0,
+    "prompt_n": 4392,
+    "prompt_ms": 6262.848,
+    "prompt_per_token_ms": 1.425967213114754,
+    "prompt_per_second": 701.2783960268555,
+    "predicted_n": 1200,
+    "predicted_ms": 8588.426,
+    "predicted_per_token_ms": 7.162990825688073,
+    "predicted_per_second": 139.60648901207279
+   },
+   "valid_contract": false,
+   "contract_error": "claude response is not valid JSON: Unterminated string starting at: line 109 column 22 (char 4212)",
+   "raw": "{\n  \"themes\": [\"police operation\", \"press conference\", \"Taiwan\"],\n  \"category_hint\": \"general/public-life\",\n  \"quality_flags\": [],\n  \"segments\": [\n    {\n      \"t_start\": 0.0,\n      \"t_end\": 36.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 36.0,\n      \"t_end\": 66.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 66.0,\n      \"t_end\": 96.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 96.0,\n      \"t_end\": 126.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 126.0,\n      \"t_end\": 156.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 156.0,\n      \"t_end\": 186.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 186.0,\n      \"t_end\": 216.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 216.0,\n      \"t_end\": 246.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 246.0,\n      \"t_end\": 276.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 276.0,\n      \"t_end\": 306.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 306.0,\n      \"t_end\": 336.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight",
+   "parsed": null
+  }
+ }
+}

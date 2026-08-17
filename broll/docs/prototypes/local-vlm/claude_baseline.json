@@ -1,0 +1,323 @@
+{
+ "8724": {
+  "id": 8724,
+  "share": "ff4",
+  "rel_path": "Nuclear/B-roll/Referendum Protest/Proxy/fx30_computex7424.mov",
+  "duration_s": 16.533333,
+  "category_hint": "general/public-life",
+  "model": "claude-haiku-4-5-20251001",
+  "width": 1920,
+  "height": 1080,
+  "themes": [
+   "indoor gathering",
+   "public event",
+   "multiple people"
+  ],
+  "quality_flags": [
+   "soft_focus"
+  ],
+  "segments": [
+   {
+    "t_start": 0.0,
+    "t_end": 13.0,
+    "description": "Indoor gathering, multiple people in light-colored clothing viewed from behind, banners in blurred background, indoor lighting",
+    "objects": "people, gathering, event, light-colored clothing, banners, signage",
+    "setting": "indoor event space, indoor lighting",
+    "motion": "static",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 16.0,
+    "t_end": 16.0,
+    "description": "black frame",
+    "objects": "blank frame",
+    "setting": "n/a",
+    "motion": "n/a",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   }
+  ],
+  "sheets": [
+   "E:\\broll-queue\\sheets\\8724\\sheet_0001.jpg"
+  ]
+ },
+ "13454": {
+  "id": 13454,
+  "share": "ff3",
+  "rel_path": "Taroko/Interviewees/Maoyao/FX3/Proxy/20250308_fx3taroko0857.mov",
+  "duration_s": 58.069333,
+  "category_hint": "leisure/sport-outdoor",
+  "model": "claude-haiku-4-5-20251001",
+  "width": 1920,
+  "height": 1080,
+  "themes": [
+   "running",
+   "outdoor",
+   "action sequence",
+   "urban",
+   "nature",
+   "mountains"
+  ],
+  "quality_flags": [
+   "soft_focus",
+   "overexposed"
+  ],
+  "segments": [
+   {
+    "t_start": 0.0,
+    "t_end": 8.0,
+    "description": "Urban apartment complex, person running, modern buildings with striped balconies, concrete pathway, planters, daylight",
+    "objects": "person running, apartment building, urban residential area, concrete pathway, balcony, planter, daylight",
+    "setting": "urban residential complex, daylight",
+    "motion": "static camera, subject in motion",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 12.0,
+    "t_end": 19.0,
+    "description": "Person running on dirt path, overgrown vegetation, trees, park setting, daylight",
+    "objects": "person running, dirt path, nature area, vegetation, trees, park, overgrown, daylight",
+    "setting": "park or nature area with overgrown vegetation, daylight",
+    "motion": "static camera, subject in motion",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 23.0,
+    "t_end": 31.0,
+    "description": "Macro close-up of vegetation, blurred plants and leaves, nature detail photography",
+    "objects": "vegetation, plants, leaves, foliage, macro photography, nature detail",
+    "setting": "close-up nature photography",
+    "motion": "static",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 35.0,
+    "t_end": 46.0,
+    "description": "Open grassy field, person with safety hard hat, parked vehicles, mountains in background, overcast daylight, metal railing",
+    "objects": "person, grassy field, grassland, mountains, vehicle, sedan, automobile, metal railing, parking area, overcast sky, outdoor landscape",
+    "setting": "outdoor field with parking area, mountainous landscape, overcast daylight",
+    "motion": "static camera",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 50.0,
+    "t_end": 54.0,
+    "description": "overexposed frames",
+    "objects": "blank frame, overexposed",
+    "setting": "unknown",
+    "motion": "static",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 58.0,
+    "t_end": 58.0,
+    "description": "Vehicle interior close-up, steering wheel detail, windshield, blurred shallow focus",
+    "objects": "vehicle interior, steering wheel, dashboard, windshield, car interior",
+    "setting": "inside vehicle",
+    "motion": "static",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   }
+  ],
+  "sheets": [
+   "E:\\broll-queue\\sheets\\13454\\sheet_0001.jpg",
+   "E:\\broll-queue\\sheets\\13454\\sheet_0002.jpg"
+  ]
+ },
+ "2555": {
+  "id": 2555,
+  "share": "ff4-garbage",
+  "rel_path": "Ruskin/台灣資源回收業 征戰全世界.mkv",
+  "duration_s": 62.188,
+  "category_hint": null,
+  "model": "claude-haiku-4-5-20251001",
+  "width": 1920,
+  "height": 1080,
+  "themes": [
+   "Taiwan",
+   "recycling industry",
+   "waste management",
+   "environmental statistics",
+   "manufacturing"
+  ],
+  "quality_flags": [],
+  "segments": [
+   {
+    "t_start": 3.0,
+    "t_end": 8.0,
+    "description": "Factory floor, workers in colored apparel, machinery, production line, fluorescent ceiling lights, industrial work environment",
+    "objects": "factory, manufacturing, workers, machinery, production line, industrial equipment, Taiwan",
+    "setting": "indoor factory, artificial lighting",
+    "motion": "motion blur, active work",
+    "onscreen_text": "[Chinese text overlay, statistics]",
+    "onscreen_text_en": "[Taiwan waste/recycling statistics]"
+   },
+   {
+    "t_start": 8.0,
+    "t_end": 18.0,
+    "description": "Warehouse interior, overhead view of packed boxes and containers organized in rows, industrial shelving, high ceiling",
+    "objects": "warehouse, storage, containers, boxes, shelving, organization, industrial facility",
+    "setting": "indoor warehouse, artificial lighting",
+    "motion": "static to slow pan",
+    "onscreen_text": "[Chinese text overlay]",
+    "onscreen_text_en": "[Taiwan recycling information]"
+   },
+   {
+    "t_start": 20.0,
+    "t_end": 25.0,
+    "description": "Outdoor waste site, yellow excavator moving debris and materials, piles of waste, industrial machinery, daytime",
+    "objects": "excavator, heavy equipment, waste, debris, machinery, collection site",
+    "setting": "outdoor industrial site, daytime",
+    "motion": "machinery in operation",
+    "onscreen_text": "[Chinese text overlay with statistics]",
+    "onscreen_text_en": "[Taiwan waste management data]"
+   },
+   {
+    "t_start": 28.0,
+    "t_end": 34.0,
+    "description": "Recycling facility warehouse with bundled materials, office/control room with monitors and wall charts, worker in hard hat pointing at diagram",
+    "objects": "recycling facility, materials, control room, monitors, workers, safety equipment, hard hat, diagrams",
+    "setting": "indoor facility and office, artificial lighting",
+    "motion": "static shots with hand gestures",
+    "onscreen_text": "[Chinese text overlay]",
+    "onscreen_text_en": "[facility and waste management information]"
+   },
+   {
+    "t_start": 38.0,
+    "t_end": 42.0,
+    "description": "Snowy outdoor setting, bright green recycling collection kiosks, people using collection points, winter weather",
+    "objects": "recycling kiosk, collection point, people, outdoor, snow, winter, green bin",
+    "setting": "outdoor, snow, winter daylight",
+    "motion": "people walking, static kiosk",
+    "onscreen_text": "[Chinese text overlay with statistics]",
+    "onscreen_text_en": "[recycling collection rate information]"
+   },
+   {
+    "t_start": 44.0,
+    "t_end": 48.0,
+    "description": "Snowy landscape with yellow truck and workers in blue uniforms and hard hats handling waste materials, group of workers in uniform",
+    "objects": "truck, workers, safety equipment, hard hat, waste, snow, outdoor, people",
+    "setting": "outdoor, snow, winter daylight",
+    "motion": "people moving, vehicle present",
+    "onscreen_text": "[Chinese text overlay]",
+    "onscreen_text_en": "[waste management and global statistics]"
+   },
+   {
+    "t_start": 49.0,
+    "t_end": 51.0,
+    "description": "Indoor control room with monitors and wall maps, man in checkered shirt, warehouse with stacked white boxes",
+    "objects": "control room, monitors, office, workers, warehouse, boxes, containers, maps",
+    "setting": "indoor facility, artificial lighting",
+    "motion": "static shots",
+    "onscreen_text": "[Chinese text overlay]",
+    "onscreen_text_en": "[Taiwan waste management information]"
+   },
+   {
+    "t_start": 55.0,
+    "t_end": 60.0,
+    "description": "Large date text, magazine cover graphic for 商業周刊 (Business Weekly) with yellow truck illustration and people, title card",
+    "objects": "title card, date, magazine cover, 商業周刊, Business Weekly, truck illustration, graphic",
+    "setting": "graphic overlay, grey and colored backgrounds",
+    "motion": "static graphic",
+    "onscreen_text": "2月9日 | 商業周刊 | 歐洲回收王 領科技 | 商周與你一起 發現綠色傳奇",
+    "onscreen_text_en": "February 9 | Business Weekly | European Recycling Leader Technology | Business Weekly and you together discover green legend"
+   }
+  ],
+  "sheets": [
+   "E:\\broll-queue\\sheets\\2555\\sheet_0001.jpg",
+   "E:\\broll-queue\\sheets\\2555\\sheet_0002.jpg",
+   "E:\\broll-queue\\sheets\\2555\\sheet_0003.jpg"
+  ]
+ },
+ "5495": {
+  "id": 5495,
+  "share": "mofa-disaster",
+  "rel_path": "Day 2/Fx3/Proxy/20250625_fx3_call_6931.mov",
+  "duration_s": 87.594667,
+  "category_hint": "society/policing-crime",
+  "model": "claude-haiku-4-5-20251001",
+  "width": 1920,
+  "height": 1080,
+  "themes": [
+   "law enforcement operation",
+   "evidence documentation",
+   "seizure"
+  ],
+  "quality_flags": [
+   "soft_focus"
+  ],
+  "segments": [
+   {
+    "t_start": 0.0,
+    "t_end": 16.0,
+    "description": "Law enforcement personnel in uniform, interior operation scene, vertical blinds, masks, caps, case containers visible",
+    "objects": "law enforcement, police, personnel, uniforms, masks, caps, operation, interior, seizure operation",
+    "setting": "interior institutional space, vertical blinds, daylight",
+    "motion": "static",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 20.0,
+    "t_end": 32.0,
+    "description": "Stacked rectangular items in display case, close-up detail, hands visible handling items",
+    "objects": "stacked items, display case, currency, money, documents, evidence, close-up, hands",
+    "setting": "indoor evidence display, close-up photography",
+    "motion": "static",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 36.0,
+    "t_end": 44.0,
+    "description": "Uniformed personnel close-up portraits, officers with masks and caps, documentation shots",
+    "objects": "personnel, officers, uniforms, masks, caps, portraits, close-up, identification",
+    "setting": "indoor institutional space",
+    "motion": "static",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 48.0,
+    "t_end": 68.0,
+    "description": "Display cases with stacked items, multiple close-up angles, hands handling items",
+    "objects": "display case, stacked items, currency, money, documents, evidence, close-up, multiple angles",
+    "setting": "indoor evidence display",
+    "motion": "static",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 72.0,
+    "t_end": 80.0,
+    "description": "Blurred extreme close-up of items, out of focus detail shot",
+    "objects": "currency, money, stacked items, extreme close-up, out of focus, blurred",
+    "setting": "indoor, extreme detail",
+    "motion": "static or slight camera movement",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   },
+   {
+    "t_start": 84.0,
+    "t_end": 88.0,
+    "description": "Civilians in light-colored clothing, interior gathering space, multiple people, masks",
+    "objects": "civilians, people, gathering, light clothing, interior, masks, event space, public space",
+    "setting": "indoor public or community space, daylight",
+    "motion": "static",
+    "onscreen_text": "",
+    "onscreen_text_en": ""
+   }
+  ],
+  "sheets": [
+   "E:\\broll-queue\\sheets\\5495\\sheet_0001.jpg",
+   "E:\\broll-queue\\sheets\\5495\\sheet_0002.jpg",
+   "E:\\broll-queue\\sheets\\5495\\sheet_0003.jpg"
+  ]
+ }
+}

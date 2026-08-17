@@ -1,0 +1,200 @@
+{
+ "runtime": "llama.cpp b10470 llama-server",
+ "model": "Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+ "mmproj": "mmproj-Qwen3VL-4B-Instruct-F16.gguf",
+ "ngl": 99,
+ "threads": 22,
+ "schema_constrained": false,
+ "load_s": 64.22710108757019,
+ "clips": {
+  "8724": {
+   "sheets": [
+    "E:\\broll-queue\\sheets\\8724\\sheet_0001.jpg"
+   ],
+   "n_sheets": 1,
+   "input_tokens": 3652,
+   "output_tokens": 314,
+   "gen_s": 15.5,
+   "timings": {
+    "cache_n": 0,
+    "prompt_n": 3652,
+    "prompt_ms": 13326.95,
+    "prompt_per_token_ms": 3.6492196056955093,
+    "prompt_per_second": 274.03119243337744,
+    "predicted_n": 314,
+    "predicted_ms": 2170.193,
+    "predicted_per_token_ms": 6.933523961661343,
+    "predicted_per_second": 144.22680379118353
+   },
+   "valid_contract": true,
+   "contract_error": "",
+   "raw": "```json\n{\n  \"themes\": [],\n  \"category_hint\": \"general/unsorted\",\n  \"quality_flags\": [],\n  \"segments\": [\n    {\n      \"t_start\": 0.0,\n      \"t_end\": 7.0,\n      \"description\": \"Back view of crowd, people wearing white shirts with Chinese characters, dim lighting\",\n      \"objects\": [\"crowd\", \"white shirt\", \"Chinese characters\", \"back view\", \"dim lighting\"],\n      \"setting\": \"indoor or covered area, dim lighting\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 7.0,\n      \"t_end\": 13.0,\n      \"description\": \"Back view of crowd, people wearing dark jackets, dim lighting\",\n      \"objects\": [\"crowd\", \"dark jacket\", \"back view\", \"dim lighting\"],\n      \"setting\": \"indoor or covered area, dim lighting\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 13.0,\n      \"t_end\": 14.0,\n      \"description\": \"Green screen, no content\",\n      \"objects\": [\"green screen\"],\n      \"setting\": \"green screen\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    }\n  ]\n}\n```",
+   "parsed": {
+    "themes": [],
+    "category_hint": "general/unsorted",
+    "quality_flags": [],
+    "segments": [
+     {
+      "t_start": 0.0,
+      "t_end": 7.0,
+      "description": "Back view of crowd, people wearing white shirts with Chinese characters, dim lighting",
+      "objects": [
+       "crowd",
+       "white shirt",
+       "Chinese characters",
+       "back view",
+       "dim lighting"
+      ],
+      "setting": "indoor or covered area, dim lighting",
+      "motion": "static",
+      "onscreen_text": "",
+      "onscreen_text_en": ""
+     },
+     {
+      "t_start": 7.0,
+      "t_end": 13.0,
+      "description": "Back view of crowd, people wearing dark jackets, dim lighting",
+      "objects": [
+       "crowd",
+       "dark jacket",
+       "back view",
+       "dim lighting"
+      ],
+      "setting": "indoor or covered area, dim lighting",
+      "motion": "static",
+      "onscreen_text": "",
+      "onscreen_text_en": ""
+     },
+     {
+      "t_start": 13.0,
+      "t_end": 14.0,
+      "description": "Green screen, no content",
+      "objects": [
+       "green screen"
+      ],
+      "setting": "green screen",
+      "motion": "static",
+      "onscreen_text": "",
+      "onscreen_text_en": ""
+     }
+    ]
+   }
+  },
+  "13454": {
+   "sheets": [
+    "E:\\broll-queue\\sheets\\13454\\sheet_0001.jpg",
+    "E:\\broll-queue\\sheets\\13454\\sheet_0002.jpg"
+   ],
+   "n_sheets": 2,
+   "input_tokens": 3877,
+   "output_tokens": 33,
+   "gen_s": 11.7,
+   "timings": {
+    "cache_n": 0,
+    "prompt_n": 3877,
+    "prompt_ms": 11319.897,
+    "prompt_per_token_ms": 2.9197567706989944,
+    "prompt_per_second": 342.4942824126403,
+    "predicted_n": 33,
+    "predicted_ms": 225.411,
+    "predicted_per_token_ms": 7.04409375,
+    "predicted_per_second": 141.9629033188265
+   },
+   "valid_contract": true,
+   "contract_error": "",
+   "raw": "```json\n{\n  \"themes\": [],\n  \"category_hint\": \"general/unsorted\",\n  \"quality_flags\": [],\n  \"segments\": []\n}\n```",
+   "parsed": {
+    "themes": [],
+    "category_hint": "general/unsorted",
+    "quality_flags": [],
+    "segments": []
+   }
+  },
+  "2555": {
+   "sheets": [
+    "E:\\broll-queue\\sheets\\2555\\sheet_0001.jpg",
+    "E:\\broll-queue\\sheets\\2555\\sheet_0002.jpg",
+    "E:\\broll-queue\\sheets\\2555\\sheet_0003.jpg"
+   ],
+   "n_sheets": 3,
+   "input_tokens": 4392,
+   "output_tokens": 415,
+   "gen_s": 9.5,
+   "timings": {
+    "cache_n": 0,
+    "prompt_n": 4392,
+    "prompt_ms": 6340.828,
+    "prompt_per_token_ms": 1.4437222222222224,
+    "prompt_per_second": 692.654019317351,
+    "predicted_n": 415,
+    "predicted_ms": 2942.002,
+    "predicted_per_token_ms": 7.106285024154589,
+    "predicted_per_second": 140.72050256933883
+   },
+   "valid_contract": true,
+   "contract_error": "",
+   "raw": "```json\n{\n  \"themes\": [\"waste recycling\", \"Taiwan\", \"global waste\", \"industrial facility\", \"green technology\"],\n  \"category_hint\": \"environment/waste-recycling\",\n  \"quality_flags\": [],\n  \"segments\": [\n    {\n      \"t_start\": 0.0,\n      \"t_end\": 59.0,\n      \"description\": \"Industrial waste sorting facility, workers, machinery, stacked recyclables, control room, magazine cover, green screen\",\n      \"objects\": [\"recycling facility\", \"workers\", \"forklift\", \"industrial machinery\", \"control room\", \"magazine cover\", \"green screen\", \"recyclables\", \"text on screen\", \"onscreen_text\", \"onscreen_text_en\"],\n      \"setting\": \"industrial facility, indoor, mixed lighting\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"商業周刊 | 這兩年廢棄酒廠得幾天價錢 | 00:00:00 | 00:00:06 | 00:00:08 | 00:00:33 | 00:00:45 | 00:00:49 | 00:00:51 | 00:00:55 | 00:00:59\",\n      \"onscreen_text_en\": \"Business Weekly | These two years, waste wine factory gets several days' price | 00:00:00 | 00:00:06 | 00:00:08 | 00:00:33 | 00:00:45 | 00:00:49 | 00:00:51 | 00:00:55 | 00:00:59\"\n    }\n  ]\n}\n```",
+   "parsed": {
+    "themes": [
+     "waste recycling",
+     "Taiwan",
+     "global waste",
+     "industrial facility",
+     "green technology"
+    ],
+    "category_hint": "environment/waste-recycling",
+    "quality_flags": [],
+    "segments": [
+     {
+      "t_start": 0.0,
+      "t_end": 59.0,
+      "description": "Industrial waste sorting facility, workers, machinery, stacked recyclables, control room, magazine cover, green screen",
+      "objects": [
+       "recycling facility",
+       "workers",
+       "forklift",
+       "industrial machinery",
+       "control room",
+       "magazine cover",
+       "green screen",
+       "recyclables",
+       "text on screen",
+       "onscreen_text",
+       "onscreen_text_en"
+      ],
+      "setting": "industrial facility, indoor, mixed lighting",
+      "motion": "static",
+      "onscreen_text": "商業周刊 | 這兩年廢棄酒廠得幾天價錢 | 00:00:00 | 00:00:06 | 00:00:08 | 00:00:33 | 00:00:45 | 00:00:49 | 00:00:51 | 00:00:55 | 00:00:59",
+      "onscreen_text_en": "Business Weekly | These two years, waste wine factory gets several days' price | 00:00:00 | 00:00:06 | 00:00:08 | 00:00:33 | 00:00:45 | 00:00:49 | 00:00:51 | 00:00:55 | 00:00:59"
+     }
+    ]
+   }
+  },
+  "5495": {
+   "sheets": [
+    "E:\\broll-queue\\sheets\\5495\\sheet_0001.jpg",
+    "E:\\broll-queue\\sheets\\5495\\sheet_0002.jpg",
+    "E:\\broll-queue\\sheets\\5495\\sheet_0003.jpg"
+   ],
+   "n_sheets": 3,
+   "input_tokens": 4392,
+   "output_tokens": 1200,
+   "gen_s": 11.0,
+   "timings": {
+    "cache_n": 0,
+    "prompt_n": 4392,
+    "prompt_ms": 2020.94,
+    "prompt_per_token_ms": 0.46014116575591985,
+    "prompt_per_second": 2173.24611319485,
+    "predicted_n": 1200,
+    "predicted_ms": 8719.749,
+    "predicted_per_token_ms": 7.272517931609674,
+    "predicted_per_second": 137.50395796943238
+   },
+   "valid_contract": false,
+   "contract_error": "claude response is not valid JSON: Unterminated string starting at: line 109 column 22 (char 4212)",
+   "raw": "```json\n{\n  \"themes\": [\"police operation\", \"press conference\", \"Taiwan\"],\n  \"category_hint\": \"general/public-life\",\n  \"quality_flags\": [],\n  \"segments\": [\n    {\n      \"t_start\": 0.0,\n      \"t_end\": 36.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 36.0,\n      \"t_end\": 66.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 66.0,\n      \"t_end\": 96.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 96.0,\n      \"t_end\": 126.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 126.0,\n      \"t_end\": 156.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 156.0,\n      \"t_end\": 186.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 186.0,\n      \"t_end\": 216.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 216.0,\n      \"t_end\": 246.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 246.0,\n      \"t_end\": 276.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 276.0,\n      \"t_end\": 306.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight\",\n      \"objects\": [\"officials\", \"uniform\", \"table\", \"equipment\", \"mask\", \"attendees\", \"room\", \"window\"],\n      \"setting\": \"indoor room, daylight\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 306.0,\n      \"t_end\": 336.0,\n      \"description\": \"Officials in uniform at table with equipment, masked attendees, indoor setting, daylight",
+   "parsed": null
+  }
+ }
+}

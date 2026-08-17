@@ -1,0 +1,59 @@
+{
+ "model": "Qwen/Qwen3-VL-4B-Instruct",
+ "device": "cuda",
+ "dtype": "torch.bfloat16",
+ "load_s": 4.610190153121948,
+ "clips": {
+  "8724": {
+   "sheets": [
+    "E:\\broll-queue\\sheets\\8724\\sheet_0001.jpg"
+   ],
+   "n_sheets": 1,
+   "input_tokens": 3652,
+   "output_tokens": 234,
+   "gen_s": 309.6,
+   "tok_per_s_out": 0.76,
+   "peak_vram_gb": 12.771176815032959,
+   "valid_contract": true,
+   "contract_error": "",
+   "raw": "```json\n{\n  \"themes\": [],\n  \"category_hint\": \"general/unsorted\",\n  \"quality_flags\": [],\n  \"segments\": [\n    {\n      \"t_start\": 0.0,\n      \"t_end\": 7.0,\n      \"description\": \"Crowd from behind, people wearing white shirts with Chinese characters, dim lighting\",\n      \"objects\": [\"crowd\", \"people\", \"white shirt\", \"Chinese characters\"],\n      \"setting\": \"indoor or dimly lit environment\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    },\n    {\n      \"t_start\": 7.0,\n      \"t_end\": 13.0,\n      \"description\": \"Crowd from behind, people wearing white shirts with Chinese characters, dim lighting\",\n      \"objects\": [\"crowd\", \"people\", \"white shirt\", \"Chinese characters\"],\n      \"setting\": \"indoor or dimly lit environment\",\n      \"motion\": \"static\",\n      \"onscreen_text\": \"\",\n      \"onscreen_text_en\": \"\"\n    }\n  ]\n}\n```",
+   "parsed": {
+    "themes": [],
+    "category_hint": "general/unsorted",
+    "quality_flags": [],
+    "segments": [
+     {
+      "t_start": 0.0,
+      "t_end": 7.0,
+      "description": "Crowd from behind, people wearing white shirts with Chinese characters, dim lighting",
+      "objects": [
+       "crowd",
+       "people",
+       "white shirt",
+       "Chinese characters"
+      ],
+      "setting": "indoor or dimly lit environment",
+      "motion": "static",
+      "onscreen_text": "",
+      "onscreen_text_en": ""
+     },
+     {
+      "t_start": 7.0,
+      "t_end": 13.0,
+      "description": "Crowd from behind, people wearing white shirts with Chinese characters, dim lighting",
+      "objects": [
+       "crowd",
+       "people",
+       "white shirt",
+       "Chinese characters"
+      ],
+      "setting": "indoor or dimly lit environment",
+      "motion": "static",
+      "onscreen_text": "",
+      "onscreen_text_en": ""
+     }
+    ]
+   }
+  }
+ }
+}

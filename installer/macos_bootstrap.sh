@@ -50,7 +50,7 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.28"
+INSTALLER_VERSION="1.0.29"
 
 DRY_RUN=0
 TAILNET_HOST=""

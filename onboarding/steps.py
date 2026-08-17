@@ -72,6 +72,11 @@ from ccsync_companion import site as site_mod
 # 0.7.9 was bumped but never built, so it never claimed an installer number
 # and there is no 1.0.28-shaped gap to explain -- the pairing stays 1:1 with
 # what actually shipped.
+# 1.0.29: real installer changes this time -- the wizard and both bootstraps
+# read GET /api/v1/site (NAS Syncthing device ID, remote root, rclone remote
+# name, SFTP host/port/shell_type) instead of shipping one fleet's values as
+# defaults; blank dashboard URL / device ID now refuse with a named message;
+# rclone stanza gains `port =`. Bundles companion 0.7.11 (2026-08-17).
 # 1.0.27: the 1.0.21 rule a fifth time, for companion 0.7.8 (R14 -- BPG's
 # watch-folder seeding and Start press). No installer source changed; 1.0.26
 # was published on 2026-08-13 bundling 0.7.7, so this number has to move or
@@ -100,7 +105,7 @@ from ccsync_companion import site as site_mod
 # contract: CAPABILITY MISSING: markers + exit 3, RESOLVE-MAPPING-STATUS:
 # marker, and the existing-config rclone_path repair. The .sh and this file
 # must ship as a pair, same as the .ps1.
-INSTALLER_VERSION = "1.0.28"
+INSTALLER_VERSION = "1.0.29"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every

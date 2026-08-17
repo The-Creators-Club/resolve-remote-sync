@@ -56,7 +56,15 @@ log = logging.getLogger("ccsync.config")
 # ffmpeg -progress. Carries the 0.7.9 work too (requester-first ytdl, the
 # pinned ffmpeg/deno sidecars, signed-in downloads), which was bumped but
 # never built: the fleet goes 0.7.8 -> 0.7.10 and skips 0.7.9 entirely.
-VERSION = "0.7.10"
+# 0.7.11: site-manifest support (site.py) -- the companion fetches
+# GET /api/v1/site once per start and takes the SMB UNC (server_p_unc), the
+# NAS Syncthing device ID and the rclone SFTP tuning (chunk size, concurrency,
+# shell_type) from the server instead of built-in tenant literals; every
+# compiled-in address/remote-name default is gone (dashboard_url and remote
+# are blank until the installer sets them); derive_server_unc() learned the
+# Synology /volumeN share convention. Same code now serves a TrueNAS or a
+# Synology site (docs/SYNOLOGY_PORT_PLAN.md, 2026-08-17).
+VERSION = "0.7.11"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

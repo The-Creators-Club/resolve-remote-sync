@@ -199,6 +199,12 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # INSTALLER_VERSION in installer/macos_bootstrap.sh together -- one installer
 # number covers all three, and build_editor_package.ps1 / tools\release.ps1
 # refuse on drift between any of them.
+# 1.0.29: this script now fetches GET /api/v1/site for the NAS Syncthing
+# device ID, remote root, rclone remote name and SFTP host/port/shell_type
+# when the flags are absent (they used to default to one fleet's values, and
+# -NasSyncthingId shipped a production device ID); missing -DashboardUrl is
+# exit 2, a missing device ID is a capability miss. Bundles companion 0.7.11
+# (2026-08-17, docs/SYNOLOGY_PORT_PLAN.md WP0/WP5).
 # 1.0.28: nothing in any installer source changed -- the 1.0.21 rule, again:
 # onboard.exe bundles the companion, so companion 0.7.10 (the proxy ledger)
 # rebuilds this package's bytes and the server would keep the OLD build on a
@@ -228,7 +234,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.28"
+$InstallerVersion = "1.0.29"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see

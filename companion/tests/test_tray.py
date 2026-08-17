@@ -1355,6 +1355,16 @@ def _clicky_menu(fired):
 
 
 def test_the_popup_handle_dies_with_the_popup(monkeypatch):
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        # _show_menu() itself calls the real ctypes.set_last_error/
+        # get_last_error, which only exist when ctypes.__init__ is built for
+        # win32 -- on any other host this is an AttributeError, not a
+        # behaviour difference to paper over (macOS CI, 2026-08-17).
+        _pytest.skip("_show_menu() is Win32-only")
     icon, user32 = _win_icon(monkeypatch, _clicky_menu([]))
     icon._show_menu()
 
@@ -1377,7 +1387,13 @@ def test_assigning_the_menu_does_no_win32_work(monkeypatch):
 
 
 def test_the_menu_open_flag_is_set_only_while_the_popup_is_up(monkeypatch):
+    import sys
     import threading
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("_show_menu() is Win32-only")  # see the comment above
 
     flag = threading.Event()
     seen = {}
@@ -1392,9 +1408,13 @@ def test_the_menu_open_flag_is_set_only_while_the_popup_is_up(monkeypatch):
 
 
 def test_the_flag_clears_and_the_handle_dies_even_if_the_popup_raises(monkeypatch):
+    import sys
     import threading
 
     import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("_show_menu() is Win32-only")  # see test_the_popup_handle...
 
     flag = threading.Event()
 
@@ -1416,8 +1436,12 @@ def test_a_failed_popup_call_is_logged(caplog):
     call failed", and a right-click that does nothing is the single
     most-reported tray symptom. GetLastError is what separates them."""
     import logging
+    import sys
 
     import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("_show_menu() is Win32-only")  # see test_the_popup_handle...
 
     monkeypatch = _pytest.MonkeyPatch()
     try:
@@ -1433,6 +1457,12 @@ def test_a_failed_popup_call_is_logged(caplog):
 def test_a_dismissed_popup_is_not_reported_as_a_failure(caplog, monkeypatch):
     import ctypes
     import logging
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("_show_menu() is Win32-only")  # see test_the_popup_handle...
 
     ctypes.set_last_error(0)
     icon, _user32 = _win_icon(monkeypatch, _clicky_menu([]))
@@ -1442,6 +1472,13 @@ def test_a_dismissed_popup_is_not_reported_as_a_failure(caplog, monkeypatch):
 
 
 def test_a_chosen_item_runs_its_action(monkeypatch):
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("_show_menu() is Win32-only")  # see test_the_popup_handle...
+
     fired: list = []
     menu = _clicky_menu(fired)
     icon, user32 = _win_icon(monkeypatch, menu, track_result=1002)
@@ -1451,8 +1488,14 @@ def test_a_chosen_item_runs_its_action(monkeypatch):
 
 def test_an_action_that_raises_does_not_kill_the_message_pump(monkeypatch, caplog):
     import logging
+    import sys
+
+    import pytest as _pytest
 
     from ccsync_companion import tray_native
+
+    if sys.platform != "win32":
+        _pytest.skip("_show_menu() is Win32-only")  # see test_the_popup_handle...
 
     def _boom(icon, item):
         raise RuntimeError("nope")
@@ -1469,6 +1512,12 @@ def test_a_menu_that_cannot_be_created_is_logged_not_raised(monkeypatch, caplog)
     published that as the live handle and right-click went dead until the
     companion was restarted."""
     import logging
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("_show_menu() is Win32-only")  # see test_the_popup_handle...
 
     icon, user32 = _win_icon(monkeypatch, _clicky_menu([]), popup=0)
     with caplog.at_level(logging.WARNING, logger="ccsync.tray.native"):

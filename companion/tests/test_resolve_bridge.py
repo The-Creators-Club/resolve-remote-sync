@@ -1137,6 +1137,21 @@ def test_poll_timeline_items_is_the_only_caller_that_arms_the_cache(monkeypatch)
 # imported twice.
 
 
+def _local_path(*parts: str) -> str:
+    """A HOST-NATIVE local path, e.g. what a real editor's local_root
+    produces -- never a hardcoded Windows drive-letter literal.
+
+    canon.local_to_canonical's `dest_path`/`local_root` are documented as
+    worked out "in the HOST's spelling" via the real os.path.relpath, so a
+    literal like `"F:\\Creators_Club\\..."` is only realistic on an actual
+    Windows host; on macOS local_root is a real POSIX mount
+    (`/Volumes/...`), and relpath cannot relate a backslash-separated string
+    to a `/`-rooted one at all (macOS CI, 2026-08-17). Root-relative and
+    drive-letter-free so it is equally valid os.sep-joined on either host.
+    """
+    return os.path.join(os.sep + "Creators_Club", *parts)
+
+
 def _import_world(monkeypatch, project_name="Energy Transition", pool_clips=()):
     """A connected Resolve whose media pool holds `pool_clips` at the root."""
     root = FakeFolder(clips=[FakeMediaPoolItem(p, name=os.path.basename(p))
@@ -1237,7 +1252,12 @@ def test_bin_names_are_sanitised(raw, expected):
 
 def test_import_files_to_bin_path_imports_into_the_term_bin(monkeypatch):
     pool, root = _import_world(monkeypatch)
-    path = "P:\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+    # A host-native path, not a hardcoded "P:\\..." literal: production only
+    # ever hands ImportMedia a local_root path (ImportMedia cannot resolve
+    # "P:\\" on a Mac, see _pool_path_alias below), and FakeMediaPool.
+    # ImportMedia's os.path.basename() needs real separators for this host
+    # to name the clip correctly (macOS CI, 2026-08-17).
+    path = _local_path("Projects", "2026", "Youtube", "algal reef", "a.mp4")
 
     result = resolve_bridge.import_files_to_bin_path(
         [path], ("Youtube", "algal reef"),
@@ -1313,13 +1333,13 @@ def test_import_stores_the_canonical_spelling(monkeypatch):
     bookkeeping is keyed on what it passed in)."""
     from ccsync_companion import canon
 
-    local = "F:\\Creators_Club\\Projects\\2026\\Youtube\\algal reef\\a.mp4"
+    local = _local_path("Projects", "2026", "Youtube", "algal reef", "a.mp4")
     pool, _root = _import_world(monkeypatch)
 
     result = resolve_bridge.import_files_to_bin_path(
         [local], ("Youtube", "algal reef"),
         canonical_fn=lambda p: canon.local_to_canonical(
-            p, "F:\\Creators_Club", "P:\\"),
+            p, os.sep + "Creators_Club", "P:\\"),
     )
 
     assert result["ok"] is True
@@ -1365,7 +1385,7 @@ def test_find_existing_clip_matches_the_canonical_spelling():
     of the same file would file a duplicate media pool item."""
     from ccsync_companion import canon
 
-    local = "F:\\Creators_Club\\Projects\\2026\\B-roll\\x.mov"
+    local = _local_path("Projects", "2026", "B-roll", "x.mov")
     stored = "P:\\Projects\\2026\\B-roll\\x.mov"
     bin_folder = FakeFolder(clips=[FakeMediaPoolItem(stored)], name="Archive")
 
@@ -1373,7 +1393,7 @@ def test_find_existing_clip_matches_the_canonical_spelling():
     hit = resolve_bridge._find_existing_clip(
         bin_folder, local,
         canonical_fn=lambda p: canon.local_to_canonical(
-            p, "F:\\Creators_Club", "P:\\"),
+            p, os.sep + "Creators_Club", "P:\\"),
     )
     assert hit is bin_folder.GetClipList()[0]
 

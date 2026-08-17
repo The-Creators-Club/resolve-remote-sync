@@ -71,6 +71,7 @@ reads "Stop".
 from __future__ import annotations
 
 import logging
+import ntpath
 import os
 import platform
 import re
@@ -81,7 +82,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence, Union
 
-from . import resolve_bridge
+from . import canon, resolve_bridge
 
 log = logging.getLogger("ccsync.bpg")
 
@@ -328,7 +329,17 @@ def _escape_watch_folder(path: str) -> str:
 
 
 def _norm(path: Any) -> str:
-    return os.path.normcase(os.path.normpath(str(path or "").strip()))
+    """Case/separator-folded, in the string's OWN spelling.
+
+    Watch-folder entries are always canonical `P:\\Projects\\...` strings --
+    BPG itself only ever runs on Windows (find_bpg_command above) -- so this
+    must fold backslashes and case even when the companion process is not on
+    Windows (macOS CI, 2026-08-17: os.path there is posixpath, which treats
+    `\\` as an ordinary filename character and does not lowercase, so two
+    spellings of the same watch folder stopped comparing equal). canon.norm
+    is the package's one place that already knows this rule.
+    """
+    return canon.norm(str(path or "").strip())
 
 
 def _is_covered(wanted: str, entries: Iterable[str]) -> bool:
@@ -337,11 +348,12 @@ def _is_covered(wanted: str, entries: Iterable[str]) -> bool:
     target = _norm(wanted)
     if not target:
         return True
+    sep = ntpath.sep  # these are always Windows-spelled, not the host's os.sep
     for entry in entries:
         existing = _norm(entry)
         if not existing:
             continue
-        if target == existing or target.startswith(existing.rstrip(os.sep) + os.sep):
+        if target == existing or target.startswith(existing.rstrip(sep) + sep):
             return True
     return False
 
@@ -378,10 +390,6 @@ def ensure_watch_folders(wanted: Sequence[str], *, path: str = "",
     read is a reason not to launch, not a crash.
     """
     result: dict[str, Any] = {"ok": False, "added": [], "reason": ""}
-    target = path or settings_path()
-    if not target:
-        result["reason"] = "no %APPDATA%"
-        return result
     seen: set[str] = set()
     dirs: list[str] = []
     for entry in wanted or ():
@@ -391,7 +399,17 @@ def ensure_watch_folders(wanted: Sequence[str], *, path: str = "",
         seen.add(_norm(text))
         dirs.append(text)
     if not dirs:
+        # Nothing to add: this is a no-op regardless of whether a settings
+        # path exists at all, so it must not depend on target below -- a
+        # caller with an empty want list (maybe_launch's default watch_dirs)
+        # on a machine that cannot resolve %APPDATA% (any non-Windows host,
+        # e.g. macOS CI, 2026-08-17) got "watch folders could not be set" for
+        # a launch that had nothing to watch anyway.
         result["ok"] = True
+        return result
+    target = path or settings_path()
+    if not target:
+        result["reason"] = "no %APPDATA%"
         return result
     try:
         try:

@@ -664,6 +664,26 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _assert_port_free(port: int) -> None:
+    """The server released `port` -- proven the same way a REAL restart
+    would prove it, not more strictly.
+
+    A plain bind() here is too strict on Linux/macOS once a request was
+    actually served: closing the accepted connection leaves that (port,
+    client-port) pair in TIME_WAIT, and BSD-derived stacks refuse a bare
+    bind() to the local port of ANY matching TIME_WAIT entry -- Windows does
+    not enforce this the same way, so this only reproduced in CI on the
+    macOS runner (2026-08-17). BrollCompanionServer itself sets
+    allow_reuse_address = os.name != "nt" for exactly this reason (see its
+    docstring); a real second server on this port would rebind fine, so the
+    check must set SO_REUSEADDR too or it is testing something stricter than
+    the production contract.
+    """
+    with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+
+
 @pytest.fixture
 def live_server(tree, monkeypatch):
     """A real server on an ephemeral port, with all three route groups wired."""
@@ -863,8 +883,7 @@ def test_start_serves_the_reveal_route_on_the_one_port(tmp_path, monkeypatch, sp
         broll_server.stop(server)
 
     # ...and exactly one listener was ever taken, so the port is free again.
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", port))
+    _assert_port_free(port)
 
 
 def test_the_readme_snippet_documents_the_projects_share(tmp_path):

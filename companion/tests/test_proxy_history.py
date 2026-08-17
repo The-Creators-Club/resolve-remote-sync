@@ -10,6 +10,7 @@ filesystem would test nothing.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -36,8 +37,17 @@ def _history(tmp_path, clock=None):
 
 def _done(history, name="A001.MP4", src=1_000_000, proxy=100_000, duration=60.0,
           encode_s=10.0, project="2026/FF5/Nuclear"):
+    # `path` stands in for what proxy_gen actually passes: a HOST-NATIVE
+    # filesystem path from proxy_scan's os.walk (os.path.join(dirpath,
+    # filename)), never a canonical `P:\` string -- record()'s basename
+    # extraction is os.path.basename, so it must be built with this host's
+    # own separators or it silently exercises only Windows/ntpath's
+    # (`/` and `\` both split) leniency instead of the real contract
+    # (macOS CI, 2026-08-17). `project` itself stays forward-slash-joined --
+    # that IS canonical, see proxy_scan.py's project_rel.replace("/", os.sep).
+    path = os.path.join("P:" + os.sep + "Projects", *project.split("/"), name)
     history.record(
-        proxy_history.RESULT_DONE, f"P:\\Projects\\{project}\\{name}",
+        proxy_history.RESULT_DONE, path,
         project=project, kind="own", encoder="hevc_nvenc",
         src_bytes=src, proxy_bytes=proxy, duration_s=duration, encode_s=encode_s,
     )

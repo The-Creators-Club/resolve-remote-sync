@@ -3358,6 +3358,7 @@ def test_the_check_only_runs_after_an_upgrade(tmp_path, monkeypatch):
     """A grant is only ever lost by the binary changing, and a listdir on the
     sync root is not something to do on every start."""
     import ccsync_companion.app as app_mod
+    from ccsync_companion import ui_dispatch
 
     calls: list[str] = []
     app = _make_app(tmp_path)
@@ -3365,6 +3366,14 @@ def test_the_check_only_runs_after_an_upgrade(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "start", lambda: None)
     monkeypatch.setattr(app, "shutdown", lambda: None)
     monkeypatch.setattr(app_mod.upgrade_mod, "cleanup_old_exe", lambda *a, **k: False)
+    # This test is about the upgrade-marker gate, not about UI dispatch. On a
+    # real Mac app.run() would otherwise start a real main-thread dispatcher,
+    # whose _make_root() calls tkinter.Tk() and trips
+    # conftest._no_real_tk_windows -- an error in teardown, with the body
+    # still passing (MAC-2e, same fix as
+    # test_run_tray_start_non_import_error_still_runs_shutdown above;
+    # macOS CI, 2026-08-17).
+    monkeypatch.setattr(ui_dispatch, "start", lambda *a, **kw: None)
 
     def _timer(delay, fn):
         fn()
@@ -4745,8 +4754,18 @@ def test_the_background_refresh_catches_a_mapping_changed_outside_this_process(
 ):
     """P: can also be remapped by the installer's logon task or a manual
     `net use`, so the cache-only tray read needs something refreshing it."""
-    monkeypatch.setattr(app_mod.os, "name", "nt")
     app = _make_app(tmp_path)
+    # AFTER construction, not before: CompanionApp.__init__ computes its
+    # guard_state_dir with a real pathlib.Path(cfg's log_path), and pathlib's
+    # WindowsPath.__new__ is bound at interpreter start to unconditionally
+    # raise NotImplementedError on a real posix host (its `os.name != 'nt'`
+    # guard is evaluated once, at import) -- patching os.name to fake
+    # Windows earlier let the outer Path() through (it dispatches via
+    # object.__new__, sidestepping the subclass check) but blew up the first
+    # time something recursed into a fresh WindowsPath, e.g. `.parent`
+    # (macOS CI, 2026-08-17). Nothing under test here reads os.name during
+    # __init__ -- only p_mapping_mode()/_refresh_p_mapping_mode() do.
+    monkeypatch.setattr(app_mod.os, "name", "nt")
     answers = ["local", "server"]
     monkeypatch.setattr(app, "_probe_p_mapping_mode", lambda: answers.pop(0))
 

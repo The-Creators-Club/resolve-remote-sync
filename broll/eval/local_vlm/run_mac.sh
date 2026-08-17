@@ -10,12 +10,12 @@
 #   2. installs llama.cpp if absent: PATH llama-server, else `brew install llama.cpp`,
 #      else the official macOS arm64 release tar.gz for LLAMA_TAG (pinned below, the same
 #      tag as the base rig's CUDA build) into $CACHE/llama.cpp-$LLAMA_TAG;
-#   3. downloads the 8B, probes Metal's recommendedMaxWorkingSetSize with it (what
-#      llama.cpp gets without `sudo sysctl iogpu.wired_limit_mb`, which needs a password
-#      here), and lets mac_models.py pick the largest quant of each model that fits
-#      model + mmproj + KV + overhead into that budget (Q8_0 default for the 8B; the pick,
-#      quant and source are written to <results>/<model>/pick.json); the 30B/32B files
-#      are prefetched in the background while the 8B runs;
+#   3. sets the memory budget to Metal's default working-set limit (3/4 of RAM on a
+#      36 GB Mac; raising it needs `sudo sysctl iogpu.wired_limit_mb`, i.e. a password)
+#      and lets mac_models.py pick the largest quant of each model that fits
+#      model + mmproj + KV + overhead into it (Q8_0 default for the 8B; the pick, quant
+#      and source are written to <results>/<model>/pick.json); the 30B/32B files are
+#      prefetched in the background while the 8B runs;
 #   4. runs the models IN SEQUENCE, one llama-server at a time (run_eval.py starts and
 #      stops its own; the script also kills any stray one between models):
 #        8b   arm A on all clips, then arm B (all) and arm C (25)      -> results-mac/qwen3-vl-8b-<quant>/
@@ -146,25 +146,13 @@ dl() { # dl <repo> <file> -> echoes the local path (resumable, safe to call twic
 
 kill_servers() { if pkill -x llama-server 2>/dev/null; then log "killed stray llama-server"; fi; sleep 2; }
 
+# Metal working-set budget. llama.cpp b10470 no longer logs recommendedMaxWorkingSetSize,
+# and iogpu.wired_limit_mb=0 means the macOS default: 3/4 of RAM above 32 GB, 2/3 at or
+# below (the 36 GB Macs report 28991 MB, 32 GB ones 22906 MB). Minus 0.5 GB margin.
 MEM_GB=$("$PY" -c "import subprocess; print(int(subprocess.check_output(['sysctl','-n','hw.memsize']))/1e9)")
-BUDGET_GB=$("$PY" -c "print(round($MEM_GB*0.75-0.5,1))")
-probe_budget() { # $1 model $2 mmproj -> sets BUDGET_GB from Metal's recommendedMaxWorkingSetSize
-  local plog="${RESULTS}/probe.log" pid i=0 mb
-  "$LLAMA_SERVER" -m "$1" --mmproj "$2" -c 512 -ngl 99 --port 8999 --host 127.0.0.1 --no-warmup >"$plog" 2>&1 &
-  pid=$!
-  while [ $i -lt 90 ]; do
-    if grep -q "recommendedMaxWorkingSetSize" "$plog" 2>/dev/null; then break; fi
-    sleep 2; i=$((i+1))
-  done
-  sleep 3; kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null || true
-  mb=$(grep -o "recommendedMaxWorkingSetSize *= *[0-9.]*" "$plog" | head -1 | grep -o "[0-9.][0-9.]*$")
-  if [ -n "$mb" ]; then
-    BUDGET_GB=$("$PY" -c "print(round($mb/1000.0-0.5,1))")
-    log "Metal recommendedMaxWorkingSetSize = ${mb} MB -> budget ${BUDGET_GB} GB for model+mmproj+KV+overhead"
-  else
-    log "could not read recommendedMaxWorkingSetSize from the probe; using ${BUDGET_GB} GB (0.75*RAM-0.5)"
-  fi
-}
+WIRED_MB=$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)
+BUDGET_GB=$("$PY" -c "m=$MEM_GB; w=$WIRED_MB; print(round((w/1000.0 if w>0 else (m*0.75 if m>34 else m*2/3))-0.5,1))")
+log "memory budget for model+mmproj+KV+overhead: ${BUDGET_GB} GB (RAM ${MEM_GB} GB, iogpu.wired_limit_mb=${WIRED_MB})"
 
 pick_json() { "$PY" mac_models.py pick --model "$1" --budget-gb "$BUDGET_GB" --ctx 16384 ${PREFER:+--prefer $PREFER} --force; }
 pf() { "$PY" -c "import json,sys
@@ -201,8 +189,7 @@ for key in $(echo "$MODELS" | tr ',' ' '); do
   MODEL_PATH=$(dl "$REPO" "$FILE") || continue
   MMPROJ_PATH=$(dl "$MREPO" "$MFILE") || continue
   if [ "$PROBED" -eq 0 ]; then
-    probe_budget "$MODEL_PATH" "$MMPROJ_PATH"; PROBED=1
-    PICK=$(pick_json "$key")   # re-pick with the measured budget
+    PROBED=1
     # prefetch the OTHER models' files now, in the background, while this one runs
     OTHERS=""
     for k2 in $(echo "$MODELS" | tr ',' ' '); do [ "$k2" != "$key" ] && OTHERS="$OTHERS $k2"; done

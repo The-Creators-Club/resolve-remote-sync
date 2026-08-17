@@ -1729,17 +1729,21 @@ def test_a_failed_geometry_lookup_leaves_the_anchor_untouched(monkeypatch):
     """The whole point of item 20 was a menu that would not open. A
     positioning nicety must never become a new way to do that."""
     from ccsync_companion import tray as tray_mod
+    # The function lives in tray_native and reads ITS OWN _taskbar_geometry;
+    # patching tray's re-export was inert, so this test's outcome depended on
+    # the live taskbar of whoever ran it (2026-08-18).
+    from ccsync_companion import tray_native as tray_native_mod
 
     def boom():
         raise OSError("SHAppBarMessage exploded")
 
-    monkeypatch.setattr(tray_mod, "_taskbar_geometry", boom)
+    monkeypatch.setattr(tray_native_mod, "_taskbar_geometry", boom)
     assert tray_mod._anchor_clear_of_taskbar(1700, 1058, _ANCHOR_FLAGS) == (
         1700, 1058, _ANCHOR_FLAGS)
 
     # ...and the same when the shell simply has no answer (no taskbar, or
     # SHAppBarMessage returned 0).
-    monkeypatch.setattr(tray_mod, "_taskbar_geometry", lambda: None)
+    monkeypatch.setattr(tray_native_mod, "_taskbar_geometry", lambda: None)
     assert tray_mod._anchor_clear_of_taskbar(1700, 1058, _ANCHOR_FLAGS) == (
         1700, 1058, _ANCHOR_FLAGS)
 

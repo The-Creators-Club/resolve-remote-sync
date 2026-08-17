@@ -15,6 +15,7 @@ back mid-encode must leave nothing behind.
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import time
 
@@ -127,6 +128,10 @@ def _cfg(tmp_path, **overrides):
     return cfg
 
 
+# 1 TB drive with 900 GB free -- far above proxy_gen's floor.
+_ROOMY_DISK = shutil._ntuple_diskusage(10 ** 12, 10 ** 11, 9 * 10 ** 11)
+
+
 def _make_gen(tmp_path, cfg=None, **kwargs):
     kwargs.setdefault("idle_probe", _Idle(9999))
     kwargs.setdefault("probe_fn", _probe())
@@ -135,6 +140,12 @@ def _make_gen(tmp_path, cfg=None, **kwargs):
     kwargs.setdefault("scan_fn", lambda *a, **k: {
         "projects": {}, "totals": proxy_scan._empty_totals()})
     kwargs.setdefault("encode_fn", _FakeFfmpeg())
+    # A fake disk_usage: the generator refuses to encode when the drive is
+    # under its safety floor (23.8 GB), and 44 of these tests silently depended
+    # on the HOST's temp drive being roomy -- they all failed the night the
+    # base rig's C: dropped to 19 GB free (2026-08-18). The tests that exercise
+    # the floor pass their own disk_usage_fn explicitly.
+    kwargs.setdefault("disk_usage_fn", lambda path: _ROOMY_DISK)
     return proxy_gen.ProxyGenerator(cfg or _cfg(tmp_path), tmp_path / "state", **kwargs)
 
 

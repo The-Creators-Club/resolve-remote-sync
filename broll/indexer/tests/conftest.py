@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -64,10 +65,36 @@ def ffmpeg_available() -> bool:
 
 
 @pytest.fixture(scope="session")
-def tiny_clip(tmp_path_factory, ffmpeg_available) -> Path:
+def require_ffmpeg() -> None:
+    """A real ffmpeg/ffprobe on PATH, or a skip -- unless the caller insists.
+
+    Mirrors companion/tests/conftest.py's `rclone_binary` fixture (CLAUDE.md,
+    2026-08-17 CI run 32041222871): a runner with no ffmpeg on PATH must not
+    silently turn "these prove real proxies/scenes/10-bit-forcing decode
+    correctly" into a green suite that ran nothing. Set
+    CCSYNC_REQUIRE_FFMPEG=1 to turn the skip into a hard failure -- pytest
+    exits 0 when tests skip, so that is the only way a missing binary reads
+    as red rather than green. `ci.yml`'s linux job installs ffmpeg with apt
+    before this suite runs precisely so the skip path is normally never
+    taken there; the env var is the belt-and-braces half, for anyone running
+    these tests on a machine that has not.
+    """
+    if shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None:
+        return
+    message = "ffmpeg/ffprobe not found on PATH"
+    if os.environ.get("CCSYNC_REQUIRE_FFMPEG") == "1":
+        pytest.fail(
+            f"{message}\n\nCCSYNC_REQUIRE_FFMPEG=1 is set, so this is a failure "
+            "rather than a skip -- these tests invoke a real ffmpeg/ffprobe to prove "
+            "proxy/sprite/scene-detection behaviour against real codecs, and a "
+            "release must not be cut without them."
+        )
+    pytest.skip(message)
+
+
+@pytest.fixture(scope="session")
+def tiny_clip(tmp_path_factory, require_ffmpeg) -> Path:
     """A 2s, 320x240 testsrc clip generated with ffmpeg lavfi — used for real ffprobe/ffmpeg tests."""
-    if not ffmpeg_available:
-        pytest.skip("ffmpeg/ffprobe not available on PATH")
     out_dir = tmp_path_factory.mktemp("media")
     out_path = out_dir / "tiny_clip.mp4"
     cmd = [

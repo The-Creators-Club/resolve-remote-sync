@@ -320,6 +320,27 @@ jobs:
           # dashboard container are) and this is a test-time import only. Do
           # NOT regenerate broll/indexer/requirements.lock for this.
           broll/indexer/.venv/bin/python -m pip install --disable-pip-version-check "numpy==2.5.2"
+
+      # test_ffmpeg_tools.py / test_proxy_integrity.py / test_encoding.py shell
+      # out to a REAL ffmpeg/ffprobe to prove proxy encoding, 10-bit forcing,
+      # timecode round trips and CJK filename handling against real codecs --
+      # a bare ubuntu-latest runner has neither on PATH (measured, CI run
+      # 32041222871: 4 + 11 fail/error rather than skip, because several of
+      # those fixtures shell out directly and never asked
+      # conftest.py's `require_ffmpeg`/`ffmpeg_available` fixtures first).
+      # Installing it here is preferred over letting them skip: it is not a
+      # conveyed artefact (this job never ships this ffmpeg to a customer,
+      # unlike the GPLv3 posture the licence gate cares about for the
+      # dashboard container and companion targets), so there is no reason not
+      # to have the suite actually run. `require_ffmpeg` stays as
+      # belt-and-braces for anyone running this suite on a machine that
+      # genuinely has neither -- CCSYNC_REQUIRE_FFMPEG=1 turns that into a
+      # hard failure instead of a silent skip, the same pattern
+      # `rclone_binary` uses in companion/tests/conftest.py.
+      - name: install ffmpeg (broll/indexer needs a real ffmpeg/ffprobe)
+        if: ${{ !cancelled() }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: broll/indexer -- pytest
         if: ${{ !cancelled() }}
         working-directory: broll/indexer

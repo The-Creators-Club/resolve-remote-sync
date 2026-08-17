@@ -19,7 +19,13 @@ from broll_index import ffmpeg_tools
 
 
 @pytest.fixture
-def clip(tmp_path: Path) -> Path:
+def clip(tmp_path: Path, require_ffmpeg) -> Path:
+    """require_ffmpeg (conftest.py) is what turns "no ffmpeg on PATH" into a
+    clean skip (or, with CCSYNC_REQUIRE_FFMPEG=1, a failure) for every test
+    in this file -- before this fixture depended on it, a runner with no
+    ffmpeg raised FileNotFoundError straight out of subprocess.run() below,
+    which is what CI run 32041222871 saw as 11 errors rather than 11 skips
+    (2026-08-17)."""
     out = tmp_path / "src.mp4"
     subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",

@@ -92,7 +92,7 @@ def test_build_proxy_does_not_upscale_a_small_source(tiny_clip, tmp_path):
     assert ffmpeg_tools.probe_video(dest)["height"] == 240
 
 
-def test_build_proxy_downscales_a_large_source(tmp_path):
+def test_build_proxy_downscales_a_large_source(tmp_path, require_ffmpeg):
     big = tmp_path / "big.mp4"
     subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -107,7 +107,7 @@ def test_build_proxy_downscales_a_large_source(tmp_path):
     assert dest.stat().st_size < big.stat().st_size
 
 
-def test_build_proxy_forces_8bit_from_a_10bit_source(tmp_path):
+def test_build_proxy_forces_8bit_from_a_10bit_source(tmp_path, require_ffmpeg):
     """A 10-bit source (every FX3/FX30 shoot) must not produce a 10-bit
     proxy: without the -pix_fmt pin libx264 inherited the source format and
     emitted H.264 High 10, which browsers render as a black rectangle --
@@ -129,7 +129,7 @@ def test_build_proxy_forces_8bit_from_a_10bit_source(tmp_path):
     assert video.get("profile") != "High 10"
 
 
-def test_build_proxy_carries_the_sources_timecode(tmp_path):
+def test_build_proxy_carries_the_sources_timecode(tmp_path, require_ffmpeg):
     """Resolve's LinkProxyMedia validates the pairing and REFUSES a proxy
     with no embedded timecode against a source that has one (R10, proven
     live 2026-08-12) -- so the preview must inherit the camera's timecode
@@ -283,7 +283,7 @@ def test_detect_nvenc_available_returns_bool():
     result = ffmpeg_tools.detect_nvenc_available()
     assert isinstance(result, bool)
 
-def test_build_proxy_survives_an_odd_height_non_420_source(tmp_path):
+def test_build_proxy_survives_an_odd_height_non_420_source(tmp_path, require_ffmpeg):
     """An odd-height RGB/4:4:4 source (screen captures, ffv1) fails at encoder
     init unless the scale filter guards HEIGHT to even as well as width — the
     width's `-2` already does, the height's bare `min(H,ih)` did not

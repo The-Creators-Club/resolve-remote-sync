@@ -20,8 +20,13 @@ CJK_NAME = "測試片段_ceshi.mp4"
 
 
 @pytest.fixture
-def cjk_clip(tmp_path: Path) -> Path:
-    """A tiny real clip with a CJK filename AND a CJK title tag in its metadata."""
+def cjk_clip(tmp_path: Path, require_ffmpeg) -> Path:
+    """A tiny real clip with a CJK filename AND a CJK title tag in its metadata.
+
+    require_ffmpeg (conftest.py) turns "no ffmpeg on PATH" into a clean skip
+    (or, with CCSYNC_REQUIRE_FFMPEG=1, a failure) instead of the raw
+    FileNotFoundError subprocess.run() below would otherwise raise
+    (2026-08-17, same fix as test_ffmpeg_tools.py / test_proxy_integrity.py)."""
     out = tmp_path / CJK_NAME
     subprocess.run(
         [

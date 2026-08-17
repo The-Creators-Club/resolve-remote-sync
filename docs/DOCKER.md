@@ -15,7 +15,7 @@ operator deliberately switches.
 | base image | stock `python:3.12.7-slim` | `ccsync-dashboard:<version>`, built here |
 | code | bind-mounted `:ro` from the host | image layers |
 | dependencies | `pip install` into a `/venv` volume on first boot | baked, `--require-hashes` |
-| needs PyPI at boot | on the first boot, and after any requirements change | never |
+| needs PyPI at boot | on the first boot, and after any requirements change | never for the base set; ONCE, on the first boot after a site turns `[features] youtube_unblock` on (see "What image mode does NOT bake in") |
 | what a deploy ships | the code trees, over SFTP | an image, plus the code trees are unused |
 | rollback | re-ship the previous tree | re-tag / re-pull the previous image |
 
@@ -120,6 +120,23 @@ Fill in the five `REPLACE_ME` values (`SYNCTHING_API_KEY`, `DASH_REPORT_TOKEN`,
 - **The Claude Code CLI** at `/opt/claude` stays a mount because it must not be
   redistributed at all (item 1).
 - **deno** at `/opt/deno` rides along with those two.
+- **The YouTube "unblock" plugin (`bgutil-ytdlp-pot-provider`, GPLv3)** is
+  NOT in the image layer either, for the exact same reason as ffmpeg above —
+  and, unlike ffmpeg/deno/Claude, it is not even a *mount*: it is a pip
+  package `run.sh` installs into `/venv` (the SAME venv the base
+  `requirements.lock` populated, and the SAME mechanism — an md5-stamped,
+  `--require-hashes` `pip install`), but only when `DASH_SITE_YOUTUBE_UNBLOCK=1`,
+  which is only ever "1" on a site whose `site.toml` sets
+  `[features] youtube_unblock` (2026-08-17, `docs/COMMERCIAL_READINESS.md`
+  items 2/3 — see `dashboard/deploy/requirements-unblock.txt`'s own header
+  and `docs/CI.md` for why the licence gate treats it as a separate,
+  customer-opt-in target). Concretely: a fresh **image-mode** container never
+  touches PyPI for the base app (`.image-baked` short-circuits that), but the
+  first boot after a site flips `youtube_unblock` on DOES need PyPI reachable
+  from the container — the same requirement bind-mount mode always had, now
+  true for image mode too, but ONLY for this one optional feature. A future
+  `ccsync-unblock` image layer that bakes this in as its own opt-in image is
+  plausible follow-up work; it does not exist.
 - **Every data volume.** `/data`, `/projects`, `/broll-data`, `/music-data`,
   `/music-encoder`, `/music-proxies`, `/music-share`, `/ytdl-data`,
   `/claude-home` are unchanged, byte for byte, from `compose.yaml`. The data is

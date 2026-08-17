@@ -484,9 +484,13 @@ TAILNET_BIND_IP = truenas_backend.DEFAULT_TAILNET_BIND
 
 # yt-dlp's PO-token provider, run as a sidecar. The tag is pinned and MUST be
 # bumped together with the `bgutil-ytdlp-pot-provider` pin in
-# dashboard/deploy/requirements.txt -- the plugin and this server are one
-# component in two processes, and the project ships them as a matched pair.
-# server/tests/test_safety.py asserts the two versions agree.
+# dashboard/deploy/requirements-unblock.txt (NOT the base
+# dashboard/deploy/requirements.txt every deployment installs -- moved out
+# 2026-08-17, docs/COMMERCIAL_READINESS.md items 2/3, so the GPLv3 plugin
+# only reaches a customer who turned [features] youtube_unblock on) -- the
+# plugin and this server are one component in two processes, and the project
+# ships them as a matched pair. server/tests/test_safety.py asserts the two
+# versions agree.
 POT_PROVIDER_SERVICE = "bgutil"
 POT_PROVIDER_VERSION = "1.3.1"
 POT_PROVIDER_IMAGE = f"brainicism/bgutil-ytdlp-pot-provider:{POT_PROVIDER_VERSION}-deno"
@@ -1007,7 +1011,9 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
             # on the LAN can ask this for tokens.
             #
             # The tag is pinned and MATCHED to the plugin pin in
-            # dashboard/deploy/requirements.txt: one component, two processes.
+            # dashboard/deploy/requirements-unblock.txt (never the base
+            # requirements.txt -- 2026-08-17, COMMERCIAL_READINESS.md items
+            # 2/3): one component, two processes.
             # The `-deno` flavour is deliberate (the `-node` one is the same
             # server on a different runtime; deno is what this fleet already
             # provisions for yt-dlp's JS challenges).

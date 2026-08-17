@@ -106,6 +106,56 @@ if [ "$want" != "$have" ]; then
     fi
 fi
 
+# The YouTube "unblock" plugin (bgutil-ytdlp-pot-provider, GPLv3), installed
+# into this SAME /venv but ONLY when this site turned the feature on
+# (2026-08-17, docs/COMMERCIAL_READINESS.md items 2/3, CI run 32041222871's
+# licence gate). DASH_SITE_YOUTUBE_UNBLOCK is compose_config()'s existing,
+# always-present "0"/"1" signal (published to every companion by
+# GET /api/v1/site) -- reused here rather than inventing a second env var for
+# the same fact. Moved OUT of the base requirements.lock/Dockerfile image for
+# exactly this reason: a base lock that always carried a GPLv3
+# anti-anti-automation package conveyed it to every customer whether or not
+# they ever enabled `youtube_unblock`.
+#
+# UNLIKE the base install above, a failure here is NEVER fatal to the
+# container, not even on a genuine first boot: this dependency serves one
+# optional feature (docs/YTDL_LOCAL_DOWNLOAD.md's PO-token path), and the
+# dashboard -- "the one service that tells everyone whether their footage is
+# syncing" -- must keep booting either way. An unmet dependency degrades
+# `/ytdl` exactly the way an unmounted /opt/deno already does: a clean
+# bot-check failure, not a crash.
+#
+# NOTE for image mode (dashboard/deploy/Dockerfile): this lock is
+# deliberately NOT baked into the image, for the same reason ffmpeg/deno/the
+# Claude CLI are not (docs/DOCKER.md, "What image mode does NOT bake in") --
+# so `.image-baked` does NOT short-circuit this block the way it does the
+# base install above. A site that flips `youtube_unblock` on under image mode
+# needs PyPI reachable from the container at the NEXT boot after the flag
+# changes, same as bind-mount mode always has. (A dedicated `ccsync-unblock`
+# image layer that bakes this in too is future work, not done here.)
+if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then
+    REQS_UNBLOCK=/app/deploy/requirements-unblock.txt
+    PIP_HASH_FLAG_UNBLOCK=""
+    if [ -f /app/deploy/requirements-unblock.lock ]; then
+        REQS_UNBLOCK=/app/deploy/requirements-unblock.lock
+        PIP_HASH_FLAG_UNBLOCK=--require-hashes
+    fi
+    STAMP_UNBLOCK=$VENV/.requirements-unblock-hash
+    want_unblock="$(md5sum "$REQS_UNBLOCK" | cut -d' ' -f1)"
+    have_unblock="$(cat "$STAMP_UNBLOCK" 2>/dev/null || true)"
+    if [ "$want_unblock" != "$have_unblock" ]; then
+        echo "run.sh: youtube_unblock is on -- installing $REQS_UNBLOCK"
+        if "$VENV/bin/pip" install --quiet --no-cache-dir $PIP_HASH_FLAG_UNBLOCK -r "$REQS_UNBLOCK"; then
+            printf '%s' "$want_unblock" > "$STAMP_UNBLOCK"
+        else
+            echo "run.sh: WARNING: youtube_unblock dependency install FAILED" >&2
+            echo "run.sh: WARNING: (PyPI unreachable?). /ytdl's PO-token path will" >&2
+            echo "run.sh: WARNING: bot-check-fail until this succeeds; everything" >&2
+            echo "run.sh: WARNING: else keeps running." >&2
+        fi
+    fi
+fi
+
 # Anything this process creates under /data (dashboard.db, the WAL, and
 # packages/) stays owner-only: the process's effective GID is 3001
 # (editors, needed for the setgid /projects tree), so a default umask would

@@ -1,0 +1,35 @@
+# Optional dependency set for the YouTube "unblock" components -- the
+# PO-token provider PLUGIN half of `youtube_unblock` (the sidecar SERVER half
+# is a pinned container image, `POT_PROVIDER_IMAGE` in
+# server/install_dashboard_app.py, not a pip package; the two are one
+# component split across two processes -- see POT_PROVIDER_VERSION there).
+#
+# WHY THIS FILE IS SEPARATE FROM requirements.txt (2026-08-17,
+# docs/COMMERCIAL_READINESS.md items 2 + 3, CI run 32041222871's licence
+# gate): `bgutil-ytdlp-pot-provider` is GPLv3. `youtube_unblock` is a
+# customer-enabled, OFF-BY-DEFAULT feature specifically because it exists to
+# get past YouTube's anti-automation measures (see
+# docs/legal/YOUTUBE_FEATURE_NOTICE.md) -- so the VENDOR BUILD must not
+# convey this package to a customer who never turned the feature on. Before
+# this file existed it sat in the base `requirements.txt`/`.lock` that every
+# container installs and the image bakes, i.e. every customer received a
+# GPLv3 package whether or not `[features] youtube_unblock` was ever set.
+#
+# Installed the same way as the base set -- `deploy/run.sh` pip-installs
+# `requirements-unblock.lock` with `--require-hashes` into the SAME `/venv`,
+# but ONLY when `DASH_SITE_YOUTUBE_UNBLOCK=1` (the env `compose_config()`
+# already sets for every deploy, unconditionally "0" or "1" -- see
+# `server/install_dashboard_app.py`), after the base install and gated by its
+# own hash stamp. In image mode (`dashboard/deploy/Dockerfile`) this lock is
+# NOT baked in at all -- same reasoning as ffmpeg/deno/the Claude CLI in
+# `docs/DOCKER.md` "What image mode does NOT bake in" -- so a site that
+# enables `youtube_unblock` under image mode needs PyPI reachable at the
+# CONTAINER's first boot after the flag flips, same as bind-mount mode always
+# has. The `warn, don't crash, after the first successful boot` rule applies
+# here exactly as it does to the base set.
+#
+# EXACT pin, matched to the sidecar image tag in
+# server/install_dashboard_app.py (POT_PROVIDER_IMAGE): the plugin and the
+# server it talks to are one component in two processes and the project
+# ships them as a pair. Bump both together or neither.
+bgutil-ytdlp-pot-provider==1.3.1

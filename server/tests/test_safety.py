@@ -1800,13 +1800,20 @@ def test_the_pot_provider_plugin_and_image_are_the_same_version():
     files, so nothing but this test stops a bump to one from silently leaving
     the other behind -- which would fail at runtime as "no formats found",
     indistinguishable from the bot check it exists to defeat (2026-08-11).
+
+    The plugin's pin lives in requirements-unblock.txt, NOT the base
+    requirements.txt every deployment installs (moved out 2026-08-17,
+    docs/COMMERCIAL_READINESS.md items 2/3, CI run 32041222871's licence gate
+    -- bgutil-ytdlp-pot-provider is GPLv3 and youtube_unblock is a
+    customer-enabled, off-by-default feature, so the base container lock must
+    not convey it to a customer who never turned that feature on).
     """
     import re
 
     reqs = (Path(install_dashboard_app.__file__).resolve().parents[1]
-            / "dashboard" / "deploy" / "requirements.txt").read_text(encoding="utf-8")
+            / "dashboard" / "deploy" / "requirements-unblock.txt").read_text(encoding="utf-8")
     m = re.search(r"^bgutil-ytdlp-pot-provider==([0-9][^\s#]*)", reqs, re.M)
-    assert m, "requirements.txt no longer pins bgutil-ytdlp-pot-provider exactly"
+    assert m, "requirements-unblock.txt no longer pins bgutil-ytdlp-pot-provider exactly"
     pinned = m.group(1)
 
     assert pinned == install_dashboard_app.POT_PROVIDER_VERSION, (
@@ -1815,6 +1822,37 @@ def test_the_pot_provider_plugin_and_image_are_the_same_version():
     assert install_dashboard_app.POT_PROVIDER_IMAGE.startswith(
         f"brainicism/bgutil-ytdlp-pot-provider:{pinned}"), (
         f"image tag {install_dashboard_app.POT_PROVIDER_IMAGE} does not carry {pinned}")
+
+
+def test_the_base_container_lock_never_pins_the_gplv3_unblock_plugin():
+    """2026-08-17, docs/COMMERCIAL_READINESS.md items 2/3, CI run
+    32041222871's licence gate: bgutil-ytdlp-pot-provider (GPLv3) MOVED OUT of
+    the base requirements.txt/.lock that every deployment installs and the
+    image bakes, into its own requirements-unblock.txt/.lock, installed by
+    run.sh only when a site turned [features] youtube_unblock on. This is the
+    regression this whole file's other pot-provider tests exist to catch --
+    it is the guard against the package silently drifting back into the base
+    set requirements.txt no longer names it (repeating the exact bug this
+    split fixes: every customer's container conveying a GPLv3
+    anti-anti-automation package regardless of whether they ever asked for it).
+    """
+    import re
+
+    deploy_dir = (Path(install_dashboard_app.__file__).resolve().parents[1]
+                  / "dashboard" / "deploy")
+    # An ACTUAL PIN, not a comment naming the package (both files' headers
+    # explain the split by name, on purpose -- that is documentation, not a
+    # requirement line). A requirement line starts at column 0 with the name.
+    pin_re = re.compile(r"^bgutil-ytdlp-pot-provider==", re.M)
+    for name in ("requirements.txt", "requirements.lock"):
+        text = (deploy_dir / name).read_text(encoding="utf-8")
+        assert not pin_re.search(text), (
+            f"deploy/{name} pins bgutil-ytdlp-pot-provider -- it belongs only in "
+            f"requirements-unblock.txt/.lock")
+    for name in ("requirements-unblock.txt", "requirements-unblock.lock"):
+        assert (deploy_dir / name).exists(), f"deploy/{name} is missing"
+        assert pin_re.search((deploy_dir / name).read_text(encoding="utf-8")), (
+            f"deploy/{name} no longer pins bgutil-ytdlp-pot-provider")
 
 
 def test_the_pot_provider_is_off_unless_the_site_asked_for_it():

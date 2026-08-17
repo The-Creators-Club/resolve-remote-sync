@@ -74,11 +74,25 @@ ytdl = [
     # never a package here (docs/COMMERCIAL_READINESS.md item 1).
     "anthropic>=0.69",
     "yt-dlp>=2026.6.9",
-    # PINNED, and pinned TOGETHER with the sidecar image tag in
-    # server/install_dashboard_app.py: the provider plugin and the server it
-    # talks to are one component split across two processes, and the project
-    # ships them as a matched pair. A floor here would let pip drift the
-    # plugin past the image on any redeploy.
+]
+
+# The YouTube "unblock" plugin -- SEPARATE from `ytdl` above, and deliberately
+# not part of it (2026-08-17, docs/COMMERCIAL_READINESS.md items 2/3, CI run
+# 32041222871's licence gate). `bgutil-ytdlp-pot-provider` is GPLv3, and
+# `youtube_unblock` is the customer-enabled, off-by-default half of the
+# YouTube feature that exists to get past YouTube's anti-automation measures
+# (docs/legal/YOUTUBE_FEATURE_NOTICE.md) -- so it must not ride along with
+# `ytdl`'s base dependency set into every deployment, on or off. Mirrors
+# `deploy/requirements.txt` / `deploy/requirements-unblock.txt`'s split;
+# test_deploy_requirements_match_pyproject_dependencies in test_hardening.py
+# checks both files against both groups.
+#
+# PINNED, and pinned TOGETHER with the sidecar image tag in
+# server/install_dashboard_app.py: the provider plugin and the server it
+# talks to are one component split across two processes, and the project
+# ships them as a matched pair. A floor here would let pip drift the plugin
+# past the image on any redeploy.
+ytdl_unblock = [
     "bgutil-ytdlp-pot-provider==1.3.1",
 ]
 

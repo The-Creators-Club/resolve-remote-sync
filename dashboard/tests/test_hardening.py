@@ -643,6 +643,62 @@ def test_deploy_requirements_match_pyproject_dependencies():
     )
 
 
+def test_deploy_unblock_requirements_match_pyproject_ytdl_unblock_group():
+    """The GPLv3 YouTube-unblock plugin's own parity check, split from the base
+    one above on purpose (2026-08-17, docs/COMMERCIAL_READINESS.md items 2/3):
+    `ytdl_unblock` in pyproject.toml and `deploy/requirements-unblock.txt` are
+    the ONLY two places `bgutil-ytdlp-pot-provider` may be declared -- letting
+    it drift back into the base `ytdl` group / `deploy/requirements.txt` is
+    exactly the bug this split fixes (it shipped in the base container lock
+    that every customer's image bakes, regardless of whether they ever turned
+    `youtube_unblock` on)."""
+    pyproject = tomllib.loads((DASHBOARD_ROOT / "pyproject.toml").read_text(encoding="utf-8-sig"))
+    declared = {
+        _requirement_name(d): d.strip()
+        for d in pyproject["project"].get("optional-dependencies", {}).get("ytdl_unblock", [])
+    }
+    deployed = {
+        _requirement_name(line): line.strip()
+        for line in (DASHBOARD_ROOT / "deploy" / "requirements-unblock.txt").read_text(
+            encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    assert deployed == declared, (
+        "deploy/requirements-unblock.txt and pyproject.toml [project.optional-dependencies."
+        "ytdl_unblock] have drifted: "
+        f"only in pyproject={sorted(set(declared) - set(deployed))}, "
+        f"only in requirements={sorted(set(deployed) - set(declared))}"
+    )
+
+
+def test_run_sh_installs_the_unblock_lock_only_when_the_site_asked_for_it():
+    """run.sh's dependency install for the GPLv3 unblock plugin, text-checked
+    the same way test_the_venv_is_not_inside_the_editor_reachable_data_volume
+    checks the rest of this file (2026-08-17, docs/COMMERCIAL_READINESS.md
+    items 2/3, CI run 32041222871's licence gate). The base install above
+    this block must stay unconditional; this one must be gated on
+    DASH_SITE_YOUTUBE_UNBLOCK, which is compose_config()'s existing
+    always-present "0"/"1" signal (test_compose_template.py /
+    test_safety.py pin that it is set on every deploy, on or off) -- reused
+    here rather than inventing a second env var for the same fact."""
+    run_sh = (DASHBOARD_ROOT / "deploy" / "run.sh").read_text(encoding="utf-8")
+    code = "\n".join(
+        line for line in run_sh.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert 'if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then' in code
+    assert "requirements-unblock.txt" in code
+    assert "requirements-unblock.lock" in code
+    # It installs into the SAME venv as the base set -- not a second one.
+    assert '"$VENV/bin/pip" install' in code
+    # Never baked-in short-circuited: unlike the base REQS, this lock is not
+    # part of the image build (docs/DOCKER.md, "What image mode does NOT
+    # bake in"), so `.image-baked` must not skip it.
+    unblock_block = code.split(
+        'if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then', 1)[1]
+    unblock_block = unblock_block.split("\numask 077", 1)[0]
+    assert ".image-baked" not in unblock_block
+
+
 def test_dashboard_version_does_not_drift():
     """__init__.VERSION is what release.ps1 and check_deploy_drift.ps1 read,
     and what /api/v1/health reports; pyproject's version is what a pip install

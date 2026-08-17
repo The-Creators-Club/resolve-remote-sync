@@ -48,3 +48,37 @@ It is imported only by ccsync_dashboard.nas.synology, on a DSM site, for the \
 one thing DSM has no API for (writing ~/.ssh/authorized_keys). Obligations \
 still owed and tracked in docs/legal/THIRD_PARTY_NOTICES.md: the notice, the \
 licence text, and a written offer for the source of the version we install."""
+
+# bgutil-ytdlp-pot-provider is GPLv3, and unlike paramiko above this is a
+# CUSTOMER-ENABLED OPTIONAL FEATURE, not something every deployment carries
+# (2026-08-17, docs/COMMERCIAL_READINESS.md items 2/3, CI run 32041222871).
+# It exists for exactly one purpose -- minting the proof-of-origin token that
+# gets a request past YouTube's anti-automation check -- so the vendor build
+# does not convey it: it lives in dashboard/deploy/requirements-unblock.lock,
+# a SEPARATE lock from the base dashboard-container target's, installed by
+# run.sh into the container's venv only when a site's site.toml sets
+# [features] youtube_unblock. `targets` below is what makes this excuse apply
+# ONLY to the dashboard-container-unblock target -- if this package ever
+# turns up in the BASE dashboard-container target (i.e. back in
+# requirements.txt/.lock, conveyed to every customer regardless of the
+# feature flag), it has no entry there and the gate fails, which is the
+# point: this allowlist entry authorises shipping it ONLY behind the flag.
+[allow.bgutil-ytdlp-pot-provider]
+license = "GPL-3.0"
+targets = ["dashboard-container-unblock"]
+reason = """\
+GPLv3, and conveyed only to a customer who set [features] youtube_unblock \
+(off by default in the vendor build -- docs/COMMERCIAL_READINESS.md item 2/3, \
+docs/legal/YOUTUBE_FEATURE_NOTICE.md). It is pip-installed as an ordinary \
+importable package into the container's /venv by \
+dashboard/deploy/run.sh (never baked into dashboard/deploy/Dockerfile's \
+image layer -- see docs/DOCKER.md, 'What image mode does NOT bake in'), so \
+the LGPL/GPL dynamic-linking-style posture paramiko relies on above applies \
+here too: nothing is statically linked, and a customer who enabled the \
+feature can replace the installed copy with their own build without \
+touching our code. Obligations still owed and tracked in \
+docs/legal/THIRD_PARTY_NOTICES.md: the notice, the licence text, and a \
+written offer for the source of the version we install -- and, \
+independently of licensing, docs/COMMERCIAL_READINESS.md item 2's legal \
+review of the anti-anti-automation posture itself, which this allowlist \
+entry does not settle."""

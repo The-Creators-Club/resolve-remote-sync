@@ -65,6 +65,33 @@ by platform" below.
   than "not on this developer's machine". `--only`/`--platform` scope it away
   from the `companion` target — see below — and `tools/license_allowlist.toml`
   is where a copyleft package gets an excuse.
+
+  **`dashboard-container-unblock` is deliberately not in that `--only` list,
+  on purpose, not by oversight** (2026-08-17, CI run 32041222871). It is a
+  second target, added the same day, for one package:
+  `bgutil-ytdlp-pot-provider` (GPLv3) — the YouTube "unblock" plugin, split
+  out of `dashboard-container`'s own lock into
+  `dashboard/deploy/requirements-unblock.lock` because
+  `docs/COMMERCIAL_READINESS.md` items 2/3 require it: `youtube_unblock` is a
+  customer-enabled, off-by-default feature that exists to get past YouTube's
+  anti-automation measures, so the vendor build's ALWAYS-installed base
+  container lock must not convey a GPLv3 package for it regardless of
+  whether a given customer ever turns the feature on. `dashboard-container`'s
+  own `--strict` run is clean of it (that is the fix); scanning it too, in
+  the same job, with the same `--strict`, would fail CI on a licence gate
+  whose entire premise is "what does the vendor build always convey" — this
+  package is never in that set. The allowlist excuses it anyway
+  (`tools/license_allowlist.toml`'s `[allow.bgutil-ytdlp-pot-provider]`,
+  `targets = ["dashboard-container-unblock"]`, with a `reason` exactly like
+  paramiko's below), because a target that exists and is simply never asked
+  for is not the same claim as "this copyleft package is fine to ship
+  unconditionally" — it is one more line of defence if `--only` is ever
+  widened by mistake. Run it by hand before touching
+  `requirements-unblock.txt/.lock`:
+  `dashboard/.venv/Scripts/python.exe tools/check_licenses.py --strict --only dashboard-container-unblock --platform linux`
+  (needs `dashboard/.venv` built with the `ytdl_unblock` extra — see
+  `docs/RELEASE.md`, "Refreshing the lockfiles" — or the package reports
+  `UNSCANNED` rather than `ALLOWED`).
 - **two line-ending checks.** `.gitattributes` forces `eol=lf` on everything
   the NAS container or a Mac executes, because a CRLF `run.sh` once took the
   dashboard down (`set -eu` → *"Illegal option -"*: dash read the CR as an
@@ -72,6 +99,23 @@ by platform" below.
   while already sitting on the editor share. The developer-side check is
   unreliable — **MSYS grep strips a CR before matching** — so the runner
   byte-scans instead, and separately asserts `git ls-files --eol` shows `i/lf`.
+
+**`broll/indexer` needs a real ffmpeg/ffprobe**, installed with `apt-get`
+before its pytest step (2026-08-17, CI run 32041222871): `test_ffmpeg_tools.py`,
+`test_proxy_integrity.py` and `test_encoding.py` shell out to real ffmpeg to
+prove proxy encoding, 10-bit forcing, timecode round trips and CJK filename
+handling against real codecs, and a bare `ubuntu-latest` runner has neither on
+PATH. This is the "install it" branch, not the "let it skip" one — it is not a
+conveyed artefact (`tools/check_licenses.py`'s own docstring: only `companion`
+and `dashboard-container` are), so installing a real ffmpeg for the test run
+costs nothing licence-wise. `tests/conftest.py`'s `require_ffmpeg` fixture is
+the belt-and-braces half, mirroring companion's `rclone_binary` (skip cleanly
+when ffmpeg is absent; `CCSYNC_REQUIRE_FFMPEG=1` turns that into a hard
+failure instead, for anyone who wants "missing ffmpeg" to be loud rather than
+quiet) — before this fixture existed, several of these tests' own fixtures
+shelled out to `ffmpeg` directly with no presence check at all, so a runner
+without it saw `FileNotFoundError`/`CalledProcessError` (fail/error) rather
+than a clean skip.
 
 `broll/indexer`'s install step also `pip install`s `numpy==2.5.2` — unpinned by
 hash, pinned by version, deliberately outside the `--require-hashes -r

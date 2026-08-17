@@ -517,7 +517,9 @@ services:
   # tailnet can ask it for tokens.
   #
   # The tag is pinned and matched to the `bgutil-ytdlp-pot-provider` pin in
-  # requirements.txt -- one component, two processes. Bump both or neither.
+  # requirements-unblock.txt (NOT the base requirements.txt every deployment
+  # installs -- 2026-08-17, COMMERCIAL_READINESS.md items 2/3) -- one
+  # component, two processes. Bump both or neither.
   # The `-deno` flavour matches the runtime this fleet already provisions for
   # yt-dlp's JS challenges.
   # NOT IN THE DEFAULT STACK (2026-08-17, COMMERCIAL_READINESS.md item 3).
@@ -527,5 +529,6 @@ services:
   # [features] youtube_unblock. A proof-of-origin token minter exists for one
   # purpose, and that purpose is the customer's call to make, not the
   # vendor's. The image tag is still pinned and still matched to the
-  # `bgutil-ytdlp-pot-provider` pin in requirements.txt: one component, two
-  # processes, bump both or neither.
+  # `bgutil-ytdlp-pot-provider` pin in requirements-unblock.txt (never the
+  # base requirements.txt): one component, two processes, bump both or
+  # neither.

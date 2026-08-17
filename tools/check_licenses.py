@@ -157,6 +157,28 @@ TARGETS = [
         why="installed into the container venv by dashboard/deploy/run.sh, or "
             "baked in by dashboard/deploy/Dockerfile, and run on the customer's NAS",
     ),
+    Target(
+        label="dashboard-container-unblock",
+        lock=REPO / "dashboard" / "deploy" / "requirements-unblock.lock",
+        platforms=["linux"],
+        # dashboard/.venv is built from pyproject.toml's `ytdl_unblock` extra
+        # (docs/RELEASE.md), so unlike the base target above this one usually
+        # DOES have a local twin to scan.
+        venvs=[REPO / "dashboard" / ".venv"],
+        why="installed into the SAME container venv as dashboard-container, but "
+            "ONLY by run.sh, and ONLY on a site whose site.toml sets "
+            "[features] youtube_unblock (docs/COMMERCIAL_READINESS.md items 2/3). "
+            "Separated from dashboard-container 2026-08-17 (CI run 32041222871) "
+            "because its one package, bgutil-ytdlp-pot-provider, is GPLv3: the "
+            "vendor build/base lock must not convey it to a customer who never "
+            "enabled the feature. POLICY: this target is deliberately NOT part "
+            "of `--only dashboard-container`, which is what ci.yml's strict run "
+            "uses -- see docs/CI.md 'The licence gate is split by platform' for "
+            "why a customer-opt-in feature does not belong in a gate whose whole "
+            "point is 'what does the vendor build always convey'. Run this "
+            "target by hand (`--only dashboard-container-unblock`) before "
+            "shipping a change to requirements-unblock.txt/.lock.",
+    ),
 ]
 
 

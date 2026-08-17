@@ -649,8 +649,9 @@ thing if you prefer it):
 | Component | Input | Extras |
 |---|---|---|
 | `companion` | `pyproject.toml` | `tray`, `dev` |
-| `dashboard` | `pyproject.toml` | `broll`, `music`, `ytdl`, `synology`, `oidc`, `dev` |
-| `dashboard/deploy` | `requirements.txt` | — (the container set) |
+| `dashboard` | `pyproject.toml` | `broll`, `music`, `ytdl`, `ytdl_unblock`, `synology`, `oidc`, `dev` |
+| `dashboard/deploy` | `requirements.txt` | — (the base container set) |
+| `dashboard/deploy` (unblock) | `requirements-unblock.txt` | — (the GPLv3 YouTube-unblock plugin, installed only when `[features] youtube_unblock` is on — see the file's own header and `docs/CI.md`) |
 | `server` | `requirements.txt` | — |
 | `onboarding` | `requirements.in` | — |
 | `bench` | `pyproject.toml` | `dev` |
@@ -664,6 +665,15 @@ Two of these have caveats worth knowing before you regenerate them:
   it changes what every customer's container installs on its next boot, and
   `run.sh` re-runs pip only when the file's hash changes — so a bump here *is*
   the container upgrade mechanism, exactly as `requirements.txt` was.
+  `dashboard/deploy/requirements-unblock.lock` is the same mechanism for one
+  optional package (`bgutil-ytdlp-pot-provider`, GPLv3): `run.sh` installs it
+  into the same venv only when `DASH_SITE_YOUTUBE_UNBLOCK=1`, so this lock
+  never reaches a customer who has not turned `[features] youtube_unblock`
+  on (`docs/COMMERCIAL_READINESS.md` items 2/3). Regenerate it the same way,
+  from `requirements-unblock.txt`, and keep `dashboard/pyproject.toml`'s
+  `ytdl_unblock` extra in step — `dashboard/tests/test_hardening.py`'s
+  `test_deploy_unblock_requirements_match_pyproject_ytdl_unblock_group`
+  checks both directions.
 - **`music/indexer` pulls `torch` and, on Linux, the whole `nvidia-*` set.**
   That is the CPU/default-PyPI wheel set and it is correct for the base rig;
   the CUDA-index build belongs to the GPU image (item 14), not here. It is

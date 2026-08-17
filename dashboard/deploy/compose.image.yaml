@@ -205,8 +205,10 @@ services:
   # run one), and image mode carrying it would have meant the same customer
   # got a different feature set for choosing a different deploy mode.
   # install_dashboard_app.compose_config() adds `bgutil` -- with the pinned tag
-  # matched to the `bgutil-ytdlp-pot-provider` pin in requirements.txt/.lock --
-  # for a site whose site.toml sets [features] youtube_unblock, and only then.
+  # matched to the `bgutil-ytdlp-pot-provider` pin in
+  # requirements-unblock.txt/.lock (NOT the base requirements.txt/.lock this
+  # image bakes -- 2026-08-17, COMMERCIAL_READINESS.md items 2/3) -- for a
+  # site whose site.toml sets [features] youtube_unblock, and only then.
   # server/tests/test_compose_template.py holds the two templates to the same
   # service set.
 

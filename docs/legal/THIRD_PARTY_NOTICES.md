@@ -40,6 +40,7 @@ through.
 
 | Package | Version | Licence | Present in | Verification |
 |---|---|---|---|---|
+| `bgutil-ytdlp-pot-provider` | 1.3.1 | **GNU General Public License v3 (GPLv3)** (GPL) | dashboard | metadata |
 | `certifi` | 2026.7.22 | **Mozilla Public License 2.0 (MPL 2.0)** (MPL) | dashboard, music/web | metadata+text |
 | `certifi` | 2026.6.17 | **Mozilla Public License 2.0 (MPL 2.0)** (MPL) | broll/web | metadata+text |
 | `paramiko` | 5.0.0 | **LGPL-2.1** (LGPL) | dashboard | metadata+text |
@@ -69,8 +70,8 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 | Package | Version | Licence | Home page |
 |---|---|---|---|
 | `altgraph` | 0.17.5 | MIT License | https://altgraph.readthedocs.io |
-| `ccsync-companion` | 0.7.11 | UNKNOWN | UNKNOWN |
-| `ccsync-companion` | 0.7.11 | UNKNOWN | UNKNOWN |
+| `ccsync-companion` | 0.8.0 | UNKNOWN | UNKNOWN |
+| `ccsync-companion` | 0.8.0 | UNKNOWN | UNKNOWN |
 | `colorama` | 0.4.6 | BSD License | https://github.com/tartley/colorama |
 | `iniconfig` | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
 | `packaging` | 26.2 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
@@ -88,23 +89,28 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 
 ### dashboard
 
-FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `E:\Projects\resolve-remote-sync\dashboard\.venv` — 40 package(s).
+FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `E:\Projects\resolve-remote-sync\dashboard\.venv` — 53 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
-| `annotated-doc` | 0.0.4 | MIT | https://github.com/fastapi/annotated-doc |
+| `annotated-doc` | 0.0.5 | MIT | https://github.com/fastapi/annotated-doc |
 | `annotated-types` | 0.8.0 | MIT | https://github.com/annotated-types/annotated-types |
+| `anthropic` | 0.122.0 | MIT License | https://github.com/anthropics/anthropic-sdk-python |
 | `anyio` | 4.14.2 | MIT | https://anyio.readthedocs.io/en/stable/versionhistory.html |
 | `bcrypt` | 5.0.0 | Apache Software License | https://github.com/pyca/bcrypt/ |
+| `bgutil-ytdlp-pot-provider` | 1.3.1 | GNU General Public License v3 (GPLv3) | UNKNOWN |
 | `ccsync-dashboard` | 0.1.0 | UNKNOWN | UNKNOWN |
 | `ccsync-dashboard` | 0.1.0 | UNKNOWN | UNKNOWN |
 | `certifi` | 2026.7.22 | Mozilla Public License 2.0 (MPL 2.0) | https://github.com/certifi/python-certifi |
-| `cffi` | 2.1.0 | MIT-0 | https://cffi.readthedocs.io/en/latest/whatsnew.html |
-| `charset-normalizer` | 3.4.9 | MIT | https://github.com/jawah/charset_normalizer/blob/master/CHANGELOG.md |
+| `cffi` | 2.1.1 | MIT-0 | https://cffi.readthedocs.io/en/latest/whatsnew.html |
+| `charset-normalizer` | 3.5.1 | MIT | https://github.com/jawah/charset_normalizer/blob/master/CHANGELOG.md |
 | `click` | 8.4.2 | BSD-3-Clause | https://github.com/pallets/click/ |
 | `colorama` | 0.4.6 | BSD License | https://github.com/tartley/colorama |
-| `cryptography` | 49.0.0 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
-| `fastapi` | 0.139.2 | MIT | https://github.com/fastapi/fastapi |
+| `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
+| `distro` | 1.9.0 | Apache Software License | https://github.com/python-distro/distro |
+| `docstring_parser` | 0.18.0 | MIT License | https://github.com/rr-/docstring_parser |
+| `fastapi` | 0.141.1 | MIT | https://github.com/fastapi/fastapi |
+| `flatbuffers` | 25.12.19 | Apache Software License | https://google.github.io/flatbuffers/ |
 | `h11` | 0.16.0 | MIT License | https://github.com/python-hyper/h11 |
 | `httpcore` | 1.0.9 | BSD-3-Clause | https://www.encode.io/httpcore/ |
 | `httpx` | 0.28.1 | BSD License | https://github.com/encode/httpx |
@@ -112,26 +118,34 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 | `iniconfig` | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
 | `invoke` | 3.0.3 | BSD-2-Clause | https://github.com/pyinvoke/invoke |
 | `Jinja2` | 3.1.6 | BSD License | https://github.com/pallets/jinja/ |
+| `jiter` | 0.16.0 | MIT | https://github.com/pydantic/jiter/ |
 | `MarkupSafe` | 3.0.3 | BSD-3-Clause | https://github.com/pallets/markupsafe/ |
-| `packaging` | 26.2 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
+| `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | https://numpy.org |
+| `onnxruntime` | 1.28.0 | MIT License | https://onnxruntime.ai |
+| `packaging` | 26.3 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | `paramiko` | 5.0.0 | LGPL-2.1 | https://github.com/paramiko/paramiko |
 | `pluggy` | 1.6.0 | MIT License | UNKNOWN |
+| `protobuf` | 7.35.1 | 3-Clause BSD License | https://developers.google.com/protocol-buffers/ |
 | `pycparser` | 3.0 | BSD-3-Clause | https://github.com/eliben/pycparser |
 | `pydantic` | 2.13.4 | MIT | https://github.com/pydantic/pydantic |
 | `pydantic_core` | 2.46.4 | MIT | https://github.com/pydantic |
-| `Pygments` | 2.20.0 | BSD-2-Clause | https://pygments.org |
+| `Pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
 | `PyJWT` | 2.13.0 | MIT | https://github.com/jpadilla/pyjwt |
 | `PyNaCl` | 1.6.2 | Apache Software License | https://github.com/pyca/pynacl |
 | `pyspnego` | 0.12.1 | MIT | https://github.com/jborean93/pyspnego |
 | `pytest` | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
+| `python-multipart` | 0.0.32 | Apache-2.0 | https://github.com/Kludex/python-multipart |
+| `RapidFuzz` | 3.14.5 | MIT | https://github.com/rapidfuzz/RapidFuzz |
 | `requests` | 2.34.2 | Apache Software License | https://github.com/psf/requests |
 | `smbprotocol` | 1.17.0 | MIT | https://github.com/jborean93/smbprotocol |
+| `sniffio` | 1.3.1 | Apache Software License; MIT License | https://github.com/python-trio/sniffio |
 | `sspilib` | 0.5.0 | MIT | https://github.com/jborean93/sspilib |
-| `starlette` | 1.3.1 | BSD-3-Clause | https://github.com/Kludex/starlette |
-| `typing-inspection` | 0.4.2 | MIT | https://github.com/pydantic/typing-inspection |
+| `starlette` | 1.6.0 | BSD-3-Clause | https://github.com/Kludex/starlette |
+| `typing-inspection` | 0.4.4 | MIT | https://github.com/pydantic/typing-inspection |
 | `typing_extensions` | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | `urllib3` | 2.7.0 | MIT | https://github.com/urllib3/urllib3/blob/main/CHANGES.rst |
-| `uvicorn` | 0.51.0 | BSD-3-Clause | https://uvicorn.dev/ |
+| `uvicorn` | 0.52.3 | BSD-3-Clause | https://uvicorn.dev/ |
+| `yt-dlp` | 2026.7.4 | Unlicense | https://github.com/yt-dlp/yt-dlp |
 
 ### music/web
 
@@ -231,32 +245,37 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 
 ## All pip dependencies (merged)
 
-84 distinct (package, version) pair(s) across every scanned venv.
+95 distinct (package, version) pair(s) across every scanned venv.
 
 | Package | Version | Licence | Components | Licence text on disk |
 |---|---|---|---|---|
 | `altgraph` | 0.17.5 | MIT License | companion | yes |
-| `annotated-doc` | 0.0.4 | MIT | dashboard, broll/web | yes |
-| `annotated-doc` | 0.0.5 | MIT | music/web | yes |
+| `annotated-doc` | 0.0.5 | MIT | dashboard, music/web | yes |
+| `annotated-doc` | 0.0.4 | MIT | broll/web | yes |
 | `annotated-types` | 0.8.0 | MIT | dashboard, music/web | yes |
 | `annotated-types` | 0.7.0 | MIT License | broll/web | yes |
+| `anthropic` | 0.122.0 | MIT License | dashboard | yes |
 | `anyio` | 4.14.2 | MIT | dashboard, music/web, broll/web | yes |
 | `bcrypt` | 5.0.0 | Apache Software License | dashboard | yes |
+| `bgutil-ytdlp-pot-provider` | 1.3.1 | GNU General Public License v3 (GPLv3) | dashboard | no |
 | `broll-web` | 0.1.0 | UNKNOWN | broll/web | no |
-| `ccsync-companion` | 0.7.11 | UNKNOWN | companion, companion | no |
+| `ccsync-companion` | 0.8.0 | UNKNOWN | companion, companion | no |
 | `ccsync-dashboard` | 0.1.0 | UNKNOWN | dashboard, dashboard | no |
 | `certifi` | 2026.7.22 | Mozilla Public License 2.0 (MPL 2.0) | dashboard, music/web | yes |
 | `certifi` | 2026.6.17 | Mozilla Public License 2.0 (MPL 2.0) | broll/web | yes |
-| `cffi` | 2.1.0 | MIT-0 | dashboard | yes |
-| `charset-normalizer` | 3.4.9 | MIT | dashboard, broll/web | yes |
+| `cffi` | 2.1.1 | MIT-0 | dashboard | yes |
+| `charset-normalizer` | 3.5.1 | MIT | dashboard | yes |
+| `charset-normalizer` | 3.4.9 | MIT | broll/web | yes |
 | `click` | 8.4.2 | BSD-3-Clause | dashboard, music/web, broll/web | yes |
 | `colorama` | 0.4.6 | BSD License | companion, dashboard, music/web, broll/web | yes |
-| `cryptography` | 49.0.0 | Apache-2.0 OR BSD-3-Clause | dashboard | yes |
-| `fastapi` | 0.139.2 | MIT | dashboard, broll/web | yes |
-| `fastapi` | 0.141.1 | MIT | music/web | yes |
+| `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | dashboard | yes |
+| `distro` | 1.9.0 | Apache Software License | dashboard | yes |
+| `docstring_parser` | 0.18.0 | MIT License | dashboard | yes |
+| `fastapi` | 0.141.1 | MIT | dashboard, music/web | yes |
+| `fastapi` | 0.139.2 | MIT | broll/web | yes |
 | `fastembed` | 0.8.0 | Other/Proprietary License | broll/web | yes |
 | `filelock` | 3.31.1 | MIT | broll/web | yes |
-| `flatbuffers` | 25.12.19 | Apache Software License | music/web, broll/web | no |
+| `flatbuffers` | 25.12.19 | Apache Software License | dashboard, music/web, broll/web | no |
 | `fsspec` | 2026.6.0 | BSD-3-Clause | broll/web | yes |
 | `h11` | 0.16.0 | MIT License | dashboard, music/web, broll/web | yes |
 | `hf-xet` | 1.5.2 | Apache-2.0 | broll/web | yes |
@@ -269,26 +288,28 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `invoke` | 3.0.3 | BSD-2-Clause | dashboard | yes |
 | `jieba` | 0.42.1 | MIT License | broll/web | no |
 | `Jinja2` | 3.1.6 | BSD License | dashboard | yes |
+| `jiter` | 0.16.0 | MIT | dashboard | yes |
 | `loguru` | 0.7.3 | MIT License | broll/web | no |
 | `MarkupSafe` | 3.0.3 | BSD-3-Clause | dashboard | yes |
 | `mmh3` | 5.2.1 | MIT License | broll/web | yes |
-| `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | music/web | yes |
+| `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | dashboard, music/web | yes |
 | `numpy` | 2.5.1 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | broll/web | yes |
-| `onnxruntime` | 1.28.0 | MIT License | music/web | yes |
+| `onnxruntime` | 1.28.0 | MIT License | dashboard, music/web | yes |
 | `onnxruntime` | 1.27.0 | MIT License | broll/web | yes |
 | `opencc-python-reimplemented` | 0.1.7 | Apache Software License | broll/web | yes |
-| `packaging` | 26.2 | Apache-2.0 OR BSD-2-Clause | companion, dashboard, broll/web | yes |
-| `packaging` | 26.3 | Apache-2.0 OR BSD-2-Clause | music/web | yes |
+| `packaging` | 26.2 | Apache-2.0 OR BSD-2-Clause | companion, broll/web | yes |
+| `packaging` | 26.3 | Apache-2.0 OR BSD-2-Clause | dashboard, music/web | yes |
 | `paramiko` | 5.0.0 | LGPL-2.1 | dashboard | yes |
 | `pefile` | 2024.8.26 | MIT | companion | yes |
 | `pillow` | 12.3.0 | MIT-CMU | companion, broll/web | yes |
 | `pluggy` | 1.6.0 | MIT License | companion, dashboard, music/web, broll/web | yes |
-| `protobuf` | 7.35.1 | 3-Clause BSD License | music/web, broll/web | yes |
+| `protobuf` | 7.35.1 | 3-Clause BSD License | dashboard, music/web, broll/web | yes |
 | `py_rust_stemmers` | 0.1.8 | UNKNOWN | broll/web | yes |
 | `pycparser` | 3.0 | BSD-3-Clause | dashboard | yes |
 | `pydantic` | 2.13.4 | MIT | dashboard, music/web, broll/web | yes |
 | `pydantic_core` | 2.46.4 | MIT | dashboard, music/web, broll/web | yes |
-| `Pygments` | 2.20.0 | BSD-2-Clause | companion, dashboard, music/web, broll/web | yes |
+| `Pygments` | 2.20.0 | BSD-2-Clause | companion, music/web, broll/web | yes |
+| `Pygments` | 2.21.0 | BSD-2-Clause | dashboard | yes |
 | `pyinstaller` | 6.21.0 | GNU General Public License v2 (GPLv2) | companion | yes |
 | `pyinstaller-hooks-contrib` | 2026.6 | Apache Software License; GNU General Public License v2 (GPLv2) | companion | yes |
 | `PyJWT` | 2.13.0 | MIT | dashboard | yes |
@@ -297,28 +318,32 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `pystray` | 0.19.5 | GNU Lesser General Public License v3 (LGPLv3) | companion | yes |
 | `pytest` | 9.1.1 | MIT | companion, dashboard, music/web, broll/web | yes |
 | `python-dotenv` | 1.2.2 | BSD-3-Clause | music/web, broll/web | yes |
-| `python-multipart` | 0.0.32 | Apache-2.0 | music/web | yes |
+| `python-multipart` | 0.0.32 | Apache-2.0 | dashboard, music/web | yes |
 | `pywin32-ctypes` | 0.2.3 | BSD-3-Clause | companion | yes |
 | `PyYAML` | 6.0.3 | MIT License | music/web, broll/web | yes |
-| `RapidFuzz` | 3.14.5 | MIT | broll/web | yes |
+| `RapidFuzz` | 3.14.5 | MIT | dashboard, broll/web | yes |
 | `requests` | 2.34.2 | Apache Software License | dashboard, broll/web | yes |
 | `six` | 1.17.0 | MIT License | companion | yes |
 | `smbprotocol` | 1.17.0 | MIT | dashboard | yes |
+| `sniffio` | 1.3.1 | Apache Software License; MIT License | dashboard | yes |
 | `sspilib` | 0.5.0 | MIT | dashboard | yes |
-| `starlette` | 1.3.1 | BSD-3-Clause | dashboard, broll/web | yes |
-| `starlette` | 1.6.0 | BSD-3-Clause | music/web | yes |
+| `starlette` | 1.6.0 | BSD-3-Clause | dashboard, music/web | yes |
+| `starlette` | 1.3.1 | BSD-3-Clause | broll/web | yes |
 | `tokenizers` | 0.23.1 | Apache Software License | broll/web | no |
 | `tqdm` | 4.69.0 | MPL-2.0 AND MIT | broll/web | yes |
-| `typing-inspection` | 0.4.2 | MIT | dashboard, music/web, broll/web | yes |
+| `typing-inspection` | 0.4.4 | MIT | dashboard | yes |
+| `typing-inspection` | 0.4.2 | MIT | music/web, broll/web | yes |
 | `typing_extensions` | 4.16.0 | PSF-2.0 | dashboard, music/web, broll/web | yes |
 | `urllib3` | 2.7.0 | MIT | dashboard, broll/web | yes |
-| `uvicorn` | 0.51.0 | BSD-3-Clause | dashboard, broll/web | yes |
+| `uvicorn` | 0.52.3 | BSD-3-Clause | dashboard | yes |
 | `uvicorn` | 0.52.1 | BSD-3-Clause | music/web | yes |
+| `uvicorn` | 0.51.0 | BSD-3-Clause | broll/web | yes |
 | `watchdog` | 6.0.0 | Apache Software License | companion | yes |
 | `watchfiles` | 1.2.0 | MIT License | music/web, broll/web | yes |
 | `websockets` | 17.0.1 | BSD-3-Clause | music/web | yes |
 | `websockets` | 16.1.1 | BSD-3-Clause | broll/web | yes |
 | `win32_setctime` | 1.2.0 | MIT License | broll/web | yes |
+| `yt-dlp` | 2026.7.4 | Unlicense | dashboard | yes |
 
 <!-- BEGIN HAND-MAINTAINED -->
 ## Non-pip components (hand-maintained)
@@ -362,7 +387,7 @@ counsel should look at.
 | yt-dlp (NAS side) | `yt-dlp>=2026.6.9` | Unlicense | *stated from knowledge — confirm* | PyPI, installed by the container's own `pip` (`dashboard/deploy/requirements.txt`, the `yt-dlp` pin) | B |
 | yt-dlp (editor side) | latest, refreshed daily | Unlicense | *stated from knowledge — confirm* | GitHub releases (`companion/src/ccsync_companion/ytdlp_manager.py`) | B |
 | deno | `v2.9.5` | MIT | version string measured 2026-08-16 (`sidecar_tools.py:44`) — VERIFIED; licence *stated from knowledge — confirm* | `github.com/denoland/deno` releases, sha256-pinned (`sidecar_tools.py:96-133`) | B |
-| bgutil PO-token provider | `bgutil-ytdlp-pot-provider==1.3.1` + the matching sidecar container image | **NOT VERIFIED** — see below | not installed in any venv on this machine, so no metadata to read | PyPI + a container image pinned in `server/install_dashboard_app.py` (`POT_PROVIDER_IMAGE`) | B |
+| bgutil PO-token provider | `bgutil-ytdlp-pot-provider==1.3.1` + the matching sidecar container image | **GPLv3** — see below | plugin licence VERIFIED 2026-08-17 from installed metadata (`dashboard` venv table above); sidecar image licence *stated from knowledge — confirm* | PyPI (plugin, `dashboard/deploy/requirements-unblock.txt`) + a container image pinned in `server/install_dashboard_app.py` (`POT_PROVIDER_IMAGE`) — BOTH ONLY on a site with `[features] youtube_unblock` on | A (plugin, into our own container venv) / B (sidecar image, pulled by the customer's own docker) |
 | Tailscale | customer's own | client BSD-3-Clause; the coordination service is a paid SaaS | *stated from knowledge — confirm* | the customer installs and pays for it (`docs/SERVER-SYNOLOGY.md`) | C |
 | CLAP text tower (ONNX export) | derived from `laion/larger_clap_music_and_speech`, exported 2026-08-10 | Apache-2.0 | model id, dim 512 and 125,302,016 text params VERIFIED from `music/web/data/text_encoder/manifest.json`; licence *stated from knowledge — confirm* | Hugging Face, exported on the base rig by `music/indexer/export_text_encoder.py` | **A** |
 | MiniLM (b-roll embeddings) | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` via fastembed | Apache-2.0 | model id VERIFIED in `broll/web/app/semantic.py:51-53`; licence *stated from knowledge — confirm* | Hugging Face / the fastembed CDN, on the base rig only | not shipped — see below |
@@ -489,19 +514,41 @@ repository's stated software licence (RAIL/OpenRAIL riders, "no commercial use"
 model cards). The three above are believed to be Apache-2.0/MIT, but that is
 *stated from knowledge — confirm* against each model card before sale.
 
-### bgutil PO-token provider — unverified and separately at issue
+### bgutil PO-token provider — GPLv3, and split out of the base container 2026-08-17
 
-Its licence could **NOT BE VERIFIED** from this machine: it is not installed in
-any scanned venv, only pinned in `dashboard/deploy/requirements.txt` (the `bgutil-ytdlp-pot-provider` pin) and as a
-sidecar image in `server/install_dashboard_app.py`. Its upstream repository is
-`Brainicism/bgutil-ytdlp-pot-provider`; its licence there is believed to be
-**GPL-3.0** — *stated from knowledge — confirm from the repository's own
-LICENSE file*.
+Its licence is now **VERIFIED**: installed metadata in the `dashboard` venv
+reads **GNU General Public License v3 (GPLv3)** (the plugin table above). Its
+upstream repository is `Brainicism/bgutil-ytdlp-pot-provider`; the sidecar
+container image's own licence is still *stated from knowledge — confirm from
+the repository's own LICENSE file*.
+
+**2026-08-17 (CI run 32041222871's licence gate, `docs/COMMERCIAL_READINESS.md`
+items 2/3): moved OUT of the base `dashboard/deploy/requirements.txt`/`.lock`
+that every deployment installs and the image bakes, into its own
+`dashboard/deploy/requirements-unblock.txt`/`.lock`.** Before this split, the
+base container lock — the one thing every customer's dashboard installs
+regardless of which optional features they turned on — conveyed a GPLv3
+anti-anti-automation package unconditionally; `tools/check_licenses.py`'s
+`dashboard-container` target is now clean of it (see its own `dashboard-
+container-unblock` target and `tools/license_allowlist.toml`'s
+`[allow.bgutil-ytdlp-pot-provider]` entry, `targets = ["dashboard-container-
+unblock"]`). `dashboard/deploy/run.sh` installs the unblock lock into the same
+container venv only when `DASH_SITE_YOUTUBE_UNBLOCK=1` — which is only ever
+"1" on a site whose `site.toml` sets `[features] youtube_unblock` (see
+`server/install_dashboard_app.py compose_config()`). `docs/CI.md` documents
+why the strict CI run (`--only dashboard-container`) does not scan this
+package at all: it is a customer-enabled optional feature, not something the
+vendor build always conveys, so it does not belong in a gate whose whole
+point is "what does the vendor build always convey".
 
 Independently of licensing, this component exists to defeat YouTube's bot
 check, which `docs/COMMERCIAL_READINESS.md` item 2 treats as DMCA §1201 /
-EUCD Art. 6 exposure and gates behind a customer-enabled `youtube_unblock`
-site flag. Counsel should read items 2 and 3 together for it.
+EUCD Art. 6 exposure and gates behind the same customer-enabled
+`youtube_unblock` site flag. Counsel should read items 2 and 3 together for
+it. The written-offer/source-availability obligations GPLv3 §6 imposes on us
+whenever this is actually conveyed (i.e. on a site with the feature on) are
+still open, same as ffmpeg's above — no address exists yet to make the offer
+from.
 
 ### yt-credit-downloader — NO LICENCE GRANT (open item)
 

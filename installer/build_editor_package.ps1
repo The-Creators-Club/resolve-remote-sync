@@ -625,8 +625,23 @@ if ($Publish) {
         "--version", $version, "--min-version", $minVersion
     )
     if ($signedBinary) { $signArgs += "--signed-binary" }
-    $signOut = & $signPy @signArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    # sign_release.py writes advisories (min_version 0.0.0, unsigned binary) to
+    # stderr and JSON to stdout, so this MUST merge the streams -- and native
+    # stderr redirection under $ErrorActionPreference='Stop' turns the first
+    # advisory line into a terminating NativeCommandError. Measured 2026-08-17:
+    # a ship with no CCSYNC_MIN_VERSION died here at exit 1 with the exe built
+    # and nothing published. Same shape as the PyInstaller/git calls above:
+    # drop to Continue and judge by $LASTEXITCODE.
+    $prevSignEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $signOut = & $signPy @signArgs 2>&1
+        $signExit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $prevSignEAP
+    }
+    if ($signExit -ne 0) {
         Write-Warn2 "could not sign the release record -- NOT publishing:"
         ($signOut | ForEach-Object { Write-Warn2 "  $_" })
         Write-Warn2 "The release key lives OUTSIDE this repo (default %USERPROFILE%\.ccsync-release\release.key)."
@@ -711,8 +726,17 @@ if ($Publish) {
             "--version", $onboardVersion, "--min-version", $minVersion
         )
         if ($onboardSignedBinary) { $onboardSignArgs += "--signed-binary" }
-        $onboardSignOut = & $signPy @onboardSignArgs 2>&1
-        if ($LASTEXITCODE -ne 0) {
+        # Same stderr-under-EAP='Stop' hazard as the companion record above.
+        $prevSignEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $onboardSignOut = & $signPy @onboardSignArgs 2>&1
+            $onboardSignExit = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $prevSignEAP
+        }
+        if ($onboardSignExit -ne 0) {
             $onboardSkipReason = "could not sign the installer's release record (see tools\release_key.py)"
         }
         else {

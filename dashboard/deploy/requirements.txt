@@ -4,6 +4,17 @@
 # ../pyproject.toml). The package itself is NOT pip-installed in the
 # container: /app is mounted read-only and run.sh puts /app/src on
 # PYTHONPATH instead.
+#
+# THESE ARE FLOORS. `requirements.lock` beside this file is the exact,
+# hash-pinned closure resolved from them, and it is what run.sh installs
+# (--require-hashes) and what deploy/Dockerfile bakes into the image. AFTER
+# EDITING THIS FILE, REGENERATE THE LOCK -- otherwise the change reaches
+# nothing (docs/RELEASE.md, "Refreshing the lockfiles"):
+#
+#   cd dashboard/deploy && uv pip compile --universal --generate-hashes \
+#       --python-version 3.12 -o requirements.lock requirements.txt
+#
+# 2026-08-17, COMMERCIAL_READINESS.md item 13.
 fastapi>=0.110
 uvicorn>=0.29
 jinja2>=3.1
@@ -40,8 +51,18 @@ python-multipart>=0.0.9
 onnxruntime>=1.17
 
 # --- YouTube downloader UI (mounted at /ytdl) -------------------------------
-# `fastapi`/`uvicorn` above cover the web half; ffmpeg comes from /opt/ffmpeg
-# (PATH, see run.sh) and the Claude CLI is a subprocess, not a package.
+# `fastapi`/`uvicorn` above cover the web half and ffmpeg comes from
+# /opt/ffmpeg (PATH, see run.sh).
+#
+# The two AI calls (search-term expansion, relevance filtering) go through the
+# ANTHROPIC SDK with ANTHROPIC_API_KEY from the container environment. Until
+# 2026-08-17 they shelled out to the interactive `claude` CLI, provisioned onto
+# the host by the installer and authenticated by a one-time `/login` under one
+# human's personal account -- unshippable per customer, and an agent binary
+# with filesystem tools inside a container that mounts the Projects tree rw
+# (docs/COMMERCIAL_READINESS.md item 1). Floor pin, not exact: the SDK is
+# backwards-compatible and this file's hash is what makes run.sh re-run pip.
+anthropic>=0.69
 #
 # Pin the FLOOR generously and expect to raise it: yt-dlp releases track
 # YouTube's extractor changes, and an old one does not degrade -- it fails
@@ -82,3 +103,13 @@ bgutil-ytdlp-pot-provider==1.3.1
 # package nothing imports costs a few hundred KB. LGPL-2.1 -- it belongs in
 # the NOTICE file (COMMERCIAL_READINESS item 1).
 paramiko>=3.4
+
+# --- OIDC login (DASH_AUTH_METHOD=oidc) -------------------------------------
+# Verifies the id_token against the IdP's JWKS (jwt.PyJWKClient). PyJWT rather
+# than authlib because that verification is the ONLY thing oidc.py needs from a
+# JOSE library, and `cryptography` -- which does the RSA/EC maths -- is already
+# here as a paramiko dependency. Installed on every site for the same reason
+# paramiko is: one file, one image, and run.sh re-runs pip only when this
+# file's hash changes. Imported lazily, so a container that somehow lacks it
+# reports one clear boot problem rather than failing to import the dashboard.
+PyJWT>=2.8

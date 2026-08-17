@@ -637,3 +637,23 @@ h2 {
 .toast .bad { color: var(--red-hot); }
 /* The optional action, e.g. [ COPY PATH ] when no companion answered. */
 .toast .text-btn { margin-top: 4px; }
+
+/* The rights/ToS attestation panel and the standing legal footer
+   (COMMERCIAL_READINESS.md item 2, 2026-08-17). Deliberately plain: this is
+   the one block on the page that must be READ, so it gets normal wrapping and
+   line length rather than the terminal styling everything else wears. */
+.attesttext {
+  white-space: pre-wrap;
+  max-width: 78ch;
+  margin: 0 0 1rem;
+  font-family: inherit;
+  line-height: 1.45;
+}
+.attestrow { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.legal {
+  margin: 2rem 0 1rem;
+  max-width: 90ch;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+.legal div + div { margin-top: 0.4rem; }

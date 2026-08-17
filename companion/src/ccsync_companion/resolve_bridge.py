@@ -27,9 +27,10 @@ import sys
 import threading
 import time
 import unicodedata
+from pathlib import Path
 from typing import Any, Optional
 
-from . import canon, proxy_relink, resolve_prefs, ui_state
+from . import canon, proxy_relink, resolve_journal, resolve_prefs, ui_state
 
 log = logging.getLogger("ccsync.resolve")
 
@@ -968,7 +969,142 @@ def _get_media_pool_items_locked() -> dict[str, Any]:
     return {"ok": True, "message": "", "items": items, "project_name": project_name}
 
 
-def replace_clip(media_pool_item, new_path: str, tries: int = 3) -> dict[str, Any]:
+# -- save point + undo journal (COMMERCIAL_READINESS.md item 9, 2026-08-17) --
+#
+# Every media-pool MUTATION in this module goes through _before_mutation()
+# first. Putting it here rather than at the four call sites is deliberate:
+# fixer.py, app.py's two automatic passes, music_worker and
+# _canonicalize_imported all reach Resolve through replace_clip /
+# link_proxy_media, so one hook covers paths that have not been written yet.
+# See resolve_journal.py for what is written and why.
+
+# How long a cached project name is trusted. The name is read for the journal
+# on every edit and a media-pool walk already costs a fusionscript call; the
+# window only has to be shorter than the time it takes a human to switch
+# projects.
+_PROJECT_NAME_TTL_SECONDS = 20.0
+
+_project_name_cache: Optional[tuple[str, float]] = None
+
+
+def current_project_name(max_age: float = _PROJECT_NAME_TTL_SECONDS) -> str:
+    """The open project's name, "" when there is none. Cached for `max_age`."""
+    global _project_name_cache
+    cached = _project_name_cache
+    now = time.monotonic()
+    if cached is not None and (now - cached[1]) < max_age:
+        return cached[0]
+    name = ""
+    try:
+        with _bridge_call("current_project_name"):
+            resolve = connect()
+            if resolve is not None:
+                project = resolve.GetProjectManager().GetCurrentProject()
+                if project is not None:
+                    name = _safe_project_name(project)
+    except Exception:
+        log.debug("resolve: could not read the current project name", exc_info=True)
+    _project_name_cache = (name, now)
+    return name
+
+
+def save_project(project_name: str = "") -> dict[str, Any]:
+    """`SaveProject()` + `ExportProject()` into ~/.ccsync/resolve_edits.
+
+    BEST EFFORT, both halves. `ProjectManager.SaveProject` is the documented
+    spelling but some builds only carry `Project.SaveProject`; `ExportProject`
+    is missing entirely from older API builds and is refused outright for a
+    project open in a collaboration. Neither may stop the relink that
+    follows -- an editor staring at Media Offline is a worse outcome than an
+    un-exported project -- so this reports what it managed and never raises.
+    """
+    result: dict[str, Any] = {"saved": False, "backup": "", "message": ""}
+    try:
+        with _bridge_call("save_project"):
+            resolve = connect()
+            if resolve is None:
+                result["message"] = "Resolve is not running"
+                return result
+            manager = resolve.GetProjectManager()
+            project = manager.GetCurrentProject()
+            if project is None:
+                result["message"] = "no project open"
+                return result
+            name = project_name or _safe_project_name(project)
+            for owner in (manager, project):
+                saver = getattr(owner, "SaveProject", None)
+                if saver is None:
+                    continue
+                try:
+                    saver()
+                    result["saved"] = True
+                    break
+                except Exception:
+                    log.debug("resolve: SaveProject via %r failed", owner, exc_info=True)
+            exporter = getattr(manager, "ExportProject", None)
+            if exporter is None:
+                result["message"] = "this Resolve build cannot export projects"
+                return result
+            slug = resolve_journal.project_slug(name)
+            directory = resolve_journal.journal_root() / slug
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+            target = directory / f"{stamp}.drp"
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                result["message"] = f"could not make {directory} ({exc})"
+                return result
+            try:
+                # withStillsAndLUTs=False: this is a rollback copy of the
+                # project DATABASE, not an archive. Stills and LUTs turn
+                # seconds into minutes and are not what a bad relink lost.
+                ok = exporter(name, str(target), False)
+            except Exception as exc:
+                result["message"] = f"ExportProject refused ({exc})"
+                return result
+            if ok and target.exists():
+                result["backup"] = str(target)
+            else:
+                result["message"] = (
+                    "Resolve refused to export a backup copy (a project open in a "
+                    "collaboration cannot be exported)"
+                )
+    except Exception as exc:
+        result["message"] = f"could not take a save point ({exc})"
+        log.debug("resolve: save point failed", exc_info=True)
+    return result
+
+
+def _before_mutation(source: str) -> str:
+    """Take a save point if one is due, and return the project name to
+    journal against. Never raises: see save_project()."""
+    try:
+        name = current_project_name()
+        if resolve_journal.save_point_due(name):
+            outcome = save_project(name)
+            resolve_journal.note_save_point(
+                name, saved=bool(outcome.get("saved")),
+                backup=str(outcome.get("backup") or ""),
+            )
+            if outcome.get("backup"):
+                log.info("resolve: saved %r and exported a rollback copy to %s "
+                         "before the %s pass", name or "the project",
+                         outcome["backup"], source)
+            else:
+                log.warning(
+                    "resolve: no rollback copy before the %s pass -- %s. The undo "
+                    "journal under ~/.ccsync/%s is the fallback",
+                    source, outcome.get("message") or "export unavailable",
+                    resolve_journal.JOURNAL_DIRNAME,
+                )
+        return name
+    except Exception:
+        log.debug("resolve: could not take a save point", exc_info=True)
+        return ""
+
+
+def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
+                 source: str = "manual", journal: bool = True) -> dict[str, Any]:
     """Relink `media_pool_item` to `new_path` via ReplaceClip.
 
     This preserves every timeline usage of the clip (per SPEC.md's fixer
@@ -1003,6 +1139,11 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3) -> dict[str, An
     if before is not None and _norm_path(before) == norm_new:
         return {"ok": True, "message": f"Already linked to {new_path}"}
 
+    # Save point BEFORE the first ReplaceClip of the burst, journal entry
+    # after it takes -- the entry names the inverse edit, so it must not be
+    # written for a swap that never happened (item 9, 2026-08-17).
+    project_name = _before_mutation(source) if journal else ""
+
     raised = 0
     for attempt in range(max(1, tries)):
         ui_state.wait_while_menu_open()
@@ -1014,6 +1155,12 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3) -> dict[str, An
                 log.warning("resolve: ReplaceClip(%s) raised: %s", new_path, exc, exc_info=True)
             after = _file_path_locked()
         if after is not None and _norm_path(after) == norm_new:
+            if journal:
+                resolve_journal.record(
+                    resolve_journal.KIND_REPLACE_CLIP, project_name,
+                    clip_name=_safe_clip_name(media_pool_item),
+                    old_path=before or "", new_path=new_path, source=source,
+                )
             return {"ok": True, "message": f"Relinked to {new_path}"}
         if attempt + 1 < max(1, tries):
             # Off-lock backoff: give Resolve's main thread room to finish the
@@ -1066,7 +1213,8 @@ def refresh_lut_list() -> bool:
             return False
 
 
-def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
+def link_proxy_media(media_pool_item, proxy_path: str, *,
+                     source: str = "manual", journal: bool = True) -> dict[str, Any]:
     """Point `media_pool_item`'s PROXY at `proxy_path`. Never raises.
 
     Distinct from replace_clip: that repoints the ORIGINAL, this repoints the
@@ -1080,8 +1228,10 @@ def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
     if not proxy_path:
         return {"ok": False, "message": "no proxy path given"}
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
+    project_name = _before_mutation(source) if journal else ""
     with _bridge_call("link_proxy_media"):
         try:
+            old_proxy = _safe_clip_property(media_pool_item, "Proxy Media Path")
             result = media_pool_item.LinkProxyMedia(proxy_path)
         except Exception as exc:
             log.warning("resolve: LinkProxyMedia(%s) raised: %s", proxy_path, exc, exc_info=True)
@@ -1091,7 +1241,140 @@ def link_proxy_media(media_pool_item, proxy_path: str) -> dict[str, Any]:
             "ok": False,
             "message": f"Resolve wouldn't accept {proxy_path} as this clip's proxy",
         }
+    if journal:
+        resolve_journal.record(
+            resolve_journal.KIND_LINK_PROXY, project_name,
+            clip_name=_safe_clip_name(media_pool_item),
+            clip_path=_safe_clip_property(media_pool_item, "File Path"),
+            old_path=old_proxy, new_path=proxy_path, source=source,
+        )
     return {"ok": True, "message": f"Proxy relinked to {proxy_path}"}
+
+
+def _safe_clip_property(media_pool_item, key: str) -> str:
+    """One clip property as a string, "" for anything that goes wrong.
+
+    No-arg GetClipProperty() like the rest of this module: the one-arg form
+    is not implemented by every API build (see replace_clip)."""
+    try:
+        props = media_pool_item.GetClipProperty() or {}
+        value = props.get(key)
+        return str(value) if value else ""
+    except Exception:
+        return ""
+
+
+def unlink_proxy_media(media_pool_item) -> dict[str, Any]:
+    """Detach whatever proxy is attached. Never raises.
+
+    Exists for the UNDO path only (item 9, 2026-08-17): the inverse of
+    linking a proxy to a clip that had none is detaching it again, and
+    ReplaceClip cannot express that. Not journalled -- it IS the journal
+    being replayed, and recording an undo as a new edit would make the next
+    undo redo it.
+    """
+    if media_pool_item is None:
+        return {"ok": False, "message": "no media pool item"}
+    ui_state.wait_while_menu_open()
+    with _bridge_call("unlink_proxy_media"):
+        try:
+            unlink = getattr(media_pool_item, "UnlinkProxyMedia", None)
+            if unlink is None:
+                return {"ok": False, "message": "this Resolve build cannot unlink proxies"}
+            result = unlink()
+        except Exception as exc:
+            log.warning("resolve: UnlinkProxyMedia raised: %s", exc, exc_info=True)
+            return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
+    if not result:
+        return {"ok": False, "message": "Resolve refused to unlink the proxy"}
+    return {"ok": True, "message": "Proxy detached"}
+
+
+def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
+    """Put every clip in the newest journal back where it was.
+
+    THE ROLLBACK OF LAST RESORT (item 9, 2026-08-17). Resolve's own Undo does
+    not cover a scripted ReplaceClip, and `save_project`'s exported `.drp` is
+    best effort -- older builds and collaboration projects refuse it. This
+    replays the journal in REVERSE, so a clip touched twice in one burst ends
+    up at the path it had before the burst started.
+
+    Entries whose clip is no longer in the media pool (removed since, or the
+    editor has a different project open) are counted as `skipped`, never
+    guessed at. Never raises.
+    """
+    path = Path(session_path) if session_path is not None else resolve_journal.latest_session()
+    if path is None:
+        return {"ok": False, "undone": 0, "skipped": 0,
+                "message": "CCSync has not changed any clip paths on this machine."}
+    data = resolve_journal.read_session(path)
+    entries = data.get("entries") or []
+    if not entries:
+        return {"ok": False, "undone": 0, "skipped": 0,
+                "message": f"{Path(path).name} records no changes."}
+
+    pool = get_media_pool_items()
+    if not pool.get("ok"):
+        return {"ok": False, "undone": 0, "skipped": len(entries),
+                "message": pool.get("message") or NOT_RUNNING_MESSAGE}
+    by_path: dict[str, Any] = {}
+    for item in pool.get("items") or []:
+        mpi = item.get("media_pool_item")
+        if mpi is not None and item.get("file_path"):
+            by_path.setdefault(_norm_path(str(item["file_path"])), mpi)
+
+    undone = 0
+    skipped = 0
+    for entry in reversed(entries):
+        kind = str(entry.get("kind") or "")
+        old = str(entry.get("old") or "")
+        new = str(entry.get("new") or "")
+        if kind == resolve_journal.KIND_REPLACE_CLIP:
+            mpi = by_path.get(_norm_path(new))
+            if mpi is None or not old:
+                skipped += 1
+                continue
+            result = replace_clip(mpi, old, tries=1, journal=False)
+            if result.get("ok"):
+                undone += 1
+                by_path[_norm_path(old)] = mpi
+            else:
+                skipped += 1
+        elif kind == resolve_journal.KIND_LINK_PROXY:
+            # The clip is addressed by its ORIGINAL's path, which a proxy
+            # relink never changed -- the journal's old/new are proxy paths.
+            mpi = by_path.get(_norm_path(str(entry.get("clip_path") or "")))
+            if mpi is None:
+                mpi = _find_by_clip_name(pool.get("items") or [], entry.get("clip"))
+            if mpi is None:
+                skipped += 1
+                continue
+            result = (link_proxy_media(mpi, old, journal=False) if old
+                      else unlink_proxy_media(mpi))
+            if result.get("ok"):
+                undone += 1
+            else:
+                skipped += 1
+        else:
+            skipped += 1
+
+    message = (f"Put {undone} clip path(s) back the way they were "
+               f"(from {Path(path).name}).")
+    if skipped:
+        message += (f" {skipped} could not be undone — those clips are no longer in "
+                    "this project's media pool.")
+    log.info("resolve: undo replayed %s -- %d undone, %d skipped", path, undone, skipped)
+    return {"ok": undone > 0, "undone": undone, "skipped": skipped, "message": message}
+
+
+def _find_by_clip_name(items: list[dict[str, Any]], name: Any) -> Any:
+    text = str(name or "")
+    if not text:
+        return None
+    for item in items:
+        if item.get("clip_name") == text:
+            return item.get("media_pool_item")
+    return None
 
 
 # -- b-roll "Send to Resolve" ----------------------------------------------
@@ -1387,6 +1670,16 @@ def _attach_adjacent_proxy(media_pool_item, local_path: str) -> None:
         try:
             if media_pool_item.LinkProxyMedia(candidate):
                 log.info("resolve: attached proxy %s", candidate)
+                # Journalled but with NO save point: the clip was imported
+                # seconds ago by this same call, so there is no prior state
+                # an export would preserve -- only the attachment is worth
+                # being able to reverse (item 9, 2026-08-17).
+                resolve_journal.record(
+                    resolve_journal.KIND_LINK_PROXY, current_project_name(),
+                    clip_name=_safe_clip_name(media_pool_item),
+                    clip_path=local_path, old_path="", new_path=candidate,
+                    source="insert-adjacent-proxy",
+                )
             else:
                 log.warning(
                     "resolve: refused %s as this clip's proxy -- no embedded "
@@ -1787,7 +2080,7 @@ def _canonicalize_imported(
             continue
         if not target or _norm_path(str(target)) == _norm_path(local_path):
             continue
-        result = replace_clip(item, str(target), tries=1)
+        result = replace_clip(item, str(target), tries=1, source="import-canonicalise")
         if result.get("ok"):
             log.info("resolve: stored %s canonically as %s", local_path, target)
         else:

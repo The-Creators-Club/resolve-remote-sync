@@ -4,8 +4,8 @@ One command. It finishes any remaining local work first (no API usage), then
 indexes, then builds search vectors.
 
 ```powershell
-Start-Process -FilePath "C:\Users\alex\AppData\Local\Programs\Python\Python312\python.exe" `
-  -ArgumentList "-u","run_queue.py","--config","config.queue.yaml","--model","haiku","--api-workers","12" `
+Start-Process -FilePath "$env:BROLL_PYTHON" `
+  -ArgumentList "-u","run_queue.py","--model","haiku","--api-workers","12" `
   -WorkingDirectory "E:\Projects\resolve-remote-sync\broll\indexer" `
   -RedirectStandardOutput "E:\broll-queue\claude.log" `
   -RedirectStandardError "E:\broll-queue\claude.err" -WindowStyle Hidden
@@ -13,12 +13,28 @@ Start-Process -FilePath "C:\Users\alex\AppData\Local\Programs\Python\Python312\p
 
 Leave it running; come back in the morning.
 
+No `--config`: it defaults to `private/broll/indexer/config.queue.yaml`, which
+`run_queue.py` resolves from its own location. The queue names 25 of this
+client's projects, so it moved out of the tracked tree on 2026-08-17
+(COMMERCIAL_READINESS.md item 10 / section B) — the file is still on this rig,
+just not ours to ship. See `private/README.md`.
+
+`$env:BROLL_PYTHON` is the indexer's interpreter (`watchdog.ps1` reads the same
+variable, or takes `-Python`). It used to be one operator's
+`C:\Users\<name>\AppData\…` path written out here; that was removed as PII on
+2026-08-17 (COMMERCIAL_READINESS.md item 10). Set it once per rig —
+`setx BROLL_PYTHON "<path to python.exe>"`, then open a new window — and keep
+the value in your own notes / the git-ignored `site.toml`, not in the repo.
+
 **Start it detached, as above — not in the foreground.** Three runs on 2026-07-22
 were launched inside a terminal/agent session and every one of them was killed
 when that session ended, one of them seconds after it started. Fourteen hours
 produced nothing. `Start-Process` outlives the shell that launched it.
 
-`--api-workers` is the throughput knob: that many `claude -p` calls run at once.
+`--api-workers` is the throughput knob: that many API calls run at once (and it
+is also the client's own in-flight ceiling — see `docs/indexing-api.md`; the
+stage has called the Messages API with `ANTHROPIC_API_KEY` rather than `claude -p`
+since 2026-08-17).
 Serial (`1`) measured a flat 20 videos/hour — over 100 h for a 2,000-video
 queue — while the machine sat at 12% CPU with 97 GB of RAM free, because the
 stage waits on one round-trip at a time. Raising it cannot raise the account's
@@ -50,7 +66,7 @@ per `--api-workers`, so 24 of them at 24 workers — and `--max-hours` cannot do
 the job: it is only checked *between* stage invocations, and the API stage
 runs the whole queue in a single invocation.
 
-## Session limits are expected, not errors
+## Rate limits are expected, not errors
 
 On a 429 it waits 15 minutes and resumes. The queue is left untouched — nothing
 is marked failed and no work is repeated. Fully resumable: if the machine
@@ -75,7 +91,7 @@ folders, deliberately excluded.
 
 ```powershell
 cd E:\Projects\resolve-remote-sync\broll
-E:\Projects\broll-platform\web\.venv\Scripts\python.exe eval\run_eval_api.py E:\broll-queue\broll.db --queries eval\queries_archive.yaml
+E:\Projects\broll-platform\web\.venv\Scripts\python.exe eval\run_eval_api.py E:\broll-queue\broll.db --queries ..\private\broll\eval\queries_archive.yaml
 ```
 
 Before indexing this scored **recall 19/20, guards 4/5**, with the one miss

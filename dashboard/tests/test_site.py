@@ -23,6 +23,11 @@ EXPECTED_KEYS = {
     "rclone_remote",
     "nas_syncthing_id", "dashboard_url", "template_folders", "shared_asset_folders",
     "nas_kind",
+    # Brand + the read-only extension list (2026-08-17,
+    # COMMERCIAL_READINESS.md items 10/11).
+    "org_short", "product_name", "video_extensions",
+    # The optional-feature switches (items 2/3), already served by api_site.
+    "features",
 }
 
 SITE_ENV = {
@@ -149,3 +154,154 @@ def test_smb_host_falls_back_to_the_nas_host_for_pre_manifest_containers():
     assert explicit.smb_host == "smb.example"
     neither = Settings.from_env({})
     assert neither.smb_host == ""
+
+
+# -- brand + the pinned lists (2026-08-17, COMMERCIAL_READINESS.md items 10/11)
+
+def test_the_brand_is_site_data_with_a_product_default(tmp_path):
+    settings = replace(Settings.from_env({**SITE_ENV, "DASH_SITE_ORG_SHORT": "CC"}),
+                       db_path=str(tmp_path / "s.db"), session_secret="secret")
+    with TestClient(create_app(settings)) as client:
+        body = client.get("/api/v1/site").json()
+    assert body["org_name"] == "Creators Club"
+    assert body["org_short"] == "CC"
+    assert body["product_name"] == "CC Sync"
+
+
+def test_org_short_falls_back_to_the_full_name(tmp_path):
+    settings = replace(Settings.from_env(SITE_ENV), db_path=str(tmp_path / "s.db"),
+                       session_secret="secret")
+    with TestClient(create_app(settings)) as client:
+        body = client.get("/api/v1/site").json()
+    assert body["org_short"] == "Creators Club"
+
+
+def test_an_unbranded_deployment_publishes_the_product_not_a_tenant(tmp_path):
+    """The whole point: a fresh install must show the PRODUCT's name, never
+    the first customer's."""
+    settings = Settings(db_path=str(tmp_path / "s.db"))
+    with TestClient(create_app(settings)) as client:
+        body = client.get("/api/v1/site").json()
+    assert body["org_name"] == "" and body["org_short"] == ""
+    assert body["product_name"] == "CC Sync"
+
+
+def test_a_reseller_can_rename_the_product(tmp_path):
+    settings = replace(Settings.from_env({"DASH_SITE_PRODUCT_NAME": "Acme Sync"}),
+                       db_path=str(tmp_path / "s.db"))
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/v1/site").json()["product_name"] == "Acme Sync"
+
+
+def test_the_topbar_wears_the_sites_brand_and_falls_back_to_the_product(tmp_path):
+    from ccsync_dashboard import ui
+
+    settings = replace(Settings.from_env({**SITE_ENV, "DASH_SITE_ORG_SHORT": "CC"}),
+                       db_path=str(tmp_path / "s.db"), session_secret="secret",
+                       dev_insecure=True)
+    with TestClient(create_app(settings)) as client:
+        assert "CC <span" in client.get("/partials/topbar").text
+
+    plain = replace(Settings(db_path=str(tmp_path / "b.db")), dev_insecure=True)
+    with TestClient(create_app(plain)) as client:
+        assert "CC SYNC <span" in client.get("/partials/topbar").text
+    assert ui is not None
+
+
+def test_the_video_extension_list_is_served_read_only(tmp_path):
+    """Published so a future client reads it instead of growing a fourth copy;
+    NOT configurable -- server/tests/test_cross_component.py pins the three
+    in-repo copies byte-identical to this one."""
+    settings = Settings(db_path=str(tmp_path / "s.db"))
+    with TestClient(create_app(settings)) as client:
+        body = client.get("/api/v1/site").json()
+    assert body["video_extensions"] == provision.VIDEO_EXTENSIONS
+    assert ".braw" in body["video_extensions"]
+
+
+def test_the_tree_lists_can_be_overridden_by_the_site(monkeypatch):
+    """site.toml [tree] template_folders / shared_assets reach the container
+    as DASH_SITE_*; the DEFAULTS are what the cross-component test pins."""
+    import importlib
+
+    monkeypatch.setenv("DASH_SITE_TEMPLATE_FOLDERS", "Footage, Audio ,Graphics")
+    monkeypatch.setenv("DASH_SITE_SHARED_ASSETS", "Assets/Luts,Assets/SFX")
+    mod = importlib.reload(provision)
+    try:
+        assert mod.TEMPLATE_FOLDERS == ["Footage", "Audio", "Graphics"]
+        assert mod.SHARED_ASSET_FOLDERS == [
+            ("assets-luts", "Assets/Luts", "Assets/Luts (LUT library)"),
+            ("assets-sfx", "Assets/SFX", "Assets/SFX"),
+        ]
+        # The defaults are untouched by an override -- they are the contract.
+        assert mod.DEFAULT_TEMPLATE_FOLDERS[0] == "AE"
+    finally:
+        monkeypatch.delenv("DASH_SITE_TEMPLATE_FOLDERS")
+        monkeypatch.delenv("DASH_SITE_SHARED_ASSETS")
+        importlib.reload(provision)
+
+
+def test_a_blank_override_is_not_an_empty_project_template(monkeypatch):
+    """An empty list would create projects with no subfolders at all."""
+    import importlib
+
+    monkeypatch.setenv("DASH_SITE_TEMPLATE_FOLDERS", "  ,  ")
+    mod = importlib.reload(provision)
+    try:
+        assert mod.TEMPLATE_FOLDERS == mod.DEFAULT_TEMPLATE_FOLDERS
+    finally:
+        monkeypatch.delenv("DASH_SITE_TEMPLATE_FOLDERS")
+        importlib.reload(provision)
+
+
+# --------------------------------------------------------------------------
+# Optional features (COMMERCIAL_READINESS.md items 2 + 3, 2026-08-17)
+# --------------------------------------------------------------------------
+# The manifest is how every client -- companion, installer, wizard -- learns
+# which optional features this customer turned on. BOTH DEFAULT FALSE, and the
+# default is what the vendor build ships: the customer, not the vendor, decides
+# whether downloading third-party YouTube material is lawful for them
+# (docs/legal/YOUTUBE_FEATURE_NOTICE.md).
+
+def _features(tmp_path, **flags):
+    settings = Settings(db_path=str(tmp_path / "f.db"), **flags)
+    with TestClient(create_app(settings)) as client:
+        return client.get("/api/v1/site").json()["features"]
+
+
+def test_the_manifest_publishes_both_feature_flags_off_by_default(tmp_path):
+    assert _features(tmp_path) == {"youtube_download": False,
+                                   "youtube_unblock": False}
+
+
+def test_a_site_that_turned_the_downloader_on_says_so(tmp_path):
+    assert _features(tmp_path, site_feature_youtube_download=True) == {
+        "youtube_download": True, "youtube_unblock": False}
+
+
+def test_unblock_is_never_published_without_the_downloader(tmp_path):
+    """An {download: false, unblock: true} answer would tell every companion to
+    install a JS challenge solver for a feature they cannot use."""
+    assert _features(tmp_path, site_feature_youtube_unblock=True)[
+        "youtube_unblock"] is False
+    assert _features(tmp_path, site_feature_youtube_download=True,
+                     site_feature_youtube_unblock=True)["youtube_unblock"] is True
+
+
+def test_the_features_block_carries_no_secret(tmp_path):
+    """The manifest is OPEN (app.py's _OPEN_EXACT). Whether a feature is on is
+    not a secret; nothing else may join it here."""
+    features = _features(tmp_path)
+    assert set(features) == {"youtube_download", "youtube_unblock"}
+    assert all(isinstance(v, bool) for v in features.values())
+
+
+def test_the_env_spelling_is_one_and_nothing_else(tmp_path):
+    """"1" and nothing else is on, matching DASH_BROLL_ENABLED: an unset,
+    empty, misspelt or "true"-shaped value all mean OFF, because off is the
+    state that is safe to be wrong about."""
+    for value in ("", "0", "true", "True", "yes", "on"):
+        s = Settings.from_env({"DASH_SITE_YOUTUBE_DOWNLOAD": value})
+        assert s.site_feature_youtube_download is False, value
+    assert Settings.from_env(
+        {"DASH_SITE_YOUTUBE_DOWNLOAD": "1"}).site_feature_youtube_download is True

@@ -1,0 +1,50 @@
+# Allowlist for tools/check_licenses.py -- COMMERCIAL_READINESS.md item 13,
+# 2026-08-17.
+#
+# THE GATE IS THE POINT, NOT THIS FILE. Every entry here is a copyleft or
+# unknown-licence package in something we CONVEY (the frozen companion, the
+# dashboard container). The default answer is "replace it or stop shipping it";
+# an entry is a decision that we ship it a specific way that is compliant, and
+# `reason` is where that way is written down. An LGPL/GPL/AGPL/SSPL entry with
+# no `reason` FAILS the gate exactly as if it were absent -- an allowlist whose
+# entries do not say why is a mute button.
+#
+# The long-form analysis lives in docs/legal/THIRD_PARTY_NOTICES.md (generated
+# by tools/gen_notices.py). This file is the short, machine-checked half; keep
+# the two in agreement, and when they disagree the notices file is the one a
+# lawyer read.
+#
+# Keys are PEP 503 normalised names (lowercase, runs of -_. collapsed to -).
+#
+#   license        what the metadata says, copied here so a silent upstream
+#                  relicence shows up as a mismatch in review.
+#   reason         REQUIRED for copyleft: how we ship it compliantly.
+#   targets        optional; limits the entry to one of check_licenses.TARGETS.
+#                  Omit to allow it everywhere it appears.
+#   expect_removed optional; the entry is temporary and the plan is to delete
+#                  the dependency. Reports as XFAIL rather than ALLOWED, and
+#                  deleting the entry is what makes the gate fail again -- so
+#                  the gate cleans itself up the day the dependency goes.
+
+# [allow.pystray] WAS HERE, and its removal on 2026-08-17 is the mechanism
+# working as designed. pystray (LGPLv3, statically linked into the single-file
+# PyInstaller freeze) was the ranked stop-ship in item 3; the tray is
+# ccsync_companion/tray_native.py now -- ctypes on Windows, PyObjC on macOS --
+# and pystray is gone from companion/pyproject.toml and from
+# companion/requirements.lock. With no entry here, the gate FAILS if it ever
+# comes back, which is exactly what an allowlist is for.
+# tools/tests/test_check_licenses.py pins that.
+
+[allow.paramiko]
+license = "LGPL-2.1"
+targets = ["dashboard-container"]
+reason = """\
+LGPL-2.1, and the LGPL's dynamic-linking allowance is genuinely satisfied \
+here rather than argued into place: paramiko is pip-installed as an ordinary \
+importable package into the container's /venv (or an image layer built from \
+the same requirements.lock), nothing is statically linked, and the customer \
+can replace the installed copy with their own build without touching our code. \
+It is imported only by ccsync_dashboard.nas.synology, on a DSM site, for the \
+one thing DSM has no API for (writing ~/.ssh/authorized_keys). Obligations \
+still owed and tracked in docs/legal/THIRD_PARTY_NOTICES.md: the notice, the \
+licence text, and a written offer for the source of the version we install."""

@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as ccsync_config
+from . import loopback_guard
 from . import music_server
 from . import resolve_bridge
 
@@ -124,8 +125,17 @@ def reveal_command(target: str, select: bool, platform: Optional[str] = None):
 
     `select` asks for the file to be highlighted inside its folder, which both
     desktops support natively; without it the target is opened as a folder.
+
+    A BUNDLE is never opened, only revealed (2026-08-17,
+    COMMERCIAL_READINESS.md item 5): `open <x>.app` LAUNCHES the application
+    and `open <x>.dmg` mounts the image, so a share containing one turned
+    "show me where this is" into "run this". Forcing select on those is not a
+    degraded answer -- Finder/Explorer highlights the bundle in its parent,
+    which is what the editor asked to see.
     """
     plat = platform if platform is not None else sys.platform
+    if loopback_guard.is_bundle_path(target):
+        select = True
     if plat.startswith("win"):
         # "/select,<path>" is one token to Explorer -- and stays one token here
         # precisely because nothing re-splits it.
@@ -160,7 +170,7 @@ def windows_command_line(argv: list) -> str:
 
     Explorer, handed the first form, does not error: it silently opens the
     editor's default folder, so the endpoint reported ok:true and a window
-    really appeared -- for every clip, every time (ruskin, 2026-08-16; the
+    really appeared -- for every clip, every time (an editor, 2026-08-16; the
     same one-character bug and the same fix as footage-sorter's revealArgs).
     So on Windows the switch is written bare and the quotes wrap the path
     ALONE. The path is refused rather than escaped when it contains `"`:
@@ -232,6 +242,20 @@ def build_reveal_response(
     # Deferred: broll_server imports this module to dispatch its routes, so a
     # module-level import would be a cycle. sys.modules makes it free.
     from . import broll_server
+    from . import site as site_mod
+
+    # The whole /ytdl route group is off unless the customer's site manifest
+    # turned the downloader on (2026-08-17, COMMERCIAL_READINESS.md item 2).
+    # Reveal is the harmless-looking one -- it only opens a folder -- but a
+    # feature that is off should have no surface at all, and a page that can
+    # still make the companion open Explorer is surface. The SITE flag alone,
+    # not youtube_enabled(): an editor who opted their own machine out of
+    # executing downloads (`ytdl_local_downloads = false`) still browses the
+    # clips the server fetched for them.
+    if not site_mod.feature_enabled("youtube_download"):
+        return 200, {"ok": False,
+                     "message": "the YouTube downloader is not enabled for "
+                                "this site"}
 
     rel_path = body.get("rel_path")
     try:

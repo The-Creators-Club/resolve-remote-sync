@@ -433,7 +433,7 @@ def test_the_probe_command_never_re_launches_the_companion():
     start a second companion instead of a probe -- and the probe must not
     import this package in any case (slow, and every import side effect would
     run twice)."""
-    frozen_posix = watch_probe_command("/Volumes/SAMDISK/Creators_Club",
+    frozen_posix = watch_probe_command("/Volumes/EXT-DISK/Creators_Club",
                                        executable="/opt/ccsync/ccsync-companion",
                                        frozen=True, is_windows=False)
     assert frozen_posix[0] == "/bin/ls"

@@ -124,7 +124,8 @@ def test_login_endpoints_answer_503_when_probes_are_saturated(tmp_path):
         page = client.post("/login", data={"username": "j", "password": "p"})
         assert "busy checking sign-ins" in page.text
         # a saturated pool is not a failed password, so it must not throttle
-        assert auth.login_throttled("j") is False
+        # (the budget moved into SQLite on 2026-08-17 -- see sessions.py)
+        assert app.state.session_store.throttled("j") == 0.0
 
 
 # -- syncthing REST path encoding ---------------------------------------
@@ -437,9 +438,9 @@ def test_a_form_with_absurdly_many_fields_is_refused(tmp_path):
     inside the byte ceiling could still be a million `a=1&` pairs for parse_qs
     to build dict entries for. page_login_submit has always capped this."""
     settings = Settings(db_path=str(tmp_path / "fields.db"), session_secret=SECRET,
-                        admin_users=frozenset({"alex"}))
+                        admin_users=frozenset({"owen"}))
     with TestClient(create_app(settings)) as client:
-        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
         body = "&".join(f"f{i}=1" for i in range(500))
         resp = client.post("/partials/project-roots", content=body,
                            headers={"Content-Type": "application/x-www-form-urlencoded"})
@@ -463,9 +464,9 @@ def test_the_interactive_api_docs_are_not_published(tmp_path):
     own to every logged-in editor -- the full route inventory and every admin
     request schema. Authz still held at each route, so disclosure not bypass."""
     settings = Settings(db_path=str(tmp_path / "docs.db"), session_secret=SECRET,
-                        admin_users=frozenset({"alex"}))
+                        admin_users=frozenset({"owen"}))
     with TestClient(create_app(settings)) as client:
-        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
         for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
             assert client.get(path).status_code == 404, path
 
@@ -511,7 +512,7 @@ def test_upgrade_is_not_offered_for_an_unreported_platform(tmp_path):
     dbmod.migrate(conn)
     dbmod.insert_companion_package(
         conn, version="0.2.0", platform="windows", filename="c.exe", sha256="a" * 64,
-        size_bytes=1, published_by="alex", now=dbmod.utcnow_iso())
+        size_bytes=1, published_by="owen", now=dbmod.utcnow_iso())
     dbmod.set_current_package(conn, "windows", "0.2.0")
     assert _upgrade_info(conn, "windows", "0.1.0")["version"] == "0.2.0"
     assert _upgrade_info(conn, None, "0.1.0") is None
@@ -574,7 +575,7 @@ def test_project_detail_renders_a_syncthing_folder_error(tmp_path):
     """A folder Syncthing has STOPPED ('folder marker missing' after a move)
     must say so instead of showing a stale-but-plausible completion %."""
     settings = Settings(db_path=str(tmp_path / "fe.db"), session_secret=SECRET,
-                        admin_users=frozenset({"alex"}))
+                        admin_users=frozenset({"owen"}))
     app = create_app(settings)
     with TestClient(app) as client:
         conn = dbmod.connect(settings.db_path)
@@ -583,7 +584,7 @@ def test_project_detail_renders_a_syncthing_folder_error(tmp_path):
         dbmod.set_folder_status(conn, pid, "stopped", "folder marker missing", now)
         conn.commit()
         conn.close()
-        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
         page = client.get("/project/p")
         assert page.status_code == 200
         assert "[ SYNCTHING FOLDER STOPPED ]" in page.text
@@ -621,7 +622,10 @@ def test_deploy_requirements_match_pyproject_dependencies():
     # thing DSM has no API for (~/.ssh/authorized_keys), and the container is
     # where that backend runs. Harmless on a TrueNAS site -- an installed
     # package nothing imports.
-    for group in ("broll", "music", "ytdl", "synology"):
+    # "oidc" joins them 2026-08-17 on the same terms as "synology": PyJWT is
+    # not imported by ccsync_dashboard at module scope (oidc.verify_id_token
+    # imports it lazily), but the container is where an OIDC sign-in runs.
+    for group in ("broll", "music", "ytdl", "synology", "oidc"):
         declared.update({
             _requirement_name(d): d.strip()
             for d in pyproject["project"].get("optional-dependencies", {}).get(group, [])

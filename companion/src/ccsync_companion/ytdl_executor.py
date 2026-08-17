@@ -68,6 +68,7 @@ from . import ffmpeg_tools
 from . import resolve_bridge
 from . import upgrade as upgrade_mod
 from . import sidecar_tools
+from . import ytdl_attestation
 from . import ytdl_common
 from . import ytdl_cookies
 from . import ytdlp_manager
@@ -214,9 +215,23 @@ NOMINAL_JOB_BYTES = 5 * 1024 * 1024 * 1024
 # capabilities() reasons. Small, closed and editor-readable: the SPA shows
 # nothing (it just falls back to the server path), but this is what the
 # companion log says when an editor asks why their machine is not downloading.
-REASON_DISABLED = "local YouTube downloads are switched off in config"
+REASON_DISABLED = ("the YouTube downloader is off for this site, or switched "
+                   "off in config")
 REASON_NO_DASHBOARD = "this machine has no dashboard URL or token configured"
 REASON_NO_EDITOR = "nobody is signed in on this machine"
+# H5 (2026-08-17): the fleet routes verify a SIGNED identity, so a machine
+# with a name but no live token cannot claim anything. Distinct from
+# REASON_NO_EDITOR because the fix is different -- that one is "sign in", this
+# one is "sign in AGAIN" (a 30-day token that has run out).
+REASON_NO_IDENTITY = ("this machine has no valid sign-in token -- sign in "
+                      "again from the tray")
+# COMMERCIAL_READINESS.md item 2 (2026-08-17). The editor has not accepted the
+# rights/ToS attestation ON THIS MACHINE. Server-side acceptance is recorded
+# per user and gates the browser; this is the per-machine half, because "this
+# computer downloads other people's video" is a fact about the machine and
+# whoever owns it.
+REASON_NOT_ATTESTED = ("the YouTube download terms have not been accepted on "
+                       "this machine -- tray > 'YouTube download terms...'")
 # COMP-BROLL-5 (2026-08-14). ffmpeg is an OPTIONAL dependency on this fleet
 # (ffmpeg_tools.ffmpeg_available says so, and proxy_generation_enabled is
 # tri-state for the same reason), but EVERY rung this executor runs is a
@@ -259,7 +274,12 @@ def default_request(method: str, url: str, body: Optional[dict],
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # No redirects: `headers` carries the fleet token, and urlopen follows
+        # 3xx while stripping only Authorization -- a custom header rides along
+        # to whatever host the Location names. Same rule as reporter.py's
+        # default_http_post (COMMERCIAL_READINESS.md item 15, 2026-08-17); a
+        # 3xx now surfaces as the HTTPError this function already unwraps.
+        with upgrade_mod.build_no_redirect_opener().open(req, timeout=timeout) as resp:
             raw = resp.read()
             status = resp.status
     except urllib.error.HTTPError as exc:
@@ -360,11 +380,13 @@ class Deps:
         request_fn: Optional[RequestFn] = None,
         run_fn: Optional[RunFn] = None,
         sleep_fn: Optional[Callable[[float], None]] = None,
+        identity_token_fn: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self.cfg = cfg or {}
         self.ytdlp = ytdlp
         self._editor_fn = editor_fn
         self._selection_fn = selection_fn
+        self._identity_token_fn = identity_token_fn
         self.request = request_fn or default_request
         self.run = run_fn or default_run
         self.sleep = sleep_fn or time.sleep
@@ -398,6 +420,27 @@ class Deps:
                 log.debug("ytdl: editor_fn failed", exc_info=True)
                 return ""
         return str(self.cfg.get("editor_name", "") or "").strip()
+
+    def identity_token(self) -> str:
+        """The dashboard-signed identity token, or "" when not signed in.
+
+        The fleet routes VERIFY this since 2026-08-17 (H5): the shared report
+        token proves "a fleet machine", and this proves WHICH editor's. Without
+        it every claim, heartbeat, manifest and status post is a 403, so ""
+        means no capability -- the same answer, and the same fallback, as an
+        editor who is not signed in at all.
+
+        Read per call, like `token`: IdentityManager replaces it on sign-in and
+        clears it on sign-out, and a cached copy would keep a signed-out
+        machine claiming jobs until the tray restarted.
+        """
+        if self._identity_token_fn is not None:
+            try:
+                return str(self._identity_token_fn() or "").strip()
+            except Exception:
+                log.debug("ytdl: identity_token_fn failed", exc_info=True)
+                return ""
+        return ""
 
     def selection_labels(self) -> Optional[set]:
         """This machine's synced project labels, or None when unknowable.
@@ -593,7 +636,12 @@ def capabilities(deps: Deps) -> dict:
         "scope_qualities": list(SCOPE_QUALITIES),
         "free_bytes": free_bytes_at(projects_root(deps.cfg) or Path.home()),
     }
-    if not ytdlp_manager.local_downloads_enabled(deps.cfg):
+    # youtube_enabled, not local_downloads_enabled: the site's own
+    # `youtube_download` flag comes first (2026-08-17). A site that never
+    # turned the downloader on has no /ytdl mount either, so this is belt and
+    # braces -- and the braces matter, because a companion pointed at a
+    # dashboard mid-rollback must not be the one component still downloading.
+    if not ytdlp_manager.youtube_enabled(deps.cfg):
         result["reason"] = REASON_DISABLED
         return result
     if not deps.dashboard_url or not deps.token:
@@ -601,6 +649,12 @@ def capabilities(deps: Deps) -> dict:
         return result
     if not result["editor"]:
         result["reason"] = REASON_NO_EDITOR
+        return result
+    if not deps.identity_token():
+        result["reason"] = REASON_NO_IDENTITY
+        return result
+    if not ytdl_attestation.accepted(result["editor"]):
+        result["reason"] = REASON_NOT_ATTESTED
         return result
     if not status.get("ok"):
         result["reason"] = str(status.get("message") or "yt-dlp is not ready on this machine")
@@ -637,15 +691,18 @@ class FleetClient:
         return f"{self.deps.dashboard_url}{API_PREFIX}{suffix}"
 
     def _headers(self) -> dict:
-        # X-CCSync-Identity alongside the token on every call: routes_fleet
-        # treats it as a MISTAKE-PREVENTER (the live lease is the real
-        # authority), and sending it means a stale companion acting for the
-        # wrong editor gets a 410 instead of quietly downloading somebody
-        # else's job.
+        # X-CCSync-Identity carries the dashboard-SIGNED identity token, not
+        # the editor's name (H5, 2026-08-17). It used to be the bare name, and
+        # routes_fleet said so out loud -- "a MISTAKE-PREVENTER, not an
+        # authorisation boundary" -- which meant the shared fleet token, held
+        # by every machine, was the only thing between a companion and another
+        # editor's job. The server now verifies the signature before it
+        # believes the name; this is the same token reporter.py and
+        # selection.py already send on every call they make.
         return {
             "Content-Type": "application/json",
             "X-CCSync-Token": self.deps.token,
-            "X-CCSync-Identity": self.editor,
+            "X-CCSync-Identity": self.deps.identity_token(),
         }
 
     def _call(self, method: str, suffix: str, body: Optional[dict] = None):

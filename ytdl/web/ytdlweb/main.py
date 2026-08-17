@@ -76,7 +76,7 @@ def css():
 
 @app.get('/favicon.svg')
 def favicon():
-    # The Creators Club mark, the same file b-roll and music serve -- the tab
+    # The product mark, the same file b-roll and music serve -- the tab
     # icon is part of looking like one product.
     return Response((config.STATIC_DIR / 'favicon.svg').read_bytes(),
                     media_type='image/svg+xml')

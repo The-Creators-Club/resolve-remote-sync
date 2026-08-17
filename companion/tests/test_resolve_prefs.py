@@ -1,7 +1,7 @@
 """resolve_prefs: reading and editing Resolve's two preference files.
 
 The fixtures below are trimmed from REAL files: config.dat and .config.data
-off the base rig (no LUT locations) and off Leso's Mac (one already set).
+off the base rig (no LUT locations) and off an editor's Mac (one already set).
 That is where the key names came from, so the tests are anchored to the same
 evidence the module is.
 """
@@ -43,17 +43,17 @@ CustomLutNum = 0
 Panels = none
 """
 
-# Leso's Mac: one LUT location already configured, and a mapped mount.
+# An editor's Mac: one LUT location already configured, and a mapped mount.
 MAC_CONFIG_DAT = """Site.Count = 1
 
 Site.1.FS.Count = 3
 
 Site.1.FS.1.Type = IOFileSys
-Site.1.FS.1.Root = /Users/leso/Movies
+Site.1.FS.1.Root = /Users/editor1/Movies
 Site.1.FS.1.MappedRoot =
 
 Site.1.FS.2.Type = IOFileSys
-Site.1.FS.2.Root = /Volumes/SAMDISK/Creators_Club
+Site.1.FS.2.Root = /Volumes/EXT-DISK/Creators_Club
 Site.1.FS.2.MappedRoot = P:\\
 
 Site.1.FS.3.Type = IOFileSys
@@ -61,19 +61,19 @@ Site.1.FS.3.Root = /Volumes
 Site.1.FS.3.MappedRoot =
 
 Custom.LUT.Path.Count = 1
-Custom.LUT.Path.1 = /Users/leso/Documents/GR FILM LUTS
+Custom.LUT.Path.1 = /Users/editor1/Documents/GR FILM LUTS
 
 System.Gallery.DtMgr.FileSys = 1
 System.Gallery.Folder = .gallery
 """
 
 MAC_CONFIG_DATA = """IoFsNum = 2
-IoFsMount_1 = /Users/leso/Movies
+IoFsMount_1 = /Users/editor1/Movies
 IoFsMappedMount_1 =
-IoFsMount_2 = /Volumes/SAMDISK/Creators_Club
+IoFsMount_2 = /Volumes/EXT-DISK/Creators_Club
 IoFsMappedMount_2 = P:\\
 CustomLutNum = 1
-CustomLutPath_1 = /Users/leso/Documents/GR FILM LUTS
+CustomLutPath_1 = /Users/editor1/Documents/GR FILM LUTS
 """
 
 
@@ -99,7 +99,7 @@ def test_reads_an_empty_lut_location_list(tmp_path):
 
 def test_reads_an_existing_lut_location(tmp_path):
     prefs = rp.ResolvePrefs(_prefs_dir(tmp_path, MAC_CONFIG_DAT, MAC_CONFIG_DATA))
-    assert prefs.lut_locations() == ["/Users/leso/Documents/GR FILM LUTS"]
+    assert prefs.lut_locations() == ["/Users/editor1/Documents/GR FILM LUTS"]
 
 
 def test_gallery_location_resolves_through_the_media_storage_list(tmp_path):
@@ -141,20 +141,20 @@ def test_adds_a_lut_location_to_both_files(tmp_path, resolve_quit):
 
 
 def test_appends_without_dropping_an_editors_own_location(tmp_path, resolve_quit):
-    """Leso had a LUT location of their own. Replacing the list instead of
+    """The editor had a LUT location of their own. Replacing the list instead of
     appending would silently take away LUTs they are using."""
     directory = _prefs_dir(tmp_path, MAC_CONFIG_DAT, MAC_CONFIG_DATA)
     prefs = rp.ResolvePrefs(directory)
-    assert prefs.add_lut_location("/Volumes/SAMDISK/Creators_Club/Assets/Luts") == rp.OK
+    assert prefs.add_lut_location("/Volumes/EXT-DISK/Creators_Club/Assets/Luts") == rp.OK
 
     reread = rp.ResolvePrefs(directory)
     assert reread.lut_locations() == [
-        "/Users/leso/Documents/GR FILM LUTS",
-        "/Volumes/SAMDISK/Creators_Club/Assets/Luts",
+        "/Users/editor1/Documents/GR FILM LUTS",
+        "/Volumes/EXT-DISK/Creators_Club/Assets/Luts",
     ]
     data = (directory / rp.CONFIG_DATA_NAME).read_text(encoding="utf-8")
     assert "CustomLutNum = 2" in data
-    assert "CustomLutPath_2 = /Volumes/SAMDISK/Creators_Club/Assets/Luts" in data
+    assert "CustomLutPath_2 = /Volumes/EXT-DISK/Creators_Club/Assets/Luts" in data
 
 
 def test_adding_the_same_location_twice_is_a_no_op(tmp_path, resolve_quit):

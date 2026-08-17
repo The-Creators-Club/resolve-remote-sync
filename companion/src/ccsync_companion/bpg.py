@@ -46,7 +46,7 @@ Four facts shape everything here, all established on the base rig:
 
 COLLATERAL, accepted deliberately: BPG proxies EVERY unproxied clip in a
 watched folder, and it does not recognise this companion's `Proxy/<stem>.mp4`
-as a proxy -- only its own `Proxy/<stem>.mov`. Handing it the ruskin folder
+as a proxy -- only its own `Proxy/<stem>.mov`. Handing it one editor's folder
 (6 BRAW gaps) therefore queued 179 items, 173 of which already had an ffmpeg
 proxy, for ~3.8 GB of duplicates. That is the price of a watcher that takes no
 file list, and it is paid per FOLDER, so the watch dirs stay as narrow as the

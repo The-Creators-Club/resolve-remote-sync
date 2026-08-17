@@ -15,6 +15,10 @@
 #
 # NO SECRETS IN HERE. Passwords, API keys and tokens stay in the environment:
 #   TRUENAS_PW           the NAS admin password (SSH sudo + REST)
+#   TRUENAS_SUDO_PW      optional: a DIFFERENT password for `sudo -S` on the NAS
+#   TRUENAS_API_KEY      optional but preferred: a scoped TrueNAS API key, so
+#                        the dashboard container never holds the admin password
+#                        (mint it with server/create_api_key.py)
 #   SYNCTHING_API_KEY    Syncthing's GUI API key
 #   DASH_REPORT_TOKEN    the fleet report token the companions send
 #   DASH_SESSION_SECRET  dashboard login sessions
@@ -37,12 +41,22 @@ host = "192.168.0.10"
 # Its password is TRUENAS_PW, or SYNO_PW on a Synology site.
 admin_user = "truenas_admin"
 # Verify the NAS's TLS certificate on API calls. "0" trusts a self-signed one,
-# which is the out-of-the-box state of both platforms.
+# which is the out-of-the-box state of both platforms -- and is WARNED about on
+# every run since 2026-08-17, because these calls carry the admin password or
+# an account-creating API key (COMMERCIAL_READINESS.md item 6). Point it at a
+# CA bundle once the NAS has a real certificate:
+#   verify_ssl = "/etc/ssl/certs/nas-ca.pem"     # see docs/SERVER.md
+# Env: TRUENAS_VERIFY_SSL / SYNO_VERIFY_SSL.
 verify_ssl = "0"
-# Optional SSH host-key pin, in known_hosts form -- get it with
+# SSH host-key pin, in known_hosts form -- get it with
 #   ssh-keyscan -t ed25519 <host>
-# Unset means the key is accepted unverified on first use (a warning is
-# printed). Also settable as --host-key / $CCSYNC_SSH_HOSTKEY.
+# and paste the "<type> <base64>" half here. THIS IS NO LONGER OPTIONAL in
+# practice: since 2026-08-17 an unpinned host that is not already recorded in
+# ~/.ccsync/known_hosts is REFUSED, because that channel carries the admin
+# password on its stdin. For the very first connection to a new NAS, run once
+# with --trust-host-key-on-first-use (or $CCSYNC_SSH_TRUST_ON_FIRST_USE=1): the
+# key is recorded, printed, and every later run is checked against it -- a key
+# that CHANGES is a refusal. Also settable as --host-key / $CCSYNC_SSH_HOSTKEY.
 # ssh_hostkey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."
 
 [tree]
@@ -56,6 +70,18 @@ tree_name = "Creators_Club"
 # by the product: the companion, the dashboard and the b-roll/music mounts all
 # agree on those names.
 projects_dir = "Projects"
+# OPTIONAL. The subfolders every new project is created with, and the
+# fleet-wide asset libraries that are shared with every editor automatically
+# (no tick, no project marker). Unset = the product defaults below, which are
+# documentary-shop shaped and were CODE in three components until 2026-08-17
+# (docs/COMMERCIAL_READINESS.md item 11). Set them and the same lists reach
+# server/setup_tree.py, the dashboard's "create new project" flow and GET
+# /api/v1/site -- so change them here, not in one component.
+# template_folders = ["AE", "Audio/Music", "Audio/Voiceover", "B-roll",
+#                     "Interviewees", "Render in Place", "Subs", "Youtube"]
+# Rel paths under the tree root. The Syncthing folder id is derived from each
+# (slugified), so "Assets/Luts" is always folder `assets-luts`.
+# shared_assets = ["Assets/Luts", "Assets/Stills"]
 # Where editor home directories live -- the PARENT, never one editor's home.
 # Defaults to <pool_root>/homes, which is what TrueNAS creates. DSM's User Home
 # service puts them at /var/services/homes (= /volume1/homes), so set it there.
@@ -112,12 +138,25 @@ rclone_remote = "ccsync_sftp"
 # rclone's `shell_type`. "unix" lets it run md5sum over SSH for checksums;
 # DSM editors have /sbin/nologin as their shell, so a Synology site needs
 # "none" or every checksum call fails.
+#
+# IGNORED, and forced to "none", whenever [stack] editor_shell is "sftp-only"
+# (the default): a nologin editor cannot run md5sum whatever this says, and the
+# two disagreeing is what produces "failed to calculate hash" on every lane
+# pass. Set it only alongside editor_shell = "shell".
 shell_type = "unix"            # Synology: "none"
 
 [syncthing]
 # Syncthing's GUI, as seen FROM THE DASHBOARD CONTAINER (the NAS's own LAN
 # address works; localhost does not).
 gui_url = "http://192.168.0.10:8384"
+# Which HOST address the GUI is published on. The GUI is an unauthenticated
+# admin surface over every folder in the fleet, and the TrueNAS catalog app
+# published it on every interface until 2026-08-17 (COMMERCIAL_READINESS.md
+# item 7). Set it to the one address the base rig reaches it on -- or to
+# 127.0.0.1 and use an SSH tunnel, which is what the Synology stack does.
+# Then give it a login:  python server/secure_syncthing_gui.py
+# (that does NOT affect the API key, so nothing automated notices).
+# gui_bind = "192.168.0.10"
 # The NAS's Syncthing device ID -- what an editor's companion pairs with.
 # Read it from the Syncthing GUI (Actions > Show ID) after the first install.
 device_id = ""
@@ -125,10 +164,61 @@ device_id = ""
 [site]
 # Cosmetic identity, served by GET /api/v1/site to clients that have no
 # credentials yet (the installer, the wizard, the companion).
+#
+# org_name is YOUR name. It is what the dashboard topbar shows, and what the
+# companion's tray says instead of "your studio drive" -- every one of those
+# strings was the literal "Creators Club" until 2026-08-17
+# (docs/COMMERCIAL_READINESS.md item 10). org_short is the same name where
+# only a few characters fit; unset means "use org_name".
 org_name = "Your Studio"
+# org_short = "YS"
+# THE PRODUCT's name, not yours -- the one brand string here with a non-blank
+# default, because every deployment runs the same software. Set it only if you
+# are reselling this under your own name.
+# product_name = "CC Sync"
 # The drive letter editors map the tree as. Hardcoded to P: by decision
 # (2026-07-26); it is served so no client has to assume it.
 # canonical_prefix = "P:\\"
+
+[broll]
+# The b-roll search UI's OWN-FOOTAGE collection: the shares listed as
+# BROLL_CREATORS_SHARES browse under this root rather than the subject
+# taxonomy. The slug travels in every search URL and the label is what the
+# folder tree shows an editor.
+#
+# Unset = "owned" / "Our Footage" -- a description of what it holds rather
+# than a name, because the product does not know the customer's. It was the
+# literal "creators_club" in both places until 2026-08-17
+# (docs/COMMERCIAL_READINESS.md item 10). The old slug is still accepted on
+# the wire, so a bookmarked ?collection=creators_club URL keeps working.
+#
+# Nothing in the database moves when you change these: the collection is
+# derived at query time, never stored on a row.
+# default_collection = "studio"
+# default_collection_label = "Our Footage"
+
+[features]
+# OPTIONAL FEATURES, OFF UNLESS THIS SITE TURNS THEM ON (2026-08-17,
+# docs/COMMERCIAL_READINESS.md items 2 and 3).
+#
+# youtube_download -- the /ytdl YouTube downloader: search, review, download.
+#   Off by default because the customer, not the vendor, is the party who
+#   decides whether downloading third-party YouTube material is lawful for
+#   their footage, in their jurisdiction, under YouTube's Terms of Service.
+#   Off means: the dashboard does not mount /ytdl at all, the fleet download
+#   routes 404, and every editor's companion hides its YouTube menu items and
+#   refuses the loopback actions. See docs/legal/YOUTUBE_FEATURE_NOTICE.md.
+#
+# youtube_unblock -- the components that exist to get past YouTube's
+#   anti-automation measures: the PO-token provider sidecar, the deno
+#   "n-challenge" JS solver, and the browser-cookie sign-in that downloads as
+#   a logged-in account. THE VENDOR BUILD SHIPS NONE OF THESE INSTALLED. They
+#   are provisioned only when a customer sets this (or passes
+#   --enable-youtube-unblock to server/install_dashboard_app.py), which is
+#   that customer asserting they have the right to do so.
+#   Requires youtube_download; on its own it does nothing.
+youtube_download = false
+youtube_unblock = false
 
 [stack]
 # The uid:gid the dashboard container runs as: the service account that owns
@@ -140,3 +230,34 @@ gid = "3001"
 # Their names, used for `chown -R <owner>:<group>` on the project tree.
 owner = "broll"
 group = "editors"
+# What an editor account IS on the NAS (COMMERCIAL_READINESS.md item 7):
+#
+#   "sftp-only"  (DEFAULT, and the right answer) nologin + an sshd
+#                `Match Group <group>` block carrying ForceCommand
+#                internal-sftp and PasswordAuthentication no. Editors get
+#                lanes A/B and no login. This is DSM's behaviour out of the
+#                box, and what setup_editor_account.py now creates on TrueNAS.
+#   "shell"      /usr/bin/bash, as every editor had before 2026-08-17. Choose
+#                it only while existing editors' rclone.conf still says
+#                shell_type = unix -- and plan the migration:
+#                  python server/setup_editor_account.py --migrate-existing
+#                  python server/setup_editor_account.py --migrate-existing --apply
+#
+# CONSEQUENCE, wired not documented: with "sftp-only" the site manifest
+# publishes sftp_shell_type = "none" whatever [net] shell_type says, because
+# rclone cannot shell out to md5sum on a nologin account. Redeploy the
+# dashboard after changing this so editors pick it up.
+editor_shell = "sftp-only"
+# Who can reach a project directory (docs/TENANCY.md):
+#
+#   "shared"       (DEFAULT, today's behaviour) one `editors` group, 2770
+#                  everywhere -- every editor can read, write and DELETE every
+#                  other editor's project.
+#   "per-project"  each project also gets a `proj-<slug>` group; the project
+#                  subtree belongs to it, and the directories above get the
+#                  sticky bit so one editor cannot remove another's project.
+#                  Membership follows the dashboard tick / --project.
+#
+# Multi-ORG is NOT this switch: one customer = one dashboard container. See
+# docs/TENANCY.md before turning this on -- it changes an existing tree.
+project_acl = "shared"

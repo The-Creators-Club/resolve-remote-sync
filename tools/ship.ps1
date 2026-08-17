@@ -37,11 +37,19 @@
       3. LOCAL      installer\windows_upgrade.ps1 with the exe just built,
          then tools\check_deploy_drift.ps1.
 
-    Secrets come from user environment variables (set once with setx):
-    TRUENAS_PW, DASH_REPORT_TOKEN, DASH_SESSION_SECRET, SYNCTHING_API_KEY.
-    The script refuses to start with any of them missing rather than let
+    Secrets come from THIS SESSION's environment: TRUENAS_PW,
+    DASH_REPORT_TOKEN, DASH_SESSION_SECRET, SYNCTHING_API_KEY. The script
+    refuses to start with any of them missing rather than let
     install_dashboard_app.py fail halfway. Since 2026-08-17 it refuses on a
     missing dashboard URL / admin user the same way -- see -DashboardUrl.
+
+    DO NOT `setx` THEM (2026-08-17, docs/COMMERCIAL_READINESS.md item 15).
+    setx writes the value in clear text into HKCU\Environment, where it stays
+    forever, is readable by every process running as you, is inherited by
+    every process you ever launch, and travels with a roaming profile or a
+    profile backup. Load them into the current window instead, from a
+    DPAPI-protected file only your account on this machine can decrypt --
+    the recipe is docs/SECRETS.md, and it is three lines.
 
     Run it via tools\ship.cmd to skip the execution-policy dance.
 
@@ -92,14 +100,21 @@ param(
     # 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md): the four publish/health
     # URLs below used to be one deployment's LAN address, compiled into the
     # ship command itself. $env:CCSYNC_DASHBOARD_URL / $env:CCSYNC_ADMIN_USER
-    # are the setx-once route, exactly like the secrets gate below.
+    # are the environment route. NEITHER IS A SECRET, so setx is fine for
+    # these two -- it is not for the four in the secrets gate below
+    # (docs/SECRETS.md, COMMERCIAL_READINESS.md item 15).
     [string]$DashboardUrl = "",
     [string]$AdminUser = "",
     [switch]$DashboardOnly,
     [switch]$Recreate,
     [switch]$SkipLocalUpgrade,
     [switch]$SkipTests,
-    [switch]$AllowDirty
+    [switch]$AllowDirty,
+    # COMMERCIAL_READINESS.md item 4 (2026-08-17): make an exe with no valid
+    # Authenticode signature CURRENT for the whole fleet anyway. The upgrade
+    # channel's own ed25519 signature is separate and always required; this
+    # is about the editor-facing SmartScreen/AV experience.
+    [switch]$AllowUnsignedBinary
 )
 
 # "Continue", not "Stop": the deploy script prints an SSH host-key WARNING to
@@ -149,7 +164,10 @@ foreach ($name in @("TRUENAS_PW", "DASH_REPORT_TOKEN", "DASH_SESSION_SECRET", "S
 }
 if ($missing.Count -gt 0) {
     Write-Fail "missing environment variable(s): $($missing -join ', ')"
-    Write-Step "set each once with:  setx <NAME> `"<value>`"  then open a NEW window"
+    Write-Step "load them into THIS window:  . .\tools\load_secrets.ps1"
+    Write-Step "(first time: .\tools\load_secrets.ps1 -Save, which stores them DPAPI-encrypted"
+    Write-Step " under %LOCALAPPDATA%\ccsync\secrets -- see docs\SECRETS.md.)"
+    Write-Step "Do NOT use setx: it puts them in clear text in HKCU\Environment for good."
     exit 1
 }
 
@@ -166,8 +184,8 @@ if (-not $AdminUser -and -not $DashboardOnly) { $missingSite += "-AdminUser (or 
 if ($missingSite.Count -gt 0) {
     Write-Fail "missing: $($missingSite -join ', ')"
     Write-Step "this repo no longer has a dashboard address or an admin account compiled in --"
-    Write-Step "pass them, or setx CCSYNC_DASHBOARD_URL `"http://<your-dashboard>:8480`" and"
-    Write-Step "setx CCSYNC_ADMIN_USER `"<your-dashboard-admin>`", then open a NEW window."
+    Write-Step "pass them, or set CCSYNC_DASHBOARD_URL / CCSYNC_ADMIN_USER in your environment"
+    Write-Step "(neither is a secret, so setx is fine for these two -- see docs\SECRETS.md for the four that are)."
     exit 1
 }
 Write-Step "shipping to: $DashboardUrl (admin: $(if ($AdminUser) { $AdminUser } else { 'n/a' }))"
@@ -427,6 +445,31 @@ if ($LASTEXITCODE -ne 0) {
 # the companion build, because onboard.exe bundles the companion exe.
 Write-Host ""
 Write-Step "--- step 2b: package + publish (password prompt is your DASHBOARD login) ---"
+# --- the Authenticode gate (item 4, 2026-08-17) -----------------------------
+# Step 2b publishes AND makes current in one call, so the only place to refuse
+# an unsigned binary is here, between the build and the publish. Not a
+# warning: -MakeCurrent hands this exe to every editor's one-click updater and
+# to every fresh install, and "Windows protected your PC" on first contact is
+# the single loudest signal a customer gets that this is not a product.
+$builtExe = Join-Path $PSScriptRoot "..\companion\dist\ccsync-companion.exe"
+if (Test-Path -LiteralPath $builtExe) {
+    $authStatus = (Get-AuthenticodeSignature -LiteralPath $builtExe).Status
+    if ($authStatus -ne "Valid") {
+        if (-not $AllowUnsignedBinary) {
+            Write-Fail "the companion exe is NOT Authenticode-signed (status: $authStatus) -- refusing to make it CURRENT for the fleet."
+            Write-Step "Set CCSYNC_SIGN_THUMBPRINT (or CCSYNC_SIGN_PFX + CCSYNC_SIGN_PFX_PASSWORD)"
+            Write-Step "and re-run, or re-run with -AllowUnsignedBinary for a deliberate"
+            Write-Step "internal build. See docs\RELEASE.md 'Code signing'."
+            Write-Step "The dashboard deploy in step 1 stands; nothing was published."
+            exit 1
+        }
+        Write-Host "[ship] WARNING: publishing an UNSIGNED binary as CURRENT (-AllowUnsignedBinary) -- every fresh install meets SmartScreen" -ForegroundColor Yellow
+    }
+    else {
+        Write-Step "Authenticode: Valid"
+    }
+}
+
 & powershell -NoProfile -ExecutionPolicy Bypass -File "installer\build_editor_package.ps1" `
     -RebuildOnboard -Publish -MakeCurrent -DashboardUrl $DashboardUrl -AdminUser $AdminUser
 if ($LASTEXITCODE -ne 0) {

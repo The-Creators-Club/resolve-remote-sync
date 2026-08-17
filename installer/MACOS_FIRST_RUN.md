@@ -318,7 +318,7 @@ coming down the wire.
 
   ```bash
   ./installer/macos_bootstrap.sh --tailnet-host <nas> --editor-name <you> \
-      --local-root "/Volumes/<SSD>/Creators_Club" --dry-run
+      --local-root "/Volumes/<SSD>/<tree>" --dry-run
   ```
 
   **Success:** every action prefixed `[dry-run]`, including "would verify
@@ -334,7 +334,7 @@ coming down the wire.
   ```bash
   DASHBOARD_TOKEN=<token> ./installer/macos_bootstrap.sh \
       --tailnet-host <nas> --editor-name <you> \
-      --local-root "/Volumes/<SSD>/Creators_Club"
+      --local-root "/Volumes/<SSD>/<tree>"
   ```
 
   **Success -- these lines, in this order-ish:**
@@ -429,10 +429,10 @@ coming down the wire.
   # quit Resolve completely first (or launch it once and quit, for the
   # never-launched case)
   ./installer/macos_bootstrap.sh --resolve-mapping-only \
-      --local-root "/Volumes/<SSD>/Creators_Club"
+      --local-root "/Volumes/<SSD>/<tree>"
   ```
 
-  **Success:** `Mapped Mount configured: P:\ -> /Volumes/<SSD>/Creators_Club`
+  **Success:** `Mapped Mount configured: P:\ -> /Volumes/<SSD>/<tree>`
   and, on a second run, `already maps … -- nothing written`.
 
   **Failing looks like:** exit 5 (`not in the format this installer knows`)
@@ -495,7 +495,7 @@ coming down the wire.
   ```bash
   sed -n '/^# ---CCSYNC-MAPPING-HELPER-BEGIN---$/,/^# ---CCSYNC-MAPPING-HELPER-END---$/p' \
       installer/macos_bootstrap.sh > /tmp/ccsync_mapping.py
-  python3 /tmp/ccsync_mapping.py verify --local-root "/Volumes/<SSD>/Creators_Club"; echo "exit=$?"
+  python3 /tmp/ccsync_mapping.py verify --local-root "/Volumes/<SSD>/<tree>"; echo "exit=$?"
   ```
 
   **Success:** `Resolve maps P:\ to …`, `exit=0`, with Resolve running.
@@ -511,10 +511,10 @@ The point of the port. Do these deliberately, in order.
   disconnect the SSD (no eject -- that is the realistic case).
 
   **Success, all of:**
-  - a notification: *"Sync paused — your Creators Club drive is
+  - a notification: *"Sync paused — your studio drive is
     disconnected."*
   - menu bar icon orange; menu says `PAUSED — drive disconnected`; lane
-    detail says `PAUSED: your Creators Club drive is disconnected -- plug it
+    detail says `PAUSED: your studio drive is disconnected -- plug it
     back in and syncing resumes on its own`
   - log: `sync paused: local_root … is not available (absent)`
   - **`ls /Volumes` shows no leftover directory for the drive**
@@ -673,8 +673,8 @@ The point of the port. Do these deliberately, in order.
   measurement, not a hope:
 
   ```bash
-  find "/Volumes/<SSD>/Creators_Club" -type f | wc -l
-  du -sh "/Volumes/<SSD>/Creators_Club"
+  find "/Volumes/<SSD>/<tree>" -type f | wc -l
+  du -sh "/Volumes/<SSD>/<tree>"
   ```
 
 - [ ] **H2. Dry run.** `./installer/macos_uninstall.sh --dry-run` -- every

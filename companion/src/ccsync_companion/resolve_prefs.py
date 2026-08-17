@@ -26,7 +26,7 @@ line-ending style all survive), atomic (tempfile + os.replace) and preceded
 by a timestamped backup of both files.
 
 The key names here are not guesses: they were read off a live Resolve 20
-install that already had a LUT location configured (Leso's Mac, 2026-08-05)
+install that already had a LUT location configured (a Mac editor's, 2026-08-05)
 and cross-checked against a second install with none (the base rig).
 """
 
@@ -341,8 +341,8 @@ class ResolvePrefs:
         """Append `path` to the LUT Locations list in BOTH files.
 
         Returns OK, ALREADY, RESOLVE_RUNNING or FORMAT_UNRECOGNISED. Appends
-        rather than replaces: an editor's own LUT location (Leso had one
-        pointing at a pack under ~/Documents) is theirs, and silently
+        rather than replaces: an editor's own LUT location (one Mac editor had
+        one pointing at a pack under ~/Documents) is theirs, and silently
         dropping it would take away LUTs they are using.
         """
         if self.has_lut_location(path):

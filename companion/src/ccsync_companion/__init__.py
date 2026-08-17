@@ -1,4 +1,4 @@
-"""ccsync-companion — editor-side agent for the Creators Club Resolve remote-sync system.
+"""ccsync-companion — editor-side agent for the CC Sync Resolve remote-sync system.
 
 Tray app + three supervised daemons (per SPEC.md, Architecture + Components §2):
 

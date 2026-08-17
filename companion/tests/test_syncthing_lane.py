@@ -303,7 +303,7 @@ def test_check_once_no_api_key_anywhere(tmp_path):
     assert "API key" in status.last_error
 
 
-# -- per-home API-key fallback (alex_laptop, 2026-07-26) --------------------
+# -- per-home API-key fallback (owen_laptop, 2026-07-26) --------------------
 
 
 def _write_config_xml(path, key):

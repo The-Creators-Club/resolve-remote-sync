@@ -77,12 +77,12 @@ def test_never_touches_entry_one(tmp_path, resolve_quit):
 def test_writes_the_mapped_root_into_both_files(tmp_path, resolve_quit):
     directory = _prefs_dir(tmp_path, MAC_CONFIG_DAT, MAC_CONFIG_DATA)
     rp.ResolvePrefs(directory).ensure_media_storage(
-        "/Volumes/SAMDISK/Creators_Club/Assets/Stills", "P:\\Assets\\Stills"
+        "/Volumes/EXT-DISK/Creators_Club/Assets/Stills", "P:\\Assets\\Stills"
     )
     dat = (directory / rp.CONFIG_DAT_NAME).read_text(encoding="utf-8")
     data = (directory / rp.CONFIG_DATA_NAME).read_text(encoding="utf-8")
-    assert "/Volumes/SAMDISK/Creators_Club/Assets/Stills" in dat
-    assert "/Volumes/SAMDISK/Creators_Club/Assets/Stills" in data
+    assert "/Volumes/EXT-DISK/Creators_Club/Assets/Stills" in dat
+    assert "/Volumes/EXT-DISK/Creators_Club/Assets/Stills" in data
     # The GUI form must carry the mapping too, or Resolve rebuilds
     # config.dat from it on the next launch and the mapping is lost.
     assert "IoFsMappedMount_3 = P:\\Assets\\Stills" in data
@@ -91,14 +91,14 @@ def test_writes_the_mapped_root_into_both_files(tmp_path, resolve_quit):
 def test_mac_insertion_keeps_volumes_last(tmp_path, resolve_quit):
     directory = _prefs_dir(tmp_path, MAC_CONFIG_DAT, MAC_CONFIG_DATA)
     rp.ResolvePrefs(directory).ensure_media_storage(
-        "/Volumes/SAMDISK/Creators_Club/Assets/Stills", "P:\\Assets\\Stills"
+        "/Volumes/EXT-DISK/Creators_Club/Assets/Stills", "P:\\Assets\\Stills"
     )
     roots = [e["root"] for e in rp.ResolvePrefs(directory).media_storage()]
     assert roots[-1] == "/Volumes"
     assert roots == [
-        "/Users/leso/Movies",
-        "/Volumes/SAMDISK/Creators_Club",
-        "/Volumes/SAMDISK/Creators_Club/Assets/Stills",
+        "/Users/editor1/Movies",
+        "/Volumes/EXT-DISK/Creators_Club",
+        "/Volumes/EXT-DISK/Creators_Club/Assets/Stills",
         "/Volumes",
     ]
 

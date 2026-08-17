@@ -109,6 +109,15 @@ def main():
     ap.add_argument('--root', default='', help='override the share root')
     args = ap.parse_args()
 
+    # Before any encode starts, not on the first ffmpeg call: since the
+    # hardcoded C:\Users\<name>\tools\ffmpeg default was deleted (2026-08-17,
+    # COMMERCIAL_READINESS.md item 10) an unconfigured rig has to say so by
+    # name rather than fail a few hundred files in.
+    try:
+        config.require_tools()
+    except config.FfmpegNotConfigured as exc:
+        sys.exit(str(exc))
+
     root = Path(args.root) if args.root else None
     if root and not root.exists():
         sys.exit(f'music root not found: {root}')

@@ -6,7 +6,7 @@ the operator wants the LIST, because the fix is to re-download or re-copy the
 source, and it is far cheaper to do that in one pass than to trip over them one
 at a time.
 
-    python find_broken_sources.py --config config.queue.yaml
+    python find_broken_sources.py    # --config defaults to private/broll/indexer/config.queue.yaml
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 
 import yaml
+
+from broll_index.site_data import DEFAULT_QUEUE_CONFIG
 
 
 def probe_error(path: Path) -> str | None:
@@ -34,7 +36,7 @@ def probe_error(path: Path) -> str | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.queue.yaml")
+    ap.add_argument("--config", default=DEFAULT_QUEUE_CONFIG)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out", default="broken_sources.md")
     args = ap.parse_args()

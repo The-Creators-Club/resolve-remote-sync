@@ -39,13 +39,13 @@ def test_load_config_creates_defaults_on_first_run(tmp_path):
 def test_load_config_merges_user_overrides(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(
-        'editor_name = "alex"\n'
+        'editor_name = "owen"\n'
         'local_root = "C:\\\\Creators_Club"\n'
         "poll_interval = 5\n",
         encoding="utf-8",
     )
     cfg = config_mod.load_config(path)
-    assert cfg["editor_name"] == "alex"
+    assert cfg["editor_name"] == "owen"
     assert cfg["local_root"] == "C:\\Creators_Club"
     assert cfg["poll_interval"] == 5
     # Untouched keys still fall back to DEFAULTS.
@@ -81,10 +81,10 @@ def test_load_config_tolerates_utf8_bom(tmp_path):
     # .ps1) -- a config written that way must still parse cleanly, the same
     # way identity.py's load_identity() already tolerates a BOM.
     path = tmp_path / "config.toml"
-    text = 'editor_name = "alex"\nlocal_root = "C:\\\\Creators_Club"\n'
+    text = 'editor_name = "owen"\nlocal_root = "C:\\\\Creators_Club"\n'
     path.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
     cfg = config_mod.load_config(path)
-    assert cfg["editor_name"] == "alex"
+    assert cfg["editor_name"] == "owen"
     assert cfg["local_root"] == "C:\\Creators_Club"
     assert cfg["_config_load_error"] is None
 
@@ -179,6 +179,20 @@ def test_default_toml_text_documents_every_default_key():
         # change are written live, the batch/failure knobs are documented
         # commented out so a later re-tune still reaches existing installs.
         "youtube_import_batch_limit", "youtube_import_max_failures",
+        # The lane B circuit breaker's thresholds and the .ccsync-trash
+        # retention window (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+        # Same class as the transport tuning above: the shipped numbers are
+        # the measured-safe defaults, and pinning them in every first-run
+        # file is how a later re-tune reaches nobody.
+        "lane_b_max_deletes_per_pass", "lane_b_max_delete_fraction",
+        "lane_b_remote_shrink_fraction",
+        "trash_max_age_days", "trash_max_bytes", "trash_prune_interval_seconds",
+        # The proxy generator's free-space floor and stability window, and the
+        # two rehearsal switches (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+        # Same class: measured-safe defaults that a later re-tune must be able
+        # to reach, and two switches whose ON state is a deliberate one-off.
+        "proxy_gen_free_space_floor_gb", "proxy_gen_free_space_floor_pct",
+        "proxy_gen_stability_seconds", "proxy_dry_run", "fixer_dry_run",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -228,7 +242,25 @@ EXAMPLE_COMMENTED_OUT = {
     # The YouTube importer's batch/failure knobs -- tunable in the field,
     # shipped values are the measured defaults (see DEFAULT_TOML_TEXT above).
     "youtube_import_batch_limit", "youtube_import_max_failures",
+    # The lane B circuit breaker + .ccsync-trash retention, same class again
+    # (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+    "lane_b_max_deletes_per_pass", "lane_b_max_delete_fraction",
+    "lane_b_remote_shrink_fraction",
+    "trash_max_age_days", "trash_max_bytes", "trash_prune_interval_seconds",
+    # The proxy generator's free-space floor and stability window, and the two
+    # rehearsal switches (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+    "proxy_gen_free_space_floor_gb", "proxy_gen_free_space_floor_pct",
+    "proxy_gen_stability_seconds", "proxy_dry_run", "fixer_dry_run",
 }
+
+# Read straight off the loaded config with .get() and DELIBERATELY absent from
+# DEFAULTS (loopback_guard.py's module docstring): they are escape hatches, not
+# settings anyone should be setting routinely, and a DEFAULTS entry would make
+# ensure_config write them into every first-run file. They are still documented
+# -- commented out -- because broll_server names loopback_extra_origins in the
+# refusal an editor actually reads, and a key that only the source mentions is
+# not a setting (2026-08-17, COMMERCIAL_READINESS.md item 5).
+EXAMPLE_ESCAPE_HATCHES = {"loopback_extra_origins", "loopback_dev_origins"}
 
 
 def _example_toml_text() -> str:
@@ -256,8 +288,23 @@ def test_config_example_invents_no_keys_the_code_does_not_read():
     a setting an editor can write, restart for, and watch do nothing."""
     text = _example_toml_text()
     assignments = set(re.findall(r"^#?\s*([a-z_][a-z0-9_]*) = ", text, re.MULTILINE))
-    unknown = sorted(assignments - set(config_mod.DEFAULTS))
+    unknown = sorted(assignments - set(config_mod.DEFAULTS) - EXAMPLE_ESCAPE_HATCHES)
     assert unknown == [], f"config.example.toml documents keys nothing reads: {unknown}"
+
+
+def test_the_loopback_escape_hatches_are_documented_but_never_defaults():
+    """Both halves of the deal: absent from DEFAULTS (so ensure_config never
+    writes them into a first-run file and pins them), present in both
+    templates as COMMENTED-OUT lines (so the editor reading broll_server's
+    "set dashboard_url (or loopback_extra_origins)" refusal can find one)."""
+    text = _example_toml_text()
+    for key in EXAMPLE_ESCAPE_HATCHES:
+        assert key not in config_mod.DEFAULTS, \
+            f"{key} is an escape hatch -- see loopback_guard.py's docstring"
+        assert re.search(rf"^#\s*{re.escape(key)} = ", text, re.MULTILINE), \
+            f"config.example.toml never documents {key}"
+        assert re.search(rf"^#\s*{re.escape(key)} = ", config_mod.DEFAULT_TOML_TEXT,
+                         re.MULTILINE), f"DEFAULT_TOML_TEXT never documents {key}"
 
 
 def test_the_keep_awake_thresholds_match_the_guard_module():
@@ -322,7 +369,7 @@ def _good_cfg(tmp_path, **overrides):
     # with no compiled-in dashboard default left, an install that names no
     # dashboard is an install nobody finished, and validate_config says so.
     cfg = {
-        "editor_name": "ruskin",
+        "editor_name": "editor2",
         "local_root": str(tmp_path),
         "remote": "ccsync_sftp",
         "remote_root": "/mnt/pool/share/Tree",

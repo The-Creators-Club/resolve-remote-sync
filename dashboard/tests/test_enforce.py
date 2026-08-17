@@ -178,7 +178,7 @@ def test_enforce_skipped_when_syncthing_reports_no_my_id(conn, fake, collector):
 # -- B16: a machine-style device name must not be read as an editor ---------
 
 
-LAPTOP_ID = "ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP-ALEXLAP"
+LAPTOP_ID = "OWENLAP-OWENLAP-OWENLAP-OWENLAP-OWENLAP-OWENLAP-OWENLAP-OWENLAP"
 
 
 def _add_second_folder(fake, slug="2026-ff5-alpha"):
@@ -192,8 +192,8 @@ def _add_second_folder(fake, slug="2026-ff5-alpha"):
 
 
 def test_a_machine_named_device_is_not_unshared_from_everything(conn, fake, collector):
-    """B16: `alex-laptop` is username-SHAPED, so resolve_editor_username read
-    it as editor "alex-laptop" -- an account that does not exist and has no
+    """B16: `owen-laptop` is username-SHAPED, so resolve_editor_username read
+    it as editor "owen-laptop" -- an account that does not exist and has no
     selections rows. The preserve rule only kept devices whose editor resolved
     to None, so a device with a real-but-empty editor was removed from every
     folder it was shared with, and the enforce brake counted DEVICES (one) so
@@ -202,7 +202,7 @@ def test_a_machine_named_device_is_not_unshared_from_everything(conn, fake, coll
     slug2 = _add_second_folder(fake)
 
     # The laptop is approved AFTER the seed and shared with both folders.
-    fake.state["devices"].append({"deviceID": LAPTOP_ID, "name": "alex-laptop"})
+    fake.state["devices"].append({"deviceID": LAPTOP_ID, "name": "owen-laptop"})
     for folder in fake.state["folders"]:
         folder["devices"].append({"deviceID": LAPTOP_ID})
 
@@ -238,9 +238,9 @@ def test_a_reporting_editor_counts_as_known_even_with_no_selections(conn, fake, 
     assert dbmod.resolve_editor_username(
         "rsmith", dbmod.known_editor_usernames(conn)) == "rsmith"
     assert dbmod.resolve_editor_username(
-        "alex-laptop", dbmod.known_editor_usernames(conn)) is None
+        "owen-laptop", dbmod.known_editor_usernames(conn)) is None
     # with no account list at all, the old shape-only behaviour is kept
-    assert dbmod.resolve_editor_username("alex-laptop") == "alex-laptop"
+    assert dbmod.resolve_editor_username("owen-laptop") == "owen-laptop"
 
 
 def test_known_editor_records_outlive_the_evidence(conn):

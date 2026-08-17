@@ -63,6 +63,11 @@ org_name = "CC Sync Synology port test"
 [stack]
 owner = "ccsync-svc"
 group = "editors"
+# DSM's out-of-the-box behaviour IS this posture: local accounts are
+# /sbin/nologin, interactive SSH is administrators-only, SFTP is a subsystem
+# (docs/TENANCY.md, 2026-08-17). "shell" is refused by the Synology backend.
+editor_shell = "sftp-only"
+project_acl = "shared"
 # No Resolve project server in this stack (it is a compose profile that is off
 # unless asked for), so check_health.py skips the Postgres probe instead of
 # failing forever.

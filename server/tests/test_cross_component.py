@@ -94,10 +94,17 @@ def test_video_extension_lists_agree_across_all_four_modules():
         "companion/sync/rclone_lane.VIDEO_EXTS": list(companion_rclone.VIDEO_EXTS),
         "companion/sync/syncthing_admin._VIDEO_EXTS": list(companion_admin._VIDEO_EXTS),
     }
-    reference = lists["server/common.VIDEO_EXTENSIONS"]
+    # THE canonical copy is dashboard/provision.py's, because that is the one
+    # a client can read without the repo: GET /api/v1/site publishes it as
+    # `video_extensions` (2026-08-17, COMMERCIAL_READINESS.md item 11). The
+    # other three stay hand-copied -- the container cannot import server/, and
+    # the companion is a frozen exe that imports neither -- so this is what
+    # keeps them in step.
+    reference = lists["dashboard/provision.VIDEO_EXTENSIONS"]
     for name, value in lists.items():
         assert value == reference, (
-            f"{name} has drifted from server/common.VIDEO_EXTENSIONS: "
+            f"{name} has drifted from dashboard/provision.VIDEO_EXTENSIONS "
+            f"(the canonical copy, served by GET /api/v1/site): "
             f"only here={sorted(set(value) - set(reference))}, "
             f"only there={sorted(set(reference) - set(value))}"
         )
@@ -170,7 +177,7 @@ def test_all_three_builders_emit_the_same_ytdl_patterns():
     to each editor with the project ticked -- and the 2026-08-11
     ignoreDelete=True retrofit means the worker's completion rename never
     propagates, so the leftovers are permanent (27 orphans, ~1.6 GB, three
-    days, editor ruskin's machine).
+    days, one editor's machine).
 
     All three copies are load-bearing, for three different reasons: the server
     writes the file at provision time, the dashboard collector's
@@ -242,8 +249,28 @@ def test_slugify_agrees_between_server_and_dashboard():
 
 
 def test_marker_filename_and_template_folders_agree():
+    """The DEFAULTS are what must agree (2026-08-17, COMMERCIAL_READINESS.md
+    item 11). Both lists became site data -- site.toml [tree] template_folders
+    on the server side, DASH_SITE_TEMPLATE_FOLDERS in the container -- so the
+    effective lists CAN differ while a site is half-configured. What must
+    never differ is the out-of-the-box template a customer who configures
+    neither gets from both components."""
     assert common.MARKER_FILENAME == dash_provision.MARKER_FILENAME
+    assert common.DEFAULT_TEMPLATE_FOLDERS == dash_provision.DEFAULT_TEMPLATE_FOLDERS
+    # And with no override in either environment (which is the state of this
+    # test run) the effective lists are those defaults.
     assert common.TEMPLATE_FOLDERS == dash_provision.TEMPLATE_FOLDERS
+
+
+def test_the_shared_asset_id_rule_is_the_same_on_both_sides():
+    """A site that adds a library names only its rel path; the Syncthing
+    folder id is derived. Both derivations must be slugify(rel), or the two
+    ends provision two different folders for one directory."""
+    rels = ["Assets/Luts", "Assets/Stills", "Assets/SFX", "Assets/Fusion Macros"]
+    assert (common.shared_asset_folders_for(rels)
+            == dash_provision.shared_asset_folders_for(rels))
+    for folder_id, rel, _label in common.shared_asset_folders_for(rels):
+        assert folder_id == common.slugify(rel)
 
 
 def test_no_builder_emits_duplicate_lines():
@@ -269,6 +296,12 @@ ASSET_BUILDERS = {
 def test_shared_asset_folder_identity_agrees_across_all_three_modules():
     assert common.LUTS_FOLDER_ID == dash_provision.LUTS_FOLDER_ID == companion_admin.LUTS_FOLDER_ID
     assert common.LUTS_REL == dash_provision.LUTS_REL == companion_admin.LUTS_REL
+    assert (common.DEFAULT_SHARED_ASSET_FOLDERS
+            == dash_provision.DEFAULT_SHARED_ASSET_FOLDERS
+            == companion_admin.SHARED_ASSET_FOLDERS)
+    # Unconfigured (this test run) the effective registries are the defaults.
+    # The companion has no override at all on purpose: it is a frozen exe that
+    # learns the registry from the folders the server shares with it.
     assert (common.SHARED_ASSET_FOLDERS
             == dash_provision.SHARED_ASSET_FOLDERS
             == companion_admin.SHARED_ASSET_FOLDERS)

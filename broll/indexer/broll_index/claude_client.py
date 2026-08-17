@@ -1,38 +1,63 @@
-"""Claude Code headless (`claude -p`) invocation, JSON contract parsing, prompt building,
-and frame-window merging.
+"""Anthropic Messages API calls, JSON contract parsing, prompt building, and
+frame-window merging.
 
-`invoke_claude` is the single isolated subprocess boundary per SPEC's requirement that it
-be "easy to mock" — every other function here is pure and takes/returns plain data so it's
-trivially testable without a real `claude` binary.
+`invoke_claude` is the single network boundary per SPEC's requirement that it be
+"easy to mock" — every other function here is pure and takes/returns plain data so
+it's trivially testable without touching the API.
+
+2026-08-17, COMMERCIAL_READINESS.md item 1: this module used to shell out to the
+`claude -p` CLI against the operator's personal Claude Code subscription. That is
+not something a customer can be sold — it needs a claude.ai login on the indexing
+machine, its session limits are per-person, and the Anthropic Consumer Terms do not
+cover reselling it. The indexer now calls the Messages API through the official
+`anthropic` SDK with a customer-supplied `ANTHROPIC_API_KEY`. There is no
+subscription path left and no `claude` binary is required.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import os
+import random
 import re
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
+# Short names an operator types in config.yaml / `--model`, mapped to the API
+# model ids. An id that is not a key here is passed through untouched, so a
+# config can pin an exact model the map has not caught up with.
 MODEL_MAP = {
-    "haiku": "claude-haiku-4-5-20251001",
+    "haiku": "claude-haiku-4-5",
     "sonnet": "claude-sonnet-5",
+    "opus": "claude-opus-5",
     "fable": "claude-fable-5",
+}
+
+# USD per million tokens (input, output) — used only to write an estimated
+# `total_cost_usd` into usage.jsonl, which is how a full-archive run is
+# forecast. The CLI used to report a real figure; the API does not, so this is
+# a local estimate and is deliberately labelled as one wherever it surfaces.
+# Cache reads are billed at ~0.1x input and cache writes at ~1.25x.
+PRICE_PER_MTOK = {
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-sonnet-5": (3.00, 15.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-fable-5": (10.00, 50.00),
 }
 
 QUALITY_FLAG_VOCAB = {"shaky", "soft_focus", "overexposed", "underexposed", "noisy", "rolling_shutter"}
 
-# Everything except Read, which the prompt needs to open the contact sheets.
-# Tool definitions are part of the system prompt on every call, so dropping the
-# unused ones is a direct token saving — measured 32% off each call.
-DISALLOWED_TOOLS = ",".join([
-    "Bash", "BashOutput", "KillShell", "Edit", "Write", "NotebookEdit",
-    "Glob", "Grep", "WebFetch", "WebSearch", "Task", "TodoWrite",
-    "SlashCommand", "ExitPlanMode", "AskUserQuestion", "Artifact",
-    "ListMcpResourcesTool", "ReadMcpResourceTool",
-])
+
+def resolve_model(model: str) -> str:
+    """Short name -> API model id; anything unknown passes through unchanged."""
+    return MODEL_MAP.get(model, model)
 
 # Canonical labels for shots with no searchable visual content (see the prompt's
 # "Shots with no usable visuals" section). Their whole value is being exactly
@@ -76,109 +101,27 @@ InvokeFn = Callable[[str, str], str]
 
 
 # ---------------------------------------------------------------------------
-# subprocess boundary
+# error classification (shared by the API boundary and the pipeline)
 # ---------------------------------------------------------------------------
 
-def describe_auth(use_subscription: bool) -> str:
-    """One line stating what will actually be billed, for the run banner.
-
-    Worth surfacing loudly: the only signal that API credit is being spent
-    instead of the subscription is a single stderr warning that is easy to miss,
-    and the difference is invisible until the credit runs out mid-run.
-    """
-    import os
-
-    key_present = "ANTHROPIC_API_KEY" in os.environ
-    if use_subscription and key_present:
-        return ("auth: Claude Code subscription (ANTHROPIC_API_KEY found in the "
-                "environment and dropped for the claude subprocess)")
-    if use_subscription:
-        return "auth: Claude Code subscription (no ANTHROPIC_API_KEY set)"
-    if key_present:
-        return "auth: ANTHROPIC_API_KEY — billing pay-as-you-go API credit, NOT the subscription"
-    return "auth: no ANTHROPIC_API_KEY set and use_subscription is false — the CLI will pick its own default"
-
-
-def build_subprocess_env(use_subscription: bool) -> dict[str, str] | None:
-    """Environment for the `claude` subprocess.
-
-    `ANTHROPIC_API_KEY` takes precedence over the claude.ai login, so if it is set
-    anywhere in the environment every call bills pay-as-you-go API credit instead
-    of the Claude Code subscription — silently, apart from one warning line on
-    stderr. This platform is specified to index against the subscription, so by
-    default the key is dropped for the child process only. The parent
-    environment is untouched (other tooling on the machine may need it).
-
-    Returns None when there is nothing to change, so subprocess inherits normally.
-    """
-    if not use_subscription:
-        return None
-    import os
-
-    if "ANTHROPIC_API_KEY" not in os.environ:
-        return None
-    env = dict(os.environ)
-    env.pop("ANTHROPIC_API_KEY", None)
-    return env
-
-
-def invoke_claude(
-    prompt: str, model: str, cwd: str | None = None, use_subscription: bool = True
-) -> str:
-    """Call `claude -p <prompt> --output-format json --model <resolved-model>`.
-
-    This is the ONLY function in this module that shells out. Mock this in tests.
-
-    `cwd` must be the directory holding the contact sheets: headless `claude -p`
-    auto-denies permission prompts, and reading files outside its working
-    directory can trigger one — inside cwd it never does (verified empirically).
-    """
-    import subprocess
-
-    resolved_model = MODEL_MAP.get(model, model)
-    cmd = [
-        "claude", "-p", prompt, "--output-format", "json", "--model", resolved_model,
-        # Every tool definition sits in the system prompt of every call. This
-        # task only ever needs Read (to open the contact sheets), and stripping
-        # the rest measured 66,576 -> 45,590 input tokens per call — a 32% cut,
-        # and faster (84s vs 108s). Across an archive that is tens of millions
-        # of tokens, i.e. materially more indexing per session window.
-        "--disallowedTools", DISALLOWED_TOOLS,
-        # Without this the CLI loads the user's own MCP servers (Blender,
-        # Google Sheets, DaVinci Resolve) on EVERY call — verified in the
-        # process tree, each `claude -p` had uv/uvx server children. This task
-        # never uses them. Their schemas are fetched on demand so the token cost
-        # is small (~244/call measured), but booting two stdio servers per call
-        # is pure latency across thousands of calls, and an indexing run has no
-        # business starting Blender.
-        "--strict-mcp-config",
-    ]
-    # UTF-8 rather than the system codepage: descriptions of non-English footage
-    # come back with CJK text, which the Windows locale codec cannot decode.
-    result = subprocess.run(
-        cmd, capture_output=True, timeout=600, cwd=cwd,
-        env=build_subprocess_env(use_subscription),
-        text=True, encoding="utf-8", errors="replace",
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"claude exited {result.returncode}: {_describe_cli_failure(result.stdout, result.stderr)}"
-        )
-    # A zero exit code is not success: the CLI reports API failures (credit
-    # exhausted, rate limit, auth) as is_error in its stdout envelope.
-    err = _envelope_error(result.stdout)
-    if err:
-        raise ClaudeCallError(err)
-    return result.stdout
-
-
 class ClaudeCallError(RuntimeError):
-    """An API-level failure reported by the CLI (as opposed to bad model output).
+    """An API-level failure (as opposed to bad model output).
 
     Distinguished from a parse/validation error because these are usually
     environmental — exhausted credit, rate limit, bad auth — and affect EVERY
     subsequent call. A queue that treats them as per-video failures will march
     through the whole archive marking everything 'error'.
+    """
+
+
+class MissingApiKeyError(ClaudeCallError):
+    """No API key could be resolved — the run cannot place a single call.
+
+    A subclass of ClaudeCallError, and its message carries `authentication_error`
+    on purpose, so `is_fatal_api_error` treats it as account-wide: a missing key
+    fails every video identically, and marking thousands of clips 'error' over a
+    key that takes ten seconds to set would be a far worse outcome than stopping
+    with the queue intact.
     """
 
 
@@ -204,6 +147,10 @@ _RATE_LIMIT_MARKERS = (
     "usage limit",
     "quota exceeded",
     "too many requests",
+    # 529 overloaded_error: not a limit on this account, but it is upstream and
+    # affects every worker at once, so it wants the same treatment — wait it out
+    # and resume rather than marking each clip 'error'.
+    "overloaded",
 )
 
 # A bare "429" used to sit in the list above, and it matched ANY error text that
@@ -314,34 +261,390 @@ def seconds_until_reset(hint: str | None, now: "datetime | None" = None) -> floa
     return delta + RESET_MARGIN_S
 
 
-def _envelope_error(stdout: str) -> str | None:
-    """Extract an API error the CLI reported in its JSON envelope, if any."""
+# ---------------------------------------------------------------------------
+# API boundary — the only code in this package that touches the network
+# ---------------------------------------------------------------------------
+
+DEFAULT_API_KEY_ENV = "ANTHROPIC_API_KEY"
+DEFAULT_MAX_CONCURRENCY = 4
+
+
+def _api_settings(settings: Any = None) -> Any:
+    """The caller's AnthropicConfig, or the defaults. Imported lazily to keep
+    this module importable on its own (config.py never imports back)."""
+    if settings is not None:
+        return settings
+    from .config import AnthropicConfig
+
+    return AnthropicConfig()
+
+
+def resolve_api_key(settings: Any = None, env: "dict[str, str] | None" = None) -> str:
+    """The customer's API key, from the environment or a keyfile.
+
+    Never from config.yaml: that file is copied between machines, pasted into
+    support threads and (in this repo) committed, so a key living in it is a key
+    that leaks. `api_key_env` names the variable and `api_key_file` points at a
+    file — the value itself only ever lives outside the config.
+
+    Raises MissingApiKeyError with an actionable message rather than letting the
+    SDK fail per call: without a key not one clip can be indexed, and the run
+    must say so once instead of failing 2,000 videos one at a time.
+    """
+    settings = _api_settings(settings)
+    env = os.environ if env is None else env
+    name = getattr(settings, "api_key_env", None) or DEFAULT_API_KEY_ENV
+
+    key = (env.get(name) or "").strip()
+    if key:
+        return key
+
+    key_file = getattr(settings, "api_key_file", None)
+    if key_file:
+        path = Path(key_file).expanduser()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            raise MissingApiKeyError(
+                f"authentication_error: cannot read anthropic.api_key_file {path}: {e}"
+            ) from e
+        # First non-blank, non-comment line, so an operator can annotate the file.
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line
+        raise MissingApiKeyError(
+            f"authentication_error: anthropic.api_key_file {path} contains no key")
+
+    raise MissingApiKeyError(
+        f"authentication_error: no Anthropic API key. Set {name} in the environment, "
+        f"or set anthropic.api_key_file in config.yaml to a file holding one. "
+        f"The key itself must never be written into config.yaml.")
+
+
+def build_client(settings: Any = None, api_key: str | None = None) -> Any:
+    """An `anthropic.Anthropic` client configured for this workload."""
+    settings = _api_settings(settings)
     try:
-        obj = json.loads(stdout)
-    except (json.JSONDecodeError, TypeError):
+        import anthropic
+    except ImportError as e:  # pragma: no cover - dependency is declared in pyproject
+        raise ClaudeCallError(
+            "the `anthropic` SDK is not installed — `pip install anthropic`") from e
+
+    return anthropic.Anthropic(
+        api_key=api_key or resolve_api_key(settings),
+        # Retries live in _call_with_retry, not in the SDK. A silent SDK retry
+        # cannot log what it is waiting on, cannot honour a reset hint, and —
+        # once the budget is spent — cannot report the failure as the
+        # account-wide one that stops the run with the queue intact.
+        max_retries=0,
+        timeout=getattr(settings, "timeout_s", 600.0),
+    )
+
+
+# ---- vision input ---------------------------------------------------------
+
+_IMAGE_MEDIA_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
+}
+
+
+def image_block(path: str | Path) -> dict[str, Any]:
+    """One contact sheet as a base64 image content block."""
+    p = Path(path)
+    media_type = _IMAGE_MEDIA_TYPES.get(p.suffix.lower())
+    if media_type is None:
+        raise ValueError(f"unsupported contact-sheet image type: {p.name}")
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": base64.standard_b64encode(p.read_bytes()).decode("ascii"),
+        },
+    }
+
+
+def build_message_content(prompt: str, images: Sequence[str | Path] = ()) -> list[dict[str, Any]]:
+    """Contact sheets first, prompt text last.
+
+    Images before text is what the vision docs specify, and it matters here for a
+    second reason: the prompt lists the sheets in timecode order and the model has
+    to line each instruction up with the sheet it describes.
+    """
+    blocks: list[dict[str, Any]] = [image_block(p) for p in images]
+    blocks.append({"type": "text", "text": prompt})
+    return blocks
+
+
+# ---- concurrency ----------------------------------------------------------
+#
+# The stage is latency-bound, not usage-bound: measured at ~84 s per call and
+# strictly serial it managed 20 videos/hour. parallel_claude.py runs N of these
+# at once; this semaphore is the ceiling that N is checked against, so a caller
+# that fans out wider than the account can take still cannot put more than
+# `max_concurrency` requests in flight.
+
+_concurrency_lock = threading.Lock()
+_concurrency: threading.BoundedSemaphore | None = None
+_concurrency_size = 0
+
+
+def set_max_concurrency(n: int) -> None:
+    """Set the in-flight ceiling. Call before dispatching work, not during it."""
+    global _concurrency, _concurrency_size
+    n = max(1, int(n))
+    with _concurrency_lock:
+        _concurrency = threading.BoundedSemaphore(n)
+        _concurrency_size = n
+
+
+def current_max_concurrency() -> int:
+    return _concurrency_size
+
+
+def _get_semaphore(default_n: int) -> threading.BoundedSemaphore:
+    global _concurrency, _concurrency_size
+    with _concurrency_lock:
+        if _concurrency is None:
+            n = max(1, int(default_n or DEFAULT_MAX_CONCURRENCY))
+            _concurrency = threading.BoundedSemaphore(n)
+            _concurrency_size = n
+        return _concurrency
+
+
+@contextmanager
+def _concurrency_guard(default_n: int):
+    sem = _get_semaphore(default_n)
+    sem.acquire()
+    try:
+        yield
+    finally:
+        sem.release()
+
+
+# ---- errors and retry -----------------------------------------------------
+
+# 429 rate limit, 529 overloaded, and the transient 5xx family. 408/409 are what
+# the SDK's own retry policy treats as retryable too.
+_RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+_RETRYABLE_EXC_NAMES = ("APIConnectionError", "APITimeoutError", "ConnectionError", "Timeout")
+
+
+def _attr(obj: Any, name: str, default: Any = None) -> Any:
+    """Attribute or mapping key — so a fake SDK response can be a plain dict."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _status_code(exc: BaseException) -> int | None:
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int):
+        return code
+    code = getattr(getattr(exc, "response", None), "status_code", None)
+    return code if isinstance(code, int) else None
+
+
+def _retry_after_s(exc: BaseException) -> float | None:
+    """The server's own `retry-after`, when it sent one. Always beats our guess."""
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if not headers:
         return None
-    if not isinstance(obj, dict) or not obj.get("is_error"):
+    try:
+        value = headers.get("retry-after")
+    except AttributeError:
         return None
-    detail = obj.get("result") or obj.get("error") or "unknown error"
-    status = obj.get("api_error_status")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def is_retryable_error(exc: BaseException) -> bool:
+    status = _status_code(exc)
+    if status is not None:
+        return status in _RETRYABLE_STATUSES
+    names = {type(exc).__name__, *(b.__name__ for b in type(exc).__mro__)}
+    return bool(names & set(_RETRYABLE_EXC_NAMES))
+
+
+def describe_api_error(exc: BaseException) -> str:
+    """"API error 429: rate_limit_error: ..." — the shape is_rate_limited reads.
+
+    Deliberately built from the API's own error body: the classifiers in this
+    module (and run_queue.py's decision to wait out a limit rather than stop)
+    all key off this text, so it must carry the status code and the error type.
+    """
+    status = _status_code(exc)
+    detail = None
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            detail = ": ".join(str(v) for v in (err.get("type"), err.get("message")) if v)
+    detail = detail or getattr(exc, "message", None) or str(exc) or type(exc).__name__
     return f"API error{f' {status}' if status else ''}: {detail}"
 
 
-def _describe_cli_failure(stdout: str, stderr: str) -> str:
-    """Best available description of a non-zero exit.
+def _backoff_delay(attempt: int, settings: Any, retry_after: float | None) -> float:
+    max_delay = float(getattr(settings, "retry_max_delay_s", 60.0))
+    if retry_after is not None:
+        return min(max(retry_after, 0.0), max_delay)
+    base = float(getattr(settings, "retry_base_delay_s", 2.0))
+    delay = min(base * (2 ** attempt), max_delay)
+    # Jitter: N workers hitting the same limit at the same instant would
+    # otherwise wake together and hit it again in lockstep.
+    return delay * (0.5 + random.random() / 2)
 
-    stderr often carries only an unrelated warning (e.g. the claude.ai connectors
-    notice) while the real cause sits in the stdout envelope — reporting stderr
-    alone sent a real debugging session chasing the wrong thing entirely.
+
+def _call_with_retry(client: Any, kwargs: dict[str, Any], settings: Any,
+                     sleep: "Callable[[float], None] | None" = None) -> Any:
+    """`client.messages.create(**kwargs)` with backoff on 429/5xx/overloaded."""
+    max_retries = int(getattr(settings, "max_retries", 5))
+    last: BaseException | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return client.messages.create(**kwargs)
+        except Exception as e:  # noqa: BLE001 - re-raised below, classified first
+            if not is_retryable_error(e):
+                # 400/401/403 and friends: retrying changes nothing. Raise with
+                # the API's own wording so is_fatal_api_error can see auth and
+                # credit failures for what they are.
+                raise ClaudeCallError(describe_api_error(e)) from e
+            last = e
+            if attempt >= max_retries:
+                break
+            delay = _backoff_delay(attempt, settings, _retry_after_s(e))
+            logger.warning("claude: %s — retry %d/%d in %.1fs",
+                           describe_api_error(e), attempt + 1, max_retries, delay)
+            # Resolved per call, not bound as a default argument, so a test can
+            # monkeypatch time.sleep and not wait out a real backoff.
+            (sleep or time.sleep)(delay)
+    # Out of retries on a retryable failure. This is account-wide by nature (a
+    # rate limit or an overloaded API applies to every remaining video), so the
+    # message must classify as fatal: the run stops and the queue is resumable,
+    # rather than 2,000 clips being marked 'error' over a limit that clears.
+    raise ClaudeCallError(
+        f"{describe_api_error(last) if last else 'API error: unknown'} "
+        f"(gave up after {max_retries} retries)")
+
+
+def _thinking_param(settings: Any) -> dict[str, str] | None:
+    mode = (getattr(settings, "thinking", "disabled") or "disabled").lower()
+    if mode in ("adaptive", "on", "true"):
+        return {"type": "adaptive"}
+    if mode in ("disabled", "off", "false", "none"):
+        return {"type": "disabled"}
+    raise ValueError(f"anthropic.thinking must be 'adaptive' or 'disabled', got {mode!r}")
+
+
+def estimate_cost_usd(model: str, usage: dict[str, Any]) -> float:
+    """Local estimate of one call's cost — the API returns tokens, not dollars."""
+    prices = PRICE_PER_MTOK.get(model)
+    if not prices:
+        return 0.0
+    in_price, out_price = prices
+    billed_in = (
+        float(usage.get("input_tokens") or 0)
+        + float(usage.get("cache_creation_input_tokens") or 0) * 1.25
+        + float(usage.get("cache_read_input_tokens") or 0) * 0.1
+    )
+    return round(billed_in / 1e6 * in_price
+                 + float(usage.get("output_tokens") or 0) / 1e6 * out_price, 6)
+
+
+def _build_envelope(message: Any, model: str, duration_ms: int) -> dict[str, Any]:
+    """The Messages API response, flattened to the envelope this module parses.
+
+    The shape (`{"result": <text>, "usage": {...}, "total_cost_usd": ...}`) is
+    inherited from the `claude -p` CLI that used to sit here. Keeping it means
+    extract_claude_text / extract_usage / _log_usage / usage.jsonl and every
+    test fixture built on them survived the move to the SDK untouched.
     """
-    envelope = _envelope_error(stdout)
-    if envelope:
-        return envelope
-    err = (stderr or "").strip()
-    out = (stdout or "").strip()
-    if err and out:
-        return f"{err} | stdout: {out[:300]}"
-    return err or out[:300] or "no output"
+    stop_reason = _attr(message, "stop_reason")
+    blocks = _attr(message, "content", []) or []
+    text = "".join(_attr(b, "text", "") or "" for b in blocks if _attr(b, "type") == "text")
+
+    if stop_reason == "refusal":
+        # A content outcome for THIS clip, not an account problem: raise the
+        # per-video error so the clip is marked and the queue carries on.
+        raise ValueError("claude declined this clip (stop_reason=refusal)")
+    if stop_reason == "max_tokens":
+        logger.warning("claude: response hit max_tokens — the JSON is probably "
+                       "truncated; raise anthropic.max_tokens if this repeats")
+
+    raw_usage = _attr(message, "usage") or {}
+    usage = {
+        "input_tokens": _attr(raw_usage, "input_tokens", 0) or 0,
+        "cache_creation_input_tokens": _attr(raw_usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read_input_tokens": _attr(raw_usage, "cache_read_input_tokens", 0) or 0,
+        "output_tokens": _attr(raw_usage, "output_tokens", 0) or 0,
+    }
+    return {
+        "type": "result",
+        "is_error": False,
+        "result": text,
+        "model": model,
+        "stop_reason": stop_reason,
+        "usage": usage,
+        # Estimated, not billed — see PRICE_PER_MTOK.
+        "total_cost_usd": estimate_cost_usd(model, usage),
+        "duration_ms": duration_ms,
+    }
+
+
+def invoke_claude(
+    prompt: str,
+    model: str,
+    *,
+    images: Sequence[str | Path] = (),
+    settings: Any = None,
+    client: Any = None,
+) -> str:
+    """One Messages API call. THE network boundary — mock this, or pass `client`.
+
+    Returns the response as a JSON envelope string (see _build_envelope), which
+    parse_claude_response / extract_usage consume.
+
+    `client` takes anything with a `.messages.create(**kwargs)` method, which is
+    the whole injectable surface the tests need — no network, no SDK import.
+    """
+    settings = _api_settings(settings)
+    if client is None:
+        client = build_client(settings)
+
+    resolved_model = resolve_model(model)
+    kwargs: dict[str, Any] = {
+        "model": resolved_model,
+        "max_tokens": int(getattr(settings, "max_tokens", 8000)),
+        "messages": [{"role": "user", "content": build_message_content(prompt, images)}],
+    }
+    thinking = _thinking_param(settings)
+    if thinking is not None:
+        kwargs["thinking"] = thinking
+
+    started = time.monotonic()
+    with _concurrency_guard(getattr(settings, "max_concurrency", DEFAULT_MAX_CONCURRENCY)):
+        message = _call_with_retry(client, kwargs, settings)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    return json.dumps(_build_envelope(message, resolved_model, duration_ms),
+                      ensure_ascii=False)
+
+
+def describe_auth(settings: Any = None) -> str:
+    """One line for the run banner stating what will be billed, and from where."""
+    settings = _api_settings(settings)
+    name = getattr(settings, "api_key_env", None) or DEFAULT_API_KEY_ENV
+    try:
+        resolve_api_key(settings)
+    except MissingApiKeyError as e:
+        return f"auth: NO API KEY — {e}"
+    source = f"${name}" if (os.environ.get(name) or "").strip() else \
+        f"anthropic.api_key_file ({getattr(settings, 'api_key_file', None)})"
+    return (f"auth: Anthropic API key from {source} — billing this "
+            f"organisation's API credit")
 
 
 # ---------------------------------------------------------------------------
@@ -349,9 +652,9 @@ def _describe_cli_failure(stdout: str, stderr: str) -> str:
 # ---------------------------------------------------------------------------
 
 def extract_claude_text(raw: str) -> str:
-    """Unwrap the `claude -p --output-format json` CLI envelope to the model's raw text.
+    """Unwrap the invoke envelope (see _build_envelope) to the model's raw text.
 
-    The CLI's own JSON envelope looks like `{"type": "result", "result": "<model text>", ...}`.
+    The envelope looks like `{"type": "result", "result": "<model text>", ...}`.
     If `raw` doesn't parse as JSON at all, or doesn't look like that envelope, it's returned
     unchanged (useful for tests that feed the contract JSON directly).
     """
@@ -365,9 +668,9 @@ def extract_claude_text(raw: str) -> str:
 
 
 def extract_usage(raw: str) -> dict[str, Any]:
-    """Pull token/cost accounting out of the `claude -p` envelope, if present.
+    """Pull token/cost accounting out of the invoke envelope, if present.
 
-    Returns {} when the envelope is absent (the CLI sometimes emits the model's
+    Returns {} when the envelope is absent (a mocked invoke may emit the model's
     text bare). Note `cache_creation_input_tokens` + `cache_read_input_tokens`
     are per-call context overhead that has nothing to do with the images sent —
     on small windows it dominates total cost, which is what makes packing more
@@ -546,7 +849,7 @@ def _first_json_object(text: str) -> Any:
 
 
 def parse_claude_response(raw: str) -> dict[str, Any]:
-    """Parse+validate a `claude -p` stdout blob into the index_clip.md contract dict."""
+    """Parse+validate an invoke envelope (or bare model text) into the contract dict."""
     text = _strip_code_fences(extract_claude_text(raw))
     try:
         obj = json.loads(text)
@@ -584,8 +887,16 @@ def call_claude_with_retry(
 # ---------------------------------------------------------------------------
 
 def build_index_prompt(sheet_paths: list[Path], taxonomy: list[str]) -> str:
+    """The prompt text for one window of contact sheets.
+
+    The sheets are listed by NAME, not by absolute path: they are attached to the
+    same message as image blocks (build_message_content), so a path would be a
+    filesystem detail the model cannot act on. The list still earns its place —
+    it tells the model how many images to expect and in what order, which is what
+    lets it map a frame back to an absolute timecode.
+    """
     template = _PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
-    sheet_list = "\n".join(f"- {p}" for p in sheet_paths)
+    sheet_list = "\n".join(f"- {Path(p).name}" for p in sheet_paths)
     taxonomy_list = "\n".join(f"- {slug}" for slug in taxonomy) if taxonomy else "(no taxonomy defined yet)"
     prompt = template.replace("__SHEET_PATHS__", sheet_list)
     prompt = prompt.replace("__TAXONOMY_LIST__", taxonomy_list)

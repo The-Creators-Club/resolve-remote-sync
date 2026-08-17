@@ -20,28 +20,44 @@ SCHEMA_PATH = WEB_DIR / 'schema.sql'
 MIGRATIONS_DIR = WEB_DIR / 'migrations'
 
 # ---------------------------------------------------------------- share roots
-# The one share this library has, and where it is mounted per host. The base
-# rig indexes off W:; every editor machine sees the same tree at P:, next to
-# P:\Assets\B-roll Archive. The P: root is deliberately hardcoded fleet-wide
-# (CLAUDE.md: "a configurable drive letter is explicitly deferred") -- these
-# are two fixed mount points, not a setting.
+# The one share this library has, and where it is mounted per host.
+#
+# Its place INSIDE the tree is fixed by the product: <tree>/Assets/Music, the
+# same leaf the companion, the dashboard and the b-roll archive agree on. WHERE
+# THE TREE IS is a per-site fact -- on an editor machine it is the canonical
+# prefix (P:\ by fleet decision, CLAUDE.md: "a configurable drive letter is
+# explicitly deferred"), and an indexing host that maps the NAS share somewhere
+# else says so with MUSIC_LIBRARY_ROOT.
+#
+# Until 2026-08-17 this file hardcoded ONE studio's indexing mount --
+# W:\Creators_Club\Assets\Music -- and PROBED for it, so a second customer's
+# base rig would have silently fallen through to the editor path
+# (docs/COMMERCIAL_READINESS.md item 11). There is no literal drive or tree
+# name left here.
 SHARE = 'music'
-BASE_RIG_ROOT = Path(r'W:\Creators_Club\Assets\Music')
-EDITOR_ROOT = Path(r'P:\Assets\Music')
+LIBRARY_REL = Path('Assets') / 'Music'
+CANONICAL_PREFIX = os.environ.get('CCSYNC_CANONICAL_PREFIX', '').strip() or 'P:\\'
+EDITOR_ROOT = Path(CANONICAL_PREFIX) / LIBRARY_REL
 
 
 def _default_share_root():
-    """Where this host has the library. Env wins, then W:, then P:.
+    """Where this host has the library: env, else the editor mount.
 
-    Probed rather than configured because the two hosts are distinguishable by
-    the mount itself, and a wrong guess is loud (every file 404s) rather than
-    silent. MUSIC_ROOT is still honoured: it predates the share model, is what
-    DEPLOY.md documents, and is what the tests point at a temp directory.
+    MUSIC_LIBRARY_ROOT is the name to use. MUSIC_SHARE_ROOT and MUSIC_ROOT are
+    accepted for the deployments and docs that already set them (MUSIC_ROOT
+    predates the share model, DEPLOY.md documents it, and the tests point it
+    at a temp directory).
+
+    An INDEXING host -- the machine with the GPU, which maps the NAS share on
+    its own letter -- must set one of them. It used to be guessed from the
+    existence of a specific drive, which is only ever right for one fleet.
     """
-    env = os.environ.get('MUSIC_SHARE_ROOT') or os.environ.get('MUSIC_ROOT')
+    env = (os.environ.get('MUSIC_LIBRARY_ROOT')
+           or os.environ.get('MUSIC_SHARE_ROOT')
+           or os.environ.get('MUSIC_ROOT'))
     if env:
         return Path(env)
-    return BASE_RIG_ROOT if BASE_RIG_ROOT.is_dir() else EDITOR_ROOT
+    return EDITOR_ROOT
 
 
 MUSIC_ROOT = _default_share_root()
@@ -54,7 +70,12 @@ MUSIC_ROOT = _default_share_root()
 DATA_ROOT = Path(os.environ.get('MUSIC_DATA_ROOT')
                  or os.environ.get('DATA_ROOT')
                  or WEB_DIR / 'data')
-DB_PATH = DATA_ROOT / 'music.db'
+# MUSIC_DB_PATH names the file directly, for the case DATA_ROOT cannot express:
+# a base rig draining a copy pulled down from the NAS, whose proxies and staging
+# still belong under the local data root (2026-08-17, COMMERCIAL_READINESS.md
+# item 14 -- the indexer's require_db_path() refuses to guess when neither this
+# nor --db is set).
+DB_PATH = Path(os.environ.get('MUSIC_DB_PATH') or DATA_ROOT / 'music.db')
 
 # ------------------------------------------------------------- preview proxies
 # Port step 6. One 128k mp3 per track, so a remote editor previewing a cue over
@@ -96,6 +117,57 @@ INDEXER_DIR = Path(os.environ.get('MUSIC_INDEXER_DIR', MUSIC_DIR / 'indexer'))
 
 HOST = os.environ.get('MUSIC_HOST') or os.environ.get('HOST', '127.0.0.1')
 PORT = int(os.environ.get('MUSIC_PORT') or os.environ.get('PORT', '8790'))
+
+# ------------------------------------------------------- ingest credentials
+# Who is allowed to write into the library, and it depends entirely on WHERE
+# this app is running (COMMERCIAL_READINESS.md item 15, 2026-08-17):
+#
+#   mounted in the dashboard  the SPA drags-and-drops from a logged-in browser
+#                             and the dashboard's login_gate has already run --
+#                             the session IS the credential, and demanding a
+#                             header the page cannot send would break ingest
+#                             for the whole fleet.
+#   standalone (uvicorn)      there is NO login in front of this app at all, so
+#                             an open /api/ingest is "anyone who can reach the
+#                             port can write files into the library and run
+#                             ffmpeg on them". A token is REQUIRED, and an
+#                             unset one closes the route rather than opening it
+#                             (503) -- the same fail-closed rule b-roll's
+#                             routes_ingest.py now follows.
+#
+# `set_login_gated(True)` is called by the dashboard's mount (music.py). It is
+# NOT inferred from the environment: a host that merely has the variable set is
+# not the same as a process that actually has the middleware wrapped around it.
+_LOGIN_GATED = os.environ.get('MUSIC_LOGIN_GATED', '') == '1'
+
+
+def set_login_gated(value=True):
+    """Declare that a login gate wraps this app (the dashboard mount does)."""
+    global _LOGIN_GATED
+    _LOGIN_GATED = bool(value)
+
+
+def login_gated():
+    return _LOGIN_GATED
+
+
+def ingest_token():
+    """MUSIC_INGEST_TOKEN, or None. Read live so tests can set it per-test."""
+    token = (os.environ.get('MUSIC_INGEST_TOKEN') or '').strip()
+    return token or None
+
+
+# Ceilings on one ingest request. The dashboard's body_size_gate only makes a
+# DECLARATION check on /music/api/ingest (the multipart body is spooled past it
+# on purpose -- buffering a dropped album is the memory problem that middleware
+# exists to prevent), so nothing counted the files themselves: a single request
+# could carry ten thousand parts, each one costing a staging write, an ffprobe
+# and two library hashes on the single-worker container ("music ingest
+# unbounded", COMMERCIAL_READINESS.md §C M-tier). Both are far above a real
+# drag-and-drop -- the biggest observed drop is an 18-track album.
+MAX_INGEST_FILES = 64
+MAX_INGEST_TOTAL_BYTES = 512 * 1024 * 1024      # = the dashboard's declared ceiling
+MAX_INGEST_FILE_BYTES = 512 * 1024 * 1024
 
 
 def ensure_data_root():

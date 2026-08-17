@@ -79,7 +79,7 @@ def test_a_v6_login_would_get_105_and_the_message_says_why(dsm, monkeypatch):
     every mutation -- and the error a future maintainer sees names the cause."""
     monkeypatch.setattr(syn, "LOGIN_VERSION", 6)
     client = client_for(dsm)
-    assert client.find_user("Cablewrap") is not None          # reads work at v6
+    assert client.find_user("Studio") is not None          # reads work at v6
     with pytest.raises(NasError) as exc:
         client.ensure_editors_group()                          # mutations do not
     assert "105" in str(exc.value)
@@ -237,7 +237,7 @@ def test_is_editor_answers_from_the_users_group_list(dsm):
     client = client_for(dsm)
     client.create_or_update_editor("newbie", GOOD_KEY)
     assert client.is_editor("newbie") is True
-    assert client.is_editor("cablewrap") is False              # exists, not an editor
+    assert client.is_editor("studio") is False              # exists, not an editor
     assert client.is_editor("nosuchuser") is False
     assert client.is_editor("admin") is False                  # built-in, never
     assert client.is_editor("Robert'); DROP TABLE--") is False  # charset gate
@@ -261,7 +261,7 @@ def test_an_unreachable_dsm_raises_rather_than_answering_not_an_editor(dsm):
     ("guest", "built-in"),
     ("root", "built-in"),
     ("sc-jellyfin", "package account"),
-    ("Cablewrap", "must start with a letter"),   # charset gate catches the capital
+    ("Studio", "must start with a letter"),   # charset gate catches the capital
 ])
 def test_create_refuses_builtin_and_package_accounts(dsm, username, fragment):
     with pytest.raises(NasError) as exc:

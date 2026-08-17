@@ -23,9 +23,13 @@ from pathlib import Path
 import pytest
 
 from ccsync_companion import (
-    broll_server, config as config_mod, music_server, music_worker, resolve_bridge,
-    resolve_prefs,
+    broll_server, config as config_mod, loopback_guard, music_server, music_worker,
+    resolve_bridge, resolve_prefs,
 )
+
+# The dashboard this test fleet's companions are pointed at; live_server puts
+# it in the ccsync_cfg, so it is the one Origin browser callers may use.
+DASH_ORIGIN = "http://100.64.0.1:8000"
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +64,14 @@ def worker_in_process(monkeypatch):
 
 
 class BrollClient:
-    """Tiny http.client-based helper for hitting the test server."""
+    """Tiny http.client-based helper for hitting the test server.
+
+    Every POST carries the loopback token by default (2026-08-17,
+    COMMERCIAL_READINESS.md item 5): a state-changing request now needs an
+    allowed Origin or that header, and this client is a LOCAL caller -- the
+    tray, the wizard, curl -- which is the token's whole reason for existing.
+    Pass token=False (or an origin=) to exercise the other paths.
+    """
 
     def __init__(self, port: int):
         self.port = port
@@ -68,24 +79,34 @@ class BrollClient:
     def _connect(self) -> http.client.HTTPConnection:
         return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
 
-    def get(self, path: str):
+    def _auth_headers(self, token, origin) -> dict:
+        headers = {}
+        if token is True:
+            headers[loopback_guard.TOKEN_HEADER] = loopback_guard.read_token() or ""
+        elif isinstance(token, str):
+            headers[loopback_guard.TOKEN_HEADER] = token
+        if origin is not None:
+            headers["Origin"] = origin
+        return headers
+
+    def get(self, path: str, origin=None, token=False):
         conn = self._connect()
-        conn.request("GET", path)
+        conn.request("GET", path, headers=self._auth_headers(token, origin))
         resp = conn.getresponse()
         body = resp.read()
         headers = dict(resp.getheaders())
         conn.close()
         return resp.status, headers, body
 
-    def post_json(self, path: str, obj: dict):
+    def post_json(self, path: str, obj: dict, origin=None, token=True,
+                  content_type="application/json"):
         conn = self._connect()
         payload = json.dumps(obj).encode("utf-8")
-        conn.request(
-            "POST",
-            path,
-            body=payload,
-            headers={"Content-Type": "application/json", "Content-Length": str(len(payload))},
-        )
+        headers = {"Content-Length": str(len(payload))}
+        if content_type is not None:
+            headers["Content-Type"] = content_type
+        headers.update(self._auth_headers(token, origin))
+        conn.request("POST", path, body=payload, headers=headers)
         resp = conn.getresponse()
         body = resp.read()
         headers = dict(resp.getheaders())
@@ -99,6 +120,7 @@ class BrollClient:
         length = len(payload) if content_length is None else content_length
         conn.putrequest("POST", path, skip_accept_encoding=True)
         conn.putheader("Content-Type", "application/json")
+        conn.putheader(loopback_guard.TOKEN_HEADER, loopback_guard.read_token() or "")
         conn.putheader("Content-Length", str(length))
         conn.endheaders()
         conn.send(payload)
@@ -107,9 +129,34 @@ class BrollClient:
         conn.close()
         return resp.status, body
 
-    def options(self, path: str):
+    def request_raw(self, method: str, path: str, headers: dict,
+                    payload: bytes = b""):
+        """One request with EXACTLY these headers -- no token, no defaults.
+
+        The envelope checks (Host, Origin, Content-Type) are about what a
+        request carries, so the tests for them cannot go through a helper
+        that fills anything in.
+        """
         conn = self._connect()
-        conn.request("OPTIONS", path)
+        conn.putrequest(method, path, skip_accept_encoding=True,
+                        skip_host="Host" in headers)
+        for name, value in headers.items():
+            conn.putheader(name, value)
+        if payload:
+            conn.putheader("Content-Length", str(len(payload)))
+        conn.endheaders()
+        if payload:
+            conn.send(payload)
+        resp = conn.getresponse()
+        body = resp.read()
+        out = dict(resp.getheaders())
+        conn.close()
+        return resp.status, out, body
+
+    def options(self, path: str, origin=None):
+        conn = self._connect()
+        headers = {"Origin": origin} if origin is not None else {}
+        conn.request("OPTIONS", path, headers=headers)
         resp = conn.getresponse()
         body = resp.read()
         headers = dict(resp.getheaders())
@@ -124,11 +171,19 @@ def companion_config():
 
 @pytest.fixture
 def live_server(companion_config, monkeypatch):
-    """A real BrollCompanionServer on an ephemeral loopback port."""
+    """A real BrollCompanionServer on an ephemeral loopback port.
+
+    Built with a ccsync_cfg carrying a dashboard_url so the origin allow-list
+    is non-empty: an unconfigured companion refuses every browser caller, and
+    that is a state worth testing on purpose, not by accident everywhere.
+    """
     # Never actually try to talk to Resolve during HTTP-layer tests.
     monkeypatch.setattr(broll_server.resolve_bridge, "try_connect", lambda: False)
 
-    srv = broll_server.make_server(companion_config, host="127.0.0.1", port=0)
+    srv = broll_server.make_server(
+        companion_config, host="127.0.0.1", port=0,
+        ccsync_cfg={"dashboard_url": DASH_ORIGIN},
+    )
     port = srv.server_address[1]
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
@@ -1113,21 +1168,31 @@ def test_status_over_http(live_server):
 # ---------------------------------------------------------------------------
 
 
+#
+# THESE TESTS USED TO PIN THE WILDCARD. Until 2026-08-17 every assertion here
+# read `Access-Control-Allow-Origin == "*"` with an unconditional
+# Access-Control-Allow-Private-Network beside it -- i.e. they pinned exactly
+# the hole COMMERCIAL_READINESS.md item 5 (C1) exists to close, which is why
+# they were rewritten rather than kept. What survives is the PROPERTY they
+# were protecting: the dashboard's own page must keep working, preflight and
+# all, on every route and every status code.
+
+
 def test_options_preflight_returns_204_with_cors_headers(live_server):
     _srv, client = live_server
-    status, headers, body = client.options("/insert")
+    status, headers, body = client.options("/insert", origin=DASH_ORIGIN)
     assert status == 204
-    assert headers.get("Access-Control-Allow-Origin") == "*"
-    assert headers.get("Access-Control-Allow-Headers") == "Content-Type"
+    assert headers.get("Access-Control-Allow-Origin") == DASH_ORIGIN
+    assert "Content-Type" in headers.get("Access-Control-Allow-Headers", "")
+    assert loopback_guard.TOKEN_HEADER in headers.get("Access-Control-Allow-Headers", "")
     assert body == b""
 
 
 def test_get_status_has_cors_headers(live_server):
     _srv, client = live_server
-    status, headers, body = client.get("/status")
+    status, headers, body = client.get("/status", origin=DASH_ORIGIN)
     assert status == 200
-    assert headers.get("Access-Control-Allow-Origin") == "*"
-    assert headers.get("Access-Control-Allow-Headers") == "Content-Type"
+    assert headers.get("Access-Control-Allow-Origin") == DASH_ORIGIN
     data = json.loads(body)
     assert data["ok"] is True
 
@@ -1144,18 +1209,27 @@ def test_post_insert_has_cors_headers_even_on_error(live_server):
             "fps": 25,
             "mode": "append",
         },
+        origin=DASH_ORIGIN, token=False,
     )
     assert status == 200
-    assert headers.get("Access-Control-Allow-Origin") == "*"
+    assert headers.get("Access-Control-Allow-Origin") == DASH_ORIGIN
     data = json.loads(body)
     assert data["ok"] is False
 
 
 def test_unknown_route_still_has_cors_headers(live_server):
     _srv, client = live_server
-    status, headers, _body = client.get("/nope")
+    status, headers, _body = client.get("/nope", origin=DASH_ORIGIN)
     assert status == 404
-    assert headers.get("Access-Control-Allow-Origin") == "*"
+    assert headers.get("Access-Control-Allow-Origin") == DASH_ORIGIN
+
+
+def test_the_response_varies_on_origin(live_server):
+    """The allow decision is now per-request, so a cache that ignored Origin
+    would hand one page another page's permission."""
+    _srv, client = live_server
+    _status, headers, _body = client.get("/status", origin=DASH_ORIGIN)
+    assert "Origin" in headers.get("Vary", "")
 
 
 def test_preflight_allows_private_network_access(live_server):
@@ -1165,15 +1239,183 @@ def test_preflight_allows_private_network_access(live_server):
     target opts in — the insert would fail before any of our handler code
     ran."""
     _srv, client = live_server
-    status, headers, _body = client.options("/insert")
+    status, headers, _body = client.options("/insert", origin=DASH_ORIGIN)
     assert status == 204
     assert headers.get("Access-Control-Allow-Private-Network") == "true"
 
 
 def test_the_header_is_present_on_real_responses_too(live_server):
     _srv, client = live_server
-    _status, headers, _body = client.get("/status")
+    _status, headers, _body = client.get("/status", origin=DASH_ORIGIN)
     assert headers.get("Access-Control-Allow-Private-Network") == "true"
+
+
+def test_the_https_form_of_the_dashboard_is_allowed_too(live_server):
+    """Tailscale Serve fronts the same host on https (2026-08-17). A fleet
+    provisioned with an http dashboard_url must not lose the button the day
+    the NAS moves behind TLS."""
+    _srv, client = live_server
+    status, headers, _body = client.get(
+        "/status", origin=DASH_ORIGIN.replace("http://", "https://"))
+    assert status == 200
+    assert headers.get("Access-Control-Allow-Origin") == \
+        DASH_ORIGIN.replace("http://", "https://")
+
+
+# ---------------------------------------------------------------------------
+# Who may drive the loopback (COMMERCIAL_READINESS.md item 5 / C1)
+# ---------------------------------------------------------------------------
+
+
+def test_a_disallowed_origin_is_refused_with_no_cors_header(live_server):
+    """The whole point: an ad iframe or a phishing page in the editor's
+    browser gets 403 AND no Access-Control-Allow-Origin, so it cannot even
+    read the refusal."""
+    _srv, client = live_server
+    status, headers, body = client.get("/status", origin="https://evil.example")
+    assert status == 403
+    assert "Access-Control-Allow-Origin" not in headers
+    assert "Access-Control-Allow-Private-Network" not in headers
+    assert json.loads(body)["ok"] is False
+
+
+def test_a_disallowed_origin_cannot_post_either(live_server):
+    _srv, client = live_server
+    status, headers, _body = client.post_json(
+        "/insert", {"share": "broll", "rel_path": "clip.mov",
+                    "in_frame": 0, "out_frame": 10},
+        origin="https://evil.example", token=False,
+    )
+    assert status == 403
+    assert "Access-Control-Allow-Origin" not in headers
+
+
+def test_a_suffix_of_an_allowed_origin_is_not_allowed(live_server):
+    """`startswith`-shaped allow-lists let evil.net in by appending; this one
+    is an exact match."""
+    _srv, client = live_server
+    status, _headers, _body = client.get("/status", origin=DASH_ORIGIN + ".evil.net")
+    assert status == 403
+
+
+def test_a_disallowed_origin_gets_no_preflight(live_server):
+    _srv, client = live_server
+    status, headers, _body = client.options("/insert", origin="https://evil.example")
+    assert status == 403
+    assert "Access-Control-Allow-Private-Network" not in headers
+
+
+def test_a_preflight_with_no_origin_is_refused(live_server):
+    """A preflight is a browser asking permission. Nothing else sends one."""
+    _srv, client = live_server
+    status, _headers, _body = client.options("/insert")
+    assert status == 403
+
+
+def test_a_get_with_no_origin_still_works(live_server):
+    """Opening http://127.0.0.1:8899/status in a tab is the self-test all
+    three web UIs tell editors to run, and a top-level navigation sends no
+    Origin at all."""
+    _srv, client = live_server
+    status, headers, body = client.get("/status")
+    assert status == 200
+    assert "Access-Control-Allow-Origin" not in headers
+    assert json.loads(body)["ok"] is True
+
+
+def test_a_post_with_no_origin_and_no_token_is_refused(live_server):
+    _srv, client = live_server
+    status, _headers, body = client.post_json(
+        "/insert", {"share": "broll", "rel_path": "clip.mov",
+                    "in_frame": 0, "out_frame": 10}, token=False,
+    )
+    assert status == 403
+    assert loopback_guard.REFUSED_MESSAGE in json.loads(body)["message"]
+
+
+def test_a_post_with_the_loopback_token_is_allowed(live_server):
+    """The second way in: a local caller with no Origin to offer proves it is
+    local by reading a file only this user can read."""
+    _srv, client = live_server
+    status, _headers, body = client.post_json(
+        "/insert", {"share": "broll", "rel_path": "clip.mov",
+                    "in_frame": 0, "out_frame": 10}, token=True,
+    )
+    assert status == 200
+    assert json.loads(body)["ok"] is False  # no mount -- but it was ANSWERED
+
+
+def test_a_wrong_token_is_refused(live_server):
+    _srv, client = live_server
+    status, _headers, _body = client.post_json(
+        "/insert", {"share": "broll", "rel_path": "clip.mov",
+                    "in_frame": 0, "out_frame": 10}, token="not-the-token",
+    )
+    assert status == 403
+
+
+def test_the_token_file_is_written_where_local_callers_look(live_server):
+    _srv, _client = live_server
+    assert loopback_guard.token_path().is_file()
+    assert loopback_guard.read_token()
+
+
+def test_a_rebinding_host_header_is_refused(live_server):
+    """`evil.example` resolved to 127.0.0.1 would make the attacker's page
+    same-origin with this server and skip the Origin check entirely."""
+    _srv, client = live_server
+    status, _headers, _body = client.request_raw(
+        "GET", "/status", {"Host": f"evil.example:{client.port}"})
+    assert status == 403
+
+
+def test_localhost_is_a_legitimate_host(live_server):
+    _srv, client = live_server
+    status, _headers, _body = client.request_raw(
+        "GET", "/status", {"Host": f"localhost:{client.port}"})
+    assert status == 200
+
+
+def test_a_post_must_say_it_is_json(live_server):
+    """text/plain is one of the three types a cross-origin <form> can send
+    with no preflight at all."""
+    _srv, client = live_server
+    status, _headers, _body = client.post_json(
+        "/insert", {"share": "broll", "rel_path": "clip.mov",
+                    "in_frame": 0, "out_frame": 10},
+        origin=DASH_ORIGIN, token=False, content_type="text/plain",
+    )
+    assert status == 415
+
+
+def test_a_json_content_type_with_a_charset_is_fine(live_server):
+    _srv, client = live_server
+    status, _headers, _body = client.post_json(
+        "/insert", {"share": "broll", "rel_path": "clip.mov",
+                    "in_frame": 0, "out_frame": 10},
+        origin=DASH_ORIGIN, token=False,
+        content_type="application/json; charset=utf-8",
+    )
+    assert status == 200
+
+
+def test_an_unconfigured_companion_refuses_every_browser_caller(companion_config,
+                                                                monkeypatch):
+    """A de-tenanted build with no dashboard_url is pointed at no dashboard,
+    so no page is entitled to drive it (the token still works)."""
+    monkeypatch.setattr(broll_server.resolve_bridge, "try_connect", lambda: False)
+    srv = broll_server.make_server(companion_config, host="127.0.0.1", port=0,
+                                   ccsync_cfg={"dashboard_url": ""})
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _headers, _body = BrollClient(srv.server_address[1]).get(
+            "/status", origin=DASH_ORIGIN)
+        assert status == 403
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -1323,6 +1565,7 @@ def test_a_malformed_json_body_is_400_not_a_traceback(live_server):
     payload = b"{not json"
     conn.request("POST", "/insert", body=payload,
                  headers={"Content-Type": "application/json",
+                          "Origin": DASH_ORIGIN,
                           "Content-Length": str(len(payload))})
     resp = conn.getresponse()
     body = resp.read()

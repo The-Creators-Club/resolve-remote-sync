@@ -112,9 +112,21 @@ def test_every_environment_line_is_unchanged():
     assert env_block(_rendered()) == env_block(_golden_text())
 
 
-def test_the_pot_provider_sidecar_is_untouched():
-    assert (_service_block(_rendered(), "bgutil").rstrip()
-            == _service_block(_golden_text(), "bgutil").rstrip())
+def test_the_pot_provider_sidecar_is_not_in_the_default_stack():
+    """2026-08-17 (COMMERCIAL_READINESS.md item 3): this test used to assert
+    the `bgutil` service was byte-identical to the golden. It is now asserted
+    ABSENT from both -- a proof-of-origin token minter exists to get past
+    YouTube's anti-automation measures, so the vendor build does not run one
+    and install_dashboard_app.py adds it only for a site whose site.toml sets
+    [features] youtube_unblock (see compose_config)."""
+    for name, text in (("rendered", _rendered()), ("golden", _golden_text())):
+        assert "\n  bgutil:\n" not in text, (
+            f"the PO-token sidecar is back in the DEFAULT compose {name} -- it "
+            f"belongs behind [features] youtube_unblock")
+    # ...and the pin it is added with is still matched to requirements.txt,
+    # which is what test_safety's version test checks. Named here so a reader
+    # of this test knows where the service went.
+    assert ida.POT_PROVIDER_IMAGE.endswith("-deno")
 
 
 def test_the_services_section_is_byte_identical_down_to_the_new_ones():
@@ -141,7 +153,9 @@ def test_the_rendered_file_is_valid_yaml_and_matches_the_golden_structurally():
     rendered = yaml.safe_load(_rendered())
     golden = yaml.safe_load(_golden_text())
     assert rendered["services"]["dashboard"] == golden["services"]["dashboard"]
-    assert rendered["services"]["bgutil"] == golden["services"]["bgutil"]
+    # `bgutil` used to be compared here. Neither file carries it since
+    # 2026-08-17 -- see test_the_pot_provider_sidecar_is_not_in_the_default_stack.
+    assert "bgutil" not in rendered["services"]
     assert set(rendered["services"]) - set(golden["services"]) == {"syncthing", "postgres"}
 
 
@@ -160,7 +174,14 @@ def test_the_new_services_are_profiled_so_this_deploy_never_sees_them():
     # neither: the middleware stores that dict verbatim.
     services = ida.compose_config(8480, "/mnt/tank/apps/ccsync-dashboard",
                                   "http://gui:8384", "k", "t")["services"]
-    assert set(services) == {"dashboard", ida.POT_PROVIDER_SERVICE}
+    # The DEFAULT body is one service. The PO-token sidecar joined the list of
+    # things a site opts into on 2026-08-17 (COMMERCIAL_READINESS.md item 3);
+    # this used to assert it was always there.
+    assert set(services) == {"dashboard"}
+    with_unblock = ida.compose_config(8480, "/mnt/tank/apps/ccsync-dashboard",
+                                      "http://gui:8384", "k", "t",
+                                      youtube_download="1", youtube_unblock="1")
+    assert set(with_unblock["services"]) == {"dashboard", ida.POT_PROVIDER_SERVICE}
 
 
 def test_the_bundled_syncthing_is_pinned_and_mounts_the_tree():
@@ -216,6 +237,122 @@ def test_the_site_block_comes_from_the_manifest():
     for name, value in env.items():
         assert service["environment"][name] == value
         assert f"{name}: " in rendered, name
+
+
+IMAGE_TEMPLATE = ida.LOCAL_DASHBOARD_DIR / "deploy" / "compose.image.yaml"
+
+
+def _rendered_image() -> str:
+    return ida.render_compose_yaml(ida.compose_variables(), template=IMAGE_TEMPLATE)
+
+
+def _service_names(text: str) -> set:
+    return set(re.findall(r"^  ([a-z][a-z0-9_-]*):$", text, re.M))
+
+
+def test_image_mode_offers_exactly_the_services_the_default_mode_does():
+    """2026-08-17 integration pass. compose.image.yaml carried the `bgutil`
+    PO-token sidecar, the deno mount and YTDL_POT_BASE_URL/YTDL_COOKIES_FILE
+    unconditionally, while compose.yaml had already dropped all four for
+    COMMERCIAL_READINESS.md item 3 -- so picking image mode silently turned on
+    the anti-automation half for a customer who never bought it. The template
+    engine has no conditionals (it is `{{NAME}}` substitution and nothing
+    else), so the rule is that BOTH templates carry the default shape and
+    compose_config() adds the unblock half to either.
+    """
+    image, default = _rendered_image(), _rendered()
+    assert _service_names(image) == _service_names(default) == \
+        {"dashboard", "syncthing", "postgres"}
+    for name, text in (("image", image), ("default", default)):
+        # CODE only: both files explain at length why these are absent, and a
+        # substring search would find the explanation.
+        code = "\n".join(line for line in text.splitlines()
+                         if line.strip() and not line.strip().startswith("#"))
+        assert "\n  bgutil:\n" not in text, f"the PO-token sidecar is back in {name} mode"
+        assert "YTDL_POT_BASE_URL" not in code, f"{name} mode points at a PO-token provider"
+        assert "YTDL_COOKIES_FILE" not in code, f"{name} mode ships a cookie file path"
+        assert "/opt/deno" not in code, f"{name} mode mounts the n-challenge solver"
+
+
+def test_image_mode_takes_the_same_environment_as_the_default_mode():
+    """The two modes differ in WHERE THE CODE COMES FROM and nothing else; an
+    env key in one and not the other is a feature that appears or disappears
+    with the deploy mode."""
+    def env_keys(text):
+        block = _service_block(text, "dashboard")
+        body = block.split("\n    environment:", 1)[1].split("\n    volumes:", 1)[0]
+        return set(re.findall(r"^\s{6}([A-Z][A-Z0-9_]*):", body, re.M))
+
+    image_keys, default_keys = env_keys(_rendered_image()), env_keys(_rendered())
+    # APP_UID/APP_GID are image mode's own: run.sh reads them to warn about a
+    # uid mismatch an unprivileged container cannot fix.
+    assert image_keys - default_keys == {"APP_UID", "APP_GID"}
+    assert default_keys - image_keys == set()
+
+
+def test_the_brand_and_template_block_reaches_the_container():
+    """2026-08-17, COMMERCIAL_READINESS.md items 10 + 11. The dashboard reads
+    DASH_SITE_ORG_SHORT / _PRODUCT_NAME and the two comma-joined lists, and the
+    b-roll mount reads BROLL_DEFAULT_COLLECTION(_LABEL) -- and until this pass
+    NOTHING in the deploy set any of them, so a customer who renamed their tree
+    template in site.toml got the documentary-shop default anyway.
+
+    BLANK for this site, deliberately: each reader falls back to the product
+    default it already used, so adding them moves nothing here.
+    """
+    env = ida.site_env(8480)
+    for name in ("DASH_SITE_ORG_SHORT", "DASH_SITE_PRODUCT_NAME",
+                 "DASH_SITE_TEMPLATE_FOLDERS", "DASH_SITE_SHARED_ASSETS",
+                 "BROLL_DEFAULT_COLLECTION", "BROLL_DEFAULT_COLLECTION_LABEL"):
+        assert name in env, name
+        assert env[name] == "", f"{name} is not blank for the fixture site"
+    service = ida.compose_config(8480, "/mnt/tank/apps/ccsync-dashboard",
+                                 "http://gui:8384", "k", "t")["services"]["dashboard"]
+    for name in env:
+        assert name in service["environment"], name
+
+
+def test_a_site_that_overrides_the_template_publishes_the_joined_lists():
+    """The container has no site.toml: the comma-joined form IS how
+    dashboard/src/ccsync_dashboard/provision._site_list learns the lists, and
+    it is what makes the dashboard's "create new project" flow build the same
+    tree server/setup_tree.py does."""
+    import importlib
+
+    manifest = GOLDEN.parent / "site.toml"
+    text = manifest.read_text(encoding="utf-8")
+    assert "template_folders" not in text, \
+        "the fixture site must stay on the product defaults -- the golden diff depends on it"
+
+    fake = {"tree": {"template_folders": ["Footage", "Audio"],
+                     "shared_assets": ["Assets/Luts", "Assets/SFX"]},
+            "site": {"org_short": "YS", "product_name": "Studio Sync"},
+            "broll": {"default_collection": "studio",
+                      "default_collection_label": "Our Footage"}}
+    saved = common._SITE
+    common._SITE = fake
+    try:
+        importlib.reload(ida)
+        env = ida.site_env(8480)
+        assert env["DASH_SITE_TEMPLATE_FOLDERS"] == "Footage,Audio"
+        assert env["DASH_SITE_SHARED_ASSETS"] == "Assets/Luts,Assets/SFX"
+        assert env["DASH_SITE_ORG_SHORT"] == "YS"
+        assert env["DASH_SITE_PRODUCT_NAME"] == "Studio Sync"
+        assert env["BROLL_DEFAULT_COLLECTION"] == "studio"
+        assert env["BROLL_DEFAULT_COLLECTION_LABEL"] == "Our Footage"
+    finally:
+        common._SITE = saved
+        importlib.reload(ida)
+
+
+def test_the_shared_report_token_flag_reaches_the_dict_the_deploy_posts():
+    """COMMERCIAL_READINESS.md item 15. compose.yaml carried the key and
+    compose_config() did not -- and the TrueNAS middleware stores THIS dict, so
+    the flag would never have reached the container it was written for."""
+    service = ida.compose_config(8480, "/mnt/tank/apps/ccsync-dashboard",
+                                 "http://gui:8384", "k", "t")["services"]["dashboard"]
+    assert service["environment"]["DASH_SHARED_REPORT_TOKEN_ENABLED"] == "1"
+    assert "DASH_SHARED_REPORT_TOKEN_ENABLED" in _rendered()
 
 
 def test_the_nas_block_names_the_backend_and_its_ssh_channel():

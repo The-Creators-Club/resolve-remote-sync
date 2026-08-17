@@ -33,10 +33,10 @@ pytestmark = pytest.mark.skipif(
 
 STANZA = """[creators_club_sftp]
 type = sftp
-host = truenas.tail26290e.ts.net
-user = leso
+host = truenas.example.ts.net
+user = editor1
 port = 22
-key_file = /Users/leso/.ssh/ccsync_ed25519
+key_file = /Users/editor1/.ssh/ccsync_ed25519
 shell_type = unix
 """
 
@@ -84,8 +84,8 @@ def test_the_target_stanza_is_replaced(tmp_path):
 
     assert "rc=0" in result.stdout, result.stderr
     text = conf.read_text(encoding="utf-8")
-    assert "host = truenas.tail26290e.ts.net" in text
-    assert "user = leso" in text
+    assert "host = truenas.example.ts.net" in text
+    assert "user = editor1" in text
     assert "old.example.net" not in text
     assert "olduser" not in text
 

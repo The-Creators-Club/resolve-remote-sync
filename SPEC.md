@@ -2,15 +2,15 @@
 
 ## Context
 
-Remote editors will collaborate on the self-hosted Resolve Project Server (postgres:13 app on TrueNAS `192.168.0.102:5432`) over Tailscale. Blackmagic Cloud's media side must be replicated self-hosted, with three automatic behaviors:
+Remote editors will collaborate on the self-hosted Resolve Project Server (postgres:13 app on the TrueNAS at `<nas>:5432`) over Tailscale. Blackmagic Cloud's media side must be replicated self-hosted, with three automatic behaviors:
 
 1. **Proxies auto-download** to each editor's machine, recreating the server's folder tree exactly.
 2. **Anything an editor adds to a timeline auto-uploads** to the *same relative folder* on the NAS (music in `Audio\Music` locally → `Audio\Music` on NAS), so every Resolve workstation picks it up. Editors sync their video *originals* up; the server syncs only *proxies* of video down.
 3. **Popup warning** on the editor's machine when a timeline clip lives outside the synced project folder, with a one-click "move it to where it's syncable" fix.
 
-Target: beat Blackmagic Cloud's observed ~60 mb/s up/down. User explicitly OK with A/B-testing different transfer services.
+Target (INTERNAL benchmark baseline, not marketing copy — see `bench/README.md`): beat Blackmagic Cloud's observed ~60 mb/s up/down. User explicitly OK with A/B-testing different transfer services.
 
-Canonical layout = existing template `Z:\Cablewrap\Projects\2025\FF4\Nuclear` (`AE/ Audio/ B-roll/ Interviewees/ Render in Place/ Subs/ Youtube/`), which already uses **per-folder `Proxy/` subfolders** — the exact convention Resolve + Blackmagic Proxy Generator auto-link from. Final NAS home: `/mnt/tank/TheCreatorsPool/Creators_Club/Projects/<year>/<series>/<project>`.
+Canonical layout = the studio's existing project template (`AE/ Audio/ B-roll/ Interviewees/ Render in Place/ Subs/ Youtube/`; a site can override the list via `site.toml [tree] template_folders`), which already uses **per-folder `Proxy/` subfolders** — the exact convention Resolve + Blackmagic Proxy Generator auto-link from. Final NAS home: `/mnt/tank/TheCreatorsPool/Creators_Club/Projects/<year>/<series>/<project>`.
 
 ## Current state (verified)
 
@@ -33,7 +33,7 @@ Three sync lanes with different directions, one policy:
 
 Why split: no single tool expresses "video up-only, proxy down-only, rest both ways" in one folder. Syncthing `.stignore` can't upload a file type it ignores; rclone bisync is weak on conflicts. Splitting gives multi-stream bulk lanes (where speed matters) and battle-tested bidirectional sync for the small-file lane. Lanes are behind an adapter interface so the benchmark can swap engines per lane.
 
-**Path canon:** one virtual drive letter on Windows — `P:`. Host/base rig: `P:` → `\\192.168.0.102\TheCreatorsPool\Creators_Club` (SMB). Editors (Win): `subst P: C:\Creators_Club` at login. Editors (Mac): local root on the editing SSD (`/Volumes/<Name>/Creators_Club`) + Resolve's **Mapped Mount** preference translating `P:\` to it — set automatically by `installer/macos_bootstrap.sh` (see flaw 7), with the companion still verifying it behaviourally by checking that timeline clip paths resolve. All DB-stored paths are `P:\Projects\...` → identical everywhere. `canonical_prefix` stays `P:\` on **every** machine including Macs: `companion/src/ccsync_companion/canon.py` compares and splits canonical strings with `ntpath` whatever the host is, translates them to `local_root/...` for any filesystem probe, and re-emits backslash spellings when writing paths back into Resolve — a `P:\Projects/2026/x.braw` produced by joining with the host separator would travel to every other machine in the fleet.
+**Path canon:** one virtual drive letter on Windows — `P:`. Host/base rig: `P:` → `\\<nas>\<pool>\<tree>` (SMB; the site manifest's `smb_unc`). Editors (Win): `subst P: C:\Creators_Club` at login. Editors (Mac): local root on the editing SSD (`/Volumes/<Name>/Creators_Club`) + Resolve's **Mapped Mount** preference translating `P:\` to it — set automatically by `installer/macos_bootstrap.sh` (see flaw 7), with the companion still verifying it behaviourally by checking that timeline clip paths resolve. All DB-stored paths are `P:\Projects\...` → identical everywhere. `canonical_prefix` stays `P:\` on **every** machine including Macs: `companion/src/ccsync_companion/canon.py` compares and splits canonical strings with `ntpath` whatever the host is, translates them to `local_root/...` for any filesystem probe, and re-emits backslash spellings when writing paths back into Resolve — a `P:\Projects/2026/x.braw` produced by joining with the host separator would travel to every other machine in the fleet.
 
 **Proxy generation:** **Blackmagic Proxy Generator on the base rig** watching `P:` (per-project watch folders). It natively handles BRAW (ffmpeg cannot decode .braw), is GPU-accelerated, preserves timecode, and writes to the in-place `Proxy/` subfolder convention — exactly what Resolve auto-links, and what the template tree already uses. Output: H.264 1080p (cross-platform safe; revisit H.265 later). NAS-side ffmpeg fallback container is a later nice-to-have for non-BRAW formats when the PC is off (PC has wake-on-LAN anyway).
 
@@ -59,7 +59,7 @@ New repo: `E:\Projects\resolve-remote-sync`
 - Install Syncthing app (stable catalog), one Syncthing folder per project, `.stignore` = video extensions + `**/Proxy` (lane C only carries the rest), **staggered file versioning ON server-side** (deletion safety net).
 
 ### 2. Companion app (`companion/`, fork of broll companion skeleton, Win + Mac)
-- **Tray app** (pystray): sync status per lane, pause, open log.
+- **Tray app** (`tray.py` over our own `tray_native.py` — Win32 ctypes / AppKit PyObjC; pystray was removed 2026-08-17, LGPL): sync status per lane, pause, open log.
 - **Sync orchestrator**: runs lane A/B rclone jobs (watchdog file events + periodic scan; file-stability wait before upload; `--immutable`-style skip-if-exists on lane A so last-writer-wins can't clobber), supervises/auto-configures bundled Syncthing via its REST API for lane C. NAS endpoint over Tailscale hostname.
 - **Resolve watcher**: poll current timeline every ~3 s via scripting API (reuse `resolve_bridge.py` bootstrap). For each timeline item → media pool item → `File Path` clip property:
   - outside local project root → **popup** (native dialog): lists offending clips, suggested destination by type (audio → `Audio\Music`, video → `B-roll\<picker>`, etc., editable), **Fix** = copy into tree + `mediaPoolItem.ReplaceClip(new_path)` + queue upload; **Ignore** (per-session).
@@ -104,6 +104,137 @@ The tray closes the loop the other way: a periodic scan of Resolve's own LUT fol
 - New-project onboarding (added 2026-07-25, closes the "Resolve project with no media folder" future-work item above): the report response carries a conditional `resolve_project_unmapped: "<name>"` (computed after the existing inline auto-match, so it's authoritative); the companion (`project_setup.py`) prompts once-ever per project (persisted in `state/project_prompts.json`) and deep-links to the dashboard's `/project-setup` page, with a conditional tray item as re-trigger. There, any signed-in editor can first-set an unmapped root (`project_roots.source='editor'`, first-write-wins via INSERT OR IGNORE; changing stays admin-only) or create `Projects/<y>/<s>/<p>` + the TEMPLATE_FOLDERS (dashboard `/projects` mount now rw; eager `projects` row + a 15-min deactivation grace covers the ≤5-min Syncthing provisioning gap). Login pages gained safe `?next=` deep-link redirects.
 - Structure clone on tick (added 2026-07-25): before each project's lane runs, the sequencer replicates the NAS project's full directory skeleton locally — including empty folders (`rclone lsf --dirs-only -R` + mkdirs, `rclone_lane.clone_directory_tree`). Needed because lane B copies proxy *files* only and lane C's editor-side .stignore drops video/Proxy, so empty scaffolding never arrived otherwise. Idempotent; picks up server-side folder additions each pass.
 - Per-editor selection + sequenced sync (added 2026-07): editors log into the dashboard with TrueNAS credentials (SMB auth probe on :445 — the only verification 25.10 permits for non-admin users) and tick projects; the `selections` table (schema v2) + a 60s `enforce` collector cycle drive Syncthing folder shares (tick = share to the editor's devices, untick = unshare; unmapped devices never touched; first run seeds from pre-existing shares). New folders provision **unshared**. The companion in managed mode (`dashboard_url` set) fetches its selection and a Sequencer syncs projects **one at a time in tick order**: per project lane A run → lane B run → lane C turn (only the current folder unpaused locally; others paused; auto-accepts pending folders with editor-side .stignore), rotating after `project_rotation_seconds` (600) to prevent starvation; all selected folders unpause between passes. Live progress: rclone `--stats` JSON → LaneStatus (bytes/speed/ETA) via the companion report, and a server-side EMA of Syncthing needBytes drain → per-editor speed/ETA on the dashboard.
+
+## Commercial-readiness layer (added 2026-08-17)
+
+Everything in this section came out of the pass that turned the single-tenant
+appliance into a product (`docs/COMMERCIAL_READINESS.md`; per-finding ledger
+in `KNOWN_BUGS.md` CR-1..CR-20). None of it was shipped on the day it landed.
+
+**Site manifest.** `site.toml` (`site.example.toml` documents every key) is
+WHO A DEPLOYMENT IS; nothing site-shaped is a code default any more. The
+dashboard publishes the non-secret half at `GET /api/v1/site` (schema 1,
+additive): `org_name`/`org_short`/`product_name` (brand resolution everywhere
+is org_short → org_name → product_name, so an install that has said nothing
+shows the product's name, never the first customer's), `tree_name`,
+`canonical_prefix`, `remote_root`, `smb_unc`, `sftp_*`, `rclone_remote`,
+`nas_syncthing_id`, `dashboard_url`, `template_folders`, `shared_asset_folders`
+(both overridable in `[tree]`; the DEFAULTS are the cross-component contract),
+a read-only `video_extensions`, `nas_kind`, and `features`. Installers,
+wizard and companion read it before they have credentials. `[features]`
+switches (`youtube_download`, `youtube_unblock`) are OFF in the vendor build
+and turned on per customer; the companion's `site.feature_enabled` fails closed.
+
+**Auth and fleet credentials (dashboard).** Browser sessions are server-side
+and revocable (`sessions.py`, `auth_sessions` keyed by HMAC(secret, cookie) —
+no row, no session; logout / log-out-everywhere / admin revoke are real; 12h
+idle / 7d absolute). `DASH_AUTH_METHOD` has two implementations: `smb` (the
+NAS session probe) and `oidc` (authorization code + PKCE, `oidc.py`,
+`/login?local=1` break-glass). Secrets are strength-checked at boot
+(`broll.check_ingest_token`'s rule) and a weak one refuses to start;
+`DASH_DEV_INSECURE=1` is the one test bypass. `X-Forwarded-Proto` is believed
+only from `DASH_TRUSTED_PROXIES`. A CSRF synchroniser token guards every
+state-changing htmx/form POST. Companion-facing routes accept two
+credentials: the shared `DASH_REPORT_TOKEN` (migration only,
+`DASH_SHARED_REPORT_TOKEN_ENABLED`) and per-editor `cce1.<id>.<secret>` tokens
+minted on Admin › Users, stored hashed, revocable, and BOUND to the editor
+they name; precedence on the companion is `identity.json editor_report_token`
+→ `config.toml report_token` → the shared token. Fleet reads are scoped: an
+editor sees their own machines plus summary counts, an admin everything, and
+another editor's device is a 404. The ytdl fleet routes verify a
+purpose-separated HMAC `X-CCSync-Identity` before believing any editor name.
+
+**Companion loopback (127.0.0.1:8899).** Not open to the machine it runs on:
+callers are authorised by an Origin on this deployment's allow-list
+(`dashboard_url` + the cached site manifest, http and https) or by the
+per-session token in `~/.ccsync/loopback-token` sent as `X-CCSync-Loopback`;
+POSTs additionally need `Content-Type: application/json` and a loopback
+`Host`; `share` is one safe segment; every path route realpath-contains;
+bundles are revealed, never opened. `docs/LOOPBACK_API.md`.
+
+**Upgrade channel.** Signature-authenticated end to end: every published
+package carries an Ed25519 signature over its whole record (kind, platform,
+version, filename, sha256, size_bytes, min_version, published_at,
+signed_binary) made by an offline key held only on the release rig; the
+public half is baked into each companion (`release_pubkey.py`, pure-Python
+verifier in `ed25519.py`). The dashboard verifies on publish against
+`DASH_RELEASE_PUBKEYS` and refuses what it cannot verify; companions verify
+before downloading, verify the signed sha256 after, and keep the highest
+`min_version` they have accepted as a monotonic downgrade floor. Transport is
+https, or plain http to tailnet/LAN origins only. Code signing (Authenticode /
+Developer ID + notarization) is wired behind env vars and advisory until
+certificates exist. `docs/RELEASE.md`.
+
+**Server trust and tenancy.** The base rig refuses an unpinned NAS host key
+(`[nas] ssh_hostkey`, or a one-off `--trust-host-key-on-first-use` that
+records it in `~/.ccsync/known_hosts`); a changed key is a refusal.
+`TRUENAS_VERIFY_SSL` is a setting, warned when off. The dashboard container
+should hold a scoped `TRUENAS_API_KEY` (`server/create_api_key.py`), not the
+admin password. Editor accounts are SFTP-only (`[stack] editor_shell`, default
+`sftp-only`: nologin + sshd `Match Group` `ForceCommand internal-sftp`), and
+the manifest's `sftp_shell_type` is derived from that, never set independently.
+Project isolation is `[stack] project_acl` (`shared` = one editors group, 2770
+everywhere; `per-project` = `proj-<slug>` groups plus setgid+sticky
+containers). Multi-org is one container per customer — there is no
+in-instance tenancy. `docs/TENANCY.md`.
+
+**Backups.** Two datasets carry everything: the tree (`[tree] pool_root`) and
+the app root (`[apps] root`). Both are snapshotted hourly (keep 24) and daily
+(keep 30) by `server/setup_snapshots.py`, and every privileged recursive
+operation in `server/` takes a `ccsync-pre-<label>-<ts>` snapshot first via
+`common.snapshot_before()` (`--require-snapshot` makes a failed snapshot a
+refusal). A search index is never copied over a live one:
+`server/publish_db.py` stages beside it, `quick_check`s the candidate on the
+NAS, refuses a surprise row-count shrink, and swaps by rename keeping
+`<name>.db.prev-<ts>`. Snapshots are not offsite. `docs/BACKUP_RESTORE.md`.
+
+**Sync safety.** Lane B carries a **circuit breaker** (`sync/lane_guard.py`):
+rclone's per-pass delete caps bound one pass, the breaker bounds the sequence
+— it trips on a `remote_root` failing its marker probe, an empty/shrunken NAS
+listing, or a pass that trashes more than N files / a fraction of the local
+proxy set — parking lane B `paused` while lanes A and C keep running, and
+requiring an explicit tray resume. `.ccsync-trash` is a 14-day/50 GB undo
+window pruned by the companion, never while the breaker is tripped. "Stop all
+sync" is distinct from Pause: it stops lanes A and B AND pauses every lane C
+folder through Syncthing's REST API, persists across restarts, and can be set
+fleet-wide by an admin (`/api/v1/fleet/halt`, delivered on the report reply
+as `commands.halt`). "Remove from this machine" is gated on lane A having
+nothing pending and lane C at 100 %; the gate fails closed and an override
+requires typing the project name. `docs/SYNC_SAFETY.md`.
+
+**Resolve edit safety.** Every media-pool mutation — FIX ALL, the two
+unprompted automatic relinks, and the post-import canonicaliser — goes through
+`resolve_bridge.replace_clip` / `link_proxy_media`, which take a save point
+first: `SaveProject()`, a best-effort `ExportProject()` to
+`~/.ccsync/resolve_edits/<project>/<ts>.drp`, and an undo journal of old/new
+path per clip. Resolve's Undo does not cover a scripted `ReplaceClip`, so
+Tray → Advanced → "Undo the last clip-path change" replays that journal in
+reverse. The unprompted paths run at most once per project per 15 minutes.
+Proxy generation keeps a free-space floor, uses two (size, mtime) samples for
+growing-source detection, and refuses a proxy as a source.
+`docs/RESOLVE_EDIT_SAFETY.md`.
+
+**Third-party posture.** The tray is `tray.py` (menu model, colours, pulse)
+over `tray_native.py` (Win32 ctypes / AppKit PyObjC) — no third-party tray
+library; the b-roll indexer and the ytdl service call the Anthropic Messages
+API through the `anthropic` SDK with the CUSTOMER's `ANTHROPIC_API_KEY`
+(contact sheets travel as image content blocks; no `claude` binary anywhere);
+the NAS fetches its own sha256-pinned ffmpeg (an SFTP push is an explicit
+air-gapped opt-in that prints the GPL notice); rclone and Syncthing are pinned
+by version + sha256 in the installers. Legal paperwork lives in `docs/legal/`
+as drafts for counsel; the wizard's page 0 takes EULA acceptance and the
+companion gates its lanes on it (failing open if the bundled text is missing).
+
+**Operations.** Every component carries a hash-pinned `requirements.lock`;
+`.github/workflows/ci.yml` runs every suite on Windows/Linux/macOS with a
+licence gate; the dashboard container has two modes — bind-mount (default,
+what every live site runs) and image (`dashboard/deploy/Dockerfile`,
+`compose.image.yaml`), both executing the same `run.sh` at the same paths.
+The music ingest queue is an append-only journal (`ingest_queue.uid`); a
+base-rig drain exports a result bundle that `python -m musicweb.drain apply`
+merges — the index file is never pushed back over a live one. Both indexers
+require their paths (`BROLL_DATA_ROOT`, `BROLL_DB_PATH`, `CCSYNC_WHISPER_*`,
+`MUSIC_DB_PATH`, …); nothing is defaulted to a developer's machine.
 
 ## Flaws / holes you asked me to flag
 

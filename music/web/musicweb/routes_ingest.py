@@ -26,7 +26,16 @@ the single native dependency it does have**: an upload is not accepted at all
 without ffprobe to prove it is audio, and .ogg cannot be transcoded without
 ffmpeg. A host missing either answers 503 for the whole request rather than
 half-ingesting some of the files.
+
+WHO MAY CALL IT (2026-08-17, COMMERCIAL_READINESS.md item 15). Mounted in the
+dashboard the session is the credential and always was. Run STANDALONE there is
+no login in front of this app at all, so ingest now demands MUSIC_INGEST_TOKEN
+and refuses (503) when none is configured -- fail-closed, the rule b-roll's
+routes_ingest.py adopted the same day. And one request is bounded: file count
+and total bytes, because the dashboard's body_size_gate deliberately only makes
+a DECLARATION check on this path. See config's "ingest credentials" block.
 """
+import hmac
 import json
 import logging
 import os
@@ -36,7 +45,7 @@ import tempfile
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, UploadFile
 
 from musicweb import config, db
 from musicweb.db import con
@@ -60,21 +69,108 @@ MP3_BITRATE = '320k'
 # re-index or to Resolve.
 STAGING = 'staging'
 
-# Last resort only. The indexer half reads FFMPEG/FFPROBE with this same
-# default; the web half prefers PATH, because in the container ffmpeg is a
-# distro package and this Windows path means nothing.
-_FALLBACK_BIN = Path(r'C:\Users\alex\tools\ffmpeg\bin')
+# Last resort only, and OPT-IN: this used to be one operator's
+# C:\Users\<name>\tools\ffmpeg\bin, which is PII and is wrong on every other
+# host (2026-08-17, COMMERCIAL_READINESS.md item 10). Empty by default -- in
+# the container ffmpeg is a distro package on PATH, and a Windows rig that
+# keeps a private build sets MUSIC_FFMPEG_DIR (or FFMPEG/FFPROBE outright) in
+# its own environment / the git-ignored site.toml, not here.
+# Read per call, not bound at import: the app is imported long before an
+# operator's environment is necessarily complete, and a mounted musicweb
+# inherits the dashboard container's env.
+def _fallback_bin():
+    d = os.environ.get('MUSIC_FFMPEG_DIR', '').strip()
+    return Path(d) if d else None
+
+
+def _require_ingest_credentials(x_ingest_token):
+    """Who may write into the library. 503/401, or None. See config's
+    "ingest credentials" block for why the answer depends on the host.
+
+    Fail-closed on purpose (COMMERCIAL_READINESS.md item 15, 2026-08-17): a
+    standalone musicweb with no MUSIC_INGEST_TOKEN refuses ingest rather than
+    serving an unauthenticated write path that lands files in the shared
+    library and spends 900 s ffmpeg transcodes on them.
+    """
+    expected = config.ingest_token()
+    if expected is None:
+        if config.login_gated():
+            return          # the dashboard's session gate already ran
+        log.error('ingest refused: MUSIC_INGEST_TOKEN is not set and nothing is '
+                  'authenticating this app (it is not mounted behind the dashboard '
+                  'login), so the write path is closed.')
+        raise HTTPException(503, 'ingest is not configured on this server '
+                                 '(MUSIC_INGEST_TOKEN unset)')
+    # A configured token is accepted in EITHER posture, so an operator who sets
+    # one on the dashboard container does not break the SPA's drag-and-drop:
+    # behind the login gate the session still stands on its own.
+    try:
+        ok = hmac.compare_digest(x_ingest_token or '', expected)
+    except TypeError:
+        # compare_digest refuses a non-ASCII str, and a header is
+        # attacker-shaped input -- a refusal, never a 500 (DASH-5's lesson).
+        ok = False
+    if ok or config.login_gated():
+        return
+    raise HTTPException(401, 'missing or invalid X-Ingest-Token')
+
+
+def _upload_size(up):
+    """Bytes in one UploadFile, without reading it into memory. -1 if unknown.
+
+    Starlette has already spooled the part to disk (or to a BytesIO under the
+    1 MB threshold), so seeking to the end is the whole measurement.
+    """
+    size = getattr(up, 'size', None)
+    if isinstance(size, int) and size >= 0:
+        return size
+    fh = getattr(up, 'file', None)
+    try:
+        here = fh.tell()
+        fh.seek(0, os.SEEK_END)
+        end = fh.tell()
+        fh.seek(here)
+        return end
+    except (AttributeError, OSError, ValueError):
+        return -1
+
+
+def _check_request_ceilings(files):
+    """Refuse a whole ingest request that is too big to be a real drop.
+
+    413 and nothing written: half-applying a batch is the one outcome this
+    route already refuses everywhere else (_require_ffmpeg does the same).
+    """
+    if len(files) > config.MAX_INGEST_FILES:
+        raise HTTPException(413, f'too many files in one ingest request '
+                                 f'({len(files)}; the limit is {config.MAX_INGEST_FILES}). '
+                                 f'Drop them in smaller batches.')
+    total = 0
+    for up in files:
+        size = _upload_size(up)
+        if size < 0:
+            continue        # unmeasurable stream: the per-file write still bounds it
+        if size > config.MAX_INGEST_FILE_BYTES:
+            raise HTTPException(413, f'{up.filename!r} is {size} bytes; the per-file '
+                                     f'limit is {config.MAX_INGEST_FILE_BYTES}')
+        total += size
+    if total > config.MAX_INGEST_TOTAL_BYTES:
+        raise HTTPException(413, f'ingest request is {total} bytes; the limit is '
+                                 f'{config.MAX_INGEST_TOTAL_BYTES}')
 
 
 def _tool(name):
-    """Absolute path to ffmpeg/ffprobe, or None. env -> PATH -> base-rig tools."""
+    """Absolute path to ffmpeg/ffprobe, or None. env -> PATH -> MUSIC_FFMPEG_DIR."""
     env = os.environ.get(name.upper())
     if env:
         return env
     found = shutil.which(name)
     if found:
         return found
-    p = _FALLBACK_BIN / (name + '.exe')
+    bin_dir = _fallback_bin()
+    if bin_dir is None:
+        return None
+    p = bin_dir / (name + '.exe')
     return str(p) if p.is_file() else None
 
 
@@ -93,9 +189,10 @@ def _require_ffmpeg():
                                               ('ffprobe', ffprobe)) if not v)
         raise HTTPException(503,
                             f'ingest needs {missing}: not on PATH here, and no '
-                            'FFMPEG/FFPROBE override is set. Install ffmpeg in '
-                            'the image (or point FFMPEG/FFPROBE at it). The whole '
-                            'request is refused rather than half-applied.')
+                            'FFMPEG/FFPROBE/MUSIC_FFMPEG_DIR override is set. '
+                            'Install ffmpeg in the image (or point FFMPEG/FFPROBE '
+                            'at it). The whole request is refused rather than '
+                            'half-applied.')
     return ffmpeg, ffprobe
 
 
@@ -279,8 +376,11 @@ def queue_one(upload_name, src, c):
 # every companion, not the container healthcheck. A plain `def` is dispatched to
 # the threadpool, where blocking is what the threads are for.
 @router.post('/api/ingest')
-def ingest_files(files: List[UploadFile] = File(...)):
+def ingest_files(files: List[UploadFile] = File(...),
+                 x_ingest_token: str = Header(default=None)):
     """Drag-and-drop ingest: analysed here, or queued for the base rig."""
+    _require_ingest_credentials(x_ingest_token)
+    _check_request_ceilings(files)
     indexer = _load_indexer()
     if indexer is None:
         return _ingest_queued(files)

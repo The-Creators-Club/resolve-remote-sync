@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import webbrowser
 from datetime import datetime, timezone
@@ -73,14 +74,36 @@ class ProjectSetupPrompter:
         return {}
 
     def _record_asked(self, name: str) -> None:
+        """Persist "we have already asked about this project".
+
+        TEMP FILE + os.replace, not write_text (2026-08-17). write_text is
+        create-truncate-write-close, so a reader that opens the file in that
+        window gets ZERO BYTES -- _load_asked's json.loads raises, the except
+        swallows it, and the map comes back empty. That is the whole record of
+        which projects an editor has already declined, and losing it means the
+        NEW PROJECT popup returns for a project they dismissed: the exact
+        failure this file exists to prevent, and one this fleet has already
+        paid for once (see the popup history in KNOWN_BUGS). Found as an
+        intermittent failure of test_decline_persists_across_instances, which
+        is the same two-readers race a companion restart is.
+
+        Same atomic-write shape as identity.save_identity and
+        root_guard.write_volume_record; never raises past the log line, as
+        everything on this thread must not.
+        """
         self._asked[name.strip().lower()] = datetime.now(timezone.utc).isoformat()
+        payload = json.dumps({"asked": self._asked}, indent=1)
+        tmp_path = self.state_path.with_name(self.state_path.name + ".tmp")
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(
-                json.dumps({"asked": self._asked}, indent=1), encoding="utf-8"
-            )
+            tmp_path.write_text(payload, encoding="utf-8")
+            os.replace(tmp_path, self.state_path)
         except OSError as exc:
             log.warning("could not persist project-prompt state: %s", exc)
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
     def _was_asked(self, name: str) -> bool:
         return name.strip().lower() in self._asked

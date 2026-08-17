@@ -277,7 +277,7 @@ def test_a_launch_forgets_the_cached_process_list(monkeypatch):
 
 # -- the watch list: an empty one is a silent no-op (2026-08-13) -------------
 
-RUSKIN = r"P:\Projects\2026\CCT\Creator Profiles\Season 1\B-roll\Editor Added\ruskin"
+EDITOR2 = r"P:\Projects\2026\CCT\Creator Profiles\Season 1\B-roll\Editor Added\editor2"
 
 
 def write_ini(tmp_path, value=bpg.INVALID_MARKER, extra="codecType=1\n"):
@@ -301,11 +301,11 @@ def test_the_qt_list_is_read_the_way_qt_writes_it(value, expected):
 
 def test_a_folder_is_added_to_an_empty_list(tmp_path):
     ini = write_ini(tmp_path)
-    result = bpg.ensure_watch_folders([RUSKIN], path=str(ini))
-    assert result["ok"] is True and result["added"] == [RUSKIN]
+    result = bpg.ensure_watch_folders([EDITOR2], path=str(ini))
+    assert result["ok"] is True and result["added"] == [EDITOR2]
     text = ini.read_text(encoding="utf-8")
     assert bpg.parse_watch_folders(
-        text.splitlines()[1].split("=", 1)[1]) == [RUSKIN]
+        text.splitlines()[1].split("=", 1)[1]) == [EDITOR2]
     # Everything else in the file is the user's and survives untouched.
     assert "codecType=1" in text
 
@@ -314,10 +314,10 @@ def test_an_existing_entry_is_kept_verbatim(tmp_path):
     """The value text is carried over as text, never re-serialised: a parse we
     get subtly wrong must cost a redundant entry, never the user's list."""
     ini = write_ini(tmp_path, value=r"W:\\Temp Transfer")
-    assert bpg.ensure_watch_folders([RUSKIN], path=str(ini))["ok"] is True
+    assert bpg.ensure_watch_folders([EDITOR2], path=str(ini))["ok"] is True
     value = ini.read_text(encoding="utf-8").splitlines()[1].split("=", 1)[1]
     assert value.startswith(r"W:\\Temp Transfer, ")
-    assert bpg.parse_watch_folders(value) == [r"W:\Temp Transfer", RUSKIN]
+    assert bpg.parse_watch_folders(value) == [r"W:\Temp Transfer", EDITOR2]
 
 
 def test_an_ancestor_already_covers_it(tmp_path):
@@ -325,7 +325,7 @@ def test_an_ancestor_already_covers_it(tmp_path):
     nothing added, and adding it would grow their list every launch."""
     ini = write_ini(tmp_path, value=r"P:\\Projects")
     before = ini.read_text(encoding="utf-8")
-    result = bpg.ensure_watch_folders([RUSKIN], path=str(ini))
+    result = bpg.ensure_watch_folders([EDITOR2], path=str(ini))
     assert result["ok"] is True and result["added"] == []
     assert ini.read_text(encoding="utf-8") == before
 
@@ -333,7 +333,7 @@ def test_an_ancestor_already_covers_it(tmp_path):
 def test_the_original_settings_are_backed_up_once(tmp_path):
     ini = write_ini(tmp_path)
     original = ini.read_text(encoding="utf-8")
-    bpg.ensure_watch_folders([RUSKIN], path=str(ini))
+    bpg.ensure_watch_folders([EDITOR2], path=str(ini))
     backup = tmp_path / ("ProxyGeneratorSettings.ini" + bpg.BACKUP_SUFFIX)
     assert backup.read_text(encoding="utf-8") == original
 
@@ -346,14 +346,14 @@ def test_the_original_settings_are_backed_up_once(tmp_path):
 def test_a_settings_file_that_does_not_exist_yet_is_created(tmp_path):
     """BPG that has never been opened has no settings file."""
     ini = tmp_path / "ProxyGeneratorSettings.ini"
-    assert bpg.ensure_watch_folders([RUSKIN], path=str(ini))["ok"] is True
-    assert RUSKIN in bpg.parse_watch_folders(
+    assert bpg.ensure_watch_folders([EDITOR2], path=str(ini))["ok"] is True
+    assert EDITOR2 in bpg.parse_watch_folders(
         ini.read_text(encoding="utf-8").splitlines()[1].split("=", 1)[1])
 
 
 def test_a_machine_with_no_bpg_profile_collects_no_stray_config(tmp_path):
     ini = tmp_path / "nowhere" / "ProxyGeneratorSettings.ini"
-    result = bpg.ensure_watch_folders([RUSKIN], path=str(ini))
+    result = bpg.ensure_watch_folders([EDITOR2], path=str(ini))
     assert result["ok"] is False
     assert result["reason"] == "no BPG settings directory"
     assert not ini.parent.exists()
@@ -368,11 +368,11 @@ def test_the_settings_directory_is_created_for_a_machine_that_has_resolve(tmp_pa
     there is a proxy generator here."""
     ini = tmp_path / "nowhere" / "ProxyGeneratorSettings.ini"
 
-    result = bpg.ensure_watch_folders([RUSKIN], path=str(ini), create_dir=True)
+    result = bpg.ensure_watch_folders([EDITOR2], path=str(ini), create_dir=True)
 
     assert result["ok"] is True
-    assert result["added"] == [RUSKIN]
-    assert RUSKIN in bpg.parse_watch_folders(
+    assert result["added"] == [EDITOR2]
+    assert EDITOR2 in bpg.parse_watch_folders(
         ini.read_text(encoding="utf-8").splitlines()[1].split("=", 1)[1])
 
 
@@ -384,7 +384,7 @@ def test_the_launcher_asks_for_the_directory_to_be_created(tmp_path):
         return {"ok": True}
 
     launcher, spawned = make_launcher(ensure=ensure)
-    assert launcher.maybe_launch(**READY, watch_dirs=[RUSKIN]) is None
+    assert launcher.maybe_launch(**READY, watch_dirs=[EDITOR2]) is None
     assert seen["create_dir"] is True, (
         "maybe_launch already returned on `no proxy generator installed` -- "
         "reaching here means Resolve.exe is there (COMP-MEDIA-6)"
@@ -397,7 +397,7 @@ def test_a_settings_directory_that_cannot_be_created_is_still_not_fatal(tmp_path
     blocker.write_text("I am a file, not a directory", encoding="utf-8")
     ini = blocker / "ProxyGeneratorSettings.ini"
 
-    result = bpg.ensure_watch_folders([RUSKIN], path=str(ini), create_dir=True)
+    result = bpg.ensure_watch_folders([EDITOR2], path=str(ini), create_dir=True)
 
     assert result["ok"] is False
     assert result["reason"] == "settings file could not be written"
@@ -479,8 +479,8 @@ def test_the_watch_folders_are_set_before_anything_is_started(tmp_path):
         return {"ok": True}
 
     launcher, spawned = make_launcher(ensure=ensure)
-    assert launcher.maybe_launch(**READY, watch_dirs=[RUSKIN]) is None
-    assert seen["dirs"] == [RUSKIN]
+    assert launcher.maybe_launch(**READY, watch_dirs=[EDITOR2]) is None
+    assert seen["dirs"] == [EDITOR2]
     assert spawned == [["Resolve.exe", "-pg"]]
 
 
@@ -489,7 +489,7 @@ def test_a_generator_that_would_watch_nothing_is_not_started(tmp_path):
     opening three times a day for months while the gap never moved."""
     launcher, spawned = make_launcher(
         ensure=lambda dirs, path="", create_dir=False: {"ok": False, "reason": "boom"})
-    assert launcher.maybe_launch(**READY, watch_dirs=[RUSKIN]) == (
+    assert launcher.maybe_launch(**READY, watch_dirs=[EDITOR2]) == (
         "watch folders could not be set")
     assert spawned == []
     # No cooldown was burnt: this cost a file read, so the next tick may retry.
@@ -501,7 +501,7 @@ def test_an_ensure_that_raises_is_not_fatal():
         raise OSError("read-only settings")
 
     launcher, spawned = make_launcher(ensure=boom)
-    assert launcher.maybe_launch(**READY, watch_dirs=[RUSKIN]) == (
+    assert launcher.maybe_launch(**READY, watch_dirs=[EDITOR2]) == (
         "watch folders could not be set")
     assert spawned == []
 
@@ -517,7 +517,7 @@ def test_managing_the_watch_list_can_be_turned_off():
 
     launcher, spawned = make_launcher(
         cfg={"bpg_manage_watch_folders": False}, ensure=ensure)
-    assert launcher.maybe_launch(**READY, watch_dirs=[RUSKIN]) is None
+    assert launcher.maybe_launch(**READY, watch_dirs=[EDITOR2]) is None
     assert called["n"] == 0
     assert spawned
 
@@ -527,7 +527,7 @@ def test_managing_the_watch_list_can_be_turned_off():
 def test_start_is_pressed_after_a_launch():
     presses = []
     launcher, spawned = make_launcher(press=lambda: presses.append("x") or "pressed")
-    assert launcher.maybe_launch(**READY, watch_dirs=[RUSKIN]) is None
+    assert launcher.maybe_launch(**READY, watch_dirs=[EDITOR2]) is None
     assert len(presses) == 1
 
 
@@ -561,7 +561,7 @@ def test_autostart_can_be_turned_off():
     presses = []
     launcher, spawned = make_launcher(
         cfg={"bpg_autostart": False}, press=lambda: presses.append("x") or "pressed")
-    assert launcher.maybe_launch(**READY, watch_dirs=[RUSKIN]) is None
+    assert launcher.maybe_launch(**READY, watch_dirs=[EDITOR2]) is None
     assert presses == []
     assert spawned
 
@@ -572,7 +572,7 @@ def test_a_press_that_raises_does_not_break_the_launch():
 
     launcher, spawned = make_launcher(press=boom)
     # The spawn already happened; the press is the convenience on top of it.
-    assert launcher.maybe_launch(**READY, watch_dirs=[RUSKIN]) is None
+    assert launcher.maybe_launch(**READY, watch_dirs=[EDITOR2]) is None
     assert spawned
 
 

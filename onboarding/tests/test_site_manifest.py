@@ -178,3 +178,88 @@ def test_no_dashboard_address_is_compiled_in():
     assert steps.DEFAULT_BASE_DASHBOARD_URL == ""
     assert steps.DEFAULT_REMOTE_ROOT == ""
     assert steps.DEFAULT_BASE_LOCAL_ROOT_MACOS == ""
+
+
+# -- the rclone remote NAME (2026-08-17, COMMERCIAL_READINESS.md item 11) ----
+#
+# The wizard writes config.toml's `remote`, and it must match the stanza in
+# rclone.conf or every lane fails with "didn't find section in config file".
+# The existing fleet's stanza is `[creators_club_sftp]`, written before the
+# manifest existed, so a re-run against a dashboard that publishes no
+# rclone_remote must NOT rename it to the neutral default.
+
+def _write_config(tmp_path, body, site, role="editor"):
+    path = tmp_path / "config.toml"
+    path.write_text(body, encoding="utf-8")
+    steps.ensure_config(role, editor_name="jane", dashboard_url="http://d:8480",
+                        dashboard_token="tok", local_root=r"C:\Tree",
+                        config_path=path, site=site, platform="win32")
+    return path.read_text(encoding="utf-8")
+
+
+def test_the_sites_remote_name_wins(tmp_path):
+    text = _write_config(tmp_path, 'remote = "creators_club_sftp"\n', SITE)
+    assert 'remote = "acme_sftp"' in text
+
+
+def test_an_existing_remote_name_survives_a_manifest_that_omits_it(tmp_path):
+    """The pre-manifest fleet. Renaming this to ccsync_sftp would point the
+    companion at a stanza rclone.conf does not have."""
+    site = {k: v for k, v in SITE.items() if k != "rclone_remote"}
+    text = _write_config(tmp_path, 'remote = "creators_club_sftp"\n', site)
+    assert 'remote = "creators_club_sftp"' in text
+    assert "ccsync_sftp" not in text
+
+
+def test_a_blank_remote_name_is_filled_with_the_neutral_default(tmp_path):
+    site = {k: v for k, v in SITE.items() if k != "rclone_remote"}
+    text = _write_config(tmp_path, 'remote = ""\n', site)
+    assert 'remote = "ccsync_sftp"' in text
+
+
+def test_a_config_with_no_remote_key_at_all_gets_the_neutral_default(tmp_path):
+    site = {k: v for k, v in SITE.items() if k != "rclone_remote"}
+    text = _write_config(tmp_path, 'local_root = "C:\\Tree"\n', site)
+    assert 'remote = "ccsync_sftp"' in text
+
+
+# -- the LaunchAgent rename (item 10) ---------------------------------------
+
+def test_installing_the_agent_retires_the_legacy_pair(tmp_path):
+    """Both labels loaded at once means two companions watching one tree."""
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    for name in steps.LEGACY_PLIST_NAMES:
+        (agents / name).write_text("<plist/>", encoding="utf-8")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _FakeResult(returncode=0)
+
+    plist = steps.write_companion_launch_agent(
+        tmp_path / "ccsync-companion", agents_dir=agents, run=fake_run)
+
+    assert plist.name == "com.ccsync.companion.plist" and plist.is_file()
+    assert not any((agents / name).exists() for name in steps.LEGACY_PLIST_NAMES)
+    assert any("bootout" in c for c in calls)
+    assert "<string>com.ccsync.companion</string>" in plist.read_text(encoding="utf-8")
+
+
+def test_retiring_is_a_no_op_on_a_machine_that_never_had_them(tmp_path):
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    calls = []
+    assert steps.retire_legacy_launch_agents(
+        agents, run=lambda cmd, **kw: calls.append(cmd)) == []
+    assert calls == []
+
+
+def test_the_uninstaller_still_knows_the_legacy_names(tmp_path):
+    """An install made before the rename must stay fully removable."""
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    legacy = agents / steps.LEGACY_COMPANION_PLIST_NAME
+    legacy.write_text("<plist/>", encoding="utf-8")
+    plan = steps.build_cleanup_plan_macos(home=tmp_path)
+    assert legacy in plan.launch_agent_plists

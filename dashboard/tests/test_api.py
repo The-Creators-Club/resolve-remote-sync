@@ -158,7 +158,10 @@ def test_ui_pages_render(app_env):
     seed(conn)
     home = client.get("/")
     assert home.status_code == 200
-    assert "CREATORS CLUB" in home.text and "2025/FF4/Nuclear" in home.text
+    # The topbar's brand half is site data now: an app_env that names no org
+    # falls back to the product name (2026-08-17, COMMERCIAL_READINESS.md
+    # item 10, ui._render brand_org).
+    assert "CC SYNC" in home.text and "2025/FF4/Nuclear" in home.text
 
     page = client.get("/project/2025-ff4-nuclear")
     assert page.status_code == 200
@@ -217,15 +220,15 @@ def test_project_view_includes_report_only_machines(app_env):
     seed(conn)
     now = dbmod.utcnow_iso()
     dbmod.upsert_editor_media_project(
-        conn, editor="alex", machine="CREATOR_1", slug="2025-ff4-nuclear",
+        conn, editor="owen", machine="CREATOR_1", slug="2025-ff4-nuclear",
         mode="base", n_originals=69, bytes_originals=10, n_proxies=69,
         bytes_proxies=5, truncated=False, now=now)
     conn.commit()
 
     body = client.get("/api/v1/projects/2025-ff4-nuclear").json()
     rows = {e["display_name"]: e for e in body["editors"]}
-    assert "alex" in rows
-    base = rows["alex"]
+    assert "owen" in rows
+    base = rows["owen"]
     assert base["report_only"] is True
     assert base["media"]["n_originals"] == 69
     assert base["media"]["mode"] == "base"
@@ -238,7 +241,7 @@ def test_project_view_includes_report_only_machines(app_env):
     # and the page renders the report-only row (BASE chip, no missing button)
     page = client.get("/project/2025-ff4-nuclear")
     assert page.status_code == 200
-    assert "alex" in page.text and "[ BASE ]" in page.text
+    assert "owen" in page.text and "[ BASE ]" in page.text
     assert "69/0 orig" in page.text  # NAS inventory not seeded -> denominator 0
 
 

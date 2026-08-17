@@ -28,7 +28,7 @@ from typing import Any
 
 from . import embed, ffmpeg_tools, normalize, transcribe, transcript_quality
 from .claude_client import InvokeFn, build_index_prompt, chunk_sheets, cap_sheets, invoke_claude, call_claude_with_retry, \
-    merge_index_results, MODEL_MAP, ClaudeCallError, is_fatal_api_error, is_rate_limited, \
+    merge_index_results, resolve_model, build_client, ClaudeCallError, is_fatal_api_error, is_rate_limited, \
     extract_reset_hint
 from .config import Config
 from .share_push import push_shares
@@ -280,18 +280,23 @@ def stage_claude(
 
     taxonomy = [c["slug"] for c in storage.get_categories()]
 
-    # Pin the real CLI's working directory to the sheets dir so headless
-    # claude can read the images without an (auto-denied) permission prompt.
-    # Injected mocks keep their (prompt, model) signature untouched.
-    if invoke is invoke_claude:
-        invoke = functools.partial(
-            invoke_claude, cwd=str(sheets_dir), use_subscription=cfg.use_subscription
-        )
+    # The contact sheets travel WITH the request now, as base64 image blocks,
+    # rather than being read off disk by a CLI whose working directory had to be
+    # pinned to the sheets dir for its permission prompt. One SDK client for the
+    # whole video, so its connection pool is reused across the windows; injected
+    # mocks keep their (prompt, model) signature untouched.
+    real_call = invoke is invoke_claude
+    client = build_client(cfg.anthropic) if real_call else None
 
     results = []
     for window in windows:
         prompt = build_index_prompt(window, taxonomy)
-        result, usage = call_claude_with_retry(prompt, model, invoke=invoke)
+        call = invoke
+        if real_call:
+            call = functools.partial(
+                invoke_claude, images=window, settings=cfg.anthropic, client=client
+            )
+        result, usage = call_claude_with_retry(prompt, model, invoke=call)
         results.append(result)
         _log_usage(cfg, video, model, len(window), usage)
 
@@ -302,7 +307,7 @@ def stage_claude(
         quality_flags=merged["quality_flags"],
         category_hint=merged["category_hint"],
         segments=merged["segments"],
-        model=MODEL_MAP.get(model, model),
+        model=resolve_model(model),
     )
 
 
@@ -374,6 +379,18 @@ def stage_transcribe(
             )
             return
         else:
+            if not cfg.whisper.python or not cfg.whisper.script:
+                # Unconfigured is not an error HERE — this stage is additive
+                # enrichment and must never fail a video — but it is the state a
+                # fresh install is in, so the message names the keys rather than
+                # saying "not found: . / ." (2026-08-17, item 14). The stage the
+                # operator asked for by name refuses instead: Config.require_whisper.
+                logger.info(
+                    "transcribe: video %s skipped (whisper.python/whisper.script not "
+                    "configured — see docs/INDEXERS.md, or set CCSYNC_WHISPER_PYTHON "
+                    "/ CCSYNC_WHISPER_SCRIPT)", video["id"],
+                )
+                return
             python_exe = Path(cfg.whisper.python)
             script_path = Path(cfg.whisper.script)
             if not python_exe.is_file() or not script_path.is_file():
@@ -386,6 +403,7 @@ def stage_transcribe(
                 src_path, out_dir,
                 str(python_exe), str(script_path),
                 model=cfg.whisper.model,
+                model_dir=cfg.whisper.model_dir,
                 language=cfg.whisper.language,
                 max_gap_s=cfg.whisper.max_gap_s,
                 max_duration_s=cfg.whisper.max_duration_s,
@@ -489,7 +507,9 @@ def stage_embed(cfg: Config, storage: Storage, video: dict[str, Any]) -> None:
             return
 
         texts = [t for _, _, t in to_embed]
-        vectors = embed.embed_texts(texts, model_name=model_name, batch_size=cfg.embedding.batch_size)
+        vectors = embed.embed_texts(texts, model_name=model_name,
+                                    batch_size=cfg.embedding.batch_size,
+                                    cache_dir=cfg.embedding.cache_dir)
         dim = int(vectors.shape[1]) if vectors.size else 0
         storage.upsert_embeddings([
             (source, source_id, video["id"], model_name, dim, embed.to_blob(vec))
@@ -621,13 +641,16 @@ def _process_video(
                 # or block a later stage (e.g. claude) even if that inner guard is bypassed
                 # (a monkeypatched stage_transcribe in tests, for instance).
                 logger.warning("transcribe: video %s failed: %s", current["id"], e)
-            # Match on the MESSAGE, not the exception class. A rate limit
-            # arrives two different ways: as ClaudeCallError when the CLI exits
-            # 0 but reports is_error in its envelope, and as a plain
-            # RuntimeError when it exits non-zero. An earlier version required
-            # ClaudeCallError here, so a 429 delivered by non-zero exit slipped
-            # through and marked 1,097 videos 'error' in a single night —
-            # precisely what FatalRunError exists to prevent.
+            # Match on the MESSAGE, not the exception class. A rate limit used
+            # to arrive two different ways from the `claude -p` CLI — as
+            # ClaudeCallError when it exited 0 but reported is_error in its
+            # envelope, and as a plain RuntimeError when it exited non-zero. An
+            # earlier version required ClaudeCallError here, so a 429 delivered
+            # by non-zero exit slipped through and marked 1,097 videos 'error'
+            # in a single night — precisely what FatalRunError exists to
+            # prevent. The SDK is tidier (ClaudeCallError, always), but the rule
+            # stands: classify on what the failure SAYS, so a new transport
+            # cannot reintroduce that night.
             #
             # Gated on the stage that actually calls the API (BROLL-IDX-1,
             # 2026-08-14): probe/proxy/frames failures carry filenames and whole

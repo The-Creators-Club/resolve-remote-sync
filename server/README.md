@@ -1,6 +1,6 @@
-# server/ -- Creators Club Sync: server-side setup scripts
+# server/ -- CC Sync: server-side setup scripts
 
-Scripts that provision the TrueNAS side of the Resolve remote-sync system:
+Scripts that provision the NAS side of the Resolve remote-sync system:
 project tree, editor accounts, the Syncthing app + per-project folders, and
 a one-shot health check. See `../SPEC.md` (S1 Server setup) for the design
 this implements.
@@ -67,8 +67,10 @@ all of it comes from ONE manifest now, not from literals in `common.py`. Copy
 here picks it up. Precedence is unchanged -- a flag beats an env var beats
 `site.toml` -- but the bottom of the chain is now BLANK: a script that cannot
 find a value it needs stops and names the key, instead of silently aiming at
-the NAS this code was written against. `docs/SERVER.md` has this fleet's
-values ready to paste.
+the NAS this code was written against. `site.example.toml` documents every
+key inline; `docs/CONFIG.md` is the same schema as a lookup table, and
+`docs/SERVER.md` / `docs/SERVER-SYNOLOGY.md` show a filled-in skeleton per
+platform.
 
 Every script takes `--site <path>` (also `$CCSYNC_SITE`; otherwise
 `<repo>/site.toml`) and `--nas-kind truenas|synology` (also
@@ -114,11 +116,15 @@ able to intercept them.
 | `SYNCTHING_API_KEY` | no (or pass `--api-key`) | -- | same, plus `install_dashboard_app.py` (required there) |
 | `DASH_REPORT_TOKEN` | yes, for `install_dashboard_app.py` | -- | the shared secret companions present when POSTing status; same value goes in each editor's `dashboard_token` |
 | `DASH_SESSION_SECRET` | yes, for `install_dashboard_app.py` | -- | signs editors' dashboard login cookies. Keep it **stable across deploys** -- changing it logs everyone out. Pass it again on `--recreate`. |
+| `TRUENAS_API_KEY` | no, but **preferred** | -- | a SCOPED TrueNAS API key, written into the container instead of the admin password. What is inside the container is then limited to user/group/`sharing.smb` rather than root-equivalent. Mint one with `create_api_key.py`. TrueNAS only -- DSM has no API-key concept |
+| `TRUENAS_SUDO_PW` | no | `TRUENAS_PW` | a DIFFERENT password for `sudo -S` on the NAS, where the platform allows the two to differ |
+| `CCSYNC_SSH_TRUST_ON_FIRST_USE` | no (`--trust-host-key-on-first-use`) | unset | `1` records an unpinned host's key on the FIRST connection and prints it. Every later run is checked against it, and a key that CHANGES is always a refusal. Without a pin and without this, an unknown host is refused -- that channel carries the admin password on its stdin |
+| `CCSYNC_KNOWN_HOSTS` | no | `~/.ccsync/known_hosts` | where those pins are recorded |
 
 `TRUENAS_PW` is reused as the sudo password on the remote host (`SUDO_PW`
-is exported in the SSH session and piped to `sudo -S`), matching the
-existing pattern in `~/scripts/truenas_ssh.py` -- `truenas_admin`'s login
-password and sudo password are the same account.
+is exported in the SSH session and piped to `sudo -S`): on both platforms the
+admin account's login password and its sudo password are the same account's.
+Set `TRUENAS_SUDO_PW` where they are not.
 
 The Syncthing GUI URL + API key come from the TrueNAS Apps UI once
 `install_syncthing_app.py` has run (Apps > syncthing > Web UI for the URL;
@@ -132,9 +138,9 @@ inside the app's persistent storage).
   the SSH runner (paramiko, mirrors `~/scripts/truenas_ssh.py`), and thin
   wrappers around `requests` for the TrueNAS and Syncthing REST APIs. All
   credentials come from env vars; nothing is hardcoded.
-- **`setup_tree.py`** -- assumes the `TheCreatorsPool` dataset and its
-  mountpoint already exist (per SPEC, they do); only creates directories
-  under `Creators_Club/Projects/<year>/<series>/<project>` and sets
+- **`setup_tree.py`** -- assumes the dataset/shared folder named by
+  `[tree] pool_root` and its mountpoint already exist; only creates
+  directories under `<tree>/Projects/<year>/<series>/<project>` and sets
   ownership (`broll:editors`) + mode (`2770`, setgid) recursively. Does
   **not** create `Proxy/` subfolders -- Blackmagic Proxy Generator creates
   those on demand.
@@ -164,7 +170,8 @@ inside the app's persistent storage).
   written as. It still does a GET first to find the catalog entry and
   validates the fields the create payload needs, failing with a clear
   message rather than guessing if the schema drifts. Two things to know:
-  the in-container mount point for the bind-mounted `Creators_Club` host
+  the in-container mount point for the bind-mounted tree (`[tree]` in
+  `site.toml`) host
   path is assumed to be `/data`, and the create POST returns a job the
   script does not currently wait on -- so "created" means "accepted".
   Check the app's state in the TrueNAS UI afterwards.
@@ -213,6 +220,31 @@ inside the app's persistent storage).
   tailscale check assumes the app's container is literally named
   `tailscale` (per SPEC's "Current state" section) and execs `tailscale
   status --json` inside it via `docker exec` over SSH.
+- **`setup_snapshots.py`** -- configures the snapshot schedule that the
+  "snapshot before any privileged operation" rule depends on (tree root and
+  apps root, with hourly/daily retention). **It is a DRY RUN by default**;
+  `--apply` is what changes the NAS. `--list` shows what exists and
+  `--snapshot-now <name>` takes an ad-hoc one. Run it during the install,
+  not after the first incident -- `../docs/BACKUP_RESTORE.md`.
+- **`publish_db.py`** -- the safe way to put a rebuilt search index
+  (`broll.db`, `music.db`) onto a live NAS: checkpoint, stage, verify, swap,
+  and delete the stale `-wal`/`-shm` beside it. Copying the file over the
+  running one instead is how a half-written index gets served. See
+  `../docs/BACKUP_RESTORE.md` "Publishing a search index".
+- **`create_api_key.py`** -- mints a **scoped** TrueNAS API key for the
+  dashboard container, so the container holds something that can only touch
+  user/group/`sharing.smb` instead of the root-equivalent admin password
+  (which is readable with `docker inspect`, or from any code execution
+  inside the container). Export the result as `TRUENAS_API_KEY` before
+  `install_dashboard_app.py`, which prefers it over `TRUENAS_PW`. TrueNAS
+  only: DSM has no API-key concept, so a Synology site keeps using the
+  password.
+- **`secure_syncthing_gui.py`** -- puts a username and password on the
+  Syncthing GUI, which is otherwise an **unauthenticated admin surface over
+  every folder in the fleet**. It does **not** touch the API key, so nothing
+  automated notices. Pair it with `[syncthing] gui_bind` so the GUI is
+  published on one address (or on `127.0.0.1`, reached by an SSH tunnel)
+  rather than on every interface.
 
 ## The home directory trap (why `setup_editor_account.py` sets permissions)
 
@@ -225,7 +257,7 @@ NFSv4 ACL. On this pool that ACL carries an inheritable
 `everyone@:rwxp...:fd----I:allow` ACE, so every editor home is created:
 
 ```
-drwxrwxrwx broll:broll  /mnt/tank/TheCreatorsPool/homes/<editor>
+drwxrwxrwx broll:broll  <pool_root>/homes/<editor>
 ```
 
 world-writable, and owned by the dataset owner rather than the editor. sshd
@@ -235,7 +267,7 @@ user. The only trace is in the NAS auth log:
 
 ```
 Authentication refused: bad ownership or modes for directory
-/mnt/tank/TheCreatorsPool/homes/<editor>
+<pool_root>/homes/<editor>
 ```
 
 The editor sees only rclone's generic
@@ -281,6 +313,6 @@ python check_health.py --dry-run
 ```
 
 These particular commands are the local, offline checks -- `--dry-run` opens
-no connection, so nothing above touches `192.168.0.102`. For which scripts
+no connection, so nothing above touches the NAS at all. For which scripts
 have since been confirmed against the live NAS, see **Live status** at the
 top of this file.

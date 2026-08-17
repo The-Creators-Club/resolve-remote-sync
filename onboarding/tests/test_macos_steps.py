@@ -40,9 +40,26 @@ class TestSelectors:
         assert steps.companion_exe_name("win32") == "ccsync-companion.exe"
 
     def test_default_local_root(self):
-        mac_root = steps.default_local_root("darwin")
-        assert mac_root == str(Path.home() / "Creators_Club")
-        assert steps.default_local_root("win32") == r"C:\Creators_Club"
+        # The tree's NAME is site data since 2026-08-17
+        # (COMMERCIAL_READINESS.md item 10); with no manifest both halves fall
+        # back to the same neutral one, never to a customer's.
+        assert steps.site_tree_name({}) == steps.NEUTRAL_TREE_NAME
+        assert steps.default_local_root("darwin", site={}) == \
+            str(Path.home() / steps.NEUTRAL_TREE_NAME)
+        assert steps.default_local_root("win32", site={}) == \
+            f"C:\\{steps.NEUTRAL_TREE_NAME}"
+
+    def test_default_local_root_follows_the_site_manifest(self):
+        site = {"tree_name": "Creators_Club"}
+        assert steps.default_local_root("darwin", site=site) == \
+            str(Path.home() / "Creators_Club")
+        assert steps.default_local_root("win32", site=site) == r"C:\Creators_Club"
+
+    def test_a_tree_name_with_a_separator_is_not_used_as_a_path(self):
+        """A manifest value goes straight into a path here, so anything that
+        is not one segment counts as "the site did not say"."""
+        for bad in ("../..", "a/b", "a\\b", ".", ""):
+            assert steps.site_tree_name({"tree_name": bad}) == steps.NEUTRAL_TREE_NAME
 
     def test_default_base_local_root(self):
         # Windows base: P:\ IS the NAS share mapping, and that is true of
@@ -58,11 +75,29 @@ class TestSelectors:
         assert steps.companion_bin_dir("win32") == steps.COMPANION_BIN_DIR
 
     def test_mac_default_matches_the_bootstraps_own_default(self):
-        # macos_bootstrap.sh ships LOCAL_ROOT="$HOME/Creators_Club"; the two
-        # must agree or a wizard install and a hand re-run of the script
-        # would disagree about where the tree lives.
+        # macos_bootstrap.sh takes the tree name from the site manifest and
+        # falls back to a neutral one -- it shipped the literal
+        # "$HOME/Creators_Club" until 2026-08-17 (COMMERCIAL_READINESS.md item
+        # 10). The two halves must agree on BOTH ends of that rule, or a
+        # wizard install and a hand re-run of the script put the tree in
+        # different folders and the editor syncs an empty one.
         sh = (REPO_ROOT / "installer" / "macos_bootstrap.sh").read_text(encoding="utf-8")
-        assert 'LOCAL_ROOT="$HOME/Creators_Club"' in sh
+        assert 'LOCAL_ROOT="$HOME/$TREE_NAME"' in sh
+        assert 'TREE_NAME="$(site_value tree_name)"' in sh
+        assert f'TREE_NAME="{steps.NEUTRAL_TREE_NAME}"' in sh, \
+            "the bootstrap's fallback tree name and steps.NEUTRAL_TREE_NAME have drifted"
+        assert steps.default_local_root("darwin", site={"tree_name": "Studio_Tree"}) == \
+            str(Path.home() / "Studio_Tree")
+
+    def test_windows_default_matches_the_windows_bootstraps_own_default(self):
+        """The same parity claim on the other platform: windows_bootstrap.ps1
+        reads tree_name from the manifest and falls back to the same neutral
+        name, so a wizard install and a hand re-run of the .ps1 agree."""
+        ps1 = (REPO_ROOT / "installer" / "windows_bootstrap.ps1").read_text(encoding="utf-8")
+        assert '$LocalRoot = "$env:SystemDrive\\$TreeName"' in ps1
+        assert '$TreeName = Get-SiteValue "tree_name"' in ps1
+        assert f'$TreeName = "{steps.NEUTRAL_TREE_NAME}"' in ps1, \
+            "windows_bootstrap.ps1's fallback tree name and steps.NEUTRAL_TREE_NAME have drifted"
 
 
 # -- tailscale -----------------------------------------------------------------
@@ -97,7 +132,7 @@ class TestTailscaleMac:
             calls.append(cmd[0])
             if cmd[0] == "tailscale":
                 raise FileNotFoundError(cmd[0])
-            return _FakeResult(returncode=0, stdout="100.66.62.41  mac  leso@ ...")
+            return _FakeResult(returncode=0, stdout="100.64.0.2  mac  editor1@ ...")
 
         assert steps.tailscale_up(run=fake_run, platform="darwin") is True
         assert calls == ["tailscale", steps.TAILSCALE_CLI_MACOS]
@@ -119,7 +154,7 @@ class TestTailscaleMac:
     def test_windows_behavior_unchanged_by_the_candidate_loop(self):
         def fake_run(cmd, **kwargs):
             assert cmd == ["tailscale", "status"]
-            return _FakeResult(returncode=0, stdout="100.71.0.2 pc alex@ windows -")
+            return _FakeResult(returncode=0, stdout="100.71.0.2 pc owen@ windows -")
 
         assert steps.tailscale_up(run=fake_run, platform="win32") is True
 
@@ -151,7 +186,7 @@ class TestRunBootstrapMac:
         script = tmp_path / "macos_bootstrap.sh"
         script.write_text("# fake")
         defaults = dict(
-            editor_name="leso",
+            editor_name="editor1",
             dashboard_token="report-secret",
             tailnet_host="10.0.0.5",
             dashboard_url="http://10.0.0.5:8480",
@@ -181,7 +216,7 @@ class TestRunBootstrapMac:
         cmd = captured["cmd"]
         assert cmd[0] == "bash" and str(script) in cmd
         assert "--tailnet-host" in cmd and "10.0.0.5" in cmd
-        assert "--editor-name" in cmd and "leso" in cmd
+        assert "--editor-name" in cmd and "editor1" in cmd
         assert "--local-root" in cmd and "/Volumes/T7/Creators_Club" in cmd
         assert "--companion-file" in cmd and str(companion) in cmd
         # No PowerShell leakage.
@@ -245,7 +280,7 @@ class TestRunBootstrapMac:
 class TestMacOutputParsing:
     def test_marker_lines_parse_exactly_like_windows(self):
         output = (
-            "[ccsync] ccsync macOS bootstrap 1.0.17 -- editor 'leso'\n"
+            "[ccsync] ccsync macOS bootstrap 1.0.17 -- editor 'editor1'\n"
             "[ccsync] WARNING: CAPABILITY MISSING: rclone is NOT installed. Lanes A and B "
             "-- every video upload and every proxy download -- cannot run on this Mac.\n"
             "[ccsync] WARNING: CAPABILITY MISSING: Syncthing is NOT installed. Lane C will "
@@ -332,7 +367,7 @@ class TestBaseInstallMac:
         assert steps.companion_bin_dir("darwin") == Path.home() / ".local" / "ccsync" / "bin"
 
     def test_launch_agent_plist_matches_the_bootstraps_shape(self, tmp_path):
-        exe = Path("/Users/leso/.local/ccsync/bin/ccsync-companion")
+        exe = Path("/Users/editor1/.local/ccsync/bin/ccsync-companion")
         plist = steps.write_companion_launch_agent(exe, agents_dir=tmp_path)
         assert plist.name == steps.COMPANION_PLIST_NAME
         text = plist.read_text(encoding="utf-8")
@@ -345,13 +380,32 @@ class TestBaseInstallMac:
         assert "KeepAlive" not in text
 
     def test_wizard_plist_is_byte_identical_to_the_bootstraps(self, tmp_path):
-        # Both roles must end up with the IDENTICAL autostart shape; the
-        # editor's plist comes from macos_bootstrap.sh, base's from here.
+        """Both roles must end up with the IDENTICAL autostart shape; the
+        editor's plist comes from macos_bootstrap.sh, base's from here.
+
+        THIS TEST USED TO XFAIL ITSELF while the LaunchAgent rename was
+        mid-flight (2026-08-17, COMMERCIAL_READINESS.md item 10). The
+        bootstrap has since made the move -- but through a shell variable
+        (`<string>$COMPANION_LABEL</string>`), so the literal-text check that
+        armed the xfail could never have cleared, whatever the bootstrap did.
+        It compares the SUBSTITUTED heredoc now, which is the thing that has
+        to match.
+        """
         sh = (REPO_ROOT / "installer" / "macos_bootstrap.sh").read_text(encoding="utf-8")
-        for line in ("<string>com.creatorsclub.ccsync.companion</string>",
-                     "<key>AbandonProcessGroup</key>"):
-            assert line.strip() in [l.strip() for l in sh.splitlines()]
-        assert "<key>RunAtLoad</key>" in steps.COMPANION_LAUNCH_AGENT_TEMPLATE
+        label = steps.COMPANION_PLIST_NAME[: -len(".plist")]
+        assert f'COMPANION_LABEL="{label}"' in sh, \
+            "macos_bootstrap.sh no longer writes the com.ccsync.* LaunchAgent label"
+        # ...and it retires the legacy pair FIRST, or an upgraded Mac runs two
+        # companions and the second loses port 8899.
+        assert 'retire_legacy_agent "$COMPANION_PLIST_LEGACY"' in sh
+        for name in steps.LEGACY_PLIST_NAMES:
+            assert name in sh
+
+        exe = "/Users/editor1/.local/ccsync/bin/ccsync-companion"
+        body = sh.split('cat > "$COMPANION_PLIST" <<PLIST\n', 1)[1].split("\nPLIST\n", 1)[0]
+        from_bootstrap = (body.replace("$COMPANION_LABEL", label)
+                              .replace("$COMPANION_PATH", exe)) + "\n"
+        assert from_bootstrap == steps.COMPANION_LAUNCH_AGENT_TEMPLATE.format(exe_path=exe)
 
     def test_load_launch_agent_bootout_then_bootstrap(self, tmp_path):
         plist = tmp_path / steps.COMPANION_PLIST_NAME
@@ -419,7 +473,10 @@ class TestValidateLocalRootMac:
 
     def test_volume_root_rejected_for_editors_with_suggestion(self):
         problem = self._validate("/Volumes/T7")
-        assert problem and "/Volumes/T7/Creators_Club" in problem
+        # The suggested folder is the NEUTRAL tree name -- one customer's was
+        # baked into every one of these messages until 2026-08-17
+        # (COMMERCIAL_READINESS.md item 10).
+        assert problem and f"/Volumes/T7/{steps.NEUTRAL_TREE_NAME}" in problem
         assert self._validate("/Volumes/T7/") is not None
 
     def test_volume_root_allowed_for_base(self):
@@ -452,7 +509,7 @@ class TestValidateLocalRootMac:
             probed.append(path)
             return False
 
-        assert self._validate("/Users/leso/Creators_Club", is_mount=probe) is None
+        assert self._validate("/Users/editor1/Creators_Club", is_mount=probe) is None
         assert probed == []  # only /Volumes paths are probed
 
     def test_broken_probe_never_blocks(self):
@@ -474,7 +531,7 @@ class TestEnsureConfigMac:
     def test_defaults_local_root_to_the_mac_default(self, tmp_path):
         path = tmp_path / "config.toml"
         steps.ensure_config(
-            "editor", editor_name="leso", dashboard_url="http://x:8480",
+            "editor", editor_name="editor1", dashboard_url="http://x:8480",
             dashboard_token="tok", local_root=None, config_path=path,
             platform="darwin",
         )
@@ -485,7 +542,7 @@ class TestEnsureConfigMac:
     def test_posix_local_root_written_verbatim_and_prefix_stays_canonical(self, tmp_path):
         path = tmp_path / "config.toml"
         steps.ensure_config(
-            "editor", editor_name="leso", dashboard_url="http://x:8480",
+            "editor", editor_name="editor1", dashboard_url="http://x:8480",
             dashboard_token="tok", local_root="/Volumes/T7/Creators_Club",
             config_path=path, platform="darwin",
         )
@@ -501,7 +558,7 @@ class TestEnsureConfigMac:
         # BOTH keys from it.
         path = tmp_path / "config.toml"
         steps.ensure_config(
-            "base", editor_name="alex", dashboard_url="http://x:8480",
+            "base", editor_name="owen", dashboard_url="http://x:8480",
             dashboard_token="tok", local_root="/Volumes/Media/Tree",
             config_path=path, platform="darwin",
         )
@@ -516,7 +573,7 @@ class TestEnsureConfigMac:
 # -- clean slate, macOS --------------------------------------------------------
 
 
-HOME = Path("/Users/leso")
+HOME = Path("/Users/editor1")
 BIN = HOME / ".local" / "ccsync" / "bin"
 AGENTS = HOME / "Library" / "LaunchAgents"
 
@@ -801,7 +858,9 @@ class TestMacBundleIsOnedir:
 
         kwargs = _kwargs(_spec_calls("BUNDLE")[0])
         assert kwargs["name"].value == "CCSync Onboarding.app"
-        assert kwargs["bundle_identifier"].value == "com.creatorsclub.ccsync.onboard"
+        # Renamed off one tenant's reverse-DNS 2026-08-17
+        # (COMMERCIAL_READINESS.md item 10).
+        assert kwargs["bundle_identifier"].value == "com.ccsync.onboard"
         plist = {k.value: v for k, v in zip(kwargs["info_plist"].keys, kwargs["info_plist"].values)}
         assert "CFBundleShortVersionString" in plist
         assert isinstance(plist["NSHighResolutionCapable"], ast.Constant)

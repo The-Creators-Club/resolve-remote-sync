@@ -16,7 +16,7 @@ TOKEN = "companion-token"
 def env(tmp_path):
     db_path = tmp_path / "sel.db"
     settings = Settings(db_path=str(db_path), session_secret=SECRET,
-                        report_token=TOKEN, admin_users=frozenset({"alex"}))
+                        report_token=TOKEN, admin_users=frozenset({"owen"}))
     app = create_app(settings)
     with TestClient(app) as client:
         conn = dbmod.connect(db_path)
@@ -74,7 +74,7 @@ def test_auth_matrix(env):
     assert client.put("/api/v1/selection/jsmith/2025-ff4-nuclear").status_code == 403
     assert client.get("/api/v1/selection/jsmith").status_code == 401 or True  # other cannot read either
     # admin: yes
-    as_user(client, "alex")
+    as_user(client, "owen")
     assert client.put("/api/v1/selection/jsmith/2025-ff4-nuclear").status_code == 200
     assert client.get("/api/v1/selection/jsmith").status_code == 200
 
@@ -120,16 +120,16 @@ def test_companion_can_untick_its_own_selection(env):
 
 def test_companion_cannot_untick_someone_elses_selection(env):
     client, conn = env
-    as_user(client, "ruskin")
-    client.put("/api/v1/selection/ruskin/2025-ff4-nuclear")
+    as_user(client, "editor2")
+    client.put("/api/v1/selection/editor2/2025-ff4-nuclear")
     client.cookies.delete(auth.COOKIE_NAME)
 
-    # identity says jsmith, target says ruskin -> refused
-    r = client.delete("/api/v1/selection/ruskin/2025-ff4-nuclear",
+    # identity says jsmith, target says editor2 -> refused
+    r = client.delete("/api/v1/selection/editor2/2025-ff4-nuclear",
                       headers=companion_headers("jsmith"))
     assert r.status_code == 401
     # token without identity -> refused (session secret is configured)
-    r = client.delete("/api/v1/selection/ruskin/2025-ff4-nuclear",
+    r = client.delete("/api/v1/selection/editor2/2025-ff4-nuclear",
                       headers={"X-CCSync-Token": TOKEN})
     assert r.status_code == 401
-    assert conn.execute("SELECT COUNT(*) FROM selections WHERE editor_username='ruskin'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM selections WHERE editor_username='editor2'").fetchone()[0] == 1

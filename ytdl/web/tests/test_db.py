@@ -537,7 +537,7 @@ def test_reset_stale_jobs_restarts_mid_pipeline_and_resumes_downloads(con, job):
     db.set_phase(con, job['id'], 'searching')
 
     # ANOTHER editor's job: one active job per editor is a unique index now
-    # (YTDL-25), so the two halves of boot recovery cannot both be alex's.
+    # (YTDL-25), so the two halves of boot recovery cannot both be owen's.
     slug, label, _ = PROJECTS[1]
     other = db.create_job(con, OTHER_USER, 'wind', 'wind', slug, label)
     db.add_video(con, other, 'vid00000002', 'u')

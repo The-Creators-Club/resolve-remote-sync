@@ -10,23 +10,56 @@ folders are indistinguishable.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Iterable
 
 log = logging.getLogger("ccsync.dashboard.provision")
 
+# THE canonical copy of this list. server/common.py and the companion hold
+# their own (neither can import this module), and
+# server/tests/test_cross_component.py pins all of them byte-identical --
+# which extension counts as video decides whether a file travels by rclone
+# (lanes A/B) or by Syncthing (lane C), and a drift means some media type is
+# carried by both or by neither. NOT site-configurable for that reason; it is
+# published read-only by GET /api/v1/site as `video_extensions` so a future
+# client can read it rather than grow a fourth copy (2026-08-17,
+# COMMERCIAL_READINESS.md item 11).
 VIDEO_EXTENSIONS = [
     ".braw", ".mov", ".mp4", ".mxf", ".avi", ".mts", ".m2ts", ".mkv",
     ".r3d", ".crm", ".mpg", ".mpeg", ".wmv", ".webm", ".insv", ".360",
 ]
 _VIDEO_EXT_SET = frozenset(VIDEO_EXTENSIONS)
 
-# Intentional copy of server/common.py's TEMPLATE_FOLDERS (same reason as
-# slugify above: the container cannot import server/) -- if the standard
-# project template changes there, change it here too. Used by the
-# /project-setup "create new project" flow (api.create_tree_project).
-TEMPLATE_FOLDERS = [
+
+def _site_list(env_var: str, default: list) -> list:
+    """A comma-separated site override from the container's environment, or
+    `default`. Blank/absent means "this site did not say" -- never an empty
+    list, which would silently create projects with no subfolders at all.
+
+    The container has no site.toml (server/common.py reads that, on the
+    machine that runs the installers); its site facts arrive as DASH_SITE_*
+    env vars in the compose file, which is where the installer renders
+    site.toml's values (2026-08-17, COMMERCIAL_READINESS.md item 11).
+    """
+    raw = os.environ.get(env_var, "")
+    items = [p.strip().replace("\\", "/").strip("/") for p in raw.split(",")]
+    items = [p for p in items if p]
+    return items or list(default)
+
+
+# The out-of-the-box project template -- intentional copy of
+# server/common.py's DEFAULT_TEMPLATE_FOLDERS (same reason as slugify above:
+# the container cannot import server/). Used by the /project-setup "create new
+# project" flow (api.create_tree_project) and published by GET /api/v1/site.
+#
+# The DEFAULTS are what the cross-component test pins; the folders themselves
+# are documentary-shop specific ("Interviewees", "Render in Place"), so a site
+# that edits differently overrides them with [tree] template_folders in
+# site.toml -> DASH_SITE_TEMPLATE_FOLDERS (2026-08-17,
+# COMMERCIAL_READINESS.md item 11).
+DEFAULT_TEMPLATE_FOLDERS = [
     "AE",
     "Audio/Music",
     "Audio/Voiceover",
@@ -36,6 +69,7 @@ TEMPLATE_FOLDERS = [
     "Subs",
     "Youtube",
 ]
+TEMPLATE_FOLDERS = _site_list("DASH_SITE_TEMPLATE_FOLDERS", DEFAULT_TEMPLATE_FOLDERS)
 
 
 def classify_media(rel_parts: Iterable[str], ext: str) -> str | None:
@@ -87,7 +121,7 @@ PARTIAL_IGNORE_LINES = ["(?i)**/*.partial", "(?i)*.partial"]
 # tree, so lane C replicated every growing `.part` out to each editor with the
 # project ticked; since the 2026-08-11 ignoreDelete retrofit the worker's
 # completion rename never propagates, so what lands on an editor's disk is
-# permanent -- 27 orphans, ~1.6 GB, over three days on editor ruskin's machine
+# permanent -- 27 orphans, ~1.6 GB, over three days on one editor's machine
 # (2026-08-13/14).
 #
 # THIS copy is the one that decides whether the patterns survive: collector.
@@ -132,10 +166,39 @@ LUTS_REL = "Assets/Luts"
 STILLS_FOLDER_ID = "assets-stills"
 STILLS_REL = "Assets/Stills"
 
-SHARED_ASSET_FOLDERS = [
+DEFAULT_SHARED_ASSET_FOLDERS = [
     (LUTS_FOLDER_ID, LUTS_REL, "Assets/Luts (LUT library)"),
     (STILLS_FOLDER_ID, STILLS_REL, "Assets/Stills (Resolve gallery)"),
 ]
+
+# Known labels for the folders the product ships with. A site that adds its
+# own (sound FX, Fusion macros) gets the rel path as its label rather than a
+# blank one -- a label is what the dashboard prints, never an identity.
+_ASSET_LABELS = {rel: label for _fid, rel, label in DEFAULT_SHARED_ASSET_FOLDERS}
+
+
+def shared_asset_folders_for(rels: Iterable[str]) -> list:
+    """(id, rel, label) triples for a list of rel paths. The id is slugify(rel)
+    -- exactly what the two default ids already are -- so the Syncthing folder
+    id a site's extra library gets is derived by the same rule as everything
+    else in the fleet, not invented per component."""
+    out = []
+    for rel in rels:
+        rel = str(rel).replace("\\", "/").strip("/")
+        if not rel:
+            continue
+        out.append((slugify(rel), rel, _ASSET_LABELS.get(rel, rel)))
+    return out
+
+
+# Site override, same shape and same reason as TEMPLATE_FOLDERS above: a
+# customer with a different asset library says so once in site.toml [tree]
+# shared_assets. The DEFAULTS are what test_cross_component pins across the
+# three components -- an override is this site's data, not a code change
+# (2026-08-17, COMMERCIAL_READINESS.md item 11).
+_SITE_SHARED_ASSET_RELS = _site_list("DASH_SITE_SHARED_ASSETS", [])
+SHARED_ASSET_FOLDERS = (shared_asset_folders_for(_SITE_SHARED_ASSET_RELS)
+                        or DEFAULT_SHARED_ASSET_FOLDERS)
 
 SHARED_ASSET_FOLDER_IDS = frozenset(fid for fid, _rel, _label in SHARED_ASSET_FOLDERS)
 

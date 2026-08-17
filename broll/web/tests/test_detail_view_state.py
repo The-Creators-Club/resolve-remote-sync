@@ -86,10 +86,19 @@ def test_every_writer_of_the_category_select_goes_through_one_helper(js):
 
 def test_the_helper_never_assigns_a_shoot_slug_to_the_select(js):
     body = _function(js, "syncCategorySelect")
-    assert 'state.collection === "creators_club" ? "" : state.category' in body, (
-        "a Creators_Club slug is a shoot path, never an <option> value -- "
+    # Through the helper, not against a literal: the own-footage slug is site
+    # data since 2026-08-17 (COMMERCIAL_READINESS.md item 4) and this file
+    # used to pin one customer's spelling of it.
+    assert 'isOwnedCollection(state.collection) ? "" : state.category' in body, (
+        "an own-footage slug is a shoot path, never an <option> value -- "
         "assigning it blanks the control instead of reading 'All categories'"
     )
+
+
+def test_no_customers_collection_slug_is_compiled_into_the_frontend(js):
+    """The slug reaches the page from /api/tree, which names each root."""
+    assert 'state.collection === "' not in js
+    assert "learnCollections(state.tree)" in js
 
 
 def test_no_call_site_still_assigns_the_select_directly(js):

@@ -542,7 +542,7 @@ def test_the_url_parser_refuses_anything_that_is_not_one_video():
     for text in ('', '   ', 'algal reef controversy',
                  'https://vimeo.com/12345678901',
                  'https://www.youtube.com/playlist?list=PL123',
-                 'https://www.youtube.com/@creatorsclub',
+                 'https://www.youtube.com/@somechannel',
                  'https://www.youtube.com/results?search_query=reef',
                  f'https://youtube.com.evil.net/watch?v={VID}',
                  f'https://notyoutube.com/watch?v={VID}',

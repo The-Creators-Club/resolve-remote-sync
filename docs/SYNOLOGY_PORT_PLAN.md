@@ -39,7 +39,7 @@ Linux afterwards are days each.
 
 **Precondition:** the de-tenanting subset from `COMMERCIAL_READINESS.md`
 (blank IP/ID defaults, compose as a template, a minimal site manifest). Doing
-Synology on top of hardcoded `192.168.0.102`/`/mnt/tank` defaults is a fork,
+Synology on top of hardcoded `192.168.0.10`/`/mnt/tank` defaults is a fork,
 not a port — that is WP0.
 
 ## Design decisions (make these first)

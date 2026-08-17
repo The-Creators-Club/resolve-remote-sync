@@ -103,11 +103,14 @@ rclone_remote = "ccsync_sftp"
 
 [syncthing]
 gui_url = "http://syncthing:8384"       # the compose service name
+# gui_bind unset: the stack already publishes the GUI on 127.0.0.1 only.
 
 [stack]
 owner = "ccsync-svc"                    # the service account, created for you
 group = "editors"
 project_server = "false"                # no Postgres in this stack (a profile)
+editor_shell = "sftp-only"              # the only supported value on DSM
+project_acl = "shared"                  # "per-project" is PARTIAL here -- see below
 ```
 
 `[stack] uid`/`gid` are deliberately absent: DSM allocates local users from
@@ -228,7 +231,7 @@ which is a one-time click in the Tailscale admin console (DNS -> "Enable
 HTTPS"). Most freshly created tailnets are in this state, so treat the string as
 an expected first-run condition, show the click, and re-run -- never as
 success. VERIFIED 2026-08-17 on the DS423+ after that click: `serve status`
-reports `https://nas.tail26290e.ts.net (tailnet only) |-- / proxy
+reports `https://<nas>.<tailnet>.ts.net (tailnet only) |-- / proxy
 http://127.0.0.1:8480`; from a tailnet peer, `curl` verifies the certificate
 (`ssl_verify_result 0`), `/` 303s to the login page, `/api/v1/health` answers,
 and the container has `DASH_COOKIE_SECURE=1`. It works with DSM's nginx
@@ -286,6 +289,114 @@ Every editor's rclone remote needs `port`, `shell_type = none` and the 64Ki
 chunk size; the dashboard serves all of them from `GET /api/v1/site`, which the
 installers and the companion read.
 
+### `[stack] editor_shell` on DSM
+
+DSM's out-of-the-box behaviour **is** the hardened posture that TrueNAS had to
+be changed into (`docs/COMMERCIAL_READINESS.md` item 7, `docs/TENANCY.md` §4),
+so a Synology site keeps the default:
+
+```toml
+[stack]
+editor_shell = "sftp-only"    # the only supported value here
+```
+
+- editors are `/sbin/nologin` and interactive SSH is administrators-only on
+  DSM whatever `/etc/passwd` says;
+- **no `Match Group` block is installed.** DSM regenerates
+  `/etc/ssh/sshd_config` whenever the SSH/SFTP services are touched in Control
+  Panel, so anything written there is erased by the next toggle — and it would
+  be redundant. Keep *Enable SFTP service* on and SSH restricted in
+  Control Panel > Terminal & SNMP; that is the equivalent control.
+- `editor_shell = "shell"` is **refused** rather than silently ignored.
+- the manifest already publishes `sftp_shell_type = "none"` here, which is why
+  DSM sites have needed `[net] shell_type = "none"` since the port.
+
+Offboarding is the same command as TrueNAS; on DSM it truncates
+`~/.ssh/authorized_keys` and (with `--lock`) expires the account:
+
+```sh
+python server/setup_editor_account.py --nas-kind synology \
+    --name jsmith --revoke-key --apply --lock
+```
+
+### Per-project ACLs on DSM are PARTIAL — read this before turning them on
+
+`[stack] project_acl = "per-project"` (`docs/TENANCY.md` §2) is only half
+scriptable here, and `set_tree_acl` says so on stderr rather than pretending:
+
+- **The grant works.** An inheritable allow ACE for `proj-<slug>` is added to
+  the project directory with `synoacltool -add`.
+- **The deny does not.** The share-wide `editors` ACE is *inherited* on that
+  path, and DSM offers no scripted way to remove an inherited ACE — you must
+  break inheritance first, which only File Station exposes:
+  *Properties > Permission > uncheck "Inherit permissions from parent folder"*
+  (keeping the current entries), then delete the `editors` entry.
+- **The sticky bit is not available at all.** It is a mode bit, and a `chmod`
+  under a share destroys the Synology ACL (spike 1) — never run one there.
+  DSM's equivalent is an explicit *Deny modify* ACE on the container folders,
+  which is an operator decision, not something a script should invent against
+  a live filesystem holding the customer's footage.
+
+So on DSM, `per-project` is a grant plus a printed operator TODO. If you need
+real per-project isolation on a Synology today, do the File Station steps for
+each project and verify with `synoacltool -get <path>`.
+
+### The NAS admin password, and the container
+
+DSM has **no API-key concept**, so the dashboard container on a Synology site
+still holds `DASH_NAS_PW`. The mitigations that do apply here:
+
+- the account it holds should be a **dedicated administrators-group service
+  account** used by nothing else, not a person's DSM login — DSM requires
+  `administrators` membership for SSH and for the mutating `SYNO.Core.*` calls,
+  so it cannot be reduced further (2FA must be off for it, which is another
+  reason it should not be a human's account);
+- the stack binds the dashboard to **127.0.0.1** and `tailscale serve`
+  publishes it, so the container is not reachable from the LAN;
+- `.env` is 0600 root-owned beside the compose file, and `/app` is mounted
+  read-only;
+- rotate that password on operator turnover, exactly as you would an API key.
+
+TLS verification for those DSM calls is `SYNO_VERIFY_SSL` (falling back to
+`TRUENAS_VERIFY_SSL` / `[nas] verify_ssl`). Off is allowed and **warned about
+on every run**. To turn it on, export DSM's certificate
+(Control Panel > Security > Certificate > Export, or
+`openssl s_client -showcerts -connect <nas>:5001`) and point the variable at
+the PEM — inside the container for the dashboard's copy, which means shipping
+it with the app tree.
+
+### Host-key pinning and first use
+
+Identical to TrueNAS (`docs/SERVER.md`, "Credentials and trust on the base
+rig"): an unknown host key is refused, `[nas] ssh_hostkey` pins it, and the
+first connection to a new DSM box is
+
+```sh
+python server/check_health.py --nas-kind synology --trust-host-key-on-first-use
+```
+
+which records the key in `~/.ccsync/known_hosts` and prints the line to paste.
+The dashboard's own SSH channel (it writes `authorized_keys` over SSH here,
+because DSM has no key API) is pinned separately by
+`DASH_NAS_SSH_HOSTKEY`, which the deploy fills from the same `site.toml` key.
+
+### Syncthing's GUI
+
+The bundled Syncthing service already binds its GUI to **127.0.0.1:8384**
+(`dashboard/deploy/compose.yaml`, profile `bundled-syncthing`) — reach it with
+`ssh -L 8384:127.0.0.1:8384 <admin>@<nas>`. That is the containment; the GUI
+itself still has **no login**, so anyone with a shell on the NAS is a Syncthing
+administrator over every folder in the fleet. Add one:
+
+```sh
+SYNCTHING_API_KEY=... python server/secure_syncthing_gui.py
+```
+
+It leaves the API key alone, so the dashboard and every server script keep
+working unchanged. Do **not** point `--bind` at anything but `127.0.0.1:8384`
+here: the container's own listener must stay reachable from the compose
+network, and the port mapping is what limits it.
+
 ---
 
 ## Snapshots
@@ -302,6 +413,14 @@ fidelity matters.
 
 A snapshot made outside the API (`btrfs subvolume snapshot`, `synobtrfssnap`)
 is invisible to DSM's own list, which keys off `@<share>.meta`.
+
+**Configuring the backup floor** (2026-08-17, `docs/COMMERCIAL_READINESS.md`
+item 8): `python server\setup_snapshots.py --nas-kind synology` reports what
+exists and what it would change; `--apply` does it. Because DSM cannot be
+scheduled from here without the package, that run prints the exact click path
+and **exits 1** — "the script printed some advice" must never read as "the
+customer has backups". The full runbook, including restores and the
+`broll.db`/`music.db` publish, is [BACKUP_RESTORE.md](BACKUP_RESTORE.md).
 
 ---
 

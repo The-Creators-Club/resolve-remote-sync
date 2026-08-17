@@ -15,7 +15,43 @@ set -eu
 # TRUENAS_PW. /data is now 3000:3000 770 and the venv lives at /venv,
 # 3000:3000 mode 700: nothing but the dashboard's own uid can write either.
 VENV=/venv
+
+# The uid:gid this container is SUPPOSED to run as, from site.toml via compose
+# (APP_UID/APP_GID). Advisory only, and deliberately not fatal: an unprivileged
+# container cannot setuid, so there is nothing to do about a mismatch except say
+# so -- but saying so is worth a lot, because the symptom otherwise is silent
+# and delayed. Everything this process writes into /projects, /broll-data and
+# /music-share lands owned by whatever uid it actually has, and a wrong one
+# means editors browsing those shares over SMB see files they cannot open. DSM
+# assigns uids >= 1026 rather than letting you pick 3000, so this is exactly the
+# knob a second site gets wrong (2026-08-17, COMMERCIAL_READINESS.md item 12).
+if [ -n "${APP_UID:-}" ] && [ "$(id -u)" != "$APP_UID" ]; then
+    echo "run.sh: WARNING: running as uid $(id -u), but APP_UID says $APP_UID." >&2
+    echo "run.sh: WARNING: files written into the tree will have the WRONG owner." >&2
+    echo "run.sh: WARNING: fix compose's \`user:\` line (site.toml [stack] uid/gid)." >&2
+fi
+if [ -n "${APP_GID:-}" ] && [ "$(id -g)" != "$APP_GID" ]; then
+    echo "run.sh: WARNING: running as gid $(id -g), but APP_GID says $APP_GID." >&2
+    echo "run.sh: WARNING: the setgid /projects tree needs the editors group." >&2
+fi
+
+# requirements.txt is the hand-maintained FLOOR list; requirements.lock is what
+# `uv pip compile --universal --generate-hashes` resolved from it, and it is
+# what dashboard/deploy/Dockerfile installs. Prefer the lock, and install it
+# with --require-hashes so a compromised or typo-squatted mirror is an install
+# failure rather than a shipped backdoor (2026-08-17, COMMERCIAL_READINESS.md
+# item 13).
+#
+# The fallback is not vestigial: a site whose /app predates the lock -- a
+# rollback to an older code tree, or a hand-assembled install -- still boots on
+# the floors. Whichever file is chosen is also the one the md5 stamp below is
+# taken from, so switching between them re-runs pip exactly once.
 REQS=/app/deploy/requirements.txt
+PIP_HASH_FLAG=""
+if [ -f /app/deploy/requirements.lock ]; then
+    REQS=/app/deploy/requirements.lock
+    PIP_HASH_FLAG=--require-hashes
+fi
 STAMP=$VENV/.requirements-hash
 
 if [ ! -d "$VENV" ]; then
@@ -45,9 +81,19 @@ fi
 # fails hard, because then there is genuinely nothing to run.
 want="$(md5sum "$REQS" | cut -d' ' -f1)"
 have="$(cat "$STAMP" 2>/dev/null || true)"
+# IMAGE MODE (dashboard/deploy/Dockerfile, 2026-08-17): /venv is a layer, not a
+# bind mount, and the Dockerfile already installed this exact lockfile with
+# --require-hashes. The stamp file cannot be there -- it belongs to the host
+# volume this mode does not have -- so without this the container would try to
+# pip-install on every single boot, against a registry it may not be allowed to
+# reach. Marker rather than "is /venv writable?": the answer to that question is
+# also "no" for a broken mount, which must still fail loudly.
+if [ -f "$VENV/.image-baked" ]; then
+    have="$want"
+fi
 if [ "$want" != "$have" ]; then
     echo "run.sh: installing dependencies from $REQS"
-    if "$VENV/bin/pip" install --quiet --no-cache-dir -r "$REQS"; then
+    if "$VENV/bin/pip" install --quiet --no-cache-dir $PIP_HASH_FLAG -r "$REQS"; then
         printf '%s' "$want" > "$STAMP"
     elif [ -n "$have" ]; then
         echo "run.sh: WARNING: dependency install FAILED (PyPI unreachable?)." >&2
@@ -109,20 +155,21 @@ export PYTHONPATH=/app/src:/broll-app:/music-app:/ytdl-app
 # tells the truth about an empty mount. Prepended, so an image that ever does
 # ship its own ffmpeg does not silently take precedence over the pinned build.
 #
-# /opt/claude and /opt/deno ride along on the same reasoning, for /ytdl:
-# the Claude Code CLI that expands one topic into EN+ZH search terms and
-# relevance-filters the results, and the static deno the updated yt-dlp needs
-# as a JS runtime for YouTube's challenges (without it the high-quality
-# formats fail). Both are provisioned onto the host by
-# server/install_dashboard_app.py and mounted read-only, exactly like ffmpeg,
-# and an empty mount is a supported state: ytdlweb reports "claude: missing"
-# on api/health rather than hanging.
+# /opt/deno rides along on the same reasoning, for /ytdl: the static deno the
+# updated yt-dlp uses as a JS runtime for YouTube's "n challenge". Provisioned
+# onto the host by server/install_dashboard_app.py and mounted read-only,
+# exactly like ffmpeg -- but ONLY on a site whose site.toml sets
+# `[features] youtube_unblock` (2026-08-17, docs/COMMERCIAL_READINESS.md
+# item 3). An absent mount is the normal state, and a supported one: shutil.
+# which() tells the truth about it and /ytdl/api/health says so.
 #
-# NOTHING sets HOME here on purpose. The container's uid 3000 has no passwd
-# entry, so `claude` needs a writable HOME -- but exporting one process-wide
-# would change the resolution of ~ for pip, uvicorn and every library in the
-# dashboard for the sake of one subprocess. ytdlweb.claude_cli sets
-# HOME/CLAUDE_CONFIG_DIR (from YTDL_CLAUDE_HOME) in the subprocess env alone.
+# /opt/claude is GONE (item 1). The two AI calls use the anthropic SDK with
+# the customer's ANTHROPIC_API_KEY, so there is no subprocess, no binary to
+# put on PATH, and no need for a writable HOME -- which is why NOTHING sets
+# HOME here and nothing should: exporting one process-wide would change the
+# resolution of ~ for pip, uvicorn and every library in the dashboard. The
+# entry is kept in the PATH below so an older host that still has the mount
+# does not change behaviour mid-upgrade; it can go once no deployment has one.
 export PATH="/opt/ffmpeg:/opt/claude:/opt/deno:$PATH"
 
 exec "$VENV/bin/python" -m uvicorn --factory ccsync_dashboard.app:create_app \

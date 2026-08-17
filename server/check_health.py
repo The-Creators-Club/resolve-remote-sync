@@ -579,7 +579,7 @@ def main():
     args.dashboard_url = require_site_value(
         args.dashboard_url, "[net] dashboard_url", "--dashboard-url")
 
-    print(f"Checking Creators Club sync server ({os.environ.get('TRUENAS_HOST', DEFAULT_TRUENAS_HOST)})...\n")
+    print(f"Checking CC Sync server ({os.environ.get('TRUENAS_HOST', DEFAULT_TRUENAS_HOST)})...\n")
 
     check_postgres(args.dry_run)
     check_tailscale(args.dry_run)

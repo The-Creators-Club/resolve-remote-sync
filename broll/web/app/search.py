@@ -488,7 +488,12 @@ def build_collection_clause(
     An empty creators set makes 'creators_club' match nothing and 'downloads'
     match everything, which is the correct unconfigured behaviour.
     """
-    if collection not in (config.COLLECTION_DOWNLOADS, config.COLLECTION_CREATORS):
+    # normalise_collection maps the legacy `creators_club` spelling onto this
+    # deployment's own-footage slug and turns anything unknown into "" (=no
+    # filter), so a bookmarked URL from before the slug became site data still
+    # browses the same root (2026-08-17, COMMERCIAL_READINESS.md item 4).
+    collection = config.normalise_collection(collection)
+    if not collection:
         return "", []
     creators = sorted(creators_shares(conn))
     if not creators:

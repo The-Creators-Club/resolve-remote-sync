@@ -116,6 +116,12 @@ def _cfg(tmp_path, **overrides):
         "proxy_gen_idle_seconds": 300,
         "proxy_gen_min_age_seconds": 120,
         "proxy_scan_interval": 900,
+        # Item 9's second stability sample is OFF for the rest of this file:
+        # every test here drives encode_once() directly, which is exactly the
+        # path with no scan sample to pair with, so leaving it on would add a
+        # real 5 s wait per clip to a suite of 40. The gate has its own tests
+        # at the bottom of this file (2026-08-17).
+        "proxy_gen_stability_seconds": 0,
     }
     cfg.update(overrides)
     return cfg
@@ -2116,3 +2122,151 @@ def test_the_encoding_now_list_is_still_a_list_of_paths(tmp_path):
     gen._mark_encoding("A001.mp4", duration_s=10.0)
     assert gen.gap()["encoding_now"] == ["A001.mp4"]
     assert gen.gap()["encoding_count"] == 1
+
+
+# -- item 9 (COMMERCIAL_READINESS.md, 2026-08-17): the three encode gates ---
+
+
+class _Usage:
+    def __init__(self, free_gb, total_gb=1000.0):
+        self.free = int(free_gb * 1024 ** 3)
+        self.total = int(total_gb * 1024 ** 3)
+        self.used = self.total - self.free
+
+
+class TestFreeSpaceGate:
+    def test_a_full_volume_is_refused_and_surfaced(self, tmp_path):
+        notes = []
+        gen = _make_gen(
+            tmp_path, cfg=_cfg(tmp_path),
+            disk_usage_fn=lambda p: _Usage(free_gb=2.0),
+            notify=lambda text, title="": notes.append(text),
+        )
+        src = _original(tmp_path)
+        assert gen.encode_once(_clip(src)) == proxy_gen.RESULT_SKIPPED
+        # No .partial was even created.
+        assert not list((src.parent / "Proxy").glob("*")) if (src.parent / "Proxy").exists() else True
+        assert notes and "proxies" in notes[0]
+        assert "GB free" in gen.coverage()["low_space"]
+
+    def test_the_percentage_floor_beats_the_gigabyte_floor_on_a_big_volume(self, tmp_path):
+        gen = _make_gen(tmp_path, disk_usage_fn=lambda p: _Usage(free_gb=200.0,
+                                                                total_gb=100_000.0))
+        # 20 GB free would pass the flat floor; 5% of 100 TB is 5 TB.
+        assert gen.free_space_shortfall(str(tmp_path / "Proxy" / "x.mp4.partial"))
+
+    def test_plenty_of_room_is_no_shortfall(self, tmp_path):
+        gen = _make_gen(tmp_path, disk_usage_fn=lambda p: _Usage(free_gb=500.0))
+        assert gen.free_space_shortfall(str(tmp_path / "x.mp4.partial")) is None
+
+    def test_a_volume_whose_free_space_cannot_be_read_is_not_a_refusal(self, tmp_path):
+        def boom(path):
+            raise OSError("exotic mount")
+
+        gen = _make_gen(tmp_path, disk_usage_fn=boom)
+        assert gen.free_space_shortfall(str(tmp_path / "x.mp4.partial")) is None
+
+    def test_zero_disables_the_gate(self, tmp_path):
+        gen = _make_gen(tmp_path, cfg=_cfg(tmp_path,
+                                           proxy_gen_free_space_floor_gb=0,
+                                           proxy_gen_free_space_floor_pct=0),
+                        disk_usage_fn=lambda p: _Usage(free_gb=0.001))
+        assert gen.free_space_shortfall(str(tmp_path / "x.mp4.partial")) is None
+
+    def test_the_low_space_note_clears_once_there_is_room(self, tmp_path):
+        room = [_Usage(free_gb=1.0)]
+        gen = _make_gen(tmp_path, disk_usage_fn=lambda p: room[0])
+        src = _original(tmp_path)
+        gen.encode_once(_clip(src))
+        assert gen.coverage()["low_space"]
+        room[0] = _Usage(free_gb=900.0)
+        gen.encode_once(_clip(src))
+        assert gen.coverage()["low_space"] == ""
+
+
+class TestProxySourceRefusal:
+    @pytest.mark.parametrize("path,expected", [
+        (r"P:\Projects\FF5\Proxy\A001.mp4", True),
+        (r"P:\Projects\FF5\proxy\A001.mov", True),
+        (r"P:/Projects/FF5/proxies/A001.mp4", True),
+        (r"P:\Projects\FF5\Proxy\A001.mp4.partial", True),
+        (r"P:\Projects\FF5\A001.braw", False),
+        (r"P:\Projects\Proxy Shoot\A001.mov", False),
+    ])
+    def test_structural_classification(self, path, expected):
+        assert (proxy_gen.is_proxy_path(path) is not None) is expected
+
+    def test_a_proxy_is_never_encoded(self, tmp_path):
+        proxy = tmp_path / "Projects" / "2026" / "FF5" / "Proxy" / "A001.mp4"
+        proxy.parent.mkdir(parents=True)
+        proxy.write_bytes(b"x" * 1000)
+        stamp = time.time() - SETTLED
+        os.utime(proxy, (stamp, stamp))
+        encodes = []
+        gen = _make_gen(tmp_path, encode_fn=lambda *a, **k: encodes.append(a) or {})
+        assert gen.encode_once(_clip(proxy)) == proxy_gen.RESULT_SKIPPED
+        assert encodes == []
+
+
+class TestTwoSampleStability:
+    def _stat(self, size, mtime):
+        class S:
+            st_size = size
+            st_mtime = mtime
+        return S()
+
+    def test_a_source_that_grew_since_the_scan_is_left_alone(self, tmp_path):
+        src = _original(tmp_path, size=1000)
+        gen = _make_gen(tmp_path, cfg=_cfg(tmp_path, proxy_gen_stability_seconds=5))
+        clip = _clip(src)
+        # The scan saw it at 1000 bytes; it is 9000 now.
+        src.write_bytes(b"x" * 9000)
+        stamp = time.time() - SETTLED
+        os.utime(src, (stamp, stamp))
+        gen._last_scan_at = gen._clock() - 60  # the scan sample is old enough
+
+        assert gen._still_needed(clip) == (
+            "the original is still being written (it changed while we watched)")
+
+    def test_a_settled_source_passes_with_no_wait(self, tmp_path):
+        src = _original(tmp_path)
+        gen = _make_gen(tmp_path, cfg=_cfg(tmp_path, proxy_gen_stability_seconds=5),
+                        settle_sleep_fn=lambda s: pytest.fail("waited unnecessarily"))
+        gen._last_scan_at = gen._clock() - 60
+        assert gen._still_needed(_clip(src)) is None
+
+    def test_with_no_scan_sample_it_takes_a_second_one_after_a_wait(self, tmp_path):
+        src = _original(tmp_path)
+        waits = []
+        gen = _make_gen(tmp_path, cfg=_cfg(tmp_path, proxy_gen_stability_seconds=7),
+                        settle_sleep_fn=waits.append)
+        # No size/mtime from a scan and no scan time: the fallback path.
+        assert gen._still_needed({"path": str(src)}) is None
+        assert waits == [7.0]
+
+    def test_the_fallback_catches_a_file_growing_under_it(self, tmp_path):
+        src = _original(tmp_path)
+        gen = _make_gen(tmp_path, cfg=_cfg(tmp_path, proxy_gen_stability_seconds=1))
+
+        def grow(_seconds):
+            src.write_bytes(b"x" * 50_000)
+
+        gen._settle_sleep_fn = grow
+        assert "still being written" in (gen._still_needed({"path": str(src)}) or "")
+
+    def test_zero_disables_the_second_sample(self, tmp_path):
+        src = _original(tmp_path)
+        gen = _make_gen(tmp_path, cfg=_cfg(tmp_path, proxy_gen_stability_seconds=0),
+                        settle_sleep_fn=lambda s: pytest.fail("waited"))
+        assert gen._still_needed({"path": str(src)}) is None
+
+
+class TestProxyDryRun:
+    def test_it_encodes_nothing_and_writes_nothing(self, tmp_path):
+        src = _original(tmp_path)
+        encodes = []
+        gen = _make_gen(tmp_path, cfg=_cfg(tmp_path, proxy_dry_run=True),
+                        encode_fn=lambda *a, **k: encodes.append(a) or {})
+        assert gen.encode_once(_clip(src)) == proxy_gen.RESULT_SKIPPED
+        assert encodes == []
+        assert not (src.parent / "Proxy").exists()

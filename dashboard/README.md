@@ -1,11 +1,12 @@
 # ccsync-dashboard
 
-Fleet sync-status dashboard for Creators Club Sync. Runs on the NAS as a
-TrueNAS custom app; shows every project (left sidebar), and per project every
-editor's lane-C completion (%, files present vs total, exact missing-file
-list from the server Syncthing's REST API) plus the lane A/B status each
-editor's companion reports in. Tailnet-only, no login; the neon-red terminal
-look matches the companion.
+Fleet sync-status dashboard for CC Sync. Runs on the NAS as a container (a
+TrueNAS custom app, or a compose stack on Synology DSM); shows every project
+(left sidebar), and per project every editor's lane-C completion (%, files
+present vs total, exact missing-file list from the server Syncthing's REST
+API) plus the lane A/B status each editor's companion reports in. Reached over
+the tailnet and **behind a login** -- see "Authentication" below; the neon-red
+terminal look matches the companion.
 
 ## Architecture
 
@@ -47,18 +48,30 @@ Devices not named after a username render as `[ UNMAPPED ]`.
 
 | Var | Default | Notes |
 |---|---|---|
-| `SYNCTHING_GUI_URL` | — | e.g. `http://192.168.0.102:8384`; collector disabled if unset |
+| `SYNCTHING_GUI_URL` | — | e.g. `http://<nas>:8384`; collector disabled if unset |
 | `SYNCTHING_API_KEY` | — | same key the server scripts use |
 | `DASH_DB_PATH` | `/data/dashboard.db` | SQLite file |
 | `DASH_PORT` | `8480` | HTTP port |
-| `DASH_REPORT_TOKEN` | — | shared secret for `POST /api/v1/report`; reports rejected if unset (set `DASH_REPORT_TOKEN_OPTIONAL=1` for lab use) |
+| `DASH_REPORT_TOKEN` | — | shared secret for `POST /api/v1/report`; reports rejected if unset. **≥ 24 chars, checked at boot** — see "Authentication" below |
+| `DASH_SHARED_REPORT_TOKEN_ENABLED` | `1` | whether the ONE shared token above is still accepted alongside the per-editor tokens minted on the Users page. **Only an explicit `0` turns it off** — a typo in this variable must not silently disconnect the fleet. Turn it off once the Users page stops naming machines on the shared credential |
 | `DASH_PROJECTS_DIR` | `""` (off) | mounted Projects tree to scan for auto-provisioning (`/projects` in the app) |
 | `DASH_PACKAGES_DIR` | `""` (= `<db dir>/packages`) | published companion builds (upgrade channel); default lands under `/data`, the persistent volume — only set to move them |
 | `DASH_SYNCTHING_DATA_PREFIX` | `/data/Projects` | where the *Syncthing app* sees the same tree (folder `path` prefix for created folders) |
-| `DASH_SESSION_SECRET` | `""` (login off) | HMAC secret for session cookies; keep stable across deploys |
+| `DASH_SESSION_SECRET` | `""` (login off) | HMAC secret for session cookies; keep stable across deploys. **≥ 24 chars, checked at boot** |
 | `DASH_ADMIN_USERS` | `""` | csv usernames who may manage anyone's project ticks (must be SMB-authable accounts) |
-| `DASH_AUTH_METHOD` | `smb` | credential verification method; `smb` = SMB session probe on :445 (only method 25.10 allows for non-admin users) |
+| `DASH_AUTH_METHOD` | `smb` | credential verification method; `smb` = SMB session probe on :445 (only method 25.10 allows for non-admin users), `oidc` = single sign-on (see "Authentication") |
 | `DASH_SMB_HOST` | `""` | host for the SMB auth probe. **No default since 2026-08-17** -- see "Site identity" below |
+| `DASH_COOKIE_SECURE` | `auto` | `Secure` on the session cookie: `auto` = on for https, `1`/`0` force it. `1` also refuses to serve login over plain http |
+| `DASH_TRUSTED_PROXIES` | `127.0.0.1,::1` | csv IPs/CIDRs whose `X-Forwarded-Proto` is believed. Tailscale Serve and a compose sidecar arrive over loopback; a proxy on the *docker host* arrives from the bridge gateway (e.g. `172.17.0.0/16`) |
+| `DASH_SESSION_IDLE_SECONDS` | `43200` (12h) | inactivity after which a browser session ends |
+| `DASH_SESSION_ABSOLUTE_SECONDS` | `604800` (7d) | maximum session age; activity does not extend it |
+| `DASH_OIDC_ISSUER` | `""` | OIDC issuer URL (https, or http to loopback for a sidecar IdP); discovery at `<issuer>/.well-known/openid-configuration` |
+| `DASH_OIDC_CLIENT_ID` / `DASH_OIDC_CLIENT_SECRET` | `""` | the confidential client registered with the IdP |
+| `DASH_OIDC_SCOPES` | `openid profile email` | scopes requested |
+| `DASH_OIDC_USERNAME_CLAIM` | `preferred_username` | **the claim that becomes the NAS username** the rest of the dashboard keys on |
+| `DASH_OIDC_ADMIN_CLAIM` / `DASH_OIDC_ADMIN_VALUES` | `""` | claim + csv values that mark an admin; advisory only — `DASH_ADMIN_USERS` is what grants admin |
+| `DASH_OIDC_REDIRECT_URL` | `""` (derived) | absolute callback URL registered with the IdP; set it when something rewrites `Host` |
+| `DASH_DEV_INSECURE` | `""` | **lab/test only.** Bypasses the secret floor, the server-side session check and the CSRF token. Warns on every boot |
 | `DASH_INTERVAL_ENFORCE` | `60` | seconds between share-enforcement reconciliations |
 | `DASH_NAS_KIND` | `truenas` | which NAS backend the admin section provisions against: `truenas` or `synology` (see below). An unknown value is refused, never guessed |
 | `DASH_NAS_HOST` | `""` | backs the admin `/admin/users` section (create editor accounts, approve devices, set passwords) |
@@ -69,6 +82,117 @@ Devices not named after a username render as `[ UNMAPPED ]`.
 | `DASH_NAS_SSH_PORT` | `22` | Synology only: DSM's SSH port, for the half of provisioning that has no API |
 | `DASH_NAS_SSH_HOSTKEY` | `""` | Synology only: the NAS's SSH host key (`ssh-keyscan -t ed25519 <nas>` output, with or without the type prefix). Unset = trust on first use, with a WARNING per connection |
 | `DASH_NAS_SSH_KEY_PROBE` | `1` | Synology only: let `/admin/users` open one SSH session per render to answer "does this editor have a key installed". `0` turns it off; the column then reads as no key |
+
+### Authentication
+
+Reworked 2026-08-17 (`docs/COMMERCIAL_READINESS.md` items 6, 12 and 15). The
+shape:
+
+**Secrets are checked at boot.** `DASH_SESSION_SECRET` and `DASH_REPORT_TOKEN`
+go through the same rule the b-roll ingest token has always used
+(`broll.check_ingest_token`: ≥ 24 characters, not a placeholder like
+`REPLACE_ME`, enough character variety to be random). A secret that fails
+**refuses to start**, with the reason. Unset is still fine — that means login
+is off, or reports are refused, both documented states. Generate them with
+`openssl rand -hex 24`. A weak session secret is a forgeable *admin* cookie,
+which is why this is a refusal and not a warning.
+
+**Sessions are server-side and revocable.** The cookie is still the versioned
+HMAC token (`auth.py`), but every live session also has a row in
+`auth_sessions` keyed by `HMAC(secret, cookie)` — a keyed digest, so the table
+holds nothing replayable. A cookie with no row is not a session. Therefore:
+`[ LOGOUT ]` revokes rather than just deleting the browser's copy;
+`[ LOGOUT ALL ]` signs the account out on every device; and an admin can
+revoke anyone's from **Admin ▸ Users ▸ SIGNED-IN BROWSERS**
+(`POST /partials/admin/sessions/revoke`). Lifetimes are 12h idle (refreshed by
+activity, at most one write per minute) and 7d absolute, both configurable.
+The companion's *identity* token is a separate credential and is not affected
+by any of this.
+
+**Cookie flags.** `HttpOnly`, `SameSite=Lax` always. `Secure` follows the
+request scheme, and `X-Forwarded-Proto` counts only from a peer in
+`DASH_TRUSTED_PROXIES` (default: loopback — where Tailscale Serve and a
+compose sidecar both arrive). `DASH_COOKIE_SECURE=1` forces it on and makes
+the login page *refuse* a connection that is provably plain http, instead of
+silently looping: the browser would drop a Secure cookie set over http, and
+that failure is invisible.
+With Tailscale Serve in front (`docs/SERVER-SYNOLOGY.md`) **set
+`DASH_COOKIE_SECURE=1`**, plus
+`DASH_SITE_DASHBOARD_URL=https://<nas>.<tailnet>.ts.net`. Serve runs on the
+NAS *host* and dials `127.0.0.1:<DASH_PORT>`, which docker's port publishing
+DNATs — so the container sees the request coming from the bridge gateway
+(`172.17.0.1`), not loopback, and `auto` would therefore leave `Secure` off.
+`1` does not consult the header at all, which is why it is the recipe. The
+alternative is `DASH_TRUSTED_PROXIES=172.17.0.0/16`, which trusts every
+container on that bridge — on a NAS running other stacks, prefer `1`.
+
+**Login throttle.** Per-username *and* per-client-IP budgets, in SQLite
+(`login_attempts`), so they survive the restart every deploy performs. Five
+failures inside an hour start an exponential backoff (60s doubling to 1h). The
+page says the same thing for every refusal — wrong password, throttled, or
+non-admin using the break-glass form — because anything else is a
+username/role oracle. The specifics go to the log.
+
+**CSRF.** Every state-changing request that carries a session cookie needs a
+synchroniser token: `<meta name="csrf">` in `base.html`, `hx-headers` on
+`<body>` so every htmx call inherits it, and a hidden `csrf` field in the
+plain forms. A cross-site `Origin`/`Referer` is refused on top of that.
+Token-authenticated routes (`/api/v1/report`, `/api/v1/verify`, the selection
+and package endpoints) are exempt — a browser cannot be tricked into attaching
+an `X-CCSync-Token`.
+**The mounted SPAs are exempt for now** (`/broll/`, `/music/`, `/ytdl/` in
+`app._CSRF_EXEMPT_PREFIXES`) because their `fetch()` calls do not send the
+token yet. The token is already published to them on the topbar they inject
+(`data-csrf` on `.brand` in `partials/topbar.html`). **To come off the exempt
+list**, a SPA reads it once at startup —
+`document.querySelector('[data-dash-topbar]')?.dataset.csrf` — and sends it as
+`X-CSRF-Token` on every non-GET `fetch`; then delete its prefix from
+`_CSRF_EXEMPT_PREFIXES`. Until then `SameSite=Lax` is what holds that line,
+and it holds it for exactly the cross-site POST case.
+
+**Passwords this dashboard sets** must be ≥ 12 characters (`auth.
+MIN_PASSWORD_CHARS`), enforced on set/change only. Existing NAS passwords are
+never checked or invalidated — the dashboard cannot see them, and locking a
+fleet out mid-shoot is not a security improvement.
+
+**Single sign-on (`DASH_AUTH_METHOD=oidc`).** Authorization code + PKCE S256,
+`state`/`nonce` in a signed 10-minute HttpOnly flow cookie, discovery via
+`.well-known/openid-configuration`, `id_token` verified against the IdP's JWKS
+(asymmetric algorithms only). Register `https://<dashboard>/auth/oidc/callback`
+as the redirect URI. The claim named by `DASH_OIDC_USERNAME_CLAIM` **must be
+the NAS username** — every join in this app (Syncthing device names,
+selections, the `editors` group) is one, and an email address there produces
+an editor nothing matches; the callback refuses a value containing `@` rather
+than guessing. Admin rights still come from `DASH_ADMIN_USERS`;
+`DASH_OIDC_ADMIN_CLAIM` is logged, not obeyed. `/login?local=1` keeps the
+password form as **break-glass for `DASH_ADMIN_USERS` only**, so an IdP outage
+cannot lock the operator out and cannot reopen password login for the fleet.
+
+**Per-editor report tokens.** The one `DASH_REPORT_TOKEN` every companion
+holds proves only "somebody in this fleet" — it is not revocable per person,
+and one leak is fleet-wide. Admin ▸ Users mints a **per-editor** token instead
+(`cce1.<id>.<secret>`), stored hashed, revocable individually, and **bound**:
+`resolve_companion_credential` returns the editor it belongs to, so a report
+whose `editor_name` disagrees is a 401, and a selection read under it can only
+read that editor's selection. The secret appears in the minting response and
+nowhere else, ever. Shape is checked first, so a per-editor token is never
+compared against the shared secret and cannot be accepted as it. The Users page
+counts machines still on the shared credential (`shared_machines`); when that
+reaches zero, set `DASH_SHARED_REPORT_TOKEN_ENABLED=0`. How an admin hands one
+over is deliberately not automated: mint it and pass the value on the same
+channel you already use for the editor's NAS password. Routes and shapes:
+`docs/API.md`.
+
+**Fleet reads are scoped.** `auth.Scope` decides what a viewer sees:
+non-admins are locked to their own editor identity across `/api/v1/projects`,
+`/projects/{slug}`, `/transfers`, `/editors` and the presence views; admins see
+the fleet and may focus one person with `?as=<editor>`. The one route that
+answers actual file paths — `/projects/{slug}/devices/{device_id}/missing` —
+answers **404, not 403**, outside its scope, because an editor has no business
+learning that another editor's device id even exists.
+
+**`DASH_REPORT_TOKEN_OPTIONAL` is no longer a shipped code path.** It is
+ignored (with an error line) unless `DASH_DEV_INSECURE=1` is also set.
 
 ### Synology (DSM 7.2+)
 
@@ -135,7 +259,9 @@ what `/project-setup` creates.
 | `DASH_SITE_ORG_NAME` | `""` | `org_name` |
 | `DASH_SITE_TREE_NAME` | `""` | `tree_name` |
 | `DASH_SITE_CANONICAL_PREFIX` | `P:\` | `canonical_prefix` (the editor drive letter, hardcoded by decision 2026-07-26) |
-| `DASH_SITE_REMOTE_ROOT` | `""` | `remote_root` (e.g. `/mnt/tank/TheCreatorsPool/Creators_Club`) |
+| `DASH_SITE_ORG_SHORT` | `""` | `org_short` -- the customer's name where only a few characters fit; blank = use `org_name` |
+| `DASH_SITE_PRODUCT_NAME` | `CC Sync` | `product_name` -- the **vendor's** name, the one brand string here with a non-blank default |
+| `DASH_SITE_REMOTE_ROOT` | `""` | `remote_root` (e.g. `/mnt/<pool>/<tree>`) |
 | `DASH_SITE_SMB_UNC` | `""` | `smb_unc` -- the companion reads this into `server_p_unc` instead of deriving it |
 | `DASH_SITE_SFTP_HOST` | `""` | `sftp_host` |
 | `DASH_SITE_SFTP_PORT` | `22` | `sftp_port` (DSM often moves sshd) |
@@ -162,14 +288,20 @@ its reports and render in MY QUEUE with speed + ETA.
 ```
 python -m venv .venv && .venv/Scripts/pip install -e .[dev]
 .venv/Scripts/python -m pytest                       # 31 tests, no network
-SYNCTHING_GUI_URL=http://192.168.0.102:8384 SYNCTHING_API_KEY=... \
+SYNCTHING_GUI_URL=http://<nas>:8384 SYNCTHING_API_KEY=... \
     .venv/Scripts/python -m ccsync_dashboard.collector --once --db ./dev.db
-DASH_DB_PATH=./dev.db DASH_REPORT_TOKEN_OPTIONAL=1 \
+DASH_DB_PATH=./dev.db DASH_DEV_INSECURE=1 DASH_REPORT_TOKEN_OPTIONAL=1 \
     .venv/Scripts/python -m uvicorn --factory ccsync_dashboard.app:create_app --port 8480
 ```
 
 ## Deploy
 
-`python server/install_dashboard_app.py` (see `docs/SERVER.md`). Manual
-fallback: paste `deploy/compose.yaml` into TrueNAS UI > Apps > Install via
-YAML. Redeploys re-upload `app/` and never touch `data/`.
+`python server/install_dashboard_app.py` (see `docs/SERVER.md`, or
+`docs/SERVER-SYNOLOGY.md` on DSM). Manual fallback: paste
+`deploy/compose.yaml` into TrueNAS UI > Apps > Install via YAML. Redeploys
+re-upload `app/` and never touch `data/`.
+
+---
+
+DaVinci Resolve is a registered trademark of Blackmagic Design Pty Ltd. CC Sync
+is not affiliated with, endorsed by, or sponsored by Blackmagic Design.

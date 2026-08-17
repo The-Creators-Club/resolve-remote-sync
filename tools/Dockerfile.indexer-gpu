@@ -1,0 +1,139 @@
+# The GPU indexer image: b-roll (frames, whisper, embeddings) and music (CLAP).
+#
+# 2026-08-17, COMMERCIAL_READINESS.md item 14. Both indexers were `pip install
+# -e .` from source against a hand-built CUDA environment on one workstation --
+# the fastest way to make a customer's "indexing does not work" unanswerable.
+# This is one image with three entrypoints rather than two images, because the
+# expensive layers (CUDA runtime, ffmpeg, torch) are the SAME layers and a
+# second image would pay ~6 GB to duplicate them.
+#
+# NOT part of the dashboard deployment. The dashboard container is a stock
+# python:3.12-slim with no build anywhere (dashboard/deploy/compose.yaml), runs
+# on the NAS, and must never grow a GPU dependency: it embeds *query text* on
+# CPU and reads databases this image writes. See docs/INDEXERS.md.
+#
+# Build (multi-GB, several minutes, needs a network):
+#   docker build -f tools/Dockerfile.indexer-gpu -t ccsync/indexer-gpu:1 .
+# Run: tools/compose.indexer-gpu.yaml, or `docker run --gpus all`.
+#
+# LICENCE POSTURE, stated because it is a decision and not an accident: ffmpeg
+# is installed from the DISTRO (apt, Ubuntu's `ffmpeg` package) and is not
+# vendored, patched, or statically linked into anything this project
+# distributes. The image is a build recipe -- what it pulls at build time is the
+# distro's own binary under the distro's own licence, and nothing here is
+# redistributed as part of the product. If this image is ever PUBLISHED to a
+# registry that changes: a published image distributes those binaries, and
+# Ubuntu's ffmpeg build includes GPL components, so the published artefact is
+# then a GPL-covered aggregate and must be treated as one. The dashboard's own
+# ffmpeg provisioning (server/install_dashboard_app.py) fetches a pinned static
+# build for the same reason and with the same caveat.
+
+# Pinned tag, not `:latest` and not a floating `12.4` alias: CUDA minor versions
+# change which cuDNN and which torch wheel are correct, and a rebuild that
+# silently moves is how "it worked last month" happens. Runtime, not devel --
+# nothing here compiles CUDA kernels.
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# ffmpeg and ffprobe are the one native dependency BOTH indexers have: every
+# b-roll stage before the model call is ffmpeg, and every music track is decoded
+# by it. libsndfile1 is soundfile's, git is for nothing at runtime and is left
+# out deliberately.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-venv python3-pip \
+        ffmpeg libsndfile1 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# One venv rather than the distro's site-packages: the image is single-purpose,
+# but pip installing over a distro python is how a system tool breaks on an
+# upgrade, and /opt/venv is trivially copyable into a slimmer final stage later.
+RUN python3.11 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+# torch FIRST and from the cu124 index, alone in its own layer: it is 2.5 GB,
+# it is the layer that must be cached across every other change, and resolving
+# it together with the rest lets pip pick the CPU build off PyPI without saying
+# so. The version pair is the one NVIDIA's 12.4 runtime supports.
+RUN pip install --index-url https://download.pytorch.org/whl/cu124 \
+        torch==2.6.0 torchaudio==2.6.0
+
+# The music indexer's own stack. transformers loads CLAP; librosa/pyloudnorm/
+# soundfile are the DSP half (BPM, key, loudness); onnx* is export_text_encoder,
+# which produces the text tower the NAS container runs on CPU.
+RUN pip install \
+        numpy==2.1.3 \
+        transformers==4.46.3 \
+        librosa==0.11.0 \
+        pyloudnorm==0.1.1 \
+        soundfile==0.13.1 \
+        onnx==1.17.0 \
+        onnxruntime==1.20.1
+
+# The b-roll indexer's stack, including transcription. ctranslate2 finds cuDNN
+# in the image rather than through the nvidia-*-cu12 wheels the sidecar venv
+# installs on a bare Windows rig -- that is what the CUDA base tag buys, and why
+# tools/make_whisper_env.sh is invoked with --cpu inside a container.
+RUN pip install \
+        anthropic==0.92.0 \
+        faster-whisper==1.1.1 \
+        ctranslate2==4.5.0 \
+        fastembed==0.8.2 \
+        xxhash==3.5.0 \
+        pyyaml==6.0.2 \
+        requests==2.32.3 \
+        jieba==0.42.1 \
+        opencc-python-reimplemented==0.1.7
+
+# Non-root. These processes read a customer's whole media library and write a
+# database; there is nothing they need root for, and a container that mounts the
+# library read-write as uid 0 is a bad default to ship. 3000:3001 matches the
+# dashboard container's ids (dashboard/deploy/compose.yaml) so a host directory
+# shared between them needs one ownership, not two.
+RUN groupadd -g 3001 ccsync && useradd -u 3000 -g 3001 -m -s /usr/sbin/nologin ccsync
+
+# Both indexers are installed from source in editable mode so a bind-mounted
+# checkout (the developer case) and a baked copy (the shipped case) behave the
+# same. music_index puts ../web on sys.path itself -- see its __init__.
+WORKDIR /app
+COPY broll/indexer /app/broll/indexer
+COPY music/indexer /app/music/indexer
+COPY music/web /app/music/web
+RUN pip install --no-deps -e /app/broll/indexer -e /app/music/indexer \
+    && chown -R 3000:3001 /app
+
+# The three volumes, and they are volumes because every one of them is state
+# that must outlive the container:
+#   /data     data_root -- frames, proxies, posters, sprites, transcripts (tens of GB)
+#   /index    the sqlite databases the web halves read
+#   /models   HuggingFace + fastembed caches; without this every start re-downloads
+#             ~1.6 GB of whisper and ~600 MB of CLAP into a layer that is discarded
+#   /library  the media itself, mounted READ-ONLY wherever the workflow allows
+VOLUME ["/data", "/index", "/models"]
+
+# Every required path, pre-answered (both configs refuse without them). An
+# operator overriding one overrides it here, not by editing a config.yaml that
+# may be mounted read-only.
+ENV BROLL_DATA_ROOT=/data/broll \
+    BROLL_DB_PATH=/index/broll.db \
+    BROLL_MODEL_CACHE=/models/fastembed \
+    CCSYNC_WHISPER_PYTHON=/opt/venv/bin/python \
+    CCSYNC_WHISPER_SCRIPT=/app/broll/indexer/tools/whisper_transcribe.py \
+    CCSYNC_WHISPER_MODEL_DIR=/models/whisper \
+    MUSIC_DATA_ROOT=/data/music \
+    MUSIC_DB_PATH=/index/music.db \
+    MUSIC_MODEL_CACHE=/models/hf \
+    HF_HOME=/models/hf
+
+COPY tools/indexer-entrypoint.sh /usr/local/bin/indexer-entrypoint
+RUN chmod 0755 /usr/local/bin/indexer-entrypoint
+
+USER 3000:3001
+ENTRYPOINT ["/usr/local/bin/indexer-entrypoint"]
+# No default command: `index`, `transcribe` and `music-embed` cost hours and
+# money, and a container that starts one because it was run with no arguments is
+# the wrong default. Bare `docker run` prints the usage instead.
+CMD ["help"]

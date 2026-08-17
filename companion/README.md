@@ -1,6 +1,8 @@
 # ccsync-companion
 
-Editor-side companion app for the Creators Club Resolve remote-sync system.
+Editor-side companion app for CC Sync -- fleet sync for DaVinci Resolve(R).
+Requires DaVinci Resolve Studio on this machine (the free edition exposes
+neither collaboration nor the external scripting interface this app drives).
 See `../SPEC.md` (repo root) for the full system design — this README covers
 just this `companion/` package: a tray app + three supervised daemons that
 implement "Architecture + Components §2" of that spec.
@@ -47,10 +49,10 @@ implement "Architecture + Components §2" of that spec.
    Lane B uses `rclone sync` (NAS is authoritative for proxies — renames and
    deletes propagate down).
 
-4. **Tray** (`tray.py`) — pystray icon: green = all lanes OK, orange = a lane
+4. **Tray** (`tray.py`) — tray icon (`tray_native.py`): green = all lanes OK, orange = a lane
    is syncing, red = any lane has an error. Menu: per-lane status line,
    "Sync now", "Pause sync" toggle, "Open log", "Quit". Falls back to
-   headless console logging if pystray/Pillow aren't installed (same
+   headless console logging if Pillow isn't installed (same
    try/except pattern used throughout).
 
 `app.py` (`CompanionApp`) wires all of the above together and is what
@@ -145,8 +147,10 @@ pip install -e .
 ccsync-companion
 ```
 
-Tray icon needs the optional extra: `pip install -e ".[tray]"` (installs
-`pystray` + `Pillow`). Runs headless (console logging only) without it.
+Tray icon needs the optional extra: `pip install -e ".[tray]"` (Pillow, and
+PyObjC on macOS). pystray is deliberately NOT a dependency any more -- it is
+LGPLv3 and this app is frozen, so the tray is `tray_native.py`, written from
+the OS APIs. Runs headless (console logging only) without the extra.
 
 ## Config reference
 
@@ -166,8 +170,8 @@ of what either of those produces. Restart the app after editing.
 | `editor_name` | `""` | Used to build the `B-roll/Editor Added/<editor_name>` popup destination. |
 | `local_root` | `""` | This machine's local project tree root. **Must be set.** |
 | `canonical_prefix` | `"P:\\"` | The shared-drive prefix Resolve's stored clip paths use (SPEC.md's Path canon). Used for BAD_PREFIX detection. |
-| `remote` | `"creators_club_sftp"` | Name of the rclone remote. Must match the stanza the bootstrap installer writes into `rclone.conf`. |
-| `remote_root` | `""` | **Absolute** NAS path under which project trees live, e.g. `/mnt/tank/TheCreatorsPool/Creators_Club`. Must be set, and must be absolute — see below. |
+| `remote` | `"ccsync_sftp"` | Name of the rclone remote. Must match the stanza the bootstrap installer writes into `rclone.conf`. |
+| `remote_root` | `""` | **Absolute** NAS path under which project trees live, e.g. `/mnt/<pool>/<tree>`. Must be set, and must be absolute — see below. |
 | `projects` | `[]` | Positional pair for `syncthing_folder_ids` (lane C's folder-ID check). Does **not** scope what syncs. |
 | `active_project` | `""` | Destination the popup fixer suggests for editor-added media. Does **not** scope what syncs; blank just suggests the tree root. |
 | `poll_interval` | `3` | Resolve timeline poll interval, seconds. |
@@ -252,7 +256,7 @@ Proxy-contents down). The server's directory structure is therefore
 replicated verbatim on every editor machine:
 
 ```
-Creators_Club/Projects/<year>/<series>/<project>/{AE,Audio,B-roll,...}
+<tree>/Projects/<year>/<series>/<project>/{AE,Audio,B-roll,...}
 ```
 
 Any year, any series, any project — `Projects/2026/Creator Profiles/Season 1`
@@ -264,9 +268,9 @@ this; see their rows above for what they really do.
 ### `remote_root` must be absolute
 
 An SFTP session lands in the editor's **home directory** on the NAS
-(`/mnt/tank/TheCreatorsPool/homes/<editor>`), not at the data root. So a
-relative `remote_root = "Creators_Club"` builds `creators_club_sftp:Creators_Club`,
-which resolves to `~/Creators_Club` — a directory that doesn't exist — instead
+(`<pool_root>/homes/<editor>`), not at the data root. So a relative
+`remote_root = "<tree>"` builds `ccsync_sftp:<tree>`, which resolves to
+`~/<tree>` — a directory that doesn't exist — instead
 of the shared tree. Lane A would upload into the editor's home directory and
 lane B would find nothing to bring down, with no error that points at the
 cause.
@@ -488,3 +492,8 @@ Windows/macOS box before shipping, same caveat as broll-platform's
    won't start uploading for at least 30s after its last write — is that
    window fine, or should `--min-age` be config-exposed too (right now it's
    hardcoded in `rclone_lane.py`)?
+
+---
+
+DaVinci Resolve is a registered trademark of Blackmagic Design Pty Ltd. CC Sync
+is not affiliated with, endorsed by, or sponsored by Blackmagic Design.

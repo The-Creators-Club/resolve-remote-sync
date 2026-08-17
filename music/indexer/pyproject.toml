@@ -25,8 +25,22 @@ dependencies = [
     "onnxruntime>=1.17",
 ]
 
+[project.optional-dependencies]
+# The suite's own dependency, named here so requirements.lock can carry it
+# with a hash -- CI installs `--require-hashes` and cannot `pip install pytest`
+# on the side (2026-08-17, COMMERCIAL_READINESS.md item 13).
+dev = ["pytest>=8.0"]
+
 [tool.setuptools.packages.find]
 include = ["music_index*"]
+
+# `cd music/indexer && python -m pytest tests -q` on the SYSTEM interpreter --
+# there is deliberately no venv here and the suite deliberately imports no
+# torch: what it covers is the required-path surface (music_index/config.py),
+# which is the half a machine without the GPU can still get wrong. The CLAP
+# half is exercised by running the indexer, not by unit tests.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 # The storage layer (musicweb.db) and schema.sql live in ../web and are shared:
 # this package writes the database the web app reads. music_index/__init__.py

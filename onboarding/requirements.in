@@ -1,0 +1,15 @@
+# onboarding/ has no pyproject.toml and no runtime dependencies: onboard.py is
+# tkinter + urllib + subprocess, all stdlib, because it is frozen with
+# PyInstaller and every wheel it pulled in would be a wheel in the .exe.
+#
+# This file exists so the suite's one dependency can be locked with a hash like
+# every other component's (2026-08-17, COMMERCIAL_READINESS.md item 13):
+#
+#   cd onboarding
+#   uv pip compile --universal --generate-hashes --python-version 3.12 \
+#       -o requirements.lock requirements.in
+#
+# If a RUNTIME dependency is ever added here, add it above the marker below and
+# check build_onboard.spec's hiddenimports at the same time -- the frozen
+# wizard imports nothing PyInstaller cannot see.
+pytest>=8.0

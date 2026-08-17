@@ -1,4 +1,4 @@
-"""Shared helpers for the Creators Club sync server scripts.
+"""Shared helpers for the CC Sync server scripts.
 
 Style conventions used across every script in this package:
   - Python + `requests` for TrueNAS REST API calls (https://<host>/api/v2.0/...)
@@ -45,7 +45,7 @@ class EnvError(RuntimeError):
 # --------------------------------------------------------------------------
 #
 # Until 2026-08-17 every one of the constants below was a literal from THIS
-# fleet's NAS (192.168.0.102, /mnt/tank/TheCreatorsPool, ...). That is a fork
+# fleet's NAS (192.168.0.10, /mnt/tank/TheCreatorsPool, ...). That is a fork
 # waiting to happen the moment a second site exists -- see
 # docs/COMMERCIAL_READINESS.md item 10 and docs/SYNOLOGY_PORT_PLAN.md WP0 --
 # so the identity moved OUT of the code and into one file, and the shipped
@@ -162,7 +162,7 @@ def require_site_value(value: str, key: str, flag: str = "") -> str:
     """Return `value`, or refuse naming the site.toml key that would set it.
 
     The refusal exists because the alternative -- a default pointing at the
-    Creators Club NAS -- silently aims someone else's deploy at this fleet's
+    vendor's own NAS -- silently aims someone else's deploy at this fleet's
     IP and pool names (COMMERCIAL_READINESS.md item 10).
     """
     value = str(value or "").strip()
@@ -215,6 +215,94 @@ DEFAULT_DATASET_OWNER = site_value("stack", "owner") or "broll"
 EDITORS_GROUP = site_value("stack", "group") or "editors"
 
 # --------------------------------------------------------------------------
+# Editor account posture (COMMERCIAL_READINESS.md item 7 / finding H4, 2026-08-17)
+# --------------------------------------------------------------------------
+#
+# Editors used to get /usr/bin/bash on TrueNAS: a shell account on the box that
+# holds every customer's footage, handed to a freelancer so that rclone can run
+# `md5sum` over SSH. Nothing else in this product ever executes a remote command
+# as an editor -- verified across companion/, installer/, onboarding/,
+# write_marker.py and accept_device.py on 2026-08-17 -- so the shell buys
+# exactly one thing (rclone's `shell_type = unix` checksums) and costs a login.
+#
+#   "sftp-only"  nologin shell + sshd `Match Group <editors>` with
+#                ForceCommand internal-sftp. The DEFAULT for a new install, and
+#                already what DSM does out of the box.
+#   "shell"      what this fleet had before 2026-08-17. Keep it only while
+#                existing editors' rclone.conf still says shell_type = unix.
+#
+# The consequence is NOT optional and is wired rather than documented: with
+# sftp-only, rclone cannot shell out, so the site manifest must publish
+# sftp_shell_type = "none" (install_dashboard_app.site_env forces it).
+EDITOR_SHELL_MODES = ("sftp-only", "shell")
+SFTP_ONLY_SHELL = "/usr/sbin/nologin"
+
+
+def editor_shell_mode() -> str:
+    """"sftp-only" (default) or "shell", from [stack] editor_shell."""
+    mode = (site_value("stack", "editor_shell") or "sftp-only").lower()
+    if mode not in EDITOR_SHELL_MODES:
+        raise EnvError(
+            f"[stack] editor_shell is {mode!r}; expected one of "
+            f"{', '.join(EDITOR_SHELL_MODES)} (docs/SERVER.md, \"Editor accounts\")"
+        )
+    return mode
+
+
+def editor_shell_is_sftp_only() -> bool:
+    return editor_shell_mode() == "sftp-only"
+
+
+# --------------------------------------------------------------------------
+# Per-project isolation (COMMERCIAL_READINESS.md item 7, docs/TENANCY.md)
+# --------------------------------------------------------------------------
+#
+# "shared" is what the tree has always been: one `editors` group, 2770
+# everywhere, so any editor can delete any other editor's project.
+# "per-project" adds a `proj-<slug>` group per project and makes the project
+# directory 2770 <owner>:proj-<slug>; membership is what a dashboard tick
+# already means. Both keep the service account writing everywhere, which lane C
+# depends on -- Syncthing is one uid and shares every folder.
+PROJECT_ACL_MODES = ("shared", "per-project")
+PROJECT_GROUP_PREFIX = "proj-"
+# Unix group names are limited to 32 chars on Linux (and DSM is stricter about
+# what it will accept), and a slug is free-form; truncate deterministically so
+# the same project always maps to the same group.
+PROJECT_GROUP_MAXLEN = 32
+
+
+def project_acl_mode() -> str:
+    """"shared" (default, today's behaviour) or "per-project"."""
+    mode = (site_value("stack", "project_acl") or "shared").lower()
+    if mode not in PROJECT_ACL_MODES:
+        raise EnvError(
+            f"[stack] project_acl is {mode!r}; expected one of "
+            f"{', '.join(PROJECT_ACL_MODES)} (docs/TENANCY.md)"
+        )
+    return mode
+
+
+def project_group_name(slug: str) -> str:
+    """The unix group that owns project `slug` under project_acl=per-project.
+
+    Deterministic and derived from the slug alone, because the group has to be
+    re-derivable by the dashboard provisioner, by setup_tree.py and by a human
+    reading `ls -l` -- nothing stores a mapping.
+    """
+    slug = validate_slug(slug)
+    name = f"{PROJECT_GROUP_PREFIX}{slug}"
+    if len(name) <= PROJECT_GROUP_MAXLEN:
+        return name
+    import hashlib
+
+    # Keep a readable head plus a stable 6-hex tail, so two long slugs sharing
+    # a prefix cannot collide into one group (which would silently re-share a
+    # project with the wrong people).
+    digest = hashlib.sha256(slug.encode()).hexdigest()[:6]
+    head = name[: PROJECT_GROUP_MAXLEN - 7].rstrip("-")
+    return f"{head}-{digest}"
+
+# --------------------------------------------------------------------------
 # Shared asset folders (added 2026-08-05)
 # --------------------------------------------------------------------------
 #
@@ -249,16 +337,16 @@ DEFAULT_STILLS_ROOT = DEFAULT_CC_ROOT + "/" + STILLS_REL
 # them, and the companion accepts every one of them. Adding a second library
 # (title templates, sound FX, Fusion macros) is a one-line change here plus
 # the same line in dashboard/provision.py's copy.
-SHARED_ASSET_FOLDERS = [
+DEFAULT_SHARED_ASSET_FOLDERS = [
     (LUTS_FOLDER_ID, LUTS_REL, "Assets/Luts (LUT library)"),
     (STILLS_FOLDER_ID, STILLS_REL, "Assets/Stills (Resolve gallery)"),
 ]
 
 # Project template subfolders, relative to <projects_root>/<year>/<series>/<project>/
-# Per SPEC.md canonical layout (Z:\Cablewrap\Projects\2025\FF4\Nuclear) with Audio
+# Per SPEC.md canonical layout (the studio's original project template) with Audio
 # split into Music / Voiceover subfolders. Proxy/ subfolders are NOT pre-created;
 # the Blackmagic Proxy Generator creates them on demand next to media.
-TEMPLATE_FOLDERS = [
+DEFAULT_TEMPLATE_FOLDERS = [
     "AE",
     "Audio/Music",
     "Audio/Voiceover",
@@ -269,8 +357,72 @@ TEMPLATE_FOLDERS = [
     "Youtube",
 ]
 
+# --------------------------------------------------------------------------
+# Site overrides for the two lists above (2026-08-17, COMMERCIAL_READINESS.md
+# item 11)
+# --------------------------------------------------------------------------
+#
+# Both lists are documentary-shop shaped -- "Interviewees", "Render in Place",
+# a LUT library and a Resolve gallery -- and they were triplicated across
+# server/common.py, dashboard/provision.py and server/setup_tree.py as CODE.
+# For a second customer that is a fork, so they are now DATA with these as the
+# defaults:
+#
+#     [tree]
+#     template_folders = ["Footage", "Audio", "Graphics"]
+#     shared_assets    = ["Assets/Luts", "Assets/SFX"]
+#
+# The dashboard container reads the same two values as DASH_SITE_TEMPLATE_
+# FOLDERS / DASH_SITE_SHARED_ASSETS (it has no site.toml), and
+# server/tests/test_cross_component.py now pins the DEFAULTS across the
+# components rather than the effective lists -- a site that overrides one end
+# must override both, which is what the installer rendering both from this
+# file is for.
+def site_list(section: str, key: str) -> list:
+    """A list-of-strings value from site.toml, or []. A scalar is accepted as
+    a one-item list (a site that writes `template_folders = "Footage"` means
+    one folder, not eight characters); anything else is [] -- absence, not a
+    crash three steps later inside a chown."""
+    table = load_site().get(section) or {}
+    if not isinstance(table, dict):
+        return []
+    value = table.get(key)
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = []
+    for item in value:
+        item = str(item).replace("\\", "/").strip().strip("/")
+        if item:
+            out.append(item)
+    return out
+
+
+def shared_asset_folders_for(rels) -> list:
+    """(id, rel, label) triples for rel paths. The id is slugify(rel), the
+    same rule every Syncthing folder id in the fleet is made by -- kept in
+    step with dashboard/provision.shared_asset_folders_for."""
+    labels = {rel: label for _fid, rel, label in DEFAULT_SHARED_ASSET_FOLDERS}
+    return [(slugify(rel), rel, labels.get(rel, rel)) for rel in rels]
+
+
+TEMPLATE_FOLDERS = site_list("tree", "template_folders") or DEFAULT_TEMPLATE_FOLDERS
+# SHARED_ASSET_FOLDERS is the defaults here and re-bound below the slugify()
+# definition when the site overrides it -- shared_asset_folders_for() needs
+# slugify, and moving slugify above the constants block would move 200 lines
+# to save a rebind nobody but this comment has to know about.
+SHARED_ASSET_FOLDERS = DEFAULT_SHARED_ASSET_FOLDERS
+
 # Video extensions: these travel via rclone lanes A (up) / B (down), never
 # via Syncthing (lane C), so lane C's .stignore must exclude them.
+#
+# DELIBERATELY NOT site data, unlike the two lists above: which extensions are
+# "video" is what decides whether a file is carried by rclone or by Syncthing,
+# and the three copies (here, dashboard/provision.py -- the canonical one --
+# and companion/sync/syncthing_admin.py) must stay byte-identical or a media
+# type ends up carried by both or by neither. The dashboard publishes it
+# read-only at GET /api/v1/site as `video_extensions`.
 VIDEO_EXTENSIONS = [
     ".braw", ".mov", ".mp4", ".mxf", ".avi", ".mts", ".m2ts", ".mkv",
     ".r3d", ".crm", ".mpg", ".mpeg", ".wmv", ".webm", ".insv", ".360",
@@ -299,6 +451,13 @@ def slugify(text: str) -> str:
     return slug
 
 
+# The [tree] shared_assets override, applied now that slugify() exists (see
+# the note beside SHARED_ASSET_FOLDERS in the constants block).
+_SITE_SHARED_ASSET_RELS = site_list("tree", "shared_assets")
+if _SITE_SHARED_ASSET_RELS:
+    SHARED_ASSET_FOLDERS = shared_asset_folders_for(_SITE_SHARED_ASSET_RELS)
+
+
 # rclone runs with its default --inplace=false, so lane A writes
 # "<name>.<token>.partial" (and the express run "<name>.<token>.exp.partial")
 # into the NAS project dir -- which is also a sendreceive Syncthing root. A
@@ -320,7 +479,7 @@ PARTIAL_IGNORE_LINES = ["(?i)**/*.partial", "(?i)*.partial"]
 # protection retrofit set ignoreDelete=True on EDITOR folders too, the
 # rename/delete the worker performs on completion never propagates: what
 # lands on an editor's disk is permanent until someone deletes it by hand.
-# Observed live 2026-08-13/14 on editor ruskin's machine -- 27 orphaned
+# Observed live 2026-08-13/14 on one editor's machine -- 27 orphaned
 # .part/.ytdl files, ~1.5 GB, accumulated over three days.
 #
 # rclone lane B has excluded `- *.part` / `- *.ytdl` since the Youtube/
@@ -647,6 +806,90 @@ def nas_admin_password(dry_run: bool = False, kind: str = "") -> str:
     )
 
 
+# The sudo password, where a site keeps it apart from the SSH login password.
+#
+# "same password for SSH + sudo + API" was finding H2 (COMMERCIAL_READINESS.md
+# item 6). On a NAS the three are usually one account by construction -- TrueNAS
+# has one admin, DSM has one administrators group -- so this is not a promise
+# that they CAN always differ; it is the seam that lets a site that can split
+# them do so, and the default is unchanged: sudo reuses the login password.
+NAS_SUDO_PW_ENV = {"truenas": "TRUENAS_SUDO_PW", "synology": "SYNO_SUDO_PW"}
+
+
+def nas_sudo_password(dry_run: bool = False, kind: str = "") -> str:
+    """What `sudo -S` on the NAS reads from the SSH channel's stdin.
+
+    TRUENAS_SUDO_PW / SYNO_SUDO_PW when the site sets one, else the SSH login
+    password (which is what every deployment before 2026-08-17 used, and what
+    both platforms' out-of-the-box admin account wants).
+    """
+    try:
+        chosen = (kind or "").strip().lower() or nas_kind()
+    except EnvError:
+        chosen = "truenas"
+    value = os.environ.get(NAS_SUDO_PW_ENV.get(chosen, "TRUENAS_SUDO_PW"), "").strip()
+    return value or nas_admin_password(dry_run=dry_run, kind=chosen)
+
+
+# A scoped TrueNAS API key, used INSTEAD of HTTP basic auth with the admin
+# password when it is set (`Authorization: Bearer <key>`, TrueNAS 25.10).
+# server/create_api_key.py mints one with only the methods this product calls;
+# see docs/SERVER.md "Scoped API key". Nothing else changes: the SSH half still
+# authenticates as the admin, because writing an authorized_keys file and
+# running `sudo` are not API operations.
+TRUENAS_API_KEY_ENV = "TRUENAS_API_KEY"
+
+
+def truenas_api_key() -> str:
+    return os.environ.get(TRUENAS_API_KEY_ENV, "").strip()
+
+
+# TLS verification for the NAS's own API. Off is still ALLOWED -- both
+# platforms ship a self-signed cert and a customer who has not put a real one
+# on their NAS must still be able to install -- but it is no longer silent:
+# these calls carry the admin password or an API key with user/group rights.
+_TLS_WARNED = set()
+
+
+def _verify_ssl_setting(raw: str, env_name: str, host_hint: str = "the NAS"):
+    """"" / "0" -> False (warned once), "1" -> True, anything else -> CA path."""
+    raw = str(raw or "").strip()
+    if raw in ("", "0", "false", "no", "off"):
+        if env_name not in _TLS_WARNED:
+            _TLS_WARNED.add(env_name)
+            print(f"WARNING: TLS certificate verification is OFF for {host_hint}'s API "
+                  f"({env_name} is unset or 0). The admin password and every account "
+                  f"this creates cross that connection (COMMERCIAL_READINESS.md item 6). "
+                  f"Export the NAS's CA and set {env_name}=/path/to/ca.pem -- "
+                  f"docs/SERVER.md, \"Verifying the NAS certificate\".", file=sys.stderr)
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return raw
+
+
+def truenas_verify_ssl():
+    """False / True / a CA bundle path, from TRUENAS_VERIFY_SSL or [nas] verify_ssl."""
+    return _verify_ssl_setting(
+        os.environ.get("TRUENAS_VERIFY_SSL", "").strip() or site_value("nas", "verify_ssl"),
+        "TRUENAS_VERIFY_SSL")
+
+
+def nas_host_user(dry_run: bool = False):
+    """(host, user) for the NAS, without requiring any secret.
+
+    Split out of truenas_conn_params so an API-key call does not have to have
+    the admin password configured at all (2026-08-17).
+    """
+    host = require_site_value(
+        os.environ.get("SYNO_HOST", "") or os.environ.get("TRUENAS_HOST", DEFAULT_TRUENAS_HOST),
+        "[nas] host", "TRUENAS_HOST")
+    user = require_site_value(
+        os.environ.get("SYNO_USER", "") or os.environ.get("TRUENAS_USER", DEFAULT_TRUENAS_USER),
+        "[nas] admin_user", "TRUENAS_USER")
+    return host, user
+
+
 def truenas_conn_params(dry_run: bool = False):
     """host/user/pw for both SSH and REST API against the NAS.
 
@@ -661,15 +904,10 @@ def truenas_conn_params(dry_run: bool = False):
 
     host/user ARE required in both modes since 2026-08-17: they used to default
     to this fleet's own NAS, so a fresh checkout with no configuration aimed
-    every script at 192.168.0.102 as truenas_admin (COMMERCIAL_READINESS.md
+    every script at 192.168.0.10 as truenas_admin (COMMERCIAL_READINESS.md
     item 10). Blank now refuses and names the key.
     """
-    host = require_site_value(
-        os.environ.get("SYNO_HOST", "") or os.environ.get("TRUENAS_HOST", DEFAULT_TRUENAS_HOST),
-        "[nas] host", "TRUENAS_HOST")
-    user = require_site_value(
-        os.environ.get("SYNO_USER", "") or os.environ.get("TRUENAS_USER", DEFAULT_TRUENAS_USER),
-        "[nas] admin_user", "TRUENAS_USER")
+    host, user = nas_host_user(dry_run=dry_run)
     return host, user, nas_admin_password(dry_run=dry_run)
 
 
@@ -677,11 +915,35 @@ def truenas_conn_params(dry_run: bool = False):
 # SSH (paramiko), mirrors ~/scripts/truenas_ssh.py
 # --------------------------------------------------------------------------
 
-# Host-key pinning (AUDIT SEC-3). Unset -> AutoAddPolicy plus a one-time
-# warning, so the default stays "works on a fresh admin box"; set -> the
-# offered key must match exactly or the connection is refused.
+# Host-key trust (AUDIT SEC-3; COMMERCIAL_READINESS.md item 6 finding H2,
+# 2026-08-17).
+#
+# PINNING IS THE RULE. Until 2026-08-17 an unset pin meant AutoAddPolicy plus a
+# printed warning -- i.e. this channel, which carries the NAS admin password on
+# its stdin and runs `sudo -S` with it, trusted whatever answered on port 22.
+# On a tailnet that is a small risk; on a customer LAN it is the whole estate.
+# What an unset pin means now:
+#
+#   pin configured (--host-key / CCSYNC_SSH_HOSTKEY / [nas] ssh_hostkey)
+#       RejectPolicy against that key. Unchanged, and still the right answer.
+#   no pin, host already recorded in ~/.ccsync/known_hosts
+#       RejectPolicy against the RECORDED key. A key that changed is a refusal
+#       naming both fingerprints -- never a fresh trust-on-first-use.
+#   no pin, host not recorded
+#       REFUSAL, naming the two ways forward -- unless
+#       --trust-host-key-on-first-use (or CCSYNC_SSH_TRUST_ON_FIRST_USE=1) says
+#       an operator is deliberately bootstrapping. Then the offered key is
+#       written to ~/.ccsync/known_hosts and printed with the exact site.toml
+#       line to paste, so the next run is pinned rather than trusting again.
 _HOST_KEY_PIN = ""
-_HOST_KEY_WARNED = False
+_TRUST_ON_FIRST_USE = False
+_TOFU_FLAG = "--trust-host-key-on-first-use"
+TOFU_ENV = "CCSYNC_SSH_TRUST_ON_FIRST_USE"
+# Where an accepted first-use key is recorded. Under ~/.ccsync/ beside the
+# rest of this toolchain's per-operator state, in OpenSSH known_hosts format so
+# `ssh-keygen -F`/`-R` and a human's eyes both work on it. The env var is for
+# tests (and for an operator who keeps several sites' state apart).
+KNOWN_HOSTS_ENV = "CCSYNC_KNOWN_HOSTS"
 
 
 def set_host_key_pin(value: str) -> None:
@@ -690,24 +952,57 @@ def set_host_key_pin(value: str) -> None:
     _HOST_KEY_PIN = str(value or "").strip()
 
 
+def set_trust_on_first_use(value: bool) -> None:
+    """Allow ONE unverified first connection (from --trust-host-key-on-first-use)."""
+    global _TRUST_ON_FIRST_USE
+    _TRUST_ON_FIRST_USE = bool(value)
+
+
+def trust_on_first_use() -> bool:
+    """Whether this run may accept an unknown host key.
+
+    Read from argv directly as well as from the setter, for the same reason
+    site_path_from_argv exists: not every script routes its parsed args back
+    into this module, and a flag that is silently ignored on one script and
+    honoured on another is worse than no flag.
+    """
+    if _TRUST_ON_FIRST_USE or _TOFU_FLAG in sys.argv[1:]:
+        return True
+    return os.environ.get(TOFU_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def host_key_pin() -> str:
-    """The configured pin: --host-key (via set_host_key_pin) or
-    CCSYNC_SSH_HOSTKEY. Format is one `known_hosts`-style key, with or
-    without a leading host field, e.g.
+    """The configured pin: --host-key (via set_host_key_pin), else
+    CCSYNC_SSH_HOSTKEY, else [nas] ssh_hostkey in site.toml. Format is one
+    `known_hosts`-style key, with or without a leading host field, e.g.
 
         ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...
 
     Get it from the NAS with `ssh-keyscan -t ed25519 <host>`.
     """
-    return _HOST_KEY_PIN or os.environ.get("CCSYNC_SSH_HOSTKEY", "").strip()
+    return (_HOST_KEY_PIN
+            or os.environ.get("CCSYNC_SSH_HOSTKEY", "").strip()
+            or site_value("nas", "ssh_hostkey"))
+
+
+def known_hosts_path() -> Path:
+    """The known_hosts-style file first-use keys are recorded in."""
+    override = os.environ.get(KNOWN_HOSTS_ENV, "").strip()
+    return Path(override) if override else Path.home() / ".ccsync" / "known_hosts"
 
 
 def add_host_key_arg(ap) -> None:
-    """Add the shared --host-key flag to an argparse parser."""
+    """Add the shared --host-key / --trust-host-key-on-first-use pair."""
     ap.add_argument("--host-key", default="",
                     help="pin the NAS SSH host key (a known_hosts-style line, e.g. "
-                         "\"ssh-ed25519 AAAAC3...\"; or set CCSYNC_SSH_HOSTKEY). "
-                         "Unset means the key is accepted unverified on first use.")
+                         "\"ssh-ed25519 AAAAC3...\"; or set CCSYNC_SSH_HOSTKEY, or "
+                         "[nas] ssh_hostkey in site.toml). An unpinned host that is "
+                         "not already in ~/.ccsync/known_hosts is REFUSED.")
+    ap.add_argument(_TOFU_FLAG, action="store_true", default=False,
+                    help="accept the NAS's host key unverified ONCE, record it in "
+                         f"~/.ccsync/known_hosts and print the line to pin it with "
+                         f"(or set ${TOFU_ENV}=1). For the first connection to a new "
+                         f"NAS, made by someone who can see the box.")
 
 
 def _parse_host_key(pin: str):
@@ -753,32 +1048,125 @@ def _parse_host_key(pin: str):
     return keytype, key
 
 
+def _known_host_key(host: str):
+    """The key recorded for `host` in ~/.ccsync/known_hosts, or None.
+
+    paramiko's own HostKeys parser is used rather than a hand-rolled one so
+    that hashed entries and multiple key types behave the way `ssh` does.
+    """
+    import paramiko
+
+    path = known_hosts_path()
+    if not path.is_file():
+        return None
+    keys = paramiko.hostkeys.HostKeys()
+    try:
+        keys.load(str(path))
+    except Exception as exc:  # noqa: BLE001 - a corrupt file is a refusal, not a crash
+        raise EnvError(
+            f"{path} could not be read as a known_hosts file ({type(exc).__name__}: {exc}). "
+            f"Fix or delete it, or pin the key with [nas] ssh_hostkey instead."
+        ) from exc
+    entry = keys.lookup(host) or {}
+    for keytype in entry.keys():
+        return keytype, entry[keytype]
+    return None
+
+
+def _record_host_key(host: str, key) -> Path:
+    """Append `key` to ~/.ccsync/known_hosts (0600) and return the path."""
+    path = known_hosts_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"{host} {key.get_name()} {key.get_base64()}\n")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # Windows/ACL filesystems where chmod is a no-op: the record is still
+        # worth having, and it is public-key material either way.
+        pass
+    return path
+
+
+def _fingerprint(key) -> str:
+    import base64
+    import hashlib
+
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
 def ssh_client(host: str, user: str, pw: str, timeout: int = 20):
     """Connected paramiko.SSHClient with the shared host-key policy applied.
 
-    Every SSH/SFTP entry point in this package goes through here so the
-    pinning decision is made in exactly one place.
+    Every SSH/SFTP entry point in this package goes through here so the trust
+    decision is made in exactly one place -- see the _HOST_KEY_PIN block above
+    for the three states and why an unknown host is now a refusal.
     """
-    global _HOST_KEY_WARNED
-
     import paramiko
 
     client = paramiko.SSHClient()
     pin = host_key_pin()
+    recorded = None
+    tofu = None
     if pin:
         keytype, key = _parse_host_key(pin)
         client.get_host_keys().add(host, keytype, key)
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
     else:
-        if not _HOST_KEY_WARNED:
-            print(f"WARNING: accepting {host}'s SSH host key unverified (first-use trust). "
-                  f"Pin it with --host-key or CCSYNC_SSH_HOSTKEY=\"$(ssh-keyscan -t ed25519 "
-                  f"{host} | awk '{{print $2, $3}}')\" to make this strict.",
-                  file=sys.stderr)
-            _HOST_KEY_WARNED = True
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(host, username=user, password=pw,
-                   look_for_keys=False, allow_agent=False, timeout=timeout)
+        recorded = _known_host_key(host)
+        if recorded:
+            keytype, key = recorded
+            client.get_host_keys().add(host, keytype, key)
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        elif trust_on_first_use():
+            class _RecordOnFirstUse(paramiko.MissingHostKeyPolicy):
+                """AutoAdd that REMEMBERS, so the next run is pinned."""
+
+                def __init__(self):
+                    self.key = None
+
+                def missing_host_key(self, client_, hostname, key_):
+                    self.key = key_
+                    client_.get_host_keys().add(hostname, key_.get_name(), key_)
+
+            tofu = _RecordOnFirstUse()
+            client.set_missing_host_key_policy(tofu)
+        else:
+            raise EnvError(
+                f"refusing to SSH to {host}: its host key is neither pinned nor known.\n"
+                f"  This channel carries the NAS admin password and runs `sudo -S` with "
+                f"it, so an unverified key means anything on the network can have it "
+                f"(COMMERCIAL_READINESS.md item 6).\n"
+                f"  Pin it (preferred):  ssh-keyscan -t ed25519 {host}\n"
+                f"    then put the '<type> <base64>' half in site.toml as "
+                f"[nas] ssh_hostkey, or export CCSYNC_SSH_HOSTKEY.\n"
+                f"  Or, standing in front of the box, accept it once with "
+                f"{_TOFU_FLAG} (${TOFU_ENV}=1) -- it is recorded in "
+                f"{known_hosts_path()} and every later run is checked against it."
+            )
+    try:
+        client.connect(host, username=user, password=pw,
+                       look_for_keys=False, allow_agent=False, timeout=timeout)
+    except paramiko.BadHostKeyException as exc:
+        source = "[nas] ssh_hostkey / CCSYNC_SSH_HOSTKEY" if pin else str(known_hosts_path())
+        raise EnvError(
+            f"REFUSING to talk to {host}: its SSH host key CHANGED.\n"
+            f"  expected {_fingerprint(exc.expected_key)} (from {source})\n"
+            f"  offered  {_fingerprint(exc.key)}\n"
+            f"  Either the NAS was reinstalled/re-keyed -- in which case update the pin "
+            f"(or `ssh-keygen -R {host} -f {known_hosts_path()}`) deliberately -- or "
+            f"something is answering in its place. Nothing was sent."
+        ) from exc
+
+    if tofu is not None and tofu.key is not None:
+        path = _record_host_key(host, tofu.key)
+        print(f"TRUSTED ON FIRST USE: {host} host key {_fingerprint(tofu.key)} "
+              f"({tofu.key.get_name()}), recorded in {path}. Later runs are checked "
+              f"against it and a change is a refusal.\n"
+              f"  Pin it properly by adding this to site.toml [nas]:\n"
+              f'    ssh_hostkey = "{tofu.key.get_name()} {tofu.key.get_base64()}"',
+              file=sys.stderr)
     return client
 
 
@@ -811,7 +1199,9 @@ def run_ssh(cmd: str, dry_run: bool = False, timeout: int = 120):
     try:
         wrapped = SUDO_PW_PREAMBLE + cmd
         stdin, stdout, stderr = client.exec_command(wrapped, get_pty=False, timeout=timeout)
-        stdin.write(pw + "\n")
+        # The SUDO password, which is the login one unless the site split them
+        # (nas_sudo_password, 2026-08-17).
+        stdin.write(nas_sudo_password(dry_run=False) + "\n")
         stdin.flush()
         # EOF on stdin: without this a remote `read`/`cat` in cmd would hang
         # waiting for more input.
@@ -874,18 +1264,33 @@ def truenas_api(method: str, path: str, json_body=None, dry_run: bool = False,
 
     `path` must start with '/', e.g. '/user' or '/group'.
     Returns a requests.Response in real mode, or None in dry-run mode.
+
+    Auth: a scoped API key ($TRUENAS_API_KEY) as `Authorization: Bearer <key>`
+    when one is configured, else HTTP basic with the admin password. The key is
+    preferred because it can be minted with only the handful of methods this
+    product calls -- root-equivalent basic auth over the LAN was finding H2
+    (COMMERCIAL_READINESS.md item 6). TLS verification is now a setting rather
+    than a hardcoded False (truenas_verify_ssl).
     """
-    host, user, pw = truenas_conn_params(dry_run=dry_run)
+    api_key = truenas_api_key()
+    if api_key:
+        host, user = nas_host_user(dry_run=dry_run)
+        pw = ""
+    else:
+        host, user, pw = truenas_conn_params(dry_run=dry_run)
     url = f"https://{host}/api/v2.0{path}"
     if dry_run:
-        print(f"[dry-run] {method.upper()} {url} params={params} body={json_body}")
+        how = "api-key" if api_key else f"basic:{user}"
+        print(f"[dry-run] {method.upper()} {url} params={params} body={json_body} auth={how}")
         return None
 
     import requests
 
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     resp = requests.request(
-        method, url, json=json_body, params=params,
-        auth=(user, pw), verify=False, timeout=30,
+        method, url, json=json_body, params=params, headers=headers,
+        auth=None if api_key else (user, pw),
+        verify=truenas_verify_ssl(), timeout=30,
     )
     return resp
 
@@ -988,15 +1393,16 @@ def _dsm_param(value) -> str:
 def synology_verify_ssl():
     """False (trust the self-signed DSM cert, the out-of-the-box state), True,
     or a CA bundle path -- from SYNO_VERIFY_SSL / TRUENAS_VERIFY_SSL / [nas]
-    verify_ssl, in that order."""
+    verify_ssl, in that order.
+
+    Off is warned about exactly as loudly as the TrueNAS path is (2026-08-17):
+    the DSM login POST carries the administrators-group password, and DSM's
+    own certificate is self-signed until someone replaces it.
+    """
     raw = (os.environ.get("SYNO_VERIFY_SSL", "").strip()
            or os.environ.get("TRUENAS_VERIFY_SSL", "").strip()
            or site_value("nas", "verify_ssl"))
-    if raw in ("", "0", "false", "no"):
-        return False
-    if raw in ("1", "true", "yes"):
-        return True
-    return raw
+    return _verify_ssl_setting(raw, "SYNO_VERIFY_SSL", host_hint="DSM")
 
 
 def synology_port() -> int:
@@ -1314,6 +1720,61 @@ def get_backend(args=None, kind: str = "", calls: ScriptCalls | None = None):
         from backends.synology import PENDING  # noqa: PLC0415
         raise NotImplementedError(PENDING)
     return backend
+
+
+REQUIRE_SNAPSHOT_ENV = "CCSYNC_REQUIRE_SNAPSHOT"
+
+
+def snapshot_before(label: str, path: str = "", dry_run: bool = False,
+                    require: bool = False, backend=None) -> bool:
+    """Snapshot `path`'s dataset/share before a privileged, destructive step.
+
+    The rule this exists to enforce (COMMERCIAL_READINESS.md item 8,
+    2026-08-17): nothing in this package runs `chown -R`, replaces the live app
+    tree, or deletes the stack without a point-in-time it can be put back to.
+    Every recovery path this system had before today was a rename-aside, a
+    `.ccsync-trash` or Syncthing versioning -- none of which survives the
+    operation that needs them most, a wrong path typed into a recursive
+    privileged command.
+
+    BEST-EFFORT BY DEFAULT, and that is deliberate: a NAS whose snapshot API
+    answers 403 must not be a NAS where projects cannot be created. The call
+    warns and returns False, the caller carries on. `require=True` (or
+    $CCSYNC_REQUIRE_SNAPSHOT=1, which is how a caller with no flag of its own
+    gets the strict mode) turns the same failure into an EnvError, i.e. `cli()`
+    prints one line and the script exits 2 with nothing touched.
+
+    `path` defaults to the tree root, which is what the recursive operations
+    act on; pass the apps root for a deploy.
+    """
+    target = str(path or DEFAULT_CC_ROOT or "").strip()
+    strict = bool(require) or os.environ.get(REQUIRE_SNAPSHOT_ENV, "").strip() in ("1", "true", "yes")
+    if not target:
+        why = ("no path to snapshot: neither an explicit path nor [tree] "
+               "pool_root/tree_name in site.toml")
+        if strict:
+            raise EnvError(f"--require-snapshot was given but there is {why}.")
+        print(f"WARNING: skipping the pre-{label} snapshot -- {why}.", file=sys.stderr)
+        return False
+    try:
+        ok = bool((backend or get_backend()).snapshot(target, label, dry_run))
+    except Exception as exc:  # noqa: BLE001 - unsupported, refused, dropped: same answer
+        ok, exc_text = False, f"{type(exc).__name__}: {exc}"
+    else:
+        exc_text = ""
+    if ok:
+        return True
+    detail = exc_text or "the backend reported a failure (see above)"
+    if strict:
+        raise EnvError(
+            f"refusing to run {label!r} without a snapshot of {target}: {detail}. "
+            f"Configure snapshots (server/setup_snapshots.py --apply), or drop "
+            f"--require-snapshot / {REQUIRE_SNAPSHOT_ENV} to accept the risk.")
+    print(f"WARNING: no pre-{label} snapshot of {target} ({detail}). Continuing -- "
+          f"but this operation has nothing behind it. Run "
+          f"server/setup_snapshots.py --apply to put a floor under the tree "
+          f"(docs/BACKUP_RESTORE.md).", file=sys.stderr)
+    return False
 
 
 def cli(main_fn) -> int:

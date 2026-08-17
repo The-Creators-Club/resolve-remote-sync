@@ -1,4 +1,4 @@
-"""The folder tree's two roots: Downloads and Creators_Club.
+"""The folder tree's two roots: Downloads and this site's own footage.
 
 Split by SHARE, because that is the only signal this app can see -- which side
 of a proxy/original pair a share archives lives in the indexer's config, and the
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from app import config
 from app.search import build_collection_clause
 from tests.factories import insert_video
 
@@ -36,7 +37,7 @@ def _seed_both(conn):
 
 def test_creators_club_selects_only_configured_shares(client, conn, creators):
     _seed_both(conn)
-    body = client.get("/api/search", params={"collection": "creators_club"}).json()
+    body = client.get("/api/search", params={"collection": config.COLLECTION_CREATORS}).json()
     assert body["total"] == 1
     assert body["results"][0]["video"]["share"] == "mofa-disaster"
 
@@ -56,7 +57,7 @@ def test_an_unlisted_share_is_a_download_not_invisible(client, conn, creators):
     insert_video(conn, share="brand-new-share", rel_path="x.mov", category="energy/nuclear")
 
     dl = client.get("/api/search", params={"collection": "downloads"}).json()
-    cc = client.get("/api/search", params={"collection": "creators_club"}).json()
+    cc = client.get("/api/search", params={"collection": config.COLLECTION_CREATORS}).json()
 
     assert dl["total"] + cc["total"] == 4, "every video is in exactly one root"
     assert "brand-new-share" in {r["video"]["share"] for r in dl["results"]}
@@ -66,7 +67,7 @@ def test_unconfigured_puts_everything_under_downloads(client, conn, monkeypatch)
     monkeypatch.delenv("BROLL_CREATORS_SHARES", raising=False)
     _seed_both(conn)
     assert client.get("/api/search", params={"collection": "downloads"}).json()["total"] == 3
-    assert client.get("/api/search", params={"collection": "creators_club"}).json()["total"] == 0
+    assert client.get("/api/search", params={"collection": config.COLLECTION_CREATORS}).json()["total"] == 0
 
 
 def test_no_collection_returns_everything(client, conn, creators):
@@ -80,7 +81,7 @@ def test_collection_composes_with_category(client, conn, creators):
         "collection": "downloads", "category": "energy"}).json()
     assert body["total"] == 2
     body = client.get("/api/search", params={
-        "collection": "creators_club", "category": "energy"}).json()
+        "collection": config.COLLECTION_CREATORS, "category": "energy"}).json()
     assert body["total"] == 0, "the two filters must AND, not OR"
 
 
@@ -93,7 +94,7 @@ def test_collection_composes_with_a_text_query(client, conn, creators):
     insert_segment(conn, other, description="firefighters at a reactor", objects="hose")
 
     body = client.get("/api/search", params={
-        "q": "firefighters", "collection": "creators_club"}).json()
+        "q": "firefighters", "collection": config.COLLECTION_CREATORS}).json()
     assert {r["video"]["rel_path"] for r in body["results"]} == {"own2.mov"}
 
 
@@ -123,13 +124,13 @@ def test_a_pushed_proxies_share_is_our_footage_without_an_env_edit(client, conn,
     insert_video(conn, share="ff4-whisky", rel_path="Whisky/Proxy/a.mov",
                  category=None, status="organised")
 
-    cc = client.get("/api/search", params={"collection": "creators_club"}).json()
+    cc = client.get("/api/search", params={"collection": config.COLLECTION_CREATORS}).json()
     dl = client.get("/api/search", params={"collection": "downloads"}).json()
     assert cc["total"] == 1
     assert dl["total"] == 0, "it must leave Downloads, not appear in both"
 
     tree = client.get("/api/tree").json()
-    creators_root = next(r for r in tree if r["collection"] == "creators_club")
+    creators_root = next(r for r in tree if r["collection"] == config.COLLECTION_CREATORS)
     assert [g["slug"] for g in creators_root["groups"]] == ["ff4-whisky"]
 
 
@@ -141,7 +142,7 @@ def test_a_pushed_originals_share_stays_a_download(client, conn, monkeypatch):
     _push_share_root(conn, "pond5", "originals")
     insert_video(conn, share="pond5", rel_path="stock/a.mov", category="energy/nuclear")
 
-    cc = client.get("/api/search", params={"collection": "creators_club"}).json()
+    cc = client.get("/api/search", params={"collection": config.COLLECTION_CREATORS}).json()
     dl = client.get("/api/search", params={"collection": "downloads"}).json()
     assert cc["total"] == 0
     assert dl["total"] == 1
@@ -158,7 +159,7 @@ def test_the_env_list_and_the_pushed_shares_are_unioned(client, conn, creators):
                  category=None, status="organised")
     insert_video(conn, share="pond5", rel_path="stock/c.mov", category=None)
 
-    cc = client.get("/api/search", params={"collection": "creators_club"}).json()
+    cc = client.get("/api/search", params={"collection": config.COLLECTION_CREATORS}).json()
     dl = client.get("/api/search", params={"collection": "downloads"}).json()
     assert {r["video"]["share"] for r in cc["results"]} == {"ff4-whisky", "mofa-disaster"}
     assert {r["video"]["share"] for r in dl["results"]} == {"pond5"}
@@ -198,7 +199,7 @@ def test_tree_omits_a_root_with_nothing_in_it(client, conn, monkeypatch):
     monkeypatch.delenv("BROLL_CREATORS_SHARES", raising=False)
     _seed_both(conn)
     tree = client.get("/api/tree").json()
-    creators_root = next(r for r in tree if r["collection"] == "creators_club")
+    creators_root = next(r for r in tree if r["collection"] == config.COLLECTION_CREATORS)
     assert creators_root["total"] == 0
     assert creators_root["groups"] == []
 
@@ -277,7 +278,7 @@ def test_creators_tree_is_built_from_paths_not_categories(client, conn, creators
                          category=None, status="organised")
 
     tree = client.get("/api/tree").json()
-    cc = next(r for r in tree if r["collection"] == "creators_club")
+    cc = next(r for r in tree if r["collection"] == config.COLLECTION_CREATORS)
 
     assert cc["total"] == 5
     shoot = cc["groups"][0]
@@ -299,7 +300,7 @@ def test_the_proxy_component_is_folded_out_of_the_label(client, conn, creators):
     insert_video(conn, share="mofa-disaster", rel_path="Day 2/Fx3/Proxy/a.mov",
                  category=None, status="organised")
     tree = client.get("/api/tree").json()
-    cc = next(r for r in tree if r["collection"] == "creators_club")
+    cc = next(r for r in tree if r["collection"] == config.COLLECTION_CREATORS)
 
     day = cc["groups"][0]["children"][0]
     assert (day["slug"], day["label"]) == ("mofa-disaster::Day 2", "Day 2")
@@ -336,7 +337,7 @@ def test_shoot_tree_never_shows_the_excluded_camera_originals(client, conn, crea
                  category=None, status="excluded")
 
     tree = client.get("/api/tree").json()
-    cc = next(r for r in tree if r["collection"] == "creators_club")
+    cc = next(r for r in tree if r["collection"] == config.COLLECTION_CREATORS)
     assert cc["total"] == 1
 
 
@@ -349,7 +350,7 @@ def test_the_shoot_tree_mirrors_the_real_folders_all_the_way_down(client, conn, 
                  category=None, status="organised")
 
     tree = client.get("/api/tree").json()
-    cc = next(r for r in tree if r["collection"] == "creators_club")
+    cc = next(r for r in tree if r["collection"] == config.COLLECTION_CREATORS)
 
     whisky = cc["groups"][0]["children"][0]
     assert (whisky["slug"], whisky["label"]) == ("mofa-disaster::Whisky", "Whisky")
@@ -374,7 +375,7 @@ def test_folders_below_the_depth_cap_fold_into_their_parent(client, conn, creato
                  category=None, status="organised")
 
     tree = client.get("/api/tree").json()
-    cc = next(r for r in tree if r["collection"] == "creators_club")
+    cc = next(r for r in tree if r["collection"] == config.COLLECTION_CREATORS)
     person = cc["groups"][0]["children"][0]["children"][0]["children"][0]
 
     assert person["label"] == "黃培峻 Huang Pei-jun"
@@ -416,3 +417,48 @@ def test_browsing_hides_the_camera_originals_of_a_proxies_share(client, conn, mo
     body = client.get("/api/search").json()
     assert [r["video"]["rel_path"] for r in body["results"]] == ["Whisky/Proxy/a.mov"]
     assert body["total"] == 1, "the count must not include what the grid refuses to show"
+
+
+# -- the slug itself is site data (2026-08-17, COMMERCIAL_READINESS.md item 4)
+#
+# It was the literal "creators_club": one customer's name in every search URL,
+# every tree root and the label an editor reads. Nothing in the DATABASE moves
+# with it -- the collection is derived from BROLL_CREATORS_SHARES at query
+# time, never stored on a row.
+
+def test_the_default_slug_names_no_customer():
+    assert config.get_creators_collection() == "owned"
+    assert config.get_creators_collection_label() == "Our Footage"
+
+
+def test_a_site_can_name_its_own_footage(monkeypatch):
+    monkeypatch.setenv("BROLL_DEFAULT_COLLECTION", "Acme Films")
+    monkeypatch.setenv("BROLL_DEFAULT_COLLECTION_LABEL", "Acme Films")
+    # URL-safe or nothing: the slug travels as a query parameter.
+    assert config.get_creators_collection() == "acme-films"
+    assert config.get_creators_collection_label() == "Acme Films"
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "!!!", "---"])
+def test_an_unusable_slug_falls_back_rather_than_producing_an_empty_one(monkeypatch, raw):
+    monkeypatch.setenv("BROLL_DEFAULT_COLLECTION", raw)
+    assert config.get_creators_collection() == "owned"
+
+
+def test_the_legacy_slug_still_reaches_the_same_root():
+    """A bookmarked ?collection=creators_club must not silently become
+    'no filter', which would show an editor the whole archive instead."""
+    assert config.normalise_collection("creators_club") == config.COLLECTION_CREATORS
+    assert config.normalise_collection("CREATORS_CLUB ") == config.COLLECTION_CREATORS
+    assert config.normalise_collection(config.COLLECTION_DOWNLOADS) == "downloads"
+    for junk in ("", None, "nope", "../etc"):
+        assert config.normalise_collection(junk) == ""
+
+
+def test_the_legacy_slug_filters_exactly_like_the_current_one(client, conn, creators):
+    insert_video(conn, share="mofa-disaster", category="energy")
+    insert_video(conn, share="pexels", category="energy")
+    legacy = client.get("/api/search", params={"collection": "creators_club"}).json()
+    current = client.get("/api/search",
+                         params={"collection": config.COLLECTION_CREATORS}).json()
+    assert legacy["total"] == current["total"] == 1

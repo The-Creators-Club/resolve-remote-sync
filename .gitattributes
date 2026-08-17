@@ -29,6 +29,21 @@ installer/macos_uninstall.sh text eol=lf
 tools/release_macos.sh   text eol=lf
 tools/build_onboard_macos.sh text eol=lf
 
+# Anything a Linux container BUILDS from or a CI runner parses, for the same
+# reason as the shell scripts above: a CR at the end of a `RUN` line becomes
+# part of the command, and a workflow file is read by a Linux YAML parser.
+# Added 2026-08-17 -- broll/web/Dockerfile was LF in this working copy only by
+# luck of when it was written, and `* text=auto` would have checked it out
+# CRLF on the next fresh clone.
+Dockerfile      text eol=lf
+Dockerfile.*    text eol=lf
+*.dockerfile    text eol=lf
+.github/workflows/*.yml  text eol=lf
+.github/workflows/*.yaml text eol=lf
+# The compose files and run.sh the NAS reads (run.sh is covered by *.sh above;
+# these are the YAML beside it).
+dashboard/deploy/*.yaml  text eol=lf
+
 # Windows-side scripts: CRLF is fine and matches what editors see.
 *.ps1  text eol=crlf
 

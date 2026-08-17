@@ -20,7 +20,7 @@ def test_plan_dedupes_and_sizes():
     ]
     sizes = {"G:\\raw\\A001.braw": 1000, "G:\\raw\\B002.wav": 50}
     plan = consolidate.plan_local_consolidation(
-        items, local_root="", editor_name="ruskin", project_prefix="Projects/2026/Creator Profiles/Season 1",
+        items, local_root="", editor_name="editor2", project_prefix="Projects/2026/Creator Profiles/Season 1",
         size_fn=lambda p: sizes.get(p, sizes.get(p.replace("g:", "G:"), 0)),
     )
     assert plan["count"] == 2  # deduped to unique paths
@@ -33,7 +33,7 @@ def test_plan_dedupes_and_sizes():
 def test_plan_uses_server_root_over_prefix():
     items = [_item("G:\\x\\clip.mov")]
     plan = consolidate.plan_local_consolidation(
-        items, local_root="", editor_name="ruskin", project_prefix="Projects/wrong",
+        items, local_root="", editor_name="editor2", project_prefix="Projects/wrong",
         server_roots={"cct creator profiles": "Projects/2026/Creator Profiles/Season 1"},
         size_fn=lambda p: 10,
     )

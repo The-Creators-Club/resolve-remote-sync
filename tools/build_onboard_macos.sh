@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Creators Club Sync -- macOS onboarding wizard build.
+# CC Sync -- macOS onboarding wizard build.
 #
 # Builds "CCSync Onboarding.app" (onboarding/build_onboard_macos.spec) and
 # zips it for handoff. The Mac-side sibling of the -RebuildOnboard half of
@@ -343,6 +343,54 @@ step "building (this takes a minute)..."
 [ -d "$APP_PATH" ] || fail "PyInstaller reported success but there is no bundle at $APP_PATH"
 step "built $APP_PATH"
 
+# --- Developer ID + notarisation (COMMERCIAL_READINESS.md item 4, 2026-08-17)
+# This bundle matters MORE than the companion binary does: it is the very
+# first thing a new Mac editor double-clicks, before anything of ours exists
+# on their machine to vouch for it. Ad-hoc means Gatekeeper refuses it and
+# the setup instructions have to say "right-click, Open, then Open again",
+# which is indistinguishable from the advice malware gives.
+#
+# --deep: this is an onedir .app with nested frameworks/dylibs, and every one
+# of them has to carry the same signature or --verify --deep --strict (below,
+# and Gatekeeper on the editor's Mac) rejects the bundle.
+SIGNED_BINARY=false
+if [ -n "${CCSYNC_APPLE_DEV_ID:-}" ]; then
+    have_cmd codesign || fail "CCSYNC_APPLE_DEV_ID is set but there is no codesign on PATH"
+    step "signing the bundle with Developer ID: $CCSYNC_APPLE_DEV_ID"
+    codesign --force --deep --sign "$CCSYNC_APPLE_DEV_ID" --options runtime --timestamp "$APP_PATH" \
+        || fail "codesign with '$CCSYNC_APPLE_DEV_ID' failed -- nothing was zipped or published"
+    if [ -n "${CCSYNC_NOTARY_PROFILE:-}" ]; then
+        NOTARY_ZIP="$ONBOARDING_DIR/dist/ccsync-onboard-notarize.zip"
+        rm -f "$NOTARY_ZIP"
+        ditto -c -k --keepParent "$APP_PATH" "$NOTARY_ZIP" \
+            || fail "could not zip the bundle for notarisation"
+        step "submitting to Apple for notarisation (this can take minutes)..."
+        xcrun notarytool submit "$NOTARY_ZIP" --keychain-profile "$CCSYNC_NOTARY_PROFILE" --wait \
+            || fail "notarisation failed -- run: xcrun notarytool log <submission-id> --keychain-profile $CCSYNC_NOTARY_PROFILE"
+        rm -f "$NOTARY_ZIP"
+        # A .app CAN be stapled (unlike the bare companion Mach-O), and it
+        # must be: the editor's first launch may be on a machine that cannot
+        # reach Apple, and a stapled ticket makes Gatekeeper offline-safe.
+        # Stapling happens BEFORE the shipping zip is made, or the ticket is
+        # not in what they receive.
+        xcrun stapler staple "$APP_PATH" \
+            || fail "could not staple the notarisation ticket to $APP_PATH"
+        step "notarisation ticket stapled into the bundle"
+    else
+        warn "CCSYNC_NOTARY_PROFILE is not set -- the wizard is Developer ID SIGNED but NOT NOTARISED."
+        warn "Gatekeeper still refuses a downloaded unnotarised .app. See docs/RELEASE.md."
+    fi
+    SIGNED_BINARY=true
+else
+    warn "**********************************************************************"
+    warn "UNSIGNED WIZARD (ad-hoc only). No CCSYNC_APPLE_DEV_ID in the environment."
+    warn "This is the FIRST thing a new Mac editor runs, and Gatekeeper will tell"
+    warn "them it 'cannot be opened because the developer cannot be verified'."
+    warn "Buy an Apple Developer ID and set CCSYNC_APPLE_DEV_ID +"
+    warn "CCSYNC_NOTARY_PROFILE. See docs/RELEASE.md 'Code signing'."
+    warn "**********************************************************************"
+fi
+
 if have_cmd codesign; then
     CODESIGN_OUT="$(codesign -dv "$APP_PATH" 2>&1)"
     CODESIGN_RC=$?
@@ -437,6 +485,35 @@ fi
 
 have_cmd curl || fail "no curl on PATH -- cannot publish"
 
+# --- sign the release record (COMMERCIAL_READINESS.md item 4, 2026-08-17) ---
+# Before the password prompt, on purpose: a missing release key should cost a
+# message, not a login. The key is the SAME offline key the Windows ship uses
+# (see tools/release_macos.sh for how it gets onto this Mac).
+#
+# The signed filename is derived from the payload: this is the macos onboard
+# slot, where the server picks .zip for zip magic and .sh otherwise
+# (api._package_filename), and sign_release.py mirrors that from the file's
+# first bytes. Signing a .sh name and uploading a .zip is refused server-side.
+SIGN_PY="$VENV_PY"
+[ -x "$SIGN_PY" ] || SIGN_PY="$(command -v python3 || true)"
+[ -n "$SIGN_PY" ] || fail "no python to run tools/sign_release.py with"
+MIN_VERSION="${CCSYNC_MIN_VERSION:-0.0.0}"
+SIGN_ARGS="--signed-binary"
+[ "${SIGNED_BINARY:-false}" = true ] || SIGN_ARGS=""
+# shellcheck disable=SC2086  # SIGN_ARGS is a deliberate single optional flag
+SIGN_JSON="$("$SIGN_PY" "$REPO_ROOT/tools/sign_release.py" \
+    --artifact "$ZIP_PATH" --kind onboard --platform macos \
+    --version "$ONBOARD_VERSION" --min-version "$MIN_VERSION" $SIGN_ARGS 2>/dev/null)" \
+    || fail "could not sign the release record.
+         The offline release key is missing on this Mac. Copy it from the
+         release rig to ~/.ccsync-release/release.key (chmod 600), or set
+         CCSYNC_RELEASE_KEY. Nothing was uploaded."
+SIGN_QUERY="$(printf '%s' "$SIGN_JSON" | sed -n 's/.*"query": "\([^"]*\)".*/\1/p')"
+[ -n "$SIGN_QUERY" ] || fail "tools/sign_release.py produced no query suffix -- NOT publishing"
+SIGN_SHA="$(printf '%s' "$SIGN_JSON" | sed -n 's/.*"sha256": "\([^"]*\)".*/\1/p')"
+[ "$SIGN_SHA" = "$ZIP_SHA" ] || fail "the signed record describes $SIGN_SHA but the zip is $ZIP_SHA -- NOT publishing"
+step "signed release record (min_version $MIN_VERSION, signed_binary ${SIGNED_BINARY:-false})"
+
 # --- log in (same shape as release_macos.sh: password via stdin, cookie
 # jar in a private temp dir) -------------------------------------------
 PUB_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/ccsync-onboard-pub.XXXXXXXX")" || fail "could not create a temp dir"
@@ -469,7 +546,7 @@ step "logged in as $ADMIN_USER"
 
 MC=0
 [ "$MAKE_CURRENT" = 1 ] && MC=1
-PUT_URL="$DASHBOARD_URL/api/v1/admin/packages/macos/$ONBOARD_VERSION?kind=onboard&sha256=$ZIP_SHA&make_current=$MC"
+PUT_URL="$DASHBOARD_URL/api/v1/admin/packages/macos/$ONBOARD_VERSION?kind=onboard&sha256=$ZIP_SHA&make_current=$MC$SIGN_QUERY"
 step "uploading $(du -k "$ZIP_PATH" | awk '{print $1}') KB to $PUT_URL"
 PUT_CODE="$(curl -s -o "$BODY_FILE" -w '%{http_code}' --max-time 600 \
     -b "$COOKIE_JAR" -H "Content-Type: application/octet-stream" \

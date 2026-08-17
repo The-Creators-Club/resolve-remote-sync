@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import quote
 
 from . import config as config_mod
+from . import upgrade as upgrade_mod
 from .sync.repath import normalized_safe_rel
 
 log = logging.getLogger("ccsync.selection")
@@ -45,7 +46,13 @@ CACHE_FILENAME = "selection.json"
 
 def default_http_get(url: str, headers: dict, timeout: float) -> Any:
     req = urllib.request.Request(url, headers=headers, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # No redirects: `headers` carries the fleet token and the machine identity,
+    # and urlopen follows 3xx while stripping only Authorization -- custom
+    # headers go to whatever host the redirect names. See reporter's
+    # default_http_post for the whole reasoning (COMMERCIAL_READINESS.md item
+    # 15, 2026-08-17). A 3xx becomes an HTTPError, which get() already handles
+    # as "dashboard unreachable" and falls back to the cache for.
+    with upgrade_mod.build_no_redirect_opener().open(req, timeout=timeout) as resp:
         data = resp.read()
     return json.loads(data.decode("utf-8")) if data else {}
 
@@ -329,7 +336,9 @@ class SelectionClient:
                 headers["X-CCSync-Identity"] = identity_token
         req = urllib.request.Request(url, headers=headers, method="DELETE")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            # No redirects -- same rule as default_http_get above.
+            with upgrade_mod.build_no_redirect_opener().open(
+                    req, timeout=self.timeout) as resp:
                 resp.read()
         except urllib.error.HTTPError as exc:
             return False, f"dashboard refused the untick (HTTP {exc.code})"

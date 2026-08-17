@@ -22,10 +22,11 @@ including similarity, which runs off the embeddings the base rig already stored.
 | env var | default | what it is |
 |---|---|---|
 | `MUSIC_DATA_ROOT` | `music/web/data` | holds `music.db` and the ingest `staging/` dir. **The only path the app writes** |
-| `MUSIC_SHARE_ROOT` | `W:\Creators_Club\Assets\Music` | the library. `P:\Assets\Music` on editor machines |
+| `MUSIC_LIBRARY_ROOT` | `P:\Assets\Music` | the library. An indexing host that maps the NAS share on another letter sets this; `MUSIC_SHARE_ROOT`/`MUSIC_ROOT` are accepted aliases, in that order |
 | `MUSIC_PROXIES_DIR` | `<MUSIC_DATA_ROOT>/proxies` | 128k preview mp3s, one per track id |
 | `MUSIC_TEXT_ENCODER_DIR` | `<MUSIC_DATA_ROOT>/text_encoder` | the exported CLAP text tower |
 | `MUSIC_INDEXER_DIR` | `music/indexer` | only used by ingest and the waveform fallback |
+| `MUSIC_INGEST_TOKEN` | unset | `X-Ingest-Token` for `/api/ingest`. **Required when this app runs standalone** — unset there, ingest answers 503. Mounted in the dashboard the session is the credential; see below |
 | `HOST` / `PORT` | `127.0.0.1` / `8790` | standalone run only |
 
 Every one of those is `MUSIC_`-prefixed **because this app is mounted inside the dashboard
@@ -70,20 +71,42 @@ to a page that 500s on every request is worse than no link.
 | `absent` | `import musicweb.main` raised | `/music/*` 404s, no nav link, one WARNING in the log |
 | `degraded` | imported, but the DB could not be opened | `/music` mounted and reachable if typed, **no nav link**, one ERROR in the log |
 
-### There is deliberately no ingest token here
+### The ingest credential depends on WHERE this app is running
 
 `broll.py` re-checks `X-Ingest-Token` on every `/broll/api/ingest/*` request because those
 routes are an unauthenticated-by-design write path for the indexer (not a browser, no
-session), so they are allowed *past* `login_gate` — and the b-roll app's own guard treats
-the token as optional ("not configured = dev mode = open"). None of that applies here:
-`/api/ingest` is called by the SPA from a logged-in browser (as `/api/resolve*` and
-`/api/reveal` were before they moved onto the companion's loopback), nothing about
-`/music/*` is exempt from `login_gate`, and there is no
-upstream dev-mode branch to reach. **The session is the credential.** The day music grows
-a machine-to-machine ingest for the base rig (port step 7's queued handoff), it needs the
-full b-roll treatment — a mandatory token validated in `create_app` and re-checked in
-`MusicGate` — and a `music_enabled` / `MUSIC_INGEST_TOKEN` pair in
-`dashboard/src/ccsync_dashboard/settings.py` to go with it.
+session), so they are allowed *past* `login_gate`. Music's `/api/ingest` is different: it
+is called by the SPA from a logged-in browser (as `/api/resolve*` and `/api/reveal` were
+before they moved onto the companion's loopback), and nothing about `/music/*` is exempt
+from `login_gate`. **Mounted in the dashboard, the session is the credential** — and it
+must stay that way, because the page has no token to send.
+
+**Standalone, it is not** (2026-08-17, `COMMERCIAL_READINESS.md` item 15). Run under its
+own uvicorn there is no login in front of this app at all, so an open `/api/ingest` means
+anyone who can reach the port writes files into the shared library and spends 900 s ffmpeg
+transcodes doing it. So:
+
+| where | `MUSIC_INGEST_TOKEN` | `/api/ingest` |
+|---|---|---|
+| mounted in the dashboard | unset | allowed — `login_gate` already ran |
+| mounted in the dashboard | set | allowed with the header **or** on the session |
+| standalone | set | requires a matching `X-Ingest-Token` (401 otherwise) |
+| standalone | unset | **503, fail-closed** |
+
+"Mounted" is a CALL, not an environment variable: `mount_music` runs
+`musicweb.config.set_login_gated(True)`. A host that merely has a variable set is not a
+process with the middleware wrapped around it, and the difference is the whole security
+property. (`MUSIC_LOGIN_GATED=1` exists as an escape hatch for a deployment that puts its
+own authenticating proxy in front — use it knowing exactly what is doing the
+authenticating.)
+
+One request is also **bounded**: `config.MAX_INGEST_FILES` (64) and
+`MAX_INGEST_TOTAL_BYTES` / `MAX_INGEST_FILE_BYTES` (512 MB), refused with a 413 before a
+byte is written. `app.py`'s `body_size_gate` only makes a *declaration* check on
+`/music/api/ingest` — the multipart body is spooled past it on purpose, because buffering
+a dropped album is the memory problem that middleware exists to prevent — so nothing
+counted the parts themselves, and a request could carry ten thousand of them, each costing
+a staging write, an ffprobe and two library hashes on the single-worker container.
 
 For the same reason there is **no `DASH_MUSIC_ENABLED` flag**: b-roll needs one so the
 dashboard can refuse to start rather than serve a write path with a weak token. Music has
@@ -136,7 +159,7 @@ shared archive the container fills in itself and music's is not.
 | startup check for `broll_src/"app"/"main.py"`, hard-fails when `DASH_BROLL_ENABLED=1` | checks `music_src/"musicweb"/"main.py"` and **warns and skips** — there is no flag asserting the operator wanted it |
 | step 2b `install_tree(root, "broll-web", …, staging_slug="ccsync-brollweb-upload")` | step 2c `install_tree(root, "music-web", …, excludes=MUSIC_EXCLUDE_DIRS, staging_slug="ccsync-musicweb-upload")` |
 | — | step 2d, the data artefacts: `install_tree` for `music-encoder`/`music-proxies`, and `install_music_db` for the index |
-| — | step 2e, static ffmpeg/ffprobe into `<root>/ffmpeg` (fetched **here** and pushed over the LAN by default — see below) |
+| — | step 2e, static ffmpeg/ffprobe into `<root>/ffmpeg` (the **NAS** fetches it itself by default — see below) |
 | `mkdir`/`chown root:root`/`chmod 755` on `<root>/broll-web` | the same on `music-web`, `music-encoder`, `music-proxies`, `ffmpeg`; `music-data` is `3000:3000` mode `770` instead, like `<root>/data`, because it is the one music path the container writes |
 | the archive root prepared `broll:editors 2770` setgid | `…/Creators_Club/Assets/Music` prepared exactly the same way, mounted `rw` |
 | `run.sh`: `export PYTHONPATH=/app/src:/broll-app` | `export PYTHONPATH=/app/src:/broll-app:/music-app`, plus `export PATH="/opt/ffmpeg:$PATH"` |
@@ -190,7 +213,7 @@ index in existence when you push it.
 ```powershell
 # 0. is anything waiting?  /music (the ingest panel) or, on the NAS:
 #    the mount is 3000:3000 mode 770, so every read of it needs sudo
-ssh truenas_admin@192.168.0.102 `
+ssh truenas_admin@192.168.0.10 `
   "sudo ls -l /mnt/tank/apps/ccsync-dashboard/music-data"
 
 # 1. pull it down -- music.db AND its -wal/-shm. The index is in WAL mode and a
@@ -198,14 +221,16 @@ ssh truenas_admin@192.168.0.102 `
 #    that arrives beside a DIFFERENT database is how a working index becomes a
 #    corrupt one. Take the copy when nobody is mid-upload: this is a file copy,
 #    not a snapshot.
-ssh truenas_admin@192.168.0.102 `
+ssh truenas_admin@192.168.0.10 `
   "sudo cp -a /mnt/tank/apps/ccsync-dashboard/music-data/music.db* /tmp/ && sudo chown truenas_admin /tmp/music.db*"
-scp truenas_admin@192.168.0.102:/tmp/music.db* .\nas-index\
+scp truenas_admin@192.168.0.10:/tmp/music.db* .\nas-index\
 
-# 2. drain it HERE, where the GPU and the library (W:) are. The uploads
-#    themselves are already in the share, so nothing but the index moves.
+# 2. drain it HERE, where the GPU and the library are. The uploads themselves
+#    are already in the share, so nothing but the index moves. --export-drain
+#    writes the ANALYSED RESULTS of the rows this run closed to a small bundle;
+#    that bundle, not this file, is what goes back (step 3a).
 cd music\indexer
-python index_music.py --queue --db ..\..\nas-index\music.db      # --retry-failed to re-attempt parked rows
+python index_music.py --queue --db ..\..\nas-index\music.db --export-drain drain.db
 python index_music.py --queue-status --db ..\..\nas-index\music.db
 
 # 3. that drained copy is now the truth: it has everything the base rig's index
@@ -216,16 +241,45 @@ python index_music.py --queue-status --db ..\..\nas-index\music.db
 Remove-Item ..\web\data\music.db-wal, ..\web\data\music.db-shm -ErrorAction SilentlyContinue
 Copy-Item ..\..\nas-index\music.db ..\web\data\music.db -Force
 
-# 4. push just the index back (never `all` -- that is a 1.4 GB re-upload)
+# 3a. THE PREFERRED WAY BACK (2026-08-17, COMMERCIAL_READINESS.md item 14):
+#     apply the bundle to the LIVE index instead of pushing a file over it. It
+#     closes only the journal rows this drain analysed, so anything an editor
+#     queued in the meantime is still pending afterwards rather than gone. One
+#     transaction, idempotent, and it needs nothing but the standard library --
+#     so it runs on the NAS host, in the container, or against a copy.
+scp drain.db truenas_admin@192.168.0.10:/tmp/
+ssh truenas_admin@192.168.0.10 `
+  "sudo python3 -m musicweb.drain apply /tmp/drain.db --db /mnt/tank/apps/ccsync-dashboard/music-data/music.db"
+#     (run it from the shipped music-web tree so `musicweb` is importable; or
+#      `python -m musicweb.drain inspect drain.db` first to see what it holds)
+
+# 4. the whole-file push. Still correct for a FIRST install or a rebuild, and
+#    still a lost-write window for anything else -- prefer 3a. Never `all`;
+#    that is a 1.4 GB re-upload.
 cd ..\..\server
-python install_dashboard_app.py --music-data db
+python publish_db.py --which music --apply       # preferred; see below
+# python install_dashboard_app.py --music-data db   # the deploy-time route
 ```
+
+**Prefer `publish_db.py --which music`** (added 2026-08-17,
+`docs/COMMERCIAL_READINESS.md` item 8). It is `--music-data db` plus the three
+checks that step 4 cannot make on its own: it checkpoints the source before
+copying it, it runs `PRAGMA quick_check` on the candidate **on the NAS** before
+anything live is renamed, and it refuses a publish whose content tables lost
+more than 10% of their rows — which is exactly what a wrong `--source` or a
+half-drained pull looks like. It keeps the previous index as
+`music.db.prev-<ts>` and `--rollback --apply` puts it back by rename.
+`ingest_queue` is deliberately excluded from the shrink check, because those
+rows exist only on the NAS. Full procedure: `docs/BACKUP_RESTORE.md` §6.
 
 Two hazards worth naming, because neither is detectable after the fact:
 
-- **The window between step 1 and step 4 is a lost-write window.** Anything an editor
-  queues while you hold the copy lands in the NAS `music.db` and is overwritten by the push.
-  Re-check `/music`'s queue immediately before step 4; if it grew, go back to step 1.
+- **The window between step 1 and step 4 is a lost-write window — which is why step 3a
+  exists.** Anything an editor queues while you hold the copy lands in the NAS `music.db`
+  and is overwritten by a whole-file push. Applying the bundle (step 3a) has no such
+  window: it names the journal rows the drain closed and touches nothing else, so a
+  mid-drain upload is simply still pending. If you do push the file anyway, re-check
+  `/music`'s queue immediately before step 4 and go back to step 1 if it grew.
 - **A `--music-data db` push from a base rig that never drained** discards pending rows the
   same way. That is why `db` is opt-in and why the installer keeps `music.db.old.<ts>`
   forever — it is the only copy of the row you just lost.
@@ -252,20 +306,29 @@ it, **runs `-version` on the candidate before moving it into place**, and instal
 (already-installed binaries are left alone), non-fatal (a fleet dashboard must not fail to
 deploy because a download host was unreachable) and skippable with `--no-ffmpeg`.
 
-**The download happens *here*, not on the NAS** (`--ffmpeg-fetch local`, the default). This
-is the one step that has actually failed a deploy: the NAS pulls `johnvansickle.com` at
-~28 kB/s, so 42 MB needs ~25 minutes against `run_ssh`'s 600 s timeout — and because step 2e
-runs *before* any tree ships, the whole deploy died having landed nothing (2026-08-10; the
-dashboard stayed up on the old version throughout, which is the design working, but a fresh
-host could not be provisioned at all). Fetching on the workstation and pushing over gigabit
-LAN moves the slow, flaky half onto the machine that is fastest at it and leaves the NAS a
-few seconds of SFTP and `tar`:
+**The download happens on the NAS, not here** (`--ffmpeg-fetch remote`, the default since
+2026-08-17). It was the other way round from 2026-08-10, for a real reason: this is the one
+step that has actually failed a deploy — the NAS pulls `johnvansickle.com` at ~28 kB/s, so
+42 MB needs ~25 minutes against the 600 s timeout the step was then given, and because step
+2e runs *before* any tree ships, the whole deploy died having landed nothing (the dashboard
+stayed up on the old version throughout, which is the design working, but a fresh host could
+not be provisioned at all). What outranks it is licensing: the static build is **GPLv3**, so
+a machine that pushes it onto a customer's NAS is *conveying* it and owes corresponding
+source or a three-year written offer (COMMERCIAL_READINESS.md item 3). A NAS that fetches
+its own copy from upstream conveys nothing. The operational half is answered instead of
+ignored — the remote step now gets 1800 s, its `curl` retries three times, and the step is
+non-fatal, so the worst a slow host costs is `/api/ingest` answering 503:
 
-    --ffmpeg-fetch local     (default) fetch here, verify the pin, SFTP it over
-    --ffmpeg-fetch remote    the NAS curls it -- for a workstation with no route out
-    MUSIC_FFMPEG_FETCH=…     same values, for a non-interactive deploy
-    MUSIC_FFMPEG_FILE=…      a tarball you already have; still checked against the pin
-    MUSIC_FFMPEG_CACHE=…     where fetched tarballs are kept, default <repo>/.cache/ffmpeg
+    --ffmpeg-fetch remote        (default) the NAS curls the pinned URL and checks the pin
+    --push-ffmpeg-from-local     fetch here, verify the pin, SFTP it over -- for an
+                                 air-gapped site; prints the GPLv3 notice that then
+                                 applies to you (== --ffmpeg-fetch local)
+    MUSIC_FFMPEG_FETCH=…         same values, for a non-interactive deploy
+    MUSIC_FFMPEG_FILE=…          a tarball you already have; still checked against the
+                                 pin (local push only -- in remote mode it is ignored,
+                                 loudly)
+    MUSIC_FFMPEG_CACHE=…         where fetched tarballs are kept, default
+                                 <repo>/.cache/ffmpeg
 
 The local path probes the host **first** (`[ -x ffmpeg ] && [ -x ffprobe ]`), so a routine
 redeploy of a provisioned host neither downloads nor pushes anything; the cache means a

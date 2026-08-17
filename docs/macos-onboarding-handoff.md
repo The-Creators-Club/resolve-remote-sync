@@ -42,7 +42,7 @@ brief), `KNOWN_BUGS.md` item 8 (the standing status).
 | macOS runtime validated | **no — not one line has executed** |
 
 The artifact lives at
-`/Users/leso/resolve-remote-sync/companion/dist/ccsync-companion`
+`<mac-checkout>/companion/dist/ccsync-companion` on the Mac
 (sha256 `74965ae9dba0ee2cdc51c6e775cd228f0ecbbac5837b76cfb61caa20c6d540ec`,
 20,954,720 bytes). It is the first Mac build whose manifest is honest on
 every field; the previous one was `0.4.20+dirty` with `tests_run: false`.
@@ -78,7 +78,7 @@ GET /api/v1/companion/package/macos/current
 
 So a Mac editor running the bootstrap today gets rclone, syncthing, a config
 and a LaunchAgent — and then no companion. That is exactly the half-finished
-state sitting on leso's Mac from a 13:43 run on 2026-08-04.
+state sitting on the Mac editor's machine from a 13:43 run on 2026-08-04.
 
 ---
 
@@ -112,7 +112,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/ccsync_ed25519
 
 # 2. download the script from the dashboard ([ INSTALLER ] → /download), then
 DASHBOARD_TOKEN=<token> bash ccsync-onboard-*.sh \
-    --tailnet-host 100.71.216.3 --editor-name <name> \
+    --tailnet-host <nas-tailnet-ip> --editor-name <name> \
     --local-root "/Volumes/<SSD>/Creators_Club"
 
 # 3. sign in from the tray — nothing syncs until this happens
@@ -210,14 +210,23 @@ includes.
 
 ## 4. The Mac
 
-`liaoshaoxuandeMacBook-Pro` — Apple silicon (arm64), macOS 15.7.4 (24G517),
-tailnet `100.66.62.41`, owned by `leso`. SSH is open and the machine is fully
-scriptable; **credentials are not recorded in this repo** — see the operator's
-own notes.
+The Mac editor's machine (`editor-1`) — Apple silicon (arm64), macOS 15.7.4
+(24G517). Everything below is driven over SSH as
+`ssh <mac-local-user>@<mac-tailnet-ip>`; **check that precondition first** —
+remote login must be enabled in Sharing, and it is off by default on a fresh
+macOS install, which is what a step here failing with "connection refused"
+means. **Credentials are not recorded in this repo** — see the operator's own
+notes.
+
+> The hostname, tailnet IP and account name that used to be written out here
+> were removed as PII on 2026-08-17 (COMMERCIAL_READINESS.md item 10). They
+> are the operator's, not the product's: keep them in your own notes or in
+> the git-ignored `site.toml`, and substitute them for the `<…>` placeholders
+> in this document.
 
 State on it right now:
 
-- `/Users/leso/resolve-remote-sync` @ `c725256`, clean tree
+- `<mac-checkout>` (the repo clone) @ `c725256`, clean tree
 - `companion/.venv` — uv-managed CPython **3.12.13** (the system python is
   3.9.6 and python.org's is 3.11.0; both are below the `>=3.12` floor, so a
   uv-managed 3.12 was installed and symlinked at `~/.local/bin/python3.12`).
@@ -226,7 +235,7 @@ State on it right now:
 - `~/.local/ccsync/bin/` — rclone 1.75.0 and syncthing, from the 13:43
   partial bootstrap
 - `~/.ccsync/config.toml` — seeded, with `local_root =
-  /Users/leso/Creators_Club` (the **internal** disk — see §5)
+  ~/Creators_Club` (the **internal** disk — see §5)
 - Two `syncthing serve` processes running; the Syncthing LaunchAgent exists
   but is **not loaded**
 - The companion has never been installed and has never run
@@ -251,7 +260,7 @@ session cookie.
 2. **Which drive, and which filesystem, for the SSD drills (E1–E4).** These
    are the point of the port and are currently **inert**: `local_root` is the
    internal disk, so the root guard can never fire. The only external volume
-   on the Mac is `/Volumes/SAMDISK`, which is **ExFAT** and already holds
+   on the Mac is `/Volumes/<external-ssd>`, which is **ExFAT** and already holds
    unrelated project material. ExFAT has no POSIX permissions and no
    symlinks, which is a poor fit for a sync root. Needs a real answer before
    E means anything.
@@ -268,7 +277,7 @@ session cookie.
 Each is blocked by the one above it.
 
 1. **A7 — menu-bar smoke run.** Launch
-   `/Users/leso/resolve-remote-sync/companion/dist/ccsync-companion` from
+   `<mac-checkout>/companion/dist/ccsync-companion` from
    Terminal on the Mac and watch: does a menu-bar icon appear, and does a
    dialog open without deadlocking? Two minutes, needs a human, answers
    **B1**. **This is the next thing to do.**

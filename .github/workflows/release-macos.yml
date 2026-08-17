@@ -1,0 +1,103 @@
+# Build the macOS companion on a runner -- COMMERCIAL_READINESS.md item 13,
+# added 2026-08-17. THIS IS THE ONE THAT CLOSES A REAL GAP.
+#
+# PyInstaller does not cross-compile, so `tools\ship.cmd` on the base rig
+# publishes neither macOS artefact and prints an advisory instead. The
+# consequence, in the field: Mac editors run a build from a previous fix pass
+# and stay there until someone sits at a Mac. A hosted macos-latest runner IS
+# that Mac, on demand, for free.
+#
+# MANUAL ONLY, and IT DOES NOT PUBLISH. `tools/release_macos.sh` is invoked
+# WITHOUT --publish/--make-current: a runner cannot reach the tailnet, and an
+# upgrade channel any workflow could write to would be a supply-chain hole
+# rather than a convenience. Download the artefact, then publish from a machine
+# on the tailnet:
+#
+#   ./tools/release_macos.sh --publish --make-current \
+#       --dashboard-url <url> --admin-user <you>
+#
+# ...or upload the artefact through the dashboard's admin Packages page.
+#
+# SIGNING. The script currently AD-HOC signs (PyInstaller's default), which is
+# what makes a macOS upgrade reset TCC permissions on every install. Developer
+# ID signing + notarisation is COMMERCIAL_READINESS.md item 4; the secret name
+# reserved for it is CCSYNC_APPLE_DEV_ID, exported here already so the workflow
+# needs no edit when the script learns to use it. Nothing below assumes it is
+# set: unset means an ad-hoc-signed build, exactly as today.
+
+name: release-macos
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: "Skip the companion suite (the release script runs it by default)"
+        type: boolean
+        default: false
+      allow_dirty:
+        description: "Allow a dirty tree"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: companion/requirements.lock
+
+      # The script creates companion/.venv and installs `.[dev,tray]` itself,
+      # but not PyInstaller. Same pin and the same reasoning as
+      # release-windows.yml: it is a GPL-2.0 BUILD tool, deliberately absent
+      # from requirements.lock so tools/check_licenses.py can stay strict about
+      # what is actually frozen.
+      - name: prepare the companion venv
+        run: |
+          python -m venv companion/.venv
+          companion/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
+          companion/.venv/bin/python -m pip install --disable-pip-version-check "pyinstaller==6.21.0"
+
+      - name: build
+        env:
+          # Reserved for item 4. release_macos.sh ignores it today.
+          CCSYNC_APPLE_DEV_ID: ${{ secrets.CCSYNC_APPLE_DEV_ID }}
+        run: |
+          set -eu
+          args=""
+          if [ "${{ inputs.skip_tests }}" = "true" ]; then args="$args --skip-tests"; fi
+          if [ "${{ inputs.allow_dirty }}" = "true" ]; then args="$args --allow-dirty"; fi
+          ./tools/release_macos.sh $args
+
+      # The wizard is a separate artefact with its own script (installer >=
+      # 1.0.17) and it has never been built on a Mac either. Best-effort: a
+      # missing script must not fail a companion build that succeeded.
+      - name: build the onboarding wizard
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -x ./tools/build_onboard_macos.sh ]; then
+            ./tools/build_onboard_macos.sh || echo "onboarding wizard build failed -- companion artefact is still good"
+          else
+            echo "tools/build_onboard_macos.sh not present or not executable -- skipped"
+          fi
+
+      - name: upload the build
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccsync-companion-macos
+          # Both shapes: the script's own dist/ output and whatever the wizard
+          # produced. if-no-files-found: error, because "the Mac build ran and
+          # produced nothing" is the exact failure this workflow exists to stop
+          # going unnoticed.
+          path: |
+            companion/dist/**
+            onboarding/dist/**
+          if-no-files-found: error

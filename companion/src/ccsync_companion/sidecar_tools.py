@@ -7,7 +7,7 @@ the local executor runs is a `bestvideo+bestaudio` merge, ffmpeg does the
 merge, and no editor has ffmpeg -- nothing ever put one there. The proxy
 generator was written with ffmpeg as an OPTIONAL dependency (`winget install
 Gyan.FFmpeg` if you want proxies), which is fine for a base-rig feature and
-fatal for a fleet feature: ruskin's `/ytdl/capabilities` answered `ok:false
+fatal for a fleet feature: an editor's `/ytdl/capabilities` answered `ok:false
 -- ffmpeg is not installed` (COMP-BROLL-5 refusing the claim, correctly), so
 every job took the server path, the NAS downloaded, and lane B carried the
 originals back down.
@@ -57,6 +57,15 @@ Nothing here may raise into the tray or hold up startup. It runs on the
 yt-dlp manager's own daily thread (YtDlpManager._loop), so there is no second
 thread and no second opt-out: `ytdl_local_downloads = false` switches this
 off too.
+
+TWO GATES SINCE 2026-08-17 (docs/COMMERCIAL_READINESS.md items 2 + 3). The
+whole module is inert unless the customer's site manifest says
+`youtube_download`; and **deno alone additionally needs `youtube_unblock`**,
+because a JS runtime here is not a codec, it is the thing that answers
+YouTube's anti-automation challenge. The vendor build therefore installs
+ffmpeg/ffprobe and no challenge solver; a customer entitled to one turns it on
+in their own site.toml. Nothing is stripped -- the pins and the installer stay
+here, dormant -- so enabling it is a config change, never a second binary.
 """
 
 from __future__ import annotations
@@ -189,8 +198,30 @@ def is_installed(tool: str = "ffmpeg") -> bool:
         return False
 
 
+def _unblock_enabled() -> bool:
+    """Has the customer's site turned the unblock components on? Fails closed.
+
+    A thin wrapper so the two callers below read the same answer and tests have
+    one thing to patch. See ytdlp_manager.unblock_enabled for the reasoning.
+    """
+    try:
+        return ytdlp_manager.unblock_enabled()
+    except Exception:                          # noqa: BLE001 - never raises
+        log.debug("sidecar: unblock flag unreadable; treating it as off",
+                  exc_info=True)
+        return False
+
+
 def managed_deno() -> Optional[str]:
-    """The managed deno's path, or None. What ytdl_executor hands yt-dlp."""
+    """The managed deno's path, or None. What ytdl_executor hands yt-dlp.
+
+    None when the site has not enabled `youtube_unblock`, EVEN IF the binary
+    is on disk from before the flag existed (2026-08-17): the switch has to
+    stop yt-dlp being handed a challenge solver, not merely stop a download.
+    Deleting the file is the operator's call, not this function's.
+    """
+    if not _unblock_enabled():
+        return None
     return str(managed_path("deno")) if is_installed("deno") else None
 
 
@@ -332,9 +363,13 @@ def ensure(cfg: Optional[dict[str, Any]] = None,
     default. An editor with `winget install Gyan.FFmpeg` on PATH, or an
     explicit ffmpeg_path, keeps theirs and we download nothing for it.
     """
-    if not ytdlp_manager.local_downloads_enabled(cfg):
+    if not ytdlp_manager.youtube_enabled(cfg):
+        # Either the site never turned the downloader on (2026-08-17 --
+        # COMMERCIAL_READINESS.md item 2, the default) or this editor opted
+        # their machine out. Same answer: nothing is downloaded onto the disk.
         return {"ok": False, "action": ACTION_DISABLED,
-                "message": "local YouTube downloads are switched off in config"}
+                "message": "the YouTube downloader is off for this site or "
+                           "switched off in config"}
 
     with _work_lock:
         table = pinned_assets()
@@ -351,15 +386,26 @@ def ensure(cfg: Optional[dict[str, Any]] = None,
             own_ffmpeg = False
         if not own_ffmpeg:
             wanted += ["ffmpeg", "ffprobe"]
-        if not _editor_has_own_deno():
+        # deno IS the n-challenge solver: its only job here is to answer the
+        # JavaScript challenge YouTube serves signed-in clients, which is an
+        # anti-anti-automation component and therefore not part of the vendor
+        # build's default install (COMMERCIAL_READINESS.md item 3,
+        # docs/legal/YOUTUBE_FEATURE_NOTICE.md). It is downloaded only where
+        # the customer's site manifest says `youtube_unblock`. The code above
+        # and below stays exactly as it was -- dormant, not deleted -- so
+        # turning the flag on is a config change and never a different binary.
+        if _unblock_enabled() and not _editor_has_own_deno():
             wanted.append("deno")
 
         missing = [tool for tool in wanted if not is_installed(tool)]
         if not missing:
-            return {"ok": True, "action": ACTION_NONE,
-                    "message": ("using the ffmpeg already on this machine; " if own_ffmpeg else
-                                f"ffmpeg {FFMPEG_RELEASE_TAG} is installed; ")
-                               + f"deno {DENO_RELEASE_TAG} is installed"}
+            parts = ["using the ffmpeg already on this machine" if own_ffmpeg
+                     else f"ffmpeg {FFMPEG_RELEASE_TAG} is installed"]
+            parts.append(f"deno {DENO_RELEASE_TAG} is installed"
+                         if "deno" in wanted or is_installed("deno")
+                         else "no JS runtime (this site has not enabled "
+                              "youtube_unblock)")
+            return {"ok": True, "action": ACTION_NONE, "message": "; ".join(parts)}
 
         directory = ytdlp_manager.ensure_tools_dir()
         if directory is None or not _free_space_ok(directory):

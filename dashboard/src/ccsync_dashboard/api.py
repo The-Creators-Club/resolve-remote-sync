@@ -1,7 +1,11 @@
 """JSON API under /api/v1, plus the view-model builders shared with ui.py.
 
-The report endpoint is the only write path exposed over HTTP; it requires the
-X-CCSync-Token shared secret unless DASH_REPORT_TOKEN_OPTIONAL=1.
+The report endpoint is the only write path exposed over HTTP; it requires an
+X-CCSync-Token -- a per-editor token an admin minted, or the one fleet-wide
+shared secret while DASH_SHARED_REPORT_TOKEN_ENABLED is on.
+DASH_REPORT_TOKEN_OPTIONAL is NOT a way around that any more: since 2026-08-17
+(COMMERCIAL_READINESS.md item 15) it is ignored, loudly, unless the machine
+also sets the DASH_DEV_INSECURE lab flag.
 """
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from . import VERSION, auth, db, health
+from . import VERSION, auth, db, health, release_trust
 from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
 from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -95,6 +99,61 @@ def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+# ------------------------------------------------- companion credentials
+# TWO credentials reach the companion-facing routes, and every one of them goes
+# through resolve_companion_credential (COMMERCIAL_READINESS.md item 15,
+# 2026-08-17):
+#
+#   editor  "cce1.<id>.<secret>", minted per editor on the Users page, stored
+#           hashed, revocable one person at a time, and BOUND: it carries whose
+#           machine it is, so a report or a selection read under it may not
+#           claim another editor's identity.
+#   shared  the one DASH_REPORT_TOKEN every deployed companion holds today.
+#           Kept for migration and nothing else -- it proves only "somebody in
+#           this fleet", which is why the identity header exists beside it --
+#           and DASH_SHARED_REPORT_TOKEN_ENABLED=0 retires it.
+#
+# `conn` may be None for callers that have no database handle yet (app.py's
+# pre-body gate opens its own; see _companion_credential there). A per-editor
+# token can then only be recognised by SHAPE, never accepted -- so None never
+# widens what is allowed.
+
+AUTH_NONE = "none"
+AUTH_SHARED = "shared"
+AUTH_EDITOR = "editor"
+
+
+def resolve_companion_credential(
+    settings, conn: sqlite3.Connection | None, token: str
+) -> tuple[str, str | None]:
+    """-> (AUTH_*, editor username or None).
+
+    AUTH_EDITOR always comes with the editor the token is bound to; AUTH_SHARED
+    never does, because the shared token identifies nobody.
+    """
+    token = str(token or "")
+    if db.looks_like_editor_report_token(token):
+        # Shape-first: a per-editor token is NEVER compared against the shared
+        # secret, so a deployment mid-migration cannot have one accidentally
+        # accepted as the other.
+        if conn is None:
+            return AUTH_NONE, None
+        editor = db.verify_editor_report_token(conn, token)
+        if editor is None:
+            return AUTH_NONE, None
+        return AUTH_EDITOR, editor
+    if (getattr(settings, "shared_report_token_enabled", True)
+            and token_ok(settings.report_token, token)):
+        return AUTH_SHARED, None
+    return AUTH_NONE, None
+
+
+def companion_token_ok(settings, conn: sqlite3.Connection | None, token: str) -> bool:
+    """Either credential, without caring which. For the routes that pair it
+    with a separate identity check of their own."""
+    return resolve_companion_credential(settings, conn, token)[0] != AUTH_NONE
 
 
 # ------------------------------------------------------------- view models
@@ -560,12 +619,16 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     # and ReportIn dropped it, so nothing could tell a RELAYED editor from a
     # merely slow one -- exactly the case the companion's own docstring names.
     transport = db.fetch_transport_map(conn)
+    # The safety latches (item 9): a tripped breaker or a halted machine is
+    # invisible in every other signal here -- lane B simply reads idle.
+    guards = db.fetch_sync_guard_map(conn)
     result = []
     for entry in machines.values():
         key = (entry["editor_username"], entry["machine"])
         entry["status"] = health.worst(l["chip"] for l in entry["lanes"])
         entry["verified"] = verified.get(key, False)
         entry["transport"] = transport.get(key) or {}
+        entry["guard"] = guards.get(key) or {}
         entry["companion_version"] = (
             (machine_versions.get(key) or {}).get("companion_version")
             or entry["companion_version"]
@@ -589,8 +652,118 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         entry["companion_version_unknown"] = not entry["companion_version"]
         result.append(entry)
     result.sort(key=lambda e: (e["editor_username"], e["machine"]))
+    # Fleet-level rollups for the banner (item 9). Computed here rather than
+    # in the template so the numbers are testable and both the page and the
+    # /partials/fleet poll get the same ones.
+    tripped = [e for e in result if (e.get("guard") or {}).get("breaker_tripped")]
+    halted = [e for e in result if (e.get("guard") or {}).get("halt_active")]
     return {"generated_at": now, "editors": result,
-            "current_companion_version": current_version_for("windows")}
+            "current_companion_version": current_version_for("windows"),
+            "breaker_tripped": [
+                {"editor": e["editor_username"], "machine": e["machine"],
+                 "reason": (e.get("guard") or {}).get("breaker_reason")}
+                for e in tripped
+            ],
+            "halted": [
+                {"editor": e["editor_username"], "machine": e["machine"],
+                 "scope": (e.get("guard") or {}).get("halt_scope")}
+                for e in halted
+            ],
+            "fleet_halt": db.get_fleet_halt(conn)}
+
+
+# ------------------------------------------------------- scoping fleet reads
+#
+# COMMERCIAL_READINESS.md §C L1, "unscoped fleet reads" (2026-08-17). Every
+# read below used to answer the WHOLE fleet to any signed-in editor: other
+# editors' machine names, their companion builds, their per-project completion
+# and -- through /projects/{slug}/devices/{id}/missing -- the actual file paths
+# missing from another person's laptop. Combined with the telemetry the
+# companion already sends (Resolve project name, media manifest, bin tree,
+# §3's GDPR note), that is one editor able to inventory another's work.
+#
+# The rule is the one auth.Scope already encodes for transfers and presence:
+# an EDITOR sees their own machines plus fleet-level SUMMARY numbers; an ADMIN
+# sees everything, and may focus one editor with ?as=. Redaction happens at the
+# route boundary rather than inside the view builders because the builders are
+# shared with ui.py's page renderers, which pass their own scope in -- one
+# rule, two callers, and no builder that can be called "unscoped by accident".
+
+def _scope_shows(scope: auth.Scope, editor: str) -> bool:
+    """Whether a row belonging to `editor` survives redaction.
+
+    NOT auth.Scope.allows: that answers True for any admin, ignoring ?as=,
+    which is right for "may you act on this" and wrong for "should you be
+    LOOKING at this" -- an admin who has focused one editor is asking to see
+    one editor. `scope.editor` is the focused/own username, or None for an
+    unfocused admin (everything). A viewer with neither is shown nothing.
+    """
+    if scope.admin and scope.editor is None:
+        return True
+    if scope.editor is None:
+        return False
+    return str(editor or "").lower() == scope.editor.lower()
+
+
+def _scope_projects_view(view: dict[str, Any], scope: auth.Scope) -> dict[str, Any]:
+    """Drop other editors' per-device rows; keep the project-level totals.
+
+    The totals stay because they are the fleet summary an editor legitimately
+    needs -- "is anyone behind on this project" -- and they name nobody.
+    """
+    if scope.admin and scope.editor is None:
+        return view
+    for project in view.get("projects", []):
+        editors = project.get("editors", [])
+        kept = [e for e in editors
+                if not e.get("editor_username")
+                or _scope_shows(scope, str(e["editor_username"]))]
+        project["editors_hidden"] = len(editors) - len(kept)
+        project["editors"] = kept
+    return view
+
+
+def _scope_project_view(view: dict[str, Any], scope: auth.Scope) -> dict[str, Any]:
+    if scope.admin and scope.editor is None:
+        return view
+    editors = view.get("editors", [])
+    kept = [e for e in editors
+            if not e.get("editor_username")
+            or _scope_shows(scope, str(e["editor_username"]))]
+    view["editors_hidden"] = len(editors) - len(kept)
+    view["editors"] = kept
+    return view
+
+
+def _scope_editors_view(view: dict[str, Any], scope: auth.Scope) -> dict[str, Any]:
+    """Own machines in full; everybody else's collapsed into a count.
+
+    `summary` is what keeps the fleet page useful for a non-admin: how many
+    machines are reporting and how many are unhealthy, with no names in it.
+    """
+    machines = view.get("editors", [])
+    summary = {
+        "machines_total": len(machines),
+        "machines_ok": sum(1 for m in machines if m.get("status") == "ok"),
+        "machines_unhealthy": sum(1 for m in machines if m.get("status") not in ("ok", None)),
+        "machines_outdated": sum(1 for m in machines if m.get("companion_outdated")),
+    }
+    view["summary"] = summary
+    if scope.admin and scope.editor is None:
+        return view
+    kept = [m for m in machines
+            if _scope_shows(scope, str(m.get("editor_username") or ""))]
+    view["machines_hidden"] = len(machines) - len(kept)
+    view["editors"] = kept
+    # The safety-alarm rollups name editors and machines too, so they follow
+    # the same rule as the rows they summarise (COMMERCIAL_READINESS.md item
+    # 9, 2026-08-17 -- added with those fields, not a later fix). The FLEET
+    # halt is deliberately NOT redacted: it is why this editor's own sync has
+    # stopped, and they must be able to see it.
+    for key in ("breaker_tripped", "halted"):
+        view[key] = [m for m in view.get(key, [])
+                     if _scope_shows(scope, str(m.get("editor") or ""))]
+    return view
 
 
 # ------------------------------------------------------------------ routes
@@ -616,7 +789,8 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
     collector = db.fetch_collector_status(conn)
     if not (
         auth.get_session_user(request) is not None
-        or token_ok(settings.report_token, request.headers.get("x-ccsync-token", ""))
+        or companion_token_ok(settings, conn,
+                              request.headers.get("x-ccsync-token", ""))
     ):
         # Enough for a probe to distinguish "process up" from "process up but
         # blind", and nothing an outsider can inventory the fleet from.
@@ -708,6 +882,14 @@ def api_site(request: Request) -> dict[str, Any]:
     return {
         "schema": 1,
         "org_name": settings.site_org_name,
+        # BRAND INDIRECTION (2026-08-17, COMMERCIAL_READINESS.md item 10).
+        # `org_short` is the customer's name where only a few characters fit
+        # (topbar, tray tooltip); `product_name` is the VENDOR's, which is why
+        # it alone has a non-blank default. Every consumer falls back
+        # org_short -> org_name -> product_name, so an unbranded install shows
+        # the product rather than another tenant's studio.
+        "org_short": settings.site_org_short or settings.site_org_name,
+        "product_name": settings.site_product_name or "CC Sync",
         "tree_name": settings.site_tree_name,
         "canonical_prefix": settings.site_canonical_prefix,
         "remote_root": settings.site_remote_root,
@@ -734,21 +916,47 @@ def api_site(request: Request) -> dict[str, Any]:
             {"id": folder_id, "rel": rel, "label": label}
             for folder_id, rel, label in provision.SHARED_ASSET_FOLDERS
         ],
+        # READ-ONLY, and deliberately not configurable: which extensions are
+        # "video" decides what travels by rclone (lanes A/B) instead of
+        # Syncthing (lane C), so the three copies of this list must stay
+        # byte-identical or a media type gets carried by both or by neither
+        # (server/tests/test_cross_component.py). provision.py is the
+        # canonical copy; publishing it lets a future client read it instead
+        # of growing a fourth (2026-08-17, COMMERCIAL_READINESS.md item 11).
+        "video_extensions": list(provision.VIDEO_EXTENSIONS),
         "nas_kind": settings.nas_kind,
+        # Optional features this site has turned on. Additive to schema 1 on
+        # purpose (companion/site.py reads unknown-to-it keys as absent), and
+        # BOTH DEFAULT FALSE: a client that cannot read this key, or reaches a
+        # dashboard too old to send it, must behave as if the feature is off
+        # rather than as if it is on (COMMERCIAL_READINESS.md items 2 + 3).
+        "features": {
+            "youtube_download": settings.site_feature_youtube_download,
+            # Never true on its own -- the unblock components only exist to
+            # serve the downloader, and a site that answered
+            # {download: false, unblock: true} would be telling companions to
+            # install a JS challenge solver for a feature they cannot use.
+            "youtube_unblock": bool(settings.site_feature_youtube_download
+                                    and settings.site_feature_youtube_unblock),
+        },
     }
 
 
 @router.get("/projects")
-def api_projects(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-    return build_projects_view(conn)
+def api_projects(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    return _scope_projects_view(build_projects_view(conn), auth.scope_for(request))
 
 
 @router.get("/projects/{slug}")
-def api_project(slug: str, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+def api_project(
+    slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
     view = build_project_view(conn, slug)
     if view is None:
         raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
-    return view
+    return _scope_project_view(view, auth.scope_for(request))
 
 
 @router.get("/transfers")
@@ -770,7 +978,8 @@ def api_presence(
 
 @router.get("/projects/{slug}/devices/{device_id}/missing")
 def api_missing(
-    slug: str, device_id: str, conn: sqlite3.Connection = Depends(get_conn)
+    slug: str, device_id: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     project = db.fetch_project(conn, slug)
     if project is None:
@@ -778,14 +987,22 @@ def api_missing(
     device = next((e for e in project["editors"] if e["device_id"] == device_id), None)
     if device is None:
         raise HTTPException(status_code=404, detail=f"device not in project: {device_id}")
+    # The one route in this group that answers actual FILE PATHS -- what is
+    # missing from a named person's machine. 404, not 403: an editor has no
+    # business learning that another editor's device id even exists here.
+    scope = auth.scope_for(request)
+    if not scope.allows(str(device.get("editor_username") or "")):
+        raise HTTPException(status_code=404, detail=f"device not in project: {device_id}")
     result = db.fetch_missing(conn, project["id"], device["device_row_id"])
     result["need_items"] = device["need_items"]
     return result
 
 
 @router.get("/editors")
-def api_editors(conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
-    return build_editors_view(conn)
+def api_editors(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    return _scope_editors_view(build_editors_view(conn), auth.scope_for(request))
 
 
 def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = None,
@@ -874,33 +1091,30 @@ def api_login(payload: LoginIn, request: Request, response: Response) -> dict[st
     if not settings.session_secret:
         raise HTTPException(status_code=503, detail="login not configured (DASH_SESSION_SECRET unset)")
     username = payload.username.strip().lower()
-    if auth.login_throttled(username):
-        raise HTTPException(status_code=429, detail="too many failed attempts; wait a minute")
+    # Per-username AND per-IP budget, in SQLite so it survives the restart
+    # every deploy performs (auth.login_throttled, 2026-08-17).
+    if auth.login_throttled(request, username):
+        raise HTTPException(status_code=429, detail="too many failed attempts; wait and retry")
     verifier = getattr(request.app.state, "credential_verifier", auth.verify_credentials)
     try:
         verified = verifier(settings, username, payload.password)
     except auth.CredentialProbeBusy as exc:
         raise HTTPException(status_code=503, detail=f"login busy: {exc} -- try again") from exc
     if not verified:
-        auth.record_login_failure(username)
+        auth.record_login_failure(request, username)
         raise HTTPException(status_code=401, detail="bad username or password")
-    auth.clear_login_failures(username)
-    response.set_cookie(
-        auth.COOKIE_NAME,
-        auth.make_session_cookie(settings.session_secret, username),
-        max_age=auth.SESSION_TTL_SECONDS,
-        httponly=True,
-        samesite="lax",
-        # see auth.cookie_secure: on for https, off for today's http LAN
-        secure=auth.cookie_secure(settings, request),
-        path="/",
-    )
+    auth.clear_login_failures(request, username)
+    # Mints the cookie AND the revocable server-side session row (HttpOnly,
+    # SameSite=Lax, Secure per auth.cookie_secure) -- see auth.start_session.
+    auth.start_session(request, response, username)
     return {"ok": True, "user": username, "is_admin": auth.is_admin(settings, username)}
 
 
 @router.post("/logout")
-def api_logout(response: Response) -> dict[str, Any]:
-    response.delete_cookie(auth.COOKIE_NAME, path="/")
+def api_logout(request: Request, response: Response) -> dict[str, Any]:
+    # Revokes the server-side session, not just the browser's copy of the
+    # cookie: a logout that leaves a stolen cookie working is not a logout.
+    auth.end_session(request, response)
     return {"ok": True}
 
 
@@ -939,9 +1153,15 @@ def _require_fleet_member(settings, username: str) -> None:
         client = nas_factory.make_nas_client(settings)
         allowed = client.is_editor(username)
     except NasError as exc:
+        # /api/v1/verify is OPEN (app.py's _OPEN_EXACT) -- it is how a companion
+        # bootstraps -- so a NasError's text, which names the NAS host and its
+        # API path, would be readable by anyone who can reach the port. Logged
+        # here, generic on the wire (COMMERCIAL_READINESS.md §C L "error detail
+        # leaks", 2026-08-17).
+        log.warning("fleet-membership check for %r failed: %s", username, exc)
         raise HTTPException(
             status_code=503,
-            detail=f"cannot confirm fleet membership right now ({exc}) -- try again",
+            detail="cannot confirm fleet membership right now -- try again shortly",
         ) from exc
     if not allowed:
         raise HTTPException(
@@ -964,17 +1184,17 @@ def api_verify(
     if not settings.session_secret:
         raise HTTPException(status_code=503, detail="identity not configured (DASH_SESSION_SECRET unset)")
     username = payload.username.strip().lower()
-    if auth.login_throttled(username):
-        raise HTTPException(status_code=429, detail="too many failed attempts; wait a minute")
+    if auth.login_throttled(request, username):
+        raise HTTPException(status_code=429, detail="too many failed attempts; wait and retry")
     verifier = getattr(request.app.state, "credential_verifier", auth.verify_credentials)
     try:
         verified = verifier(settings, username, payload.password)
     except auth.CredentialProbeBusy as exc:
         raise HTTPException(status_code=503, detail=f"verify busy: {exc} -- try again") from exc
     if not verified:
-        auth.record_login_failure(username)
+        auth.record_login_failure(request, username)
         raise HTTPException(status_code=401, detail="bad username or password")
-    auth.clear_login_failures(username)
+    auth.clear_login_failures(request, username)
     _require_fleet_member(settings, username)
     result = {
         "ok": True,
@@ -1043,7 +1263,8 @@ def _selection_view(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
     }
 
 
-def _require_selection_read(request: Request, editor: str) -> None:
+def _require_selection_read(request: Request, editor: str,
+                            conn: sqlite3.Connection | None = None) -> None:
     """Session (self or admin), or the companion's token PLUS a matching
     identity header.
 
@@ -1056,7 +1277,18 @@ def _require_selection_read(request: Request, editor: str) -> None:
     requiring one there would just break lab deployments."""
     settings = request.app.state.settings
     token = request.headers.get("x-ccsync-token", "")
-    if token_ok(settings.report_token, token):
+    auth_kind, token_editor = resolve_companion_credential(settings, conn, token)
+    if auth_kind == AUTH_EDITOR:
+        # A per-editor token IS the identity, so it stands on its own -- and it
+        # binds: it can only read the selection of the editor it was minted for
+        # (COMMERCIAL_READINESS.md item 15, 2026-08-17).
+        if token_editor == editor:
+            return
+        raise HTTPException(
+            status_code=401,
+            detail="this X-CCSync-Token belongs to a different editor",
+        )
+    if auth_kind == AUTH_SHARED:
         if not settings.session_secret:
             return  # cannot mint or check identities at all -- token is all there is
         identity = request.headers.get("x-ccsync-identity", "")
@@ -1096,7 +1328,8 @@ def _require_selection_write(request: Request, editor: str) -> str:
     return user
 
 
-def _require_selection_untick(request: Request, editor: str) -> str:
+def _require_selection_untick(request: Request, editor: str,
+                              conn: sqlite3.Connection | None = None) -> str:
     """_require_selection_write, plus the companion's token + a MATCHING
     identity header -- for UNTICK ONLY. The tray's "Remove this project from
     this machine" must untick before deleting (a delete while ticked just
@@ -1105,7 +1338,15 @@ def _require_selection_untick(request: Request, editor: str) -> str:
     one identity must not be able to start syncing projects TO machines."""
     settings = request.app.state.settings
     token = request.headers.get("x-ccsync-token", "")
-    if token_ok(settings.report_token, token):
+    auth_kind, token_editor = resolve_companion_credential(settings, conn, token)
+    if auth_kind == AUTH_EDITOR:
+        if token_editor == editor:
+            return f"companion:{editor}"
+        raise HTTPException(
+            status_code=401,
+            detail="this X-CCSync-Token belongs to a different editor",
+        )
+    if auth_kind == AUTH_SHARED:
         if not settings.session_secret:
             return f"companion:{editor}"  # lab carve-out, same as reads
         identity = request.headers.get("x-ccsync-identity", "")
@@ -1125,7 +1366,7 @@ def api_get_selection(
     editor: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
     editor = editor.strip().lower()
-    _require_selection_read(request, editor)
+    _require_selection_read(request, editor, conn)
     return _selection_view(conn, editor)
 
 
@@ -1153,7 +1394,7 @@ def api_untick(
     editor: str, slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
     editor = editor.strip().lower()
-    _require_selection_untick(request, editor)
+    _require_selection_untick(request, editor, conn)
     removed = db.remove_selection(conn, editor, slug)
     conn.commit()
     _nudge_collector(request)
@@ -1467,7 +1708,14 @@ def create_tree_project(
             (target / sub).mkdir(parents=True, exist_ok=True)
         provision.write_marker(target, slug, created_by=user)
     except OSError as exc:
-        raise ProjectSetupError(f"could not create folders on the NAS: {exc}")
+        # The OSError text carries the NAS's ABSOLUTE path
+        # (/mnt/<pool>/<tenant>/Projects/...), and this route is reachable by
+        # any signed-in editor -- logged, not answered (COMMERCIAL_READINESS.md
+        # §C L "error detail leaks", 2026-08-17).
+        log.warning("could not create project folders for %r: %s", rel, exc)
+        raise ProjectSetupError(
+            "could not create the folders on the NAS -- ask an admin to check the "
+            "dashboard log")
 
     return _register_project(settings, conn, rel, slug, resolve_project, user)
 
@@ -1702,11 +1950,19 @@ class CreateEditorIn(BaseModel):
     username: str = Field(min_length=1, max_length=32)
     ssh_pubkey: str = Field(min_length=1)
     full_name: str | None = None
-    password: str | None = None
+    # Optional: absent still means "randomise it, no dashboard login". Present
+    # means it must clear the same floor as SetPasswordIn.
+    password: str | None = Field(default=None, min_length=auth.MIN_PASSWORD_CHARS)
 
 
 class SetPasswordIn(BaseModel):
-    password: str = Field(min_length=1)
+    # min_length is auth.MIN_PASSWORD_CHARS, not 1 (2026-08-17,
+    # COMMERCIAL_READINESS.md item 15's "admin password min length 1"). Floor
+    # on what this dashboard SETS only: existing short NAS passwords keep
+    # working, because locking a fleet out mid-shoot is not a security
+    # improvement. The htmx twin (ui.partial_admin_set_password) checks the
+    # same floor with a readable message instead of a 422.
+    password: str = Field(min_length=auth.MIN_PASSWORD_CHARS)
 
 
 class ApproveDeviceIn(BaseModel):
@@ -1801,6 +2057,168 @@ def api_admin_set_password(username: str, payload: SetPasswordIn, request: Reque
     except NasError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"ok": True}
+
+
+# The JSON twin of the Users page's SIGNED-IN BROWSERS panel
+# (ui.partial_admin_sessions), so "sign that laptop out" is scriptable and not
+# only clickable -- COMMERCIAL_READINESS.md item 6 / H1, 2026-08-17. Deliberately
+# NOT a NAS call: revocation must keep working while the NAS is unreachable,
+# which is precisely when an admin reaches for it.
+
+@router.get("/admin/sessions")
+def api_admin_sessions(request: Request) -> dict[str, Any]:
+    _require_admin(request)
+    store = auth.session_store(request)
+    rows = store.list_all() if store is not None else []
+    # The sid is a keyed digest of the cookie and cannot be replayed, but there
+    # is no reason to publish it whole either.
+    for row in rows:
+        row["sid"] = row["sid"][:12]
+    return {"sessions": rows}
+
+
+@router.post("/admin/users/{username}/sessions/revoke")
+def api_admin_revoke_sessions(username: str, request: Request) -> dict[str, Any]:
+    admin = _require_admin(request)
+    username = username.strip().lower()
+    if not is_valid_username(username):
+        raise HTTPException(status_code=422, detail="not a valid username")
+    store = auth.session_store(request)
+    if store is None:
+        raise HTTPException(status_code=503, detail="sessions are not being recorded")
+    revoked = store.revoke_user(username, by=f"admin:{admin}")
+    log.warning("admin %r revoked %d session(s) for %r", admin, revoked, username)
+    return {"ok": True, "revoked": revoked}
+
+
+# ------------------------------------------------- per-editor report tokens
+#
+# The admin half of COMMERCIAL_READINESS.md item 15 (2026-08-17). Minting is a
+# POST because it CREATES a credential, and the secret comes back in that one
+# response and is never retrievable again -- there is nothing stored that could
+# answer it a second time (db.create_editor_report_token stores a hash).
+#
+# How an admin actually hands one over is deliberately NOT automated here: see
+# docs/GOTCHAS.md "per-editor report tokens". The pairing flow that exists
+# (tray Sign in -> POST /api/v1/verify -> identity.json) is the right seam to
+# deliver it through later; today the admin mints and passes the value on the
+# same channel they already use for the editor's NAS password.
+
+class CreateReportTokenIn(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+    label: str = Field(default="", max_length=64)
+
+
+@router.get("/admin/report-tokens")
+def api_admin_report_tokens(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    _require_admin(request)
+    return build_report_tokens_view(conn)
+
+
+@router.post("/admin/report-tokens")
+def api_admin_create_report_token(
+    payload: CreateReportTokenIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    admin = _require_admin(request)
+    username = payload.username.strip().lower()
+    if not is_valid_username(username):
+        raise HTTPException(
+            status_code=422,
+            detail="username must start with a letter and contain only lowercase letters, "
+                   "digits, '.', '_', '-'",
+        )
+    token, row = db.create_editor_report_token(
+        conn, username, created_by=admin, label=payload.label)
+    conn.commit()
+    log.info("minted a per-editor report token for %s (id %s, by %s)",
+             username, row["token_id"], admin)
+    # `token` appears here and nowhere else, ever.
+    return {"ok": True, "token": token, "token_row": row,
+            "view": build_report_tokens_view(conn)}
+
+
+@router.delete("/admin/report-tokens/{token_id}")
+def api_admin_revoke_report_token(
+    token_id: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    admin = _require_admin(request)
+    revoked = db.revoke_editor_report_token(conn, token_id, revoked_by=admin)
+    conn.commit()
+    if not revoked:
+        raise HTTPException(status_code=404, detail="no such live token")
+    log.info("revoked per-editor report token %s (by %s)", token_id, admin)
+    return {"ok": True, "view": build_report_tokens_view(conn)}
+
+
+def build_report_tokens_view(conn: sqlite3.Connection) -> dict[str, Any]:
+    """The Users page's token panel: live tokens plus the migration counter.
+
+    `shared_machines` is what tells an operator whether it is safe to set
+    DASH_SHARED_REPORT_TOKEN_ENABLED=0 yet -- the machines whose LAST report
+    still authenticated with the one shared fleet token."""
+    usage = db.count_shared_token_machines(conn)
+    return {
+        "tokens": db.fetch_editor_report_tokens(conn),
+        "shared_machines": usage["machines"],
+        "shared_count": usage["shared"],
+        "editor_count": usage["editor"],
+    }
+
+
+# ---------------------------------------------------- fleet halt (item 9)
+
+class FleetHaltIn(BaseModel):
+    """Body of POST /fleet/halt. `reason` is shown in EVERY editor's tray, so
+    it is the one field an admin must actually fill in when halting."""
+    active: bool
+    reason: str = Field(default="", max_length=500)
+
+
+@router.get("/fleet/halt")
+def api_fleet_halt(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """Read the fleet halt. Any signed-in user (or a companion holding the
+    report token) may READ it -- an editor whose tray says "your admin
+    stopped syncing" must be able to confirm that from the dashboard --
+    while setting it is admin-only below."""
+    settings = request.app.state.settings
+    if not (
+        auth.get_session_user(request) is not None
+        or token_ok(settings.report_token, request.headers.get("x-ccsync-token", ""))
+    ):
+        raise HTTPException(status_code=401, detail="log in first")
+    return {"halt": db.get_fleet_halt(conn)}
+
+
+@router.post("/fleet/halt")
+def api_set_fleet_halt(
+    payload: FleetHaltIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """The fleet-wide stop (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+
+    Persisted in `meta` and handed to every companion on its next report
+    reply, which is what makes it survive a dashboard restart AND reach a
+    machine that was offline when it was set. Reversible by construction:
+    the same route with active=false releases it, and the companion's
+    HaltState refuses a LOCAL release of a fleet halt so one editor cannot
+    opt out of it.
+
+    Deliberately NOT a per-machine control. The case this exists for is
+    "something is destroying files and I do not yet know which machine" --
+    one switch, one reason, everybody stops."""
+    admin = _require_admin(request)
+    state = db.set_fleet_halt(conn, payload.active, payload.reason, admin)
+    conn.commit()
+    log.warning(
+        "FLEET HALT %s by %s: %s",
+        "ENGAGED" if state["active"] else "released", admin, state["reason"] or "(no reason)",
+    )
+    return {"ok": True, "halt": state}
 
 
 @router.post("/admin/devices/approve")
@@ -1930,12 +2348,45 @@ def _upgrade_info(
     current = db.get_current_package(conn, plat, kind="companion")
     if current is None or not running or running == current["version"]:
         return None
+    # MIGRATION SHAPE (item 4, 2026-08-17): version/url/sha256/size_bytes are
+    # exactly what they were, in the same places, because 0.7.11 companions
+    # are in the field right now and parse_upgrade reads those four keys and
+    # ignores the rest. Everything below is ADDED, never substituted -- the
+    # first signed build reaches an unverifying companion through the same
+    # response shape it already understands, and verifies every build after
+    # that. A row published before this migration serves signature="" and
+    # is refused by any companion new enough to look.
     return {
         "version": current["version"],
         "url": f"/api/v1/companion/package/{plat}/{current['version']}",
         "sha256": current["sha256"],
         "size_bytes": current["size_bytes"],
+        "kind": "companion",
+        "platform": plat,
+        "filename": current["filename"],
+        "published_at": current["published_at"],
+        "min_version": _row_str(current, "min_version"),
+        "signed_binary": bool(_row_value(current, "signed_binary") or 0),
+        "signature": _row_str(current, "signature"),
+        "pubkey_id": _row_str(current, "pubkey_id"),
     }
+
+
+def _row_value(row: sqlite3.Row | dict[str, Any], key: str) -> Any:
+    """A column that may not exist yet.
+
+    The v14 columns are read by code that also runs against a DB opened by a
+    concurrently-starting older process during a redeploy, and sqlite3.Row
+    raises IndexError -- not KeyError -- for an unknown key."""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
+def _row_str(row: sqlite3.Row | dict[str, Any], key: str) -> str:
+    value = _row_value(row, key)
+    return "" if value is None else str(value)
 
 
 def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = None) -> dict[str, Any]:
@@ -1954,6 +2405,15 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             "published_by": row["published_by"],
             "is_current": bool(row["is_current"]),
             "file_exists": _package_file(settings, row).is_file(),
+            # Item 4: the admin page and check_deploy_drift.ps1 must be able
+            # to see, at a glance, whether the build the fleet is offered is
+            # one an editor's companion will actually accept. `signed` is
+            # false for every row published before v14.
+            "signature": _row_str(row, "signature"),
+            "pubkey_id": _row_str(row, "pubkey_id"),
+            "min_version": _row_str(row, "min_version"),
+            "signed_binary": bool(_row_value(row, "signed_binary") or 0),
+            "signed": bool(_row_str(row, "signature")),
         }
         # `current` keeps its pre-kind shape (platform -> version) and keeps
         # meaning "the companion the fleet is offered" -- the onboard current
@@ -1993,6 +2453,11 @@ async def api_publish_package(
     make_current: int = 0,
     prune: int = 0,
     kind: str = "companion",
+    signature: str = "",
+    pubkey_id: str = "",
+    min_version: str = "",
+    published_at: str = "",
+    signed_binary: int = 0,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """Publish a companion build: raw exe bytes as the request body (no
@@ -2006,6 +2471,17 @@ async def api_publish_package(
     newest non-current ones. It is off by default: publishing must not
     silently destroy older build artifacts (rollback material) as a side
     effect, given the standing no-deletion rule.
+
+    SIGNATURE REQUIRED (COMMERCIAL_READINESS.md item 4, 2026-08-17). The
+    upload must carry `signature`/`pubkey_id`/`min_version`/`published_at`/
+    `signed_binary` from tools/sign_release.py, and the signature must verify
+    against DASH_RELEASE_PUBKEYS over the record the server itself assembles
+    -- including the filename the SERVER chose, so a signed artifact cannot be
+    re-labelled into another kind or platform on the way in. There is no
+    unsigned path and no "warn and continue": publish tooling that predates
+    signing fails here, loudly, which is the only place the failure is cheap.
+    A companion that downloads an unsigned build is renaming an unverified
+    binary over itself.
 
     Two shapes here are deliberate (see the unbounded-packages-upload
     finding): the body is capped at MAX_PACKAGE_BODY_BYTES both by
@@ -2029,6 +2505,41 @@ async def api_publish_package(
     sha = sha256.strip().lower()
     if not _PACKAGE_SHA256_RE.match(sha):
         raise HTTPException(status_code=422, detail="sha256 query param must be 64 hex chars")
+
+    # Refuse BEFORE the body is streamed: a 40 MB upload over Tailscale that
+    # is going to be rejected on a query param it never had is a five-minute
+    # wait for a one-line answer.
+    signature = signature.strip()
+    pubkey_id = pubkey_id.strip()
+    min_version = min_version.strip()
+    published_at = published_at.strip()
+    if not settings.release_pubkeys:
+        raise HTTPException(
+            status_code=503,
+            detail="this dashboard has no release public key configured, so it cannot "
+                   "verify a build and will not publish one. Set DASH_RELEASE_PUBKEYS "
+                   "to the vendor's key (tools/release_key.py pubkey) and redeploy -- "
+                   "see docs/RELEASE.md.",
+        )
+    if not signature:
+        raise HTTPException(
+            status_code=422,
+            detail="unsigned publish REFUSED: no signature. Builds are signed offline "
+                   "by tools/sign_release.py and published with its &signature=... "
+                   "query suffix. Publish tooling older than 2026-08-17 cannot "
+                   "publish to this dashboard -- update it (docs/RELEASE.md).",
+        )
+    if not release_trust.valid_min_version(min_version):
+        raise HTTPException(
+            status_code=422,
+            detail="min_version must be dotted-numeric (e.g. 0.7.11) -- it is the "
+                   "downgrade floor every companion will remember",
+        )
+    if not published_at:
+        raise HTTPException(
+            status_code=422,
+            detail="published_at is part of the signed record and must be sent with it",
+        )
     if db.get_package(conn, platform, version, kind) is not None:
         bump = (
             "bump INSTALLER_VERSION in installer/windows_bootstrap.ps1, "
@@ -2100,12 +2611,52 @@ async def api_publish_package(
     # extension (macos onboard: wizard zip vs bootstrap script) needs the
     # payload's head -- see _package_filename.
     filename = _package_filename(kind, platform, version, head=head)
+
+    # Verify the release signature over the record the SERVER assembled --
+    # server-chosen filename, server-counted size, server-computed digest --
+    # not over anything the uploader asserted. A mismatch anywhere (a
+    # re-labelled kind/platform, a swapped artifact, a record signed for a
+    # different version) fails here with the staging file still unpublished
+    # (item 4, 2026-08-17).
+    record = {
+        "kind": kind,
+        "platform": platform,
+        "version": version,
+        "filename": filename,
+        "sha256": sha,
+        "size_bytes": size,
+        "min_version": min_version,
+        "published_at": published_at,
+        "signed_binary": bool(signed_binary),
+    }
+    ok, detail = release_trust.verify_record(record, signature, settings.release_pubkeys)
+    if not ok:
+        part.unlink(missing_ok=True)
+        log.warning("REFUSED an unverifiable publish of %s %s %s by %s: %s",
+                    kind, platform, version, user, detail)
+        raise HTTPException(
+            status_code=400,
+            detail=f"release signature REJECTED ({detail}) -- nothing was published. "
+                   f"The signature must cover this exact record: kind={kind}, "
+                   f"platform={platform}, version={version}, filename={filename}, "
+                   f"sha256={sha}, size_bytes={size}, min_version={min_version}, "
+                   f"published_at={published_at}, signed_binary={bool(signed_binary)}.",
+        )
+    if pubkey_id and pubkey_id != detail:
+        # Advisory only: `detail` is the id of the key that ACTUALLY verified,
+        # and that is what gets stored. A disagreement means the publisher
+        # thinks it signed with a different key than the one this dashboard
+        # trusts -- worth a log line during a rotation, never a refusal.
+        log.info("publish declared pubkey_id %s but %s is what verified it",
+                 pubkey_id, detail)
+
     await run_in_threadpool(os.replace, part, dest_dir / filename)
 
     db.insert_companion_package(
         conn, version=version, platform=platform, filename=filename,
-        sha256=sha, size_bytes=size, published_by=user, now=db.utcnow_iso(),
-        kind=kind,
+        sha256=sha, size_bytes=size, published_by=user, now=published_at,
+        kind=kind, signature=signature, pubkey_id=detail,
+        min_version=min_version, signed_binary=bool(signed_binary),
     )
     if make_current:
         db.set_current_package(conn, platform, version, kind)
@@ -2160,12 +2711,14 @@ def api_delete_package(
     return {"ok": True, "view": build_packages_view(conn, settings)}
 
 
-def _require_package_read(request: Request) -> None:
+def _require_package_read(request: Request,
+                          conn: sqlite3.Connection | None = None) -> None:
     """Same dual auth as _require_selection_read, minus the editor scoping:
-    any signed-in user or any companion holding the shared report token may
-    download a published package (it's the same exe everyone runs)."""
+    any signed-in user, or any companion holding EITHER fleet credential (the
+    shared report token or its own per-editor one), may download a published
+    package -- it is the same exe everyone runs."""
     settings = request.app.state.settings
-    if token_ok(settings.report_token, request.headers.get("x-ccsync-token", "")):
+    if companion_token_ok(settings, conn, request.headers.get("x-ccsync-token", "")):
         return
     if auth.get_session_user(request) is not None:
         return
@@ -2187,7 +2740,7 @@ def api_download_package(
     ask for, so it fetches .../package/macos/current?kind=onboard and verifies
     the bytes against the X-CCSync-SHA256 header below.
     """
-    _require_package_read(request)
+    _require_package_read(request, conn)
     settings = request.app.state.settings
     plat, kind = platform.strip().lower(), kind.strip().lower()
     if version.strip().lower() == "current":
@@ -2204,11 +2757,25 @@ def api_download_package(
     path = _package_file(settings, row)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="package file missing on server")
+    # X-CCSync-Signature is for the ONE client that cannot verify ed25519:
+    # installer/macos_bootstrap.sh, a POSIX shell script doing a first
+    # install. It cannot check the signature, but it CAN refuse a channel
+    # that has none -- which is the difference between "trusting the
+    # dashboard" and "trusting anything that answered". Every other consumer
+    # (upgrade.py) verifies the signed record from the report response and
+    # never reads these headers (item 4, 2026-08-17).
+    headers = {"X-CCSync-SHA256": row["sha256"], "X-CCSync-Version": row["version"]}
+    signature = _row_str(row, "signature")
+    if signature:
+        headers["X-CCSync-Signature"] = signature
+        headers["X-CCSync-Pubkey-Id"] = _row_str(row, "pubkey_id")
+        headers["X-CCSync-Min-Version"] = _row_str(row, "min_version")
+        headers["X-CCSync-Signed-Binary"] = "1" if _row_value(row, "signed_binary") else "0"
     return FileResponse(
         str(path),
         media_type="application/octet-stream",
         filename=row["filename"],
-        headers={"X-CCSync-SHA256": row["sha256"], "X-CCSync-Version": row["version"]},
+        headers=headers,
     )
 
 
@@ -2433,6 +3000,98 @@ def flatten_transport_health(
     return flat
 
 
+class BreakerIn(BaseModel):
+    """companion sync/lane_guard.LaneBBreaker.report() -- lane B's circuit
+    breaker (COMMERCIAL_READINESS.md item 9, 2026-08-17). `tripped` means
+    that machine has STOPPED downloading proxies and needs a human."""
+    tripped: bool = False
+    reason: str | None = Field(default=None, max_length=1000)
+    tripped_at: str | None = Field(default=None, max_length=64)
+    deletes: int | None = Field(default=None, ge=0)
+    bytes: int | None = Field(default=None, ge=0)
+    last_pass_deletes: int | None = Field(default=None, ge=0)
+    resumed_at: str | None = Field(default=None, max_length=64)
+
+
+class TrashIn(BaseModel):
+    """`.ccsync-trash` -- what lane B removed and can still be recovered."""
+    count: int | None = Field(default=None, ge=0)
+    bytes: int | None = Field(default=None, ge=0)
+    removed: int | None = Field(default=None, ge=0)
+    removed_bytes: int | None = Field(default=None, ge=0)
+
+
+class HaltIn(BaseModel):
+    """companion sync/lane_guard.HaltState.report() -- "stop all sync"."""
+    active: bool = False
+    scope: str | None = Field(default=None, max_length=16)   # 'local' | 'fleet'
+    reason: str | None = Field(default=None, max_length=500)
+    at: str | None = Field(default=None, max_length=64)
+
+
+class SkippedExistsIn(BaseModel):
+    """Lane A files the NAS already holds AT A DIFFERENT SIZE --
+    `copy --ignore-existing` will never replace them (item 9)."""
+    count: int | None = Field(default=None, ge=0)
+    samples: list[str] | None = Field(default=None, max_length=64)
+    checked_at: str | None = Field(default=None, max_length=64)
+
+
+class RemovalOverrideIn(BaseModel):
+    """An editor who deleted a project's local copy anyway, past the
+    caught-up gate. Reported so the deletion is not only in one machine's
+    log file."""
+    slug: str | None = Field(default=None, max_length=128)
+    rel: str | None = Field(default=None, max_length=512)
+    at: str | None = Field(default=None, max_length=64)
+    pending_uploads: int | None = Field(default=None, ge=0)
+    reasons: list[str] | None = Field(default=None, max_length=8)
+
+
+class SyncGuardIn(BaseModel):
+    """The companion's `sync_guard` section (item 9, 2026-08-17).
+
+    Every field optional, sub-models tolerant of extras, exactly like
+    TransportHealthIn: a companion that grows a counter must never 422 its
+    whole report against an older dashboard. And the converse matters more
+    here -- an OLDER companion sends none of this, which reads as "no alarm",
+    which is right: it has no breaker to trip.
+    """
+    lane_b_breaker: BreakerIn | None = None
+    trash: TrashIn | None = None
+    halt: HaltIn | None = None
+    skipped_exists: SkippedExistsIn | None = None
+    removal_overrides: list[RemovalOverrideIn] | None = Field(default=None, max_length=8)
+
+
+def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] | None:
+    """SyncGuardIn -> the flat machine_state columns (schema v16).
+
+    None when the companion sent nothing -- upsert_machine_state then leaves
+    every stored value alone, so a pre-item-9 companion reporting into an
+    upgraded dashboard cannot clear another machine's alarm. `at` doubles as
+    the "this report carried a guard section" marker the upsert keys its
+    latch writes on."""
+    if guard is None:
+        return None
+    breaker = guard.lane_b_breaker
+    halt = guard.halt
+    return {
+        "at": now,
+        "breaker_tripped": int(bool(breaker.tripped)) if breaker is not None else 0,
+        "breaker_reason": breaker.reason if breaker is not None else None,
+        "breaker_at": breaker.tripped_at if breaker is not None else None,
+        "trash_bytes": guard.trash.bytes if guard.trash is not None else None,
+        "trash_count": guard.trash.count if guard.trash is not None else None,
+        "halt_active": int(bool(halt.active)) if halt is not None else 0,
+        "halt_scope": (halt.scope if halt is not None and halt.active else None),
+        "halt_reason": (halt.reason if halt is not None and halt.active else None),
+        "skipped_exists": (
+            guard.skipped_exists.count if guard.skipped_exists is not None else None
+        ),
+    }
+
+
 class ReportIn(BaseModel):
     editor_name: str = Field(min_length=1, max_length=64)
     machine: str = Field(min_length=1, max_length=128)
@@ -2461,6 +3120,12 @@ class ReportIn(BaseModel):
     # orphaned-.partial / express-failure counters that exist ONLY to give
     # the server visibility reached nobody (KNOWN_BUGS B17).
     transport_health: TransportHealthIn | None = None
+    # The safety latches (COMMERCIAL_READINESS.md item 9, 2026-08-17): a
+    # tripped lane B breaker, a halted machine, the trash size and lane A's
+    # "skipped, exists" counter. The first two are ALARMS -- a machine in
+    # either state looks perfectly healthy on every other field in this
+    # model.
+    sync_guard: SyncGuardIn | None = None
     # Set by _truncate_report_sections, never by the client: {section:
     # entries dropped}. Echoed in the reply and logged, so a truncated report
     # is loud rather than silent (B6).
@@ -2515,17 +3180,34 @@ def api_report(
 ) -> dict[str, Any]:
     settings = request.app.state.settings
     token = request.headers.get("x-ccsync-token", "")
-    if settings.report_token:
-        if not token_ok(settings.report_token, token):
+    auth_kind, token_editor = resolve_companion_credential(settings, conn, token)
+    if auth_kind == AUTH_NONE:
+        if not settings.report_token and not db.looks_like_editor_report_token(token):
+            # No shared token configured and none presented: the deployment
+            # never set DASH_REPORT_TOKEN and has not minted per-editor tokens
+            # either. Same message this route has always given.
+            if not settings.report_token_optional:
+                raise HTTPException(
+                    status_code=401,
+                    detail="report token not configured on server (set DASH_REPORT_TOKEN)",
+                )
+        else:
             raise HTTPException(status_code=401, detail="bad or missing X-CCSync-Token")
-    elif not settings.report_token_optional:
-        raise HTTPException(
-            status_code=401,
-            detail="report token not configured on server (set DASH_REPORT_TOKEN)",
-        )
     received_at = db.utcnow_iso()
     editor = payload.editor_name.strip().lower()
     machine = payload.machine.strip()
+
+    # A per-editor token IS an identity claim, so it is checked against the one
+    # the body makes before anything is written. The shared token makes no such
+    # claim -- that is exactly its weakness, and why the identity header below
+    # exists (COMMERCIAL_READINESS.md item 15, 2026-08-17).
+    if auth_kind == AUTH_EDITOR and token_editor != editor:
+        log.warning("report refused: a per-editor token belonging to %r reported as %r",
+                    token_editor, editor)
+        raise HTTPException(
+            status_code=401,
+            detail="this X-CCSync-Token belongs to a different editor than editor_name",
+        )
 
     # Machine-identity verification: a valid X-CCSync-Identity token whose
     # username matches the reported editor_name proves this companion actually
@@ -2570,6 +3252,14 @@ def api_report(
         # editor from a username-shaped machine name later, when the enforce
         # cycle decides whether a device may be unshared (B16).
         db.record_known_editor(conn, editor, "report", received_at)
+
+    # Which credential this machine used, so an operator can see how far the
+    # fleet has moved off the shared token before switching it off (see
+    # settings.shared_report_token_enabled and app.py's boot log).
+    if auth_kind != AUTH_NONE:
+        db.record_report_auth(conn, editor, machine, auth_kind, received_at)
+    if auth_kind == AUTH_EDITOR:
+        db.touch_editor_report_token(conn, token, received_at)
 
     # B6: a truncated section is never silent. The report was ACCEPTED (the
     # alternative -- 422 -- took the whole machine off the fleet grid), but
@@ -2647,7 +3337,19 @@ def api_report(
         platform=(payload.platform or "").strip().lower() or None,
         companion_version=(payload.companion_version or "").strip() or None,
         transport=flatten_transport_health(payload.transport_health, received_at),
+        guard=flatten_sync_guard(payload.sync_guard, received_at),
     )
+    # An overridden "Remove from this machine" destroyed a local copy the
+    # gate said was not caught up. There is nowhere on the grid for a
+    # one-off event, so it goes in the dashboard's log -- which is the only
+    # record that outlives the machine it happened on (item 9).
+    for override in (payload.sync_guard.removal_overrides or []) if payload.sync_guard else []:
+        log.warning(
+            "%s/%s DELETED the local copy of %s past the caught-up gate (%s pending "
+            "upload(s)): %s",
+            editor, machine, override.rel or override.slug,
+            override.pending_uploads, "; ".join(override.reasons or []),
+        )
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
     mode = (payload.mode or "editor").strip().lower()
@@ -2718,6 +3420,22 @@ def api_report(
     # can't race a project switch. Key absent = mapped (or no project open).
     if resolve_project and detected_slug is None:
         result["resolve_project_unmapped"] = resolve_project
+    # FLEET HALT (COMMERCIAL_READINESS.md item 9, 2026-08-17). The reply is
+    # the dashboard's only channel back to a companion -- it already carries
+    # the upgrade advertisement and the unmapped-project prompt -- so an
+    # admin's "stop everything" reaches every tray within one report
+    # interval with no new request and no push infrastructure.
+    #
+    # ALWAYS present, both states. The companion treats an ABSENT key as
+    # "this dashboard is too old to have an opinion" and holds whatever halt
+    # it has; sending `active: false` is what releases one, so the key must
+    # not be omitted when the flag is clear.
+    halt_state = db.get_fleet_halt(conn)
+    result["commands"] = {"halt": {
+        "active": bool(halt_state["active"]),
+        "reason": halt_state["reason"],
+        "at": halt_state["set_at"],
+    }}
     return result
 
 

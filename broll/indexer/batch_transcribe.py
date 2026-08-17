@@ -8,7 +8,7 @@ reuses — so the pipeline then ingests them without re-transcribing anything.
 
 Run it ALONGSIDE the pipeline's local stages, not ahead of them:
 
-    python batch_transcribe.py --config config.queue.yaml
+    python batch_transcribe.py    # --config defaults to private/broll/indexer/config.queue.yaml
 
 "Before" was the original instruction and it was wrong (BROLL-15, 2026-08-11).
 The queue below skips `status='skipped'`, which is a verdict `probe` reaches —
@@ -30,6 +30,8 @@ import time
 from pathlib import Path
 
 import yaml
+
+from broll_index.site_data import DEFAULT_QUEUE_CONFIG
 
 
 def _add_cuda_dll_dirs() -> None:
@@ -97,7 +99,7 @@ def _ts(seconds: float) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.queue.yaml")
+    ap.add_argument("--config", default=DEFAULT_QUEUE_CONFIG)
     ap.add_argument("--model", default="large-v3-turbo")
     ap.add_argument("--compute-type", default="float16")
     ap.add_argument("--limit", type=int, default=None)

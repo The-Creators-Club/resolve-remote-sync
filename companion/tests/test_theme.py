@@ -68,7 +68,10 @@ def _clean_icon_cache():
 def test_the_window_icon_is_the_new_mark_not_the_old_pre_composed_one():
     """The white mark is the tintable asset; icon.png is already coloured and
     cannot become red without repainting it."""
-    assert theme.WINDOW_ICON_ASSET == "cc_mark_white.png"
+    # The PRODUCT's mark since 2026-08-17 (COMMERCIAL_READINESS.md item 10):
+    # the studio logo it used to be is still shipped, but only a site that
+    # asks for it by name ($CCSYNC_BRAND_LOGO) wears it.
+    assert theme.WINDOW_ICON_ASSET == "ccsync_mark.png"
     assert theme.window_mark_path() is not None
     assert theme.window_mark_path() != theme.icon_path()
     # icon_path() deliberately still means the pre-composed file (other code

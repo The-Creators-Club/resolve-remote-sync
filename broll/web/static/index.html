@@ -18,7 +18,11 @@
        ../partials/topbar and swaps it in here, so this page carries the same
        header and nav as every other dashboard page. -->
   <div class="topbar" id="dash-topbar">
-    <span class="brand">CREATORS CLUB <span class="dim">//</span> B-ROLL</span>
+    <!-- The PRODUCT's name, not a customer's: this header is only ever seen
+         before the real topbar (which carries the site's own brand from the
+         manifest) has been fetched, or in the standalone dev loop. It used to
+         read "CREATORS CLUB" (2026-08-17, COMMERCIAL_READINESS.md item 10). -->
+    <span class="brand">CC SYNC <span class="dim">//</span> B-ROLL</span>
     <!-- Root-relative on purpose, unlike every asset URL here: mounted under
          /broll/ this is the way back out to the dashboard at the origin root.
          Standalone (dev) it harmlessly reloads this page. -->

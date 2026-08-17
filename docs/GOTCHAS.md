@@ -170,8 +170,8 @@ script in the next means the script sees **nothing**.
 
 This is not cosmetic. On 2026-07-26 it made `install_dashboard_app.py` fall
 back to the default `DASH_ADMIN_USERS=truenas_admin`, which would have
-dropped `alex` from the dashboard admin list and with it the ability to
-publish packages at all. Caught only because `--dry-run` prints the compose
+dropped the operator's own account from the dashboard admin list and with it
+the ability to publish packages at all. Caught only because `--dry-run` prints the compose
 body.
 
 **Fix.** Set the variables and run the command in **one** invocation, and
@@ -348,14 +348,14 @@ of step with the published one for no gain.
   first-use-trust warning. Pin it:
 
   ```
-  CCSYNC_SSH_HOSTKEY="$(ssh-keyscan -t ed25519 192.168.0.102 | awk '{print $2, $3}')"
+  CCSYNC_SSH_HOSTKEY="$(ssh-keyscan -t ed25519 <nas> | awk '{print $2, $3}')"
   ```
 
 - **DaVinci Resolve holds its attached proxy files open without
   share-delete**, so lane B's move-to-trash of superseded proxies fails
   with a lock error and retries every pass -- the tray says "tidying old
   files in slices" indefinitely and the machine's manifest over-counts
-  proxies (99/69 on alex_laptop, 2026-07-26) until Resolve is closed once
+  proxies (99/69 on owen_laptop, 2026-07-26) until Resolve is closed once
   and the sweep completes.
 
 - **rclone silently rewrites fullwidth punctuation in filenames on
@@ -373,7 +373,7 @@ of step with the published one for no gain.
   and do NOT hand-rename the local file: pre-fix rclone treats the
   corrected name as a different file and re-downloads the `‛` version.
 
-  **Still seen on a pinned companion (2026-08-14, ruskin's box, v0.7.4.)**
+  **Still seen on a pinned companion (2026-08-14, an editor's box, v0.7.4.)**
   Lane A flapped `error` on Creator Profiles/Season 1 with
   `failed to open source object: ...Satu‛‛： Piloting...: The system cannot
   find the file specified` -- a DOUBLY escaped name that exists on no disk,
@@ -400,7 +400,7 @@ of step with the published one for no gain.
   means the certificate (device ID) is right; the EOF means the OTHER side
   read the hello and hung up because the dialing device is not in its own
   config -- a fresh `syncthing generate` config knows nobody
-  (alex_laptop, 2026-07-26). The bootstraps now seed the NAS device via
+  (owen_laptop, 2026-07-26). The bootstraps now seed the NAS device via
   REST; if it recurs, also check for TWO syncthing.exe processes from
   different homes (`Get-Process syncthing | Select-Object Id, Path`).
 - **An editor machine can run Syncthing from a different home than the
@@ -692,3 +692,109 @@ after the binary, never after the output path, and the output must stay last
 because several callers index `cmd[-1]`. And publish at most once a second --
 ffmpeg emits a block per output packet, hundreds a second, and each one takes
 the lock the tray's refresh thread reads `gap()` under.
+
+## 12. Fleet credentials and the write paths behind the login
+
+Added 2026-08-17 with `COMMERCIAL_READINESS.md` item 15. Four rules that all
+changed on the same day, and each one fails in a way that looks like something
+else.
+
+### An editor now has their own report token, and it outranks the shared one
+
+Every companion in the field authenticates with the single
+`DASH_REPORT_TOKEN`. It cannot be revoked for one person, everyone who has
+ever been onboarded holds it, and rotating it takes the whole fleet off the
+dashboard at once. **Admin > Users > REPORT TOKENS** mints a per-editor token
+instead: `cce1.<id>.<secret>`, stored only as a sha256, revocable on its own
+row, and **shown exactly once** -- nothing can print it again, because nothing
+has it.
+
+Handing it over is deliberately manual and there is no pairing flow for it
+yet. `/api/v1/verify` -- the tray's *Sign in…* -- only ever answers with the
+SHARED token; it is the bootstrap endpoint an unauthenticated companion calls,
+so it must not be able to hand out a per-editor credential to whoever asks.
+The admin passes the value on the same channel they already use for that
+editor's NAS password, and the editor (or the admin, over SSH) puts it in
+`~/.ccsync/config.toml`:
+
+```toml
+report_token = "cce1.…"
+```
+
+Restart the companion. `identity.preferred_report_token` decides what goes on
+the wire, most specific first: `identity.json`'s `editor_report_token`,
+`config.toml`'s `report_token`, the shared token captured at the last sign-in,
+`config.toml`'s `dashboard_token`. **A sign-in never demotes a migrated
+machine** -- `save_identity` carries `editor_report_token` through the rewrite,
+which is the one bug in this area that would have gone unnoticed until the
+shared token was switched off.
+
+The token BINDS. A report or a selection read under it may only claim the
+editor it was minted for; the dashboard 401s a mismatch by name in the log.
+That is the whole point -- the shared token proves only "somebody in this
+fleet", which is why `X-CCSync-Identity` had to exist beside it.
+
+**When can the shared token be turned off?** The dashboard says so at every
+boot: it names the machines whose *last* report used the shared credential
+(`report_auth` table), and the same numbers are on the Users page. When that
+list is empty, set `DASH_SHARED_REPORT_TOKEN_ENABLED=0` and redeploy. Do it
+before that and every un-migrated machine goes dark simultaneously.
+
+### `~/.ccsync` is owner-only now, and on Windows that means `icacls`
+
+`identity.json` and `config.toml` hold credentials and were written at the
+process default umask. On POSIX that is 0644. **On Windows `os.chmod` does not
+help at all** -- it toggles the read-only attribute and says nothing about who
+may read the file; the profile directory's inherited ACL decides, and on a
+shared or domain-joined machine that routinely includes other local accounts.
+`secretfile.harden` runs `icacls <path> /inheritance:r /grant:r <owner>:(R,W)`
+in ONE call (two calls leave a window where the file has no ACEs, and a crash
+in between leaves identity.json unreadable by its own owner). It never raises:
+a machine that cannot be tightened still runs, with one WARNING naming the
+file. An install that predates this gets its `config.toml` tightened once, at
+the next companion start.
+
+### No dashboard call follows a redirect any more
+
+`urllib.request.urlopen` follows 3xx automatically and strips only the
+`Authorization` header -- `X-CCSync-Token` and `X-CCSync-Identity` ride along
+to whatever host the `Location` names. The upgrade channel has refused
+redirects since AUDIT_3 H-1; the reporter, the selection client and the ytdl
+executor now do too, through the same `upgrade.build_no_redirect_opener()`. A
+3xx arrives as an `HTTPError`, which every one of those callers already treats
+as a failed request.
+
+**If you stub HTTP in a companion test, stub the opener, not `urlopen`** --
+patching `urllib.request.urlopen` now leaves the test passing against code
+that never calls it.
+
+### Both mounted apps' ingest routes are fail-closed
+
+`broll/web`'s `/api/ingest/*` treated an unset `BROLL_INGEST_TOKEN` as "dev
+mode, ingest is open". That branch is gone: no token, **503**, with a log line
+saying why. A bare dev checkout needs a token like any deployment
+(`openssl rand -hex 24`); the indexer needs the same value.
+
+`music/web` never had a token because its ingest is drag-and-drop from a
+logged-in browser -- true only while it is MOUNTED in the dashboard. Standalone
+there is no login in front of it at all, so `/api/ingest` there now demands
+`MUSIC_INGEST_TOKEN` and refuses without one. The dashboard's mount declares
+itself with `musicweb.config.set_login_gated(True)`, which is a CALL from
+`mount_music`, not an env var: a host that merely has a variable set is not a
+process with the middleware wrapped around it. One request is also bounded now
+(`MAX_INGEST_FILES`, `MAX_INGEST_TOTAL_BYTES`) -- `app.py`'s `body_size_gate`
+only makes a *declaration* check on `/music/api/ingest`, on purpose, because
+buffering a dropped album is the memory problem that middleware exists to
+prevent.
+
+### An editor no longer reads the whole fleet
+
+`/api/v1/editors`, `/api/v1/projects`, `/api/v1/projects/{slug}` and the
+missing-files routes used to answer everything to anyone with a session:
+other editors' machine names, builds, completion, and the actual file paths
+missing from a named person's laptop. Now an editor sees their own machines
+plus summary counts, and an admin sees all (with `?as=` to focus one editor).
+Missing-files for somebody else's device is a **404, not a 403** -- an editor
+must not learn that the device id exists. The redaction lives in `api.py`
+(`_scope_projects_view` / `_scope_editors_view`) and `ui.py` imports it, so
+the JSON API and the pages cannot drift apart.

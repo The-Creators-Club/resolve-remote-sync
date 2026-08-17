@@ -15,7 +15,7 @@ from typing import Any
 from ccsync_companion.app import CompanionApp
 
 
-def _token(username: str = "alex", ttl: int = 3600) -> str:
+def _token(username: str = "owen", ttl: int = 3600) -> str:
     # Same v2 identity shape identity.py's parse_token expects (it never
     # verifies the signature locally, only the format + expiry field) --
     # mirrors test_identity.py's helper.
@@ -35,7 +35,7 @@ def _make_local_root(tmp_path) -> str:
 
 def _cfg(tmp_path, **overrides) -> dict[str, Any]:
     cfg = {
-        "editor_name": "alex",
+        "editor_name": "owen",
         "local_root": _make_local_root(tmp_path),
         "canonical_prefix": "P:\\",
         "remote": "creators_club_sftp",
@@ -64,7 +64,7 @@ def _sign_in_with_role(app: CompanionApp, username: str, role: str | None) -> No
 def test_base_role_disables_sync_even_though_config_says_enabled(tmp_path):
     app = _make_app(tmp_path, sync_enabled=True)
     assert app._sync_enabled is True  # nobody signed in yet -- static default
-    _sign_in_with_role(app, "alex", "base")
+    _sign_in_with_role(app, "owen", "base")
     assert app._sync_enabled is False
     assert app.effective_mode() == "base"
 
@@ -113,7 +113,7 @@ def test_no_role_from_dashboard_falls_back_to_static_config(tmp_path):
 
 def test_sign_out_reverts_to_static_config(tmp_path):
     app = _make_app(tmp_path, sync_enabled=True)
-    _sign_in_with_role(app, "alex", "base")
+    _sign_in_with_role(app, "owen", "base")
     assert app._sync_enabled is False
     app.identity.sign_out()
     app._apply_identity_role()

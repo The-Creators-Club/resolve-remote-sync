@@ -6,7 +6,8 @@ hits, in/out selection, and one-click insert into DaVinci Resolve on each editor
 Three components, three directories. Each component is built independently against the
 contracts in this file. **Do not change a contract without updating this file.**
 
-- `indexer/`   — Python CLI worker. Runs on Alex's Windows PC. Probes media, generates
+- `indexer/`   — Python CLI worker. Runs on the operator's Windows indexing rig
+  (the base rig, in this deployment). Probes media, generates
   proxies/sprites/contact-sheets with ffmpeg, calls Claude Code headless for visual
   indexing, writes results to the database, sorts inbox clips into category folders.
 - `web/`       — FastAPI app + single-page frontend. Owns the SQLite database. Serves
@@ -143,7 +144,14 @@ Still authoritative; implemented since 2026-08-10 by
 `companion/src/ccsync_companion/broll_server.py` (the CC Sync companion), not by a
 `companion/` directory in this component tree.
 
-`http://127.0.0.1:8899`, CORS: `Access-Control-Allow-Origin: *` (binds loopback only).
+`http://127.0.0.1:8899`, binds loopback only. CORS was `Access-Control-Allow-Origin: *`
+until **2026-08-17**; a loopback bind is not an authorisation decision (any page in the
+editor's browser is also "local"), so it is now an allow-list — see
+`docs/LOOPBACK_API.md`. In short: the dashboard's own origin gets CORS headers and
+nothing else does; a POST needs that origin **or** the `X-CCSync-Loopback` token, plus
+`Content-Type: application/json`. This UI is served from the dashboard, so it is
+unaffected — but a companion whose `dashboard_url` does not match the URL editors
+actually browse will 403 every call, and says so in its log.
 
 - `GET  /status` → `{ok, resolve_connected, mounts: {share: local_root}, version}`
 - `POST /insert` — body:

@@ -92,18 +92,18 @@ def test_not_signed_in_is_never_green():
 
 
 def test_signed_in_and_idle_is_green():
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     assert compute_overall_color(_idle3(), app) == "green"
 
 
 def test_paused_is_never_green():
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.paused = True
     assert compute_overall_color(_idle3(), app) == "orange"
 
 
 def test_sync_disabled_is_never_green():
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app._sync_enabled = False
     assert compute_overall_color(_idle3(), app) == "orange"
 
@@ -111,7 +111,7 @@ def test_sync_disabled_is_never_green():
 def test_config_problems_are_red():
     """DEL-3: lanes no longer start at all in this state, so it must not
     read as anything other than broken."""
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.config_problems = ["remote_root is blank -- ..."]
     assert compute_overall_color(_idle3(), app) == "red"
 
@@ -119,7 +119,7 @@ def test_config_problems_are_red():
 def test_menu_has_dashboard_link_when_url_configured():
     from ccsync_companion.tray import _build_menu
 
-    menu = _build_menu(_FakeApp({"dashboard_url": "http://192.168.0.102:8480"}))
+    menu = _build_menu(_FakeApp({"dashboard_url": "http://192.168.0.10:8480"}))
     assert "Open dashboard" in _menu_labels(menu)
 
 
@@ -140,7 +140,7 @@ def test_menu_always_has_scan_whole_project():
     menu = _build_menu(_FakeApp({"dashboard_url": ""}))
     assert "Scan whole project" in _all_menu_labels(menu)
 
-    menu = _build_menu(_FakeApp({"dashboard_url": "http://192.168.0.102:8480"}))
+    menu = _build_menu(_FakeApp({"dashboard_url": "http://192.168.0.10:8480"}))
     assert "Scan whole project" in _all_menu_labels(menu)
 
 
@@ -198,18 +198,18 @@ def test_tooltip_does_not_claim_nothing_syncs_when_login_is_not_required():
 def test_menu_shows_sign_out_and_status_when_signed_in():
     from ccsync_companion.tray import _build_menu
 
-    menu = _build_menu(_FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex")))
+    menu = _build_menu(_FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen")))
     labels = _menu_labels(menu)
     assert "Sign out" in labels
     assert "Sign in…" not in labels
-    assert "Signed in as alex" in labels
+    assert "Signed in as owen" in labels
 
 
 def test_identity_status_label_helper():
     from ccsync_companion.tray import _identity_status_label
 
     assert _identity_status_label(_FakeApp({}, identity=_FakeIdentity(None))) == "NOT SIGNED IN"
-    assert _identity_status_label(_FakeApp({}, identity=_FakeIdentity("ruskin"))) == "Signed in as ruskin"
+    assert _identity_status_label(_FakeApp({}, identity=_FakeIdentity("editor2"))) == "Signed in as editor2"
 
 
 def test_menu_handles_app_without_identity_attribute():
@@ -446,7 +446,7 @@ def test_lane_error_is_classified_not_dumped_verbatim():
 
     app = _FakeApp({"dashboard_url": ""})
     net = LaneStatus(name="lane_a_video_up", state="error",
-                     last_error="rclone exited 1: dial tcp 100.71.216.3:22: i/o timeout")
+                     last_error="rclone exited 1: dial tcp 100.64.0.1:22: i/o timeout")
     assert "Tailscale" in _format_lane_line(net, app)
     assert "dial tcp" not in _format_lane_line(net, app)
 
@@ -577,15 +577,15 @@ def test_icon_stop_actually_stops_the_refresh_loop():
         def run(self):
             pass
 
-    real_icon = tray_mod.pystray.Icon
+    real_icon = tray_mod.tray_backend.Icon
     try:
-        tray_mod.pystray.Icon = _FakeIcon
+        tray_mod.tray_backend.Icon = _FakeIcon
         icon = tray_mod.start_tray(_FakeApp({"dashboard_url": ""}), refresh_interval=0.01)
         icon.stop()
         assert getattr(icon, "_ccsync_stop", False) is True
         assert stopped == [True]
     finally:
-        tray_mod.pystray.Icon = real_icon
+        tray_mod.tray_backend.Icon = real_icon
 
 
 # -- snapshot + fingerprint (the 2026-07-26 right-click freeze) -------------
@@ -594,7 +594,7 @@ def test_icon_stop_actually_stops_the_refresh_loop():
 def test_build_menu_accepts_a_prebuilt_snapshot():
     from ccsync_companion.tray import _build_menu, _tray_snapshot
 
-    app = _FakeApp({"dashboard_url": "http://192.168.0.102:8480"})
+    app = _FakeApp({"dashboard_url": "http://192.168.0.10:8480"})
     snap = _tray_snapshot(app)
     labels = _menu_labels(_build_menu(app, snap))
     assert "Open dashboard" in labels
@@ -635,14 +635,14 @@ def test_fingerprint_changes_on_pause_and_sign_in():
     fp_paused = _menu_fingerprint(_tray_snapshot(app))
     assert fp_plain != fp_paused
     app.paused = False
-    app.identity = _FakeIdentity("alex")
+    app.identity = _FakeIdentity("owen")
     assert _menu_fingerprint(_tray_snapshot(app)) != fp_plain
 
 
 def test_tooltip_shows_live_numbers_and_states():
     from ccsync_companion.tray import _tooltip_text, _tray_snapshot
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     assert _tooltip_text(_tray_snapshot(app)) == "CCSync: up to date"
 
     app.lane_statuses = lambda: [LaneStatus(
@@ -660,51 +660,81 @@ def test_tooltip_shows_live_numbers_and_states():
     assert "not signed in" in _tooltip_text(_tray_snapshot(signed_out))
 
 
-def test_menu_open_guard_tracks_the_popup_call(monkeypatch):
-    """While TrackPopupMenuEx blocks (menu open), is_open() must be True; the
-    flag must clear even if the call raises."""
-    import sys
-
-    import pytest as _pytest
-
-    if sys.platform != "win32":
-        _pytest.skip("pystray win32 backend only")
-    from pystray import _win32
-
+def test_the_menu_open_guard_reads_the_process_wide_flag():
+    """The guard no longer INSTALLS anything (2026-08-17): it used to
+    monkeypatch pystray's TrackPopupMenuEx to learn when the menu was up.
+    tray_native's Icon sets the same Event itself, so all that is left here is
+    that the guard reads THE flag -- ui_state.menu_open, the one
+    resolve_bridge also defers its GIL-holding calls on."""
     from ccsync_companion import tray as tray_mod
+    from ccsync_companion import ui_state
+
+    guard = tray_mod._MenuOpenGuard()
+    guard.install()          # a no-op, and must stay callable
+    assert guard.flag is ui_state.menu_open
+
+    ui_state.menu_open.clear()
+    assert guard.is_open() is False
+    ui_state.menu_open.set()
+    try:
+        assert guard.is_open() is True
+    finally:
+        ui_state.menu_open.clear()
+
+
+def test_start_tray_hands_the_backend_the_menu_open_flag():
+    """The whole point of the rewrite: the flag reaches the backend as an
+    argument instead of through a monkeypatch."""
+    from ccsync_companion import tray as tray_mod
+    from ccsync_companion import ui_state
 
     seen = {}
-    guard = tray_mod._MenuOpenGuard()
 
-    def fake_track(*args, **kwargs):
-        seen["open_during"] = guard.is_open()
-        return 0
+    class _FakeIcon:
+        def __init__(self, *a, **k):
+            seen.update(k)
+            self.icon = None
+            self.menu = None
 
-    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx", fake_track, raising=True)
-    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
-    guard.install()
+        def stop(self):
+            pass
 
-    assert guard.is_open() is False
-    _win32.win32.TrackPopupMenuEx()
-    assert seen["open_during"] is True
-    assert guard.is_open() is False
+        def run(self):
+            pass
 
-    # a raising call must still clear the flag
-    def raising_track(*args, **kwargs):
-        raise RuntimeError("boom")
+    real_icon = tray_mod.tray_backend.Icon
+    try:
+        tray_mod.tray_backend.Icon = _FakeIcon
+        icon = tray_mod.start_tray(_FakeApp({"dashboard_url": ""}), refresh_interval=0.01)
+        icon.stop()
+    finally:
+        tray_mod.tray_backend.Icon = real_icon
+    assert seen.get("menu_open_flag") is ui_state.menu_open
 
-    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
-    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx", raising_track, raising=True)
-    guard2 = tray_mod._MenuOpenGuard()
-    guard2.install()
-    with _pytest.raises(RuntimeError):
-        _win32.win32.TrackPopupMenuEx()
-    assert guard2.is_open() is False
 
-    # a second guard adopts the existing wrap instead of double-wrapping
-    guard3 = tray_mod._MenuOpenGuard()
-    guard3.install()
-    assert guard3._open is guard2._open
+def test_start_tray_survives_a_backend_that_has_no_menu_open_flag():
+    """CCSYNC_TRAY_BACKEND=pystray (and any test stand-in) knows nothing about
+    the keyword; the tray must start anyway, just without the deferral."""
+    from ccsync_companion import tray as tray_mod
+
+    class _OldStyleIcon:
+        def __init__(self, name, image, title, menu=None):
+            self.icon = image
+            self.menu = menu
+
+        def stop(self):
+            pass
+
+        def run(self):
+            pass
+
+    real_icon = tray_mod.tray_backend.Icon
+    try:
+        tray_mod.tray_backend.Icon = _OldStyleIcon
+        icon = tray_mod.start_tray(_FakeApp({"dashboard_url": ""}), refresh_interval=0.01)
+        icon.stop()
+    finally:
+        tray_mod.tray_backend.Icon = real_icon
 
 
 def test_icon_image_cache_returns_same_object():
@@ -891,7 +921,7 @@ def test_a_lane_error_while_the_drive_is_out_is_not_a_deleted_project():
 def test_the_snapshot_carries_root_absent_and_the_fingerprint_changes():
     from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     before = _tray_snapshot(app)
     assert before["root_absent"] is False
     fp_before = _menu_fingerprint(before)
@@ -909,7 +939,7 @@ def test_the_snapshot_carries_root_absent_and_the_fingerprint_changes():
 def test_the_menu_lane_lines_pick_the_drive_wording_up():
     from ccsync_companion.tray import _build_menu, _tray_snapshot
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app._root_absent = True
     labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
     assert any("drive disconnected" in label for label in labels)
@@ -918,7 +948,7 @@ def test_the_menu_lane_lines_pick_the_drive_wording_up():
 def test_the_icon_goes_orange_while_the_drive_is_out():
     """Orange, not red: nothing is broken and nothing is lost -- plugging the
     drive back in resumes sync on its own."""
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app._root_absent = True
     assert compute_overall_color(_idle3(), app) == "orange"
 
@@ -926,7 +956,7 @@ def test_the_icon_goes_orange_while_the_drive_is_out():
 def test_the_tooltip_names_the_drive():
     from ccsync_companion.tray import _tooltip_text, _tray_snapshot
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app._root_absent = True
     assert "disconnected" in _tooltip_text(_tray_snapshot(app))
 
@@ -1007,14 +1037,15 @@ def test_the_credentials_dialog_answer_survives_the_dispatch_round_trip(monkeypa
 
     app = _UpgradeApp()
     _record_tray_dispatch(monkeypatch, run=True)
-    monkeypatch.setattr(tray_mod, "_build_credentials_dialog", lambda a: ("alex", "pw"))
-    assert tray_mod._ask_server_credentials_locked(app) == ("alex", "pw")
+    monkeypatch.setattr(tray_mod, "_build_credentials_dialog", lambda a: ("owen", "pw"))
+    assert tray_mod._ask_server_credentials_locked(app) == ("owen", "pw")
 
 
 def test_the_icon_runs_on_a_thread_on_windows_and_detached_on_macos(monkeypatch):
-    """pystray's win32 backend owns a message loop of its own on a daemon
-    thread (unchanged). On macOS NSStatusItem is main-thread-only, so the
-    icon is installed detached against the runloop ui_dispatch.serve() runs."""
+    """tray_native's Windows backend owns a message loop of its own and is
+    given a daemon thread to run it on. On macOS NSStatusItem is
+    main-thread-only, so the icon is installed detached against the runloop
+    ui_dispatch.serve() is about to run."""
     import threading
     import time
 
@@ -1036,9 +1067,9 @@ def test_the_icon_runs_on_a_thread_on_windows_and_detached_on_macos(monkeypatch)
         def run_detached(self):
             events.append(("run_detached", threading.current_thread().name))
 
-    real_icon = tray_mod.pystray.Icon
+    real_icon = tray_mod.tray_backend.Icon
     try:
-        tray_mod.pystray.Icon = _FakeIcon
+        tray_mod.tray_backend.Icon = _FakeIcon
 
         monkeypatch.setattr(tray_mod.ui_dispatch, "uses_main_thread", lambda: False)
         icon = tray_mod.start_tray(_FakeApp({"dashboard_url": ""}), refresh_interval=0.01)
@@ -1055,7 +1086,7 @@ def test_the_icon_runs_on_a_thread_on_windows_and_detached_on_macos(monkeypatch)
         icon.stop()
         assert events == [("run_detached", threading.current_thread().name)]
     finally:
-        tray_mod.pystray.Icon = real_icon
+        tray_mod.tray_backend.Icon = real_icon
 
 
 # ===========================================================================
@@ -1176,7 +1207,7 @@ def test_the_line_carries_the_distinguished_reason():
 
 class _BridgeApp(_FakeApp):
     def __init__(self, state):
-        super().__init__({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+        super().__init__({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
         self._bridge_state = state
         self.probes = 0
 
@@ -1226,273 +1257,327 @@ def test_a_broken_bridge_state_getter_costs_only_the_line():
     assert _tray_snapshot(app)["resolve_line"] is None
 
 
-# -- item 20: the menu swap must never leave a destroyed handle behind ------
+# -- item 20, rewritten: the popup exists only while it is on screen --------
 #
-# pystray's win32 _update_menu DestroyMenu()s the live handle FIRST, rebuilds
-# ~30 items, and publishes the new handle last -- so for the whole rebuild
-# `_menu_handle` names a destroyed HMENU and a right-click arriving inside it
-# gets nothing. It is also called from two threads that know nothing of each
-# other (our refresh loop, and pystray's own post-click update_menu() on the
-# pump thread), which double-destroys one handle and leaks the other until
-# the 10 000-object USER quota kills menus outright.
+# tray_native keeps NO live HMENU (2026-08-17, COMMERCIAL_READINESS.md item 3).
+# pystray did, and rebuilt it on every `icon.menu = ...` -- DestroyMenu()
+# first, ~30 items, publish the new handle last -- from two threads that knew
+# nothing of each other (our refresh loop, and its own post-click
+# update_menu() on the pump thread). A right-click landing inside a rebuild
+# got a destroyed handle and showed nothing; two interleaving destroyed one
+# handle twice and leaked the other, until at the 10 000-object USER quota
+# CreatePopupMenu started failing and right-click did nothing at all.
+#
+# The tests below pin the shape that makes every one of those impossible:
+# assignment does no Win32 work, and the handle's entire life is inside one
+# call, on one thread.
 
 
-class _HandleRegistry:
-    """Stands in for CreatePopupMenu/DestroyMenu bookkeeping."""
+class _FakeUser32:
+    """Only the user32 entry points the popup path touches."""
 
-    def __init__(self):
-        import threading
-
-        self._lock = threading.Lock()
-        self.next_handle = 0
-        self.live = set()
+    def __init__(self, track_result=0, track_error=0, popup_handle=0x99):
+        self.track_result = track_result
+        self.track_error = track_error
+        self.popup_handle = popup_handle
+        self.tracked = []
         self.destroyed = []
-        self.violations = []
+        self.posted = []
+        self.foreground = []
 
-    def create(self):
-        with self._lock:
-            self.next_handle += 1
-            self.live.add(self.next_handle)
-            return self.next_handle
+    def SetForegroundWindow(self, hwnd):
+        self.foreground.append(hwnd)
+        return 1
 
-    def destroy(self, handle, icon):
-        current = getattr(icon, "_menu_handle", None)
-        if current is not None and current[0] == handle:
-            # The handle a concurrent right-click would have picked up.
-            self.violations.append(handle)
-        with self._lock:
-            self.live.discard(handle)
-            self.destroyed.append(handle)
+    def TrackPopupMenuEx(self, hmenu, flags, x, y, hwnd, reserved):
+        import ctypes
 
+        self.tracked.append((hmenu, flags, x, y, hwnd, reserved))
+        if self.track_error:
+            ctypes.set_last_error(self.track_error)
+        if callable(self.track_result):
+            return self.track_result()
+        return self.track_result
 
-class _FakeMenuIcon:
-    """A pystray win32 Icon reduced to what _atomic_update_menu touches."""
+    def DestroyMenu(self, handle):
+        self.destroyed.append(handle)
+        return 1
 
-    def __init__(self, registry):
-        self.menu = object()
-        self._menu_handle = None
-        self._registry = registry
-        self.creates = 0
-        self.raise_on_create = False
-        self.handle_on_create = None   # 0 fakes the exhausted USER-object quota
+    def PostMessageW(self, hwnd, msg, wparam, lparam):
+        self.posted.append((hwnd, msg, wparam, lparam))
+        return 1
 
-    def _create_menu(self, menu, callbacks):
-        import time
-
-        if self.raise_on_create:
-            raise RuntimeError("CreatePopupMenu boom")
-        self.creates += 1
-        callbacks.append(lambda icon: None)
-        time.sleep(0)   # widen the interleaving window for the race below
-        if self.handle_on_create is not None:
-            return self.handle_on_create
-        return self._registry.create()
+    def CreatePopupMenu(self):
+        return self.popup_handle
 
 
-def _fake_win32_menus(monkeypatch, icon, registry):
-    """Point pystray's DestroyMenu at the registry -- win32-only, like the
-    backend being patched."""
-    import sys
-
-    import pytest as _pytest
-
-    if sys.platform != "win32":
-        _pytest.skip("pystray win32 backend only")
-    from pystray import _win32
-
-    monkeypatch.setattr(_win32.win32, "DestroyMenu",
-                        lambda handle: registry.destroy(handle, icon), raising=True)
-    return _win32
+class _FakeApi:
+    def __init__(self, user32):
+        self.user32 = user32
 
 
-def test_the_menu_handle_never_names_a_destroyed_menu(monkeypatch):
+def _win_icon(monkeypatch, menu, track_result=0, track_error=0, popup=0x99):
+    """A _WindowsIcon with user32 and the menu builder replaced.
+
+    Constructible on any platform on purpose: __init__ touches no ctypes, so
+    the popup logic is testable without a window, a display or a real HMENU --
+    which is what keeps this suite headless (real Tk/Win32 windows opening
+    under pytest is a standing hazard in this repo).
+    """
+    from ccsync_companion import tray_native
+
+    user32 = _FakeUser32(track_result, track_error)
+    monkeypatch.setattr(tray_native._Win32, "get",
+                        classmethod(lambda cls: _FakeApi(user32)))
+    icon = tray_native._WindowsIcon("test", None, "", menu=menu)
+    icon._hwnd = 4242
+    icon._added = True
+    monkeypatch.setattr(icon, "_menu_anchor", lambda: (1700, 1032, 0x0128))
+
+    def _build(source, callbacks):
+        for index, item in enumerate(source.rendered()):
+            if item.action is not None and item.submenu is None:
+                callbacks[1000 + index] = item
+        return popup
+
+    monkeypatch.setattr(icon, "_build_popup", _build)
+    return icon, user32
+
+
+def _clicky_menu(fired):
+    from ccsync_companion import tray_native
+
+    return tray_native.Menu(
+        tray_native.MenuItem("Header", None, enabled=False),
+        tray_native.Menu.SEPARATOR,
+        tray_native.MenuItem("Do it", lambda icon, item: fired.append(item.label())),
+    )
+
+
+def test_the_popup_handle_dies_with_the_popup(monkeypatch):
+    icon, user32 = _win_icon(monkeypatch, _clicky_menu([]))
+    icon._show_menu()
+
+    assert user32.foreground == [4242]              # MSDN's first requirement
+    assert [call[0] for call in user32.tracked] == [0x99]
+    assert user32.destroyed == [0x99]               # ...and it is gone again
+    # MSDN's second: post WM_NULL to the owner or the menu can refuse to
+    # dismiss on the following click.
+    assert user32.posted == [(4242, 0x0000, 0, 0)]
+
+
+def test_assigning_the_menu_does_no_win32_work(monkeypatch):
+    """The assignment that used to DestroyMenu() a live handle."""
+    from ccsync_companion import tray_native
+
+    icon, user32 = _win_icon(monkeypatch, _clicky_menu([]))
+    for _ in range(50):
+        icon.menu = tray_native.Menu(tray_native.MenuItem("x", None))
+    assert user32.destroyed == [] and user32.tracked == []
+
+
+def test_the_menu_open_flag_is_set_only_while_the_popup_is_up(monkeypatch):
     import threading
 
-    from ccsync_companion import tray as tray_mod
+    flag = threading.Event()
+    seen = {}
+    icon, user32 = _win_icon(monkeypatch, _clicky_menu([]))
+    icon._menu_open = flag
+    user32.track_result = lambda: seen.setdefault("during", flag.is_set()) and 0
 
-    registry = _HandleRegistry()
-    icon = _FakeMenuIcon(registry)
-    _fake_win32_menus(monkeypatch, icon, registry)
-
-    def churn():
-        for _ in range(150):
-            icon.menu = object()          # a genuinely different menu each time
-            tray_mod._atomic_update_menu(icon)
-
-    threads = [threading.Thread(target=churn) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(30)
-
-    assert registry.violations == []
-    # Every menu ever created is destroyed except the one still on the icon:
-    # the counts balance, so nothing leaks toward the USER quota.
-    assert icon._menu_handle is not None
-    assert len(registry.destroyed) == icon.creates - 1
-    assert registry.live == {icon._menu_handle[0]}
+    assert flag.is_set() is False
+    icon._show_menu()
+    assert seen["during"] is True
+    assert flag.is_set() is False
 
 
-def test_an_unchanged_menu_object_is_not_rebuilt(monkeypatch):
-    """pystray calls update_menu() after every left-click and every menu
-    selection with the menu untouched -- and our refresh loop only assigns
-    icon.menu when the fingerprint really moved."""
-    from ccsync_companion import tray as tray_mod
-
-    registry = _HandleRegistry()
-    icon = _FakeMenuIcon(registry)
-    _fake_win32_menus(monkeypatch, icon, registry)
-
-    tray_mod._atomic_update_menu(icon)
-    first = icon._menu_handle
-    tray_mod._atomic_update_menu(icon)
-    tray_mod._atomic_update_menu(icon)
-
-    assert icon.creates == 1
-    assert icon._menu_handle is first
-    assert registry.destroyed == []
-
-    icon.menu = object()
-    tray_mod._atomic_update_menu(icon)
-    assert icon.creates == 2
-    assert registry.destroyed == [first[0]]
-
-
-def test_a_failed_rebuild_leaves_the_old_menu_usable(monkeypatch):
-    from ccsync_companion import tray as tray_mod
-
-    registry = _HandleRegistry()
-    icon = _FakeMenuIcon(registry)
-    _fake_win32_menus(monkeypatch, icon, registry)
-
-    tray_mod._atomic_update_menu(icon)
-    good = icon._menu_handle
-
-    icon.menu = object()
-    icon.raise_on_create = True
-    tray_mod._atomic_update_menu(icon)
-    assert icon._menu_handle is good
-    assert registry.destroyed == []
-    assert good[0] in registry.live
-
-    # ...and the same for the quota case: CreatePopupMenu returning NULL is
-    # how the leak used to end, with _menu_handle set to None and right-click
-    # dead until a restart.
-    icon.raise_on_create = False
-    icon.handle_on_create = 0
-    tray_mod._atomic_update_menu(icon)
-    assert icon._menu_handle is good
-    assert registry.destroyed == []
-
-    # An icon whose MENU is falsy is a different thing -- pystray's own
-    # _create_menu returns None for one by contract -- and must be published,
-    # not warned about forever.
-    icon.menu = None
-    tray_mod._atomic_update_menu(icon)
-    assert icon._menu_handle is None
-    assert registry.destroyed == [good[0]]
-
-
-def test_the_swap_falls_back_to_stock_pystray_when_the_internals_move():
-    """Same fail-open posture as _MenuOpenGuard.install: an unrecognised
-    pystray costs the fix, never the tray."""
-    from ccsync_companion import tray as tray_mod
-
-    class _Alien:
-        menu = None
-
-    called = []
-    tray_mod._atomic_update_menu(_Alien(), lambda icon: called.append(icon))
-    assert len(called) == 1
-
-
-def test_the_swap_guard_installs_once_over_the_win32_backend(monkeypatch):
-    import sys
+def test_the_flag_clears_and_the_handle_dies_even_if_the_popup_raises(monkeypatch):
+    import threading
 
     import pytest as _pytest
 
-    if sys.platform != "win32":
-        _pytest.skip("pystray win32 backend only")
-    from pystray import _win32
+    flag = threading.Event()
 
-    from ccsync_companion import tray as tray_mod
+    def _boom():
+        raise RuntimeError("user32 said no")
 
-    stock = _win32.Icon._update_menu
-    monkeypatch.setattr(_win32.Icon, "_update_menu", stock, raising=True)
-    monkeypatch.setattr(_win32.Icon, "_ccsync_atomic_menu_swap", False, raising=False)
+    icon, user32 = _win_icon(monkeypatch, _clicky_menu([]))
+    icon._menu_open = flag
+    user32.track_result = _boom
 
-    tray_mod._MenuSwapGuard().install()
-    wrapped = _win32.Icon._update_menu
-    assert wrapped is not stock
-
-    tray_mod._MenuSwapGuard().install()
-    assert _win32.Icon._update_menu is wrapped   # not double-wrapped
-
-    # ...and what got installed is the atomic one: build, publish, destroy.
-    registry = _HandleRegistry()
-    icon = _FakeMenuIcon(registry)
-    monkeypatch.setattr(_win32.win32, "DestroyMenu",
-                        lambda handle: registry.destroy(handle, icon), raising=True)
-    wrapped(icon)
-    assert icon._menu_handle is not None
-    assert registry.violations == []
+    with _pytest.raises(RuntimeError):
+        icon._show_menu()
+    assert flag.is_set() is False
+    assert user32.destroyed == [0x99]
 
 
-# -- item 20: a right-click that does nothing has to say so -----------------
-
-
-def test_a_failed_popup_call_is_logged(monkeypatch, caplog):
-    """TrackPopupMenuEx is declared with no restype and no errcheck, so a 0
-    return -- the handle was destroyed under it, or the USER quota is gone --
-    looked exactly like the user pressing Escape: silence."""
+def test_a_failed_popup_call_is_logged(caplog):
+    """TrackPopupMenuEx returns 0 for BOTH "the user pressed Escape" and "the
+    call failed", and a right-click that does nothing is the single
+    most-reported tray symptom. GetLastError is what separates them."""
     import logging
-    import sys
 
     import pytest as _pytest
 
-    if sys.platform != "win32":
-        _pytest.skip("pystray win32 backend only")
-    from pystray import _win32
-
-    from ccsync_companion import tray as tray_mod
-
-    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx", lambda *a, **kw: 0, raising=True)
-    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
-    tray_mod._MenuOpenGuard().install()
-
-    with caplog.at_level(logging.WARNING, logger="ccsync.tray"):
-        assert _win32.win32.TrackPopupMenuEx() == 0
-
-    assert any("tray menu failed to open" in r.getMessage() for r in caplog.records)
+    monkeypatch = _pytest.MonkeyPatch()
+    try:
+        icon, _user32 = _win_icon(monkeypatch, _clicky_menu([]), track_error=1400)
+        with caplog.at_level(logging.WARNING, logger="ccsync.tray.native"):
+            icon._show_menu()
+    finally:
+        monkeypatch.undo()
+    assert any("failed to open" in r.getMessage() for r in caplog.records)
+    assert any("1400" in r.getMessage() for r in caplog.records)
 
 
-def test_a_chosen_menu_item_is_not_reported_as_a_failure(monkeypatch, caplog):
+def test_a_dismissed_popup_is_not_reported_as_a_failure(caplog, monkeypatch):
+    import ctypes
     import logging
-    import sys
 
-    import pytest as _pytest
-
-    if sys.platform != "win32":
-        _pytest.skip("pystray win32 backend only")
-    from pystray import _win32
-
-    from ccsync_companion import tray as tray_mod
-
-    posted = []
-    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx", lambda *a, **kw: 3, raising=True)
-    monkeypatch.setattr(_win32.win32, "PostMessage",
-                        lambda *a: posted.append(a), raising=True)
-    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
-    tray_mod._MenuOpenGuard().install()
-
-    with caplog.at_level(logging.WARNING, logger="ccsync.tray"):
-        assert _win32.win32.TrackPopupMenuEx(1, 2, 3, 4, 4242, None) == 3
-
+    ctypes.set_last_error(0)
+    icon, _user32 = _win_icon(monkeypatch, _clicky_menu([]))
+    with caplog.at_level(logging.WARNING, logger="ccsync.tray.native"):
+        icon._show_menu()
     assert [r for r in caplog.records if "failed to open" in r.getMessage()] == []
-    # MSDN's TrackPopupMenu note, which pystray omits: post WM_NULL to the
-    # owner window afterwards, or the menu can refuse to dismiss on the next
-    # click.
-    assert posted == [(4242, 0x0000, 0, 0)]
+
+
+def test_a_chosen_item_runs_its_action(monkeypatch):
+    fired: list = []
+    menu = _clicky_menu(fired)
+    icon, user32 = _win_icon(monkeypatch, menu, track_result=1002)
+    icon._show_menu()
+    assert fired == ["Do it"]
+
+
+def test_an_action_that_raises_does_not_kill_the_message_pump(monkeypatch, caplog):
+    import logging
+
+    from ccsync_companion import tray_native
+
+    def _boom(icon, item):
+        raise RuntimeError("nope")
+
+    menu = tray_native.Menu(tray_native.MenuItem("Explode", _boom))
+    icon, _user32 = _win_icon(monkeypatch, menu, track_result=1000)
+    with caplog.at_level(logging.ERROR, logger="ccsync.tray.native"):
+        icon._show_menu()          # must return, not propagate
+    assert any("Explode" in r.getMessage() for r in caplog.records)
+
+
+def test_a_menu_that_cannot_be_created_is_logged_not_raised(monkeypatch, caplog):
+    """CreatePopupMenu returning NULL is the USER-object quota. The old code
+    published that as the live handle and right-click went dead until the
+    companion was restarted."""
+    import logging
+
+    icon, user32 = _win_icon(monkeypatch, _clicky_menu([]), popup=0)
+    with caplog.at_level(logging.WARNING, logger="ccsync.tray.native"):
+        icon._show_menu()
+    assert user32.tracked == [] and user32.destroyed == []
+    assert any("could not be created" in r.getMessage() for r in caplog.records)
+
+
+def test_an_empty_menu_shows_nothing_at_all(monkeypatch):
+    from ccsync_companion import tray_native
+
+    icon, user32 = _win_icon(monkeypatch, tray_native.Menu())
+    icon.menu = None
+    icon._show_menu()
+    assert user32.tracked == []
+
+
+# -- the menu model itself (pure, no OS) ------------------------------------
+
+
+def test_rendered_collapses_the_separators_conditional_sections_leave_behind():
+    """Half of _build_menu's sections are conditional and carry their own
+    trailing separator, so on a quiet machine the raw list is a run of
+    them -- and a menu that opens with a horizontal rule looks broken."""
+    from ccsync_companion.tray_native import Menu, MenuItem
+
+    menu = Menu(
+        Menu.SEPARATOR,
+        MenuItem("one", None),
+        Menu.SEPARATOR,
+        Menu.SEPARATOR,
+        MenuItem("two", None),
+        Menu.SEPARATOR,
+    )
+    assert [i.label() for i in menu.rendered()] == ["one", "- - - -", "two"]
+    # ...and the raw list is untouched, because _menu_fingerprint reads it.
+    assert len(menu.items) == 6
+
+
+def test_rendered_drops_invisible_items():
+    from ccsync_companion.tray_native import Menu, MenuItem
+
+    menu = Menu(MenuItem("shown", None), MenuItem("hidden", None, visible=False))
+    assert [i.label() for i in menu.rendered()] == ["shown"]
+
+
+def test_a_checked_callable_is_resolved_per_render():
+    from ccsync_companion.tray_native import MenuItem
+
+    paused = {"value": False}
+    item = MenuItem("Pause", None, checked=lambda i: paused["value"])
+    assert item.is_checked() is False
+    paused["value"] = True
+    assert item.is_checked() is True
+
+    # None is not False: an item with no `checked` is not a checkbox at all.
+    assert MenuItem("plain", None).is_checked() is None
+
+
+def test_a_raising_checked_callable_does_not_take_the_menu_down():
+    from ccsync_companion.tray_native import MenuItem
+
+    def _boom(item):
+        raise RuntimeError("nope")
+
+    assert MenuItem("x", None, checked=_boom).is_checked() is False
+
+
+def test_a_menu_as_the_action_is_a_submenu():
+    from ccsync_companion.tray_native import Menu, MenuItem
+
+    inner = Menu(MenuItem("nested", None))
+    item = MenuItem("Advanced", inner)
+    assert item.submenu is inner
+    assert item.action is None
+
+
+def test_an_item_is_callable_like_the_old_backends():
+    """_build_menu's handlers are (icon, item) callables and the tests reach
+    them by calling the item, which is the shape pystray had."""
+    from ccsync_companion.tray_native import MenuItem
+
+    seen = []
+    item = MenuItem("go", lambda icon, it: seen.append((icon, it.label())))
+    item(None)
+    assert seen == [(None, "go")]
+
+
+def test_ampersands_and_tabs_do_not_become_windows_mnemonics():
+    """'&' introduces a mnemonic and swallows itself; a tab starts the
+    accelerator column. Both turn up in editor-facing strings by accident."""
+    from ccsync_companion.tray_native import _escape_menu_label
+
+    assert _escape_menu_label("audio & graphics") == "audio && graphics"
+    assert "\t" not in _escape_menu_label("a\tb")
+
+
+def test_the_notify_icon_structs_are_the_sizes_windows_validates():
+    """Shell_NotifyIcon rejects a NOTIFYICONDATAW whose cbSize is not one it
+    knows, and the only symptom is a tray icon that never appears."""
+    import sys
+
+    import pytest as _pytest
+
+    if sys.platform != "win32":
+        _pytest.skip("Windows structs")
+    from ccsync_companion.tray_native import _check_struct_sizes
+
+    assert _check_struct_sizes() == []
 
 
 def test_pystray_records_reach_the_companion_log(tmp_path):
@@ -1523,8 +1608,8 @@ _TASKBAR_TOP = (0, 0, 1920, 48)
 _TASKBAR_LEFT = (0, 0, 62, 1080)
 _TASKBAR_RIGHT = (1858, 0, 1920, 1080)
 
-# What pystray actually passes (pystray/_win32.py:215).
-_PYSTRAY_FLAGS = 0x0008 | 0x0020 | 0x0100      # RIGHTALIGN|BOTTOMALIGN|RETURNCMD
+# What tray_native._menu_anchor() starts from (and pystray passed before it).
+_ANCHOR_FLAGS = 0x0008 | 0x0020 | 0x0100      # RIGHTALIGN|BOTTOMALIGN|RETURNCMD
 
 
 def test_an_anchor_inside_the_taskbar_moves_to_its_inner_edge():
@@ -1541,7 +1626,7 @@ def test_an_anchor_inside_the_taskbar_moves_to_its_inner_edge():
         (2, _TASKBAR_RIGHT, (1890, 900), (1858, 900), 0x0008 | 0x0020),     # right
     ]
     for edge, rect, (cx, cy), expected_xy, expected_align in cases:
-        x, y, flags = tray_mod._clamp_menu_anchor(cx, cy, _PYSTRAY_FLAGS, rect, edge)
+        x, y, flags = tray_mod._clamp_menu_anchor(cx, cy, _ANCHOR_FLAGS, rect, edge)
         assert (x, y) == expected_xy, edge
         # only the alignment bits move; RETURNCMD (and anything else the
         # backend asked for) survives
@@ -1557,12 +1642,12 @@ def test_a_top_or_left_taskbar_clears_pystrays_right_bottom_alignment():
     from ccsync_companion import tray as tray_mod
 
     _x, _y, flags = tray_mod._clamp_menu_anchor(
-        1700, 22, _PYSTRAY_FLAGS, _TASKBAR_TOP, 1)
+        1700, 22, _ANCHOR_FLAGS, _TASKBAR_TOP, 1)
     assert not flags & 0x0020                      # BOTTOMALIGN gone
     assert not flags & 0x0010                      # and no VCENTER left behind
 
     _x, _y, flags = tray_mod._clamp_menu_anchor(
-        30, 900, _PYSTRAY_FLAGS, _TASKBAR_LEFT, 0)
+        30, 900, _ANCHOR_FLAGS, _TASKBAR_LEFT, 0)
     assert not flags & 0x0008                      # RIGHTALIGN gone
     assert not flags & 0x0004
     assert flags & 0x0020                          # ...and the other axis intact
@@ -1575,20 +1660,20 @@ def test_an_anchor_outside_the_taskbar_is_left_alone():
 
     for point in [(1700, 500), (0, 0), (-1200, 400), (1700, 1031), (1921, 1058)]:
         assert tray_mod._clamp_menu_anchor(
-            point[0], point[1], _PYSTRAY_FLAGS, _TASKBAR_BOTTOM, 3
-        ) == (point[0], point[1], _PYSTRAY_FLAGS)
+            point[0], point[1], _ANCHOR_FLAGS, _TASKBAR_BOTTOM, 3
+        ) == (point[0], point[1], _ANCHOR_FLAGS)
 
 
 def test_an_unknown_taskbar_edge_or_junk_rect_changes_nothing():
     from ccsync_companion import tray as tray_mod
 
     assert tray_mod._clamp_menu_anchor(
-        1700, 1058, _PYSTRAY_FLAGS, _TASKBAR_BOTTOM, 99
-    ) == (1700, 1058, _PYSTRAY_FLAGS)
+        1700, 1058, _ANCHOR_FLAGS, _TASKBAR_BOTTOM, 99
+    ) == (1700, 1058, _ANCHOR_FLAGS)
     for rect in [None, (), ("x", "y", "z", "w"), (1, 2, 3)]:
         assert tray_mod._clamp_menu_anchor(
-            1700, 1058, _PYSTRAY_FLAGS, rect, 3
-        ) == (1700, 1058, _PYSTRAY_FLAGS)
+            1700, 1058, _ANCHOR_FLAGS, rect, 3
+        ) == (1700, 1058, _ANCHOR_FLAGS)
 
 
 def test_a_failed_geometry_lookup_leaves_the_anchor_untouched(monkeypatch):
@@ -1600,54 +1685,49 @@ def test_a_failed_geometry_lookup_leaves_the_anchor_untouched(monkeypatch):
         raise OSError("SHAppBarMessage exploded")
 
     monkeypatch.setattr(tray_mod, "_taskbar_geometry", boom)
-    assert tray_mod._anchor_clear_of_taskbar(1700, 1058, _PYSTRAY_FLAGS) == (
-        1700, 1058, _PYSTRAY_FLAGS)
+    assert tray_mod._anchor_clear_of_taskbar(1700, 1058, _ANCHOR_FLAGS) == (
+        1700, 1058, _ANCHOR_FLAGS)
 
     # ...and the same when the shell simply has no answer (no taskbar, or
     # SHAppBarMessage returned 0).
     monkeypatch.setattr(tray_mod, "_taskbar_geometry", lambda: None)
-    assert tray_mod._anchor_clear_of_taskbar(1700, 1058, _PYSTRAY_FLAGS) == (
-        1700, 1058, _PYSTRAY_FLAGS)
+    assert tray_mod._anchor_clear_of_taskbar(1700, 1058, _ANCHOR_FLAGS) == (
+        1700, 1058, _ANCHOR_FLAGS)
 
 
-def test_the_popup_wrapper_hands_win32_the_clamped_anchor(monkeypatch):
-    """End to end through the installed wrapper: pystray asks for the raw
-    cursor position inside the taskbar, user32 is handed the inner edge."""
+def test_the_popup_is_anchored_clear_of_the_taskbar(monkeypatch):
+    """End to end through tray_native._menu_anchor: the raw cursor position is
+    inside the taskbar (where every tray right-click lands) and user32 is
+    handed the bar's inner edge instead."""
     import sys
 
     import pytest as _pytest
 
     if sys.platform != "win32":
-        _pytest.skip("pystray win32 backend only")
-    from pystray import _win32
+        _pytest.skip("wintypes.POINT is Windows-only")
+    from ccsync_companion import tray_native
 
-    from ccsync_companion import tray as tray_mod
-
-    seen = []
-    monkeypatch.setattr(tray_mod, "_taskbar_geometry",
+    monkeypatch.setattr(tray_native, "_taskbar_geometry",
                         lambda: (_TASKBAR_BOTTOM, 3))
-    monkeypatch.setattr(_win32.win32, "TrackPopupMenuEx",
-                        lambda *a: (seen.append(a), 3)[1], raising=True)
-    monkeypatch.setattr(_win32.win32, "PostMessage", lambda *a: None, raising=True)
-    monkeypatch.setattr(_win32.win32, "_ccsync_menu_open_flag", None, raising=False)
-    tray_mod._MenuOpenGuard().install()
 
-    assert _win32.win32.TrackPopupMenuEx(
-        77, _PYSTRAY_FLAGS, 1700, 1058, 4242, None) == 3
-    (hmenu, flags, x, y, hwnd, reserved), = seen
-    assert (hmenu, hwnd, reserved) == (77, 4242, None)   # everything else intact
-    assert (x, y) == (1700, 1032)
-    assert flags & 0x0100 and flags & 0x0020
+    class _CursorUser32(_FakeUser32):
+        def GetCursorPos(self, point):
+            point._obj.x, point._obj.y = 1700, 1058
+            return 1
 
-    # A call that carries no coordinates at all (the bare-call tests above,
-    # and anything that stops passing them positionally) must still work.
-    seen.clear()
-    assert _win32.win32.TrackPopupMenuEx() == 3
-    assert seen == [()]
+    user32 = _CursorUser32()
+    monkeypatch.setattr(tray_native._Win32, "get",
+                        classmethod(lambda cls: _FakeApi(user32)))
+    icon = tray_native._WindowsIcon("test", None, "")
+    x, y, flags = icon._menu_anchor()
+
+    assert (x, y) == (1700, 1032)                 # the bar's inner edge
+    assert flags & 0x0100                          # TPM_RETURNCMD
+    assert flags & 0x0020                          # TPM_BOTTOMALIGN
 
 
 # ===========================================================================
-# 2026-08-10: the Creators Club mark, and what a pulse is allowed to mean
+# 2026-08-10: the product mark, and what a pulse is allowed to mean
 # ===========================================================================
 #
 # The icon used to draw two chevrons in the status color. It now draws the CC
@@ -1699,33 +1779,33 @@ def test_the_snapshot_carries_the_pulse_flag_for_each_state():
         snap = _tray_snapshot(app)
         return snap["color"], snap["pulse"]
 
-    signed_in = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    signed_in = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     assert snap_for(signed_in) == ("green", False)
 
-    syncing = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    syncing = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     syncing.lane_statuses = _syncing3
     assert snap_for(syncing) == ("orange", True)
 
-    paused = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    paused = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     paused.paused = True
     assert snap_for(paused) == ("orange", False)
 
     signed_out = _FakeApp({"dashboard_url": ""})
     assert snap_for(signed_out) == ("orange", False)
 
-    drive_out = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    drive_out = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     drive_out._root_absent = True
     assert snap_for(drive_out) == ("orange", False)
 
-    disabled = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    disabled = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     disabled._sync_enabled = False
     assert snap_for(disabled) == ("orange", False)
 
-    broken = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    broken = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     broken.lane_statuses = lambda: [_status("lane_a_video_up", "error")]
     assert snap_for(broken) == ("red", True)
 
-    misconfigured = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    misconfigured = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     misconfigured.config_problems = ["remote_root is blank -- ..."]
     assert snap_for(misconfigured) == ("red", True)
 
@@ -1832,6 +1912,10 @@ def test_the_frozen_build_ships_the_mark():
 
     spec = (Path(__file__).resolve().parent.parent / "build.spec").read_text(
         encoding="utf-8")
+    assert "src/ccsync_companion/assets/ccsync_mark.png" in spec
+    # Still shipped so a fleet already wearing it can select it with
+    # CCSYNC_BRAND_LOGO instead of having its tray change on upgrade
+    # (2026-08-17, COMMERCIAL_READINESS.md item 10).
     assert "src/ccsync_companion/assets/cc_mark_white.png" in spec
     assert "src/ccsync_companion/assets/icon.png" in spec
     assert '"ccsync_companion/assets"' in spec
@@ -1870,12 +1954,12 @@ def test_the_pulse_animates_only_while_the_snapshot_says_so():
         def run(self):
             pass
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.lane_statuses = _syncing3
 
-    real_icon = tray_mod.pystray.Icon
+    real_icon = tray_mod.tray_backend.Icon
     try:
-        tray_mod.pystray.Icon = _FakeIcon
+        tray_mod.tray_backend.Icon = _FakeIcon
         icon = tray_mod.start_tray(app, refresh_interval=0.01, pulse_interval=0.01)
         try:
             deadline = time.monotonic() + 5.0
@@ -1902,7 +1986,7 @@ def test_the_pulse_animates_only_while_the_snapshot_says_so():
         finally:
             icon.stop()
     finally:
-        tray_mod.pystray.Icon = real_icon
+        tray_mod.tray_backend.Icon = real_icon
 
 
 def test_the_falling_edge_frame_waits_for_the_menu_to_close(monkeypatch):
@@ -1955,7 +2039,7 @@ def test_the_falling_edge_frame_waits_for_the_menu_to_close(monkeypatch):
                 return False
             return menu_open.is_set()
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     statuses = [_syncing3()]
 
     def _lane_statuses():
@@ -1968,9 +2052,9 @@ def test_the_falling_edge_frame_waits_for_the_menu_to_close(monkeypatch):
     app.lane_statuses = _lane_statuses
 
     monkeypatch.setattr(tray_mod, "_MenuOpenGuard", _FakeGuard)
-    real_icon = tray_mod.pystray.Icon
+    real_icon = tray_mod.tray_backend.Icon
     try:
-        tray_mod.pystray.Icon = _FakeIcon
+        tray_mod.tray_backend.Icon = _FakeIcon
         icon = tray_mod.start_tray(app, refresh_interval=0.01, pulse_interval=0.02)
         try:
             deadline = time.monotonic() + 5.0
@@ -2008,7 +2092,7 @@ def test_the_falling_edge_frame_waits_for_the_menu_to_close(monkeypatch):
         finally:
             icon.stop()
     finally:
-        tray_mod.pystray.Icon = real_icon
+        tray_mod.tray_backend.Icon = real_icon
 
 
 # -- missing proxies: advisory lines only (proxy_gen.py) --------------------
@@ -2021,7 +2105,7 @@ def test_the_falling_edge_frame_waits_for_the_menu_to_close(monkeypatch):
 def _proxy_app(missing=0, braw=0, left=0, encoding=False, can_generate=True,
                made=0, failed=0, src_bytes=0, proxy_bytes=0, eta=None,
                detail=None, last_at=""):
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.proxy_gap = lambda: {
         "missing": missing, "braw": braw, "left": left, "encoding": encoding,
         "can_generate": can_generate, "state": "running" if encoding else "user-active",
@@ -2291,7 +2375,7 @@ def test_an_older_generator_with_no_history_block_renders_normally():
     failed to open, sends no "history" key at all."""
     from ccsync_companion.tray import _build_menu, _tray_snapshot
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.proxy_gap = lambda: {"missing": 12, "braw": 0, "left": 0,
                              "encoding": False, "can_generate": True}
     labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
@@ -2402,7 +2486,7 @@ def test_a_proxy_getter_that_raises_degrades_to_no_lines():
     never the whole menu (2026-07-26's right-click freeze)."""
     from ccsync_companion.tray import _build_menu, _tooltip_text, _tray_snapshot
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
 
     def _boom():
         raise RuntimeError("the generator is on fire")
@@ -2419,7 +2503,7 @@ def test_a_companion_with_no_generator_at_all_renders_normally():
     """proxy_gap() returns {} when the generator failed to construct."""
     from ccsync_companion.tray import _build_menu, _menu_fingerprint, _tray_snapshot
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     snap = _tray_snapshot(app)
     assert snap["proxy_gap"] == {}
     assert _menu_fingerprint(snap)  # no exception, and no proxy contribution

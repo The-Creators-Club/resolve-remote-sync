@@ -1,10 +1,20 @@
 # Copy to config.yaml and edit. Paths use forward slashes even on Windows.
+#
+# Every path below is REQUIRED and none of them has a default (2026-08-17,
+# COMMERCIAL_READINESS.md item 14): they used to carry one workstation's
+# directories, so a fresh install silently wrote to somewhere that did not exist.
+# The loader refuses by key name, and each has an environment override for
+# containers, where the config is mounted read-only: BROLL_DATA_ROOT,
+# BROLL_DB_PATH, BROLL_DB_URL, BROLL_DB_TOKEN, BROLL_MODEL_CACHE, and the
+# CCSYNC_WHISPER_* set below.
 
 shares:
   broll:
     root: "Y:/broll"
     description: "Main b-roll share"
 
+# Frames, proxies, posters, sprites and transcripts. Tens of GB — put it on the
+# fast local disk, never on the share. Required; BROLL_DATA_ROOT overrides.
 data_root: "D:/broll-data"
 
 db:
@@ -15,26 +25,56 @@ db:
   url: "http://truenas.local:8000/api"  # used when mode == api
   token: "changeme"                     # used when mode == api (X-Ingest-Token header)
 
-# Default model for `run`. One of: haiku | sonnet | fable
+# Default model for `run`. One of: haiku | sonnet | opus | fable — or an exact
+# API model id, which is passed through unchanged.
+#   haiku  -> claude-haiku-4-5   ($1 / $5 per Mtok)   cheapest, the archive default
+#   sonnet -> claude-sonnet-5    ($3 / $15)           the quality/cost default
+#   opus   -> claude-opus-5      ($5 / $25)
+#   fable  -> claude-fable-5     ($10 / $50)
 model: sonnet
 
 # Model used for `taxonomy propose` (a "big model" clustering pass per SPEC).
 taxonomy_model: sonnet
 
+# Anthropic Messages API access. Indexing costs money per clip — see
+# docs/indexing-findings.md for the calls-per-clip arithmetic and what each knob
+# below does to it.
+#
+# THE API KEY NEVER GOES IN THIS FILE. It is read from the environment variable
+# named by `api_key_env`, or from the file named by `api_key_file`; setting
+# `anthropic.api_key` here is rejected by the loader on purpose.
+anthropic:
+  api_key_env: ANTHROPIC_API_KEY   # environment variable holding the key
+  # api_key_file: "C:/ProgramData/ccsync/anthropic.key"  # alternative to the env var
+  max_tokens: 8000        # per call; a truncated response is logged and retried once
+  timeout_s: 600
+  max_retries: 5          # per call, on 429 / 5xx / overloaded only
+  retry_base_delay_s: 2   # exponential with jitter, honouring the server's retry-after
+  retry_max_delay_s: 60
+  max_concurrency: 4      # API calls in flight; parallel_claude.py --workers sets this
+  thinking: disabled      # "adaptive" buys reasoning tokens on EVERY call — see the docs
+
 sampling:
   scene_threshold: 0.3     # ffmpeg select='gt(scene,N)'
   max_gap_s: 4.0           # fill scene-detected frames so no gap exceeds this
-  frames_per_call: 36      # ~4 contact sheets (9 frames each) per claude -p call
+  frames_per_call: 36      # ~4 contact sheets (9 frames each) per model call
 
 # Local speech transcription (faster-whisper, runs on owned hardware — no model quota
 # cost, so it runs over everything). Additive enrichment: independent of the visual
 # pipeline's discovered -> probed -> proxied -> indexed status flow, never blocks or
 # errors a video. See docs/indexing-findings.md and broll_index/transcribe.py.
+#
+# `python` and `script` have NO default and no fallback: build the environment with
+# broll/indexer/tools/make_whisper_env.ps1 (Windows) or tools/make_whisper_env.sh, then
+# point these at what it printed. CCSYNC_WHISPER_PYTHON / CCSYNC_WHISPER_SCRIPT /
+# CCSYNC_WHISPER_MODEL_DIR override them, which is how the GPU image sets them.
+# Unset + enabled = the stage skips and says so; `broll-index transcribe` refuses.
 whisper:
   enabled: true
-  python: "C:/Users/alex/tools/whisper/.venv/Scripts/python.exe"  # faster-whisper venv
-  script: "C:/Users/alex/tools/whisper/transcribe.py"
+  python: ".whisper-env/Scripts/python.exe"   # ".whisper-env/bin/python" on Linux/macOS
+  script: "tools/whisper_transcribe.py"       # relative to broll/indexer
   model: "large-v3-turbo"
+  model_dir: ""            # model cache; "" = the child's HuggingFace default
   language: null           # null = autodetect; set e.g. "zh" to force a language
   max_gap_s: 1.0           # join cues separated by less than this into one passage
   max_duration_s: 30.0     # ...but cap a joined passage at this many seconds
@@ -49,3 +89,4 @@ embedding:
   enabled: true
   model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 384-dim, multilingual
   batch_size: 64
+  cache_dir: ""            # fastembed weights; "" = ~/.cache/fastembed. BROLL_MODEL_CACHE overrides

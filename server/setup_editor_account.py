@@ -38,6 +38,42 @@ chmod on a non-trivial ACL fails with EPERM. So this script calls
 `filesystem.setperm` with `stripacl` to replace the inherited ACL with a
 trivial 0700 owned by the editor.
 
+EDITOR SHELL (2026-08-17, COMMERCIAL_READINESS.md item 7 / finding H4):
+new accounts are created SFTP-ONLY -- `/usr/sbin/nologin` plus an sshd
+`Match Group editors` block carrying `ForceCommand internal-sftp` and
+`PasswordAuthentication no`. Editors used to get `/usr/bin/bash`: an
+interactive login on the machine holding every customer's footage, bought for
+exactly one feature (rclone's `shell_type = unix`, which runs `md5sum` over
+SSH to verify a transfer). Nothing else in this product ever executes a remote
+command as an editor -- verified across companion/, installer/, onboarding/,
+write_marker.py and accept_device.py.
+
+That has ONE consequence, and it is wired rather than left to a runbook: with
+no shell, rclone cannot checksum, so the site manifest must publish
+`sftp_shell_type = "none"` (install_dashboard_app.site_env forces it whenever
+[stack] editor_shell is "sftp-only"). Editors pick that up on their next
+config refresh; rclone then compares size+modtime instead of MD5.
+
+A site that is not ready for that sets [stack] editor_shell = "shell" and
+keeps today's behaviour. Existing accounts are NOT converted by a plain
+re-run -- their rclone.conf still says `shell_type = unix` and every checksum
+would start failing the moment they were. Convert them deliberately:
+
+    python setup_editor_account.py --migrate-existing            # dry run
+    python setup_editor_account.py --migrate-existing --apply
+
+NO ChrootDirectory: sshd requires every component of a chroot to be root-owned
+and not group-writable, and the tree root is <owner>:editors 2770 by design --
+so the only chrootable point is the pool mountpoint, and chrooting there would
+re-root every absolute path the site manifest publishes (DASH_SITE_REMOTE_ROOT,
+every editor's rclone.conf, every dashboard remote path). Containment BETWEEN
+editors is docs/TENANCY.md's job instead.
+
+OFFBOARDING: the editor's key is generated without a passphrase (a tray app
+cannot prompt for one on every rclone pass), so it must be removable:
+
+    python setup_editor_account.py --name jsmith --revoke-key --apply [--lock]
+
 PASSWORD LOGIN -- resolved, no longer an open question: TrueNAS 25.10 simply
 refuses to combine the two, rejecting `password_disabled=True` for any SMB
 user with HTTP 422 "Password authentication may not be disabled for SMB
@@ -61,9 +97,10 @@ import sys
 # reach past every monkeypatch in server/tests.
 from common import (  # noqa: F401
     DEFAULT_HOMES_PARENT, EDITORS_GROUP, ScriptCalls, add_host_key_arg,
-    add_nas_kind_arg, add_site_arg, cli, get_backend, ok, require_site_value,
-    run_ssh, set_host_key_pin, shell_quote, site_value, synology_api, truenas_api,
-    wait_for_job,
+    add_nas_kind_arg, add_site_arg, cli, editor_shell_is_sftp_only,
+    editor_shell_mode, get_backend, ok, project_acl_mode, project_group_name,
+    require_site_value, run_ssh, set_host_key_pin, shell_quote, site_value,
+    synology_api, truenas_api, wait_for_job,
 )
 
 # The platform half of this script -- the group and /user calls, filesystem.
@@ -204,13 +241,191 @@ def find_user(name: str, dry_run: bool):
     return backend().find_user(name, dry_run)
 
 
+def manifest_consequence() -> str:
+    """The one sentence an operator must read before/after converting editors."""
+    return (
+        "MANIFEST CONSEQUENCE: with SFTP-only editors, rclone cannot run md5sum over\n"
+        "  SSH, so the site manifest must publish sftp_shell_type = \"none\".\n"
+        "  install_dashboard_app.py forces it whenever [stack] editor_shell is\n"
+        "  \"sftp-only\", so REDEPLOY THE DASHBOARD after this and let each editor's\n"
+        "  companion refresh its config (GET /api/v1/site). Until it does, their\n"
+        "  rclone.conf still says shell_type = unix and every checksum call fails --\n"
+        "  visible as repeated 'failed to calculate hash' in the lane A/B logs."
+    )
+
+
+def ensure_sshd_policy(dry_run: bool) -> None:
+    """Install the sshd Match block for the editors group, if the site wants it.
+
+    Called on every account create/update, not only on migration: the block is
+    what makes nologin meaningful (an account with a key and no ForceCommand
+    can still open a subsystem-less session on some sshd builds), and it is
+    idempotent by markers.
+    """
+    if not editor_shell_is_sftp_only():
+        return
+    method = getattr(backend(), "ensure_sshd_editor_policy", None)
+    if method is None:
+        return
+    state, detail = method(EDITORS_GROUP, dry_run)
+    if state == "ok":
+        print(f"sshd policy installed/refreshed for group {EDITORS_GROUP} "
+              f"(ForceCommand internal-sftp, PasswordAuthentication no)")
+    elif state == "unchanged":
+        print(f"sshd policy already correct for group {EDITORS_GROUP}")
+    else:
+        print(f"WARNING: could not install the sshd policy for {EDITORS_GROUP}: {detail}\n"
+              f"         The account is still nologin, but add the Match block by hand "
+              f"(docs/SERVER.md, \"Editor accounts\") or editors keep a login channel.",
+              file=sys.stderr)
+
+
+def args_slug_list(slugs: list) -> str:
+    return ", ".join(project_group_name(s) for s in slugs if s)
+
+
+def ensure_project_groups(username: str, slugs: list, dry_run: bool) -> None:
+    """Put `username` in proj-<slug> for each --project (per-project mode only)."""
+    if not slugs:
+        return
+    if project_acl_mode() != "per-project":
+        print(f"NOTE: --project was given but [stack] project_acl is "
+              f"{project_acl_mode()!r}, so every editor already reaches every project. "
+              f"Nothing to do (docs/TENANCY.md).", file=sys.stderr)
+        return
+    if backend().kind == "synology":
+        # DSM's update_editor only manages the editors group, and the DENY half
+        # of per-project isolation is a File Station step there anyway
+        # (docs/TENANCY.md). Say it rather than half-doing it.
+        print(f"NOTE: per-project groups are PARTIAL on DSM -- the grant is scriptable, "
+              f"removing the inherited share-wide {EDITORS_GROUP} ACE is not. Add "
+              f"{args_slug_list(slugs)} membership in DSM > Control Panel > User & Group, "
+              f"and break inheritance on each project folder in File Station "
+              f"(docs/SERVER-SYNOLOGY.md).", file=sys.stderr)
+        return
+    for slug in slugs:
+        try:
+            group = project_group_name(slug)
+        except ValueError as e:
+            print(f"WARNING: skipping --project {slug!r}: {e}", file=sys.stderr)
+            continue
+        gid, _unix_gid = backend().ensure_group(group, dry_run)
+        if dry_run:
+            print(f"[dry-run] would add {username} to {group}")
+            continue
+        existing = find_user(username, dry_run=False)
+        if not existing:
+            print(f"WARNING: cannot add {username} to {group}: no such account",
+                  file=sys.stderr)
+            continue
+        _uid, err = backend().update_editor(existing, gid, existing.get("sshpubkey") or "")
+        if err:
+            print(f"WARNING: could not add {username} to {group}: {err}", file=sys.stderr)
+        else:
+            print(f"project access: {username} added to {group}")
+
+
+def revoke_key(args) -> int:
+    """Offboarding: take the (passphrase-less) key away. Dry run unless --apply."""
+    name = normalize_username(args.name)
+    existing = find_user(name, dry_run=False)
+    if not existing:
+        print(f"FAILED: no account named {name!r}", file=sys.stderr)
+        return 1
+    if not args.apply:
+        print(f"[report-only] would remove {name}'s SSH public key"
+              + (" and disable the account" if args.lock else "")
+              + " -- re-run with --apply to do it.")
+        print("  Lanes A and B stop working for them immediately; lane C (Syncthing) "
+              "does NOT -- unshare their device on the dashboard as well.")
+        return 0
+    ok_done, detail = backend().revoke_editor_key(existing["id"], lock=args.lock)
+    if not ok_done:
+        print(f"FAILED to revoke {name}'s key: {detail}", file=sys.stderr)
+        return 1
+    print(f"revoked: {name}'s SSH public key is removed"
+          + (", account disabled" if args.lock else ""))
+    print("Now unshare their Syncthing device on the dashboard (lane C is a separate "
+          "trust path and is NOT covered by this), and delete the key from their machine.")
+    return 0
+
+
+def migrate_existing(args) -> int:
+    """Convert existing editors to nologin + the sshd Match block.
+
+    Dry run by default. This changes accounts the fleet is USING: an editor
+    whose companion has not yet refreshed its site config still has
+    `shell_type = unix` in rclone.conf, and their checksums fail from the
+    moment their shell goes away until it has.
+    """
+    if editor_shell_mode() != "sftp-only":
+        print(f"FAILED: [stack] editor_shell is {editor_shell_mode()!r}. Set it to "
+              f"\"sftp-only\" in site.toml first -- migrating accounts while the "
+              f"manifest still promises a shell would only put them back.",
+              file=sys.stderr)
+        return 2
+
+    gid, _unix_gid = backend().ensure_group(EDITORS_GROUP, dry_run=False)
+    rows, err = backend().list_editors(gid)
+    if err:
+        print(f"FAILED to list the {EDITORS_GROUP} group: {err}", file=sys.stderr)
+        return 1
+    want = backend().editor_shell()
+    stale = [r for r in rows if (r.get("shell") or "") != want]
+
+    print(f"{len(rows)} account(s) in {EDITORS_GROUP}; {len(stale)} still have an "
+          f"interactive shell:")
+    for row in rows:
+        mark = "->" if row in stale else "  "
+        print(f"  {mark} {row.get('username')}: shell={row.get('shell') or '?'}")
+    print()
+    print(manifest_consequence())
+    print()
+
+    if not args.apply:
+        print(f"[report-only] would set shell={want} on {len(stale)} account(s) and "
+              f"install the sshd Match block. Re-run with --apply.")
+        return 0
+
+    ensure_sshd_policy(dry_run=False)
+    failures = 0
+    for row in stale:
+        ok_done, detail = backend().set_editor_shell(row["id"], want)
+        if ok_done:
+            print(f"converted: {row.get('username')} -> {want}")
+        else:
+            failures += 1
+            print(f"FAILED to convert {row.get('username')}: {detail}", file=sys.stderr)
+    if failures:
+        print(f"{failures} account(s) were not converted.", file=sys.stderr)
+        return 1
+    print("\nAll editors are SFTP-only. Redeploy the dashboard so the manifest says so.")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--name", required=True, help="unix/SMB username for the editor")
-    ap.add_argument("--ssh-pubkey-file", required=True, help="path to the editor's SSH public key (.pub)")
+    ap.add_argument("--name", help="unix/SMB username for the editor")
+    ap.add_argument("--ssh-pubkey-file", help="path to the editor's SSH public key (.pub)")
     ap.add_argument("--full-name", default=None, help="defaults to --name")
     ap.add_argument("--tailnet-host", default="<TAILNET-HOSTNAME-OR-IP>",
                      help="tailnet address of the NAS, for the printed rclone stanza")
+    ap.add_argument("--project", action="append", default=[], metavar="SLUG",
+                     help="under [stack] project_acl = \"per-project\", add this editor "
+                          "to proj-<slug> so they can work on that project. Repeatable. "
+                          "See docs/TENANCY.md.")
+    ap.add_argument("--migrate-existing", action="store_true",
+                     help="convert EXISTING editors to the SFTP-only posture (nologin + "
+                          "the sshd Match block). Reports only unless --apply is given.")
+    ap.add_argument("--revoke-key", action="store_true",
+                     help="offboarding: remove --name's installed SSH public key. Reports "
+                          "only unless --apply is given.")
+    ap.add_argument("--lock", action="store_true",
+                     help="with --revoke-key, also disable the account (SMB and the "
+                          "dashboard login stop working too).")
+    ap.add_argument("--apply", action="store_true",
+                     help="make --migrate-existing / --revoke-key real. Both DEFAULT to a "
+                          "dry run: they change accounts the fleet is already using.")
     add_host_key_arg(ap)
     add_site_arg(ap)
     add_nas_kind_arg(ap)
@@ -219,6 +434,19 @@ def main():
     set_host_key_pin(args.host_key)
     global _ARGS
     _ARGS = args
+
+    if args.migrate_existing:
+        if args.name or args.ssh_pubkey_file:
+            ap.error("--migrate-existing works on every existing editor; it does not take "
+                     "--name/--ssh-pubkey-file")
+        return migrate_existing(args)
+    if args.revoke_key:
+        if not args.name:
+            ap.error("--revoke-key needs --name")
+        return revoke_key(args)
+    if not args.name or not args.ssh_pubkey_file:
+        ap.error("--name and --ssh-pubkey-file are required (unless --migrate-existing)")
+
     homes_parent = require_site_value(HOMES_PARENT, "[tree] pool_root")
 
     try:
@@ -246,13 +474,15 @@ def main():
                   file=sys.stderr)
 
     gid, unix_gid = ensure_group(EDITORS_GROUP, args.dry_run)
+    ensure_sshd_policy(args.dry_run)
 
     existing = find_user(args.name, args.dry_run)
     full_name = args.full_name or args.name
 
     if args.dry_run:
         print(f"[dry-run] would ensure user {args.name!r} exists, group={EDITORS_GROUP}, "
-              f"smb=True, sshpubkey=<from file>")
+              f"shell={backend().editor_shell()} ([stack] editor_shell = "
+              f"{editor_shell_mode()!r}), smb=True, sshpubkey=<from file>")
         print(f"[dry-run] would set the home directory to mode 0{HOME_MODE} owned by "
               f"{args.name}:{EDITORS_GROUP} via filesystem.setperm (stripacl), then verify "
               f"sshd StrictModes will accept it")
@@ -270,7 +500,10 @@ def main():
             print(f"FAILED to create user {args.name!r}: {err}", file=sys.stderr)
             return 1
         user_id = created["id"]
-        print(f"created user: {args.name} (uid {created.get('uid', '?')}), group {EDITORS_GROUP}, smb enabled")
+        print(f"created user: {args.name} (uid {created.get('uid', '?')}), group "
+              f"{EDITORS_GROUP}, shell {backend().editor_shell()}, smb enabled")
+
+    ensure_project_groups(args.name, args.project, args.dry_run)
 
     if args.dry_run:
         print("\nrclone remote config stanza (add to the editor's rclone.conf, "
@@ -355,7 +588,11 @@ def _rclone_stanza(name: str, tailnet_host: str) -> str:
     """
     remote = site_value("net", "rclone_remote") or "ccsync_sftp"
     port = site_value("net", "sftp_port") or "22"
-    shell_type = site_value("net", "shell_type") or "unix"
+    # editor_shell wins over [net] shell_type: a nologin account cannot run
+    # md5sum whatever the manifest says, and the two disagreeing is what
+    # produces "failed to calculate hash" on every pass (2026-08-17, item 7).
+    shell_type = ("none" if editor_shell_is_sftp_only()
+                  else site_value("net", "shell_type") or "unix")
     return (
         f"[{remote}]\n"
         f"type = sftp\n"

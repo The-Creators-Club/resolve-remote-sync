@@ -92,8 +92,13 @@ def main() -> int:
     sys.stdout.flush()  # subprocess writes directly; flush ours first
     py = REPO / "web" / ".venv" / "Scripts" / "python.exe"
     subprocess.run(
+        # The archive query set is written against this site's own footage, so it
+        # lives outside the tracked tree from 2026-08-17 (COMMERCIAL_READINESS.md
+        # item 10 / section B). Resolved from __file__ rather than from REPO,
+        # which is cwd-relative and lands inside broll/ when run from there.
         [str(py), str(REPO / "eval" / "run_eval_api.py"), DB,
-         "--queries", str(REPO / "eval" / "queries_archive.yaml")],
+         "--queries", str(Path(__file__).resolve().parents[1]
+                          / "private" / "broll" / "eval" / "queries_archive.yaml")],
         cwd=str(REPO),
     )
     return 0

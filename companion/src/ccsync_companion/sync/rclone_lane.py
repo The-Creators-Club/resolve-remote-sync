@@ -37,10 +37,12 @@ from typing import Any, Callable, Iterable, Optional
 from .base import (
     STATE_ERROR,
     STATE_IDLE,
+    STATE_PAUSED,
     STATE_SYNCING,
     LaneAdapter,
     LaneStatus,
 )
+from . import lane_guard
 
 log = logging.getLogger("ccsync.sync.rclone")
 
@@ -423,7 +425,7 @@ def build_filter_rules_down() -> list[str]:
     "Energy Transition" incident). Requester-first downloads (0.7.8 + the
     ffmpeg sidecar) put the original on the requester's disk FIRST and lane A
     carries it up like any other video -- so pulling every editor's YouTube
-    originals down to every other editor is pure bandwidth: ruskin's first
+    originals down to every other editor is pure bandwidth: one editor's first
     pass after upgrading was 58 GB of other people's clips. Owner's call,
     2026-08-16: YouTube originals go UP only, never down. Two consequences,
     both accepted: (1) a clip that fell back to the server path (no local
@@ -947,9 +949,11 @@ def scan_orphan_partials(
 def scan_trash_dir(local_root: str, max_entries: int = 50000) -> Optional[dict]:
     """Count/size `<local_root>/.ccsync-trash` -- lane B's recovery copies.
 
-    Same rule as the partials: reported, never pruned (deleting the recovery
-    copy defeats its entire purpose). Bounded by `max_entries` so a huge
-    trash tree can't turn a status read into a multi-minute walk."""
+    A READ, and only a read. Retention moved to lane_guard.prune_trash on
+    2026-08-17 (COMMERCIAL_READINESS.md item 9); this is what the tray's "how
+    much is in trash" line and the report's `sync_guard.trash` field are built
+    from. Bounded by `max_entries` so a huge trash tree can't turn a status
+    read into a multi-minute walk."""
     base = Path(local_root) / TRASH_DIR_NAME
     if not base.is_dir():
         return {"count": 0, "bytes": 0, "truncated": False}
@@ -973,6 +977,217 @@ def scan_trash_dir(local_root: str, max_entries: int = 50000) -> Optional[dict]:
         log.debug("trash scan failed for %s: %s", base, exc)
         return None
     return {"count": count, "bytes": total, "truncated": truncated}
+
+
+def _run_capture(cmd: list[str], timeout: float) -> tuple[int, str]:
+    """Run an rclone command and hand back (returncode, STDERR).
+
+    The sibling of _run_lsf, for the commands whose answer arrives on stderr
+    because they carry --use-json-log (lsf answers on stdout). Kept separate
+    rather than generalised: an accidental stdout/stderr mix-up in a probe
+    that gates a delete is not a bug worth being clever about."""
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        timeout=timeout,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_win_creationflags(),
+    )
+    return proc.returncode, (proc.stderr or "")
+
+
+def list_remote_top(
+    rclone_path: str,
+    remote: str,
+    remote_root: str,
+    subpath: Optional[str] = None,
+    run_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
+    # Short on purpose: this runs inside _run_lock, i.e. it delays every
+    # project's turn on the sequencer's rotation, and a remote that cannot
+    # list one directory in a minute is going to fail the pass anyway.
+    timeout: float = 60.0,
+) -> Optional[list[str]]:
+    """Immediate children of the remote side of a lane B pass, or None when
+    the listing failed (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+
+    The breaker's pre-flight probe. NOT recursive on purpose: this answers
+    "does the remote still look like itself" and has to be affordable on
+    every pass, so it costs one directory listing rather than a tree walk.
+    Dot-entries are dropped -- `.stfolder`/`.stversions` exist on the NAS
+    whether or not a single project does, so counting them would make an
+    emptied share look populated.
+    """
+    if not remote or not remote_root:
+        return None
+    remote_side = f"{remote}:{_join_remote_path(remote_root, subpath or '')}"
+    cmd = [rclone_path, "lsf", remote_side]
+    runner = run_fn or _run_lsf
+    try:
+        output = runner(cmd, timeout)
+    except Exception as exc:
+        log.debug("remote sanity listing failed for %s: %s", remote_side, exc)
+        return None
+    if output is None:
+        return None
+    return [
+        name for name in (line.strip().strip("/") for line in output.splitlines())
+        if name and not name.startswith(".")
+    ]
+
+
+# rclone's per-file line under --dry-run on a `copy`. Measured against the
+# bundled 1.74.4: "clip.mov: Skipped copy as --dry-run is set (size 4.2Gi)".
+# It is NOT one of the "Copied"/"Moved"/"Deleted" shapes RcloneRunTally
+# counts, which is why the pending-upload probe parses its own.
+_DRY_RUN_SKIP = "skipped copy"
+
+
+def scan_pending_uploads(
+    rclone_path: str,
+    local_root: str,
+    remote: str,
+    remote_root: str,
+    filter_file: Path,
+    subpath: Optional[str] = None,
+    run_fn: Optional[Callable[[list[str], float], tuple[int, str]]] = None,
+    timeout: float = 300.0,
+    max_samples: int = 20,
+    tuning: Optional["RcloneTuning"] = None,
+) -> Optional[dict]:
+    """What lane A would upload for `subpath` right now -- a --dry-run of the
+    real lane A command (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+
+    The gate on "Remove from this machine": `rmtree` on a project whose
+    originals have not reached the NAS is the one destructive action in this
+    system with no undo anywhere, and until now the only guard was a sentence
+    in a dialog asking the editor to go and check the dashboard themselves.
+
+    Built from build_up_command so the ANSWER MATCHES THE LANE: same filter
+    rules, same --min-age/--min-size floors, same --ignore-existing. A file
+    the lane would never upload must not block a removal.
+
+    Returns {"count", "samples"} or None when the probe failed -- and None is
+    load-bearing: the caller must refuse the removal on it, because "I could
+    not tell" is not "there is nothing pending".
+    """
+    if not remote or not remote_root:
+        return None
+    cmd = build_up_command(
+        rclone_path, local_root, remote, remote_root, filter_file,
+        transfers=1, subpath=subpath, tuning=tuning,
+    ) + ["--dry-run"]
+    runner = run_fn or _run_capture
+    try:
+        returncode, stderr_text = runner(cmd, timeout)
+    except Exception as exc:
+        log.warning("pending-upload probe failed for %s: %s", subpath, exc)
+        return None
+    if returncode != 0:
+        log.warning(
+            "pending-upload probe exited %s for %s: %s",
+            returncode, subpath, _stderr_for_log(stderr_text),
+        )
+        return None
+    count = 0
+    samples: list[str] = []
+    for line in stderr_text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if _DRY_RUN_SKIP not in str(record.get("msg", "")).lower():
+            continue
+        count += 1
+        name = str(record.get("object") or "")
+        if name and len(samples) < max_samples:
+            samples.append(name)
+    return {"count": count, "samples": samples}
+
+
+def scan_size_mismatches(
+    rclone_path: str,
+    local_root: str,
+    remote: str,
+    remote_root: str,
+    filter_file: Path,
+    subpath: Optional[str] = None,
+    run_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
+    timeout: float = 600.0,
+    max_samples: int = 20,
+) -> Optional[dict]:
+    """Files lane A has on this machine that the NAS holds AT A DIFFERENT SIZE
+    (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+
+    Lane A is `copy --ignore-existing`: the first version of a name to reach
+    the NAS is the only one that ever will. Re-export a clip under the same
+    name -- which every "fix the audio and render again" does -- and lane A
+    skips it forever, silently, with the editor watching a green lane. That
+    is the one shape of data loss on lane A, and nothing anywhere reported it.
+
+    `rclone check --one-way --size-only --differ -` is exactly this question:
+    --one-way ignores what the NAS has and we don't, --size-only compares the
+    thing that actually differs (a re-export is a different length; the hashes
+    would cost a full re-read of every original over SFTP), and --differ -
+    puts the answers on stdout. Same filter file as the lane, so a file the
+    lane would never carry cannot appear here.
+
+    Returns {"count", "samples"} or None when the check could not run.
+    """
+    if not remote or not remote_root:
+        return None
+    validate_filter_file(filter_file)
+    local_sub = _local_subpath(subpath)
+    local_side = str(Path(local_root) / local_sub) if local_sub else str(local_root)
+    remote_side = f"{remote}:{_join_remote_path(remote_root, subpath or '')}"
+    cmd = [
+        rclone_path, "check", local_side, remote_side,
+        "--filter-from", str(filter_file),
+        "--ignore-case",
+        "--size-only",
+        "--one-way",
+        "--differ", "-",
+        *_transport_flags(),
+    ]
+    # _run_check, NOT _run_lsf: `rclone check` exits 1 whenever it FINDS a
+    # difference, and _run_lsf's returncode guard would swallow exactly the
+    # answer this function exists to produce.
+    runner = run_fn or _run_check
+    try:
+        output = runner(cmd, timeout)
+    except Exception as exc:
+        log.debug("size-mismatch check failed for %s: %s", subpath, exc)
+        return None
+    if output is None:
+        return None
+    names = [line.strip() for line in output.splitlines() if line.strip()]
+    return {"count": len(names), "samples": names[:max_samples]}
+
+
+def _run_check(cmd: list[str], timeout: float) -> Optional[str]:
+    """`rclone check`'s stdout, tolerating its non-zero "found differences"
+    exit. Measured against the bundled 1.74.4: exit 1 with `--differ -` and
+    real differences on stdout, exit 0 when everything matches. Only a
+    missing binary / unreachable remote produces empty stdout AND non-zero,
+    which reads as {"count": 0} -- acceptable for an advisory counter, and
+    the reason this is not used to gate anything destructive."""
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        timeout=timeout,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_win_creationflags(),
+    )
+    if proc.returncode not in (0, 1):
+        log.warning(
+            "rclone check exited %d: %s", proc.returncode, _stderr_for_log(proc.stderr)
+        )
+        return None
+    return proc.stdout
 
 
 def _append_stats_flags(cmd: list[str], stats_interval: Optional[str]) -> list[str]:
@@ -1588,6 +1803,8 @@ class RcloneLane(LaneAdapter):
         on_trash: Optional[Callable[[str], None]] = None,
         on_watch_blocked: Optional[Callable[[str], None]] = None,
         watch_probe_fn: Optional[Callable[[str], tuple[str, str]]] = None,
+        breaker: Optional["lane_guard.LaneBBreaker"] = None,
+        remote_list_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
     ) -> None:
         assert direction in (DIRECTION_UP, DIRECTION_DOWN)
         self.direction = direction
@@ -1649,6 +1866,36 @@ class RcloneLane(LaneAdapter):
 
         self._state_dir = state_dir or (Path.home() / ".ccsync" / "state")
         self._filter_file = self._state_dir / f"filter_{direction}.txt"
+
+        # -- lane B circuit breaker (COMMERCIAL_READINESS.md item 9) ------
+        # Constructed HERE, not injected-or-nothing, so a lane B built by any
+        # caller (the app, a test, consolidate) carries the breaker: the one
+        # verb in this system that removes local files must never be able to
+        # run unguarded because a call site forgot an argument. app.py passes
+        # its own instance so the tray and the report read the same object.
+        if direction == DIRECTION_DOWN:
+            self.breaker = breaker or lane_guard.LaneBBreaker(
+                self._state_dir / lane_guard.BREAKER_STATE_FILENAME, cfg,
+            )
+        else:
+            self.breaker = breaker
+        # Injectable for the tests, exactly like subprocess_run: the probe
+        # spawns a real `rclone lsf` otherwise.
+        self._remote_list_fn = remote_list_fn
+        self._trash_prune_interval = _cfg_int(
+            cfg, "trash_prune_interval_seconds",
+            int(lane_guard.DEFAULT_TRASH_PRUNE_INTERVAL_SECONDS),
+        )
+        self._trash_max_age_days = _cfg_int(
+            cfg, "trash_max_age_days", int(lane_guard.DEFAULT_TRASH_MAX_AGE_DAYS))
+        self._trash_max_bytes = _cfg_int(
+            cfg, "trash_max_bytes", lane_guard.DEFAULT_TRASH_MAX_BYTES)
+        self._last_trash_prune_at: Optional[float] = None
+        self._trash_summary: Optional[dict] = None
+        # Lane A only: same-name-different-size files `copy --ignore-existing`
+        # will never upload (see scan_size_mismatches). Refreshed on the
+        # orphan-scan cadence, reported and surfaced -- never acted on.
+        self._size_mismatches: Optional[dict] = None
 
         # ONE EVENT PER THREAD GENERATION. A single long-lived event that
         # start() cleared and stop() set could only ever be right for one of
@@ -1836,9 +2083,16 @@ class RcloneLane(LaneAdapter):
 
         One directory per run (timestamped) and keyed by project subpath, so
         a recovery is unambiguous: `<local_root>/.ccsync-trash/<ts>/Projects/
-        <rel>/<the file's original relative path>`. Nothing ever prunes it --
-        deleting the recovery copy would defeat its whole purpose, and the
-        hard requirement outranks the disk-hygiene gain (AUDIT_2 C-7)."""
+        <rel>/<the file's original relative path>`.
+
+        Retention CHANGED 2026-08-17 (COMMERCIAL_READINESS.md item 9). It was
+        "nothing ever prunes it -- deleting the recovery copy would defeat its
+        whole purpose" (AUDIT_2 C-7), which was right while the trash was the
+        only thing between a mis-sync and permanent loss. With the circuit
+        breaker in front of it the trash is a 14-day undo window, not an
+        archive, and an unbounded one filled editor SSDs -- so
+        lane_guard.prune_trash now ages it out (and never runs at all while
+        the breaker is tripped)."""
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         base = Path(self.local_root) / TRASH_DIR_NAME / stamp
         local_sub = _local_subpath(subpath)
@@ -2111,7 +2365,65 @@ class RcloneLane(LaneAdapter):
             )
         with self._lock:
             self._orphans = report
+        self._refresh_size_mismatches(subpath)
         return report
+
+    def _refresh_size_mismatches(self, subpath: Optional[str] = None) -> Optional[dict]:
+        """The "skipped, exists" counter (COMMERCIAL_READINESS.md item 9,
+        2026-08-17), on the orphan scan's cadence because it costs the same
+        kind of remote listing.
+
+        `copy --ignore-existing` never re-uploads a name the NAS already
+        has, so a re-exported clip is silently stranded on the editor's
+        machine forever with the lane showing green. Reported, never acted
+        on: overwriting the NAS copy from here would be lane A growing a
+        delete/replace path, which is exactly what this system does not do.
+        Never raises."""
+        try:
+            report = scan_size_mismatches(
+                self.rclone_path, self.local_root, self.remote, self.remote_root,
+                self._ensure_filter_file(), subpath,
+            )
+        except Exception:
+            log.debug("%s: size-mismatch scan failed", self.name, exc_info=True)
+            return None
+        if report is None:
+            return None
+        report = {**report, "subpath": subpath,
+                  "checked_at": datetime.now(timezone.utc).isoformat()}
+        if report.get("count"):
+            log.warning(
+                "%s: %d file(s) under %s exist on the NAS AT A DIFFERENT SIZE -- "
+                "lane A is `copy --ignore-existing`, so these will never be "
+                "re-uploaded (first sample: %s). Rename the local file, or have an "
+                "admin remove the NAS copy, if the local one is the good one.",
+                self.name, report["count"], subpath or "the tree",
+                (report.get("samples") or ["?"])[0],
+            )
+        with self._lock:
+            self._size_mismatches = report
+        return report
+
+    def size_mismatch_report(self) -> Optional[dict]:
+        """Last "same name, different size" scan, or None. See
+        _refresh_size_mismatches."""
+        with self._lock:
+            return dict(self._size_mismatches) if self._size_mismatches else None
+
+    def pending_uploads(self, subpath: Optional[str] = None) -> Optional[dict]:
+        """What lane A still owes the NAS for `subpath` -- the gate on
+        "Remove from this machine" (item 9). None means "could not tell",
+        which the caller MUST treat as "do not delete". Never raises."""
+        if self.direction != DIRECTION_UP:
+            return None
+        try:
+            return scan_pending_uploads(
+                self.rclone_path, self.local_root, self.remote, self.remote_root,
+                self._ensure_filter_file(), subpath, tuning=self.tuning,
+            )
+        except Exception:
+            log.exception("%s: pending-upload probe failed", self.name)
+            return None
 
     def orphan_report(self) -> Optional[dict]:
         """Last refresh_orphan_report() result, or None if never run.
@@ -2192,6 +2504,15 @@ class RcloneLane(LaneAdapter):
             log.debug("%s: run skipped -- the lane is stopping", self.name)
             return self.status()
 
+        # The circuit breaker, ahead of rclone_available() and the command
+        # build so a tripped lane B costs nothing at all per pass
+        # (COMMERCIAL_READINESS.md item 9, 2026-08-17). PAUSED, not ERROR:
+        # the lane is not broken, it has been stopped on purpose, and the
+        # sequencer must keep rotating lanes A and C through this machine's
+        # projects exactly as before.
+        if self.breaker is not None and self.breaker.tripped:
+            return self._breaker_stand_down()
+
         available, msg = rclone_available(self.rclone_path)
         if not available:
             with self._lock:
@@ -2210,6 +2531,26 @@ class RcloneLane(LaneAdapter):
                     self._status.state = STATE_IDLE
                     self._status.detail = f"project dir not yet local: {subpath}"
                 return self.status()
+
+        # PRE-FLIGHT, and it is the only guard that fires before a byte moves:
+        # `--max-delete` bounds one pass, this refuses to start the pass at all
+        # against a remote that does not look like the tree (a wrong
+        # remote_root, an empty/half-mounted share). COMMERCIAL_READINESS.md
+        # item 9, 2026-08-17.
+        if self.direction == DIRECTION_DOWN and self.breaker is not None:
+            scope = str(subpath or "").replace("\\", "/").strip("/")
+            entries = list_remote_top(
+                self.rclone_path, self.remote, self.remote_root, subpath,
+                run_fn=self._remote_list_fn,
+            )
+            if self.breaker.check_remote(scope, entries) is not None:
+                return self._breaker_stand_down()
+            # Counted BEFORE the run: it is the denominator of the breaker's
+            # fraction rule, and after the pass the files it measures may be
+            # the ones that were trashed.
+            local_proxies = lane_guard.count_local_proxies(self.local_root, subpath)
+        else:
+            local_proxies = 0
 
         with self._lock:
             self._status.state = STATE_SYNCING
@@ -2300,6 +2641,11 @@ class RcloneLane(LaneAdapter):
             self._set_periodic_scope(None)
 
         self._record_completions(result, subpath)
+        # Ahead of every return below, including the stop-mid-transfer one: a
+        # pass that was killed halfway still moved whatever it moved, and a
+        # breaker that only counts tidy passes is a breaker that a flapping
+        # link can walk straight past (item 9).
+        tripped = self._account_pass(result, subpath, local_proxies)
 
         if returncode != 0 and self._stop_event.is_set():
             # SYNC-5 (2026-08-14): stop() terminated this child mid-transfer,
@@ -2317,7 +2663,7 @@ class RcloneLane(LaneAdapter):
             )
             status = self._stand_down_status("stopped mid-transfer")
             self._notify_trash(result)
-            return status
+            return self._breaker_stand_down() if tripped else status
 
         with self._lock:
             self._status.transferring = 0
@@ -2405,6 +2751,13 @@ class RcloneLane(LaneAdapter):
                 self._status.last_sync = datetime.now(timezone.utc)
                 self._status.detail = f"transferred {result.transferred} file(s)"
         self._notify_trash(result)
+        if tripped:
+            # The pass itself is over and its status was just published; the
+            # breaker's sentence has to be the one the editor and the fleet
+            # grid end up holding, or the lane reads "transferred 0 file(s)"
+            # while proxy download is stopped.
+            return self._breaker_stand_down()
+        self._maybe_prune_trash()
         return self.status()
 
     def _record_completions(self, result: RcloneRunResult, subpath: Optional[str]) -> None:
@@ -2481,6 +2834,127 @@ class RcloneLane(LaneAdapter):
             self.on_trash(str(backup_dir))
         except Exception:
             log.exception("%s: on_trash callback failed", self.name)
+
+    # -- circuit breaker (COMMERCIAL_READINESS.md item 9, 2026-08-17) -----
+    def _breaker_stand_down(self) -> LaneStatus:
+        """Park lane B with the breaker's own sentence.
+
+        STATE_PAUSED, deliberately: STATE_ERROR would paint the fleet grid
+        red and read as "the lane is broken", when the truth is "the lane
+        was stopped on purpose and needs a human". The sequencer keeps
+        rotating -- lanes A and C are untouched by a lane B trip, which is
+        the entire point of a breaker rather than a shutdown."""
+        reason = self.breaker.reason if self.breaker is not None else "stopped"
+        with self._lock:
+            self._status.state = STATE_PAUSED
+            self._status.transferring = 0
+            self._status.queued = 0
+            self._status.speed_bps = None
+            self._status.eta_seconds = None
+            self._status.transfers = []
+            self._status.current_project = None
+            self._status.last_error = None
+            self._status.detail = f"STOPPED (safety): {reason}"
+        return self.status()
+
+    def _backup_dir_bytes(self) -> int:
+        """Bytes this run moved into its own --backup-dir. Cheap: one run's
+        directory, not the whole trash. Reads _last_backup_dir WITHOUT
+        clearing it -- _notify_trash still needs it."""
+        backup_dir = self._last_backup_dir
+        if not backup_dir:
+            return 0
+        total = 0
+        try:
+            for dirpath, _dirnames, filenames in os.walk(backup_dir):
+                for name in filenames:
+                    try:
+                        total += os.path.getsize(os.path.join(dirpath, name))
+                    except OSError:
+                        pass
+        except OSError:
+            return 0
+        return total
+
+    def _account_pass(
+        self, result: RcloneRunResult, subpath: Optional[str], local_proxies: int
+    ) -> bool:
+        """Feed one lane B pass to the breaker. Returns True if it TRIPPED.
+
+        Never raises: the accounting is a safety device, and a safety device
+        that can fail the run it guards is worse than none."""
+        if self.direction != DIRECTION_DOWN or self.breaker is None:
+            return False
+        try:
+            scope = str(subpath or "").replace("\\", "/").strip("/")
+            return self.breaker.note_pass(
+                scope, result.deleted, self._backup_dir_bytes(), local_proxies
+            ) is not None
+        except Exception:
+            log.exception("%s: breaker accounting failed", self.name)
+            return False
+
+    def resume_after_trip(self, by: str = "tray") -> bool:
+        """Operator clears the breaker (tray action). Also re-arms the lane's
+        stop latch, because a trip that happened during a sign-out leaves
+        both latched and clearing one is not obviously enough."""
+        if self.breaker is None:
+            return False
+        cleared = self.breaker.resume(by)
+        if cleared:
+            with self._lock:
+                self._status.state = STATE_IDLE
+                self._status.detail = "proxy download resumed"
+        return cleared
+
+    # -- .ccsync-trash retention (item 9) ---------------------------------
+    def _maybe_prune_trash(self) -> None:
+        """Run the retention policy at most once per interval. Lane B only:
+        the trash belongs to lane B's --backup-dir and nothing else writes
+        it. Never raises."""
+        if self.direction != DIRECTION_DOWN or self._trash_prune_interval <= 0:
+            return
+        now = time.monotonic()
+        if (self._last_trash_prune_at is not None
+                and now - self._last_trash_prune_at < self._trash_prune_interval):
+            return
+        self._last_trash_prune_at = now
+        try:
+            summary = lane_guard.prune_trash(
+                self.local_root,
+                max_age_days=self._trash_max_age_days,
+                max_bytes=self._trash_max_bytes,
+                breaker=self.breaker,
+            )
+            trash = scan_trash_dir(self.local_root)
+            if trash is not None:
+                summary = {**summary, **trash}
+            with self._lock:
+                self._trash_summary = summary
+        except Exception:
+            log.exception("%s: trash prune failed", self.name)
+
+    def trash_report(self) -> Optional[dict]:
+        """Last trash scan/prune summary ({"count","bytes","removed",...}),
+        or None before the first prune cycle. The tray's "how much is in
+        trash" line and the report's `sync_guard.trash` read this."""
+        with self._lock:
+            return dict(self._trash_summary) if self._trash_summary else None
+
+    def sync_guard_report(self) -> dict:
+        """This lane's contribution to the report's `sync_guard` section."""
+        out: dict = {}
+        if self.breaker is not None:
+            try:
+                out["lane_b_breaker"] = self.breaker.report()
+            except Exception:
+                log.exception("%s: breaker report failed", self.name)
+        trash = self.trash_report()
+        if trash:
+            out["trash"] = trash
+        if self._size_mismatches:
+            out["skipped_exists"] = self._size_mismatches
+        return out
 
     # -- spawn cancellation (KNOWN_BUGS B13) ------------------------------
     def _raise_if_stopping(self, what: str) -> None:

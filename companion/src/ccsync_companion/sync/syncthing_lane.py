@@ -126,7 +126,7 @@ def default_api_key_paths() -> list[Path]:
 
     Static preference between the two homes has now bitten in BOTH
     directions: a stale stock config 403'ing against the managed instance
-    (the original default_config_xml_path fix), and -- on alex_laptop,
+    (the original default_config_xml_path fix), and -- on owen_laptop,
     2026-07-26 -- a preserved managed home 403'ing against a veteran stock
     instance, which silenced every sequencer write (no ignores, no folder
     policy) while lane C reported a misleading error. The only reliable

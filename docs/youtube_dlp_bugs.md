@@ -11,6 +11,33 @@ non-latin-1 name (loud 401, never a lossy collision); schema is now v3
 `test_static_app.py`'s 13 behavioural tests need node and skip without it
 (KNOWN_BUGS R7). Still-open residuals live in KNOWN_BUGS.md.
 
+**2026-08-17 — some of these code sites no longer exist.** The
+commercial-readiness pass rewrote the seams several findings were written
+against; the findings stay for their write-ups, but read them with this:
+
+- **There is no `claude` CLI and no `-p` argv any more** (item 1). The two AI
+  calls go through the `anthropic` SDK with the customer's `ANTHROPIC_API_KEY`,
+  so `_invoke` builds a Messages request instead of a command line. **YTDL-7**
+  (an un-capped topic hitting execve's per-arg limit, misclassified as "claude
+  CLI not installed") cannot happen at all now — there is no argv; the topic is
+  a fenced data block in the user turn. The claude-home volume, the one-time
+  `/login` and the `/opt/claude` mount are all gone with it. The four
+  `claude_*:` prefixes survive unchanged (the SPA's hint map depends on them);
+  what `claude_auth:` and `claude_missing:` MEAN has changed — see
+  `ytdl/web/DEPLOY.md`.
+- **deno, the PO-token sidecar and the NAS-side signed-in `cookies.txt` are now
+  opt-in per customer** (`site.toml` `[features] youtube_unblock`, item 3), so
+  **YTDL-24**'s "a missing deno produces per-video failures" is the EXPECTED
+  state on a site that has not enabled them, not a fault to report. `/api/health`
+  still surfaces the JS-runtime answer; read it beside the flag.
+- **`YTDL_DEV_USER` is gone** (item 15) — the identity stand-in is now an
+  in-process `session.set_test_user()` call that no environment variable can
+  reach.
+- **The whole app is unmounted unless `[features] youtube_download` is set**
+  (item 2), and every download path additionally refuses until the editor has
+  accepted the rights/ToS attestation — see
+  `docs/legal/YOUTUBE_FEATURE_NOTICE.md`.
+
 Findings from a six-hunter sweep of `ytdl/` (worker + claude_cli, db + path
 safety, API + dashboard mount, vendored downloader, frontend SPA, and
 cross-component contracts + tests), orchestrated and cross-verified. The text

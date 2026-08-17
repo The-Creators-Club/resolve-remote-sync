@@ -63,6 +63,17 @@ def _build_fake_musicweb() -> dict[str, types.ModuleType]:
     config.DB_PATH = config.DATA_ROOT / "music.db"
     config.MUSIC_ROOT = Path(os.environ.get("MUSIC_ROOT", "./library")).resolve()
 
+    # musicweb's ingest is fail-closed standalone since 2026-08-17
+    # (COMMERCIAL_READINESS.md item 15); the mount is what declares that a
+    # login gate is wrapped around it. Faithful to upstream, and the flag the
+    # test below reads.
+    config.login_gated_calls = []
+
+    def set_login_gated(value=True):
+        config.login_gated_calls.append(bool(value))
+
+    config.set_login_gated = set_login_gated
+
     db = types.ModuleType("musicweb.db")
 
     def connect(path=None):
@@ -95,9 +106,11 @@ def _build_fake_musicweb() -> dict[str, types.ModuleType]:
 
     @api.post("/api/ingest")
     def ingest() -> dict:
-        # musicweb's write routes carry NO token of their own: they are called
-        # by the SPA from a logged-in browser and nothing about /music/* is
-        # exempted from the dashboard's login_gate. Faithful to upstream.
+        # musicweb's write route carries no token WHEN MOUNTED: it is called by
+        # the SPA from a logged-in browser and nothing about /music/* is
+        # exempted from the dashboard's login_gate. Upstream only demands a
+        # token when it is running standalone, with nothing in front of it --
+        # see music/web/DEPLOY.md and music/web/tests/test_ingest_gate.py.
         return {"ok": True}
 
     music_app.include_router(api)
@@ -296,6 +309,29 @@ def test_mounting_does_not_mutate_musicwebs_own_globals(tmp_path, music_env):
     app = _app(tmp_path)
     assert app.state.music_mounted is True
     assert sys.modules["musicweb.db"]._schema_ready is False
+
+
+def test_mounting_declares_the_login_gate_to_musicweb(tmp_path, music_env):
+    """musicweb's /api/ingest is fail-closed when it is not authenticated by
+    anything (COMMERCIAL_READINESS.md item 15, 2026-08-17): standalone it
+    demands MUSIC_INGEST_TOKEN. Mounted here the browser is already past
+    login_gate and the SPA has no token to send, so the mount says so.
+
+    A CALL rather than an env var on purpose -- a host that merely has a
+    variable set is not a process with the middleware wrapped around it.
+    """
+    _app(tmp_path)
+    assert sys.modules["musicweb.config"].login_gated_calls == [True]
+
+
+def test_an_older_music_checkout_without_the_declaration_still_mounts(
+        tmp_path, music_env, caplog):
+    """Best-effort like everything else about this mount: a checkout that
+    predates set_login_gated must not stop the dashboard booting."""
+    del sys.modules["musicweb.config"].set_login_gated
+    app = _app(tmp_path)
+    assert app.state.music_mounted is True
+    assert "login-gated" in caplog.text
 
 
 def test_dashboard_routes_are_unchanged_by_the_mount(tmp_path, music_env):

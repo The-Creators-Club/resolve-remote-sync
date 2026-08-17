@@ -4,9 +4,20 @@ Audit date: 2026-08-17. Scope: all 580 tracked files plus full git history
 (147 commits), via six parallel audits (org-specific hardcoding, secrets/PII,
 security surface, licensing/ToS, platform portability, data safety); every
 top-tier claim was re-verified against source before it went in here.
-Nothing in this document has been acted on yet.
+Nothing in this document had been acted on when it was written; see the status block below and the per-item status paragraphs.
 
 Companion doc: `SYNOLOGY_PORT_PLAN.md` (the platform half of item 12).
+
+**Status 2026-08-17 (evening) — every item below has been worked, in repo,
+on branch `commercial-readiness`, by a 15-agent Opus fleet (one agent per
+area, disjoint file territories, an integration agent afterwards, all suites
+green at the end). The Synology port (item 12's platform half) landed first
+on `main`. Each item now carries a "Status 2026-08-17" paragraph saying what
+is done, what is only drafted, and what still needs an operator, a
+certificate, counsel or a Mac. NOTHING is shipped: the fleet is still on
+companion 0.7.11 / dashboard 0.4.1 / installer 1.0.29 (this branch bumps them to 0.8.0 / 0.5.0 / 1.0.30, unpublished), and the per-finding
+ledger is `KNOWN_BUGS.md` CR-1..CR-21. The consolidated operator checklist is
+at the end of this document ("What the operator does next").**
 
 ## Verdict
 
@@ -53,6 +64,8 @@ software — three ToS problems in one feature.
 Fix: Anthropic SDK + customer-supplied key, per tenant, no subscription path;
 delete the CLI push and purge `.cache/ytdl/claude`.
 
+**Status 2026-08-17 — DONE in repo, unshipped.** Both halves converted to the `anthropic` SDK with the customer's `ANTHROPIC_API_KEY`. Indexer: `broll_index/claude_client.py` (key from env or keyfile, never config.yaml — the loader refuses it), contact sheets as image blocks, thread-pool concurrency with a client-enforced in-flight cap, 429/5xx/overloaded retry then account-wide classification, `use_subscription` deleted; 29 fake-client tests; not yet run against a live key (`broll/docs/indexing-api.md`). Ytdl: `ytdlweb/claude_cli.py` on the SDK, prompt split so fetched titles are fenced data in the user turn; `claude-bin`/`claude-home`/`YTDL_CLAUDE_HOME` and the one-time `/login` deleted from the installer, both compose files and `run.sh`. Operator: export the key (indexer env; compose for the container, `--recreate`), set a spend limit, run one small share and read `usage.jsonl`; on the live NAS `rm -rf <host-root>/claude-home <host-root>/claude-bin` and REVOKE the OAuth credential.
+
 ### 2. Put a legal wrapper around — or drop — the YouTube download stack — STOP-SHIP, weeks + counsel
 
 Editors export a live Google session into `~/.ccsync/youtube-cookies.txt` from
@@ -67,6 +80,8 @@ yt-dlp's.
 Fix: customer-enabled and customer-configured (off by default), explicit
 rights attestation, remove the circumvention components from the vendor
 build, outside-counsel read before it is sold.
+
+**Status 2026-08-17 — DONE in repo, counsel owed.** `site.toml [features] youtube_download` defaults OFF end to end (no mount, fleet routes 404, no companion surface, no tooling installed); a rights/ToS attestation is recorded per user (`ytdl.db.attestations`) and per machine with version + digest + timestamp and gates the browser, the claim and `capabilities()`; copyright + rate disclaimers stand on the page; `docs/legal/YOUTUBE_FEATURE_NOTICE.md` explains the customer's responsibilities. The PO-token sidecar, deno solver and cookie sign-in are a second opt-in (`youtube_unblock` / `--enable-youtube-unblock`); the default compose body carries none of them (pinned by `test_safety`). All text is a draft for counsel; a retention policy for the records is still open. This studio's git-ignored `site.toml` sets both flags on.
 
 ### 3. Resolve the licensing debt — STOP-SHIP, weeks
 
@@ -92,6 +107,8 @@ privacy + telemetry disclosure. Also: written licence grant for the vendored
 attribution and "requires Resolve Studio" everywhere; keep the Blackmagic
 Cloud benchmark comparison internal.
 
+**Status 2026-08-17 — largely DONE in repo; counsel + one licence grant outstanding.** pystray is out of the companion entirely — `ccsync_companion/tray_native.py` (Win32 ctypes / AppKit PyObjC, original, from the API docs) replaces it, the win32 monkeypatches are deleted, `pyproject.toml`/`build.spec`/`requirements.lock`/licence allowlist agree, and `tools/check_licenses.py` fails if it returns; proved on Windows with `companion/tools/tray_smoke.py`, **macOS unverified**. The NAS fetches its own sha256-pinned ffmpeg by default (`--push-ffmpeg-from-local` prints the GPLv3 §6 notice). `LICENSE`, `docs/legal/{EULA,PRIVACY,TELEMETRY,THIRD_PARTY_NOTICES}.md` + `tools/gen_notices.py` landed as DRAFTS FOR COUNSEL; the wizard takes EULA acceptance and the companion gates its lanes on it. `docs/EDITOR_SETUP.md` carries the "for DaVinci Resolve®" / "requires Studio" / non-affiliation lines; the Blackmagic Cloud comparison is marked internal in `bench/`. **Still blocking a sale:** counsel review and the real legal entity name (placeholder "Cablewrap Creative" was inferred from the email domain), a written licence grant for the vendored `yt-credit-downloader` (`ytdl/web/ytdlweb/vendor/PROVENANCE.md`), and config switches to disable `resolve_project` / `local_manifest` / `media_tree` reporting independently of sync.
+
 ### 4. Sign the binaries and authenticate the upgrade channel — STOP-SHIP + security, weeks
 
 Windows exe is unsigned, macOS is ad-hoc signed and not notarized
@@ -107,6 +124,8 @@ Fix: Authenticode + Developer ID/notarization; sign the release manifest with
 an offline key baked into the companion (minisign/ed25519) and verify before
 `os.replace`; TLS-only same-origin; monotonic min-version floor against
 downgrade re-offers.
+
+**Status 2026-08-17 — DONE (code), BLOCKED ON PURCHASE (certificates).** Offline Ed25519 release key (`tools/release_key.py`, private half at `%USERPROFILE%\.ccsync-release\release.key`, never in the repo; public half baked into `ccsync_companion/release_pubkey.py`, pure-Python verifier). `tools/sign_release.py` signs each package record at publish; the dashboard verifies against `DASH_RELEASE_PUBKEYS` and rejects unsigned publishes (422) / unconfigured key (503); the companion verifies before downloading, checks the signed sha256 after, refuses anything below its monotonic downgrade floor, and refuses plain HTTP off the tailnet. Migration is additive — 0.7.11 can take the first signed build. `signtool` / `codesign`+`notarytool`+`stapler` hooks are wired behind env vars, loud "UNSIGNED BUILD" advisory otherwise; `ship` refuses `-MakeCurrent` of an unsigned binary without `-AllowUnsignedBinary`. A key was generated on this rig (pubkey `GKNmk8MktRkGkrBv+ziF7O6ZNKCnjXfC9/TwDiYwKDY=`) — decide keep/rotate before the first customer ship and BACK IT UP OFFLINE. Remaining: buy an OV/EV Authenticode certificate + Apple Developer ID, set the env vars, set `DASH_RELEASE_PUBKEYS` on both live dashboards (+ `--recreate`), copy the key to the Mac.
 
 ### 5. Lock down the companion loopback API on 127.0.0.1:8899 — CRITICAL security, days
 
@@ -125,6 +144,8 @@ Fix: allow-list Origin to the configured dashboard origin, require
 segment, realpath-contain `/insert`, never `open` a bundle, cap concurrent
 fetch children. Update the tests.
 
+**Status 2026-08-17 — DONE in repo, unshipped.** `loopback_guard.py` holds the rules; `broll_server.py` vets every request at the dispatch layer (Host, Origin, token, content type) before any handler. CORS is an exact allow-list built from `dashboard_url` + the cached site manifest in both schemes; a refused caller gets 403 with no `Access-Control-Allow-Origin` and a generic body. `share` is one safe segment (fixing the macOS `/Volumes` traversal), `probe_darwin_mount` realpath-contains, `/insert` shares the containment check, bundles are revealed rather than opened, fetches are capped at two and refuse when `root_guard` says the tree is absent. The tests that pinned the wildcard were rewritten and ~130 added; `docs/YTDL_LOCAL_DOWNLOAD.md:331` and `broll/SPEC.md` corrected; `docs/LOOPBACK_API.md` written. **Operator action before the ship:** confirm each companion's `dashboard_url` (or the site manifest's) equals the origin editors actually browse — a mismatch turns every Send-to-Resolve into a 403 (`loopback_extra_origins` is the per-machine escape hatch).
+
 ### 6. TLS everywhere; scoped credentials instead of the NAS admin password — HIGH security, weeks
 
 No HTTPS anywhere (`KNOWN_BUGS.md:642`): passwords, 7-day unrevocable session
@@ -140,6 +161,8 @@ Fix: TLS terminator (Tailscale Serve or Caddy sidecar), `DASH_COOKIE_SECURE=1`,
 server-side session revocation; scoped TrueNAS API key for user/group
 management only; pinned host key + CA (`CCSYNC_SSH_HOSTKEY`,
 `TRUENAS_VERIFY_SSL=<ca.pem>` already exist — make them mandatory).
+
+**Status 2026-08-17 — DONE in repo on both sides; TLS terminator = Tailscale Serve (decided, verified on the Synology); live-NAS steps owed.** Dashboard: server-side revocable sessions (`sessions.py`; logout, log-out-everywhere, admin revoke; 12h idle / 7d absolute), `X-Forwarded-Proto` believed only from `DASH_TRUSTED_PROXIES` (default loopback), `DASH_COOKIE_SECURE=1` forces `Secure` and refuses plaintext login — behind Serve set `1`, not `auto` (the request arrives from the docker bridge). Server: host-key pinning is the rule (`[nas] ssh_hostkey`, `--trust-host-key-on-first-use` records to `~/.ccsync/known_hosts`, a changed key refuses); `verify=False` became `TRUENAS_VERIFY_SSL` (CA path works from the container); `sudo` may have its own password; `server/create_api_key.py` mints a scoped TrueNAS API key and with `TRUENAS_API_KEY` the deploy keeps the admin password OUT of the container (DSM has no equivalent and keeps the password behind loopback). Open: verify the `api_key.create` body against the customer's TrueNAS version; export a CA for this fleet; pin this fleet's host key; set `DASH_COOKIE_SECURE=1` + `DASH_SITE_DASHBOARD_URL=https://…ts.net` on the Serve-published sites; the three mounted SPAs still sit on the CSRF-exempt list.
 
 ### 7. Decide and enforce the tenancy model on the NAS and in the fleet API — HIGH security, weeks
 
@@ -158,6 +181,8 @@ ACLs; Syncthing GUI auth + loopback bind; verify `X-CCSync-Identity` on ytdl
 routes. For orgs: **one container per customer** — retrofitting in-instance
 tenancy is a schema + Syncthing-namespace rewrite.
 
+**Status 2026-08-17 — DONE in repo; migration of THIS fleet is an operator step.** New editors are nologin + `ForceCommand internal-sftp` with `PasswordAuthentication no` (`[stack] editor_shell`, default `sftp-only`; the manifest's `sftp_shell_type=none` follows automatically); `setup_editor_account.py --migrate-existing` (dry-run default) converts an existing fleet, `--revoke-key --lock` makes the passphrase-less keys revocable. ChrootDirectory evaluated and rejected (would re-root every absolute path the manifest publishes). `[stack] project_acl = "per-project"` adds `proj-<slug>` groups plus setgid+sticky containers (the sticky bit is what stops one editor deleting another's project); default stays `shared`. `server/secure_syncthing_gui.py` puts a generated login on the Syncthing GUI and `[syncthing] gui_bind` narrows its bind, without touching the API key. Ytdl fleet routes verify the signed `X-CCSync-Identity` (H5). Multi-org = one container per customer, stated in `docs/TENANCY.md`. Open: THIS fleet's `site.toml` pins `editor_shell = "shell"` until `--migrate-existing --apply` runs (flipping early breaks every editor's rclone checksums); DSM per-project is a grant plus an operator TODO; the dashboard provisioner does not yet imply group membership on a tick; `secure_syncthing_gui.py` has not been run on either NAS.
+
 ### 8. Put a backup floor under the authoritative tree, and codify the DB publish — HIGH data safety, days
 
 There are zero references to ZFS snapshots, replication or restore in code or
@@ -172,6 +197,8 @@ Fix: periodic TrueNAS snapshot task on the pool + app dataset, snapshot before
 `chown -R`/deploy/`--recreate`; a `broll.db` swap script reusing
 `build_db_swap_script` with `PRAGMA quick_check`; a written backup/restore
 runbook.
+
+**Status 2026-08-17 — code complete, NOT YET APPLIED to either NAS.** `server/setup_snapshots.py` creates idempotent hourly (keep 24) + daily (keep 30) snapshot tasks on both the tree and the apps dataset — TrueNAS through `/pool/snapshottask`, Synology through the backend seam, which prints the exact DSM click path and exits non-zero where the Snapshot Replication package is missing. `snapshot_now`/`list_snapshots`/`ensure_snapshot_schedule` on both backends; `common.snapshot_before()` wired into `setup_tree.py`'s `chown -R` and the deploy/`--recreate` swap (best-effort unless `--require-snapshot`). The `broll.db` publish that lived only in a memory note is `server/publish_db.py --which broll|music` (checkpoint, stage, `quick_check` on the NAS, shrink refusal, atomic rename, `.prev-<ts>`, `--rollback`); `broll/HANDOFF.md` and `music/web/DEPLOY.md` point at it. Runbook `docs/BACKUP_RESTORE.md`; 35 new server tests. **Remaining: an operator runs `setup_snapshots.py --apply` on each NAS and confirms with `--list`; the `pool.snapshottask` payload is unverified against a live 25.10 middleware; offsite replication is deliberately out of scope.**
 
 ### 9. Close the remaining data-loss edges — MEDIUM data safety, weeks
 
@@ -196,6 +223,8 @@ runbook.
 - Wizard unmaps `P:` without the "is it ours?" check the bootstrap has
   (`onboarding/steps.py:1431`); macOS uninstall deletes the Syncthing
   identity by default.
+
+**Status 2026-08-17 — DONE in repo, unshipped (both halves).** Sync: lane B circuit breaker (`sync/lane_guard.py`; pre-flight marker/empty/shrunken-remote probe, per-pass and cumulative delete caps, trips to `paused` with lanes A/C running, persisted, cleared only from the tray), `.ccsync-trash` retention (14 d / 50 GB, never while tripped — reversal of AUDIT_2 C-7), fail-closed "Remove from this machine" gate (lane A `--dry-run` + Syncthing completion; typed-name override, logged + reported), a real halt (lanes A/B + lane C folders paused via Syncthing REST, persisted; fleet-wide via `POST /api/v1/fleet/halt` + Users-page panel, delivered on the report reply's `commands.halt`), lane A "skipped, exists" counter; dashboard schema v16, `sync_guard` report section, row chips + fleet banners; `docs/SYNC_SAFETY.md`. Resolve/proxy: every `ReplaceClip`/`LinkProxyMedia` takes a `SaveProject` + `ExportProject` save point and writes an undo journal (`resolve_journal.py`, Tray → Advanced → Undo), unprompted paths rate-limited to one burst per project per 15 min, fixer re-checks its O_EXCL reservation and verifies size + source stability before relinking; proxy gen gained a free-space floor, two-sample growing-source detection and a refusal to encode from a proxy; `fix_10bit_proxies.py` refuses anything outside `Proxy/`; `build_archive --apply` compares hashes, protects recorded repairs and trashes what it replaces; the wizard applies the bootstrap's "is P: ours?" test; `fixer_dry_run` / `proxy_dry_run` (`sort`/`regen_sprites` already had `--dry-run` — the table's claim was wrong); `docs/RESOLVE_EDIT_SAFETY.md`. `project_path()`'s `..` was fixed by the Synology port. Owed: a live-Resolve check that `ExportProject` writes the `.drp`; the ship.
 
 ### 10. De-tenant: a site manifest, no compiled-in identity, and a fresh repo — HIGH universal, weeks
 
@@ -223,6 +252,8 @@ fixtures (`leso`/`ruskin`/`alex`/`SAMDISK`); start the product repo from a
 squashed commit and keep this one as the private engineering archive (no
 secret was ever committed, so the rewrite is for identity, not keys).
 
+**Status 2026-08-17 — DONE in repo except the product-repo squash (a recipe, not run).** The manifest grew `org_short`, `product_name`, `features`, a read-only `video_extensions`, and `[tree] template_folders` / `shared_assets` overrides (defaults pinned cross-component); every user-visible "Creators Club" — dashboard topbar, four SPA headers, eight companion tray/popup sentences, module descriptions — is site data or the neutral product string, with a neutral default mark (`assets/ccsync_mark.png`) behind `$CCSYNC_BRAND_LOGO`. macOS bundle ids and launchd labels moved to `com.ccsync.*` with the legacy pair retired by both the wizard and `macos_bootstrap.sh`. The wizard takes the rclone remote name from the manifest and never renames an existing one; the b-roll own-footage slug is `BROLL_DEFAULT_COLLECTION` (default `owned`, legacy `creators_club` still routed); the music `W:\Creators_Club` probe is gone (`MUSIC_LIBRARY_ROOT`). Client data files moved to git-ignored `private/`; `docs/macos-onboarding-handoff.md` scrubbed; `alex` defaults neutralised; `.gitignore` gained the defence-in-depth patterns; `tools/make_product_repo.ps1` + `docs/PRODUCT_REPO.md` are the squashed-repo recipe. Test fixtures are neutralised as of 2026-08-17: `leso`→`editor1`, `ruskin`→`editor2`, `RUSKIN-PC`→`EDITOR-PC-02`, `SAMDISK`→`EXT-DISK`, `alex`→`owen`, and every real tailnet/LAN address and the tailnet name replaced with `site.example.toml`'s placeholders — zero hits repo-wide outside this audit, the archived bug-hunt notes, and the product-repo scrubber's own denylist (which excludes itself from the export). Note the open conflict: `make_product_repo.ps1` treats the placeholder licensor name as a tenant marker while requiring `LICENSE` to ship — resolved the day counsel supplies the real entity name. Not changed on purpose: the PHYSICAL `Creators_Club` tree/archive directory name (a migration).
+
 ### 11. Make the tree shape and drive letter customer data, not code — MEDIUM universal, weeks
 
 `Creators_Club` as the tree root name (608 hits), `P:` as the canonical prefix
@@ -239,6 +270,8 @@ Fix: `canon.py` is already generic — the work is defaults, the Windows
 installer's ~40 `P:` sites, and the music probe; template folders and
 shared-asset registry become server-side data served by the manifest; delete
 the personal-path defaults.
+
+**Status 2026-08-17 — DONE in repo, unshipped.** Every `P:` and `Creators_Club` site in `windows_bootstrap.ps1`, `windows_uninstall.ps1`, `windows_upgrade.ps1`, `macos_bootstrap.sh` and `macos_uninstall.sh` derives from the manifest's `canonical_prefix` / `tree_name` (loopback share name, logon task, Explorer label key, the "is this drive ours?" guard included); the uninstallers read the prefix from the local `config.toml` so they work off-tailnet; 61 new table-test cases across `Test-DriveMapParser.ps1` and the new `installer/tests/test_macos_site_values.sh`; three `-DryRun` runs against fake `W:`/`Y:` manifests. Template folders and the shared-asset registry are `site.toml [tree]` overrides served by the manifest; the video-extension list has one canonical copy (`dashboard/provision.py`) the other three are pinned to; the forced `creators_club_sftp` remote name is gone; personal-path defaults are deleted from both indexers (paths are required — item 14). Owed: `INSTALLER_VERSION` 1.0.30 in three files, one real install on a scratch Windows machine, and the macOS half has still never run on a Mac.
 
 ### 12. State the platform envelope honestly, then widen it deliberately — MEDIUM universal, quarter → architectural
 
@@ -260,6 +293,8 @@ an OIDC auth backend; validate macOS on a Mac and add a Mac release runner.
 v2: a `ServerBackend` protocol (TrueNAS / Synology / generic Linux — see
 `SYNOLOGY_PORT_PLAN.md`); Linux client only if a customer asks.
 
+**Status 2026-08-17 — DONE in repo for everything a Windows base rig can do.** Platform envelope stated (Resolve Studio + TrueNAS SCALE 25.x or Synology DSM 7.2 + Tailscale; `docs/INSTALL.md`, `docs/ARCHITECTURE.md`); the `ServerBackend`/`NasBackend` seams and the Synology port landed on `main` (v2 pulled forward). `dashboard/deploy/Dockerfile` builds a self-contained, digest-pinned, non-root, `--require-hashes` image with `compose.image.yaml` as a full template variant; bind-mount mode remains the default and both share one entrypoint (`docs/DOCKER.md`); NOT built — no Docker on the base rig — and `install_dashboard_app.py` still deploys bind-mount mode only. `DASH_AUTH_METHOD=oidc` is a real second implementation (`oidc.py`: discovery, PKCE, state/nonce, JWKS via PyJWT, `/login?local=1` break-glass; 17 tests against an in-process IdP) — never pointed at a real IdP. The Mac release gap is closed by `.github/workflows/release-macos.yml`; macOS validation on a real Mac is still owed. Linux client and in-instance multi-tenancy remain deferred.
+
 ### 13. Product-grade operations: CI, lockfiles, crash reporting, docs for strangers — MEDIUM ops, weeks
 
 No CI of any kind runs the 5,256 tests; releases are hand-run PowerShell on
@@ -278,6 +313,8 @@ release gap too); `uv lock`/`pip-compile --generate-hashes` per component + a
 licence gate; Sentry-class crash reporting with opt-in; a generic install
 guide + architecture doc; a `site.toml` schema and validator.
 
+**Status 2026-08-17 — DONE in repo.** Eleven hash-pinned `requirements.lock` files (`uv pip compile --universal --generate-hashes`), consumed by `run.sh --require-hashes`, the image build and CI (refresh recipe in `docs/RELEASE.md`); `.github/workflows/ci.yml` runs every suite on Windows/Linux/macOS with `tools/check_licenses.py` (+ `tools/license_allowlist.toml`) and a CRLF byte-scan; `release-windows.yml` / `release-macos.yml` build (never publish) with the item-4 signing secrets wired; rclone/Syncthing installer downloads pinned by version + sha256; `crash_report.py` on both sides (local redacted crash JSON always, Sentry-compatible send only on explicit opt-in the shipped builds cannot even satisfy) plus optional json-lines log rotation under `DASH_LOG_DIR`. Docs for strangers: `docs/INSTALL.md`, `docs/ARCHITECTURE.md`, `docs/API.md`, `docs/CONFIG.md` (the `site.toml` schema in prose — the loader in `server/common.py` is the validator), `docs/README.md` index; the operational docs de-tenanted (literal IPs/names → placeholders or `site.toml` keys; the dated bug-hunt files kept as archives). Owed: push the repo to a CI provider (it has never had one); i18n/accessibility untouched.
+
 ### 14. Package the GPU indexers or scope them out of v1 — LOW universal, weeks
 
 Both indexers are `pip install -e .` from source with hand-edited YAML. Music
@@ -289,6 +326,8 @@ this repo.
 Fix: a GPU Docker image covering CUDA/whisper/torch; required-not-defaulted
 `data_root`/`db.path`; a queue drain with no lost-write window — or ship
 search-only from a vendor-built index in v1.
+
+**Status 2026-08-17 — mostly DONE.** Every path in both indexers is required-not-defaulted with a refusal naming the key and env overrides (`BROLL_DATA_ROOT`, `BROLL_DB_PATH`, `CCSYNC_WHISPER_PYTHON/_SCRIPT/_MODEL_DIR`, `BROLL_MODEL_CACHE`, `MUSIC_DB_PATH`, `MUSIC_MODEL_CACHE`); no personal path left in any default. The faster-whisper environment is in-repo (`broll/indexer/tools/make_whisper_env.ps1|.sh`, `tools/whisper_transcribe.py`, a `[transcribe]` extra). `tools/Dockerfile.indexer-gpu` + `tools/compose.indexer-gpu.yaml` package both indexers on a pinned CUDA base with nvidia device reservations (**written, not built**). The lossy pull-drain-push is gone: an append-only ingest journal (`ingest_queue.uid`, migration 003) plus a verified result-bundle merge (`musicweb/drain.py`). `docs/INDEXERS.md` documents what runs where and the v1 scope-out (search-only from a vendor-built index for customers without a GPU). Operator: set the two whisper keys on the base rig (they no longer default), set `MUSIC_DB_PATH`, build and smoke the image on a GPU host, run one real drain end to end; the ffmpeg-in-image licence posture is a counsel question before any registry publish.
 
 ### 15. Security hardening sprint (medium tier) — weeks
 
@@ -309,6 +348,8 @@ search-only from a vendor-built index in v1.
   helper is a fixed-name script in `%TEMP%`.
 - `YTDL_DEV_USER` and `DASH_REPORT_TOKEN_OPTIONAL` are one env var from full
   impersonation / unauthenticated writes — remove from shipped builds.
+
+**Status 2026-08-17 — DONE in repo across all its rows, unshipped.** Standalone b-roll ingest fail-closed (503, dev branch deleted); music ingest fail-closed when not behind the dashboard login and bounded (64 files / 512 MB); secret strength enforced at boot with the ingest token's rule; login throttle in SQLite with per-username AND per-IP budgets and backoff; CSRF synchroniser token on every dashboard htmx/form POST (the three mounted SPAs still on the exempt list — one header each to close); per-editor fleet tokens end to end (minted/revoked on Admin › Users, hashed, shown once, bound to an editor) with the shared token behind `DASH_SHARED_REPORT_TOKEN_ENABLED` and a boot log naming the machines still using it; `identity.json`/`config.toml` owner-only on both platforms (`secretfile.harden`, `icacls` on Windows) plus the installer's `icacls` on install and upgrade; no dashboard call follows a redirect; error bodies carry no NAS hosts or absolute paths; fleet reads scoped to the viewer; the editor-laptop SMB share gets an inbound 139/445 block rule; the elevated helper is a per-run random name in an ACL'd per-user dir; `setx` secrets replaced by `tools/load_secrets.ps1` (DPAPI) + `docs/SECRETS.md`; `YTDL_DEV_USER` deleted; `DASH_REPORT_TOKEN_OPTIONAL` inert outside `DASH_DEV_INSECURE`; admin password floor of 12 on set/change. Operator: publish a companion build before minting any per-editor token; flip the shared token off only when the boot log goes quiet.
 
 ## Detail by area
 
@@ -349,7 +390,7 @@ Fix — identity and PII:
 - `leso` home paths in **production** source (`stills.py:14`,
   `resolve_prefs.py:29,344`) and ~20 tests; full machine dossier incl. tailnet
   IP and "SSH is open" in `docs/macos-onboarding-handoff.md`.
-- `ruskin` + hostname `DESKTOP-LQQ41TC` across KNOWN_BUGS; `alex` as default
+- `ruskin` + hostname `DESKTOP-<redacted>` across KNOWN_BUGS; `alex` as default
   admin in 8 files.
 - Client catalogue: 25 named projects, episode titles, camera bodies, sizes in
   `config.queue.yaml`; ~450 real archive filenames in `duplicates_report.md`.
@@ -471,6 +512,52 @@ Automation, Windows-only.
   generic install/architecture docs, config schema); item 14 (GPU indexer
   image or search-only v1). v2 candidates: `ServerBackend` abstraction
   (`SYNOLOGY_PORT_PLAN.md`), in-instance multi-tenancy, Linux client.
+
+## What the operator does next (consolidated, 2026-08-17)
+
+Ordered so that nothing breaks the fleet that is currently on 0.7.11.
+
+1. **Before ANY dashboard deploy:** check the live `DASH_SESSION_SECRET` and
+   `DASH_REPORT_TOKEN` are ≥ 24 chars and not placeholders (the container now
+   refuses to boot otherwise — CR-8); set `DASH_RELEASE_PUBKEYS` to the baked
+   public key (CR-6); set `ANTHROPIC_API_KEY` in the deploying shell (CR-2);
+   confirm this studio's `site.toml` has `[features] youtube_download =
+   youtube_unblock = true` and `[stack] editor_shell = "shell"`; expect every
+   browser session to be signed out once (CR-8) and migrations v14–v16 to run.
+2. **Deploy the dashboard** (`tools\ship.cmd -DashboardOnly` or the full ship);
+   then on the NAS: `setup_snapshots.py --apply` + `--list` (CR-10),
+   `secure_syncthing_gui.py` (CR-9), `rm -rf <host-root>/claude-home
+   <host-root>/claude-bin` + revoke the OAuth credential (CR-2), and consider
+   `create_api_key.py` → `TRUENAS_API_KEY` + redeploy (CR-9). Pin the NAS host
+   key in `site.toml` (CR-9). Same on the Synology where applicable.
+3. **Confirm every companion's `dashboard_url`** matches the origin editors
+   browse (CR-7) BEFORE publishing the companion; behind Tailscale Serve set
+   `DASH_COOKIE_SECURE=1` + `DASH_SITE_DASHBOARD_URL=https://…ts.net`.
+4. **Bump versions and ship** (companion `VERSION`, `INSTALLER_VERSION` 1.0.30
+   in three files, dashboard version): `tools\ship.cmd -AllowUnsignedBinary`
+   until certificates exist. Back up `%USERPROFILE%\.ccsync-release\release.key`
+   offline first (CR-6). Watch the first deploy's ffmpeg fetch (CR-4) and the
+   first lane B pass per machine (CR-11 baseline). Publish the first signed
+   build BEFORE editors upgrade past 0.7.11.
+5. **After the ship:** mint per-editor tokens and later flip
+   `DASH_SHARED_REPORT_TOKEN_ENABLED=0` (CR-18); check `~/.ccsync/resolve_edits/`
+   gets a `.drp` on the base rig (CR-12); set the whisper keys + `MUSIC_DB_PATH`
+   on the base rig and run one real music drain (CR-20); run one real indexing
+   pass on the API key (CR-1); once verified, `CCSYNC_REQUIRE_SNAPSHOT=1`.
+6. **Purchases / people:** Authenticode + Apple Developer ID certificates
+   (CR-6); counsel review of `docs/legal/*` and the entity name (CR-5), the
+   YouTube attestation wording (CR-2), the ffmpeg-in-image posture (item 14);
+   a written licence grant for `yt-credit-downloader` (CR-2); an Anthropic key
+   on the customer's own organisation per site (CR-1/CR-2).
+7. **On a Mac:** `tools/release_macos.sh` / `build_onboard_macos.sh` (with the
+   release key copied to `~/.ccsync-release/`), watch the LaunchAgent rename
+   migration (`launchctl list | grep ccsync` shows one companion — CR-16), and
+   run the first-run script that has never run.
+8. **Later:** push the repo to GitHub for CI (CR-19), first `docker build` of
+   the dashboard image and the GPU indexer image, `setup_editor_account.py
+   --migrate-existing --apply` then flip `editor_shell` to `sftp-only` (CR-9),
+   the three SPAs' CSRF header (CR-8), a Keycloak/Entra sign-in for OIDC,
+   `tools/make_product_repo.ps1` when the product repo is wanted.
 
 ## What is already product-grade
 

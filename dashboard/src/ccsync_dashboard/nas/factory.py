@@ -27,8 +27,15 @@ def nas_configured(settings) -> bool:
 
     nas_base_url is the tests' escape hatch (it replaces host entirely), so a
     settings object carrying one counts as configured.
+
+    A scoped API key counts as credentials too since 2026-08-17: on a TrueNAS
+    site it is what REPLACES the password in the container
+    (COMMERCIAL_READINESS.md item 6), so requiring the password as well would
+    503 the admin section on exactly the deployments that took the advice.
     """
-    if not (getattr(settings, "nas_pw", "") or "").strip():
+    kind = (getattr(settings, "nas_kind", "") or "truenas").strip().lower()
+    api_key = (getattr(settings, "nas_api_key", "") or "").strip() if kind == "truenas" else ""
+    if not ((getattr(settings, "nas_pw", "") or "").strip() or api_key):
         return False
     return bool((getattr(settings, "nas_host", "") or "").strip()
                 or (getattr(settings, "nas_base_url", "") or "").strip())
@@ -48,6 +55,7 @@ def make_nas_client(settings) -> NasBackend:
             base_url=settings.nas_base_url or None,
             verify_ssl=settings.nas_verify_ssl,
             homes_parent=getattr(settings, "nas_homes_parent", "") or "",
+            api_key=getattr(settings, "nas_api_key", "") or "",
         )
     if kind == "synology":
         client = SynologyClient(

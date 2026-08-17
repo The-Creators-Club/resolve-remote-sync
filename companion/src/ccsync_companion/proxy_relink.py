@@ -23,7 +23,7 @@ lane B has already put on disk; it copies, moves and deletes nothing.
 Scope rules, deliberately narrow:
   - Only clips whose ORIGINAL is inside the tree (under local_root or on the
     canonical prefix). An editor's own local/BM-Cloud media is none of our
-    business -- on ruskin's machine that was 297 of 431 clips.
+    business -- on one editor's machine that was 297 of 431 clips.
   - Only when the proxy is not already working. Resolve reports a working
     proxy as its RESOLUTION ("1920x1080"); "Offline" means attached but
     unreachable, "None"/"" means nothing attached.

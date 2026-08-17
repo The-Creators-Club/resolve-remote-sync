@@ -67,7 +67,7 @@ def test_mount_point_for_external_volume_roots():
 
 
 def test_mount_point_for_is_none_off_volumes():
-    assert rg.mount_point_for("/Users/alex/Creators_Club") is None
+    assert rg.mount_point_for("/Users/owen/Creators_Club") is None
     assert rg.mount_point_for("C:\\Creators_Club") is None
     assert rg.mount_point_for("") is None
     assert rg.mount_point_for(None) is None
@@ -123,7 +123,7 @@ def test_darwin_root_off_volumes_is_isdir_only():
     """~/Creators_Club on the internal disk: there is no volume to be
     mounted, so the mount check must not be applied to it."""
     assert _probe(
-        local_root="/Users/alex/Creators_Club",
+        local_root="/Users/owen/Creators_Club",
         isdir_fn=lambda p: True, ismount_fn=lambda p: False,
     ) == rg.ROOT_PRESENT
 
@@ -268,7 +268,13 @@ def test_write_and_read_the_volume_record(tmp_path):
         "volume_uuid": UUID, "mount_point": MOUNT, "local_root": ROOT,
     }
     # Atomic: the temp file is replaced, never left beside the record.
-    assert [p.name for p in tmp_path.iterdir()] == ["volume.json"]
+    # Named siblings, not "tmp_path holds exactly one entry" (2026-08-17):
+    # conftest's _eula_already_accepted writes the licence record into
+    # tmp_path/.ccsync, so the whole-directory form was measuring the
+    # fixture, not the write. What this test is about is that
+    # write_volume_record leaves no .tmp beside its own output.
+    siblings = [p.name for p in tmp_path.iterdir() if p.is_file()]
+    assert siblings == ["volume.json"]
 
 
 def test_read_volume_record_tolerates_everything(tmp_path):
@@ -324,7 +330,7 @@ def test_refresh_is_a_no_op_off_darwin_and_off_volumes(tmp_path):
     path = tmp_path / "volume.json"
     assert rg.refresh_volume_record(ROOT, is_darwin=False, record_path=path) is None
     assert rg.refresh_volume_record(
-        "/Users/alex/Creators_Club", is_darwin=True, record_path=path
+        "/Users/owen/Creators_Club", is_darwin=True, record_path=path
     ) is None
     assert not path.exists()
 
@@ -338,7 +344,7 @@ def test_a_volumes_root_on_darwin_is_removable():
 
 def test_an_internal_root_is_not_removable():
     assert rg.local_root_is_removable(
-        "/Users/alex/Creators_Club", record={}, is_darwin=True) is False
+        "/Users/owen/Creators_Club", record={}, is_darwin=True) is False
     assert rg.local_root_is_removable("C:\\Creators_Club", record={}, is_darwin=False) is False
     assert rg.local_root_is_removable("", record={}, is_darwin=True) is False
 
@@ -637,7 +643,7 @@ def test_a_blank_local_root_is_not_a_block():
 def test_an_internal_disk_root_still_reports_a_denied_read():
     """There is no volume to confirm for ~/Creators_Club, and TCC covers
     Desktop/Documents/Downloads too."""
-    root = "/Users/leso/Creators_Club"
+    root = "/Users/editor1/Creators_Club"
     assert rg.access_is_blocked(
         root, is_darwin=True, listdir_fn=_denied(root)) is True
 

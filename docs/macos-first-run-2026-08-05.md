@@ -1,5 +1,8 @@
 # macOS first-run findings — 2026-08-05 (session 2: it runs)
 
+> **Archive.** Kept as history; the addresses, hostnames and people in it are
+> those of the original deployment. Do not copy commands out of it.
+
 Sequel to `macos-first-run-2026-08-04.md`, which got as far as *building* on a
 Mac. This session is the first time the port has **run**: companion started,
 signed in, tray icon on screen, tree on an external SSD, Resolve mapped, all
@@ -25,7 +28,7 @@ they were found.
 | Hardware | 16" MacBook Pro, arm64, macOS 15.7.4 |
 | Display | 3456×2234, notch spanning x 771–956 in a 1728pt menu bar |
 | Tcl/Tk | **9.0.3** — this is load-bearing; see MAC-8 |
-| Sync root | `/Volumes/SAMDISK/Creators_Club` on a 2 TB **exFAT** volume, uuid `A8424FB3-…` |
+| Sync root | `/Volumes/<external-ssd>/Creators_Club` on a 2 TB **exFAT** volume, uuid `A8424FB3-…` |
 | Versions at end | companion 0.4.22, installer 1.0.19, dashboard 0.3.7 |
 
 The drive-and-filesystem question that blocked section E last session is
@@ -48,8 +51,8 @@ exists.
 required".** A masterless `tk.StringVar()` binds to `tkinter._default_root`,
 which on darwin is the hidden root. The `Entry` wrote the typed text into the
 dialog's interpreter; `.get()` read the hidden one's empty variable. Verified
-directly: masterless `var.get()` returns `''` while the entry displays
-`'alex'`; with `master=root` it returns `'alex'`. The fixer's destination
+directly: masterless `var.get()` returns `''` while the entry displays the
+typed username; with `master=root` it returns that username. The fixer's destination
 comboboxes had the identical bug, where it would have filed media at the tree
 root. `companion/tests/test_tk_interpreter_hygiene.py` is an AST guard against
 the next one.

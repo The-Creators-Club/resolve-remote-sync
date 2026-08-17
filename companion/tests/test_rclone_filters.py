@@ -90,7 +90,7 @@ def test_filter_rules_down_allows_proxy_dir_and_contents_then_excludes_rest():
     # UP only. The R12 include (2026-08-13) existed while the NAS was the only
     # downloader; with requester-first downloads the original starts on the
     # requester's disk and lane A carries it up, and pulling every editor's
-    # clips to every other editor was 58 GB of bandwidth on ruskin's first
+    # clips to every other editor was 58 GB of bandwidth on one editor's first
     # pass. `*.part`/`*.ytdl` stay excluded regardless (see the docstring).
     assert rules == [
         "- ._*",
@@ -768,16 +768,16 @@ def fixture_tree(tmp_path):
     that is NOT actually inside a Proxy dir."""
     src = tmp_path / "src"
     (src / "B-roll" / "Proxy").mkdir(parents=True)
-    (src / "B-roll" / "Editor Added" / "alex").mkdir(parents=True)
+    (src / "B-roll" / "Editor Added" / "owen").mkdir(parents=True)
     (src / "Interviewees" / "Jane" / "Proxy" / "Nested").mkdir(parents=True)
     (src / "Audio" / "Music").mkdir(parents=True)
 
     (src / "B-roll" / "Proxy" / "clip1.mov").write_text("proxy1")
     (src / "Interviewees" / "Jane" / "Proxy" / "Nested" / "clip2.mov").write_text("proxy2-nested")
-    (src / "B-roll" / "Editor Added" / "alex" / "clip3.mov").write_text("original")
+    (src / "B-roll" / "Editor Added" / "owen" / "clip3.mov").write_text("original")
     (src / "Audio" / "Music" / "track.wav").write_text("music")
     (src / "Proxynotreal.mov").write_text("root file, name resembles Proxy but isn't inside one")
-    (src / "B-roll" / "Editor Added" / "alex" / "notes.txt").write_text("not a video")
+    (src / "B-roll" / "Editor Added" / "owen" / "notes.txt").write_text("not a video")
     # Root-level Proxy dir: rclone's `**/` does not match zero components,
     # so this case needs the explicit /Proxy/ rules.
     (src / "Proxy").mkdir()
@@ -828,13 +828,13 @@ def test_lane_a_ignore_existing_never_clobbers(rclone_binary, fixture_tree, tmp_
     # First real copy.
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
-    dest_file = dst / "B-roll" / "Editor Added" / "alex" / "clip3.mov"
+    dest_file = dst / "B-roll" / "Editor Added" / "owen" / "clip3.mov"
     assert dest_file.read_text() == "original"
 
     # Modify the source (and backdate it past --min-age so this actually
     # exercises --ignore-existing rather than incidentally being skipped for
     # being "too new"), then copy again.
-    modified_src = fixture_tree / "B-roll" / "Editor Added" / "alex" / "clip3.mov"
+    modified_src = fixture_tree / "B-roll" / "Editor Added" / "owen" / "clip3.mov"
     modified_src.write_text("modified")
     old_time = time.time() - 3600
     os.utime(modified_src, (old_time, old_time))
@@ -1472,16 +1472,16 @@ def test_express_uploads_only_the_listed_paths_including_non_ascii(
     filename has to survive, since the audit's worst finding was a
     non-ASCII decode bug."""
     non_ascii = "café 日本語.braw"
-    target = fixture_tree / "B-roll" / "Editor Added" / "alex" / non_ascii
+    target = fixture_tree / "B-roll" / "Editor Added" / "owen" / non_ascii
     target.write_bytes(b"c" * 2048)
     old = time.time() - 3600
     os.utime(target, (old, old))
 
     list_file = write_files_from_list(
         [
-            f"B-roll/Editor Added/alex/{non_ascii}",
-            "B-roll/Editor Added/alex/clip3.mov",
-            "B-roll/Editor Added/alex/DELETED-BEFORE-THE-RUN.mov",  # no longer exists
+            f"B-roll/Editor Added/owen/{non_ascii}",
+            "B-roll/Editor Added/owen/clip3.mov",
+            "B-roll/Editor Added/owen/DELETED-BEFORE-THE-RUN.mov",  # no longer exists
         ],
         tmp_path / "state" / "express.txt",
     )
@@ -1494,8 +1494,8 @@ def test_express_uploads_only_the_listed_paths_including_non_ascii(
     # error: rclone ignores it and still exits 0 (measured).
     assert proc.returncode == 0, proc.stderr
 
-    assert (dst / "B-roll" / "Editor Added" / "alex" / non_ascii).read_bytes() == b"c" * 2048
-    assert (dst / "B-roll" / "Editor Added" / "alex" / "clip3.mov").exists()
+    assert (dst / "B-roll" / "Editor Added" / "owen" / non_ascii).read_bytes() == b"c" * 2048
+    assert (dst / "B-roll" / "Editor Added" / "owen" / "clip3.mov").exists()
     # Nothing else came along for the ride -- that is the whole point.
     assert not (dst / "Proxynotreal.mov").exists()
     assert not (dst / "Audio").exists()
@@ -1508,15 +1508,15 @@ def test_express_ignore_existing_never_clobbers_the_nas_copy(
     rclone_binary, fixture_tree, tmp_path
 ):
     list_file = write_files_from_list(
-        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+        ["B-roll/Editor Added/owen/clip3.mov"], tmp_path / "state" / "express.txt"
     )
     dst = tmp_path / "dst_express"
     cmd = _express_cmd(rclone_binary, fixture_tree, dst, list_file)
     assert subprocess.run(cmd, capture_output=True, text=True, timeout=60).returncode == 0
-    dest_file = dst / "B-roll" / "Editor Added" / "alex" / "clip3.mov"
+    dest_file = dst / "B-roll" / "Editor Added" / "owen" / "clip3.mov"
     assert dest_file.read_text() == "original"
 
-    src_file = fixture_tree / "B-roll" / "Editor Added" / "alex" / "clip3.mov"
+    src_file = fixture_tree / "B-roll" / "Editor Added" / "owen" / "clip3.mov"
     src_file.write_text("modified")
     old = time.time() - 3600
     os.utime(src_file, (old, old))
@@ -1536,7 +1536,7 @@ def test_express_never_deletes_anything_on_either_side(
     partial.write_text("an orphan partial rclone must not touch")
 
     list_file = write_files_from_list(
-        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+        ["B-roll/Editor Added/owen/clip3.mov"], tmp_path / "state" / "express.txt"
     )
     proc = subprocess.run(
         _express_cmd(rclone_binary, fixture_tree, dst, list_file),
@@ -1557,7 +1557,7 @@ def test_express_temp_files_cannot_collide_with_the_periodic_pass(
     moment would share one temp path and interleave. --partial-suffix gives
     them disjoint names; this proves the flag actually takes effect."""
     list_file = write_files_from_list(
-        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+        ["B-roll/Editor Added/owen/clip3.mov"], tmp_path / "state" / "express.txt"
     )
     proc = subprocess.run(
         _express_cmd(rclone_binary, fixture_tree, tmp_path / "dst_ps", list_file) + ["-vv"],
@@ -1604,7 +1604,7 @@ def test_rclone_refuses_files_from_raw_together_with_any_filter(
     both gates are enforced in Python instead. If a future rclone allows the
     combination this test fails loudly and the flags can come back."""
     list_file = write_files_from_list(
-        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+        ["B-roll/Editor Added/owen/clip3.mov"], tmp_path / "state" / "express.txt"
     )
     filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
     base = _express_cmd(rclone_binary, fixture_tree, tmp_path / "dst_x", list_file)
@@ -1620,7 +1620,7 @@ def test_a_blank_list_line_is_read_as_the_root_dir(rclone_binary, fixture_tree, 
     the hazard is real, by writing the bad file by hand."""
     bad = tmp_path / "bad.txt"
     with open(bad, "w", encoding="utf-8", newline="") as fh:
-        fh.write("B-roll/Editor Added/alex/clip3.mov\n\n")
+        fh.write("B-roll/Editor Added/owen/clip3.mov\n\n")
     proc = subprocess.run(
         _express_cmd(rclone_binary, fixture_tree, tmp_path / "dst_blank", bad),
         capture_output=True, text=True, timeout=60,
@@ -1628,7 +1628,7 @@ def test_a_blank_list_line_is_read_as_the_root_dir(rclone_binary, fixture_tree, 
     assert proc.returncode != 0
     assert "is a directory not a file" in proc.stderr
     with pytest.raises(ExpressListError):
-        write_files_from_list(["B-roll/Editor Added/alex/clip3.mov", ""], tmp_path / "ok.txt")
+        write_files_from_list(["B-roll/Editor Added/owen/clip3.mov", ""], tmp_path / "ok.txt")
 
 
 def test_a_backslash_list_entry_silently_transfers_nothing(
@@ -1639,7 +1639,7 @@ def test_a_backslash_list_entry_silently_transfers_nothing(
     this reason."""
     bad = tmp_path / "bad.txt"
     with open(bad, "w", encoding="utf-8", newline="") as fh:
-        fh.write("B-roll\\Editor Added\\alex\\clip3.mov\n")
+        fh.write("B-roll\\Editor Added\\owen\\clip3.mov\n")
     dst = tmp_path / "dst_bs"
     proc = subprocess.run(
         _express_cmd(rclone_binary, fixture_tree, dst, bad),
@@ -1649,15 +1649,15 @@ def test_a_backslash_list_entry_silently_transfers_nothing(
     assert not (dst / "B-roll").exists()
 
     good = write_files_from_list(
-        ["B-roll\\Editor Added\\alex\\clip3.mov"], tmp_path / "good.txt"
+        ["B-roll\\Editor Added\\owen\\clip3.mov"], tmp_path / "good.txt"
     )
-    assert good.read_text(encoding="utf-8") == "B-roll/Editor Added/alex/clip3.mov\n"
+    assert good.read_text(encoding="utf-8") == "B-roll/Editor Added/owen/clip3.mov\n"
     proc = subprocess.run(
         _express_cmd(rclone_binary, fixture_tree, dst, good),
         capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, proc.stderr
-    assert (dst / "B-roll" / "Editor Added" / "alex" / "clip3.mov").exists()
+    assert (dst / "B-roll" / "Editor Added" / "owen" / "clip3.mov").exists()
 
 
 def test_express_lists_far_fewer_objects_than_a_full_pass(
@@ -1675,7 +1675,7 @@ def test_express_lists_far_fewer_objects_than_a_full_pass(
     assert full_proc.returncode == 0, full_proc.stderr
 
     list_file = write_files_from_list(
-        ["B-roll/Editor Added/alex/clip3.mov"], tmp_path / "state" / "express.txt"
+        ["B-roll/Editor Added/owen/clip3.mov"], tmp_path / "state" / "express.txt"
     )
     express = build_express_command(
         rclone_binary, str(fixture_tree), None, str(tmp_path / "dst_cmp2"), list_file,
@@ -1788,7 +1788,7 @@ def test_lane_a_dry_run_skips_an_in_flight_express_path(rclone_binary, fixture_t
     """Against the REAL binary: the excluded file is skipped, its siblings
     are not."""
     filter_file = write_filter_file(
-        build_filter_rules_up(["B-roll/Editor Added/alex/clip3.mov"]),
+        build_filter_rules_up(["B-roll/Editor Added/owen/clip3.mov"]),
         tmp_path / "filter_up.txt",
     )
     dst = tmp_path / "dst_up"

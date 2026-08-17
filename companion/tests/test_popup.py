@@ -28,21 +28,21 @@ def _item(file_path, clip_name=None, media_pool_item=None, resolve_project_name=
 
 def test_build_popup_rows_uses_suggested_destination():
     items = [_item(r"C:\Desktop\track.wav"), _item(r"C:\Desktop\clip.mov")]
-    rows = build_popup_rows(items, r"C:\Creators_Club", "alex")
+    rows = build_popup_rows(items, r"C:\Creators_Club", "owen")
     assert rows[0]["suggested_dest"] == "Audio/Music"
-    assert rows[1]["suggested_dest"] == "B-roll/Editor Added/alex"
+    assert rows[1]["suggested_dest"] == "B-roll/Editor Added/owen"
 
 
 def test_build_popup_rows_falls_back_to_basename_for_clip_name():
     items = [_item(r"C:\Desktop\track.wav", clip_name=None)]
-    rows = build_popup_rows(items, r"C:\Creators_Club", "alex")
+    rows = build_popup_rows(items, r"C:\Creators_Club", "owen")
     assert rows[0]["clip_name"] == "track.wav"
 
 
 def test_perform_fix_all_uses_selection_over_suggestion(tmp_path):
     items = [_item(str(tmp_path / "track.wav"))]
     (tmp_path / "track.wav").write_text("audio")
-    rows = build_popup_rows(items, str(tmp_path / "root"), "alex")
+    rows = build_popup_rows(items, str(tmp_path / "root"), "owen")
 
     calls = []
 
@@ -60,7 +60,7 @@ def test_perform_fix_all_uses_selection_over_suggestion(tmp_path):
 
 def test_perform_fix_all_falls_back_to_suggested_dest_when_no_selection():
     items = [_item(r"C:\Desktop\track.wav")]
-    rows = build_popup_rows(items, r"C:\Creators_Club", "alex")
+    rows = build_popup_rows(items, r"C:\Creators_Club", "owen")
 
     calls = []
 
@@ -74,7 +74,7 @@ def test_perform_fix_all_falls_back_to_suggested_dest_when_no_selection():
 
 def test_perform_ignore_all_marks_every_row():
     items = [_item(r"C:\Desktop\a.mov"), _item(r"C:\Desktop\b.mov")]
-    rows = build_popup_rows(items, r"C:\Creators_Club", "alex")
+    rows = build_popup_rows(items, r"C:\Creators_Club", "owen")
     tracker = fixer.IgnoreTracker()
 
     perform_ignore_all(rows, tracker)
@@ -121,7 +121,7 @@ def test_dedupe_three_timeline_items_one_path_keeps_all_three_media_pool_items()
 
 def test_build_popup_rows_always_dedupes_before_building():
     items = [_item(r"C:\Desktop\track.wav"), _item(r"C:\desktop\TRACK.WAV")]
-    rows = build_popup_rows(items, r"C:\Creators_Club", "alex")
+    rows = build_popup_rows(items, r"C:\Creators_Club", "owen")
     assert len(rows) == 1
     assert len(rows[0]["media_pool_items"]) == 2
 
@@ -137,11 +137,11 @@ def test_build_popup_rows_prefers_matched_resolve_project(tmp_path):
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="CCT Creator Profiles")]
 
     rows = build_popup_rows(
-        items, str(tmp_path), "alex", project_prefix="Projects/2025/FF4/Nuclear",
+        items, str(tmp_path), "owen", project_prefix="Projects/2025/FF4/Nuclear",
     )
 
     assert rows[0]["suggested_dest"] == (
-        "Projects/2026/Creator Profiles/Season 1/B-roll/Editor Added/alex"
+        "Projects/2026/Creator Profiles/Season 1/B-roll/Editor Added/owen"
     )
 
 
@@ -151,18 +151,18 @@ def test_build_popup_rows_falls_back_to_configured_project_prefix_when_unmatched
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="Some Unrelated Show")]
 
     rows = build_popup_rows(
-        items, str(tmp_path), "alex", project_prefix="Projects/2025/FF4/Nuclear",
+        items, str(tmp_path), "owen", project_prefix="Projects/2025/FF4/Nuclear",
     )
 
-    assert rows[0]["suggested_dest"] == "Projects/2025/FF4/Nuclear/B-roll/Editor Added/alex"
+    assert rows[0]["suggested_dest"] == "Projects/2025/FF4/Nuclear/B-roll/Editor Added/owen"
 
 
 def test_build_popup_rows_falls_back_to_tree_root_when_nothing_matches(tmp_path):
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="Some Unrelated Show")]
 
-    rows = build_popup_rows(items, str(tmp_path), "alex", project_prefix="")
+    rows = build_popup_rows(items, str(tmp_path), "owen", project_prefix="")
 
-    assert rows[0]["suggested_dest"] == "B-roll/Editor Added/alex"
+    assert rows[0]["suggested_dest"] == "B-roll/Editor Added/owen"
 
 
 # -- server_roots (dashboard's sticky per-Resolve-project mapping) -----------
@@ -177,21 +177,21 @@ def test_build_popup_rows_server_roots_wins_over_local_matching(tmp_path):
 
     server_roots = {"cct creator profiles": "Projects/2099/Server/Override"}
     rows = build_popup_rows(
-        items, str(tmp_path), "alex", project_prefix="Projects/2025/FF4/Nuclear",
+        items, str(tmp_path), "owen", project_prefix="Projects/2025/FF4/Nuclear",
         server_roots=server_roots,
     )
 
-    assert rows[0]["suggested_dest"] == "Projects/2099/Server/Override/B-roll/Editor Added/alex"
+    assert rows[0]["suggested_dest"] == "Projects/2099/Server/Override/B-roll/Editor Added/owen"
 
 
 def test_build_popup_rows_server_roots_lookup_is_case_insensitive(tmp_path):
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="CCT Creator Profiles")]
 
     server_roots = {"cct creator profiles": "Projects/2026/Creator Profiles/Season 1"}
-    rows = build_popup_rows(items, str(tmp_path), "alex", server_roots=server_roots)
+    rows = build_popup_rows(items, str(tmp_path), "owen", server_roots=server_roots)
 
     assert rows[0]["suggested_dest"] == (
-        "Projects/2026/Creator Profiles/Season 1/B-roll/Editor Added/alex"
+        "Projects/2026/Creator Profiles/Season 1/B-roll/Editor Added/owen"
     )
 
 
@@ -204,12 +204,12 @@ def test_build_popup_rows_server_roots_absent_entry_falls_through_to_existing_ch
     # fall through to the local pick_project_prefix chain, not the tree root.
     server_roots = {"some other project": "Projects/2099/Whatever"}
     rows = build_popup_rows(
-        items, str(tmp_path), "alex", project_prefix="Projects/2025/FF4/Nuclear",
+        items, str(tmp_path), "owen", project_prefix="Projects/2025/FF4/Nuclear",
         server_roots=server_roots,
     )
 
     assert rows[0]["suggested_dest"] == (
-        "Projects/2026/Creator Profiles/Season 1/B-roll/Editor Added/alex"
+        "Projects/2026/Creator Profiles/Season 1/B-roll/Editor Added/owen"
     )
 
 
@@ -218,10 +218,10 @@ def test_build_popup_rows_server_roots_none_falls_through_to_existing_chain(tmp_
     write_project_marker(tmp_path / "Projects" / "2026" / "Creator Profiles" / "Season 1")
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="CCT Creator Profiles")]
 
-    rows = build_popup_rows(items, str(tmp_path), "alex", server_roots=None)
+    rows = build_popup_rows(items, str(tmp_path), "owen", server_roots=None)
 
     assert rows[0]["suggested_dest"] == (
-        "Projects/2026/Creator Profiles/Season 1/B-roll/Editor Added/alex"
+        "Projects/2026/Creator Profiles/Season 1/B-roll/Editor Added/owen"
     )
 
 
@@ -229,11 +229,11 @@ def test_build_popup_rows_server_roots_empty_dict_falls_through_to_existing_chai
     items = [_item(r"C:\Desktop\clip.mov", resolve_project_name="Some Unrelated Show")]
 
     rows = build_popup_rows(
-        items, str(tmp_path), "alex", project_prefix="Projects/2025/FF4/Nuclear",
+        items, str(tmp_path), "owen", project_prefix="Projects/2025/FF4/Nuclear",
         server_roots={},
     )
 
-    assert rows[0]["suggested_dest"] == "Projects/2025/FF4/Nuclear/B-roll/Editor Added/alex"
+    assert rows[0]["suggested_dest"] == "Projects/2025/FF4/Nuclear/B-roll/Editor Added/owen"
 
 
 # -- perform_fix_all with grouped media_pool_items ----------------------------
@@ -245,7 +245,7 @@ def test_perform_fix_all_passes_all_grouped_media_pool_items_to_fix_clip():
         _item(r"C:\Desktop\clip.mov", media_pool_item=mpi_a),
         _item(r"c:\desktop\CLIP.mov", media_pool_item=mpi_b),
     ]
-    rows = build_popup_rows(items, r"C:\Creators_Club", "alex")
+    rows = build_popup_rows(items, r"C:\Creators_Club", "owen")
 
     calls = []
 
@@ -259,7 +259,7 @@ def test_perform_fix_all_passes_all_grouped_media_pool_items_to_fix_clip():
 
 def test_perform_fix_all_falls_back_to_suggestion_when_selection_is_blank():
     items = [_item(r"C:\Desktop\track.wav")]
-    rows = build_popup_rows(items, r"C:\Creators_Club", "alex")
+    rows = build_popup_rows(items, r"C:\Creators_Club", "owen")
 
     calls = []
 
@@ -350,7 +350,7 @@ def test_no_display_fallback_actually_ignores_the_items(monkeypatch):
         {"file_path": r"G:\raw\B002.wav", "media_pool_item": object(),
          "clip_name": "B002", "resolve_project_name": ""},
     ]
-    popup.show_popup(items, "C:\\Creators_Club", "alex", tracker)
+    popup.show_popup(items, "C:\\Creators_Club", "owen", tracker)
 
     assert tracker.is_ignored(r"G:\raw\A001.braw")
     assert tracker.is_ignored(r"G:\raw\B002.wav")
@@ -364,7 +364,7 @@ def test_build_popup_rows_carries_the_effective_prefix(tmp_path):
     rows = popup.build_popup_rows(
         [{"file_path": r"G:\x\clip.mov", "media_pool_item": object(),
           "clip_name": "clip", "resolve_project_name": "CCT S1"}],
-        local_root=str(tmp_path), editor_name="ruskin",
+        local_root=str(tmp_path), editor_name="editor2",
         project_prefix="Projects/2026/CCT/Season 1",
     )
     assert rows[0]["effective_prefix"] == "Projects/2026/CCT/Season 1"
@@ -1308,7 +1308,7 @@ def _bare_dialog(rows):
     dialog.local_root = "L"
     dialog.ignore_tracker = fixer.IgnoreTracker()
     dialog.on_done = None
-    dialog.editor_name = "alex"
+    dialog.editor_name = "owen"
     dialog._fixing = False
     dialog._progress_lock = __import__("threading").Lock()
     dialog._progress = {}
@@ -1651,7 +1651,7 @@ def test_show_popup_dispatches_construction_AND_mainloop_together(monkeypatch):
     monkeypatch.setattr(popup, "PopupDialog", _FakeDialog)
     items = [{"file_path": r"G:\raw\A001.braw", "media_pool_item": object(),
               "clip_name": "A001", "resolve_project_name": ""}]
-    popup.show_popup(items, r"C:\Creators_Club", "alex", fixer_mod.IgnoreTracker())
+    popup.show_popup(items, r"C:\Creators_Club", "owen", fixer_mod.IgnoreTracker())
 
     assert len(calls) == 1
     assert built == [], "the dialog must be built INSIDE the dispatched call"

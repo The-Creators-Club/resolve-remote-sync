@@ -23,7 +23,7 @@ from ccsync_companion.sync.base import STATE_ERROR, STATE_SYNCING, LaneStatus
 
 def _cfg(**overrides):
     cfg = {
-        "editor_name": "alex",
+        "editor_name": "owen",
         "dashboard_url": "http://dash.example.com",
         "dashboard_token": "tok123",
         "dashboard_report_interval": 60,
@@ -69,7 +69,7 @@ def test_post_once_payload_shape_matches_contract():
     assert timeout == reporter.full_report_timeout
     assert reporter.full_report_timeout > reporter.timeout
 
-    assert data["editor_name"] == "alex"
+    assert data["editor_name"] == "owen"
     assert data["machine"] == platform.node()
     assert data["companion_version"] == config_mod.VERSION
     # reported_at must be a parseable ISO 8601 UTC timestamp.
@@ -494,7 +494,7 @@ def test_post_once_omits_identity_header_when_get_identity_token_returns_none():
 
     reporter = DashboardReporter(
         lambda: [], _cfg(), http_post=fake_post,
-        get_editor_name=lambda: "alex",
+        get_editor_name=lambda: "owen",
         get_identity_token=lambda: None,
     )
     reporter.post_once()
@@ -508,11 +508,11 @@ def test_post_once_no_getters_falls_back_to_cfg_editor_name_back_compat():
     def fake_post(url, data, headers, timeout):
         calls.append((data, headers))
 
-    reporter = DashboardReporter(lambda: [], _cfg(editor_name="alex"), http_post=fake_post)
+    reporter = DashboardReporter(lambda: [], _cfg(editor_name="owen"), http_post=fake_post)
     reporter.post_once()
 
     data, headers = calls[0]
-    assert data["editor_name"] == "alex"
+    assert data["editor_name"] == "owen"
     assert "X-CCSync-Identity" not in headers
 
 
@@ -544,7 +544,7 @@ def test_post_once_get_identity_token_failure_omits_header_but_still_posts():
 
     reporter = DashboardReporter(
         lambda: [], _cfg(), http_post=fake_post,
-        get_editor_name=lambda: "alex", get_identity_token=failing_get_identity_token,
+        get_editor_name=lambda: "owen", get_identity_token=failing_get_identity_token,
     )
     reporter.post_once()  # must not raise
 
@@ -778,7 +778,7 @@ def test_default_http_post_sends_json_body_and_headers(fake_dashboard_server):
     url = f"http://127.0.0.1:{port}/api/v1/report"
     default_http_post(
         url,
-        {"editor_name": "alex", "lanes": []},
+        {"editor_name": "owen", "lanes": []},
         {"Content-Type": "application/json", "X-CCSync-Token": "tok123"},
         5.0,
     )
@@ -787,7 +787,7 @@ def test_default_http_post_sends_json_body_and_headers(fake_dashboard_server):
     assert request["path"] == "/api/v1/report"
     assert request["headers"]["x-ccsync-token"] == "tok123"
     assert request["headers"]["content-type"] == "application/json"
-    assert request["body"] == {"editor_name": "alex", "lanes": []}
+    assert request["body"] == {"editor_name": "owen", "lanes": []}
 
 
 def test_reporter_end_to_end_against_fake_server(fake_dashboard_server):
@@ -964,7 +964,7 @@ def test_fit_payload_drops_the_heavy_sections_last_and_keeps_the_report():
     A LIGHT report that arrives beats a HEAVY one that 413s."""
     reporter = _reporter_with()
     payload = {
-        "editor_name": "alex", "machine": "PC", "lanes": [{"name": "lane_a_video_up"}],
+        "editor_name": "owen", "machine": "PC", "lanes": [{"name": "lane_a_video_up"}],
         "media_tree": {"Big": [{"clip_name": "x" * 400} for _ in range(40000)]},
         "local_manifest": {"only": {"n_originals": 1, "originals": None, "proxies": None}},
     }
@@ -972,7 +972,7 @@ def test_fit_payload_drops_the_heavy_sections_last_and_keeps_the_report():
     assert reporter_mod.payload_size(fitted) <= 4096
     assert "media_tree" not in fitted          # the biggest section goes first
     assert fitted["lanes"] == [{"name": "lane_a_video_up"}]
-    assert fitted["editor_name"] == "alex" and fitted["machine"] == "PC"
+    assert fitted["editor_name"] == "owen" and fitted["machine"] == "PC"
 
     # ...and when even that is not enough, local_manifest goes too
     payload["local_manifest"] = {f"p{i}": {"n_originals": i} for i in range(400)}
@@ -990,7 +990,7 @@ def test_a_fitted_payload_carries_the_bytes_it_was_measured_as():
     and 2x transient peak memory per heavy report on the machine with the
     64-project manifest."""
     reporter = _reporter_with()
-    payload = {"editor_name": "alex", "machine": "PC", "lanes": []}
+    payload = {"editor_name": "owen", "machine": "PC", "lanes": []}
     fitted = reporter._fit_payload(dict(payload), budget=reporter_mod.PAYLOAD_BUDGET_BYTES)
 
     body = getattr(fitted, "encoded", None)
@@ -1005,7 +1005,7 @@ def test_a_shed_payload_carries_the_bytes_of_its_FINAL_shape():
     one -- sending those would put the dropped sections back on the wire."""
     reporter = _reporter_with()
     payload = {
-        "editor_name": "alex", "machine": "PC", "lanes": [],
+        "editor_name": "owen", "machine": "PC", "lanes": [],
         "media_tree": {"Big": [{"clip_name": "x" * 400} for _ in range(4000)]},
     }
     fitted = reporter._fit_payload(dict(payload), budget=4096)
@@ -1025,12 +1025,12 @@ def test_default_http_post_sends_the_pre_encoded_body_when_there_is_one(
     url = f"http://127.0.0.1:{port}/api/v1/report"
     headers = {"Content-Type": "application/json"}
 
-    measured = reporter_mod._measured({"editor_name": "alex"}, b'{"editor_name": "alex"}')
+    measured = reporter_mod._measured({"editor_name": "owen"}, b'{"editor_name": "owen"}')
     default_http_post(url, measured, headers, 5.0)
-    default_http_post(url, {"editor_name": "ruskin"}, headers, 5.0)
+    default_http_post(url, {"editor_name": "editor2"}, headers, 5.0)
 
     bodies = [r["body"] for r in fake_dashboard_server.captured]
-    assert bodies == [{"editor_name": "alex"}, {"editor_name": "ruskin"}]
+    assert bodies == [{"editor_name": "owen"}, {"editor_name": "editor2"}]
 
 
 def test_the_queue_is_capped_at_the_dashboards_ceiling(caplog):
@@ -1209,7 +1209,7 @@ def test_fit_payload_sheds_the_proxy_project_map_and_keeps_the_scalars(caplog):
     the report fit."""
     reporter = _reporter_with()
     payload = {
-        "editor_name": "alex", "lanes": [{"name": "lane_a_video_up"}],
+        "editor_name": "owen", "lanes": [{"name": "lane_a_video_up"}],
         "proxy_coverage": _coverage(projects={
             f"2026/FF5/P{i:03d}": {"missing": i} for i in range(64)}),
         "local_manifest": {"only": {"n_originals": 1, "originals": None, "proxies": None}},

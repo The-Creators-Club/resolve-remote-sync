@@ -12,6 +12,11 @@ from app import fuzzy, semantic  # noqa: E402
 from app.db import ensure_schema, get_db, open_connection  # noqa: E402
 from app.main import app  # noqa: E402
 
+# One value for the whole suite, matched by the `client` fixture's default
+# header. Long enough to also satisfy the dashboard gate's 24-char floor, so a
+# test that reuses it against ccsync_dashboard.broll.check_ingest_token passes.
+INGEST_TOKEN = "test-ingest-token-0123456789abcdef"
+
 
 @pytest.fixture(autouse=True)
 def reset_hybrid_search_caches():
@@ -34,7 +39,11 @@ def reset_hybrid_search_caches():
 def data_root(tmp_path, monkeypatch):
     """Fresh DATA_ROOT per test, with a schema-applied DB."""
     monkeypatch.setenv("BROLL_DATA_ROOT", str(tmp_path))
-    monkeypatch.delenv("BROLL_INGEST_TOKEN", raising=False)
+    # The ingest routes are fail-closed since 2026-08-17 (no token = 503), so
+    # the suite runs configured like a deployment rather than in the dev mode
+    # that no longer exists. The `client` fixture sends the matching header on
+    # every request; tests about the gate itself build their own bare client.
+    monkeypatch.setenv("BROLL_INGEST_TOKEN", INGEST_TOKEN)
     ensure_schema(tmp_path / "broll.db")
     return tmp_path
 
@@ -56,6 +65,6 @@ def client(data_root, conn):
         yield conn
 
     app.dependency_overrides[get_db] = _override
-    with TestClient(app) as c:
+    with TestClient(app, headers={"X-Ingest-Token": INGEST_TOKEN}) as c:
         yield c
     app.dependency_overrides.clear()

@@ -17,8 +17,40 @@
   {% endfor %}
 </div>
 
+{# Safety alarms (COMMERCIAL_READINESS.md item 9, 2026-08-17). ABOVE the
+   companion table, not a chip inside it: a machine that has stopped
+   downloading proxies, or that an editor has halted, looks completely
+   healthy on every other signal this page has -- so the fleet banner is the
+   only thing that makes it visible without reading every row. #}
+{% if fleet.fleet_halt and fleet.fleet_halt.active %}
+<div class="banner alarm">⛔ FLEET SYNC IS HALTED — every companion has stopped syncing.
+  {% if fleet.fleet_halt.reason %}{{ fleet.fleet_halt.reason }}{% endif %}
+  <span class="mono-sm muted">set by {{ fleet.fleet_halt.set_by }} {{ fleet.fleet_halt.set_at | ago }}</span>
+</div>
+{% endif %}
+{% if fleet.breaker_tripped %}
+<div class="banner alarm">⛔ PROXY DOWNLOAD STOPPED on {{ fleet.breaker_tripped | length }} machine(s):
+  {% for m in fleet.breaker_tripped %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
+  Check the server, then have each editor use the tray's "Resume proxy download".
+</div>
+{% endif %}
+{% if fleet.halted %}
+<div class="banner alarm">⛔ SYNCING STOPPED on {{ fleet.halted | length }} machine(s):
+  {% for m in fleet.halted %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
+</div>
+{% endif %}
+
 <div class="side-head" style="margin-top:2rem">[ COMPANIONS ]</div>
 <div class="rule">{{ "─" * 100 }}</div>
+{# An editor sees their own machines; the rest of the fleet is a COUNT, never a
+   roster (COMMERCIAL_READINESS.md §C L1, 2026-08-17 -- api.py's
+   _scope_editors_view). An admin has nothing hidden, so this line does not
+   appear for them. #}
+{% if fleet.machines_hidden %}
+<div class="muted">Showing your machines. {{ fleet.machines_hidden }} other machine(s) in
+  the fleet: {{ fleet.summary.machines_unhealthy }} unhealthy,
+  {{ fleet.summary.machines_outdated }} on an old build.</div>
+{% endif %}
 {% if fleet.editors %}
 <table class="editors">
   <thead><tr><th></th><th>EDITOR</th><th>MACHINE</th><th>LANES</th><th>VERSION</th><th>LAST REPORT</th></tr></thead>
@@ -40,6 +72,12 @@
         {% if e.transport.relayed %}<span class="chip amber" title="{{ e.transport.relayed }} Syncthing peer(s) connected via a RELAY, not directly -- lane C on this machine is limited to relay speed (1-5 MB/s), not the link. Checked {{ e.transport.at | ago }}.">[ RELAYED: {{ e.transport.relayed }} ]</span>
         {% elif e.transport.direct %}<span class="chip lane green" title="{{ e.transport.direct }} Syncthing peer(s) connected directly. Checked {{ e.transport.at | ago }}.">direct:{{ e.transport.direct }}</span>{% endif %}
         {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ e.transport.orphan_partial_bytes | human_bytes }} of orphaned rclone .partial files left on the NAS by an interrupted lane A. Never deleted automatically; remove them by hand to reclaim the space.">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
+        {# The safety latches, first among the chips: they outrank every
+           transport diagnostic beside them (item 9). #}
+        {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ e.guard.breaker_reason }} — tripped {{ e.guard.breaker_at | ago }}. Lane A and lane C are still running; nothing was deleted.">[ PROXY DOWNLOAD STOPPED ]</span>{% endif %}
+        {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ SYNC HALTED{{ " (FLEET)" if e.guard.halt_scope == "fleet" }} ]</span>{% endif %}
+        {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ e.guard.skipped_exists }} file(s) exist on the NAS under the same name at a different size. Lane A is copy --ignore-existing, so this machine's newer versions will never upload.">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
+        {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ e.guard.trash_count }} recoverable file(s) in this machine's .ccsync-trash. Pruned automatically after 14 days.">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
         {% if e.transport.express_last_error %}<span class="chip amber" title="last express-lane failure: {{ e.transport.express_last_error }}">[ EXPRESS FAILED ]</span>
         {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file(s) dropped by the express lane's batch cap -- they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
       </td>

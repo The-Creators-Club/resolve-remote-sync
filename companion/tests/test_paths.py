@@ -111,7 +111,7 @@ def test_windows_tree_membership_folds_forward_slashes():
 
 def test_windows_out_of_tree_when_exists():
     result = classify_path(
-        r"C:\Users\alex\Desktop\clip.mov",
+        r"C:\Users\owen\Desktop\clip.mov",
         local_root=r"C:\Creators_Club",
         canonical_prefix="P:\\",
         exists_fn=_always_true,
@@ -347,7 +347,7 @@ def test_base_rig_stray_nas_media_is_out_of_tree():
     assert classify_path("T:\\Creators_Club\\Projects\\2025\\FF4\\Nuclear\\a.wav", **kwargs) == OK
     assert classify_path("T:\\Temp Transfer\\Creators Club\\x.braw", **kwargs) == OUT_OF_TREE
     assert classify_path("G:\\Temp Transfer\\y.braw", **kwargs) == OUT_OF_TREE
-    assert classify_path("C:\\Users\\alex\\Downloads\\z.mp4", **kwargs) == OUT_OF_TREE
+    assert classify_path("C:\\Users\\owen\\Downloads\\z.mp4", **kwargs) == OUT_OF_TREE
 
 
 # -- macOS editors: a canonical P:\ prefix on a posix host ------------------

@@ -10,6 +10,11 @@ be unit tested" reasoning the companion's own popup.py documents.
 
 Flow (Back/Next through a single window, frames swapped in place):
 
+    0. Licence   -- the EULA, ACCEPT/DECLINE. DECLINE closes the installer;
+                    ACCEPT records ~/.ccsync/eula_accepted.json, which the
+                    companion gates its sync lanes on. Skipped when this
+                    machine already accepted this version of the document
+                    (2026-08-17, COMMERCIAL_READINESS.md item 3).
     1. Welcome   -- what this does + installer/bundled-companion versions.
     2. Role      -- EDITOR (remote) or BASE rig, both platforms; sets the
                     dashboard-URL default (tailnet vs LAN) and which pages
@@ -64,7 +69,8 @@ WINDOW_SIZE = "660x560"
 TAILSCALE_DOWNLOAD_URL = ("https://tailscale.com/download/mac" if IS_MACOS
                           else "https://tailscale.com/download/windows")
 # Example path shown next to the local-root field; role-independent on macOS.
-LOCAL_ROOT_EXAMPLE = "/Volumes/YourSSD/Creators_Club" if IS_MACOS else r"D:\Creators_Club"
+LOCAL_ROOT_EXAMPLE = (f"/Volumes/YourSSD/{steps.NEUTRAL_TREE_NAME}" if IS_MACOS
+                      else f"D:\\{steps.NEUTRAL_TREE_NAME}")
 
 
 def _label(parent, text, **kw):
@@ -154,7 +160,11 @@ class OnboardWizard:
         self.container.pack(fill="both", expand=True)
 
         self.page_frame: Optional[tk.Frame] = None
-        self.show_welcome()
+        # The licence comes before everything, including the welcome text --
+        # it is what the editor is agreeing to by installing at all
+        # (2026-08-17, COMMERCIAL_READINESS.md item 3). It shows itself only
+        # when this machine has not already accepted the bundled version.
+        self.show_eula()
 
     # -- page scaffolding -----------------------------------------------
 
@@ -231,6 +241,83 @@ class OnboardWizard:
         """
         self._ui_queue.put(fn)
 
+    # -- page 0: the licence ----------------------------------------------
+
+    def show_eula(self) -> None:
+        """The licence agreement, and the only place it is ever read.
+
+        2026-08-17, docs/COMMERCIAL_READINESS.md item 3. The wizard runs
+        before the companion is installed, so it is the only party that can
+        take consent before anything syncs; ACCEPT writes
+        ~/.ccsync/eula_accepted.json (steps.record_eula_acceptance), which the
+        companion's eula.py reads and gates its sync lanes on.
+
+        Skipped when this machine already holds an acceptance at least as new
+        as the bundled document -- re-running the installer is meant to be
+        safe and routine, and making an editor re-read the same agreement
+        every time teaches them to click past it. A bumped EULA-VERSION
+        marker brings the page back.
+        """
+        if steps.eula_accepted():
+            log.info("licence already accepted on this machine -- skipping that page")
+            self.show_welcome()
+            return
+
+        frame = self._new_page()
+        _heading(frame, "LICENCE AGREEMENT")
+        _label(frame,
+               "Read the agreement below. ACCEPT records your agreement on this\n"
+               "machine and continues; DECLINE closes the installer and nothing\n"
+               "is changed.",
+               wraplength=560).pack(anchor="w", pady=(0, 10))
+
+        box = tk.Frame(frame, bg=theme.FIELD, highlightthickness=1,
+                       highlightbackground=theme.RED_DIM)
+        box.pack(fill="both", expand=True, pady=(0, 4))
+        text_widget = tk.Text(box, bg=theme.FIELD, fg=theme.TEXT, font=theme.mono(8),
+                              relief="flat", wrap="word", height=16,
+                              insertbackground=theme.RED)
+        scroll = tk.Scrollbar(box, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scroll.set)
+        text_widget.insert("1.0", steps.EULA_TEXT or (
+            "The licence document is missing from this build of the installer.\n\n"
+            "Ask your administrator for a copy before continuing -- accepting\n"
+            "here records that you agreed to an agreement this installer could\n"
+            "not show you."
+        ))
+        # Read-only AFTER the insert: a disabled Text refuses writes from the
+        # program too, so ordering is not cosmetic.
+        text_widget.config(state="disabled")
+        text_widget.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        _label(frame, f"version {steps.EULA_VERSION or '?'}",
+               fg=theme.MUTED, font=theme.mono(9)).pack(anchor="w", pady=(6, 0))
+
+        bar = tk.Frame(frame, bg=theme.BG)
+        bar.pack(side="bottom", fill="x", pady=(16, 0))
+        theme.neon_button(tk, bar, "DECLINE", self._on_eula_decline,
+                          primary=False).pack(side="left")
+        theme.neon_button(tk, bar, "ACCEPT", self._on_eula_accept,
+                          primary=True).pack(side="right")
+
+    def _on_eula_decline(self) -> None:
+        log.info("licence DECLINED -- closing the installer without changing anything")
+        self.root.destroy()
+
+    def _on_eula_accept(self) -> None:
+        try:
+            path = steps.record_eula_acceptance()
+            log.info("licence v%s accepted -- recorded in %s", steps.EULA_VERSION, path)
+        except Exception:
+            # Do not trap the editor on page 0 over an unwritable ~/.ccsync:
+            # the install writes config.toml and identity.json into that same
+            # directory minutes later and fails loudly there, with a log the
+            # editor can send on. The companion's own gate is what notices a
+            # missing record.
+            log.exception("could not record the licence acceptance -- continuing")
+        self.show_welcome()
+
     # -- page 1: welcome --------------------------------------------------
 
     def show_welcome(self) -> None:
@@ -238,8 +325,8 @@ class OnboardWizard:
         _heading(frame, "WELCOME")
         if IS_MACOS:
             welcome_text = (
-                "This installer sets up (or refreshes) this Mac for Creators\n"
-                "Club editing: it removes every trace of older CCSync versions,\n"
+                "This installer sets up (or refreshes) this Mac for shared\n"
+                "editing: it removes every trace of older CCSync versions,\n"
                 "installs the sync tools and the current companion app (which\n"
                 "updates itself from the dashboard from now on), signs it in,\n"
                 "and points DaVinci Resolve's P:\\ mapping at your local copy\n"
@@ -249,8 +336,8 @@ class OnboardWizard:
             )
         else:
             welcome_text = (
-                "This installer sets up (or refreshes) this machine for Creators\n"
-                "Club editing: it removes every trace of older CCSync versions,\n"
+                "This installer sets up (or refreshes) this machine for shared\n"
+                "editing: it removes every trace of older CCSync versions,\n"
                 "remounts the project drive, installs the current companion app\n"
                 "(which updates itself from the dashboard from now on), and\n"
                 "signs it in.\n\n"
@@ -331,7 +418,10 @@ class OnboardWizard:
         if self.dashboard_url_var.get().strip() in url_defaults:
             self.dashboard_url_var.set(
                 steps.DEFAULT_BASE_DASHBOARD_URL if role == "base" else steps.DEFAULT_DASHBOARD_URL)
-        root_defaults = {steps.DEFAULT_LOCAL_ROOT, steps.DEFAULT_BASE_LOCAL_ROOT,
+        # LEGACY_DEFAULT_LOCAL_ROOT is in the set on purpose: a machine whose
+        # field still holds the pre-2026-08-17 default has not been
+        # hand-edited either, and clobbering it is the intended behaviour.
+        root_defaults = {steps.LEGACY_DEFAULT_LOCAL_ROOT, steps.DEFAULT_BASE_LOCAL_ROOT,
                          steps.default_local_root(), steps.default_base_local_root()}
         if self.local_root_var.get().strip() in root_defaults:
             self.local_root_var.set(
@@ -562,13 +652,16 @@ class OnboardWizard:
             row=0, column=0, sticky="w")
         _entry(form, self.local_root_var, width=34).grid(row=0, column=1, sticky="w", padx=(10, 0))
         if role == "base" and IS_MACOS:
-            _label(frame, "The Creators_Club folder on the NAS share this machine edits\n"
+            # "the project tree", not one customer's tree name (2026-08-17,
+            # COMMERCIAL_READINESS.md item 11) -- the wizard cannot know it
+            # here, and the seeded value in the box already shows it.
+            _label(frame, "The project-tree folder on the NAS share this machine edits\n"
                            f"from (e.g. {steps.default_base_local_root()}) --\n"
                            "mount the share first if it isn't under /Volumes yet.",
                    fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
         elif role == "base":
-            _label(frame, "The Creators_Club folder on the NAS mapping this machine edits\n"
-                           "from (default T:\\Creators_Club).",
+            _label(frame, "The project-tree folder on the NAS mapping this machine\n"
+                           "edits from (the drive your admin mapped for the base rig).",
                    fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
         elif IS_MACOS:
             _label(frame, "Best on an external SSD, plugged in right now:\n"
@@ -677,7 +770,13 @@ class OnboardWizard:
             warnings = steps.execute_cleanup_macos(plan, self._append_log)
         else:
             plan = steps.build_cleanup_plan(role, self.local_root_var.get().strip() or None)
-            warnings = steps.execute_cleanup(plan, self._append_log)
+            # smb_unc so the unmount gate can recognise THIS site's NAS share
+            # as somebody else's mapping, not just any non-loopback UNC
+            # (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+            warnings = steps.execute_cleanup(
+                plan, self._append_log,
+                smb_unc=str(self.site.get("smb_unc") or ""),
+            )
         for warning in warnings:
             self._append_log(f"WARNING: {warning}")
         self._append_log("clean slate done.")

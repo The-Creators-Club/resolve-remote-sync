@@ -14,6 +14,8 @@ transaction, tracked with `PRAGMA user_version`, and registered in
 | # | File | What |
 |---|---|---|
 | 001 | `001_track_share.sql` | `tracks.share` (constant `'music'`) — the b-roll `(share, rel_path)` rule |
+| 002 | `002_ingest_queue.sql` | the drag-and-drop ingest queue (port step 7) |
+| 003 | `003_ingest_journal.sql` | `ingest_queue.uid` — a per-upload identity that survives the database being copied, so a drain can close exactly the rows it analysed instead of pushing the whole file back over uploads queued in the meantime (`musicweb/drain.py`) |
 
 Two things differ from b-roll's runner, both because this database predates
 `user_version`:

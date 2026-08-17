@@ -4,7 +4,7 @@
     Run every test suite in the repo with the interpreter each one needs.
 
 .DESCRIPTION
-    One command instead of nine, because the suites do not share a venv and
+    One command instead of ten, because the suites do not share a venv and
     three of them do not even have one: server/ borrows the dashboard's,
     onboarding/ and broll/indexer run on the system python, and broll/web
     still borrows the venv of the old standalone broll-platform checkout
@@ -66,14 +66,34 @@ $Suites = @(
     @{ Name = "server";        Dir = "$repo\server";        Py = "$repo\dashboard\.venv\Scripts\python.exe"; Bash = $true },
     @{ Name = "onboarding";    Dir = "$repo\onboarding";    Py = "python" },
     @{ Name = "bench";         Dir = "$repo\bench";         Py = "$repo\bench\.venv\Scripts\python.exe" },
-    @{ Name = "broll/web";     Dir = "$repo\broll\web";     Py = "E:\Projects\broll-platform\web\.venv\Scripts\python.exe" },
+    # broll/web has no venv of its own and still borrows the old standalone
+    # broll-platform checkout's. That path exists on ONE machine (this one), so
+    # since 2026-08-17 it falls back to the dashboard venv, which carries the
+    # same deps -- otherwise this suite reads "NO INTERPRETER" on every other
+    # clone, which is a silent skip of test_mounted_prefix.py.
+    @{ Name = "broll/web";     Dir = "$repo\broll\web";     Py = "E:\Projects\broll-platform\web\.venv\Scripts\python.exe";
+                                                            Fallback = "$repo\dashboard\.venv\Scripts\python.exe" },
     @{ Name = "broll/indexer"; Dir = "$repo\broll\indexer"; Py = "python" },
     @{ Name = "music/web";     Dir = "$repo\music\web";     Py = "$repo\music\web\.venv\Scripts\python.exe" },
+    # music/indexer runs on the SYSTEM python, like broll/indexer: the real
+    # pipeline needs the GPU and torch, but its suite is the path/config half
+    # and is stdlib-only on purpose. It was the last tests/ directory in the
+    # repo this wrapper did not run (2026-08-17 integration pass) -- and
+    # test_config_paths.py is what stops the indexer writing a customer's
+    # library path back into the shipped config.
+    @{ Name = "music/indexer"; Dir = "$repo\music\indexer"; Py = "python" },
     # ytdl/web has no venv of its own; its suite runs under the dashboard venv
     # (the deployed reality: it is mounted in-process by the dashboard).
     # YTDL-14 (2026-08-11): the suite existed, passed, and was wired into
     # nothing -- the next regression would have shipped silently.
-    @{ Name = "ytdl/web";      Dir = "$repo\ytdl\web";      Py = "$repo\dashboard\.venv\Scripts\python.exe" }
+    @{ Name = "ytdl/web";      Dir = "$repo\ytdl\web";      Py = "$repo\dashboard\.venv\Scripts\python.exe" },
+    # tools/ has no venv either -- it is stdlib-only by design (gen_notices.py
+    # and check_licenses.py must run under ANY interpreter on this machine,
+    # because the thing they audit is the dependency list). The dashboard venv
+    # is the one with pytest and `packaging`, which check_licenses uses to
+    # evaluate the lockfiles' platform markers (2026-08-17,
+    # COMMERCIAL_READINESS.md item 13).
+    @{ Name = "tools";         Dir = "$repo\tools";         Py = "$repo\dashboard\.venv\Scripts\python.exe" }
 )
 
 # A suite whose Py is the bare string "python" was never existence-checked
@@ -94,6 +114,10 @@ foreach ($s in $Suites) {
     if (-not $py) {
         $results += @{ Name = $s.Name; Outcome = "NO INTERPRETER (no 'python' on PATH)" }
         continue
+    }
+    if (-not (Test-Path $py) -and $s.Fallback -and (Test-Path $s.Fallback)) {
+        Write-Host "  (no $py -- falling back to $($s.Fallback))" -ForegroundColor Yellow
+        $py = $s.Fallback
     }
     if (-not (Test-Path $py)) {
         $results += @{ Name = $s.Name; Outcome = "NO INTERPRETER ($py)" }
@@ -125,6 +149,22 @@ Write-Host "`n=== installer (Pester-less table tests) ===" -ForegroundColor Cyan
 $global:LASTEXITCODE = 9999
 powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-DriveMapParser.ps1"
 $results += @{ Name = "installer"; Outcome = $(if ($LASTEXITCODE -eq 0) { "PASS" } else { "FAIL (exit $LASTEXITCODE)" }) }
+
+# The macOS half of the same two checks -- the site-manifest reader, the
+# canonical_prefix -> drive-letter rule and the pinned-download verifier
+# (2026-08-17, COMMERCIAL_READINESS.md items 11 and 13). Pure string helpers
+# sliced out of macos_bootstrap.sh, so they run here and not only on a Mac.
+# Same $bashExe as the server suite, for the same reason.
+Write-Host "`n=== installer/macos (bash table tests) ===" -ForegroundColor Cyan
+if (-not $bashExe) {
+    Write-Host "  SKIP: no Git bash found" -ForegroundColor Yellow
+    $results += @{ Name = "installer/macos"; Outcome = "SKIP (no bash)" }
+}
+else {
+    $global:LASTEXITCODE = 9999
+    & $bashExe -lc "cd '$($repo -replace '\\','/')' && bash installer/tests/test_macos_site_values.sh"
+    $results += @{ Name = "installer/macos"; Outcome = $(if ($LASTEXITCODE -eq 0) { "PASS" } else { "FAIL (exit $LASTEXITCODE)" }) }
+}
 
 Write-Host ""
 Write-Host ("-" * 46)

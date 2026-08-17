@@ -214,6 +214,102 @@ def test_a_prereq_failure_registers_no_job(tmp_path, rclone_present):
 
 
 # ---------------------------------------------------------------------------
+# The cap, the tree and the destination (COMMERCIAL_READINESS.md item 5)
+# ---------------------------------------------------------------------------
+
+
+def test_a_third_concurrent_download_is_refused_not_queued(tmp_path, rclone_present):
+    """The web UI re-POSTs every 1.5 s, so without a cap a page holding the
+    button down is a spawn button: one rclone per click, all of them competing
+    with lanes A and B for the same SFTP link."""
+    started: list = []
+    runner = _capturing_runner(started)
+    for n in range(broll_fetch.MAX_CONCURRENT_FETCHES):
+        assert broll_fetch.poll_fetch(
+            CFG, f"a/clip{n}.mov", str(tmp_path / f"clip{n}.mov"), runner=runner
+        )["state"] == "downloading"
+
+    result = broll_fetch.poll_fetch(
+        CFG, "a/one_too_many.mov", str(tmp_path / "one_too_many.mov"), runner=runner)
+
+    assert result == {"state": "failed", "message": broll_fetch.BUSY_MESSAGE}
+    assert len(started) == broll_fetch.MAX_CONCURRENT_FETCHES
+    # ...and the refused one registered nothing, so the next poll is a fresh
+    # start rather than a job stuck in "failed".
+    with broll_fetch._JOBS_LOCK:
+        assert str(tmp_path / "one_too_many.mov").lower() not in \
+            [k.lower() for k in broll_fetch._JOBS]
+
+
+def test_a_poll_of_a_running_job_is_never_capped(tmp_path, rclone_present):
+    """The cap must not break the poll loop of the downloads already running:
+    joining an existing job is not a new child."""
+    started: list = []
+    runner = _capturing_runner(started)
+    dests = [str(tmp_path / f"clip{n}.mov")
+             for n in range(broll_fetch.MAX_CONCURRENT_FETCHES)]
+    for n, dest in enumerate(dests):
+        broll_fetch.poll_fetch(CFG, f"a/clip{n}.mov", dest, runner=runner)
+
+    for n, dest in enumerate(dests):
+        assert broll_fetch.poll_fetch(
+            CFG, f"a/clip{n}.mov", dest, runner=runner)["state"] == "downloading"
+    assert len(started) == broll_fetch.MAX_CONCURRENT_FETCHES
+
+
+def test_a_destination_outside_the_tree_is_refused(tmp_path):
+    """Defence in depth behind the (share, rel_path) validation: an
+    `rclone copyto` writes wherever it is pointed, and the mounts table it is
+    pointed through is a file an editor can hand-edit."""
+    cfg = dict(CFG, local_root=str(tmp_path / "tree"))
+    (tmp_path / "tree").mkdir()
+    refusal = broll_fetch.fetch_refusal(cfg, str(tmp_path / "elsewhere" / "clip.mov"))
+    assert refusal and "outside this machine's tree" in refusal
+
+
+def test_a_destination_inside_the_tree_is_allowed(tmp_path):
+    cfg = dict(CFG, local_root=str(tmp_path))
+    assert broll_fetch.fetch_refusal(
+        cfg, str(tmp_path / "Assets" / "B-roll Archive" / "clip.mov")) is None
+
+
+def test_no_local_root_means_nowhere_to_put_it(tmp_path):
+    assert broll_fetch.fetch_refusal(dict(CFG, local_root=""),
+                                     str(tmp_path / "clip.mov"))
+
+
+def test_an_absent_tree_stops_the_download_before_rclone_runs(tmp_path):
+    """THE macOS failure this guard exists for: `rclone` into an unmounted
+    /Volumes/<Name> does not fail -- it creates the directory on the boot
+    volume and fills the internal disk (root_guard.py). Every lane asks the
+    guard first; this download never did."""
+    cfg = dict(CFG, local_root=str(tmp_path))
+    refusal = broll_fetch.fetch_refusal(
+        cfg, str(tmp_path / "clip.mov"),
+        probe=lambda root: broll_fetch.root_guard.ROOT_ABSENT,
+    )
+    assert refusal and "isn't mounted" in refusal
+
+
+def test_a_misplaced_volume_is_refused_too(tmp_path):
+    cfg = dict(CFG, local_root=str(tmp_path))
+    assert broll_fetch.fetch_refusal(
+        cfg, str(tmp_path / "clip.mov"),
+        probe=lambda root: broll_fetch.root_guard.ROOT_MISPLACED,
+    )
+
+
+def test_a_broken_probe_never_blocks_the_download(tmp_path):
+    """root_guard's contract: ROOT_UNKNOWN is "no new information", never a
+    reason to stop an editor working."""
+    cfg = dict(CFG, local_root=str(tmp_path))
+    assert broll_fetch.fetch_refusal(
+        cfg, str(tmp_path / "clip.mov"),
+        probe=lambda root: broll_fetch.root_guard.ROOT_UNKNOWN,
+    ) is None
+
+
+# ---------------------------------------------------------------------------
 # The stderr feed
 # ---------------------------------------------------------------------------
 

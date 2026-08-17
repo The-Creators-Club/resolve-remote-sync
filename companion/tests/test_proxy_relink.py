@@ -130,7 +130,7 @@ def test_working_proxy_is_left_alone():
 
 
 def test_out_of_tree_media_is_never_touched():
-    """267 of ruskin's 431 clips were BM Cloud media with broken proxies --
+    """267 of an editor's 431 clips were BM Cloud media with broken proxies --
     the editor's own business, not this system's."""
     bm = r"F:\[BM Cloud]\Exhibition Videos\Downloads\clip.mp4"
     bm_proxy = r"F:\[BM Cloud]\Exhibition Videos\Downloads\Proxy\clip.mov"

@@ -1,66 +1,58 @@
 """Regressions from the real FF2 run, where an exhausted API credit balance
-marked five videos permanently 'error' while reporting an unrelated warning.
+marked five videos permanently 'error'.
+
+2026-08-17, COMMERCIAL_READINESS.md item 1: the first four tests here used to
+pin the `claude -p` CLI's stdout/stderr envelope — the wrapper that swallowed
+the real cause and reported an unrelated connectors warning instead. That
+wrapper is gone with the CLI; the same failures now arrive as SDK exceptions,
+and what has to survive is the CLASSIFICATION (fatal vs per-video), which every
+other test in this file still covers unchanged.
 """
 from __future__ import annotations
 
-import json
+from types import SimpleNamespace
 
 import pytest
 
 from broll_index.claude_client import (
     ClaudeCallError,
-    _describe_cli_failure,
-    _envelope_error,
+    describe_api_error,
     invoke_claude,
     is_fatal_api_error,
 )
 
-# Verbatim stderr from the run: a warning with nothing to do with the failure.
-REAL_STDERR = (
-    "⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth "
-    "source is set and takes precedence over your claude.ai login · Unset it to load "
-    "your organization's connectors"
-)
-# The actual cause, which lived in stdout.
-REAL_STDOUT = json.dumps(
-    {
-        "type": "result",
-        "subtype": "success",
-        "is_error": True,
-        "api_error_status": 400,
-        "result": "Credit balance is too low",
-    }
-)
+
+def _api_error(status: int, err_type: str, message: str):
+    """Shaped like anthropic.APIStatusError (see tests/test_anthropic_client.py)."""
+    exc = Exception(f"{status}: {message}")
+    exc.status_code = status
+    exc.body = {"type": "error", "error": {"type": err_type, "message": message}}
+    exc.response = SimpleNamespace(status_code=status, headers={})
+    return exc
 
 
-def test_the_real_error_is_reported_not_the_warning():
-    described = _describe_cli_failure(REAL_STDOUT, REAL_STDERR)
-    assert "Credit balance is too low" in described
+def test_the_real_error_is_reported_with_its_status():
+    """The FF2 cause, verbatim, now as the API's own error body."""
+    described = describe_api_error(
+        _api_error(400, "invalid_request_error",
+                   "Your credit balance is too low to access the Anthropic API"))
+    assert "credit balance is too low" in described.lower()
     assert "400" in described
+    assert is_fatal_api_error(described)
 
 
-def test_envelope_error_ignores_successful_responses():
-    ok = json.dumps({"type": "result", "is_error": False, "result": "{}"})
-    assert _envelope_error(ok) is None
-    assert _envelope_error("not json") is None
-    assert _envelope_error("") is None
+def test_a_credit_failure_raises_rather_than_returning_a_bad_response():
+    class Messages:
+        def create(self, **kwargs):
+            raise _api_error(400, "invalid_request_error",
+                             "Your credit balance is too low to access the Anthropic API")
+
+    with pytest.raises(ClaudeCallError, match="(?i)credit balance"):
+        invoke_claude("prompt", "haiku", client=SimpleNamespace(messages=Messages()))
 
 
-def test_zero_exit_with_is_error_still_raises(monkeypatch):
-    """The CLI can report an API failure while exiting 0 — that is not success."""
-    class FakeResult:
-        returncode = 0
-        stdout = REAL_STDOUT
-        stderr = ""
-
-    monkeypatch.setattr("subprocess.run", lambda *a, **k: FakeResult())
-    with pytest.raises(ClaudeCallError, match="Credit balance"):
-        invoke_claude("prompt", "haiku")
-
-
-def test_fallback_when_stdout_has_no_envelope():
-    assert "boom" in _describe_cli_failure("", "boom")
-    assert _describe_cli_failure("", "") == "no output"
+def test_an_error_with_no_body_still_describes_something():
+    assert "boom" in describe_api_error(Exception("boom"))
 
 
 @pytest.mark.parametrize(

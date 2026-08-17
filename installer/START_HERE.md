@@ -1,4 +1,8 @@
-# Creators Club Remote Editing — Start Here
+# CC Sync Remote Editing — Start Here
+
+CC Sync — fleet sync for DaVinci Resolve®. **Requires DaVinci Resolve Studio**
+(the paid version): collaboration and the scripting interface do not exist in
+the free edition.
 
 Welcome! This gets you editing on our shared DaVinci Resolve project server with
 proxies synced to your machine automatically. ~20 minutes, one time.
@@ -15,7 +19,7 @@ for everyone, and the installer refuses to run that way).
 Follow the wizard: pick **REMOTE EDITOR** on the role page (BASE is only
 for the studio base rig). It cleans out any older CCSync install first,
 remounts your P: drive fresh, installs everything, signs you in with your
-TrueNAS account (you can't finish without valid credentials), and at the
+NAS account (you can't finish without valid credentials), and at the
 end shows you two values — your **Syncthing device ID** and **SSH public
 key** — to send to your admin so they can approve you.
 
@@ -52,8 +56,8 @@ so think in hundreds of GB rather than tens. It does **not** have to be your
 ## 1. Join the private network (Tailscale)
 
 1. Install Tailscale: https://tailscale.com/download
-2. Sign in with the **invite link your admin sends you** (it joins you to the
-   `cablewrapcreative.com` network).
+2. Sign in with the **invite link your admin sends you** (it joins you to your
+   organisation's private network).
 3. That's it — you can now reach the server privately. No port forwarding, no VPN config.
 
 ## 2. Run the setup script
@@ -194,7 +198,7 @@ makes your added media appear for everyone else. Your original stays where it
 is; delete it yourself later if you want.
 
 **Now sign in — this is the switch that turns sync on.** Right-click the
-tray icon → **Sign in…** and enter your TrueNAS username and password
+tray icon → **Sign in…** and enter your NAS username and password
 (the ones your admin set up). Until the tray says `Signed in as <you>`, nothing
 syncs — and your machine won't show up on your admin's side either, since the
 app only reports in once it knows who you are. If they say they can't see your
@@ -263,3 +267,8 @@ script with it, or the app can't report status or follow your ticks.)
 Problems? Tray icon red, clips offline, popup confused — message your admin
 with a screenshot of the tray menu. If sync seems dead, the log at
 `~/.ccsync/companion.log` says what's wrong in plain English near the top.
+
+---
+
+DaVinci Resolve is a registered trademark of Blackmagic Design Pty Ltd. CC Sync
+is not affiliated with, endorsed by, or sponsored by Blackmagic Design.

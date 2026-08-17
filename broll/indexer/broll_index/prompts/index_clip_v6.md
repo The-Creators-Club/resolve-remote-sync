@@ -6,7 +6,8 @@ whole clip (00:00:00 = the first frame of the clip) — this holds even if you a
 shown one window of frames from a longer clip, so always report segment boundaries using
 these absolute timecodes converted to seconds.
 
-Read each of these contact sheet images before answering:
+The contact sheet images are attached to this message, in this order. Examine every
+one of them before answering:
 
 __SHEET_PATHS__
 

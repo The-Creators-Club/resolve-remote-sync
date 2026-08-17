@@ -35,6 +35,7 @@ import re
 import shutil
 import sqlite3
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,7 +45,7 @@ from musicweb import config
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the
@@ -52,6 +53,7 @@ CURRENT_SCHEMA_VERSION = 2
 _MIGRATIONS = {
     1: ('001_track_share.sql', lambda c: 'share' in _columns(c, 'tracks')),
     2: ('002_ingest_queue.sql', lambda c: _table_exists(c, 'ingest_queue')),
+    3: ('003_ingest_journal.sql', lambda c: 'uid' in _columns(c, 'ingest_queue')),
 }
 
 
@@ -496,20 +498,26 @@ def queue_add(con, rel_path, orig_name, share=config.SHARE, bytes_=None,
     Upserts on rel_path so re-using a name whose previous row failed (the file
     was removed by hand, the operator dropped it again) resets that row to
     pending rather than raising on the UNIQUE.
+
+    `uid` is re-minted by that upsert, deliberately (migrations/003): the reset
+    row is a DIFFERENT upload, and a result bundle drained from the previous one
+    must not be able to close it -- it would attach some other file's embedding
+    to these bytes and report the upload as indexed.
     """
     con.execute("""
-        INSERT INTO ingest_queue(share,rel_path,orig_name,bytes,duration,
+        INSERT INTO ingest_queue(uid,share,rel_path,orig_name,bytes,duration,
                                  content_hash,transcoded,state,error,attempts,
                                  track_id,queued_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,NULL,0,NULL,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,NULL,0,NULL,?,?)
         ON CONFLICT(rel_path) DO UPDATE SET
+            uid=excluded.uid,
             share=excluded.share, orig_name=excluded.orig_name,
             bytes=excluded.bytes, duration=excluded.duration,
             content_hash=excluded.content_hash,
             transcoded=excluded.transcoded,
             state=excluded.state, error=NULL, attempts=0, track_id=NULL,
             queued_at=excluded.queued_at, updated_at=excluded.updated_at
-    """, (share, rel_path, orig_name, bytes_, duration, digest,
+    """, (uuid.uuid4().hex, share, rel_path, orig_name, bytes_, duration, digest,
           1 if transcoded else 0, PENDING, _now(), _now()))
     con.commit()
     return con.execute('SELECT id FROM ingest_queue WHERE rel_path=?',

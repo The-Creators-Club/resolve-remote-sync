@@ -934,7 +934,7 @@ def test_the_ytdlp_keys_are_never_a_config_problem(tmp_path):
     from ccsync_companion import config as config_mod
 
     errors, _warnings = config_mod.validate_config({
-        "editor_name": "ruskin",
+        "editor_name": "editor2",
         "local_root": str(tmp_path),
         "remote": "creators_club_sftp",
         "remote_root": "/mnt/tank/TheCreatorsPool/Creators_Club",

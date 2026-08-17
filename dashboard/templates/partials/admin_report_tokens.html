@@ -1,0 +1,75 @@
+{# Per-editor fleet report tokens (COMMERCIAL_READINESS.md item 15, 2026-08-17).
+
+   Its own panel, loaded with hx-trigger="load" like the sessions box beside
+   it, so it never depends on the Users panel's NAS round-trip to appear -- and
+   so minting a token cannot re-render (or fail with) that panel.
+
+   The minted secret is rendered ONCE, here, and never again: the dashboard
+   stores only its hash. #}
+<div class="admin-users-box" id="admin-report-tokens">
+  <div class="side-head">[ REPORT TOKENS ]
+    <span class="muted">One credential per editor, revocable on its own. Replaces the single
+      shared fleet token every companion holds today.</span></div>
+
+  {% if error %}
+    <div class="banner">▲ {{ error }}</div>
+  {% endif %}
+
+  {% if minted %}
+    <div class="banner">
+      NEW TOKEN FOR {{ minted_username | upper }} — copy it now, it is shown once and
+      never stored in a readable form.
+      <div class="mono-sm" style="margin-top:0.4rem; word-break:break-all">{{ minted }}</div>
+      <div class="muted" style="margin-top:0.4rem">
+        Put it in that editor's <code>~/.ccsync/config.toml</code> as
+        <code>report_token = "…"</code> and restart their companion (tray → Quit,
+        then relaunch). It outranks the shared <code>dashboard_token</code>
+        and survives every tray sign-in.
+      </div>
+    </div>
+  {% endif %}
+
+  {% if report_tokens.shared_machines %}
+    <div class="muted" style="margin-top:0.6rem">
+      {{ report_tokens.shared_count }} machine(s) still report with the SHARED fleet token:
+      <span class="mono-sm">{{ report_tokens.shared_machines | join(", ") }}</span>.
+      Once this is empty, set <code>DASH_SHARED_REPORT_TOKEN_ENABLED=0</code> and redeploy.
+    </div>
+  {% elif report_tokens.editor_count %}
+    <div class="muted" style="margin-top:0.6rem">
+      All {{ report_tokens.editor_count }} reporting machine(s) use per-editor tokens —
+      <code>DASH_SHARED_REPORT_TOKEN_ENABLED=0</code> is safe to set.
+    </div>
+  {% endif %}
+
+  <table class="editors" style="margin-top:0.8rem">
+    <thead><tr><th>EDITOR</th><th>LABEL</th><th>CREATED</th><th>LAST USED</th><th></th></tr></thead>
+    <tbody>
+    {% for t in report_tokens.tokens %}
+      <tr class="editor-row">
+        <td>{{ t.editor_username }}</td>
+        <td class="muted">{{ t.label or "-" }}</td>
+        <td class="mono-sm muted">{{ t.created_at }}</td>
+        <td class="mono-sm muted">{{ t.last_used_at or "never" }}</td>
+        <td>
+          <form class="inline-form" hx-post="/partials/admin/report-tokens/revoke"
+                hx-target="#admin-report-tokens" hx-swap="outerHTML">
+            <input type="hidden" name="token_id" value="{{ t.token_id }}">
+            <button class="btn" type="submit">[ REVOKE ]</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">no per-editor tokens yet</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="side-head" style="margin-top:0.8rem">[ MINT A TOKEN ]</div>
+  <form class="inline-form" hx-post="/partials/admin/report-tokens/create"
+        hx-target="#admin-report-tokens" hx-swap="outerHTML">
+    <input type="text" name="username" placeholder="editor username" required>
+    <input type="text" name="label" placeholder="label (e.g. 'editor laptop')">
+    <button class="btn" type="submit">[ MINT ]</button>
+  </form>
+</div>

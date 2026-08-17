@@ -188,6 +188,44 @@ def test_a_path_someone_chmodd_is_shouted_about(tmp_path):
     assert "-add" in log and "group:editors:allow:rwxpdDaARWc--:fd--" in log
 
 
+def test_per_project_mode_grants_and_then_says_what_it_cannot_do(tmp_path):
+    """docs/TENANCY.md: on DSM the grant is scriptable and the DENY is not.
+
+    The share-wide `editors` ACE is INHERITED on a project path, and DSM
+    exposes no way to delete an inherited ACE without breaking inheritance
+    first (File Station only). Saying so on stderr is the whole contract --
+    a silent half-implementation would read as isolation that is not there.
+    """
+    lines = backend().set_tree_acl(TREE, "ccsync-svc", "editors",
+                                    project_group="proj-2026-demo-port-test",
+                                    container_dirs=["/volume1/CCSyncTest/x"])
+    joined = "\n".join(lines)
+    assert "group:proj-2026-demo-port-test:allow" in joined
+    assert "OPERATOR TODO" in joined and "Inherit permissions" in joined
+    # The sticky bit is a MODE bit, and a chmod under a share destroys the ACL.
+    assert "chmod" not in joined and "3770" not in joined
+
+
+def test_dsm_editors_are_already_sftp_only():
+    assert backend().editor_shell() == "/sbin/nologin"
+    ok_done, detail = backend().set_editor_shell("jsmith", "/usr/bin/bash")
+    assert ok_done is False and "administrators-only" in detail
+    # ...and no sshd file is written: DSM regenerates sshd_config on every
+    # Control Panel service toggle, so a Match block there is erased.
+    state, _ = backend().ensure_sshd_editor_policy("editors")
+    assert state == "unchanged"
+
+
+def test_an_editors_key_can_be_taken_away_on_dsm():
+    ssh = FakeSsh()
+    ok_done, detail = backend(ssh=ssh).revoke_editor_key("jsmith")
+    assert ok_done is True, detail
+    sent = "\n".join(inner(cmd) for cmd, *_ in ssh.calls) if hasattr(ssh, "calls") \
+        else ""
+    if sent:
+        assert "authorized_keys" in sent
+
+
 def test_the_health_check_reads_the_acl_rather_than_trusting_it():
     dsm_ssh = FakeSsh(answers=[("synoacltool", (0, "It's Linux mode\n", ""))])
     ok, message = backend(ssh=dsm_ssh).check_tree_acl(TREE, "editors", dry_run=False)
@@ -299,10 +337,10 @@ def test_the_dashboard_binds_loopback_by_default_and_never_the_world(monkeypatch
     monkeypatch.setattr(common, "site_value", lambda *a, **k: "")
     obj = SynologyBackend()
     assert obj.dash_binds(8480) == [("", "127.0.0.1")]
-    assert obj.dash_binds(8480, bind_lan="192.168.0.104") == \
-        [("DASH_BIND_LAN", "192.168.0.104")]
-    assert obj.dash_binds(8480, bind_lan="192.168.0.104", bind_tailnet="100.65.15.123") == \
-        [("DASH_BIND_LAN", "192.168.0.104"), ("DASH_BIND_TAILNET", "100.65.15.123")]
+    assert obj.dash_binds(8480, bind_lan="192.168.0.11") == \
+        [("DASH_BIND_LAN", "192.168.0.11")]
+    assert obj.dash_binds(8480, bind_lan="192.168.0.11", bind_tailnet="100.64.0.2") == \
+        [("DASH_BIND_LAN", "192.168.0.11"), ("DASH_BIND_TAILNET", "100.64.0.2")]
     with pytest.raises(common.EnvError):
         obj.dash_binds(8480, bind_lan="0.0.0.0")
 

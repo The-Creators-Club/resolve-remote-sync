@@ -67,7 +67,7 @@ def test_traversal_is_rejected(share, rel):
     '/etc/passwd',
     '/Assets/Music/x.wav',
     '//nas/share/x.wav',
-    r'\\Cablewrap-1\web\x.wav',
+    r'\\FILESERVER-1\web\x.wav',
 ])
 def test_absolute_paths_are_rejected(share, rel):
     with pytest.raises(config.PathTraversalError):
@@ -116,11 +116,27 @@ def test_share_root_is_the_configured_root(share):
     assert config.share_root('music') == share
 
 
-def test_the_two_fleet_roots_are_the_documented_ones():
-    """W: on the base rig, P: on editor machines. P: is hardcoded fleet-wide
-    (CLAUDE.md), so a configurable drive letter here would be a regression."""
-    assert str(config.BASE_RIG_ROOT) == r'W:\Creators_Club\Assets\Music'
+def test_the_editor_root_is_the_canonical_prefix_plus_the_fixed_leaf():
+    """Assets/Music is fixed by the product; the prefix is P:\\ by fleet
+    decision (CLAUDE.md). What is NOT here any more is a second, hardcoded
+    root for one studio's indexing machine -- W:\\Creators_Club\\Assets\\Music
+    was probed for until 2026-08-17 (COMMERCIAL_READINESS.md item 11), and an
+    indexing host says where its mount is with MUSIC_LIBRARY_ROOT."""
     assert str(config.EDITOR_ROOT) == r'P:\Assets\Music'
+    assert not hasattr(config, 'BASE_RIG_ROOT')
+
+
+def test_an_indexing_host_names_its_own_mount(tmp_path, monkeypatch):
+    monkeypatch.delenv('MUSIC_SHARE_ROOT', raising=False)
+    monkeypatch.delenv('MUSIC_ROOT', raising=False)
+    monkeypatch.setenv('MUSIC_LIBRARY_ROOT', str(tmp_path))
+    assert config._default_share_root() == tmp_path
+
+
+def test_with_nothing_set_it_is_the_editor_mount_not_a_guess(monkeypatch):
+    for var in ('MUSIC_LIBRARY_ROOT', 'MUSIC_SHARE_ROOT', 'MUSIC_ROOT'):
+        monkeypatch.delenv(var, raising=False)
+    assert config._default_share_root() == config.EDITOR_ROOT
 
 
 def test_env_overrides_the_probe(tmp_path, monkeypatch):
@@ -136,13 +152,19 @@ def test_music_root_still_overrides_it(tmp_path, monkeypatch):
     assert config._default_share_root() == tmp_path
 
 
-def test_the_probe_prefers_the_base_rig_then_falls_back_to_the_editor_root(
-        tmp_path, monkeypatch):
-    monkeypatch.delenv('MUSIC_SHARE_ROOT', raising=False)
-    monkeypatch.delenv('MUSIC_ROOT', raising=False)
+def test_the_env_names_win_in_the_documented_order(tmp_path, monkeypatch):
+    """There is no drive PROBE any more (2026-08-17, COMMERCIAL_READINESS.md
+    item 11): "is W: mounted" only ever answered for one fleet. An indexing
+    host names its mount, and the three accepted names have a fixed order so a
+    machine carrying the old ones keeps working."""
+    newest, older, oldest = tmp_path / 'a', tmp_path / 'b', tmp_path / 'c'
+    monkeypatch.setenv('MUSIC_LIBRARY_ROOT', str(newest))
+    monkeypatch.setenv('MUSIC_SHARE_ROOT', str(older))
+    monkeypatch.setenv('MUSIC_ROOT', str(oldest))
+    assert config._default_share_root() == newest
 
-    monkeypatch.setattr(config, 'BASE_RIG_ROOT', tmp_path)      # "W: is mounted"
-    assert config._default_share_root() == tmp_path
+    monkeypatch.delenv('MUSIC_LIBRARY_ROOT')
+    assert config._default_share_root() == older
 
-    monkeypatch.setattr(config, 'BASE_RIG_ROOT', tmp_path / 'nope')
-    assert config._default_share_root() == config.EDITOR_ROOT
+    monkeypatch.delenv('MUSIC_SHARE_ROOT')
+    assert config._default_share_root() == oldest

@@ -188,7 +188,12 @@ def test_ingest_requires_token_when_configured(client, monkeypatch):
     monkeypatch.setenv("BROLL_INGEST_TOKEN", "secret-token")
     body = {"share": "broll", "rel_path": "needs-token.mov"}
 
-    r_no_header = client.post("/api/ingest/video", json=body)
+    # An EMPTY header rather than no header at all: conftest's client sends a
+    # default X-Ingest-Token on every request and httpx merges it in, so "" is
+    # how a test reaches the no-credential branch through this fixture.
+    r_no_header = client.post(
+        "/api/ingest/video", json=body, headers={"X-Ingest-Token": ""}
+    )
     assert r_no_header.status_code == 401
 
     r_wrong = client.post(
@@ -202,12 +207,44 @@ def test_ingest_requires_token_when_configured(client, monkeypatch):
     assert r_ok.status_code == 200
 
 
-def test_ingest_no_token_required_in_dev_mode(client, monkeypatch):
+def test_ingest_refuses_when_no_token_is_configured(client, monkeypatch):
+    """No BROLL_INGEST_TOKEN = the write path is CLOSED, not open.
+
+    This pins the deletion of the old dev-mode branch (COMMERCIAL_READINESS.md
+    item 15, 2026-08-17): an unconfigured server used to accept ingest from
+    anyone who could reach it, which is a repoint-every-clip primitive. The
+    previous test here asserted 200 for exactly this request.
+    """
     monkeypatch.delenv("BROLL_INGEST_TOKEN", raising=False)
-    r = client.post(
-        "/api/ingest/video", json={"share": "broll", "rel_path": "dev-mode.mov"}
+    body = {"share": "broll", "rel_path": "dev-mode.mov"}
+
+    r = client.post("/api/ingest/video", json=body)
+    assert r.status_code == 503
+    assert "BROLL_INGEST_TOKEN" in r.json()["detail"]
+
+    # ...and no token an attacker guesses opens it either.
+    r_guess = client.post(
+        "/api/ingest/video", json=body, headers={"X-Ingest-Token": ""}
     )
-    assert r.status_code == 200
+    assert r_guess.status_code == 503
+
+
+def test_ingest_token_check_survives_a_non_ascii_header(client, monkeypatch):
+    """A non-ASCII X-Ingest-Token is a 401, never a 500.
+
+    hmac.compare_digest raises TypeError on a str carrying anything above
+    U+007F; the dashboard's own gate met this as DASH-5 (2026-08-11) and
+    answered a refusal with a traceback.
+    """
+    monkeypatch.setenv("BROLL_INGEST_TOKEN", "secret-token")
+    r = client.post(
+        "/api/ingest/video",
+        json={"share": "broll", "rel_path": "non-ascii.mov"},
+        # bytes, because httpx refuses to encode a non-ASCII str header at all;
+        # starlette decodes it latin-1, which is what reaches the handler.
+        headers={"X-Ingest-Token": "sécret-token".encode("utf-8")},
+    )
+    assert r.status_code == 401
 
 
 def test_ingest_shares_records_origin_facts(client, conn):

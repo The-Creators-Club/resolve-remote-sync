@@ -34,7 +34,13 @@ from pathlib import Path
 
 import pytest
 
-from ccsync_companion import broll_server, music_server, ytdl_server
+from ccsync_companion import (
+    broll_server, loopback_guard, music_server, ytdl_server,
+)
+
+# The dashboard the live_server fixture is pointed at -- the one origin a
+# browser caller may present (COMMERCIAL_READINESS.md item 5, 2026-08-17).
+DASH_ORIGIN = "http://100.64.0.1:8000"
 
 # The junction/symlink helper is test_music_server's, not a second copy of it:
 # it is the only way to build a "no '..', no drive letter, still outside the
@@ -347,7 +353,7 @@ def test_no_code_path_hands_anything_to_a_shell():
 # The Windows command line: the quote goes AROUND THE PATH, never before /select
 # ---------------------------------------------------------------------------
 #
-# 2026-08-16, ruskin: every "open in Explorer" click opened Documents.
+# 2026-08-16, an editor: every "open in Explorer" click opened Documents.
 # Popen(list) quotes any argument with a space, and every path in this tree
 # has one, so Explorer got `"/select,F:\...\Season 1\clip.mp4"` -- a token
 # that starts with a quote, which it does not recognise as a switch and
@@ -362,7 +368,7 @@ def test_no_code_path_hands_anything_to_a_shell():
 @pytest.mark.parametrize("path", [
     r"F:\Creators_Club\Projects\2026\CCT\Creator Profiles\Season 1\Youtube\a b [x].mp4",
     r"C:\tmp\a.mp4",                                        # no spaces: same shape
-    r"\\192.168.0.102\TheCreatorsPool\Creators_Club\Projects\x y\clip.mp4",
+    r"\\192.168.0.10\TheCreatorsPool\Creators_Club\Projects\x y\clip.mp4",
     r"C:\rock & roll & calc [xyz789].mp4",                  # MUSIC-2's metacharacters
 ])
 def test_windows_select_line_is_bare_switch_then_quoted_path(path):
@@ -437,6 +443,34 @@ def test_spawn_uses_popen_with_no_shell(monkeypatch):
 def test_the_command_builder_has_no_answer_off_these_two_platforms():
     assert ytdl_server.reveal_command("/tmp/x.mp4", True, platform="linux") is None
     assert ytdl_server.reveal_command("/tmp/x.mp4", False, platform="linux") is None
+
+
+def test_a_bundle_is_revealed_never_opened():
+    """`open /Volumes/x/Thing.app` LAUNCHES it, and both reveal routes on this
+    listener pass a folder-shaped target through here with select=False (the
+    "file isn't here yet, show the folder" branch). A share holding a bundle
+    would have turned "show me where this is" into "run this"
+    (COMMERCIAL_READINESS.md item 5, 2026-08-17)."""
+    assert ytdl_server.reveal_command("/Users/x/Thing.app", False,
+                                      platform="darwin") == \
+        ["open", "-R", "/Users/x/Thing.app"]
+    assert ytdl_server.reveal_command("C:/x/Thing.app", False,
+                                      platform="win32") == \
+        ["explorer", "/select,C:/x/Thing.app"]
+
+
+@pytest.mark.parametrize("name", ["Thing.app", "Disk.dmg", "Setup.pkg",
+                                  "Some.Bundle", "thing.APP"])
+def test_every_launchable_shape_is_revealed_not_opened(name):
+    assert ytdl_server.reveal_command(f"/Users/x/{name}", False,
+                                      platform="darwin")[1] == "-R"
+
+
+def test_an_ordinary_folder_is_still_opened_as_a_folder():
+    """...and the guard does not turn every folder reveal into a select."""
+    assert ytdl_server.reveal_command("/Users/x/Youtube", False,
+                                      platform="darwin") == \
+        ["open", "/Users/x/Youtube"]
 
 
 def test_an_unsupported_platform_says_so_and_spawns_nothing(tree, spawned):
@@ -559,27 +593,41 @@ def test_a_mount_that_is_not_a_path_is_reported_not_crashed_on(spawned):
 
 
 class Client:
+    """As the other two route groups' clients: every POST carries the loopback
+    token, because since 2026-08-17 a state-changing request needs an allowed
+    Origin or that header (COMMERCIAL_READINESS.md item 5), and this stands in
+    for a local caller. `origin=` exercises the browser path."""
+
     def __init__(self, port: int):
         self.port = port
 
     def _connect(self) -> http.client.HTTPConnection:
         return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
 
-    def get(self, path: str):
+    def _auth(self, token, origin) -> dict:
+        headers = {}
+        if token:
+            headers[loopback_guard.TOKEN_HEADER] = loopback_guard.read_token() or ""
+        if origin is not None:
+            headers["Origin"] = origin
+        return headers
+
+    def get(self, path: str, origin=None):
         conn = self._connect()
-        conn.request("GET", path)
+        conn.request("GET", path, headers=self._auth(False, origin))
         resp = conn.getresponse()
         body = resp.read()
         headers = dict(resp.getheaders())
         conn.close()
         return resp.status, headers, body
 
-    def post_json(self, path: str, obj: dict):
+    def post_json(self, path: str, obj: dict, origin=None, token=True):
         conn = self._connect()
         payload = json.dumps(obj).encode("utf-8")
-        conn.request("POST", path, body=payload,
-                     headers={"Content-Type": "application/json",
-                              "Content-Length": str(len(payload))})
+        headers = {"Content-Type": "application/json",
+                   "Content-Length": str(len(payload))}
+        headers.update(self._auth(token, origin))
+        conn.request("POST", path, body=payload, headers=headers)
         resp = conn.getresponse()
         body = resp.read()
         headers = dict(resp.getheaders())
@@ -591,6 +639,7 @@ class Client:
         length = len(payload) if content_length is None else content_length
         conn.putrequest("POST", path, skip_accept_encoding=True)
         conn.putheader("Content-Type", "application/json")
+        conn.putheader(loopback_guard.TOKEN_HEADER, loopback_guard.read_token() or "")
         conn.putheader("Content-Length", str(length))
         conn.endheaders()
         conn.send(payload)
@@ -599,9 +648,9 @@ class Client:
         conn.close()
         return resp.status, body
 
-    def options(self, path: str):
+    def options(self, path: str, origin=None):
         conn = self._connect()
-        conn.request("OPTIONS", path)
+        conn.request("OPTIONS", path, headers=self._auth(False, origin))
         resp = conn.getresponse()
         body = resp.read()
         headers = dict(resp.getheaders())
@@ -629,7 +678,8 @@ def live_server(tree, monkeypatch):
         music_server.MOUNTS_KEY: {"music": str(root)},
         ytdl_server.MOUNTS_KEY: {"projects": str(root)},
     }
-    srv = broll_server.make_server(cfg, host="127.0.0.1", port=0)
+    srv = broll_server.make_server(cfg, host="127.0.0.1", port=0,
+                                   ccsync_cfg={"dashboard_url": DASH_ORIGIN})
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     try:
@@ -728,12 +778,27 @@ def test_a_handler_that_raises_answers_500_and_logs(live_server, monkeypatch, ca
 def test_the_route_gets_the_same_cors_and_pna_headers(live_server):
     """The downloader page is served from the dashboard, so it sits on a
     tailnet address and calls loopback -- Chromium blocks that at the
-    PREFLIGHT without the Private Network Access opt-in."""
+    PREFLIGHT without the Private Network Access opt-in.
+
+    THIS TEST USED TO PIN THE WILDCARD, as its b-roll twin did. Since
+    2026-08-17 (COMMERCIAL_READINESS.md item 5 / C1) the answer is the
+    caller's own origin, echoed only when it is on the allow-list, and a
+    preflight from anywhere else gets 403 with no CORS headers at all -- so a
+    hostile page cannot even read the refusal. The PROPERTY the wildcard
+    assertion protected is what survives: the dashboard's own page must still
+    get through the private-network preflight.
+    """
     _srv, client, _clip = live_server
-    status, headers, _body = client.options("/ytdl/reveal")
+    status, headers, _body = client.options("/ytdl/reveal", origin=DASH_ORIGIN)
     assert status == 204
-    assert headers.get("Access-Control-Allow-Origin") == "*"
+    assert headers.get("Access-Control-Allow-Origin") == DASH_ORIGIN
     assert headers.get("Access-Control-Allow-Private-Network") == "true"
+    assert loopback_guard.TOKEN_HEADER in headers.get("Access-Control-Allow-Headers", "")
+
+    status, headers, _body = client.options("/ytdl/reveal",
+                                            origin="https://evil.example.com")
+    assert status == 403
+    assert "Access-Control-Allow-Origin" not in headers
 
 
 def test_a_get_on_the_reveal_route_is_404_not_a_500(live_server):

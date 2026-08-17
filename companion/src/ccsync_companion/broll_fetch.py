@@ -12,7 +12,7 @@ lanes A and B already use. broll_server.build_insert_response was the only
 caller; since 2026-08-16 music_server.build_send_response is the second, for
 the identical reason -- the music library (Assets/Music) is not a synced
 folder either, so every "+ Resolve" on a remote editor's machine dead-ended
-at the same "is the share mounted?" (ruskin, 2026-08-16). Both answer
+at the same "is the share mounted?" (an editor, 2026-08-16). Both answer
 {"state": "downloading"} responses the web UI polls, and perform the
 insert on the first poll that finds the file in place. The NAS-side folder
 is a parameter (`remote_rel`) so the two callers share one job registry,
@@ -40,9 +40,24 @@ import subprocess
 import threading
 from typing import Any, Optional
 
+from . import config as ccsync_config
+from . import loopback_guard
+from . import root_guard
 from .sync import rclone_lane
 
 log = logging.getLogger("ccsync.broll")
+
+# How many of these may run at once. There is no queue and no sequencer turn
+# (see the header), so without a cap the browser's own 1.5 s re-POST loop is a
+# spawn button: one click per clip, one rclone per click, every one of them
+# competing with lane A and lane B for the same SFTP link. Two is enough for
+# "the clip I want plus the one I just asked for" and small enough that a page
+# holding the button down cannot take the machine's bandwidth away from the
+# sync that moves everyone's footage (2026-08-17, COMMERCIAL_READINESS.md
+# item 5).
+MAX_CONCURRENT_FETCHES = 2
+BUSY_MESSAGE = ("this machine is already downloading as much as it will at "
+                "once -- try again when the clip in progress has finished")
 
 # Where the archive lives under remote_root on the NAS. Must stay in step
 # with broll_server.BROLL_ARCHIVE_REL (the local half of the same layout);
@@ -120,6 +135,17 @@ def _job_key(dest: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(dest)))
 
 
+def _running_count() -> int:
+    """How many downloads are in flight. Callers hold _JOBS_LOCK.
+
+    Reads job.state without job.lock on purpose: a stale answer here costs at
+    most one extra (or one refused) download, and taking a second lock while
+    holding the registry's is how the registry gets to deadlock against
+    _run_job's terminal-state write.
+    """
+    return sum(1 for job in _JOBS.values() if job.state == STATE_DOWNLOADING)
+
+
 def prereq_error(ccsync_cfg: dict[str, Any]) -> Optional[str]:
     """Why this machine cannot fetch from the NAS at all, or None if it can.
 
@@ -140,6 +166,54 @@ def prereq_error(ccsync_cfg: dict[str, Any]) -> Optional[str]:
     ok, detail = rclone_lane.rclone_available(rclone_path)
     if not ok:
         return f"can't fetch the clip from the NAS -- {detail}"
+    return None
+
+
+def fetch_refusal(
+    ccsync_cfg: Optional[dict[str, Any]], dest: str,
+    probe: Optional[Any] = None,
+) -> Optional[str]:
+    """Why this download must not start AT ALL, or None. Editor-facing text.
+
+    Two questions prereq_error does not ask, both added 2026-08-17
+    (COMMERCIAL_READINESS.md item 5, M-tier "on-demand fetch bypasses root
+    guard"):
+
+      * is `dest` inside this machine's tree? The callers derive it from a
+        validated (share, rel_path) pair, so this is defence in depth -- but
+        it is the last thing standing between a mounts table an editor can
+        hand-edit and an `rclone copyto` that writes anywhere the companion's
+        user can write.
+      * is the tree actually MOUNTED? On macOS `rclone sync` into an absent
+        /Volumes/<Name> does not fail: it creates the directory on the BOOT
+        volume and fills the internal disk (root_guard.py's opening
+        paragraph). Every lane asks the guard first; this download, which
+        creates its own destination directories, never did.
+
+    ROOT_UNKNOWN is allowed through deliberately: a probe that broke is "no
+    new information", never a reason to stop an editor working (root_guard's
+    contract). `probe` is the test seam for the guard.
+    """
+    root = str((ccsync_cfg or {}).get("local_root") or "").strip()
+    if not root:
+        return ("this machine's sync config has no local_root, so there is "
+                "nowhere to put the file (local_root= in ~/.ccsync/config.toml)")
+    try:
+        local_root = str(ccsync_config.resolved_local_root(ccsync_cfg or {}))
+    except Exception:
+        local_root = root
+    if not loopback_guard.is_within(dest, local_root):
+        log.warning("broll fetch: refusing %s -- outside the tree at %s",
+                    dest, local_root)
+        return "that file is outside this machine's tree -- nothing was downloaded"
+
+    check = probe if probe is not None else root_guard.probe_root
+    state = check(local_root)
+    if state in (root_guard.ROOT_ABSENT, root_guard.ROOT_MISPLACED):
+        log.warning("broll fetch: refusing %s -- the tree at %s is %s",
+                    dest, local_root, state)
+        return ("this machine's tree isn't mounted right now, so nothing can "
+                "be downloaded into it -- reconnect the drive and try again")
     return None
 
 
@@ -282,6 +356,13 @@ def poll_fetch(
             err = prereq_error(ccsync_cfg)
             if err:
                 return {"state": STATE_FAILED, "message": err}
+            if _running_count() >= MAX_CONCURRENT_FETCHES:
+                # No queue: the web UI re-POSTs every 1.5 s anyway, so "busy"
+                # IS the retry mechanism. Registering nothing keeps a refused
+                # click out of the registry entirely.
+                log.info("broll fetch: at the %d-download cap -- refusing %s",
+                         MAX_CONCURRENT_FETCHES, dest)
+                return {"state": STATE_FAILED, "message": BUSY_MESSAGE}
             job = FetchJob(dest, rel_path)
             cmd = build_fetch_command(ccsync_cfg, rel_path, dest, remote_rel)
             _JOBS[key] = job

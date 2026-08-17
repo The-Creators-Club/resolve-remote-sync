@@ -5,6 +5,7 @@ See SPEC.md "Data layout (DATA_ROOT)" and "Web API contract".
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 
@@ -38,19 +39,73 @@ def get_sheets_dir() -> Path:
 
 
 def get_ingest_token() -> str | None:
-    """BROLL_INGEST_TOKEN. If unset, ingest is allowed without a token (dev mode)."""
+    """BROLL_INGEST_TOKEN, or None when it is unset.
+
+    None means the ingest routes REFUSE (503) -- it stopped meaning "dev mode,
+    ingest is open" on 2026-08-17 (COMMERCIAL_READINESS.md item 15). See
+    routes_ingest.verify_ingest_token.
+    """
     token = os.environ.get("BROLL_INGEST_TOKEN")
     return token if token else None
 
 
-# The two browse roots. Downloads is everything sourced from the web;
-# Creators_Club is footage we shot. The split is by SHARE because that is the
-# only thing the web app can see: which side of a proxy/original pair a share
-# archives lives in the indexer's config (ShareConfig.source), and this app does
-# not read that file — it may not even be on the same machine.
+# The two browse roots. Downloads is everything sourced from the web; the
+# other one is footage this customer shot. The split is by SHARE because that
+# is the only thing the web app can see: which side of a proxy/original pair a
+# share archives lives in the indexer's config (ShareConfig.source), and this
+# app does not read that file — it may not even be on the same machine.
+#
+# THE OWN-FOOTAGE SLUG IS SITE DATA (2026-08-17,
+# docs/COMMERCIAL_READINESS.md item 4/10). It was the literal "creators_club":
+# one customer's name in every search URL, every tree root and the folder
+# label an editor reads. `owned` is the neutral default; a site that wants its
+# own name in the UI sets BROLL_DEFAULT_COLLECTION (slug) and
+# BROLL_DEFAULT_COLLECTION_LABEL.
+#
+# Nothing in the DATABASE moves: the collection is derived from
+# BROLL_CREATORS_SHARES at query time, never stored on a row.
 COLLECTION_DOWNLOADS = "downloads"
-COLLECTION_CREATORS = "creators_club"
-COLLECTION_LABELS = {COLLECTION_DOWNLOADS: "Downloads", COLLECTION_CREATORS: "Creators_Club"}
+# The pre-2026-08-17 slug. Still accepted on the wire so a bookmarked
+# ?collection=creators_club URL, and any client that predates the rename,
+# keep working -- see normalise_collection.
+LEGACY_COLLECTION_CREATORS = "creators_club"
+
+
+def get_creators_collection() -> str:
+    """The own-footage collection's slug. Lowercased and stripped of anything
+    that is not URL-safe: it travels as a query parameter and as a JSON key
+    into the frontend, so a slug with a space in it would break both."""
+    raw = os.environ.get("BROLL_DEFAULT_COLLECTION", "").strip().lower()
+    slug = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-")
+    return slug or "owned"
+
+
+def get_creators_collection_label() -> str:
+    """What the folder tree calls that root. Defaults to a description of what
+    it holds rather than to a name, because the product does not know the
+    customer's."""
+    return os.environ.get("BROLL_DEFAULT_COLLECTION_LABEL", "").strip() or "Our Footage"
+
+
+# Module-level for the many call sites that compare against it. Read at import
+# like every other get_*() default in this file; the env is set by the compose
+# file, which a deploy re-renders.
+COLLECTION_CREATORS = get_creators_collection()
+COLLECTION_LABELS = {COLLECTION_DOWNLOADS: "Downloads",
+                     COLLECTION_CREATORS: get_creators_collection_label()}
+
+
+def normalise_collection(value) -> str:
+    """A ?collection= value as this deployment spells it, or "" for "no
+    filter". The legacy `creators_club` maps onto whatever the own-footage
+    collection is called here -- an editor's bookmark must not silently turn
+    into "show me everything"."""
+    value = str(value or "").strip().lower()
+    if value == LEGACY_COLLECTION_CREATORS:
+        return COLLECTION_CREATORS
+    if value in (COLLECTION_DOWNLOADS, COLLECTION_CREATORS):
+        return value
+    return ""
 
 
 def get_creators_shares() -> set[str]:

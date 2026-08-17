@@ -1,5 +1,8 @@
 # Known bugs (original 2026-08 hunt worklist, archived)
 
+> **Archive.** Kept as history; the addresses, hostnames and people in it are
+> those of the original deployment. Do not copy commands out of it.
+
 > Archived verbatim on 2026-08-03 when the fix fleet completed; see `KNOWN_BUGS.md`
 > for resolution status. Line numbers reflect the tree as of commit 38066ba plus the
 > then-uncommitted b-roll diff.
@@ -168,8 +171,8 @@ default**. Do not commit this diff until B1–B4 are resolved, or hold the featu
 - **Fix hint:** stream-count bytes with a hard ceiling regardless of `Content-Length`; check the token before reading the body.
 
 ### B16. A machine-style device name is read as an editor and unshared from everything — MAJOR
-- **Where:** `server/accept_device.py:77,98,122-124` (accepts `alex-laptop`, no username validation); `db.py:453-464,302` (`resolve_editor_username` returns any `_USERNAME_RE` match); `collector.py:536-543,579-583,593-617`.
-- **Defect:** the server treats machine names as legitimate device labels; the dashboard reads any username-shaped name as an editor. A device approved as `alex-laptop` maps to editor `alex-laptop`, which has no `selections` rows.
+- **Where:** `server/accept_device.py:77,98,122-124` (accepts `editor-laptop`, no username validation); `db.py:453-464,302` (`resolve_editor_username` returns any `_USERNAME_RE` match); `collector.py:536-543,579-583,593-617`.
+- **Defect:** the server treats machine names as legitimate device labels; the dashboard reads any username-shaped name as an editor. A device approved as `editor-laptop` maps to editor `editor-laptop`, which has no `selections` rows.
 - **Failure:** `collector.py:579-583` preserves only devices whose editor resolves to `None`, so a device with a real-but-empty editor is removed from every folder it's shared with. Only `enforce_max_share_removals=3` stands between that and a fleet-wide unshare — and it caps *devices*, not folders, so one such device is under the limit and gets silently unshared everywhere.
 - **Fix hint:** validate device names against the actual editor account list before treating a name as an editor; count folder removals in the brake.
 

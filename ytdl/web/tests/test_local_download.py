@@ -18,10 +18,21 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import PROJECTS, USER
-from ytdlweb import config, db, worker, ytdl_common
+from ytdlweb import config, db, identity, worker, ytdl_common
 
 TOKEN = 'a-fleet-token'
 OTHER = 'sam'
+
+# The dashboard's session/identity signing secret. Since H5 (2026-08-17) the
+# fleet routes VERIFY X-CCSync-Identity against this, so the shared fleet token
+# no longer decides WHOSE job a caller may claim -- see ytdlweb/identity.py.
+SECRET = 'a-session-secret'
+
+
+def _identity_header(user=USER):
+    """A genuine identity token for `user`, as the dashboard's /api/v1/verify
+    would have minted it."""
+    return {'x-ccsync-identity': identity.make_identity_token(SECRET, user)}
 
 # yt-dlp's own YYYY.MM.DD, comfortably newer than the shipped floor.
 FRESH_YTDLP = '2026.08.10'
@@ -33,9 +44,16 @@ def fleet(client, monkeypatch):
 
     config.REPORT_TOKEN is read from the environment at import (conftest pins it
     empty on purpose), so a test that wants the gate to open says so here.
+
+    ...and the same for DASH_SESSION_SECRET plus a VALID identity token for
+    USER, because since H5 both gates have to open (2026-08-17): the token says
+    "a fleet machine", the identity token says which editor's. A test that
+    wants somebody else's identity overrides the header per call
+    (`_identity_header(OTHER)`).
     """
     monkeypatch.setattr(config, 'REPORT_TOKEN', TOKEN)
-    client.headers.update({'x-ccsync-token': TOKEN})
+    monkeypatch.setattr(config, 'SESSION_SECRET', SECRET)
+    client.headers.update({'x-ccsync-token': TOKEN, **_identity_header(USER)})
     return client
 
 
@@ -157,7 +175,8 @@ def test_a_second_editor_gets_409_while_the_lease_is_live(fleet, con):
     on two machines all end up here."""
     job = _job(con)
     fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
-    r = fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(editor=OTHER))
+    r = fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(editor=OTHER),
+                   headers=_identity_header(OTHER))
     assert r.status_code == 409
     assert r.json()['detail']['claimed_by'] == USER
     assert db.get_job(con, job['id'])['claimed_by'] == USER
@@ -170,7 +189,8 @@ def test_a_second_editor_may_claim_once_the_lease_has_run_out(fleet, con):
     fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
     _expire_lease(con, job['id'])
     assert fleet.post(f'/api/jobs/{job["id"]}/claim',
-                      json=_claim_body(editor=OTHER)).status_code == 200
+                      json=_claim_body(editor=OTHER),
+                      headers=_identity_header(OTHER)).status_code == 200
     assert db.get_job(con, job['id'])['claimed_by'] == OTHER
 
 
@@ -320,11 +340,116 @@ def test_a_job_that_is_not_downloading_is_not_claimable(fleet, con, phase):
 
 
 def test_a_claim_needs_a_holder_and_a_job(fleet, con):
+    """H5 (2026-08-17) changed the first half of this. A blank `editor` in the
+    BODY used to be a 400 "a lease needs a holder"; the body no longer decides
+    who the holder is, so a blank one is simply ignored and the verified
+    identity is used. What is refused now is a claim with no verifiable
+    identity at all -- see the identity-gate tests below."""
     job = _job(con)
     assert fleet.post(f'/api/jobs/{job["id"]}/claim',
-                      json=_claim_body(editor='  ')).status_code == 400
+                      json=_claim_body(editor='  ')).status_code == 200
+    assert db.get_job(con, job['id'])['claimed_by'] == USER
     assert fleet.post('/api/jobs/999999/claim',
                       json=_claim_body()).status_code == 404
+
+
+# ---------------------------------------------------------- the identity gate
+# H5 / COMMERCIAL_READINESS.md item 7 (2026-08-17). The shared fleet token is
+# held by EVERY companion, so on its own it says "a fleet machine" and nothing
+# about which. Before this, the editor name was self-asserted -- so any machine
+# holding the token could claim a job as somebody else and then complete it,
+# fail its clips, or take it away from the editor who was downloading it.
+
+def test_a_fleet_call_without_a_verified_identity_is_refused(fleet, con):
+    job = _job(con)
+    for header in ({}, {'x-ccsync-identity': ''}, {'x-ccsync-identity': USER},
+                   {'x-ccsync-identity': 'v2.identity.YWxleA.9999999999.deadbeef'}):
+        r = fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(),
+                       headers={'x-ccsync-identity': ''} | header)
+        assert r.status_code == 403, header
+        assert r.json()['detail']['reason'] == 'identity'
+    assert db.get_job(con, job['id'])['download_mode'] == db.MODE_SERVER
+
+
+def test_a_session_cookie_cannot_be_replayed_as_a_machine_identity(fleet, con):
+    """The dashboard signs sessions and identities with the same secret and
+    tells them apart by a PURPOSE claim (its SEC-1). A browser cookie lifted
+    off an editor must not become a fleet identity."""
+    job = _job(con)
+    session_shaped = identity.make_identity_token(SECRET, USER).replace(
+        '.identity.', '.session.', 1)
+    r = fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(),
+                   headers={'x-ccsync-identity': session_shaped})
+    assert r.status_code == 403
+
+
+def test_an_expired_identity_token_is_refused(fleet, con):
+    job = _job(con)
+    stale = identity.make_identity_token(SECRET, USER, ttl=-60)
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(),
+                      headers={'x-ccsync-identity': stale}).status_code == 403
+
+
+def test_a_token_signed_with_another_secret_is_refused(fleet, con):
+    job = _job(con)
+    forged = identity.make_identity_token('not-this-fleets-secret', USER)
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(),
+                      headers={'x-ccsync-identity': forged}).status_code == 403
+
+
+def test_the_body_cannot_claim_a_job_for_somebody_else(fleet, con):
+    """The whole point of H5: `editor` in the body is ignored, and the lease
+    lands on the name the SIGNATURE vouches for."""
+    job = _job(con)
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim',
+                      json=_claim_body(editor=OTHER)).status_code == 200
+    assert db.get_job(con, job['id'])['claimed_by'] == USER
+
+
+def test_an_unconfigured_session_secret_fails_closed(client, con, monkeypatch):
+    """No secret means no identity can be verified, so every fleet route is a
+    403 -- the same posture require_fleet_token takes, and it costs only local
+    downloads (the NAS worker downloads everything anyway)."""
+    monkeypatch.setattr(config, 'REPORT_TOKEN', TOKEN)
+    monkeypatch.setattr(config, 'SESSION_SECRET', '')
+    job = _job(con)
+    r = client.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(),
+                    headers={'x-ccsync-token': TOKEN,
+                             **_identity_header(USER)})
+    assert r.status_code == 403
+    assert r.json()['detail']['reason'] == 'identity_unconfigured'
+
+
+# ------------------------------------------------------- the rights gate (H5's
+# neighbour: COMMERCIAL_READINESS.md item 2)
+
+def test_a_claim_is_refused_until_that_editor_accepted_the_terms(fleet, con):
+    """The companion path is machine-to-machine and has no browser to gate, so
+    the attestation is checked HERE too. "The other client checks it" is not a
+    check."""
+    from ytdlweb import attestation
+
+    con.execute('DELETE FROM attestations')
+    con.commit()
+    job = _job(con)
+    r = fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
+    assert r.status_code == 403
+    assert r.json()['detail']['reason'] == 'attestation'
+    assert db.get_job(con, job['id'])['download_mode'] == db.MODE_SERVER
+
+    db.record_attestation(con, USER, attestation.TEXT_VERSION,
+                          attestation.text_sha256())
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim',
+                      json=_claim_body()).status_code == 200
+
+
+def test_an_acceptance_of_an_older_wording_does_not_count(fleet, con):
+    con.execute('DELETE FROM attestations')
+    db.record_attestation(con, USER, '1999-01-01.1', 'whatever')
+    con.commit()
+    job = _job(con)
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim',
+                      json=_claim_body()).status_code == 403
 
 
 # ------------------------------------------------------------------ heartbeat
@@ -364,7 +489,8 @@ def test_another_editors_heartbeat_does_not_hold_the_lease_open(fleet, con):
     job = _job(con)
     fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
     assert fleet.post(f'/api/jobs/{job["id"]}/heartbeat',
-                      json={'editor': OTHER}).status_code == 410
+                      json={'editor': OTHER},
+                      headers=_identity_header(OTHER)).status_code == 410
 
 
 # ------------------------------------------------------------- the work order
@@ -376,7 +502,7 @@ def test_the_manifest_is_leaseholder_only(fleet, con):
 
     fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
     assert fleet.get(url).status_code == 200
-    assert fleet.get(url, headers={'x-ccsync-identity': OTHER}).status_code == 410
+    assert fleet.get(url, headers=_identity_header(OTHER)).status_code == 410
 
     db.reclaim_download(con, job['id'])
     assert fleet.get(url).status_code == 410
@@ -623,7 +749,7 @@ def test_a_status_post_is_leaseholder_only_and_410s_after_a_reclaim(fleet, con):
 
     fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
     assert fleet.post(url, json={'state': 'downloading'},
-                      headers={'x-ccsync-identity': OTHER}).status_code == 410
+                      headers=_identity_header(OTHER)).status_code == 410
     db.reclaim_download(con, job['id'])
     assert fleet.post(url, json={'state': 'downloading'}).status_code == 410
     assert fleet.post(f'/api/jobs/{job["id"]}/clips/zzzzzzzzzzz/status',

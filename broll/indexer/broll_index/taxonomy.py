@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 from collections import Counter
 from pathlib import Path
@@ -43,6 +44,7 @@ def propose_taxonomy(
     model: str = "sonnet",
     out_path: str | Path = "taxonomy_proposal.md",
     invoke: InvokeFn = invoke_claude,
+    settings: Any = None,
 ) -> Path:
     themes = storage.all_themes()
     if not themes:
@@ -52,7 +54,13 @@ def propose_taxonomy(
     theme_lines = "\n".join(f"- {theme} (x{count})" for theme, count in counts.most_common())
     prompt = TAXONOMY_PROMPT_TEMPLATE.replace("__THEME_LIST__", theme_lines)
 
-    raw = invoke(prompt, model)
+    # Text-only call, no contact sheets. `settings` carries the API key
+    # resolution (env var or keyfile) from config; an injected fake keeps its
+    # plain (prompt, model) signature.
+    call = invoke
+    if call is invoke_claude:
+        call = functools.partial(invoke_claude, settings=settings)
+    raw = call(prompt, model)
     text = extract_claude_text(raw)
 
     out_path = Path(out_path)

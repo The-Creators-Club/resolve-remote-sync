@@ -64,7 +64,23 @@ log = logging.getLogger("ccsync.config")
 # are blank until the installer sets them); derive_server_unc() learned the
 # Synology /volumeN share convention. Same code now serves a TrueNAS or a
 # Synology site (docs/SYNOLOGY_PORT_PLAN.md, 2026-08-17).
-VERSION = "0.7.11"
+# 0.8.0: the commercial-readiness pass (docs/COMMERCIAL_READINESS.md,
+# KNOWN_BUGS.md CR-1..CR-21, 2026-08-17). Behaviour an editor can see:
+# pystray is gone -- the tray is our own tray_native.py (LGPL, CR-3); the
+# 8899 loopback is origin-allow-listed and token-gated (CR-7 -- a companion
+# whose dashboard_url is not the URL editors browse 403s Send-to-Resolve);
+# the upgrade channel verifies an ed25519 signature before downloading and
+# keeps a monotonic min_version floor (CR-6); lane B has a persisted circuit
+# breaker, .ccsync-trash ages out, "Remove from this machine" is gated and a
+# real halt exists (CR-11); every Resolve relink takes a save point + undo
+# journal (CR-12); proxy gen has a free-space floor (CR-13); the wizard
+# takes EULA acceptance and the companion gates its lanes on it (CR-5);
+# YouTube features are dormant unless the site manifest enables them (CR-2);
+# per-editor report tokens are preferred when present (CR-18); brand strings
+# come from the site manifest (CR-16); crash reports are written locally
+# (CR-19). Minor bump, not patch: the loopback contract and the signed
+# channel are visible interface changes for the dashboard and the SPAs.
+VERSION = "0.8.0"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -111,6 +127,24 @@ DEFAULTS: dict[str, Any] = {
     # Blackmagic Proxy Generator is still writing on the NAS is not shipped
     # truncated (see sync/rclone_lane.py: LANE_B_MIN_AGE_SECONDS). 0 = off.
     "lane_b_min_age_seconds": 120,
+    # -- lane B circuit breaker + trash retention -------------------------
+    # COMMERCIAL_READINESS.md item 9 (2026-08-17). rclone's own
+    # --max-delete 100 / --max-delete-size 20G bounds ONE pass; these bound
+    # the SEQUENCE, and stop lane B outright until an operator resumes it
+    # from the tray. Documented commented-out in both templates for the same
+    # reason the transport tuning is: writing them into every first-run file
+    # pins them, so a later re-tune would reach nobody.
+    # See sync/lane_guard.py for what each one measures.
+    "lane_b_max_deletes_per_pass": 50,
+    "lane_b_max_delete_fraction": 0.25,
+    "lane_b_remote_shrink_fraction": 0.5,
+    # The `.ccsync-trash` window. Its own reversal of an older decision (the
+    # trash used to be kept forever); the breaker is what makes a bounded
+    # window safe -- and prune_trash refuses to run at all while it is
+    # tripped. 0 disables the age rule / the size cap respectively.
+    "trash_max_age_days": 14,
+    "trash_max_bytes": 50 * 1024**3,
+    "trash_prune_interval_seconds": 6 * 3600,
     # Debounce window for the Lane A watchdog file events (addition; SPEC.md
     # says "10s debounce" for lane A but doesn't name a config key for it).
     "watch_debounce_seconds": 10,
@@ -194,6 +228,14 @@ DEFAULTS: dict[str, Any] = {
     "rclone_path": "rclone",
     "log_path": "~/.ccsync/companion.log",
     "log_level": "INFO",
+    # Crash reports (addition; COMMERCIAL_READINESS.md item 13, 2026-08-17).
+    # crash_report.py ALWAYS writes ~/.ccsync/crashes/<ts>.json locally -- no
+    # switch, no network, that is just a better log tail. These two keys govern
+    # only the OPT-IN network sender, and both are required: `true` with no DSN
+    # sends nowhere, because there is no vendor endpoint compiled in. The
+    # sender also needs `sentry_sdk`, which the frozen build does not ship.
+    "crash_reporting": False,
+    "crash_dsn": "",
     # Dashboard reporter (addition; not in SPEC.md's config list) -- posts
     # lane statuses to a server-side dashboard so an admin can see editor
     # health without remoting in. It used to default to ONE deployment's
@@ -206,6 +248,12 @@ DEFAULTS: dict[str, Any] = {
     # require_login is on.
     "dashboard_url": "",
     "dashboard_token": "",
+    # The PER-EDITOR fleet token, if this machine has been handed one
+    # (COMMERCIAL_READINESS.md item 15, 2026-08-17). Blank = fall back to the
+    # shared `dashboard_token` above. Wherever both exist this one wins --
+    # identity.preferred_report_token owns the precedence, and the tray's
+    # sign-in never overwrites it.
+    "report_token": "",
     # Login gate (addition; see identity.py): when true, the companion will
     # not start sync lanes/the sequencer, nor report under an identity,
     # until the editor signs in (tray "Sign in...") with their TrueNAS
@@ -302,6 +350,24 @@ DEFAULTS: dict[str, Any] = {
     # Deliberately in-process only: a blacklist persisted to disk turns a
     # transient GPU failure into a permanent one.
     "proxy_gen_max_failures": 3,
+    # -- item 9's data-safety gates (COMMERCIAL_READINESS.md, 2026-08-17) ---
+    # Free space the generator keeps clear on the volume it writes to,
+    # whichever of the two is LARGER. Proxies land next to their originals,
+    # i.e. on the volume every sync lane and Resolve's own cache share, so
+    # filling it stalls far more than proxy generation. 0 disables the gate.
+    "proxy_gen_free_space_floor_gb": 20,
+    "proxy_gen_free_space_floor_pct": 5,
+    # Gap between the two (size, mtime) samples that decide a source has
+    # stopped growing. The scan's own sample usually supplies the first one,
+    # so this is only waited out for a clip encoded outside a scan. 0 = one
+    # sample (the pre-2026-08-17 behaviour; not recommended).
+    "proxy_gen_stability_seconds": 5,
+    # Rehearsal switches. Both report what WOULD be done and change nothing:
+    # `proxy_dry_run` for the generator, `fixer_dry_run` for FIX ALL's copy +
+    # relink -- the two largest destructive actions the companion takes, and
+    # until 2026-08-17 the only ones with no way to be rehearsed.
+    "proxy_dry_run": False,
+    "fixer_dry_run": False,
     # How long before the same "clips have no proxy" toast may appear again.
     # A day, so restarts don't re-nag about a gap already decided about.
     "proxy_notify_cooldown_seconds": 86400,
@@ -474,7 +540,7 @@ DEFAULTS: dict[str, Any] = {
     # here: the editor cannot see this state -- Resolve is on screen looking
     # normal while every companion feature that needs it is silently gone --
     # and it never heals on its own (Resolve does not retry a script server
-    # that failed at launch). Cost ruskin's rig a full session, 2026-08-12.
+    # that failed at launch). Cost an editor a full session, 2026-08-12.
     "resolve_scripting_warning": True,
     # Seconds between those warnings, and also how long the state must have
     # held before the FIRST one -- Resolve's script server takes a moment to
@@ -614,6 +680,29 @@ scan_interval_down = 120
 # .ccsync-trash. 0 disables the gate.
 lane_b_min_age_seconds = 120
 
+# -- lane B circuit breaker + .ccsync-trash retention (item 9, 2026-08-17) --
+# rclone's --max-delete 100 / --max-delete-size 20G bounds ONE lane B pass.
+# These bound the SEQUENCE: past any of them lane B STOPS on this machine
+# (lanes A and C keep running) until someone uses the tray's "Resume proxy
+# download". Nothing is ever deleted -- removals become moves into
+# .ccsync-trash -- so a trip costs visibility, never footage.
+#   lane_b_max_deletes_per_pass     how many files one pass may trash
+#   lane_b_max_delete_fraction      ...or this share of the local proxy set,
+#                                   whichever is smaller (small projects)
+#   lane_b_remote_shrink_fraction   trip when the NAS listing shrinks past
+#                                   this share of what it held last pass
+# lane_b_max_deletes_per_pass = 50
+# lane_b_max_delete_fraction = 0.25
+# lane_b_remote_shrink_fraction = 0.5
+#
+# How long recovery copies are kept in <local_root>/.ccsync-trash, and how
+# big that directory may get before the OLDEST batches are dropped. The
+# newest batch is never pruned by the size rule, and NOTHING is pruned while
+# the breaker above is tripped. 0 disables the age rule / the size cap.
+# trash_max_age_days = 14
+# trash_max_bytes = 53687091200
+# trash_prune_interval_seconds = 21600
+
 # Lane A watchdog file-stability debounce, in seconds.
 watch_debounce_seconds = 10
 
@@ -679,6 +768,13 @@ rclone_path = "rclone"
 log_path = "~/.ccsync/companion.log"
 log_level = "INFO"
 
+# Crash reports. A JSON file per unhandled exception is ALWAYS written to
+# ~/.ccsync/crashes/ -- locally, and sent nowhere. These two only switch on the
+# optional network sender, and BOTH are needed: there is no vendor endpoint
+# compiled in, so `true` with an empty crash_dsn still sends nothing.
+crash_reporting = false
+crash_dsn = ""
+
 # Dashboard reporter: periodically POSTs lane statuses to a server-side
 # dashboard so an admin can see editor health without remoting in. Your
 # admin's dashboard URL (the installer writes it here; remote editors use
@@ -687,7 +783,23 @@ log_level = "INFO"
 # link entirely -- the reporter thread isn't even started. dashboard_token
 # is sent as the X-CCSync-Token header; ask the admin for the value.
 dashboard_url = ""
+# WHO MAY DRIVE THE LOOPBACK API on 127.0.0.1:8899 -- the "Send to Resolve"
+# and "Download here" buttons on the b-roll, music and YouTube pages
+# (2026-08-17). Only the dashboard's own origin may, and dashboard_url above
+# IS that origin, so neither of these is normally needed. Escape hatches, with
+# no default; the companion names the first one when it refuses a page.
+#   loopback_extra_origins  additional EXACT origins (scheme + host + port),
+#                           for editors who browse the dashboard at a name
+#                           dashboard_url does not use.
+#   loopback_dev_origins    also accept http(s)://127.0.0.1|localhost:*.
+# loopback_extra_origins = ["https://nas.example.ts.net"]
+# loopback_dev_origins = false
 dashboard_token = ""
+# Your OWN fleet token, if your admin has minted one for you (dashboard ->
+# Admin -> Users -> "report tokens"). It looks like "cce1.<id>.<secret>", it
+# identifies YOUR machines rather than the whole fleet, and it can be revoked
+# for you alone. Leave blank to use the shared dashboard_token above.
+report_token = ""
 # Login gate: when true, the companion will not start sync lanes/the
 # sequencer, nor report under an identity, until the editor signs in via the
 # tray ("Sign in...") with their TrueNAS username+password and the dashboard
@@ -797,6 +909,24 @@ proxy_gen_min_age_seconds = 120
 # Never remembered across restarts -- a blacklist on disk would turn a
 # transient GPU failure into a permanent one.
 # proxy_gen_max_failures = 3
+# Free space kept clear on the volume the proxies are written to, whichever of
+# the two is larger. Proxies land next to their originals -- the same volume
+# every sync lane and Resolve's own cache share -- so filling it stalls far
+# more than proxy generation. 0 disables the check.
+# proxy_gen_free_space_floor_gb = 20
+# proxy_gen_free_space_floor_pct = 5
+# Seconds between the two (size, mtime) samples that decide a source has
+# stopped growing. rclone and every card copier set the mtime when they CREATE
+# a file, so a transfer in flight can look settled while its size is still
+# climbing -- and ffmpeg would then make a proxy of half an interview. The
+# scan's own sample usually supplies the first one, so this is rarely waited
+# out. 0 = one sample (the pre-2026-08-17 behaviour; not recommended).
+# proxy_gen_stability_seconds = 5
+# Rehearsal: report every clip that WOULD be encoded and encode nothing.
+# proxy_dry_run = false
+# Rehearsal for FIX ALL: report what would be copied and where each clip would
+# be relinked, and copy/relink nothing. Read once at startup.
+# fixer_dry_run = false
 # How long (seconds) before the same "clips have no proxy" notice may appear
 # again. A day, so a restart doesn't re-nag about a gap you already know about.
 # proxy_notify_cooldown_seconds = 86400
@@ -986,10 +1116,38 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 
 
 def ensure_config_exists(path: Path = CONFIG_PATH) -> None:
-    """Write DEFAULT_TOML_TEXT to `path` if it doesn't exist yet."""
+    """Write DEFAULT_TOML_TEXT to `path` if it doesn't exist yet.
+
+    Owner-only from the moment it exists: this file carries a fleet report
+    token, and it used to be created at the process default umask -- 0644 on
+    POSIX, and on Windows whatever the profile directory happened to inherit
+    (COMMERCIAL_READINESS.md item 15, 2026-08-17). See secretfile.harden.
+    """
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(DEFAULT_TOML_TEXT, encoding="utf-8")
+        # Imported here, not at module scope: config.py is imported by almost
+        # everything in this package and secretfile pulls in subprocess.
+        from . import secretfile
+
+        secretfile.harden(path)
+        return
+    if path == CONFIG_PATH:
+        # An install that predates the rule above still has a world-readable
+        # config.toml, and it will never be rewritten -- config.toml is written
+        # by the installer, not by the running companion. Tightened once per
+        # process, and ONLY for the real path: a tests' tmp_path config must
+        # never spawn icacls.
+        global _CONFIG_HARDENED
+        if not _CONFIG_HARDENED:
+            _CONFIG_HARDENED = True
+            from . import secretfile
+
+            secretfile.harden(path)
+
+
+# Set by ensure_config_exists; see its "install that predates the rule" branch.
+_CONFIG_HARDENED = False
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:

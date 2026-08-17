@@ -10,11 +10,20 @@
 # the claude CLI's credentials are user-scoped, and an elevated process gets a
 # different token that cannot see the mapped share drives.
 #
-#   .\watchdog.ps1                    # what the scheduled task runs
-#   .\watchdog.ps1 -DryRun -Force     # exercise the restart path while a run is live
+#   .\watchdog.ps1                             # what the scheduled task runs
+#   .\watchdog.ps1 -Python C:\...\python.exe   # when PATH's python is the wrong one
+#   .\watchdog.ps1 -DryRun -Force              # exercise the restart path while a run is live
 param(
     [switch]$DryRun,   # do everything except actually launch
-    [switch]$Force     # skip the "already running" check
+    [switch]$Force,    # skip the "already running" check
+    # No default on purpose: this used to be one operator's
+    # C:\Users\<name>\AppData\... interpreter, which is both PII and wrong on
+    # every other machine (2026-08-17, COMMERCIAL_READINESS.md item 10).
+    # Unset = resolve python.exe from PATH; pass -Python (or set
+    # $env:BROLL_PYTHON) when the indexer's interpreter is not the first one
+    # on the scheduled task's PATH -- which is the usual case, because the
+    # task runs non-elevated with a service-ish environment.
+    [string]$Python = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,11 +38,21 @@ $log     = 'E:\broll-queue\watchdog.log'
 # rather than run by path, so fall back to the in-repo location.
 $indexer = $PSScriptRoot
 if (-not $indexer) { $indexer = 'E:\Projects\resolve-remote-sync\broll\indexer' }
-$python  = 'C:\Users\alex\AppData\Local\Programs\Python\Python312\python.exe'
 $db      = 'E:\broll-queue\broll.db'
 
 function Write-Log($msg) {
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg" | Add-Content -Path $log -Encoding utf8
+}
+
+# Resolved after Write-Log exists so the failure is logged, not swallowed: a
+# scheduled task's stderr goes nowhere, and a missing interpreter here used to
+# be indistinguishable from a run that simply never restarted.
+$python = $Python
+if (-not $python) { $python = $env:BROLL_PYTHON }
+if (-not $python) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+if (-not $python) {
+    Write-Log "FAIL - no python: pass -Python <path>, set BROLL_PYTHON, or put python.exe on PATH"
+    exit 1
 }
 
 try {
@@ -76,8 +95,12 @@ try {
         Write-Log "DRY-RUN - would restart, $remaining videos remaining"
         exit 0
     }
+    # No --config below: run_queue's default is
+    # private/broll/indexer/config.queue.yaml, resolved from its own file, since
+    # the site's catalogue moved out of the tracked tree on 2026-08-17
+    # (COMMERCIAL_READINESS.md item 10 / section B).
     Start-Process -FilePath $python `
-        -ArgumentList '-u','run_queue.py','--config','config.queue.yaml',
+        -ArgumentList '-u','run_queue.py',
                       '--model','haiku','--api-workers','12' `
         -WorkingDirectory $indexer `
         -RedirectStandardOutput "E:\broll-queue\claude-$stamp.log" `

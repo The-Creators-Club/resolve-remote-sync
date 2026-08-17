@@ -12,9 +12,11 @@ SECRET = "test-secret"
 
 @pytest.fixture(autouse=True)
 def _reset_throttle():
-    auth._failures.clear()
+    """No-op kept as a marker: the failure budget moved out of a module-level
+    dict and into SQLite on 2026-08-17 (sessions.SessionStore), so it is
+    per-database and every test's tmp_path already isolates it. The strict,
+    production-shaped behaviour lives in test_sessions.py."""
     yield
-    auth._failures.clear()
 
 
 def test_cookie_round_trip_and_expiry():
@@ -30,20 +32,20 @@ def test_cookie_round_trip_and_expiry():
 
 
 def test_can_manage_matrix():
-    settings = Settings(admin_users=frozenset({"alex"}))
+    settings = Settings(admin_users=frozenset({"owen"}))
     assert auth.can_manage(settings, "jsmith", "jsmith") is True
     assert auth.can_manage(settings, "jsmith", "other") is False
-    assert auth.can_manage(settings, "alex", "other") is True
+    assert auth.can_manage(settings, "owen", "other") is True
     assert auth.can_manage(settings, None, "jsmith") is False
 
 
 @pytest.fixture
 def client(tmp_path):
     settings = Settings(db_path=str(tmp_path / "a.db"), session_secret=SECRET,
-                        admin_users=frozenset({"alex"}))
+                        admin_users=frozenset({"owen"}))
     app = create_app(settings)
     app.state.credential_verifier = (
-        lambda s, u, p: (u, p) in {("jsmith", "pw1"), ("alex", "pw2")}
+        lambda s, u, p: (u, p) in {("jsmith", "pw1"), ("owen", "pw2")}
     )
     with TestClient(app) as c:
         yield c
@@ -120,10 +122,10 @@ def test_htmx_redirect_keeps_the_pages_query_and_survives_a_missing_current_url(
     resp = client.get(
         "/partials/sidebar?current=x",
         headers={"HX-Request": "true",
-                 "HX-Current-URL": "http://dash/project/2026-cct?as=ruskin"},
+                 "HX-Current-URL": "http://dash/project/2026-cct?as=editor2"},
         follow_redirects=False,
     )
-    assert resp.headers["HX-Redirect"] == "/login?next=%2Fproject%2F2026-cct%3Fas%3Druskin"
+    assert resp.headers["HX-Redirect"] == "/login?next=%2Fproject%2F2026-cct%3Fas%3Deditor2"
     # no HX-Current-URL (htmx always sends it, but a hand-rolled caller may
     # not): fall back to the request's own path rather than dropping the header
     resp = client.get("/partials/sidebar", headers={"HX-Request": "true"},
@@ -166,7 +168,7 @@ def test_selection_read_with_the_shared_token_needs_a_matching_identity(tmp_path
         token_only = {"X-CCSync-Token": "tok"}
         assert c.get("/api/v1/selection/jsmith", headers=token_only).status_code == 401
         # a valid identity for SOMEONE ELSE is not enough either
-        wrong = dict(token_only, **{"X-CCSync-Identity": auth.make_identity_token(SECRET, "ruskin")})
+        wrong = dict(token_only, **{"X-CCSync-Identity": auth.make_identity_token(SECRET, "editor2")})
         assert c.get("/api/v1/selection/jsmith", headers=wrong).status_code == 401
         # a session cookie is not an identity token
         stale = dict(token_only, **{"X-CCSync-Identity": auth.make_session_cookie(SECRET, "jsmith")})
@@ -225,7 +227,7 @@ def test_verify_only_mints_identities_for_fleet_members(tmp_path):
              "locked": False, "password_disabled": False},
         ])
         settings = Settings(db_path=str(tmp_path / "v.db"), session_secret=SECRET,
-                            report_token="tok", admin_users=frozenset({"alex"}),
+                            report_token="tok", admin_users=frozenset({"owen"}),
                             truenas_pw="fake-pw", truenas_base_url=truenas.base_url)
         app = create_app(settings)
         app.state.credential_verifier = lambda s, u, p: p == "pw"   # SMB says yes to all
@@ -234,7 +236,7 @@ def test_verify_only_mints_identities_for_fleet_members(tmp_path):
                 return c.post("/api/v1/verify", json={"username": username, "password": "pw"})
 
             assert verify("jsmith").status_code == 200                    # editor
-            assert verify("alex").status_code == 200                      # DASH_ADMIN_USERS
+            assert verify("owen").status_code == 200                      # DASH_ADMIN_USERS
             for outsider in ("bookkeeper", "root", "ghost"):
                 resp = verify(outsider)
                 assert resp.status_code == 403, outsider
@@ -276,10 +278,10 @@ def test_session_cookie_secure_flag_follows_the_scheme(tmp_path):
     https only; DASH_COOKIE_SECURE forces either way."""
     from ccsync_dashboard import auth as authmod
 
-    def cookie_header(settings, headers=None):
+    def cookie_header(settings, headers=None, peer=("testclient", 50000)):
         app = create_app(settings)
         app.state.credential_verifier = lambda s, u, p: True
-        with TestClient(app) as c:
+        with TestClient(app, client=peer) as c:
             resp = c.post("/api/v1/login", json={"username": "jsmith", "password": "pw"},
                           headers=headers or {})
             assert resp.status_code == 200
@@ -288,15 +290,22 @@ def test_session_cookie_secure_flag_follows_the_scheme(tmp_path):
     auto = Settings(db_path=str(tmp_path / "c1.db"), session_secret=SECRET)
     assert "secure" not in cookie_header(auto)                       # http today
     assert "httponly" in cookie_header(auto) and "samesite=lax" in cookie_header(auto)
-    # a TLS terminator in front is the only way this deployment sees https
-    assert "secure" in cookie_header(auto, {"X-Forwarded-Proto": "https"})
+    # A TLS terminator in front is the only way this deployment sees https --
+    # and since 2026-08-17 (H1) its X-Forwarded-Proto counts only when it
+    # arrives from a peer in DASH_TRUSTED_PROXIES. Tailscale Serve and a
+    # sidecar both arrive over loopback, which is the default.
+    assert "secure" not in cookie_header(auto, {"X-Forwarded-Proto": "https"})
+    assert "secure" in cookie_header(
+        Settings(db_path=str(tmp_path / "c1b.db"), session_secret=SECRET),
+        {"X-Forwarded-Proto": "https"}, peer=("127.0.0.1", 50000))
 
     forced = Settings(db_path=str(tmp_path / "c2.db"), session_secret=SECRET,
                       cookie_secure="1")
-    assert "secure" in cookie_header(forced)
+    assert "secure" in cookie_header(forced, {"X-Forwarded-Proto": "https"})
     off = Settings(db_path=str(tmp_path / "c3.db"), session_secret=SECRET,
                    cookie_secure="0")
-    assert "secure" not in cookie_header(off, {"X-Forwarded-Proto": "https"})
+    assert "secure" not in cookie_header(off, {"X-Forwarded-Proto": "https"},
+                                         peer=("127.0.0.1", 50000))
 
     assert Settings.from_env({}).cookie_secure == "auto"
     assert Settings.from_env({"DASH_COOKIE_SECURE": "1"}).cookie_secure == "1"
@@ -309,8 +318,12 @@ def test_session_cookie_secure_flag_on_the_html_login_form(tmp_path):
     app = create_app(settings)
     app.state.credential_verifier = lambda s, u, p: True
     with TestClient(app) as c:
+        # X-Forwarded-Proto: the form is REFUSED on a connection that is
+        # provably plain http while DASH_COOKIE_SECURE=1, because the browser
+        # would drop the Secure cookie and loop forever (auth.
+        # refuse_plaintext_login, 2026-08-17).
         resp = c.post("/login", data={"username": "jsmith", "password": "pw"},
-                      follow_redirects=False)
+                      headers={"X-Forwarded-Proto": "https"}, follow_redirects=False)
         assert resp.status_code == 303
         assert "secure" in resp.headers["set-cookie"].lower()
 
@@ -349,21 +362,30 @@ def test_identity_token_longer_ttl_than_session():
     now = _t.time()
     sess = auth.make_session_cookie(SECRET, "jsmith", now=now)
     ident = auth.make_identity_token(SECRET, "jsmith", now=now)
-    # identity expiry field (index 3: v2.<purpose>.<user_b64>.<exp>.<sig>) is
-    # further out than the session's.
-    assert int(ident.split(".")[3]) > int(sess.split(".")[3])
+    # The expiry is the second-to-last field of both -- identity keeps the
+    # five-field shape (v2.<purpose>.<user_b64>.<exp>.<sig>) that the companion
+    # parses, while a session cookie carries a per-login nonce as well
+    # (2026-08-17, see make_session_cookie).
+    assert int(ident.split(".")[-2]) > int(sess.split(".")[-2])
+    assert len(ident.split(".")) == 5 and len(sess.split(".")) == 6
 
 
-def test_login_throttle_evicts_expired_entries():
-    # SEC-12: a spray of failed logins against throwaway/random usernames
-    # must not grow the in-process dict forever -- the next call to
-    # login_throttled sweeps every expired/empty entry, not just the queried
-    # username's.
+def test_login_throttle_does_not_grow_without_bound(tmp_path):
+    """SEC-12, restated for the SQLite budget (2026-08-17): a spray of failed
+    logins against throwaway usernames must not accumulate forever. The
+    in-process dict swept on every attempt; the table is pruned at boot, and
+    an entry outside the window stops counting immediately either way."""
+    from ccsync_dashboard import sessions
+
+    store = sessions.SessionStore(tmp_path / "spray.db")
+    store.ensure_schema()
     for i in range(50):
-        auth.record_login_failure(f"spray{i}", now=0.0)
-    assert len(auth._failures) == 50
-    assert auth.login_throttled("jsmith", now=1000.0) is False
-    assert len(auth._failures) == 0  # all 50 stale entries evicted by the sweep
+        store.record_failure(f"spray{i}", None, now="2026-08-17T00:00:00+00:00")
+    assert store.throttled("jsmith", None, now="2026-08-17T04:00:00+00:00") == 0
+    # the next FAILURE sweeps them, so the table cannot grow across a
+    # months-long container uptime; boot-time prune_attempts is the backstop
+    store.record_failure("jsmith", None, now="2026-08-17T04:00:00+00:00")
+    assert store.prune_attempts(now="2026-08-17T09:00:00+00:00") == 1
 
 
 def test_report_requires_a_matching_identity_header(tmp_path):
@@ -460,9 +482,9 @@ def test_scope_helper():
     from ccsync_dashboard.auth import Scope
     editor = Scope(user="jsmith", admin=False)
     assert editor.editor == "jsmith" and editor.allows("jsmith") and not editor.allows("other")
-    admin = Scope(user="alex", admin=True, focus="ruskin")
-    assert admin.editor == "ruskin" and admin.allows("anyone")
-    admin_all = Scope(user="alex", admin=True)
+    admin = Scope(user="owen", admin=True, focus="editor2")
+    assert admin.editor == "editor2" and admin.allows("anyone")
+    admin_all = Scope(user="owen", admin=True)
     assert admin_all.editor is None and admin_all.allows("whoever")
 
 
@@ -473,7 +495,9 @@ def test_login_page_renders(client):
                        follow_redirects=False)
     assert resp.status_code == 303 and auth.COOKIE_NAME in resp.cookies
     bad = client.post("/login", data={"username": "jsmith", "password": "nope"})
-    assert "bad username or password" in bad.text
+    # ONE generic message for every refusal since 2026-08-17 -- "bad password"
+    # vs "too many attempts" vs "not an admin" was a username/role oracle.
+    assert "sign-in refused" in bad.text
 
 
 def test_login_rejects_oversized_body(client):

@@ -61,9 +61,9 @@ def test_verify_account_success_returns_username_token_report_token():
 
 def test_verify_account_returns_role_when_dashboard_sends_one():
     def fake_post(url, data, headers, timeout):
-        return {"ok": True, "username": "alex", "token": "v1.alex.999.abc", "role": "base"}
+        return {"ok": True, "username": "owen", "token": "v1.owen.999.abc", "role": "base"}
 
-    result = steps.verify_account("http://dash.example.com", "alex", "hunter2", http_post=fake_post)
+    result = steps.verify_account("http://dash.example.com", "owen", "hunter2", http_post=fake_post)
     assert result["role"] == "base"
 
 
@@ -894,7 +894,7 @@ def test_write_identity_persists_role(tmp_path, monkeypatch):
     from ccsync_companion import config as config_mod
 
     monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
-    steps.write_identity("alex", "v1.alex.9999999999.deadbeef", role="base")
+    steps.write_identity("owen", "v1.owen.9999999999.deadbeef", role="base")
 
     data = json.loads((tmp_path / "identity.json").read_text())
     assert data["role"] == "base"

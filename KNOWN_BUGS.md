@@ -49,6 +49,409 @@ SHIPPED 2026-08-15 as companion 0.7.8 / installer 1.0.27 (commit `5ab221d`)
 
 ---
 
+**Status 2026-08-17 (evening): the commercial-readiness pass
+(`docs/COMMERCIAL_READINESS.md`, all 15 items) was IMPLEMENTED IN REPO by a
+15-agent Opus fleet on branch `commercial-readiness` (disjoint file
+territories, integration agent + full-suite verification afterwards; ~220
+files, ~+18k lines, roughly half tests). NOTHING FROM IT IS SHIPPED. Every
+entry below tagged CR-n is "fixed in repo, unshipped" unless it says
+otherwise, and several need an operator step on a live NAS, a certificate,
+counsel, or a Mac before the fix is real. The consolidated operator list is
+the "Status 2026-08-17" paragraphs in `docs/COMMERCIAL_READINESS.md`.**
+
+---
+
+## Open — the 2026-08-17 commercial-readiness pass (CR-n)
+
+### CR-1 — the b-roll indexer billed a personal Claude Code subscription — FIXED in repo 2026-08-17, unshipped
+`broll/indexer` drove `claude -p` against one operator's claude.ai login: a
+customer install has no `claude` binary and no such login, the session
+limits are per-person, and the Consumer Terms do not cover reselling it. The
+`claude` stage now calls the Messages API through the `anthropic` SDK
+(`broll_index/claude_client.py`), key from `ANTHROPIC_API_KEY` (name
+configurable) or a keyfile — never from config.yaml, which the loader
+refuses. Contact sheets travel as base64 image blocks; `parallel_claude.py`
+is a thread pool whose `--workers` is also the client's in-flight ceiling;
+429/5xx/overloaded retry with jittered backoff honouring `retry-after`, then
+classify as account-wide so the queue stays resumable. `total_cost_usd` in
+`usage.jsonl` is now a LOCAL ESTIMATE. Not yet exercised against a live key —
+owed: one real pass on a customer key to re-baseline per-clip cost.
+`broll/docs/indexing-api.md`.
+
+### CR-2 — the YouTube feature shipped on by default, with the vendor's Claude account, an unverified identity and no rights record — FIXED in repo 2026-08-17, unshipped
+Items 1, 2, 3, 7/H5, 15 of the readiness doc, all in the ytdl stack:
+- **It was on for everybody.** Now `site.toml [features] youtube_download`
+  (default OFF, published in `GET /api/v1/site`): off, `mount_ytdl()` returns
+  `disabled` before importing anything, `/ytdl` and every fleet route 404, and
+  each companion hides its tray items, refuses `/ytdl/*` loopback calls and
+  installs no tooling. A client that cannot read the manifest treats it as off.
+  THIS studio's git-ignored `site.toml` sets both flags on.
+- **No rights record.** A rights/ToS attestation is now accepted per user
+  (`ytdl.db.attestations`) and per machine
+  (`~/.ccsync/state/ytdl-attestation.json`) with wording version, digest and
+  timestamp; downloads 403 (`reason:'attestation'`) in the browser, at the
+  claim and in `capabilities()`. Wording is a DRAFT FOR COUNSEL
+  (`docs/legal/YOUTUBE_FEATURE_NOTICE.md`).
+- **The circumvention components were part of the install.** PO-token
+  sidecar, deno n-challenge solver and cookie sign-in are a second, narrower
+  opt-in (`[features] youtube_unblock` / `--enable-youtube-unblock`). The
+  vendor build provisions none of them; the code stays dormant.
+- **Every deployment ran on one human's Claude account** (`claude -p` +
+  a hand-performed `/login` in a `claude-home` volume). Now the `anthropic`
+  SDK with the CUSTOMER's `ANTHROPIC_API_KEY`; claude-bin/claude-home mounts
+  deleted (removal + credential revocation steps in `ytdl/web/DEPLOY.md`).
+  Untrusted page/title text goes in the user turn as fenced data.
+- **The fleet token was treated as an identity (H5).** `X-CCSync-Identity`
+  now carries the dashboard's signed identity token and `routes_fleet`
+  verifies it against `DASH_SESSION_SECRET` (fails closed); `is_leaseholder`
+  no longer accepts a nameless caller. `YTDL_DEV_USER` is gone, replaced by an
+  in-process `session.set_test_user()`.
+Owed: a written licence grant for `ytdl/web/ytdlweb/vendor/`
+(`PROVENANCE.md` — upstream `The-Creators-Club/Utilities` has no licence
+file), counsel review of the attestation wording, a retention policy for the
+attestation + download records, and on the live NAS `rm -rf
+<host-root>/claude-home <host-root>/claude-bin` + revoking the OAuth
+credential.
+
+### CR-3 — pystray (LGPLv3) was frozen into the companion, and its internals were copied — FIXED in repo 2026-08-17, unshipped
+`pystray` is LGPLv3 (verified from installed metadata). It was collected into
+the single-file PyInstaller freeze, which conveys it with no way to relink
+against a modified copy, and `tray.py:242-395` monkeypatched its win32
+internals. Replaced by `ccsync_companion/tray_native.py` — original, written
+from the Shell_NotifyIconW / TrackPopupMenuEx / CreateIconIndirect and
+NSStatusBar / NSMenu documentation. Removed from `pyproject.toml`,
+`build.spec` and `requirements.lock`; `tools/check_licenses.py` FAILS if it
+comes back. `CCSYNC_TRAY_BACKEND=pystray` remains as a dev escape hatch that
+refuses under `sys.frozen`. Two old bugs die with it: the HMENU is built at
+right-click time and destroyed on close (the destroyed-handle race and USER
+leak behind the 2026-07-26 freezes are structurally impossible), and the
+menu-open flag is set by the backend on BOTH platforms. Verified on the base
+rig with `companion/tools/tray_smoke.py` (icon added, menu read back out of
+USER32, item selected). **macOS is code-complete but unverified.**
+
+### CR-4 — the installer conveyed a GPLv3 ffmpeg to the customer's NAS — FIXED in repo 2026-08-17
+`install_dashboard_app.py` defaulted to `--ffmpeg-fetch local`: this
+workstation SFTP-pushed johnvansickle's GPLv3 static build onto the target —
+conveying under §6 with no source offer. Default flipped to `remote` (the
+NAS curls the same pinned URL and verifies the same sha256); the 2026-08-10
+reason for `local` (42 MB at ~28 kB/s outlived `run_ssh`'s 600 s) is
+answered by `FFMPEG_REMOTE_INSTALL_TIMEOUT = 1800`, `curl --retry 3`, still
+NON-FATAL. Air-gapped sites keep the push behind `--push-ffmpeg-from-local`,
+which prints `FFMPEG_LOCAL_PUSH_GPL_NOTICE` before any bytes move. Watch the
+first deploy: first time a NAS does the ~25-minute download under the new
+ceiling.
+
+### CR-5 — no LICENSE, EULA, privacy policy, telemetry disclosure or third-party notices — DRAFTED 2026-08-17, awaiting counsel
+All exist as DRAFTS FOR COUNSEL: `LICENSE`, `docs/legal/EULA.md`,
+`PRIVACY.md`, `TELEMETRY.md`, `THIRD_PARTY_NOTICES.md` (generated by
+`tools/gen_notices.py`, `--check` as a CI gate). The wizard's new page 0
+requires acceptance and records `~/.ccsync/eula_accepted.json`; the companion
+refuses to start lanes without a current one, and FAILS OPEN when the bundled
+document is missing (a packaging fault must never stop a fleet syncing —
+`build.spec`'s `assets/EULA.md` datas line is pinned by
+`test_build_spec_ships_the_eula`). Bumping the EULA's `<!-- EULA-VERSION -->`
+marker pushes every editor in every fleet back through the wizard — a
+release-level decision. Open and both hard: counsel review starting with the
+legal entity name (placeholder "Cablewrap Creative" was INFERRED from the
+operator's email domain), and the `yt-credit-downloader` grant (CR-2). Also
+from TELEMETRY.md: `resolve_project` / `local_manifest` / `media_tree`
+reporting has no "off" but uninstalling — a config switch is owed.
+
+### CR-6 — the upgrade channel was unauthenticated (STOP-SHIP) — FIXED in repo 2026-08-17, certificates NOT bought
+`upgrade.url` and the sha256 that "verified" the download arrived in the SAME
+plain-HTTP `/api/v1/report` response, so anything able to answer as the
+dashboard could hand an editor an arbitrary binary plus a matching hash,
+which `upgrade.py` renamed over the running companion and launched. FIXED:
+every published record is signed offline with an ed25519 key that exists on
+no server (`tools/release_key.py`, `tools/sign_release.py`; public half baked
+into `ccsync_companion/release_pubkey.py`, pure-Python RFC 8032 verifier in
+`ed25519.py`, no new frozen dep). The companion verifies BEFORE downloading
+and the signed sha256 after; the dashboard verifies on publish against
+`DASH_RELEASE_PUBKEYS` and refuses an unsigned publish (422) or an
+unconfigured key (503). Plus a monotonic downgrade floor
+(`~/.ccsync/upgrade_floor.json`, `min_version` in the signed record) and a
+transport rule (https, or plain http to tailnet/LAN only, logged once).
+Migration is additive: 0.7.11 can still take the first signed build. A key WAS
+generated on this rig (`%USERPROFILE%\.ccsync-release\release.key`, pubkey
+`GKNmk8MktRkGkrBv+ziF7O6ZNKCnjXfC9/TwDiYwKDY=`, id `ed717ff9611d6ec8`) — decide
+whether to keep it before the first customer ship, and BACK IT UP OFFLINE
+(losing it means no build can ever be offered to the fleet again). STILL
+OPEN: no Authenticode or Developer ID certificate exists, so every build is
+`signed_binary=false` and `tools\ship.cmd` needs `-AllowUnsignedBinary`; and
+`DASH_RELEASE_PUBKEYS` must be set on both live dashboards (+ `--recreate`) or
+every publish 503s. `docs/RELEASE.md` "Code signing".
+
+### CR-7 — the 8899 loopback answered any page in the editor's browser (CRITICAL C1) — FIXED in repo 2026-08-17, unshipped
+`broll_server.py` sent `Access-Control-Allow-Origin: *` plus
+`Access-Control-Allow-Private-Network: true` and checked no Origin, Host,
+token or content type — any ad iframe or phished link could insert clips
+into the timeline being graded, start NAS fetches, spawn Explorer/`open`, and
+claim fleet ytdl jobs. Three smaller holes went with it: `probe_darwin_mount`
+interpolated `share` into `/Volumes/<share>` unvalidated (`../..` = `/`),
+`/insert` was the one path route without containment, and a reveal could
+`open` a `.app`. `docs/YTDL_LOCAL_DOWNLOAD.md:331` claimed an origin check
+existed; it never had. Now: `loopback_guard.py` allow-lists the Origin to this
+deployment's dashboard (`dashboard_url` + the cached site manifest, both
+schemes); a POST needs that Origin OR the `X-CCSync-Loopback` token from
+`~/.ccsync/loopback-token`, plus `Content-Type: application/json` and a
+loopback `Host`; `share` is one safe segment; every path route
+realpath-contains; bundles are revealed, never opened; fetches are capped at 2
+and go through `root_guard`. `docs/LOOPBACK_API.md`. **Ops note for the ship:
+every companion's `dashboard_url` must equal the origin editors actually
+browse** (Tailscale Serve `https://nas.<tailnet>.ts.net` vs a provisioned
+`http://100.x:8480`) or every Send-to-Resolve 403s; `loopback_extra_origins`
+is the per-machine escape hatch, the site manifest's `dashboard_url` the
+fleet-wide one.
+
+### CR-8 — the dashboard's session layer: no revocation, no secret floor, spoofable X-Forwarded-Proto, no CSRF token — FIXED in repo 2026-08-17, unshipped
+Items 6/H1, 12 and 15. A stolen session cookie was good for seven days and
+nothing could stop it (rotating `DASH_SESSION_SECRET` signs out the fleet AND
+invalidates every companion identity token); two browsers signing in as the
+same editor in the same second got a byte-identical cookie;
+`X-Forwarded-Proto` was believed from anyone; `DASH_SESSION_SECRET` /
+`DASH_REPORT_TOKEN` had no strength check while compose ships `REPLACE_ME`;
+the login throttle was an unlocked in-process dict, per-username only; CSRF
+rested on `SameSite=Lax`; `DASH_REPORT_TOKEN_OPTIONAL` was one env var from
+unauthenticated fleet writes. Fixed: server-side revocable sessions
+(`sessions.py`, `auth_sessions` keyed by HMAC(secret, cookie); logout,
+`[ LOGOUT ALL ]`, admin revoke on Users; 12h idle / 7d absolute), per-login
+nonce, `DASH_TRUSTED_PROXIES` (default loopback), `DASH_COOKIE_SECURE=1`
+refuses plaintext login, `check_boot_secrets` reuses
+`broll.check_ingest_token` and REFUSES TO START on a weak secret, SQLite
+throttle per-username AND per-IP with backoff and one generic message, CSRF
+synchroniser token on every dashboard htmx/form POST, 12-char floor on
+passwords the dashboard SETS, `DASH_AUTH_METHOD=oidc` (PKCE, state/nonce,
+JWKS via PyJWT, `/login?local=1` break-glass) — never pointed at a real IdP.
+`DASH_DEV_INSECURE=1` is the ONE dev/test bypass (`dashboard/tests/conftest.py`
+sets it). BEHAVIOUR CHANGES ON DEPLOY: everyone is signed out once; the
+container REFUSES TO BOOT if either secret is under 24 chars/placeholder —
+CHECK THE LIVE VALUES FIRST; behind Tailscale Serve set `DASH_COOKIE_SECURE=1`
+(not `auto` — the request arrives from the docker bridge, not loopback).
+STILL OPEN: the three mounted SPAs (`/broll`, `/music`, `/ytdl`) do not send
+the CSRF token yet and sit on `app._CSRF_EXEMPT_PREFIXES` (the token is on
+the topbar they inject as `data-csrf`; one header each).
+
+### CR-9 — the base rig trusted any host key, the container held the NAS root password, and every editor had a shell — FIXED in repo 2026-08-17, unshipped
+Items 6 (H2/H3) and 7 (H4). SSH: `ssh_client` accepted whatever answered on
+22 while writing the admin password to that channel — pinning is now the rule
+(`[nas] ssh_hostkey`); an unknown host is a refusal, first use needs
+`--trust-host-key-on-first-use` and is recorded in `~/.ccsync/known_hosts`, a
+CHANGED key refuses naming both fingerprints. TLS: `verify=False` became
+`TRUENAS_VERIFY_SSL` (off still allowed, warned every run, CA path works from
+the container). Container: `server/create_api_key.py` mints a scoped TrueNAS
+API key; with `TRUENAS_API_KEY` set the deploy writes NO password into the
+container (DSM has no equivalent and keeps the password behind loopback).
+Editors: new accounts are `nologin` + sshd `Match Group editors` block
+(`ForceCommand internal-sftp`, `PasswordAuthentication no`) and the manifest
+publishes `sftp_shell_type=none` automatically; NO ChrootDirectory (would
+re-root every absolute path the manifest publishes); `[stack] project_acl =
+"per-project"` adds `proj-<slug>` groups + setgid+sticky containers
+(`docs/TENANCY.md`), default `shared`. `server/secure_syncthing_gui.py` puts
+a login on the Syncthing GUI (an unauthenticated admin surface on both
+platforms until it is run). Residual, deliberate: THIS fleet is pinned to
+`[stack] editor_shell = "shell"` in its site.toml until
+`setup_editor_account.py --migrate-existing --apply` runs (deploying with it
+flipped early breaks every editor's rclone checksums); the `api_key.create`
+body shape and the chart's `web_port.host_ips` are coded from knowledge and
+marked "verify against the live version"; the dashboard provisioner does not
+yet add proj-<slug> membership on a tick; DSM per-project is a grant plus an
+operator TODO.
+
+### CR-10 — the fleet had no backups at all, and the b-roll index was published by `copy` over a live WAL database — FIXED in repo 2026-08-17, NOT YET APPLIED to either NAS
+Zero references to snapshots, replication or restore existed; the only
+`broll.db` publish recipe was a plain SMB copy over a WAL-mode database the
+container holds open read-write. `server/setup_snapshots.py` creates the
+periodic tasks on the tree AND the apps dataset (hourly keep 24, daily keep
+30, recursive) idempotently — TrueNAS via `/pool/snapshottask`; DSM prints the
+exact Snapshot Replication click path and exits 1. `common.snapshot_before()`
+snapshots before `setup_tree.py`'s `chown -R` and before the deploy /
+`--recreate` swap (best-effort unless `--require-snapshot` /
+`$CCSYNC_REQUIRE_SNAPSHOT`). `server/publish_db.py --which broll|music` is
+the ff3 memory-note recipe as code: checkpoint, local `sqlite3.backup()`,
+`quick_check` locally AND on the NAS, >10 % row-count shrink refusal, atomic
+rename, `<name>.db.prev-<ts>` kept, `--rollback`. Runbook
+`docs/BACKUP_RESTORE.md`. Owed by the operator: `setup_snapshots.py --apply`
+on the TrueNAS (and the Synology), then `--list` within the hour — until then
+this entry is code, not protection; the `pool.snapshottask` payload is
+unverified against a live 25.10 middleware.
+
+### CR-11 — lane B could walk a proxy set into the trash 20 GB per pass with the grid green — FIXED in repo 2026-08-17, unshipped
+`--max-delete 100 / 20G` bounds ONE pass, not the sequence: a wrong
+`remote_root`, a NAS listing empty while its pool imports, or a project
+unshared behind the companion's back all present as "the source no longer
+has these files". Four more edges went with it: `.ccsync-trash` never pruned;
+"Remove from this machine" `rmtree`'d with no caught-up check; Pause was not
+Stop and nothing could halt lane C or the fleet; lane A silently never
+re-uploads a same-name re-export. Fixed in `sync/lane_guard.py`: a persisted
+**circuit breaker** (trips BEFORE a pass on a marker-less/empty/halved
+remote, AFTER on >50 deletions or >25 % of the local proxy set, and on a
+cumulative leak; lane B parks `paused` — never `error` — while lanes A and C
+keep running; cleared only from the tray); **trash retention** (14 days /
+50 GB, oldest first, never while tripped — a deliberate reversal of AUDIT_2
+C-7); a fail-closed **removal gate** (lane A `--dry-run` + Syncthing
+completion; override = type the project name, logged AND reported); a real
+**halt** (lanes A+B stopped and every lane C folder paused via Syncthing REST,
+persisted; fleet-wide via `POST /api/v1/fleet/halt` + a Users-page panel,
+delivered on the report reply's `commands.halt`); and a `rclone check
+--one-way --size-only` "won't upload" counter. Dashboard: schema v16,
+`sync_guard` report section, row chips + fleet banners. `docs/SYNC_SAFETY.md`.
+Costs: one extra `rclone lsf` per lane B pass; the first pass after upgrade
+computes the baseline and may trip once on a project mid-reorganisation.
+
+### CR-12 — the companion rewrote Resolve project databases with no save, no backup and no undo — FIXED in repo 2026-08-17, unshipped
+Four code paths write clip paths — FIX ALL, the automatic canonical relink,
+the automatic proxy repoint, the post-import canonicaliser — and two are
+unprompted; none saved, exported or journalled, and Resolve's Undo does not
+cover a scripted `ReplaceClip`. Now `resolve_journal.py` + a
+`_before_mutation()` hook inside `resolve_bridge.replace_clip` /
+`link_proxy_media`: `SaveProject()`, best-effort
+`ProjectManager.ExportProject()` to `~/.ccsync/resolve_edits/<project>/<ts>.drp`,
+and a per-burst JSON journal of old/new path per clip; Tray → Advanced →
+"Undo the last clip-path change CCSync made…" replays it in reverse; the
+unprompted paths are rate-limited to one burst per project per 15 min; the
+fixer re-checks its O_EXCL reservation immediately before `os.replace` and
+verifies copy size + source stability before relinking; `fixer_dry_run` /
+`proxy_dry_run` rehearsal switches. `docs/RESOLVE_EDIT_SAFETY.md`. Add new
+Resolve mutations THROUGH those two bridge functions. The companion suite's
+`_no_live_resolve` conftest fixture exists because the save point calls
+`connect()`. Unverified: that `ExportProject` really writes the `.drp` on a
+live Resolve (fakes only) — check once on the base rig.
+
+### CR-13 — proxy generation: no free-space floor, one-sample growing-source test, would encode a proxy of a proxy — FIXED in repo 2026-08-17, unshipped
+`free_space_shortfall()` keeps max(20 GB, 5 %) clear
+(`proxy_gen_free_space_floor_gb/_pct`), checked before anything is created,
+skipped-and-surfaced (log, tray, `coverage()["low_space"]`); two (size,
+mtime) samples `proxy_gen_stability_seconds` apart replace the single mtime
+(rclone/Syncthing/card copiers stamp mtime at create AND finish); `is_proxy_path`
+refuses `Proxy/`/`proxies/` at any depth, `.partial`, and a file that is its
+own output.
+
+### CR-14 — `fix_10bit_proxies.py --apply` could transcode an archive ORIGINAL in place, and `build_archive.py --apply` undid its repairs — FIXED in repo 2026-08-17
+`reencode()` overwrote whatever it was handed and `source_for()` fell back to
+the target itself whenever the parent was not `Proxy` — a row pointing at the
+top-slot original got the archive's best copy re-encoded to 540p over
+itself, `fixed` printed beside it. Now refused outright (`is_a_proxy`),
+refusals printed in the dry run too. `build_archive --apply` decided by size
+alone, so every R9 repair looked un-copied and the next build put the 10-bit
+source back — now `needs_copy()` walks absent → size → mtime → quick
+head+tail hash, `broll_index/inplace_fixes.py` records repairs at the archive
+root and protects them, and anything replaced is stashed under
+`.ccsync-replaced/<ts>/` (never swept automatically).
+
+### CR-15 — the onboarding wizard tore down a real NAS `P:` mapping — FIXED in repo 2026-08-17
+`execute_cleanup` ran `subst P: /D` + `net use P: /delete /y` on the ROLE
+alone; the bootstrap (INST-15) and uninstaller (D-8) already refused to touch
+a `P:` they did not create. Now `p_mapping_is_ours()` applies the bootstrap's
+rule verbatim (subst = ours, `\\localhost\CCSync_P` = ours, the site's
+`smb_unc` or any other UNC = refuse, unreadable = refuse).
+
+### CR-16 — a Mac upgraded across the LaunchAgent rename could run two companions — FIXED on both sides in repo 2026-08-17, unshipped
+Bundle ids and launchd labels moved `com.creatorsclub.*` → `com.ccsync.*`
+(item 10). A machine installed before that has the legacy label still
+bootstrapped, pointing at the same `~/.local/ccsync/bin`. The wizard
+(`steps.retire_legacy_launch_agents()`) and `installer/macos_bootstrap.sh`
+(`retire_legacy_agent`) both bootout + unload + delete the legacy pair before
+writing the new one; `macos_uninstall.sh` enumerates both generations. Never
+run on a Mac — the first Mac upgrade after this must be watched
+(`launchctl list | grep ccsync` shows exactly one companion). Also from the
+brand pass: every "Creators Club" string is site data (`org_name`/`org_short`,
+fallback `product_name` = "CC Sync"), the tray mark is the neutral
+`assets/ccsync_mark.png` unless `CCSYNC_BRAND_LOGO=cc_mark_white.png`, the
+b-roll own-footage slug is `BROLL_DEFAULT_COLLECTION` (default `owned`, legacy
+`creators_club` still routed), and the music `W:\Creators_Club` probe is
+`MUSIC_LIBRARY_ROOT`. Not changed on purpose: the PHYSICAL `Creators_Club`
+archive/tree directory name — a migration, not an edit.
+
+### CR-17 — the installers were a fork per customer, and shipped unverified binaries — FIXED in repo 2026-08-17, unshipped
+`P:` and `Creators_Club` were literals at ~70 sites in `windows_bootstrap.ps1`
+(mount, teardown, `CCSync-SubstP` task, `CCSync_P` share, `MountPoints2`
+label, the "is this drive somebody else's?" guard); a site mounting elsewhere
+got an uninstaller that silently removed nothing. Both now derive from the
+manifest's `canonical_prefix`/`tree_name`; the uninstallers read the prefix
+from the local `config.toml` (off-tailnet). rclone (v1.75.0) and Syncthing
+(v2.1.3) are pinned by version + sha256 in both bootstraps, verified before
+unpacking, "latest" resolvers gone. The editor-laptop SMB share now comes with
+an inbound block on TCP 139/445 (loopback is not filtered, so the mapping
+still works; `-KeepRemoteSmbOpen` opts out); the elevated helper is a per-run
+random name in an ACL'd per-user dir; `config.toml`/`identity.json` get
+`icacls /inheritance:r` on install AND upgrade; `setx` for the four operator
+secrets is replaced by `tools/load_secrets.ps1` (DPAPI) + `docs/SECRETS.md`.
+Client data files (`config.queue.yaml`, `config.ff2.yaml`,
+`duplicates_report.md`, `broll/eval/queries_*.yaml`) moved to a git-ignored
+`private/`; `docs/macos-onboarding-handoff.md` scrubbed; `.gitignore` gained
+the defence-in-depth patterns; `tools/make_product_repo.ps1` +
+`docs/PRODUCT_REPO.md` are the squashed-product-repo recipe (not run). Owed:
+`INSTALLER_VERSION` 1.0.30, one real install on a scratch Windows machine, and
+the macOS half has still never run on a Mac.
+
+### CR-18 — one fleet token for everyone, and four write paths behind it — FIXED in repo 2026-08-17, unshipped
+`DASH_REPORT_TOKEN` proved "this is a companion", nothing about WHOSE, and
+was not revocable per editor. Now an admin mints a per-editor token on Admin
+› Users (`cce1.<id>.<secret>`, stored as sha256, shown once, revocable) and it
+BINDS: a report or selection read under it may not claim another editor; the
+shared token stays accepted behind `DASH_SHARED_REPORT_TOKEN_ENABLED`
+(default 1) and the dashboard NAMES the machines still using it at every
+boot. Handing a token over is manual by design (`/api/v1/verify` is the
+unauthenticated bootstrap and must never issue one); it goes in `config.toml`
+as `report_token`. Also: `identity.json`/`config.toml` owner-only via
+`secretfile.harden` (`icacls` on Windows — `chmod` is a no-op there); the
+reporter, selection client and ytdl executor no longer follow redirects
+(stub the OPENER in tests, never `urlopen`); `broll/web` standalone ingest
+fail-closed (no token = 503, dev branch deleted); `music/web` ingest
+fail-closed when not behind the dashboard login and bounded (64 files /
+512 MB); error bodies no longer carry NAS hosts or absolute paths (+ a global
+500 handler); fleet reads are scoped (an editor sees their own machines plus
+counts; another editor's device is a 404). Owed: publish a companion build
+BEFORE minting any token; flip the shared token off only when the boot log
+goes quiet; set `BROLL_INGEST_TOKEN` on any dev checkout of `broll/web`.
+
+### CR-19 — the container's dependency set was never recorded, and no CI ever ran — FIXED in repo 2026-08-17, unshipped
+Every dependency was a floor, one exact pin, no lockfile, no
+`--require-hashes`. Now eleven `requirements.lock` files (`uv pip compile
+--universal --generate-hashes`), `deploy/run.sh` prefers the lock with
+`--require-hashes`, `dashboard/deploy/Dockerfile` bakes it into a
+digest-pinned image (`compose.image.yaml`, `docs/DOCKER.md` — bind-mount mode
+stays the default and both share one entrypoint), `.github/workflows/ci.yml`
+runs every suite on Windows/Linux/macOS with `tools/check_licenses.py` and a
+CRLF byte-scan; `release-windows.yml` / `release-macos.yml` build (never
+publish) — the Mac runner is the answer to "PyInstaller needs a Mac".
+`crash_report.py` on both sides writes a local redacted crash JSON always and
+sends only on an explicit opt-in the shipped builds cannot satisfy (no
+`sentry_sdk`). NOT verified: nothing has been through `docker build` (no
+Docker on the base rig; `--require-hashes` forbids the source-build fallback,
+so a wheel-less package fails early); `install_dashboard_app.py` still deploys
+bind-mount mode only; the repo has never been pushed to a CI provider.
+
+### CR-20 — the music queue drain overwrote every upload queued while it ran — FIXED in repo 2026-08-17 (MUSIC-13)
+"Pull `music.db`, drain on the base rig, push back" is a file copy with no
+merge — every `pending` row created during the window was discarded. Now
+`ingest_queue.uid` (migration `003_ingest_journal.sql`), `index_music.py
+--queue --export-drain` writes a result bundle, and `python -m musicweb.drain
+apply` merges it in one transaction (`INSERT … ON CONFLICT`), closing only
+the named uids and only when the live journal still agrees on `rel_path` +
+`content_hash`. Also from item 14: both indexers' paths are
+required-not-defaulted (`BROLL_DATA_ROOT`, `BROLL_DB_PATH`, `CCSYNC_WHISPER_*`,
+`MUSIC_DB_PATH`, …; the base rig must now SET the two whisper keys or
+transcription skips), the faster-whisper env is in-repo
+(`broll/indexer/tools/make_whisper_env.*`), and `tools/Dockerfile.indexer-gpu`
+packages both indexers (written, not built). `docs/INDEXERS.md`. The NAS's
+`music.db` migrates to v3 on the first redeployed dashboard boot; the first
+real drain has not been run.
+
+---
+
+### CR-21 — a declined NEW PROJECT prompt could come back after a companion restart — FIXED in repo 2026-08-17 (found by the integration pass), unshipped
+`project_setup._record_asked` wrote the "already asked" map with
+`write_text` (create-truncate-write-close), so a concurrent reader could see
+zero bytes; `_load_asked` swallowed the `JSONDecodeError` and the whole map
+came back empty — the popup returns for a project the editor already
+declined (the same family as the 2026-07-25 recurring-popup incident). It
+surfaced as one intermittent test failure during the 13-suite integration
+run. Now temp-file + `os.replace`, like `identity.save_identity`; two tests
+pin it.
+
+---
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed
@@ -95,9 +498,9 @@ reporter field would make a wedged fusionscript call visible without log
 archaeology.
 
 ### R18 — requester-first downloads never engaged; the fleet ran the server path for two days without anyone noticing — FIXED in repo 2026-08-16 (companion 0.7.9 + dashboard env), unshipped
-Read live on ruskin's machine the morning after he took 0.7.8 (SSH,
+Read live on an editor's machine the morning after they took 0.7.8 (SSH,
 `companion.log`, `127.0.0.1:8899`, the dashboard's fleet + ytdl APIs), while
-chasing five symptoms he reported at once. What each turned out to be:
+chasing five symptoms they reported at once. What each turned out to be:
 
 - **"Syncing 48 GB of Creator Profiles he already has"** — lane B's first
   pass after 0.7.4 → 0.7.8: 0.7.6's `+ /Youtube/**` pulling every YouTube
@@ -202,10 +605,10 @@ was re-exported from a signed-in age-verified session and installed
 in-container. The old partial file is `cookies.txt.bak-20260816`.
 
 Ship: `tools\ship.cmd` (dashboard deploy carries the flag; companion 0.7.9
-publishes the sidecar + lane B + reveal + music + YouTube sign-in). Ruskin's
-box gets ffmpeg+deno ~30 s after his tray takes 0.7.9; his next YouTube job
-downloads locally, and age-gated clips work once he runs "Sign in to
-YouTube" with his own cookies.txt. **Still open after the ship:** Mac builds.
+publishes the sidecar + lane B + reveal + music + YouTube sign-in). An
+editor's box gets ffmpeg+deno ~30 s after their tray takes 0.7.9; their next
+YouTube job downloads locally, and age-gated clips work once they run "Sign
+in to YouTube" with their own cookies.txt. **Still open after the ship:** Mac builds.
 
 ### R17 — ten clips whose proxies Resolve refuses, and R10 does not explain nine of them
 Found 2026-08-15 reading the base rig's `companion.log` after the 0.7.8 ship:
@@ -387,7 +790,7 @@ verified live: the archive preview now links to its imported clip. Editors
 need the 0.7.4 republish for the explicit link on insert.
 
 ### R11 — the Windows self-upgrade races its own single-instance mutex — FIXED in repo 2026-08-12, ships with 0.7.6
-A remote editor's machine (ruskin, DESKTOP-LQQ41TC) was left with **no
+A remote editor's Windows machine was left with **no
 companion at all** by a one-click update. Its log is the whole proof:
 
     00:34:53,950 upgrade: v0.7.3 launched; shutting down v0.7.0
@@ -471,7 +874,7 @@ Aftermath on that machine, worth knowing about:
   offered an "Install v0.7.3" downgrade until the channel is bumped.
 
 ### R15 — the empty Youtube folder: ytdl delivered json and corpses, never videos — FOUR FIXES, SHIPPED 2026-08-15 in 0.7.8
-Investigated live on ruskin's machine 2026-08-13 23:2x → 2026-08-14 (full
+Investigated live on an editor's machine 2026-08-13 23:2x → 2026-08-14 (full
 writeup: "The Empty Youtube Folder" artifact; hybrid redesign plan:
 docs/YTDL_LOCAL_DOWNLOAD.md). One editor-visible symptom — every
 `credits.json` and 540p preview present, zero videos, a growing pile of
@@ -499,7 +902,7 @@ docs/YTDL_LOCAL_DOWNLOAD.md). One editor-visible symptom — every
 3. **Syncthing replicated yt-dlp's in-flight files and the editor-side
    `ignoreDelete=True` retrofit (2026-08-11) made them immortal** —
    `.stignore` ignored rclone's `*.partial` but not `*.part`/`*.part-Frag*`/
-   `*.ytdl`: 27 orphans, 1.6 GB, three days deep on ruskin's disk (cleaned).
+   `*.ytdl`: 27 orphans, 1.6 GB, three days deep on that editor's disk (cleaned).
    Fixed three ways in lockstep — server/common.py, dashboard provision.py
    (the load-bearing copy: `collector._ensure_ignores` re-POSTs on ANY
    list difference, so a server-only fix would be stripped every provision
@@ -535,7 +938,7 @@ Verified read-only 2026-08-16 against the live NAS Syncthing config API — 7
 project folders, **0 missing** `(?i)**/*.part`, `(?i)**/*.part-Frag*` or
 `(?i)**/*.ytdl`. Re-running the server script by hand is now only for a
 folder the collector cannot see (no marker, or a project it refuses to
-provision). **Still owed:** ruskin (plus any other stale tray) accepting the
+provision). **Still owed:** that editor (plus any other stale tray) accepting the
 upgrade — the editor half lives in the companion's own `STIGNORE_LINES`,
 re-asserted at startup and per turn, so it reaches a machine only when its
 companion does.
@@ -551,7 +954,7 @@ both were empty:
   good, and a watcher with no folders is a silent no-op. The rig launched it
   at 14:09, 15:26 and 18:13 on 2026-08-13 alone, against 6 BRAW clips that
   had had no proxy since 2026-05-20 (`…/Creator Profiles/Season 1/B-roll/
-  Editor Added/ruskin/`), and the gap never moved.
+  Editor Added/<editor>/`), and the gap never moved.
 - Even with folders, the window opens **Idle** with a **Start** button and the
   folders at "Waiting". There is no flag, env var or INI key for it.
 
@@ -670,7 +1073,8 @@ Full write-ups in `docs/bug-hunt-2026-08.md` and
 - **macOS runtime validation backlog** — `installer/MACOS_FIRST_RUN.md`
   §A7–H unrun; wizard bundle never built on a Mac; onboarding suite needs a
   darwin run; lane C `.stfolder` behaviour untested there; MAC-12's wedged
-  FSEvents stream on Leso's SAMDISK still needs hands on the machine.
+  FSEvents stream on a Mac editor's external disk still needs hands on the
+  machine.
 - **Bench Syncthing 1.x (was item 1 residual)** — v1 argv test-pinned but
   never live-verified.
 - **Mac builds owed — now carrying the whole 2026-08-11 fix pass.** Until
@@ -679,5 +1083,5 @@ Full write-ups in `docs/bug-hunt-2026-08.md` and
   editors have none of today's fixes (including both UI criticals, which are
   worst on darwin), and `/music/send` + `/music/status` still 404 on every
   deployed companion until the fleet republish.
-- **NAS hygiene (was item 7 incidental)** — `alex_laptop` in the `editors`
+- **NAS hygiene (was item 7 incidental)** — `owen_laptop` in the `editors`
   group still looks like a machine-shaped account; rename if it is one.

@@ -10,14 +10,21 @@ indexed continuously for ten hours at that flat ~20/hour and only hit a session
 limit at the very end, so the account had headroom the whole time and the
 machine was simply waiting on one HTTP round-trip at a time.
 
-`invoke_claude` is a stateless subprocess call (no temp files, no shared state,
-cwd is the video's own contact-sheet directory), so N of them run concurrently
-without interfering. If the extra concurrency does exhaust the session window
-sooner, nothing is lost: a fatal error leaves every video's status untouched and
-run_queue.py waits out the reset and resumes. So this is either a ~4x win or
-throughput-neutral — it cannot be worse.
+`invoke_claude` is a stateless HTTPS request (no temp files, no shared state,
+the contact sheets travel inside the request as image blocks), so N of them run
+concurrently without interfering. If the extra concurrency does exhaust the
+account's rate limit sooner, nothing is lost: a fatal error leaves every video's
+status untouched and run_queue.py waits out the reset and resumes. So this is
+either a ~4x win or throughput-neutral — it cannot be worse.
 
-    python parallel_claude.py --config config.queue.yaml --workers 4
+Threads, not processes (2026-08-17, COMMERCIAL_READINESS.md item 1): the work is
+one HTTPS round trip per call, the `anthropic` client is thread-safe and pools
+connections, and a shared process means `claude_client.set_max_concurrency` is a
+real ceiling on requests in flight rather than one that each process re-applies
+to itself. Each worker still opens its own sqlite connection — those are not
+shareable across threads.
+
+    python parallel_claude.py --workers 4    # --config defaults to private/broll/indexer/config.queue.yaml
 """
 
 from __future__ import annotations
@@ -29,8 +36,10 @@ import sys
 import time
 from datetime import datetime
 
+from broll_index.claude_client import describe_auth, set_max_concurrency
 from broll_index.config import load_config
 from broll_index.pipeline import FatalRunError, _process_video
+from broll_index.site_data import DEFAULT_QUEUE_CONFIG
 from broll_index.storage.sqlite_backend import SqliteBackend
 
 # 'proxied' is STAGE_PREREQ_STATUS['claude'] — a video is ready for the model
@@ -40,7 +49,7 @@ CLAUDE_PREREQ_STATUS = "proxied"
 
 def _process_one(cfg, model: str, video_id: int,
                  deadline: float | None = None) -> tuple[int, str]:
-    """Own sqlite connection per worker — connections are not thread/process safe."""
+    """Own sqlite connection per worker — connections are not thread-safe."""
     # A wall-clock stop has to be enforced HERE, at the moment a video would
     # start, rather than by killing the run: every call in flight when the axe
     # falls is a wasted request, and with a high --workers that is the whole
@@ -133,12 +142,13 @@ def eligible_ids(db_path: str, skip_shares: "set[str] | None" = None,
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.queue.yaml")
+    ap.add_argument("--config", default=DEFAULT_QUEUE_CONFIG)
     ap.add_argument("--model", default="haiku")
-    # 4 concurrent `claude -p` calls: enough to hide most of the per-call
-    # latency without turning a session-limit hit into a thundering herd of
-    # wasted calls. Each in-flight call at the moment of a limit is one wasted
-    # request, so the cost of a stop scales with this number.
+    # 4 concurrent API calls: enough to hide most of the per-call latency
+    # without turning a rate-limit hit into a thundering herd of wasted calls.
+    # Each in-flight call at the moment of a limit is one wasted request, so the
+    # cost of a stop scales with this number. Also becomes the client's own
+    # in-flight ceiling (set_max_concurrency below).
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--share", action="append", default=None,
@@ -163,6 +173,11 @@ def main() -> int:
 
     cfg = load_config(args.config)
     SqliteBackend(cfg.db.path).close()  # ensure schema before workers open it
+    print(describe_auth(cfg.anthropic), flush=True)
+    # The pool size is the ceiling the API client enforces: a worker that would
+    # be the (N+1)th request in flight blocks on the semaphore instead of
+    # opening a connection the account cannot serve.
+    set_max_concurrency(args.workers)
 
     skip = {name for name, s in cfg.shares.items() if not s.index}
     only = set(args.share) if args.share else None
@@ -195,7 +210,7 @@ def main() -> int:
     done = errors = skipped = stopped = 0
     fatal: str | None = None
 
-    with cf.ProcessPoolExecutor(max_workers=args.workers) as pool:
+    with cf.ThreadPoolExecutor(max_workers=args.workers) as pool:
         futs = {pool.submit(_process_one, cfg, args.model, vid, deadline): vid
                 for vid in ids}
         for i, fut in enumerate(cf.as_completed(futs), 1):

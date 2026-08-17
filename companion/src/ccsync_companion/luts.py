@@ -28,7 +28,7 @@ A correct preference is not enough on its own. **Resolve scans its LUT
 locations once, at startup, and caches the result for the whole session**, so
 a machine whose P: mapping is not up yet when Resolve launches runs blind to
 the library until it is restarted -- with the preference reading perfectly all
-the while. That is Ruskin's 2026-08-11 "LUTs missing": the pref said
+the while. That is the 2026-08-11 "LUTs missing" report: the pref said
 ``P:\\Assets\\Luts``, the files were on disk, and every graded frame logged
 ``Failed to read Shaper LUT``. stale_lut_index() below detects exactly that
 from Resolve's own log and repairs it with RefreshLUTList(), no restart.
@@ -89,9 +89,9 @@ LOG_TAIL_BYTES = 2 * 1024 * 1024
 def resolve_log_path() -> Optional[Path]:
     """Resolve's own log file, or None on a platform we do not know.
 
-    The Windows path is measured (Ruskin's machine, 2026-08-11); the macOS one
-    is Blackmagic's documented location. Both fail safe: a path that is not
-    there simply means no stale-index repair, never an error.
+    The Windows path is measured (an editor's machine, 2026-08-11); the
+    macOS one is Blackmagic's documented location. Both fail safe: a path
+    that is not there simply means no stale-index repair, never an error.
     """
     system = platform.system()
     if system == "Windows":
@@ -265,8 +265,8 @@ def stray_luts(search_dirs: list[Path], library: Path, max_results: int = 200) -
     machine only.
 
     Matched by BASENAME anywhere in the library, not by relative path: an
-    editor dropping "Ruskin CC.cube" loose in Resolve's LUT folder has the
-    same LUT as the library's "Ruskin/Ruskin CC.cube", and prompting to copy
+    editor dropping "Studio CC.cube" loose in Resolve's LUT folder has the
+    same LUT as the library's "Studio/Studio CC.cube", and prompting to copy
     it in again would be noise forever.
     """
     by_name: dict[str, list[int]] = {}
@@ -517,7 +517,7 @@ class LutLinkManager:
         locations once at startup, so an editor who opened Resolve before P:
         finished mapping has a session-long hole where the shared library
         should be. The pref reads correctly, the files are on disk, and every
-        graded frame logs "Failed to read Shaper LUT" (Ruskin, 2026-08-11).
+        graded frame logs "Failed to read Shaper LUT" (an editor, 2026-08-11).
 
         RefreshLUTList() closes it without restarting Resolve or touching a
         preference file -- so, unlike the rest of this module, it works while

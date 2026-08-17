@@ -31,7 +31,13 @@ from pathlib import Path
 
 import pytest
 
-from ccsync_companion import broll_server, music_server, music_worker, ytdl_server
+from ccsync_companion import (
+    broll_server, loopback_guard, music_server, music_worker, ytdl_server,
+)
+
+# The dashboard the live_server fixture is pointed at -- the one origin a
+# browser caller may present (COMMERCIAL_READINESS.md item 5, 2026-08-17).
+DASH_ORIGIN = "http://100.64.0.1:8000"
 
 
 @pytest.fixture(autouse=True)
@@ -69,23 +75,35 @@ class Client:
     def _connect(self) -> http.client.HTTPConnection:
         return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
 
-    def get(self, path: str):
+    def _auth(self, token, origin) -> dict:
+        headers = {}
+        if token:
+            headers[loopback_guard.TOKEN_HEADER] = (
+                token if isinstance(token, str) else (loopback_guard.read_token() or "")
+            )
+        if origin is not None:
+            headers["Origin"] = origin
+        return headers
+
+    def get(self, path: str, origin=None):
         conn = self._connect()
-        conn.request("GET", path)
+        conn.request("GET", path, headers=self._auth(False, origin))
         resp = conn.getresponse()
         body = resp.read()
         headers = dict(resp.getheaders())
         conn.close()
         return resp.status, headers, body
 
-    def post_json(self, path: str, obj: dict):
+    def post_json(self, path: str, obj: dict, origin=None, token=True):
+        # The loopback token by default: since 2026-08-17 a POST here needs an
+        # allowed Origin or that header (COMMERCIAL_READINESS.md item 5), and
+        # this client stands in for a LOCAL caller.
         conn = self._connect()
         payload = json.dumps(obj).encode("utf-8")
-        conn.request(
-            "POST", path, body=payload,
-            headers={"Content-Type": "application/json",
-                     "Content-Length": str(len(payload))},
-        )
+        headers = {"Content-Type": "application/json",
+                   "Content-Length": str(len(payload))}
+        headers.update(self._auth(token, origin))
+        conn.request("POST", path, body=payload, headers=headers)
         resp = conn.getresponse()
         body = resp.read()
         headers = dict(resp.getheaders())
@@ -94,17 +112,18 @@ class Client:
 
     def post_raw(self, path: str, payload: bytes):
         conn = self._connect()
-        conn.request("POST", path, body=payload,
-                     headers={"Content-Type": "application/json",
-                              "Content-Length": str(len(payload))})
+        headers = {"Content-Type": "application/json",
+                   "Content-Length": str(len(payload))}
+        headers.update(self._auth(True, None))
+        conn.request("POST", path, body=payload, headers=headers)
         resp = conn.getresponse()
         body = resp.read()
         conn.close()
         return resp.status, body
 
-    def options(self, path: str):
+    def options(self, path: str, origin=None):
         conn = self._connect()
-        conn.request("OPTIONS", path)
+        conn.request("OPTIONS", path, headers=self._auth(False, origin))
         resp = conn.getresponse()
         body = resp.read()
         headers = dict(resp.getheaders())
@@ -150,7 +169,8 @@ def live_server(no_real_worker, monkeypatch, tmp_path):
         "mounts": {"broll": str(tmp_path).replace("\\", "/")},
         music_server.MOUNTS_KEY: {"music": str(tmp_path).replace("\\", "/")},
     }
-    srv = broll_server.make_server(cfg, host="127.0.0.1", port=0)
+    srv = broll_server.make_server(cfg, host="127.0.0.1", port=0,
+                                   ccsync_cfg={"dashboard_url": DASH_ORIGIN})
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     try:
@@ -841,15 +861,32 @@ def test_music_malformed_json_body_is_400_not_a_traceback(live_server):
 def test_music_routes_get_the_same_cors_and_pna_headers(live_server):
     """The music UI is served from the dashboard, so the page sits on a
     tailnet address and calls loopback -- Chromium blocks that at the
-    PREFLIGHT without the Private Network Access opt-in."""
+    PREFLIGHT without the Private Network Access opt-in.
+
+    Pinned the "*" wildcard until 2026-08-17; now it pins that the DASHBOARD's
+    origin -- and only it -- gets the same treatment on this route group as on
+    b-roll's (COMMERCIAL_READINESS.md item 5)."""
     _srv, client, _calls = live_server
-    status, headers, _body = client.options("/music/send")
+    status, headers, _body = client.options("/music/send", origin=DASH_ORIGIN)
     assert status == 204
-    assert headers.get("Access-Control-Allow-Origin") == "*"
+    assert headers.get("Access-Control-Allow-Origin") == DASH_ORIGIN
     assert headers.get("Access-Control-Allow-Private-Network") == "true"
 
-    _status, headers, _body = client.get("/music/status")
-    assert headers.get("Access-Control-Allow-Origin") == "*"
+    _status, headers, _body = client.get("/music/status", origin=DASH_ORIGIN)
+    assert headers.get("Access-Control-Allow-Origin") == DASH_ORIGIN
+
+
+def test_a_hostile_page_cannot_drive_the_music_routes(live_server):
+    """The music route group is on the same listener, so it inherits the same
+    allow-list -- checked here rather than assumed."""
+    _srv, client, calls = live_server
+    status, headers, _body = client.post_json(
+        "/music/send", {"action": "bin", "share": "music", "rel_path": "a.wav"},
+        origin="https://evil.example", token=False,
+    )
+    assert status == 403
+    assert "Access-Control-Allow-Origin" not in headers
+    assert calls == []
 
 
 def test_a_get_on_the_send_route_is_404_not_a_500(live_server):
@@ -1066,7 +1103,7 @@ def test_a_non_string_share_is_a_400_on_the_music_route_too():
 #
 # The library is not a synced folder, so on every remote editor's machine
 # "+ Resolve" answered "file not found -- is the share mounted?" and stopped
-# (ruskin, 2026-08-16) -- the dead end the b-roll insert escaped on 2026-08-11.
+# (an editor's rig, 2026-08-16) -- the dead end the b-roll insert escaped on 2026-08-11.
 # Same escape, same gate (derived mount only, never a base rig, never another
 # share), same job registry (broll_fetch), one NAS-side folder parameter.
 

@@ -14,7 +14,7 @@ from ccsync_companion.selection import SelectionClient
 
 def _cfg(**overrides):
     cfg = {
-        "editor_name": "Alex",
+        "editor_name": "Owen",
         "dashboard_url": "http://dash.example.com",
         "dashboard_token": "tok123",
     }
@@ -36,7 +36,7 @@ def test_fetch_success_writes_cache_and_returns_list(tmp_path):
 
     def fake_get(url, headers, timeout):
         calls.append((url, headers, timeout))
-        return {"editor": "alex", "generated_at": "2026-07-24T00:00:00Z", "selection": _SAMPLE}
+        return {"editor": "owen", "generated_at": "2026-07-24T00:00:00Z", "selection": _SAMPLE}
 
     client = SelectionClient(_cfg(), tmp_path, http_get=fake_get)
     result = client.fetch()
@@ -50,7 +50,7 @@ def test_fetch_success_writes_cache_and_returns_list(tmp_path):
     # "selection" list, so the sticky "project_roots" mapping survives a
     # restart too -- see get_project_roots().
     assert cached["response"]["selection"] == _SAMPLE
-    assert cached["response"]["editor"] == "alex"
+    assert cached["response"]["editor"] == "owen"
 
 
 def test_fetch_url_uses_lowercased_editor_name(tmp_path):
@@ -60,9 +60,9 @@ def test_fetch_url_uses_lowercased_editor_name(tmp_path):
         calls.append(url)
         return {"selection": []}
 
-    client = SelectionClient(_cfg(editor_name="Alex"), tmp_path, http_get=fake_get)
+    client = SelectionClient(_cfg(editor_name="Owen"), tmp_path, http_get=fake_get)
     client.fetch()
-    assert calls[0] == "http://dash.example.com/api/v1/selection/alex"
+    assert calls[0] == "http://dash.example.com/api/v1/selection/owen"
 
 
 def test_fetch_url_quotes_editor_name_with_space(tmp_path):
@@ -75,9 +75,9 @@ def test_fetch_url_quotes_editor_name_with_space(tmp_path):
         calls.append(url)
         return {"selection": []}
 
-    client = SelectionClient(_cfg(editor_name="alex chen"), tmp_path, http_get=fake_get)
+    client = SelectionClient(_cfg(editor_name="owen chen"), tmp_path, http_get=fake_get)
     client.fetch()
-    assert calls[0] == "http://dash.example.com/api/v1/selection/alex%20chen"
+    assert calls[0] == "http://dash.example.com/api/v1/selection/owen%20chen"
 
 
 def test_fetch_uses_editor_name_fn_when_provided(tmp_path):
@@ -86,7 +86,7 @@ def test_fetch_uses_editor_name_fn_when_provided(tmp_path):
     # reflects a tray sign-in), not pinned to cfg["editor_name"] at
     # construction time.
     calls = []
-    names = iter(["alex", "jamie"])
+    names = iter(["owen", "jamie"])
 
     def fake_get(url, headers, timeout):
         calls.append(url)
@@ -98,7 +98,7 @@ def test_fetch_uses_editor_name_fn_when_provided(tmp_path):
     )
     client.fetch()
     client.fetch()
-    assert calls[0].endswith("/selection/alex")
+    assert calls[0].endswith("/selection/owen")
     assert calls[1].endswith("/selection/jamie")
 
 

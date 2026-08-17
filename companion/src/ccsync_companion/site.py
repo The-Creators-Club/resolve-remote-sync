@@ -57,7 +57,14 @@ SITE_PATH_SUFFIX = "/api/v1/site"
 FETCH_TIMEOUT = 5.0
 
 STRING_KEYS = (
-    "org_name", "tree_name", "canonical_prefix", "remote_root", "smb_unc",
+    "org_name",
+    # BRAND (2026-08-17, docs/COMMERCIAL_READINESS.md item 10). Additive to
+    # schema 1: a dashboard that predates them sends neither, and every reader
+    # below falls back rather than showing a name. `org_short` is the same
+    # organisation where only a few characters fit; `product_name` is the
+    # VENDOR's product, which is why it is the last fallback and not blank.
+    "org_short", "product_name",
+    "tree_name", "canonical_prefix", "remote_root", "smb_unc",
     "sftp_host", "rclone_remote", "nas_syncthing_id", "dashboard_url",
     "nas_kind",
     # TRANSPORT TUNING THE SERVER OWNS (2026-08-17, Synology spike 6). rclone's
@@ -77,6 +84,15 @@ STRING_KEYS = (
     "sftp_shell_type",
 )
 LIST_KEYS = ("template_folders", "shared_asset_folders")
+
+# OPTIONAL FEATURES the site has turned on, under the manifest's `features`
+# object (2026-08-17, docs/COMMERCIAL_READINESS.md items 2 + 3). Additive to
+# schema 1: a dashboard that predates them sends no `features` at all, and
+# **that reads as every feature off**, which is the whole point of the
+# switch -- the vendor build does not download YouTube material until a
+# customer says it may. Never the other way round: a client that cannot tell
+# must not assume yes.
+FEATURE_KEYS = ("youtube_download", "youtube_unblock")
 # 0 for sftp_concurrency means "the server didn't say" -- unlike config.toml,
 # where an explicit 0 means "disable the flag entirely".
 INT_KEYS = {"sftp_port": 22, "sftp_concurrency": 0}
@@ -123,6 +139,13 @@ def normalise(data: Any) -> Optional[dict[str, Any]]:
             out[key] = int(data.get(key, fallback))
         except (TypeError, ValueError):
             out[key] = fallback
+    # `is True`, not bool(): the only thing that turns a feature on is the
+    # server sending a real JSON `true`. A string, a 1, a non-empty dict --
+    # anything a hand-edited cache or a half-migrated dashboard could put here
+    # -- is not an assertion that this customer may download YouTube material.
+    features = data.get("features")
+    features = features if isinstance(features, dict) else {}
+    out["features"] = {key: features.get(key) is True for key in FEATURE_KEYS}
     return out
 
 
@@ -227,6 +250,29 @@ def cached_site(path: Optional[Path] = None,
     return normalise(data)
 
 
+def feature_enabled(name: str, site: Optional[dict[str, Any]] = None) -> bool:
+    """Has this site turned optional feature `name` on? FAIL CLOSED.
+
+    Reads the CACHE, never the network: every caller is a tray-thread or
+    capability-probe decision that cannot wait on a dead tailnet route, and the
+    cache is refreshed by whoever last talked to the dashboard (see the module
+    docstring). No cache, an old dashboard, an unreadable file, an unknown
+    feature name -- all of them are False, because "we could not ask" and "the
+    answer is no" must be the same answer for a feature whose off state is the
+    one the vendor ships (docs/legal/YOUTUBE_FEATURE_NOTICE.md).
+
+    Pass `site` when you already have a manifest in hand (one read, not two).
+    """
+    try:
+        manifest = site if site is not None else cached_site()
+        features = (manifest or {}).get("features")
+        return bool(isinstance(features, dict) and features.get(name) is True)
+    except Exception:
+        log.debug("site feature %r could not be read; treating it as off", name,
+                  exc_info=True)
+        return False
+
+
 def refresh_site(
     dashboard_url: str,
     path: Optional[Path] = None,
@@ -242,3 +288,94 @@ def refresh_site(
         save_site(site, path)
         return site
     return cached_site(path)
+
+
+# --------------------------------------------------------------------------
+# Brand -- what the tray and the popups call this editor's tree
+# --------------------------------------------------------------------------
+#
+# Until 2026-08-17 eight tray/popup strings said "your Creators Club drive"
+# and the window mark was one studio's logo, compiled in
+# (docs/COMMERCIAL_READINESS.md item 10). They read the site manifest now,
+# with a NEUTRAL fallback: an editor whose dashboard has never been reached,
+# or whose site names no org, is told about "your studio drive" rather than
+# about somebody else's studio.
+
+# Deliberately lowercase and article-free: every call site embeds it in a
+# sentence ("Your ... is disconnected"), and DRIVE_PHRASE handles the capital.
+NEUTRAL_DRIVE_OWNER = "studio"
+# The vendor's product name, used where an org name would be wrong (the popup
+# title bar, the tray tooltip's app name). Must match the dashboard's
+# settings.site_product_name default.
+DEFAULT_PRODUCT_NAME = "CC Sync"
+
+# The manifest is read from disk for these, and the tray asks on every status
+# repaint, so the parse is memoised against the cache file's identity+mtime --
+# a stat per call, not a JSON parse per call, and a re-provisioned site is
+# still picked up. Keyed on the path too, because the test suite repoints
+# config.CONFIG_DIR per test (tests/conftest.py).
+_BRAND_CACHE: dict = {}
+
+
+def _brand_site(path: Optional[Path] = None) -> Optional[dict[str, Any]]:
+    target = Path(path) if path is not None else site_path()
+    try:
+        key = (str(target), target.stat().st_mtime_ns)
+    except OSError:
+        return None
+    hit = _BRAND_CACHE.get("entry")
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    site = cached_site(target)
+    _BRAND_CACHE["entry"] = (key, site)
+    return site
+
+
+def org_name(site: Optional[dict[str, Any]] = None,
+             path: Optional[Path] = None) -> str:
+    """This deployment's organisation name, or "" when nothing has said.
+
+    "" is a legitimate answer and every caller must handle it -- a blank is
+    what an un-provisioned machine and a site that declines to be named both
+    look like, and neither may be papered over with a default org."""
+    site = site if site is not None else _brand_site(path)
+    if not isinstance(site, dict):
+        return ""
+    return str(site.get("org_name") or "").strip()
+
+
+def org_short(site: Optional[dict[str, Any]] = None,
+              path: Optional[Path] = None) -> str:
+    """The organisation name for places only a few characters fit. Falls back
+    to the full name, then to ""."""
+    site = site if site is not None else _brand_site(path)
+    if not isinstance(site, dict):
+        return ""
+    return (str(site.get("org_short") or "").strip()
+            or str(site.get("org_name") or "").strip())
+
+
+def product_name(site: Optional[dict[str, Any]] = None,
+                 path: Optional[Path] = None) -> str:
+    """The product's own name. Never blank: unlike an org name, there is
+    always a product, and a nameless window title helps nobody."""
+    site = site if site is not None else _brand_site(path)
+    value = ""
+    if isinstance(site, dict):
+        value = str(site.get("product_name") or "").strip()
+    return value or DEFAULT_PRODUCT_NAME
+
+
+def drive_phrase(capitalised: bool = False,
+                 site: Optional[dict[str, Any]] = None,
+                 path: Optional[Path] = None) -> str:
+    """"your Creators Club drive" / "your studio drive" -- the sync tree as the
+    editor thinks of it, for the eight tray and popup sentences that name it.
+
+    A phrase rather than a format string because the sentences it lands in
+    start with it as often as not, and one capitalisation flag is cheaper than
+    eight call sites each doing their own .capitalize() on a name that may
+    itself be capitalised ("your CC drive" must not become "Your Cc drive").
+    """
+    owner = org_name(site, path) or NEUTRAL_DRIVE_OWNER
+    return f"{'Your' if capitalised else 'your'} {owner} drive"

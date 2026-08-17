@@ -47,7 +47,7 @@ def client_for(tmp_path, nas_case, syncthing=None, **extra):
     settings = Settings(
         db_path=str(tmp_path / f"{nas_case.kind}.db"),
         session_secret=SECRET,
-        admin_users=frozenset({"alex"}),
+        admin_users=frozenset({"owen"}),
         syncthing_url=syncthing.url if syncthing else "",
         syncthing_api_key="fake-key" if syncthing else "",
         **kwargs,
@@ -56,7 +56,7 @@ def client_for(tmp_path, nas_case, syncthing=None, **extra):
 
 
 def as_admin(client):
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     return client
 
 
@@ -136,8 +136,10 @@ def test_set_password_over_every_backend(tmp_path, nas_case, syncthing):
         nas_case.seed_editor("jsmith")
     with TestClient(client_for(tmp_path, nas_case, syncthing)) as client:
         as_admin(client)
+        # >= auth.MIN_PASSWORD_CHARS: the floor on passwords this dashboard
+        # SETS landed 2026-08-17 (COMMERCIAL_READINESS.md item 15).
         resp = client.post("/api/v1/admin/users/jsmith/password",
-                           json={"password": "knownpw123"})
+                           json={"password": "knownpw1234567"})
 
     if nas_case.provisions:
         assert resp.status_code == 200, resp.text
@@ -188,7 +190,7 @@ def test_factory_refuses_an_unknown_kind_rather_than_guessing():
 
 def test_unknown_kind_is_a_503_not_a_500(tmp_path, syncthing):
     settings = Settings(db_path=str(tmp_path / "k.db"), session_secret=SECRET,
-                        admin_users=frozenset({"alex"}), nas_kind="qnap",
+                        admin_users=frozenset({"owen"}), nas_kind="qnap",
                         nas_host="nas.example", nas_user="admin", nas_pw="pw",
                         syncthing_url=syncthing.url, syncthing_api_key="fake-key")
     with TestClient(create_app(settings)) as client:
@@ -203,19 +205,86 @@ def test_unknown_kind_is_a_503_not_a_500(tmp_path, syncthing):
 
 
 def test_a_blank_host_reads_as_not_configured(tmp_path):
-    """WP0 blanked the hardcoded 192.168.0.102 default. A deployment that
+    """WP0 blanked the hardcoded 192.168.0.10 default. A deployment that
     never set DASH_NAS_HOST must get the honest "not configured" 503, not a
     connection error against https:///api/v2.0."""
     assert nas_configured(Settings(nas_pw="pw")) is False
     assert nas_configured(Settings(nas_pw="pw", nas_host="nas.example")) is True
     settings = Settings(db_path=str(tmp_path / "b.db"), session_secret=SECRET,
-                        admin_users=frozenset({"alex"}), nas_pw="pw")
+                        admin_users=frozenset({"owen"}), nas_pw="pw")
     with TestClient(create_app(settings)) as client:
         as_admin(client)
         resp = client.post("/api/v1/admin/users",
                            json={"username": "newbie", "ssh_pubkey": GOOD_KEY})
         assert resp.status_code == 503
         assert client.get("/api/v1/admin/users").json()["truenas_configured"] is False
+
+
+# --------------------------------------------- scoped API key (item 6 / H3)
+
+
+def test_a_scoped_api_key_counts_as_credentials(tmp_path):
+    """COMMERCIAL_READINESS.md item 6: the deploy stops writing the NAS admin
+    password into this container once a scoped key exists. If the key did not
+    count as "configured", the admin section would 503 on exactly the
+    deployments that took the advice."""
+    assert nas_configured(Settings(nas_api_key="1-abc")) is False, "still needs a host"
+    assert nas_configured(Settings(nas_api_key="1-abc", nas_host="nas.example")) is True
+    assert nas_configured(Settings(nas_host="nas.example")) is False
+
+
+def test_the_api_key_replaces_basic_auth_on_every_call(monkeypatch):
+    """Bearer OR basic, never both -- two credentials make a 401 ambiguous
+    about which one the NAS rejected."""
+    seen = {}
+
+    import requests
+
+    class FakeSession:
+        def request(self, method, url, **kw):
+            seen.update(kw)
+            # The headers ARE the assertion; a transport error is the cheapest
+            # way to stop before a real socket, and _request turns it into the
+            # NasError every caller already handles.
+            raise requests.RequestException("stop here")
+
+    client = TrueNASClient("nas.example", "truenas_admin", "pw",
+                           session=FakeSession(), api_key="1-abcdef")
+    with pytest.raises(NasError):
+        client.get("/user")
+    assert seen["headers"] == {"Authorization": "Bearer 1-abcdef"}
+    assert seen["auth"] is None
+
+
+def test_without_a_key_the_password_is_still_used(monkeypatch):
+    seen = {}
+
+    import requests
+
+    class FakeSession:
+        def request(self, method, url, **kw):
+            seen.update(kw)
+            raise requests.RequestException("stop")
+
+    client = TrueNASClient("nas.example", "truenas_admin", "pw",
+                           session=FakeSession(), api_key="")
+    with pytest.raises(NasError):
+        client.get("/user")
+    assert seen["headers"] is None
+    assert seen["auth"] == ("truenas_admin", "pw")
+
+
+def test_the_factory_hands_the_key_to_the_truenas_client():
+    client = make_nas_client(Settings(nas_host="nas.example", nas_api_key="1-abc"))
+    assert isinstance(client, TrueNASClient)
+    assert client.api_key == "1-abc"
+
+
+def test_the_deploy_env_names_reach_the_setting():
+    assert Settings.from_env({"TRUENAS_API_KEY": "1-legacy"}).nas_api_key == "1-legacy"
+    both = Settings.from_env({"TRUENAS_API_KEY": "1-legacy",
+                              "DASH_NAS_API_KEY": "1-neutral"})
+    assert both.nas_api_key == "1-neutral", "the neutral name wins, as it does elsewhere"
 
 
 # ------------------------------------------------------------------- settings
@@ -358,7 +427,7 @@ def test_the_admin_call_sites_provision_through_any_backend(tmp_path, syncthing,
     fake = FakeSynology()
     monkeypatch.setattr(nas_factory, "make_nas_client", lambda settings: fake)
     settings = Settings(db_path=str(tmp_path / "s.db"), session_secret=SECRET,
-                        admin_users=frozenset({"alex"}), nas_kind="synology",
+                        admin_users=frozenset({"owen"}), nas_kind="synology",
                         nas_host="dsm.example", nas_user="ccsync", nas_pw="pw",
                         syncthing_url=syncthing.url, syncthing_api_key="fake-key")
     with TestClient(create_app(settings)) as client:

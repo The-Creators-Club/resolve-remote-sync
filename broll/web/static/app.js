@@ -36,13 +36,31 @@ const SHUTTLE_RATES = [1, 2, 4, 8];
 const SEARCH_MODES = ["hybrid", "keyword", "semantic"];
 const SEARCH_SOURCES = ["all", "visual", "transcript"];
 
+// The own-footage collection's slug. SITE DATA since 2026-08-17 (the server's
+// BROLL_DEFAULT_COLLECTION -- docs/COMMERCIAL_READINESS.md item 4): it was the
+// literal "creators_club", one customer's name, in this file and in every
+// search URL. It is LEARNED from /api/tree, which names each root, so no
+// spelling of it is compiled in here -- "downloads" is the only slug the
+// product itself owns, and the other root is whatever this site calls it.
+const COLLECTION_DOWNLOADS = "downloads";
+let ownedCollection = "";
+
+function isOwnedCollection(slug) {
+  return !!slug && slug !== COLLECTION_DOWNLOADS && slug === ownedCollection;
+}
+
+function learnCollections(tree) {
+  const owned = (tree || []).find((r) => r.collection !== COLLECTION_DOWNLOADS);
+  if (owned) ownedCollection = owned.collection;
+}
+
 const state = {
   q: "",
   category: "",
-  collection: "", // "" | "downloads" | "creators_club" -- the folder-tree root
+  collection: "", // "" | "downloads" | <the own-footage slug> -- the tree root
   // `<share>::<rel/prefix>` from a clicked path crumb in the detail panel.
   // Independent of `category`/`collection`, which are the folder TREE's own
-  // pair: the tree browses creators_club shoots by slug and downloads by
+  // pair: the tree browses own-footage shoots by slug and downloads by
   // subject, so neither can express "this folder of this downloads share".
   path: "",
   tree: [],
@@ -422,10 +440,12 @@ async function loadCategories() {
  * visually inside a clip, not places in the tree, so they stay as filters.
  *
  * A root with nothing in it is not rendered at all: an unconfigured deployment
- * has no Creators_Club shares, and an empty shelf is worse than no shelf. */
+ * has no own-footage shares, and an empty shelf is worse than no shelf. */
 async function loadFolderTree() {
   try {
     state.tree = await fetchJson("api/tree");
+    // The own-footage root names itself; nothing here spells it (item 4).
+    learnCollections(state.tree);
   } catch (e) {
     console.error("failed to load folder tree", e);
     return;
@@ -545,7 +565,7 @@ function parentFolder(category) {
  * control cannot diverge again. */
 function syncCategorySelect() {
   const select = $("#category-select");
-  if (select) select.value = state.collection === "creators_club" ? "" : state.category;
+  if (select) select.value = isOwnedCollection(state.collection) ? "" : state.category;
 }
 
 function selectFolder(collection, category) {
@@ -593,7 +613,7 @@ async function runSearch() {
   if (state.q) params.set("q", state.q);
   // Creators_Club folders are shoot paths, not subject slugs — own footage is
   // not model-indexed, so there is no subject to filter on.
-  if (state.collection === "creators_club") {
+  if (isOwnedCollection(state.collection)) {
     if (state.category) params.set("shoot", state.category);
   } else if (state.category) {
     params.set("category", state.category);

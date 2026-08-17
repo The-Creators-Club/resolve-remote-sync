@@ -1,5 +1,8 @@
 # macOS first-run findings — 2026-08-04 (session 1, partial)
 
+> **Archive.** Kept as history; the addresses, hostnames and people in it are
+> those of the original deployment. Do not copy commands out of it.
+
 Record of the first time any of the macOS port has run on a Mac, against the
 checklist in `installer/MACOS_FIRST_RUN.md`.
 
@@ -24,7 +27,7 @@ binary**, and the single defect that stopped it (MAC-1) is understood.
 | | |
 |---|---|
 | Hardware / OS | Apple silicon (arm64), macOS 15.7.4 (24G517) |
-| Repo | `/Users/leso/resolve-remote-sync` @ `0f5d99d`, clean at session start |
+| Repo | `<mac-checkout>` @ `0f5d99d`, clean at session start |
 | Line endings | `installer/*.sh`, `tools/release_macos.sh` all checked out LF — `.gitattributes` worked, A2 passes |
 | Resolve | 21.0.0, direct build (not App Store — prefs are in `~/Library/Preferences/…`, not a sandbox container) |
 | Tailscale | installed, up; `nas` (100.65.15.123) reachable direct |
@@ -345,10 +348,10 @@ run**, so this is Resolve's own untouched shape and is the closest thing this
 session produced to what D5 asks for:
 
 - `config.dat` — `Site.1.FS.Count = 2`, entries at `Site.1.FS.1`
-  (`/Users/leso/Movies`) and `Site.1.FS.2` (`/Volumes`). **1-based**, all
+  (`~/Movies`) and `Site.1.FS.2` (`/Volumes`). **1-based**, all
   `MappedRoot` blank, `MacDIO = 1` on both, and the `/Volumes` auto-entry is
   last, as the code expects.
-- `.config.data` — `IoFsNum = 1`, `IoFsMount_1 = /Users/leso/Movies`,
+- `.config.data` — `IoFsNum = 1`, `IoFsMount_1 = <home>/Movies`,
   `IoFsMappedMount_1` blank, `IoFsDirectIO_1 = 1`. **1-based.**
 - **⚠️ The two files disagree, and the code's assumption is the wrong way
   round.** `.config.data` carries **no `/Volumes` entry at all** — only
@@ -358,9 +361,9 @@ session produced to what D5 asks for:
   helper does with a `.config.data` whose last entry is a real media path
   before running it in write mode**, and diff both backups afterwards.
 - **`.config.data` is owned by `root`** (`-rw-rw-rw- root staff`), while
-  `config.dat` is owned by `leso`. Mode 666 means the helper can write it, but
-  an atomic write-temp-then-rename will leave the replacement owned by `leso`.
-  Probably harmless — Resolve runs as `leso` — but it is a change to the file's
+  `config.dat` is owned by the local user. Mode 666 means the helper can write
+  it, but an atomic write-temp-then-rename will leave the replacement owned by
+  that user. Probably harmless — Resolve runs as them — but it is a change to the file's
   ownership that nothing in the design anticipated, and it is not reversible
   by re-running the helper.
 
@@ -380,7 +383,7 @@ companion/dist/ccsync-companion
   20954128 bytes
 ```
 
-Manifest fields are all populated — `built_by leso@liaoshaoxuandeMacBook-Pro`,
+Manifest fields are all populated — `built_by <user>@<mac-hostname>`,
 real `artifact_mtime`, `arch arm64`, `platform macos` — so A6's GNU-coreutils
 trap did not fire: `stat -f%z`, `date -u -r` and `hostname -s` all resolve to
 the BSD spellings on this machine.
@@ -414,9 +417,9 @@ pass.
 
 **Blocking the install drill:** sections C and F need a published `macos`
 package (A8), and E needs an external SSD as the sync root. The current
-`~/.ccsync/config.toml` has `local_root = /Users/leso/Creators_Club` — the
+`~/.ccsync/config.toml` has `local_root = ~/Creators_Club` — the
 internal disk — which makes the entire external-SSD root guard inert. The one
-external volume present (`/Volumes/SAMDISK`) is **ExFAT** and already holds
+external volume present (`/Volumes/<external-ssd>`) is **ExFAT** and already holds
 unrelated project material; ExFAT has no POSIX permissions or symlinks and is
 a poor fit for a sync root, so the SSD drills need a decision about which
 drive and which filesystem before they can mean anything.

@@ -22,6 +22,7 @@ REPO_ROOT = SPEC_DIR.parent
 COMPANION_SRC = REPO_ROOT / "companion" / "src"
 BOOTSTRAP_PS1 = REPO_ROOT / "installer" / "windows_bootstrap.ps1"
 COMPANION_EXE = REPO_ROOT / "companion" / "dist" / "ccsync-companion.exe"
+EULA_MD = SPEC_DIR / "assets" / "EULA.md"
 
 sys.path.insert(0, str(COMPANION_SRC))
 sys.path.insert(0, str(SPEC_DIR))
@@ -41,15 +42,25 @@ a = Analysis(
         (str(COMPANION_EXE), "."),   # bundled so onboard.exe installs everything
         # Logo for the wizard window icon -- theme.apply_window_icon() reads
         # it from sys._MEIPASS/ccsync_companion/assets/icon.png.
-        # cc_mark_white.png is what theme.apply_window_icon() prefers now
-        # (tinted to the brand red at runtime); icon.png stays as its
-        # fallback. Without the mark the wizard silently degrades to the
+        # The white-on-transparent mark is what theme.apply_window_icon()
+        # prefers now (tinted to the brand red at runtime); icon.png stays as
+        # its fallback. Without the mark the wizard silently degrades to the
         # old April logo -- the first thing a new editor ever sees
-        # (2026-08-11).
+        # (2026-08-11). BOTH marks ship: ccsync_mark.png is the product's own
+        # default and cc_mark_white.png is one studio's, selectable with
+        # CCSYNC_BRAND_LOGO (2026-08-17, COMMERCIAL_READINESS.md item 10).
+        (str(COMPANION_SRC / "ccsync_companion" / "assets" / "ccsync_mark.png"),
+         "ccsync_companion/assets"),
         (str(COMPANION_SRC / "ccsync_companion" / "assets" / "cc_mark_white.png"),
          "ccsync_companion/assets"),
         (str(COMPANION_SRC / "ccsync_companion" / "assets" / "icon.png"),
          "ccsync_companion/assets"),
+        # The licence the wizard's first page shows and takes consent for
+        # (2026-08-17, COMMERCIAL_READINESS.md item 3). steps.find_eula_asset()
+        # reads it from sys._MEIPASS/assets/EULA.md. Without it the wizard
+        # cannot claim consent and asks again on every run -- it does NOT
+        # fail open, unlike the companion's copy of the same document.
+        (str(EULA_MD), "assets"),
     ],
     hiddenimports=[
         "ccsync_companion",

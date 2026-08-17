@@ -39,8 +39,8 @@ HOST_ROOT_RE = re.compile(r"^/mnt/[^/]+/apps/ccsync-dashboard(/[^/]+)*$")
 # base rig, tailnet for remote editors. Never 0.0.0.0 -- a new NAS interface
 # must not silently expose the dashboard.
 #
-# Blank since 2026-08-17: these were this fleet's own 192.168.0.102 /
-# 100.71.216.3, which is the first thing a second site would have had to fork
+# Blank since 2026-08-17: these were this fleet's own 192.168.0.10 /
+# 100.64.0.1, which is the first thing a second site would have had to fork
 # (COMMERCIAL_READINESS.md item 10). They come from site.toml now, and a blank
 # one is refused by dash_binds() rather than defaulted -- an address the NAS
 # does not have makes Docker fail the app with "cannot assign requested
@@ -297,10 +297,28 @@ class TrueNASBackend:
         # KEEP THIS IN SYNC with the payload in install_syncthing_app.py's docstring.
         uid = common.site_int("stack", "uid", 3000)
         gid = common.site_int("stack", "gid", 3001)
+        # Which host address the GUI is published on. Blank keeps the chart's
+        # own behaviour (every interface), which is what this install did until
+        # 2026-08-17 and is finding H4 of COMMERCIAL_READINESS.md item 7: the
+        # Syncthing GUI is an unauthenticated admin surface over every folder in
+        # the fleet. A site sets [syncthing] gui_bind to the one address the
+        # base rig reaches it on -- 127.0.0.1 plus an SSH tunnel is the
+        # strictest useful value, and it is what the Synology stack already
+        # does.
+        #
+        # `host_ips` is the TrueNAS 25.10 port-schema field for this. VERIFY
+        # AGAINST THE LIVE VERSION before a customer install: if the create is
+        # rejected with a schema error naming host_ips, this is the field to
+        # drop (and then bind it with `secure_syncthing_gui.py --bind` plus a
+        # firewall rule instead).
+        gui_bind = common.site_value("syncthing", "gui_bind")
+        web_port = {"bind_mode": "published", "port_number": gui_port}
+        if gui_bind:
+            web_port["host_ips"] = [gui_bind]
         values = {
             "run_as": {"user": uid, "group": gid},
             "network": {
-                "web_port": {"bind_mode": "published", "port_number": gui_port},
+                "web_port": web_port,
                 "tcp_port": {"bind_mode": "published", "port_number": 22000},
                 "udp_port": {"bind_mode": "published", "port_number": 22000},
                 "host_network": False,
@@ -366,6 +384,16 @@ class TrueNASBackend:
               f"host path {host_path} -> container mount {container_mount}")
         print(f"Next: fetch the GUI's API key (TrueNAS UI > Apps > {app_name} > Web UI, or the app's "
               f"config file) and pass it to setup_syncthing_folder.py / accept_device.py / check_health.py.")
+        if not gui_bind:
+            print(f"WARNING: the Syncthing GUI is published on EVERY interface of this NAS "
+                  f"(port {gui_port}) and ships with no password. It can add devices and "
+                  f"re-point folders across the whole fleet. Set [syncthing] gui_bind in "
+                  f"site.toml, and run:\n"
+                  f"    SYNCTHING_API_KEY=... python server/secure_syncthing_gui.py",
+                  file=sys.stderr)
+        else:
+            print(f"Then: SYNCTHING_API_KEY=... python server/secure_syncthing_gui.py "
+                  f"-- the GUI has no password until you do.")
         return 0
 
     # ----------------------------------------------------------------------
@@ -428,6 +456,18 @@ class TrueNASBackend:
             return None, f"HTTP {resp.status_code}"
         return resp.json(), ""
 
+    # TrueNAS SCALE (Debian userland) ships nologin at /usr/sbin/nologin, and
+    # /user validates `shell` against `user.shell_choices` -- an unknown path is
+    # a 422, not a silently-broken account. Both spellings are checked because
+    # 25.10 lists them from /etc/shells and the set has moved before.
+    NOLOGIN_CHOICES = ("/usr/sbin/nologin", "/sbin/nologin", "/usr/bin/false")
+
+    def editor_shell(self) -> str:
+        """The `shell` an editor account is created with, per [stack] editor_shell."""
+        if not common.editor_shell_is_sftp_only():
+            return "/usr/bin/bash"
+        return self.NOLOGIN_CHOICES[0]
+
     def create_editor(self, username: str, full_name: str, group_id, pubkey: str,
                       homes_parent: str, dry_run: bool = False):
         body = {
@@ -440,7 +480,14 @@ class TrueNASBackend:
             # appends the username itself (25.10 API semantics).
             "home": homes_parent,
             "home_create": True,
-            "shell": "/usr/bin/bash",
+            # nologin unless the site says [stack] editor_shell = "shell"
+            # (COMMERCIAL_READINESS.md item 7 / H4, 2026-08-17). This was
+            # /usr/bin/bash for every editor: an interactive account on the box
+            # holding the whole customer's footage, bought for exactly one
+            # feature -- rclone's `shell_type = unix` md5sum. See
+            # common.editor_shell_mode and setup_editor_account.py
+            # --migrate-existing.
+            "shell": self.editor_shell(),
             # Stays False: 25.10 rejects password_disabled for SMB users
             # outright (see setup_editor_account's module docstring). sshd's own
             # `PasswordAuthentication no` is what makes SSH key-only.
@@ -479,6 +526,140 @@ class TrueNASBackend:
         if resp is not None and resp.status_code == 422 and "SMB" in resp.text:
             return "smb-refused", ""
         return "failed", f"HTTP {resp.status_code} {resp.text}"
+
+    def list_editors(self, group_id, dry_run: bool = False):
+        """Every account in the editors group. ([row, ...], error).
+
+        Rows are the /user shape, so `username`, `id`, `shell` and `sshpubkey`
+        are all there -- --migrate-existing reports on all four.
+        """
+        resp = self.calls.api("GET", "/user", dry_run=dry_run)
+        if dry_run:
+            return [], ""
+        if not self.calls.ok(resp):
+            return [], f"HTTP {resp.status_code} {resp.text}"
+        try:
+            rows = resp.json()
+        except ValueError:
+            return [], "GET /user: response was not JSON"
+        return [u for u in rows
+                if group_id in (u.get("groups") or []) or u.get("group") == group_id
+                or (isinstance(u.get("group"), dict) and u["group"].get("id") == group_id)], ""
+
+    def revoke_editor_key(self, user_id, lock: bool = False, dry_run: bool = False):
+        """Offboarding: drop the installed public key. (ok, detail).
+
+        The editor's key is generated WITHOUT a passphrase by the onboarding
+        wizard (onboarding/steps.py, `-N ""`), because a tray app cannot prompt
+        for one on every rclone pass. That is a defensible trade only if the
+        key can be taken away again -- and until 2026-08-17 nothing in this
+        repo ever removed one (COMMERCIAL_READINESS.md item 7 / H4). This is
+        that step; `lock` additionally disables the account so the SMB session
+        the dashboard login checks stops working too.
+        """
+        body = {"sshpubkey": ""}
+        if lock:
+            body["locked"] = True
+        resp = self.calls.api("PUT", f"/user/id/{user_id}", json_body=body, dry_run=dry_run)
+        if dry_run:
+            return True, ""
+        if not self.calls.ok(resp):
+            return False, f"HTTP {resp.status_code} {resp.text}"
+        return True, ""
+
+    def set_editor_shell(self, user_id, shell: str, dry_run: bool = False):
+        """Change an existing editor's login shell. (ok, detail).
+
+        Only setup_editor_account.py --migrate-existing calls this: a plain
+        re-run must NOT flip a working editor to nologin, because their
+        rclone.conf still says `shell_type = unix` and every checksum would
+        start failing the moment it did (2026-08-17).
+        """
+        resp = self.calls.api("PUT", f"/user/id/{user_id}",
+                              json_body={"shell": shell}, dry_run=dry_run)
+        if dry_run:
+            return True, ""
+        if not self.calls.ok(resp):
+            detail = f"HTTP {resp.status_code} {resp.text}"
+            if resp is not None and resp.status_code == 422:
+                detail += (f" -- if it rejected the shell path, check "
+                           f"`GET /api/v2.0/user/shell_choices` for what this "
+                           f"release calls nologin (tried: {shell})")
+            return False, detail
+        return True, ""
+
+    # sshd policy for the editors group. TrueNAS regenerates /etc/ssh/sshd_config
+    # from middleware, so a file dropped in sshd_config.d is erased by the next
+    # service change -- the supported seam is the ssh service's free-text
+    # "Auxiliary Parameters" (`options`), which middleware appends verbatim to
+    # the END of sshd_config. A Match block there covers everything after it,
+    # which is exactly what a trailing block should do.
+    SSHD_POLICY_BEGIN = "# --- ccsync editors policy (managed by setup_editor_account.py) ---"
+    SSHD_POLICY_END = "# --- end ccsync editors policy ---"
+
+    def sshd_editor_policy(self, group: str) -> str:
+        """The auxiliary-parameters block that makes `group` SFTP-only.
+
+        NO ChrootDirectory, deliberately (2026-08-17, COMMERCIAL_READINESS.md
+        item 7): sshd demands every component of a chroot be root-owned and not
+        group-writable, and the tree root is <owner>:<editors> 2770 by design --
+        so the only chrootable point is the pool mountpoint, and chrooting there
+        would re-root every rclone path the site manifest publishes
+        (DASH_SITE_REMOTE_ROOT is absolute, and every editor's rclone.conf and
+        every dashboard remote path is built from it). ForceCommand
+        internal-sftp already removes the shell, which is what H4 was about;
+        chroot would only add containment against an editor reading OTHER
+        directories on the NAS, and that is what docs/TENANCY.md's per-project
+        mode addresses instead.
+        """
+        return "\n".join([
+            self.SSHD_POLICY_BEGIN,
+            f"Match Group {group}",
+            "    ForceCommand internal-sftp",
+            "    PasswordAuthentication no",
+            "    AllowTcpForwarding no",
+            "    X11Forwarding no",
+            "    PermitTunnel no",
+            "    PermitTTY no",
+            self.SSHD_POLICY_END,
+        ])
+
+    def ensure_sshd_editor_policy(self, group: str, dry_run: bool = False):
+        """Install/refresh the Match block. ("ok"|"unchanged"|"failed", detail).
+
+        Idempotent by markers rather than by string equality of the whole field:
+        an operator's own auxiliary parameters sit in the same box and must
+        survive (they are usually the reason the box is non-empty at all).
+        """
+        block = self.sshd_editor_policy(group)
+        if dry_run:
+            print(f"[dry-run] would GET /ssh and ensure its auxiliary parameters carry:\n{block}")
+            return "ok", ""
+        resp = self.calls.api("GET", "/ssh", dry_run=False)
+        if not self.calls.ok(resp):
+            return "failed", f"GET /ssh: HTTP {resp.status_code} {resp.text}"
+        try:
+            current = str((resp.json() or {}).get("options") or "")
+        except ValueError:
+            return "failed", "GET /ssh: response was not JSON"
+
+        if self.SSHD_POLICY_BEGIN in current:
+            head, _, rest = current.partition(self.SSHD_POLICY_BEGIN)
+            _old, _, tail = rest.partition(self.SSHD_POLICY_END)
+            # The same "\n\n" the append branch uses, so a second run rebuilds
+            # byte-identical text and reports "unchanged" instead of PUTting an
+            # sshd config change on every account create.
+            head = head.rstrip()
+            wanted = ((head + "\n\n" if head else "") + block + tail).strip()
+        else:
+            wanted = (current.rstrip() + "\n\n" + block).strip() if current.strip() else block
+        if wanted == current.strip():
+            return "unchanged", ""
+
+        put = self.calls.api("PUT", "/ssh", json_body={"options": wanted}, dry_run=False)
+        if not self.calls.ok(put):
+            return "failed", f"PUT /ssh: HTTP {put.status_code} {put.text}"
+        return "ok", ""
 
     def ensure_home_permissions(self, home: str, uid: int, unix_gid: int,
                                 username: str) -> bool:
@@ -589,19 +770,44 @@ class TrueNASBackend:
             f"recordsize/atime/ACL settings this script has no business guessing."
         )
 
-    def set_tree_acl(self, base: str, owner: str, group: str) -> list[str]:
+    def set_tree_acl(self, base: str, owner: str, group: str,
+                     project_group: str = "", container_dirs=None) -> list[str]:
         """The chown/chmod pair setup_tree.py appends to its remote script.
 
         Returned as shell lines, not executed: setup_tree builds ONE script and
         runs it in ONE ssh session (and server/tests executes that script under
         a stub sudo, which is how the quoting is proved).
+
+        With `project_group` set ([stack] project_acl = "per-project",
+        docs/TENANCY.md), two things change and nothing else does:
+
+          * the project subtree is owned by <owner>:proj-<slug> rather than
+            <owner>:<editors>, so only the people ticked onto this project can
+            read or write inside it;
+          * the CONTAINER directories above it (Projects/, the year, the
+            series) get the sticky bit as well as setgid -- 3770. Without that,
+            per-project groups change nothing about the finding they exist for:
+            deleting a directory needs write on its PARENT, and the parents are
+            group-writable to every editor by design. Sticky means only the
+            entry's owner (the service account) can remove it.
+
+        The service account still owns everything, which is what keeps lane C
+        working: Syncthing runs as one uid and must write into every folder.
         """
         base_q = common.shell_quote(base)
-        owner_group = common.shell_quote(f"{owner}:{group}")
+        effective_group = project_group or group
+        owner_group = common.shell_quote(f"{owner}:{effective_group}")
         lines = [
             f'echo "$SUDO_PW" | sudo -S -p "" chown -R {owner_group} {base_q} '
-            f"&& echo {common.shell_quote(f'ownership set: {owner}:{group} on {base}')}"
+            f"&& echo {common.shell_quote(f'ownership set: {owner}:{effective_group} on {base}')}"
         ]
+        for container in (container_dirs or []):
+            cont_q = common.shell_quote(container)
+            lines.append(
+                f'if echo "$SUDO_PW" | sudo -S -p "" chmod 3770 {cont_q} >/dev/null 2>&1; then '
+                f"echo {common.shell_quote(f'container protected: 3770 (setgid+sticky) on {container} -- one editor can no longer delete the project directory of another')}; "
+                f"else echo {common.shell_quote(f'container NOT protected: chmod blocked on {container} (likely ZFS aclmode=restricted) -- see docs/TENANCY.md')}; fi"
+            )
         # Non-fatal: some datasets have ZFS aclmode=restricted, which blocks
         # chmod outright (even for root). Ownership above still applies fine in
         # that case; only the setgid bit is missing. `if` conditions are exempt
@@ -613,12 +819,213 @@ class TrueNASBackend:
         )
         return lines
 
+    # ----------------------------------------------------------------------
+    # Snapshots (COMMERCIAL_READINESS.md item 8, 2026-08-17)
+    # ----------------------------------------------------------------------
+    #
+    # Until this date the answer here was UnsupportedOnBackend: "snapshots are
+    # a thing the admin configures in the UI". Nobody had, and the audit found
+    # what that meant -- a mistaken `chown -R`, a deploy or a fleet-side bug
+    # had NOTHING behind it. So the floor is code now.
+    #
+    # Taking one goes over SSH (`zfs snapshot`), not through the middleware, on
+    # purpose: the REST namespace for a single snapshot was renamed between
+    # SCALE generations (zfs.snapshot.create -> pool.snapshot.create) and this
+    # repo cannot verify which one a given customer's box answers, whereas the
+    # `zfs` CLI has spelled it the same way for twenty years and the snapshot
+    # it makes is an ordinary one the UI lists. SCHEDULING is the opposite case
+    # -- /pool/snapshottask is stable across every SCALE this repo has met, and
+    # there is no CLI for it at all -- so that half is REST.
+
+    #: A dataset a snapshot task may be created for. Anything else is a typo,
+    #: and a recursive task on the wrong dataset snapshots someone's whole
+    #: pool on an hourly schedule (the same reasoning as HOST_ROOT_RE).
+    DATASET_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9_.: ]*(/[-A-Za-z0-9_.: ]+)+$")
+
+    @staticmethod
+    def dataset_of(path: str) -> str:
+        """The ZFS dataset a /mnt/... path belongs to, as `zfs` spells it.
+
+        Path in, dataset out: the scripts know /mnt/tank/TheCreatorsPool, the
+        pool knows tank/TheCreatorsPool. Only the mountpoint prefix is
+        stripped; whether the result is a dataset or a directory INSIDE one is
+        the caller's problem, and `zfs snapshot` says so plainly if it is the
+        latter.
+        """
+        p = str(path or "").strip().rstrip("/")
+        if not p.startswith("/mnt/"):
+            return ""
+        return p[len("/mnt/"):]
+
+    def resolve_dataset(self, path: str, dry_run: bool) -> str:
+        """The dataset `path` actually lives in, asked of the NAS.
+
+        dataset_of() is only string surgery, and the paths this repo hands
+        around are mostly DIRECTORIES inside a dataset rather than dataset
+        mountpoints: /mnt/tank/TheCreatorsPool/Creators_Club is a folder in
+        `tank/TheCreatorsPool` on this fleet's box, and whether
+        /mnt/tank/apps/ccsync-dashboard is its own dataset is a per-site
+        choice. `zfs snapshot` on a directory fails, so ask df -- which needs
+        no privilege and answers with the dataset name ZFS mounted there --
+        and fall back to the string form if it cannot be read.
+        """
+        naive = self.dataset_of(path)
+        if dry_run or not naive:
+            return naive
+        rc, out, _err = self.calls.ssh(
+            f"df --output=source {common.shell_quote(path)} | tail -n 1",
+            dry_run=False, timeout=60)
+        found = (out or "").strip().splitlines()[-1:] or [""]
+        dataset = found[0].strip()
+        if rc != 0 or not dataset or dataset.startswith("/") or "/" not in dataset:
+            return naive
+        if dataset != naive:
+            print(f"{path} is inside dataset {dataset} (not a dataset of its own) "
+                  f"-- snapshotting {dataset}")
+        return dataset
+
     def snapshot(self, path: str, label: str, dry_run: bool) -> bool:
-        raise UnsupportedOnBackend(
-            "snapshots on TrueNAS are ZFS periodic snapshot tasks, configured once in "
-            "the UI (Data Protection > Periodic Snapshot Tasks) -- no install script "
-            "creates or deletes them. See docs/COMMERCIAL_READINESS.md item 8."
-        )
+        """One snapshot, named from `label` and the clock. See snapshot_now."""
+        import time  # noqa: PLC0415 - only this path needs a clock
+
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(label or "manual")).strip("-")
+        ok, _ident = self.snapshot_now(path, f"ccsync-pre-{safe}-{stamp}", dry_run)
+        return ok
+
+    def snapshot_now(self, path: str, name: str, dry_run: bool) -> tuple[bool, str]:
+        dataset = self.resolve_dataset(path, dry_run)
+        if not dataset:
+            print(f"FAILED: {path!r} is not under /mnt, so there is no ZFS dataset to "
+                  f"snapshot.", file=sys.stderr)
+            return False, ""
+        if not re.match(r"^[A-Za-z0-9][-A-Za-z0-9_.:]*$", name):
+            print(f"FAILED: {name!r} is not a usable snapshot name (letters, digits and "
+                  f"-_.: only).", file=sys.stderr)
+            return False, ""
+        ident = f"{dataset}@{name}"
+        # `zfs snapshot` on an EXISTING name is an error, and re-running a
+        # deploy inside the same second is a normal thing to do, so an
+        # already-taken snapshot is success: the point-in-time it names exists.
+        cmd = (f'echo "$SUDO_PW" | sudo -S -p "" zfs snapshot {common.shell_quote(ident)}')
+        rc, _out, err = self.calls.ssh(cmd, dry_run=dry_run, timeout=120)
+        if dry_run:
+            print(f"[dry-run] would take a ZFS snapshot: {ident} (the dataset is "
+                  f"resolved from the path on the NAS at run time, so a real run may "
+                  f"snapshot the parent dataset this path sits in)")
+            return True, ident
+        if rc != 0 and "exists" not in (err or "").lower():
+            print(f"FAILED to snapshot {ident}: {err.strip()[:300] or rc}", file=sys.stderr)
+            return False, ""
+        print(f"snapshot taken: {ident}")
+        return True, ident
+
+    def list_snapshots(self, path: str, dry_run: bool) -> list[dict]:
+        dataset = self.resolve_dataset(path, dry_run)
+        if not dataset:
+            return []
+        cmd = ('echo "$SUDO_PW" | sudo -S -p "" zfs list -H -t snapshot -s creation '
+               f"-o name,used,creation -d 1 {common.shell_quote(dataset)}")
+        rc, out, err = self.calls.ssh(cmd, dry_run=dry_run, timeout=120)
+        if dry_run:
+            print(f"[dry-run] would list ZFS snapshots of {dataset}")
+            return []
+        if rc != 0:
+            print(f"could not list snapshots of {dataset}: {err.strip()[:200] or rc}",
+                  file=sys.stderr)
+            return []
+        rows = []
+        for line in (out or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3 or "@" not in parts[0]:
+                continue
+            rows.append({"name": parts[0].split("@", 1)[1], "used": parts[1],
+                         "created": parts[2]})
+        return rows
+
+    def ensure_snapshot_schedule(self, path: str, schedules: list[dict],
+                                 dry_run: bool) -> list[tuple[str, str]]:
+        """Idempotent /pool/snapshottask create-or-update, keyed on
+        (dataset, naming_schema).
+
+        The naming schema is the identity because the middleware gives a task
+        no name of its own, and because it is the thing that must not collide:
+        two tasks on one dataset writing the same schema fight over the same
+        snapshot names. Existing tasks are matched, diffed, and only PUT when
+        something actually differs -- a re-run of setup_snapshots.py on a
+        configured site prints "unchanged", which is what makes it safe to put
+        in a runbook.
+        """
+        dataset = self.resolve_dataset(path, dry_run)
+        out: list[tuple[str, str]] = []
+        if not dataset:
+            return [("failed", f"{path!r} is not under /mnt -- no dataset to schedule")]
+        if not self.DATASET_RE.match(dataset):
+            return [("failed", f"refusing to schedule snapshots on {dataset!r}: that is "
+                               f"a pool, not a dataset. Name the dataset the tree lives "
+                               f"in (site.toml [tree] pool_root).")]
+
+        existing = []
+        if not dry_run:
+            resp = self.calls.api("GET", "/pool/snapshottask", dry_run=False)
+            if not self.calls.ok(resp):
+                return [("failed", f"could not read existing snapshot tasks: "
+                                   f"HTTP {resp.status_code} {resp.text[:200]}")]
+            try:
+                existing = [t for t in resp.json() if t.get("dataset") == dataset]
+            except ValueError:
+                return [("failed", "GET /pool/snapshottask did not answer JSON")]
+
+        for spec in schedules:
+            body = {
+                "dataset": dataset,
+                "recursive": bool(spec.get("recursive", True)),
+                "lifetime_value": int(spec["lifetime_value"]),
+                "lifetime_unit": str(spec["lifetime_unit"]),
+                "naming_schema": str(spec["naming_schema"]),
+                "schedule": dict(spec["schedule"]),
+                "enabled": True,
+                # An empty dataset at 03:00 is not an error worth an alert, and
+                # a task that fails on it is a task an admin switches off.
+                "allow_empty": True,
+            }
+            if dry_run:
+                print(f"[dry-run] would ensure a periodic snapshot task on {dataset}: "
+                      f"{spec['label']} -- {body['naming_schema']}, keep "
+                      f"{body['lifetime_value']} {body['lifetime_unit'].lower()}(s), "
+                      f"at {_cron_text(body['schedule'])}")
+                out.append(("dry-run", spec["label"]))
+                continue
+            match = next((t for t in existing
+                          if t.get("naming_schema") == body["naming_schema"]), None)
+            if match is None:
+                resp = self.calls.api("POST", "/pool/snapshottask", json_body=body,
+                                      dry_run=False)
+                if not self.calls.ok(resp):
+                    out.append(("failed", f"{spec['label']}: HTTP {resp.status_code} "
+                                          f"{resp.text[:200]}"))
+                    continue
+                print(f"created snapshot task: {dataset} {body['naming_schema']} "
+                      f"(keep {body['lifetime_value']} {body['lifetime_unit'].lower()})")
+                out.append(("created", spec["label"]))
+                continue
+            drift = {k: v for k, v in body.items()
+                     if k != "dataset" and _differs(match.get(k), v)}
+            if not drift:
+                print(f"snapshot task already correct, skipping: {dataset} "
+                      f"{body['naming_schema']}")
+                out.append(("unchanged", spec["label"]))
+                continue
+            resp = self.calls.api("PUT", f"/pool/snapshottask/id/{match.get('id')}",
+                                  json_body=body, dry_run=False)
+            if not self.calls.ok(resp):
+                out.append(("failed", f"{spec['label']}: HTTP {resp.status_code} "
+                                      f"{resp.text[:200]}"))
+                continue
+            print(f"updated snapshot task: {dataset} {body['naming_schema']} "
+                  f"({', '.join(sorted(drift))})")
+            out.append(("updated", spec["label"]))
+        return out
 
     # ----------------------------------------------------------------------
     # Diagnostics
@@ -628,3 +1035,22 @@ class TrueNASBackend:
         """Tailscale runs as its own TrueNAS app here, so its CLI is only
         reachable inside that container."""
         return self.container_exec("tailscale", "tailscale status --json", dry_run)
+
+
+def _cron_text(schedule: dict) -> str:
+    """A snapshot task's schedule as five cron fields, for the dry-run line."""
+    return " ".join(str(schedule.get(k, "*"))
+                    for k in ("minute", "hour", "dom", "month", "dow"))
+
+
+def _differs(found, wanted) -> bool:
+    """Does the middleware's stored value differ from what we want?
+
+    Dicts are compared on OUR keys only: GET /pool/snapshottask returns the
+    schedule with `begin`/`end` fields the create payload never sets, and
+    treating those as drift would make every re-run a PUT (and every runbook
+    line a lie about being idempotent).
+    """
+    if isinstance(wanted, dict):
+        return any(_differs((found or {}).get(k), v) for k, v in wanted.items())
+    return str(found) != str(wanted)

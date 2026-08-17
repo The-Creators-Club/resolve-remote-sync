@@ -1,11 +1,22 @@
-# Editor Setup -- Creators Club Sync
+# Editor Setup -- CC Sync
 
 Step-by-step for a remote editor joining a project. Read this once, top to
 bottom; most of it is one-time setup.
 
+CC Sync is a fleet-sync companion **for DaVinci Resolve®**. It **requires
+DaVinci Resolve Studio** on this machine: the free edition does not expose the
+external scripting interface the companion uses, so the watcher, the fixer,
+the relink popup, "Send to Resolve" and the proxy attach all do nothing
+without it. DaVinci Resolve and DaVinci Resolve Studio are products of
+Blackmagic Design Pty Ltd, licensed to you separately by them; CC Sync is not
+affiliated with, endorsed by or sponsored by Blackmagic Design (2026-08-17,
+docs/COMMERCIAL_READINESS.md item 3).
+
 ## 0. Before you start
 
-You'll need, from the admin:
+**DaVinci Resolve Studio, installed and activated**, with *Preferences →
+System → General → External scripting using* set to **Local**. Then, from the
+admin:
 - Your TrueNAS username (they set this up with `server/setup_editor_account.py`).
   It is **lowercase** and case-sensitive.
 - The tailnet hostname/IP of the NAS (something like `truenas.tailXXXX.ts.net`

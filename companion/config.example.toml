@@ -16,11 +16,11 @@
 
 # Your name/handle, used to build the "B-roll/Editor Added/<editor_name>"
 # destination suggested by the popup fixer.
-editor_name = "alex"
+editor_name = "editor-1"
 
 # Absolute path to this machine's local copy of the project tree.
 #   Windows: "C:\\Creators_Club"
-#   macOS:   "/Users/alex/Creators_Club"
+#   macOS:   "/Users/<you>/Creators_Club"
 local_root = "C:\\Creators_Club"
 
 # The canonical shared-drive prefix used in Resolve's stored clip paths
@@ -90,6 +90,29 @@ scan_interval_down = 120
 # proxies once per pass and sweeps each superseded partial into
 # .ccsync-trash. 0 disables the gate.
 lane_b_min_age_seconds = 120
+
+# -- lane B circuit breaker + .ccsync-trash retention (item 9, 2026-08-17) --
+# rclone's --max-delete 100 / --max-delete-size 20G bounds ONE lane B pass.
+# These bound the SEQUENCE: past any of them lane B STOPS on this machine
+# (lanes A and C keep running) until someone uses the tray's "Resume proxy
+# download". Nothing is ever deleted -- removals become moves into
+# .ccsync-trash -- so a trip costs visibility, never footage.
+#   lane_b_max_deletes_per_pass     how many files one pass may trash
+#   lane_b_max_delete_fraction      ...or this share of the local proxy set,
+#                                   whichever is smaller (small projects)
+#   lane_b_remote_shrink_fraction   trip when the NAS listing shrinks past
+#                                   this share of what it held last pass
+# lane_b_max_deletes_per_pass = 50
+# lane_b_max_delete_fraction = 0.25
+# lane_b_remote_shrink_fraction = 0.5
+#
+# How long recovery copies are kept in <local_root>/.ccsync-trash, and how
+# big that directory may get before the OLDEST batches are dropped. The
+# newest batch is never pruned by the size rule, and NOTHING is pruned while
+# the breaker above is tripped. 0 disables the age rule / the size cap.
+# trash_max_age_days = 14
+# trash_max_bytes = 53687091200
+# trash_prune_interval_seconds = 21600
 
 # Lane A watchdog file-stability debounce, in seconds.
 watch_debounce_seconds = 10
@@ -167,6 +190,24 @@ rclone_path = "rclone"
 log_path = "~/.ccsync/companion.log"
 log_level = "INFO"
 
+# Crash reports (2026-08-17).
+#
+# A JSON file per unhandled exception is ALWAYS written to ~/.ccsync/crashes/:
+# traceback, version, platform, and the last 200 lines of companion.log at the
+# moment it happened. That last part is why it exists -- the log rotates at
+# 5 MB, and by the time anyone asks, the lines that explain the failure are
+# usually gone. It is written owner-only, secrets in it are redacted, at most
+# 20 are kept, and it is never sent anywhere.
+#
+# The two keys below switch on the OPTIONAL network sender, and BOTH are
+# required: there is no vendor endpoint compiled into this app, so
+# `crash_reporting = true` with an empty crash_dsn still sends nothing at all.
+# The sender also needs the `sentry_sdk` package, which the frozen build
+# deliberately does not ship -- so this is a source-install / self-built
+# feature for a customer who wants it. See docs/legal/TELEMETRY.md.
+crash_reporting = false
+crash_dsn = ""
+
 # Dashboard reporter: periodically POSTs lane statuses to a server-side
 # dashboard so an admin can see editor health without remoting in. There is
 # NO default (2026-08-17): the installer writes your admin's URL here --
@@ -175,7 +216,28 @@ log_level = "INFO"
 # dashboard" link entirely -- the reporter thread isn't even started.
 # dashboard_token is sent as the X-CCSync-Token header; ask the admin for it.
 dashboard_url = "http://<your-dashboard-host>:8480"
+# WHO MAY DRIVE THE LOOPBACK API on 127.0.0.1:8899 -- the "Send to Resolve"
+# and "Download here" buttons on the b-roll, music and YouTube pages
+# (2026-08-17, COMMERCIAL_READINESS.md item 5). Since then only the dashboard's
+# own origin may, and dashboard_url above IS that origin, so neither of these
+# is normally needed. They are escape hatches, deliberately absent from the
+# defaults, and the companion names the first one when it refuses a page:
+#
+#   loopback_extra_origins  additional EXACT origins, for a deployment whose
+#                           editors browse the dashboard at a name
+#                           dashboard_url does not use (a second tailnet name,
+#                           a reverse proxy). Scheme + host + port, no path.
+#   loopback_dev_origins    also accept http(s)://127.0.0.1|localhost:* -- for
+#                           a developer running the dashboard on this machine.
+# loopback_extra_origins = ["https://nas.example.ts.net"]
+# loopback_dev_origins = false
 dashboard_token = ""
+# YOUR OWN fleet token, if your admin has minted one (dashboard -> Admin ->
+# Users -> REPORT TOKENS). Shaped "cce1.<id>.<secret>". It identifies your
+# machines rather than the whole fleet, can be revoked for you alone, and
+# outranks the shared dashboard_token above wherever both are set -- a tray
+# sign-in never overwrites it. Blank = use the shared token.
+report_token = ""
 # Login gate: when true, the companion will not start sync lanes/the
 # sequencer, nor report under an identity, until the editor signs in via the
 # tray ("Sign in...") with their TrueNAS username+password and the dashboard
@@ -291,6 +353,25 @@ proxy_gen_min_age_seconds = 120
 # Never remembered across restarts -- a blacklist on disk would turn a
 # transient GPU failure into a permanent one.
 # proxy_gen_max_failures = 3
+# Free space kept clear on the volume the proxies are written to, whichever of
+# the two is larger. Proxies land next to their originals -- the same volume
+# every sync lane and Resolve's own cache share -- so filling it stalls far
+# more than proxy generation. 0 disables the check.
+# proxy_gen_free_space_floor_gb = 20
+# proxy_gen_free_space_floor_pct = 5
+# Seconds between the two (size, mtime) samples that decide a source has
+# stopped growing. rclone and every card copier set the mtime when they CREATE
+# a file, so a transfer in flight can look settled while its size is still
+# climbing -- and ffmpeg would then make a proxy of half an interview. The
+# scan's own sample usually supplies the first one, so this is rarely waited
+# out. 0 = one sample (the pre-2026-08-17 behaviour; not recommended).
+# proxy_gen_stability_seconds = 5
+# Rehearsal: report every clip that WOULD be encoded and encode nothing.
+# proxy_dry_run = false
+# Rehearsal for FIX ALL: report what would be copied and where each clip would
+# be relinked, and copy/relink nothing. Read once at startup, so restart the
+# tray after changing it. See docs/RESOLVE_EDIT_SAFETY.md.
+# fixer_dry_run = false
 # How long (seconds) before the same "clips have no proxy" notice may appear
 # again. A day, so a restart doesn't re-nag about a gap you already know about.
 # proxy_notify_cooldown_seconds = 86400
@@ -427,7 +508,7 @@ lut_check_interval = 900
 # finished mapping and the shared library is missing for that whole session --
 # while the preference above still reads perfectly, so nothing else here can
 # see it. The symptom is "LUTs missing" plus a "Failed to read Shaper LUT" per
-# rendered frame in Resolve's log (Ruskin, 2026-08-11). The companion spots
+# rendered frame in Resolve's log (2026-08-11). The companion spots
 # that in the log and re-scans the list in place, with no restart and no
 # preference edit -- the one LUT fix that works while an editor is mid-edit.
 lut_index_repair_enabled = true

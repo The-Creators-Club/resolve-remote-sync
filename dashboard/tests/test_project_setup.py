@@ -57,7 +57,7 @@ def env(tmp_path):
     projects_dir.mkdir()
     settings = Settings(
         db_path=str(tmp_path / "s.db"), session_secret=SECRET, report_token=TOKEN,
-        admin_users=frozenset({"alex"}), projects_dir=str(projects_dir),
+        admin_users=frozenset({"owen"}), projects_dir=str(projects_dir),
     )
     app = create_app(settings)
     with TestClient(app) as client:
@@ -87,7 +87,7 @@ def test_report_flag_absent_when_matched_or_mapped_or_no_project(env):
     assert "resolve_project_unmapped" not in resp.json()
     # explicitly mapped -> absent
     dbmod.admin_set_project_root(conn, "Mystery Doc", "2025-ff4-nuclear",
-                                 admin="alex", now=dbmod.utcnow_iso())
+                                 admin="owen", now=dbmod.utcnow_iso())
     conn.commit()
     resp = client.post("/api/v1/report", headers=headers, json=report("Mystery Doc"))
     assert "resolve_project_unmapped" not in resp.json()
@@ -153,8 +153,8 @@ def test_first_set_is_scoped_to_your_own_reported_projects(env):
     permanently fix where that editor's media gets written. Non-admins may
     now only claim names their own machines have reported."""
     client, conn, _pd = env
-    reported(conn, "Ruskins Doc", editor="ruskin", machine="RUSKIN-PC")
-    body = {"resolve_project": "Ruskins Doc", "slug": "2025-ff4-nuclear"}
+    reported(conn, "Editor2 Doc", editor="editor2", machine="EDITOR-PC-02")
+    body = {"resolve_project": "Editor2 Doc", "slug": "2025-ff4-nuclear"}
 
     as_user(client, "jsmith")
     resp = client.put("/api/v1/project-roots", json=body)
@@ -163,13 +163,13 @@ def test_first_set_is_scoped_to_your_own_reported_projects(env):
     assert conn.execute("SELECT COUNT(*) c FROM project_roots").fetchone()["c"] == 0
 
     # the owner can
-    as_user(client, "ruskin")
+    as_user(client, "editor2")
     assert client.put("/api/v1/project-roots", json=body).status_code == 200
 
     # ...and an admin can first-set anything, reported or not
     conn.execute("DELETE FROM project_roots")
     conn.commit()
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.put("/api/v1/project-roots",
                       json={"resolve_project": "Never Reported", "slug": "2025-ff4-nuclear"})
     assert resp.status_code == 200
@@ -205,7 +205,7 @@ def test_create_and_link_refuse_an_unreported_resolve_project(env):
 def test_editor_cannot_change_or_delete_existing(env):
     client, conn, _pd = env
     dbmod.admin_set_project_root(conn, "Fresh Doc", "2025-ff4-nuclear",
-                                 admin="alex", now=dbmod.utcnow_iso())
+                                 admin="owen", now=dbmod.utcnow_iso())
     conn.commit()
     as_user(client, "jsmith")
     assert client.put("/api/v1/project-roots",
@@ -214,7 +214,7 @@ def test_editor_cannot_change_or_delete_existing(env):
     assert client.put("/api/v1/project-roots",
                       json={"resolve_project": "Fresh Doc", "slug": None}
                       ).status_code == 403
-    as_user(client, "alex")
+    as_user(client, "owen")
     assert client.put("/api/v1/project-roots",
                       json={"resolve_project": "Fresh Doc", "slug": None}
                       ).status_code == 200
@@ -608,7 +608,7 @@ def test_browse_traversal_guard(env):
 def test_page_shows_mapping_when_already_set(env):
     client, conn, _pd = env
     dbmod.admin_set_project_root(conn, "Mystery Doc", "2025-ff4-nuclear",
-                                 admin="alex", now=dbmod.utcnow_iso())
+                                 admin="owen", now=dbmod.utcnow_iso())
     conn.commit()
     as_user(client, "jsmith")
     page = client.get("/project-setup?resolve_project=Mystery Doc")

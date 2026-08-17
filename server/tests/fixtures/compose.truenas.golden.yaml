@@ -26,6 +26,32 @@
 #               dashboard boots and then refuses every editor login.
 #   2026-08-17  +DASH_COOKIE_SECURE -- "auto" (honour X-Forwarded-Proto) here;
 #               "1" for a site whose [net] dashboard_url is https (WP4).
+#   2026-08-17  +DASH_RELEASE_PUBKEYS -- the vendor's release signing key(s)
+#               (COMMERCIAL_READINESS.md item 4). Empty by default: publishing
+#               is then refused with a 503 naming the variable, and nothing
+#               else about the container changes.
+#   2026-08-17  +DASH_SHARED_REPORT_TOKEN_ENABLED (item 15) -- whether the one
+#               fleet-wide report token is still accepted beside the
+#               per-editor ones. "1", because every companion in the field
+#               holds only the shared one; it becomes "0" when the dashboard's
+#               boot-time list of machines still using it is empty. The
+#               integration pass added it to compose_config() too: the file
+#               carried the key and the dict did not, and the TrueNAS deploy
+#               posts the DICT, so the flag would never have reached the
+#               container it was written for.
+#   2026-08-17  +DASH_SITE_ORG_SHORT / DASH_SITE_PRODUCT_NAME /
+#               DASH_SITE_TEMPLATE_FOLDERS / DASH_SITE_SHARED_ASSETS and
+#               BROLL_DEFAULT_COLLECTION(_LABEL) (items 10 + 11) -- the brand
+#               strings and the project template the dashboard and the b-roll
+#               mount had no way to learn. The container has no site.toml;
+#               these are how site.toml reaches it. ALL BLANK for this site,
+#               which is what keeps the deployment unchanged: each reader
+#               falls back to the product default it already used.
+#   2026-08-17  +DASH_CRASH_DIR (item 13) -- /data/crashes, which is where
+#               crash_report.crash_dir() already put them (beside the
+#               database). Stated rather than inferred, so the persistent
+#               volume is not a coincidence of DASH_DB_PATH. Nothing is sent
+#               anywhere without DASH_SENTRY_DSN, and no deploy sets that.
 #
 # server/install_dashboard_app.py embeds this same structure as a Python dict
 # (keep the two in sync) and injects the secrets from env vars. This file is
@@ -76,12 +102,16 @@
 #   /mnt/tank/apps/ccsync-dashboard/ytdl-data  (ytdl.db + the worker's
 #     scratch; owned 3000:3000 mode 770 -- the ONLY ytdl path the container
 #     writes that is not inside Projects/)
-#   /mnt/tank/apps/ccsync-dashboard/claude-home  (the one-time `claude /login`
-#     credentials; 3000:3000 mode 700 -- it holds a live OAuth credential)
-#   /mnt/tank/apps/ccsync-dashboard/claude-bin,
-#   /mnt/tank/apps/ccsync-dashboard/deno  (the Claude Code CLI and a static
-#     deno for yt-dlp's JS challenges, root:root 755, put there by the install
-#     script for the same reason as ffmpeg: nothing builds this image)
+#   /mnt/tank/apps/ccsync-dashboard/deno  (a static deno -- the JS runtime
+#     yt-dlp answers YouTube's "n challenge" with; root:root 755, put there by
+#     the install script for the same reason as ffmpeg: nothing builds this
+#     image. NOT PART OF THE DEFAULT DEPLOY: the mount and the service below
+#     appear only when the customer's site.toml sets [features]
+#     youtube_unblock -- see docs/legal/YOUTUBE_FEATURE_NOTICE.md. The file you
+#     are reading is the DEFAULT shape, which carries neither.)
+#   (claude-home / claude-bin are gone as of 2026-08-17: the /ytdl AI calls
+#     use the anthropic SDK with the customer's ANTHROPIC_API_KEY, so there is
+#     no CLI binary and no OAuth credential volume.)
 #   "/mnt/tank/TheCreatorsPool/Creators_Club/Assets/Music"  (the music library
 #     itself, P:\Assets\Music to an editor: broll:editors 2770 setgid like
 #     Projects/, mounted rw because queued ingest writes accepted uploads
@@ -95,9 +125,17 @@ services:
     user: "3000:3001"
     command: ["/bin/sh", "/app/deploy/run.sh"]
     environment:
-      SYNCTHING_GUI_URL: "http://192.168.0.102:8384"
+      SYNCTHING_GUI_URL: "http://192.168.0.10:8384"
       SYNCTHING_API_KEY: "REPLACE_ME"
       DASH_REPORT_TOKEN: "REPLACE_ME"
+      # Whether that ONE shared token is still accepted, beside the per-editor
+      # tokens an admin mints on Admin > Users (COMMERCIAL_READINESS.md item
+      # 15, 2026-08-17). Left on ("1") because every companion in the field
+      # holds only the shared one; the dashboard names the machines still using
+      # it at every boot, and once that list is empty this becomes "0" -- which
+      # is the point of the per-editor tokens: revocable per person, not one
+      # leak away from the whole fleet. Only an explicit "0" turns it off.
+      DASH_SHARED_REPORT_TOKEN_ENABLED: "1"
       # Login sessions: any stable random string; keep it the same across
       # redeploys or everyone is logged out. SMB auth verifies TrueNAS
       # passwords (the only method that works for non-admin users on 25.10).
@@ -108,12 +146,19 @@ services:
       # identity not fully configured" once, and then refuses every editor
       # login. Nothing in the deploy set it between the WP0 de-tenanting and
       # 2026-08-17, when the Synology bring-up printed that line.
-      DASH_SMB_HOST: "192.168.0.102"
+      DASH_SMB_HOST: "192.168.0.10"
       # "auto" honours X-Forwarded-Proto (the DSM reverse proxy and
       # `tailscale serve` both set it); "1" pins Secure on the session cookie,
       # which is what an https-published dashboard wants.
       DASH_COOKIE_SECURE: "auto"
       DASH_DB_PATH: "/data/dashboard.db"
+      # Opt-in crash reporting (COMMERCIAL_READINESS.md item 13). The container
+      # ALWAYS writes crash JSON here and sends it NOWHERE; setting
+      # DASH_SENTRY_DSN is the whole of turning the network sender on. Inside
+      # /data on purpose -- the one persistent volume, so a crash that killed
+      # the container is still readable afterwards. docs/legal/TELEMETRY.md.
+      # DASH_SENTRY_DSN: ""
+      DASH_CRASH_DIR: "/data/crashes"
       DASH_PORT: "8480"
       # auto-provision Syncthing folders for new project dirs found here
       DASH_PROJECTS_DIR: "/projects"
@@ -127,6 +172,14 @@ services:
       # Shares that hold OUR OWN footage rather than downloads; they browse
       # under a Creators_Club root instead of the subject taxonomy.
       BROLL_CREATORS_SHARES: "mofa-disaster"
+      # What that own-footage collection is CALLED -- a slug that travels in
+      # every search URL, and the label the folder tree shows. It was the
+      # literal "creators_club" (one customer's name) until 2026-08-17
+      # (COMMERCIAL_READINESS.md item 10); blank leaves the neutral "owned" /
+      # "Our Footage" the app defaults to. site.toml [broll]
+      # default_collection / default_collection_label.
+      BROLL_DEFAULT_COLLECTION: ""
+      BROLL_DEFAULT_COLLECTION_LABEL: ""
       # MANDATORY when the mount is enabled, and checked at startup: a blank,
       # placeholder or short value makes the container REFUSE TO START with
       # DASH_BROLL_ENABLED=1 (ccsync_dashboard.broll.check_ingest_token).
@@ -168,26 +221,17 @@ services:
       #   YTDL_DASH_DB        the dashboard's own SQLite, opened READ-ONLY
       #                       (file:...?mode=ro) for the caller's ticked
       #                       projects. Same container, same uid, WAL.
-      #   YTDL_CLAUDE_HOME    where the one-time `claude /login` credentials
-      #                       live. Read by ytdlweb.claude_cli, which sets
-      #                       HOME/CLAUDE_CONFIG_DIR in the SUBPROCESS env
-      #                       only -- run.sh deliberately exports no HOME.
       YTDL_DATA_ROOT: "/ytdl-data"
       YTDL_PROJECTS_ROOT: "/projects"
       YTDL_DASH_DB: "/data/dashboard.db"
-      YTDL_CLAUDE_HOME: "/claude-home"
-      # The PO-token provider sidecar (see the `bgutil` service below), by
-      # compose service name. Without a provider yt-dlp cannot mint the GVS
-      # proof-of-origin token YouTube demands for AUTHENTICATED requests, and
-      # every signed-in request comes back with no formats at all.
-      YTDL_POT_BASE_URL: "http://bgutil:4416"
-      # A signed-in cookies.txt. MANDATORY on this NAS rather than the
-      # optional escape hatch the name suggests: a datacentre IP doing bulk
-      # extraction is bot-checked, so there is no anonymous path left.
-      # Operator-provisioned -- it is a live Google session and is never in
-      # this repo (ytdl/web/DEPLOY.md). Absent is a supported state: the
-      # option is ignored and jobs fail with the honest bot-check message.
-      YTDL_COOKIES_FILE: "/ytdl-data/cookies.txt"
+      # The CUSTOMER's Anthropic key: what the two AI calls (search-term
+      # expansion, relevance filtering) authenticate with since the `claude`
+      # CLI came out on 2026-08-17 (docs/COMMERCIAL_READINESS.md item 1).
+      # Blank is a supported state -- /ytdl then reports "no working Anthropic
+      # API key" and nothing else on the dashboard is affected. A SECRET: the
+      # install script masks it in --dry-run output and, on Synology, writes
+      # it to the 0600 .env beside this file rather than into it.
+      ANTHROPIC_API_KEY: "REPLACE_ME"
       # yt-dlp DOWNLOADS the EJS challenge solver at first use and caches it.
       # run.sh deliberately exports no HOME, so the default cache path is
       # /.cache -- which uid 3000 cannot create, so the solver would be
@@ -200,14 +244,37 @@ services:
       # nothing set this (2026-08-16). Removing the line is the global
       # rollback; per job it is the "download on the server instead" link.
       YTDL_LOCAL_DOWNLOAD: "1"
+      # WHICH OPTIONAL FEATURES THIS SITE TURNED ON (2026-08-17,
+      # docs/COMMERCIAL_READINESS.md items 2 + 3). BOTH DEFAULT "0", and "0"
+      # is what the vendor build ships: the customer decides whether
+      # downloading third-party YouTube material is lawful for them, and
+      # whether they may run the components that get past YouTube's
+      # anti-automation measures. Set from site.toml [features] by the install
+      # script; published to every companion by GET /api/v1/site.
+      #
+      # youtube_download="0" means the dashboard does not mount /ytdl at all:
+      # the page, the fleet claim/manifest/status routes and the nav link are
+      # simply not there. youtube_unblock="1" additionally brings back the
+      # `bgutil` PO-token sidecar, the /opt/deno mount, YTDL_POT_BASE_URL and
+      # YTDL_COOKIES_FILE -- the install script adds all four; this default
+      # file carries none of them. See docs/legal/YOUTUBE_FEATURE_NOTICE.md.
+      DASH_SITE_YOUTUBE_DOWNLOAD: "0"
+      DASH_SITE_YOUTUBE_UNBLOCK: "0"
       # Published companion builds (upgrade channel). Optional: defaults to
       # a "packages" dir next to DASH_DB_PATH, i.e. /data/packages -- which
       # is already persistent. Only set this to move them elsewhere.
       # DASH_PACKAGES_DIR: "/data/packages"
+      # The vendor's release public key(s), comma-separated base64
+      # (COMMERCIAL_READINESS.md item 4, 2026-08-17). Every published build
+      # must carry an Ed25519 signature that verifies against one of these,
+      # made by a key that exists on no server. UNSET = publishing is refused
+      # (503); everything else keeps working. `python tools/release_key.py
+      # pubkey` prints the value.
+      DASH_RELEASE_PUBKEYS: ""
       # Admin "Users" section (create editor accounts, approve devices,
       # set known passwords). Leave TRUENAS_PW blank to disable that section
       # only -- everything else keeps working without it.
-      TRUENAS_HOST: "192.168.0.102"
+      TRUENAS_HOST: "192.168.0.10"
       TRUENAS_USER: "truenas_admin"
       TRUENAS_PW: "REPLACE_ME"
       # Which runtime NAS backend the dashboard builds
@@ -217,7 +284,7 @@ services:
       # wins over TRUENAS_*). Same values as the trio above; both are set so a
       # rollback to a pre-2026-08-17 image still finds credentials, and so a
       # Synology site does not have to spell its password TRUENAS_PW.
-      DASH_NAS_HOST: "192.168.0.102"
+      DASH_NAS_HOST: "192.168.0.10"
       DASH_NAS_USER: "truenas_admin"
       DASH_NAS_PW: "REPLACE_ME"
       # The Synology backend does over SSH what DSM has no API for: writing an
@@ -237,9 +304,21 @@ services:
       # The stack's own NAS account (site.toml [stack] owner); hidden from the
       # Users page (2026-08-17).
       DASH_NAS_SERVICE_USER: "broll"
-      # TLS verification for those TrueNAS API calls (they carry TRUENAS_PW).
-      # "0" = trust the NAS's self-signed cert, as before. Set "1" (or a CA
-      # bundle path inside the container) once the NAS has a trusted cert.
+      # A SCOPED TrueNAS API key, preferred over the password above and the
+      # reason the password no longer has to be in this container at all
+      # (2026-08-17, COMMERCIAL_READINESS.md item 6 / finding H3: `docker
+      # inspect` on this container handed over a root-equivalent NAS login,
+      # and every editor can reach the dashboard). Mint one with
+      # `python server/create_api_key.py --name ccsync-dashboard`; it is
+      # restricted to the user/group/sharing.smb methods the admin Users page
+      # calls. TrueNAS only -- DSM has no API-key concept, so a Synology stack
+      # leaves this empty and keeps using DASH_NAS_PW.
+      TRUENAS_API_KEY: "${TRUENAS_API_KEY:-}"
+      DASH_NAS_API_KEY: "${TRUENAS_API_KEY:-}"
+      # TLS verification for those TrueNAS API calls (they carry the API key
+      # or TRUENAS_PW). "0" = trust the NAS's self-signed cert, as before. Set
+      # "1", or a CA bundle path inside the container (docs/SERVER.md,
+      # "Verifying the NAS certificate"), once the NAS has a trusted cert.
       TRUENAS_VERIFY_SSL: "0"
       # --- what GET /api/v1/site serves ------------------------------------
       # The facts a client needs BEFORE it has any credentials: the companion
@@ -258,12 +337,25 @@ services:
       #                    editors are /sbin/nologin, so rclone cannot run
       #                    md5sum over SSH and every checksum fails.
       DASH_SITE_ORG_NAME: "Creators Club"
+      # The short form for the topbar mark, and the PRODUCT's name (not the
+      # customer's -- a reseller sets that one). Blank means "use org_name" /
+      # "CC Sync"; the dashboard applies those defaults, so a blank must reach
+      # it as a blank (2026-08-17, COMMERCIAL_READINESS.md item 10).
+      DASH_SITE_ORG_SHORT: ""
+      DASH_SITE_PRODUCT_NAME: ""
       DASH_SITE_TREE_NAME: "Creators_Club"
+      # The project template and the fleet-wide asset libraries, comma-joined
+      # (item 11). The container has no site.toml, so this pair is how the
+      # dashboard's "create new project" flow builds the SAME tree
+      # server/setup_tree.py does. Blank = the product defaults, never an
+      # empty list -- that would create projects with no subfolders at all.
+      DASH_SITE_TEMPLATE_FOLDERS: ""
+      DASH_SITE_SHARED_ASSETS: ""
       # Single-quoted: these two carry backslashes (P:\ and a UNC path), and a
       # backslash in a DOUBLE-quoted YAML scalar is an escape character.
       DASH_SITE_CANONICAL_PREFIX: 'P:\'
       DASH_SITE_REMOTE_ROOT: "/mnt/tank/TheCreatorsPool/Creators_Club"
-      DASH_SITE_SMB_UNC: '\\192.168.0.102\TheCreatorsPool\Creators_Club'
+      DASH_SITE_SMB_UNC: '\\192.168.0.10\TheCreatorsPool\Creators_Club'
       DASH_SITE_SFTP_HOST: ""
       DASH_SITE_SFTP_PORT: "22"
       DASH_SITE_SFTP_CHUNK_SIZE: "255Ki"
@@ -273,7 +365,7 @@ services:
       # A FALLBACK only: the dashboard prefers Syncthing's live myID, so a
       # blank here is fine and a stale one cannot win.
       DASH_SITE_NAS_SYNCTHING_ID: ""
-      DASH_SITE_DASHBOARD_URL: "http://100.71.216.3:8480"
+      DASH_SITE_DASHBOARD_URL: "http://100.64.0.1:8480"
     ports:
       # Bind only the interfaces the fleet actually uses (LAN for the base
       # rig, tailnet for remote editors) rather than 0.0.0.0 -- if the NAS
@@ -285,8 +377,8 @@ services:
       # fails with "cannot assign requested address" and the app never starts
       # if a hardcoded IP no longer exists on the host. Set DASH_BIND_LAN /
       # DASH_BIND_TAILNET in the app's env (or a .env next to this file).
-      - "${DASH_BIND_LAN:-192.168.0.102}:8480:8480"
-      - "${DASH_BIND_TAILNET:-100.71.216.3}:8480:8480"
+      - "${DASH_BIND_LAN:-192.168.0.10}:8480:8480"
+      - "${DASH_BIND_TAILNET:-100.64.0.1}:8480:8480"
     volumes:
       # ro: the container must never be able to modify its own code -- the
       # command: line executes /app/deploy/run.sh, so a writable /app plus
@@ -367,21 +459,19 @@ services:
       # group 3000, NOT editors. The finished CLIPS do not live here: they are
       # written into /projects, which sync then distributes.
       - /mnt/tank/apps/ccsync-dashboard/ytdl-data:/ytdl-data:rw
-      # Where the one-time `claude /login` puts its OAuth credentials, so they
-      # survive a redeploy (once per NAS). rw and 3000:3000 mode 700 -- it
-      # holds a live credential for the user's own Claude account, and the
-      # container's uid is the only thing that may read it. Until the login is
-      # done, ytdl jobs fail with an explicit "not logged in" banner.
-      - /mnt/tank/apps/ccsync-dashboard/claude-home:/claude-home:rw
-      # The Claude Code CLI and a static deno, provisioned onto the host by
-      # install_dashboard_app.py exactly like ffmpeg and mounted read-only:
-      # nothing builds this image and the container is unprivileged, so it can
-      # install neither for itself. deno is not optional decoration -- the
-      # updated yt-dlp asks for a JS runtime to answer YouTube's challenges,
-      # and without one the high-quality formats fail. run.sh puts both on
-      # PATH; empty dirs are a supported state (ytdlweb's api/health says so).
-      - /mnt/tank/apps/ccsync-dashboard/claude-bin:/opt/claude:ro
-      - /mnt/tank/apps/ccsync-dashboard/deno:/opt/deno:ro
+      # NOTE (2026-08-17): two mounts used to follow and no longer do.
+      # claude-home and claude-bin are gone with the CLI -- the AI calls use
+      # the anthropic SDK with ANTHROPIC_API_KEY above, so there is no OAuth
+      # credential volume and no agent binary inside a container that mounts
+      # the whole Projects tree rw (COMMERCIAL_READINESS.md item 1).
+      #
+      # And `/mnt/tank/apps/ccsync-dashboard/deno:/opt/deno:ro` is added by
+      # install_dashboard_app.py ONLY on a site whose site.toml sets
+      # [features] youtube_unblock (item 3): deno's job here is answering
+      # YouTube's "n challenge", which is an anti-anti-automation component
+      # the vendor build does not ship. This default file therefore has no
+      # deno mount and no `bgutil` service -- see the note where that service
+      # used to be, below the healthcheck.
     restart: unless-stopped
     # Without this, `restart: unless-stopped` only covers a process that
     # EXITS. A collector thread that died before entering its guarded loop
@@ -430,6 +520,12 @@ services:
   # requirements.txt -- one component, two processes. Bump both or neither.
   # The `-deno` flavour matches the runtime this fleet already provisions for
   # yt-dlp's JS challenges.
-  bgutil:
-    image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
-    restart: unless-stopped
+  # NOT IN THE DEFAULT STACK (2026-08-17, COMMERCIAL_READINESS.md item 3).
+  # install_dashboard_app.py adds this service -- image
+  # brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno, `restart:
+  # unless-stopped`, no ports -- only when the customer's site.toml sets
+  # [features] youtube_unblock. A proof-of-origin token minter exists for one
+  # purpose, and that purpose is the customer's call to make, not the
+  # vendor's. The image tag is still pinned and still matched to the
+  # `bgutil-ytdlp-pot-provider` pin in requirements.txt: one component, two
+  # processes, bump both or neither.

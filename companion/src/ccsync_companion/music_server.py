@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -59,8 +58,6 @@ MUSIC_LIBRARY_REL = ("Assets", "Music")
 # not an addition to "mounts": that dict is what GET /status hands the b-roll
 # settings panel, and the music library has no business appearing in it.
 MOUNTS_KEY = "music_mounts"
-
-_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 
 # -- mounts -----------------------------------------------------------------
@@ -115,34 +112,17 @@ def local_path_for(share: str, rel_path: str, mounts: dict) -> str:
     (joining would hand back a path with nothing to do with the share), and a
     final containment check catches anything -- a symlink, a component none of
     these rules anticipated -- that still resolves outside the root.
+
+    Since 2026-08-17 (COMMERCIAL_READINESS.md item 5) the implementation is
+    broll_server.contained_local_path -- the same two guards, moved so that
+    /insert gets them too rather than only the routes that grew them here.
+    This name stays because three modules and their tests call it.
     """
     # Deferred: broll_server imports THIS module to dispatch its routes, so a
     # module-level import here would be a cycle. sys.modules makes it free.
     from . import broll_server
 
-    norm = str(rel_path or "").replace("\\", "/")
-    if norm.startswith("/") or _DRIVE_RE.match(norm):
-        raise broll_server.PathTraversalError(
-            f"rel_path must be relative, got {rel_path!r}"
-        )
-
-    # The ROOT comes back with the path: it may have come from the /Volumes
-    # probe rather than the mounts table, and reading `mounts[share]` again
-    # here skipped this check entirely for a Mac editor with /Volumes/music
-    # mounted and no config entry -- the documented case, and the one where a
-    # symlink out of the volume was then followed (MED-11, 2026-08-11).
-    root, local = broll_server.translate_path_with_root(share, rel_path, mounts)
-
-    if root:
-        try:
-            Path(local).resolve(strict=False).relative_to(
-                Path(root).resolve(strict=False)
-            )
-        except ValueError:
-            raise broll_server.PathTraversalError(
-                f"rel_path escapes the share root: {rel_path!r}"
-            ) from None
-    return local
+    return broll_server.contained_local_path(share, rel_path, mounts)
 
 
 # -- the killable child ------------------------------------------------------
@@ -331,9 +311,14 @@ def build_reveal_response(
     try:
         run(argv)
     except (OSError, ValueError) as exc:
-        # ValueError: windows_command_line refused a `"` in the path.
+        # ValueError: windows_command_line refused a `"` in the path. The
+        # exception text (a spawn errno, a full path, a quoted command line)
+        # stays in the log -- the page gets the fact, not the internals
+        # (2026-08-17, COMMERCIAL_READINESS.md L-tier "error detail leaks").
         log.warning("music: could not open the file manager (%s)", exc)
-        return 200, {"ok": False, "error": f"could not open the file manager: {exc}"}
+        return 200, {"ok": False,
+                     "error": "could not open the file manager -- see the "
+                              "companion's log"}
     return 200, {"ok": True, "message": message}
 
 
@@ -372,7 +357,7 @@ def build_send_response(
     A missing track is no longer terminal (2026-08-16): the music library is
     not a synced folder any more than the b-roll archive is, so on every
     remote editor's machine "+ Resolve" answered "file not found -- is the
-    share mounted?" and stopped (ruskin, 2026-08-16) -- the exact dead end
+    share mounted?" and stopped (an editor, 2026-08-16) -- the exact dead end
     b-roll's /insert escaped on 2026-08-11. Same escape here: when the share
     is the library at its derived place in the tree and this machine has a
     working rclone remote, the companion pulls that ONE track down and
@@ -413,6 +398,13 @@ def build_send_response(
         # re-joined with forward slashes, never the raw client string.
         from . import broll_fetch
 
+        # The tree has to be mounted, and the destination inside it, before
+        # anything downloads into it (2026-08-17, COMMERCIAL_READINESS.md
+        # item 5): rclone against an absent macOS root does not fail, it
+        # fills the boot disk (root_guard.py).
+        refusal = broll_fetch.fetch_refusal(ccsync_cfg, local_path_str)
+        if refusal:
+            return 200, {"ok": False, "error": refusal}
         clean_rel = "/".join(broll_server._split_components(rel_path))
         fetch = (fetcher if fetcher is not None else broll_fetch.poll_fetch)(
             ccsync_cfg, clean_rel, local_path_str,

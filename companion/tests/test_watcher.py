@@ -875,7 +875,7 @@ def test_a_bridge_state_consumer_that_raises_costs_nothing(tmp_path):
     assert watcher.poll_once()["ok"] is True
 
 
-# -- the MISSING log flood (2026-08-13, ruskin's machine) -------------------
+# -- the MISSING log flood (2026-08-13, an editor's machine) ----------------
 #
 # "Energy Transition" carries thousands of clips whose media has not synced
 # down yet. Every one of them logged its own DEBUG line EVERY poll (3 s), so

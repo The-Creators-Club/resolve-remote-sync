@@ -371,6 +371,13 @@ def _baseline_section(all_summaries: list[ComboSummary], baseline_mbps: float) -
     lines = [
         "## Did we beat Resolve Cloud?",
         "",
+        # INTERNAL ONLY (2026-08-17, docs/COMMERCIAL_READINESS.md item 3): a
+        # comparison against a named competitor, from one uncontrolled
+        # measurement -- and that competitor is Blackmagic, whose Resolve
+        # Studio this product requires. It stays in the engineering report and
+        # goes nowhere near customer-facing material. See bench/README.md.
+        "> **INTERNAL ONLY — do not reproduce in customer-facing material.**",
+        "",
         f"Baseline: Blackmagic Cloud observed **~{baseline_mbps:.0f} mb/s** "
         f"(unit ambiguous in the wild, so both readings are shown):",
         f"- if that means {baseline_mbps:.0f} **Mbps** (megabits/sec) -> **{baseline_mb_s_from_mbps:.1f} MB/s**",

@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS debias (
 -- an absolute path -- the row is written on the NAS and read on the base rig.
 CREATE TABLE IF NOT EXISTS ingest_queue (
     id           INTEGER PRIMARY KEY,
+    -- Identity that survives the database being copied to another host, so a
+    -- drain can name exactly the rows it analysed (migrations/003, and
+    -- musicweb/drain.py for what it is for). `id` cannot: it is a per-database
+    -- rowid. Re-minted whenever queue_add resets a row to pending.
+    uid          TEXT,
     share        TEXT NOT NULL DEFAULT 'music',
     rel_path     TEXT UNIQUE NOT NULL,   -- where it landed, under the share root
     orig_name    TEXT NOT NULL,          -- what the browser called it
@@ -121,5 +126,10 @@ CREATE INDEX IF NOT EXISTS idx_tracks_bpm ON tracks(bpm);
 CREATE INDEX IF NOT EXISTS idx_queue_state ON ingest_queue(state, id);
 -- the content-hash duplicate check reads this on every upload
 CREATE INDEX IF NOT EXISTS idx_queue_hash  ON ingest_queue(content_hash);
+-- apply_bundle looks every drained row up by uid; UNIQUE also stops two rows
+-- claiming one identity, which would close the wrong upload. Many NULLs are
+-- allowed by a SQLite unique index, which is what rows written by an older
+-- container need.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_uid ON ingest_queue(uid);
 -- and it only hashes library files whose byte count already matches
 CREATE INDEX IF NOT EXISTS idx_tracks_bytes ON tracks(bytes);

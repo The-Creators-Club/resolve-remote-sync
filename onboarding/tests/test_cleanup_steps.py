@@ -318,8 +318,12 @@ class TestExecuteCleanup:
         joined = [" ".join(c) for c in run_calls]
         kill_idx = next(i for i, c in enumerate(joined) if c.startswith("taskkill"))
         task_idx = next(i for i, c in enumerate(joined) if "schtasks" in c)
-        subst_idx = next(i for i, c in enumerate(joined) if "subst" in c)
-        net_idx = next(i for i, c in enumerate(joined) if "net use" in c)
+        # The UNMOUNT commands specifically: since item 9 (2026-08-17) the
+        # unmount is preceded by a `subst` / `net use P:` PROBE that decides
+        # whether P: is ours to remove at all, so "the first line mentioning
+        # subst" is now that probe.
+        subst_idx = next(i for i, c in enumerate(joined) if "subst P: /D" in c)
+        net_idx = next(i for i, c in enumerate(joined) if "net use P: /delete" in c)
         assert kill_idx < task_idx < subst_idx < net_idx
         assert "P:" in joined[subst_idx]
 
@@ -388,10 +392,10 @@ class TestMergeConfigText:
     def test_replaces_existing_and_appends_missing(self):
         text = '# comment\neditor_name = "old"\ntransfers = 4\n'
         merged = steps.merge_config_text(text, {
-            "editor_name": '"alex"',
+            "editor_name": '"owen"',
             "mode": '"base"',
         })
-        assert 'editor_name = "alex"' in merged
+        assert 'editor_name = "owen"' in merged
         assert 'mode = "base"' in merged
         assert "# comment" in merged
         assert "transfers = 4" in merged
@@ -431,12 +435,12 @@ class TestEnsureConfig:
     def test_base_role_keys(self, tmp_path):
         path = tmp_path / "config.toml"
         steps.ensure_config(
-            "base", editor_name="alex", dashboard_url="http://lan:8480",
+            "base", editor_name="owen", dashboard_url="http://lan:8480",
             dashboard_token="tok", local_root="T:\\Creators_Club", config_path=path,
         )
         text = path.read_text(encoding="utf-8")
         assert 'mode = "base"' in text
-        assert 'editor_name = "alex"' in text
+        assert 'editor_name = "owen"' in text
         assert 'local_root = "T:\\\\Creators_Club"' in text
         assert 'canonical_prefix = "T:\\\\Creators_Club"' in text
         assert 'dashboard_token = "tok"' in text
@@ -444,7 +448,7 @@ class TestEnsureConfig:
     def test_editor_role_keys(self, tmp_path):
         path = tmp_path / "config.toml"
         steps.ensure_config(
-            "editor", editor_name="ruskin", dashboard_url="http://tail:8480",
+            "editor", editor_name="editor2", dashboard_url="http://tail:8480",
             dashboard_token="tok", local_root="D:\\CC", config_path=path,
         )
         text = path.read_text(encoding="utf-8")
@@ -460,7 +464,7 @@ class TestEnsureConfig:
         """WP0: everything tenant-shaped comes from GET /api/v1/site."""
         path = tmp_path / "config.toml"
         steps.ensure_config(
-            "editor", editor_name="ruskin", dashboard_url="http://tail:8480",
+            "editor", editor_name="editor2", dashboard_url="http://tail:8480",
             dashboard_token="tok", local_root="D:\\CC", config_path=path,
             site={"rclone_remote": "acme_sftp", "remote_root": "/volume1/Media/Tree"},
         )
@@ -477,7 +481,7 @@ class TestEnsureConfig:
         # it by name at startup.
         path = tmp_path / "config.toml"
         steps.ensure_config(
-            "editor", editor_name="ruskin", dashboard_url="http://tail:8480",
+            "editor", editor_name="editor2", dashboard_url="http://tail:8480",
             dashboard_token="tok", local_root="D:\\CC", config_path=path,
         )
         text = path.read_text(encoding="utf-8")
@@ -489,7 +493,7 @@ class TestEnsureConfig:
         path.write_text('# my precious tweak\ntransfers = 8\nmode = "editor"\n',
                         encoding="utf-8")
         steps.ensure_config(
-            "base", editor_name="alex", dashboard_url="u", dashboard_token="t",
+            "base", editor_name="owen", dashboard_url="u", dashboard_token="t",
             config_path=path,
         )
         text = path.read_text(encoding="utf-8")
@@ -603,7 +607,7 @@ class TestEnsureConfig:
 
         path = tmp_path / "config.toml"
         steps.ensure_config(
-            "base", editor_name="alex", dashboard_url="http://lan:8480",
+            "base", editor_name="owen", dashboard_url="http://lan:8480",
             dashboard_token="tok", local_root="T:\\Creators_Club", config_path=path,
         )
         with path.open("rb") as fh:
@@ -655,3 +659,132 @@ def test_installer_on_forbidden_drive_only_when_frozen(monkeypatch):
     assert steps.installer_on_forbidden_drive() is True
     monkeypatch.setattr(steps.sys, "executable", "C:\\Users\\x\\Desktop\\onboard.exe")
     assert steps.installer_on_forbidden_drive() is False
+
+
+# -- "is P: OURS?" before the unmount (COMMERCIAL_READINESS.md item 9,
+# 2026-08-17) ----------------------------------------------------------------
+
+
+class TestPMappingOwnership:
+    def test_an_unmapped_p_is_free_to_take(self):
+        ours, why = steps.p_mapping_is_ours({"known": True, "mapped": False})
+        assert ours is True and why == ""
+
+    def test_a_subst_mapping_is_this_installers_own_style(self):
+        ours, _ = steps.p_mapping_is_ours(
+            {"known": True, "mapped": True, "kind": "subst",
+             "target": r"C:\Creators_Club"})
+        assert ours is True
+
+    def test_our_own_loopback_share_is_ours(self):
+        ours, _ = steps.p_mapping_is_ours(
+            {"known": True, "mapped": True, "kind": "net",
+             "target": r"\\localhost\CCSync_P"})
+        assert ours is True
+
+    def test_a_real_nas_mapping_is_refused(self):
+        ours, why = steps.p_mapping_is_ours(
+            {"known": True, "mapped": True, "kind": "net",
+             "target": r"\\truenas\Creators_Club"})
+        assert ours is False
+        assert r"\\truenas\Creators_Club" in why
+
+    def test_the_sites_own_share_is_named_in_the_refusal(self):
+        ours, why = steps.p_mapping_is_ours(
+            {"known": True, "mapped": True, "kind": "net",
+             "target": r"\\nas.example\Creators_Club"},
+            smb_unc=r"\\nas.example\Creators_Club")
+        assert ours is False and "this site's own NAS share" in why
+
+    def test_cannot_tell_counts_as_foreign(self):
+        # Guessing "there is no P:" is how a real mapping gets deleted.
+        ours, why = steps.p_mapping_is_ours({"known": False})
+        assert ours is False and "could not be read" in why
+
+
+class TestUnmountGate:
+    def _run(self, mapping, smb_unc=""):
+        run_calls = []
+
+        def fake_run(cmd, **kw):
+            run_calls.append(" ".join(cmd))
+            return _FakeCompleted()
+
+        warnings = steps.execute_cleanup(
+            steps.CleanupPlan(kill_process_names=[], kill_pythonw_launcher=False,
+                              unmount_p=True),
+            log=lambda m: None, run=fake_run,
+            delete_file=lambda p: None, delete_run_value=lambda n: False,
+            sleep=lambda s: None, p_drive_exists=lambda: False,
+            read_p_mapping=lambda: mapping, smb_unc=smb_unc,
+        )
+        return warnings, run_calls
+
+    def test_a_foreign_p_is_left_exactly_as_it_is(self):
+        warnings, run_calls = self._run(
+            {"known": True, "mapped": True, "kind": "net",
+             "target": r"\\truenas\Creators_Club"})
+        assert not any("subst P: /D" in c for c in run_calls)
+        assert not any("net use P: /delete" in c for c in run_calls)
+        assert any("Resolve database" in w for w in warnings)
+
+    def test_our_own_p_is_still_unmounted(self):
+        _warnings, run_calls = self._run(
+            {"known": True, "mapped": True, "kind": "subst",
+             "target": r"C:\Creators_Club"})
+        assert any("subst P: /D" in c for c in run_calls)
+        assert any("net use P: /delete" in c for c in run_calls)
+
+    def test_a_reader_that_explodes_refuses_rather_than_unmounting(self):
+        def boom():
+            raise OSError("no shell")
+
+        warnings, run_calls = self._run_boom(boom)
+        assert not any("subst P: /D" in c for c in run_calls)
+        assert warnings
+
+    def _run_boom(self, reader):
+        run_calls = []
+        warnings = steps.execute_cleanup(
+            steps.CleanupPlan(kill_process_names=[], kill_pythonw_launcher=False,
+                              unmount_p=True),
+            log=lambda m: None,
+            run=lambda cmd, **kw: run_calls.append(" ".join(cmd)) or _FakeCompleted(),
+            delete_file=lambda p: None, delete_run_value=lambda n: False,
+            sleep=lambda s: None, p_drive_exists=lambda: False,
+            read_p_mapping=reader,
+        )
+        return warnings, run_calls
+
+
+class TestDefaultReadPMapping:
+    def test_it_finds_a_subst_mapping(self):
+        def fake_run(cmd, **kw):
+            if "subst" in cmd:
+                return _FakeCompleted(stdout="P:\\: => C:\\Creators_Club\n")
+            return _FakeCompleted()
+
+        mapping = steps.default_read_p_mapping(fake_run)
+        assert mapping == {"mapped": True, "kind": "subst",
+                           "target": "C:\\Creators_Club", "known": True}
+
+    def test_it_finds_a_net_use_mapping(self):
+        def fake_run(cmd, **kw):
+            if "subst" in cmd:
+                return _FakeCompleted(stdout="Q:\\: => D:\\other\n")
+            return _FakeCompleted(
+                stdout="Local name        P:\r\nRemote name       \\\\truenas\\CC\r\n")
+
+        mapping = steps.default_read_p_mapping(fake_run)
+        assert mapping["kind"] == "net"
+        assert mapping["target"] == r"\\truenas\CC"
+
+    def test_nothing_mapped_is_known_and_free(self):
+        mapping = steps.default_read_p_mapping(lambda cmd, **kw: _FakeCompleted())
+        assert mapping["known"] is True and mapping["mapped"] is False
+
+    def test_a_shell_that_will_not_run_is_not_known(self):
+        def boom(cmd, **kw):
+            raise OSError("no shell")
+
+        assert steps.default_read_p_mapping(boom)["known"] is False

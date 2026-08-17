@@ -1,0 +1,132 @@
+# A self-contained image for ccsync-dashboard -- COMMERCIAL_READINESS.md item
+# 12, added 2026-08-17.
+#
+# WHAT THIS REPLACES, AND WHAT IT DOES NOT
+#
+# Until now this deployment had NO image build at all: compose ran a stock
+# pinned python:3.12.7-slim, bind-mounted the code read-only at /app and a
+# host directory at /venv, and run.sh pip-installed the dependencies into that
+# bind mount on the first boot after requirements.txt changed. That mode still
+# works and is still the DEFAULT -- the live sites use it (docs/DOCKER.md,
+# "bind-mount mode"). Nothing here changes compose.yaml.
+#
+# What that mode costs, and what this image buys:
+#   - a container boot could depend on PyPI being reachable from the NAS;
+#   - the deployed dependency set was whatever pip resolved on the day of the
+#     first boot, per site, with no record of it anywhere;
+#   - and "what is actually installed in the container" was on
+#     COMMERCIAL_READINESS.md's "not verified from the repo" list.
+# Here the dependency set is `requirements.lock` installed with
+# `--require-hashes`, resolved once on a developer machine and identical on
+# every site, and the image is a build artefact that can be scanned, signed and
+# rolled back as one thing.
+#
+# BUILD FROM THE REPO ROOT -- the image carries four trees from four
+# directories, and .dockerignore keeps the 2 GB repo down to ~10 MB of context:
+#
+#   docker build -f dashboard/deploy/Dockerfile -t ccsync-dashboard:0.4.1 .
+#
+# NOT BUILT ON THIS MACHINE. Docker Desktop is not installed on the base rig
+# (checked 2026-08-17), so this file has never been through `docker build`.
+# Treat the first build as part of the migration, not as a formality.
+
+# Pinned BY DIGEST, not just by tag. compose.yaml pins python:3.12.7-slim
+# because an unpinned 3.12-slim silently changes underneath a redeploy; a tag
+# is still mutable in principle, and this image is the thing a customer's
+# security review asks about. The digest is the multi-arch index for
+# python:3.12.7-slim (registry-1.docker.io, fetched 2026-08-17), so it resolves
+# on both amd64 (TrueNAS, the DS423+ is x86_64) and arm64.
+#
+# Bump it deliberately, together with compose.yaml's tag, and re-run the tests.
+ARG BASE_IMAGE=python:3.12.7-slim@sha256:60d9996b6a8a3689d36db740b49f4327be3be09a21122bd02fb8895abb38b50d
+
+# --- stage 1: the dependency venv ------------------------------------------
+#
+# A separate stage so the runtime image carries the venv but not pip's caches,
+# and so a lockfile change rebuilds only this layer.
+FROM ${BASE_IMAGE} AS deps
+
+# The container-side dependency set, hash-pinned. This is the SAME file
+# deploy/run.sh prefers in bind-mount mode, so the two modes install the
+# identical closure -- there is exactly one answer to "what is in the venv".
+#
+# --require-hashes is not decoration: it is what makes a compromised or
+# typo-squatted PyPI mirror a build failure instead of a shipped backdoor. It
+# also forbids any unpinned transitive dependency, which is why the lock is
+# generated with `uv pip compile --universal --generate-hashes` (docs/RELEASE.md).
+COPY dashboard/deploy/requirements.lock /tmp/requirements.lock
+
+# --no-cache-dir: the cache is dead weight in a layer that is copied wholesale
+# into the next stage anyway. `python -m venv` rather than installing into the
+# system site-packages, so the runtime path is byte-for-byte the one run.sh
+# already execs (/venv/bin/python) in both modes.
+RUN python -m venv /venv \
+    && /venv/bin/pip install --no-cache-dir --require-hashes \
+        -r /tmp/requirements.lock
+
+# --- stage 2: the runtime image ---------------------------------------------
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="ccsync-dashboard" \
+      org.opencontainers.image.description="Creators Club Sync fleet dashboard, with the b-roll, music and ytdl sub-apps mounted in-process" \
+      org.opencontainers.image.source="https://example.invalid/ccsync" \
+      org.opencontainers.image.licenses="NOASSERTION"
+
+COPY --from=deps /venv /venv
+
+# The four trees, at exactly the paths deploy/run.sh puts on PYTHONPATH
+# (/app/src:/broll-app:/music-app:/ytdl-app) and compose bind-mounts in the
+# other mode. Same paths in both modes is the whole point: run.sh, the sub-app
+# guards and every DEPLOY.md stay true.
+#
+# The three sub-apps are deliberately NOT all called `app`: b-roll's package IS
+# top-level `app`, music's is `musicweb` and ytdl's is `ytdlweb`. Two top-level
+# packages of the same name on one PYTHONPATH collide in sys.modules and one
+# wins silently (CLAUDE.md). That is why they get three separate roots here
+# rather than one shared /opt/ccsync directory.
+COPY dashboard/src /app/src
+COPY dashboard/deploy /app/deploy
+COPY broll/web /broll-app
+COPY music/web /music-app
+COPY ytdl/web /ytdl-app
+
+# Tells run.sh the venv came from the image, so it never runs pip. Without it
+# run.sh would compare requirements.lock's md5 against a stamp that does not
+# exist, try to install, and -- in a container with no PyPI egress -- either
+# stall the boot or (on a first boot) exit 1.
+#
+# a+rX, not a+rwX: /app and the three sub-app trees are the code this container
+# EXECUTES, and a writable code path in a process holding the NAS admin
+# password is remote code execution (AUDIT C-1, the reason compose mounts them
+# :ro). The image keeps that posture without needing a mount option, and
+# read-for-everyone is what lets the container run as ANY uid (see below).
+RUN : > /venv/.image-baked \
+    && chmod -R a+rX /venv /app /broll-app /music-app /ytdl-app
+
+# A non-root default so `docker run` with no `user:` is still unprivileged.
+# 3000:3000 matches this fleet's service account (setup_tree.py's broll:broll),
+# but it is only a DEFAULT: compose passes `user: "${APP_UID}:${APP_GID}"` from
+# site.toml, and DSM assigns uids >= 1026 rather than letting you pick 3000. The
+# image therefore owns nothing the runtime uid needs to write -- every writable
+# path (/data, /projects, /broll-data, /music-data, /music-share, /ytdl-data,
+# /claude-home) is a mount, chowned on the host by the install script.
+#
+# An unprivileged container cannot setuid, so there is no entrypoint here that
+# reads APP_UID and switches to it; run.sh instead SHOUTS if APP_UID/APP_GID are
+# set and disagree with the uid it is actually running as, which is the only
+# honest thing a process without CAP_SETUID can do about it.
+RUN groupadd --gid 3000 ccsync \
+    && useradd --uid 3000 --gid 3000 --no-create-home --shell /usr/sbin/nologin ccsync
+USER 3000:3000
+
+# Documentation only (compose publishes the real bind addresses); DASH_PORT
+# overrides it and run.sh defaults to 8480.
+EXPOSE 8480
+
+# NOTHING sets HOME, PYTHONPATH or PATH here on purpose -- run.sh owns all
+# three, and it is the entrypoint in both modes so the two cannot drift.
+# /opt/ffmpeg, /opt/claude and /opt/deno stay MOUNTS rather than image content:
+# the ffmpeg build is GPL and shipping it inside a vendor image is conveying
+# (COMMERCIAL_READINESS.md item 3), and the Claude Code CLI must not be
+# redistributed at all (item 1).
+CMD ["/bin/sh", "/app/deploy/run.sh"]

@@ -6,7 +6,17 @@ dashboard's api._upgrade_info). The reporter hands every report response to
 UpgradeManager.note_report_response(); when an upgrade is available the tray
 grows an "Update now" item, and apply() does the whole swap:
 
-    download to <exe dir>/ccsync-companion.new[.exe] -> sha256 verify
+    verify the OFFLINE RELEASE SIGNATURE over the whole offered record
+                                     (release_pubkey.py -- ed25519, key baked
+                                      into this binary, private half on no
+                                      fleet machine at all; item 4,
+                                      2026-08-17). Unsigned or unverifiable
+                                      is REFUSED, with no fallback: the
+                                      dashboard is not a trust anchor.
+    -> downgrade-floor check         (~/.ccsync/upgrade_floor.json, monotonic)
+    -> transport check               (https, or plain http to tailnet/LAN only)
+    -> download to <exe dir>/ccsync-companion.new[.exe] -> sha256 verify
+                                     (against the SIGNED sha256)
     -> chmod 0o755                   (POSIX only -- see _make_executable)
     -> os.replace(exe, exe.old)      (a RUNNING exe can't be overwritten on
                                       Windows, but it CAN be renamed on the
@@ -41,6 +51,8 @@ reporter.py).
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import json
 import logging
 import os
 import re
@@ -56,6 +68,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
+from . import release_pubkey
 
 log = logging.getLogger("ccsync.upgrade")
 
@@ -138,6 +151,165 @@ def same_origin(url: str, base_url: str) -> bool:
         return False
     return (parsed.scheme.lower(), parsed.netloc.lower()) == (
         base.scheme.lower(), base.netloc.lower()
+    )
+
+
+# ------------------------------------------------- signature + floor + transport
+#
+# COMMERCIAL_READINESS.md item 4 (2026-08-17). Everything above this point
+# defends the CHANNEL: the URL must be on the dashboard's own origin, no
+# redirect may move it, the body must match an advertised sha256. None of it
+# defends against the dashboard itself -- and on a customer install the
+# dashboard is a container on someone else's NAS, reachable by whoever holds
+# that NAS. The offer is now a record signed OFFLINE by a key that exists on
+# no fleet machine, verified here before a single byte is downloaded.
+
+# Written under the config dir (~/.ccsync), NOT the state dir: state/ is
+# lane scratch that is safe to delete, and deleting the floor is the one
+# operator action that un-blocks a downgrade (see docs/RELEASE.md).
+FLOOR_FILENAME = "upgrade_floor.json"
+
+
+def floor_path(cfg: Any) -> Path:
+    """Where this machine remembers the highest min_version it has accepted."""
+    return config_mod.resolved_log_path(cfg or {}).parent / FLOOR_FILENAME
+
+
+def read_floor(path: Path) -> str:
+    """The remembered floor, or "" when there is none. Never raises: an
+    unreadable or corrupt floor file means "no floor", because the
+    alternative -- refusing every update because a JSON file got truncated --
+    strands the machine on a build that can never be fixed."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        value = str(data.get("min_version") or "").strip()
+        return value if parse_version(value) is not None else ""
+    except Exception:
+        return ""
+
+
+def note_floor(path: Path, min_version: Any) -> str:
+    """Raise the floor to `min_version` if that is higher, and persist it.
+    Returns the floor in force afterwards. Never raises.
+
+    MONOTONIC BY DESIGN. The floor only ever goes up, and no signed record can
+    lower it -- otherwise the one thing an attacker needs is a copy of an old,
+    genuinely-signed record with a low min_version, and the whole mechanism
+    unwinds itself. That does mean a deliberate rollback below the floor
+    cannot be done from the dashboard at all: the operator deletes
+    ~/.ccsync/upgrade_floor.json on the machine, which is a hands-on act on
+    each affected box, which is the point (docs/RELEASE.md)."""
+    path = Path(path)
+    current = read_floor(path)
+    offered = parse_version(min_version)
+    if offered is None:
+        return current
+    have = parse_version(current)
+    if have is not None and have >= offered:
+        return current
+    new = str(min_version).strip()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            json.dumps({"min_version": new, "updated_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+        log.info("upgrade: downgrade floor raised to v%s (was %s)", new, current or "none")
+    except Exception:
+        # A floor we could not write is not a reason to refuse the update the
+        # record came with -- it is a reason to re-raise it next time.
+        log.debug("upgrade: could not persist the downgrade floor", exc_info=True)
+    return new
+
+
+def below_floor(version: Any, floor: str) -> bool:
+    """True when `version` may not be installed given `floor`.
+
+    An unparseable OFFER against a real floor is refused: "different, not
+    newer" survives above the floor (a rollback to any version >= floor is
+    still one click), but nothing gets in on the strength of a version string
+    we cannot rank."""
+    have = parse_version(floor)
+    if have is None:
+        return False
+    offered = parse_version(version)
+    if offered is None:
+        return True
+    return offered < have
+
+
+def verify_offer(
+    info: Any, pubkeys: Optional[Any] = None
+) -> tuple[bool, str]:
+    """(ok, detail) for the release signature over an offer. Never raises."""
+    if not isinstance(info, dict):
+        return False, "no offer"
+    return release_pubkey.verify_record(
+        info, info.get("signature", ""), pubkeys=pubkeys
+    )
+
+
+def _host_is_local(host: str) -> bool:
+    """True for a tailnet/LAN/loopback host.
+
+    100.64.0.0/10 is the CGNAT range Tailscale hands out; *.ts.net is a
+    MagicDNS name for the same thing. RFC1918 and loopback cover a LAN
+    deployment, and so do the intranet name shapes a customer's NAS actually
+    answers to: a single-label host (`truenas`, resolved by the search
+    domain) and the .local/.lan/.internal/.home.arpa suffixes. Everything
+    else -- anything that looks like a name the public DNS could resolve --
+    is "the open internet" as far as this check is concerned."""
+    host = (host or "").strip().lower().split("%")[0]
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if not host:
+        return False
+    if host == "localhost" or "." not in host:
+        return True
+    if host.endswith((".ts.net", ".local", ".lan", ".internal", ".home.arpa")):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if ip.is_loopback or ip.is_private or ip.is_link_local:
+        return True
+    return ip in ipaddress.ip_network("100.64.0.0/10")
+
+
+def transport_ok(base_url: Any) -> tuple[bool, str]:
+    """(ok, note) for the configured dashboard URL as an update transport.
+
+    https is verified by urllib against the system trust store -- nothing
+    here disables that, and nothing may.
+
+    Plain http is allowed ONLY to a tailnet/LAN host, which is what the whole
+    fleet runs on today (2026-08-17) and what the Tailscale-Serve decision
+    keeps as the fallback. It is not a lie of omission: `note` is logged once
+    per process so an operator reading a log can see that the confidentiality
+    and freshness of the channel rest on the signature alone. Plain http to a
+    PUBLIC host is refused outright -- there is no scenario where an editor's
+    companion should be pulling a binary over cleartext from the internet."""
+    parsed = urllib.parse.urlparse(str(base_url or "").strip())
+    scheme = (parsed.scheme or "").lower()
+    host = parsed.hostname or ""
+    if scheme == "https":
+        return True, ""
+    if scheme != "http":
+        return False, f"dashboard_url {base_url!r} is not http(s) -- refusing to update from it"
+    if _host_is_local(host):
+        return True, (
+            f"update channel to {host} is plain HTTP (tailnet/LAN). Downloads are "
+            f"not confidential and not TLS-authenticated; every build is accepted "
+            f"only on its offline release signature. Put the dashboard behind "
+            f"Tailscale Serve (docs/SERVER-SYNOLOGY.md) to close that gap."
+        )
+    return False, (
+        f"dashboard_url {base_url!r} is plain HTTP to a PUBLIC host -- refusing to "
+        f"download a companion build over it. Use https."
     )
 
 
@@ -272,8 +444,22 @@ def parse_upgrade(resp: Any) -> Optional[dict[str, Any]]:
         return None
     if version == config_mod.VERSION:
         return None
-    return {"version": version, "url": url, "sha256": sha256,
-            "size_bytes": info.get("size_bytes")}
+    # Carry the SIGNED record fields through verbatim (item 4, 2026-08-17):
+    # they are the bytes the release key signed, so anything this function
+    # "tidies" would break verification. version/sha256 are the exception --
+    # they are normalised above and re-asserted below, which means a server
+    # that pads them with whitespace fails verification rather than being
+    # quietly accommodated.
+    out = {key: info[key] for key in release_pubkey.RECORD_FIELDS if key in info}
+    out.update({
+        "version": version,
+        "url": url,
+        "sha256": sha256,
+        "size_bytes": info.get("size_bytes"),
+        "signature": str(info.get("signature") or "").strip(),
+        "pubkey_id": str(info.get("pubkey_id") or "").strip(),
+    })
+    return out
 
 
 def advertised_size(info: Any) -> Optional[int]:
@@ -426,6 +612,7 @@ class UpgradeManager:
         on_available: Optional[Callable[[dict[str, Any]], None]] = None,
         clock_fn: Callable[[], float] = time.monotonic,
         sleep_fn: Callable[[float], None] = time.sleep,
+        floor_file: Optional[Path] = None,
     ) -> None:
         self.cfg = cfg
         self._http_open = http_open or default_http_open
@@ -438,6 +625,51 @@ class UpgradeManager:
         self._lock = threading.Lock()
         self._available: Optional[dict[str, Any]] = None
         self._applying = False
+        # Derived, not injected from app.py: app.run() builds this manager
+        # BEFORE it computes its state dir, and the floor deliberately lives
+        # one level up from state/ anyway (see note_floor).
+        self._floor_file = Path(floor_file) if floor_file else floor_path(cfg)
+        self._transport_note_logged = False
+        self._refusal_logged = ""
+
+    def _log_transport_once(self, note: str) -> None:
+        if note and not self._transport_note_logged:
+            self._transport_note_logged = True
+            log.warning("upgrade: %s", note)
+
+    def _accept_offer(self, info: dict[str, Any]) -> tuple[bool, str]:
+        """(ok, reason) -- signature, then downgrade floor. Never raises.
+
+        Called on EVERY offer as it arrives and again inside
+        download_and_verify: the tray must not show "Update available" for a
+        build that would be refused at the click, and the download path must
+        not depend on having been told about the offer through the tray."""
+        try:
+            ok, detail = verify_offer(info)
+            if not ok:
+                return False, f"release signature rejected ({detail})"
+            floor = note_floor(self._floor_file, info.get("min_version"))
+            if below_floor(info.get("version"), floor):
+                return False, (
+                    f"v{info.get('version')} is below the downgrade floor v{floor} this "
+                    f"machine has accepted. Rolling back past the floor is deliberate "
+                    f"and manual: delete {self._floor_file} on this machine "
+                    f"(docs/RELEASE.md)"
+                )
+            return True, ""
+        except Exception:
+            log.debug("upgrade: offer acceptance check failed", exc_info=True)
+            return False, "the offer could not be checked"
+
+    def _log_refusal(self, version: Any, reason: str) -> None:
+        """One line per distinct (version, reason). The reporter feeds an
+        offer every heavy tick, and a refused offer must not write the same
+        ERROR to companion.log every 30 seconds forever."""
+        key = f"{version}|{reason}"
+        if key == self._refusal_logged:
+            return
+        self._refusal_logged = key
+        log.error("upgrade: REFUSING the offered build v%s -- %s", version, reason)
 
     @property
     def available(self) -> Optional[dict[str, Any]]:
@@ -453,6 +685,15 @@ class UpgradeManager:
             info = parse_upgrade(resp)
         except Exception:
             info = None
+        if info is not None:
+            # An offer that will not be installed is not an offer. Dropping it
+            # here (rather than at the click) keeps the tray honest and keeps
+            # the "different, not newer" wording from advertising something
+            # the machine has already decided to refuse.
+            accepted, reason = self._accept_offer(info)
+            if not accepted:
+                self._log_refusal(info.get("version"), reason)
+                info = None
         newly: Optional[dict[str, Any]] = None
         with self._lock:
             if info is not None:
@@ -474,6 +715,18 @@ class UpgradeManager:
         removed). Never raises."""
         url = str(info.get("url") or "")
         base = str(self.cfg.get("dashboard_url", "")).strip().rstrip("/")
+        # SIGNATURE + FLOOR BEFORE ANYTHING TOUCHES THE NETWORK (item 4,
+        # 2026-08-17). Re-checked here even though note_report_response
+        # already did it: apply() reads self._available, and this method is
+        # public and injectable -- the check that matters must sit on the
+        # path that actually writes bytes to disk. The sha256 compared after
+        # the download is info["sha256"], i.e. the value the release key
+        # signed, so the hash check now proves the file is the SIGNED file
+        # rather than merely the file the server described.
+        accepted, reason = self._accept_offer(info)
+        if not accepted:
+            self._log_refusal(info.get("version"), reason)
+            return None
         # ORIGIN PINNING (CORE-M10): an absolute URL is only followed when it
         # points at the same dashboard we already trust for config/tokens.
         if not same_origin(url, base):
@@ -487,6 +740,13 @@ class UpgradeManager:
                 log.warning("upgrade: dashboard_url is not configured -- cannot download")
                 return None
             url = base + url
+        # TRANSPORT (item 4): checked after the origin is resolved, because
+        # "which scheme and host will this actually hit" is only settled here.
+        ok_transport, note = transport_ok(base)
+        if not ok_transport:
+            self._log_refusal(info.get("version"), note)
+            return None
+        self._log_transport_once(note)
         headers = {}
         token = str(self.cfg.get("dashboard_token", "")).strip()
         if token:

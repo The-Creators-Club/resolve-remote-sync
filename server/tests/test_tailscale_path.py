@@ -36,7 +36,7 @@ def _clean_results():
 def _status(peers: dict, backend_state: str = "Running") -> str:
     return json.dumps({
         "BackendState": backend_state,
-        "Self": {"HostName": "truenas", "TailscaleIPs": ["100.71.216.3"]},
+        "Self": {"HostName": "truenas", "TailscaleIPs": ["100.64.0.1"]},
         "Peer": peers,
     })
 
@@ -73,7 +73,7 @@ def _peer(host, ip, cur_addr="", relay="", online=True, dns=None):
     ],
 )
 def test_direct_is_decided_by_cur_addr_not_relay(cur_addr, relay, expected_direct):
-    raw = _status({"nodekey:abc": _peer("truenas", "100.71.216.3", cur_addr, relay)})
+    raw = _status({"nodekey:abc": _peer("truenas", "100.64.0.1", cur_addr, relay)})
     result = check_health.parse_tailscale_status(raw, "truenas")
     assert result["found"] is True
     assert result["direct"] is expected_direct
@@ -92,13 +92,13 @@ def test_the_two_rules_really_do_disagree_in_both_directions():
 
 def test_describe_reports_the_endpoint_and_keeps_the_region_as_detail():
     direct = check_health.parse_tailscale_status(
-        _status({"k": _peer("truenas", "100.71.216.3", "203.0.113.7:41641", "hkg")}), "truenas"
+        _status({"k": _peer("truenas", "100.64.0.1", "203.0.113.7:41641", "hkg")}), "truenas"
     )
     assert check_health.describe_tailscale_path(direct) == (
         "DIRECT via 203.0.113.7:41641 (home DERP hkg)"
     )
     relayed = check_health.parse_tailscale_status(
-        _status({"k": _peer("truenas", "100.71.216.3", "", "hkg")}), "truenas"
+        _status({"k": _peer("truenas", "100.64.0.1", "", "hkg")}), "truenas"
     )
     assert check_health.describe_tailscale_path(relayed) == (
         "RELAYED via DERP hkg (no direct CurAddr)"
@@ -110,22 +110,22 @@ def test_describe_reports_the_endpoint_and_keeps_the_region_as_detail():
 
 
 @pytest.mark.parametrize("hint", [
-    "truenas", "truenas.tail1234.ts.net.", "nodekey:abc", "100.71.216.3", "216.3",
+    "truenas", "truenas.tail1234.ts.net.", "nodekey:abc", "100.64.0.1", "64.0.1",
 ])
 def test_peer_is_findable_by_name_dnsname_key_or_ip(hint):
-    raw = _status({"nodekey:abc": _peer("truenas", "100.71.216.3", "", "hkg")})
+    raw = _status({"nodekey:abc": _peer("truenas", "100.64.0.1", "", "hkg")})
     assert check_health.parse_tailscale_status(raw, hint)["found"] is True
 
 
 def test_unknown_peer_is_not_found_and_is_not_reported_as_direct():
-    raw = _status({"nodekey:abc": _peer("truenas", "100.71.216.3", "1.2.3.4:41641", "")})
+    raw = _status({"nodekey:abc": _peer("truenas", "100.64.0.1", "1.2.3.4:41641", "")})
     result = check_health.parse_tailscale_status(raw, "some-editor")
     assert result["found"] is False
     assert result["direct"] is False
 
 
 def test_empty_hint_never_matches_a_peer():
-    raw = _status({"nodekey:abc": _peer("truenas", "100.71.216.3")})
+    raw = _status({"nodekey:abc": _peer("truenas", "100.64.0.1")})
     assert check_health.parse_tailscale_status(raw, "")["found"] is False
 
 
@@ -141,7 +141,7 @@ def _fake_ssh(out: str, rc: int = 0):
 
 def test_relayed_online_peer_warns_without_failing_the_health_check(monkeypatch):
     raw = _status({
-        "k1": _peer("editor-alex", "100.65.15.123", "", "hkg"),
+        "k1": _peer("editor-owen", "100.64.0.2", "", "hkg"),
         "k2": _peer("editor-sam", "100.88.89.10", "198.51.100.4:41641", "hkg"),
     })
     monkeypatch.setattr(check_health, "run_ssh", _fake_ssh(raw))
@@ -150,21 +150,21 @@ def test_relayed_online_peer_warns_without_failing_the_health_check(monkeypatch)
     assert [passed for passed, _ in check_health.RESULTS] == [True], "login check still passes"
     assert len(check_health.WARNINGS) == 1
     message = check_health.WARNINGS[0]
-    assert "editor-alex" in message and "DERP hkg" in message
+    assert "editor-owen" in message and "DERP hkg" in message
     assert "editor-sam" not in message
     # Actionable, not a bare boolean.
     assert "41641" in message and "netcheck" in message
 
 
 def test_offline_peers_are_listed_but_never_warned_about(monkeypatch):
-    raw = _status({"k": _peer("editor-laptop", "100.65.15.123", "", "", online=False)})
+    raw = _status({"k": _peer("editor-laptop", "100.64.0.2", "", "", online=False)})
     monkeypatch.setattr(check_health, "run_ssh", _fake_ssh(raw))
     check_health.check_tailscale(dry_run=False)
     assert check_health.WARNINGS == []
 
 
 def test_logged_out_still_fails_and_skips_the_path_sweep(monkeypatch):
-    raw = _status({"k": _peer("editor", "100.65.15.123", "", "hkg")}, backend_state="NeedsLogin")
+    raw = _status({"k": _peer("editor", "100.64.0.2", "", "hkg")}, backend_state="NeedsLogin")
     monkeypatch.setattr(check_health, "run_ssh", _fake_ssh(raw))
     check_health.check_tailscale(dry_run=False)
     assert check_health.RESULTS[0][0] is False
@@ -234,8 +234,8 @@ def _local(monkeypatch, raw, returncode=0, which="tailscale"):
 def test_local_check_warns_when_the_nas_peer_is_relayed(monkeypatch):
     """The live state of this network: the NAS peer is DERP-relayed, so this
     is what a real run prints today."""
-    _local(monkeypatch, _status({"k": _peer("truenas", "100.71.216.3", "", "hkg")}))
-    check_health.check_tailscale_path_from_here(["100.71.216.3", "truenas"], dry_run=False)
+    _local(monkeypatch, _status({"k": _peer("truenas", "100.64.0.1", "", "hkg")}))
+    check_health.check_tailscale_path_from_here(["100.64.0.1", "truenas"], dry_run=False)
     assert len(check_health.WARNINGS) == 1
     assert "truenas" in check_health.WARNINGS[0]
     # Non-fatal: it must not add a FAIL, because nothing is broken.
@@ -243,8 +243,8 @@ def test_local_check_warns_when_the_nas_peer_is_relayed(monkeypatch):
 
 
 def test_local_check_is_quiet_when_the_path_is_direct(monkeypatch, capsys):
-    _local(monkeypatch, _status({"k": _peer("truenas", "100.71.216.3", "203.0.113.7:41641", "hkg")}))
-    check_health.check_tailscale_path_from_here(["100.71.216.3"], dry_run=False)
+    _local(monkeypatch, _status({"k": _peer("truenas", "100.64.0.1", "203.0.113.7:41641", "hkg")}))
+    check_health.check_tailscale_path_from_here(["100.64.0.1"], dry_run=False)
     assert check_health.WARNINGS == []
     assert "DIRECT via 203.0.113.7:41641" in capsys.readouterr().out
 
@@ -268,7 +268,7 @@ def test_local_check_skips_cleanly_when_the_command_fails(monkeypatch):
 
 
 def test_local_check_tries_every_hint_before_giving_up(monkeypatch):
-    _local(monkeypatch, _status({"k": _peer("truenas", "100.71.216.3", "", "hkg")}))
+    _local(monkeypatch, _status({"k": _peer("truenas", "100.64.0.1", "", "hkg")}))
     check_health.check_tailscale_path_from_here(["nas.example", "truenas"], dry_run=False)
     assert len(check_health.WARNINGS) == 1
 
@@ -287,12 +287,12 @@ def test_local_check_makes_no_subprocess_call_in_dry_run(monkeypatch):
 
 
 def test_hints_prefer_an_explicit_flag_then_the_dashboard_tailnet_host():
-    assert check_health.nas_peer_hints("box", "http://100.71.216.3:8480") == ["box"]
-    assert check_health.nas_peer_hints(None, "http://100.71.216.3:8480") == [
-        "100.71.216.3", check_health.DEFAULT_NAS_TAILNET_NAME,
+    assert check_health.nas_peer_hints("box", "http://100.64.0.1:8480") == ["box"]
+    assert check_health.nas_peer_hints(None, "http://100.64.0.1:8480") == [
+        "100.64.0.1", check_health.DEFAULT_NAS_TAILNET_NAME,
     ]
     # A LAN address is not a tailnet address and would match no peer.
-    assert check_health.nas_peer_hints(None, "http://192.168.0.102:8480") == [
+    assert check_health.nas_peer_hints(None, "http://192.168.0.10:8480") == [
         check_health.DEFAULT_NAS_TAILNET_NAME,
     ]
     assert check_health.nas_peer_hints(None, "") == [check_health.DEFAULT_NAS_TAILNET_NAME]

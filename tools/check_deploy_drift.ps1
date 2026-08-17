@@ -429,6 +429,26 @@ if ($AdminUser -and $DashboardUrl) {
                 else { Write-Drift "fleet is offered v$curWin but the repo is v$RepoVersion -- publish (see docs/RELEASE.md)" }
             }
 
+            # Signature state of the build the fleet is actually offered
+            # (COMMERCIAL_READINESS.md item 4, 2026-08-17). An UNSIGNED row is
+            # a build published before signing existed: every companion new
+            # enough to check will refuse it, so the fleet is frozen on
+            # whatever it already runs -- silently, unless this says so.
+            $curRow = $pkgs.packages | Where-Object {
+                $_.platform -eq "windows" -and $_.kind -eq "companion" -and $_.is_current
+            } | Select-Object -First 1
+            if ($curRow) {
+                if ("$($curRow.signature)") {
+                    Write-Row "release signature" "signed by key $($curRow.pubkey_id), min_version $(if ("$($curRow.min_version)") { $curRow.min_version } else { '(none)' })"
+                    Write-Ok "the current package carries a release signature"
+                }
+                else {
+                    Write-Drift "the current windows package is UNSIGNED -- companions that verify will REFUSE it; republish through tools\ship.cmd"
+                }
+                if ("$($curRow.signed_binary)" -eq "True") { Write-Ok "the current package is Authenticode-signed" }
+                else { Write-Drift "the current package's exe is NOT Authenticode-signed -- fresh installs meet SmartScreen (docs/RELEASE.md 'Code signing')" }
+            }
+
             # macOS, same rows. The Mac binary is built by tools/release_macos.sh
             # ON A MAC (PyInstaller does not cross-compile), so nothing that runs
             # on this rig can keep this channel current -- which is exactly why it

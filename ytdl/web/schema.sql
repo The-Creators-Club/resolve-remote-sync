@@ -185,3 +185,16 @@ CREATE INDEX IF NOT EXISTS idx_jvt_term      ON job_video_terms(job_id, term_id)
 -- statement raises and ensure_schema takes /ytdl down.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active ON jobs(created_by)
     WHERE phase NOT IN ('done', 'failed', 'cancelled');
+
+-- The rights/ToS attestation record (attestation.py, 2026-08-17). One row per
+-- (editor, wording version) -- a re-worded notice adds a row rather than
+-- replacing the record of what was agreed to before. Downloads refuse until
+-- the current TEXT_VERSION is present for the caller; see
+-- docs/legal/YOUTUBE_FEATURE_NOTICE.md.
+CREATE TABLE IF NOT EXISTS attestations (
+    username     TEXT NOT NULL,
+    version      TEXT NOT NULL,
+    text_sha256  TEXT NOT NULL,
+    accepted_at  TEXT NOT NULL,
+    PRIMARY KEY (username, version)
+);

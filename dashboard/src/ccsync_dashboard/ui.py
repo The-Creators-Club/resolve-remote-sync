@@ -3,6 +3,7 @@ so the JSON API and the pages can never disagree."""
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -13,12 +14,17 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import auth, db, provision
+from . import auth, db, oidc, provision
 from .api import (
     build_admin_users_view, build_editors_view, build_packages_view, build_presence_view,
-    build_project_view, build_projects_view, build_queue_view, build_transfers_view, get_conn,
-    normalize_device_id,
+    build_project_view, build_projects_view, build_queue_view, build_report_tokens_view,
+    build_transfers_view, get_conn, normalize_device_id,
 )
+# The fleet-read redaction the JSON API applies, imported under a name that
+# says where the rule lives: ONE definition, two callers (COMMERCIAL_READINESS.md
+# §C L1, 2026-08-17). See api.py's "scoping fleet reads" block.
+from .api import _scope_editors_view as api_scope_editors_view
+from .api import _scope_projects_view as api_scope_projects_view
 from .nas import NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
 from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -27,6 +33,14 @@ TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
 
 router = APIRouter(default_response_class=HTMLResponse)
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+log = logging.getLogger("ccsync.dashboard.ui")
+
+# ONE message for every way a sign-in can be refused (2026-08-17,
+# COMMERCIAL_READINESS.md item 15). "bad username or password" vs "too many
+# attempts" vs "you are not an admin" is a username-and-role oracle for anyone
+# who can reach the login page; the difference goes to the log, not the page.
+_LOGIN_REFUSED = "sign-in refused -- check your username and password, then try again"
 
 
 def human_bytes(n) -> str:
@@ -88,6 +102,21 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     user = auth.get_session_user(request)
     context.setdefault("session_user", user)
     context.setdefault("session_is_admin", auth.is_admin(settings, user))
+    # Every template gets it, because every partial can contain a form and a
+    # partial re-rendered into the page must carry a live token (base.html puts
+    # it on <body> as hx-headers, so htmx sends it on every request from the
+    # page; partials/topbar.html republishes it for the mounted SPAs). "" for
+    # an anonymous render -- there is no session to protect yet.
+    context.setdefault("csrf_token", auth.csrf_token(request))
+    # BRAND (2026-08-17, COMMERCIAL_READINESS.md item 10). The topbar used to
+    # read "CREATORS CLUB" as a literal, in this template and in the three
+    # SPAs' fallback headers. It is site data now, and the fallback chain is
+    # org_short -> org_name -> product_name: an unbranded install shows the
+    # PRODUCT's name, never the first customer's.
+    context.setdefault("brand_org", (settings.site_org_short
+                                     or settings.site_org_name
+                                     or settings.site_product_name))
+    context.setdefault("brand_product", settings.site_product_name)
     # Only offer the B-ROLL link when the mount FULLY took (broll.MOUNTED).
     # The import is guarded, so a missing or stale /broll-app leaves the
     # dashboard running with the feature absent; and a mount whose data root
@@ -144,7 +173,10 @@ def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
         # refresh has always rendered the checkboxes, so building this page's
         # first paint without them made the sidebar sprout controls 30s in.
         **_sidebar_context(request, conn, None, projects_view=projects_view),
-        "fleet": build_editors_view(conn),
+        # Scoped: an editor sees their own machines plus the summary counts,
+        # an admin sees the fleet (COMMERCIAL_READINESS.md L1, 2026-08-17).
+        "fleet": api_scope_editors_view(build_editors_view(conn),
+                                        auth.scope_for(request)),
         "queue": build_queue_view(conn, queue_editor, projects_view=projects_view)
                  if queue_editor else None,
     }
@@ -165,12 +197,44 @@ def _safe_next(raw: str) -> str:
     return "/"
 
 
+def _login_context(request: Request, next_path: str, error: str | None,
+                   local: bool) -> dict:
+    settings = request.app.state.settings
+    sso = str(settings.auth_method or "").strip().lower() == "oidc"
+    return {
+        "error": error,
+        "next_path": next_path,
+        # With OIDC configured the password form is BREAK-GLASS only: hidden
+        # behind ?local=1 and, when it is shown, restricted to DASH_ADMIN_USERS
+        # (see page_login_submit). An IdP outage must not lock the operator out
+        # of their own dashboard; it must not quietly reopen password login for
+        # the whole fleet either.
+        "sso_enabled": sso,
+        "show_password_form": (not sso) or local,
+        "sso_url": f"{oidc.LOGIN_PATH}?next={quote(next_path, safe='')}",
+        "local_url": f"/login?local=1&next={quote(next_path, safe='')}",
+    }
+
+
 @router.get("/login")
 def page_login(request: Request):
     next_path = _safe_next(request.query_params.get("next", ""))
     if auth.get_session_user(request):
         return RedirectResponse(next_path, status_code=303)
-    return _render(request, "login.html", {"error": None, "next_path": next_path})
+    settings = request.app.state.settings
+    if auth.refuse_plaintext_login(settings, request):
+        # DASH_COOKIE_SECURE=1 says the cookie only ever crosses TLS; serving
+        # the form on a plain-http connection under that promise sends the
+        # password in clear AND has the browser drop the cookie afterwards, so
+        # the editor loops on this page with no error anywhere (2026-08-17,
+        # COMMERCIAL_READINESS.md item 6).
+        raise HTTPException(
+            status_code=400,
+            detail="this dashboard is configured for https only (DASH_COOKIE_SECURE=1) "
+                   "but you reached it over http -- use the https URL",
+        )
+    local = request.query_params.get("local", "") == "1"
+    return _render(request, "login.html", _login_context(request, next_path, None, local))
 
 
 MAX_LOGIN_BODY_BYTES = 8 * 1024   # generous for a username/password/next form
@@ -204,11 +268,26 @@ async def page_login_submit(request: Request):
     username = form.get("username", "").strip().lower()
     password = form.get("password", "")
     next_path = _safe_next(form.get("next", ""))
+    local = request.query_params.get("local", "") == "1" or form.get("local", "") == "1"
+    sso = str(settings.auth_method or "").strip().lower() == "oidc"
     error = None
     if not settings.session_secret:
         error = "login not configured on the server (DASH_SESSION_SECRET unset)"
-    elif auth.login_throttled(username):
-        error = "too many failed attempts -- wait a minute"
+    elif auth.refuse_plaintext_login(settings, request):
+        error = ("this dashboard is configured for https only (DASH_COOKIE_SECURE=1) "
+                 "-- use the https URL")
+    elif auth.login_throttled(request, username):
+        # One generic message for every refusal below, including this one: a
+        # throttle that says "wait 4 minutes" for real usernames and "bad
+        # password" for made-up ones is a username oracle.
+        error = _LOGIN_REFUSED
+    elif sso and not auth.is_admin(settings, username):
+        # Break-glass is for the operator, not a password back door for the
+        # fleet. Same generic message, so it does not disclose who is an admin.
+        log.warning("local password login refused for non-admin %r while "
+                    "DASH_AUTH_METHOD=oidc", username)
+        auth.record_login_failure(request, username)
+        error = _LOGIN_REFUSED
     else:
         verifier = getattr(request.app.state, "credential_verifier", auth.verify_credentials)
         # verifier is a blocking SMB session setup (up to a 10s timeout) --
@@ -224,27 +303,39 @@ async def page_login_submit(request: Request):
             error = "the server is busy checking sign-ins -- try again in a moment"
         else:
             if verified:
-                auth.clear_login_failures(username)
+                auth.clear_login_failures(request, username)
                 response = RedirectResponse(next_path, status_code=303)
-                response.set_cookie(
-                    auth.COOKIE_NAME,
-                    auth.make_session_cookie(settings.session_secret, username),
-                    max_age=auth.SESSION_TTL_SECONDS, httponly=True, samesite="lax",
-                    # see auth.cookie_secure: on for https, off for the
-                    # current plain-http LAN/tailnet deployment (where a
-                    # hardcoded True makes the browser drop the cookie and
-                    # login silently loops)
-                    secure=auth.cookie_secure(settings, request), path="/",
-                )
+                # Mints the cookie AND the revocable server-side session row;
+                # see auth.start_session (cookie flags: Secure per
+                # auth.cookie_secure, HttpOnly, SameSite=Lax).
+                auth.start_session(request, response, username)
+                log.info("login for %r from %s", username, auth.client_ip(request))
                 return response
-            auth.record_login_failure(username)
-            error = "bad username or password"
-    return _render(request, "login.html", {"error": error, "next_path": next_path})
+            auth.record_login_failure(request, username)
+            error = _LOGIN_REFUSED
+    return _render(request, "login.html", _login_context(request, next_path, error, local))
 
 
 @router.post("/logout")
-def page_logout():
+def page_logout(request: Request):
     response = RedirectResponse("/", status_code=303)
+    # Revokes the server-side row too: deleting the browser's copy alone left
+    # a stolen cookie valid for the rest of its lifetime (item 6 / H1).
+    auth.end_session(request, response)
+    return response
+
+
+@router.post("/logout-everywhere")
+def page_logout_everywhere(request: Request):
+    """"Sign me out on every device." The one thing an editor who thinks their
+    laptop was taken can do without waiting for an admin."""
+    user = auth.get_session_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="not logged in")
+    store = auth.session_store(request)
+    revoked = store.revoke_user(user, by=f"self:{user}") if store else 0
+    log.warning("%r revoked %d session(s) from every device", user, revoked)
+    response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(auth.COOKIE_NAME, path="/")
     return response
 
@@ -765,9 +856,10 @@ def partial_bins(slug: str, request: Request, conn: sqlite3.Connection = Depends
 
 @router.get("/partials/fleet")
 def partial_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    scope = auth.scope_for(request)
     return _render(request, "partials/fleet_grid.html", {
-        "view": build_projects_view(conn),
-        "fleet": build_editors_view(conn),
+        "view": api_scope_projects_view(build_projects_view(conn), scope),
+        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
     })
 
 
@@ -794,6 +886,10 @@ def partial_missing(
         raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
     editor = next((e for e in project["editors"] if e["device_id"] == device_id), None)
     if editor is None:
+        raise HTTPException(status_code=404, detail=f"device not in project: {device_id}")
+    # The file paths missing from a named person's machine. Same rule (and the
+    # same 404, so no device id is confirmed) as the JSON twin api_missing.
+    if not auth.scope_for(request).allows(str(editor.get("editor_username") or "")):
         raise HTTPException(status_code=404, detail=f"device not in project: {device_id}")
     missing = db.fetch_missing(conn, project["id"], editor["device_row_id"])
     return _render(request, "partials/missing_files.html", {
@@ -844,6 +940,53 @@ def partial_admin_users(request: Request):
     })
 
 
+# ------------------------------------------------- admin: browser sessions
+# A separate partial and a separate route from the Users panel above, loaded by
+# admin_users.html with its own hx-get. Kept apart deliberately: the Users panel
+# talks to the NAS and goes amber the moment the NAS blinks (DASH-7), and
+# "revoke this person's sessions" -- the thing an admin reaches for when a
+# laptop goes missing -- must keep working while that is happening.
+
+def _sessions_context(request: Request, error: str | None = None) -> dict:
+    store = auth.session_store(request)
+    rows = store.list_all() if store is not None else []
+    for row in rows:
+        # A prefix only: the full sid is a keyed digest of the cookie, and
+        # while it cannot be replayed, there is no reason to print it.
+        row["short_sid"] = row["sid"][:12]
+    return {"sessions": rows, "error": error,
+            "session_user": auth.get_session_user(request)}
+
+
+@router.get("/partials/admin/sessions")
+def partial_admin_sessions(request: Request):
+    _require_admin_page(request)
+    return _render(request, "partials/admin_sessions.html", _sessions_context(request))
+
+
+@router.post("/partials/admin/sessions/revoke")
+async def partial_admin_revoke_sessions(request: Request):
+    """Sign somebody out everywhere. The revocation is what makes a stolen
+    cookie recoverable at all -- before 2026-08-17 the only answer was to
+    rotate DASH_SESSION_SECRET, which signs out the entire fleet and
+    invalidates every companion identity token with it."""
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    username = form.get("username", "").strip().lower()
+    error = None
+    store = auth.session_store(request)
+    if not username:
+        error = "username required"
+    elif store is None:
+        error = "sessions are not being recorded on this deployment"
+    else:
+        revoked = store.revoke_user(username, by=f"admin:{admin}")
+        log.warning("admin %r revoked %d session(s) for %r", admin, revoked, username)
+        error = f"revoked {revoked} session(s) for {username}"
+    return _render(request, "partials/admin_sessions.html",
+                   _sessions_context(request, error))
+
+
 def _create_or_update_editor_sync(
     nas: NasBackend, username: str, ssh_pubkey: str,
     full_name: str | None, password: str | None,
@@ -877,6 +1020,10 @@ async def partial_admin_create_user(
                  "digits, '.', '_', '-'")
     elif not looks_like_ssh_pubkey(ssh_pubkey):
         error = "does not look like an OpenSSH public key"
+    elif password and auth.check_password(password):
+        # Optional field: blank still means "randomise it, no dashboard login".
+        # A SHORT one is refused -- same floor as the set-password form.
+        error = auth.check_password(password)
     else:
         try:
             nas = nas_factory.make_nas_client(settings)
@@ -925,6 +1072,14 @@ async def partial_admin_set_password(request: Request):
                  "digits, '.', '_', '-'")
     elif not password:
         error = "password required"
+    elif auth.check_password(password):
+        # Floor on NEW passwords only (auth.MIN_PASSWORD_CHARS): the minimum
+        # used to be one character, and this password is what an editor signs
+        # into the dashboard with AND their NAS/SMB credential. Existing short
+        # passwords keep working -- nobody is locked out mid-shoot
+        # (2026-08-17, COMMERCIAL_READINESS.md item 15, L-tier "admin password
+        # min length 1").
+        error = auth.check_password(password)
     else:
         try:
             nas = nas_factory.make_nas_client(settings)
@@ -980,6 +1135,112 @@ async def partial_admin_approve_device(
         "admin_users": build_admin_users_view(settings),
         "error": error,
     })
+
+
+# ------------------------------------------------- per-editor report tokens
+#
+# COMMERCIAL_READINESS.md item 15 (2026-08-17). Its own panel and its own
+# routes rather than fields bolted onto the Users partial: that partial's
+# render calls a NAS backend, and minting a fleet credential must not be able
+# to fail because the NAS is slow. The secret is rendered exactly once, in the
+# response to the mint -- nothing stores it, so no later render can repeat it.
+
+def _report_tokens_render(request, conn, *, error: str | None = None,
+                          minted: str | None = None, minted_username: str = ""):
+    return _render(request, "partials/admin_report_tokens.html", {
+        "report_tokens": build_report_tokens_view(conn),
+        "error": error,
+        "minted": minted,
+        "minted_username": minted_username,
+    })
+
+
+@router.get("/partials/admin/report-tokens")
+def partial_admin_report_tokens(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    _require_admin_page(request)
+    return _report_tokens_render(request, conn)
+
+
+@router.post("/partials/admin/report-tokens/create")
+async def partial_admin_create_report_token(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    username = form.get("username", "").strip().lower()
+    label = form.get("label", "").strip()
+    if not is_valid_username(username):
+        return _report_tokens_render(
+            request, conn,
+            error=("username must start with a letter and contain only lowercase "
+                   "letters, digits, '.', '_', '-'"))
+    token, _row = db.create_editor_report_token(conn, username, created_by=admin,
+                                                label=label)
+    conn.commit()
+    return _report_tokens_render(request, conn, minted=token, minted_username=username)
+
+
+@router.post("/partials/admin/report-tokens/revoke")
+async def partial_admin_revoke_report_token(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    revoked = db.revoke_editor_report_token(conn, form.get("token_id", "").strip(),
+                                            revoked_by=admin)
+    conn.commit()
+    error = None if revoked else "that token was already revoked (or never existed)"
+    return _report_tokens_render(request, conn, error=error)
+
+
+# ------------------------------------------------------------- fleet halt
+#
+# COMMERCIAL_READINESS.md item 9 (2026-08-17). One switch that stops every
+# companion in the fleet, honoured on each machine's next report reply. It
+# lives on the Users page rather than the fleet grid deliberately: this is an
+# administrative control with a blast radius of the whole company, and the
+# fleet grid is a page people leave open and click around on.
+#
+# The route is a thin wrapper over the same db helpers /api/v1/fleet/halt
+# uses, so the button and the API can never disagree about what is stored.
+
+def _fleet_halt_render(request, conn, *, error: str | None = None):
+    return _render(request, "partials/fleet_halt.html", {
+        "halt": db.get_fleet_halt(conn),
+        "error": error,
+    })
+
+
+@router.get("/partials/admin/fleet-halt")
+def partial_admin_fleet_halt(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    _require_admin_page(request)
+    return _fleet_halt_render(request, conn)
+
+
+@router.post("/partials/admin/fleet-halt")
+async def partial_admin_set_fleet_halt(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    active = form.get("active", "") == "1"
+    reason = form.get("reason", "").strip()
+    if active and not reason:
+        # The reason is shown in EVERY editor's tray. A halt with no reason
+        # produces a fleet of people who cannot work and cannot find out why.
+        return _fleet_halt_render(
+            request, conn, error="say why -- every editor's tray will show this")
+    db.set_fleet_halt(conn, active, reason, admin)
+    conn.commit()
+    log.warning(
+        "FLEET HALT %s from the Users page by %s: %s",
+        "ENGAGED" if active else "released", admin, reason or "(no reason)",
+    )
+    return _fleet_halt_render(request, conn)
 
 
 # --------------------------------------------------------- installer download

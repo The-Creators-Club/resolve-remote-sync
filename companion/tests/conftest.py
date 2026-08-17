@@ -77,6 +77,106 @@ def _isolate_ccsync_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _eula_already_accepted(_isolate_ccsync_home):
+    """Every test runs on a machine whose editor accepted the licence.
+
+    Since 2026-08-17 (COMMERCIAL_READINESS.md item 3) _start_lanes() refuses
+    to start the lanes without ~/.ccsync/eula_accepted.json, which the
+    onboarding wizard writes long before the companion exists. A test tree
+    with no such record would be a machine nobody ever onboarded, and every
+    lane-start assertion in the suite would be measuring the licence gate
+    instead of what it was written for. Depends on _isolate_ccsync_home so
+    the record lands in the per-test temp dir, never in the developer's own
+    ~/.ccsync.
+
+    Tests of the gate itself remove or rewrite this record explicitly (see
+    test_eula.py and test_app.py's licence-gate tests).
+    """
+    from ccsync_companion import eula as eula_mod
+
+    eula_mod.record_acceptance()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _youtube_feature_enabled(_isolate_ccsync_home, monkeypatch):
+    """Every test runs on a machine whose SITE enabled the YouTube downloader.
+
+    Since 2026-08-17 (COMMERCIAL_READINESS.md items 2 + 3) it is OFF by
+    default: the downloader exists only where the customer's site manifest says
+    `youtube_download`, and the unblock components (deno, the cookie sign-in)
+    only where it also says `youtube_unblock`. A test tree with neither is a
+    machine at a customer who has not bought the feature, and every executor
+    assertion in the suite would be measuring the gate instead of what it was
+    written for -- exactly the reasoning behind _eula_already_accepted above.
+
+    The PER-MACHINE rights attestation is deliberately NOT set here: it is
+    per editor NAME, and the suite uses several. The executor tests record it
+    for their own editor (test_ytdl_executor.make_deps).
+
+    A PATCH, NOT A FILE. Writing the cached manifest would create
+    `<tmp_path>/.ccsync/state/` in every test, and two tests assert on the
+    exact contents of tmp_path to prove a write left nothing beside it
+    (test_root_guard's atomic-record test) or that no cache exists yet
+    (test_site's round trip). So this defers to the REAL reader whenever the
+    test has provided a manifest of its own -- explicitly, or by writing the
+    cache -- and only answers "on" when there is nothing to read.
+    `_feature_enabled_unpatched` is the escape hatch for the tests that are
+    about the reader itself (test_ytdl_feature_gate.py).
+    """
+    from ccsync_companion import site as site_mod
+
+    real = getattr(site_mod, '_feature_enabled_unpatched', site_mod.feature_enabled)
+    site_mod._feature_enabled_unpatched = real
+
+    def _enabled(name, site=None):
+        if site is not None or site_mod.site_path().is_file():
+            return real(name, site)
+        return name in ('youtube_download', 'youtube_unblock')
+
+    monkeypatch.setattr(site_mod, 'feature_enabled', _enabled)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_live_resolve(monkeypatch):
+    """GUARD. No test may reach the developer's OWN running Resolve.
+
+    Since item 9 (2026-08-17) every media-pool mutation takes a save point
+    first -- `connect()`, then `SaveProject()` and `ExportProject()` on
+    whatever project is open. On the base rig, where Resolve is usually
+    running while the suite is, that is the suite saving and exporting a real
+    project. Same class of hazard as _no_real_tk_windows: "headless-safe" is
+    not "safe" on the machine that has the thing.
+
+    A test that wants a Resolve monkeypatches `connect` itself; its patch is
+    applied after this one and wins.
+    """
+    from ccsync_companion import resolve_bridge
+
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_resolve_journal():
+    """No test inherits another's save point or rate-limit window.
+
+    resolve_journal keeps its open-burst, save-point and automatic-path
+    state in module globals (one companion, one Resolve). Without this, the
+    FIRST test to drive an automatic relink claims the 15-minute window for
+    the project name "" and every later test's pass is silently refused --
+    a failure that moves with pytest-randomly's ordering (item 9,
+    2026-08-17).
+    """
+    from ccsync_companion import resolve_journal
+
+    resolve_journal.reset_for_tests()
+    yield
+    resolve_journal.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_tk_windows(monkeypatch, request):
     """GUARD. No test may create a real Tk window.
 

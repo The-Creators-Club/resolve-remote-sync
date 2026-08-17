@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .claude_client import describe_auth
-from .config import Config, load_config
+from .config import Config, ConfigError, load_config
 from .duplicates import do_duplicates
 from .manifest import do_export_manifest
 from .migrate import migrate_sqlite_db
@@ -16,6 +16,7 @@ from .origins import record_originals
 from .pipeline import run_pipeline
 from .rebase import do_rebase
 from .scanner import do_scan
+from .site_data import DEFAULT_DUPLICATES_REPORT
 from .sorter import do_sort
 from .storage.base import Storage
 from .storage.http_backend import HttpBackend
@@ -69,7 +70,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     storage = build_storage(cfg)
-    print(describe_auth(cfg.use_subscription))
+    print(describe_auth(cfg.anthropic))
     stages = args.stages.split(",") if args.stages else None
     stages = [s.strip() for s in stages] if stages else None
     count = run_pipeline(cfg, storage, model=args.model, limit=args.limit, stages=stages)
@@ -80,6 +81,15 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_transcribe(args: argparse.Namespace) -> int:
     """Thin wrapper over `run --stages transcribe` (see SPEC.md's `transcribe` stage)."""
     cfg = load_config(args.config)
+    # Inside a `run`, an unconfigured whisper environment is a stage that skips;
+    # asked for BY NAME it is a refusal, or the operator reads "processed 12
+    # video(s)" and believes 12 transcripts exist (2026-08-17, item 14).
+    if cfg.whisper.enabled:
+        try:
+            cfg.require_whisper()
+        except ConfigError as exc:
+            print(f"transcribe: {exc}", file=sys.stderr)
+            return 2
     storage = build_storage(cfg)
     count = run_pipeline(cfg, storage, model=cfg.model, limit=args.limit, stages=["transcribe"])
     print(f"transcribe: processed {count} video(s)")
@@ -89,7 +99,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 def cmd_taxonomy_propose(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     storage = build_storage(cfg)
-    out_path = propose_taxonomy(storage, model=cfg.taxonomy_model, out_path=args.out)
+    out_path = propose_taxonomy(storage, model=cfg.taxonomy_model, out_path=args.out,
+                                settings=cfg.anthropic)
     print(f"taxonomy propose: wrote {out_path}")
     return 0
 
@@ -214,6 +225,10 @@ def cmd_duplicates(args: argparse.Namespace) -> int:
     plan, report = do_duplicates(storage, resolve_path=resolve_path, verify=args.verify, apply=args.apply)
 
     out = Path(args.out)
+    # The default now lives under the git-ignored private/ tree, which a fresh
+    # checkout does not have (2026-08-17); creating it beats failing after the
+    # whole-file verification pass has already run.
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")
     print(report if args.verbose else plan.summary())
     print(f"\nduplicates: full report written to {out}")
@@ -337,7 +352,10 @@ def build_parser() -> argparse.ArgumentParser:
         "footage on copy — see SPEC.md)",
     )
     p_duplicates.add_argument("--apply", action="store_true", help="commit changes (default: dry run)")
-    p_duplicates.add_argument("--out", default="duplicates_report.md")
+    # The report names every duplicated file, so it is the site's catalogue in
+    # list form and must not land in the tracked tree (2026-08-17,
+    # COMMERCIAL_READINESS.md item 10 / section B).
+    p_duplicates.add_argument("--out", default=DEFAULT_DUPLICATES_REPORT)
     p_duplicates.add_argument("--verbose", action="store_true", help="print the full report")
     p_duplicates.set_defaults(func=cmd_duplicates)
 

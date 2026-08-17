@@ -4,22 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccsync-companion"
-version = "0.7.11"
-description = "Editor-side companion app for the Creators Club Resolve remote-sync system: timeline watcher, move-and-relink popup, and rclone/Syncthing sync lanes."
+version = "0.8.0"
+description = "Editor-side companion app for the CC Sync Resolve remote-sync system: timeline watcher, move-and-relink popup, and rclone/Syncthing sync lanes."
 requires-python = ">=3.12"
 dependencies = [
     "watchdog>=4",
 ]
 
 [project.optional-dependencies]
-# pyobjc-framework-Cocoa is pinned here rather than left to pystray: we call
-# AppKit/Foundation DIRECTLY (shutdown_guard's NSWorkspace notifications and
-# the app-activation policy that keeps this out of the Dock), so the import
-# has to be guaranteed by our own dependency list. pystray happens to pull
-# pyobjc in today; a future release choosing a different backend would take
-# our code with it. sys_platform marker so Windows installs stay unchanged.
+# pystray is GONE from this list (2026-08-17, docs/COMMERCIAL_READINESS.md
+# item 3): it is LGPLv3 and the companion ships as a single-file PyInstaller
+# freeze, which conveys it without the relinking freedom §4 requires. The tray
+# is ccsync_companion/tray_native.py now -- ctypes on Windows, PyObjC on macOS,
+# written from the OS APIs. tray.py's CCSYNC_TRAY_BACKEND=pystray escape hatch
+# is for a developer who installs pystray by hand; it must not become a
+# declared dependency again, and it refuses to load in a frozen build.
+#
+# pyobjc-framework-Cocoa was already pinned here rather than left to pystray --
+# we call AppKit/Foundation DIRECTLY (shutdown_guard's NSWorkspace
+# notifications, the app-activation policy that keeps this out of the Dock, and
+# now the NSStatusItem itself) -- and with pystray gone it is the ONLY thing
+# guaranteeing pyobjc is present at all. sys_platform marker so Windows
+# installs stay unchanged.
 tray = [
-    "pystray>=0.19",
     "Pillow>=10",
     "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
 ]

@@ -53,7 +53,7 @@ PASTE_CLOSE = ESC + "[201~"
 PRELUDE = """\
 set -u
 fail() { echo "FAILED: $1" >&2; exit 1; }
-ADMIN_USER="alex"
+ADMIN_USER="owen"
 DASHBOARD_URL="http://dashboard.invalid:8480"
 """
 
@@ -156,7 +156,7 @@ def test_escaped_values_parse_as_json_and_round_trip(tmp_path, value):
     """The whole point: whatever goes in, the login body is valid JSON and the
     server sees the bytes that were typed."""
     escaped = _escape(tmp_path, value)
-    body = '{"username":"alex","password":"' + escaped + '"}'
+    body = '{"username":"owen","password":"' + escaped + '"}'
     parsed = json.loads(body)
     assert parsed["password"] == value
 
@@ -173,7 +173,7 @@ def test_the_json_body_is_parseable_by_python_json_load(tmp_path):
     result = _run(tmp_path, body_script, stdin=value)
     assert result.returncode == 0, result.stderr
     parsed = json.loads(result.stdout)
-    assert parsed == {"username": "alex", "password": value}
+    assert parsed == {"username": "owen", "password": value}
 
 
 def test_control_characters_become_escapes_not_raw_bytes(tmp_path):
@@ -224,7 +224,11 @@ def test_the_release_manifest_is_valid_json_even_with_hostile_values(tmp_path):
         'GIT_DESCRIBE="$(cat)"\n'
         "GIT_DIRTY=true\n"
         "TESTS_RUN=false\n"
-        'BUILT_BY="alex@mac"\n'
+        # signed_binary joined the manifest with the signed upgrade channel
+        # (COMMERCIAL_READINESS.md item 4, 2026-08-17); release_macos.sh runs
+        # under `set -u`, so an absent one is an unbound-variable abort here.
+        "SIGNED_BINARY=false\n"
+        'BUILT_BY="owen@mac"\n'
         + _extract_write_manifest()
         + "write_manifest\n"
     )
@@ -326,7 +330,7 @@ def test_a_bracketed_paste_is_stripped_then_accepted(tmp_path):
     result = _run(tmp_path, READ_BODY, stdin=PASTE_OPEN + "hunter2" + PASTE_CLOSE + "\n")
     assert result.returncode == 0, result.stderr
     assert result.stdout == "PASSWORD=[hunter2]"
-    assert "dashboard password for alex@http://dashboard.invalid:8480" in result.stderr
+    assert "dashboard password for owen@http://dashboard.invalid:8480" in result.stderr
 
 
 def test_a_typed_password_is_untouched(tmp_path):

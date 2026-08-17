@@ -129,7 +129,7 @@ class TimelineWatcher:
         self._offered_non_canonical: set[str] = set()
         self._warned_foreign: set[str] = set()
         # MISSING paths already logged individually. Seen live 2026-08-13 on
-        # ruskin's machine (0.7.4, log_level=DEBUG): "Energy Transition" has
+        # an editor's machine (0.7.4, log_level=DEBUG): "Energy Transition" has
         # thousands of clips whose media has not synced down yet, and every
         # one of them logged its own DEBUG line every poll -- 5 MB of
         # companion.log rotated every ~25 minutes, which drowned (and then

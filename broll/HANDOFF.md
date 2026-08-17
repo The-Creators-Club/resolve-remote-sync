@@ -55,7 +55,7 @@ fixer dialog on every scan**. Verified by direct test, not assumed.
 
 The b-roll UI is **mounted in-process in the cc_sync dashboard at `/broll`**
 (`dashboard/src/ccsync_dashboard/broll.py`), behind `DASH_BROLL_ENABLED`.
-Confirmed working remotely over Tailscale from alex_laptop.
+Confirmed working remotely over Tailscale from owen_laptop.
 
 Three things about the mount that are easy to break:
 
@@ -165,14 +165,38 @@ Tests: **434 indexer · 136 web · 311 dashboard · 50 companion.**
 
 ### Must run after the MOFA pass, or the clips stay invisible to editors
 
-1. `build_archive.py --config config.queue.yaml --dest "P:/Assets/B-roll Archive" --apply`
+1. `build_archive.py --dest "P:/Assets/B-roll Archive" --apply` — `--config`
+   now defaults to `private/broll/indexer/config.queue.yaml`, outside the
+   tracked tree since 2026-08-17 (COMMERCIAL_READINESS.md item 10 / section B:
+   the queue names 25 of this client's projects, which the product must not ship)
 2. `broll-index origins --verify`
 3. `broll-index taxonomy assign taxonomy.rules.yaml`
 4. the `embed` stage
-5. `copy E:\broll-queue\broll.db "P:\Assets\B-roll Archive\broll.db"`
+5. publish the index — **not** a `copy`:
+   `python server\publish_db.py --which broll --source E:\broll-queue\broll.db --apply`
+
+   > The plain `copy E:\broll-queue\broll.db "P:\Assets\B-roll Archive\broll.db"`
+   > that used to be on this line is unsafe and was replaced 2026-08-17
+   > (`docs/COMMERCIAL_READINESS.md` item 8): the live `broll.db` is a WAL-mode
+   > database the dashboard container holds **open read-write**, so a copy over
+   > it leaves the old `-wal`/`-shm` beside a database they do not belong to and
+   > can publish a half-written file with nothing to go back to. The script
+   > checkpoints, stages, runs `PRAGMA quick_check` on the NAS, refuses a
+   > surprise row-count shrink, and swaps by rename, keeping the previous index
+   > as `broll.db.prev-<ts>` (`--rollback` puts it back).
+   > Full procedure: `docs/BACKUP_RESTORE.md` §6.
 
 Then the API stage: **554 MOFA (1 call each) + 130 outstanding YouTube**, via
 `indexer\watchdog.ps1 -Force`. Note the watchdog scheduled task is **Disabled**.
+
+**The API stage needs `ANTHROPIC_API_KEY` set now.** Since 2026-08-17
+(COMMERCIAL_READINESS.md item 1) the indexer calls the Messages API through the
+`anthropic` SDK instead of driving `claude -p` against a Claude Code
+subscription — a subscription cannot be sold to a customer, and its session
+limits are per-person. There is no subscription path left, `use_subscription` in
+config.yaml is dead, and a run with no key stops before its first call rather
+than marking clips `error`. Key handling, per-clip cost arithmetic, the
+`anthropic:` config knobs and what a rate limit now does: `docs/indexing-api.md`.
 
 ---
 

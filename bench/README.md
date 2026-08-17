@@ -1,10 +1,24 @@
 # ccbench -- sync-transport benchmark harness
 
-Picks the fastest transfer engine per Creators Club sync lane (see
-`../SPEC.md` §"Architecture") for editors syncing with the TrueNAS box, and
-verifies whether the Tailscale path is direct or DERP-relayed before
-trusting any transfer number. Target to beat: Blackmagic Cloud's observed
-~60 mb/s.
+Picks the fastest transfer engine per sync lane (see `../SPEC.md`
+§"Architecture") for editors syncing with the NAS, and verifies whether the
+Tailscale path is direct or DERP-relayed before trusting any transfer number.
+
+> ## INTERNAL ONLY — the competitor baseline
+>
+> The target this harness measures against is **Blackmagic Cloud's observed
+> ~60 mb/s**, taken from one studio's own experience on one link. It is an
+> engineering yardstick and nothing else.
+>
+> It must not appear in customer-facing material — marketing copy, the
+> website, the installer, a proposal, a demo deck (2026-08-17,
+> docs/COMMERCIAL_READINESS.md item 3). Two reasons, both real: it is
+> comparative advertising against a named competitor, backed by a single
+> uncontrolled measurement that would not survive being challenged; and that
+> competitor is Blackmagic Design, whose Resolve Studio this product requires,
+> whose scripting API it depends on, and whose EULA it is read against. The
+> `--baseline-mbps` figure and the "Did we beat Resolve Cloud?" section of a
+> generated report carry the same restriction.
 
 Three lanes, per SPEC.md:
 

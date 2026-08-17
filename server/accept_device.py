@@ -56,7 +56,7 @@ DEVICE_ID_RE = re.compile(r"^[A-Z2-7]{7}(-[A-Z2-7]{7}){7}$")
 # _USERNAME_RE so the two ends agree on what could even be a username.
 #
 # A name that is merely username-SHAPED is not enough on the dashboard side any
-# more: machine names look exactly like usernames ("alex-laptop", "edit-pc"),
+# more: machine names look exactly like usernames ("editor-laptop", "edit-pc"),
 # and a device approved under one used to resolve to an editor account with no
 # selections, which the enforce cycle read as "ticked for nothing" and unshared
 # from every folder it was on (KNOWN_BUGS B16). The dashboard is the only

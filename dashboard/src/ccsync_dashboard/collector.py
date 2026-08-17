@@ -739,7 +739,7 @@ class Collector:
         "Mapped" means the device's name resolves to an editor account the
         dashboard has a POSITIVE record of -- not merely one that is
         username-SHAPED. Machine names look exactly like usernames, so a
-        device approved as `alex-laptop` used to resolve to an editor with no
+        device approved as `editor-laptop` used to resolve to an editor with no
         selections rows, which read as "ticked for nothing" and got it
         unshared from every folder it was on (KNOWN_BUGS B16).
         """
@@ -816,7 +816,7 @@ class Collector:
             name = str(dev.get("name") or "")
             device_id = dev["deviceID"]
             # Username-SHAPED but not a known account: almost always a MACHINE
-            # name (alex-laptop, edit-pc) approved as a device. Treated as
+            # name (editor-laptop, edit-pc) approved as a device. Treated as
             # unmapped, i.e. left exactly as it is. Warned once per device per
             # process -- every 60s forever would be noise, and silence here is
             # what made B16 invisible.

@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from ytdlweb import claude_cli, config, db, projects, worker
+from ytdlweb import attestation, claude_cli, config, db, projects, worker
 from ytdlweb.db import con
 from ytdlweb.session import current_user
 from ytdlweb.vendor import ytsearch
@@ -39,6 +39,63 @@ def _job_or_404(c, job_id, user):
     if job is None:
         raise HTTPException(404, 'no such job')
     return job
+
+
+def _require_attestation(c, user):
+    """403 unless `user` has accepted the CURRENT rights/ToS wording.
+
+    Enforced on every route that can cause a download to happen, not only on
+    the one the SPA happens to call first: the notice is what records that a
+    human took responsibility for the material, and an API caller who skipped
+    the page must not be able to skip that (COMMERCIAL_READINESS.md item 2,
+    2026-08-17; docs/legal/YOUTUBE_FEATURE_NOTICE.md).
+
+    403 with a machine-readable `reason` so the SPA can re-open the notice
+    rather than showing a bare error -- an editor whose acceptance predates a
+    re-wording is not doing anything wrong, they just have not read the new
+    text yet.
+    """
+    if db.attestation_of(c, user, attestation.TEXT_VERSION) is None:
+        raise HTTPException(403, {'detail': attestation.REFUSAL,
+                                  'reason': 'attestation',
+                                  'version': attestation.TEXT_VERSION})
+
+
+@router.get('/api/attestation')
+def get_attestation(request: Request):
+    """The notice text plus whether THIS editor has accepted it.
+
+    One shape either way (attestation.payload): the copyright notice and the
+    rate disclaimer are shown on the page whatever the answer is, and only the
+    download gate depends on `accepted`.
+    """
+    user = current_user(request)
+    c = con()
+    return attestation.payload(db.attestation_of(c, user, attestation.TEXT_VERSION))
+
+
+class AcceptAttestation(BaseModel):
+    # The version the browser actually displayed. Sent back so a page left
+    # open across a deploy that re-worded the notice cannot record acceptance
+    # of text the editor never saw.
+    version: str = ''
+
+
+@router.post('/api/attestation')
+def accept_attestation(req: AcceptAttestation, request: Request):
+    user = current_user(request)
+    version = str(req.version or '').strip()
+    if version != attestation.TEXT_VERSION:
+        raise HTTPException(409, {
+            'detail': ('the terms were updated while this page was open -- '
+                       'reload and read the new wording before accepting'),
+            'reason': 'stale_version',
+            'version': attestation.TEXT_VERSION})
+    c = con()
+    row = db.record_attestation(c, user, attestation.TEXT_VERSION,
+                                attestation.text_sha256())
+    log.info('attestation %s accepted by %s', attestation.TEXT_VERSION, user)
+    return attestation.payload(row)
 
 
 @router.get('/api/me')
@@ -196,6 +253,7 @@ def _validated_max_candidates(raw):
 @router.post('/api/jobs')
 def create_job(req: NewJob, request: Request):
     user = current_user(request)
+    _require_attestation(con(), user)
     term = (req.term or '').strip()
     if not term:
         raise HTTPException(400, 'a search topic is required')
@@ -409,6 +467,7 @@ def create_url_job(req: NewUrlJob, request: Request):
     youtube_import watcher all see something they already understand.
     """
     user = current_user(request)
+    _require_attestation(con(), user)
     raw = '\n'.join(req.urls) if isinstance(req.urls, list) else (req.urls or '')
     if len(raw) > MAX_URL_CHARS:
         raise HTTPException(
@@ -645,6 +704,10 @@ def start_download(job_id: int, request: Request):
     """
     user = current_user(request)
     c = con()
+    # Re-checked HERE and not only at create: a manifest can sit at review for
+    # a week (see below), which is long enough for the wording to have been
+    # re-versioned since the search was submitted.
+    _require_attestation(c, user)
     job = _job_or_404(c, job_id, user)
     if job['phase'] not in ('ready_for_review', 'done'):
         raise HTTPException(409, {

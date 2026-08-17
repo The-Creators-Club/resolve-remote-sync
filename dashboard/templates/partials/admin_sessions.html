@@ -1,0 +1,37 @@
+{# Live browser sessions, and the button that ends them. Its own partial and
+   its own route (ui.partial_admin_sessions) so a NAS blip cannot take it down
+   with the Users panel -- "revoke this person's sessions" is what an admin
+   reaches for when a laptop goes missing, and that is precisely the moment the
+   rest of the page must not matter. #}
+<div class="admin-sessions-box" id="admin-sessions">
+  <div class="side-head">[ SIGNED-IN BROWSERS ]
+    <span class="muted">Revoking signs that account out everywhere within a second;
+      the companion's own identity token is separate and is not affected.</span></div>
+
+  {% if error %}<div class="banner">▲ {{ error }}</div>{% endif %}
+
+  {% if sessions %}
+    <table class="editors">
+      <thead><tr><th>USERNAME</th><th>SIGNED IN</th><th>LAST SEEN</th><th>FROM</th><th></th></tr></thead>
+      <tbody>
+      {% for s in sessions %}
+        <tr class="editor-row">
+          <td class="who">{{ s.username }}{{ " (you)" if s.username == session_user }}</td>
+          <td class="mono-sm muted">{{ s.created_at | ago }}</td>
+          <td class="mono-sm muted">{{ s.last_seen | ago }}</td>
+          <td class="mono-sm muted">{{ s.client }}</td>
+          <td>
+            <form class="inline-form" hx-post="/partials/admin/sessions/revoke"
+                  hx-target="#admin-sessions" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ s.username }}">
+              <button class="btn" type="submit">[ REVOKE ALL ]</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">nobody is signed in through a browser right now</div>
+  {% endif %}
+</div>

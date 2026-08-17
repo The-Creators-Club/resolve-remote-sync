@@ -16,6 +16,7 @@ worker makes is committed as it happens -- the SPA polls the job row 1500 ms
 apart, so an uncommitted counter is a counter that lies.
 """
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -27,9 +28,11 @@ from pathlib import Path
 # there is no cycle to fall into.
 from ytdlweb import claude_cli, config
 
+log = logging.getLogger(__name__)
+
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -57,6 +60,10 @@ _MIGRATIONS = {
     7: ('007_local_download.sql',
         lambda con: ('download_mode' in _columns(con, 'jobs')
                      and 'download_host' in _columns(con, 'job_videos'))),
+    # The rights/ToS attestation record (attestation.py, COMMERCIAL_READINESS
+    # item 2). A whole new table, so the predicate is simply "is it there".
+    8: ('008_attestations.sql',
+        lambda con: _table_exists(con, 'attestations')),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -606,15 +613,20 @@ def lease_active(job, at=None):
 def is_leaseholder(job, editor, at=None):
     """Is `editor` the live leaseholder of this job?
 
-    `editor=None` means "somebody holds it and the caller did not say who" --
-    accepted, because the fleet token is the trust boundary here and the
-    identity a companion sends is self-asserted (the same posture the
-    dashboard's own selection route takes: token, plus an identity header that
-    catches mistakes rather than attacks).
+    `editor` IS REQUIRED (H5, 2026-08-17). It used to accept None as "somebody
+    holds it and the caller did not say who", because the identity a companion
+    sent was self-asserted and the shared fleet token was the whole trust
+    boundary -- which meant a name was never the thing deciding anything.
+    routes_fleet now verifies a signed identity token before it calls this, so
+    a blank name here is a caller bug, and answering True to it would hand any
+    token-holding machine somebody else's job.
     """
     if not lease_active(job, at):
         return False
-    return editor is None or str(_column(job, 'claimed_by') or '') == str(editor)
+    name = str(editor or '').strip()
+    if not name:
+        return False
+    return str(_column(job, 'claimed_by') or '') == name
 
 
 def claim_download(c, job_id, editor, lease_seconds, at=None):
@@ -1293,3 +1305,45 @@ def manifest_json(c, job):
 def dumps(obj):
     """JSON as this app writes it to disk: readable, and never \\uXXXX for CJK."""
     return json.dumps(obj, indent=2, ensure_ascii=False)
+
+
+# --------------------------------------------------------------- attestations
+# The rights/ToS record (attestation.py, COMMERCIAL_READINESS.md item 2,
+# 2026-08-17). Two functions and no cache: this is read once per job creation
+# and once per claim, which is nowhere near the poll endpoint's rate, and a
+# cached "yes" that outlived a wording change is exactly the failure the
+# version column exists to prevent.
+
+
+def attestation_of(c, username, version):
+    """The row recording `username` accepting `version`, or None.
+
+    Tolerates the table being absent -- a database that predates migration 008
+    (or one whose migration is mid-flight) answers "not accepted", which
+    refuses downloads rather than allowing them. Failing closed is the whole
+    point of the gate.
+    """
+    try:
+        return c.execute(
+            'SELECT username, version, text_sha256, accepted_at FROM attestations '
+            'WHERE username=? AND version=?', (str(username or ''), str(version))
+        ).fetchone()
+    except sqlite3.Error:
+        log.warning('attestations table unreadable; treating every editor as '
+                    'not having accepted', exc_info=True)
+        return None
+
+
+def record_attestation(c, username, version, text_sha256):
+    """Record an acceptance. Idempotent -- pressing Accept twice is one row.
+
+    The timestamp of the FIRST acceptance is kept on a repeat (DO NOTHING, not
+    DO UPDATE): "when did this editor agree to this wording" has one answer and
+    a second click is not a new agreement.
+    """
+    c.execute(
+        'INSERT INTO attestations(username,version,text_sha256,accepted_at) '
+        'VALUES(?,?,?,?) ON CONFLICT(username,version) DO NOTHING',
+        (str(username or ''), str(version), str(text_sha256), now()))
+    c.commit()
+    return attestation_of(c, username, version)

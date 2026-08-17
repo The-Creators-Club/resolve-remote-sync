@@ -17,7 +17,10 @@
        ../partials/topbar and swaps it in here, so this page carries the same
        header and nav as every other dashboard page. -->
   <div class="topbar" id="dash-topbar">
-    <span class="brand">CREATORS CLUB <span class="dim">//</span> YOUTUBE</span>
+    <!-- The PRODUCT's name, not a customer's -- see broll/web's copy of this
+         header (2026-08-17, COMMERCIAL_READINESS.md item 10). The real
+         topbar, fetched from ../partials/topbar, carries the site's brand. -->
+    <span class="brand">CC SYNC <span class="dim">//</span> YOUTUBE</span>
     <!-- Root-relative on purpose, unlike every asset URL here: mounted under
          /ytdl/ this is the way back out to the dashboard at the origin root.
          Standalone (dev) it harmlessly reloads this page. -->
@@ -93,6 +96,22 @@
 </header>
 
 <main id="main">
+
+  <!-- The rights/ToS attestation (COMMERCIAL_READINESS.md item 2, 2026-08-17).
+       Filled in and shown by app.js from GET api/attestation; hidden once this
+       editor has accepted the CURRENT wording. It is above everything because
+       it gates everything: the server refuses to create a job, start a
+       download, or hand a claim to a companion without it, so a page that
+       buried it would only produce 403s nobody could act on. -->
+  <section id="attest" class="panel hidden">
+    <h2 id="attesttitle">Before you download</h2>
+    <pre id="attesttext" class="attesttext"></pre>
+    <div class="attestrow">
+      <button id="attestaccept" class="primary-btn">I ACCEPT</button>
+      <span id="attestnote" class="muted"></span>
+    </div>
+  </section>
+
 
   <!-- progress: the pipeline running (REQ 3) -->
   <section id="progress" class="panel hidden">
@@ -199,6 +218,17 @@
       </div>
     </div>
   </section>
+
+  <!-- ALWAYS ON THE PAGE, accepted or not (COMMERCIAL_READINESS.md item 2).
+       The copyright line and the rate/volume disclaimer are not part of the
+       one-time gate above: an editor who accepted in March should still be
+       reading them in September, and "this may stop working at any time" is
+       the honest description of a feature that depends on YouTube's goodwill.
+       Text comes from ytdlweb.attestation so there is one wording to review. -->
+  <footer id="legal" class="legal muted">
+    <div id="legalcopyright"></div>
+    <div id="legalrate"></div>
+  </footer>
 
 </main>
 

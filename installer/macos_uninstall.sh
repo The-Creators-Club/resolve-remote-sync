@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Creators Club Sync -- macOS uninstall.
+# CC Sync -- macOS uninstall.
 #
 # Removes the CCSync software this Mac runs. IT NEVER TOUCHES YOUR SYNCED
 # MEDIA: the project tree on your SSD is left exactly as it is, in both
@@ -65,8 +65,16 @@ BIN_DIR="$CCSYNC_LOCAL/bin"
 SYNCTHING_HOME="$CCSYNC_LOCAL/syncthing-config"
 CCSYNC_PROFILE="$HOME/.ccsync"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
-COMPANION_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.companion.plist"
-SYNCTHING_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.syncthing.plist"
+# BOTH label generations. The agents were renamed com.creatorsclub.* ->
+# com.ccsync.* on 2026-08-17 (docs/COMMERCIAL_READINESS.md item 10 -- a
+# launchd label is a durable, user-visible identifier and must not carry
+# another company's reverse-DNS name), so an uninstaller that knows only the
+# new names leaves every Mac provisioned before that with two live agents and
+# no way to stop them from the wizard.
+COMPANION_PLIST="$LAUNCH_AGENTS_DIR/com.ccsync.companion.plist"
+SYNCTHING_PLIST="$LAUNCH_AGENTS_DIR/com.ccsync.syncthing.plist"
+COMPANION_PLIST_LEGACY="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.companion.plist"
+SYNCTHING_PLIST_LEGACY="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.syncthing.plist"
 RCLONE_CONF_PATH="$HOME/.config/rclone/rclone.conf"
 # Resolved from THIS machine's config.toml below (see LOCAL_ROOT). The name
 # stopped being a constant on 2026-08-17 (WP0): the bootstrap takes it from
@@ -75,6 +83,10 @@ RCLONE_CONF_PATH="$HOME/.config/rclone/rclone.conf"
 # any site that names its remote something else -- and on every install made
 # before that, whose config.toml still names the old one.
 REMOTE_NAME="ccsync_sftp"
+# Same story as REMOTE_NAME: the prefix is site data since 2026-08-17
+# (docs/COMMERCIAL_READINESS.md item 11), read from this machine's own
+# config.toml below. P:\ only as the last-resort default, which is what every
+# install made before the change has.
 CANONICAL_PREFIX='P:\'
 
 LOCAL_ROOT=""
@@ -86,6 +98,9 @@ if [ -f "$CCSYNC_PROFILE/config.toml" ]; then
     CONFIGURED_REMOTE="$(sed -n 's/^[[:space:]]*remote[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
         "$CCSYNC_PROFILE/config.toml" | head -n 1)"
     [ -n "$CONFIGURED_REMOTE" ] && REMOTE_NAME="$CONFIGURED_REMOTE"
+    CONFIGURED_PREFIX="$(sed -n 's/^[[:space:]]*canonical_prefix[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' \
+        "$CCSYNC_PROFILE/config.toml" | head -n 1 | sed 's/\\\\/\\/g')"
+    [ -n "$CONFIGURED_PREFIX" ] && CANONICAL_PREFIX="$CONFIGURED_PREFIX"
 fi
 
 if [ "$FULL" = 1 ]; then
@@ -105,7 +120,8 @@ fi
 # already loaded, and a deleted plist just means it cannot be booted out by
 # path any more (it comes back at the next logon only if the file is there,
 # but the CURRENT session keeps the running job either way).
-for plist in "$COMPANION_PLIST" "$SYNCTHING_PLIST"; do
+for plist in "$COMPANION_PLIST" "$SYNCTHING_PLIST" \
+             "$COMPANION_PLIST_LEGACY" "$SYNCTHING_PLIST_LEGACY"; do
     if [ ! -f "$plist" ]; then
         skip "no LaunchAgent: $plist"
         continue

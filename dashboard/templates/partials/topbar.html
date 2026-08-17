@@ -6,7 +6,17 @@
    data-dash-topbar is the marker the SPAs check before injecting: a fetch
    that came back as something else (the login page, an error body) must
    leave their fallback header alone. #}
-<a class="brand" data-dash-topbar href="/">CREATORS CLUB <span class="dim">//</span> SYNC STATUS</a>
+{# The brand half is SITE DATA, not a literal (2026-08-17,
+   docs/COMMERCIAL_READINESS.md item 10): ui._render supplies brand_org as
+   org_short -> org_name -> product_name, so an install that has said nothing
+   about itself shows the product's name rather than the first customer's. #}
+{# data-csrf republishes the session's CSRF token to the mounted SPAs, which
+   inject this partial into their own pages and therefore have no <meta name=
+   "csrf"> of their own. They do not send it yet -- app.py's _CSRF_EXEMPT_
+   PREFIXES lists /broll/, /music/ and /ytdl/, and dashboard/README.md records
+   what each owner has to do to come off that list. Publishing it here first
+   means the change on their side is one header, not a new endpoint. #}
+<a class="brand" data-dash-topbar data-csrf="{{ csrf_token or '' }}" href="/">{{ brand_org | upper }} <span class="dim">//</span> SYNC STATUS</a>
 {# The sync dashboard's own pages come first; everything after a "//" is a
    separate platform or a download, not a page of this app. Each separator
    lives with the item it precedes so an absent item takes its "//" with
@@ -45,7 +55,15 @@
 <span class="session">
   {% if session_user %}
     <span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>
-    <form method="post" action="/logout" class="inline-form"><button class="btn" type="submit">[ LOGOUT ]</button></form>
+    {# A PLAIN form, not htmx, so it does not inherit base.html's hx-headers --
+       the token has to travel as a field. app.py's csrf_gate reads either. #}
+    <form method="post" action="/logout" class="inline-form">
+      <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+      <button class="btn" type="submit">[ LOGOUT ]</button></form>
+    <form method="post" action="/logout-everywhere" class="inline-form"
+          title="revoke this account's sessions on every device -- use it if a machine was lost">
+      <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+      <button class="btn" type="submit">[ LOGOUT ALL ]</button></form>
   {% else %}
     <a class="btn" href="/login">[ LOGIN ]</a>
   {% endif %}

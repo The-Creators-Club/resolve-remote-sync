@@ -63,6 +63,8 @@ from common import (
     build_marker_write_cmd,
     cli,
     get_backend,
+    project_acl_mode,
+    project_group_name,
     project_path,
     project_path_rel,
     project_relative_dirs,
@@ -71,6 +73,7 @@ from common import (
     set_host_key_pin,
     shell_quote,
     slugify,
+    snapshot_before,
     validate_slug,
 )
 
@@ -98,7 +101,8 @@ def ancestor_dirs(projects_root: str, base: str) -> list[str]:
 
 
 def build_remote_script(base: str, owner: str, group: str, slug: str = "",
-                        projects_root: str = "", backend=None) -> str:
+                        projects_root: str = "", backend=None,
+                        project_group: str = "") -> str:
     """Bash snippet run on the NAS. Prints one line per folder: created or
     already-existed, then (re-)applies ownership/permissions and reports
     that too. Runs as root via sudo -S so it works regardless of what
@@ -178,7 +182,16 @@ def build_remote_script(base: str, owner: str, group: str, slug: str = "",
     # override mode bits outright). Backend-supplied lines rather than an
     # executed step, because this script sends ONE script down ONE ssh session
     # and server/tests runs that script under a stub sudo (2026-08-17).
-    lines.extend((backend or get_backend()).set_tree_acl(base, owner, group))
+    #
+    # With [stack] project_acl = "per-project" the subtree belongs to
+    # proj-<slug> instead of the fleet-wide editors group, and the containers
+    # above it get the sticky bit -- otherwise per-project groups protect
+    # nothing, since deleting a directory needs write on its PARENT
+    # (docs/TENANCY.md, COMMERCIAL_READINESS.md item 7).
+    containers = ([projects_root.rstrip("/")] + ancestor_dirs(projects_root, base)
+                  if project_group and projects_root else [])
+    lines.extend((backend or get_backend()).set_tree_acl(
+        base, owner, group, project_group=project_group, container_dirs=containers))
     return "\n".join(lines)
 
 
@@ -197,6 +210,11 @@ def main():
     add_host_key_arg(ap)
     add_site_arg(ap)
     add_nas_kind_arg(ap)
+    ap.add_argument("--require-snapshot", action="store_true",
+                     help="stop (exit 2, nothing created) if the pre-chown snapshot "
+                          "cannot be taken. Default is best-effort: warn and continue, "
+                          "because a NAS with no snapshot API must not be a NAS where "
+                          "projects cannot be created.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     set_host_key_pin(args.host_key)
@@ -224,8 +242,30 @@ def main():
     print(f"  (only written if {MARKER_FILENAME} is absent -- an existing identity is kept)")
     print(f"Template folders ({len(TEMPLATE_FOLDERS)}): {', '.join(TEMPLATE_FOLDERS)}")
 
+    # Per-project isolation, off unless the site asks for it (docs/TENANCY.md).
+    # The group is created through the platform's identity API rather than a
+    # `groupadd` in the remote script, so it is the same object the dashboard's
+    # provisioner and setup_editor_account.py --project manage membership on.
+    project_group = ""
+    if project_acl_mode() == "per-project":
+        project_group = project_group_name(slug)
+        print(f"Per-project ACL: {base} will belong to {args.owner}:{project_group}, "
+              f"and the directories above it get the sticky bit")
+        backend.ensure_group(project_group, args.dry_run)
+
     script = build_remote_script(base, args.owner, args.group, slug=slug,
-                                 projects_root=args.projects_root, backend=backend)
+                                 projects_root=args.projects_root, backend=backend,
+                                 project_group=project_group)
+
+    # The script below ends in `chown -R` + a recursive chmod, as root, against
+    # a path assembled from free text. That is the single most expensive thing
+    # this package can get wrong, and until 2026-08-17 there was nothing behind
+    # it (COMMERCIAL_READINESS.md item 8). Snapshot first; best-effort unless
+    # --require-snapshot, and it is the whole tree that is snapshotted, not
+    # `base`, because a snapshot is per dataset/share.
+    snapshot_before("setup_tree", args.projects_root, dry_run=args.dry_run,
+                    require=args.require_snapshot, backend=backend)
+
     rc, out, err = run_ssh(script, dry_run=args.dry_run)
 
     if args.dry_run:

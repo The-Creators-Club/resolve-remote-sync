@@ -21,6 +21,18 @@ log = logging.getLogger("ccsync.dashboard.settings")
 # what tells everyone whether their footage is syncing, and it keeps doing
 # that with no NAS credentials at all (only /admin/users and the login probe
 # depend on these).
+def _looks_like_ed25519_pubkey(value: str) -> bool:
+    """base64 of exactly 32 bytes (COMMERCIAL_READINESS.md item 4, 2026-08-17)."""
+    import base64
+
+    if not value:
+        return False
+    try:
+        return len(base64.b64decode(value, validate=True)) == 32
+    except Exception:
+        return False
+
+
 _SITE_IDENTITY_ENV = {
     "smb_host": "DASH_SMB_HOST",
     "nas_host": "DASH_NAS_HOST (or TRUENAS_HOST)",
@@ -38,6 +50,16 @@ class Settings:
     # Reports are rejected when no token is configured, unless explicitly
     # opted out (lab use). The UI itself is tailnet-gated, not the API write.
     report_token_optional: bool = False
+    # Whether the ONE shared fleet token above is still accepted, alongside the
+    # per-editor tokens an admin mints on the Users page (COMMERCIAL_READINESS.md
+    # item 15, 2026-08-17). True today because every deployed companion holds
+    # only the shared token, and turning it off before the fleet has migrated
+    # takes every machine off the dashboard at once. TURN IT OFF
+    # (DASH_SHARED_REPORT_TOKEN_ENABLED=0) once the boot log stops naming
+    # machines on the shared credential -- that is the whole point of the
+    # per-editor tokens: revocable per person, and not one leak away from the
+    # entire fleet.
+    shared_report_token_enabled: bool = True
 
     # Login (per-editor project selection). Phase-0 verified: SMB session
     # setup on :445 is the only credential check that works for non-admin
@@ -56,6 +78,51 @@ class Settings:
     # working while a future TLS front-end gets the flag for free the moment
     # it terminates https. "1"/"0" force it on/off.
     cookie_secure: str = "auto"
+    # Whose X-Forwarded-Proto is believed (COMMERCIAL_READINESS.md item 6/H1,
+    # 2026-08-17). It used to be everyone's: any host on the tailnet could
+    # send the header and decide whether the Secure flag went on. csv of IPs
+    # and/or CIDRs; the default is loopback only, which is where Tailscale
+    # Serve and a compose-network sidecar both arrive. A dashboard published
+    # through a proxy on the DOCKER HOST is seen as coming from the bridge
+    # gateway (e.g. 172.17.0.1) -- add it here, or set DASH_COOKIE_SECURE=1
+    # and skip the question entirely (which is the documented recipe).
+    trusted_proxies: str = "127.0.0.1,::1"
+    # Server-side session lifetimes (seconds). Idle is refreshed by activity,
+    # absolute never is. See sessions.py.
+    session_idle_seconds: float = 12 * 3600
+    session_absolute_seconds: float = 7 * 24 * 3600
+    # THE test/dev escape hatch, and the only one. It turns off the boot-time
+    # secret-strength refusal and the "an unknown session id is not a session"
+    # rule, both of which the suite would otherwise trip on every hand-minted
+    # cookie and every `session_secret="test-secret"`. create_app also honours
+    # the DASH_DEV_INSECURE env var, the same way it honours BROLL_INGEST_TOKEN
+    # from the environment, so the suite can set it once. It is logged, loudly,
+    # at every boot: it must never be set on a deployment.
+    dev_insecure: bool = False
+
+    # ---------------------------------------------------------------- OIDC
+    # DASH_AUTH_METHOD=oidc (COMMERCIAL_READINESS.md item 12, 2026-08-17). The
+    # seam already existed with one implementation ("smb"); this is the second.
+    # Blank issuer + method "oidc" is refused at boot rather than silently
+    # falling back to passwords.
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_scopes: str = "openid profile email"
+    # The claim the REST of the dashboard keys on. Every join in this app --
+    # Syncthing device names, selections, NAS accounts -- is a NAS username, so
+    # the IdP has to be told to publish one that matches. preferred_username is
+    # what Keycloak/Authentik/Entra all put a login name in.
+    oidc_username_claim: str = "preferred_username"
+    # Admin mapping: a claim to look at (e.g. "groups" or "roles") and the
+    # value(s) that grant admin. Empty claim = admin comes from
+    # DASH_ADMIN_USERS alone, which is the safe default.
+    oidc_admin_claim: str = ""
+    oidc_admin_values: frozenset[str] = frozenset()
+    # Absolute redirect URI registered with the IdP. Blank = derived from the
+    # request, which is right behind a single known front-end and wrong behind
+    # anything that rewrites Host -- so it is settable.
+    oidc_redirect_url: str = ""
 
     # NAS API access for the admin "add/approve users" section (creating
     # editor accounts, setting known passwords). Optional: that section is
@@ -71,6 +138,14 @@ class Settings:
     nas_host: str = ""
     nas_user: str = ""
     nas_pw: str = ""
+    # A SCOPED TrueNAS API key, PREFERRED over nas_pw when both are set
+    # (DASH_NAS_API_KEY / TRUENAS_API_KEY, written by the deploy). The password
+    # in this container is root-equivalent and readable with `docker inspect`
+    # or from any code execution inside it, while this UI only ever calls
+    # user/group/sharing.smb -- COMMERCIAL_READINESS.md item 6, finding H3.
+    # Mint one with `python server/create_api_key.py`. TrueNAS only: DSM has no
+    # API-key concept, so a Synology site keeps using the password.
+    nas_api_key: str = ""
     # TLS verification for those calls (they carry the NAS password). Default
     # False preserves the existing behaviour -- the NAS presents a self-signed
     # cert -- but it is a knob: "1" to verify, or a path to a CA bundle.
@@ -111,6 +186,16 @@ class Settings:
     # secret (a Syncthing device ID is a public key), which is why the route
     # is open -- see api.api_site.
     site_org_name: str = ""
+    # The same organisation, short enough for a topbar or a tray tooltip
+    # ("CC" for "Creators Club"). Blank means "use org_name"; both blank means
+    # "use the product name", which is what an unbranded install shows
+    # (2026-08-17, COMMERCIAL_READINESS.md item 10).
+    site_org_short: str = ""
+    # THE VENDOR'S product name, not the customer's -- it is the one brand
+    # string in this file that has a non-blank default, because every
+    # deployment is running the same product and a blank window title helps
+    # nobody. A reseller who ships this under their own name sets it.
+    site_product_name: str = "CC Sync"
     site_tree_name: str = ""
     # The drive letter the editor tree is mapped at on Windows. Hardcoded to
     # P: everywhere in the companion by an explicit decision (2026-07-26); the
@@ -141,11 +226,36 @@ class Settings:
     site_nas_syncthing_id: str = ""
     site_dashboard_url: str = ""
 
+    # OPTIONAL FEATURES this site has turned on, published in the manifest as
+    # `features` (COMMERCIAL_READINESS.md items 2 + 3, 2026-08-17). BOTH
+    # DEFAULT OFF, and off is the vendor build's shape: the customer decides
+    # whether downloading third-party YouTube material is lawful for them, so
+    # /ytdl is not mounted, the fleet download routes 404 and every companion
+    # hides its YouTube items until this site says otherwise
+    # (docs/legal/YOUTUBE_FEATURE_NOTICE.md).
+    #
+    # `youtube_unblock` is narrower still and is the customer asserting they
+    # may get past YouTube's anti-automation measures: it is what provisions
+    # the PO-token provider, the deno n-challenge solver and the cookie
+    # sign-in. It means nothing without site_feature_youtube_download.
+    site_feature_youtube_download: bool = False
+    site_feature_youtube_unblock: bool = False
+
     # Published companion builds (the upgrade channel). Empty = default to a
     # "packages" dir next to the SQLite file, which in production lands under
     # /data -- the only volume that survives a redeploy -- with no compose
     # change needed.
     packages_dir: str = ""
+
+    # Base64 Ed25519 public keys the publish route accepts release signatures
+    # from (DASH_RELEASE_PUBKEYS, comma- or whitespace-separated). Empty means
+    # the upgrade channel is UNAUTHENTICATED, and publishing is refused rather
+    # than falling back -- a dashboard that will accept an unsigned build is
+    # one compromise away from handing the fleet an arbitrary binary it then
+    # renames over the running companion (COMMERCIAL_READINESS.md item 4,
+    # 2026-08-17). A customer's dashboard pins the VENDOR's key here; a vendor
+    # rotating a key lists both for the overlap release.
+    release_pubkeys: tuple[str, ...] = ()
 
     # Serve the b-roll search UI at /broll from inside this process, so editors
     # get one URL and one login instead of a second service to reach and sign
@@ -239,6 +349,28 @@ class Settings:
             effective = new_value if new_value else old_value
             object.__setattr__(self, neutral, effective)
             object.__setattr__(self, legacy, effective)
+        # DASH_DEV_INSECURE is honoured from the environment even for a
+        # hand-built Settings (2026-08-17, COMMERCIAL_READINESS.md item 15).
+        # The dashboard's suite constructs Settings(...) directly in sixteen
+        # files with a deliberately weak `session_secret` and hand-minted
+        # cookies; making the one dev flag reachable here is what lets the
+        # boot-time secret floor and the unknown-session rule be strict
+        # EVERYWHERE ELSE instead of being softened into uselessness. Same
+        # precedent as create_app reading BROLL_INGEST_TOKEN from the
+        # environment.
+        if not self.dev_insecure and os.environ.get("DASH_DEV_INSECURE", "") == "1":
+            object.__setattr__(self, "dev_insecure", True)
+        # DASH_REPORT_TOKEN_OPTIONAL is one env var away from unauthenticated
+        # writes to the fleet's status, so it is no longer a shipped code path
+        # (COMMERCIAL_READINESS.md item 15): it now does nothing at all unless
+        # the dev flag is also on, and says so.
+        if self.report_token_optional and not self.dev_insecure:
+            object.__setattr__(self, "report_token_optional", False)
+            log.error(
+                "DASH_REPORT_TOKEN_OPTIONAL is set but IGNORED: it makes /api/v1/report "
+                "an unauthenticated write path and is not a shipped configuration. Set "
+                "DASH_REPORT_TOKEN instead (a lab may set DASH_DEV_INSECURE=1 as well)."
+            )
         # See smb_host: the SMB probe target defaults to the NAS itself. A
         # deploy that ran before DASH_SMB_HOST existed in the compose env would
         # otherwise refuse every login the moment this code lands (found by the
@@ -288,6 +420,10 @@ class Settings:
             port=int(num("DASH_PORT", 8480)),
             report_token=env.get("DASH_REPORT_TOKEN", ""),
             report_token_optional=env.get("DASH_REPORT_TOKEN_OPTIONAL", "") == "1",
+            # Default TRUE, and only an explicit "0" turns it off: a typo in
+            # this variable must not silently disconnect the fleet.
+            shared_report_token_enabled=(
+                env.get("DASH_SHARED_REPORT_TOKEN_ENABLED", "").strip() != "0"),
             auth_method=env.get("DASH_AUTH_METHOD", "smb"),
             smb_host=env.get("DASH_SMB_HOST", ""),
             session_secret=env.get("DASH_SESSION_SECRET", ""),
@@ -295,14 +431,33 @@ class Settings:
                 u.strip().lower() for u in env.get("DASH_ADMIN_USERS", "").split(",") if u.strip()
             ),
             cookie_secure=(env.get("DASH_COOKIE_SECURE", "").strip().lower() or "auto"),
+            trusted_proxies=(env.get("DASH_TRUSTED_PROXIES", "").strip() or "127.0.0.1,::1"),
+            session_idle_seconds=num("DASH_SESSION_IDLE_SECONDS", 12 * 3600),
+            session_absolute_seconds=num("DASH_SESSION_ABSOLUTE_SECONDS", 7 * 24 * 3600),
+            dev_insecure=env.get("DASH_DEV_INSECURE", "") == "1",
+            oidc_issuer=env.get("DASH_OIDC_ISSUER", "").strip().rstrip("/"),
+            oidc_client_id=env.get("DASH_OIDC_CLIENT_ID", "").strip(),
+            oidc_client_secret=env.get("DASH_OIDC_CLIENT_SECRET", ""),
+            oidc_scopes=(env.get("DASH_OIDC_SCOPES", "").strip() or "openid profile email"),
+            oidc_username_claim=(env.get("DASH_OIDC_USERNAME_CLAIM", "").strip()
+                                 or "preferred_username"),
+            oidc_admin_claim=env.get("DASH_OIDC_ADMIN_CLAIM", "").strip(),
+            oidc_admin_values=frozenset(
+                v.strip().lower() for v in env.get("DASH_OIDC_ADMIN_VALUES", "").split(",")
+                if v.strip()
+            ),
+            oidc_redirect_url=env.get("DASH_OIDC_REDIRECT_URL", "").strip(),
             nas_kind=(env.get("DASH_NAS_KIND", "").strip().lower() or "truenas"),
             nas_host=first("DASH_NAS_HOST", "TRUENAS_HOST"),
             nas_user=first("DASH_NAS_USER", "TRUENAS_USER"),
             nas_pw=first("DASH_NAS_PW", "TRUENAS_PW"),
+            nas_api_key=first("DASH_NAS_API_KEY", "TRUENAS_API_KEY"),
             nas_verify_ssl=verify_ssl("DASH_NAS_VERIFY_SSL", "TRUENAS_VERIFY_SSL"),
             nas_homes_parent=env.get("DASH_NAS_HOMES_PARENT", "").strip().rstrip("/"),
             nas_service_user=env.get("DASH_NAS_SERVICE_USER", "").strip(),
             site_org_name=env.get("DASH_SITE_ORG_NAME", "").strip(),
+            site_org_short=env.get("DASH_SITE_ORG_SHORT", "").strip(),
+            site_product_name=env.get("DASH_SITE_PRODUCT_NAME", "").strip() or "CC Sync",
             site_tree_name=env.get("DASH_SITE_TREE_NAME", "").strip(),
             site_canonical_prefix=env.get("DASH_SITE_CANONICAL_PREFIX", "").strip() or "P:\\",
             site_remote_root=env.get("DASH_SITE_REMOTE_ROOT", "").strip(),
@@ -315,9 +470,26 @@ class Settings:
             site_rclone_remote=env.get("DASH_SITE_RCLONE_REMOTE", "").strip(),
             site_nas_syncthing_id=env.get("DASH_SITE_NAS_SYNCTHING_ID", "").strip(),
             site_dashboard_url=env.get("DASH_SITE_DASHBOARD_URL", "").strip().rstrip("/"),
+            # "1" and nothing else, matching DASH_BROLL_ENABLED: an unset,
+            # empty, misspelt or "true"-shaped value all mean OFF, because the
+            # off state is the one that is safe to be wrong about here.
+            site_feature_youtube_download=env.get("DASH_SITE_YOUTUBE_DOWNLOAD", "") == "1",
+            site_feature_youtube_unblock=env.get("DASH_SITE_YOUTUBE_UNBLOCK", "") == "1",
             broll_enabled=env.get("DASH_BROLL_ENABLED", "") == "1",
             broll_ingest_token=env.get("BROLL_INGEST_TOKEN", "").strip(),
             packages_dir=env.get("DASH_PACKAGES_DIR", ""),
+            # Only entries that actually decode to a 32-byte Ed25519 key are
+            # kept: the shipped compose sets "REPLACE_ME", and a placeholder
+            # left in place must produce "no release key configured" (a 503
+            # naming the variable) rather than "signature rejected" on every
+            # publish, which reads like a broken signing key instead of an
+            # unfinished deployment.
+            release_pubkeys=tuple(
+                k for k in (
+                    part.strip()
+                    for part in env.get("DASH_RELEASE_PUBKEYS", "").replace(",", " ").split()
+                ) if _looks_like_ed25519_pubkey(k)
+            ),
             projects_dir=env.get("DASH_PROJECTS_DIR", ""),
             syncthing_data_prefix=env.get("DASH_SYNCTHING_DATA_PREFIX", "/data/Projects"),
             syncthing_assets_prefix=env.get("DASH_SYNCTHING_ASSETS_PREFIX", "/data/Assets"),

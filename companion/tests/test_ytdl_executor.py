@@ -44,7 +44,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from ccsync_companion import broll_server, music_server, ytdl_common
+from ccsync_companion import broll_server, loopback_guard, music_server, ytdl_common
 from ccsync_companion import ytdl_executor as ex
 from ccsync_companion import ytdl_server
 
@@ -314,7 +314,7 @@ def make_cfg(tmp_path, **overrides) -> dict:
         "dashboard_token": "fleet-token",
         "local_root": str(tmp_path / "tree"),
         "canonical_prefix": "P:\\",
-        "editor_name": "ruskin",
+        "editor_name": "editor2",
         "mode": "editor",
         "ytdl_local_downloads": True,
         "ffmpeg_path": fake_ffmpeg(tmp_path),
@@ -324,18 +324,32 @@ def make_cfg(tmp_path, **overrides) -> dict:
 
 
 def make_deps(tmp_path, fleet=None, ytdlp=None, cfg=None, selection=None,
-              editor="ruskin", ytdlp_ok=True, sleeps=None) -> ex.Deps:
+              editor="editor2", ytdlp_ok=True, sleeps=None) -> ex.Deps:
     cfg = cfg if cfg is not None else make_cfg(tmp_path)
     if ytdlp is not None:
         cfg["ytdlp_path"] = str(ytdlp.script)
     if selection is None:
         selection = [{"slug": "energy", "label": LABEL, "rel_path": LABEL,
                       "active": True}]
+    if editor:
+        # The rights/ToS attestation, per machine and per editor name
+        # (2026-08-17, COMMERCIAL_READINESS.md item 2). capabilities() refuses
+        # without it, so a suite that did not record it would be testing the
+        # gate in every one of these. conftest cannot do it -- it is keyed on
+        # a name only the test knows.
+        from ccsync_companion import ytdl_attestation
+
+        ytdl_attestation.accept(editor)
     deps = ex.Deps(
         cfg,
         ytdlp=FakeYtDlpManager(ok=ytdlp_ok),
         editor_fn=lambda: editor or None,
         selection_fn=(lambda: selection),
+        # The dashboard-signed identity token the fleet routes verify (H5).
+        # Opaque here: this side only has to SEND it, and a companion with no
+        # token has no capability.
+        identity_token_fn=(lambda: f"v2.identity.token-for-{editor}"
+                           if editor else None),
         request_fn=(fleet.request if fleet is not None else None),
         run_fn=(ytdlp.run_fn if ytdlp is not None else None),
         sleep_fn=(sleeps.append if sleeps is not None else (lambda seconds: None)),
@@ -553,14 +567,19 @@ def test_the_claim_carries_what_the_server_gates_on(tmp_path, ytdlp):
 
     method, path, body, headers = fleet.claimed[0]
     assert (method, path) == ("POST", "/ytdl/api/jobs/7/claim")
-    assert body == {"editor": "ruskin", "ytdlp_version": "2026.08.11",
+    assert body == {"editor": "editor2", "ytdlp_version": "2026.08.11",
                     "template_version": ytdl_common.TEMPLATE_VERSION,
                     "sidecar_version": ytdl_common.SIDECAR_VERSION,
                     "scope_qualities": ["480p", "720p", "1080p"],
                     "free_bytes": 500 * 1024 ** 3}
     assert body["scope_qualities"] == list(ex.SCOPE_QUALITIES)
     assert headers["X-CCSync-Token"] == "fleet-token"
-    assert headers["X-CCSync-Identity"] == "ruskin"
+    # H5 (2026-08-17): the identity header carries the dashboard-SIGNED token,
+    # not the editor's name. It used to be the bare name, which meant the
+    # shared fleet token -- held by every machine -- was the only thing between
+    # a companion and another editor's job. The body's `editor` is still sent
+    # (an older server reads it) and the server now ignores it.
+    assert headers["X-CCSync-Identity"] == "v2.identity.token-for-editor2"
 
 
 def test_the_argv_is_the_shared_naming_contract(tmp_path, ytdlp):
@@ -1276,7 +1295,7 @@ def test_capabilities_is_ok_when_everything_is_in_place(tmp_path):
     deps = make_deps(tmp_path)
     cap = ex.capabilities(deps)
     assert cap["ok"] is True and cap["reason"] is None
-    assert cap["editor"] == "ruskin"
+    assert cap["editor"] == "editor2"
     assert cap["ytdlp_version"] == "2026.08.11"
     assert cap["template_version"] == ytdl_common.TEMPLATE_VERSION
     assert cap["sidecar_version"] == ytdl_common.SIDECAR_VERSION
@@ -1310,9 +1329,9 @@ def test_capabilities_never_runs_the_binary(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("overrides,editor,ytdlp_ok,expected", [
-    ({"ytdl_local_downloads": False}, "ruskin", True, ex.REASON_DISABLED),
-    ({"dashboard_url": ""}, "ruskin", True, ex.REASON_NO_DASHBOARD),
-    ({"dashboard_token": ""}, "ruskin", True, ex.REASON_NO_DASHBOARD),
+    ({"ytdl_local_downloads": False}, "editor2", True, ex.REASON_DISABLED),
+    ({"dashboard_url": ""}, "editor2", True, ex.REASON_NO_DASHBOARD),
+    ({"dashboard_token": ""}, "editor2", True, ex.REASON_NO_DASHBOARD),
     ({}, "", True, ex.REASON_NO_EDITOR),
     ({}, None, True, ex.REASON_NO_EDITOR),
 ])
@@ -1369,7 +1388,11 @@ def test_capabilities_passes_the_sidecars_own_message_through(tmp_path):
 
 
 def test_no_sidecar_manager_at_all_is_no_capability(tmp_path):
-    deps = ex.Deps(make_cfg(tmp_path), editor_fn=lambda: "ruskin")
+    from ccsync_companion import ytdl_attestation
+
+    ytdl_attestation.accept("editor2")
+    deps = ex.Deps(make_cfg(tmp_path), editor_fn=lambda: "editor2",
+                   identity_token_fn=lambda: "v2.identity.token")
     cap = ex.capabilities(deps)
     assert cap["ok"] is False and "sidecar" in cap["reason"]
 
@@ -1616,7 +1639,7 @@ def test_a_410_anywhere_raises_lease_lost_and_nothing_else_does(tmp_path):
         return answers["status"], {"detail": "gone"}
 
     deps = ex.Deps(make_cfg(tmp_path), request_fn=request)
-    client = ex.FleetClient(deps, "ruskin")
+    client = ex.FleetClient(deps, "editor2")
     with pytest.raises(ex.LeaseLost):
         client.heartbeat(7)
     with pytest.raises(ex.LeaseLost):
@@ -1634,11 +1657,18 @@ def test_default_request_turns_an_http_error_into_an_answer(monkeypatch):
     is a caller a test stubs wrong."""
     import urllib.error
 
-    def _raise(req, timeout=None):
-        raise urllib.error.HTTPError(req.full_url, 410, "Gone", {},
-                                     _BytesResponse(b'{"detail": "reclaimed"}'))
+    class _Opener:
+        # Stubbed at the OPENER, not at urlopen: since 2026-08-17 this request
+        # goes through upgrade.build_no_redirect_opener so the fleet token can
+        # never be re-sent to a redirect target (COMMERCIAL_READINESS.md item
+        # 15). Patching urlopen would leave the test passing against code that
+        # no longer calls it.
+        def open(self, req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 410, "Gone", {},
+                                         _BytesResponse(b'{"detail": "reclaimed"}'))
 
-    monkeypatch.setattr(ex.urllib.request, "urlopen", _raise)
+    monkeypatch.setattr(ex.upgrade_mod, "build_no_redirect_opener",
+                        lambda *handlers: _Opener())
     status, parsed = ex.default_request("POST", "http://d/x", {"a": 1}, {}, 5)
     assert status == 410 and parsed == {"detail": "reclaimed"}
 
@@ -1662,7 +1692,14 @@ class _BytesResponse:
 
 
 class Client:
-    """test_ytdl_server.Client's shape -- same listener, same conventions."""
+    """test_ytdl_server.Client's shape -- same listener, same conventions.
+
+    Every POST carries the loopback token: since 2026-08-17
+    (COMMERCIAL_READINESS.md item 5) a state-changing request on 8899 needs an
+    allowed Origin or that header, and the executor's callers are the SPA on
+    the dashboard origin and local ones. Without it every /ytdl/download here
+    was answering 403 instead of the status the test is about.
+    """
 
     def __init__(self, port: int):
         self.port = port
@@ -1683,7 +1720,9 @@ class Client:
         payload = json.dumps(obj).encode("utf-8")
         conn.request("POST", path, body=payload,
                      headers={"Content-Type": "application/json",
-                              "Content-Length": str(len(payload))})
+                              "Content-Length": str(len(payload)),
+                              loopback_guard.TOKEN_HEADER:
+                                  loopback_guard.read_token() or ""})
         resp = conn.getresponse()
         body = resp.read()
         conn.close()
@@ -1763,7 +1802,9 @@ def test_a_malformed_download_body_is_400_not_a_dead_request(live_server):
     conn = http.client.HTTPConnection("127.0.0.1", client.port, timeout=5)
     conn.request("POST", "/ytdl/download", body=b"{not json",
                  headers={"Content-Type": "application/json",
-                          "Content-Length": "9"})
+                          "Content-Length": "9",
+                          loopback_guard.TOKEN_HEADER:
+                              loopback_guard.read_token() or ""})
     resp = conn.getresponse()
     body = json.loads(resp.read())
     conn.close()

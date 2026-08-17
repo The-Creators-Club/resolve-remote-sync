@@ -23,6 +23,13 @@ _LIBRARY = _TMP / 'library'
 _LIBRARY.mkdir(parents=True, exist_ok=True)
 os.environ['DATA_ROOT'] = str(_TMP)
 os.environ['MUSIC_ROOT'] = str(_LIBRARY)
+# Ingest is fail-closed since 2026-08-17 (COMMERCIAL_READINESS.md item 15): a
+# standalone musicweb -- which is exactly what this suite drives -- refuses the
+# write path without MUSIC_INGEST_TOKEN. The suite therefore runs configured
+# like a deployment, and the `client` fixture sends the matching header on every
+# request. Tests about the gate itself clear one or the other.
+INGEST_TOKEN = 'test-music-ingest-token-0123456789'
+os.environ['MUSIC_INGEST_TOKEN'] = INGEST_TOKEN
 
 from musicweb import db                          # noqa: E402
 from musicweb.main import app                    # noqa: E402
@@ -107,5 +114,5 @@ def seeded_db():
 @pytest.fixture()
 def client(seeded_db):
     from fastapi.testclient import TestClient
-    with TestClient(app) as c:
+    with TestClient(app, headers={'X-Ingest-Token': INGEST_TOKEN}) as c:
         yield c

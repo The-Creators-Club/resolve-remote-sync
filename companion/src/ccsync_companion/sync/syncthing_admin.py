@@ -67,7 +67,7 @@ PARTIAL_IGNORE_LINES = ["(?i)**/*.partial", "(?i)*.partial"]
 # protection retrofit set ignoreDelete=True on EDITOR folders too, the
 # rename/delete the worker performs on completion never follows: what lands
 # here is permanent until someone deletes it by hand (27 orphans, ~1.6 GB,
-# three days, editor ruskin's machine 2026-08-13/14). rclone lane B has always
+# three days, one editor's machine 2026-08-13/14). rclone lane B has always
 # excluded these (rclone_lane.build_filter_rules_down), so lane C was the last
 # leak.
 #
@@ -226,7 +226,7 @@ class SyncthingAdmin:
         # config_xml_path is authoritative; the default wiring tries every
         # known home's key against the live instance (a preserved-but-stale
         # managed home 403'ing against a veteran stock instance silently
-        # disabled every sequencer write on alex_laptop, 2026-07-26).
+        # disabled every sequencer write on owen_laptop, 2026-07-26).
         self.api_key_paths: list[Path] = (
             [config_xml_path] if config_xml_path else default_api_key_paths()
         )
@@ -606,4 +606,18 @@ class SyncthingAdmin:
         return self._request(
             "GET",
             self._query("/rest/db/completion", {"folder": folder_id, "device": device_id}),
+        )
+
+    def folder_completion(self, folder_id: str) -> Any:
+        """Aggregate completion for a folder across every device sharing it.
+
+        `/rest/db/completion?folder=X` with NO device is Syncthing's own
+        "how far behind is this folder, everywhere" answer -- `completion`
+        (a percentage), `needBytes`, `needItems`. completion() above needs a
+        device id, and the caller that matters here (the "Remove from this
+        machine" gate, COMMERCIAL_READINESS.md item 9, 2026-08-17) does not
+        know one: it is asking whether ANYTHING this editor made has yet to
+        reach ANYBODY, immediately before deleting the only copy."""
+        return self._request(
+            "GET", self._query("/rest/db/completion", {"folder": folder_id})
         )

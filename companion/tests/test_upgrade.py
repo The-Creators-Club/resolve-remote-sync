@@ -1,10 +1,18 @@
 """Self-upgrade tests: the availability state machine, download+verify, and
 the rename-swap in apply() with injected replace/spawn recorders -- in the
-never-raise style of test_reporter.py."""
+never-raise style of test_reporter.py.
+
+Every offer here is SIGNED (COMMERCIAL_READINESS.md item 4, 2026-08-17) with
+a throwaway key this module generates, trusted via an autouse fixture that
+swaps RELEASE_PUBKEYS for the duration. That is deliberate: an unsigned offer
+is now refused everywhere, so a helper that produced one would test the
+refusal path in every test rather than the path it names."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
+import json
 import os
 import pathlib
 import subprocess
@@ -14,17 +22,60 @@ from pathlib import Path
 import pytest
 
 from ccsync_companion import config as config_mod
+from ccsync_companion import ed25519
+from ccsync_companion import release_pubkey
 from ccsync_companion import upgrade as upgrade_mod
 from ccsync_companion.upgrade import UpgradeManager, cleanup_old_exe, parse_upgrade
 
+# A fixed seed, not secrets.token_bytes: a failing signature test should fail
+# the same way twice.
+TEST_SEED = bytes(range(32))
+TEST_PUBKEY = base64.b64encode(ed25519.public_key(TEST_SEED)).decode("ascii")
+OTHER_SEED = bytes(range(32, 64))
+OTHER_PUBKEY = base64.b64encode(ed25519.public_key(OTHER_SEED)).decode("ascii")
 
-def _info(version="9.9.9", body=b"new-exe-bytes", url="/api/v1/companion/package/windows/9.9.9"):
-    return {
+
+@pytest.fixture(autouse=True)
+def _trust_the_test_key(monkeypatch, tmp_path):
+    """Trust the throwaway key, and keep the downgrade floor out of the real
+    ~/.ccsync -- note_floor() writes, and a test must never raise this
+    machine's actual floor."""
+    monkeypatch.setattr(release_pubkey, "RELEASE_PUBKEYS", (TEST_PUBKEY,))
+    # Beside tmp_path, not inside it: several tests assert that a refused
+    # download left the destination directory completely empty, and tmp_path
+    # is that directory.
+    floor = tmp_path.with_name(tmp_path.name + "-floor") / "upgrade_floor.json"
+    monkeypatch.setattr(upgrade_mod, "floor_path", lambda cfg: floor)
+
+
+def _sign(record, seed=TEST_SEED):
+    return base64.b64encode(
+        ed25519.sign(seed, release_pubkey.canonical_record(record))
+    ).decode("ascii")
+
+
+def _info(version="9.9.9", body=b"new-exe-bytes", url="/api/v1/companion/package/windows/9.9.9",
+          min_version="0.0.0", seed=TEST_SEED, sign=True, **overrides):
+    record = {
+        "kind": "companion",
+        "platform": "windows",
         "version": version,
-        "url": url,
+        "filename": f"ccsync-companion-{version}.exe",
         "sha256": hashlib.sha256(body).hexdigest(),
         "size_bytes": len(body),
+        "min_version": min_version,
+        "published_at": "2026-08-17T00:00:00Z",
+        "signed_binary": False,
     }
+    record.update(overrides)
+    info = dict(record)
+    info["url"] = url
+    if sign:
+        info["signature"] = _sign(record, seed)
+        info["pubkey_id"] = release_pubkey.pubkey_id(
+            base64.b64encode(ed25519.public_key(seed)).decode("ascii")
+        )
+    return info
 
 
 class _FakeResponse:
@@ -41,6 +92,19 @@ class _FakeResponse:
         return False
 
 
+def _no_download_left(dest_dir) -> bool:
+    """No partial/finished update remains in the exe's directory.
+
+    Was `list(dest_dir.iterdir()) == []` until 2026-08-17, which pinned "the
+    directory is empty" rather than "the download was cleaned up" -- and then
+    conftest's per-test ~/.ccsync isolation started materialising a directory
+    inside tmp_path. What these tests are about is the ~20 MB temp file, so
+    say that."""
+    return not any(
+        p.name.startswith("ccsync-companion.new") for p in Path(dest_dir).iterdir()
+    )
+
+
 def _fake_open(body: bytes, calls=None):
     def opener(url, headers, timeout):
         if calls is not None:
@@ -50,7 +114,9 @@ def _fake_open(body: bytes, calls=None):
 
 
 def _cfg(**overrides):
-    cfg = {"dashboard_url": "http://dash.example.com", "dashboard_token": "tok123"}
+    # A tailnet address, not a public hostname: plain http off the tailnet is
+    # refused by transport_ok() since item 4 (2026-08-17).
+    cfg = {"dashboard_url": "http://100.64.0.1:8480", "dashboard_token": "tok123"}
     cfg.update(overrides)
     return cfg
 
@@ -126,7 +192,7 @@ def test_download_good_sha(tmp_path):
     assert path.read_bytes() == body
     url, headers, _timeout = calls[0]
     # relative url absolutized against dashboard_url, token header attached
-    assert url == "http://dash.example.com/api/v1/companion/package/windows/9.9.9"
+    assert url == "http://100.64.0.1:8480/api/v1/companion/package/windows/9.9.9"
     assert headers["X-CCSync-Token"] == "tok123"
 
 
@@ -134,7 +200,7 @@ def test_download_bad_sha_removes_temp(tmp_path):
     mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"tampered"))
     info = _info(body=b"expected-bytes")
     assert mgr.download_and_verify(info, tmp_path) is None
-    assert list(tmp_path.iterdir()) == []
+    assert _no_download_left(tmp_path)
 
 
 def test_download_network_error(tmp_path):
@@ -142,7 +208,7 @@ def test_download_network_error(tmp_path):
         raise OSError("connection refused")
     mgr = UpgradeManager(_cfg(), http_open=opener)
     assert mgr.download_and_verify(_info(), tmp_path) is None
-    assert list(tmp_path.iterdir()) == []
+    assert _no_download_left(tmp_path)
 
 
 def test_download_without_dashboard_url(tmp_path):
@@ -181,8 +247,9 @@ def test_the_free_space_check_accounts_for_the_advertised_size(tmp_path, monkeyp
     import shutil as _shutil
 
     body = b"x" * 4096
-    info = _info(body=body)
-    info["size_bytes"] = 250 * 1024 * 1024
+    # Passed through _info so it is part of the SIGNED record: mutating the
+    # offer after signing is what the signature is there to catch.
+    info = _info(body=body, size_bytes=250 * 1024 * 1024)
 
     class _Usage:
         free = upgrade_mod.MIN_FREE_BYTES_MARGIN + 10 * 1024 * 1024
@@ -190,7 +257,7 @@ def test_the_free_space_check_accounts_for_the_advertised_size(tmp_path, monkeyp
     monkeypatch.setattr(_shutil, "disk_usage", lambda path: _Usage())
     mgr = UpgradeManager(_cfg(), http_open=_fake_open(body))
     assert mgr.download_and_verify(info, tmp_path) is None
-    assert list(tmp_path.iterdir()) == []
+    assert _no_download_left(tmp_path)
 
     class _Plenty:
         free = upgrade_mod.MIN_FREE_BYTES_MARGIN + 400 * 1024 * 1024
@@ -203,20 +270,35 @@ def test_a_body_bigger_than_the_advertised_size_is_abandoned(tmp_path):
     """The advertised size is the tighter of the two ceilings: a body that
     outgrows it is not the build we were offered, and there is no reason to
     write the rest of it to disk before the sha check notices."""
-    info = _info(body=b"y" * 100)
-    info["size_bytes"] = 10
+    info = _info(body=b"y" * 100, size_bytes=10)
     mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"y" * 100))
     assert mgr.download_and_verify(info, tmp_path) is None
-    assert list(tmp_path.iterdir()) == []
+    assert _no_download_left(tmp_path)
 
 
-def test_an_upgrade_with_no_advertised_size_still_downloads(tmp_path):
-    """Older dashboards send no size_bytes at all -- unknown must not block."""
+def test_an_upgrade_with_an_unusable_advertised_size_still_downloads(tmp_path):
+    """`advertised_size` returning None ("unknown") must not block a download
+    -- it falls back to the hard ceiling.
+
+    This test used to pop size_bytes entirely, standing in for a dashboard
+    too old to send it. That shape no longer exists: size_bytes is one of the
+    fields the release signature covers (item 4, 2026-08-17), so a record
+    without it cannot be signed and a dashboard old enough to omit it sends
+    no signature either. The next test pins that refusal."""
+    body = b"new-exe-bytes"
+    info = _info(body=body, size_bytes=upgrade_mod.MAX_DOWNLOAD_BYTES * 10)
+    assert upgrade_mod.advertised_size(info) is None
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(body))
+    assert mgr.download_and_verify(info, tmp_path) is not None
+
+
+def test_an_offer_missing_a_signed_field_is_refused(tmp_path):
     body = b"new-exe-bytes"
     info = _info(body=body)
     info.pop("size_bytes")
     mgr = UpgradeManager(_cfg(), http_open=_fake_open(body))
-    assert mgr.download_and_verify(info, tmp_path) is not None
+    assert mgr.download_and_verify(info, tmp_path) is None
+    assert _no_download_left(tmp_path)
 
 
 # -- apply() ------------------------------------------------------------
@@ -399,12 +481,12 @@ def test_upgrade_url_must_share_the_dashboards_origin():
     launched detached. There was no origin check at all."""
     from ccsync_companion.upgrade import same_origin
 
-    base = "http://100.71.216.3:8480"
+    base = "http://100.64.0.1:8480"
     assert same_origin("/api/v1/packages/ccsync-companion-0.4.5.exe", base) is True
-    assert same_origin("http://100.71.216.3:8480/x.exe", base) is True
+    assert same_origin("http://100.64.0.1:8480/x.exe", base) is True
     assert same_origin("http://evil.example.com/payload.exe", base) is False
-    assert same_origin("https://100.71.216.3:8480/x.exe", base) is False  # scheme differs
-    assert same_origin("http://100.71.216.3:9999/x.exe", base) is False   # port differs
+    assert same_origin("https://100.64.0.1:8480/x.exe", base) is False  # scheme differs
+    assert same_origin("http://100.64.0.1:9999/x.exe", base) is False   # port differs
     assert same_origin("", base) is False
 
 
@@ -415,7 +497,7 @@ def test_download_refuses_a_foreign_host(tmp_path):
         opened.append(url)
         raise AssertionError("must never be fetched")
 
-    mgr = UpgradeManager({"dashboard_url": "http://100.71.216.3:8480"}, http_open=spy_open)
+    mgr = UpgradeManager({"dashboard_url": "http://100.64.0.1:8480"}, http_open=spy_open)
     result = mgr.download_and_verify(
         {"url": "http://evil.example.com/x.exe", "sha256": "0" * 64}, tmp_path,
     )
@@ -814,7 +896,7 @@ def test_a_download_that_fails_verification_is_never_made_executable(
     mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"tampered"))
     assert mgr.download_and_verify(_info(body=b"expected-bytes"), tmp_path) is None
     assert chmods == []
-    assert list(tmp_path.iterdir()) == []
+    assert _no_download_left(tmp_path)
 
 
 def test_a_chmod_failure_does_not_refuse_the_update(tmp_path, darwin, monkeypatch, caplog):
@@ -997,3 +1079,232 @@ def test_the_spawn_returns_the_child_it_launched(tmp_path, darwin, popen_calls):
     child = UpgradeManager._default_spawn(exe)
 
     assert child is not None
+
+
+# ======================================================================
+# COMMERCIAL_READINESS.md item 4 (2026-08-17): the signed upgrade channel,
+# the monotonic downgrade floor, and the transport rules.
+# ======================================================================
+
+
+def test_a_valid_signature_is_accepted_and_names_the_key():
+    ok, detail = upgrade_mod.verify_offer(_info())
+    assert ok
+    assert detail == release_pubkey.pubkey_id(TEST_PUBKEY)
+
+
+def test_an_offer_signed_by_an_untrusted_key_is_refused(tmp_path):
+    """The whole point: a dashboard that can serve bytes still cannot mint an
+    offer this build will install."""
+    info = _info(seed=OTHER_SEED)
+    ok, detail = upgrade_mod.verify_offer(info)
+    assert not ok and "no baked release key" in detail
+
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"))
+    mgr.note_report_response({"upgrade": info})
+    assert mgr.available is None
+    assert mgr.download_and_verify(info, tmp_path) is None
+    assert _no_download_left(tmp_path)
+
+
+def test_an_unsigned_offer_is_refused_with_no_fallback(tmp_path, caplog):
+    """A pre-signing dashboard advertises version/url/sha256 and nothing
+    else. That used to be enough to rename a download over the running exe."""
+    info = _info(sign=False)
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"))
+    with caplog.at_level("ERROR"):
+        mgr.note_report_response({"upgrade": info})
+    assert mgr.available is None
+    assert "REFUSING" in caplog.text
+    assert mgr.download_and_verify(info, tmp_path) is None
+
+
+@pytest.mark.parametrize("field, value", [
+    ("version", "6.6.6"),
+    ("sha256", "b" * 64),
+    ("filename", "ccsync-onboard-9.9.9.exe"),
+    ("platform", "macos"),
+    ("kind", "onboard"),
+    ("size_bytes", 999),
+    ("min_version", "1.2.3"),
+    ("published_at", "2020-01-01T00:00:00Z"),
+    ("signed_binary", True),
+])
+def test_tampering_with_any_signed_field_invalidates_the_offer(field, value):
+    """Signing only the sha256 would leave the server free to re-label a
+    genuine build -- which is how a Mac gets handed a Windows exe."""
+    info = _info()
+    info[field] = value
+    ok, _detail = upgrade_mod.verify_offer(info)
+    assert not ok
+
+
+def test_a_corrupt_signature_never_raises():
+    for bad in (None, "", "not-base64!!", "AAAA", 12345):
+        ok, _detail = upgrade_mod.verify_offer({**_info(), "signature": bad})
+        assert not ok
+    assert upgrade_mod.verify_offer("garbage") == (False, "no offer")
+
+
+def test_a_build_with_no_baked_key_installs_nothing(monkeypatch):
+    """Fail closed: a companion built without RELEASE_PUBKEYS trusts nobody
+    rather than everybody. tools/release.ps1 refuses to build one."""
+    monkeypatch.setattr(release_pubkey, "RELEASE_PUBKEYS", ())
+    ok, detail = upgrade_mod.verify_offer(_info())
+    assert not ok and "trusts no release key" in detail
+
+
+def test_the_sha256_checked_after_download_is_the_signed_one(tmp_path):
+    """The old sha256 came from the same response as the url, so it proved
+    only that the server got what it asked for. Now it is a signed value: a
+    body that does not match it is discarded even though the offer verified."""
+    info = _info(body=b"the-signed-build")
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"something-else"))
+    assert mgr.download_and_verify(info, tmp_path) is None
+    assert _no_download_left(tmp_path)
+
+
+# -- the downgrade floor ------------------------------------------------
+
+
+def test_the_floor_is_remembered_and_only_ever_rises(tmp_path):
+    floor = tmp_path / "upgrade_floor.json"
+    assert upgrade_mod.read_floor(floor) == ""
+    assert upgrade_mod.note_floor(floor, "0.7.11") == "0.7.11"
+    assert upgrade_mod.read_floor(floor) == "0.7.11"
+    # A LOWER min_version cannot lower it -- otherwise replaying one old,
+    # genuinely-signed record undoes the whole mechanism.
+    assert upgrade_mod.note_floor(floor, "0.5.0") == "0.7.11"
+    assert upgrade_mod.note_floor(floor, "0.8.0") == "0.8.0"
+    assert json.loads(floor.read_text())["min_version"] == "0.8.0"
+
+
+def test_an_unparseable_or_missing_floor_is_no_floor(tmp_path):
+    floor = tmp_path / "upgrade_floor.json"
+    floor.write_text("{not json", encoding="utf-8")
+    assert upgrade_mod.read_floor(floor) == ""
+    floor.write_text(json.dumps({"min_version": "nightly"}), encoding="utf-8")
+    assert upgrade_mod.read_floor(floor) == ""
+    assert upgrade_mod.note_floor(floor, None) == ""
+
+
+def test_note_floor_never_raises_on_an_unwritable_path(tmp_path):
+    blocked = tmp_path / "a-file"
+    blocked.write_text("x", encoding="utf-8")
+    assert upgrade_mod.note_floor(blocked / "nested" / "floor.json", "1.0.0") == "1.0.0"
+
+
+def test_below_floor_refuses_anything_it_cannot_rank():
+    assert upgrade_mod.below_floor("0.7.10", "0.7.11")
+    assert not upgrade_mod.below_floor("0.7.11", "0.7.11")
+    assert not upgrade_mod.below_floor("0.9.0", "0.7.11")
+    assert upgrade_mod.below_floor("nightly", "0.7.11")
+    # No floor at all ranks nothing.
+    assert not upgrade_mod.below_floor("nightly", "")
+
+
+def test_an_offer_below_the_remembered_floor_is_refused(tmp_path, caplog):
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"),
+                         floor_file=tmp_path / "floor.json")
+    # A signed 9.9.9 asserting "never go below 9.9.9" raises the floor.
+    mgr.note_report_response({"upgrade": _info(version="9.9.9", min_version="9.9.9")})
+    assert mgr.available["version"] == "9.9.9"
+    assert upgrade_mod.read_floor(tmp_path / "floor.json") == "9.9.9"
+
+    # A later, genuinely-signed rollback offer below it is refused -- and the
+    # standing offer is cleared with it.
+    older = _info(version="1.0.0", min_version="0.0.0")
+    with caplog.at_level("ERROR"):
+        mgr.note_report_response({"upgrade": older})
+    assert mgr.available is None
+    assert "downgrade floor" in caplog.text
+    assert mgr.download_and_verify(older, tmp_path) is None
+
+
+def test_a_rollback_at_or_above_the_floor_is_still_offered(tmp_path):
+    """Different, not newer survives ABOVE the floor: a deliberate rollback
+    stays one click, which is the property the floor must not cost."""
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"),
+                         floor_file=tmp_path / "floor.json")
+    mgr.note_report_response({"upgrade": _info(version="9.9.9", min_version="1.0.0")})
+    mgr.note_report_response({"upgrade": _info(version="1.0.0", min_version="1.0.0")})
+    assert mgr.available["version"] == "1.0.0"
+    assert upgrade_mod.offer_label("1.0.0", running="9.9.9").startswith("Roll back")
+
+
+def test_the_floor_file_lives_beside_the_config_not_in_state(tmp_path, monkeypatch):
+    """Documented location: ~/.ccsync/upgrade_floor.json. state/ is lane
+    scratch that anything may delete; the floor may not be."""
+    monkeypatch.undo()   # drop the autouse floor_path patch for this one
+    cfg = {"log_path": str(tmp_path / "logs" / "companion.log")}
+    assert upgrade_mod.floor_path(cfg) == tmp_path / "logs" / "upgrade_floor.json"
+
+
+# -- transport ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("url", [
+    "https://dash.example.com",
+    "https://nas.example.ts.net",
+    "http://100.64.0.1:8480",      # tailnet CGNAT: today's whole fleet
+    "http://192.168.0.10:8480",     # LAN
+    "http://127.0.0.1:8480",
+    "http://localhost:8480",
+    "http://truenas:8480",           # single-label intranet name
+    "http://nas.local",
+    "http://nas.lan:8480",
+])
+def test_allowed_update_origins(url):
+    ok, _note = upgrade_mod.transport_ok(url)
+    assert ok
+
+
+@pytest.mark.parametrize("url", [
+    "http://dash.example.com",       # cleartext to a public name
+    "http://8.8.8.8",
+    "ftp://dash.example.com",
+    "",
+    None,
+])
+def test_refused_update_origins(url):
+    ok, note = upgrade_mod.transport_ok(url)
+    assert not ok and note
+
+
+def test_plain_http_on_the_tailnet_is_allowed_but_logged_once(tmp_path, caplog):
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"))
+    with caplog.at_level("WARNING"):
+        assert mgr.download_and_verify(_info(), tmp_path) is not None
+        assert mgr.download_and_verify(_info(), tmp_path) is not None
+    assert caplog.text.count("plain HTTP (tailnet/LAN)") == 1
+
+
+def test_a_public_cleartext_dashboard_downloads_nothing(tmp_path, caplog):
+    mgr = UpgradeManager(_cfg(dashboard_url="http://dash.example.com"),
+                         http_open=_fake_open(b"new-exe-bytes"))
+    with caplog.at_level("ERROR"):
+        assert mgr.download_and_verify(
+            _info(url="http://dash.example.com/api/v1/x"), tmp_path) is None
+    assert "plain HTTP to a PUBLIC host" in caplog.text
+
+
+def test_https_needs_no_advisory(tmp_path, caplog):
+    mgr = UpgradeManager(_cfg(dashboard_url="https://nas.example.ts.net"),
+                         http_open=_fake_open(b"new-exe-bytes"))
+    with caplog.at_level("WARNING"):
+        assert mgr.download_and_verify(_info(), tmp_path) is not None
+    assert "plain HTTP" not in caplog.text
+
+
+# -- the two copies of the primitives ----------------------------------
+
+
+def test_the_dashboard_carries_an_identical_ed25519_copy():
+    """ed25519.py is duplicated into the dashboard package on purpose (they
+    are different deployment units). Drift between them means a build the
+    dashboard accepts and the fleet refuses, discovered at ship time."""
+    here = Path(upgrade_mod.__file__).resolve().parent
+    theirs = here.parents[2] / "dashboard" / "src" / "ccsync_dashboard" / "ed25519.py"
+    if not theirs.is_file():
+        pytest.skip("no dashboard checkout beside this one")
+    assert theirs.read_bytes() == (here / "ed25519.py").read_bytes()

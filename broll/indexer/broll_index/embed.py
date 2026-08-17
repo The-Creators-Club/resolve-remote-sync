@@ -57,25 +57,33 @@ def _warn_once() -> None:
         _warned = True
 
 
-def get_model(model_name: str = DEFAULT_MODEL) -> Any:
+def get_model(model_name: str = DEFAULT_MODEL, cache_dir: str = "") -> Any:
     """Load (and cache) a fastembed TextEmbedding model.
 
     Model init/first-use download is slow (network fetch + ONNX session setup), so this
     is lazy and cached per model name — called at most once per model per process.
+
+    `cache_dir` (config `embedding.cache_dir` / BROLL_MODEL_CACHE) is part of the
+    process cache key: in the GPU image it is a mounted volume, and re-loading the
+    same model name from a different directory is a different model on disk
+    (2026-08-17, COMMERCIAL_READINESS.md item 14).
     """
     if not _FASTEMBED_AVAILABLE:
         _warn_once()
         raise RuntimeError("fastembed is not installed")
+    key = f"{model_name}\x00{cache_dir}"
     with _lock:
-        model = _model_cache.get(model_name)
+        model = _model_cache.get(key)
         if model is None:
-            model = TextEmbedding(model_name=model_name)
-            _model_cache[model_name] = model
+            kwargs = {"cache_dir": cache_dir} if cache_dir else {}
+            model = TextEmbedding(model_name=model_name, **kwargs)
+            _model_cache[key] = model
         return model
 
 
 def embed_texts(
-    texts: list[str], model_name: str = DEFAULT_MODEL, batch_size: int = 64
+    texts: list[str], model_name: str = DEFAULT_MODEL, batch_size: int = 64,
+    cache_dir: str = "",
 ) -> np.ndarray:
     """Embed a batch of texts. Returns float32, L2-normalized vectors, shape (n, dim).
 
@@ -89,7 +97,7 @@ def embed_texts(
         _warn_once()
         raise RuntimeError("fastembed is not installed")
 
-    model = get_model(model_name)
+    model = get_model(model_name, cache_dir=cache_dir)
     vectors = np.array(list(model.embed(texts, batch_size=batch_size)), dtype=np.float32)
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms[norms == 0] = 1.0  # avoid divide-by-zero for a (theoretical) all-zero vector

@@ -246,7 +246,7 @@ def test_a_config_data_without_a_volumes_entry_just_appends(helper, monkeypatch,
     carried a /Volumes auto-entry, .config.data carried none. With nothing to
     step over, the new entry appends -- and the count still matches."""
     no_volumes = """IoFsNum = 1
-IoFsMount_1 = /Users/leso/Movies
+IoFsMount_1 = /Users/editor1/Movies
 IoFsMappedMount_1 =
 IoFsDirectIO_1 = 1
 SomeOtherSetting = 7
@@ -258,7 +258,7 @@ SomeOtherSetting = 7
     data = read(config_dir, ".config.data")
     assert "IoFsNum = 2" in data
     # 1-based in, 1-based out -- the file's own numbering is preserved.
-    assert "IoFsMount_1 = /Users/leso/Movies" in data
+    assert "IoFsMount_1 = /Users/editor1/Movies" in data
     assert f"IoFsMount_2 = {LOCAL_ROOT}" in data
     assert "IoFsMappedMount_2 = P:\\" in data
 

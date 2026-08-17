@@ -1,7 +1,8 @@
 """Build the shared b-roll archive tree that editors link against.
 
-    python build_archive.py --config config.queue.yaml --dest "P:/Assets/B-roll Archive"
-    python build_archive.py --config config.queue.yaml --dest ... --apply
+    python build_archive.py --dest "P:/Assets/B-roll Archive"
+    python build_archive.py --dest ... --apply
+    # --config defaults to private/broll/indexer/config.queue.yaml
 
 Copies each clip's media into a browsable tree, plus the two stills the search
 UI previews it with:
@@ -45,7 +46,9 @@ import sys
 import time
 from pathlib import Path, PurePosixPath
 
+from broll_index import inplace_fixes
 from broll_index.config import load_config
+from broll_index.site_data import DEFAULT_QUEUE_CONFIG
 
 DOWNLOADS = "Downloads"
 CREATORS = "Creators_Club"
@@ -406,9 +409,42 @@ def write_paths(db_path: str, pairs: list[tuple[int, str]]) -> None:
         conn.close()
 
 
+# mtimes are compared with a tolerance: shutil.copy2 preserves them, but SMB,
+# exFAT and FAT round to 1-2 s, so an exact comparison would call every file
+# on the NAS share "different" and re-copy 60 GB on every run.
+MTIME_TOLERANCE_SECONDS = 2.0
+
+
+def needs_copy(src: Path, dst: Path) -> bool:
+    """Does `dst` still need to be (re)placed from `src`?
+
+    Size alone was the whole test until 2026-08-17, and it is both too weak
+    (a truncated copy that happens to match, a different clip of the same
+    length) and, paired with the in-place repair path, actively destructive
+    (COMMERCIAL_READINESS.md item 9 -- see the `protected` list in main()).
+
+    The ladder is cheap-first: absent, then size, then mtime (copy2 preserves
+    it, so a faithful copy agrees), and only when size agrees but mtime does
+    not is a quick head+tail hash read -- two seeks, not a full 60 GB pass.
+    """
+    try:
+        if not dst.exists():
+            return True
+        d_stat, s_stat = dst.stat(), src.stat()
+        if d_stat.st_size != s_stat.st_size:
+            return True
+        if abs(d_stat.st_mtime - s_stat.st_mtime) <= MTIME_TOLERANCE_SECONDS:
+            return False
+        return inplace_fixes.quick_hash(dst) != inplace_fixes.quick_hash(src)
+    except OSError:
+        # Cannot tell: copying again is additive and reversible (the old copy
+        # goes to the trash), so it is the safe side of the doubt.
+        return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.queue.yaml")
+    ap.add_argument("--config", default=DEFAULT_QUEUE_CONFIG)
     ap.add_argument("--dest", required=True, help=r'e.g. "P:/Assets/B-roll Archive"')
     ap.add_argument("--apply", action="store_true", help="without this, plan only")
     ap.add_argument("--limit", type=int, default=None)
@@ -495,11 +531,26 @@ def main() -> int:
         write_paths(cfg.db.path, recorded)
         print(f"recorded {len(recorded)} archive path(s) in the database")
 
+    # WHAT STILL NEEDS COPYING. Size alone used to decide this, and size is
+    # not identity: `fix_10bit_proxies.py --apply` re-encodes a preview in
+    # place (KNOWN_BUGS R9), which changes its size, so every repaired file
+    # looked un-copied and the next build put the 10-bit source back over it
+    # -- undoing the repair silently, on every clip, every run
+    # (COMMERCIAL_READINESS.md item 9, 2026-08-17). A destination recorded in
+    # the in-place-fix manifest AND still hashing to what was recorded is
+    # deliberately not a byte-copy of its source, and is left alone.
+    fixed = inplace_fixes.load(dest_root)
+    protected = [(v, s, d) for v, s, d in plan
+                 if d.exists() and inplace_fixes.is_fixed(dest_root, d, fixed)]
+    protected_dests = {str(d) for _v, _s, d in protected}
     todo = [(v, s, d) for v, s, d in plan
-            if not d.exists() or d.stat().st_size != s.stat().st_size]
+            if str(d) not in protected_dests and needs_copy(s, d)]
     todo_bytes = sum(s.stat().st_size for _v, s, _d in todo)
     print(f"to copy now     : {len(todo)}  ({todo_bytes / 1024**3:.1f} GB)")
-    print(f"already present : {len(plan) - len(todo)}")
+    print(f"already present : {len(plan) - len(todo) - len(protected)}")
+    if protected:
+        print(f"repaired in place: {len(protected)}  (left alone — see "
+              f"{inplace_fixes.MANIFEST_NAME})")
 
     if not args.apply:
         print("\n-- plan only, nothing copied. Sample:")
@@ -522,6 +573,15 @@ def main() -> int:
         tmp = dst.with_suffix(dst.suffix + ".part")
         try:
             shutil.copy2(src, tmp)
+            # Anything already under the final name goes to the archive's
+            # trash first, never straight under the wheels: this loop is the
+            # only place in the pipeline that overwrites a file somebody may
+            # have repaired, re-cut or hand-placed, and until 2026-08-17 an
+            # overwrite here was unrecoverable (item 9). The trash is never
+            # swept automatically -- the operator empties it.
+            if dst.exists():
+                kept = inplace_fixes.stash(dest_root, dst)
+                print(f"  replacing {dst.name} (old copy kept at {kept})", flush=True)
             tmp.replace(dst)
         except Exception as e:  # noqa: BLE001 - one bad file must not stop 2,000
             print(f"  FAILED {dst.name}: {e}", flush=True)

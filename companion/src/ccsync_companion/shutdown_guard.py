@@ -3,9 +3,9 @@
 Two guards, one cause. Both live here because they answer the same question
 -- "is anything actually moving right now?" -- from the same predicate.
 
-On 2026-08-02 ruskin's machine went away at 02:44:35 with three camera
+On 2026-08-02 an editor's machine went away at 02:44:35 with three camera
 originals part-uploaded -- 19.3 GB of partials on the server, and nothing on
-his screen had ever suggested that switching off was a bad idea. rclone has
+their screen had ever suggested that switching off was a bad idea. rclone has
 no resume for SFTP uploads (``--partial-suffix`` only names the temp file),
 so every one of those files restarts from zero. The bytes are not at risk;
 the editor's evening is.

@@ -1,0 +1,51 @@
+# Build context for dashboard/deploy/Dockerfile, which is built FROM THE REPO
+# ROOT because the image carries four trees that live in four different
+# directories (dashboard/, broll/web, music/web, ytdl/web):
+#
+#   docker build -f dashboard/deploy/Dockerfile -t ccsync-dashboard:<ver> .
+#
+# The repo is ~2 GB and all but ~10 MB of that is data and build output the
+# image must never contain. A denylist rather than the `*` + `!path` allowlist
+# form on purpose: the four trees are named in the Dockerfile's COPY lines, so
+# an allowlist here would state the same fact twice and go stale silently
+# (2026-08-17, COMMERCIAL_READINESS.md item 12).
+
+.git
+.github
+.pytest_cache
+.cache
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+**/.venv
+
+# Components that are not in the container at all. Together ~350 MB, most of
+# it PyInstaller dist/ and build/ output.
+companion
+onboarding
+bench
+installer
+tools
+server
+docs
+broll/indexer
+music/indexer
+
+# Test suites and their fixtures: excluded from the SHIPPED trees for the same
+# reason install_dashboard_app.py's BROLL_EXCLUDE_DIRS excludes them -- they
+# are not runtime code and some carry fixture media.
+**/tests
+**/node_modules
+
+# The data roots. music/web/data alone is 1.5 GB (music.db + the exported CLAP
+# text encoder), and every one of these is a MOUNT at runtime, never image
+# content: /broll-data, /music-data, /music-encoder, /ytdl-data.
+broll/web/data
+music/web/data
+ytdl/web/data
+
+# Site identity and secrets. site.toml names one customer's NAS; it reaches
+# the container through the environment (compose), never baked into a layer.
+site.toml
+site.example.toml
+*.log

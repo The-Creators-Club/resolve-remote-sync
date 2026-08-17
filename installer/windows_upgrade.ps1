@@ -6,7 +6,7 @@
 .DESCRIPTION
     For a machine that already ran installer/windows_bootstrap.ps1. Swaps in
     the new companion and leaves EVERYTHING else alone -- the Syncthing device
-    identity, the rclone SSH key + config, the P: drive mapping, and the
+    identity, the rclone SSH key + config, the tree drive mapping, and the
     editor's settings all survive, so there is nothing for the admin to
     re-approve. Steps:
 
@@ -224,8 +224,8 @@ else {
     # otherwise falls back to the system ANSI codepage. Reading UTF-8 as ANSI
     # and writing it back as UTF-8 double-encodes every non-ASCII value --
     # permanently, silently, and on EVERY upgrade run, because the result is
-    # still valid UTF-8 and valid TOML. Measured: editor_name = "台北-alex"
-    # became "å°åŒ—-alex", after which the editor's reports and project
+    # still valid UTF-8 and valid TOML. Measured: editor_name = "台北-editor"
+    # became "å°åŒ—-editor", after which the editor's reports and project
     # selections go to a username that does not exist (INST-3). On READ,
     # PS 5.1's -Encoding UTF8 strips a BOM if present and decodes BOM-less
     # UTF-8 correctly; only writes add one.
@@ -313,6 +313,33 @@ else {
         $utf8NoBom = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllText($ConfigPath, (($lines -join "`r`n") + "`r`n"), $utf8NoBom)
         Write-Step "config updated ($ConfigPath): $($added -join ', ')"
+    }
+}
+
+# Tighten the two files that hold the fleet token in clear text, on every
+# upgrade -- that is how the machines provisioned before 2026-08-17 get the
+# fix, since they will never run the bootstrap again (COMMERCIAL_READINESS.md
+# item 15; macOS has chmod 600 on both, Windows set no ACL at all).
+# Best-effort and quiet: a permissions cosmetic must never fail an upgrade
+# that has already swapped the exe.
+foreach ($secretFile in @($ConfigPath, "$env:USERPROFILE\.ccsync\identity.json")) {
+    if (-not (Test-Path -LiteralPath $secretFile)) { continue }
+    if ($DryRun) {
+        Write-Step "[dry-run] would restrict $secretFile to $env:USERNAME + SYSTEM + Administrators"
+        continue
+    }
+    try {
+        # icacls, not Set-Acl: PS 5.1's Set-Acl needs a full SDDL round-trip to
+        # drop inheritance. Redirection inside cmd, or a native stderr write is
+        # fatal under $ErrorActionPreference = 'Stop'.
+        $me = "$env:USERDOMAIN\$env:USERNAME"
+        cmd /c "icacls `"$secretFile`" /inheritance:r /grant:r `"$me`":(F) `"*S-1-5-18`":(F) `"*S-1-5-32-544`":(F) >nul 2>&1"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn2 "could not tighten the permissions on $secretFile (icacls exit $LASTEXITCODE) -- it holds your fleet token"
+        }
+    }
+    catch {
+        Write-Warn2 "could not tighten the permissions on $secretFile ($($_.Exception.Message)) -- it holds your fleet token"
     }
 }
 

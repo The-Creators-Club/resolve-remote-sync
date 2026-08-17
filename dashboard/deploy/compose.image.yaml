@@ -1,0 +1,248 @@
+# Compose for ccsync-dashboard in IMAGE MODE -- COMMERCIAL_READINESS.md item
+# 12, added 2026-08-17. THE DEFAULT IS STILL compose.yaml; this is the opt-in.
+#
+# Same template grammar as compose.yaml (`{{ NAME }}` placeholders, written
+# without the spaces, filled in by
+# server/install_dashboard_app.render_compose_yaml(), which takes a `template`
+# path; every ${VAR} is compose's own runtime substitution and is left alone),
+# and the same variables. Nothing in the install script points at this file
+# yet -- render it explicitly:
+#
+#   python -c "import sys; sys.path.insert(0,'server'); \
+#     import install_dashboard_app as i, pathlib; \
+#     print(i.render_compose_yaml(template=pathlib.Path('dashboard/deploy/compose.image.yaml')))"
+#
+# WHAT DIFFERS FROM compose.yaml, AND ONLY THAT:
+#
+#   image:    the ccsync-dashboard image built by deploy/Dockerfile instead of
+#             a stock python:3.12.7-slim. Set CCSYNC_IMAGE (or a .env beside
+#             this file) to the tag you built and pushed/loaded on the NAS.
+#   volumes:  the five CODE mounts are GONE -- /app, /venv, /broll-app,
+#             /music-app and /ytdl-app are image content now. Every DATA mount
+#             is unchanged, byte for byte, because the data is the thing that
+#             cannot be rebuilt: /data, /projects, /broll-data, /music-data,
+#             /music-encoder, /music-proxies, /music-share, /ytdl-data and
+#             /claude-home. /opt/ffmpeg, /opt/claude and /opt/deno stay mounts
+#             too, deliberately: the ffmpeg build is GPL and the Claude Code
+#             CLI must not be redistributed inside a vendor image
+#             (COMMERCIAL_READINESS.md items 1 and 3).
+#
+# Everything else -- environment, ports, healthcheck, the two optional
+# profiles -- is compose.yaml's, and the reasoning for each line lives there.
+# Read that file first; this one deliberately does not repeat 400 lines of it,
+# because two copies of a rationale drift.
+#
+# In particular the SERVICE SET is compose.yaml's: one `dashboard`, plus the
+# two profiled services that are inert until named. No PO-token sidecar, no
+# deno mount, no YTDL_POT_BASE_URL/YTDL_COOKIES_FILE -- those are the
+# anti-automation half, which only a site with [features] youtube_unblock gets,
+# and only through install_dashboard_app.compose_config()
+# (COMMERCIAL_READINESS.md item 3). Image mode must never be the mode that
+# turns a feature on: server/tests/test_compose_template.py pins the two
+# templates to the same services and the same environment keys.
+#
+# Prereq host dirs: the same list compose.yaml documents, MINUS app/, venv/,
+# broll-web/, music-web/ and ytdl-web/. `install_dashboard_app.py` still
+# creates all of them; the five unused ones are harmless.
+#
+# MIGRATING BETWEEN MODES: docs/DOCKER.md. In short -- stop the stack, keep
+# every host dir, swap the compose file, start it. The database, the archive
+# and the tree are untouched by both modes.
+services:
+  dashboard:
+    # No digest pin here on purpose: this is YOUR build, and the thing that is
+    # pinned by digest is deploy/Dockerfile's base image. Use an immutable tag
+    # (the dashboard version, not "latest") so a rollback is a tag change.
+    image: "${CCSYNC_IMAGE:-ccsync-dashboard:latest}"
+    # The image defaults to 3000:3000; this line is what makes it the site's
+    # own service account. DSM assigns uids >= 1026, so it is read from the
+    # live account, never assumed. run.sh warns if APP_UID/APP_GID below
+    # disagree with the uid it actually got.
+    user: "{{APP_UID}}:{{APP_GID}}"
+    # Baked into the image as CMD; stated here so `docker compose config`
+    # shows the same entrypoint in both modes and a reader can diff them.
+    command: ["/bin/sh", "/app/deploy/run.sh"]
+    environment:
+      # run.sh reads these two and shouts on a mismatch -- an unprivileged
+      # container cannot setuid, so a warning is the whole remedy.
+      APP_UID: "{{APP_UID}}"
+      APP_GID: "{{APP_GID}}"
+      SYNCTHING_GUI_URL: "{{SYNCTHING_URL}}"
+      SYNCTHING_API_KEY: "REPLACE_ME"
+      DASH_REPORT_TOKEN: "REPLACE_ME"
+      # Whether that ONE shared token is still accepted beside the per-editor
+      # ones (COMMERCIAL_READINESS.md item 15). "0" once the dashboard's
+      # boot-time list of machines still using it is empty.
+      DASH_SHARED_REPORT_TOKEN_ENABLED: "1"
+      DASH_SESSION_SECRET: "REPLACE_ME"
+      # The vendor's release public key(s), comma-separated base64
+      # (COMMERCIAL_READINESS.md item 4, 2026-08-17). Unset = the upgrade
+      # channel cannot be published to (503); nothing else is affected.
+      DASH_RELEASE_PUBKEYS: ""
+      DASH_ADMIN_USERS: "{{NAS_ADMIN_USERS}}"
+      DASH_SMB_HOST: "{{SMB_HOST}}"
+      DASH_COOKIE_SECURE: "{{DASH_COOKIE_SECURE}}"
+      DASH_DB_PATH: "/data/dashboard.db"
+      DASH_PORT: "{{DASH_PORT}}"
+      DASH_PROJECTS_DIR: "/projects"
+      # Opt-in crash reporting (COMMERCIAL_READINESS.md item 13). Unset = the
+      # container writes crash JSON under DASH_CRASH_DIR and sends nothing
+      # anywhere, which is the shipped default. See docs/legal/TELEMETRY.md.
+      # DASH_SENTRY_DSN: ""
+      DASH_CRASH_DIR: "/data/crashes"
+      DASH_BROLL_ENABLED: "{{DASH_BROLL_ENABLED}}"
+      BROLL_DATA_ROOT: "/broll-data"
+      BROLL_SHARES: "broll:Main b-roll archive"
+      BROLL_CREATORS_SHARES: "mofa-disaster"
+      BROLL_DEFAULT_COLLECTION: "{{BROLL_DEFAULT_COLLECTION}}"
+      BROLL_DEFAULT_COLLECTION_LABEL: "{{BROLL_DEFAULT_COLLECTION_LABEL}}"
+      # MANDATORY while DASH_BROLL_ENABLED=1: the container REFUSES TO START on
+      # a blank, placeholder or short value. `openssl rand -hex 24`.
+      BROLL_INGEST_TOKEN: "REPLACE_ME"
+      MUSIC_DATA_ROOT: "/music-data"
+      MUSIC_SHARE_ROOT: "/music-share"
+      MUSIC_PROXIES_DIR: "/music-proxies"
+      MUSIC_TEXT_ENCODER_DIR: "/music-encoder"
+      YTDL_DATA_ROOT: "/ytdl-data"
+      YTDL_PROJECTS_ROOT: "/projects"
+      YTDL_DASH_DB: "/data/dashboard.db"
+      # ANTHROPIC_API_KEY (the customer's) replaced YTDL_CLAUDE_HOME on
+      # 2026-08-17 -- there is no `claude` subprocess any more.
+      #
+      # YTDL_POT_BASE_URL and YTDL_COOKIES_FILE ARE DELIBERATELY ABSENT, as
+      # they are from compose.yaml: they point at the components that exist to
+      # get past YouTube's anti-automation measures, and the vendor build
+      # ships none of them (COMMERCIAL_READINESS.md item 3). They were here
+      # until the 2026-08-17 integration pass, which made image mode carry the
+      # SAME default shape -- otherwise picking image mode silently turned on
+      # a feature the site never bought. A site with [features]
+      # youtube_unblock gets them the way compose.yaml's default gets them:
+      # from install_dashboard_app.compose_config(), which adds the pair and
+      # the sidecar together. See docs/legal/YOUTUBE_FEATURE_NOTICE.md.
+      ANTHROPIC_API_KEY: "REPLACE_ME"
+      YTDL_CACHE_DIR: "/ytdl-data/cache"
+      YTDL_LOCAL_DOWNLOAD: "1"
+      # WHICH OPTIONAL FEATURES THIS SITE TURNED ON, published by
+      # GET /api/v1/site. Both OFF -- the same default compose.yaml carries.
+      DASH_SITE_YOUTUBE_DOWNLOAD: "0"
+      DASH_SITE_YOUTUBE_UNBLOCK: "0"
+      TRUENAS_HOST: "{{NAS_HOST}}"
+      TRUENAS_USER: "{{NAS_USER}}"
+      TRUENAS_PW: "REPLACE_ME"
+      # A SCOPED API key instead of the admin password, where the NAS has the
+      # concept (COMMERCIAL_READINESS.md item 6 / finding H3). Both spellings,
+      # same value, as in compose.yaml.
+      TRUENAS_API_KEY: "${TRUENAS_API_KEY:-}"
+      DASH_NAS_API_KEY: "${TRUENAS_API_KEY:-}"
+      DASH_NAS_KIND: "{{NAS_KIND}}"
+      DASH_NAS_HOST: "{{NAS_HOST}}"
+      DASH_NAS_USER: "{{NAS_USER}}"
+      DASH_NAS_PW: "REPLACE_ME"
+      DASH_NAS_SSH_PORT: "{{NAS_SSH_PORT}}"
+      DASH_NAS_SSH_HOSTKEY: "{{NAS_SSH_HOSTKEY}}"
+      DASH_NAS_SSH_KEY_PROBE: "{{NAS_SSH_KEY_PROBE}}"
+      DASH_NAS_HOMES_PARENT: "{{NAS_HOMES_PARENT}}"
+      DASH_NAS_SERVICE_USER: "{{NAS_SERVICE_USER}}"
+      TRUENAS_VERIFY_SSL: "0"
+      DASH_SITE_ORG_NAME: "{{SITE_ORG_NAME}}"
+      DASH_SITE_ORG_SHORT: "{{SITE_ORG_SHORT}}"
+      DASH_SITE_PRODUCT_NAME: "{{SITE_PRODUCT_NAME}}"
+      DASH_SITE_TREE_NAME: "{{SITE_TREE_NAME}}"
+      DASH_SITE_TEMPLATE_FOLDERS: "{{SITE_TEMPLATE_FOLDERS}}"
+      DASH_SITE_SHARED_ASSETS: "{{SITE_SHARED_ASSETS}}"
+      # Single-quoted: these two carry backslashes (P:\ and a UNC path), and a
+      # backslash in a DOUBLE-quoted YAML scalar is an escape character.
+      DASH_SITE_CANONICAL_PREFIX: '{{SITE_CANONICAL_PREFIX}}'
+      DASH_SITE_REMOTE_ROOT: "{{SITE_REMOTE_ROOT}}"
+      DASH_SITE_SMB_UNC: '{{SITE_SMB_UNC}}'
+      DASH_SITE_SFTP_HOST: "{{SITE_SFTP_HOST}}"
+      DASH_SITE_SFTP_PORT: "{{SITE_SFTP_PORT}}"
+      DASH_SITE_SFTP_CHUNK_SIZE: "{{SITE_SFTP_CHUNK_SIZE}}"
+      DASH_SITE_SFTP_CONCURRENCY: "{{SITE_SFTP_CONCURRENCY}}"
+      DASH_SITE_SFTP_SHELL_TYPE: "{{SITE_SFTP_SHELL_TYPE}}"
+      DASH_SITE_RCLONE_REMOTE: "{{SITE_RCLONE_REMOTE}}"
+      DASH_SITE_NAS_SYNCTHING_ID: "{{SITE_NAS_SYNCTHING_ID}}"
+      DASH_SITE_DASHBOARD_URL: "{{SITE_DASHBOARD_URL}}"
+    ports:
+{{DASH_PORT_BINDS}}
+    volumes:
+      # DATA ONLY. The code mounts compose.yaml carries (/app, /venv,
+      # /broll-app, /music-app, /ytdl-app) are image layers here -- and read-only
+      # ones, so the AUDIT C-1 posture ("the container must never be able to
+      # modify its own code") holds without a mount option.
+      - {{NAS_APPS_ROOT}}/data:/data
+      - {{NAS_TREE_ROOT}}/Projects:/projects:rw
+      - "{{NAS_TREE_ROOT}}/Assets/B-roll Archive:/broll-data:rw"
+      - {{NAS_APPS_ROOT}}/music-data:/music-data:rw
+      - {{NAS_APPS_ROOT}}/music-encoder:/music-encoder:ro
+      - {{NAS_APPS_ROOT}}/music-proxies:/music-proxies:ro
+      - "{{NAS_TREE_ROOT}}/Assets/Music:/music-share:rw"
+      - {{NAS_APPS_ROOT}}/ffmpeg:/opt/ffmpeg:ro
+      - {{NAS_APPS_ROOT}}/ytdl-data:/ytdl-data:rw
+      # claude-home / claude-bin are gone with the CLI (2026-08-17), and the
+      # deno mount is gone with the rest of the unblock half: it is the JS
+      # runtime yt-dlp answers YouTube's "n challenge" with, so the default
+      # stack carries neither it nor the sidecar below. compose.yaml documents
+      # the same absence; install_dashboard_app.compose_config() adds the
+      # mount for a site whose site.toml sets [features] youtube_unblock.
+    restart: unless-stopped
+    # Character-for-character compose.yaml's (server/tests/test_safety.py
+    # asserts that file's copy against install_dashboard_app.healthcheck_config;
+    # this one has to match for the same reason -- it reads the BODY, because
+    # api_health answers 200 on every path and the dead-collector signal lives
+    # entirely in `ok`).
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import json,urllib.request,sys; sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:{{DASH_PORT}}/api/v1/health', timeout=5)).get('ok') else 1)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # THE PO-TOKEN SIDECAR IS NOT HERE, and that is the point. It was, until the
+  # 2026-08-17 integration pass: compose.yaml had already dropped it for
+  # COMMERCIAL_READINESS.md item 3 (a proof-of-origin token minter exists to
+  # get past YouTube's anti-automation measures, so the vendor build does not
+  # run one), and image mode carrying it would have meant the same customer
+  # got a different feature set for choosing a different deploy mode.
+  # install_dashboard_app.compose_config() adds `bgutil` -- with the pinned tag
+  # matched to the `bgutil-ytdlp-pot-provider` pin in requirements.txt/.lock --
+  # for a site whose site.toml sets [features] youtube_unblock, and only then.
+  # server/tests/test_compose_template.py holds the two templates to the same
+  # service set.
+
+  # --- OPTIONAL: Syncthing in this stack (profile "bundled-syncthing") -------
+  # Inert unless `--profile bundled-syncthing`. See compose.yaml for why it is
+  # carried here at all (SYNOLOGY_PORT_PLAN decision 3).
+  syncthing:
+    profiles: ["bundled-syncthing"]
+    image: syncthing/syncthing:1.30.0
+    user: "{{APP_UID}}:{{APP_GID}}"
+    environment:
+      STGUIAPIKEY: "${SYNCTHING_API_KEY:?set SYNCTHING_API_KEY}"
+      STGUIADDRESS: "0.0.0.0:8384"
+    volumes:
+      - {{NAS_TREE_ROOT}}:/data
+      - {{NAS_APPS_ROOT}}/syncthing-config:/var/syncthing/config
+    ports:
+      # GUI on loopback ONLY -- an unauthenticated-by-default admin surface
+      # that can rewrite every folder in the fleet.
+      - "127.0.0.1:8384:8384"
+      - "22000:22000/tcp"
+      - "22000:22000/udp"
+      - "21027:21027/udp"
+    restart: unless-stopped
+
+  # --- OPTIONAL: the Resolve Project Server (profile "project-server") -------
+  # postgres:13 is what DaVinci Resolve's project server expects -- do not
+  # "upgrade" it casually.
+  postgres:
+    profiles: ["project-server"]
+    image: postgres:13
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "${PG_PASSWORD:-DaVinci}"
+    volumes:
+      - {{NAS_APPS_ROOT}}/postgres:/var/lib/postgresql/data
+    ports:
+      - "${DASH_PG_PORT:-5432}:5432"
+    restart: unless-stopped

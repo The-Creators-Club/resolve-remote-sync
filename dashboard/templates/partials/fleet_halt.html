@@ -1,0 +1,49 @@
+{# Fleet-wide sync halt (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+
+   One switch that stops every companion in the fleet. It reaches each machine
+   on that machine's NEXT REPORT REPLY, so a box that is off right now adopts
+   the halt the moment it comes back -- which is the property that makes this
+   worth having over "message everyone on Slack".
+
+   Its own panel, loaded with hx-trigger="load" like the sessions and token
+   boxes beside it, so the switch never depends on the Users panel's NAS
+   round-trip to render. #}
+<div class="admin-users-box" id="admin-fleet-halt">
+  <div class="side-head">[ FLEET SYNC HALT ]
+    <span class="muted">Stops uploads, proxy downloads and shared project files on
+      every editor machine. Nothing is deleted; it is fully reversible.</span></div>
+
+  {% if error %}
+    <div class="banner">▲ {{ error }}</div>
+  {% endif %}
+
+  {% if halt.active %}
+    <div class="banner alarm">
+      ⛔ SYNCING IS HALTED FLEET-WIDE
+      <div class="mono-sm" style="margin-top:0.4rem">{{ halt.reason }}</div>
+      <div class="mono-sm" style="margin-top:0.4rem">
+        set by {{ halt.set_by }} at {{ halt.set_at }}
+      </div>
+    </div>
+    <div class="muted" style="margin-top:0.6rem">
+      Each companion picks this up on its next report (within a minute) and shows the
+      reason in its tray. Editors cannot start syncing again themselves — only this
+      button can.
+    </div>
+    <form class="inline-form" style="margin-top:0.6rem"
+          hx-post="/partials/admin/fleet-halt"
+          hx-target="#admin-fleet-halt" hx-swap="outerHTML">
+      <input type="hidden" name="active" value="0">
+      <button class="btn" type="submit">[ START SYNCING AGAIN ]</button>
+    </form>
+  {% else %}
+    <form class="inline-form" style="margin-top:0.6rem"
+          hx-post="/partials/admin/fleet-halt"
+          hx-target="#admin-fleet-halt" hx-swap="outerHTML">
+      <input type="hidden" name="active" value="1">
+      <input type="text" name="reason" required style="min-width:24rem"
+             placeholder="why (shown in every editor's tray)">
+      <button class="btn" type="submit">[ HALT ALL SYNCING ]</button>
+    </form>
+  {% endif %}
+</div>

@@ -20,7 +20,7 @@ def _cfg(tmp_path, **embedding_overrides) -> Config:
     )
 
 
-def _fake_embed_texts(texts, model_name="m", batch_size=64):
+def _fake_embed_texts(texts, model_name="m", batch_size=64, cache_dir=""):
     """Deterministic, cheap stand-in for embed.embed_texts — no model, no network.
 
     Encodes each text as a short vector derived from its content so equality checks

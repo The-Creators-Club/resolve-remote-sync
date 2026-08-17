@@ -3,6 +3,7 @@ persistence, deep-link construction, and thread-safety edges -- all with
 injected fakes, no Tk/browser/network."""
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -37,6 +38,16 @@ def make_prompter(tmp_path, confirm=None, open_url=None, current=None, notify=No
     return prompter, opened, confirmed
 
 
+def _asked_names(state_dir) -> set:
+    """The names recorded in the on-disk "already asked" map, or an empty set
+    while there is nothing readable there yet."""
+    try:
+        data = json.loads((state_dir / STATE_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return set((data.get("asked") or {}))
+
+
 def wait_for(predicate, timeout=3.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -67,7 +78,12 @@ def test_decline_persists_across_instances(tmp_path):
 
     prompter, opened, _c = make_prompter(tmp_path, confirm=decline)
     prompter.note_report_response({"resolve_project_unmapped": "New Doc"})
-    assert wait_for(lambda: (tmp_path / STATE_FILENAME).exists())
+    # Wait for the NAME to be in the file, not merely for the file to exist:
+    # the record is written from the prompt thread, and "the path exists" was
+    # true a moment before the bytes were (this test failed intermittently
+    # under a loaded full-suite run until _record_asked became atomic,
+    # 2026-08-17).
+    assert wait_for(lambda: "new doc" in _asked_names(tmp_path))
     assert opened == []
 
     # a fresh instance (companion restart) never auto-prompts again
@@ -79,6 +95,31 @@ def test_decline_persists_across_instances(tmp_path):
     assert opened2 == []
     # but the tray condition still surfaces it
     assert prompter2.unmapped_project == "New Doc"
+
+
+def test_the_asked_map_is_written_atomically(tmp_path):
+    """A reader must never see a truncated state file.
+
+    write_text is create-truncate-write-close, so a second prompter reading
+    mid-write got zero bytes, _load_asked's json.loads raised, the except
+    swallowed it, and the map came back EMPTY -- which re-prompts for a
+    project the editor already declined. Checked by watching for the temp
+    file and by proving the record is complete the instant the path exists.
+    """
+    prompter, _o, _c = make_prompter(tmp_path)
+    prompter._record_asked("New Doc")
+    prompter._record_asked("Second Doc")
+
+    state = tmp_path / STATE_FILENAME
+    assert _asked_names(tmp_path) == {"new doc", "second doc"}
+    # No temp file left beside the record.
+    assert [p.name for p in tmp_path.iterdir() if p.is_file()] == [state.name]
+
+    # ...and a fresh reader built from that file agrees, which is the
+    # companion-restart path.
+    fresh, _o2, confirmed2 = make_prompter(tmp_path)
+    assert fresh._was_asked("new doc") and fresh._was_asked("Second Doc")
+    assert confirmed2 == []
 
 
 def test_absent_flag_clears_unmapped(tmp_path):

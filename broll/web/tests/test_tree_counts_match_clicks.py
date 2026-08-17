@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from app import config
 from app.search import build_shoot_clause
 from tests.factories import insert_video
 
@@ -64,7 +65,7 @@ def test_own_footage_is_not_counted_under_downloads(client, conn, creators):
 
     body = client.get("/api/tree").json()
     assert _root(body, "downloads")["total"] == 1
-    assert _root(body, "creators_club")["total"] == 1
+    assert _root(body, config.COLLECTION_CREATORS)["total"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +74,7 @@ def test_own_footage_is_not_counted_under_downloads(client, conn, creators):
 
 def _shoot(client, slug):
     body = client.get("/api/search",
-                      params={"collection": "creators_club", "shoot": slug}).json()
+                      params={"collection": config.COLLECTION_CREATORS, "shoot": slug}).json()
     return {r["video"]["rel_path"] for r in body["results"]}
 
 
@@ -82,7 +83,7 @@ def test_a_shoot_node_returns_exactly_what_it_counted(client, conn, creators):
     insert_video(conn, share="ff4", rel_path="Whisky/Interviews/Proxy/b.mov")
     insert_video(conn, share="ff4", rel_path="Whisky/B-roll/Proxy/c.mov")
 
-    groups = _root(client.get("/api/tree").json(), "creators_club")["groups"]
+    groups = _root(client.get("/api/tree").json(), config.COLLECTION_CREATORS)["groups"]
     share_node = next(n for n in groups if n["slug"] == "ff4")
     whisky = next(c for c in share_node["children"] if c["label"] == "Whisky")
     interviews = next(c for c in whisky["children"] if c["label"] == "Interviews")

@@ -60,10 +60,17 @@ def _get(port: int, path: str):
 
 
 def _post(port: int, path: str, obj: dict):
+    # With the loopback token, as any local (non-browser) caller must since
+    # 2026-08-17: a POST needs an allowed Origin or that header
+    # (COMMERCIAL_READINESS.md item 5, docs/LOOPBACK_API.md).
+    from ccsync_companion import loopback_guard
+
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     payload = json.dumps(obj).encode("utf-8")
     conn.request("POST", path, body=payload,
                  headers={"Content-Type": "application/json",
+                          loopback_guard.TOKEN_HEADER:
+                              loopback_guard.read_token() or "",
                           "Content-Length": str(len(payload))})
     resp = conn.getresponse()
     body = resp.read()
@@ -192,7 +199,7 @@ def test_the_port_key_is_never_a_config_problem(tmp_path):
     from ccsync_companion import config as config_mod
 
     cfg = {
-        "editor_name": "ruskin",
+        "editor_name": "editor2",
         "local_root": str(tmp_path),
         "remote": "creators_club_sftp",
         "remote_root": "/mnt/tank/TheCreatorsPool/Creators_Club",

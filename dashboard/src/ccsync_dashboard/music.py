@@ -178,6 +178,8 @@ def mount_music(app: FastAPI) -> str:
                     type(e).__name__, e)
         return ABSENT
 
+    _declare_login_gated()
+
     gated = MusicGate(music_app)
 
     try:
@@ -198,6 +200,31 @@ def mount_music(app: FastAPI) -> str:
     app.mount(MOUNT_PATH, gated)
     log.info("music UI mounted at %s", MOUNT_PATH)
     return MOUNTED
+
+
+def _declare_login_gated() -> None:
+    """Tell musicweb that app.py's login_gate is wrapped around it.
+
+    musicweb's drag-and-drop ingest is fail-closed since 2026-08-17
+    (COMMERCIAL_READINESS.md item 15): standalone it demands MUSIC_INGEST_TOKEN
+    and refuses without one. Mounted here the browser is already past the
+    dashboard's login and cannot send a header the SPA does not know, so this
+    is the declaration that turns the session into the credential -- and it is
+    a CALL from the mount rather than an env var, because a host that merely
+    has a variable set is not the same as a process with the middleware
+    actually wrapped around it.
+
+    Best-effort, like everything else about this mount: an older music
+    checkout has no such function and must not stop the dashboard booting.
+    """
+    try:
+        from musicweb import config as music_config  # type: ignore[import-not-found]
+
+        music_config.set_login_gated(True)
+    except Exception as e:  # noqa: BLE001 - see module docstring
+        log.warning("could not declare the music mount login-gated (%s: %s); its "
+                    "ingest route will refuse unless MUSIC_INGEST_TOKEN is set",
+                    type(e).__name__, e)
 
 
 def _init_music_storage() -> None:

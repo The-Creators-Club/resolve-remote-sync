@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Creators Club Sync -- macOS companion release.
+# CC Sync -- macOS companion release.
 #
 # The Mac-side twin of tools/release.ps1: verify version + vendored-file
 # parity, run the tests, run PyInstaller, confirm the ad-hoc signature, and
@@ -469,6 +469,9 @@ echo ""
 step "--- step 4/6: PyInstaller build ---"
 
 ARTIFACT_ARCH=""
+# Developer ID / notarised, as opposed to the ad-hoc signature PyInstaller
+# always applies. Signed into the release record (item 4, 2026-08-17).
+SIGNED_BINARY=false
 if [ "$DRY_RUN" = 1 ]; then
     dry "would run: \$VENV/bin/python -m PyInstaller build.spec --noconfirm   (in $COMPANION_DIR)"
     dry "would then confirm the ad-hoc signature: codesign -dv $ARTIFACT"
@@ -479,6 +482,63 @@ else
     [ -f "$ARTIFACT" ] || fail "PyInstaller reported success but there is no binary at $ARTIFACT"
     chmod +x "$ARTIFACT" 2>/dev/null || true
     step "built $ARTIFACT"
+
+    # --- Developer ID + notarisation (COMMERCIAL_READINESS.md item 4,
+    # 2026-08-17). Set these on the release Mac:
+    #   CCSYNC_APPLE_DEV_ID       "Developer ID Application: Name (TEAMID)"
+    #   CCSYNC_NOTARY_PROFILE     a keychain profile made once with
+    #                             `xcrun notarytool store-credentials`
+    # With neither, the ad-hoc signature PyInstaller applies stays and the
+    # build is stamped signed_binary=false. Ad-hoc is enough for the KERNEL
+    # (an unsigned arm64 binary is killed on launch) but not for GATEKEEPER:
+    # a downloaded ad-hoc binary is refused with "cannot be opened because the
+    # developer cannot be verified", and the editor has to right-click-Open or
+    # clear the quarantine bit by hand -- which is exactly the instruction a
+    # customer must never be given.
+    #
+    # --options runtime (hardened runtime) and --timestamp are BOTH required
+    # for notarisation; a signature without either is accepted by codesign and
+    # rejected by notarytool minutes later, after the upload.
+    SIGNED_BINARY=false
+    if [ -n "${CCSYNC_APPLE_DEV_ID:-}" ]; then
+        have_cmd codesign || fail "CCSYNC_APPLE_DEV_ID is set but there is no codesign on PATH"
+        step "signing with Developer ID: $CCSYNC_APPLE_DEV_ID"
+        codesign --force --sign "$CCSYNC_APPLE_DEV_ID" --options runtime --timestamp "$ARTIFACT" \
+            || fail "codesign with '$CCSYNC_APPLE_DEV_ID' failed -- NOT publishing an unsigned build under a signed build's version number"
+        if [ -n "${CCSYNC_NOTARY_PROFILE:-}" ]; then
+            # notarytool takes an archive, never a bare Mach-O.
+            NOTARY_ZIP="$DIST_DIR/ccsync-companion-notarize.zip"
+            rm -f "$NOTARY_ZIP"
+            ditto -c -k --keepParent "$ARTIFACT" "$NOTARY_ZIP" \
+                || fail "could not zip the binary for notarisation"
+            step "submitting to Apple for notarisation (this can take minutes)..."
+            xcrun notarytool submit "$NOTARY_ZIP" --keychain-profile "$CCSYNC_NOTARY_PROFILE" --wait \
+                || fail "notarisation failed -- run: xcrun notarytool log <submission-id> --keychain-profile $CCSYNC_NOTARY_PROFILE"
+            rm -f "$NOTARY_ZIP"
+            # A bare Mach-O cannot be stapled (there is nowhere to put the
+            # ticket) -- Gatekeeper looks the ticket up online instead, which
+            # is why this is a warning and not a failure. It is the reason a
+            # .app bundle would be worth having one day.
+            xcrun stapler staple "$ARTIFACT" 2>/dev/null \
+                && step "notarisation ticket stapled" \
+                || warn "could not staple the ticket to a bare Mach-O -- Gatekeeper will check Apple online instead (works, but needs a network on first launch)"
+        else
+            warn "CCSYNC_NOTARY_PROFILE is not set -- the binary is Developer ID SIGNED but NOT NOTARISED."
+            warn "Gatekeeper still refuses a downloaded unnotarised binary. Create the profile once:"
+            warn "  xcrun notarytool store-credentials <profile> --apple-id <id> --team-id <team> --password <app-specific-password>"
+        fi
+        SIGNED_BINARY=true
+    else
+        warn "**********************************************************************"
+        warn "UNSIGNED BUILD (ad-hoc only). No CCSYNC_APPLE_DEV_ID in the environment."
+        warn "Every Mac editor who DOWNLOADS this build meets Gatekeeper's"
+        warn "'cannot be opened because the developer cannot be verified'."
+        warn "Buy an Apple Developer Program membership (Developer ID Application"
+        warn "certificate) and set CCSYNC_APPLE_DEV_ID + CCSYNC_NOTARY_PROFILE."
+        warn "See docs/RELEASE.md 'Code signing'. The upgrade channel's own"
+        warn "signature is separate and is still applied."
+        warn "**********************************************************************"
+    fi
 
     # PyInstaller ad-hoc signs macOS binaries automatically (codesign_identity
     # is None in build.spec, which means "-" / ad-hoc, not "unsigned"). An
@@ -499,6 +559,12 @@ else
         echo "$CODESIGN_OUT" | sed 's/^/    /'
         if printf '%s' "$CODESIGN_OUT" | grep -q 'Signature=adhoc'; then
             step "ad-hoc signature present"
+            # Belt and braces on the flag the release record carries: if the
+            # binary still reads ad-hoc, no Developer ID landed, whatever the
+            # environment said (item 4, 2026-08-17).
+            SIGNED_BINARY=false
+        elif [ "$SIGNED_BINARY" = true ]; then
+            step "Developer ID signature present"
         else
             warn "the signature is not ad-hoc -- read the codesign output above and make sure that is what you meant"
         fi
@@ -575,6 +641,7 @@ write_manifest() {
     "git_describe":  "$(json_escape "$GIT_DESCRIBE")",
     "git_dirty":  $GIT_DIRTY,
     "tests_run":  $TESTS_RUN,
+    "signed_binary":  $SIGNED_BINARY,
     "built_by":  "$(json_escape "$BUILT_BY")",
     "built_with":  "tools/release_macos.sh"
 }
@@ -635,6 +702,35 @@ fi
 
 have_cmd curl || fail "no curl on PATH -- cannot publish"
 [ -n "$SHA" ] || fail "no sha256 for $ARTIFACT -- nothing to publish"
+
+# --- sign the release record (COMMERCIAL_READINESS.md item 4, 2026-08-17) ---
+# The dashboard REFUSES an unsigned publish, so this runs before the password
+# prompt: a missing release key should cost a message, not a login.
+#
+# THE RELEASE KEY LIVES ON THE RELEASE MACHINE, and the Mac is a second one.
+# Copy it there ONCE, by hand, to ~/.ccsync-release/release.key (chmod 600) --
+# or set CCSYNC_RELEASE_KEY to wherever you keep it. It is the same key the
+# Windows ship signs with, because a companion trusts exactly the keys baked
+# into it and Mac editors run the same baked list.
+SIGN_PY="$VENV_PY"
+[ -x "$SIGN_PY" ] || SIGN_PY="$(command -v python3 || true)"
+[ -n "$SIGN_PY" ] || fail "no python to run tools/sign_release.py with"
+MIN_VERSION="${CCSYNC_MIN_VERSION:-0.0.0}"
+SIGN_ARGS="--signed-binary"
+[ "$SIGNED_BINARY" = true ] || SIGN_ARGS=""
+# shellcheck disable=SC2086  # SIGN_ARGS is a deliberate single optional flag
+SIGN_JSON="$("$SIGN_PY" "$REPO_ROOT/tools/sign_release.py" \
+    --artifact "$ARTIFACT" --kind companion --platform macos \
+    --version "$VERSION" --min-version "$MIN_VERSION" $SIGN_ARGS 2>/dev/null)" \
+    || fail "could not sign the release record.
+         The offline release key is missing on this Mac. Copy it from the
+         release rig to ~/.ccsync-release/release.key (chmod 600), or set
+         CCSYNC_RELEASE_KEY. Nothing was uploaded."
+SIGN_QUERY="$(printf '%s' "$SIGN_JSON" | sed -n 's/.*"query": "\([^"]*\)".*/\1/p')"
+[ -n "$SIGN_QUERY" ] || fail "tools/sign_release.py produced no query suffix -- NOT publishing"
+SIGN_SHA="$(printf '%s' "$SIGN_JSON" | sed -n 's/.*"sha256": "\([^"]*\)".*/\1/p')"
+[ "$SIGN_SHA" = "$SHA" ] || fail "the signed record describes $SIGN_SHA but the binary is $SHA -- NOT publishing"
+step "signed release record (min_version $MIN_VERSION, signed_binary $SIGNED_BINARY)"
 
 if [ "$GIT_DIRTY" = true ]; then
     warn "publishing $VERSION_STAMP -- built from an UNCOMMITTED tree (${GIT_DESCRIBE:-unknown});"
@@ -704,7 +800,7 @@ step "logged in as $ADMIN_USER"
 # --- upload -----------------------------------------------------------
 MC=0
 [ "$MAKE_CURRENT" = 1 ] && MC=1
-PUT_URL="$DASHBOARD_URL/api/v1/admin/packages/macos/$VERSION?kind=companion&sha256=$SHA&make_current=$MC"
+PUT_URL="$DASHBOARD_URL/api/v1/admin/packages/macos/$VERSION?kind=companion&sha256=$SHA&make_current=$MC$SIGN_QUERY"
 step "uploading $((SIZE_BYTES / 1024)) KB to $PUT_URL"
 PUT_CODE="$(curl -s -o "$BODY_FILE" -w '%{http_code}' --max-time 600 \
     -b "$COOKIE_JAR" -H "Content-Type: application/octet-stream" \

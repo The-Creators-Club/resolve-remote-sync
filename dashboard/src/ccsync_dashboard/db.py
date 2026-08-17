@@ -11,7 +11,11 @@ comparison correct in SQL and in Python.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import hmac
+import json
 import re
+import secrets
 import sqlite3
 from pathlib import Path
 from typing import Any, Container, Iterable, Mapping
@@ -245,7 +249,7 @@ ALTER TABLE projects ADD COLUMN need_bytes INTEGER;
 # (b) known_editors -- an append-only record of usernames the dashboard has
 #     CONFIRMED are editor accounts. resolve_editor_username() treats any
 #     username-SHAPED Syncthing device name as an editor, so a device approved
-#     as "alex-laptop" resolved to an editor with no selections rows and the
+#     as "editor-laptop" resolved to an editor with no selections rows and the
 #     enforce cycle unshared it from every folder it was on (KNOWN_BUGS B16).
 #     A name that is merely username-shaped is now treated as UNMAPPED (and
 #     therefore left alone) until it appears here.
@@ -261,6 +265,92 @@ CREATE TABLE IF NOT EXISTS known_editors (
   editor_username TEXT PRIMARY KEY,
   first_seen      TEXT NOT NULL,
   source          TEXT NOT NULL    -- 'report' | 'seed' | 'selection' | 'admin'
+);
+"""
+
+# v16: the companion's SAFETY LATCHES, flattened onto machine_state
+# (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+#
+# A machine whose lane B circuit breaker has tripped looks EXACTLY like a
+# healthy quiet one on the fleet grid -- lane B idle, no error, green -- and
+# the same is true of one an editor has halted. Those are the two states an
+# admin most needs to see and the two the grid could not show, so they get
+# columns rather than a JSON blob: the grid sorts and alarms on them.
+#
+# Same shape as v13's transport columns and for the same reason (they are a
+# CURRENT STATE per machine, not a history), including the COALESCE-on-update
+# rule in upsert_machine_state -- except `breaker_tripped` and `halt_active`,
+# which are sent on EVERY tick and must be able to go back to 0.
+SCHEMA_V16 = """
+ALTER TABLE machine_state ADD COLUMN breaker_tripped INTEGER;
+ALTER TABLE machine_state ADD COLUMN breaker_reason TEXT;
+ALTER TABLE machine_state ADD COLUMN breaker_at TEXT;
+ALTER TABLE machine_state ADD COLUMN trash_bytes INTEGER;
+ALTER TABLE machine_state ADD COLUMN trash_count INTEGER;
+ALTER TABLE machine_state ADD COLUMN halt_active INTEGER;
+ALTER TABLE machine_state ADD COLUMN halt_scope TEXT;
+ALTER TABLE machine_state ADD COLUMN halt_reason TEXT;
+ALTER TABLE machine_state ADD COLUMN skipped_exists INTEGER;
+ALTER TABLE machine_state ADD COLUMN guard_at TEXT;
+"""
+
+# v14: the signed upgrade channel (COMMERCIAL_READINESS.md item 4,
+# 2026-08-17). Every published package now carries an offline Ed25519
+# signature over its whole record; the dashboard stores it and serves it
+# alongside the fields it already served, and companions verify it BEFORE
+# downloading anything. Additive and nullable on purpose -- rows published
+# before this migration keep working for the [ INSTALLER ] download and stay
+# visibly unsigned in the admin view instead of vanishing.
+#
+#   signature     base64 of the 64-byte Ed25519 signature
+#   pubkey_id     which release key signed it (rotation/logging only)
+#   min_version   the downgrade floor this release asserts
+#   signed_binary whether the ARTIFACT carries Authenticode / Developer ID
+#                 (distinct from the record signature above)
+SCHEMA_V14 = """
+ALTER TABLE companion_packages ADD COLUMN signature TEXT;
+ALTER TABLE companion_packages ADD COLUMN pubkey_id TEXT;
+ALTER TABLE companion_packages ADD COLUMN min_version TEXT;
+ALTER TABLE companion_packages ADD COLUMN signed_binary INTEGER;
+"""
+
+# v15: per-editor report tokens (COMMERCIAL_READINESS.md item 15, 2026-08-17).
+# Until now every companion in the fleet authenticated with ONE shared
+# DASH_REPORT_TOKEN: it cannot be revoked for a single editor, a leaving
+# contractor keeps it, and a leak means rotating every machine at once.
+#
+# The secret is stored HASHED (sha256 of the secret half) and shown to the
+# admin exactly once, like an API key anywhere else -- the dashboard must not
+# be a place a stolen backup yields working fleet credentials. `token_id` is
+# the public half carried in the token string, so verification is one indexed
+# lookup rather than a hash of every row.
+#
+# `report_auth` is the migration telemetry the shared token needs: one row per
+# machine recording which credential its LAST report used, so an operator can
+# see when the fleet has finished moving and it is safe to set
+# DASH_SHARED_REPORT_TOKEN_ENABLED=0. Deliberately its own table rather than a
+# column on machine_state -- it is a transitional fact with a shorter life than
+# the fleet grid.
+SCHEMA_V15 = """
+CREATE TABLE IF NOT EXISTS editor_report_tokens (
+  token_id        TEXT PRIMARY KEY,       -- public half, appears in the token
+  editor_username TEXT NOT NULL,
+  token_hash      TEXT NOT NULL,          -- sha256 hex of the secret half
+  label           TEXT NOT NULL DEFAULT '',
+  created_at      TEXT NOT NULL,
+  created_by      TEXT NOT NULL,
+  last_used_at    TEXT,
+  revoked_at      TEXT,
+  revoked_by      TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_editor_report_tokens_editor
+  ON editor_report_tokens(editor_username);
+CREATE TABLE IF NOT EXISTS report_auth (
+  editor_username TEXT NOT NULL,
+  machine         TEXT NOT NULL,
+  auth_kind       TEXT NOT NULL,          -- 'shared' | 'editor'
+  at              TEXT NOT NULL,
+  PRIMARY KEY (editor_username, machine)
 );
 """
 
@@ -380,6 +470,9 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (11, SCHEMA_V11),
     (12, SCHEMA_V12),
     (13, SCHEMA_V13),
+    (14, SCHEMA_V14),
+    (15, SCHEMA_V15),
+    (16, SCHEMA_V16),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -494,7 +587,7 @@ def resolve_editor_username(
 
     `known_editors` is the set of usernames the dashboard has a POSITIVE
     record of (see known_editor_usernames). Being username-SHAPED is not
-    enough: machine names look exactly like usernames ("alex-laptop",
+    enough: machine names look exactly like usernames ("editor-laptop",
     "edit-pc"), and a device approved under one used to resolve to an editor
     account that does not exist, with no selections rows -- so the enforce
     cycle read it as "this editor is ticked for nothing" and unshared the
@@ -540,6 +633,177 @@ def record_known_editor(
         "VALUES (?, ?, ?)",
         (name, now or utcnow_iso(), source),
     )
+
+
+# ----------------------------------------------------- per-editor report tokens
+#
+# Format: "cce1.<token_id>.<secret>" -- a version tag, a public id and the
+# secret, all lowercase hex after the tag. The version tag is what lets a
+# caller tell a per-editor token from the shared DASH_REPORT_TOKEN by LOOKING
+# at it, before any database work: everything that authenticates a companion
+# needs that discrimination (app.py's pre-body gate most of all, which must
+# decide before it has spent a byte on the request).
+#
+# The secret is never stored. Only sha256(secret) is, so a stolen dashboard.db
+# is not a set of working fleet credentials -- and the admin sees the value
+# exactly once, at mint time (COMMERCIAL_READINESS.md item 15, 2026-08-17).
+REPORT_TOKEN_PREFIX = "cce1."
+_REPORT_TOKEN_RE = re.compile(r"^cce1\.([0-9a-f]{16})\.([0-9a-f]{48})$")
+
+
+def looks_like_editor_report_token(token: str) -> bool:
+    """Shape only -- says nothing about whether it is valid or revoked."""
+    return bool(_REPORT_TOKEN_RE.match(str(token or "")))
+
+
+def _hash_report_secret(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def create_editor_report_token(
+    conn: sqlite3.Connection, editor: str, created_by: str,
+    label: str = "", now: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Mint a token for `editor`. -> (the token string, its row-as-dict).
+
+    The token string is the ONLY time the secret exists outside the caller's
+    hands; nothing stores it and no route ever answers with it again.
+    """
+    name = str(editor or "").strip().lower()
+    if not name or not _USERNAME_RE.match(name):
+        raise ValueError(f"{editor!r} is not a valid editor username")
+    token_id = secrets.token_hex(8)
+    secret = secrets.token_hex(24)
+    created_at = now or utcnow_iso()
+    conn.execute(
+        "INSERT INTO editor_report_tokens "
+        "(token_id, editor_username, token_hash, label, created_at, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (token_id, name, _hash_report_secret(secret), str(label or "").strip()[:64],
+         created_at, str(created_by or "")),
+    )
+    row = {"token_id": token_id, "editor_username": name,
+           "label": str(label or "").strip()[:64], "created_at": created_at,
+           "created_by": str(created_by or ""), "last_used_at": None,
+           "revoked_at": None, "revoked_by": None}
+    return f"{REPORT_TOKEN_PREFIX}{token_id}.{secret}", row
+
+
+def verify_editor_report_token(
+    conn: sqlite3.Connection, token: str, now: str | None = None
+) -> str | None:
+    """The editor this token belongs to, or None.
+
+    None covers every failure alike -- wrong shape, unknown id, wrong secret,
+    revoked -- because a caller that could tell them apart would have an
+    oracle for which token ids exist.
+    """
+    match = _REPORT_TOKEN_RE.match(str(token or ""))
+    if match is None:
+        return None
+    token_id, secret = match.group(1), match.group(2)
+    row = conn.execute(
+        "SELECT editor_username, token_hash, revoked_at FROM editor_report_tokens "
+        "WHERE token_id = ?", (token_id,)
+    ).fetchone()
+    if row is None or row["revoked_at"]:
+        return None
+    if not hmac.compare_digest(row["token_hash"], _hash_report_secret(secret)):
+        return None
+    return str(row["editor_username"])
+
+
+def touch_editor_report_token(
+    conn: sqlite3.Connection, token: str, now: str | None = None
+) -> None:
+    """Record that this token was just used. Best-effort, never raises.
+
+    Separate from verify_ so the hot path can decide whether a write is worth
+    it -- and so a read-only verification (the pre-body gate in app.py, which
+    opens its own connection) does not have to write at all.
+    """
+    match = _REPORT_TOKEN_RE.match(str(token or ""))
+    if match is None:
+        return
+    try:
+        conn.execute("UPDATE editor_report_tokens SET last_used_at = ? WHERE token_id = ?",
+                     (now or utcnow_iso(), match.group(1)))
+    except sqlite3.Error:
+        pass
+
+
+def fetch_editor_report_tokens(
+    conn: sqlite3.Connection, editor: str | None = None, include_revoked: bool = False
+) -> list[dict[str, Any]]:
+    """Token METADATA -- never a secret; there is no secret stored to leak."""
+    sql = ("SELECT token_id, editor_username, label, created_at, created_by, "
+           "last_used_at, revoked_at, revoked_by FROM editor_report_tokens")
+    where, params = [], []
+    if editor:
+        where.append("editor_username = ?")
+        params.append(str(editor).strip().lower())
+    if not include_revoked:
+        where.append("revoked_at IS NULL")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY editor_username, created_at DESC"
+    return [dict(r) for r in conn.execute(sql, params)]
+
+
+def revoke_editor_report_token(
+    conn: sqlite3.Connection, token_id: str, revoked_by: str, now: str | None = None
+) -> bool:
+    """True if a live token was revoked. Revoking is a soft delete: the row
+    stays so an admin can still see that the credential existed and when it
+    was last used."""
+    cur = conn.execute(
+        "UPDATE editor_report_tokens SET revoked_at = ?, revoked_by = ? "
+        "WHERE token_id = ? AND revoked_at IS NULL",
+        (now or utcnow_iso(), str(revoked_by or ""), str(token_id or "")),
+    )
+    return cur.rowcount > 0
+
+
+def record_report_auth(
+    conn: sqlite3.Connection, editor: str, machine: str, auth_kind: str,
+    now: str | None = None
+) -> None:
+    """Which credential this machine's last report used. Migration telemetry.
+
+    See count_shared_token_machines: the answer to "is it safe to turn
+    DASH_SHARED_REPORT_TOKEN_ENABLED off yet" has to come from the fleet, not
+    from an operator's memory of who they handed tokens to."""
+    name = str(editor or "").strip().lower()
+    if not name or auth_kind not in ("shared", "editor"):
+        return
+    conn.execute(
+        "INSERT INTO report_auth (editor_username, machine, auth_kind, at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(editor_username, machine) DO UPDATE SET "
+        "auth_kind = excluded.auth_kind, at = excluded.at",
+        (name, str(machine or ""), auth_kind, now or utcnow_iso()),
+    )
+
+
+def count_shared_token_machines(conn: sqlite3.Connection) -> dict[str, Any]:
+    """{"shared": n, "editor": n, "machines": [...]} -- who is still on the
+    shared fleet token. Tolerates a database that predates the table (an
+    older dashboard.db mid-migration) by answering zeroes."""
+    result: dict[str, Any] = {"shared": 0, "editor": 0, "machines": []}
+    try:
+        rows = conn.execute(
+            "SELECT editor_username, machine, auth_kind FROM report_auth"
+        ).fetchall()
+    except sqlite3.Error:
+        return result
+    for row in rows:
+        kind = row["auth_kind"]
+        if kind in result:
+            result[kind] += 1
+        if kind == "shared":
+            result["machines"].append(f"{row['editor_username']}/{row['machine']}")
+    result["machines"].sort()
+    return result
 
 
 def known_editor_usernames(conn: sqlite3.Connection) -> set[str]:
@@ -850,12 +1114,21 @@ def insert_companion_package(
     published_by: str,
     now: str,
     kind: str = "companion",
+    signature: str = "",
+    pubkey_id: str = "",
+    min_version: str = "",
+    signed_binary: bool = False,
 ) -> None:
+    # `now` is the SIGNER's published_at, not the server's clock: it is one of
+    # the fields the release signature covers, so storing anything else would
+    # serve a record that no longer verifies (item 4, 2026-08-17).
     conn.execute(
         """INSERT INTO companion_packages
-             (kind, version, platform, filename, sha256, size_bytes, published_at, published_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (kind, version, platform, filename, sha256, size_bytes, now, published_by),
+             (kind, version, platform, filename, sha256, size_bytes, published_at,
+              published_by, signature, pubkey_id, min_version, signed_binary)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (kind, version, platform, filename, sha256, size_bytes, now, published_by,
+         signature, pubkey_id, min_version, 1 if signed_binary else 0),
     )
 
 
@@ -1021,22 +1294,35 @@ def upsert_machine_state(
     resolve_project: str | None = None, verified: bool = False,
     platform: str | None = None, companion_version: str | None = None,
     transport: Mapping[str, Any] | None = None,
+    guard: Mapping[str, Any] | None = None,
 ) -> None:
     """`transport` is summarize_transport_health()'s flattened dict, or None.
 
     None leaves the stored transport columns ALONE rather than nulling them:
     the companion only computes transport_health on HEAVY ticks, so a LIGHT
     report must not wipe the relay/orphan state between two heavy ones (same
-    rule the media tables follow)."""
+    rule the media tables follow).
+
+    `guard` is flatten_sync_guard()'s dict -- the lane B breaker, the trash
+    size, the halt and lane A's "skipped, exists" counter (v16,
+    COMMERCIAL_READINESS.md item 9). Same None-leaves-it-alone rule, with one
+    deliberate exception below: the two BOOLEAN latches are written on every
+    guard-bearing report, because a breaker that clears has to be able to
+    clear the alarm."""
     t = dict(transport or {})
+    g = dict(guard or {})
     conn.execute(
         """INSERT INTO machine_state
              (editor_username, machine, detected_project_root, reported_at,
               resolve_project, verified, platform, companion_version,
               transport_relayed, transport_direct, orphan_partials,
               orphan_partial_bytes, express_dropped, express_last_error,
-              transport_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              transport_at,
+              breaker_tripped, breaker_reason, breaker_at, trash_bytes,
+              trash_count, halt_active, halt_scope, halt_reason,
+              skipped_exists, guard_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(editor_username, machine) DO UPDATE SET
              detected_project_root=excluded.detected_project_root,
              reported_at=excluded.reported_at,
@@ -1059,14 +1345,116 @@ def upsert_machine_state(
                                      THEN machine_state.express_last_error
                                      ELSE excluded.express_last_error END,
              transport_at=COALESCE(excluded.transport_at,
-                                   machine_state.transport_at)""",
+                                   machine_state.transport_at),
+             -- The LATCHES are set from this report whenever it carried a
+             -- guard section at all (guard_at is the marker), never
+             -- COALESCEd: COALESCE cannot express "back to false", so a
+             -- resumed breaker would have left the fleet alarm on forever.
+             breaker_tripped=CASE WHEN excluded.guard_at IS NULL
+                                  THEN machine_state.breaker_tripped
+                                  ELSE excluded.breaker_tripped END,
+             breaker_reason=CASE WHEN excluded.guard_at IS NULL
+                                 THEN machine_state.breaker_reason
+                                 ELSE excluded.breaker_reason END,
+             breaker_at=CASE WHEN excluded.guard_at IS NULL
+                             THEN machine_state.breaker_at
+                             ELSE excluded.breaker_at END,
+             halt_active=CASE WHEN excluded.guard_at IS NULL
+                              THEN machine_state.halt_active
+                              ELSE excluded.halt_active END,
+             halt_scope=CASE WHEN excluded.guard_at IS NULL
+                             THEN machine_state.halt_scope
+                             ELSE excluded.halt_scope END,
+             halt_reason=CASE WHEN excluded.guard_at IS NULL
+                              THEN machine_state.halt_reason
+                              ELSE excluded.halt_reason END,
+             trash_bytes=COALESCE(excluded.trash_bytes, machine_state.trash_bytes),
+             trash_count=COALESCE(excluded.trash_count, machine_state.trash_count),
+             skipped_exists=COALESCE(excluded.skipped_exists,
+                                     machine_state.skipped_exists),
+             guard_at=COALESCE(excluded.guard_at, machine_state.guard_at)""",
         (editor, machine, detected_project_root, now, resolve_project, int(verified),
          platform, companion_version,
          t.get("relayed"), t.get("direct"), t.get("orphan_partials"),
          t.get("orphan_partial_bytes"), t.get("express_dropped"),
-         t.get("express_last_error"), t.get("at")),
+         t.get("express_last_error"), t.get("at"),
+         g.get("breaker_tripped"), g.get("breaker_reason"), g.get("breaker_at"),
+         g.get("trash_bytes"), g.get("trash_count"), g.get("halt_active"),
+         g.get("halt_scope"), g.get("halt_reason"), g.get("skipped_exists"),
+         g.get("at")),
     )
     evict_extra_machines(conn, editor)
+
+
+def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> the safety-latch state for the fleet grid (v16).
+
+    The alarm source: a tripped lane B breaker or a halted machine is
+    indistinguishable from a healthy idle one on every other signal the grid
+    has (COMMERCIAL_READINESS.md item 9, 2026-08-17)."""
+    return {
+        (r["editor_username"], r["machine"]): {
+            "breaker_tripped": bool(r["breaker_tripped"]),
+            "breaker_reason": r["breaker_reason"],
+            "breaker_at": r["breaker_at"],
+            "trash_bytes": r["trash_bytes"],
+            "trash_count": r["trash_count"],
+            "halt_active": bool(r["halt_active"]),
+            "halt_scope": r["halt_scope"],
+            "halt_reason": r["halt_reason"],
+            "skipped_exists": r["skipped_exists"],
+            "at": r["guard_at"],
+        }
+        for r in conn.execute(
+            """SELECT editor_username, machine, breaker_tripped, breaker_reason,
+                      breaker_at, trash_bytes, trash_count, halt_active, halt_scope,
+                      halt_reason, skipped_exists, guard_at
+               FROM machine_state"""
+        )
+    }
+
+
+# The fleet halt lives in `meta`, not in a table of its own: it is exactly one
+# row of state for the whole dashboard, and `meta` is where the collector
+# already keeps that class of thing. JSON in the value so the reason and who
+# set it travel with the flag (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+FLEET_HALT_KEY = "fleet_halt"
+
+
+def get_fleet_halt(conn: sqlite3.Connection) -> dict[str, Any]:
+    """{"active", "reason", "set_by", "set_at"} -- never None.
+
+    A corrupt/absent value reads as NOT halted, deliberately: a dashboard
+    that cannot parse its own flag must not silently stop the whole fleet
+    from syncing, and an admin can always set it again."""
+    raw = meta_get(conn, FLEET_HALT_KEY)
+    if not raw:
+        return {"active": False, "reason": "", "set_by": "", "set_at": ""}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {"active": False, "reason": "", "set_by": "", "set_at": ""}
+    if not isinstance(data, dict):
+        return {"active": False, "reason": "", "set_by": "", "set_at": ""}
+    return {
+        "active": bool(data.get("active")),
+        "reason": str(data.get("reason") or ""),
+        "set_by": str(data.get("set_by") or ""),
+        "set_at": str(data.get("set_at") or ""),
+    }
+
+
+def set_fleet_halt(
+    conn: sqlite3.Connection, active: bool, reason: str, by: str, now: str | None = None
+) -> dict[str, Any]:
+    state = {
+        "active": bool(active),
+        "reason": str(reason or "")[:500],
+        "set_by": str(by or "")[:64],
+        "set_at": now or utcnow_iso(),
+    }
+    meta_set(conn, FLEET_HALT_KEY, json.dumps(state))
+    return state
 
 
 def fetch_transport_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:

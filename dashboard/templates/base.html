@@ -4,10 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}CC SYNC{% endblock %}</title>
-  {# The real Creators Club mark (2026-08-10), not the old generated PNG. SVG
+  {# The real product mark (2026-08-10), not the old generated PNG. SVG
      with a PNG fallback for anything that won't take an SVG favicon. #}
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="alternate icon" type="image/png" href="/static/favicon.png">
+  {# The CSRF synchroniser token (2026-08-17, COMMERCIAL_READINESS.md item 15:
+     "CSRF rests on SameSite=Lax alone; htmx POST partials have no token").
+     Read from here by anything that needs it in JS; htmx gets it from the
+     hx-headers on <body>, which every element on the page inherits, so no
+     individual form has to remember. Empty for an anonymous render. #}
+  <meta name="csrf" content="{{ csrf_token or '' }}">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js" defer></script>
   <script>
@@ -42,7 +48,11 @@
     })();
   </script>
 </head>
-<body>
+{# hx-headers on <body>: htmx walks up the DOM for it, so EVERY hx-get/hx-post
+   on the page carries the token without each partial having to declare it --
+   including partials swapped in later, because the attribute lives on an
+   ancestor that never gets replaced. #}
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token or "" }}"}'>
   <header class="topbar">
     {# The topbar lives in its own partial because the mounted SPAs (/broll,
        /music) fetch it from /partials/topbar and swap it in over their static

@@ -41,9 +41,15 @@ const PHASE_LABEL = {
 // The machine-readable prefixes worker.py writes into jobs.error. The whole
 // point of them is that the fix is different in every case and an editor
 // cannot tell them apart from a raw stderr dump.
+// The prefixes are unchanged since 2026-08-17; what two of them MEAN is not.
+// The server stopped shelling out to the `claude` CLI and now calls the
+// Anthropic API with a key the customer supplies, so claude_auth: is "set
+// ANTHROPIC_API_KEY", not "run the one-time login", and claude_missing: is a
+// broken container rather than a missing binary an operator forgot to install
+// (docs/COMMERCIAL_READINESS.md item 1).
 const HINTS = [
-  ['claude_auth:', 'Claude Code is not logged in on the server. An admin must run the one-time login — see ytdl/web/DEPLOY.md. Nothing else on this page is affected.'],
-  ['claude_missing:', 'The claude CLI is not installed in the dashboard container. See ytdl/web/DEPLOY.md (it ships alongside ffmpeg).'],
+  ['claude_auth:', 'This deployment has no working Anthropic API key. An admin must set ANTHROPIC_API_KEY on the dashboard container — see ytdl/web/DEPLOY.md. Nothing else on this page is affected.'],
+  ['claude_missing:', 'The dashboard container cannot reach the Anthropic API (missing SDK, or no route out). See ytdl/web/DEPLOY.md.'],
   ['claude_timeout:', 'Claude did not answer in time. Try the search again; if it keeps happening the server is overloaded.'],
   ['claude_output:', 'Claude answered with something this app could not read. Trying again usually works.'],
 ];
@@ -134,6 +140,12 @@ const state = {
   pollTimer: null,
   pollStart: 0,
   historyOffset: 0,    // how many ledger rows are already on screen
+  // The rights/ToS attestation (COMMERCIAL_READINESS.md item 2, 2026-08-17).
+  // FALSE until the server says otherwise: an editor who has not accepted, and
+  // a page that could not ask, are the same state here, and it is the one that
+  // keeps the GO buttons disabled.
+  attested: false,
+  attestVersion: '',
 };
 
 // ---------------------------------------------------------------- helpers
@@ -1499,6 +1511,58 @@ async function loadDashboardTopbar() {
 }
 
 // ---------------------------------------------------------------- init
+// -------------------------------------------------- the rights attestation
+// COMMERCIAL_READINESS.md item 2 (2026-08-17). The server owns the wording and
+// the record; this renders both, and disables the two GO buttons until the
+// current wording is accepted. The buttons are disabled rather than hidden:
+// an editor who has used this page for months must see that the thing they
+// know is still there and why it is not clickable.
+
+async function loadAttestation() {
+  let info;
+  try {
+    info = await api('api/attestation');
+  } catch {
+    // An old server without the route, or a blip. Leave the page as it was:
+    // the SERVER is the gate, so a page that cannot ask is a page whose
+    // searches will simply be refused with the reason attached.
+    return;
+  }
+  $('#legalcopyright').textContent = info.copyright_notice || '';
+  $('#legalrate').textContent = info.rate_disclaimer || '';
+  $('#attesttitle').textContent = info.title || 'Before you download';
+  $('#attesttext').textContent = info.text || '';
+  state.attestVersion = info.version || '';
+  setAttested(!!info.accepted);
+}
+
+function setAttested(accepted) {
+  state.attested = accepted;
+  $('#attest').classList.toggle('hidden', accepted);
+  for (const id of ['#go', '#golinks', '#download']) {
+    const el = document.querySelector(id);
+    if (el) {
+      el.disabled = !accepted;
+      el.title = accepted ? el.dataset.title || el.title
+                          : 'Accept the download terms at the top of this page first';
+    }
+  }
+}
+
+async function acceptAttestation() {
+  try {
+    const info = await post('api/attestation', {version: state.attestVersion});
+    setAttested(!!info.accepted);
+    toast('Recorded — thank you.');
+  } catch (e) {
+    // A 409 means the wording changed while this page was open; reloading is
+    // the only honest fix, because accepting text that is no longer current
+    // would record agreement to something nobody displayed.
+    toast(e.message);
+    if (e.status === 409) location.reload();
+  }
+}
+
 async function init() {
   loadDashboardTopbar();
   // Before anything is awaited: the boxes are part of the SEARCH form and must
@@ -1530,6 +1594,12 @@ async function init() {
     renderGrid();
   };
   $('#historymore').onclick = () => loadHistory(true);
+
+  $('#attestaccept').onclick = acceptAttestation;
+  // AWAITED, and before the job is attached: everything the search form can do
+  // is refused by the server without this, so the notice has to be on screen
+  // before an editor types into a box that is about to 403.
+  await loadAttestation();
 
   await loadProjects();
   loadHealth();

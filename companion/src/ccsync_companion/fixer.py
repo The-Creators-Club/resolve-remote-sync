@@ -696,6 +696,89 @@ def remove_reserved_name(path: Path) -> Optional[str]:
         return str(path)
 
 
+def reclaim_if_reservation_lost(dest_dir: Path, dest_path: Path,
+                                filename: str) -> Path:
+    """The reservation re-check, run AFTER the copy and BEFORE os.replace.
+
+    `_claim_destination_path` creates the final name with O_EXCL before the
+    copy starts, which is what makes the collision loop authoritative
+    (DEL-7). It does not, and cannot, stop a writer that ignores the
+    reservation: rclone and Syncthing both overwrite a 0-byte file happily,
+    and a multi-GB copy gives lane B/C minutes to do it. os.replace() would
+    then silently destroy whatever arrived -- the exact outcome the O_EXCL
+    claim was added to prevent, one step later in the sequence
+    (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+
+    So: if the reserved name is still the empty file we made, it is ours and
+    the caller replaces into it. Anything else -- content, or gone entirely --
+    means the claim did not hold, and a FRESH name is claimed instead. The
+    copy lands beside the arrival under `name (2).ext` rather than on top of
+    it, and the relink follows the returned path.
+    """
+    try:
+        if dest_path.exists() and dest_path.stat().st_size == 0:
+            return dest_path
+    except OSError:
+        # Cannot tell (an SMB blip mid-copy) -- treat the claim as lost. A
+        # spare copy beside the original costs disk; a wrong os.replace costs
+        # somebody else's file.
+        log.warning("fix_clip: could not re-check the reserved name %s -- claiming a "
+                    "fresh one rather than replacing into it", dest_path)
+    else:
+        log.warning(
+            "fix_clip: %s is no longer the empty name CCSync reserved (something "
+            "else wrote or removed it during the copy) -- putting our copy under a "
+            "new name instead of overwriting it", dest_path,
+        )
+    return _claim_destination_path(dest_dir, filename)
+
+
+def sample_source(src: Any) -> Optional[tuple[int, float]]:
+    """(size, mtime) for the source, or None when it cannot be read.
+
+    Taken BEFORE the copy so verify_copy() can tell "we copied it wrong" from
+    "it changed while we copied"."""
+    try:
+        stat = os.stat(src)
+        return (int(stat.st_size), float(stat.st_mtime))
+    except OSError:
+        return None
+
+
+def verify_copy(src: Any, dest_path: Any,
+                src_before: Optional[tuple[int, float]] = None) -> Optional[str]:
+    """None when `dest_path` is a faithful copy of `src`, else why not.
+
+    Checked BEFORE the ReplaceClip, because relinking Resolve to a truncated
+    file is worse than not relinking at all: the clip goes from "offline, and
+    the editor knows" to "online, and wrong", and lane A then uploads the
+    truncation under a name it can never replace (`--ignore-existing`).
+
+    Size is the signal for the copy itself. `src_before` catches the other
+    failure -- a source still being written (a card mid-ingest, a download in
+    flight): sizes can agree by luck, but the mtime moving means the bytes we
+    read were a snapshot of something unfinished. Both come back as a failed
+    fix and the caller removes what it wrote.
+    (COMMERCIAL_READINESS.md item 9, 2026-08-17.)
+    """
+    try:
+        src_stat = os.stat(src)
+        dest_stat = os.stat(dest_path)
+    except OSError as exc:
+        return f"the copy could not be checked ({exc})"
+    if src_stat.st_size == 0:
+        return "the original is empty"
+    if src_stat.st_size != dest_stat.st_size:
+        return (f"the copy is {dest_stat.st_size} bytes of a {src_stat.st_size}-byte "
+                f"original -- it was cut short")
+    if src_before is not None:
+        before_size, before_mtime = src_before
+        if before_size != src_stat.st_size or before_mtime != src_stat.st_mtime:
+            return ("the original changed while it was being copied -- it is still "
+                    "being written. Try again once it has finished")
+    return None
+
+
 def _dest_dir_is_contained(dest_dir: Path, local_root_resolved: Path,
                            dest_rel: str | None = None) -> bool:
     """True iff `dest_dir`, once resolved, is local_root itself or somewhere
@@ -747,16 +830,52 @@ def canonical_clip_path(dest_path: Any, local_root: str, canonical_prefix: str) 
     return canon.local_to_canonical(dest_path, local_root, canonical_prefix)
 
 
+# `fixer_dry_run` from config.toml, resolved ONCE per process and cached.
+# Read here rather than threaded down from CompanionApp because every caller
+# of fix_clip -- popup.perform_fix_all, consolidate, the tests' doubles --
+# would otherwise need a new kwarg, and a rehearsal switch that only some
+# call sites honour is worse than none (item 9, 2026-08-17).
+_dry_run_default: Optional[bool] = None
+
+
+def dry_run_default() -> bool:
+    """Is FIX ALL in rehearsal mode on this machine?"""
+    global _dry_run_default
+    if _dry_run_default is None:
+        try:
+            from . import config as config_mod
+            _dry_run_default = bool(config_mod.load_config().get("fixer_dry_run", False))
+        except Exception:
+            _dry_run_default = False
+        if _dry_run_default:
+            log.warning("fixer_dry_run = true: FIX ALL will report its plan and copy "
+                        "NOTHING until that setting is removed from config.toml")
+    return _dry_run_default
+
+
+def reset_dry_run_cache() -> None:
+    """Forget the cached `fixer_dry_run` answer (tests, and a config reload)."""
+    global _dry_run_default
+    _dry_run_default = None
+
+
+def _relink_for_fix_all(media_pool_item, new_path: str) -> dict[str, Any]:
+    """fix_clip's default relinker. Named so the undo journal can say WHICH
+    of the companion's four media-pool writers made an entry (item 9)."""
+    return resolve_bridge.replace_clip(media_pool_item, new_path, source="fix-all")
+
+
 def fix_clip(
     file_path: str,
     dest_rel: str,
     local_root: str,
     media_pool_items: Any,
     copy_fn=None,
-    replace_clip_fn=resolve_bridge.replace_clip,
+    replace_clip_fn=_relink_for_fix_all,
     on_bytes: Optional[Callable[[int, int], None]] = None,
     should_abort: Optional[Callable[[], bool]] = None,
     canonical_prefix: str = "",
+    dry_run: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Copy `file_path` into local_root/dest_rel (collision-safe) once, then
     relink EVERY DISTINCT media pool item in `media_pool_items` to that one
@@ -789,6 +908,15 @@ def fix_clip(
     is neither fixed nor failed. `leftover_paths` names anything the delete
     could not remove, so the dialog can tell the user rather than leaving a
     multi-GB orphan for lane A to upload (CORE-H5).
+
+    `dry_run` (config `fixer_dry_run`, COMMERCIAL_READINESS.md item 9,
+    2026-08-17) runs every check and every refusal and then STOPS: no name is
+    claimed, no byte is copied, no clip is relinked. The plan comes back in
+    the result as `would_copy_to` with `ok: False`, `dry_run: True`, and is
+    logged. It exists because FIX ALL is the companion's largest destructive
+    action and had no way to be rehearsed on a machine whose local_root or
+    destination mapping is in doubt -- and "run it and see" costs a
+    multi-GB copy per clip.
     """
     if copy_fn is None:
         def copy_fn(s, d):
@@ -837,6 +965,23 @@ def fix_clip(
             "copied_to": None,
         }
 
+    if dry_run is None:
+        dry_run = dry_run_default()
+    if dry_run:
+        planned = dest_dir / src.name
+        log.info("fix_clip [dry-run]: would copy %s -> %s and relink %d media pool "
+                 "item(s) to %s", file_path, planned, len(items),
+                 canonical_clip_path(planned, local_root, canonical_prefix))
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": (f"Dry run: would copy to {planned} and relink "
+                        f"{len(items)} clip reference(s). Nothing was changed."),
+            "copied_to": None,
+            "would_copy_to": str(planned),
+            "would_relink_to": canonical_clip_path(planned, local_root, canonical_prefix),
+        }
+
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -861,8 +1006,10 @@ def fix_clip(
         f"{dest_path.name}.{os.getpid()}-{uuid.uuid4().hex[:8]}{TMP_SUFFIX}"
     )
     placeholder = is_placeholder(str(src))
+    src_before = sample_source(src)
     try:
         copy_fn(src, tmp_path)
+        dest_path = reclaim_if_reservation_lost(dest_dir, dest_path, src.name)
         os.replace(tmp_path, dest_path)
     except CopyAborted:
         # THE CORE-H5 BARGAIN. Mid-file abort is only acceptable because
@@ -918,6 +1065,26 @@ def fix_clip(
             "message": classify_copy_failure(exc, placeholder),
             "copied_to": None,
             "placeholder": placeholder,
+        }
+
+    # THE LAST GATE BEFORE RESOLVE IS TOLD ANYTHING (item 9, 2026-08-17).
+    # Everything above protects the destination; this protects the project
+    # database. A short copy or a source that moved under us must not become
+    # a relink -- see verify_copy.
+    bad = verify_copy(src, dest_path, src_before)
+    if bad is not None:
+        removed_note = ""
+        try:
+            os.remove(dest_path)
+        except OSError as exc:
+            removed_note = f" It is still at {dest_path} ({exc}); delete it by hand."
+        log.warning("fix_clip: refusing to relink %s -- %s", file_path, bad)
+        return {
+            "ok": False,
+            "message": (f"Copied {src.name}, but {bad}. Nothing was relinked and the "
+                        f"bad copy was removed.{removed_note}"),
+            "copied_to": None,
+            "verify_error": bad,
         }
 
     failures: list[str] = []

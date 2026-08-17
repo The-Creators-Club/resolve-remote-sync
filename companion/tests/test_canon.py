@@ -248,7 +248,7 @@ def test_round_trip_through_both_directions_is_stable(posix_host):
     "a, b",
     [
         (r"P:\Projects\Clip.mov", r"p:/projects/CLIP.MOV"),
-        (r"C:\Users\alex\Desktop\clip.mov", r"c:\USERS\alex\DESKTOP\clip.MOV"),
+        (r"C:\Users\owen\Desktop\clip.mov", r"c:\USERS\owen\DESKTOP\clip.MOV"),
         (r"P:\Projects\.\a\..\a\x.braw", r"P:\Projects\a\x.braw"),
     ],
 )
@@ -272,7 +272,7 @@ def test_norm_does_not_collapse_genuinely_different_paths():
     "path, expected",
     [
         (r"P:\Desktop\track.wav", "track.wav"),
-        (r"C:\Users\alex\clip.mov", "clip.mov"),
+        (r"C:\Users\owen\clip.mov", "clip.mov"),
         ("P:/Projects/a.braw", "a.braw"),
         ("/Volumes/T7/Creators_Club/a.mov", "a.mov"),
         ("bare.mov", "bare.mov"),

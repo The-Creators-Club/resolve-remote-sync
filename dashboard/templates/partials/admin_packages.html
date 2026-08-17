@@ -16,6 +16,12 @@
           <td class="mono-sm">{{ p.version }}
             {% if p.is_current %}<span class="chip green">[ CURRENT ]</span>{% endif %}
             {% if not p.file_exists %}<span class="chip red" title="row exists but the file is gone from the packages dir">[ FILE MISSING ]</span>{% endif %}
+            {# COMMERCIAL_READINESS.md item 4, 2026-08-17: a row published before
+               release signing exists carries no signature, and every companion
+               that verifies will refuse it -- so the fleet silently stops
+               upgrading. Say it here, where MAKE CURRENT is clicked. #}
+            {% if not p.signature %}<span class="chip red" title="published without a release signature -- companions that verify will REFUSE this build; republish through tools\ship.cmd">[ UNSIGNED ]</span>{% endif %}
+            {% if p.signature and not p.signed_binary %}<span class="chip amber" title="the record is signed, but the binary itself carries no Authenticode/Developer ID signature -- fresh installs meet SmartScreen/Gatekeeper">[ NO CODE SIG ]</span>{% endif %}
           </td>
           <td class="mono-sm muted">{{ p.platform }}</td>
           <td class="mono-sm">{{ p.size_bytes | human_bytes }}</td>

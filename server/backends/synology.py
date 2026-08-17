@@ -427,6 +427,9 @@ class SynologyBackend:
         print(f"    ssh -L {gui_port}:127.0.0.1:{gui_port} <admin>@<nas>")
         print(f"  The API key is the SYNCTHING_API_KEY you put in {self.env_file}; pass the "
               f"same value to setup_syncthing_folder.py / accept_device.py / check_health.py.")
+        print(f"  The loopback bind is the containment; the GUI itself still has no LOGIN, "
+              f"so anyone with a shell on the NAS is a Syncthing admin. Add one:\n"
+              f"    SYNCTHING_API_KEY=... python server/secure_syncthing_gui.py")
         return 0
 
     # ----------------------------------------------------------------------
@@ -580,7 +583,7 @@ class SynologyBackend:
         here would make this script CREATE an existing account.
 
         Matched case-insensitively -- DSM's own names are mixed case
-        (`Cablewrap`), and a refusal that can be dodged by capitalising is not
+        (`Studio`), and a refusal that can be dodged by capitalising is not
         a refusal.
         """
         if dry_run:
@@ -696,6 +699,75 @@ class SynologyBackend:
         if not ok_key:
             return None, detail
         return username, ""
+
+    # -- editor shell posture (COMMERCIAL_READINESS.md item 7 / H4) ---------
+    #
+    # Nothing to do on DSM, and that is worth stating rather than leaving as an
+    # absence: a DSM local account is /sbin/nologin already, interactive SSH is
+    # refused for anyone outside `administrators` whatever their shell says, and
+    # SFTP is the subsystem -- so [stack] editor_shell = "sftp-only" describes
+    # this platform's out-of-the-box state (spike 2). editor_shell = "shell"
+    # cannot be honoured here and is refused rather than silently ignored.
+
+    def editor_shell(self) -> str:
+        return "/sbin/nologin"
+
+    def list_editors(self, group_id, dry_run: bool = False):
+        """Every member of the editors group, in the /user row shape."""
+        if dry_run:
+            return [], ""
+        members, err = self.list_group_members(common.EDITORS_GROUP, dry_run)
+        if err:
+            return [], err
+        return [{"id": name, "username": name, "shell": "/sbin/nologin"}
+                for name in members], ""
+
+    def revoke_editor_key(self, user_id, lock: bool = False, dry_run: bool = False):
+        """Offboarding: empty ~/.ssh/authorized_keys (DSM has no key API).
+
+        Truncated rather than deleted, so the 0600 file sshd expects stays put
+        and a later re-add does not have to re-create the directory.
+        """
+        username = str(user_id)
+        home = f"{HOME_ROOT}/{username}"
+        keys = common.shell_quote(f"{home}/.ssh/authorized_keys")
+        if dry_run:
+            print(f"[dry-run] would truncate {home}/.ssh/authorized_keys"
+                  + (" and expire the account" if lock else ""))
+            return True, ""
+        rc, _out, err = self._root(f"[ -e {keys} ] && : > {keys} || true", False, 60)
+        if rc != 0:
+            return False, f"could not clear {home}/.ssh/authorized_keys: {err.strip()[:200]}"
+        if lock:
+            try:
+                self._dsm("SYNO.Core.User", "set", 1, post=True,
+                          name=username, expired="now")
+            except common.DsmError as exc:
+                return False, f"key removed, but the account could not be expired: {exc}"
+        return True, ""
+
+    def set_editor_shell(self, user_id, shell: str, dry_run: bool = False):
+        if shell == "/sbin/nologin":
+            return True, "already nologin (DSM's default for a local account)"
+        return False, ("DSM does not offer editors an interactive shell at all -- SSH is "
+                       "administrators-only there, whatever /etc/passwd says. Leave "
+                       "[stack] editor_shell = \"sftp-only\" on a Synology site.")
+
+    def ensure_sshd_editor_policy(self, group: str, dry_run: bool = False):
+        """A no-op that explains itself.
+
+        DSM regenerates /etc/ssh/sshd_config whenever the SSH/SFTP services are
+        touched in Control Panel, so a Match block written here is erased by
+        the next toggle -- and it would be redundant: DSM already refuses
+        interactive SSH to non-administrators and serves lanes A/B through the
+        SFTP subsystem, which is what ForceCommand internal-sftp buys on
+        TrueNAS.
+        """
+        print(f"sshd policy: nothing to install on DSM -- {group} members are nologin, "
+              f"interactive SSH is administrators-only, and lanes A/B use the SFTP "
+              f"subsystem. Keep 'Enable SFTP service' on and SSH restricted in "
+              f"Control Panel > Terminal & SNMP.")
+        return "unchanged", ""
 
     def set_password_disabled(self, user_id, dry_run: bool = False) -> tuple[str, str]:
         """DSM has no per-user "password disabled" flag.
@@ -1029,9 +1101,27 @@ class SynologyBackend:
               f"installs the inheritable editors ACE -- no chmod is involved anywhere)")
         return True
 
-    def set_tree_acl(self, base: str, owner: str, group: str) -> list:
+    def set_tree_acl(self, base: str, owner: str, group: str,
+                     project_group: str = "", container_dirs=None) -> list:
         """Shell lines giving `group` write access under `base` -- WITHOUT a
         single chmod or chown.
+
+        PER-PROJECT MODE IS PARTIAL HERE, and says so rather than pretending
+        (2026-08-17, docs/TENANCY.md). `project_group` adds an inheritable ACE
+        for proj-<slug> on the project directory, which is the grant half. The
+        DENY half -- stopping the share-wide `editors` ACE reaching this path --
+        cannot be done from a script the way it can on ZFS: the editors ACE is
+        INHERITED from the shared folder, and an inherited ACE cannot be
+        deleted without first breaking inheritance on the path, which DSM
+        exposes only through File Station (Properties > Permission > uncheck
+        "Inherit permissions from parent folder"). `container_dirs` is likewise
+        ignored: the sticky bit is a mode bit, and a chmod under a share
+        destroys the ACL (spike 1) -- DSM's equivalent is the "Deny modify"
+        ACE, which is an operator decision, not a scripted one.
+
+        So: on DSM this mode is a grant plus a printed operator TODO. Anything
+        else would be a guess against a live filesystem holding the customer's
+        footage.
 
         THE DANGEROUS ONE. Measured (spike 1): chmod/chown on any path under a
         Synology shared folder DESTROYS its ACL -- inheritance gone, and DSM's
@@ -1056,7 +1146,18 @@ class SynologyBackend:
         ace = f"group:{group}:allow:{EDITORS_ACE}"
         want = f"group:{group}:allow"
         get_acl = self.root_cmd(f"synoacltool -get {base_q}")
-        return [
+        extra = []
+        if project_group:
+            proj_ace = f"group:{project_group}:allow:{EDITORS_ACE}"
+            proj_want = f"group:{project_group}:allow"
+            extra = [
+                f"if {get_acl} 2>/dev/null | grep -q {common.shell_quote(proj_want)}; then "
+                f"echo {common.shell_quote(f'ACL ok: {project_group} already has an allow ACE on {base}')}; "
+                f"else {self.root_cmd(f'synoacltool -add {base_q} {common.shell_quote(proj_ace)}')} "
+                f"&& echo {common.shell_quote(f'ACL set: {proj_ace} on {base}')}; fi",
+                f"echo {common.shell_quote(f'OPERATOR TODO (docs/TENANCY.md): {project_group} can now write {base}, but the share-wide {group} ACE is INHERITED here and still grants every editor. Break inheritance on this folder in File Station (Properties > Permission > uncheck Inherit permissions from parent folder, keeping the current entries) and remove the {group} entry. DSM exposes no scripted way to do it.')} >&2",
+            ]
+        return extra + [
             # `if` conditions are exempt from `set -e`, so none of this can
             # abort the rest of setup_tree's script.
             f"if {get_acl} 2>/dev/null | grep -q {common.shell_quote(want)}; then "
@@ -1149,6 +1250,121 @@ class SynologyBackend:
         print(f"snapshot taken: {share} @ {when} "
               f"(/volume?/@sharesnap/{share}/{when})")
         return True
+
+    def snapshot_now(self, path: str, name: str, dry_run: bool) -> tuple:
+        """`snapshot()` with the identifier kept (COMMERCIAL_READINESS item 8).
+
+        DSM names a share snapshot itself, from the clock, in its own
+        GMT+NN-YYYY.MM.DD-HH.MM.SS spelling -- there is no way to ask for
+        `ccsync-20260817-1400` the way `zfs snapshot` lets you. So `name` is
+        carried as the DESCRIPTION, which is what the Snapshot Replication UI
+        lists beside each one and what an operator restoring at 3am reads to
+        tell "before the deploy" from "hourly". The identifier returned is the
+        timestamp directory the snapshot actually lives in.
+        """
+        share = share_of(path)
+        if not share:
+            print(f"FAILED: {path!r} is not under a /volume<N>/<share> path, so there is "
+                  f"no shared folder to snapshot.", file=sys.stderr)
+            return False, ""
+        if dry_run:
+            print(f"[dry-run] would take a share snapshot of {share!r} "
+                  f"(SYNO.Core.Share.Snapshot create desc={name!r})")
+            return True, f"{share}@<dsm-timestamp>"
+        try:
+            data = self._dsm("SYNO.Core.Share.Snapshot", "create", 1, post=True,
+                             name=share, desc=name)
+        except common.DsmError as exc:
+            print(f"FAILED to snapshot share {share!r}: {exc}", file=sys.stderr)
+            return False, ""
+        when = data.get("data") or data.get("time") or "<unknown>"
+        print(f"snapshot taken: {share} @ {when} ({name})")
+        return True, f"{share}@{when}"
+
+    def list_snapshots(self, path: str, dry_run: bool) -> list:
+        """The share's snapshots, oldest first.
+
+        Read off the FILESYSTEM (/volume<N>/@sharesnap/<share>/) rather than
+        through SYNO.Core.Share.Snapshot list, because the directory is the
+        thing a restore actually copies out of (spike 8) and because it answers
+        on a box with no Snapshot Replication package installed -- which is the
+        box most likely to be asked whether it has any backups at all.
+        """
+        share = share_of(path)
+        vol = volume_of(path)
+        if not share or not vol:
+            return []
+        snapdir = common.shell_quote(f"{vol}/@sharesnap/{share}")
+        rc, out, err = self._root(f"ls -1 {snapdir} 2>/dev/null || true", dry_run, 60)
+        if dry_run:
+            print(f"[dry-run] would list share snapshots under {vol}/@sharesnap/{share}")
+            return []
+        if rc != 0:
+            print(f"could not list snapshots of {share}: {err.strip()[:200] or rc}",
+                  file=sys.stderr)
+            return []
+        return [{"name": line.strip(), "created": line.strip(), "used": ""}
+                for line in (out or "").splitlines() if line.strip()]
+
+    #: What an admin does by hand when the API cannot schedule (below). Kept as
+    #: one string so setup_snapshots.py, the runbook and the failure message
+    #: cannot drift apart.
+    SCHEDULE_STEPS = (
+        "DSM > Package Center > install 'Snapshot Replication' (free), then:\n"
+        "  Snapshot Replication > Snapshots > pick the shared folder > "
+        "Settings > Schedule:\n"
+        "    - Enable snapshot schedule, run every hour, every day\n"
+        "  Settings > Retention: 'Apply advanced retention policy' >\n"
+        "    - keep 24 hourly (latest 1 day), keep 30 daily (latest 30 days)\n"
+        "  Repeat for the shared folder holding the app stack.\n"
+        "Verify: Snapshots list is non-empty within the hour, and\n"
+        "  ls /volume1/@sharesnap/<share>/ over SSH shows timestamp dirs."
+    )
+
+    def ensure_snapshot_schedule(self, path: str, schedules: list,
+                                 dry_run: bool) -> list:
+        """Try DSM's scheduler; say exactly what to click when it is not there.
+
+        Scheduling a share snapshot on DSM belongs to the Snapshot Replication
+        PACKAGE -- base DSM can take, list, restore and delete one
+        (`snapshot()` above, spike 8) but `SYNO.Core.Share.Snapshot.Setting
+        set` answers 403 without the package, and there is no supported CLI for
+        it (`synoschedtask` creates DSM tasks, not snapshot schedules, and
+        hand-editing /etc/crontab on DSM is how you lose cron).
+
+        So this is honest rather than clever: it attempts the API, and any
+        refusal becomes ("manual", the click path) -- never a silent success.
+        Nothing here writes a crontab (2026-08-17, COMMERCIAL_READINESS item 8).
+        """
+        share = share_of(path)
+        if not share:
+            return [("failed", f"{path!r} is not under /volume<N>/<share>")]
+        out = []
+        for spec in schedules:
+            label = spec.get("label", "?")
+            if dry_run:
+                print(f"[dry-run] would ask DSM to schedule {label} snapshots of "
+                      f"{share!r} (SYNO.Core.Share.Snapshot.Setting set), and print the "
+                      f"manual steps if the Snapshot Replication package is absent")
+                out.append(("dry-run", label))
+                continue
+            try:
+                self._dsm("SYNO.Core.Share.Snapshot.Setting", "set", 1, post=True,
+                          name=share,
+                          snapshot_schedule=json.dumps({
+                              "enable": True,
+                              "hour": spec["schedule"].get("hour", "*"),
+                              "minute": spec["schedule"].get("minute", "0"),
+                          }),
+                          keep_count=int(spec["lifetime_value"]))
+            except Exception as exc:  # noqa: BLE001 - 403, 101, or no such API: same answer
+                out.append(("manual", f"DSM would not schedule {label} snapshots of "
+                                      f"{share!r} from here ({exc}). Do it once by hand:"
+                                      f"\n{self.SCHEDULE_STEPS}"))
+                continue
+            print(f"scheduled snapshots: {share} ({label})")
+            out.append(("created", label))
+        return out
 
     # ----------------------------------------------------------------------
     # Diagnostics (spike 4)

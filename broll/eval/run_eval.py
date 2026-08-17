@@ -5,8 +5,8 @@ reports recall, precision guards, and per-tag breakdowns. Use it to compare two
 indexes fairly — v1 vs v2 prompt, or Haiku vs Sonnet — since the query set is
 fixed and written from an editor's point of view rather than from the index.
 
-    python eval/run_eval.py E:/broll-data/broll.db --queries eval/queries_ff2.yaml
-    python eval/run_eval.py a.db b.db --queries eval/queries_ff2.yaml   # compare
+    python eval/run_eval.py E:/broll-data/broll.db     # --queries defaults to DEFAULT_QUERIES below
+    python eval/run_eval.py a.db b.db --queries <path>   # compare two indexes on one set
 
 Exit code is non-zero if any precision guard fails (a query expected to return
 nothing returned something), because that is a correctness bug rather than a
@@ -22,6 +22,15 @@ import sys
 from pathlib import Path
 
 import yaml
+
+# Query sets are written against one site's real footage — the expectations are
+# substrings of that customer's filenames and transcripts — so they live outside
+# the tracked tree from 2026-08-17 (COMMERCIAL_READINESS.md item 10 / section B).
+# Resolved from __file__ rather than the cwd, which used to decide whether the
+# default found anything at all. Pass --queries for any other set.
+DEFAULT_QUERIES = str(
+    Path(__file__).resolve().parents[2] / "private" / "broll" / "eval" / "queries_ff2.yaml"
+)
 
 _TOKEN_RE = re.compile(r'"([^"]*)"|(\S+)')
 
@@ -145,7 +154,7 @@ def report(run: dict) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("dbs", nargs="+")
-    ap.add_argument("--queries", default="eval/queries_ff2.yaml")
+    ap.add_argument("--queries", default=DEFAULT_QUERIES)
     args = ap.parse_args()
 
     queries = yaml.safe_load(Path(args.queries).read_text(encoding="utf-8"))["queries"]

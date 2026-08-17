@@ -587,7 +587,73 @@ if ($Publish) {
     }
 
     $mc = if ($MakeCurrent) { 1 } else { 0 }
-    $uri = "$DashboardUrl/api/v1/admin/packages/windows/${version}?sha256=$sha&make_current=$mc"
+
+    # --- sign the release record (COMMERCIAL_READINESS.md item 4, 2026-08-17) ---
+    # The dashboard REFUSES an unsigned publish, so this is not optional and
+    # must not be "warn and continue": a ship that silently skipped it would
+    # 422 at the PUT anyway, and the failure should name the missing key
+    # rather than the missing query parameter.
+    #
+    # signed_binary is re-derived from the FILE, not read out of
+    # ccsync-release.json: the manifest is provenance, and an exe re-signed
+    # (or resigned by hand) after the manifest was written must not be able
+    # to lie about it in either direction.
+    $signPy = ""
+    foreach ($candidate in @((Join-Path $CompanionDir ".venv\Scripts\python.exe"), "python")) {
+        if ($candidate -eq "python" -or (Test-Path -LiteralPath $candidate)) { $signPy = $candidate; break }
+    }
+    $signedBinary = ((Get-AuthenticodeSignature -LiteralPath $ExePath).Status -eq "Valid")
+    if (-not $signedBinary) {
+        Write-Warn2 "=================================================================="
+        Write-Warn2 "UNSIGNED BUILD: this exe carries no valid Authenticode signature."
+        Write-Warn2 "It publishes fine (the upgrade channel's own signature is separate),"
+        Write-Warn2 "but SmartScreen will warn every editor who installs it fresh."
+        Write-Warn2 "Set CCSYNC_SIGN_THUMBPRINT (or CCSYNC_SIGN_PFX + _PASSWORD) and"
+        Write-Warn2 "rebuild with tools\release.ps1 -- see docs/RELEASE.md."
+        Write-Warn2 "=================================================================="
+    }
+    # min_version: the oldest build the fleet may still be rolled back to.
+    # Deliberately an env var rather than a computed default -- it is a policy
+    # decision (raise it whenever a release fixes something a downgrade would
+    # reintroduce), and a wrong value is remembered by every editor for ever.
+    $minVersion = "$env:CCSYNC_MIN_VERSION".Trim()
+    if (-not $minVersion) { $minVersion = "0.0.0" }
+
+    $signArgs = @(
+        (Join-Path $RepoRoot "tools\sign_release.py"),
+        "--artifact", $ExePath, "--kind", "companion", "--platform", "windows",
+        "--version", $version, "--min-version", $minVersion
+    )
+    if ($signedBinary) { $signArgs += "--signed-binary" }
+    $signOut = & $signPy @signArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn2 "could not sign the release record -- NOT publishing:"
+        ($signOut | ForEach-Object { Write-Warn2 "  $_" })
+        Write-Warn2 "The release key lives OUTSIDE this repo (default %USERPROFILE%\.ccsync-release\release.key)."
+        Write-Warn2 "Create it once with: python tools\release_key.py new  (then: ... bake, then rebuild)"
+        exit 1
+    }
+    $signRecord = $null
+    try {
+        # sign_release.py prints advisories on stderr and JSON on stdout; 2>&1
+        # merges them (as ErrorRecords under PS 5.1), so stringify everything
+        # and take the JSON object out of the middle.
+        $jsonText = ($signOut | ForEach-Object { "$_" }) -join "`n"
+        $start = $jsonText.IndexOf("{")
+        $end = $jsonText.LastIndexOf("}")
+        $signRecord = $jsonText.Substring($start, $end - $start + 1) | ConvertFrom-Json
+    }
+    catch {
+        Write-Warn2 "sign_release.py produced output this script could not parse -- NOT publishing"
+        exit 1
+    }
+    if ("$($signRecord.sha256)" -ne $sha) {
+        Write-Warn2 "the signed record describes sha256 $($signRecord.sha256) but the exe is $sha -- NOT publishing"
+        exit 1
+    }
+    Write-Step "signed release record: key $($signRecord.pubkey_id), min_version $minVersion, signed_binary $signedBinary"
+
+    $uri = "$DashboardUrl/api/v1/admin/packages/windows/${version}?sha256=$sha&make_current=$mc$($signRecord.query)"
 
     # --- the onboarding installer rides along as kind=onboard --------------
     # It bundles the companion exe, so a stale one hands new editors an old
@@ -635,7 +701,30 @@ if ($Publish) {
     else {
         $onboardVersion = $mIv.Matches[0].Groups[1].Value
         $onboardSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $OnboardExePath).Hash.ToLower()
-        $onboardUri = "$DashboardUrl/api/v1/admin/packages/windows/${onboardVersion}?kind=onboard&sha256=$onboardSha&make_current=$mc"
+        # The onboard package is signed by the same offline key as the
+        # companion (item 4, 2026-08-17): it is the binary a brand-new editor
+        # runs FIRST, with nothing installed to verify anything for them.
+        $onboardSignedBinary = ((Get-AuthenticodeSignature -LiteralPath $OnboardExePath).Status -eq "Valid")
+        $onboardSignArgs = @(
+            (Join-Path $RepoRoot "tools\sign_release.py"),
+            "--artifact", $OnboardExePath, "--kind", "onboard", "--platform", "windows",
+            "--version", $onboardVersion, "--min-version", $minVersion
+        )
+        if ($onboardSignedBinary) { $onboardSignArgs += "--signed-binary" }
+        $onboardSignOut = & $signPy @onboardSignArgs 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $onboardSkipReason = "could not sign the installer's release record (see tools\release_key.py)"
+        }
+        else {
+            try {
+                $t = ($onboardSignOut | ForEach-Object { "$_" }) -join "`n"
+                $onboardRecord = $t.Substring($t.IndexOf("{"), $t.LastIndexOf("}") - $t.IndexOf("{") + 1) | ConvertFrom-Json
+                $onboardUri = "$DashboardUrl/api/v1/admin/packages/windows/${onboardVersion}?kind=onboard&sha256=$onboardSha&make_current=$mc$($onboardRecord.query)"
+            }
+            catch {
+                $onboardSkipReason = "sign_release.py output for the installer could not be parsed"
+            }
+        }
     }
 
     # --- the macOS installer is NOT published from here (since 1.0.17) ------

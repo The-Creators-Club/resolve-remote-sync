@@ -1,0 +1,340 @@
+# CI for CC Sync -- COMMERCIAL_READINESS.md item 13, added 2026-08-17.
+#
+# Until now the ~5,250 tests ran when someone remembered to run them, on one
+# Windows box, and `tools\ship.cmd` gated only on the `server/` suite. Nothing
+# ran on a Mac at all, which is half of why Mac editors are a fix pass behind.
+#
+# THREE THINGS THIS DOES THAT THE LOCAL WORKFLOW CANNOT:
+#   1. Runs every suite on every push, on the OS each one is FOR.
+#   2. Installs from requirements.lock with --require-hashes, so "what was this
+#      tested against" has an answer.
+#   3. Puts a macOS runner in the loop (see also release-macos.yml, which is
+#      what actually closes the "Mac builds need a Mac" gap).
+#
+# WHAT IT CANNOT DO. A GitHub runner cannot reach the NAS, the tailnet, an
+# editor machine, DaVinci Resolve or a real rclone remote. Suites that need any
+# of those already skip themselves (they probe for the binary or the host); if
+# you add one that does not, make it skip rather than making CI green by
+# deleting it. `docs/CI.md` lists what is therefore NOT covered here.
+#
+# Interpreter/working-directory rules are CLAUDE.md's, verbatim, and two of them
+# are load-bearing rather than stylistic:
+#   - `python -m pytest` FROM the component dir (module-run puts the cwd first
+#     on sys.path, which is how the in-repo package wins over anything stale).
+#   - `server/` runs through BASH. 18 of its tests execute generated remote
+#     scripts under a stub sudo/chown; launched from PowerShell they SKIP
+#     SILENTLY and the summary prints PASS (measured 2026-08-10, OPS-6).
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch cancels the first: these are minutes-long
+# matrices and the older answer is never the one anyone wants.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Keeps pytest's own output ASCII-safe on the Windows runner, whose console
+  # codepage is cp1252 and whose UnicodeEncodeError would be indistinguishable
+  # from a real failure.
+  PYTHONIOENCODING: "utf-8"
+  PYTHONUTF8: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Windows: everything that is Windows-first by construction. The companion is
+  # ctypes Win32, a registry Run key, a logon task and Tk dialogs; the installer
+  # is PowerShell.
+  # ---------------------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            companion/requirements.lock
+            onboarding/requirements.lock
+            bench/requirements.lock
+
+      # A venv per suite, from that suite's lock. They do not share one locally
+      # either (CLAUDE.md), and the companion's tray extras have no business in
+      # the bench environment.
+      - name: companion -- install
+        run: |
+          python -m venv companion/.venv-ci
+          companion/.venv-ci/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
+      - name: companion -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: companion
+        run: .venv-ci/Scripts/python -m pytest tests -q --junitxml=../junit-companion.xml
+
+      - name: onboarding -- install
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv onboarding/.venv-ci
+          onboarding/.venv-ci/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r onboarding/requirements.lock
+      - name: onboarding -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: onboarding
+        run: .venv-ci/Scripts/python -m pytest tests -q --junitxml=../junit-onboarding.xml
+
+      - name: bench -- install
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv bench/.venv-ci
+          bench/.venv-ci/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r bench/requirements.lock
+      - name: bench -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: bench
+        run: .venv-ci/Scripts/python -m pytest tests -q --junitxml=../junit-bench.xml
+
+      # The drive-map parser is the piece that decides whether P: gets torn down
+      # and remounted on an editor's machine, and it has no Python test.
+      - name: installer -- drive-map parser
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File installer/tests/Test-DriveMapParser.ps1
+
+      - name: upload junit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-windows
+          path: junit-*.xml
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Linux: the container half, plus the checks that only make sense on a POSIX
+  # filesystem (the CRLF gate) and the licence gate.
+  # ---------------------------------------------------------------------------
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            dashboard/requirements.lock
+            broll/web/requirements.lock
+            music/web/requirements.lock
+            ytdl/web/requirements.lock
+            broll/indexer/requirements.lock
+            server/requirements.lock
+
+      # THE CRLF GATE. A CRLF run.sh took the dashboard down once (`set -eu` ->
+      # "Illegal option -", dash reading the CR as an option character) and
+      # installer/macos_bootstrap.sh had the same defect while already sitting on
+      # the editor share. .gitattributes now forces eol=lf on those files -- but
+      # a working copy checked out BEFORE a rule was added stays CRLF, and MSYS
+      # grep STRIPS a CR before matching, so the developer-side check lies.
+      # Byte-scan instead, on a runner that checks out fresh (2026-08-10).
+      - name: line endings -- no CR in any shell script
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS= read -r f; do
+            if [ -f "$f" ] && LC_ALL=C grep -qU $'\r' "$f"; then
+              echo "CR found in $f"; bad=1
+            fi
+          done < <(git ls-files '*.sh' '*.bash' 'dashboard/deploy/run.sh' \
+                                'dashboard/deploy/Dockerfile' 'broll/web/Dockerfile' \
+                                'dashboard/deploy/*.yaml' '.github/workflows/*.yml')
+          if [ "$bad" -ne 0 ]; then
+            echo "A CR in a file the NAS container or a Mac executes is a crash-loop, not a style nit."
+            exit 1
+          fi
+          echo "no CR in any tracked shell script"
+
+      - name: line endings -- git agrees with .gitattributes
+        run: |
+          set -euo pipefail
+          # `git ls-files --eol` reports i/<index> w/<worktree>. Anything the
+          # attributes say is lf must be lf in the index too; a file committed
+          # with CRLF before the rule existed still shows i/crlf here.
+          bad="$(git ls-files --eol '*.sh' '*.bash' 'dashboard/deploy/Dockerfile' \
+                              'broll/web/Dockerfile' 'dashboard/deploy/*.yaml' \
+                              '.github/workflows/*.yml' | grep -v 'i/lf' || true)"
+          if [ -n "$bad" ]; then
+            echo "$bad"
+            echo "These are committed with CRLF despite .gitattributes' eol=lf."
+            echo "Fix with: rm <file> && git checkout -- <file>"
+            exit 1
+          fi
+          echo "every tracked shell script is lf in the index"
+
+      - name: dashboard -- install
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv dashboard/.venv-ci
+          dashboard/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r dashboard/requirements.lock
+      - name: dashboard -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: dashboard
+        # PYTHONPATH=src rather than an editable install: the package lives under
+        # src/ and `python -m pytest` only puts the component dir itself first.
+        # It is also what deploy/run.sh does in production.
+        env:
+          PYTHONPATH: src
+        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../junit-dashboard.xml
+
+      # THROUGH BASH, and reusing the dashboard venv exactly as CLAUDE.md says:
+      # server/ has no venv of its own. This is the suite `ship` already gates
+      # on, because it guards the deploy script.
+      - name: server -- pytest (bash)
+        if: ${{ !cancelled() }}
+        shell: bash
+        working-directory: server
+        run: ../dashboard/.venv-ci/bin/python -m pytest tests -q --junitxml=../junit-server.xml
+
+      - name: broll/web -- install
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv broll/web/.venv-ci
+          broll/web/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r broll/web/requirements.lock
+      - name: broll/web -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: broll/web
+        # test_mounted_prefix.py pins the document-relative URLs the /broll
+        # mount depends on; CLAUDE.md calls it load-bearing.
+        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-broll-web.xml
+
+      - name: music/web -- install
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv music/web/.venv-ci
+          music/web/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r music/web/requirements.lock
+      - name: music/web -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: music/web
+        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-music-web.xml
+
+      - name: ytdl/web -- install
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv ytdl/web/.venv-ci
+          ytdl/web/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r ytdl/web/requirements.lock
+      - name: ytdl/web -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: ytdl/web
+        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-ytdl-web.xml
+
+      # CPU only. The `embeddings` extra (fastembed) is not installed and the
+      # slow marker's tests skip themselves when the model is not cached, so
+      # nothing here downloads a model. music/indexer is deliberately ABSENT
+      # from this job: its dependency set is torch + the CUDA wheels, which
+      # belongs to the GPU image (COMMERCIAL_READINESS.md item 14), not here.
+      - name: broll/indexer -- install
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv broll/indexer/.venv-ci
+          broll/indexer/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r broll/indexer/requirements.lock
+      - name: broll/indexer -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: broll/indexer
+        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-broll-indexer.xml
+
+      # music/indexer's DEPENDENCY SET is torch + the CUDA wheels and stays out
+      # of CI (see above) -- but its SUITE is deliberately torch-free
+      # (test_config_paths.py's docstring says so, and it is the check that the
+      # indexer refuses to guess a customer's library path rather than baking
+      # one in). So it runs here with NO lock install, on the dashboard venv,
+      # exactly as tools/run_all_tests.ps1 runs it on the system interpreter.
+      # Added 2026-08-17: CI and run_all_tests.ps1 must list the same suites,
+      # or "green locally" and "green in CI" mean different things.
+      - name: music/indexer -- pytest (no torch; the suite is the path/config half)
+        if: ${{ !cancelled() }}
+        working-directory: music/indexer
+        run: ../../dashboard/.venv-ci/bin/python -m pytest tests -q --junitxml=../../junit-music-indexer.xml
+
+      - name: tools -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: tools
+        run: ../dashboard/.venv-ci/bin/python -m pytest tests -q --junitxml=../junit-tools.xml
+
+      # The macOS bootstrap's string helpers -- the site-manifest reader, the
+      # canonical_prefix -> drive-letter rule, the pinned-download verifier and
+      # the "no com.creatorsclub.* label is written again" check. Pure bash and
+      # no Mac required, which is the point of slicing them out of
+      # macos_bootstrap.sh; run here so they gate a PR rather than only the
+      # developer's own run_all_tests.ps1 (2026-08-17).
+      - name: installer -- macOS bootstrap site values (bash)
+        if: ${{ !cancelled() }}
+        run: bash installer/tests/test_macos_site_values.sh
+
+      # --strict: every lock above has been installed by now, so a package whose
+      # licence could not be read is a real gap rather than "not on this
+      # developer's machine". Fails on GPL/AGPL/SSPL/unknown in anything we
+      # convey, unless tools/license_allowlist.toml says why.
+      - name: licence gate
+        if: ${{ !cancelled() }}
+        run: dashboard/.venv-ci/bin/python tools/check_licenses.py --strict
+
+      - name: upload junit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-linux
+          path: junit-*.xml
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # macOS. The port is code-complete and has real platform branches everywhere,
+  # and until this job existed none of them ran anywhere. The build smoke is
+  # `--dry-run`, which the script supports and which changes, builds and
+  # publishes NOTHING -- the real build lives in release-macos.yml.
+  # ---------------------------------------------------------------------------
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: companion/requirements.lock
+
+      - name: companion -- install
+        run: |
+          python -m venv companion/.venv-ci
+          companion/.venv-ci/bin/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
+
+      # The suite spawns REAL Tk dialogs if a fixture is bypassed (CLAUDE.md).
+      # A macOS runner has no window server for a login session, so a stray
+      # dialog HANGS rather than failing -- hence the job timeout above, which
+      # is the difference between a red build and a stuck one.
+      - name: companion -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: companion
+        run: .venv-ci/bin/python -m pytest tests -q --junitxml=../junit-companion-macos.xml
+
+      # Inspection only: prints every step, builds nothing, publishes nothing,
+      # and needs neither the dashboard nor an admin account.
+      - name: macOS release script -- dry run
+        if: ${{ !cancelled() }}
+        run: ./tools/release_macos.sh --dry-run --skip-tests --allow-dirty
+
+      - name: upload junit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-macos
+          path: junit-*.xml
+          if-no-files-found: warn

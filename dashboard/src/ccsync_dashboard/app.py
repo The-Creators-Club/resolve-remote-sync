@@ -6,6 +6,7 @@ model depends on workers=1; see db.py).
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
@@ -16,9 +17,11 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
-from . import api, auth, broll, db, music, ui, ytdl
+from . import api, auth, broll, crash_report, db, music, oidc, sessions, ui, ytdl
 from .collector import Collector
 from .settings import Settings
+
+log = logging.getLogger("ccsync.dashboard.app")
 
 STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 
@@ -33,7 +36,39 @@ _OPEN_EXACT = {
     # logged in, and it carries no secret (SYNOLOGY_PORT_PLAN.md WP0 step 3;
     # see api.api_site for what may never be added to it).
     "/api/v1/site",
+    # The two legs of an OIDC sign-in (COMMERCIAL_READINESS.md item 12,
+    # 2026-08-17). Necessarily open: nobody has a session yet, which is the
+    # entire point. Both are inert unless DASH_AUTH_METHOD=oidc -- they answer
+    # 503 with the break-glass URL otherwise -- and the callback authenticates
+    # on the signed flow cookie plus a verified id_token, never on being
+    # reachable.
+    oidc.LOGIN_PATH, oidc.CALLBACK_PATH,
 }
+
+# State-changing requests exempt from the CSRF check (COMMERCIAL_READINESS.md
+# item 15, 2026-08-17). Two classes only:
+#
+#  * routes whose credential is a BEARER TOKEN, not the session cookie -- a
+#    browser cannot be tricked into attaching an X-CCSync-Token it does not
+#    have, so there is nothing to forge. The check itself already skips any
+#    request that arrives without our session cookie, so this list is really
+#    about the small overlap (a companion running in a logged-in browser's
+#    machine).
+#  * the mounted SPAs, whose own fetch() calls do not send the token YET. They
+#    are documented in dashboard/README.md as owing that change; SameSite=Lax
+#    on the session cookie is what holds the line until they make it, and it
+#    holds it for exactly the cross-site POST case CSRF is about.
+#
+# /login and /api/v1/login are exempt for a third reason: there is no session
+# yet, so there is no token to have. /api/v1/logout is exempt because the worst
+# a forged one achieves is signing the victim OUT, and it is the JSON twin the
+# onboarding flow may call without a page to read a token from; the UI's own
+# /logout is NOT exempt and carries a hidden field.
+_CSRF_EXEMPT_EXACT = {"/login", "/api/v1/login", "/api/v1/logout", "/api/v1/report",
+                      "/api/v1/verify"}
+_CSRF_EXEMPT_PREFIXES = ("/api/v1/selection/", "/api/v1/admin/packages/",
+                         "/broll/", "/music/", "/ytdl/")
+_CSRF_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 # Hard ceiling on a companion report body, enforced from Content-Length BEFORE
 # anything is parsed. Every field inside ReportIn is individually capped too;
@@ -84,8 +119,88 @@ MAX_DEFAULT_BODY_BYTES = 4 * 1024 * 1024
 _BODY_LIMIT_METHODS = ("POST", "PUT", "PATCH")
 
 
+def _log_shared_token_migration(conn, settings: Settings) -> None:
+    """Say at every boot how much of the fleet is still on the SHARED token.
+
+    Per-editor report tokens landed 2026-08-17 (COMMERCIAL_READINESS.md item
+    15) and every companion in the field holds only the shared one, so
+    `DASH_SHARED_REPORT_TOKEN_ENABLED` defaults to true and this is the number
+    that says when it can be turned off. Without it the migration has no
+    finish line an operator can see, and "one token for the whole fleet" stays
+    forever. Best-effort: a database that cannot be read must never stop the
+    dashboard starting.
+    """
+    try:
+        usage = db.count_shared_token_machines(conn)
+    except Exception:  # noqa: BLE001
+        return
+    if not settings.shared_report_token_enabled:
+        log.info("shared fleet report token is DISABLED; %d machine(s) authenticate "
+                 "with per-editor tokens", usage["editor"])
+        if usage["shared"]:
+            log.warning("...but %d machine(s) last reported with the shared token and "
+                        "will now be refused until they are given a per-editor token: %s",
+                        usage["shared"], ", ".join(usage["machines"]))
+        return
+    if usage["shared"]:
+        log.warning(
+            "%d machine(s) still authenticate with the SHARED fleet report token "
+            "(%s); %d use per-editor tokens. The shared token cannot be revoked for "
+            "one editor -- mint per-editor tokens on Admin > Users, then set "
+            "DASH_SHARED_REPORT_TOKEN_ENABLED=0.",
+            usage["shared"], ", ".join(usage["machines"]), usage["editor"])
+    elif usage["editor"]:
+        log.info("every reporting machine (%d) uses a per-editor token; the shared "
+                 "fleet token is still ACCEPTED -- set "
+                 "DASH_SHARED_REPORT_TOKEN_ENABLED=0 to retire it", usage["editor"])
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+
+    # Before the first thing that can refuse to start. Writes a JSON crash file
+    # under /data for every unhandled exception -- the COLLECTOR THREAD above
+    # all, which can die leaving a container that answers 200 forever (DASH-2).
+    # Local and silent by default: the network sender needs DASH_SENTRY_DSN
+    # *and* a sentry_sdk that deploy/requirements.txt does not install, and the
+    # rotating json-lines file needs DASH_LOG_DIR. Never raises
+    # (2026-08-17, COMMERCIAL_READINESS.md item 13).
+    crash_report.install(settings)
+
+    # Credentials are checked before anything is built, and a bad one refuses
+    # to start (see the b-roll ingest token below for where this posture came
+    # from). DASH_SESSION_SECRET and DASH_REPORT_TOKEN had no strength check at
+    # all while that token had a 24-character floor -- and the shipped compose
+    # sets both to "REPLACE_ME". A weak session secret is a forgeable ADMIN
+    # cookie, which outranks everything else in this file. Same rule, same
+    # function (broll.check_ingest_token), same answer.
+    # COMMERCIAL_READINESS.md item 15, 2026-08-17.
+    boot_problems = auth.check_boot_secrets(settings)
+    if boot_problems and not settings.dev_insecure:
+        raise RuntimeError(
+            "refusing to start: " + "; ".join(boot_problems)
+            + ". Generate secrets with `openssl rand -hex 24` and redeploy. "
+              "(A lab may set DASH_DEV_INSECURE=1 to bypass this; never do that "
+              "on a deployment.)"
+        )
+    if settings.dev_insecure:
+        log.warning(
+            "DASH_DEV_INSECURE=1: the secret-strength floor, the server-side session "
+            "check and the CSRF token are all relaxed. This is a test/dev switch and "
+            "must never be set on a deployment.%s",
+            (" Problems bypassed: " + "; ".join(boot_problems)) if boot_problems else "",
+        )
+    log.info("%s", auth.describe_auth(settings))
+    auth.warn_about_password_floor(settings)
+
+    # Built here rather than in the lifespan so a test that calls create_app
+    # without entering the lifespan still gets a working store (it creates its
+    # own tables on first use).
+    session_store = sessions.SessionStore(
+        settings.db_path,
+        idle_seconds=settings.session_idle_seconds,
+        absolute_seconds=settings.session_absolute_seconds,
+    )
 
     # The b-roll ingest routes are a WRITE path that no session protects (the
     # indexer is not a browser), so the token guarding them is a credential and
@@ -111,7 +226,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         conn = db.connect(settings.db_path)
         db.migrate(conn)
+        # Additive, idempotent DDL owned by the auth layer rather than a
+        # numbered migration step (see sessions.SCHEMA): it carries no data any
+        # other module reads, and a numbered step would have to be co-ordinated
+        # with every other schema change in flight.
+        session_store.ensure_schema(conn)
+        _log_shared_token_migration(conn, settings)
         conn.close()
+        session_store.prune()
+        session_store.prune_attempts()
         # The collector runs even with no SYNCTHING_GUI_URL configured: it is
         # the only thing that ever calls db.prune, and eight tables grow
         # without bound on /data otherwise. run_cycle() skips every
@@ -131,9 +254,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # route inventory and every admin request schema to any logged-in editor --
     # authz still held at each route, so disclosure rather than bypass, but the
     # dashboard publishes no API explorer (KNOWN_BUGS DASH-4, 2026-08-11).
-    app = FastAPI(title="Creators Club Sync Dashboard", lifespan=lifespan,
+    # The PRODUCT's name, not a customer's: this is the ASGI app title, which
+    # a second deployment must not inherit branded as the first one
+    # (2026-08-17, COMMERCIAL_READINESS.md item 10). A site that says who it
+    # is gets "<org> — <product> Dashboard".
+    app_title = " — ".join(
+        p for p in (settings.site_org_name,
+                    f"{settings.site_product_name or 'CC Sync'} Dashboard") if p)
+    app = FastAPI(title=app_title, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
+    app.state.session_store = session_store
 
     def _too_large(limit: int) -> JSONResponse:
         return JSONResponse(
@@ -153,6 +284,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError:
             return True   # unparseable length: refuse rather than guess
 
+    def _companion_credential(request) -> tuple[str, str | None]:
+        """(AUTH_*, editor) for this request's X-CCSync-Token, middleware-side.
+
+        A per-editor token can only be checked against the database, and this
+        runs before any route has a connection -- so one is opened HERE, and
+        only for a token that already has the per-editor SHAPE. The shared
+        token (every companion in the fleet today) still costs no database
+        work at all, and an unauthenticated request costs a regex.
+        """
+        token = request.headers.get("x-ccsync-token", "")
+        if not db.looks_like_editor_report_token(token):
+            return api.resolve_companion_credential(settings, None, token)
+        try:
+            conn = db.connect(settings.db_path)
+        except Exception:  # noqa: BLE001 - an unopenable DB is not an auth pass
+            return api.AUTH_NONE, None
+        try:
+            return api.resolve_companion_credential(settings, conn, token)
+        finally:
+            conn.close()
+
     def _report_auth_denial(request) -> JSONResponse | None:
         """The /api/v1/report token check, run BEFORE the body is read.
 
@@ -162,21 +314,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         the entire body before api_report ever looked at the token. Any host
         on the LAN/tailnet could therefore spend the container's memory and
         CPU with no credentials at all (KNOWN_BUGS B15). api_report repeats
-        this check verbatim: this is the belt, that is the braces, and a
-        direct-to-route unit test must still 401.
+        this check: this is the belt, that is the braces, and a direct-to-route
+        unit test must still 401.
         """
-        if settings.report_token:
-            if not api.token_ok(settings.report_token,
-                                request.headers.get("x-ccsync-token", "")):
-                return JSONResponse(
-                    {"detail": "bad or missing X-CCSync-Token"}, status_code=401)
+        if _companion_credential(request)[0] != api.AUTH_NONE:
             return None
-        if not settings.report_token_optional:
+        token = request.headers.get("x-ccsync-token", "")
+        if not settings.report_token and not db.looks_like_editor_report_token(token):
+            if settings.report_token_optional:
+                return None
             return JSONResponse(
                 {"detail": "report token not configured on server (set DASH_REPORT_TOKEN)"},
                 status_code=401,
             )
-        return None
+        return JSONResponse(
+            {"detail": "bad or missing X-CCSync-Token"}, status_code=401)
 
     async def _buffer_body(request, limit: int) -> bool:
         """Read the body in chunks, stopping at `limit`, and re-arm the
@@ -205,6 +357,72 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request._body = body
         request._receive = replay
         return False
+
+    def _origin_mismatch(request) -> bool:
+        """True when the browser told us this request came from somewhere else.
+
+        Browsers attach `Origin` to every cross-site POST, so this catches the
+        whole class on its own -- including the forms a template might forget
+        to give a token to. Same-origin requests either carry a matching Origin
+        or none at all (some browsers omit it for same-origin form posts),
+        which is why an ABSENT header is not a refusal."""
+        origin = (request.headers.get("origin") or "").strip()
+        if not origin or origin.lower() == "null":
+            origin = (request.headers.get("referer") or "").strip()
+            if not origin:
+                return False
+        host = (request.headers.get("host") or "").strip().lower()
+        if not host:
+            return False
+        from urllib.parse import urlsplit
+
+        return (urlsplit(origin).netloc or "").lower() != host
+
+    async def _csrf_from_form(request) -> str:
+        """The hidden field, for the plain (non-htmx) forms -- today just the
+        logout button. body_size_gate has already buffered and re-armed the
+        body by the time this middleware runs, so this costs no second read."""
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type != "application/x-www-form-urlencoded":
+            return ""
+        from urllib.parse import parse_qs
+
+        try:
+            body = await request.body()
+            parsed = parse_qs(body.decode("utf-8", "replace"), max_num_fields=64)
+        except Exception:                                       # noqa: BLE001
+            return ""
+        values = parsed.get(auth.CSRF_FIELD) or []
+        return values[0] if values else ""
+
+    # Added FIRST on purpose, which makes it the INNERMOST middleware: it runs
+    # after body_size_gate has buffered and re-armed the body, so reading the
+    # hidden form field here costs nothing and cannot steal the stream from the
+    # route. Reversing the two would leave every htmx POST bodyless.
+    @app.middleware("http")
+    async def csrf_gate(request, call_next):
+        if request.method not in _CSRF_METHODS:
+            return await call_next(request)
+        path = request.url.path
+        if path in _CSRF_EXEMPT_EXACT or path.startswith(_CSRF_EXEMPT_PREFIXES):
+            return await call_next(request)
+        # Only sessions THIS server minted are checked -- see
+        # auth._resolve_session. In a deployment that is every session there
+        # is (an unknown session id does not authenticate at all), and in the
+        # suite it is none of the hand-signed ones.
+        if not auth.session_is_tracked(request):
+            return await call_next(request)
+        presented = request.headers.get(auth.CSRF_HEADER, "")
+        if not presented:
+            presented = await _csrf_from_form(request)
+        if _origin_mismatch(request) or not auth.csrf_ok(request, presented):
+            log.warning("CSRF refusal: %s %s from %s", request.method, path,
+                        auth.client_ip(request))
+            return JSONResponse(
+                {"detail": "missing or bad CSRF token -- reload the page and try again"},
+                status_code=403,
+            )
+        return await call_next(request)
 
     @app.middleware("http")
     async def body_size_gate(request, call_next):
@@ -253,9 +471,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return api.token_ok(broll_ingest_token, request.headers.get("x-ingest-token", ""))
 
     def _companion_token_ok(request) -> bool:
-        # api.token_ok is hmac.compare_digest: `==` on a shared secret leaks
-        # its length and matching prefix through timing.
-        return api.token_ok(settings.report_token, request.headers.get("x-ccsync-token", ""))
+        # Either fleet credential: the shared DASH_REPORT_TOKEN, or a
+        # per-editor token (COMMERCIAL_READINESS.md item 15, 2026-08-17). Both
+        # are compared with hmac.compare_digest inside api.py -- `==` on a
+        # secret leaks its length and matching prefix through timing.
+        #
+        # This decides only whether the request may SKIP the login gate; the
+        # routes behind it re-check, and the selection routes additionally
+        # demand that a per-editor token match the editor in the path.
+        return _companion_credential(request)[0] != api.AUTH_NONE
 
     # The ytdl fleet routes (docs/YTDL_LOCAL_DOWNLOAD.md §4): claim, heartbeat,
     # manifest, per-clip status. Machine-to-machine, so they authenticate with
@@ -332,8 +556,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return RedirectResponse(f"/login?next={quote(target, safe='')}", status_code=303)
         return await call_next(request)
 
+    @app.exception_handler(Exception)
+    async def unhandled_error(request, exc):  # noqa: ANN001
+        """One generic body for every unhandled exception; the detail is logged.
+
+        Starlette's default answers a plain-text "Internal Server Error", which
+        leaks nothing -- but it is HTML-ish text handed to fetch() callers that
+        parse JSON, and it leaves no record tying the failure to a request.
+        This logs the traceback WITH the method and path (the thing an operator
+        needs) and answers the same shape as every other error in this API
+        (COMMERCIAL_READINESS.md §C L "error detail leaks", 2026-08-17).
+
+        Nothing derived from the exception reaches the client: no message, no
+        type name, no path -- a stack frame in a 500 body is how an editor
+        learns the container's directory layout. Starlette's ServerErrorMiddleware
+        still re-raises afterwards, so `TestClient(raise_server_exceptions=True)`
+        and uvicorn's own error log are unchanged.
+        """
+        log.exception("unhandled error serving %s %s", request.method,
+                      request.url.path)
+        return JSONResponse({"detail": "internal error"}, status_code=500)
+
     app.include_router(api.router)
     app.include_router(ui.router)
+    # Always mounted, never active unless DASH_AUTH_METHOD=oidc: both routes
+    # start by re-checking the OIDC settings and answer 503 with the
+    # break-glass URL when they are absent. Mounting it conditionally would
+    # mean a misconfigured issuer produced a 404 -- indistinguishable from an
+    # old build -- instead of a message naming the missing variable.
+    app.include_router(oidc.router)
 
     # Mounted AFTER the routers so a b-roll route can never shadow a dashboard
     # one, and behind a flag so the fleet dashboard never depends on the b-roll
@@ -366,7 +617,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     # Browsers request /favicon.ico unprompted (the path is already in
-    # _OPEN_EXACT); serve the Creators Club logo instead of a 404. The
+    # _OPEN_EXACT); serve the product mark instead of a 404. The
     # <link rel="icon"> in base.html covers everything else.
     favicon_file = STATIC_DIR / "favicon.ico"
     if favicon_file.is_file():

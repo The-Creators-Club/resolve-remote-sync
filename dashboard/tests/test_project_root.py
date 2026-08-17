@@ -30,7 +30,7 @@ def report_headers(editor="jsmith"):
 @pytest.fixture
 def env(tmp_path):
     settings = Settings(db_path=str(tmp_path / "r.db"), session_secret=SECRET,
-                        report_token=TOKEN, admin_users=frozenset({"alex"}))
+                        report_token=TOKEN, admin_users=frozenset({"owen"}))
     app = create_app(settings)
     with TestClient(app) as client:
         conn = dbmod.connect(tmp_path / "r.db")
@@ -125,7 +125,7 @@ def test_media_tree_requires_an_explicit_mapping(env):
 
     # with an explicit mapping the very same report lands
     dbmod.admin_set_project_root(conn, "Nuclear Family Reunion", "2025-ff4-nuclear",
-                                 admin="alex", now=dbmod.utcnow_iso())
+                                 admin="owen", now=dbmod.utcnow_iso())
     conn.commit()
     assert client.post("/api/v1/report", headers=headers, json=payload).status_code == 200
     rows = conn.execute("SELECT project_slug FROM media_tree_clips").fetchall()
@@ -135,7 +135,7 @@ def test_media_tree_requires_an_explicit_mapping(env):
 def test_first_match_is_sticky(env):
     client, conn = env
     headers = report_headers()
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))  # login gate
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))  # login gate
     assert client.post("/api/v1/report", headers=headers,
                        json=report("CCT Creator Profiles")).status_code == 200
     roots = client.get("/api/v1/project-roots").json()["project_roots"]
@@ -171,12 +171,12 @@ def test_admin_only_changes(env):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
     assert client.put("/api/v1/project-roots", json=body).status_code == 403
 
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     resp = client.put("/api/v1/project-roots", json=body)
     assert resp.status_code == 200
     (root,) = resp.json()["project_roots"]
     assert root["slug"] == "2025-ff4-nuclear" and root["source"] == "admin"
-    assert root["updated_by"] == "alex"
+    assert root["updated_by"] == "owen"
 
     # unknown slug rejected; remove -> re-detected on next report
     assert client.put("/api/v1/project-roots",
@@ -193,7 +193,7 @@ def test_unmatched_projects_surface_for_admin(env):
     client.post("/api/v1/report", headers=headers, json=report("Mystery Doc"))
     assert dbmod.fetch_unmapped_resolve_projects(conn) == ["Mystery Doc"]
 
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     page = client.get("/")
     assert "[ PROJECT ROOTS ]" in page.text and "Mystery Doc" in page.text
     resp = client.post("/partials/project-roots",
@@ -227,7 +227,7 @@ def browse_env(tmp_path):
     projects_dir = tmp_path / "Projects"
     (projects_dir / "2026" / "CCT" / "Custom Folder").mkdir(parents=True)
     settings = Settings(db_path=str(tmp_path / "rb.db"), session_secret=SECRET,
-                        report_token=TOKEN, admin_users=frozenset({"alex"}),
+                        report_token=TOKEN, admin_users=frozenset({"owen"}),
                         projects_dir=str(projects_dir))
     app = create_app(settings)
     with TestClient(app) as client:
@@ -237,7 +237,7 @@ def browse_env(tmp_path):
 
 
 def as_admin(client):
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     return client
 
 

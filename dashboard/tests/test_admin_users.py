@@ -46,7 +46,7 @@ def env(tmp_path, truenas, syncthing):
     settings = Settings(
         db_path=str(tmp_path / "admin.db"),
         session_secret=SECRET,
-        admin_users=frozenset({"alex"}),
+        admin_users=frozenset({"owen"}),
         truenas_host="unused-in-tests",
         truenas_user="truenas_admin",
         truenas_pw="fake-pw",
@@ -78,7 +78,7 @@ def test_admin_sees_unmapped_and_pending_devices(env):
             "name": "", "address": "100.9.9.9:22000",
         }
     }
-    as_user(client, "alex")
+    as_user(client, "owen")
     body = client.get("/api/v1/admin/users").json()
     statuses = {d["device_id"]: d["status"] for d in body["pending_devices"]}
     # EDITOR2_ID is configured but named after itself (never approved) -> unmapped
@@ -97,7 +97,7 @@ def test_a_truenas_blip_does_not_hide_the_device_approval_half(env):
     new_id = "NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1-NEWDEV1"
     syncthing.state["pending_devices"] = {new_id: {"name": "", "address": "100.9.9.9:22000"}}
     truenas.stop()                      # the blip
-    as_user(client, "alex")
+    as_user(client, "owen")
 
     body = client.get("/api/v1/admin/users").json()
     assert body["truenas_error"] and "truenas:" in body["error"]
@@ -116,7 +116,7 @@ def test_a_truenas_blip_does_not_hide_the_device_approval_half(env):
 def test_a_syncthing_blip_does_not_hide_the_account_half(env):
     client, _truenas, syncthing = env
     syncthing.stop()
-    as_user(client, "alex")
+    as_user(client, "owen")
 
     body = client.get("/api/v1/admin/users").json()
     assert body["syncthing_error"] and body["truenas_error"] is None
@@ -128,7 +128,7 @@ def test_a_syncthing_blip_does_not_hide_the_account_half(env):
 
 def test_create_editor_account_end_to_end(env):
     client, truenas, _syncthing = env
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/api/v1/admin/users", json={
         "username": "newbie",
         "ssh_pubkey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA newbie@laptop",
@@ -154,7 +154,7 @@ def test_create_editor_account_end_to_end(env):
 
 def test_create_editor_rejects_bad_username_and_bad_key(env):
     client, _truenas, _syncthing = env
-    as_user(client, "alex")
+    as_user(client, "owen")
     bad_name = client.post("/api/v1/admin/users", json={
         "username": "Not A Good Name!", "ssh_pubkey": "ssh-ed25519 AAAA x@y",
     })
@@ -173,15 +173,15 @@ def test_create_editor_surfaces_home_directory_trap(env):
     truenas.state["groups"].append({"id": 111, "group": "editors", "gid": 3001})
     truenas.state["users"].append({
         # already an editor (group id 111) -- an in-place update we DO allow
-        "id": 80, "uid": 3005, "username": "alex_laptop", "full_name": "alex_laptop",
+        "id": 80, "uid": 3005, "username": "owen_laptop", "full_name": "owen_laptop",
         "home": "/var/empty", "group": {"id": 116}, "groups": [40, 91, 111],
         "sshpubkey": None, "smb": True, "locked": False, "password_disabled": False,
     })
-    truenas.state["block_sshpubkey_usernames"].add("alex_laptop")
+    truenas.state["block_sshpubkey_usernames"].add("owen_laptop")
 
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/api/v1/admin/users", json={
-        "username": "alex_laptop", "ssh_pubkey": "ssh-ed25519 AAAA alex@laptop",
+        "username": "owen_laptop", "ssh_pubkey": "ssh-ed25519 AAAA owen@laptop",
     })
     assert resp.status_code == 502
     assert "not writable" in resp.json()["detail"]
@@ -206,7 +206,7 @@ def test_create_editor_refuses_to_hijack_a_non_editor_account(env):
         "sshpubkey": "ssh-ed25519 AAAA book@pc", "smb": True, "locked": False,
         "password_disabled": False,
     })
-    as_user(client, "alex")
+    as_user(client, "owen")
 
     resp = client.post("/api/v1/admin/users", json={
         "username": "truenas_admin", "ssh_pubkey": "ssh-ed25519 AAAA attacker@laptop",
@@ -232,7 +232,7 @@ def test_approve_pending_device(env):
     new_id = "NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX"
     syncthing.state["pending_devices"] = {new_id: {"name": "", "address": "100.9.9.9:22000"}}
 
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/api/v1/admin/devices/approve", json={
         "device_id": new_id, "username": "newbie",
     })
@@ -251,7 +251,7 @@ def test_approve_pending_device(env):
 
 def test_approve_renames_already_configured_unmapped_device(env):
     client, _truenas, syncthing = env
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/api/v1/admin/devices/approve", json={
         "device_id": EDITOR2_ID, "username": "rsmith",
     })
@@ -268,11 +268,11 @@ def test_set_known_password(env):
         "home": "/mnt/tank/TheCreatorsPool/homes/jsmith", "group": {"id": 111}, "groups": [111],
         "sshpubkey": "ssh-ed25519 AAAA", "smb": True, "locked": False, "password_disabled": False,
     })
-    as_user(client, "alex")
-    resp = client.post("/api/v1/admin/users/jsmith/password", json={"password": "knownpw123"})
+    as_user(client, "owen")
+    resp = client.post("/api/v1/admin/users/jsmith/password", json={"password": "knownpw1234567"})
     assert resp.status_code == 200
     [user] = [u for u in truenas.state["users"] if u["username"] == "jsmith"]
-    assert user["password"] == "knownpw123"
+    assert user["password"] == "knownpw1234567"
 
 
 def _seed_editors_group_and_system_accounts(truenas):
@@ -301,10 +301,10 @@ def test_set_password_refuses_root_and_system_accounts(env):
     set_known_password now carries create_or_update_editor's refusals."""
     client, truenas, _syncthing = env
     _seed_editors_group_and_system_accounts(truenas)
-    as_user(client, "alex")
+    as_user(client, "owen")
 
     for name in ("root", "truenas_admin"):
-        resp = client.post(f"/api/v1/admin/users/{name}/password", json={"password": "pwned1234"})
+        resp = client.post(f"/api/v1/admin/users/{name}/password", json={"password": "pwned1234abcd"})
         assert resp.status_code == 502, name
         assert "system account" in resp.json()["detail"], name
 
@@ -316,36 +316,36 @@ def test_set_password_refuses_root_and_system_accounts(env):
 def test_set_password_refuses_accounts_outside_the_editors_group(env):
     client, truenas, _syncthing = env
     _seed_editors_group_and_system_accounts(truenas)
-    as_user(client, "alex")
+    as_user(client, "owen")
 
     resp = client.post("/api/v1/admin/users/bookkeeper/password",
-                       json={"password": "pwned1234"})
+                       json={"password": "pwned1234abcd"})
     assert resp.status_code == 502
     assert "not in the 'editors' group" in resp.json()["detail"]
     by_name = {u["username"]: u for u in truenas.state["users"]}
     assert "password" not in by_name["bookkeeper"]
 
     # ...and a real editor still works
-    resp = client.post("/api/v1/admin/users/jsmith/password", json={"password": "knownpw123"})
+    resp = client.post("/api/v1/admin/users/jsmith/password", json={"password": "knownpw1234567"})
     assert resp.status_code == 200
     by_name = {u["username"]: u for u in truenas.state["users"]}
-    assert by_name["jsmith"]["password"] == "knownpw123"
+    assert by_name["jsmith"]["password"] == "knownpw1234567"
 
 
 def test_set_password_rejects_a_bad_username_charset_before_touching_truenas(env):
     client, truenas, _syncthing = env
     _seed_editors_group_and_system_accounts(truenas)
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/api/v1/admin/users/Not%20A%20Name!/password",
-                       json={"password": "whatever1"})
+                       json={"password": "whatever12345"})
     assert resp.status_code == 422
     # the htmx form path validates too (see the ui.py call site)
     resp = client.post("/partials/admin/users/password",
-                       data={"username": "root", "password": "pwned1234"})
+                       data={"username": "root", "password": "pwned1234abcd"})
     assert resp.status_code == 200
     assert "system account" in resp.text
     resp = client.post("/partials/admin/users/password",
-                       data={"username": "Not A Name!", "password": "pwned1234"})
+                       data={"username": "Not A Name!", "password": "pwned1234abcd"})
     assert resp.status_code == 200
     assert "username must start with a letter" in resp.text
     assert all("password" not in u for u in truenas.state["users"])
@@ -353,7 +353,7 @@ def test_set_password_rejects_a_bad_username_charset_before_touching_truenas(env
 
 def test_admin_users_page_renders_for_admin(env):
     client, _truenas, _syncthing = env
-    as_user(client, "alex")
+    as_user(client, "owen")
     page = client.get("/admin/users")
     assert page.status_code == 200
     assert "[ USERS ]" in page.text
@@ -367,7 +367,7 @@ def test_admin_users_page_renders_for_admin(env):
 
 def test_partial_create_user_end_to_end(env):
     client, truenas, _syncthing = env
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/partials/admin/users/create", data={
         "username": "newbie",
         "ssh_pubkey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA newbie@laptop",
@@ -391,7 +391,7 @@ def test_partial_create_user_requires_admin(env):
 
 def test_partial_create_user_bad_key_shows_error(env):
     client, _truenas, _syncthing = env
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/partials/admin/users/create", data={
         "username": "newbie", "ssh_pubkey": "not a key at all",
     })
@@ -407,12 +407,12 @@ def test_partial_set_password_end_to_end(env):
         "home": "/mnt/tank/TheCreatorsPool/homes/jsmith", "group": {"id": 111}, "groups": [111],
         "sshpubkey": "ssh-ed25519 AAAA", "smb": True, "locked": False, "password_disabled": False,
     })
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/partials/admin/users/password",
-                       data={"username": "jsmith", "password": "knownpw123"})
+                       data={"username": "jsmith", "password": "knownpw1234567"})
     assert resp.status_code == 200
     [user] = [u for u in truenas.state["users"] if u["username"] == "jsmith"]
-    assert user["password"] == "knownpw123"
+    assert user["password"] == "knownpw1234567"
 
 
 def test_partial_approve_device_end_to_end(env):
@@ -421,7 +421,7 @@ def test_partial_approve_device_end_to_end(env):
     # the same way the JSON API twin does (DASH-1).
     new_id = "NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX"
     syncthing.state["pending_devices"] = {new_id: {"name": "", "address": "100.9.9.9:22000"}}
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/partials/admin/users/approve",
                        data={"device_id": new_id, "username": "newbie"})
     assert resp.status_code == 200
@@ -439,7 +439,7 @@ def test_partial_approve_shape_checks_the_device_id(env):
     Syncthing 502, and a well-formed-but-lowercased one created a device that
     can never connect."""
     client, _truenas, syncthing = env
-    as_user(client, "alex")
+    as_user(client, "owen")
     before = list(syncthing.state["devices"])
 
     resp = client.post("/partials/admin/users/approve",
@@ -465,7 +465,7 @@ def test_partial_create_user_records_the_known_editor(env):
     through the UI got no known_editors row and enforce never shared them
     anything."""
     client, truenas, _syncthing = env
-    as_user(client, "alex")
+    as_user(client, "owen")
     # (the live collector seeds its own known editors off the fake Syncthing
     # config in the background, so only 'newbie' is asserted on here)
     assert "newbie" not in known_editors(client)
@@ -480,7 +480,7 @@ def test_partial_create_user_records_the_known_editor(env):
 
 def test_partial_create_user_records_nothing_when_truenas_refuses(env):
     client, _truenas, _syncthing = env
-    as_user(client, "alex")
+    as_user(client, "owen")
     resp = client.post("/partials/admin/users/create", data={
         "username": "newbie", "ssh_pubkey": "not a key at all",
     })
@@ -492,13 +492,13 @@ def test_truenas_not_configured_is_read_only(tmp_path, syncthing):
     settings = Settings(
         db_path=str(tmp_path / "noadmin.db"),
         session_secret=SECRET,
-        admin_users=frozenset({"alex"}),
+        admin_users=frozenset({"owen"}),
         syncthing_url=syncthing.url,
         syncthing_api_key="fake-key",
         # truenas_pw left blank -- feature should degrade, not crash
     )
     with TestClient(create_app(settings)) as client:
-        as_user(client, "alex")
+        as_user(client, "owen")
         body = client.get("/api/v1/admin/users").json()
         assert body["truenas_configured"] is False
         assert body["editors"] == []

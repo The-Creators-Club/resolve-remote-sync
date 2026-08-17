@@ -48,6 +48,16 @@ a { color: inherit; text-decoration: none; }
   padding: 0 0.6rem;
   font-weight: bold;
 }
+/* The safety alarms (COMMERCIAL_READINESS.md item 9, 2026-08-17): a machine
+   that has stopped syncing must not look like the amber "heads up" banner
+   this page already uses for advisories. */
+.banner.alarm {
+  background: var(--red);
+  color: var(--bg);
+  margin: 0.4rem 0;
+  padding: 0.3rem 0.6rem;
+}
+.banner.alarm .muted { color: var(--bg); opacity: 0.75; }
 
 .rule {
   color: var(--red-dim);

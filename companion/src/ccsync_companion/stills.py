@@ -10,8 +10,8 @@ location is a consequence of which media storage entry that index happens to
 name. Out of the box it is entry 1 -- each machine's own scratch disk -- and
 those are different everywhere by definition:
 
-    base rig    G:\\Resolve Media\\.gallery
-    Leso's Mac  /Users/leso/Movies/.gallery
+    a Windows rig   G:\\Resolve Media\\.gallery
+    a Mac editor    /Users/<them>/Movies/.gallery
 
 Machines sharing a project database are expected to agree, which is what
 produces the "stills location is not the same" complaint at launch.

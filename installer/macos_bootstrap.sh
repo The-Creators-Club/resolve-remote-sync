@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 #
-# Creators Club Sync -- macOS editor bootstrap.
+# CC Sync -- macOS editor bootstrap.
 #
 # Idempotent setup for a remote Resolve editor's Mac:
 #   - Tailscale   (brew cask, else prints download URL)
-#   - rclone      (brew, else direct tarball to ~/.local/ccsync/bin)
-#   - Syncthing   (brew, else direct zip to the same bin dir) + a
+#   - rclone      (brew, else a PINNED, sha256-verified zip to
+#                 ~/.local/ccsync/bin)
+#   - Syncthing   (brew, else the same pinned + verified route) + a
 #                 LaunchAgent that is written AND loaded, so the daemon is
 #                 actually running (lane C is dead without it)
-#   - the local sync root (--local-root, default ~/Creators_Club). On an
+#   - the local sync root (--local-root, default ~/<tree name from the
+#     dashboard's site manifest>). On an
 #     external SSD (/Volumes/<Name>/...) the volume is verified to be a REAL
 #     mount -- never a leftover ghost directory -- and its UUID recorded in
 #     ~/.ccsync/volume.json
@@ -17,7 +19,8 @@
 #     dashboard with DASHBOARD_TOKEN and checksum-verified) plus its
 #     LaunchAgent autostart entry
 #   - a seeded companion config at ~/.ccsync/config.toml
-#   - Resolve's Mapped Mount preference (P:\ -> the local root), edited
+#   - Resolve's Mapped Mount preference (the site's canonical_prefix, P:\
+#     unless the manifest says otherwise, -> the local root), edited
 #     directly in Resolve's own preference files while Resolve is quit
 #   - prints this machine's Syncthing device ID at the end
 #
@@ -35,7 +38,7 @@
 #
 # Usage:
 #   ./macos_bootstrap.sh --tailnet-host nas.tailnet.ts.net --editor-name jsmith [--dry-run]
-#   ./macos_bootstrap.sh --resolve-mapping-only [--local-root /Volumes/Rig/Creators_Club]
+#   ./macos_bootstrap.sh --resolve-mapping-only [--local-root /Volumes/Rig/CCSync]
 #
 # CONTRACT WITH THE ONBOARDING WIZARD (onboarding/steps.py, since 1.0.17).
 # The wizard branches on three machine-readable things this script emits;
@@ -50,12 +53,44 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.29"
+INSTALLER_VERSION="1.0.30"
+
+# ----------------------------------------------------------------------
+# PINNED DOWNLOADS (2026-08-17, docs/COMMERCIAL_READINESS.md item 13)
+# ----------------------------------------------------------------------
+# rclone and Syncthing used to be fetched as "latest" -- rclone through the
+# `rclone-current-osx-<arch>.zip` alias, Syncthing through a GitHub API lookup
+# done at run time -- and installed with NO integrity check at all. That is a
+# vendor-shipped installer handing an unverified binary the customer's entire
+# footage library, and it also meant no two editor Macs were guaranteed to run
+# the same sync engine.
+#
+# Same contract as the companion's sidecar_tools.py: a release pinned by
+# version, each asset pinned by the sha256 OF THE ARCHIVE AS DOWNLOADED,
+# hardcoded here. No checksum file is fetched -- a hash served by the host that
+# served the bytes proves nothing. An artifact that does not match is deleted,
+# not installed, and the run reports a capability miss.
+#
+# Digests below came from the publishers' own signed checksum lists on
+# 2026-08-17 (rclone's per-version SHA256SUMS, Syncthing's release
+# sha256sum.txt.asc). Bumping a pin is a code change with a review; the
+# procedure is in installer/README.md under "Bumping a pinned download", and
+# the Windows half (installer/windows_bootstrap.ps1) MUST be bumped with it.
+RCLONE_VERSION="v1.75.0"
+RCLONE_SHA256_ARM64="35e8f2a666ce789b29111db0dd843ddabc0d59c6b609d07bcaae5d1a07cba6f8"
+RCLONE_SHA256_AMD64="19edbb8e5e73096eb66e92a42abbc5c34bfa8981ea3986a53872c7eef85a22f4"
+SYNCTHING_VERSION="v2.1.3"
+SYNCTHING_SHA256_ARM64="e0f0d8df05bf0118c48c6515214a96bf3a3f11dbd115f56c3c0b52251b3f71aa"
+SYNCTHING_SHA256_AMD64="207557c0f708578375be9a286d13078cd709bfccae43d61d004913bb512b10aa"
 
 DRY_RUN=0
 TAILNET_HOST=""
 EDITOR_NAME=""
-LOCAL_ROOT="$HOME/Creators_Club"
+# NO DEFAULT here since 2026-08-17 (docs/COMMERCIAL_READINESS.md item 11):
+# it used to be one deployment's tree name compiled into this script. It is
+# resolved after the site manifest is read, in this order -- --local-root, the
+# existing config.toml's local_root, then ~/<tree_name from the manifest>.
+LOCAL_ROOT=""
 # Absolute on purpose: the SFTP session lands in the editor's home directory
 # on the NAS, so a relative remote root resolves under ~/ and silently misses
 # the real project tree. NO DEFAULT since 2026-08-17 (WP0,
@@ -141,6 +176,28 @@ step() { echo "[ccsync] $1"; }
 skip() { echo "[ccsync] SKIP: $1"; }
 warn() { echo "[ccsync] WARNING: $1" >&2; }
 dry()  { echo "[ccsync] [dry-run] $1"; }
+
+# Verifies a downloaded archive against a PINNED sha256 (2026-08-17,
+# docs/COMMERCIAL_READINESS.md item 13). Returns non-zero AND deletes the file
+# on any mismatch -- a tampered or truncated archive must never reach `unzip`,
+# let alone $BIN_DIR. shasum is in the macOS base system; sha256sum is not.
+verify_sha256() {
+    file="$1"
+    expected="$2"
+    what="$3"
+    [ -f "$file" ] || { warn "$what was not downloaded"; return 1; }
+    actual="$(shasum -a 256 "$file" 2>/dev/null | awk '{print $1}')"
+    if [ "$actual" = "$expected" ]; then
+        step "verified $what (sha256 $(printf '%s' "$actual" | cut -c1-16)...)"
+        return 0
+    fi
+    warn "CHECKSUM MISMATCH for $what"
+    warn "  expected sha256 $expected"
+    warn "  got      sha256 ${actual:-<could not be computed>}"
+    warn "The download was NOT installed and has been deleted. Either the mirror served something else, or the pin in this installer is stale -- see 'Bumping a pinned download' in installer/README.md."
+    rm -f "$file"
+    return 1
+}
 
 # Hard-capability misses (rclone absent, Syncthing absent, no device ID).
 # Each one means this Mac can never sync something it is supposed to sync,
@@ -240,6 +297,57 @@ case "$REMOTE_ROOT" in
 esac
 
 BIN_DIR="$HOME/.local/ccsync/bin"
+# THE TREE NAME AND THE CANONICAL PREFIX ARE SITE DATA (2026-08-17,
+# docs/COMMERCIAL_READINESS.md item 11). "Creators_Club" and P:\ were literals
+# here; the companion already reads canonical_prefix from its own config, so
+# the two halves now agree by construction rather than by luck.
+TREE_NAME="$(site_value tree_name)"
+[ -n "$TREE_NAME" ] || TREE_NAME="CCSync"
+
+# The prefix Resolve's Mapped Mount and the companion's stored clip paths use.
+# On a Mac nothing is MOUNTED at a drive letter -- the mapping is a Resolve
+# preference that rewrites "P:\..." to the local root -- so any letter the
+# site publishes works, and a manifest without one keeps P:\.
+# Pure string-in/string-out so installer/tests/test_macos_site_values.sh can
+# exercise it without a Mac. Prints the bare uppercase LETTER, or nothing at
+# all for a prefix this product cannot express as a Resolve Mapped Mount (a
+# UNC, a POSIX path, an empty manifest field) -- the caller refuses on that
+# rather than falling back to P:, because a wrong prefix silently leaves every
+# stored clip path unresolvable.
+canonical_prefix_letter() {
+    case "$1" in
+        [A-Za-z]:*) printf '%s' "${1%%:*}" | tr '[:lower:]' '[:upper:]' ;;
+        *) return 0 ;;
+    esac
+}
+
+CANONICAL_PREFIX="$(site_value canonical_prefix)"
+[ -n "$CANONICAL_PREFIX" ] || CANONICAL_PREFIX='P:\'
+CANONICAL_DRIVE="$(canonical_prefix_letter "$CANONICAL_PREFIX")"
+if [ -z "$CANONICAL_DRIVE" ]; then
+    echo "[ccsync] ERROR: the site manifest's canonical_prefix is '$CANONICAL_PREFIX', which is not a drive-letter path." >&2
+    echo "[ccsync] Resolve's Mapped Mount rewrites a drive-letter prefix; ask your admin to set canonical_prefix to e.g. 'P:\\' in site.toml." >&2
+    exit 2
+fi
+# Normalise to "<LETTER>:\" -- the Resolve preference and config.toml below
+# both compare it as a literal string.
+CANONICAL_PREFIX="${CANONICAL_DRIVE}:\\"
+# TOML needs the backslash doubled; the config heredoc below expands this
+# verbatim, so the escaping has to be right HERE and nowhere else.
+CANONICAL_PREFIX_TOML="${CANONICAL_DRIVE}:\\\\"
+
+# --local-root wins; then an EXISTING install (a re-run that quietly picked a
+# different folder would leave the real tree stranded and sync an empty one);
+# then ~/<tree name>.
+if [ -z "$LOCAL_ROOT" ] && [ -f "$HOME/.ccsync/config.toml" ]; then
+    LOCAL_ROOT="$(sed -n 's/^[[:space:]]*local_root[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' \
+        "$HOME/.ccsync/config.toml" | head -n 1)"
+    [ -z "$LOCAL_ROOT" ] || step "local root from your existing config.toml: $LOCAL_ROOT"
+fi
+if [ -z "$LOCAL_ROOT" ]; then
+    LOCAL_ROOT="$HOME/$TREE_NAME"
+    step "no --local-root given -- using $LOCAL_ROOT (pass --local-root to put the tree on an external volume)"
+fi
 CC_ROOT="$LOCAL_ROOT"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 RCLONE_CONF_DIR="$HOME/.config/rclone"
@@ -256,8 +364,17 @@ REMOTE_NAME="$(site_value rclone_remote)"
 CCSYNC_CONFIG_DIR="$HOME/.ccsync"
 CCSYNC_CONFIG_PATH="$CCSYNC_CONFIG_DIR/config.toml"
 VOLUME_JSON_PATH="$CCSYNC_CONFIG_DIR/volume.json"
-COMPANION_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.companion.plist"
-CANONICAL_PREFIX='P:\'
+# LAUNCH AGENT LABELS: com.ccsync.*, not com.creatorsclub.* (2026-08-17,
+# docs/COMMERCIAL_READINESS.md item 10). A launchd label is a durable,
+# user-visible identifier that appears in `launchctl list`, in Login Items and
+# in every support transcript -- a customer's Mac must not advertise another
+# company's reverse-DNS name. The OLD labels are unloaded and their plists
+# removed further down, so a Mac provisioned before this change ends up with
+# exactly one agent per service rather than two fighting over the same port.
+COMPANION_PLIST="$LAUNCH_AGENTS_DIR/com.ccsync.companion.plist"
+COMPANION_PLIST_LEGACY="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.companion.plist"
+COMPANION_LABEL="com.ccsync.companion"
+COMPANION_LABEL_LEGACY="com.creatorsclub.ccsync.companion"
 
 if [ "$RESOLVE_MAPPING_ONLY" = 1 ]; then
     step "ccsync macOS bootstrap $INSTALLER_VERSION -- Resolve mapping only, local root '$CC_ROOT'"
@@ -1434,27 +1551,36 @@ else
     if [ "$installed" = 0 ]; then
         ARCH="$(uname -m)"
         if [ "$ARCH" = "arm64" ]; then
-            ZIP_URL="https://downloads.rclone.org/rclone-current-osx-arm64.zip"
+            RCLONE_ASSET="rclone-$RCLONE_VERSION-osx-arm64.zip"
+            RCLONE_SHA256="$RCLONE_SHA256_ARM64"
         else
-            ZIP_URL="https://downloads.rclone.org/rclone-current-osx-amd64.zip"
+            RCLONE_ASSET="rclone-$RCLONE_VERSION-osx-amd64.zip"
+            RCLONE_SHA256="$RCLONE_SHA256_AMD64"
         fi
+        ZIP_URL="https://downloads.rclone.org/$RCLONE_VERSION/$RCLONE_ASSET"
         ZIP_PATH="$STAGE_DIR/rclone.zip"
         EXTRACT_DIR="$STAGE_DIR/rclone-extract"
         if [ "$DRY_RUN" = 1 ]; then
-            dry "would download $ZIP_URL, extract, and copy rclone to $BIN_DIR"
+            dry "would download $ZIP_URL, verify sha256 $RCLONE_SHA256, extract, and copy rclone to $BIN_DIR"
         else
-            step "downloading rclone from $ZIP_URL ..."
+            step "downloading rclone $RCLONE_VERSION from $ZIP_URL ..."
             curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"
-            rm -rf "$EXTRACT_DIR"
-            mkdir -p "$EXTRACT_DIR"
-            unzip -q -o "$ZIP_PATH" -d "$EXTRACT_DIR"
-            FOUND="$(find "$EXTRACT_DIR" -name rclone -type f | head -n 1)"
-            if [ -z "$FOUND" ]; then
-                warn "could not find rclone binary inside the downloaded zip -- install rclone manually"
+            # Verified BEFORE unzip: an artifact that does not match the pin
+            # never gets inflated onto the disk at all.
+            if ! verify_sha256 "$ZIP_PATH" "$RCLONE_SHA256" "rclone $RCLONE_VERSION"; then
+                warn "rclone was not installed from the direct download"
             else
-                cp "$FOUND" "$BIN_DIR/rclone"
-                chmod +x "$BIN_DIR/rclone"
-                step "installed rclone to $BIN_DIR/rclone"
+                rm -rf "$EXTRACT_DIR"
+                mkdir -p "$EXTRACT_DIR"
+                unzip -q -o "$ZIP_PATH" -d "$EXTRACT_DIR"
+                FOUND="$(find "$EXTRACT_DIR" -name rclone -type f | head -n 1)"
+                if [ -z "$FOUND" ]; then
+                    warn "could not find rclone binary inside the downloaded zip -- install rclone manually"
+                else
+                    cp "$FOUND" "$BIN_DIR/rclone"
+                    chmod +x "$BIN_DIR/rclone"
+                    step "installed rclone to $BIN_DIR/rclone"
+                fi
             fi
         fi
     fi
@@ -1516,44 +1642,32 @@ else
 
         # GitHub's /releases/latest/download/<name> alias only resolves when
         # that EXACT filename exists in the release. Syncthing's assets are
-        # version-named, so the unversioned alias 404s. Note macOS assets are
-        # .zip (the Linux/BSD ones are .tar.gz) -- unzip, don't tar.
-        resolve_syncthing_url() {
-            local url tag
-            url="$(curl -fsSL -H 'User-Agent: ccsync-bootstrap' \
-                    https://api.github.com/repos/syncthing/syncthing/releases/latest 2>/dev/null \
-                  | grep -oE '"browser_download_url": *"[^"]+"' \
-                  | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/' \
-                  | grep -E "syncthing-macos-${ASSET_ARCH}-v[^/]+\.zip$" \
-                  | head -n 1)"
-            if [ -n "$url" ]; then
-                printf '%s' "$url"
-                return 0
-            fi
-            # Backstop: the unauthenticated API is rate-limited to 60/hour per
-            # IP, so sniff the version tag out of the release redirect instead.
-            tag="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-                    https://github.com/syncthing/syncthing/releases/latest 2>/dev/null \
-                  | sed -nE 's#.*/tag/(v[0-9][^/]*)$#\1#p')"
-            if [ -n "$tag" ]; then
-                printf 'https://github.com/syncthing/syncthing/releases/download/%s/syncthing-macos-%s-%s.zip' \
-                    "$tag" "$ASSET_ARCH" "$tag"
-                return 0
-            fi
-            return 1
-        }
-
+        # version-named, which is why the pinned URL below names the version.
+        # Note macOS assets are .zip (Linux/BSD are .tar.gz) -- unzip, not tar.
+        #
+        # The run-time version lookup this replaces (GitHub API, release-URL
+        # redirect as a backstop) is gone with the pin: it made every editor
+        # Mac a different Syncthing depending on the day it was installed, it
+        # spent two unauthenticated GitHub calls against a 60/hour/IP budget,
+        # and whatever it found was installed unverified (2026-08-17,
+        # docs/COMMERCIAL_READINESS.md item 13).
+        if [ "$ASSET_ARCH" = "arm64" ]; then
+            SYNCTHING_SHA256="$SYNCTHING_SHA256_ARM64"
+        else
+            SYNCTHING_SHA256="$SYNCTHING_SHA256_AMD64"
+        fi
+        SYNCTHING_ASSET="syncthing-macos-${ASSET_ARCH}-${SYNCTHING_VERSION}.zip"
+        ZIP_URL="https://github.com/syncthing/syncthing/releases/download/$SYNCTHING_VERSION/$SYNCTHING_ASSET"
         ZIP_PATH="$STAGE_DIR/syncthing.zip"
         EXTRACT_DIR="$STAGE_DIR/syncthing-extract"
         if [ "$DRY_RUN" = 1 ]; then
-            dry "would resolve the latest syncthing-macos-${ASSET_ARCH}-<version>.zip via the GitHub API, download, unzip, and copy syncthing to $BIN_DIR"
+            dry "would download $ZIP_URL, verify sha256 $SYNCTHING_SHA256, unzip, and copy syncthing to $BIN_DIR"
         else
-            ZIP_URL="$(resolve_syncthing_url || true)"
-            if [ -z "$ZIP_URL" ]; then
-                warn "could not determine a Syncthing download URL -- install Syncthing manually from https://syncthing.net/downloads/ and re-run this script"
+            step "downloading Syncthing $SYNCTHING_VERSION from $ZIP_URL ..."
+            curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"
+            if ! verify_sha256 "$ZIP_PATH" "$SYNCTHING_SHA256" "Syncthing $SYNCTHING_VERSION"; then
+                warn "Syncthing was not installed from the direct download"
             else
-                step "downloading Syncthing from $ZIP_URL ..."
-                curl -fsSL "$ZIP_URL" -o "$ZIP_PATH"
                 rm -rf "$EXTRACT_DIR"
                 mkdir -p "$EXTRACT_DIR"
                 unzip -q -o "$ZIP_PATH" -d "$EXTRACT_DIR"
@@ -1595,8 +1709,31 @@ else
     fi
 fi
 
-SYNCTHING_PLIST="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.syncthing.plist"
+SYNCTHING_PLIST="$LAUNCH_AGENTS_DIR/com.ccsync.syncthing.plist"
+SYNCTHING_PLIST_LEGACY="$LAUNCH_AGENTS_DIR/com.creatorsclub.ccsync.syncthing.plist"
 ensure_dir "$LAUNCH_AGENTS_DIR"
+
+# Retire the OLD label on a Mac provisioned before 2026-08-17. Both agents run
+# the same binary, so leaving the legacy one loaded means two Syncthings
+# fighting over port 8384 and two companions on loopback 8899 -- worse than
+# either name. Unload first, THEN delete: launchd keeps running a job whose
+# plist has been deleted until it is booted out, and there would be nothing
+# left to boot it out with.
+retire_legacy_agent() {
+    legacy_plist="$1"
+    legacy_label="$2"
+    [ -f "$legacy_plist" ] || return 0
+    if [ "$DRY_RUN" = 1 ]; then
+        dry "would unload and remove the legacy LaunchAgent $legacy_plist (label $legacy_label)"
+        return 0
+    fi
+    launchctl bootout "gui/$(id -u)/$legacy_label" >/dev/null 2>&1 || true
+    launchctl bootout "gui/$(id -u)" "$legacy_plist" >/dev/null 2>&1 || true
+    launchctl unload "$legacy_plist" >/dev/null 2>&1 || true
+    rm -f "$legacy_plist"
+    step "retired the legacy LaunchAgent $legacy_label (renamed to com.ccsync.*, 2026-08-17)"
+}
+retire_legacy_agent "$SYNCTHING_PLIST_LEGACY" "com.creatorsclub.ccsync.syncthing"
 
 # Returns the first <string> inside a plist's ProgramArguments array, i.e.
 # the program the agent actually runs. Empty when it can't be determined.
@@ -1653,7 +1790,7 @@ else
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.creatorsclub.ccsync.syncthing</string>
+    <string>com.ccsync.syncthing</string>
     <key>ProgramArguments</key>
     <array>
         <string>$SYNCTHING_BIN</string>
@@ -1714,7 +1851,7 @@ fi
 # Seed the NAS as a known device via the RUNNING instance's REST API (an XML
 # edit behind a live daemon is silently overwritten). Without this entry a
 # fresh config drops every NAS connection as "unknown device" one second
-# after hello, in a permanent reconnect loop (alex_laptop, 2026-07-26).
+# after hello, in a permanent reconnect loop (owen_laptop, 2026-07-26).
 # autoAcceptFolders stays false on purpose: the companion's sequencer accepts
 # folder offers at the CORRECT local path, while Syncthing's own auto-accept
 # mangles this deployment's slash-labelled folders into flat directories.
@@ -2034,7 +2171,7 @@ elif [ -z "$DASHBOARD_TOKEN" ]; then
 else
     COMPANION_URL="${DASHBOARD_URL%/}/api/v1/companion/package/macos/$COMPANION_VERSION"
     if [ "$DRY_RUN" = 1 ]; then
-        dry "would download $COMPANION_URL (X-CCSync-Token), verify it against the X-CCSync-SHA256 header, and install it to $COMPANION_PATH"
+        dry "would download $COMPANION_URL (X-CCSync-Token), refuse it unless the dashboard serves an X-CCSync-Signature, verify it against the X-CCSync-SHA256 header, and install it to $COMPANION_PATH"
         COMPANION_READY=1
     else
         COMPANION_DL="$STAGE_DIR/ccsync-companion.download"
@@ -2047,8 +2184,27 @@ else
         else
             COMPANION_EXPECTED_SHA="$(grep -i '^X-CCSync-SHA256:' "$COMPANION_HDRS" 2>/dev/null \
                 | tail -n 1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tr 'A-Z' 'a-z')"
+            COMPANION_SIGNATURE="$(grep -i '^X-CCSync-Signature:' "$COMPANION_HDRS" 2>/dev/null \
+                | tail -n 1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r')"
             COMPANION_SOURCE_SHA="$(sha256_of "$COMPANION_DL" || true)"
-            if [ -z "$COMPANION_EXPECTED_SHA" ]; then
+            # COMMERCIAL_READINESS.md item 4 (2026-08-17). This script is the
+            # ONE consumer of the package channel that cannot verify the
+            # ed25519 release signature -- it is POSIX sh on a Mac that has
+            # nothing of ours installed yet, and there is no dependable
+            # ed25519 verifier in the base system (LibreSSL's pkeyutl support
+            # varies by macOS version). What it CAN do is refuse a channel
+            # that carries no signature at all: the companion this installs
+            # will verify every subsequent upgrade against a key baked into
+            # itself, and a dashboard serving unsigned packages is either
+            # ancient or not the dashboard.
+            #
+            # The trust anchor for THIS first fetch stays what it always was:
+            # the DASHBOARD_TOKEN the admin gave the editor, over the tailnet,
+            # plus the sha256 below. That is stated here rather than implied.
+            if [ -z "$COMPANION_SIGNATURE" ]; then
+                COMPANION_FAIL_REASON="the dashboard served this companion build WITHOUT a release signature, so it was NOT installed. Tell the admin to republish the companion through tools/ship.cmd (a build published before 2026-08-17 is unsigned, and every current companion refuses it)."
+                warn "$COMPANION_FAIL_REASON"
+            elif [ -z "$COMPANION_EXPECTED_SHA" ]; then
                 # No header, no verification, no install: an unverified binary
                 # that runs with the editor's NAS credentials is exactly what
                 # the checksum is for.
@@ -2141,6 +2297,11 @@ if [ "$COMPANION_MISSING" = 1 ]; then
         fi
     fi
 else
+    # Retire com.creatorsclub.ccsync.companion BEFORE writing com.ccsync.*:
+    # two loaded agents both exec the companion, and the second one loses the
+    # loopback port 8899 the b-roll and music "send to Resolve" buttons call
+    # (2026-08-17, docs/COMMERCIAL_READINESS.md item 10).
+    retire_legacy_agent "$COMPANION_PLIST_LEGACY" "$COMPANION_LABEL_LEGACY"
     COMPANION_PLIST_PROGRAM="$(plist_program "$COMPANION_PLIST")"
     COMPANION_PLIST_OK=0
     if [ -f "$COMPANION_PLIST" ] && [ "$COMPANION_PLIST_PROGRAM" = "$COMPANION_PATH" ] \
@@ -2174,7 +2335,7 @@ else
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.creatorsclub.ccsync.companion</string>
+    <string>$COMPANION_LABEL</string>
     <key>ProgramArguments</key>
     <array>
         <string>$COMPANION_PATH</string>
@@ -2282,11 +2443,13 @@ else
 editor_name = "$EDITOR_NAME"
 
 # This machine's local copy of the project tree. Resolve's Mapped Mount
-# preference points P:\ here -- macos_bootstrap.sh sets that up.
+# preference points $CANONICAL_PREFIX here -- macos_bootstrap.sh sets that up.
 local_root = "$CC_ROOT"
 
-# The shared-drive prefix used in Resolve's stored clip paths.
-canonical_prefix = "P:\\\\"
+# The shared-drive prefix used in Resolve's stored clip paths. Comes from the
+# site manifest's canonical_prefix, so this file and the Mapped Mount this
+# script just wrote cannot disagree (2026-08-17, item 11).
+canonical_prefix = "$CANONICAL_PREFIX_TOML"
 
 # Must match the rclone remote name in ~/.config/rclone/rclone.conf.
 remote = "$REMOTE_NAME"

@@ -8,8 +8,8 @@ name = "ccsync-dashboard"
 # check_deploy_drift.ps1 read only __init__.py, so this drifted three releases
 # behind unnoticed. test_hardening.test_dashboard_version_does_not_drift is
 # the guard.
-version = "0.4.1"
-description = "Creators Club Sync fleet dashboard: per-project, per-editor sync status served off the NAS"
+version = "0.5.0"
+description = "CC Sync fleet dashboard: per-project, per-editor sync status served off the NAS"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110",
@@ -67,6 +67,12 @@ music = [
 # silently absent. test_deploy_requirements_match_pyproject_dependencies
 # checks both directions against deploy/requirements.txt.
 ytdl = [
+    # The two AI calls (search-term expansion, relevance filtering). Floor pin,
+    # not exact: the SDK is backwards-compatible. It replaced the interactive
+    # `claude` CLI on 2026-08-17 -- that was a BINARY the installer provisioned
+    # onto the NAS, authenticated by one human's personal account, so it was
+    # never a package here (docs/COMMERCIAL_READINESS.md item 1).
+    "anthropic>=0.69",
     "yt-dlp>=2026.6.9",
     # PINNED, and pinned TOGETHER with the sidecar image tag in
     # server/install_dashboard_app.py: the provider plugin and the server it
@@ -91,6 +97,22 @@ ytdl = [
 # LGPL-2.1 -- it belongs in the NOTICE file when readiness item 1 gets done.
 synology = [
     "paramiko>=3.4",
+]
+
+# DASH_AUTH_METHOD=oidc (COMMERCIAL_READINESS.md item 12, 2026-08-17). PyJWT
+# rather than authlib: the only thing this dashboard needs from a JOSE library
+# is "verify an id_token against a JWKS", PyJWT does exactly that
+# (jwt.PyJWKClient) in ~90 KB, and authlib would bring a second OAuth client
+# stack alongside the one in oidc.py. `cryptography` -- which does the actual
+# RSA/EC verification -- is already installed here as a paramiko dependency.
+#
+# Installed on every site like paramiko, and for the same reason: one
+# requirements file for one image, and run.sh only re-runs pip when its hash
+# changes. A site that never sets DASH_AUTH_METHOD=oidc simply never imports it
+# (oidc.verify_id_token imports lazily, so a container WITHOUT it reports one
+# clear problem instead of failing to import the dashboard).
+oidc = [
+    "PyJWT>=2.8",
 ]
 
 dev = [

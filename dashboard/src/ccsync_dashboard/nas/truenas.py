@@ -93,6 +93,13 @@ class TrueNASClient:
     verify_ssl: bool | str = field(default_factory=_verify_setting)
     # See HOME_PARENT: blank = fall back to the first fleet's literal, loudly.
     homes_parent: str = ""
+    # A scoped API key (DASH_NAS_API_KEY / TRUENAS_API_KEY). When set it is
+    # used INSTEAD of HTTP basic auth with `password`, and the deploy leaves
+    # the password out of the container entirely -- see settings.nas_api_key
+    # and COMMERCIAL_READINESS.md item 6 (finding H3). TrueNAS 25.10 accepts
+    # `Authorization: Bearer <key>` on every /api/v2.0 route.
+    api_key: str = field(default_factory=lambda: os.environ.get(
+        "DASH_NAS_API_KEY", "").strip() or os.environ.get("TRUENAS_API_KEY", "").strip())
 
     def _homes_parent(self) -> str:
         if self.homes_parent:
@@ -105,10 +112,15 @@ class TrueNASClient:
                   params: dict[str, Any] | None = None) -> requests.Response:
         base = self.base_url or f"https://{self.host}/api/v2.0"
         url = f"{base}{path}"
+        # Bearer key when the site has one, basic auth otherwise. Never both:
+        # sending an Authorization header AND basic credentials makes a 401
+        # ambiguous about which of the two the NAS rejected.
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
+        auth = None if self.api_key else (self.user, self.password)
         try:
             return self.session.request(
-                method, url, json=json_body, params=params,
-                auth=(self.user, self.password), verify=self.verify_ssl, timeout=self.timeout,
+                method, url, json=json_body, params=params, headers=headers,
+                auth=auth, verify=self.verify_ssl, timeout=self.timeout,
             )
         except requests.RequestException as exc:
             raise TrueNASError(f"{method} {path}: {exc}") from exc

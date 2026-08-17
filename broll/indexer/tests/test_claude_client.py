@@ -285,12 +285,21 @@ def test_call_claude_with_retry_gives_up_after_one_retry():
     assert call_count["n"] == 2  # exactly one retry, no more
 
 
-def test_model_map_has_all_three_aliases():
+def test_model_aliases_resolve_to_current_api_model_ids():
+    """The aliases are what an operator types; these are what the API answers to.
+    Bare ids (no date suffix) — a date-suffixed variant 404s (2026-08-17)."""
     assert MODEL_MAP == {
-        "haiku": "claude-haiku-4-5-20251001",
+        "haiku": "claude-haiku-4-5",
         "sonnet": "claude-sonnet-5",
+        "opus": "claude-opus-5",
         "fable": "claude-fable-5",
     }
+
+
+def test_an_unmapped_model_is_passed_through_so_a_config_can_pin_one():
+    from broll_index.claude_client import resolve_model
+
+    assert resolve_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
 
 
 # ---------------------------------------------------------------------------
@@ -454,37 +463,25 @@ def test_parse_strips_fences_inside_cli_envelope() -> None:
     assert parse_claude_response(_cli_envelope(fenced)) == _with_default_onscreen_text(VALID_CONTRACT)
 
 
-def test_invoke_passes_disallowed_tools(monkeypatch):
-    """Tool definitions live in the system prompt of every call, so the unused
-    ones are pure cost. Measured on the real archive: 66,576 -> 45,590 input
-    tokens per call (32%) and 108s -> 84s. Read must survive — the prompt tells
-    the model to open the contact sheets with it.
+def test_no_module_shells_out_to_the_claude_cli():
+    """2026-08-17, COMMERCIAL_READINESS.md item 1. The old test here pinned the
+    `--disallowedTools` argv of `claude -p`, which existed to strip tool
+    definitions out of every call's system prompt (measured 66,576 -> 45,590
+    input tokens). The API sends no tool definitions at all, so that saving is
+    now structural. What must not come back is the CLI: a customer install has
+    no `claude` binary and no claude.ai login, so any subprocess call here would
+    fail on their machine and nowhere on ours.
     """
-    import subprocess as sp
+    from pathlib import Path
 
-    from broll_index.claude_client import DISALLOWED_TOOLS, invoke_claude
+    from broll_index import claude_client
 
-    captured = {}
-
-    class R:
-        returncode = 0
-        stdout = json.dumps({"type": "result", "result": "{}", "is_error": False})
-        stderr = ""
-
-    def fake_run(cmd, *a, **kw):
-        captured["cmd"] = cmd
-        return R()
-
-    monkeypatch.setattr(sp, "run", fake_run)
-    try:
-        invoke_claude("p", "haiku")
-    except Exception:
-        pass  # parsing the stub payload is not what this test is about
-
-    cmd = captured.get("cmd", [])
-    assert "--disallowedTools" in cmd, cmd
-    disallowed = cmd[cmd.index("--disallowedTools") + 1]
-    assert "Bash" in disallowed and "WebSearch" in disallowed
-    # Read is required and must NOT be disallowed
-    assert "Read" not in disallowed.split(","), disallowed
-    assert DISALLOWED_TOOLS == disallowed
+    source = Path(claude_client.__file__).read_text(encoding="utf-8")
+    assert "import subprocess" not in source
+    assert "claude\", \"-p\"" not in source
+    # And nothing else in the package may invoke the binary either.
+    pkg = Path(claude_client.__file__).parent
+    for py in pkg.rglob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        assert "claude\", \"-p\"" not in text, py
+        assert "\"claude\", \"--\"" not in text, py

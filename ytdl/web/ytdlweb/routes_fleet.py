@@ -9,7 +9,7 @@ while an editor fetching their own reviewed selections from a residential IP is
 not. So from companion 0.8.0 the requester's own machine may execute the
 download, and the NAS worker becomes the fallback executor.
 
-Two rules govern this file and neither is negotiable:
+Three rules govern this file and none is negotiable:
 
   - **THE FLEET TOKEN, NOT THE SESSION.** These calls happen when no browser is
     open (the SPA hands the companion a job id and walks away, plan §2). They
@@ -17,6 +17,15 @@ Two rules govern this file and neither is negotiable:
     already holds -- and they FAIL CLOSED: a deployment with no
     DASH_REPORT_TOKEN answers 403 to every one of them rather than running open,
     which is the b-roll ingest gate's precedent.
+  - **AND THE TOKEN IS NOT AN IDENTITY** (H5, COMMERCIAL_READINESS.md item 7,
+    2026-08-17). Every companion in the fleet holds the same one, so it proves
+    "a fleet machine" and nothing about WHICH. The editor's name therefore
+    arrives as the dashboard's signed identity token in `X-CCSync-Identity`,
+    verified here (identity.py) before it is believed. It used to be a bare
+    self-asserted string, which meant any machine with the shared token could
+    claim a job as somebody else and then complete it, fail its clips, or take
+    it off the editor who was downloading it. Missing or unverifiable is 403,
+    for the same fail-closed reason as the token.
   - **THE BROWSER CONTRIBUTES A JOB ID AND NOTHING ELSE.** Paths, URLs,
     quality, the naming template -- all of it comes from the server under the
     token (plan §8). This is /music/send's principle ("never trust the page
@@ -35,7 +44,7 @@ import os
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from ytdlweb import config, db, worker, ytdl_common
+from ytdlweb import attestation, config, db, identity, worker, ytdl_common
 from ytdlweb.db import con
 from ytdlweb.vendor import ytsearch
 
@@ -85,8 +94,8 @@ def _job_or_404(c, job_id):
     return job
 
 
-def _leaseholder_or_410(c, job_id, editor=None):
-    """The job, if `editor` (or whoever asked) still holds its lease.
+def _leaseholder_or_410(c, job_id, editor):
+    """The job, if the VERIFIED `editor` still holds its lease.
 
     410 GONE and not 403: "your claim is over" is the answer to every way this
     can fail -- the lease expired and the server reclaimed the job (§3, one-way,
@@ -113,21 +122,40 @@ def _leaseholder_or_410(c, job_id, editor=None):
     return job
 
 
-def _identity(header_value, body_value=None):
-    """Who the caller says it is, or None. Body first, header second.
+def require_identity(x_ccsync_identity):
+    """The VERIFIED editor behind `X-CCSync-Identity`. 403 if there isn't one.
 
-    The header is `X-CCSync-Identity` (FastAPI derives the name from the
-    parameter `x_ccsync_identity`), and it is self-asserted: a MISTAKE-
-    PREVENTER, not an authorisation boundary. The shared token is what proves
-    the caller is a fleet machine -- exactly the posture the dashboard's own
-    selection route takes with the same pair. Sent, it must match the
-    leaseholder; absent, the live lease alone is the answer.
+    H5 (2026-08-17). This header used to be self-asserted -- documented here as
+    a "mistake-preventer, not an authorisation boundary" -- and that was the
+    hole: the shared fleet token is held by every companion, so a name nobody
+    checked was the only thing deciding whose job a caller could claim,
+    complete or poison. It now carries the dashboard's signed identity token
+    (the one reporter.py already sends on every status report) and is verified
+    against DASH_SESSION_SECRET before the name is used for anything.
+
+    The BODY's `editor` field is no longer consulted for identity at all. It is
+    still accepted on the wire so an older companion's request parses, but the
+    only name that decides anything is the one the signature vouches for --
+    two sources for one fact is how the wrong one ends up winning.
+
+    Fails closed on an unconfigured secret, exactly as require_fleet_token
+    does on an unconfigured token: local downloads stop and the NAS worker
+    downloads everything, which is the designed fallback.
     """
-    for candidate in (body_value, header_value):
-        name = str(candidate or '').strip()
-        if name:
-            return name
-    return None
+    if not config.SESSION_SECRET:
+        log.warning('a fleet download call arrived but DASH_SESSION_SECRET is '
+                    'not set, so no identity can be verified -- refusing. The '
+                    'server worker downloads these jobs instead.')
+        raise HTTPException(403, {
+            'detail': 'this dashboard cannot verify companion identities',
+            'reason': 'identity_unconfigured'})
+    editor = identity.read_identity_token(config.SESSION_SECRET, x_ccsync_identity)
+    if not editor:
+        raise HTTPException(403, {
+            'detail': (f'a valid {identity.HEADER} is required: sign in again '
+                       'from the companion tray'),
+            'reason': 'identity'})
+    return editor
 
 
 # --------------------------------------------------------------- the client
@@ -153,6 +181,10 @@ def client_config():
 # ------------------------------------------------------------- claim + lease
 
 class ClaimIn(BaseModel):
+    # IGNORED SINCE H5 (2026-08-17): the lease holder is the name the verified
+    # X-CCSync-Identity token carries, never this. Kept on the model so an
+    # older companion's body still parses -- dropping the field would turn a
+    # security fix into a 422 for every machine that has not upgraded.
     editor: str = ''
     # yt-dlp's own YYYY.MM.DD, straight out of `yt-dlp --version`. Compared as
     # a string (config.MIN_YTDLP_VERSION says why that is exact).
@@ -214,7 +246,8 @@ def _version_at_least(reported, minimum):
 
 @router.post('/api/jobs/{job_id}/claim')
 def claim(job_id: int, body: ClaimIn,
-          x_ccsync_token: str | None = Header(default=None)):
+          x_ccsync_token: str | None = Header(default=None),
+          x_ccsync_identity: str | None = Header(default=None)):
     """Take the lease on a job's downloads. The compare-and-set of plan §3.
 
     200 = it is yours, start downloading. Everything else is "do not", and the
@@ -235,12 +268,25 @@ def claim(job_id: int, body: ClaimIn,
            (§5).
     """
     require_fleet_token(x_ccsync_token)
-    editor = str(body.editor or '').strip()
-    if not editor:
-        raise HTTPException(400, 'editor is required: a lease needs a holder')
+    # THE VERIFIED name, not body.editor (H5, 2026-08-17). The body field is
+    # still accepted so an older companion's request parses; it decides
+    # nothing, because a lease holder that a signature does not vouch for is
+    # the hole this route had.
+    editor = require_identity(x_ccsync_identity)
 
     c = con()
     job = _job_or_404(c, job_id)
+
+    # The rights/ToS attestation, checked on the MACHINE path too and not only
+    # in the browser (attestation.py, COMMERCIAL_READINESS.md item 2). A
+    # companion is driven by a job id the SPA handed it, and the SPA is gated
+    # -- but "the other client checks it" is not a check, and this is the
+    # route that decides whose IP fetches the video.
+    if db.attestation_of(c, editor, attestation.TEXT_VERSION) is None:
+        raise HTTPException(403, {
+            'detail': attestation.REFUSAL,
+            'reason': 'attestation',
+            'version': attestation.TEXT_VERSION})
 
     # Order matters only in what the caller is told first, and this order tells
     # it the most actionable thing: "there is nothing here to download" before
@@ -336,7 +382,7 @@ def heartbeat(job_id: int, body: HeartbeatIn,
     nobody will record (§3).
     """
     require_fleet_token(x_ccsync_token)
-    editor = _identity(x_ccsync_identity, body.editor)
+    editor = require_identity(x_ccsync_identity)
     c = con()
     job = _leaseholder_or_410(c, job_id, editor)
     if not db.heartbeat_download(c, job_id, job['claimed_by'], config.LEASE_SECONDS):
@@ -385,7 +431,7 @@ def download_manifest(job_id: int,
     """
     require_fleet_token(x_ccsync_token)
     c = con()
-    job = _leaseholder_or_410(c, job_id, _identity(x_ccsync_identity))
+    job = _leaseholder_or_410(c, job_id, require_identity(x_ccsync_identity))
     rel_dir = '/'.join(p for p in (job['project_label'], db.YOUTUBE_DIR,
                                    job['term_dir']) if p)
     clips = _still_owed(c, job)
@@ -477,7 +523,7 @@ def clip_status(job_id: int, video_id: str, body: ClipStatusIn,
     """
     require_fleet_token(x_ccsync_token)
     c = con()
-    job = _leaseholder_or_410(c, job_id, _identity(x_ccsync_identity))
+    job = _leaseholder_or_410(c, job_id, require_identity(x_ccsync_identity))
     row = db.get_video(c, job_id, video_id)
     if row is None:
         raise HTTPException(404, 'no such video on this job')

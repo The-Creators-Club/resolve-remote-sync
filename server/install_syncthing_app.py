@@ -74,6 +74,20 @@ GUI port default 8384 is Syncthing's own default and does not collide with
 resolve-projectserver (5432) or anything else known to be running on this
 NAS as of SPEC.md; pass --gui-port to override if a future app collides.
 
+THE GUI IS AN ADMIN SURFACE, and this script does not secure it -- it says so
+loudly instead (2026-08-17, COMMERCIAL_READINESS.md item 7 / finding H4).
+Anyone who reaches that port can add a device, re-point a folder at another
+path or turn off send-only, across the whole fleet. Two things close it:
+
+  * `[syncthing] gui_bind` in site.toml -> the app's `web_port.host_ips`, so
+    it is published on ONE address rather than every interface. Unset keeps
+    the old behaviour, and the install warns. (VERIFY host_ips against your
+    TrueNAS version -- see backends/truenas.py:install_syncthing.)
+  * `python server/secure_syncthing_gui.py` -> a generated username and
+    password on the GUI itself, through Syncthing's own REST API. It leaves
+    the API KEY alone, so the dashboard, setup_syncthing_folder.py,
+    accept_device.py and check_health.py are unaffected.
+
 Env vars: TRUENAS_HOST / TRUENAS_USER (no defaults -- they come from [nas]
 host / admin_user in site.toml, see docs/SERVER.md), TRUENAS_PW (required).
 """

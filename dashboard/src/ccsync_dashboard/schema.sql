@@ -1,4 +1,4 @@
--- Creators Club Sync dashboard schema, version 1.
+-- CC Sync dashboard schema, version 1.
 -- Timestamps are ISO 8601 UTC strings ("2026-07-24T12:00:00+00:00");
 -- the fixed format makes lexicographic comparison correct in SQL.
 

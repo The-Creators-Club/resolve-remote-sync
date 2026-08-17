@@ -4,7 +4,7 @@ The contract these tests hold:
 
   - identity comes from ONE file, with flags and env vars still winning;
   - an unconfigured checkout REFUSES and names the key it wanted, instead of
-    quietly aiming at 192.168.0.102 / /mnt/tank/TheCreatorsPool (that default
+    quietly aiming at 192.168.0.10 / /mnt/tank/TheCreatorsPool (that default
     was the reason a second deployment would have been a fork --
     docs/COMMERCIAL_READINESS.md item 10);
   - picking a backend opens nothing: every script builds one at startup, and a
@@ -64,7 +64,7 @@ def unconfigured(monkeypatch):
 def test_the_fixture_site_is_what_the_suite_runs_against():
     """conftest.py points $CCSYNC_SITE here before common is imported."""
     assert Path(common.site_file()) == FIXTURE_SITE
-    assert common.DEFAULT_TRUENAS_HOST == "192.168.0.102"
+    assert common.DEFAULT_TRUENAS_HOST == "192.168.0.10"
     assert common.DEFAULT_CC_ROOT == "/mnt/tank/TheCreatorsPool/Creators_Club"
     assert common.DEFAULT_PROJECTS_ROOT.endswith("/Creators_Club/Projects")
     assert common.DEFAULT_APPS_ROOT == "/mnt/tank/apps/ccsync-dashboard"
@@ -74,15 +74,24 @@ def test_the_fixture_site_is_what_the_suite_runs_against():
 def test_the_example_manifest_parses_and_documents_every_section():
     site = common.load_site(EXAMPLE_SITE, reload=True)
     try:
-        assert set(site) >= {"nas", "tree", "apps", "net", "syncthing", "stack"}
+        assert set(site) >= {"nas", "tree", "apps", "net", "syncthing", "stack",
+                             "site", "features", "broll"}
         assert site["nas"]["kind"] in common.NAS_KINDS
         text = EXAMPLE_SITE.read_text(encoding="utf-8")
         # The one rule about this file that is not a matter of taste.
         for secret in ("TRUENAS_PW", "SYNCTHING_API_KEY", "DASH_SESSION_SECRET"):
             assert secret in text, f"the example must say where {secret} lives"
         assert "NO SECRETS IN HERE" in text
-        for section in ("[nas]", "[tree]", "[apps]", "[net]", "[syncthing]", "[stack]"):
+        for section in ("[nas]", "[tree]", "[apps]", "[net]", "[syncthing]", "[stack]",
+                        "[site]", "[features]", "[broll]"):
             assert f"\n{section}\n" in text
+        # The BRAND / template / b-roll keys added 2026-08-17
+        # (COMMERCIAL_READINESS.md items 10 and 11), which reach the container
+        # through install_dashboard_app.site_env. test_hardening.py owns the
+        # same rule for the [stack] / [syncthing] / [nas] keys.
+        for key in ("org_short", "product_name", "template_folders", "shared_assets",
+                    "default_collection", "default_collection_label"):
+            assert key in text, f"site.example.toml never mentions {key}"
     finally:
         common.load_site(FIXTURE_SITE, reload=True)
 
@@ -128,7 +137,7 @@ def test_the_refusal_names_the_key_and_the_flag(unconfigured):
     message = str(excinfo.value)
     assert "[tree] pool_root" in message and "--projects-root" in message
     assert "site.example.toml" in message
-    assert "192.168.0.102" not in message and "TheCreatorsPool" not in message
+    assert "192.168.0.10" not in message and "TheCreatorsPool" not in message
 
 
 def test_connection_params_refuse_instead_of_defaulting(unconfigured):
@@ -244,9 +253,16 @@ def test_the_truenas_backend_answers_every_method_the_protocol_names():
 
 
 def test_the_steps_truenas_does_not_automate_say_so_rather_than_pretending():
-    """ensure_share / ensure_service_user / snapshot are UI steps here (the
-    pool layout is a one-time decision made with recordsize and ACL settings no
-    script should guess). They must not silently return success."""
+    """ensure_share / ensure_service_user are UI steps here (the pool layout is
+    a one-time decision made with recordsize and ACL settings no script should
+    guess). They must not silently return success.
+
+    `snapshot` USED to be on this list. It stopped being on 2026-08-17
+    (COMMERCIAL_READINESS.md item 8): "the admin configures snapshots in the
+    UI" was the state of a fleet with no snapshots at all, so taking one is
+    real code now (`zfs snapshot` over SSH) and scheduling them is
+    setup_snapshots.py. Its own behaviour is pinned in test_backup_restore.py.
+    """
     from backends.base import UnsupportedOnBackend  # noqa: PLC0415
 
     backend = common.get_backend()
@@ -254,8 +270,68 @@ def test_the_steps_truenas_does_not_automate_say_so_rather_than_pretending():
         backend.ensure_share("tree", "/mnt/tank/x", "editors", dry_run=True)
     with pytest.raises(UnsupportedOnBackend):
         backend.ensure_service_user("broll", "editors", dry_run=True)
-    with pytest.raises(UnsupportedOnBackend):
-        backend.snapshot("/mnt/tank/x", "pre-deploy", dry_run=True)
     # ...while the one that is genuinely a no-op here is a no-op, not a raise:
     # an account with a shell and a home IS an SFTP account on TrueNAS.
     assert backend.grant_sftp("editors", dry_run=True) is True
+
+
+# --------------------------------------------------------------------------
+# [tree] template_folders / shared_assets -- optional overrides
+# (2026-08-17, docs/COMMERCIAL_READINESS.md item 11)
+# --------------------------------------------------------------------------
+#
+# Both lists are documentary-shop shaped ("Interviewees", "Render in Place", a
+# LUT library, a Resolve gallery) and were code in three components. They are
+# data now, with today's lists as the DEFAULTS -- which is what
+# test_cross_component.py pins across the components.
+
+def test_unset_means_the_product_defaults():
+    assert common.TEMPLATE_FOLDERS == common.DEFAULT_TEMPLATE_FOLDERS
+    assert common.SHARED_ASSET_FOLDERS == common.DEFAULT_SHARED_ASSET_FOLDERS
+    assert "Interviewees" in common.DEFAULT_TEMPLATE_FOLDERS
+
+
+def test_a_site_can_replace_both_lists(tmp_path, monkeypatch):
+    manifest = tmp_path / "site.toml"
+    manifest.write_text(
+        '[tree]\n'
+        'pool_root = "/volume1/Media"\n'
+        'tree_name = "Tree"\n'
+        'template_folders = ["Footage", "Audio", "Graphics/Titles"]\n'
+        'shared_assets = ["Assets/Luts", "Assets/SFX"]\n',
+        encoding="utf-8")
+    monkeypatch.setenv(common.SITE_ENV_VAR, str(manifest))
+    monkeypatch.setattr(sys, "argv", ["pytest"])
+    fresh = importlib.reload(common)
+    try:
+        assert fresh.TEMPLATE_FOLDERS == ["Footage", "Audio", "Graphics/Titles"]
+        assert fresh.SHARED_ASSET_FOLDERS == [
+            ("assets-luts", "Assets/Luts", "Assets/Luts (LUT library)"),
+            ("assets-sfx", "Assets/SFX", "Assets/SFX"),
+        ]
+        # The defaults are untouched: they are the cross-component contract.
+        assert "Interviewees" in fresh.DEFAULT_TEMPLATE_FOLDERS
+    finally:
+        monkeypatch.undo()
+        importlib.reload(common)
+
+
+def test_the_folder_id_of_an_added_library_is_its_slug():
+    """A Syncthing folder id, so it must be derived the same way every other
+    id in the fleet is -- not invented per component."""
+    for folder_id, rel, _label in common.shared_asset_folders_for(
+            ["Assets/Fusion Macros", "Assets/SFX"]):
+        assert folder_id == common.slugify(rel)
+
+
+def test_site_list_takes_a_scalar_and_refuses_junk(tmp_path, monkeypatch):
+    manifest = tmp_path / "site.toml"
+    manifest.write_text('[tree]\ntemplate_folders = "Footage"\nshared_assets = 7\n',
+                        encoding="utf-8")
+    common.load_site(manifest, reload=True)
+    try:
+        assert common.site_list("tree", "template_folders") == ["Footage"]
+        assert common.site_list("tree", "shared_assets") == []
+        assert common.site_list("tree", "nothing_here") == []
+    finally:
+        common.load_site(FIXTURE_SITE, reload=True)

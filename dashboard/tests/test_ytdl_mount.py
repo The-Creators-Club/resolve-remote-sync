@@ -166,6 +166,14 @@ def no_ytdlweb(monkeypatch):
 
 
 def _app(tmp_path, **kw):
+    """A dashboard whose SITE has enabled the YouTube downloader.
+
+    2026-08-17 (COMMERCIAL_READINESS.md item 2): the feature is off unless the
+    customer turned it on, so every test below that is about the MOUNT has to
+    say so, or it would be measuring the feature switch instead. The tests that
+    are about the switch pass site_feature_youtube_download=False explicitly.
+    """
+    kw.setdefault("site_feature_youtube_download", True)
     return create_app(Settings(db_path=str(tmp_path / "d.db"), session_secret=SECRET, **kw))
 
 
@@ -635,3 +643,67 @@ def test_the_identity_header_round_trips_a_latin1_name_and_withholds_a_cjk_one(
         assert c.get("/ytdl/api/me").json() == {"user": "josé"}
         as_user(c, "小明")
         assert c.get("/ytdl/api/me").json() == {"user": None}
+
+
+# --------------------------------------------------------------------------
+# The site switch (COMMERCIAL_READINESS.md item 2, 2026-08-17)
+# --------------------------------------------------------------------------
+# The YouTube downloader is OFF unless the customer's site.toml says
+# `[features] youtube_download`. Off is what the vendor build ships: the
+# customer, not the vendor, decides whether downloading third-party YouTube
+# material is lawful for them (docs/legal/YOUTUBE_FEATURE_NOTICE.md).
+
+
+def test_an_off_site_does_not_mount_the_downloader_at_all(tmp_path, ytdl_env):
+    """Not "mounted but hidden": nothing is imported, nothing is served."""
+    app = _app(tmp_path, site_feature_youtube_download=False)
+    assert app.state.ytdl_status == ytdl.DISABLED
+    assert app.state.ytdl_mounted is False
+    with TestClient(app) as c:
+        as_user(c)
+        assert c.get("/ytdl/").status_code == 404
+        assert c.get("/ytdl/api/me").status_code == 404
+
+
+def test_an_off_site_serves_no_fleet_download_route(tmp_path, ytdl_env):
+    """The companion's half is under the same mount, so it goes with it -- a
+    machine-to-machine route that answered while the feature was off would be
+    the one way a download could still happen."""
+    token = "t" * 32
+    app = _app(tmp_path, site_feature_youtube_download=False, report_token=token)
+    headers = {"X-CCSync-Token": token}
+    with TestClient(app) as c:
+        for path in ("/ytdl/api/jobs/1/claim", "/ytdl/api/jobs/1/heartbeat",
+                     "/ytdl/api/jobs/1/clips/abc/status"):
+            # The fleet token is presented, so login_gate lets these through --
+            # and there is nothing mounted behind it.
+            assert c.post(path, json={}, headers=headers).status_code == 404, path
+        assert c.get("/ytdl/api/jobs/1/download-manifest",
+                     headers=headers).status_code == 404
+        assert c.get("/ytdl/api/config/ytdl-client",
+                     headers=headers).status_code == 404
+
+
+def test_the_switch_is_the_only_difference(tmp_path, ytdl_env):
+    """Same checkout, same fake package, same everything else."""
+    off = _app(tmp_path, site_feature_youtube_download=False)
+    on = _app(tmp_path, site_feature_youtube_download=True)
+    assert off.state.ytdl_status == ytdl.DISABLED
+    assert on.state.ytdl_status == ytdl.MOUNTED
+
+
+def test_an_off_site_does_not_even_import_the_sub_app(tmp_path, no_ytdlweb):
+    """DISABLED is decided BEFORE the import, so a site with the feature off
+    never pays the yt-dlp import cost and never reports ABSENT for a tree that
+    is simply not wanted -- two different operator problems."""
+    app = _app(tmp_path, site_feature_youtube_download=False)
+    assert app.state.ytdl_status == ytdl.DISABLED
+
+
+def test_the_default_settings_have_both_flags_off():
+    """The vendor build's shape. `youtube_unblock` is published only when the
+    downloader itself is on -- an unblock-without-downloader answer would tell
+    companions to install a challenge solver for a feature they cannot use."""
+    s = Settings()
+    assert s.site_feature_youtube_download is False
+    assert s.site_feature_youtube_unblock is False

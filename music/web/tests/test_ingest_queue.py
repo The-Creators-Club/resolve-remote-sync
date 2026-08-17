@@ -478,7 +478,12 @@ def test_a_v1_database_gains_the_queue(tmp_path):
         db.ensure_schema(con)
 
         assert db._table_exists(con, 'ingest_queue')
-        assert con.execute('PRAGMA user_version').fetchone()[0] == 2
+        # CURRENT_SCHEMA_VERSION, not a literal: what this pins is "a v1
+        # database is brought fully current", and migration 003 (the journal
+        # uid) would otherwise have made the assertion stale rather than false.
+        assert (con.execute('PRAGMA user_version').fetchone()[0]
+                == db.CURRENT_SCHEMA_VERSION)
+        assert 'uid' in db._columns(con, 'ingest_queue')
         assert con.execute('SELECT COUNT(*) FROM tracks').fetchone()[0] == 1
     finally:
         con.close()

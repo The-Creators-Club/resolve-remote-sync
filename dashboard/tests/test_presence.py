@@ -18,7 +18,7 @@ TOKEN = "tok"
 def env(tmp_path):
     db_path = tmp_path / "p.db"
     settings = Settings(db_path=str(db_path), session_secret=SECRET, report_token=TOKEN,
-                        admin_users=frozenset({"alex"}))
+                        admin_users=frozenset({"owen"}))
     app = create_app(settings)
     with TestClient(app) as client:
         conn = dbmod.connect(db_path)
@@ -36,7 +36,7 @@ def env(tmp_path):
         yield client, conn, now
 
 
-def hdr(editor="ruskin"):
+def hdr(editor="editor2"):
     """Both companion headers -- X-CCSync-Identity is required on reports."""
     return {"X-CCSync-Token": TOKEN,
             "X-CCSync-Identity": auth.make_identity_token(SECRET, editor)}
@@ -63,7 +63,7 @@ def test_presence_status_roles():
 def test_report_ingests_media(env):
     client, conn, now = env
     payload = report(
-        "ruskin", "RUSKIN-PC", mode="editor",
+        "editor2", "EDITOR-PC-02", mode="editor",
         local_manifest={"2026/FF5/Energy Transition": {
             "n_originals": 0, "bytes_originals": 0, "n_proxies": 2, "bytes_proxies": 20,
             "truncated": False, "originals": None, "proxies": [["B-roll/Proxy/a.mov", 10]]}},
@@ -75,9 +75,9 @@ def test_report_ingests_media(env):
     )
     # need a project_roots mapping so media_tree (keyed by resolve name) resolves
     dbmod.admin_set_project_root(conn, "FF5 Energy Transition", "2026-ff5-energy-transition",
-                                 "alex", now)
+                                 "owen", now)
     conn.commit()
-    assert client.post("/api/v1/report", json=payload, headers=hdr("ruskin")).status_code == 200
+    assert client.post("/api/v1/report", json=payload, headers=hdr("editor2")).status_code == 200
 
     # rollup + tree + transfer landed
     roll = dbmod.fetch_editor_media_for_project(conn, "2026-ff5-energy-transition")
@@ -95,45 +95,45 @@ def test_report_ingests_media(env):
 
 def test_transfers_view_and_scope(env):
     client, conn, now = env
-    client.post("/api/v1/report", json=report("ruskin", "RUSKIN-PC"),
-                headers=hdr("ruskin"))
+    client.post("/api/v1/report", json=report("editor2", "EDITOR-PC-02"),
+                headers=hdr("editor2"))
     client.post("/api/v1/report", json=report("jane", "JANE-PC"),
                 headers=hdr("jane"))
     # unscoped (admin) sees both editors' transfers
     allv = build_transfers_view(conn)
-    assert {t["editor"] for t in allv["transfers"]} == {"ruskin", "jane"}
-    # scoped to ruskin sees only ruskin
-    scoped = build_transfers_view(conn, editor="ruskin")
-    assert {t["editor"] for t in scoped["transfers"]} == {"ruskin"}
+    assert {t["editor"] for t in allv["transfers"]} == {"editor2", "jane"}
+    # scoped to editor2 sees only editor2
+    scoped = build_transfers_view(conn, editor="editor2")
+    assert {t["editor"] for t in scoped["transfers"]} == {"editor2"}
 
 
 def test_scope_leak_blocked_over_http(env):
     client, conn, now = env
-    client.post("/api/v1/report", json=report("ruskin", "RUSKIN-PC"),
-                headers=hdr("ruskin"))
-    # ruskin logs in -> /api/v1/transfers shows only ruskin, even if others exist
+    client.post("/api/v1/report", json=report("editor2", "EDITOR-PC-02"),
+                headers=hdr("editor2"))
+    # editor2 logs in -> /api/v1/transfers shows only editor2, even if others exist
     client.post("/api/v1/report", json=report("jane", "JANE-PC"),
                 headers=hdr("jane"))
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "ruskin"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "editor2"))
     body = client.get("/api/v1/transfers").json()
-    assert body["transfers"] and all(t["editor"] == "ruskin" for t in body["transfers"])
-    # presence for a project shows only ruskin's row for a non-admin
+    assert body["transfers"] and all(t["editor"] == "editor2" for t in body["transfers"])
+    # presence for a project shows only editor2's row for a non-admin
     pres = client.get("/api/v1/projects/2026-ff5-energy-transition/presence").json()
-    assert all(e["editor"] == "ruskin" for e in pres["editors"])
+    assert all(e["editor"] == "editor2" for e in pres["editors"])
 
 
 def test_pages_render(env):
     client, conn, now = env
     dbmod.admin_set_project_root(conn, "FF5 Energy Transition",
-                                 "2026-ff5-energy-transition", "alex", now)
+                                 "2026-ff5-energy-transition", "owen", now)
     conn.commit()
     client.post("/api/v1/report", json=report(
-        "ruskin", "RUSKIN-PC", mode="editor",
+        "editor2", "EDITOR-PC-02", mode="editor",
         media_tree={"FF5 Energy Transition": [
             {"bin_path": "Interviews", "clip_name": "clipA", "file_path": "P:/a.mov",
              "kind": "proxy", "present": True}]},
-    ), headers=hdr("ruskin"))
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    ), headers=hdr("editor2"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     # transfers page + partial
     assert "LIVE TRANSFERS" in client.get("/transfers").text
     assert "b.mov" in client.get("/partials/transfers").text
@@ -143,7 +143,7 @@ def test_pages_render(env):
     bins = client.get("/partials/project/2026-ff5-energy-transition/bins")
     assert "MEDIA PRESENCE" in bins.text and "Interviews" in bins.text
     # sidebar checkbox toggle round-trips and returns the sidebar
-    r = client.post("/partials/selection/alex/2026-ff5-energy-transition/toggle?view=sidebar")
+    r = client.post("/partials/selection/owen/2026-ff5-energy-transition/toggle?view=sidebar")
     assert r.status_code == 200 and "PROJECTS" in r.text
 
 
@@ -162,14 +162,14 @@ def test_local_manifest_uses_marker_slug_not_slugify_of_rel(env):
     conn.commit()
 
     payload = report(
-        "ruskin", "RUSKIN-PC",
+        "editor2", "EDITOR-PC-02",
         local_manifest={"2026/Weird Case/Odd Name": {
             "n_originals": 1, "bytes_originals": 100, "n_proxies": 0, "bytes_proxies": 0,
             "truncated": False,
         }},
     )
     assert client.post("/api/v1/report", json=payload,
-                       headers=hdr("ruskin")).status_code == 200
+                       headers=hdr("editor2")).status_code == 200
 
     # Filed under the marker's real slug (found via label)...
     roll = dbmod.fetch_editor_media_for_project(conn, "legacy-slug-from-marker")
@@ -184,17 +184,17 @@ def test_local_manifest_uses_marker_slug_not_slugify_of_rel(env):
 def test_report_without_media_leaves_tables_untouched(env):
     client, conn, now = env
     # first report WITH media
-    dbmod.admin_set_project_root(conn, "FF5", "2026-ff5-energy-transition", "alex", now)
+    dbmod.admin_set_project_root(conn, "FF5", "2026-ff5-energy-transition", "owen", now)
     conn.commit()
     client.post("/api/v1/report", json=report(
-        "ruskin", "RUSKIN-PC",
+        "editor2", "EDITOR-PC-02",
         local_manifest={"2026/FF5/Energy Transition": {"n_originals": 0, "bytes_originals": 0,
                         "n_proxies": 1, "bytes_proxies": 10, "truncated": False}},
-    ), headers=hdr("ruskin"))
+    ), headers=hdr("editor2"))
     assert dbmod.fetch_editor_media_for_project(conn, "2026-ff5-energy-transition")
     # a LIGHT report (no local_manifest) must not wipe the rollup
-    light = report("ruskin", "RUSKIN-PC")
-    client.post("/api/v1/report", json=light, headers=hdr("ruskin"))
+    light = report("editor2", "EDITOR-PC-02")
+    client.post("/api/v1/report", json=light, headers=hdr("editor2"))
     assert dbmod.fetch_editor_media_for_project(conn, "2026-ff5-energy-transition")
 
 
@@ -202,15 +202,15 @@ def test_report_without_media_leaves_tables_untouched(env):
 
 
 def _seed_backlog(conn, now):
-    """ruskin's EDIT-PC selected the project, reported a manifest holding one
+    """editor2's EDIT-PC selected the project, reported a manifest holding one
     proxy (of the NAS's two) plus one local-only original -- so the backlog
     is: 1 proxy down (lane B), 1 original up (lane A)."""
-    dbmod.add_selection(conn, "ruskin", "2026-ff5-energy-transition", "ruskin", now)
+    dbmod.add_selection(conn, "editor2", "2026-ff5-energy-transition", "editor2", now)
     dbmod.upsert_editor_media_project(
-        conn, editor="ruskin", machine="EDIT-PC", slug="2026-ff5-energy-transition",
+        conn, editor="editor2", machine="EDIT-PC", slug="2026-ff5-energy-transition",
         mode="editor", n_originals=1, bytes_originals=500, n_proxies=1,
         bytes_proxies=10, truncated=False, now=now)
-    dbmod.replace_editor_media(conn, "ruskin", "EDIT-PC", "2026-ff5-energy-transition", [
+    dbmod.replace_editor_media(conn, "editor2", "EDIT-PC", "2026-ff5-energy-transition", [
         ("B-roll/Proxy/a.mov", "proxy", 10),
         ("B-roll/Editor Added/new.braw", "original", 500),
     ], now)
@@ -226,7 +226,7 @@ def test_sync_backlog_diffs_both_directions(env):
     assert set(by_lane) == {"a", "b"}
 
     down = by_lane["b"]
-    assert down["direction"] == "down" and down["editor"] == "ruskin"
+    assert down["direction"] == "down" and down["editor"] == "editor2"
     assert down["n_files"] == 1 and down["bytes"] == 10
     assert down["files"] == [{"name": "B-roll/Proxy/b.mov", "size": 10}]
     assert down["truncated"] is False
@@ -240,7 +240,7 @@ def test_sync_backlog_diffs_both_directions(env):
     assert build_transfers_view(conn, editor="jsmith")["queues"] == []
 
     # and the transfers partial renders the queue section
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     page = client.get("/partials/transfers")
     assert page.status_code == 200
     assert "[ QUEUED ]" in page.text
@@ -251,10 +251,10 @@ def test_sync_backlog_excludes_base_and_unselected(env):
     client, conn, now = env
     # base rig reports a manifest but is never "behind"
     dbmod.upsert_editor_media_project(
-        conn, editor="alex", machine="CREATOR_1", slug="2026-ff5-energy-transition",
+        conn, editor="owen", machine="CREATOR_1", slug="2026-ff5-energy-transition",
         mode="base", n_originals=2, bytes_originals=200, n_proxies=2,
         bytes_proxies=20, truncated=False, now=now)
-    dbmod.replace_editor_media(conn, "alex", "CREATOR_1", "2026-ff5-energy-transition",
+    dbmod.replace_editor_media(conn, "owen", "CREATOR_1", "2026-ff5-energy-transition",
                                [("B-roll/a.braw", "original", 100)], now)
     # jsmith reported a manifest but never selected the project
     dbmod.upsert_editor_media_project(
@@ -272,10 +272,10 @@ def test_queue_excludes_unticked_lane_c_and_in_flight_files(env):
     client, conn, now = env
     _seed_backlog(conn, now)
 
-    # A stale completion row for a project ruskin has NOT ticked: a second
+    # A stale completion row for a project editor2 has NOT ticked: a second
     # project + device pair left over from an old configuration.
     pid2 = dbmod.upsert_project(conn, "2025-old-thing", "2025/Old Thing", "/y", now)
-    did = dbmod.upsert_device(conn, "DEV-RUSKIN", "ruskin", False, now)
+    did = dbmod.upsert_device(conn, "DEV-EDITOR2", "editor2", False, now)
     dbmod.upsert_completion(conn, pid2, did, completion=10.0, need_items=402,
                             need_bytes=44_000_000_000, need_deletes=0,
                             global_items=500, global_bytes=50_000_000_000, now=now)
@@ -284,19 +284,19 @@ def test_queue_excludes_unticked_lane_c_and_in_flight_files(env):
     assert "2025/Old Thing" not in labels        # unticked -> not queued
 
     # ...but the same row counts once the project is ticked
-    dbmod.add_selection(conn, "ruskin", "2025-old-thing", "ruskin", now)
+    dbmod.add_selection(conn, "editor2", "2025-old-thing", "editor2", now)
     conn.commit()
     labels = [q["label"] for q in build_transfers_view(conn)["queues"]]
     assert "2025/Old Thing" in labels
 
-    # in-flight files leave the queue: ruskin's report says b.mov is
+    # in-flight files leave the queue: editor2's report says b.mov is
     # transferring right now, so the lane B backlog (exactly that file)
     # empties and the group disappears; the lane A upload stays.
-    client.post("/api/v1/report", json=report("ruskin", "EDIT-PC"), headers=hdr("ruskin"))
+    client.post("/api/v1/report", json=report("editor2", "EDIT-PC"), headers=hdr("editor2"))
     view = build_transfers_view(conn)
-    down_groups = [q for q in view["queues"] if q["lane"] == "b" and q["editor"] == "ruskin"]
+    down_groups = [q for q in view["queues"] if q["lane"] == "b" and q["editor"] == "editor2"]
     assert down_groups == []
-    assert [q["lane"] for q in view["queues"] if q["editor"] == "ruskin" and q["lane"] == "a"] == ["a"]
+    assert [q["lane"] for q in view["queues"] if q["editor"] == "editor2" and q["lane"] == "a"] == ["a"]
 
 
 def test_prune_completion_not_shared(env):
@@ -321,16 +321,16 @@ def test_prune_completion_not_shared(env):
 
 def test_completed_feed_lands_in_history_and_incoming_need_shows(env):
     client, conn, now = env
-    payload = report("ruskin", "EDIT-PC")
+    payload = report("editor2", "EDIT-PC")
     payload["completed"] = [
         {"name": "Projects/2026/FF5/Energy Transition/B-roll/a.mov",
          "direction": "up", "lane": "lane_a_video_up", "at": "2026-07-26T08:00:00+00:00"},
     ]
-    assert client.post("/api/v1/report", json=payload, headers=hdr("ruskin")).status_code == 200
+    assert client.post("/api/v1/report", json=payload, headers=hdr("editor2")).status_code == 200
 
     view = build_transfers_view(conn)
     (h,) = view["history"]
-    assert h["editor"] == "ruskin" and h["direction"] == "up"
+    assert h["editor"] == "editor2" and h["direction"] == "up"
     assert h["name"].endswith("B-roll/a.mov")
 
     # scoping: another editor sees nothing
@@ -344,7 +344,7 @@ def test_completed_feed_lands_in_history_and_incoming_need_shows(env):
     assert "arriving at the server" in incoming["name"]
 
     # page renders the HISTORY section
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     page = client.get("/partials/transfers")
     assert "[ HISTORY ]" in page.text and "B-roll/a.mov" in page.text
 
@@ -354,17 +354,17 @@ def test_freshly_ticked_project_shows_as_preparing(env):
     every queue source is silent while sharing spins up, and the page said
     "everything that should be somewhere is there" (2026-07-26)."""
     client, conn, now = env
-    dbmod.add_selection(conn, "ruskin", "2026-ff5-energy-transition", "ruskin", now)
+    dbmod.add_selection(conn, "editor2", "2026-ff5-energy-transition", "editor2", now)
     conn.commit()
 
     view = build_transfers_view(conn)
-    (q,) = [x for x in view["queues"] if x["editor"] == "ruskin"]
+    (q,) = [x for x in view["queues"] if x["editor"] == "editor2"]
     assert q.get("pending") is True
     assert view["queued_files"] == 0            # pending rows don't count as files
 
     # once completion data exists the pending row yields to real state
     pid = conn.execute("SELECT id FROM projects WHERE slug='2026-ff5-energy-transition'").fetchone()["id"]
-    did = dbmod.upsert_device(conn, "DEV-R", "ruskin", False, now)
+    did = dbmod.upsert_device(conn, "DEV-R", "editor2", False, now)
     dbmod.upsert_completion(conn, pid, did, completion=100.0, need_items=0,
                             need_bytes=0, need_deletes=0, global_items=5,
                             global_bytes=50, now=now)
@@ -375,5 +375,5 @@ def test_freshly_ticked_project_shows_as_preparing(env):
     # and the page renders the preparing chip while pending
     conn.execute("DELETE FROM completion_current")
     conn.commit()
-    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "alex"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     assert "GETTING READY" in client.get("/partials/transfers").text

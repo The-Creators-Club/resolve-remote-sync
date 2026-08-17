@@ -6,18 +6,19 @@
 
 .DESCRIPTION
     Removes the CCSync software this machine runs. It never touches your
-    synced media: your Creators_Club folder and everything in it is left
+    synced media: your local tree folder and everything in it is left
     exactly as it is, in both modes. Two modes:
 
       (default) -- remove the CCSync app and its autostart entries, and keep
         your saved sign-in and Syncthing identity, so reinstalling is
         painless and the admin does not have to re-approve you. Removes: running
-        processes, the three autostart entries, the P: drive mapping, and the
+        processes, the three autostart entries, the tree drive mapping and
+        its loopback share (plus the firewall rule that scoped it), and the
         program binaries under %LOCALAPPDATA%\ccsync\bin.
 
       -Full -- also remove your saved sign-in and Syncthing identity (a
         reinstall then needs the admin to re-approve you). Neither mode ever
-        deletes your synced media in C:\Creators_Club, and neither mode
+        deletes your synced media under local_root, and neither mode
         deletes ~/.ccsync\state (the once-ever prompt answers and local
         caches -- see section 5).
 
@@ -45,6 +46,15 @@
 #>
 [CmdletBinding()]
 param(
+    # Which drive letter the tree is mounted as. Blank = read it out of
+    # ~/.ccsync/config.toml's canonical_prefix, else P: (2026-08-17,
+    # COMMERCIAL_READINESS.md item 11). The letter used to be a literal here
+    # AND in every name this script removes -- CCSync-SubstP, CCSyncSubstP,
+    # CCSync_P, ##localhost#CCSync_P -- so on a site that mounts the tree
+    # somewhere else the uninstall silently removed nothing and reported
+    # success. Read locally, never from the dashboard: an uninstall has to
+    # work on a machine that is off the tailnet.
+    [string]$DriveLetter = "",
     [switch]$Full,
     [switch]$DryRun
 )
@@ -60,6 +70,24 @@ $CcsyncLocal = "$env:LOCALAPPDATA\ccsync"
 $BinDir = "$CcsyncLocal\bin"
 $SyncthingHome = "$CcsyncLocal\syncthing-config"
 $CcsyncProfile = "$env:USERPROFILE\.ccsync"
+
+if (-not $DriveLetter) {
+    $cfg = "$CcsyncProfile\config.toml"
+    if (Test-Path -LiteralPath $cfg) {
+        $m = Select-String -Path $cfg -Pattern '^\s*canonical_prefix\s*=\s*"([A-Za-z]):' |
+            Select-Object -First 1
+        if ($m) { $DriveLetter = $m.Matches[0].Groups[1].Value }
+    }
+}
+if (-not $DriveLetter) { $DriveLetter = "P" }
+$DriveLetter = $DriveLetter.Substring(0, 1).ToUpperInvariant()
+$DriveRoot = "${DriveLetter}:"
+$ShareName = "CCSync_$DriveLetter"
+$SubstTaskName = "CCSync-Subst$DriveLetter"
+$SubstRunEntry = "CCSyncSubst$DriveLetter"
+# Named exactly as windows_bootstrap.ps1's Set-SmbLoopbackFirewallRule creates
+# it -- the block rule is ours and must go with the share it scoped.
+$SmbFirewallRuleName = "CC Sync: block remote SMB (tree share is loopback-only)"
 
 Write-Step "mode: $(if ($Full) { 'FULL (also removes your sign-in + Syncthing identity)' } else { 'keep sign-in + settings' })"
 Write-Step "your synced media is never touched by this script -- only the CCSync app itself."
@@ -89,7 +117,7 @@ if ($pyw) {
 }
 
 # --- 2. autostart entries -------------------------------------------------
-$runEntries = @("CCSyncCompanion", "CCSyncSyncthing", "CCSyncSubstP")
+$runEntries = @("CCSyncCompanion", "CCSyncSyncthing", $SubstRunEntry)
 foreach ($name in $runEntries) {
     $exists = $null
     try { $exists = (Get-ItemProperty -Path $RunKeyPath -Name $name -ErrorAction SilentlyContinue).$name } catch {}
@@ -103,23 +131,23 @@ foreach ($name in $runEntries) {
     else { Write-Skip "no autostart entry: $name" }
 }
 
-# scheduled-task variant of the P: mapping (used when bootstrap had admin rights)
-$task = Get-ScheduledTask -TaskName "CCSync-SubstP" -ErrorAction SilentlyContinue
+# scheduled-task variant of the mapping (used when bootstrap had admin rights)
+$task = Get-ScheduledTask -TaskName $SubstTaskName -ErrorAction SilentlyContinue
 if ($task) {
-    if ($DryRun) { Write-Step "[dry-run] would unregister scheduled task: CCSync-SubstP" }
+    if ($DryRun) { Write-Step "[dry-run] would unregister scheduled task: $SubstTaskName" }
     else {
-        try { Unregister-ScheduledTask -TaskName "CCSync-SubstP" -Confirm:$false -ErrorAction Stop; Write-Step "unregistered scheduled task: CCSync-SubstP" }
-        catch { Write-Warn2 "could not unregister task CCSync-SubstP: $($_.Exception.Message)" }
+        try { Unregister-ScheduledTask -TaskName $SubstTaskName -Confirm:$false -ErrorAction Stop; Write-Step "unregistered scheduled task: $SubstTaskName" }
+        catch { Write-Warn2 "could not unregister task ${SubstTaskName}: $($_.Exception.Message)" }
     }
 }
-else { Write-Skip "no scheduled task: CCSync-SubstP" }
+else { Write-Skip "no scheduled task: $SubstTaskName" }
 
 # CCSync-OneShot-<hex> tasks: windows_bootstrap.ps1's Invoke-AtUserIntegrity
 # registers one per mapping command to run it at the user's own integrity
 # level, and unregisters it in a finally -- but only if the process survives
 # that long. Its own 30s wait, an aborted run, or onboard.exe's bootstrap
 # timeout killing the powershell leaves them behind, one per attempt, forever.
-# This script only ever knew about CCSync-SubstP, so -Full left them
+# This script only ever knew about the subst task, so -Full left them
 # accumulating in Task Scheduler on every machine that ever hit the path.
 $oneShots = @()
 try {
@@ -140,62 +168,81 @@ if ($oneShots.Count -gt 0) {
 }
 else { Write-Skip "no orphaned CCSync-OneShot-* scheduled tasks" }
 
-# --- 3. P: drive mapping --------------------------------------------------
-# D-8: on the BASE rig, P:/T: are real SMB mappings of the NAS itself that
+# --- 3. tree drive mapping -------------------------------------------------
+# D-8: on the BASE rig, the tree drive and T: are real SMB mappings of the NAS itself that
 # this installer never created (onboarding/steps.py's build_cleanup_plan
 # deliberately guards the same thing with unmount_p=(role=="editor")). This
 # script has no -Role switch, so detect instead: a subst mapping has no
 # DisplayRoot and is always ours (the bootstrap's fallback style); a net-use
 # mapping is only ours if it points at our own loopback share. Anything
 # else -- a net-use mapping to a real host -- must be left alone.
-if (Test-Path "P:\") {
+Write-Step "tree drive: $DriveRoot (loopback share '$ShareName')"
+if (Test-Path "$DriveRoot\") {
     $pDrive = $null
-    try { $pDrive = Get-PSDrive -Name P -ErrorAction Stop } catch {}
+    try { $pDrive = Get-PSDrive -Name $DriveLetter -ErrorAction Stop } catch {}
     $displayRoot = $null
     if ($pDrive) { $displayRoot = $pDrive.DisplayRoot }
     $looksLikeOurs = [string]::IsNullOrWhiteSpace($displayRoot) -or
-                     ($displayRoot -match '^\\\\localhost\\CCSync_P$')
+                     ($displayRoot -match ('^\\\\localhost\\' + [Regex]::Escape($ShareName) + '$'))
 
     if (-not $looksLikeOurs) {
-        Write-Skip "P: is mapped to '$displayRoot' -- not this installer's mapping (looks like a real NAS mapping, e.g. on the base rig). Leaving it alone; remove the share/label leftovers below only."
+        Write-Skip "$DriveRoot is mapped to '$displayRoot' -- not this installer's mapping (looks like a real NAS mapping, e.g. on the base rig). Leaving it alone; remove the share/label leftovers below only."
     }
     elseif ($DryRun) {
-        Write-Step "[dry-run] would unmap P: ($(if ($displayRoot) { $displayRoot } else { 'subst mapping' }))"
+        Write-Step "[dry-run] would unmap $DriveRoot ($(if ($displayRoot) { $displayRoot } else { 'subst mapping' }))"
     }
     else {
         # subst and net use are separate mechanisms; try both, ignore errors.
         # Redirect inside cmd -- a PowerShell-level 2>$null turns native
         # stderr into a NativeCommandError (fatal under EAP Stop).
-        & cmd /c "subst P: /D >nul 2>&1"
-        & cmd /c "net use P: /delete /y >nul 2>&1"
-        Write-Step "unmapped P: (if it was mapped)"
+        & cmd /c "subst $DriveRoot /D >nul 2>&1"
+        & cmd /c "net use $DriveRoot /delete /y >nul 2>&1"
+        Write-Step "unmapped $DriveRoot (if it was mapped)"
     }
 }
-else { Write-Skip "P: not mapped" }
+else { Write-Skip "$DriveRoot not mapped" }
 
 # the loopback share behind the labelled net-use mapping (needs admin)
 $share = $null
-try { $share = Get-SmbShare -Name "CCSync_P" -ErrorAction SilentlyContinue } catch {}
+try { $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue } catch {}
 if ($share) {
-    if ($DryRun) { Write-Step "[dry-run] would remove SMB share CCSync_P" }
+    if ($DryRun) { Write-Step "[dry-run] would remove SMB share $ShareName" }
     else {
         try {
-            Remove-SmbShare -Name "CCSync_P" -Force -Confirm:$false -ErrorAction Stop
-            Write-Step "removed SMB share CCSync_P"
+            Remove-SmbShare -Name $ShareName -Force -Confirm:$false -ErrorAction Stop
+            Write-Step "removed SMB share $ShareName"
         }
         # Targeted command, not "re-run this script elevated": an elevated
-        # run of this script sees a DIFFERENT P: device map than the user's
+        # run of this script sees a DIFFERENT device map than the user's
         # own session, so the unmount above would silently do nothing there.
-        catch { Write-Warn2 "could not remove the share CCSync_P: $($_.Exception.Message). Harmless leftover. To clear it, open an administrator PowerShell and run:  Remove-SmbShare -Name CCSync_P -Force" }
+        catch { Write-Warn2 "could not remove the share ${ShareName}: $($_.Exception.Message). Harmless leftover. To clear it, open an administrator PowerShell and run:  Remove-SmbShare -Name $ShareName -Force" }
     }
 }
-else { Write-Skip "no SMB share: CCSync_P" }
+else { Write-Skip "no SMB share: $ShareName" }
+
+# The inbound-SMB block rule the bootstrap installs alongside that share
+# (2026-08-17, COMMERCIAL_READINESS.md item 15). It goes when the share goes:
+# a vendor-named firewall rule left behind after an uninstall is how a machine
+# ends up with SMB quietly blocked and nobody knowing why.
+$smbRule = $null
+try { $smbRule = Get-NetFirewallRule -DisplayName $SmbFirewallRuleName -ErrorAction SilentlyContinue } catch {}
+if ($smbRule) {
+    if ($DryRun) { Write-Step "[dry-run] would remove firewall rule '$SmbFirewallRuleName'" }
+    else {
+        try {
+            Remove-NetFirewallRule -DisplayName $SmbFirewallRuleName -ErrorAction Stop
+            Write-Step "removed firewall rule '$SmbFirewallRuleName'"
+        }
+        catch { Write-Warn2 "could not remove the firewall rule '$SmbFirewallRuleName': $($_.Exception.Message). To clear it, open an administrator PowerShell and run:  Remove-NetFirewallRule -DisplayName '$SmbFirewallRuleName'" }
+    }
+}
+else { Write-Skip "no firewall rule: $SmbFirewallRuleName" }
 
 # Explorer label leftovers. The MountPoints2 key is Windows' own per-user
 # record of a mount point and carries more than our label (shell state,
 # _CommentFromDesktopINI, ...) -- deleting the whole key recursively throws
 # away data this installer never created. Remove only the ONE value we wrote.
-$mpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\##localhost#CCSync_P"
+$mpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\##localhost#$ShareName"
 if (Test-Path -LiteralPath $mpKey) {
     $hasLabel = $null
     try { $hasLabel = (Get-ItemProperty -LiteralPath $mpKey -Name "_LabelFromReg" -ErrorAction SilentlyContinue)._LabelFromReg } catch {}
@@ -213,11 +260,11 @@ if (Test-Path -LiteralPath $mpKey) {
         catch { Write-Warn2 "could not remove _LabelFromReg: $($_.Exception.Message)" }
     }
 }
-else { Write-Skip "no MountPoints2 entry for the CCSync_P mapping" }
+else { Write-Skip "no MountPoints2 entry for the $ShareName mapping" }
 
 # The legacy DriveIcons\P key WAS created wholesale by older installs (and
 # never worked), so removing the key is correct there.
-$driveIconsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\P"
+$driveIconsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\$DriveLetter"
 if (Test-Path -LiteralPath $driveIconsKey) {
     if ($DryRun) { Write-Step "[dry-run] would delete $driveIconsKey" }
     else {

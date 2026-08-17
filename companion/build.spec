@@ -12,14 +12,24 @@
 
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 import sys
 from pathlib import Path
 
 block_cipher = None
 
-# pystray/Pillow are optional at runtime (see src/ccsync_companion/tray.py);
-# only bundle them if they're actually installed in the build environment,
-# so a headless build doesn't fail trying to collect missing packages.
+# Pillow is optional at runtime (see src/ccsync_companion/tray.py); only
+# bundle it if it's actually installed in the build environment, so a headless
+# build doesn't fail trying to collect a missing package.
+#
+# pystray USED to be collected here too and deliberately is not any more
+# (2026-08-17, docs/COMMERCIAL_READINESS.md item 3): it is LGPLv3, and a
+# single-file PyInstaller freeze conveys it with no way for the recipient to
+# relink against a modified copy, which is precisely what LGPL §4 requires.
+# The tray is ccsync_companion/tray_native.py now -- ours, ctypes/PyObjC,
+# written from the OS APIs. Do NOT re-add pystray here: the CCSYNC_TRAY_BACKEND
+# escape hatch in tray.py is a dev-machine affordance and refuses to load in a
+# frozen build for exactly this reason.
 hidden_imports = ["watchdog", "watchdog.observers", "watchdog.events"]
 if sys.platform == "darwin":
     # watchdog picks its backend at import time inside a try/except chain
@@ -30,16 +40,16 @@ if sys.platform == "darwin":
     # a stdlib-ctypes affair and needs no help; this one is a C extension.
     hidden_imports.append("watchdog.observers.fsevents")
 try:
-    import pystray  # noqa: F401
     import PIL  # noqa: F401
 
-    hidden_imports += ["pystray", "PIL"]
-    if sys.platform == "win32":
-        hidden_imports.append("pystray._win32")
-    elif sys.platform == "darwin":
-        hidden_imports.append("pystray._darwin")
+    hidden_imports.append("PIL")
 except ImportError:
     pass
+if sys.platform == "darwin":
+    # tray_native's macOS backend imports AppKit/Foundation/objc lazily inside
+    # methods, which PyInstaller's static analysis does not follow. pyobjc came
+    # in through pystray before; now it is ours to name.
+    hidden_imports += ["AppKit", "Foundation", "objc"]
 
 entry_point = "launcher.py"  # absolute-import shim; running the package __main__.py directly breaks relative imports
 
@@ -47,8 +57,8 @@ entry_point = "launcher.py"  # absolute-import shim; running the package __main_
 # does not have, and handing PyInstaller the .ico there is not "no icon" -- it
 # tries to convert it (needing Pillow's icns support) and fails the build. The
 # macOS artifact is a BARE executable, not a .app bundle (no BUNDLE step
-# below): it is launched by a LaunchAgent and lives in the menu bar via
-# pystray, so it has no Dock presence to put an icon on anyway. The window
+# below): it is launched by a LaunchAgent and lives in the menu bar as an
+# NSStatusItem, so it has no Dock presence to put an icon on anyway. The window
 # icon (assets/icon.png, collected in datas) is unaffected on every platform.
 exe_icon = None
 if sys.platform == "win32":
@@ -83,15 +93,30 @@ a = Analysis(
     [entry_point],
     pathex=["src"],
     binaries=extra_binaries,
-    # The Creators Club logo: theme.asset_path() reads these back out of
-    # sys._MEIPASS at this exact relative path -- icon.png for every popup
-    # window, cc_mark_white.png for the tray icon's tinted/pulsing mark
+    # The marks: theme.asset_path() reads these back out of sys._MEIPASS at
+    # this exact relative path -- icon.png for every popup window, and the
+    # white-on-transparent mark for the tray icon's tinted/pulsing one
     # (2026-08-10). Listed file by file rather than collecting the directory:
     # icon.ico is already handed to EXE(icon=...) and has no business in the
     # bundle twice, and a glob would ship whatever anyone drops in assets/.
+    #
+    # BOTH marks ship (2026-08-17, docs/COMMERCIAL_READINESS.md item 10):
+    # ccsync_mark.png is the product's own and is what a build wears by
+    # default; cc_mark_white.png is one studio's, kept so a fleet already
+    # wearing it can select it with CCSYNC_BRAND_LOGO=cc_mark_white.png
+    # rather than have its tray change under it on upgrade.
     datas=[
         ("src/ccsync_companion/assets/icon.png", "ccsync_companion/assets"),
+        ("src/ccsync_companion/assets/ccsync_mark.png", "ccsync_companion/assets"),
         ("src/ccsync_companion/assets/cc_mark_white.png", "ccsync_companion/assets"),
+        # The licence the editor accepted in the wizard (2026-08-17,
+        # docs/COMMERCIAL_READINESS.md item 3). eula.py reads its version out
+        # of this file to decide whether ~/.ccsync/eula_accepted.json is still
+        # current. WITHOUT this line a frozen build has no document,
+        # EULA_VERSION reads "" and acceptance_ok() fails OPEN -- deliberately
+        # (a packaging fault must never stop a fleet syncing), which means the
+        # gate would silently do nothing in every shipped build.
+        ("src/ccsync_companion/assets/EULA.md", "ccsync_companion/assets"),
     ],
     hiddenimports=hidden_imports,
     hookspath=[],
@@ -138,12 +163,18 @@ exe = EXE(
     target_arch=None,
     # None = PyInstaller AD-HOC signs the macOS binary itself (`codesign -s -`),
     # which is not optional on Apple silicon: an unsigned arm64 binary is killed
-    # by the kernel on launch. Do NOT set a Developer ID here without also
-    # sorting out notarisation -- a signed-but-unnotarised binary is worse off
-    # with Gatekeeper than an ad-hoc one. tools/release_macos.sh verifies the
-    # signature with `codesign -dv` after every build and refuses to publish
-    # one that has none.
-    codesign_identity=None,
+    # by the kernel on launch.
+    #
+    # CCSYNC_APPLE_DEV_ID (COMMERCIAL_READINESS.md item 4, 2026-08-17) makes
+    # PyInstaller sign with a real Developer ID instead. The old rule here --
+    # "do NOT set a Developer ID without sorting out notarisation" -- still
+    # holds and is now satisfied: tools/release_macos.sh re-signs with
+    # --options runtime --timestamp and runs notarytool + stapler when
+    # CCSYNC_NOTARY_PROFILE is set, and warns loudly when it is not. Reading
+    # the same env var here means a build driven by `pyinstaller build.spec`
+    # directly (no release script) does not silently produce an ad-hoc binary
+    # that the release script then has to fix.
+    codesign_identity=(os.environ.get("CCSYNC_APPLE_DEV_ID") or None),
     entitlements_file=None,
     icon=exe_icon,
 )

@@ -1,4 +1,4 @@
-"""ccbench: sync-transport benchmark harness for Creators Club remote-editor sync.
+"""ccbench: sync-transport benchmark harness for CC Sync remote-editor sync.
 
 Picks the fastest transfer engine per sync lane (video-up, proxy-down,
 everything-else-bidirectional) for editors syncing with a TrueNAS box over

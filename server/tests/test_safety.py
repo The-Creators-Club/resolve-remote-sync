@@ -1473,7 +1473,7 @@ def test_parse_host_key_accepts_the_shapes_admins_paste():
 
     pub = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes(
         serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
-    for variant in (pub, f"{pub} comment@host", f"192.168.0.102 {pub}"):
+    for variant in (pub, f"{pub} comment@host", f"192.168.0.10 {pub}"):
         keytype, key = common._parse_host_key(variant)
         assert keytype == "ssh-ed25519"
         assert isinstance(key, paramiko.PKey)
@@ -1607,7 +1607,7 @@ def test_normalize_device_id():
 def test_device_name_warnings_spell_out_the_editor_mapping_contract():
     """KNOWN_BUGS B16: the device NAME is what the dashboard maps to an editor
     account, and that mapping decides which projects the device is shared
-    with. A machine name ("alex-laptop") is username-SHAPED, so it used to
+    with. A machine name ("owen-laptop") is username-SHAPED, so it used to
     resolve to an editor with no selections and get the device unshared from
     every folder. The dashboard is the only component holding the account
     list, so it does the real check -- this script's job is to make the
@@ -1619,11 +1619,11 @@ def test_device_name_warnings_spell_out_the_editor_mapping_contract():
     assert "UNMAPPED" in note
 
     # not a username at all -> unmapped
-    [note] = accept_device.check_device_name("Alex's Laptop", good)
+    [note] = accept_device.check_device_name("Owen's Laptop", good)
     assert "UNMAPPED" in note and "username" in note
 
     # username-shaped -> the contract, because this is the ambiguous case
-    [note] = accept_device.check_device_name("alex-laptop", good)
+    [note] = accept_device.check_device_name("owen-laptop", good)
     assert "TrueNAS USERNAME" in note
     assert "machine name" in note
     [note] = accept_device.check_device_name("jsmith", good)
@@ -1817,14 +1817,62 @@ def test_the_pot_provider_plugin_and_image_are_the_same_version():
         f"image tag {install_dashboard_app.POT_PROVIDER_IMAGE} does not carry {pinned}")
 
 
+def test_the_pot_provider_is_off_unless_the_site_asked_for_it():
+    """2026-08-17, COMMERCIAL_READINESS.md item 3. The PO-token provider is an
+    anti-anti-automation component, so the VENDOR BUILD DOES NOT RUN ONE: it
+    appears only on a site whose site.toml sets [features] youtube_unblock (or
+    a deploy passing --enable-youtube-unblock). This test previously assumed it
+    was always in the body."""
+    default = install_dashboard_app.compose_config(
+        8480, "/mnt/tank/apps/ccsync-dashboard", "http://x:8384", "k", "t",
+    )
+    assert install_dashboard_app.POT_PROVIDER_SERVICE not in default["services"]
+    env = default["services"]["dashboard"]["environment"]
+    assert "YTDL_POT_BASE_URL" not in env
+    # ...nor the NAS-side signed-in cookies file, nor the deno mount.
+    assert "YTDL_COOKIES_FILE" not in env
+    assert not any("/opt/deno" in v for v in default["services"]["dashboard"]["volumes"])
+    assert env["DASH_SITE_YOUTUBE_DOWNLOAD"] == "0"
+    assert env["DASH_SITE_YOUTUBE_UNBLOCK"] == "0"
+
+
 def test_the_pot_provider_is_reachable_only_from_inside_the_compose_network():
     """It mints tokens for anyone who asks. Publishing a port would offer that
     to the whole LAN and tailnet; the dashboard reaches it by service name on
     the compose network instead."""
     svc = install_dashboard_app.compose_config(
         8480, "/mnt/tank/apps/ccsync-dashboard", "http://x:8384", "k", "t",
+        youtube_download="1", youtube_unblock="1",
     )["services"][install_dashboard_app.POT_PROVIDER_SERVICE]
     assert "ports" not in svc, "the PO-token provider must not publish a port"
+
+
+def test_unblock_needs_the_downloader_itself():
+    """`youtube_unblock` alone provisions nothing: the unblock components only
+    serve the downloader, and a body that ran a PO-token sidecar for a feature
+    the dashboard does not mount would be a service nobody can explain."""
+    svc = install_dashboard_app.compose_config(
+        8480, "/mnt/tank/apps/ccsync-dashboard", "http://x:8384", "k", "t",
+        youtube_download="0", youtube_unblock="1",
+    )
+    assert install_dashboard_app.POT_PROVIDER_SERVICE not in svc["services"]
+    assert svc["services"]["dashboard"]["environment"]["DASH_SITE_YOUTUBE_UNBLOCK"] == "0"
+
+
+def test_the_claude_cli_is_not_provisioned_or_mounted_any_more():
+    """COMMERCIAL_READINESS.md item 1 (2026-08-17). The two /ytdl AI calls use
+    the anthropic SDK with the CUSTOMER's ANTHROPIC_API_KEY; nothing shells out
+    to an agent binary inside a container that mounts the Projects tree rw, and
+    no OAuth credential volume for one human's personal account is created."""
+    svc = install_dashboard_app.compose_config(
+        8480, "/mnt/tank/apps/ccsync-dashboard", "http://x:8384", "k", "t",
+        youtube_download="1", anthropic_api_key="sk-ant-test",
+    )["services"]["dashboard"]
+    assert not any("claude" in v for v in svc["volumes"]), svc["volumes"]
+    assert "YTDL_CLAUDE_HOME" not in svc["environment"]
+    assert svc["environment"]["ANTHROPIC_API_KEY"] == "sk-ant-test"
+    # ...and the binary provisioning table no longer names it.
+    assert [row[0] for row in install_dashboard_app.YTDL_BINARIES] == ["deno"]
 
 
 # --------------------------------------------------------------------------

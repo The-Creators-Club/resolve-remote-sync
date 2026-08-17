@@ -85,6 +85,21 @@ param(
     [string]$DashboardUrl = ""
 )
 
+# Authenticode signing (COMMERCIAL_READINESS.md item 4, 2026-08-17). Set ONE
+# of these in the release rig's environment; with neither, the build is
+# stamped UNSIGNED and says so loudly:
+#   $env:CCSYNC_SIGN_THUMBPRINT  -- SHA1 thumbprint of a cert in CurrentUser\My
+#                                   (what an EV token/HSM presents)
+#   $env:CCSYNC_SIGN_PFX + $env:CCSYNC_SIGN_PFX_PASSWORD  -- an OV .pfx on disk
+# $env:CCSYNC_SIGN_TIMESTAMP_URL overrides the RFC3161 timestamp server. A
+# timestamp is not optional: without one every signature this build ever made
+# turns invalid the day the certificate expires.
+$SignThumbprint = "$env:CCSYNC_SIGN_THUMBPRINT".Trim()
+$SignPfx = "$env:CCSYNC_SIGN_PFX".Trim()
+$SignPfxPassword = "$env:CCSYNC_SIGN_PFX_PASSWORD"
+$SignTimestampUrl = "$env:CCSYNC_SIGN_TIMESTAMP_URL".Trim()
+if (-not $SignTimestampUrl) { $SignTimestampUrl = "http://timestamp.digicert.com" }
+
 if (-not $DashboardUrl -and $env:CCSYNC_DASHBOARD_URL) { $DashboardUrl = $env:CCSYNC_DASHBOARD_URL }
 if (-not $DashboardUrl) { $DashboardUrl = "<your-dashboard-url>" }
 
@@ -382,6 +397,44 @@ if ($vendorProblem) {
 }
 Write-Step "vendored parity OK (ytdl_common.py: companion copy == ytdl/web below the marker)"
 
+# --- release-key parity (COMMERCIAL_READINESS.md item 4, 2026-08-17) --------
+# A companion built with an EMPTY RELEASE_PUBKEYS trusts nobody and can never
+# be upgraded again -- it would refuse every offer, for ever, on machines with
+# no other update path (the Run-key autostart is logon-only; nothing retries).
+# Fail here, where it costs a minute, rather than on an editor's machine.
+# The pubkey baked in must also be the one the signing key on THIS rig would
+# produce, or the build ships trusting a key nobody can sign with.
+$ReleasePubkeyPy = Join-Path $CompanionDir "src\ccsync_companion\release_pubkey.py"
+$bakedKeys = @(Select-String -Path $ReleasePubkeyPy -Pattern '^\s*"([A-Za-z0-9+/=]{40,})",\s*$' |
+    ForEach-Object { $_.Matches[0].Groups[1].Value })
+if ($bakedKeys.Count -eq 0) {
+    Write-Fail "no release public key is baked into $ReleasePubkeyPy."
+    Write-Fail "A companion built like this refuses EVERY update, permanently."
+    Write-Fail "Run:  python tools\release_key.py new   (once, ever)"
+    Write-Fail "then: python tools\release_key.py bake"
+    exit 1
+}
+Write-Step "release keys baked into the companion: $($bakedKeys.Count) ($($bakedKeys[0].Substring(0,12))...)"
+$SigningKeyPath = "$env:CCSYNC_RELEASE_KEY".Trim()
+if (-not $SigningKeyPath) { $SigningKeyPath = Join-Path $env:USERPROFILE ".ccsync-release\release.key" }
+if (Test-Path -LiteralPath $SigningKeyPath) {
+    $probePy = Get-VenvPython -ProjectDir $CompanionDir -Label "release-key check"
+    $probe = & $probePy (Join-Path $PSScriptRoot "release_key.py") "pubkey" "--quiet" 2>$null
+    $probe = "$probe".Trim()
+    if ($probe -and ($bakedKeys -notcontains $probe)) {
+        Write-Fail "the release key at $SigningKeyPath is NOT one this build trusts."
+        Write-Fail "  signing key : $probe"
+        Write-Fail "  baked keys  : $($bakedKeys -join ', ')"
+        Write-Fail "Every editor would refuse the build you are about to publish."
+        Write-Fail "Run: python tools\release_key.py bake        (replace)"
+        Write-Fail "  or python tools\release_key.py bake --add  (rotation overlap)"
+        exit 1
+    }
+}
+else {
+    Write-Warn2 "no release signing key at $SigningKeyPath -- the publish step will fail (python tools\release_key.py new)"
+}
+
 # The dashboard ships separately (Docker) and carries its own VERSION; it is
 # reported, never enforced against the companion's.
 $DashboardVersion = Get-Capture -Path (Join-Path $DashboardDir "src\ccsync_dashboard\__init__.py") -Pattern '^VERSION\s*=\s*"([^"]+)"'
@@ -498,6 +551,86 @@ else {
     Write-Step "built $ExePath"
 }
 
+# --- 3b. Authenticode --------------------------------------------------------
+# COMMERCIAL_READINESS.md item 4 (2026-08-17). Two DIFFERENT signatures matter
+# here and they are not substitutes:
+#   * the RELEASE RECORD signature (tools/sign_release.py, ed25519, offline
+#     key) is what stops the fleet installing a build the vendor did not make;
+#   * this one, Authenticode, is what stops SmartScreen telling an editor that
+#     "Windows protected your PC" on every fresh install, and what lets an
+#     enterprise allowlist the binary.
+# The build proceeds without it -- refusing would mean nobody can build
+# anything until a certificate is bought -- but the manifest records
+# signed_binary=false, sign_release.py signs THAT into the record, and
+# tools/ship.ps1 refuses -MakeCurrent for it without -AllowUnsignedBinary.
+
+$SignedBinary = $false
+$SignAdvisory = ""
+
+function Find-SignTool {
+    $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    # The SDK does not put signtool on PATH. Newest x64 build first.
+    $roots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin")
+    foreach ($root in $roots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $found = Get-ChildItem -Path $root -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    return ""
+}
+
+if (-not $DryRun -and (Test-Path -LiteralPath $ExePath)) {
+    if (-not $SignThumbprint -and -not $SignPfx) {
+        $SignAdvisory = "no CCSYNC_SIGN_THUMBPRINT and no CCSYNC_SIGN_PFX in the environment"
+    }
+    else {
+        $signtool = Find-SignTool
+        if (-not $signtool) {
+            $SignAdvisory = "signtool.exe not found (install the Windows 10/11 SDK 'Signing Tools' feature)"
+        }
+        else {
+            $signArgs = @("sign", "/fd", "sha256", "/tr", $SignTimestampUrl, "/td", "sha256")
+            if ($SignThumbprint) {
+                $signArgs += @("/sha1", $SignThumbprint)
+            }
+            else {
+                $signArgs += @("/f", $SignPfx)
+                if ($SignPfxPassword) { $signArgs += @("/p", $SignPfxPassword) }
+            }
+            $signArgs += $ExePath
+            Write-Step "signing with signtool ($(if ($SignThumbprint) { "thumbprint $SignThumbprint" } else { "pfx $SignPfx" }))..."
+            # NOT through Invoke-Native's 2>&1 pipe: the password would end up
+            # in a transcript. signtool prints its own progress.
+            & $signtool @signArgs | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Fail "signtool exited $LASTEXITCODE -- the exe is NOT signed and this run stops. Fix the certificate (or unset CCSYNC_SIGN_* to build unsigned deliberately)."
+                exit 1
+            }
+        }
+    }
+    $status = (Get-AuthenticodeSignature -LiteralPath $ExePath).Status
+    $SignedBinary = ($status -eq "Valid")
+    if ($SignedBinary) {
+        $subject = (Get-AuthenticodeSignature -LiteralPath $ExePath).SignerCertificate.Subject
+        Write-Step "Authenticode: Valid -- $subject"
+    }
+    else {
+        Write-Warn2 "=================================================================="
+        Write-Warn2 "UNSIGNED BUILD. Authenticode status: $status"
+        if ($SignAdvisory) { Write-Warn2 "  ($SignAdvisory)" }
+        Write-Warn2 "Every editor installing this will meet SmartScreen's 'Windows"
+        Write-Warn2 "protected your PC' dialog, and some AV will quarantine it."
+        Write-Warn2 "Buy an OV or EV Authenticode certificate and set"
+        Write-Warn2 "CCSYNC_SIGN_THUMBPRINT (or CCSYNC_SIGN_PFX + _PASSWORD)."
+        Write-Warn2 "See docs/RELEASE.md 'Code signing'. tools\ship.ps1 will refuse"
+        Write-Warn2 "to make this build CURRENT without -AllowUnsignedBinary."
+        Write-Warn2 "=================================================================="
+    }
+}
+
 # --- 4. manifest -----------------------------------------------------------
 
 Write-Host ""
@@ -538,6 +671,10 @@ $manifest = [ordered]@{
     git_describe   = "$GitDescribe".Trim()
     git_dirty      = $IsDirty
     tests_run      = (-not $SkipTests)
+    # Authenticode, NOT the release-record signature (item 4, 2026-08-17).
+    # build_editor_package.ps1 re-derives this from the file itself before it
+    # signs the record -- the manifest is provenance, never the authority.
+    signed_binary  = $SignedBinary
     built_by       = "$env:USERNAME@$env:COMPUTERNAME"
     built_with     = "tools/release.ps1"
 }

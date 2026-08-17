@@ -1,6 +1,11 @@
-# Server Runbook -- Creators Club Sync
+# Server Runbook -- CC Sync on TrueNAS SCALE
 
-Admin-facing runbook for TrueNAS-side operations. All scripts referenced
+CC Sync -- fleet sync for DaVinci Resolve(R). Requires DaVinci Resolve Studio
+on every editing machine.
+
+Admin-facing runbook for TrueNAS-side operations. New here? Read
+[INSTALL.md](INSTALL.md) first -- it is the generic install guide and it says
+what order these steps come in. All scripts referenced
 live in `../server/`; see `../server/README.md` for env vars and per-script
 assumptions. Every script supports `--dry-run` -- use it first.
 
@@ -8,6 +13,14 @@ When something breaks rather than needs doing, start at
 [GOTCHAS.md](GOTCHAS.md): container crash-loops, `--recreate` quietly
 replacing secrets with defaults, sudo-only Docker, and why `truenas_admin`
 cannot log in to the dashboard.
+
+When something is **lost** rather than broken, go to
+[BACKUP_RESTORE.md](BACKUP_RESTORE.md): what is snapshotted and how often
+(`server/setup_snapshots.py`), how to restore a file, a project, the whole
+tree, `dashboard.db` or a search index, and the safe way to publish
+`broll.db`/`music.db` onto a live NAS (`server/publish_db.py`). Added
+2026-08-17 for `docs/COMMERCIAL_READINESS.md` item 8; on a fresh site,
+configuring snapshots is a step of the install, not an optional extra.
 
 ## site.toml -- who this deployment is (READ THIS FIRST, 2026-08-17)
 
@@ -28,41 +41,44 @@ copy site.example.toml site.toml     # then edit it
 
 `site.example.toml` documents every key. For this fleet:
 
+Placeholders below: `<nas>` your NAS's address, `<pool>` your pool/dataset,
+`<tree>` the tree directory name, `<tailnet-ip>` its 100.x address.
+
 ```toml
 [nas]
 kind = "truenas"            # or "synology" (docs/SERVER-SYNOLOGY.md)
-host = "192.168.0.102"
+host = "<nas>"
 admin_user = "truenas_admin"
 verify_ssl = "0"
 
 [tree]
-pool_root = "/mnt/tank/TheCreatorsPool"
-tree_name = "Creators_Club"
+pool_root = "/mnt/tank/<pool>"
+tree_name = "<tree>"
 projects_dir = "Projects"
-share_name = "Creators_Club"
-smb_unc = '\\192.168.0.102\TheCreatorsPool\Creators_Club'   # single quotes: a TOML literal
+share_name = "<tree>"
+smb_unc = '\\<nas>\<pool>\<tree>'          # single quotes: a TOML literal
                                            # string, so backslashes stay as-is
 
 [apps]
 root = "/mnt/tank/apps/ccsync-dashboard"
 
 [net]
-dashboard_url = "http://100.71.216.3:8480"
-bind_lan = "192.168.0.102"
-bind_tailnet = "100.71.216.3"
+dashboard_url = "http://<tailnet-ip>:8480"
+bind_lan = "<nas>"
+bind_tailnet = "<tailnet-ip>"
 sftp_port = "22"
 sftp_chunk_size = "255Ki"   # a Synology site MUST use "64Ki" --
 sftp_concurrency = 64       # see docs/synology-spikes-2026-08-17.md spike 6
 shell_type = "unix"         # rclone's; "none" where editors are /sbin/nologin
-rclone_remote = "creators_club_sftp"   # the remote name in rclone.conf
+rclone_remote = "ccsync_sftp"          # the remote name in rclone.conf
 # sftp_host unset on purpose: dual-homed (LAN / tailnet); the wizard derives
 # it from the dashboard URL the editor used. Only set a name reachable from both.
 
 [syncthing]
-gui_url = "http://192.168.0.102:8384"
+gui_url = "http://<nas>:8384"
 
 [site]
-org_name = "Creators Club"  # cosmetic; served by GET /api/v1/site
+org_name = "Your Studio"    # cosmetic; served by GET /api/v1/site
 
 [stack]
 uid = "3000"                # broll
@@ -95,6 +111,172 @@ Rules:
   "Install via YAML" fallback means rendering it first. Rendered against this
   site it is byte-for-byte the file it has always been, and
   `server/tests/test_compose_template.py` holds it to that.
+
+## Credentials and trust on the base rig (2026-08-17)
+
+`docs/COMMERCIAL_READINESS.md` item 6 (finding H2) was: the base-rig scripts
+accepted any SSH host key, never verified the NAS's TLS certificate, and used
+one root-equivalent password for SSH, `sudo` and the REST API. Three things
+changed; none of them needs a new flag on a healthy, configured site.
+
+### The SSH host key is pinned, and an unknown one is refused
+
+That channel carries the NAS admin password on its stdin and runs `sudo -S`
+with it. Trusting whatever answers on port 22 is handing the password to the
+network.
+
+```powershell
+ssh-keyscan -t ed25519 <nas>                  # take the "<type> <base64>" half
+```
+
+```toml
+[nas]
+ssh_hostkey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."
+```
+
+(also `--host-key` and `$CCSYNC_SSH_HOSTKEY`). For a **first** connection to a
+NAS you are standing in front of:
+
+```powershell
+python server/check_health.py --trust-host-key-on-first-use
+```
+
+The key is recorded in `~/.ccsync/known_hosts` (0600), printed with the exact
+`ssh_hostkey =` line to paste, and every later run is checked against it. A key
+that **changes** is a refusal naming both fingerprints — either the NAS was
+re-keyed (update the pin deliberately, or
+`ssh-keygen -R <host> -f ~/.ccsync/known_hosts`) or something is answering in
+its place. Nothing is sent either way.
+
+### Verifying the NAS certificate
+
+Both platforms ship a self-signed certificate, so `verify_ssl = "0"` is still
+allowed — but it is now **warned about on every run**, because those calls
+carry the admin password or an account-creating API key.
+
+To turn it on, export the NAS's own CA once and point at the file:
+
+```powershell
+# TrueNAS: System > Certificates > <the CA> > Download, or from the base rig:
+openssl s_client -showcerts -connect <nas>:443 </nul 2>$null |
+    openssl x509 -outform PEM > nas-ca.pem
+$env:TRUENAS_VERIFY_SSL = "C:\keys\nas-ca.pem"      # or [nas] verify_ssl
+```
+
+For the **container**, the same value must name a path *inside* the container:
+ship the PEM into `<apps root>/certs/` (it is mounted read-only with the rest
+of the app tree) and set `TRUENAS_VERIFY_SSL=/app/certs/nas-ca.pem` before the
+deploy. `docs/SERVER-SYNOLOGY.md` has the DSM equivalent.
+
+### Scoped API key — the password stops living in the container
+
+The dashboard container held `TRUENAS_PW`, readable with `docker inspect` and
+from any code execution inside it, while every editor can reach that dashboard
+and it mounts three other web apps in-process (finding H3). The admin Users
+section only ever calls:
+
+```
+GET/POST/PUT /user      GET/POST /group      POST /filesystem/setperm      GET /core/get_jobs
+```
+
+Mint a key limited to that and redeploy:
+
+```powershell
+python server/create_api_key.py --name ccsync-dashboard --username ccsync-api
+$env:TRUENAS_API_KEY = "1-..."        # shown ONCE
+tools\ship.cmd -DashboardOnly
+```
+
+- On **TrueNAS ≥ 24.10** a key acts *as an account* and inherits its roles, so
+  least privilege is a dedicated non-shell account (Credentials > Local Users)
+  holding a privilege with only `ACCOUNT_WRITE` and `FILESYSTEM_ATTRS_WRITE`
+  (Credentials > Privileges). `--username` names it. Without `--username` the
+  key acts as the admin — better than a password only in that it can be
+  revoked without changing the login.
+- On **TrueNAS ≤ 24.04** the key carries its own allow-list; the script sends
+  the seven entries above. **Verify the shape against the live version** — the
+  script tries the newer body first, prints what the middleware said if it is
+  refused, and stops rather than guessing a third shape.
+- With a key set, the deploy writes **no** `TRUENAS_PW`/`DASH_NAS_PW` into the
+  container and says so; without one it warns and names this command.
+- Rotate by minting a new `--name` and deleting the old key in
+  Credentials > API Keys.
+
+DSM has no API-key concept: a Synology deployment keeps using the admin
+password and mitigates differently (`docs/SERVER-SYNOLOGY.md`).
+
+### A separate sudo password, where the platform allows one
+
+`TRUENAS_SUDO_PW` (`SYNO_SUDO_PW`) is what `sudo -S` reads on the NAS, if a
+site keeps it apart from the SSH login password. Unset, it is the login
+password — which is what both platforms' out-of-the-box admin account wants,
+so this is a seam rather than a promise.
+
+## Editor accounts: SFTP-only, and how to migrate
+
+Full model, including the per-project ACL switch: **`docs/TENANCY.md`**.
+
+New installs create editors with `/usr/sbin/nologin` and an sshd
+`Match Group editors` block (`ForceCommand internal-sftp`,
+`PasswordAuthentication no`, no forwarding/tunnel/TTY), installed into the SSH
+service's **auxiliary parameters** — a file in `sshd_config.d` is erased the
+next time TrueNAS middleware regenerates the config.
+
+```toml
+[stack]
+editor_shell = "sftp-only"   # default; "shell" keeps the pre-2026-08-17 bash
+```
+
+**This fleet is still on `"shell"`** (pinned in `site.toml`), because existing
+editors' `rclone.conf` says `shell_type = unix` and a nologin account cannot
+run `md5sum`. The deploy forces `sftp_shell_type = "none"` into the site
+manifest whenever `editor_shell` is `sftp-only`, so the two can never disagree
+for longer than one redeploy. Migration order and the window it opens are in
+`docs/TENANCY.md` §4.
+
+```powershell
+python server/setup_editor_account.py --migrate-existing            # report only
+python server/setup_editor_account.py --migrate-existing --apply
+```
+
+**Offboarding** — editor keys have no passphrase, so revoking is the control:
+
+```powershell
+python server/setup_editor_account.py --name jsmith --revoke-key --apply --lock
+```
+
+Then unshare their Syncthing device on the dashboard: lane C is a separate
+trust path and is not covered by the key.
+
+## Securing the Syncthing GUI
+
+Syncthing's GUI is an unauthenticated administrative surface over **every**
+folder in the fleet — from it a visitor can add a device, re-point a folder or
+turn off send-only. The TrueNAS catalog install published it on every interface
+with no password (finding H4).
+
+```toml
+[syncthing]
+gui_bind = "<nas>"             # or "127.0.0.1" and reach it by SSH tunnel
+```
+
+```powershell
+$env:SYNCTHING_API_KEY = "..."
+python server/secure_syncthing_gui.py            # generates + prints a password
+python server/secure_syncthing_gui.py --show     # report the current state
+```
+
+The credentials are printed once and written to `~/.ccsync/syncthing-gui.txt`
+(0600). **The API key is not touched**, so the dashboard's
+`settings.syncthing_gui_url`, `setup_syncthing_folder.py`, `accept_device.py`
+and `check_health.py` all keep working — they authenticate with `X-API-Key`,
+which GUI credentials do not affect. That is what makes this safe to run
+against a live fleet.
+
+`gui_bind` is applied through the catalog app's `web_port.host_ips`. **Verify
+that field against your TrueNAS version**: if the app create is rejected with a
+schema error naming it, drop it and restrict the port at the firewall plus
+`secure_syncthing_gui.py --bind` instead.
 
 ## Onboarding a new editor, end to end
 
@@ -164,7 +346,7 @@ as the expected answer.
 
 ## Onboarding a new project
 
-Projects live anywhere under `Creators_Club/Projects/` at **any depth**
+Projects live anywhere under `<tree>/Projects/` at **any depth**
 (e.g. `2026/CCT/Creator Profiles/Season 1`) — since 2026-07-25 a directory
 is a project because it carries a hidden `.ccsync-project` **marker file**
 (its `slug` field is the project's permanent identity), not because of its
@@ -202,7 +384,7 @@ starts moving for whoever ticks it.
    python server/setup_tree.py --year 2026 --series "Creator Profiles" --project "Season 1"
    python server/setup_tree.py --year 2025 --series FF4 --project Nuclear
    ```
-   Creates `Creators_Club/Projects/<year>/<series>/<project>/{AE, Audio/Music,
+   Creates `<tree>/Projects/<year>/<series>/<project>/{AE, Audio/Music,
    Audio/Voiceover, B-roll, Interviewees, Render in Place, Subs, Youtube}`,
    owned `broll:editors`, mode `2770` (setgid, so anything editors create
    stays group-writable for other editors too). `Proxy/` subfolders are

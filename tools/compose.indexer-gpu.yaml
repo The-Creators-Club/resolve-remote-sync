@@ -1,0 +1,90 @@
+# The GPU indexer, as compose services. NOT part of the dashboard deployment.
+#
+# 2026-08-17, COMMERCIAL_READINESS.md item 14. This runs on the machine with the
+# NVIDIA card -- the base rig, or a customer's own -- and never on the NAS: the
+# NAS container has no GPU and embeds only query text (18 ms on CPU, the 125M
+# text tower of a 194M model). Everything else is precomputed here.
+#
+#   docker compose -f tools/compose.indexer-gpu.yaml build
+#   docker compose -f tools/compose.indexer-gpu.yaml run --rm broll-index
+#   docker compose -f tools/compose.indexer-gpu.yaml run --rm music-drain
+#
+# `run --rm`, not `up`: these are jobs that finish, not services. `up` would
+# restart them.
+
+x-indexer: &indexer
+  build:
+    context: ..
+    dockerfile: tools/Dockerfile.indexer-gpu
+  image: ccsync/indexer-gpu:1
+  # 3000:3001 matches the dashboard container, so a host directory shared with
+  # it (the index, most obviously) needs one ownership rather than two.
+  user: "3000:3001"
+  environment:
+    # The API key is read from the environment, never from config.yaml --
+    # that file gets copied between machines and pasted into support threads.
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
+  volumes:
+    # Read-only: indexing reads the library and writes only to /data and /index.
+    # The exception is the music side, which lands ingested uploads in the
+    # library -- that service drops the :ro below.
+    - ${CCSYNC_LIBRARY:?set CCSYNC_LIBRARY to the media root}:/library:ro
+    - ${CCSYNC_DATA:-./indexer-data}:/data
+    - ${CCSYNC_INDEX:-./indexer-index}:/index
+    # Named volume, not a bind: these are caches keyed by the libraries' own
+    # layout, nothing an operator should be editing, and losing them costs a
+    # re-download rather than data.
+    - indexer-models:/models
+    - ${CCSYNC_CONFIG:-./indexer-config}:/config:ro
+  deploy:
+    resources:
+      reservations:
+        devices:
+          # The modern spelling; `runtime: nvidia` is the old one and is ignored
+          # by compose v2. Requires the NVIDIA Container Toolkit on the host --
+          # without it the container starts and every CUDA call falls back to
+          # CPU, which is not an error, just twenty times slower and silent.
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  # b-roll: the whole pipeline. Model calls cost money -- see
+  # broll/docs/indexing-findings.md for the per-clip arithmetic before starting
+  # one against a large archive.
+  broll-index:
+    <<: *indexer
+    command: ["index"]
+
+  # b-roll speech transcription, model loaded once for the whole queue. Free
+  # (owned hardware) and additive: run it alongside the local stages, never
+  # ahead of them (BROLL-15).
+  broll-transcribe:
+    <<: *indexer
+    command: ["transcribe"]
+
+  # music: a full sweep of the library. Needs the library writable only if it
+  # will also land ingested uploads; a pure re-index does not.
+  music-index:
+    <<: *indexer
+    command: ["music-embed"]
+
+  # music: drain what editors queued on the NAS, and write a RESULT BUNDLE.
+  #
+  # The index here is a copy pulled off the NAS, and what goes back is the
+  # bundle, never the file: pushing the file back overwrites every upload
+  # queued while the drain ran (musicweb/drain.py). Apply it where the live
+  # index is:
+  #   python -m musicweb.drain apply /index/drain.db --db <the live music.db>
+  music-drain:
+    <<: *indexer
+    volumes:
+      - ${CCSYNC_LIBRARY:?set CCSYNC_LIBRARY to the media root}:/library
+      - ${CCSYNC_DATA:-./indexer-data}:/data
+      - ${CCSYNC_INDEX:-./indexer-index}:/index
+      - indexer-models:/models
+      - ${CCSYNC_CONFIG:-./indexer-config}:/config:ro
+    command: ["drain", "--export-drain", "/index/drain.db"]
+
+volumes:
+  indexer-models:

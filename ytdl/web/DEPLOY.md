@@ -1,6 +1,6 @@
 # Deploying `ytdl/web`
 
-The YouTube downloader sub-app: one topic in, Claude Code expands it into EN+ZH
+The YouTube downloader sub-app: one topic in, Claude expands it into EN+ZH
 search terms, the server searches and filters, the editor reviews a thumbnail
 manifest, and the selected clips land in
 `<project>/Youtube/<term>/` on the NAS — from where sync distributes them and
@@ -13,10 +13,58 @@ folder invented for them was a Resolve bin with nothing meaningful in it
 before that its importer only walked the one level of term folders.
 
 It is mounted in-process at `/ytdl` by `ccsync_dashboard.ytdl.mount_ytdl()`, on
-exactly the contract `broll/web` and `music/web` use: tri-state
-`mounted`/`absent`/`degraded`, fail-absent, no auth of its own. **A broken or
-missing ytdl checkout must never stop the dashboard booting** — it is what tells
-everyone whether their footage is syncing.
+exactly the contract `broll/web` and `music/web` use: `mounted` /
+`disabled` / `absent` / `degraded`, fail-absent, no auth of its own. **A broken
+or missing ytdl checkout must never stop the dashboard booting** — it is what
+tells everyone whether their footage is syncing.
+
+## THE FEATURE IS OFF UNTIL THE CUSTOMER TURNS IT ON
+
+**2026-08-17 (docs/COMMERCIAL_READINESS.md item 2).** Shipping the tree used to
+be the switch. It is now the site manifest:
+
+```toml
+# site.toml
+[features]
+youtube_download = true    # mount /ytdl at all
+youtube_unblock  = false   # see "The unblock components" below
+```
+
+`--enable-youtube` / `--enable-youtube-unblock` on `install_dashboard_app.py`
+do the same thing for a one-off deploy. With `youtube_download` off — the
+default, and what the vendor build ships — `mount_ytdl()` returns `disabled`
+BEFORE importing anything: `/ytdl` and the fleet claim/manifest/status routes
+answer the dashboard's own 404, the nav link is absent, and every companion
+hides its YouTube tray items, refuses the `/ytdl/*` loopback calls and installs
+no downloader tooling (it reads `features.youtube_download` from
+`GET /api/v1/site`).
+
+Why: the customer, not the vendor, decides whether downloading third-party
+YouTube material is lawful for them. See
+**docs/legal/YOUTUBE_FEATURE_NOTICE.md**, which is also what the editor-facing
+rights attestation below implements.
+
+## The rights attestation
+
+Every editor accepts a notice — "you have the right to use this material; you
+are responsible for complying with YouTube's Terms of Service and copyright
+law; CC Sync grants you no rights" — before their first download. It is
+recorded **per user** in `ytdl.db`'s `attestations` table (username, wording
+version, digest of the exact text, timestamp) and **per machine** in the
+companion's `~/.ccsync/state/ytdl-attestation.json`. Until both exist:
+
+* `POST /api/jobs`, `POST /api/jobs/urls` and `POST /api/jobs/{id}/download`
+  answer **403** with `reason: "attestation"`;
+* `POST /api/jobs/{id}/claim` (the companion's path) answers the same;
+* the companion's `GET /ytdl/capabilities` reports `ok:false`, so the SPA
+  quietly takes the server path.
+
+The wording lives in `ytdlweb/attestation.py` (`TEXT_VERSION`, `NOTICE_TEXT`,
+`COPYRIGHT_NOTICE`, `RATE_DISCLAIMER`) and is mirrored, trimmed for a dialog
+box, in `companion/src/ccsync_companion/ytdl_attestation.py`. **Editing the text
+means bumping `TEXT_VERSION` in both** — the version is stored with each
+acceptance, so a re-worded notice re-prompts everyone instead of leaving the
+records pointing at wording nobody agreed to.
 
 ## Running it standalone (dev loop)
 
@@ -30,20 +78,29 @@ imports (FastAPI, uvicorn, yt-dlp), and it is the interpreter the deployed
 mount runs under, so it is the one to develop and test against.
 
 ```powershell
-$env:YTDL_DEV_USER   = "alex"                          # stands in for the gate header
 $env:YTDL_DEV_PROJECTS = "2026-ff5-energy=2026/FF5/Energy Transition"
 $env:YTDL_DATA_ROOT  = "E:\tmp\ytdl-data"
 $env:YTDL_PROJECTS_ROOT = "E:\tmp\projects"
+$env:ANTHROPIC_API_KEY = "<your key>"                  # the two AI calls
 ```
+
+**There is no `YTDL_DEV_USER` any more** (2026-08-17, item 15). One environment
+variable used to make every request on a deployed host arrive as that named
+editor — their ticked projects, their jobs, their download history — with only
+a comment standing between production and that. Standalone, the app now answers
+401 until something *in the process* calls `ytdlweb.session.set_test_user()`;
+add a two-line startup shim to your dev runner if you want a stand-in.
 
 | env var | container value | what it is |
 |---|---|---|
-| `YTDL_DATA_ROOT` | `/ytdl-data` | holds `ytdl.db`; also `claude`'s cwd. **The only tree this app owns** |
+| `YTDL_DATA_ROOT` | `/ytdl-data` | holds `ytdl.db`. **The only tree this app owns** |
 | `YTDL_PROJECTS_ROOT` | `/projects` | the Projects tree. A search's downloads land under `<label>/Youtube/<term>/`, a paste's directly in `<label>/Youtube/` |
 | `YTDL_DASH_DB` | `/data/dashboard.db` | the dashboard's database, opened **read-only** for the ticked-projects query |
-| `YTDL_CLAUDE_HOME` | `/claude-home` | HOME + CLAUDE_CONFIG_DIR **for the claude subprocess only** |
-| `YTDL_CLAUDE_BIN` | `claude` | absolute path if it is not on PATH |
-| `YTDL_COOKIES_FILE` | *(unset)* | optional `cookies.txt` for YouTube bot checks — see below |
+| `ANTHROPIC_API_KEY` | *(the CUSTOMER's)* | **required for search jobs.** The two AI calls go through the `anthropic` SDK. Blank = every job fails with the `claude_auth:` banner; nothing else on the dashboard is affected |
+| `ANTHROPIC_BASE_URL` | *(unset)* | point the SDK at a proxy/gateway. Blank = `api.anthropic.com` |
+| `YTDL_CLAUDE_MODEL` | `claude-sonnet-5` | a full model id (there is no CLI left to expand an alias) |
+| `YTDL_CLAUDE_MAX_TOKENS` | `8000` | ceiling on one reply |
+| `YTDL_COOKIES_FILE` | *(unset unless `youtube_unblock`)* | signed-in `cookies.txt` — see "The unblock components" |
 | `YTDL_FFMPEG_DIR` | `/opt/ffmpeg` | passed to yt-dlp; auto-detected if that directory exists |
 | `YTDL_WORKER` | *(unset)* | `0` disables the pipeline thread. **The test suite sets it** |
 | `YTDL_DOWNLOAD_PAUSE` | `3` | seconds between downloads — pacing against bot detection |
@@ -55,7 +112,9 @@ $env:YTDL_PROJECTS_ROOT = "E:\tmp\projects"
 | `YTDL_HEARTBEAT_SECONDS` | `30` | how often the local executor is told to heartbeat (returned to it at claim time) |
 | `YTDL_MIN_YTDLP_VERSION` | `2026.07.04` | claims from a companion whose yt-dlp is older are refused 403; its sidecar manager reads this via `GET /ytdl/api/config/ytdl-client` and self-updates |
 | `DASH_REPORT_TOKEN` | *(the dashboard's)* | **required for local downloads**: the fleet routes (claim/heartbeat/manifest/clip-status) fail closed without it. Shared with the dashboard process — the mount runs in it |
-| `YTDL_DEV_USER` / `YTDL_DEV_PROJECTS` | *(never set)* | standalone dev only |
+| `DASH_SESSION_SECRET` | *(the dashboard's)* | **required for local downloads**: the fleet routes verify the companion's `X-CCSync-Identity` token against it (H5). Unset = 403, and the NAS worker downloads everything |
+| `DASH_SITE_YOUTUBE_DOWNLOAD` / `_UNBLOCK` | `0` | set from `site.toml [features]` by the deploy; published in `GET /api/v1/site` |
+| `YTDL_DEV_PROJECTS` | *(never set)* | standalone dev only |
 
 The candidate ceiling itself is **not** an env var: the editor picks it per
 search (50 / 100 / 200 / 400, default 100) and it is stored on the job row, so
@@ -66,69 +125,96 @@ the API's allow-list and migration 006's SQL default all have to agree.
 Every one is `YTDL_`-prefixed because this app shares one environment with the
 dashboard, with b-roll (`BROLL_*`) and with music (`MUSIC_*`).
 
-## The one-time Claude login
+## The Anthropic API key (the customer's)
 
-Claude Code runs headless on the server under a real account. **Until the login
-has been done once, every job fails immediately with a `claude_auth:` banner
-telling the editor to fetch an admin — never a hang.** The credentials live in
-the `claude-home` volume and survive redeploys, so this is once per NAS.
+**2026-08-17, docs/COMMERCIAL_READINESS.md item 1.** The two AI calls —
+search-term expansion and relevance filtering — used to shell out to the
+interactive `claude` CLI, provisioned onto the NAS by the installer and
+authenticated by a one-time `/login` whose OAuth credentials lived in a
+`claude-home` volume. That ran every deployment on one human's personal Claude
+account, could not be rotated or metered, and put an agent binary with
+filesystem tools inside a container that mounts the whole Projects tree rw.
 
-```sh
-docker exec -it -u 3000:3001 \
-  -e HOME=/claude-home -e CLAUDE_CONFIG_DIR=/claude-home/.claude \
-  <container> /opt/claude/claude
-# then, at the prompt:
-/login
-# it prints an OAuth URL -- open it in any browser, sign in, paste the code back
+It is now `ytdlweb/claude_cli.py` → the `anthropic` SDK, with a key **the
+customer supplies** in the container's environment:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Verify with the exact command the app's health probe runs:
+`install_dashboard_app.py` reads it from the deploying shell's environment,
+masks it in `--dry-run` output, and (on Synology) writes it into the 0600 `.env`
+beside the compose file rather than into the world-readable YAML. Blank is a
+supported state: every job then fails immediately with a `claude_auth:` banner
+telling the editor to fetch an admin — never a hang — and nothing else on the
+dashboard is affected.
 
-```sh
-docker exec -u 3000:3001 -e HOME=/claude-home -e CLAUDE_CONFIG_DIR=/claude-home/.claude \
-  <container> /opt/claude/claude -p "say ok" --output-format json
-```
-
-**Headless alternative** (no interactive TTY on the NAS): run
-`claude setup-token` on a machine that has a browser, then drop the resulting
-credentials file into `claude-home/.claude/` and fix the ownership —
-`chown -R 3000:3000 claude-home` and `chmod 600` on the credentials file.
-Nothing else in the container may be able to read it.
+No tools are ever sent with these requests: not a policy the model is asked to
+follow, a capability it is not given.
 
 `/ytdl/api/health` reports the state (`ok` / `unauthenticated` / `missing` /
 `timeout`) from a **cached** probe refreshed by the worker at start and on every
-failure — never per request, because `claude -p` costs a second or two and this
+failure — never per request, because a live call costs a second or two and this
 endpoint is hit by every page load. The SPA shows the banner from it *before*
-anyone submits a job.
+anyone submits a job. Verify by hand with any tiny request against the key.
 
-### `HOME` is set for the subprocess, not the container
+### Prompt injection
 
-uid 3000 has no `passwd` entry in the slim image, so `claude` cannot work out
-where its credentials live and refuses to start. `ytdlweb/claude_cli.py` sets
-`HOME`/`CLAUDE_CONFIG_DIR` **in the subprocess env only**. Do **not** export
-`HOME` from `run.sh`: it is process-wide and would change it for the dashboard,
-ffmpeg and everything else in the container. The subprocess also runs with
-`cwd=/ytdl-data` (claude writes project state next to where it is run, and that
-is the one directory this app owns) and `--disallowed-tools "*"` — these prompts
-want text back, and `/projects` is mounted rw.
+The relevance call judges YouTube titles and channel names, which anyone can
+write. Instructions therefore live in the **system** prompt (composed from this
+repo's own tables) and every scrap of fetched text goes in the **user** turn
+inside a labelled `<candidates>` / `<topic>` block, with the system prompt
+saying out loud that the block is material to be judged rather than
+instructions. `ytdl/web/tests/test_claude_cli.py` pins the split.
+
+### Removing the old CLI provisioning (operator step, once per NAS)
+
+A previously-deployed host still has two directories nothing mounts any more.
+They are not deleted by the deploy (no-deletion rule); remove them by hand when
+convenient, and note that `claude-home` holds a **live OAuth credential** for
+whoever performed the original login:
+
+```sh
+sudo rm -rf <host-root>/claude-home <host-root>/claude-bin
+# and, on the base rig, the cached download the installer kept:
+rm -rf .cache/ytdl/claude
+```
+
+Revoke that credential from the Claude account it belongs to as well — deleting
+the file does not.
 
 ## What the deploy has to provide
 
 | thing | where | why |
 |---|---|---|
 | `ytdl/web` tree | `<host>/ytdl-web` → `/ytdl-app:ro`, on PYTHONPATH | the app |
-| `ytdl-data` volume | `/ytdl-data:rw`, `3000:3000 770` | `ytdl.db` + claude's cwd |
+| `ytdl-data` volume | `/ytdl-data:rw`, `3000:3000 770` | `ytdl.db` |
 | `/projects:rw` | already mounted | downloads land here |
-| `claude` binary | `/opt/claude:ro` | provisioned like ffmpeg (URL + sha256, cached tarball, root:root 755) |
-| **`deno` binary** | `/opt/deno:ro`, on PATH | **not optional** |
+| `anthropic` + `ANTHROPIC_API_KEY` | `deploy/requirements.txt` + container env | the two AI calls |
 | `yt-dlp` | `deploy/requirements.txt` | the downloader |
 | `/opt/ffmpeg:ro` | already mounted | merge + the H.264/CFR conversion |
+| **`deno` binary** | `/opt/deno:ro`, on PATH | **only on a `youtube_unblock` site** — see below |
 
-**Deno is not optional.** yt-dlp asks for `js_runtimes {deno,node}` +
-`remote_components ejs:github` because YouTube now requires solving JS
-challenges for full-quality formats, and the slim image has neither runtime.
-Without deno on PATH, high-quality formats fail and jobs come back with
-per-video download errors that look like YouTube being flaky.
+## The unblock components (`[features] youtube_unblock`)
+
+**Off by default and not part of the vendor build** (2026-08-17, item 3). Three
+things exist only to get past YouTube's own anti-automation measures, and a
+vendor should not install them on a customer's behalf:
+
+| component | where | what it does |
+|---|---|---|
+| `bgutil` PO-token sidecar | a compose service | mints the GVS proof-of-origin token YouTube demands for authenticated requests |
+| `deno` | `/opt/deno:ro`, on PATH | answers the "n challenge" JS puzzle for full-quality formats |
+| `YTDL_COOKIES_FILE` | `/ytdl-data/cookies.txt` | downloads as a signed-in Google account |
+
+With `youtube_unblock` unset, `compose_config()` emits none of them: no service,
+no mount, no `YTDL_POT_BASE_URL`, no `YTDL_COOKIES_FILE`. `provision_ytdl_binaries`
+does not run, and on the editor side `sidecar_tools` installs no deno and the
+tray's "Sign in to YouTube (for downloads)…" item does not exist. **The code
+stays in the tree, dormant** — turning the flag on is a configuration change,
+never a different binary.
+
+With it set, everything below applies as it always did.
 
 ## The umask trap
 

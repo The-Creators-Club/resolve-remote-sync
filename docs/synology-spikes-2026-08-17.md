@@ -1,5 +1,8 @@
 # Synology day-1 spikes — run against real hardware, 2026-08-17
 
+> **Archive.** Kept as history; the addresses, hostnames and people in it are
+> those of the original deployment. Do not copy commands out of it.
+
 The eight spikes from `SYNOLOGY_PORT_PLAN.md` ("Day-1 spikes on the device"),
 executed against a live DSM box. Everything below is measured, not inferred;
 where something could not be determined it says so and why.

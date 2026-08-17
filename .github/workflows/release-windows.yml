@@ -1,0 +1,123 @@
+# Build the Windows companion on a runner -- COMMERCIAL_READINESS.md item 13,
+# added 2026-08-17.
+#
+# MANUAL ONLY (workflow_dispatch). Releases are a decision, not a consequence of
+# a push, and `tools\ship.cmd` is still THE ship for this fleet: gates, dashboard
+# deploy, publish, make-current, local upgrade, drift check. This workflow does
+# the middle of that -- version parity, tests, PyInstaller, manifest -- on clean
+# hardware, and hands you the artifact.
+#
+# IT DOES NOT PUBLISH. Nothing here talks to a dashboard, a NAS or the fleet: a
+# GitHub runner cannot reach the tailnet, and an upgrade channel that any push
+# could write to would be a supply-chain hole rather than a convenience. Download
+# the artifact and publish it with `installer\build_editor_package.ps1 -Publish
+# -MakeCurrent`, or run `tools\ship.cmd` as usual.
+#
+# SIGNING. Unsigned unless the secrets are present, and it says so in the run
+# summary. The variable names are tools/release.ps1's own (item 4):
+#   CCSYNC_SIGN_THUMBPRINT           SHA1 of a cert in CurrentUser\My -- what an
+#                                    EV token presents, and NOT usable from a
+#                                    hosted runner (the token is physical).
+#   CCSYNC_SIGN_PFX_BASE64 + ..._PASSWORD
+#                                    an OV .pfx, base64'd into a secret. This is
+#                                    the one a hosted runner can actually use.
+#   CCSYNC_SIGN_TIMESTAMP_URL        optional RFC3161 override. A timestamp is
+#                                    not optional in substance: without one every
+#                                    signature this build ever made goes invalid
+#                                    the day the certificate expires.
+
+name: release-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: "Skip the companion suite (the release script runs it by default)"
+        type: boolean
+        default: false
+      allow_dirty:
+        description: "Allow a dirty tree (stamps the manifest +dirty)"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      # Full history: release.ps1 stamps the manifest with the commit, and a
+      # shallow checkout makes that describe the wrong thing.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: companion/requirements.lock
+
+      # release.ps1's Install-CompanionEditable creates companion\.venv and
+      # installs `.[dev,tray]` itself, but it does NOT install PyInstaller --
+      # on the base rig that has simply always been there. Do it first, from
+      # the lock plus one pinned build tool.
+      #
+      # PyInstaller is deliberately NOT in requirements.lock: it is GPL-2.0
+      # (with the bootloader exception) and it is a BUILD tool, not something
+      # we convey. Keeping it out of the lock is what lets tools/check_licenses.py
+      # stay strict about the frozen set. Pinned all the same -- an unpinned
+      # freezer changes what lands in the exe.
+      - name: prepare the companion venv
+        run: |
+          python -m venv companion/.venv
+          companion/.venv/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
+          companion/.venv/Scripts/python -m pip install --disable-pip-version-check "pyinstaller==6.21.0"
+
+      # The secret is lifted into `env` first and the condition reads THAT: the
+      # `secrets` context is not available in a step-level `if`, and a condition
+      # that silently evaluates to false would produce an unsigned build that
+      # nothing complained about.
+      - name: materialise the signing certificate
+        env:
+          PFX_B64: ${{ secrets.CCSYNC_SIGN_PFX_BASE64 }}
+        if: ${{ env.PFX_B64 != '' }}
+        shell: pwsh
+        run: |
+          # Written under RUNNER_TEMP, never into the workspace: the workspace
+          # is what gets uploaded as an artifact.
+          $pfx = Join-Path $env:RUNNER_TEMP "ccsync-sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          "CCSYNC_SIGN_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: build
+        shell: pwsh
+        env:
+          CCSYNC_SIGN_THUMBPRINT: ${{ secrets.CCSYNC_SIGN_THUMBPRINT }}
+          CCSYNC_SIGN_PFX_PASSWORD: ${{ secrets.CCSYNC_SIGN_PFX_PASSWORD }}
+          CCSYNC_SIGN_TIMESTAMP_URL: ${{ secrets.CCSYNC_SIGN_TIMESTAMP_URL }}
+        run: |
+          $args = @()
+          if ("${{ inputs.skip_tests }}" -eq "true")  { $args += "-SkipTests" }
+          if ("${{ inputs.allow_dirty }}" -eq "true") { $args += "-AllowDirty" }
+          pwsh -NoProfile -ExecutionPolicy Bypass -File tools/release.ps1 @args
+
+      - name: report what was produced
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $manifest = "companion/dist/ccsync-release.json"
+          if (Test-Path $manifest) {
+            Get-Content $manifest | Out-String | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          } else {
+            "no manifest at $manifest -- the build did not complete" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+      - name: upload the build
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccsync-companion-windows
+          path: |
+            companion/dist/ccsync-companion.exe
+            companion/dist/ccsync-release.json
+          if-no-files-found: error

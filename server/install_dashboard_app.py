@@ -20,14 +20,18 @@ Steps (each idempotent, one line printed per action):
                              group 3000, NOT 3001/editors.
        <host-root>/broll-web -- this repo's broll/web tree (shipped in step
                              2b); root:root 755, mounted :ro like app/.
-       <host-root>/ytdl-web, /claude-bin, /deno -- the ytdl code tree and the
-                             two binaries it shells out to; root:root 755,
-                             mounted :ro (steps 2f).
+       <host-root>/ytdl-web, /deno -- the ytdl code tree and the JS runtime
+                             yt-dlp answers YouTube's n-challenge with;
+                             root:root 755, mounted :ro (step 2f). The deno
+                             dir is EMPTY and unmounted unless this site
+                             enabled [features] youtube_unblock (2026-08-17,
+                             COMMERCIAL_READINESS.md item 3).
        <host-root>/ytdl-data -- ytdl.db + the pipeline worker's scratch;
                              3000:3000 mode 770, like data/ and music-data.
-       <host-root>/claude-home -- where the one-time `claude /login` keeps its
-                             OAuth credentials; 3000:3000 mode 700, because
-                             that is a live credential.
+       (claude-bin / claude-home are GONE as of 2026-08-17 -- the two AI calls
+        use the anthropic SDK with the customer's ANTHROPIC_API_KEY, so there
+        is no CLI binary and no OAuth credential volume. An old host keeps
+        its directories until an operator removes them; nothing mounts them.)
        <host-root>/staging -- where the 1.4 GB music artefacts are staged, on
                              the same pool as their target instead of in a
                              possibly RAM-backed /tmp (OPS-8); owned by
@@ -89,25 +93,38 @@ Steps (each idempotent, one line printed per action):
      .ogg -- and answers 503 without them. THERE IS NO IMAGE BUILD in this
      deployment (compose runs a stock pinned python:3.12.7-slim) and the
      container is unprivileged, so this is the only place it can come from.
-     The 42 MB tarball is fetched HERE and pushed over the LAN (--ffmpeg-fetch
-     local, the default), because the NAS pulls that host at ~28 kB/s and the
-     download alone outlived the SSH timeout; --ffmpeg-fetch remote is the old
-     "let the NAS curl it" path, for a workstation with no route out.
-     Non-fatal and idempotent; --no-ffmpeg skips it.
+     The NAS curls the pinned 42 MB tarball itself and checks it against the
+     pinned sha256 (--ffmpeg-fetch remote, the DEFAULT since 2026-08-17): the
+     static build is GPLv3, and a machine that pushes it to a customer's NAS is
+     conveying it, which nothing here can discharge. The step is given 30
+     minutes for it, because that host is slow (~28 kB/s measured 2026-08-10).
+     --push-ffmpeg-from-local (== --ffmpeg-fetch local) is the air-gapped
+     path: fetch here, verify, SFTP it over -- and it prints the GPLv3 notice
+     that then applies to you. Non-fatal and idempotent; --no-ffmpeg skips it.
   2f. Ship the ytdl web/ tree into <host-root>/ytdl-web (mounted read-only at
      /ytdl-app, on PYTHONPATH), source YTDL_WEB_SRC, default ytdl/web in this
-     repo. WARN-AND-SKIP if missing, exactly like music: there is no
-     DASH_YTDL_ENABLED asserting the operator wanted it, so shipping the tree
-     IS the switch and a host without it hides the nav link. No data push goes
+     repo. WARN-AND-SKIP if missing, exactly like music. No data push goes
      with it -- ytdl.db is created by the container in /ytdl-data.
-     Then provision the Claude CLI and a static deno into <host-root>/claude-bin
-     and <host-root>/deno (mounted read-only at /opt/claude and /opt/deno, on
-     PATH via run.sh), the same fetch-here-verify-push-install route as ffmpeg.
-     Neither has a pinned URL in this repo: set YTDL_CLAUDE_URL /
-     YTDL_CLAUDE_SHA256 and YTDL_DENO_URL / YTDL_DENO_SHA256 (or point
-     YTDL_CLAUDE_FILE / YTDL_DENO_FILE at a local download). Every failure here
-     -- including an unset URL -- is a NOTE, never a failed deploy: /ytdl then
-     reports the CLI missing instead of hanging. --no-ytdl-bins skips the step.
+
+     WHETHER IT IS MOUNTED IS THE SITE'S CALL, not the checkout's (2026-08-17,
+     docs/COMMERCIAL_READINESS.md item 2): the dashboard mounts /ytdl only when
+     `[features] youtube_download` is set (or --enable-youtube). Off -- the
+     default, and what the vendor build ships -- /ytdl and its fleet download
+     routes answer 404, and every companion hides its YouTube menu items.
+
+     The unblock components are a SECOND, narrower opt-in
+     (`[features] youtube_unblock` / --enable-youtube-unblock, item 3): the
+     PO-token provider sidecar, the NAS-side signed-in cookies file, and a
+     static deno provisioned into <host-root>/deno (mounted :ro at /opt/deno,
+     on PATH via run.sh) by the same fetch-here-verify-push-install route as
+     ffmpeg. deno has no pinned URL in this repo: set YTDL_DENO_URL /
+     YTDL_DENO_SHA256, or point YTDL_DENO_FILE at a local download. Every
+     failure -- including an unset URL -- is a NOTE, never a failed deploy.
+     --no-ytdl-bins skips the step.
+
+     The Claude CLI is no longer provisioned at all (item 1): the two AI calls
+     go through the `anthropic` SDK with ANTHROPIC_API_KEY, which the CUSTOMER
+     supplies in the container environment.
   3. If the app is not yet installed: POST /api/v2.0/app with
        {"custom_app": true, "app_name": "ccsync-dashboard",
         "custom_compose_config": {...}}   (compose dict mirrors
@@ -152,17 +169,21 @@ MUSIC_DATA_SRC (the music data/ dir, default <MUSIC_WEB_SRC>/data),
 MUSIC_DATA_PUSH (same values as --music-data; default "auto"),
 MUSIC_FFMPEG_URL / MUSIC_FFMPEG_SHA256 (the static ffmpeg build to install;
 pinned defaults, and an empty URL skips the step like --no-ffmpeg),
-MUSIC_FFMPEG_FETCH (same values as --ffmpeg-fetch: "local", the default, fetches
-the tarball on this machine and pushes it over the LAN; "remote" makes the NAS
-download it), MUSIC_FFMPEG_FILE (a tarball already on this machine -- skips the
-download entirely, and is still checked against the pinned hash),
+MUSIC_FFMPEG_FETCH (same values as --ffmpeg-fetch: "remote", the default, makes
+the NAS download the tarball itself; "local" -- also spelled
+--push-ffmpeg-from-local -- fetches it on this machine and pushes it over the
+LAN, which conveys a GPLv3 binary and says so), MUSIC_FFMPEG_FILE (a tarball
+already on this machine -- skips the download entirely, and is still checked
+against the pinned hash; it only applies to the local push),
 MUSIC_FFMPEG_CACHE (where locally-fetched tarballs are kept between deploys,
 default <repo>/.cache/ffmpeg),
 YTDL_WEB_SRC (the ytdl web/ tree to ship, default ytdl/web in this repo),
-YTDL_CLAUDE_URL / YTDL_CLAUDE_SHA256 and YTDL_DENO_URL / YTDL_DENO_SHA256 (the
-Claude CLI and static deno builds to install for /ytdl -- NO pinned defaults,
-and an unset URL skips that binary with a NOTE), YTDL_CLAUDE_FILE /
-YTDL_DENO_FILE (a download already on this machine, skipping the fetch),
+ANTHROPIC_API_KEY (the CUSTOMER's key for /ytdl's two AI calls -- blank is
+supported and makes the downloader report claude_auth:; it is masked in
+--dry-run output like every other secret),
+YTDL_DENO_URL / YTDL_DENO_SHA256 (the static deno to install when this site
+enabled youtube_unblock -- NO pinned default, and an unset URL skips it with a
+NOTE), YTDL_DENO_FILE (a download already on this machine, skipping the fetch),
 YTDL_BINARY_CACHE (where those downloads are kept between deploys, default
 <repo>/.cache/ytdl).
 
@@ -195,8 +216,11 @@ from common import (  # noqa: F401 - truenas_api/run_ssh/wait_for_job/ok are als
     DEFAULT_APPS_ROOT, DEFAULT_BROLL_ARCHIVE_ROOT, DEFAULT_CC_ROOT, DEFAULT_DATASET_OWNER,
     DEFAULT_HOMES_PARENT, DEFAULT_TRUENAS_HOST, DEFAULT_TRUENAS_USER, EDITORS_GROUP, EnvError,
     DEFAULT_PROJECTS_ROOT, PROJECTS_DIRNAME, ScriptCalls, add_host_key_arg, add_nas_kind_arg,
-    add_site_arg, cli, get_backend, nas_admin_password, ok, require_env, require_site_value,
-    run_ssh, set_host_key_pin, sftp_put_text, shell_quote, site_int, site_value, ssh_client,
+    add_site_arg, cli, editor_shell_is_sftp_only, editor_shell_mode, get_backend,
+    nas_admin_password, ok, require_env, require_site_value,
+    run_ssh, set_host_key_pin, sftp_put_text, shell_quote, site_bool, site_int, site_list,
+    site_value,
+    snapshot_before, ssh_client, truenas_api_key,
     synology_api, truenas_api, truenas_conn_params, wait_for_job,
 )
 from backends import truenas as truenas_backend
@@ -313,19 +337,53 @@ DEFAULT_FFMPEG_URL = ("https://johnvansickle.com/ffmpeg/releases/"
 # under a pinned hash. Bump both together.
 DEFAULT_FFMPEG_SHA256 = "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67"
 
-# WHICH MACHINE DOES THE DOWNLOADING. "local" (the default) fetches the tarball
-# here and pushes it to the NAS over the LAN; "remote" has the NAS curl it.
+# WHICH MACHINE DOES THE DOWNLOADING. "remote" (the default) has the NAS curl
+# the pinned tarball itself; "local" fetches it here and pushes it to the NAS
+# over the LAN.
 #
-# It used to be remote-only, and that stranded the first deploy of this app: the
-# NAS pulls johnvansickle.com at ~28 kB/s (42 MB ~= 25 minutes), run_ssh's
-# timeout is 600s, and the step runs BEFORE any tree ships -- so a fresh host got
-# a failed deploy out of a download this workstation does in seconds. Fetching
-# here and pushing over gigabit LAN moves the slow, flaky half onto the machine
-# that is fastest at it and can retry it cheaply, and turns the NAS's share of
-# the work into a few seconds of SFTP + tar. "remote" is kept for the case this
-# shape cannot serve: a workstation with no route out to the internet.
+# The default has been both ways, and the history matters because both reasons
+# are still true. It was remote-only first, and that stranded the first deploy
+# of this app: the NAS pulls johnvansickle.com at ~28 kB/s (42 MB ~= 25 minutes),
+# run_ssh's default timeout is 120s and this step used to be given 600s, and the
+# step runs BEFORE any tree ships -- so a fresh host got a failed deploy out of a
+# download this workstation does in seconds. It was flipped to local on
+# 2026-08-10 for exactly that.
+#
+# It is flipped back on 2026-08-17 (COMMERCIAL_READINESS.md item 3) because the
+# local path makes US the distributor of a GPLv3 binary: pushing johnvansickle's
+# static build onto a customer's NAS is conveying it under GPLv3 s6, which
+# obliges us to accompany it with corresponding source or a three-year written
+# offer. Having the NAS fetch it direct from upstream conveys nothing, and that
+# is the only difference between the two paths that a customer install cannot
+# be asked to think about.
+#
+# The 2026-08-10 operational reason is answered rather than ignored: the remote
+# step now gets FFMPEG_REMOTE_INSTALL_TIMEOUT (30 min, comfortably past the
+# ~25 min worst case measured then) instead of 600s, the remote script's curl
+# already retries 3 times, and the whole step remains NON-FATAL -- a slow host
+# that still does not finish costs /music's queued ingest (503 with a readable
+# message), never the deploy. "local" stays for the case remote cannot serve:
+# an air-gapped site whose NAS has no route out (--push-ffmpeg-from-local), and
+# it prints FFMPEG_LOCAL_PUSH_GPL_NOTICE when it is chosen.
 FFMPEG_FETCH_MODES = ("local", "remote")
-DEFAULT_FFMPEG_FETCH = "local"
+DEFAULT_FFMPEG_FETCH = "remote"
+# What the NAS's own download is allowed to take. Not run_ssh's 120s default and
+# not the old 600s: at the 28 kB/s measured against johnvansickle on 2026-08-10
+# this file needs ~25 minutes, and a timeout under the known worst case is how
+# the remote path earned its reputation.
+FFMPEG_REMOTE_INSTALL_TIMEOUT = 1800
+# Said out loud whenever the local push is chosen (2026-08-17,
+# COMMERCIAL_READINESS.md item 3). The GPLv3 obligation attaches to the act of
+# conveying, so the operator who chooses to convey is the one who has to hear
+# about it -- a line in a notices file nobody opens is not that.
+FFMPEG_LOCAL_PUSH_GPL_NOTICE = (
+    "NOTE: --push-ffmpeg-from-local conveys a GPLv3 binary (ffmpeg {version}) "
+    "to the target host. Under GPLv3 s6 you must accompany it with the "
+    "corresponding source, or a written offer valid for three years. "
+    "Source: https://johnvansickle.com/ffmpeg/ (build scripts) and "
+    "https://ffmpeg.org/download.html (upstream {version}). "
+    "See docs/legal/THIRD_PARTY_NOTICES.md."
+)
 # Locally-fetched tarballs live here between deploys, so re-provisioning a host
 # (or provisioning a second one) does not re-download 42 MB. Gitignored.
 DEFAULT_FFMPEG_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "ffmpeg"
@@ -359,20 +417,29 @@ DEFAULT_YTDL_WEB_DIR = Path(__file__).resolve().parents[1] / "ytdl" / "web"
 # onto the NAS's read-only mount (YTDL-40, 2026-08-11).
 YTDL_EXCLUDE_DIRS = BROLL_EXCLUDE_DIRS | {"data"}
 
-# The two binaries the ytdl app shells out to, provisioned onto the host the
-# same way ffmpeg is and for the same reason: NOTHING BUILDS THIS IMAGE (compose
-# runs a stock pinned python:3.12.7-slim) and the container is unprivileged, so
-# it can install neither for itself.
+# The binaries the ytdl app needs on the host, provisioned the same way ffmpeg
+# is and for the same reason: NOTHING BUILDS THIS IMAGE (compose runs a stock
+# pinned python:3.12.7-slim) and the container is unprivileged, so it can
+# install nothing for itself.
 #
-# The difference from ffmpeg is that neither has a pinned URL here. There is no
-# stable, versioned, checksummable public tarball for the Claude CLI that this
-# repo can name today, and the deno release the container wants depends on the
-# yt-dlp version pinned in requirements.txt. So the URLs are OPERATOR-SUPPLIED
-# (YTDL_CLAUDE_URL / YTDL_DENO_URL) and an unset one is a NOTE, not a failure:
-# a fleet dashboard must not stop deploying because an optional download host
-# was not configured yet. The feature degrades exactly as designed -- ytdlweb's
-# api/health reports the CLI missing and the SPA says so before a job is
-# submitted.
+# THE CLAUDE CLI IS GONE (2026-08-17, docs/COMMERCIAL_READINESS.md item 1). The
+# two AI calls now go through the `anthropic` SDK with a key the customer
+# supplies (ANTHROPIC_API_KEY, plumbed into the container below), so there is
+# no binary to provision, no claude-bin/claude-home to mount, and no one-time
+# interactive `/login` under a human's personal account for an operator to
+# perform over SSH. YTDL_CLAUDE_URL / _SHA256 / _FILE are dead env vars; a host
+# that still has a /claude-bin directory from an old deploy simply stops being
+# mounted, and the operator can delete it (see docs/YTDL_LOCAL_DOWNLOAD.md).
+#
+# WHAT IS LEFT IS DENO, AND IT IS OFF BY DEFAULT (item 3). Its only job in this
+# container is answering YouTube's "n challenge" for yt-dlp -- an
+# anti-anti-automation component -- so the vendor build does not install it.
+# It is provisioned only when the customer's site manifest says
+# `[features] youtube_unblock` (or --enable-youtube-unblock is passed), which
+# is that customer asserting they may. deno has no pinned URL here either
+# (the release the container wants depends on the yt-dlp pinned in
+# requirements.txt), so the URL is OPERATOR-SUPPLIED and an unset one is a
+# NOTE, not a failure.
 YTDL_BINARY_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "ytdl"
 # The staged name on the NAS is fixed rather than derived from the URL: it lands
 # in a fresh mktemp dir that nothing else writes to. The EXTENSION still comes
@@ -381,14 +448,10 @@ YTDL_BINARY_CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "ytdl"
 YTDL_BINARIES = (
     # (name, <host-root> dir, container mount, binary, url env, sha env,
     #  file env, what breaks without it)
-    ("claude", "claude-bin", "/opt/claude", "claude",
-     "YTDL_CLAUDE_URL", "YTDL_CLAUDE_SHA256", "YTDL_CLAUDE_FILE",
-     "every /ytdl job fails immediately with the 'claude CLI missing' banner "
-     "(term generation and relevance filtering both run through it)"),
     ("deno", "deno", "/opt/deno", "deno",
      "YTDL_DENO_URL", "YTDL_DENO_SHA256", "YTDL_DENO_FILE",
-     "yt-dlp has no JS runtime for YouTube's challenges, so the high-quality "
-     "formats fail and downloads fall back or error"),
+     "yt-dlp has no JS runtime for YouTube's challenges, so signed-in "
+     "extraction returns no formats"),
 )
 
 # Minimum ingest-token strength, mirroring
@@ -493,7 +556,9 @@ def cookie_secure_for(dashboard_url: str) -> str:
 
 def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
              dashboard_url: str = "") -> dict:
-    """The DASH_SITE_* block: what GET /api/v1/site serves.
+    """The SITE-DERIVED environment block: what GET /api/v1/site serves, plus
+    the two BROLL_* keys the /broll mount reads out of its own namespace (the
+    b-roll app has no DASH_SITE_* reader; see the comment beside them).
 
     Added 2026-08-17. Until then nothing in the deploy set any of them, so a
     deployed dashboard answered that route with blanks and every client
@@ -516,7 +581,36 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
     nas_host = nas_host or os.environ.get("TRUENAS_HOST", "") or DEFAULT_TRUENAS_HOST
     return {
         "DASH_SITE_ORG_NAME": site_value("site", "org_name"),
+        # The short form, for the places only a few characters fit (the
+        # dashboard topbar mark). Blank means "use org_name" -- the dashboard
+        # decides that, not the deploy, so a blank must reach it as a blank.
+        "DASH_SITE_ORG_SHORT": site_value("site", "org_short"),
+        # THE PRODUCT's name, not the customer's: the one identity string with
+        # a non-blank default, because every deployment runs the same
+        # software. Set only by a reseller.
+        "DASH_SITE_PRODUCT_NAME": site_value("site", "product_name"),
         "DASH_SITE_TREE_NAME": site_value("tree", "tree_name"),
+        # The project template and the fleet-wide asset libraries, comma-joined
+        # (dashboard/src/ccsync_dashboard/provision._site_list splits on
+        # commas). These lists were CODE in three components until 2026-08-17
+        # (COMMERCIAL_READINESS.md item 11); the container has no site.toml, so
+        # this env pair is how the dashboard's "create new project" flow and
+        # server/setup_tree.py end up building the same tree. BLANK means "this
+        # site did not say", which the reader turns into the product defaults
+        # -- never into an empty list, which would create projects with no
+        # subfolders at all.
+        "DASH_SITE_TEMPLATE_FOLDERS": ",".join(site_list("tree", "template_folders")),
+        "DASH_SITE_SHARED_ASSETS": ",".join(site_list("tree", "shared_assets")),
+        # NOT DASH_SITE_-prefixed, and deliberately: these two are read by the
+        # b-roll app mounted at /broll, whose whole environment is BROLL_*
+        # (broll/web/app/config.py get_creators_collection). The own-footage
+        # collection was the literal "creators_club" -- one customer's name in
+        # every search URL and folder label -- until 2026-08-17
+        # (COMMERCIAL_READINESS.md item 10). Blank leaves the app's neutral
+        # "owned" / "Our Footage" defaults, which is the right answer for a
+        # site that has not asked for its own name.
+        "BROLL_DEFAULT_COLLECTION": site_value("broll", "default_collection"),
+        "BROLL_DEFAULT_COLLECTION_LABEL": site_value("broll", "default_collection_label"),
         # The editor drive letter is hardcoded by decision (2026-07-26); it is
         # served anyway so a client never has to assume it.
         "DASH_SITE_CANONICAL_PREFIX": site_value("site", "canonical_prefix") or "P:\\",
@@ -532,7 +626,13 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
         "DASH_SITE_SFTP_PORT": site_value("net", "sftp_port") or "22",
         "DASH_SITE_SFTP_CHUNK_SIZE": site_value("net", "sftp_chunk_size"),
         "DASH_SITE_SFTP_CONCURRENCY": site_value("net", "sftp_concurrency"),
-        "DASH_SITE_SFTP_SHELL_TYPE": site_value("net", "shell_type"),
+        # FORCED to "none" when [stack] editor_shell is "sftp-only": a nologin
+        # editor cannot run md5sum over SSH whatever [net] shell_type says, and
+        # the two disagreeing is what produces "failed to calculate hash" on
+        # every lane pass. The manifest is where each editor learns it
+        # (2026-08-17, COMMERCIAL_READINESS.md item 7).
+        "DASH_SITE_SFTP_SHELL_TYPE": ("none" if editor_shell_is_sftp_only()
+                                      else site_value("net", "shell_type")),
         "DASH_SITE_RCLONE_REMOTE": site_value("net", "rclone_remote") or "ccsync_sftp",
         # A fallback only: the dashboard prefers Syncthing's live myID, so a
         # blank here is not a problem and a stale one cannot win.
@@ -544,7 +644,7 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
 def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token: str,
                    session_secret: str = "", admin_users: str = "",
                    truenas_host: str = "", truenas_user: str = "", truenas_pw: str = "",
-                   truenas_verify_ssl: str = "0",
+                   truenas_verify_ssl: str = "0", truenas_api_key: str = "",
                    bind_lan: str = LAN_BIND_IP, bind_tailnet: str = TAILNET_BIND_IP,
                    image: str = DEFAULT_IMAGE,
                    broll_enabled: str = "1", broll_ingest_token: str = "",
@@ -552,7 +652,18 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    tree_root: str = "", app_uid: int = 0, app_gid: int = 0,
                    binds=None, nas_kind: str = "truenas", ssh_port: str = "22",
                    ssh_hostkey: str = "", ssh_key_probe: str = "1",
-                   dashboard_url: str = "") -> dict:
+                   dashboard_url: str = "",
+                   # The YouTube downloader and its unblock components, BOTH
+                   # OFF BY DEFAULT (2026-08-17, COMMERCIAL_READINESS.md items
+                   # 2 + 3). "1" and nothing else is on, matching
+                   # broll_enabled. The defaults here are what
+                   # dashboard/deploy/compose.yaml describes, and
+                   # tests/test_safety.py pins the two together -- so the
+                   # SHIPPED compose body carries no PO-token sidecar, no deno
+                   # mount and no NAS-side cookie file, and a customer who is
+                   # entitled to them turns them on in their own site.toml.
+                   youtube_download: str = "0", youtube_unblock: str = "0",
+                   anthropic_api_key: str = "") -> dict:
     """The compose body, as the dict the TrueNAS middleware stores verbatim.
 
     Rendered from the same five variables dashboard/deploy/compose.yaml is --
@@ -580,6 +691,10 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
             ("DASH_BIND_TAILNET", require_site_value(bind_tailnet, "[net] bind_tailnet",
                                                      "--bind-tailnet")),
         ]
+    # `unblock` is meaningless without the downloader itself, and a body that
+    # said otherwise would run a PO-token sidecar for a feature that is not
+    # mounted. Same rule the dashboard's own /api/v1/site applies.
+    unblock_on = youtube_unblock == "1" and youtube_download == "1"
     return {
         "services": {
             "dashboard": {
@@ -590,6 +705,17 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     "SYNCTHING_GUI_URL": gui_url,
                     "SYNCTHING_API_KEY": api_key,
                     "DASH_REPORT_TOKEN": token,
+                    # Whether that ONE shared token is still accepted beside
+                    # the per-editor tokens (COMMERCIAL_READINESS.md item 15,
+                    # 2026-08-17). "1" because every companion in the field
+                    # holds only the shared one; it becomes "0" once the
+                    # dashboard's boot-time list of machines still using it is
+                    # empty. Added here 2026-08-17 -- compose.yaml carried the
+                    # key and this dict did not, and the TrueNAS deploy posts
+                    # THIS dict, so the flag would never have reached the
+                    # container it was written for.
+                    "DASH_SHARED_REPORT_TOKEN_ENABLED":
+                        os.environ.get("DASH_SHARED_REPORT_TOKEN_ENABLED", "") or "1",
                     "DASH_SESSION_SECRET": session_secret,
                     # Blank would be an admin list naming nobody: every /admin
                     # route 403s, for everyone. Falls back to the account this
@@ -604,6 +730,14 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # serve` and DSM's reverse proxy set; an https site pins it.
                     "DASH_COOKIE_SECURE": cookie_secure_for(dashboard_url),
                     "DASH_DB_PATH": "/data/dashboard.db",
+                    # Where crash JSON lands (COMMERCIAL_READINESS.md item 13).
+                    # It is the default the code computes anyway
+                    # (crash_report.crash_dir: beside the database) -- set
+                    # explicitly so the persistent volume is a stated fact
+                    # rather than a coincidence of DASH_DB_PATH. NOTHING is
+                    # sent anywhere without DASH_SENTRY_DSN, which no deploy
+                    # sets.
+                    "DASH_CRASH_DIR": "/data/crashes",
                     "DASH_PORT": str(port),
                     "DASH_PROJECTS_DIR": "/projects",
                     # b-roll search UI, mounted in-process at /broll so
@@ -647,38 +781,59 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # YTDL_DATA_ROOT is the only writable one. The others are
                     # what it reaches through: the SHARED Projects tree that
                     # finished clips land in (sync distributes them from
-                    # there), the dashboard's own SQLite opened READ-ONLY for
-                    # the caller's ticked projects, and the home directory the
-                    # one-time `claude /login` writes its credentials into --
-                    # which ytdlweb.claude_cli puts in the SUBPROCESS env
-                    # only, because run.sh deliberately exports no HOME.
+                    # there), and the dashboard's own SQLite opened READ-ONLY
+                    # for the caller's ticked projects.
+                    #
+                    # YTDL_CLAUDE_HOME is GONE with the CLI (2026-08-17,
+                    # COMMERCIAL_READINESS.md item 1): the AI calls go through
+                    # the anthropic SDK now, so there is no subprocess needing
+                    # a HOME and no OAuth credential volume to keep.
                     "YTDL_DATA_ROOT": "/ytdl-data",
                     "YTDL_PROJECTS_ROOT": "/projects",
                     "YTDL_DASH_DB": "/data/dashboard.db",
-                    "YTDL_CLAUDE_HOME": "/claude-home",
-                    # The PO-token provider sidecar below, by compose service
-                    # name. Without this yt-dlp finds no provider and every
-                    # signed-in request comes back with no formats.
-                    "YTDL_POT_BASE_URL": f"http://{POT_PROVIDER_SERVICE}:{POT_PROVIDER_PORT}",
-                    # A signed-in cookies.txt is MANDATORY here, not the
-                    # optional escape hatch it reads as elsewhere: this IP is
-                    # bot-checked, so anonymous extraction fails outright.
-                    # Operator-provisioned (it is a live Google session, so it
-                    # is never in this repo) -- see ytdl/web/DEPLOY.md. An
-                    # absent file is a supported state: yt-dlp ignores the
-                    # option and the failure is the honest bot-check message.
-                    "YTDL_COOKIES_FILE": "/ytdl-data/cookies.txt",
+                    # THE CUSTOMER'S KEY, and blank unless they supplied one.
+                    # No default and no fallback: an empty value makes term
+                    # generation fail with the claude_auth: hint the SPA
+                    # already renders, which is the honest state of a
+                    # deployment nobody has given a key to. Never in this repo
+                    # -- it is a secret, and SECRET_ENV_VARS masks it in
+                    # --dry-run output like every other one.
+                    "ANTHROPIC_API_KEY": anthropic_api_key,
                     # yt-dlp DOWNLOADS the EJS challenge solver at first use
                     # and caches it. run.sh deliberately exports no HOME, so
                     # the default lands on /.cache -- which uid 3000 cannot
                     # create, making it re-fetch the solver on EVERY call.
                     "YTDL_CACHE_DIR": "/ytdl-data/cache",
+                    # WHICH OPTIONAL FEATURES THIS SITE TURNED ON, published by
+                    # GET /api/v1/site so every companion reads the same answer
+                    # (2026-08-17). youtube_download decides whether the
+                    # dashboard mounts /ytdl at all.
+                    "DASH_SITE_YOUTUBE_DOWNLOAD": youtube_download,
+                    "DASH_SITE_YOUTUBE_UNBLOCK": "1" if unblock_on else "0",
+                    **({
+                        # THE UNBLOCK HALF, present only when the customer
+                        # asked for it (COMMERCIAL_READINESS.md item 3). Both
+                        # keys exist to get past YouTube's anti-automation
+                        # measures, so the vendor build carries neither.
+                        #
+                        # The PO-token provider sidecar below, by compose
+                        # service name. Without it yt-dlp finds no provider and
+                        # every signed-in request comes back with no formats.
+                        "YTDL_POT_BASE_URL":
+                            f"http://{POT_PROVIDER_SERVICE}:{POT_PROVIDER_PORT}",
+                        # A signed-in cookies.txt: a live Google session, so it
+                        # is operator-provisioned and never in this repo (see
+                        # ytdl/web/DEPLOY.md). An absent file is a supported
+                        # state -- yt-dlp ignores the option and the failure is
+                        # the honest bot-check message.
+                        "YTDL_COOKIES_FILE": "/ytdl-data/cookies.txt",
+                    } if unblock_on else {}),
                     # Requester-first downloads ON (docs/YTDL_LOCAL_DOWNLOAD.md).
                     # This is the SPA-side switch: without it the page never
                     # probes the requester's companion and every job takes the
                     # server path -- which is exactly what happened for the
                     # first two days after 0.7.8 shipped (2026-08-15/16): the
-                    # companion side was live on ruskin's box, the flag was
+                    # companion side was live on an editor's box, the flag was
                     # never set here, /ytdl/api/health said local_download:
                     # false, and nobody noticed because the server path is the
                     # designed fallback and it kept working. Set by the deploy
@@ -686,6 +841,15 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # rollback is the "download on the server instead" link
                     # (mode_lock=server); the global one is removing this line.
                     "YTDL_LOCAL_DOWNLOAD": "1",
+                    # The release public key(s) the publish route verifies
+                    # against (COMMERCIAL_READINESS.md item 4, 2026-08-17).
+                    # Comma-separated base64; `python tools/release_key.py
+                    # pubkey` prints the value. UNSET = the upgrade channel is
+                    # unauthenticated, and the dashboard refuses to publish at
+                    # all (503) rather than accepting a build nothing can
+                    # verify -- everything else keeps working. Passed through
+                    # from the deploying shell's environment, like the secrets.
+                    "DASH_RELEASE_PUBKEYS": os.environ.get("DASH_RELEASE_PUBKEYS", ""),
                     # DASH_PACKAGES_DIR intentionally unset: defaults to a
                     # "packages" dir next to DASH_DB_PATH (/data/packages),
                     # which is already the persistent volume.
@@ -700,7 +864,18 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # the dashboard is never exposed beyond LAN/tailnet.
                     "TRUENAS_HOST": truenas_host,
                     "TRUENAS_USER": truenas_user,
+                    # ...and the answer changed on 2026-08-17: with a SCOPED
+                    # API KEY the password no longer has to be here at all
+                    # (COMMERCIAL_READINESS.md item 6 / finding H3). The
+                    # dashboard prefers DASH_NAS_API_KEY over the password;
+                    # mint one with server/create_api_key.py, which restricts
+                    # it to the user/group/sharing.smb methods this UI calls.
+                    # The password stays supported (and stays the only option
+                    # on DSM, which has no API-key concept) -- it is just no
+                    # longer the only way.
                     "TRUENAS_PW": truenas_pw,
+                    "TRUENAS_API_KEY": truenas_api_key,
+                    "DASH_NAS_API_KEY": truenas_api_key,
                     # Which NAS the dashboard's runtime backend talks to
                     # (ccsync_dashboard.nas.factory). "truenas" is what it
                     # defaults to anyway -- set explicitly so a deployment
@@ -794,17 +969,18 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # here; they are written into /projects above, which is
                     # what makes sync distribute them to the editors.
                     f"{host_root}/ytdl-data:/ytdl-data:rw",
-                    # The one-time `claude /login` credentials, so they survive
-                    # a redeploy (once per NAS). 3000:3000 mode 700: a live
-                    # OAuth credential for the user's own Claude account.
-                    f"{host_root}/claude-home:/claude-home:rw",
-                    # The Claude CLI and a static deno, provisioned onto the
-                    # host like ffmpeg and mounted read-only for the same
-                    # reason -- no image build, unprivileged container. deno
-                    # is what answers YouTube's JS challenges for yt-dlp;
-                    # without it the high-quality formats fail.
-                    f"{host_root}/claude-bin:/opt/claude:ro",
-                    f"{host_root}/deno:/opt/deno:ro",
+                    # claude-home and claude-bin are GONE (2026-08-17,
+                    # COMMERCIAL_READINESS.md item 1): no CLI subprocess, so no
+                    # OAuth credential volume and no agent binary inside a
+                    # container that mounts the whole Projects tree rw. A host
+                    # that still carries those directories from an older deploy
+                    # is simply no longer mounting them.
+                    #
+                    # deno -- the "n challenge" JS solver -- is mounted only on
+                    # a site that enabled youtube_unblock (item 3). Provisioned
+                    # onto the host like ffmpeg and read-only for the same
+                    # reason: no image build, unprivileged container.
+                    *([f"{host_root}/deno:/opt/deno:ro"] if unblock_on else []),
                 ],
                 "restart": "unless-stopped",
                 "healthcheck": healthcheck_config(port),
@@ -835,10 +1011,18 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
             # The `-deno` flavour is deliberate (the `-node` one is the same
             # server on a different runtime; deno is what this fleet already
             # provisions for yt-dlp's JS challenges).
-            POT_PROVIDER_SERVICE: {
+            #
+            # OFF BY DEFAULT SINCE 2026-08-17 (COMMERCIAL_READINESS.md item 3).
+            # A proof-of-origin token minter exists for one purpose -- getting
+            # past YouTube's anti-automation measures -- so the vendor build
+            # does not run one. The service appears only on a site whose
+            # manifest says `[features] youtube_unblock`, which is that
+            # customer asserting they may; see
+            # docs/legal/YOUTUBE_FEATURE_NOTICE.md.
+            **({POT_PROVIDER_SERVICE: {
                 "image": POT_PROVIDER_IMAGE,
                 "restart": "unless-stopped",
-            },
+            }} if unblock_on else {}),
         }
     }
 
@@ -969,13 +1153,30 @@ SECRET_ENV_VARS = (
     "DASH_SESSION_SECRET",
     "BROLL_INGEST_TOKEN",
     "TRUENAS_PW",
+    # A scoped API key is still a bearer credential and is masked exactly as
+    # the password is (2026-08-17, item 6). DASH_NAS_API_KEY is deliberately
+    # NOT listed: it carries the SAME value under the neutral name, so it is
+    # already masked by the time it gets there, and listing it would demand a
+    # second, differently-named placeholder for one credential.
+    "TRUENAS_API_KEY",
+    # The customer's Anthropic key, which the /ytdl AI calls authenticate with
+    # since the Claude CLI came out (2026-08-17, item 1). A bearer credential
+    # billed to their account -- masked in --dry-run exactly like the rest.
+    "ANTHROPIC_API_KEY",
 )
 
 # The same secrets as they appear in the compose FILE (the Synology path):
 # every one is a `KEY: "REPLACE_ME"` line that becomes a ${KEY} reference into
 # the 0600 .env. DASH_NAS_PW is the sixth because the template sets both names
 # for the NAS password (see compose_config).
-STACK_ENV_SECRETS = SECRET_ENV_VARS + ("DASH_NAS_PW",)
+#
+# TRUENAS_API_KEY is deliberately NOT in here: the compose FILE already
+# references it as `${TRUENAS_API_KEY:-}` rather than a REPLACE_ME literal,
+# because it is TrueNAS-only and a Synology stack legitimately has none (DSM
+# has no API-key concept). An empty default is the correct value there, and a
+# REPLACE_ME that must be substituted would refuse the whole deploy.
+STACK_ENV_SECRETS = tuple(n for n in SECRET_ENV_VARS if n != "TRUENAS_API_KEY") \
+    + ("DASH_NAS_PW",)
 
 
 def dry_run_mask(name: str, value: str) -> str:
@@ -1164,7 +1365,10 @@ def human_bytes(n: int) -> str:
 
 
 def build_db_swap_script(data_root: str, staging: str, target: str,
-                         old: str, expected_bytes: int) -> str:
+                         old: str, expected_bytes: int,
+                         filename: str = MUSIC_DB_FILENAME,
+                         owner: str = "3000:3000", mode: str = "660",
+                         extra_verify: str = "") -> str:
     """Install one shipped music.db, with install_tree's guarantees for a file.
 
     Everything in install_tree that stops a half-transfer from becoming the
@@ -1179,13 +1383,32 @@ def build_db_swap_script(data_root: str, staging: str, target: str,
         database file they sit beside, and leaving a stale -wal next to a
         freshly replaced db is how a working index becomes a corrupt one. They
         are moved aside with it, never deleted.
+
+    Generalised on 2026-08-17 (COMMERCIAL_READINESS.md item 8) so
+    publish_db.py can install broll.db by the same route: `filename` /
+    `owner` / `mode` default to music's and are otherwise untouched, and
+    `extra_verify` is spliced in AFTER the byte check and BEFORE the first
+    rename -- i.e. at the only point where the candidate is on the target's
+    own filesystem and nothing live has been touched yet. That is where
+    `PRAGMA quick_check` belongs: a database that is the right SIZE and
+    structurally broken is exactly what a copy over a live WAL-mode file
+    produces.
     """
+    # owner/mode go into the script UNQUOTED (`chown 3000:3000`, which is what
+    # the deploy has emitted since 2026-08-11 and what server/tests asserts on),
+    # so they are the one pair here that is not shell-quoted -- hence a check
+    # rather than an escape. They can come from site.toml's [stack] owner/group
+    # via publish_db.py, i.e. from a customer's file (2026-08-17).
+    for what, value in (("owner", owner), ("mode", mode)):
+        if value and not re.fullmatch(r"[A-Za-z0-9_.:-]+", str(value)):
+            raise EnvError(f"refusing to build a swap script with {what}={value!r}: "
+                           f"only letters, digits and _.:- are allowed there.")
     root_q = shell_quote(data_root)
     db_q = shell_quote(target)
     new_q = shell_quote(target + ".new")
     old_q = shell_quote(old)
     staging_q = shell_quote(staging)
-    staged_q = shell_quote(posixpath.join(staging, MUSIC_DB_FILENAME))
+    staged_q = shell_quote(posixpath.join(staging, filename))
     sidecars = " ".join(
         f'if [ -e {shell_quote(target + s)} ]; then '
         f'mv {shell_quote(target + s)} {shell_quote(old + s)}; fi;'
@@ -1207,12 +1430,18 @@ def build_db_swap_script(data_root: str, staging: str, target: str,
         f"mkdir -p {root_q}; "
         f"rm -f {new_q}; "
         f"cp -a {staged_q} {new_q}; "
-        f"chown 3000:3000 {new_q}; "
-        f"chmod 660 {new_q}; "
+        # Blank owner/mode is the DSM tree-share case, and it is not laziness:
+        # a chown or chmod on a Synology share path DESTROYS its ACL (spike 1),
+        # so publish_db.py carries owner and ACL across with `synoacltool -copy`
+        # through extra_verify instead (2026-08-17).
+        + (f"chown {owner} {new_q}; " if owner else "")
+        + (f"chmod {mode} {new_q}; " if mode else "")
+        + (
         f"b=$(wc -c < {new_q}); "
         f'if [ "$b" -ne {expected_bytes} ]; then '
         f'echo "candidate index incomplete: $b bytes, expected {expected_bytes} '
         f'-- the installed index is untouched" >&2; exit 8; fi; '
+        f"{extra_verify}"
         # Only now is anything live touched, and only by renames.
         f"if [ -e {db_q} ]; then mv {db_q} {old_q}; fi; "
         f"{sidecars} "
@@ -1220,6 +1449,7 @@ def build_db_swap_script(data_root: str, staging: str, target: str,
         f"{sidecars_back} "
         f'echo "swap failed, previous index restored" >&2; exit 9; }}; '
         f"rm -rf {staging_q}"
+        )
     )
 
 
@@ -1440,6 +1670,20 @@ def ffmpeg_cache_path(url: str) -> Path:
     return cache / f"{hashlib.sha256(url.encode()).hexdigest()[:12]}-{name}"
 
 
+def ffmpeg_gpl_notice(url: str) -> str:
+    """FFMPEG_LOCAL_PUSH_GPL_NOTICE with the version named (2026-08-17).
+
+    The version is read off the tarball name rather than from a second constant
+    that could drift from DEFAULT_FFMPEG_URL -- a notice that cites the wrong
+    build is worse than one that admits it does not know, which is what an
+    overridden MUSIC_FFMPEG_URL that does not carry a version gets.
+    """
+    name = posixpath.basename(urllib.parse.urlparse(url).path)
+    m = re.search(r"ffmpeg-(\d[0-9A-Za-z.]*)", name)
+    return FFMPEG_LOCAL_PUSH_GPL_NOTICE.format(
+        version=m.group(1) if m else "version unknown")
+
+
 def fetch_ffmpeg_tarball(url: str, sha256: str) -> tuple[Path | None, str]:
     """Get the tarball onto THIS machine. Returns (path, error).
 
@@ -1606,15 +1850,26 @@ def provision_ffmpeg(root: str, fetch: str, dry_run: bool) -> None:
         return
 
     if fetch == "remote":
-        # SERVER-1: the 600 s ceiling below is the one this function's own error
-        # text says johnvansickle blows through at ~28 kB/s -- and paramiko
-        # answers that by RAISING, not by returning non-zero, so the "everything
-        # else deploys" promise needed the guard to be true.
+        if local_file:
+            # MUSIC_FFMPEG_FILE only ever fed the LAN push, and the push stopped
+            # being the default on 2026-08-17 -- so an operator who set it would
+            # otherwise watch the NAS download a file they already have, in
+            # silence.
+            print(f"NOTE: MUSIC_FFMPEG_FILE={local_file} is ignored in 'remote' "
+                  f"fetch mode -- the NAS downloads its own copy. Pass "
+                  f"--push-ffmpeg-from-local to push that file instead.",
+                  file=sys.stderr)
+        # SERVER-1: paramiko answers a blown ceiling by RAISING, not by returning
+        # non-zero, so the "everything else deploys" promise needs the guard to
+        # be true. The ceiling itself is FFMPEG_REMOTE_INSTALL_TIMEOUT rather
+        # than the old 600 s, which is what johnvansickle blew through at
+        # ~28 kB/s when this was the default before (2026-08-17, see the
+        # constant).
         rc, out, err = run_ssh_guarded(
             'echo "$SUDO_PW" | sudo -S sh -c '
             + shell_quote(build_ffmpeg_install_script(target_dir, url, sha)),
             dry_run,
-            600,
+            FFMPEG_REMOTE_INSTALL_TIMEOUT,
         )
         if dry_run:
             print(f"[dry-run] would have the NAS download {url} and provision "
@@ -1627,10 +1882,19 @@ def provision_ffmpeg(root: str, fetch: str, dry_run: bool) -> None:
                   f"Everything else deploys; /music's queued ingest will answer "
                   f"503 until ffmpeg and ffprobe exist in {target_dir}.\n"
                   f"  The NAS is slow to reach some download hosts (johnvansickle "
-                  f"at ~28 kB/s = ~25 min for this file, past run_ssh's 600s "
-                  f"timeout). --ffmpeg-fetch local fetches it here instead.",
+                  f"at ~28 kB/s = ~25 min for this file, against the "
+                  f"{FFMPEG_REMOTE_INSTALL_TIMEOUT}s ceiling this step is given). "
+                  f"--push-ffmpeg-from-local fetches it here and pushes it "
+                  f"instead -- which makes you the distributor of a GPLv3 "
+                  f"binary, so read the notice it prints.",
                   file=sys.stderr)
         return
+
+    # The conveying half. Printed before the bytes move, on dry runs too, so the
+    # obligation is visible while the choice is still reversible (2026-08-17,
+    # COMMERCIAL_READINESS.md item 3).
+    print(ffmpeg_gpl_notice(url or os.environ.get("MUSIC_FFMPEG_FILE", "")),
+          file=sys.stderr)
 
     tarball, err = (None, "")
     if dry_run:
@@ -1746,8 +2010,8 @@ def build_binary_install_script(target_dir: str, binary: str, staged: str,
       - the digest is checked BEFORE anything is unpacked or created, so a
         transfer that arrived wrong leaves no trace on the host at all;
       - the candidate is EXECUTED (`--version`) before it is moved into place:
-        a build for the wrong architecture must not become the `claude` or
-        `deno` the app finds on PATH;
+        a build for the wrong architecture must not become the `deno` the app
+        finds on PATH;
       - nothing is deleted -- a previous install is only ever replaced by `mv`.
 
     The archive kind is decided from the staged FILENAME, not sniffed: .zip
@@ -2371,9 +2635,14 @@ SYNOLOGY_STAGING_DIRNAME = "staging"
 SYNOLOGY_HOST_DIRS = (
     ("app", "code"), ("broll-web", "code"), ("music-web", "code"),
     ("music-encoder", "code"), ("music-proxies", "code"), ("ffmpeg", "code"),
-    ("ytdl-web", "code"), ("claude-bin", "code"), ("deno", "code"),
+    # claude-bin / claude-home are GONE (2026-08-17, COMMERCIAL_READINESS.md
+    # item 1): no CLI subprocess, so no binary and no OAuth credential volume.
+    # `deno` stays in the list -- an EMPTY code dir costs nothing and the mount
+    # only exists on a site that enabled youtube_unblock, which is the flag
+    # that also provisions the binary into it (item 3).
+    ("ytdl-web", "code"), ("deno", "code"),
     ("venv", "private"), ("data", "private"), ("music-data", "private"),
-    ("ytdl-data", "private"), ("claude-home", "private"),
+    ("ytdl-data", "private"),
     ("syncthing-config", "private"),
 )
 
@@ -2398,7 +2667,7 @@ def build_synology_host_dirs(root: str, uid: int, ssh_user: str) -> str:
         f"mkdir -p {root_q} {code_q} {private_q} {shell_quote(staging)}; "
         f"chown root:root {root_q} {code_q}; chmod 755 {root_q} {code_q}; "
         # Create-only for the private dirs' CONTENTS: dashboard.db, ytdl.db and
-        # the claude credentials live in them and are never touched by a
+        # the ytdl job ledger live in them and are never touched by a
         # redeploy. Only the directory itself is re-owned, non-recursively.
         f"chown {uid} {private_q}; chmod 700 {private_q}; "
         # Staging belongs to the SSH user: SFTP writes as them, and the files
@@ -2549,22 +2818,50 @@ def main():
                          "Only /music's queued ingest uses them, and it answers 503 "
                          "with a readable message when they are missing.")
     ap.add_argument("--no-ytdl-bins", action="store_true",
-                    help="skip provisioning the Claude CLI and deno onto the host "
-                         "for /ytdl. They are skipped anyway when YTDL_CLAUDE_URL / "
-                         "YTDL_DENO_URL are unset -- this is for re-running a deploy "
-                         "without re-probing the NAS for them.")
+                    help="skip provisioning deno onto the host for /ytdl. It is "
+                         "skipped anyway unless this site enabled youtube_unblock "
+                         "AND YTDL_DENO_URL is set -- this is for re-running a "
+                         "deploy without re-probing the NAS for it.")
+    # COMMERCIAL_READINESS.md items 2 + 3 (2026-08-17). Both default OFF and
+    # both are normally set in the customer's site.toml [features]; the flags
+    # exist so a one-off deploy can turn them on without editing the manifest.
+    ap.add_argument("--enable-youtube", action="store_true",
+                    help="deploy the /ytdl YouTube downloader (site.toml "
+                         "[features] youtube_download). OFF by default: the "
+                         "customer, not the vendor, decides whether downloading "
+                         "third-party YouTube material is lawful for them. See "
+                         "docs/legal/YOUTUBE_FEATURE_NOTICE.md.")
+    ap.add_argument("--enable-youtube-unblock", action="store_true",
+                    help="ALSO provision the components that get past YouTube's "
+                         "anti-automation measures: the PO-token provider "
+                         "sidecar, the deno n-challenge solver and the NAS-side "
+                         "signed-in cookies file (site.toml [features] "
+                         "youtube_unblock). OFF by default and never part of the "
+                         "vendor build; setting it is the customer asserting they "
+                         "may. Requires --enable-youtube.")
     ap.add_argument("--ffmpeg-fetch", choices=FFMPEG_FETCH_MODES,
                     default=os.environ.get("MUSIC_FFMPEG_FETCH",
                                            DEFAULT_FFMPEG_FETCH).strip()
                             or DEFAULT_FFMPEG_FETCH,
                     help="which machine downloads the 42 MB ffmpeg tarball: "
-                         "'local' (default) fetches it here, checksums it and "
-                         "pushes it over the LAN; 'remote' has the NAS curl it, "
-                         "which is what the first deploy of this app timed out "
-                         "on (the NAS pulls that host at ~28 kB/s).")
+                         "'remote' (default) has the NAS curl the pinned URL "
+                         "itself, so nothing GPLv3 is conveyed by this machine; "
+                         "'local' fetches it here, checksums it and pushes it "
+                         "over the LAN (see --push-ffmpeg-from-local).")
+    ap.add_argument("--push-ffmpeg-from-local", action="store_true",
+                    help="equivalent to --ffmpeg-fetch local: fetch the ffmpeg "
+                         "tarball on THIS machine and push it to the host. For "
+                         "an air-gapped site whose NAS has no route out. It "
+                         "conveys a GPLv3 binary, which obliges you to supply "
+                         "corresponding source or a written offer -- the notice "
+                         "it prints says how.")
     ap.add_argument("--recreate", action="store_true",
                     help="delete and re-create the app so compose changes (env vars, "
                          "mounts, ports) take effect; host app/ and data/ dirs survive")
+    ap.add_argument("--require-snapshot", action="store_true",
+                    help="stop (exit 2, nothing moved) if the pre-deploy snapshot of "
+                         "the apps dataset cannot be taken. Default is best-effort: "
+                         "warn and deploy anyway (COMMERCIAL_READINESS.md item 8).")
     ap.add_argument("--with-host-binaries", action="store_true",
                     help="Synology only: also push the ~1.4 GB of music DATA and the "
                          "ffmpeg/Claude/deno binaries. They are SKIPPED by default on "
@@ -2582,6 +2879,12 @@ def main():
     add_nas_kind_arg(ap)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    # --push-ffmpeg-from-local is the named door onto --ffmpeg-fetch local: the
+    # mode is one thing, but the thing an air-gapped operator is looking for is
+    # a flag that says what it does, and the GPLv3 consequence rides on the mode
+    # (2026-08-17, COMMERCIAL_READINESS.md item 3).
+    if args.push_ffmpeg_from_local:
+        args.ffmpeg_fetch = "local"
     set_host_key_pin(args.host_key)
     global _ARGS
     _ARGS = args
@@ -2672,10 +2975,14 @@ def main():
               f"'absent' and hide the nav link. music/web is part of THIS repo, "
               f"so a missing one means a partial checkout; MUSIC_WEB_SRC points "
               f"at a web/ tree elsewhere.", file=sys.stderr)
-    # ytdl pre-flight: the music rule, verbatim. Nothing on this command line
-    # asserts that the operator wants the YouTube downloader -- shipping the
-    # tree IS the switch -- so a checkout without it deploys a dashboard whose
-    # /ytdl mount reports "absent" and whose nav link is simply not there.
+    # ytdl pre-flight. Shipping the tree used to BE the switch; since
+    # 2026-08-17 the switch is the site's `[features] youtube_download`
+    # (COMMERCIAL_READINESS.md item 2) and the tree is only the code. An
+    # unshipped tree still means "absent" -- a partial checkout must say so --
+    # but a SHIPPED tree on a site that has not enabled the feature is not
+    # mounted either, so /ytdl and its fleet routes 404 and the nav link is
+    # not there. Read-only code the dashboard never imports costs a few MB and
+    # makes enabling the feature a redeploy rather than a re-ship.
     ytdl_src = ytdl_web_source()
     ship_ytdl = (ytdl_src / "ytdlweb" / "main.py").is_file()
     if not ship_ytdl:
@@ -2702,9 +3009,64 @@ def main():
     session_secret = secrets["DASH_SESSION_SECRET"]
     broll_ingest_token = secrets["BROLL_INGEST_TOKEN"]
     truenas_pw = secrets["TRUENAS_PW"]
+    # A scoped TrueNAS API key, if the site has minted one
+    # (server/create_api_key.py). Preferred over the password IN THE CONTAINER:
+    # `docker inspect` on that container currently hands over a root-equivalent
+    # NAS login (COMMERCIAL_READINESS.md item 6 / finding H3), and the admin
+    # Users page only needs user/group/sharing.smb. The base rig's own SSH and
+    # REST calls are unaffected -- they still authenticate as the admin,
+    # because `sudo` and authorized_keys are not API operations.
+    nas_api_key = truenas_api_key()
+    # Masked for the printed body, exactly as the password is -- and only when
+    # one exists, so an unconfigured site's body still shows a truthful blank.
+    compose_api_key = (secrets["TRUENAS_API_KEY"] if args.dry_run else nas_api_key)
+    # With a key, the PASSWORD is what stops being written into the container.
+    # The decision lives here rather than inside compose_config so that a
+    # dry-run's masked key cannot be mistaken for a configured one.
+    compose_nas_pw = "" if nas_api_key else truenas_pw
+    # The customer's Anthropic key for /ytdl's two AI calls (2026-08-17,
+    # COMMERCIAL_READINESS.md item 1). Blank is a supported state -- the
+    # downloader then reports claude_auth: and nothing else is affected -- so
+    # this is read, never required. Masked in --dry-run like every other
+    # credential in the printed body.
+    anthropic_api_key = (secrets["ANTHROPIC_API_KEY"] if args.dry_run
+                         else os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    # Which optional features this site turned on. site.toml is the source and
+    # the flag is the override, matching every other value here.
+    youtube_download = "1" if (args.enable_youtube
+                               or site_bool("features", "youtube_download")) else "0"
+    youtube_unblock = "1" if (args.enable_youtube_unblock
+                              or site_bool("features", "youtube_unblock")) else "0"
+    if youtube_download == "1" and not anthropic_api_key and not args.dry_run:
+        print("NOTE: the YouTube downloader is enabled for this site but "
+              "ANTHROPIC_API_KEY is not set. Everything deploys; /ytdl will "
+              "report 'no working Anthropic API key' until it is "
+              "(ytdl/web/DEPLOY.md).", file=sys.stderr)
+    if youtube_unblock == "1" and youtube_download != "1":
+        print("NOTE: [features] youtube_unblock is set but youtube_download is "
+              "not -- the unblock components only serve the downloader, so "
+              "nothing is provisioned for them.", file=sys.stderr)
+    if backend().kind == "truenas":
+        if nas_api_key:
+            print("NAS credentials for the container: scoped API key "
+                  "(TRUENAS_API_KEY); the admin password is NOT written into the "
+                  "container environment.")
+        else:
+            print("NOTE: the dashboard container will hold the NAS ADMIN PASSWORD "
+                  "(TRUENAS_PW), which `docker inspect` and any code execution in "
+                  "that container can read. Mint a scoped key instead:\n"
+                  "        python server/create_api_key.py --name ccsync-dashboard\n"
+                  "      then export TRUENAS_API_KEY=... and redeploy "
+                  "(docs/SERVER.md, \"Scoped API key\").", file=sys.stderr)
     # "0" keeps today's behaviour (self-signed NAS cert trusted); the dashboard
-    # reads the same var (truenas_client._verify_setting).
+    # reads the same var (truenas_client._verify_setting). A CA bundle path
+    # inside the container is the answer once the NAS has a real cert --
+    # docs/SERVER.md, "Verifying the NAS certificate".
     truenas_verify_ssl = os.environ.get("TRUENAS_VERIFY_SSL", "0").strip() or "0"
+    if truenas_verify_ssl in ("0", "false", "no"):
+        print("NOTE: TRUENAS_VERIFY_SSL=0 -- the container will not verify the NAS's "
+              "TLS certificate on its API calls. Export the NAS CA and set "
+              "TRUENAS_VERIFY_SSL=/certs/nas-ca.pem once it has one.", file=sys.stderr)
     # Host and user only -- neither is a secret, and both appear in the printed
     # ssh lines anyway. The password for the compose body comes from `secrets`;
     # run_ssh and truenas_api re-read TRUENAS_PW themselves for their own calls.
@@ -2714,7 +3076,7 @@ def main():
     # was this fleet's own username and, on any other site, an admin list
     # naming NOBODY: every /admin route then answers 403 to everyone, including
     # the person who just installed it (found on the 2026-08-17 Synology
-    # bring-up, where the account is `Cablewrap`).
+    # bring-up, where the account is `Studio`).
     admin_users = os.environ.get("DASH_ADMIN_USERS", "").strip() or truenas_user
 
     root = require_site_value(args.host_root, "[apps] root", "--host-root").rstrip("/")
@@ -2806,6 +3168,18 @@ def main():
             print(f"stack identity: the container will run as {app_uid}:{app_gid} "
                   f"({DEFAULT_DATASET_OWNER}:{EDITORS_GROUP}), read from the NAS")
 
+    # Step 0: a point-in-time to come back to. Everything from here down is
+    # privileged and destructive by design -- `mv app app.old.<ts>`, a
+    # recursive chown, `rm -rf` of a staging tree, and on --recreate a DELETE
+    # of the whole stack. The rollbacks in this file are all rename-aside,
+    # which covers a step that FAILS and covers nothing about a deploy that
+    # succeeded at doing the wrong thing (COMMERCIAL_READINESS.md item 8,
+    # 2026-08-17). Best-effort unless --require-snapshot: a NAS whose snapshot
+    # API is unreachable must not be a NAS that cannot be deployed to.
+    snapshot_before("recreate" if args.recreate else "deploy", root,
+                    dry_run=args.dry_run, require=args.require_snapshot,
+                    backend=backend())
+
     # Step 1: host dirs. app/ is root-owned and world-readable but NOT
     # group-writable -- editors have shell accounts in group 3001, and a
     # group-writable code dir behind the container's `command: run.sh` was an
@@ -2869,18 +3243,19 @@ def main():
             f"mkdir -p {shell_quote(root + '/music-data')} && "
             f"chown 3000:3000 {shell_quote(root + '/music-data')} && "
             f"chmod 770 {shell_quote(root + '/music-data')} && "
-            # ytdl CODE and the two binary dirs: the /app posture again --
-            # root-owned, world-readable, mounted :ro. The binaries in
-            # particular are EXECUTED by the container and must not be
-            # replaceable from inside it.
+            # ytdl CODE and the deno dir: the /app posture again -- root-owned,
+            # world-readable, mounted :ro. A binary here is EXECUTED by the
+            # container and must not be replaceable from inside it.
+            #
+            # claude-bin is gone with the CLI (2026-08-17, item 1). An existing
+            # one on a previously-deployed host is left where it is -- the
+            # no-deletion rule -- and simply stops being mounted; the operator
+            # step to remove it, with claude-home, is in ytdl/web/DEPLOY.md.
             f"mkdir -p {shell_quote(root + '/ytdl-web')} "
-            f"{shell_quote(root + '/claude-bin')} "
             f"{shell_quote(root + '/deno')} && "
             f"chown root:root {shell_quote(root + '/ytdl-web')} "
-            f"{shell_quote(root + '/claude-bin')} "
             f"{shell_quote(root + '/deno')} && "
             f"chmod 755 {shell_quote(root + '/ytdl-web')} "
-            f"{shell_quote(root + '/claude-bin')} "
             f"{shell_quote(root + '/deno')} && "
             # ytdl DATA root: ytdl.db and the worker's scratch, so data/'s
             # posture -- 3000:3000 mode 770, group 3000 and NOT 3001/editors,
@@ -2888,14 +3263,7 @@ def main():
             # live job ledger in it) is left alone.
             f"mkdir -p {shell_quote(root + '/ytdl-data')} && "
             f"chown 3000:3000 {shell_quote(root + '/ytdl-data')} && "
-            f"chmod 770 {shell_quote(root + '/ytdl-data')} && "
-            # The Claude home: 700, tighter than everything else here, because
-            # it holds a live OAuth credential for the user's own Claude
-            # account after the one-time `claude /login`. Same posture as the
-            # venv volume, and for the same class of reason.
-            f"mkdir -p {shell_quote(root + '/claude-home')} && "
-            f"chown 3000:3000 {shell_quote(root + '/claude-home')} && "
-            f"chmod 700 {shell_quote(root + '/claude-home')}"
+            f"chmod 770 {shell_quote(root + '/ytdl-data')}"
         ),
         dry_run=args.dry_run,
     )
@@ -2905,7 +3273,7 @@ def main():
     print(f"host dirs ready: {root}/app, {root}/venv, {root}/data, {root}/broll-web, "
           f"{root}/music-web, {root}/music-data, {root}/music-encoder, "
           f"{root}/music-proxies, {root}/ffmpeg, {root}/ytdl-web, {root}/ytdl-data, "
-          f"{root}/claude-home, {root}/claude-bin, {root}/deno")
+          f"{root}/deno")
 
     # Where the 1.4 GB music artefacts are staged (OPS-8). /tmp on the NAS may
     # be RAM-backed and holds the whole component until the swap `cp -a`s it
@@ -3050,10 +3418,12 @@ def main():
     if (ship_music or ship_ytdl) and not args.no_ffmpeg:
         provision_ffmpeg(root, args.ffmpeg_fetch, args.dry_run)
 
-    # The Claude CLI and deno for /ytdl. Non-fatal in every direction,
+    # deno for /ytdl -- the n-challenge solver, and ONLY on a site that
+    # enabled youtube_unblock (2026-08-17, COMMERCIAL_READINESS.md item 3).
+    # The Claude CLI is gone entirely (item 1). Non-fatal in every direction,
     # including an unset URL: see provision_ytdl_binaries. ffmpeg is not
     # repeated here -- the step above covers both mounts.
-    if ship_ytdl and not args.no_ytdl_bins:
+    if ship_ytdl and youtube_unblock == "1" and not args.no_ytdl_bins:
         provision_ytdl_binaries(root, args.dry_run)
 
     # A pre-C-2 deployment has an editor-writable venv sitting inside data/.
@@ -3204,8 +3574,9 @@ def main():
     # (2026-08-17).
     compose_body = compose_config(
         args.port, root, args.syncthing_gui_url, api_key, token,
-        session_secret, admin_users, truenas_host, truenas_user, truenas_pw,
+        session_secret, admin_users, truenas_host, truenas_user, compose_nas_pw,
         truenas_verify_ssl=truenas_verify_ssl,
+        truenas_api_key=compose_api_key,
         image=args.image,
         broll_enabled=broll_enabled,
         # Validated in the pre-flight above (weak_ingest_token) against the
@@ -3220,6 +3591,9 @@ def main():
         ssh_hostkey=site_value("nas", "ssh_hostkey"),
         ssh_port=site_value("net", "sftp_port") or "22",
         ssh_key_probe=site_value("nas", "ssh_key_probe") or "1",
+        youtube_download=youtube_download,
+        youtube_unblock=youtube_unblock,
+        anthropic_api_key=anthropic_api_key,
     )
     # A compose FILE for a platform that reads one. Rendered from exactly the
     # variables the dict above is built from, with the five secrets turned into
@@ -3244,6 +3618,11 @@ def main():
             "BROLL_INGEST_TOKEN": broll_ingest_token,
             "TRUENAS_PW": truenas_pw,
             "DASH_NAS_PW": truenas_pw,
+            # The customer's Anthropic key (2026-08-17, item 1). Legitimately
+            # blank -- a site that has not bought one deploys fine and /ytdl
+            # says so -- but it goes in the 0600 .env like every other secret,
+            # never into the world-readable compose.yaml beside it.
+            "ANTHROPIC_API_KEY": anthropic_api_key,
         }
         if args.dry_run:
             print(f"[dry-run] the .env would carry: "

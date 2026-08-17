@@ -569,7 +569,7 @@ def test_ordinary_slugs_keep_their_plain_urls():
     )
 
 
-# -- per-home API-key fallback (alex_laptop, 2026-07-26) --------------------
+# -- per-home API-key fallback (owen_laptop, 2026-07-26) --------------------
 
 
 def test_request_falls_back_across_homes_on_403(tmp_path, monkeypatch):
@@ -680,7 +680,7 @@ def test_a_known_good_key_costs_no_config_xml_parse(tmp_path, monkeypatch):
 def test_the_multi_home_fallback_still_expands_on_a_403(tmp_path, monkeypatch):
     """The lazy list must not cost the fallback its only trigger: a key that
     stops being accepted has to reach the other home's config.xml (the
-    alex_laptop 2026-07-26 failure)."""
+    owen_laptop 2026-07-26 failure)."""
     import urllib.error
 
     _two_homes(tmp_path, monkeypatch)

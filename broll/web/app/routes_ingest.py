@@ -1,10 +1,18 @@
 """Ingest endpoints used by indexer/ when not co-located with the DB.
 
 Token check: header X-Ingest-Token, checked against env BROLL_INGEST_TOKEN.
-If that env var is unset, ingest is allowed without a token (dev mode).
+FAIL-CLOSED: no BROLL_INGEST_TOKEN means no ingest at all (503). There used to
+be a "dev mode" branch here that returned early when the env var was unset, so
+a checkout run straight out of the repo -- or any deployment that lost the
+variable -- served an unauthenticated write path that can repoint every clip's
+archive path. Only the dashboard's BrollGate stood between that branch and a
+logged-in editor, and one gate is not a design (COMMERCIAL_READINESS.md item
+15, 2026-08-17). Developers set BROLL_INGEST_TOKEN like any other deployment.
 """
 from __future__ import annotations
 
+import hmac
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -14,14 +22,34 @@ from app import config
 from app.db import bump_search_generation, get_db
 from app.schemas import IndexIn, MovedIn, ShareRootIn, VideoIn
 
+log = logging.getLogger("broll.ingest")
+
 router = APIRouter(prefix="/api/ingest")
 
 
 def verify_ingest_token(x_ingest_token: str | None = Header(default=None)) -> None:
     expected = config.get_ingest_token()
     if expected is None:
-        return  # dev mode: no token configured, ingest is open
-    if x_ingest_token != expected:
+        # 503, not 401: nothing the caller can send would help, and an
+        # operator reading the log needs to know it is the SERVER that is
+        # unconfigured. Logged every time on purpose -- an ingest run that
+        # silently does nothing is how an archive goes stale unnoticed.
+        log.error("ingest refused: BROLL_INGEST_TOKEN is not set on this server, so the "
+                  "write path is closed. Set it (e.g. `openssl rand -hex 24`) on both "
+                  "the server and the indexer.")
+        raise HTTPException(
+            status_code=503,
+            detail="ingest is not configured on this server (BROLL_INGEST_TOKEN unset)",
+        )
+    # compare_digest, not ==: the token is a shared secret and `==` leaks its
+    # length and matching prefix through timing. It refuses non-ASCII str, and
+    # a header is attacker-shaped input -- a TypeError here must be a 401, not
+    # a 500 (the dashboard gate learned this as DASH-5).
+    try:
+        ok = hmac.compare_digest(x_ingest_token or "", expected)
+    except TypeError:
+        ok = False
+    if not ok:
         raise HTTPException(status_code=401, detail="missing or invalid X-Ingest-Token")
 
 

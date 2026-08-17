@@ -10,7 +10,7 @@ Separate from the `embed` stage because it needs no model and no GPU — pure
 text processing — so it can run while the local pipeline is busy, and makes
 Chinese searchable immediately rather than waiting on embeddings.
 
-    python normalize_search.py --config config.queue.yaml
+    python normalize_search.py    # --config defaults to private/broll/indexer/config.queue.yaml
 """
 
 from __future__ import annotations
@@ -24,12 +24,13 @@ from pathlib import Path
 import yaml
 
 from broll_index import normalize
+from broll_index.site_data import DEFAULT_QUEUE_CONFIG
 from broll_index.storage.sqlite_backend import bump_search_generation
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.queue.yaml")
+    ap.add_argument("--config", default=DEFAULT_QUEUE_CONFIG)
     ap.add_argument("--batch", type=int, default=500)
     args = ap.parse_args()
 

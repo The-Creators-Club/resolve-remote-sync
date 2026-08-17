@@ -346,7 +346,7 @@ def test_ffmpeg_available_sees_the_managed_binary(monkeypatch):
 
 
 def test_capabilities_turn_ok_the_moment_the_managed_ffmpeg_lands(tmp_path, monkeypatch):
-    """The end-to-end reason this module exists: ruskin's probe said
+    """The end-to-end reason this module exists: an editor's probe said
     REASON_NO_FFMPEG and every job took the server path. With the default
     bare `ffmpeg_path` and nothing on PATH, the same probe says yes once the
     daily thread has installed the pair -- no restart, no config edit."""

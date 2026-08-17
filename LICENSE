@@ -1,0 +1,48 @@
+DRAFT FOR COUNSEL — NOT LEGAL ADVICE, NOT YET EXECUTABLE.
+Written 2026-08-17 for docs/COMMERCIAL_READINESS.md item 3, which recorded
+that this repository had no LICENSE at all. It has NOT been reviewed by a
+qualified legal professional.
+TODO(legal): replace "Cablewrap Creative" with the registered legal entity
+name, its company number and registered address. The placeholder was inferred
+from the operator's email domain and is almost
+certainly NOT the correct contracting entity — confirm before use.
+
+===============================================================================
+
+CC Sync — proprietary software
+
+Copyright (c) 2026 Cablewrap Creative. All rights reserved.
+
+This software and its source code are PROPRIETARY AND CONFIDENTIAL. They are
+NOT open source, and no open-source licence is granted by their presence in
+this repository, in a distributed build, or on any machine they are installed
+on.
+
+No licence, right or interest in this software is granted except as expressly
+set out in a written agreement with Cablewrap Creative. Use of the compiled
+software by an end user is governed by the End User Licence Agreement at
+docs/legal/EULA.md. Access to this source repository is governed separately by
+the applicable employment, contractor or confidentiality agreement.
+
+Without a written agreement to the contrary you may NOT copy, modify, merge,
+publish, distribute, sublicense, sell, host as a service, or create derivative
+works of this software, nor reverse-engineer, decompile or disassemble any
+compiled build of it, except to the extent that restriction is void under
+applicable law.
+
+THIRD-PARTY COMPONENTS. This software incorporates, links against, downloads
+at install time, or is distributed alongside third-party components that are
+licensed by their own authors under their own terms — including copyleft
+terms. Those components are NOT covered by this notice and remain subject to
+their own licences, which prevail over this notice for those components.
+docs/legal/THIRD_PARTY_NOTICES.md lists them, states each licence, and carries
+the written source offers where a licence requires one.
+
+TRADEMARKS. "DaVinci Resolve" and "Blackmagic Design" are trademarks of
+Blackmagic Design Pty Ltd. CC Sync is an independent product; it is not
+produced, endorsed or supported by Blackmagic Design. All other trademarks are
+the property of their respective owners.
+
+NO WARRANTY. THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, TO THE MAXIMUM EXTENT PERMITTED BY LAW. See docs/legal/
+EULA.md for the warranty and liability terms that apply to end users.

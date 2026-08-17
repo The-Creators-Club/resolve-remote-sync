@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
+from . import secretfile
 from . import upgrade as upgrade_mod
 from .reporter import HttpPostFn, default_http_post
 
@@ -96,7 +97,8 @@ def load_identity(path: Path) -> Optional[dict[str, Any]]:
 
 
 def save_identity(path: Path, username: str, token: str, role: Optional[str] = None,
-                  report_token: Optional[str] = None) -> None:
+                  report_token: Optional[str] = None,
+                  editor_report_token: Optional[str] = None) -> None:
     """Write {username, token, role, report_token, verified_at} to `path`.
     Writes to a sibling temp file then replaces -- not a full fsync-durable
     atomic write, but enough to avoid a reader ever seeing a half-written file.
@@ -105,18 +107,65 @@ def save_identity(path: Path, username: str, token: str, role: Optional[str] = N
     (api.py's `report_token` key). It is not an identity, but this file is the
     only thing the companion rewrites at runtime, and a stale
     config.toml `dashboard_token` otherwise 401s every report forever with a
-    successful tray sign-in sitting right next to it -- see IdentityManager."""
+    successful tray sign-in sitting right next to it -- see IdentityManager.
+
+    `editor_report_token` is the PER-EDITOR one ("cce1.<id>.<secret>", minted
+    by an admin on the dashboard's Users page, 2026-08-17). It outranks the
+    shared token everywhere and must SURVIVE a sign-in: /api/v1/verify only
+    ever answers with the shared token, so writing that alone here would
+    silently demote a machine that had been migrated (see IdentityManager).
+
+    The file is written owner-only -- it holds two credentials. See
+    secretfile.harden for what that means on Windows.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "username": username,
         "token": token,
         "role": role,
         "report_token": report_token,
+        "editor_report_token": editor_report_token,
         "verified_at": datetime.now(timezone.utc).isoformat(),
     }
     tmp_path = path.with_name(path.name + ".tmp")
     tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Tightened BEFORE the rename, so the file is never readable by anyone
+    # else even for the instant between the two calls (the pattern
+    # root_guard.py's volume record already uses).
+    secretfile.harden(tmp_path)
     tmp_path.replace(path)
+
+
+def preferred_report_token(cfg: dict[str, Any],
+                           identity: Optional[dict[str, Any]]) -> tuple[str, str]:
+    """Which fleet credential this machine should present. -> (token, source).
+
+    Precedence, most specific first (COMMERCIAL_READINESS.md item 15,
+    2026-08-17):
+
+      identity.json editor_report_token   per-editor, minted by an admin and
+                                          revocable for this editor alone
+      config.toml   report_token          the same thing, placed by an
+                                          installer/admin at provision time
+      identity.json report_token          the SHARED fleet token, captured at
+                                          the last tray sign-in
+      config.toml   dashboard_token       the shared token as installed
+
+    A per-editor token beats a shared one wherever it is found, because the
+    shared one proves only "somebody in this fleet" and the dashboard will
+    stop accepting it once DASH_SHARED_REPORT_TOKEN_ENABLED=0.
+    """
+    identity = identity or {}
+    candidates = (
+        (str(identity.get("editor_report_token") or "").strip(), "identity.json"),
+        (str(cfg.get("report_token", "") or "").strip(), "config.toml report_token"),
+        (str(identity.get("report_token") or "").strip(), "identity.json (shared)"),
+        (str(cfg.get("dashboard_token", "") or "").strip(), "config.toml dashboard_token"),
+    )
+    for token, source in candidates:
+        if token:
+            return token, source
+    return "", "none"
 
 
 def parse_token(token: Optional[str]) -> tuple[Optional[str], Optional[int]]:
@@ -323,24 +372,28 @@ class IdentityManager:
         self._adopt_report_token()
 
     def _adopt_report_token(self) -> None:
-        """Publish the signed-in report token into `cfg["dashboard_token"]`.
+        """Publish the credential this machine should present into
+        `cfg["dashboard_token"]`, which is the one dict every consumer reads.
 
         /api/v1/verify returns the shared fleet report token; the companion
         used to throw it away, so a stale config.toml `dashboard_token` --
         rotated on the server, or mistyped at install -- meant every report
         401'd forever even though the tray said "signed in as ...". config.toml
         is written by the installer, not by the running companion, so the
-        freshest value lives in identity.json and is republished here into the
-        one dict every consumer reads from. Never raises."""
+        freshest value lives in identity.json and is republished here.
+
+        Since 2026-08-17 a PER-EDITOR token outranks the shared one wherever it
+        is found (preferred_report_token): it is revocable for this editor
+        alone, and the shared token stops being accepted the day an admin sets
+        DASH_SHARED_REPORT_TOKEN_ENABLED=0. Never raises."""
         try:
             with self._lock:
-                identity = self._identity or {}
-                token = str(identity.get("report_token") or "").strip()
+                identity = dict(self._identity or {})
+            token, source = preferred_report_token(self.cfg, identity)
             if not token:
                 return
             if str(self.cfg.get("dashboard_token", "") or "").strip() != token:
-                log.info("using the report token from the last sign-in "
-                         "(config.toml's dashboard_token is stale or unset)")
+                log.info("using the report token from %s", source)
             self.cfg["dashboard_token"] = token
         except Exception:
             log.debug("could not adopt the signed-in report token", exc_info=True)
@@ -352,6 +405,19 @@ class IdentityManager:
         with self._lock:
             identity = self._identity or {}
             return str(identity.get("report_token") or "").strip() or None
+
+    @property
+    def editor_report_token(self) -> Optional[str]:
+        """This machine's PER-EDITOR fleet token, or None.
+
+        Read from identity.json unconditionally -- not through snapshot() --
+        because it is a credential, not part of the identity: it stays usable
+        while the signed identity token is expired, which is exactly the state
+        in which an editor most needs their reports to still say something.
+        """
+        with self._lock:
+            identity = self._identity or {}
+            return str(identity.get("editor_report_token") or "").strip() or None
 
     def valid(self) -> bool:
         with self._lock:
@@ -413,9 +479,15 @@ class IdentityManager:
         # configured): keep whatever was already in play rather than blanking
         # a working token.
         report_token = str(result.get("report_token") or "").strip() or self.report_token
+        # PRESERVED across sign-in, deliberately: /api/v1/verify only ever
+        # answers with the SHARED token, so rewriting the file from its
+        # response alone would silently demote a machine an admin had already
+        # migrated to a per-editor credential (2026-08-17).
+        editor_report_token = self.editor_report_token
         try:
             save_identity(self.path, verified_username, token, role=role,
-                          report_token=report_token)
+                          report_token=report_token,
+                          editor_report_token=editor_report_token)
         except OSError as exc:
             log.warning("sign_in: failed to persist identity to %s: %s", self.path, exc)
 
@@ -425,6 +497,7 @@ class IdentityManager:
                 "token": token,
                 "role": role,
                 "report_token": report_token,
+                "editor_report_token": editor_report_token,
                 "verified_at": datetime.now(timezone.utc).isoformat(),
             }
         self._adopt_report_token()

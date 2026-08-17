@@ -8,6 +8,11 @@ version = "0.1.0"
 description = "B-Roll Platform indexer CLI: scan, probe, proxy, contact-sheet, Claude-index, sort."
 requires-python = ">=3.12"
 dependencies = [
+    # The visual index is Messages API calls (broll_index/claude_client.py).
+    # Not optional: without it the `claude` stage cannot run at all. The floor is
+    # the oldest release this was exercised against; requirements.lock pins the
+    # exact version CI and the image install.
+    "anthropic>=0.92",
     "xxhash>=3.4",
     "pyyaml>=6.0",
     "requests>=2.31",
@@ -20,6 +25,21 @@ dependencies = [
 # so it's kept out of the base install and offered as an extra instead.
 [project.optional-dependencies]
 embeddings = ["fastembed>=0.8"]
+# Speech transcription. The `transcribe` stage normally shells out to a SIDECAR
+# venv built by tools/make_whisper_env.ps1/.sh, because ctranslate2 pins its own
+# CUDA runtime and loads cuDNN through LoadLibrary -- keeping that out of the
+# indexer's own interpreter is what stops one CUDA upgrade breaking both halves.
+# This extra is for a machine that wants them in-process anyway (a
+# single-purpose container, a CPU-only trial): install it, then point
+# whisper.python at THIS interpreter and whisper.script at
+# tools/whisper_transcribe.py. Pinned to the same versions make_whisper_env
+# installs -- they move together, and a mismatched pair fails at library load
+# with a message that names no version (2026-08-17, item 14).
+transcribe = ["faster-whisper==1.1.1", "ctranslate2==4.5.0"]
+# The suite's own dependency, named here so requirements.lock can carry it
+# with a hash -- CI installs `--require-hashes` and cannot `pip install pytest`
+# on the side (2026-08-17, COMMERCIAL_READINESS.md item 13).
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 broll-index = "broll_index.cli:main"

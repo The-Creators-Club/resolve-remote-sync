@@ -12,7 +12,7 @@ Windows editors get this when their tray takes the upgrade; **macOS editors
 do not have it at all** until the Mac builds run on a Mac.
 
 **2026-08-16 — it had never engaged, and two things had to change for it to.**
-Read on ruskin's box the morning after he took 0.7.8: every job still
+Read on an editor's box the morning after they took 0.7.8: every job still
 `download_mode: server`, `claimed_by: null`. Two independent blockers, both
 invisible because the server path is the designed fallback and kept working:
 
@@ -59,7 +59,7 @@ And a policy reversal in the same release: **lane B no longer pulls
 while the NAS was the only downloader; with requester-first downloads the
 original starts on the requester's disk and lane A carries it up, and pulling
 every editor's clips to every other editor was 58 GB of bandwidth on
-ruskin's first pass. YouTube originals go **up only**. Consequences accepted:
+one editor's first pass. YouTube originals go **up only**. Consequences accepted:
 a clip that fell back to the server path stays NAS-only (the history's
 reveal now says so instead of "has it synced here yet?"), and an editor-local
 original the NAS lacks is excluded rather than swept to `.ccsync-trash`
@@ -116,6 +116,56 @@ Added by the 2026-08-14 bug-hunt fix pass (same one-reclaim-path philosophy):
   `capabilities()` also advertises `scope_qualities` so the SPA never
   dispatches an out-of-scope job at all (COMP-BROLL-6/-10). Version floors
   rank numerically on both sides (COMP-BROLL-9).
+
+**2026-08-17 — the commercial-readiness pass changed four things here.** Read
+this before §4, §7 and §8, which it amends. `docs/legal/YOUTUBE_FEATURE_NOTICE.md`
+is the operator/customer-facing companion to it.
+
+1. **THE WHOLE FEATURE IS OFF BY DEFAULT** (COMMERCIAL_READINESS.md item 2).
+   `site.toml` `[features] youtube_download` decides whether the dashboard
+   mounts `/ytdl` at all — off, `mount_ytdl()` returns `disabled` before it
+   imports anything, so the page, the nav link and **every fleet route in §4**
+   answer 404. The flag is published in `GET /api/v1/site` as
+   `features.youtube_download`; the companion reads it (`site.feature_enabled`)
+   and, with it off, hides its YouTube tray items, refuses the `/ytdl/*`
+   loopback calls and installs no yt-dlp/ffmpeg/deno. A client that cannot read
+   the manifest treats the feature as OFF. **This studio keeps it on** — its
+   `site.toml` (git-ignored) sets both flags true.
+   `YTDL_LOCAL_DOWNLOAD` is unchanged and now sits *inside* that gate.
+
+2. **NOTHING DOWNLOADS UNTIL THE EDITOR ACCEPTS A RIGHTS ATTESTATION** (item
+   2). Recorded per user in `ytdl.db`'s `attestations` table and per machine in
+   `~/.ccsync/state/ytdl-attestation.json`; refused with 403
+   `reason:'attestation'` on job creation, on `start_download`, and on the
+   **claim** — §4's endpoint list gains that failure mode. `capabilities()`
+   answers `ok:false` without the machine-local record, so the SPA quietly
+   takes the server path and the tray offers "YouTube download terms…".
+
+3. **THE UNBLOCK COMPONENTS ARE A SECOND, NARROWER OPT-IN** (item 3):
+   `[features] youtube_unblock` gates the PO-token sidecar, the NAS-side
+   signed-in `cookies.txt`, **the deno sidecar of §6** and the tray's "Sign in
+   to YouTube (for downloads)…". Off, `sidecar_tools` installs ffmpeg/ffprobe
+   and no deno, `managed_deno()` returns None even if one is on disk from
+   before the flag, and `ytdl_cookies.resolve()` returns None so `--cookies` is
+   never sent. The code stays in the tree, dormant — enabling it is a config
+   change, never a different binary.
+
+4. **§8's "the fleet token authenticates companion↔server" IS NO LONGER THE
+   WHOLE STORY** (item 7 / H5). Every companion holds the same token, so it
+   proved "a fleet machine" and nothing about *which* — and the editor name was
+   self-asserted, so any token-holding machine could claim a job as somebody
+   else and then complete it, fail its clips, or take it off the editor who was
+   downloading it. `X-CCSync-Identity` now carries the dashboard's **signed**
+   identity token (the one `reporter.py` already sends) and `routes_fleet`
+   verifies it against `DASH_SESSION_SECRET` before believing the name. The
+   claim body's `editor` field is ignored. Unset secret = 403 = the server
+   downloads everything, the designed fallback. `db.is_leaseholder` no longer
+   accepts a `None` editor.
+
+Two smaller ones in the same pass: the server's AI calls moved off the `claude`
+CLI to the `anthropic` SDK with the customer's `ANTHROPIC_API_KEY` (item 1 — the
+`claude-bin`/`claude-home` mounts are gone; the operator step to delete them is
+in `ytdl/web/DEPLOY.md`), and `YTDL_DEV_USER` was removed (item 15).
 
 ## 1. Why
 
@@ -261,8 +311,8 @@ work (R12) exists to prevent.
 
 The companion is a frozen PyInstaller build; yt-dlp needs updating every
 few weeks. Bundling yt-dlp as a library would tie download health to the
-companion release cadence — Ruskin sat on 0.4.22 for a month; that must
-never mean "Ruskin's downloads are broken for a month".
+companion release cadence — one editor sat on 0.4.22 for a month; that must
+never mean "that editor's downloads are broken for a month".
 
 - The companion manages the **standalone yt-dlp binary** (`yt-dlp.exe`,
   `yt-dlp_macos`) under `%LOCALAPPDATA%\ccsync\tools\` (mac:
@@ -328,9 +378,17 @@ Sync interactions (all already in place, verified 2026-08-14):
 
 ## 8. Security
 
-- Loopback stays 127.0.0.1-only with the existing fail-closed origin
-  checks (0.7.0 hardening). New endpoints get the same treatment; the
-  browser contributes nothing but a job id.
+- Loopback stays 127.0.0.1-only. **Corrected 2026-08-17:** there were no
+  "existing fail-closed origin checks" — this line described a hardening
+  that had never been written, while the server actually sent
+  `Access-Control-Allow-Origin: *` plus `Access-Control-Allow-Private-Network`
+  and checked nothing (COMMERCIAL_READINESS.md item 5 / C1). It now does, and
+  every route on the listener — these included — is behind it:
+  `loopback_guard.py` allow-lists the Origin to this deployment's dashboard
+  (`dashboard_url` and the cached site manifest, both schemes), a POST needs
+  that allowed Origin **or** the `X-CCSync-Loopback` token from
+  `~/.ccsync/loopback-token`, plus `Content-Type: application/json` and a
+  loopback `Host`. The browser still contributes nothing but a job id.
 - The fleet token authenticates companion↔server; the browser session
   authenticates human actions. Neither crosses into the other's lane.
 - The companion never accepts paths, URLs-to-download, or templates from

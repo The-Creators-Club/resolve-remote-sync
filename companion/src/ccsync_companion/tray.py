@@ -1,5 +1,5 @@
-"""System tray icon (pystray + Pillow) — Component 4 of SPEC.md's companion
-app.
+"""System tray icon (tray_native + Pillow) — Component 4 of SPEC.md's
+companion app.
 
 Only imported inside a try/except ImportError in app.py's run loop, so the
 app still runs headless (console status logging only) if these aren't
@@ -8,6 +8,14 @@ this app absorbed and retired on 2026-08-10 (its server now lives in
 broll_server.py; there is no second tray app any more).
 
 Install with: pip install ccsync-companion[tray]
+
+The backend is `tray_native`, ours, not pystray (2026-08-17,
+docs/COMMERCIAL_READINESS.md item 3): pystray is LGPLv3 and this app is frozen
+single-file by PyInstaller, which conveys it without the relinking freedom §4
+requires — and this file used to monkeypatch its win32 internals besides.
+CCSYNC_TRAY_BACKEND=pystray still swaps it back for a dev machine that wants
+to A/B a rendering difference; it is inert in the frozen build and pystray is
+no longer a dependency, so it does nothing unless someone installs it by hand.
 """
 
 from __future__ import annotations
@@ -21,12 +29,12 @@ import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
-import pystray  # noqa: F401  (raises ImportError here if missing — by design)
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw  # noqa: F401  (ImportError here is by design)
 
 from . import config as config_mod
 from . import proxy_history
 from . import resolve_bridge
+from . import site as site_mod
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
 from . import ytdlp_manager
@@ -36,6 +44,44 @@ if TYPE_CHECKING:
     from .app import CompanionApp
 
 log = logging.getLogger("ccsync.tray")
+
+
+def _pick_backend():
+    """tray_native, or pystray for a developer who explicitly asked.
+
+    The escape hatch is dev-only by construction and says so twice: it refuses
+    in a frozen build (sys.frozen), which is the case the LGPL problem was
+    ever about, and pystray is not in any dependency list any more, so on a
+    machine that has not pip-installed it by hand the variable does nothing.
+    """
+    if os.environ.get("CCSYNC_TRAY_BACKEND", "").strip().lower() == "pystray":
+        if getattr(sys, "frozen", False):
+            log.warning("CCSYNC_TRAY_BACKEND=pystray ignored: the frozen build "
+                        "does not ship pystray (LGPL — see tray_native.py)")
+        else:
+            try:
+                import pystray  # type: ignore[import-not-found]
+
+                log.warning("using the pystray tray backend (dev escape hatch)")
+                return pystray
+            except ImportError:
+                log.warning("CCSYNC_TRAY_BACKEND=pystray but pystray is not "
+                            "installed — falling back to tray_native")
+    from . import tray_native
+
+    return tray_native
+
+
+tray_backend = _pick_backend()
+
+# Re-exported from tray_native, which owns the Win32 half now: these are the
+# taskbar-geometry rules item 21 established, and the tests that pin them read
+# them here.
+from .tray_native import (  # noqa: E402
+    _anchor_clear_of_taskbar,
+    _clamp_menu_anchor,
+    _taskbar_geometry,
+)
 
 from . import theme
 
@@ -132,376 +178,46 @@ def _color_rgb(color_name: str) -> tuple[int, int, int]:
 
 
 class _MenuOpenGuard:
-    """Answers "is the tray's context menu open RIGHT NOW?" on Windows.
+    """Answers "is the tray's context menu open RIGHT NOW?"
 
-    pystray's win32 backend shows the menu with a single blocking
-    win32.TrackPopupMenuEx call on the message-loop thread. Wrapping that
-    function with a flag gives the refresh thread a reliable open/closed
-    signal, so it can defer EVERY tray mutation (icon, tooltip, menu) while
-    the user is looking at the menu -- mutating any of them mid-open is
-    what produced the random hover hangs (a menu rebuild DestroyMenu()s the
-    handle being displayed; icon/tooltip NIM_MODIFYs force redraws under
-    the cursor). On other backends install() is a no-op and is_open() stays
-    False, preserving the old always-update behavior.
+    The refresh and pulse loops must defer EVERY tray mutation (icon,
+    tooltip, menu) while the user is looking at the menu -- mutating any of
+    them mid-open is what produced the random hover hangs of 2026-07-26
+    (icon/tooltip NIM_MODIFYs force redraws under the cursor, and the old
+    backend's menu rebuild DestroyMenu()d the handle being displayed).
 
-    The flag is the PROCESS-WIDE ui_state.menu_open: the menu's highlight
-    repaints run through a Python window procedure that needs the GIL, so
-    resolve_bridge defers its GIL-holding fusionscript calls while it is
-    set (a single Resolve poll froze the hover highlight for a second-plus,
-    2026-07-26)."""
+    The flag is the PROCESS-WIDE ui_state.menu_open, and it is process-wide
+    for a second reason: the menu's highlight repaints run through a Python
+    window procedure that needs the GIL, so resolve_bridge defers its
+    GIL-holding fusionscript calls while it is set (a single Resolve poll
+    froze the hover highlight for a second-plus, 2026-07-26).
+
+    Since 2026-08-17 this class no longer INSTALLS anything -- it used to
+    monkeypatch pystray's TrackPopupMenuEx to learn the answer. tray_native's
+    Icon sets and clears the very same Event around the popup itself, on
+    Windows and (new) on macOS through NSMenu's delegate, so install() is
+    kept only because start_tray() and its tests call it.
+    """
 
     def __init__(self) -> None:
         from . import ui_state
 
         self._open = ui_state.menu_open
 
+    @property
+    def flag(self):
+        """The Event to hand tray_native.Icon(menu_open_flag=...)."""
+        return self._open
+
     def install(self) -> None:
-        try:
-            if sys.platform != "win32":
-                return
-            from pystray import _win32  # type: ignore[attr-defined]
-
-            win = _win32.win32
-            if getattr(win, "_ccsync_menu_open_flag", None) is not None:
-                self._open = win._ccsync_menu_open_flag
-                return
-            original = win.TrackPopupMenuEx
-            flag = self._open
-
-            def tracked(*args, **kwargs):
-                # ...and while we are the only thing standing between pystray
-                # and user32, fix where the menu lands (see
-                # _with_clamped_anchor). Positioning is adjusted BEFORE the
-                # flag is set: nothing about it can block the open.
-                args = _with_clamped_anchor(args)
-                flag.set()
-                try:
-                    result = original(*args, **kwargs)
-                finally:
-                    flag.clear()
-                _after_popup_menu(args, result)
-                return result
-
-            win.TrackPopupMenuEx = tracked
-            win._ccsync_menu_open_flag = flag
-        except Exception:
-            log.debug("menu-open guard unavailable", exc_info=True)
+        return None
 
     def is_open(self) -> bool:
         return self._open.is_set()
 
 
-def _last_win32_error() -> int:
-    """GetLastError(), or 0 if it can't be read. Only meaningful straight
-    after a failed call."""
-    try:
-        import ctypes
-
-        return int(ctypes.GetLastError())  # type: ignore[attr-defined]
-    except Exception:
-        return 0
-
-
-def _after_popup_menu(args: tuple, result) -> None:
-    """What pystray does not do once TrackPopupMenuEx returns.
-
-    Two things, both invisible before this. pystray declares the function
-    with no restype and no errcheck, so a FAILED call -- the handle was
-    destroyed under it, or CreatePopupMenu hit the 10k USER-object quota --
-    is indistinguishable from the user pressing Escape, and both are
-    silence. A right-click that does nothing is the single most-reported
-    tray symptom, so it gets a log line even at the cost of one per
-    dismissal.
-
-    And MSDN's TrackPopupMenu note: post WM_NULL to the owner window
-    afterwards, or the menu can fail to dismiss on the following click.
-    Best-effort -- a diagnostic must never be the thing that breaks the pump.
-    """
-    if not result:
-        log.warning(
-            "tray menu failed to open or was dismissed immediately "
-            "(TrackPopupMenuEx returned %r, GetLastError=%d)",
-            result, _last_win32_error(),
-        )
-    try:
-        hwnd = args[4] if len(args) > 4 else None
-        if hwnd:
-            from pystray import _win32  # type: ignore[attr-defined]
-
-            _win32.win32.PostMessage(hwnd, 0x0000, 0, 0)  # WM_NULL
-    except Exception:
-        log.debug("post-menu WM_NULL failed", exc_info=True)
-
-
-# -- the menu that opens BEHIND an auto-hide taskbar ------------------------
-#
-# Item 21, reported on the base rig against v0.5.0 (Windows 11, taskbar set to
-# auto-hide): the menu opens instantly now, and its bottom edge -- the Quit
-# item -- sits under the taskbar.
-#
-# pystray anchors it at the raw cursor position from GetCursorPos with
-# TPM_RIGHTALIGN | TPM_BOTTOMALIGN (pystray/_win32.py:215), i.e. "put the
-# menu's bottom-right corner exactly HERE". Here is wherever the pointer was
-# when it right-clicked the tray icon, which is inside the taskbar band, so
-# the menu's bottom lands mid-taskbar by construction. Windows normally
-# rescues that: TrackPopupMenuEx keeps the menu inside the monitor's WORK
-# AREA, and with a docked, always-visible taskbar the work area stops at the
-# taskbar's inner edge, so the menu is nudged clear of it. An auto-hide bar is
-# excluded from the work area (it reserves one pixel, not its height), so the
-# work area is the whole screen, nothing is violated, and the currently-raised
-# topmost taskbar draws over the last item or two.
-#
-# v0.5.0 did not cause this -- it exposed it. Item 20's menu opened seconds
-# late, mid-GIL-blackout, or not at all; where the thing you finally got landed
-# was nobody's top complaint. Timing changes nothing about positioning rules:
-# the same TPM flags at the same cursor point produced the same geometry
-# before, on the fraction of right-clicks that opened at all.
-#
-# So: if the anchor point is inside the taskbar, move it to the taskbar's inner
-# edge and align the menu so it grows AWAY from the bar. Everything here is
-# best-effort -- a positioning nicety must never be the reason a menu fails to
-# open, which is the bug this file just spent item 20 climbing out of.
-
-# From pystray._util.win32 (repeated, not imported: this module must stay
-# importable on macOS, where there is no win32 shim to import them from).
-_TPM_LEFTALIGN = 0x0000
-_TPM_CENTERALIGN = 0x0004
-_TPM_RIGHTALIGN = 0x0008
-_TPM_TOPALIGN = 0x0000
-_TPM_VCENTERALIGN = 0x0010
-_TPM_BOTTOMALIGN = 0x0020
-# LEFT/TOP are zero, so an alignment is SET by clearing the other bits on its
-# axis -- an OR alone cannot express them, and cannot undo pystray's
-# RIGHT|BOTTOM either (which is exactly wrong for a top or left taskbar).
-_TPM_HALIGN_MASK = _TPM_CENTERALIGN | _TPM_RIGHTALIGN
-_TPM_VALIGN_MASK = _TPM_VCENTERALIGN | _TPM_BOTTOMALIGN
-
-_ABM_GETTASKBARPOS = 0x00000005
-_ABE_LEFT = 0
-_ABE_TOP = 1
-_ABE_RIGHT = 2
-_ABE_BOTTOM = 3
-
-
-def _clamp_menu_anchor(x: int, y: int, flags: int, taskbar_rect, taskbar_edge: int):
-    """(x, y, flags) moved out of `taskbar_rect`, or unchanged.
-
-    `taskbar_rect` is (left, top, right, bottom) in screen pixels and
-    `taskbar_edge` one of the ABE_* constants. An anchor OUTSIDE the rect is
-    returned untouched: it is only the click that lands on the bar itself
-    (i.e. every tray right-click) that needs help, and a second monitor's
-    cursor position must not be dragged to the primary taskbar's edge.
-
-    The alignment flag is rewritten, not or-ed on. pystray passes
-    RIGHT|BOTTOM, which is right for a bottom or right taskbar and precisely
-    backwards for a top or left one -- there the menu would grow back into
-    the bar it was just moved out of.
-
-    Pure and total: no ctypes, no logging, and it never raises.
-    """
-    try:
-        left, top, right, bottom = (int(v) for v in taskbar_rect)
-        x, y, flags = int(x), int(y), int(flags)
-        edge = int(taskbar_edge)
-    except Exception:
-        return x, y, flags
-    if not (left <= x <= right and top <= y <= bottom):
-        return x, y, flags
-    if edge == _ABE_BOTTOM:
-        return x, top, (flags & ~_TPM_VALIGN_MASK) | _TPM_BOTTOMALIGN
-    if edge == _ABE_TOP:
-        return x, bottom, (flags & ~_TPM_VALIGN_MASK) | _TPM_TOPALIGN
-    if edge == _ABE_LEFT:
-        return right, y, (flags & ~_TPM_HALIGN_MASK) | _TPM_LEFTALIGN
-    if edge == _ABE_RIGHT:
-        return left, y, (flags & ~_TPM_HALIGN_MASK) | _TPM_RIGHTALIGN
-    return x, y, flags   # an edge we don't know is an edge we don't touch
-
-
-def _taskbar_geometry():
-    """((left, top, right, bottom), edge) for the primary taskbar, or None.
-
-    SHAppBarMessage(ABM_GETTASKBARPOS) reports the bar's SHOWN rectangle even
-    while an auto-hide bar is hidden off-screen, which is the whole point:
-    that rectangle is the region the raised bar will cover, and the region the
-    menu has to clear.
-    """
-    if sys.platform != "win32":
-        return None
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        class _APPBARDATA(ctypes.Structure):
-            _fields_ = [
-                ("cbSize", wintypes.DWORD),
-                ("hWnd", wintypes.HWND),
-                ("uCallbackMessage", wintypes.UINT),
-                ("uEdge", wintypes.UINT),
-                ("rc", wintypes.RECT),
-                ("lParam", wintypes.LPARAM),
-            ]
-
-        data = _APPBARDATA()
-        data.cbSize = ctypes.sizeof(_APPBARDATA)
-        if not ctypes.windll.shell32.SHAppBarMessage(  # type: ignore[attr-defined]
-            _ABM_GETTASKBARPOS, ctypes.byref(data)
-        ):
-            return None
-        rect = (int(data.rc.left), int(data.rc.top),
-                int(data.rc.right), int(data.rc.bottom))
-        return rect, int(data.uEdge)
-    except Exception:
-        log.debug("taskbar geometry unavailable", exc_info=True)
-        return None
-
-
-def _anchor_clear_of_taskbar(x: int, y: int, flags: int):
-    """_clamp_menu_anchor against the live taskbar; the originals on any
-    failure -- no geometry, a shell that will not answer, a pystray we no
-    longer recognise. The menu opens where it opened before, which is the
-    version of this bug we can live with."""
-    try:
-        geometry = _taskbar_geometry()
-        if geometry is None:
-            return x, y, flags
-        rect, edge = geometry
-        return _clamp_menu_anchor(x, y, flags, rect, edge)
-    except Exception:
-        log.debug("taskbar anchor adjustment skipped", exc_info=True)
-        return x, y, flags
-
-
-def _with_clamped_anchor(args: tuple) -> tuple:
-    """pystray calls TrackPopupMenuEx(hmenu, flags, x, y, hwnd, None) with
-    every argument positional (pystray/_win32.py:215). Any other shape --
-    a test calling it bare, a pystray that has moved to keywords -- is passed
-    through untouched rather than guessed at."""
-    try:
-        if len(args) < 4:
-            return args
-        flags, x, y = args[1], args[2], args[3]
-        new_x, new_y, new_flags = _anchor_clear_of_taskbar(x, y, flags)
-        if (new_x, new_y, new_flags) == (x, y, flags):
-            return args
-        return (args[0], new_flags, new_x, new_y) + tuple(args[4:])
-    except Exception:
-        log.debug("menu anchor left as pystray asked for it", exc_info=True)
-        return args
-
-
-# -- the menu swap: build new, swap, THEN destroy old -----------------------
-#
-# pystray's win32 _update_menu DestroyMenu()s the live handle FIRST, rebuilds
-# ~30 items plus a submenu, and only then publishes the new handle. For that
-# whole window `_menu_handle` names a destroyed HMENU, and a right-click
-# arriving inside it hands that to TrackPopupMenuEx, which returns 0 and
-# shows nothing (silently -- see _after_popup_menu above). Worse, it is
-# called from two threads that know nothing of each other: our refresh loop
-# on every `icon.menu = ...`, and pystray's own _base.Icon.__call__ /
-# _base._handler on the PUMP thread after every left-click and every menu
-# selection. Two of those interleaving DestroyMenu the same handle twice and
-# leak the other one's; at the 10 000-handle USER quota CreatePopupMenu
-# starts failing, `_menu_handle` goes None, and right-click does nothing at
-# all until the companion is restarted.
-#
-# So: one lock, build first, swap, destroy last, and never destroy anything
-# the icon is still pointing at. The residual race is a right-click that read
-# `_menu_handle` microseconds before a swap, instead of one landing anywhere
-# inside a whole rebuild.
-_MENU_SWAP_LOCK = threading.Lock()
-
-# Sentinel for "no menu has been built yet" -- None is a legitimate menu.
-_NO_MENU_BUILT = object()
-
-
-def _destroy_menu(handle) -> None:
-    """DestroyMenu, looked up at call time so a pystray without the win32
-    shim (or a test standing in for it) degrades to a no-op."""
-    try:
-        from pystray import _win32  # type: ignore[attr-defined]
-
-        _win32.win32.DestroyMenu(handle)
-    except Exception:
-        log.debug("DestroyMenu(%r) failed", handle, exc_info=True)
-
-
-def _atomic_update_menu(icon, stock=None) -> None:
-    """pystray's Icon._update_menu, reordered so the handle is always live.
-
-    Falls back to `stock` (the wrapped original) whenever the internals this
-    depends on aren't there -- same fail-open posture as _MenuOpenGuard.
-    """
-    create = getattr(icon, "_create_menu", None)
-    if create is None:
-        if stock is not None:
-            stock(icon)
-        return
-    with _MENU_SWAP_LOCK:
-        menu = getattr(icon, "menu", None)
-        previous = getattr(icon, "_ccsync_built_menu", _NO_MENU_BUILT)
-        if previous is menu and getattr(icon, "_menu_handle", None) is not None:
-            # pystray calls update_menu() after every left-click and every
-            # menu selection, with the menu object untouched, so it can
-            # re-render dynamic items. _build_menu renders a SNAPSHOT -- even
-            # the Pause checkmark closes over a captured bool -- so an
-            # identical menu object can only produce an identical menu, and
-            # rebuilding it is pure USER-object churn. Identity changes only
-            # when _refresh_loop's fingerprint really moved.
-            return
-        callbacks: list = []
-        try:
-            handle = create(menu, callbacks)
-        except Exception:
-            log.warning("tray menu rebuild failed -- keeping the menu already shown",
-                        exc_info=True)
-            return
-        if not handle and menu:
-            # CreatePopupMenu failed (the classic cause is the USER-object
-            # quota this reordering exists to stop leaking into). The old
-            # handle still works; a menu one refresh out of date beats none.
-            # A falsy `menu` is a different thing -- pystray's _create_menu
-            # returns None for one by contract -- and is published below.
-            log.warning("tray menu rebuild produced no handle -- keeping the previous menu")
-            return
-        old = getattr(icon, "_menu_handle", None)
-        icon._menu_handle = (handle, callbacks) if handle else None
-        icon._ccsync_built_menu = menu
-        if old:
-            _destroy_menu(old[0])
-
-
-class _MenuSwapGuard:
-    """Installs _atomic_update_menu over pystray's win32 backend.
-
-    Install-once, win32-only, never-raise -- the same shape and the same
-    reasoning as _MenuOpenGuard above. On any other backend, or a pystray
-    whose internals have moved, this is a no-op and the stock behavior
-    stands.
-    """
-
-    def install(self) -> None:
-        try:
-            if sys.platform != "win32":
-                return
-            from pystray import _win32  # type: ignore[attr-defined]
-
-            icon_cls = _win32.Icon
-            if getattr(icon_cls, "_ccsync_atomic_menu_swap", False):
-                return
-            stock = icon_cls._update_menu
-
-            def _update_menu(self) -> None:
-                _atomic_update_menu(self, stock)
-
-            icon_cls._update_menu = _update_menu
-            icon_cls._ccsync_atomic_menu_swap = True
-        except Exception:
-            log.debug("atomic menu swap unavailable", exc_info=True)
-
-
 # One rendered image per (color, brightness level) -- regenerating the
-# identical 64x64 PIL image (and the win32 HICON pystray derives from it)
+# identical 64x64 PIL image (and the win32 HICON the backend derives from it)
 # every refresh tick was pure GDI churn, and the pulse below would repeat that
 # eight times every three seconds forever. Every frame of every color is
 # rendered at most once per process.
@@ -511,7 +227,13 @@ _ICON_IMAGE_CACHE: dict = {}
 # by build.spec's datas; assets/icon.png and icon.ico are the same mark for
 # window/exe use and are NOT interchangeable with this one (they are already
 # colored and pre-composed).
-MARK_ASSET = "cc_mark_white.png"
+#
+# ONE name for the tray and the window title bar: theme.WINDOW_ICON_ASSET is
+# the product's neutral mark, and theme.brand_logo_override() ($CCSYNC_BRAND_
+# LOGO) is how a site wears its own instead. Keeping a second literal here is
+# how the two ended up differing before (2026-08-17,
+# docs/COMMERCIAL_READINESS.md item 10).
+MARK_ASSET = theme.WINDOW_ICON_ASSET
 
 # The mark fills the canvas. No tile, no border (2026-08-10, by request): the
 # icon IS the mark, silhouette constant, color carrying the status. The mark's
@@ -547,10 +269,12 @@ PULSE_LEVELS = _pulse_levels()
 
 
 def _mark_asset_path():
-    """Where cc_mark_white.png lives in this build, or None. Its own function
+    """Where the tray mark lives in this build, or None. Its own function
     so a test can point it somewhere else (and so the fallback below is
-    reachable)."""
-    return theme.asset_path(MARK_ASSET)
+    reachable). theme.window_mark_path() rather than asset_path(MARK_ASSET)
+    so a site's $CCSYNC_BRAND_LOGO reaches the tray and the title bar
+    together."""
+    return theme.window_mark_path()
 
 
 # Decoded + downscaled once per source path: a 512x512 PNG through LANCZOS is
@@ -613,7 +337,7 @@ def _dim(rgb: tuple, level: float) -> tuple:
 
 
 def _make_icon_image(color_name: str, level: float = 1.0):
-    """The Creators Club mark alone, tinted the status color, on transparency.
+    """The product mark alone, tinted the status color, on transparency.
 
     No tile and no border (2026-08-10, by request): the icon IS the mark, the
     silhouette stays constant, and only its color/brightness carries status.
@@ -692,8 +416,9 @@ def classify_lane_error(last_error: Optional[str], root_absent: bool = False) ->
         # ("untick it on the dashboard") would unshare a project that is
         # perfectly intact, sitting on a drive in the editor's bag. Nothing in
         # here is a reason to act; plugging the drive back in is.
-        return ("Your Creators Club drive is disconnected, so syncing is paused. "
-                "Plug it back in and it resumes on its own -- nothing was deleted.")
+        return (f"{site_mod.drive_phrase(capitalised=True)} is disconnected, so "
+                f"syncing is paused. Plug it back in and it resumes on its own "
+                f"-- nothing was deleted.")
     if not text:
         return "Something went wrong. Tray → Copy diagnostics for your admin."
     if "marker missing" in text:
@@ -827,7 +552,7 @@ def _open_dashboard(url: str, app: Optional["CompanionApp"] = None) -> bool:
 
     webbrowser.open() returns False -- no exception, no log line -- when no
     browser could be launched, so until 2026-08-16 a click that did nothing
-    (ruskin: "Open dashboard isn't opening the dashboard") left NOTHING in
+    (an editor: "Open dashboard isn't opening the dashboard") left NOTHING in
     the log to distinguish "the browser opened a tab that then timed out"
     from "nothing was launched at all". Now the attempt and its outcome are
     logged, and a launch failure tells the editor instead of staying silent.
@@ -856,8 +581,8 @@ def _identity_status_label(app: "CompanionApp") -> str:
 
 # -- "the icon started, but is anyone seeing it?" (macOS) --------------------
 #
-# MAC-7. pystray reports success as soon as the NSStatusItem exists, and on a
-# full menu bar that is a lie: macOS hands the item a frame in the menu bar
+# MAC-7. Creating the NSStatusItem succeeds long before anyone sees it, and on
+# a full menu bar that is a lie: macOS hands the item a frame in the menu bar
 # row and then never draws it, because the space it was given is the notch (or
 # the dead zone left of it). Measured on a 16" MBP, menu bar full, screen
 # 1728x1117 with the notch spanning x 771..956 -- four items placed at once
@@ -1050,7 +775,7 @@ def _build_sign_in_dialog(app: "CompanionApp") -> None:
     # master=root, NOT the default root. A Tk variable binds to the
     # interpreter of its master, and on macOS the default root is
     # ui_dispatch's hidden one -- a DIFFERENT interpreter from this dialog.
-    # Masterless, the Entry wrote "alex" into this root's PY_VAR0 while
+    # Masterless, the Entry wrote the typed username into this root's PY_VAR0 while
     # .get() read the hidden root's empty PY_VAR0, so a filled-in form
     # failed with "username and password are both required" (MAC-6).
     username_var = tk.StringVar(master=root)
@@ -1153,6 +878,84 @@ def _install_youtube_cookies(app: "CompanionApp", picker: Optional[Any] = None) 
     if not chosen:
         return  # cancelled
     ok, message = ytdl_cookies.install(chosen)
+    _notify(app, message)
+
+
+def _ytdl_attested(app: "CompanionApp") -> bool:
+    """Has the signed-in editor accepted the download terms on this machine?
+
+    Never raises: the tray snapshot is built on the refresh thread and a
+    missing state dir must cost a tick mark, not the menu."""
+    from . import ytdl_attestation
+
+    try:
+        who = getattr(app, "editor_identity", lambda: None)()
+        return ytdl_attestation.accepted(who)
+    except Exception:
+        log.debug("ytdl attestation state unreadable", exc_info=True)
+        return False
+
+
+def _show_youtube_terms_dialog(app: "CompanionApp", confirm=None) -> None:
+    """Show the rights/ToS notice and record acceptance on THIS machine.
+
+    COMMERCIAL_READINESS.md item 2 (2026-08-17). The web UI records the
+    editor's acceptance server-side and gates the browser; this is the
+    per-machine half, and it is what the local executor's capability probe
+    reads (ytdl_executor.REASON_NOT_ATTESTED). An editor who never opens this
+    still gets their clips -- the server downloads them, which is the designed
+    fallback -- so the failure mode of ignoring it is slowness, not breakage.
+
+    askokcancel, not a themed form: there is nothing to type, and the native
+    modal is the one dialog every editor already knows. `confirm` is the test
+    seam and returns True/False; no popup lock, for _install_youtube_cookies'
+    reason (a native modal is not one of this process's Tk roots).
+    """
+    from . import ytdl_attestation
+
+    who = getattr(app, "editor_identity", lambda: None)()
+    if not str(who or "").strip():
+        _notify(app, "Sign in first — the record has to say who accepted "
+                     "these terms.")
+        return
+
+    if ytdl_attestation.accepted(who):
+        _notify(app, f"You already accepted the YouTube download terms "
+                     f"({ytdl_attestation.TEXT_VERSION}) on this machine.")
+        return
+
+    body = f"{ytdl_attestation.NOTICE_TEXT}\n\nAccepting as: {who}"
+    if confirm is None:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            try:
+                agreed = messagebox.askokcancel(
+                    ytdl_attestation.TITLE, body, parent=root, icon="warning",
+                    default="cancel")
+            finally:
+                root.destroy()
+        except Exception as exc:
+            # NO FALLBACK TO "ACCEPT". A dialog that could not be shown is a
+            # notice nobody read, and recording agreement to text that was
+            # never displayed is the one outcome this feature must not have.
+            log.warning("youtube terms: dialog unavailable (%s)", exc)
+            _notify(app, "Couldn't show the YouTube download terms. Open the "
+                         "downloader in the dashboard and accept them there.")
+            return
+    else:
+        agreed = bool(confirm(ytdl_attestation.TITLE, body))
+
+    if not agreed:
+        return
+    _ok, message = ytdl_attestation.accept(who)
+    # The menu picks the tick up on its next refresh tick, the same way
+    # _install_youtube_cookies' state does -- there is no push here and adding
+    # one would mean a tray redraw from a dialog thread.
     _notify(app, message)
 
 
@@ -1366,10 +1169,202 @@ def _build_scripting_warning_dialog(app: "CompanionApp") -> bool:
     return bool(silenced["value"])
 
 
+def remove_blocker_body(rel: str, blockers: dict) -> str:
+    """The dialog body for a removal the caught-up gate is refusing.
+
+    Its own function so the wording is testable without Tk: what makes this
+    dialog safe is that it NAMES what is still pending, and until item 9 the
+    old one merely told the editor to go and check the dashboard themselves
+    (2026-08-17)."""
+    reasons = "\n".join(f"  · {r}" for r in (blockers.get("reasons") or []))
+    return (
+        f"'{rel}' is NOT ready to be removed.\n\n"
+        f"{reasons}\n\n"
+        "Deleting it now would destroy work that exists nowhere else. Leave CCSync "
+        "running until this finishes, then try again.\n\n"
+        "If you have to delete it anyway (a dead server, a full disk), type the "
+        "project's folder name exactly to confirm:\n"
+        f"    {rel.split('/')[-1]}"
+    )
+
+
 def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
     """Confirm, then untick + unshare + delete a project's local copy (see
     app.remove_project_from_machine for the ordering guarantees). Runs on a
-    tray worker thread; takes the popup lock like every other Tk dialog."""
+    tray worker thread; takes the popup lock like every other Tk dialog.
+
+    Since 2026-08-17 (COMMERCIAL_READINESS.md item 9) this asks the app FIRST
+    whether the project is caught up, and a project that is not can only be
+    removed by typing its folder name -- the gate is in
+    app.remove_project_from_machine, and this is the UI half of it."""
+    from . import popup
+
+    # The probe costs a remote listing, so say so before the menu appears to
+    # do nothing for several seconds. The gate is checked AGAIN inside
+    # remove_project_from_machine -- deliberately, not redundantly: an
+    # editor can leave this dialog open for an hour, and what matters is
+    # whether the project is caught up at the moment of the rmtree.
+    _notify(app, "Checking whether this project's files have reached the server…")
+    try:
+        blockers = app.removal_blockers(slug)
+    except Exception:
+        log.exception("removal_blockers(%s) raised", slug)
+        # Fails CLOSED, like the gate itself: a probe that raised tells us
+        # nothing, and "nothing" is not "safe to delete".
+        blockers = {"blocked": True, "reasons": ["CCSync could not check whether "
+                                                 "your work has been uploaded"]}
+
+    lock = getattr(app, "_popup_active_lock", None)
+    if lock is not None and not lock.acquire(blocking=False):
+        _notify(app, "Another CCSync window is already open. Close it first.")
+        return
+    override = False
+    try:
+        if blockers.get("blocked"):
+            typed = _ask_typed_confirmation_locked(
+                app, "CCSYNC.EXE: project not ready to remove",
+                remove_blocker_body(rel, blockers), rel.split("/")[-1],
+            )
+            confirmed = typed
+            override = bool(typed)
+        else:
+            body = (
+                "Remove '" + rel + "' from THIS machine?" + "\n\n"
+                "This unticks the project on the dashboard, stops syncing it here, "
+                "and deletes the local copy to free disk space." + "\n\n"
+                "CCSync has checked: everything on this machine has reached the "
+                "server, so nothing will be lost." + "\n\n"
+                "Tick the project again any time to sync it back."
+            )
+            confirmed = popup.confirm_dialog(
+                "CCSYNC.EXE: remove project",
+                body,
+                ok_label="REMOVE FROM THIS MACHINE",
+            )
+    finally:
+        if lock is not None:
+            lock.release()
+    if not confirmed:
+        return
+    try:
+        ok, message = app.remove_project_from_machine(slug, override=override)
+    except Exception:
+        log.exception("remove_project_from_machine(%s) raised", slug)
+        _notify(app, "Remove failed. Tray → Copy diagnostics for your admin.")
+        return
+    _notify(app, message if ok else f"Remove stopped: {message}")
+
+
+def _ask_typed_confirmation_locked(
+    app: "CompanionApp", title: str, body: str, expected: str
+) -> bool:
+    """Type-the-name confirmation. Caller holds the popup lock.
+
+    Not popup.confirm_dialog with scarier wording: this dialog exists for the
+    one action in the companion that destroys footage stored nowhere else, and
+    a button is a button however it is labelled. Same Tk plumbing as
+    _build_credentials_dialog."""
+    return bool(ui_dispatch.dispatch(
+        lambda: _build_typed_confirmation(app, title, body, expected)
+    ))
+
+
+def _build_typed_confirmation(
+    app: "CompanionApp", title: str, body: str, expected: str
+) -> bool:
+    try:
+        import tkinter as tk
+
+        from . import theme
+    except Exception as exc:
+        log.warning("typed-confirmation dialog unavailable (%s)", exc)
+        return False
+    try:
+        root = tk.Tk()
+    except Exception as exc:
+        log.warning("typed-confirmation dialog failed to open (%s)", exc)
+        return False
+    result = {"ok": False}
+    root.title(title)
+    theme.apply_window_icon(tk, root)
+    root.attributes("-topmost", True)
+    root.configure(bg=theme.BG, padx=18, pady=14)
+
+    tk.Label(root, text=f"► {title}", bg=theme.BG, fg=theme.RED,
+             font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+    tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+    tk.Label(root, text=body, bg=theme.BG, fg=theme.TEXT, font=theme.mono(10),
+             justify="left", anchor="w", wraplength=520).pack(anchor="w", pady=(6, 10))
+
+    typed_var = tk.StringVar(master=root)
+    entry = tk.Entry(root, textvariable=typed_var, font=theme.mono(10), width=40,
+                     bg=theme.FIELD, fg=theme.TEXT, insertbackground=theme.RED,
+                     relief="flat", highlightthickness=1,
+                     highlightbackground=theme.RED_DIM, highlightcolor=theme.RED)
+    entry.pack(anchor="w")
+    error_label = tk.Label(root, text="", bg=theme.BG, fg=theme.RED, font=theme.mono(9),
+                           justify="left", anchor="w", wraplength=520)
+    error_label.pack(anchor="w", pady=(8, 0))
+
+    btn_bar = tk.Frame(root, bg=theme.BG)
+    btn_bar.pack(anchor="e", pady=(12, 0))
+
+    def _cancel():
+        root.destroy()
+
+    def _submit():
+        if typed_var.get().strip() != expected:
+            error_label.config(text=f"type exactly: {expected}")
+            return
+        result["ok"] = True
+        root.destroy()
+
+    theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
+    theme.neon_button(tk, btn_bar, "DELETE ANYWAY", _submit, primary=True).pack(side="left")
+    root.protocol("WM_DELETE_WINDOW", _cancel)
+    entry.focus_set()
+    ui_dispatch.run_dialog(root)
+    return result["ok"]
+
+
+def _confirm_resume_lane_b(app: "CompanionApp", snap: dict) -> None:
+    """Confirm, then clear the lane B breaker (item 9, 2026-08-17).
+
+    A confirmation and not a bare action: resuming is the operator asserting
+    that the server is in a state worth syncing FROM, which is the exact
+    judgement the breaker could not make itself."""
+    from . import popup
+
+    reason = str(((snap.get("sync_guard") or {}).get("lane_b_breaker") or {})
+                 .get("reason") or "a safety check failed")
+    lock = getattr(app, "_popup_active_lock", None)
+    if lock is not None and not lock.acquire(blocking=False):
+        _notify(app, "Another CCSync window is already open. Close it first.")
+        return
+    try:
+        confirmed = popup.confirm_dialog(
+            "CCSYNC.EXE: resume proxy download",
+            "CCSync stopped downloading proxies because:\n\n"
+            f"  {reason}\n\n"
+            "Only resume once your admin has confirmed the server is healthy. If it "
+            "is not, resuming will move more of your local proxies into "
+            ".ccsync-trash (they stay recoverable, but you will not see them in "
+            "Resolve).",
+            ok_label="RESUME PROXY DOWNLOAD",
+        )
+    finally:
+        if lock is not None:
+            lock.release()
+    if not confirmed:
+        return
+    ok, message = app.resume_lane_b()
+    _notify(app, message if ok else f"Nothing to resume: {message}")
+
+
+def _confirm_halt(app: "CompanionApp") -> None:
+    """Confirm, then STOP everything -- lanes A and B and every lane C folder
+    (item 9). The dialog has to spell out how this differs from Pause, since
+    the two items sit in the same menu."""
     from . import popup
 
     lock = getattr(app, "_popup_active_lock", None)
@@ -1377,32 +1372,28 @@ def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
         _notify(app, "Another CCSync window is already open. Close it first.")
         return
     try:
-        body = (
-            "Remove '" + rel + "' from THIS machine?" + "\n\n"
-            "This unticks the project on the dashboard, stops syncing it here, "
-            "and deletes the local copy to free disk space." + "\n\n"
-            "The server's copy is NOT touched, and nothing you uploaded is lost. "
-            "If you recently added footage, check the dashboard's TRANSFERS page "
-            "shows no pending uploads for this machine first." + "\n\n"
-            "Tick the project again any time to sync it back."
-        )
         confirmed = popup.confirm_dialog(
-            "CCSYNC.EXE: remove project",
-            body,
-            ok_label="REMOVE FROM THIS MACHINE",
+            "CCSYNC.EXE: stop all syncing",
+            "Stop ALL syncing on this machine?\n\n"
+            "This is stronger than Pause: uploads, proxy downloads AND the shared "
+            "project files (Syncthing) all stop, and they STAY stopped after a "
+            "restart until you start them again from this menu.\n\n"
+            "Nothing is deleted. Use this when something looks wrong and you want "
+            "the files to stop moving.",
+            ok_label="STOP ALL SYNCING",
         )
     finally:
         if lock is not None:
             lock.release()
     if not confirmed:
         return
-    try:
-        ok, message = app.remove_project_from_machine(slug)
-    except Exception:
-        log.exception("remove_project_from_machine(%s) raised", slug)
-        _notify(app, "Remove failed. Tray → Copy diagnostics for your admin.")
-        return
-    _notify(app, message if ok else f"Remove stopped: {message}")
+    ok, message = app.halt_all_sync("stopped from the tray on this machine")
+    _notify(app, message if ok else f"Could not stop syncing: {message}")
+
+
+def _release_halt(app: "CompanionApp") -> None:
+    ok, message = app.release_halt(by="tray")
+    _notify(app, message)
 
 
 def _confirm_grade_swap(app: "CompanionApp", to_server: bool) -> None:
@@ -1685,11 +1676,22 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     _get("root_absent", lambda: bool(getattr(app, "_root_absent", False)), False)
     _get("dashboard_url", lambda: _dashboard_url(app), "")
     # Whether the "Sign in to YouTube (for downloads)…" item is offered at
-    # all -- ytdlp_manager.local_downloads_enabled's own key, read the same
-    # tri-state way (absent means on). False hides the item, matching the
+    # all. TWO gates since 2026-08-17 (COMMERCIAL_READINESS.md items 2 + 3):
+    # `ytdl_local_downloads` is this machine's own opt-out, folded into
+    # ytdlp_manager.youtube_enabled along with the site manifest's
+    # `youtube_download`; and signing IN needs the site's `youtube_unblock` on
+    # top, because downloading as a live Google account is the piece the
+    # vendor build does not ship enabled. False hides the item, matching the
     # sidecar manager doing nothing on that machine.
     _get("ytdl_local_downloads",
-         lambda: ytdlp_manager.local_downloads_enabled(getattr(app, "config", {})), True)
+         lambda: ytdlp_manager.youtube_enabled(getattr(app, "config", {})), False)
+    _get("ytdl_youtube_signin",
+         lambda: (ytdlp_manager.youtube_enabled(getattr(app, "config", {}))
+                  and ytdlp_manager.unblock_enabled()), False)
+    # Whether the terms have been accepted on THIS machine by the signed-in
+    # editor -- one small file read, the same cost as every other line here.
+    _get("ytdl_attested",
+         lambda: _ytdl_attested(app), False)
     _get("sequencer_line", lambda: _sequencer_line(app), None)
     _get("current_project_line", lambda: _current_project_line(app), None)
     # Cheap by construction: resolve_bridge records this on the way out of
@@ -1723,9 +1725,73 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     _get("p_mode", lambda: (getattr(app, "p_mapping_mode_cached", None)
                             or getattr(app, "p_mapping_mode", None)
                             or (lambda: "none"))(), "none")
+    # The two safety latches and the trash size (COMMERCIAL_READINESS.md
+    # item 9, 2026-08-17). All cached reads -- the breaker and the halt are
+    # in-memory objects, the trash summary is whatever lane B's last prune
+    # cycle measured -- so none of them may stall the render path.
+    _get("sync_guard", lambda: (getattr(app, "sync_guard", None) or (lambda: {}))() or {}, {})
     snap["color"] = compute_overall_color(statuses, app)
     _get("pulse", lambda: should_pulse(snap["color"], statuses), False)
     return snap
+
+
+def _breaker_line(guard: dict) -> Optional[str]:
+    """The one-line "proxy download is stopped" state, or None.
+
+    Deliberately its own sentence rather than a suffix on lane B's line: an
+    editor reading "PROBLEM" against a lane learns nothing they can act on,
+    and the two facts that stop the support call -- nothing was deleted, your
+    uploads are still running -- do not fit on a lane line."""
+    breaker = (guard or {}).get("lane_b_breaker") or {}
+    if not breaker.get("tripped"):
+        return None
+    reason = str(breaker.get("reason") or "a safety check failed")
+    return f"⛔ PROXY DOWNLOAD STOPPED (safety): {reason}"
+
+
+def _halt_line(guard: dict) -> Optional[str]:
+    halt = (guard or {}).get("halt") or {}
+    if not halt.get("active"):
+        return None
+    who = ("Your administrator stopped syncing for everyone"
+           if halt.get("scope") == "fleet" else "Syncing is STOPPED on this machine")
+    reason = str(halt.get("reason") or "")
+    return f"⛔ {who}" + (f": {reason}" if reason else "")
+
+
+def _trash_line(guard: dict) -> Optional[str]:
+    """"How much is in trash" -- absent below a gigabyte.
+
+    `.ccsync-trash` is where every file lane B removed still lives, and until
+    item 9 nothing anywhere said how big it had grown. Under 1 GB it is noise
+    on a menu that already has plenty."""
+    trash = (guard or {}).get("trash") or {}
+    try:
+        total = int(trash.get("bytes") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total < (1 << 30):
+        return None
+    return (f"Recoverable files in .ccsync-trash: {human_bytes(total)} "
+            f"({int(trash.get('count') or 0)} files)")
+
+
+def _skipped_exists_line(guard: dict) -> Optional[str]:
+    """Lane A's "same name, already on the server at a different size" count.
+
+    The one silent data-loss shape on the upload lane: `copy
+    --ignore-existing` will never replace it, so the re-export sits here
+    forever with the lane showing green (item 9)."""
+    skipped = (guard or {}).get("skipped_exists") or {}
+    try:
+        count = int(skipped.get("count") or 0)
+    except (TypeError, ValueError):
+        return None
+    if count <= 0:
+        return None
+    return (f"⚠ {count} file{'s' if count != 1 else ''} on the server "
+            f"{'have' if count != 1 else 'has'} the same name but a different size — "
+            "your newer version will NOT upload")
 
 
 def _progress_bucket(status: LaneStatus) -> Optional[int]:
@@ -1745,12 +1811,15 @@ def _progress_bucket(status: LaneStatus) -> Optional[int]:
 def _menu_fingerprint(snap: dict) -> tuple:
     """Everything that should trigger a menu REBUILD when it changes.
 
-    Deliberately coarser than the rendered text: pystray's win32 backend
-    DestroyMenu()s the live menu handle on every icon.menu assignment, so a
-    rebuild while the menu is open freezes it -- and with TPM_RETURNCMD the
-    returned index is then resolved against the NEW callback list, i.e. a
-    click can fire the WRONG item. Rebuilding only on real state changes
-    (not every byte counted) makes that window rare instead of every 5 s."""
+    Deliberately coarser than the rendered text. It had to be under pystray,
+    whose win32 backend DestroyMenu()d the live menu handle on every
+    icon.menu assignment: a rebuild while the menu was open froze it, and the
+    returned index was then resolved against the NEW callback list, i.e. a
+    click could fire the WRONG item. tray_native builds the HMENU at
+    right-click time and destroys it on close, so neither is possible any
+    more -- but the fingerprint stays, because rebuilding ~40 menu items and
+    their closures twice a second is work nobody needs either. Only on real
+    state changes, not on every byte counted."""
     lanes = tuple(
         (s.name, s.state, str(s.detail or ""), str(s.last_error or ""),
          str(s.current_project or ""), bool(s.queued), _progress_bucket(s))
@@ -1762,7 +1831,13 @@ def _menu_fingerprint(snap: dict) -> tuple:
         snap["sequencer_line"], snap["current_project_line"],
         snap.get("resolve_line"),
         snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
-        snap["dashboard_url"], snap.get("ytdl_local_downloads"), snap["color"],
+        snap["dashboard_url"], snap.get("ytdl_local_downloads"),
+        # Their own entries: the sign-in item appears and disappears on the
+        # site's youtube_unblock flag, and the terms item's label carries a
+        # tick -- either can change without anything else in this tuple
+        # moving (2026-08-17).
+        snap.get("ytdl_youtube_signin"), snap.get("ytdl_attested"),
+        snap["color"],
         tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
         snap.get("p_swap_available"), snap.get("p_mode"),
         # The stray-LUT count decides whether the "N LUTs only on this
@@ -1773,6 +1848,32 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # share_stray_luts took the count back to 0 (UI-3, 2026-08-11).
         int(snap.get("stray_luts") or 0),
         _proxy_fingerprint(snap.get("proxy_gap")),
+        # The safety latches decide whether two ACTIONS exist at all
+        # ("Resume proxy download", "Start syncing again"), so they have to
+        # move the fingerprint or the menu keeps offering the wrong one until
+        # something unrelated changes -- the same bug UI-3 was (item 9).
+        _guard_fingerprint(snap.get("sync_guard")),
+    )
+
+
+def _guard_fingerprint(guard: Optional[dict]) -> tuple:
+    """Coarse state of the breaker/halt/trash lines. Bucketed like every
+    other counter here: the trash grows continuously and a rebuild per
+    gigabyte is already generous."""
+    guard = guard or {}
+    breaker = guard.get("lane_b_breaker") or {}
+    halt = guard.get("halt") or {}
+    trash = guard.get("trash") or {}
+    skipped = guard.get("skipped_exists") or {}
+    try:
+        trash_gb = int(int(trash.get("bytes") or 0) // (1 << 30))
+    except (TypeError, ValueError):
+        trash_gb = 0
+    return (
+        bool(breaker.get("tripped")), str(breaker.get("reason") or ""),
+        bool(halt.get("active")), str(halt.get("scope") or ""),
+        str(halt.get("reason") or ""), trash_gb,
+        int(skipped.get("count") or 0),
     )
 
 
@@ -1966,12 +2067,12 @@ def _tooltip_text(snap: dict) -> str:
     return _with_proxy_suffix("CCSync: up to date", snap)
 
 
-def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Menu":
+def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backend.Menu":
     if snap is None:
         snap = _tray_snapshot(app)
     statuses = snap["statuses"]
     lane_items = [
-        pystray.MenuItem(
+        tray_backend.MenuItem(
             _format_lane_line_from(
                 s, paused=snap["paused"], problems=snap["problems"],
                 root_absent=bool(snap.get("root_absent")),
@@ -1991,6 +2092,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
 
     def on_consolidate_project(icon, item):
         _spawn(app, "Bring an existing project's media in", app.consolidate_project)
+
+    def on_undo_last_relink(icon, item):
+        _spawn(app, "Undo the last clip-path change", app.undo_last_relink)
 
     def on_share_luts(icon, item):
         _spawn(app, "Share LUTs", app.share_stray_luts)
@@ -2021,6 +2125,18 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         # (seen live 2026-07-26).
         _spawn(app, "Pause/resume", app.toggle_pause)
 
+    def on_resume_lane_b(icon, item):
+        # Confirm first: resuming is the operator asserting the server is
+        # fine, and the breaker exists precisely because nothing else can
+        # tell (item 9).
+        _spawn(app, "Resume proxy download", lambda: _confirm_resume_lane_b(app, snap))
+
+    def on_halt_sync(icon, item):
+        _spawn(app, "Stop all syncing", lambda: _confirm_halt(app))
+
+    def on_release_halt(icon, item):
+        _spawn(app, "Start syncing again", lambda: _release_halt(app))
+
     def on_open_dashboard(icon, item):
         url = snap["dashboard_url"]
         _spawn(app, "Open dashboard", lambda: _open_dashboard(url, app))
@@ -2045,6 +2161,10 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     def on_youtube_sign_in(icon, item):
         _spawn(app, "Sign in to YouTube", lambda: _install_youtube_cookies(app))
 
+    def on_youtube_terms(icon, item):
+        _spawn(app, "YouTube download terms",
+               lambda: _show_youtube_terms_dialog(app))
+
     def on_sign_out(icon, item):
         _spawn(app, "Sign out", lambda: _on_sign_out(app))
 
@@ -2065,24 +2185,35 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         return handler
 
     dashboard_items = (
-        [pystray.MenuItem("Open dashboard", on_open_dashboard)]
+        [tray_backend.MenuItem("Open dashboard", on_open_dashboard)]
         if snap["dashboard_url"] else []
     )
     # Sign in to YouTube for the LOCAL downloader (ytdl_cookies.py): points it
     # at a cookies.txt so this machine passes the bot check and can fetch
-    # age-restricted clips itself instead of handing them to the server. Only
-    # while local downloads are enabled -- with them off nothing here ever
-    # runs yt-dlp. Under Advanced would hide it from the editor who needs it;
-    # it sits by "Open dashboard" because it is an account action.
+    # age-restricted clips itself instead of handing them to the server.
+    # Offered only where the site enabled BOTH the downloader and
+    # `youtube_unblock` (2026-08-17) -- with either off nothing here ever runs
+    # yt-dlp signed in, and an item that cannot work is worse than no item.
+    # Under Advanced would hide it from the editor who needs it; it sits by
+    # "Open dashboard" because it is an account action.
+    # The rights/ToS attestation, per MACHINE (ytdl_attestation.py,
+    # COMMERCIAL_READINESS.md item 2). It sits beside the sign-in because it is
+    # the same kind of thing -- something the person, not the software, has to
+    # do before a download runs here -- and the label carries a tick once it is
+    # done so an editor can see the state without opening it.
     youtube_items = (
-        [pystray.MenuItem("Sign in to YouTube (for downloads)…", on_youtube_sign_in)]
-        if snap.get("ytdl_local_downloads") else []
+        ([tray_backend.MenuItem(
+            ("YouTube download terms ✓" if snap.get("ytdl_attested")
+             else "YouTube download terms…"), on_youtube_terms)]
+         if snap.get("ytdl_local_downloads") else [])
+        + ([tray_backend.MenuItem("Sign in to YouTube (for downloads)…", on_youtube_sign_in)]
+           if snap.get("ytdl_youtube_signin") else [])
     )
     # Present only while the open Resolve project has no server-side root
     # (see project_setup.py) -- clicking opens the /project-setup deep link.
     setup_name = snap["setup_name"]
     setup_items = (
-        [pystray.MenuItem(f"Set up '{setup_name}' on the server…", on_setup_project)]
+        [tray_backend.MenuItem(f"Set up '{setup_name}' on the server…", on_setup_project)]
         if setup_name else []
     )
     # Present only while the dashboard advertises a different published
@@ -2096,9 +2227,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     # available → v0.4.3 (install)" -- one click from a silent DOWNGRADE
     # that reintroduced a round of security fixes (seen live 2026-07-25).
     upgrade_items = (
-        [pystray.MenuItem(
+        [tray_backend.MenuItem(
             upgrade_mod.offer_label(upgrade_info["version"]), on_update_now,
-        ), pystray.Menu.SEPARATOR]
+        ), tray_backend.Menu.SEPARATOR]
         if upgrade_info else []
     )
     # Present only while this machine holds LUTs the shared library doesn't.
@@ -2106,10 +2237,10 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     # when there is something to do and vanishes once there isn't.
     stray_luts = int(snap.get("stray_luts") or 0)
     lut_items = (
-        [pystray.MenuItem(
+        [tray_backend.MenuItem(
             f"► {stray_luts} LUT{'s' if stray_luts != 1 else ''} only on this machine — "
             f"share with the team", on_share_luts,
-        ), pystray.Menu.SEPARATOR]
+        ), tray_backend.Menu.SEPARATOR]
         if stray_luts else []
     )
     # Missing proxies (proxy_gen.py). ADVISORY lines only -- no icon color,
@@ -2153,15 +2284,15 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     proxy_made = _proxy_made_line(proxy_gap)
     if proxy_made:
         proxy_lines.append(proxy_made)
-    proxy_items = [pystray.MenuItem(line, None, enabled=False) for line in proxy_lines]
+    proxy_items = [tray_backend.MenuItem(line, None, enabled=False) for line in proxy_lines]
     # The two ACTIONS live under Advanced: "make them now" costs a full tree
     # walk plus hours of encoding, and neither is something to hit by accident
     # on the way to Pause (the same reasoning that moved Consolidate/Scan).
     proxy_actions = []
     if proxy_encoding:
-        proxy_actions.append(pystray.MenuItem("Stop making proxies", on_stop_proxies))
+        proxy_actions.append(tray_backend.MenuItem("Stop making proxies", on_stop_proxies))
     elif proxy_missing and proxy_gap.get("can_generate"):
-        proxy_actions.append(pystray.MenuItem(
+        proxy_actions.append(tray_backend.MenuItem(
             "Make the missing proxies now (don't wait until I'm away)", on_make_proxies,
         ))
     # Always offered where this machine can generate at all, gap or no gap:
@@ -2169,7 +2300,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
     # precisely when there is nothing left to do and the menu says nothing.
     # A STABLE LABEL, so it never moves the menu fingerprint.
     if proxy_gap.get("can_generate") or _proxy_history(proxy_gap).get("last_at"):
-        proxy_actions.append(pystray.MenuItem(
+        proxy_actions.append(tray_backend.MenuItem(
             "Proxies this machine has made…", on_proxy_history,
         ))
 
@@ -2182,45 +2313,82 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         if snap.get("require_login", True) else "Sign in…"
     )
     identity_items = [
-        pystray.MenuItem(snap["identity_label"], None, enabled=False),
-        pystray.MenuItem("Sign out", on_sign_out) if signed_in
-        else pystray.MenuItem(sign_in_label, on_sign_in),
+        tray_backend.MenuItem(snap["identity_label"], None, enabled=False),
+        tray_backend.MenuItem("Sign out", on_sign_out) if signed_in
+        else tray_backend.MenuItem(sign_in_label, on_sign_in),
     ]
 
     problem_items = []
     if snap["problems"]:
-        problem_items = [pystray.MenuItem(
+        problem_items = [tray_backend.MenuItem(
             "⚠ NOT SET UP: nothing will sync (Copy diagnostics for your admin)",
             None, enabled=False,
         )]
 
+    # The safety latches go FIRST among the state lines and before every
+    # lane line (COMMERCIAL_READINESS.md item 9, 2026-08-17): "proxy download
+    # is stopped" and "your admin halted syncing" outrank which project is
+    # currently in the rotation, and an editor who reads no further must
+    # still have read those.
+    guard = snap.get("sync_guard") or {}
     state_items = [
-        pystray.MenuItem(line, None, enabled=False)
-        for line in (snap["sequencer_line"], snap["current_project_line"],
-                     snap.get("resolve_line"))
+        tray_backend.MenuItem(line, None, enabled=False)
+        for line in (_halt_line(guard), _breaker_line(guard),
+                     _skipped_exists_line(guard),
+                     snap["sequencer_line"], snap["current_project_line"],
+                     snap.get("resolve_line"), _trash_line(guard))
         if line
     ]
+
+    # Conditional-item pattern, same as the upgrade offer: the RESUME action
+    # exists only while the breaker is tripped, and the halt item flips
+    # between stop and start. Both are top-level rather than under Advanced
+    # -- an editor whose syncing has stopped must not have to go looking
+    # (item 9).
+    breaker_items = (
+        [tray_backend.MenuItem("► Resume proxy download…", on_resume_lane_b)]
+        if ((guard.get("lane_b_breaker") or {}).get("tripped")) else []
+    )
+    halt_active = bool((guard.get("halt") or {}).get("active"))
+    halt_is_fleet = (guard.get("halt") or {}).get("scope") == "fleet"
+    # RELEASE is top-level, STOP is under Advanced -- the asymmetry is the
+    # point. Stopping everything is a rare, destructive-feeling action that
+    # must not sit next to Pause; starting again is the thing an editor
+    # staring at a stopped tray needs to find immediately. A FLEET halt
+    # offers no local release at all: only the dashboard can clear it, and an
+    # item that always answers "your administrator has to do this" is worse
+    # than no item.
+    halt_release_items = (
+        [tray_backend.MenuItem("► Start syncing again", on_release_halt)]
+        if halt_active and not halt_is_fleet else []
+    )
+    halt_stop_items = (
+        [] if halt_active
+        else [tray_backend.MenuItem("Stop ALL syncing on this machine…", on_halt_sync)]
+    )
 
     # Order per AUDIT_2 UX-17: who you are, then what is happening, then the
     # things you actually click, and `Update available…` NEVER adjacent to
     # Quit -- it used to sit directly above the one item you must never
     # mis-click. Consolidate/Scan are the two rarest and most dangerous
     # actions, so they move under Advanced.
-    return pystray.Menu(
+    return tray_backend.Menu(
         *identity_items,
-        pystray.Menu.SEPARATOR,
+        tray_backend.Menu.SEPARATOR,
         *problem_items,
         *state_items,
         *lane_items,
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Sync now", on_sync_now),
-        pystray.MenuItem(
+        tray_backend.Menu.SEPARATOR,
+        *breaker_items,
+        *halt_release_items,
+        tray_backend.MenuItem("Sync now", on_sync_now),
+        tray_backend.MenuItem(
             "▶ Resume syncing (currently PAUSED)" if snap["paused"] else "⏸ Pause syncing",
             on_toggle_pause, checked=(lambda paused: lambda item: paused)(snap["paused"]),
         ),
-        pystray.MenuItem("Open my project folder", on_open_project_folder),
+        tray_backend.MenuItem("Open my project folder", on_open_project_folder),
         *([
-            pystray.MenuItem(
+            tray_backend.MenuItem(
                 "Finish grading: P: back to local proxies"
                 if snap.get("p_mode") == "server"
                 else "Grade from server originals (swap P:)…",
@@ -2232,29 +2400,33 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "pystray.Me
         *setup_items,
         *lut_items,
         *proxy_items,
-        pystray.Menu.SEPARATOR,
+        tray_backend.Menu.SEPARATOR,
         *upgrade_items,
-        pystray.MenuItem("Copy diagnostics for your admin", on_copy_diagnostics),
-        pystray.MenuItem("Open log", on_open_log),
-        pystray.MenuItem("Advanced", pystray.Menu(
-            pystray.MenuItem("Scan whole project", on_scan_whole_project),
-            pystray.MenuItem(
+        tray_backend.MenuItem("Copy diagnostics for your admin", on_copy_diagnostics),
+        tray_backend.MenuItem("Open log", on_open_log),
+        tray_backend.MenuItem("Advanced", tray_backend.Menu(
+            tray_backend.MenuItem("Scan whole project", on_scan_whole_project),
+            tray_backend.MenuItem(
                 "Bring an existing project's media into the synced folder…",
                 on_consolidate_project,
             ),
+            tray_backend.MenuItem(
+                "Undo the last clip-path change CCSync made…", on_undo_last_relink,
+            ),
             *proxy_actions,
-            *([pystray.Menu.SEPARATOR] if snap.get("removable") else []),
+            *halt_stop_items,
+            *([tray_backend.Menu.SEPARATOR] if snap.get("removable") else []),
             *[
-                pystray.MenuItem(
+                tray_backend.MenuItem(
                     "Remove '" + proj["rel"].split("/")[-1] + "' from this machine…",
                     on_remove_project(proj["slug"], proj["rel"]),
                 )
                 for proj in snap.get("removable", [])
             ],
-            pystray.MenuItem(f"ccsync-companion v{config_mod.VERSION}", None, enabled=False),
+            tray_backend.MenuItem(f"ccsync-companion v{config_mod.VERSION}", None, enabled=False),
         )),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Quit CCSync (stops syncing until you next sign in)", on_quit),
+        tray_backend.Menu.SEPARATOR,
+        tray_backend.MenuItem("Quit CCSync (stops syncing until you next sign in)", on_quit),
     )
 
 
@@ -2262,7 +2434,7 @@ def start_tray(
     app: "CompanionApp",
     refresh_interval: float = 2.0,
     pulse_interval: float = PULSE_PERIOD / PULSE_STEPS,
-) -> "pystray.Icon":
+) -> "tray_backend.Icon":
     """Start the tray icon on a background thread. Returns the Icon (call
     .stop() to remove it).
 
@@ -2270,28 +2442,43 @@ def start_tray(
       - icon color and TOOLTIP update every `refresh_interval` seconds --
         both are plain Shell_NotifyIcon modifications, safe at any time, and
         the tooltip carries the live speed/ETA numbers;
-      - the MENU is rebuilt only when its fingerprint changes. pystray's
-        win32 backend DestroyMenu()s the live menu handle on every icon.menu
-        assignment, so the old rebuild-every-5s loop could destroy a menu
-        the user had open (freeze) and then resolve the clicked index
-        against the NEW callback list (wrong action). Rebuilding only on
-        real state changes makes that window rare and keeps an open menu
-        stable under the cursor.
+      - the MENU is rebuilt only when its fingerprint changes. Under pystray
+        that was a correctness requirement -- its win32 backend
+        DestroyMenu()d the live handle on every icon.menu assignment, so the
+        old rebuild-every-5s loop could destroy a menu the user had open
+        (freeze) and then resolve the clicked index against the NEW callback
+        list (wrong action). tray_native builds the HMENU at right-click
+        time, so the fingerprint is now only about not doing pointless work.
 
     Pulse (2026-08-10): a second, faster thread breathes the mark while the
     snapshot says so (syncing, or broken -- see should_pulse). The two loops
     share one tuple and never both own the icon; see _pulse_loop."""
 
     first = _tray_snapshot(app)
-    icon = pystray.Icon(
-        "ccsync-companion",
-        _icon_image_cached(first["color"]),
-        _tooltip_text(first),
-        menu=_build_menu(app, first),
-    )
     guard = _MenuOpenGuard()
     guard.install()
-    _MenuSwapGuard().install()
+    try:
+        icon = tray_backend.Icon(
+            "ccsync-companion",
+            _icon_image_cached(first["color"]),
+            _tooltip_text(first),
+            menu=_build_menu(app, first),
+            # getattr, not guard.flag: several tests substitute a stand-in
+            # guard, and a missing flag has a defined meaning (the backend
+            # keeps an Event of its own that nothing else reads).
+            menu_open_flag=getattr(guard, "flag", None),
+        )
+    except TypeError:
+        # The pystray escape hatch (CCSYNC_TRAY_BACKEND=pystray) knows nothing
+        # about menu_open_flag, and neither does a test's stand-in Icon. The
+        # tray then behaves as it did before 2026-07-26: is_open() stays False
+        # and the loops below update unconditionally.
+        icon = tray_backend.Icon(
+            "ccsync-companion",
+            _icon_image_cached(first["color"]),
+            _tooltip_text(first),
+            menu=_build_menu(app, first),
+        )
     last_fingerprint = _menu_fingerprint(first)
     last_color = first["color"]
     last_title = _tooltip_text(first)

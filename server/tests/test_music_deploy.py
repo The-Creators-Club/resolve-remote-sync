@@ -504,17 +504,116 @@ def test_an_overridden_url_drops_the_pinned_hash(monkeypatch, capsys):
     assert "sha256sum" not in ffmpeg_cmd
 
 
-def test_the_default_is_to_fetch_here_and_push_over_the_lan(monkeypatch, capsys):
-    """The first deploy of this app died here: the step runs BEFORE any tree
-    ships, the NAS pulls johnvansickle at ~28 kB/s, and 42 MB does not fit in
-    run_ssh's 600s timeout. Nothing had landed -- but nothing could land."""
+def test_the_default_is_the_nas_downloading_it_itself(monkeypatch, capsys):
+    """2026-08-17, COMMERCIAL_READINESS.md item 3. This test USED to pin the
+    opposite (the local push was the default from 2026-08-10, because the NAS
+    pulls johnvansickle at ~28 kB/s and 42 MB did not fit in the 600s ceiling
+    the step was given). The licensing half outranks it: johnvansickle's build
+    is GPLv3, and a deploy that pushes it onto a customer's NAS is conveying it
+    with no source and no written offer. The NAS fetching its own copy from
+    upstream conveys nothing."""
+    assert ida.DEFAULT_FFMPEG_FETCH == "remote"
     cmds: list = []
-    transcript = _dry_run(monkeypatch, capsys, cmds)
-    assert "push it to the NAS over the LAN" in transcript
-    assert not any(ida.DEFAULT_FFMPEG_URL in c for c in cmds), (
-        "the NAS must not be the one downloading it by default")
-    unpack = next(c for c in cmds if "tar -xJf" in c)
-    assert "ccsync-ffmpeg-upload" in unpack and "curl" not in unpack
+    _dry_run(monkeypatch, capsys, cmds)
+    curl = next(c for c in cmds if ida.DEFAULT_FFMPEG_URL in c)
+    assert "curl" in curl and ida.DEFAULT_FFMPEG_SHA256 in curl
+    assert not any("ccsync-ffmpeg-upload" in c for c in cmds), (
+        "nothing may be pushed from this machine by default")
+
+
+def test_the_remote_step_gets_more_than_the_ceiling_it_used_to_blow(monkeypatch):
+    """The 2026-08-10 operational reason for the local default is real and was
+    not wished away: the ~25 min this host needs at 28 kB/s has to fit under the
+    SSH timeout, or the flip back to remote just re-breaks the first deploy."""
+    seen: list = []
+    monkeypatch.setattr(ida, "ffmpeg_present", lambda *a, **k: False)
+    monkeypatch.setattr(ida, "run_ssh_guarded",
+                        lambda cmd, dry, timeout: seen.append(timeout) or (0, "", ""))
+    ida.provision_ffmpeg("/mnt/tank/apps/ccsync-dashboard", "remote", dry_run=False)
+
+    assert seen == [ida.FFMPEG_REMOTE_INSTALL_TIMEOUT]
+    assert ida.FFMPEG_REMOTE_INSTALL_TIMEOUT >= 1500, (
+        "42 MB at the 28 kB/s measured on 2026-08-10 is ~1500s")
+
+
+def test_push_from_local_is_the_same_mode_as_ffmpeg_fetch_local(monkeypatch, capsys):
+    """One mode, two spellings: --push-ffmpeg-from-local exists because what an
+    air-gapped operator searches for is the ACT, not the enum value."""
+    flag: list = []
+    _dry_run(monkeypatch, capsys, flag, extra_argv=["--push-ffmpeg-from-local"])
+    mode: list = []
+    _dry_run(monkeypatch, capsys, mode, extra_argv=["--ffmpeg-fetch", "local"])
+
+    for cmds in (flag, mode):
+        assert any("ccsync-ffmpeg-upload" in c for c in cmds)
+        assert not any(ida.DEFAULT_FFMPEG_URL in c for c in cmds)
+    assert [c for c in flag if "ffmpeg" in c] == [c for c in mode if "ffmpeg" in c]
+
+
+def test_the_env_var_still_selects_the_fetch_mode(monkeypatch, capsys):
+    """MUSIC_FFMPEG_FETCH is the non-interactive spelling; the flip of the
+    DEFAULT must not have cost it its meaning."""
+    cmds: list = []
+    monkeypatch.setenv("MUSIC_FFMPEG_FETCH", "local")
+    _dry_run(monkeypatch, capsys, cmds)
+    assert any("ccsync-ffmpeg-upload" in c for c in cmds)
+    assert not any(ida.DEFAULT_FFMPEG_URL in c for c in cmds)
+
+
+def test_the_local_push_says_out_loud_that_it_conveys_a_gplv3_binary(monkeypatch,
+                                                                    capsys):
+    """GPLv3 s6 attaches to the act of conveying, and it is the operator who
+    chooses to convey -- so they hear about it before the bytes move, on a dry
+    run too, while the choice is still reversible."""
+    cmds: list = []
+    transcript = _dry_run(monkeypatch, capsys, cmds,
+                          extra_argv=["--push-ffmpeg-from-local"])
+    assert "conveys a GPLv3 binary" in transcript
+    assert "written offer valid for three years" in transcript
+    assert "7.0.2" in transcript, "the notice names the build it is talking about"
+    assert "docs/legal/THIRD_PARTY_NOTICES.md" in transcript
+    # ...and the default path says nothing of the sort, because it conveys nothing.
+    quiet: list = []
+    assert "conveys a GPLv3 binary" not in _dry_run(monkeypatch, capsys, quiet)
+
+
+def test_the_gpl_notice_names_an_overridden_build_or_admits_it_cannot():
+    """A notice that cites 7.0.2 for a mirror's 6.1 tarball is worse than one
+    that says it does not know which build this is."""
+    assert "ffmpeg 7.0.2" in ida.ffmpeg_gpl_notice(ida.DEFAULT_FFMPEG_URL)
+    assert "ffmpeg 6.1" in ida.ffmpeg_gpl_notice(
+        "https://mirror.invalid/ffmpeg-6.1-amd64-static.tar.xz")
+    assert "version unknown" in ida.ffmpeg_gpl_notice(
+        "https://mirror.invalid/static-build.tar.xz")
+
+
+def test_a_staged_local_tarball_is_not_silently_ignored_in_remote_mode(monkeypatch,
+                                                                      capsys):
+    """MUSIC_FFMPEG_FILE only ever fed the LAN push, and the push stopped being
+    the default on 2026-08-17 -- an operator who set it must not watch the NAS
+    download a file they already have, in silence."""
+    monkeypatch.setenv("MUSIC_FFMPEG_FILE", "/downloads/ffmpeg.tar.xz")
+    monkeypatch.setattr(ida, "ffmpeg_present", lambda *a, **k: False)
+    monkeypatch.setattr(ida, "run_ssh_guarded", lambda *a, **k: (0, "", ""))
+    ida.provision_ffmpeg("/mnt/tank/apps/ccsync-dashboard", "remote", dry_run=False)
+
+    err = capsys.readouterr().err
+    assert "MUSIC_FFMPEG_FILE" in err and "--push-ffmpeg-from-local" in err
+
+
+def test_a_slow_remote_download_is_still_a_note_not_a_failed_deploy(monkeypatch,
+                                                                   capsys):
+    """The reason the 2026-08-10 flip was allowed to be reversed at all: the
+    worst the slow host can now do is cost /music's queued ingest, which answers
+    503 with a readable message."""
+    monkeypatch.setattr(ida, "ffmpeg_present", lambda *a, **k: False)
+    monkeypatch.setattr(ida, "run_ssh_guarded",
+                        lambda *a, **k: (255, "", "the SSH channel dropped after 1800s"))
+    ida.provision_ffmpeg("/mnt/tank/apps/ccsync-dashboard", "remote", dry_run=False)
+
+    err = capsys.readouterr().err
+    assert "ffmpeg was NOT provisioned" in err
+    assert "--push-ffmpeg-from-local" in err
 
 
 def test_an_already_provisioned_host_is_not_re_fetched(monkeypatch, capsys):

@@ -215,7 +215,7 @@ shrinks to a page.
    template the SPK reuses.
 2. Dockerfile + registry image (readiness 12) — small, unblocks everything.
 3. SPK: `INFO`, `preinst`, `install_uifile.sh`, `postinst`, `start-stop-status`,
-   `postupgrade`, icons; build with `pkgscripts-ng`; test on the 192.168.0.104
+   `postupgrade`, icons; build with `pkgscripts-ng`; test on the 192.168.0.11
    unit (Manual Install with trust level lowered).
 4. Dashboard Setup page + Diagnostics + invites (dashboard + onboarding work).
 5. Docs rewrite for the customer: a 2-page "Install on Synology" with

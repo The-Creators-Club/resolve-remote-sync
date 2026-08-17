@@ -241,7 +241,7 @@ const DL = (id, over = {}) => Object.assign({
   folder_path: 'Youtube/algal reef',
   rel_path: `Youtube/algal reef/Channel [${id}].mp4`,
   reveal_path: `2026/FF5/Energy/Youtube/algal reef/Channel [${id}].mp4`,
-  thumbnail: null, job_id: 1, downloaded_by: 'alex',
+  thumbnail: null, job_id: 1, downloaded_by: 'owen',
   downloaded_at: '2026-08-11T09:30:00+00:00',
 }, over);
 
@@ -1454,7 +1454,7 @@ function dispatchPage(opts) {
       const m = typeof mode === 'function' ? mode(downloadPolls) : mode;
       return {json: POLLRES(JOB({id: 90, phase: 'downloading', dl_total: 1,
                                  dl_done: 0, download_mode: m,
-                                 claimed_by: m === 'local' ? 'alex' : null}))};
+                                 claimed_by: m === 'local' ? 'owen' : null}))};
     }
     if (url.startsWith('api/jobs/90/manifest')) {
       return {json: MANIFEST({job: JOB({id: 90, phase: 'ready_for_review',
@@ -1474,7 +1474,7 @@ const submit = async h => {
   return h;
 };
 
-const CAPABLE = () => ({json: {ok: true, editor: 'alex',
+const CAPABLE = () => ({json: {ok: true, editor: 'owen',
                                ytdlp_version: '2026.08.10', free_bytes: 9e11}});
 const ACCEPTED = () => ({status: 202, json: {ok: true, job_id: 90}});
 
@@ -1581,7 +1581,7 @@ scenarios['a_hung_probe_is_abandoned_after_a_second'] = async () => {
 // is never dispatched: the claim would be taken and handed straight back. A
 // companion that declares nothing behaves exactly as it did before the field.
 scenarios['an_out_of_scope_job_is_never_handed_over'] = async () => {
-  const SCOPED = () => ({json: {ok: true, editor: 'alex',
+  const SCOPED = () => ({json: {ok: true, editor: 'owen',
                                 ytdlp_version: '2026.08.10', free_bytes: 9e11,
                                 scope_qualities: ['480p', '720p', '1080p']}});
   const run = (q, capfn) => dispatchPage(
@@ -2339,7 +2339,7 @@ def test_a_capable_companion_is_probed_then_handed_the_job_id(spa):
     assert r['after_more_polls'] == 2, r
     assert r['badge'] == 'downloading on your machine', r
     assert r['badge_hidden'] is False and 'local' in r['badge_class'].split(), r
-    assert r['badge_title'] == 'claimed by alex', r
+    assert r['badge_title'] == 'claimed by owen', r
     assert r['link_hidden'] is False, 'no way back to the server'
     assert r['review_hidden'] is True and r['toast_hidden'] is True, r
 
@@ -2398,7 +2398,7 @@ def test_the_badge_flips_on_its_own_when_the_server_reclaims(spa):
     r = spa['the_badge_flips_when_the_server_reclaims']
     assert r['local']['badge'] == 'downloading on your machine', r['local']
     assert 'local' in r['local']['cls'].split(), r['local']
-    assert r['local']['title'] == 'claimed by alex', r['local']
+    assert r['local']['title'] == 'claimed by owen', r['local']
     assert r['local']['link_hidden'] is False, r['local']
     assert r['still'] == 'downloading on your machine', r
     assert r['reclaimed'] == 'downloading on the server', r

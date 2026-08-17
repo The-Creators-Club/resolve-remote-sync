@@ -4,7 +4,7 @@ references.
 Found 2026-08-12 on the base rig: the DB keys clips by INGEST share (ff3,
 ff4, ...), v1 sent that identity to the companion verbatim, and a machine
 with a hand-written mount for that share inserted the clip's PRE-archive
-copy (share ff3 -> Z:\\Cablewrap\\..., straight into the out-of-tree fixer
+copy (share ff3 -> an out-of-tree drive, straight into the out-of-tree fixer
 popup); every other machine got "no mount configured". An archived clip must
 insert its ARCHIVE top-slot file under the "broll" share, which every
 companion derives from local_root and can fetch from the NAS on demand.

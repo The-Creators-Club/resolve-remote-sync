@@ -39,13 +39,27 @@ python index_music.py           # new/changed files only
 python index_music.py --retag   # re-score after editing music_index\vocab.py
 python index_music.py --peaks   # backfill missing waveforms
 python index_music.py --force   # rebuild everything
-python index_music.py --queue --db ..\..\nas-index\music.db   # drain what editors uploaded
+python index_music.py --queue --db ..\..\nas-index\music.db --export-drain drain.db
 ```
 
 Queued uploads are the one case that does **not** work against the local index: the
 `pending` rows live in the NAS's copy of `music.db`, so `--queue` needs `--db` pointed at
-a copy pulled down from there, and the drained copy pushed back afterwards
-(`web/DEPLOY.md`, "Draining the NAS ingest queue").
+a copy pulled down from there.
+
+**The drained file does not go back — the bundle does.** Pushing the whole
+database over the live one overwrites everything editors queued while the drain
+ran (minutes to hours of lost uploads, undetectable afterwards). `--export-drain`
+writes the analysed results of the rows it closed, and those are merged in place
+where the live index is:
+
+```powershell
+python -m musicweb.drain apply drain.db --db <live music.db>
+```
+
+`apply` is one transaction, stdlib only (no torch, no numpy), every write keyed
+and idempotent, and a row is closed only if the live journal still agrees about
+its `rel_path` and `content_hash`. `python -m musicweb.drain inspect drain.db`
+shows what a bundle holds. See `../docs/INDEXERS.md` and `web/DEPLOY.md`.
 
 Indexing is resumable and skips unchanged files by size+mtime. A full rebuild of 376
 tracks takes ~9 min on the RTX 3080. `--retag` takes seconds because it re-scores from

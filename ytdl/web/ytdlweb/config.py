@@ -45,14 +45,28 @@ DASH_DB = os.environ.get('YTDL_DASH_DB') or ''
 # escape hatch for YouTube bot-checking the NAS IP (see DEPLOY.md).
 COOKIES_FILE = os.environ.get('YTDL_COOKIES_FILE') or ''
 
-# HOME/CLAUDE_CONFIG_DIR for the `claude` subprocess ONLY (claude_cli._env).
-# uid 3000 has no passwd entry in the slim image, so claude needs to be told
-# where its credentials live -- but exporting HOME globally in run.sh would
-# change it for the dashboard, ffmpeg and everything else in the container.
-CLAUDE_HOME = os.environ.get('YTDL_CLAUDE_HOME') or '/claude-home'
-CLAUDE_BIN = os.environ.get('YTDL_CLAUDE_BIN') or 'claude'
-CLAUDE_MODEL = os.environ.get('YTDL_CLAUDE_MODEL') or 'sonnet'
+# The Anthropic API, via the `anthropic` SDK (claude_cli.py). Until 2026-08-17
+# this app shelled out to the interactive `claude` CLI, authenticated by a
+# one-time `/login` whose OAuth credentials lived in a claude-home volume --
+# i.e. every customer's deployment ran under one human's personal Claude
+# account, provisioned by hand, with no way to rotate, meter or attribute it
+# (docs/COMMERCIAL_READINESS.md item 1). YTDL_CLAUDE_HOME / YTDL_CLAUDE_BIN are
+# gone with it; a stale one in an old container's environment is simply unread.
+#
+# THE CUSTOMER SUPPLIES THE KEY. No default and no fallback: an unset
+# ANTHROPIC_API_KEY means term generation fails with the `claude_auth:` hint
+# the SPA already renders, exactly as a logged-out CLI used to. See
+# ytdl/web/DEPLOY.md.
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY') or ''
+# Optional: point the SDK at a proxy or a gateway. Blank = api.anthropic.com.
+ANTHROPIC_BASE_URL = os.environ.get('ANTHROPIC_BASE_URL') or ''
+# A full model id, not the CLI's alias vocabulary ('sonnet'), because there is
+# no CLI left to expand an alias. Overridable per deployment.
+CLAUDE_MODEL = os.environ.get('YTDL_CLAUDE_MODEL') or 'claude-sonnet-5'
 CLAUDE_TIMEOUT = int(os.environ.get('YTDL_CLAUDE_TIMEOUT') or '180')
+# Ceiling on one reply. The two prompts answer with a JSON object of ~20 search
+# queries or ~40 keep/drop indices; 8000 is roomy for both and bounds a runaway.
+CLAUDE_MAX_TOKENS = int(os.environ.get('YTDL_CLAUDE_MAX_TOKENS') or '8000')
 
 # The container ships ffmpeg at /opt/ffmpeg (same bind mount music/web's ingest
 # uses). Passed to yt-dlp as ffmpeg_location; None means "whatever is on PATH",
@@ -130,9 +144,17 @@ ENRICH_PAUSE = float(os.environ.get('YTDL_ENRICH_PAUSE') or '0.75')
 # costs ~48 s, on a phase that already waits on Claude for the term list.
 SEARCH_PAUSE = float(os.environ.get('YTDL_SEARCH_PAUSE') or '2')
 
-# Standalone dev only: who the API thinks you are when no dashboard gate has
-# injected the header. Never set on a deployed host.
-DEV_USER = os.environ.get('YTDL_DEV_USER') or ''
+# YTDL_DEV_USER IS GONE (2026-08-17, COMMERCIAL_READINESS.md item 15). It used
+# to stand in for the dashboard gate's x-ccsync-user header on a standalone dev
+# run -- which meant one environment variable on a deployed host turned every
+# request, from anybody, into that named editor: their projects, their jobs,
+# their download history. "Never set on a deployed host" is a convention, and a
+# convention is not an access control.
+#
+# The replacement is a TEST HOOK, not an env var: ytdlweb.session.set_test_user
+# is importable only from a process that has the package in reach, so a
+# standalone `uvicorn ytdlweb.main:app` answers 401 until something in that
+# process asks for a stand-in. See session.py.
 
 # Standalone dev only: 'slug=label,slug2=label2' so the project picker has
 # something to offer with no dashboard database in reach.
@@ -241,6 +263,23 @@ MIN_YTDLP_VERSION = _validated_floor(MIN_YTDLP_VERSION)
 # The b-roll ingest gate's precedent, and the same reasoning -- a dashboard
 # deployed without the secret must refuse machine callers, not trust them.
 REPORT_TOKEN = os.environ.get('DASH_REPORT_TOKEN') or ''
+
+# The dashboard's session/identity signing secret, read for the SAME reason
+# REPORT_TOKEN is and under the dashboard's own name: this app is mounted
+# inside the dashboard container and shares its environment.
+#
+# It is what turns X-CCSync-Identity from a self-asserted string into a
+# verified one (identity.py, COMMERCIAL_READINESS.md item 7 / H5,
+# 2026-08-17). Before that, a companion holding the shared fleet token could
+# name ANY editor on a claim and thereafter complete, poison or cancel that
+# editor's downloads -- one shared secret, every identity.
+#
+# FAIL CLOSED, exactly like REPORT_TOKEN: unset means every fleet endpoint
+# answers 403. The cost is that local downloads stop and the NAS worker
+# downloads everything, which is the designed fallback; the dashboard already
+# cannot log anybody in without this value, so a deployment missing it is
+# broken in a much louder way first.
+SESSION_SECRET = os.environ.get('DASH_SESSION_SECRET') or ''
 
 HOST = os.environ.get('YTDL_HOST') or '127.0.0.1'
 PORT = int(os.environ.get('YTDL_PORT') or '8791')

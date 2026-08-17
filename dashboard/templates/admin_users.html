@@ -8,6 +8,23 @@
     <div hx-get="/partials/admin/users" hx-trigger="every 30s" hx-swap="innerHTML">
       {% include "partials/admin_users.html" %}
     </div>
+    {# Loaded on its own (hx-trigger="load"), not server-rendered into this
+       page: the sessions panel must not depend on the Users panel's NAS calls
+       to appear. innerHTML into a wrapper that survives the swap, so the 30s
+       poll is not thrown away by the first response; the revoke form targets
+       #admin-sessions INSIDE it. #}
+    <div style="margin-top:1.6rem" hx-get="/partials/admin/sessions"
+         hx-trigger="load, every 30s" hx-swap="innerHTML"></div>
+    {# Per-editor report tokens, loaded on its own for the same reason the
+       sessions panel above is: minting a fleet credential must not depend on
+       (or be able to fail with) the Users panel's NAS calls. #}
+    <div style="margin-top:1.6rem" hx-get="/partials/admin/report-tokens"
+         hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+    {# The fleet halt (item 9, 2026-08-17), on its own load trigger for the
+       same reason the two panels above are: a fleet-wide stop must never be
+       unreachable because the NAS is the thing that is broken. #}
+    <div style="margin-top:1.6rem" hx-get="/partials/admin/fleet-halt"
+         hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
     <div style="margin-top:1.6rem" hx-get="/partials/admin/packages" hx-trigger="every 30s" hx-swap="innerHTML">
       {% include "partials/admin_packages.html" %}
     </div>

@@ -29,7 +29,7 @@ def _make_local_root(tmp_path) -> str:
 
 def _cfg(tmp_path, **overrides) -> dict[str, Any]:
     cfg = {
-        "editor_name": "alex",
+        "editor_name": "owen",
         "local_root": _make_local_root(tmp_path),
         "canonical_prefix": "P:\\",
         "remote": "creators_club_sftp",
@@ -609,24 +609,43 @@ def test_reporter_reports_effective_mode_not_raw_config(tmp_path):
     effective_mode() (identity role wins)."""
     app = _make_app(tmp_path, mode="editor")
     app.identity._identity = {
-        "username": "alex",
+        "username": "owen",
         # v2.identity.<base64url(username), no padding>.<expires_epoch>.<sig>
         # -- see identity.py's parse_token().
         "token": "v2.identity.YWxleA.99999999999.deadbeef",
         "role": "base",
     }
     assert app.effective_mode() == "base"
-    payload = app.reporter._build_payload(editor_name="alex")
+    payload = app.reporter._build_payload(editor_name="owen")
     assert payload["mode"] == "base"
 
 
-def test_reporter_response_feeds_upgrade_manager(tmp_path):
+def test_reporter_response_feeds_upgrade_manager(tmp_path, monkeypatch):
+    """The offer is SIGNED here since 2026-08-17 (COMMERCIAL_READINESS.md
+    item 4): an unsigned one is refused before it ever reaches the tray, so
+    the bare version/url/sha256 dict this used to send would only exercise
+    the refusal path. test_upgrade.py covers the refusals themselves."""
+    import base64
+
+    from ccsync_companion import ed25519, release_pubkey
+
+    seed = bytes(range(32))
+    monkeypatch.setattr(
+        release_pubkey, "RELEASE_PUBKEYS",
+        (base64.b64encode(ed25519.public_key(seed)).decode("ascii"),),
+    )
+    record = {
+        "kind": "companion", "platform": "windows", "version": "9.9.9",
+        "filename": "ccsync-companion-9.9.9.exe", "sha256": "a" * 64,
+        "size_bytes": 10, "min_version": "0.0.0",
+        "published_at": "2026-08-17T00:00:00Z", "signed_binary": False,
+    }
+    offer = dict(record, url="/x", signature=base64.b64encode(
+        ed25519.sign(seed, release_pubkey.canonical_record(record))).decode("ascii"))
+
     app = _make_app(tmp_path)
     assert app.reporter._on_report_response is not None
-    app.reporter._on_report_response({
-        "ok": True,
-        "upgrade": {"version": "9.9.9", "url": "/x", "sha256": "a" * 64},
-    })
+    app.reporter._on_report_response({"ok": True, "upgrade": offer})
     assert app.upgrade.available["version"] == "9.9.9"
 
 
@@ -676,8 +695,8 @@ def test_editor_identity_returns_none_for_whitespace_editor_name_when_require_lo
 
 
 def test_editor_identity_returns_configured_name_when_require_login_false(tmp_path):
-    app = _make_app(tmp_path, editor_name="alex", require_login=False)
-    assert app.editor_identity() == "alex"
+    app = _make_app(tmp_path, editor_name="owen", require_login=False)
+    assert app.editor_identity() == "owen"
 
 
 def test_project_setup_absent_in_legacy_mode(tmp_path):
@@ -863,7 +882,7 @@ def test_toggle_pause_resume_does_start_lanes_once_signed_in(tmp_path):
 
     class _SignedIn:
         role = None
-        username = "alex"
+        username = "owen"
         token = "t"
         last_upgrade_info = None
 
@@ -1006,7 +1025,10 @@ def test_media_tree_refresh_repoints_a_stale_proxy(tmp_path, monkeypatch):
     calls: list[tuple[Any, str]] = []
     monkeypatch.setattr(
         resolve_bridge, "link_proxy_media",
-        lambda mpi, path: calls.append((mpi, path)) or {"ok": True, "message": ""},
+        # **kw: link_proxy_media grew keyword-only `source`/`journal` args
+        # with the undo journal (item 9, 2026-08-17), and the automatic pass
+        # names itself.
+        lambda mpi, path, **kw: calls.append((mpi, path)) or {"ok": True, "message": ""},
     )
     app._refresh_media_tree_once()
     assert calls == [(item["media_pool_item"], proxy)]
@@ -1038,7 +1060,7 @@ def test_a_failing_proxy_relink_never_breaks_the_media_tree(tmp_path, monkeypatc
     )
     monkeypatch.setattr(
         resolve_bridge, "link_proxy_media",
-        lambda mpi, path: (_ for _ in ()).throw(RuntimeError("fusionscript died")),
+        lambda mpi, path, **kw: (_ for _ in ()).throw(RuntimeError("fusionscript died")),
     )
     app._refresh_media_tree_once()
     assert "Real Project" in app.get_media_tree()
@@ -1286,6 +1308,90 @@ def test_a_good_config_still_starts_the_lanes(tmp_path):
     assert app._lanes_started is True
 
 
+# -- item 3: the licence gate ----------------------------------------------
+# 2026-08-17, COMMERCIAL_READINESS.md item 3. The onboarding wizard writes
+# ~/.ccsync/eula_accepted.json on ACCEPT; _start_lanes() refuses without it.
+# conftest's _eula_already_accepted puts a current record in every test's
+# isolated home, so these tests take it away again.
+
+
+def _syncing_app(tmp_path):
+    app = _make_app(tmp_path, dashboard_url="", sync_enabled=True,
+                    require_login=False, lane_b_enabled=True)
+    assert app.config_problems == []
+    started: list[str] = []
+    for lane in app.lanes:
+        lane.start = lambda name=lane.name: started.append(name)
+    return app, started
+
+
+def test_an_unaccepted_licence_stops_the_lanes(tmp_path):
+    from ccsync_companion import eula as eula_mod
+
+    app, started = _syncing_app(tmp_path)
+    eula_mod.acceptance_path().unlink(missing_ok=True)
+
+    app._start_lanes()
+    assert started == []
+    assert app._lanes_started is False
+    assert all("NOT SYNCING" in lane.status().detail for lane in app.lanes)
+    assert all("licence" in lane.status().detail for lane in app.lanes)
+
+
+def test_an_outdated_acceptance_stops_the_lanes(tmp_path):
+    """A bumped EULA-VERSION marker is the whole of a re-consent: a machine
+    holding the previous version must be sent back to the wizard."""
+    from ccsync_companion import eula as eula_mod
+
+    app, started = _syncing_app(tmp_path)
+    eula_mod.record_acceptance("0.1")
+
+    app._start_lanes()
+    assert started == []
+    assert app._lanes_started is False
+
+
+def test_an_accepted_licence_lets_the_lanes_start(tmp_path):
+    from ccsync_companion import eula as eula_mod
+
+    app, started = _syncing_app(tmp_path)
+    eula_mod.record_acceptance()
+
+    app._start_lanes()
+    assert "lane_a_video_up" in started
+    assert app._lanes_started is True
+
+
+def test_a_build_with_no_bundled_licence_still_syncs(tmp_path, monkeypatch):
+    """Fail open on a PACKAGING fault (assets/EULA.md missing from datas):
+    "never gut the live thing" -- a forgotten spec line must not stop every
+    editor in the fleet syncing at once. A missing ACCEPTANCE still blocks."""
+    from ccsync_companion import eula as eula_mod
+
+    app, started = _syncing_app(tmp_path)
+    eula_mod.acceptance_path().unlink(missing_ok=True)
+    monkeypatch.setattr(eula_mod, "EULA_VERSION", "")
+
+    app._start_lanes()
+    assert "lane_a_video_up" in started
+    assert app._lanes_started is True
+
+
+def test_a_raising_licence_check_does_not_stop_the_lanes(tmp_path, monkeypatch):
+    from ccsync_companion import eula as eula_mod
+
+    app, started = _syncing_app(tmp_path)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(eula_mod, "acceptance_problem", _boom)
+    assert app.eula_problem() is None
+
+    app._start_lanes()
+    assert "lane_a_video_up" in started
+
+
 # -- CORE-H1: a blank local_root must not scatter media into the CWD --------
 
 
@@ -1444,7 +1550,7 @@ def test_run_exits_cleanly_when_another_instance_holds_the_slot(monkeypatch, tmp
 
 
 def test_build_diagnostics_covers_the_audits_checklist(tmp_path):
-    app = _make_app(tmp_path, sync_enabled=True, editor_name="alex")
+    app = _make_app(tmp_path, sync_enabled=True, editor_name="owen")
     text = app.build_diagnostics()
     for expected in (
         "CCSYNC DIAGNOSTICS", "companion version", "platform", "effective mode",
@@ -1680,14 +1786,14 @@ def test_selection_client_gets_the_identity_token_getter(tmp_path):
     import base64
     import time as _time
 
-    username = base64.urlsafe_b64encode(b"alex").rstrip(b"=").decode("ascii")
+    username = base64.urlsafe_b64encode(b"owen").rstrip(b"=").decode("ascii")
     token = f"v2.identity.{username}.{int(_time.time()) + 3600}.deadbeef"
 
     headers: list[dict] = []
     app.selection_client._http_get = lambda url, hdrs, timeout: (
         headers.append(dict(hdrs)) or {"selection": []}
     )
-    app.identity._identity = {"username": "alex", "token": token}
+    app.identity._identity = {"username": "owen", "token": token}
     app.selection_client.fetch(force=True)
 
     assert headers[0].get("X-CCSync-Identity") == token
@@ -1696,7 +1802,7 @@ def test_selection_client_gets_the_identity_token_getter(tmp_path):
 # -- Remove this project from this machine (2026-07-26) ---------------------
 
 
-def _remove_stub(tmp_path, untick_ok=True, mode="editor"):
+def _remove_stub(tmp_path, untick_ok=True, mode="editor", blockers=None):
     """A minimal object exposing exactly what remove_project_from_machine
     reads, so the ordering guarantees are testable without a full app."""
     from ccsync_companion.app import CompanionApp
@@ -1738,7 +1844,17 @@ def _remove_stub(tmp_path, untick_ok=True, mode="editor"):
     stub.selection_client = _Selection()
     stub.syncthing_admin = _Admin()
     stub.removable_projects = lambda: CompanionApp.removable_projects(stub)
-    stub.remove = lambda slug: CompanionApp.remove_project_from_machine(stub, slug)
+    # The caught-up gate (COMMERCIAL_READINESS.md item 9, 2026-08-17): these
+    # tests are about the untick/unshare/delete ORDERING, so the gate is
+    # stubbed open by default and driven explicitly by the tests that are
+    # about the gate itself.
+    stub.removal_blockers = lambda slug: dict(
+        blockers or {"blocked": False, "reasons": [], "pending_uploads": 0,
+                     "lane_c": {}, "unknown": False}
+    )
+    stub._note_removal_override = lambda slug, rel, b: None
+    stub.remove = lambda slug, override=False: CompanionApp.remove_project_from_machine(
+        stub, slug, override=override)
     return stub, proj
 
 
@@ -1831,10 +1947,10 @@ def test_p_swap_available_derives_when_unconfigured(monkeypatch):
     stub = _swap_stub(monkeypatch, unc="")
     stub.config = dict(stub.config)
     stub.config.update({
-        "dashboard_url": "http://192.168.0.102:8480",
+        "dashboard_url": "http://192.168.0.10:8480",
         "remote_root": "/mnt/tank/TheCreatorsPool/Creators_Club",
     })
-    assert stub._server_p_unc() == "\\\\192.168.0.102\\TheCreatorsPool\\Creators_Club"
+    assert stub._server_p_unc() == "\\\\192.168.0.10\\TheCreatorsPool\\Creators_Club"
     assert stub.p_swap_available() is True
 
     # explicit off switch hides the feature
@@ -1877,14 +1993,14 @@ def test_swap_p_to_server_persists_credentials_on_success(monkeypatch):
                         lambda unc, u, p, run_fn=None: persisted.append((u, p)))
     stub = _swap_stub(monkeypatch)
     from ccsync_companion.app import CompanionApp
-    ok, _ = CompanionApp.swap_p_to_server(stub, "alex", "pw")
+    ok, _ = CompanionApp.swap_p_to_server(stub, "owen", "pw")
     assert ok
-    assert persisted == [("alex", "pw")]
+    assert persisted == [("owen", "pw")]
 
     # no credentials given -> nothing persisted
     ok, _ = CompanionApp.swap_p_to_server(stub)
     assert ok
-    assert persisted == [("alex", "pw")]
+    assert persisted == [("owen", "pw")]
 
 
 # --- shutdown guard wiring (shutdown_guard.py owns the policy) -------------
@@ -3885,7 +4001,7 @@ def test_signing_in_does_not_override_the_trays_pause(tmp_path):
 
     class _SignedIn:
         role = None
-        username = "alex"
+        username = "owen"
         token = "t"
         last_upgrade_info = None
 
@@ -4657,7 +4773,7 @@ def test_a_grade_swap_invalidates_the_cached_mapping(tmp_path, monkeypatch):
 
 def test_a_returning_drive_restamps_the_sign_in_gate_on_the_lanes(tmp_path, monkeypatch):
     """start()'s _root_absent branch outranks the sign-in gate, so all three
-    lanes read "PAUSED: your Creators Club drive is disconnected". With the
+    lanes read "PAUSED: your <site> drive is disconnected". With the
     drive back that sentence names nothing the editor can fix -- and the tray
     renders it as "up to date (PAUSED: your drive is disconnected)"."""
     app = _make_app(tmp_path, sync_enabled=True, require_login=True)
@@ -4815,6 +4931,38 @@ def test_overlapping_relink_batches_extend_one_thread(tmp_path, monkeypatch):
     assert second[0]["media_pool_item"].replace_calls == ["P:\\B-roll\\b.mov"]
 
 
+def test_the_unprompted_relink_is_rate_limited_per_project(tmp_path, monkeypatch):
+    """COMMERCIAL_READINESS.md item 9 (2026-08-17): the automatic canonical
+    relink rewrites the project database with no popup, and a machine whose
+    canonical_prefix or local_root is wrong re-offers the same rewrite every
+    sweep. One burst per project per window; the clips are HELD, not dropped
+    (the watcher offers each path once per process)."""
+    from ccsync_companion import resolve_journal
+
+    root = tmp_path / "root"
+    app = _make_app(tmp_path, canonical_prefix="P:\\")
+    app._tray_icon = _FakeTray()
+
+    first = [_pool_item(root, "B-roll/a.mov")]
+    app._handle_non_canonical(first)
+    _join_canon_relink()
+    assert first[0]["media_pool_item"].replace_calls == [r"P:\B-roll\a.mov"]
+
+    second = [_pool_item(root, "B-roll/b.mov")]
+    app._handle_non_canonical(second)
+    _join_canon_relink()
+    assert second[0]["media_pool_item"].replace_calls == []
+    assert len(app._canon_relink_pending) == 1
+
+    # The window expiring lets the held clip through on the next offer.
+    monkeypatch.setattr(resolve_journal, "AUTOMATIC_MIN_INTERVAL_SECONDS", 0.0)
+    third = [_pool_item(root, "B-roll/c.mov")]
+    app._handle_non_canonical(third)
+    _join_canon_relink()
+    assert second[0]["media_pool_item"].replace_calls == [r"P:\B-roll\b.mov"]
+    assert third[0]["media_pool_item"].replace_calls == [r"P:\B-roll\c.mov"]
+
+
 def test_a_relink_batch_stops_when_the_companion_is_shutting_down(tmp_path):
     """The R11 hand-off hazard: a self-upgrade landing mid-batch must not
     have to wait out 158 ReplaceClips."""
@@ -4839,7 +4987,7 @@ def test_the_startup_sweep_removes_a_stranded_0_byte_reservation(tmp_path, caplo
     from ccsync_companion import fixer as fixer_mod
 
     root = Path(_make_local_root(tmp_path))
-    folder = root / "B-roll" / "Editor Added" / "ruskin"
+    folder = root / "B-roll" / "Editor Added" / "editor2"
     folder.mkdir(parents=True)
     reservation = folder / "A001_C012.braw"
     reservation.write_bytes(b"")
@@ -4868,7 +5016,7 @@ def test_a_reservation_too_fresh_to_judge_is_rechecked_once_it_ages(tmp_path, mo
 
     monkeypatch.setattr(fixer_mod, "RESERVATION_IDLE_SECONDS", 0.05)
     root = Path(_make_local_root(tmp_path))
-    folder = root / "B-roll" / "Editor Added" / "ruskin"
+    folder = root / "B-roll" / "Editor Added" / "editor2"
     folder.mkdir(parents=True)
     reservation = folder / "A002_C001.braw"
     reservation.write_bytes(b"")

@@ -120,10 +120,13 @@ can be remounted per machine without invalidating the index. `tracks.share` is `
 That sits alongside `P:\Assets\B-roll Archive`. The editor tree root is deliberately
 hardcoded to `P:` fleet-wide — do not add a configurable drive letter.
 
-`musicweb/config.py` resolves the root in this order: `MUSIC_SHARE_ROOT` → `MUSIC_ROOT`
-(kept because it predates the share model and is what DEPLOY.md and the test conftest
-use) → `W:` if present → `P:`. An unknown share raises rather than falling back to the
-music root.
+`musicweb/config.py` resolves the root in this order: `MUSIC_LIBRARY_ROOT` →
+`MUSIC_SHARE_ROOT` → `MUSIC_ROOT` (the last two kept because they predate the name and
+are what DEPLOY.md and the test conftest use) → `P:\Assets\Music`. An unknown share
+raises rather than falling back to the music root. There is no drive PROBE: it used to
+fall back to one studio's `W:\Creators_Club\Assets\Music` if that path existed, which
+is only ever right for one fleet (2026-08-17, docs/COMMERCIAL_READINESS.md item 11) — an
+indexing host names its own mount.
 
 Every path is built through `config.resolve_path(share, rel_path)`, never by joining a
 root to a DB value. It rejects absolute paths, UNC prefixes, drive letters, `..`

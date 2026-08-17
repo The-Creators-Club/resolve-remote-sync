@@ -2,7 +2,7 @@
 
 WHY A SIDECAR AND NOT A DEPENDENCY (docs/YTDL_LOCAL_DOWNLOAD.md §6). The
 companion is a frozen PyInstaller build on a release cadence of weeks, and
-editors sit on whatever build they last accepted -- ruskin ran 0.4.22 for a
+editors sit on whatever build they last accepted -- one editor ran 0.4.22 for a
 month, and on 2026-08-13 a machine was still a day behind a published fix.
 yt-dlp needs updating every few weeks because YouTube breaks it deliberately.
 Bundling it as an importable library would tie "can this editor download a
@@ -238,6 +238,47 @@ def local_downloads_enabled(cfg: Optional[dict[str, Any]]) -> bool:
             value,
         )
     return True
+
+
+def youtube_enabled(cfg: Optional[dict[str, Any]] = None) -> bool:
+    """Does the YouTube downloader exist on this machine at all?
+
+    TWO GATES, and the SITE one comes first (2026-08-17,
+    docs/COMMERCIAL_READINESS.md item 2). `youtube_download` in the site
+    manifest is the CUSTOMER saying their deployment downloads YouTube
+    material; `ytdl_local_downloads` is one EDITOR saying their own machine
+    should not be the one doing it (a tethered link, a metered plan). They are
+    different questions and the first has to be yes before the second means
+    anything -- so a fleet whose site has not turned the feature on installs no
+    sidecar tools, offers no tray items, and answers every /ytdl loopback call
+    with "off", whatever any config.toml says.
+
+    Fails closed on an unreadable/absent manifest (site.feature_enabled): "we
+    could not ask the server" and "the answer is no" are the same answer here.
+    Deferred import -- site.py imports config, and a top-level import each way
+    would be a cycle.
+    """
+    from . import site as site_mod
+
+    if not site_mod.feature_enabled("youtube_download"):
+        return False
+    return local_downloads_enabled(cfg)
+
+
+def unblock_enabled() -> bool:
+    """May this machine install the anti-anti-automation components?
+
+    The deno n-challenge solver and the cookie sign-in exist to get past
+    YouTube's own measures, so the VENDOR BUILD SHIPS NEITHER ACTIVE: they
+    appear only where a customer set `[features] youtube_unblock` in their
+    site manifest (COMMERCIAL_READINESS.md item 3, and see
+    docs/legal/YOUTUBE_FEATURE_NOTICE.md). The code stays in the build and is
+    dormant -- there is nothing to strip, and a customer who is entitled to
+    these turns them on without a different binary.
+    """
+    from . import site as site_mod
+
+    return site_mod.feature_enabled("youtube_unblock")
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +538,10 @@ class YtDlpManager:
     # -- config-derived, zero-I/O ----------------------------------------
     @property
     def enabled(self) -> bool:
-        return local_downloads_enabled(self.cfg)
+        # youtube_enabled, not local_downloads_enabled: a site that has not
+        # turned the downloader on must not have this thread fetch a yt-dlp
+        # binary onto an editor's disk (2026-08-17).
+        return youtube_enabled(self.cfg)
 
     @property
     def override_path(self) -> str:

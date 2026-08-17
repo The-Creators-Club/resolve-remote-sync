@@ -35,6 +35,8 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
+from . import secretfile
+
 log = logging.getLogger("ccsync.ytdl")
 
 # ~/.ccsync/youtube-cookies.txt. Path.home()/".ccsync" is where config.toml,
@@ -52,6 +54,33 @@ COOKIES_FILENAME = "youtube-cookies.txt"
 _SESSION_COOKIE_NAMES = ("SID", "SAPISID", "SSID", "HSID", "APISID", "LOGIN_INFO")
 _MIN_SESSION_COOKIES = 2
 
+# The refusal an off site gets, in the editor's words. One string so the tray
+# item and the resolver never tell different stories.
+OFF_MESSAGE = ("signing in to YouTube for downloads is not enabled for this "
+               "site — ask your administrator (site.toml [features] "
+               "youtube_unblock)")
+
+
+def enabled() -> bool:
+    """May this machine download as a SIGNED-IN YouTube account?
+
+    Off unless the customer's site manifest says `youtube_unblock`
+    (2026-08-17, docs/COMMERCIAL_READINESS.md item 3). Downloading with a
+    person's live Google session is the component that most obviously
+    engages YouTube's Terms of Service, so the vendor build does not offer
+    it and a customer who is entitled to it turns it on for their own site.
+    The code stays here, dormant. Fails closed and never raises; the deferred
+    import avoids a cycle (site -> config -> ...).
+    """
+    try:
+        from . import ytdlp_manager
+
+        return ytdlp_manager.unblock_enabled()
+    except Exception:                          # noqa: BLE001 - never raises
+        log.debug("ytdl cookies: unblock flag unreadable; treating it as off",
+                  exc_info=True)
+        return False
+
 
 def default_cookies_path() -> Path:
     return Path.home() / ".ccsync" / COOKIES_FILENAME
@@ -64,7 +93,14 @@ def resolve(cfg: Optional[dict[str, Any]]) -> Optional[str]:
     present); neither is the anonymous case. Existence is checked here so the
     executor can treat the answer as "pass this to yt-dlp" with no second
     stat -- a configured-but-missing path is None, not an error, because a
-    missing --cookies file aborts the whole yt-dlp run."""
+    missing --cookies file aborts the whole yt-dlp run.
+
+    None ALSO when the site has not enabled `youtube_unblock`, even if a file
+    is sitting at either path from before the flag existed: the switch has to
+    stop yt-dlp being handed a live Google session, not merely stop the tray
+    writing one (2026-08-17)."""
+    if not enabled():
+        return None
     try:
         configured = str((cfg or {}).get("ytdl_cookies_file", "") or "").strip()
         if configured:
@@ -113,7 +149,13 @@ def validate(text: Any) -> tuple[bool, str]:
 def install(src_path: Any, dest: Optional[Path] = None) -> tuple[bool, str]:
     """Validate the file at `src_path` and copy it to the default path 0600.
 
-    (ok, message), never raises. `dest` overrides the destination for tests."""
+    (ok, message), never raises. `dest` overrides the destination for tests.
+
+    Refused outright on a site that has not enabled `youtube_unblock` -- the
+    tray hides the item there, so reaching this is a direct call or a stale
+    menu, and neither should end with a Google session on disk."""
+    if not enabled():
+        return False, OFF_MESSAGE
     target = dest if dest is not None else default_cookies_path()
     try:
         with open(str(src_path), "r", encoding="utf-8", errors="replace") as fh:
@@ -127,16 +169,21 @@ def install(src_path: Any, dest: Optional[Path] = None) -> tuple[bool, str]:
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Write then chmod, not copy2: the source's permissions are the
-        # browser-download dir's, and this file is a live session -- it gets
-        # 0600 regardless of where it came from. A tmp-then-replace so a
-        # killed write never leaves a half file the downloader would send.
+        # Write then harden, not copy2: the source's permissions are the
+        # browser-download dir's, and this file is a live Google session -- it
+        # gets owner-only regardless of where it came from. A tmp-then-replace
+        # so a killed write never leaves a half file the downloader would send.
+        #
+        # secretfile.harden, NOT os.chmod (2026-08-17,
+        # COMMERCIAL_READINESS.md item 5): os.chmod(0o600) is a NO-OP on
+        # Windows, which is where most of this fleet's editors are, so the
+        # cookie jar sat at whatever the profile's inherited ACL was -- the
+        # one file here that is a logged-in account. harden() sets an
+        # owner-only ACL there and 0600 on posix, and hardens the TEMP file
+        # before the rename so the secret is never briefly world-readable.
         tmp = target.with_suffix(target.suffix + ".new")
         tmp.write_text(text, encoding="utf-8")
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass  # Windows has no 0600; ACLs are the profile's own.
+        secretfile.harden(tmp)
         os.replace(tmp, target)
     except OSError as exc:
         return False, f"couldn't save the cookies ({exc})"

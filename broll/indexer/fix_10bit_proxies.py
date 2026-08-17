@@ -36,7 +36,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from broll_index import ffmpeg_tools
+from broll_index import ffmpeg_tools, inplace_fixes
 
 DEFAULT_ROOT = r"P:\Assets\B-roll Archive"
 PROBE_WORKERS = 8
@@ -85,35 +85,72 @@ def candidate_files(root: Path) -> list[tuple[int, Path]]:
     return out
 
 
+PROXY_DIR_NAMES = {"proxy", "proxies"}
+
+
+def is_a_proxy(path: Path) -> bool:
+    """Is this file structurally a preview -- i.e. does it live in `Proxy/`?
+
+    THE ONLY THING THAT MAKES THIS SCRIPT SAFE TO RUN (COMMERCIAL_READINESS.md
+    item 9, 2026-08-17). `candidate_files` resolves `videos.archive_path`
+    straight out of the database, and nothing in the schema promises that
+    column points inside a `Proxy/` directory -- an older row, a hand-edited
+    path or a clip published before the layout rule was enforced all resolve
+    to the TOP-SLOT ORIGINAL. `reencode` then transcoded that original in
+    place, at 540p, over itself: the archive's best copy of the clip,
+    destroyed, with `fixed` printed next to it.
+
+    Structural, matching the convention proxy_relink.py and proxy_scan.py use
+    on the companion side (`<dir>/Proxy/<stem>.mp4`). Case-insensitive, and
+    `proxies/` too because the flat fallback layout uses that name.
+    """
+    return path.parent.name.lower() in PROXY_DIR_NAMES
+
+
 def source_for(preview: Path) -> Path:
     """The top-slot original this preview was cut from, else the preview.
 
     Layout rule (HANDOFF.md §1): best media at `<dir>/<stem>.*`, preview at
     `<dir>/Proxy/<stem>.mp4`. Anything other than exactly one stem match
     (0 = stem diverged, 2+ = ambiguous) falls back to transcoding the
-    preview itself rather than guessing.
+    preview itself rather than guessing -- which is only ever safe because
+    is_a_proxy() has already established that the preview IS a proxy.
     """
     parent = preview.parent.parent
-    if preview.parent.name != "Proxy":
+    if not is_a_proxy(preview):
         return preview
     matches = [p for p in parent.glob(f"{preview.stem}.*") if p.is_file()]
     return matches[0] if len(matches) == 1 else preview
 
 
-def reencode(preview: Path) -> str | None:
-    """Replace `preview` with an 8-bit encode. Returns an error string or None."""
+def reencode(preview: Path, root: Path | None = None) -> str | None:
+    """Replace `preview` with an 8-bit encode. Returns an error string or None.
+
+    Refuses anything that is not structurally a proxy (see is_a_proxy) --
+    this function overwrites its target, and the one thing it must never
+    overwrite is an original.
+    """
+    if not is_a_proxy(preview):
+        return (f"{preview}: REFUSED -- this is not inside a Proxy/ folder, so it "
+                f"is an original, not a preview. Transcoding it would destroy the "
+                f"archive's best copy of the clip")
     src = source_for(preview)
     tmp = preview.with_name(f".fix~{preview.name}")
     try:
         ffmpeg_tools.build_proxy(src, tmp)
         os.replace(tmp, preview)
-        return None
     except Exception as exc:
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
         return f"{preview}: {exc}"
+    # Recorded so `build_archive.py --apply` does not copy the 10-bit source
+    # back over it: it compared sizes, and a re-encode is a different size
+    # (item 9, 2026-08-17). See broll_index/inplace_fixes.py.
+    if root is not None:
+        inplace_fixes.record(root, preview, note="R9 10-bit preview re-encoded")
+    return None
 
 
 def main() -> int:
@@ -140,23 +177,35 @@ def main() -> int:
             elif is_browser_hostile(info):
                 hostile.append(path)
 
+    # The refusal is reported in the DRY RUN as well as under --apply: a row
+    # whose archive_path points at an original is a database problem, and the
+    # operator has to see it before it is silently skipped (item 9,
+    # 2026-08-17).
+    eligible = [p for p in hostile if is_a_proxy(p)]
+    not_proxies = [p for p in hostile if not is_a_proxy(p)]
+
     print(f"browser-hostile previews: {len(hostile)}")
     print(f"probe errors: {len(errors)}")
     for e in errors[:10]:
         print("  probe error:", e)
+    if not_proxies:
+        print(f"REFUSED (not inside a Proxy/ folder — these are originals, not "
+              f"previews): {len(not_proxies)}")
+        for p in not_proxies[:10]:
+            print("  refused:", p.relative_to(root))
     if not args.apply:
-        for p in hostile[:10]:
+        for p in eligible[:10]:
             print("  e.g.:", p.relative_to(root))
-        if hostile:
+        if eligible:
             print("dry run — re-run with --apply to re-encode these.")
         return 0
 
-    todo = hostile[: args.limit] if args.limit else hostile
+    todo = eligible[: args.limit] if args.limit else eligible
     print(f"re-encoding {len(todo)} previews with {args.workers} workers…")
     failed: list[str] = []
     done = 0
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
-        for err in pool.map(reencode, todo):
+        for err in pool.map(lambda p: reencode(p, root), todo):
             done += 1
             if err:
                 failed.append(err)

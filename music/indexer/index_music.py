@@ -25,8 +25,16 @@ the queue instead of a directory walk, so the two never disagree.
 
 Those `pending` rows are written into the NAS's copy of the index, not this
 one, so a drain that means anything is `--db <a copy pulled down from the NAS>`
-followed by pushing it back: `music/web/DEPLOY.md`, "Draining the NAS ingest
-queue".
+-- and what goes back is a RESULT BUNDLE, never the file:
+
+    python index_music.py --queue --db nas-index/music.db --export-drain drain.db
+    python -m musicweb.drain apply drain.db --db <the live music.db>
+
+Pushing the pulled copy back overwrote everything editors queued while the
+drain ran (2026-08-17, COMMERCIAL_READINESS.md item 14). The bundle names only
+the journal rows this run analysed, so anything queued in the meantime is still
+pending afterwards. `music/web/DEPLOY.md`, "Draining the NAS ingest queue", has
+the loop; `musicweb/drain.py` has the design.
 """
 import argparse
 import collections
@@ -40,7 +48,7 @@ import numpy as np
 # music_index must come first: importing it is what puts the shared web tree
 # (musicweb.db, web/schema.sql) on sys.path.
 from music_index import audio, config, features, tagging, vocab
-from musicweb import db
+from musicweb import db, drain
 
 
 def iter_files(root: Path):
@@ -196,11 +204,17 @@ def print_queue(con):
 
 
 def drain_queue(con, clap, retry_failed=False, limit=0):
-    """Analyse every queued upload. -> (done, failed).
+    """Analyse every queued upload. -> (done, failed, uids).
 
     Each row is finished one way or the other before the next is started, so an
     interrupted drain leaves the rest pending rather than half-applied -- the
     same resumability the directory sweep has.
+
+    `uids` is the journal identity (migrations/003) of the rows this run closed,
+    in order, and it is what `--export-drain` writes a bundle for: the drain's
+    effect on the LIVE index is that set of ids and nothing else, which is what
+    makes an upload queued while this ran survive (musicweb/drain.py, 2026-08-17,
+    COMMERCIAL_READINESS.md item 14).
     """
     closed = db.queue_reconcile(con)
     if closed:
@@ -209,9 +223,10 @@ def drain_queue(con, clap, retry_failed=False, limit=0):
     rows = db.queue_pending(con, limit=limit, include_failed=retry_failed)
     if not rows:
         print('ingest queue: nothing to analyse')
-        return 0, 0
+        return 0, 0, []
 
     print(f'draining {len(rows)} queued upload(s)...')
+    drained = []
     done = failed = 0
     for i, r in enumerate(rows, 1):
         rel, qid = r['rel_path'], r['id']
@@ -237,6 +252,12 @@ def drain_queue(con, clap, retry_failed=False, limit=0):
             tid = upsert(con, rel, path, fields, windows, clap.name,
                          share=r['share'] or config.SHARE)
             db.queue_mark_done(con, qid, tid)
+            # `uid` is absent only on a database that somehow skipped migration
+            # 003; such a row simply cannot be exported, which is exactly what
+            # the bundle's "not analysed" report is for.
+            uid = r['uid'] if 'uid' in r.keys() else None
+            if uid:
+                drained.append(uid)
             done += 1
             print(f'  [{i}/{len(rows)}] {rel[:58]:60s} '
                   f'{fields.get("duration", 0)/60:4.1f}m '
@@ -248,7 +269,7 @@ def drain_queue(con, clap, retry_failed=False, limit=0):
             failed += 1
             print(f'  [{i}/{len(rows)}] FAIL {rel}: {type(e).__name__}: {e}',
                   flush=True)
-    return done, failed
+    return done, failed, drained
 
 
 def backfill_peaks(con, root: Path):
@@ -362,14 +383,28 @@ def main():
     # down from the NAS, drain it, push it back -- web/DEPLOY.md, "Draining the
     # NAS ingest queue", has the loop and the hazards.
     ap.add_argument('--db', default='',
-                    help='SQLite index to work on (default: %s)' % config.DB_PATH)
+                    help='SQLite index to work on (required unless MUSIC_DB_PATH '
+                         'or MUSIC_DATA_ROOT is set)')
+    # The half of the drain that replaces "push the file back". See
+    # musicweb/drain.py: applying this bundle to the live index closes only the
+    # journal rows this run analysed, so an upload queued in the meantime is
+    # still pending afterwards instead of being overwritten.
+    ap.add_argument('--export-drain', default='', metavar='BUNDLE',
+                    help='with --queue: write the analysed results to a bundle '
+                         'to apply to the live NAS index (never overwrite it)')
     args = ap.parse_args()
 
     root = Path(args.root)
     if not root.exists():
         sys.exit(f'music root not found: {root}')
 
-    db_path = Path(args.db) if args.db else Path(config.DB_PATH)
+    # Required, not defaulted (2026-08-17, COMMERCIAL_READINESS.md item 14):
+    # picking the in-repo index for an operator who did not name one is how a
+    # drain reports "nothing to analyse" about somebody else's queue.
+    try:
+        db_path = config.require_db_path(args.db)
+    except config.DbPathNotConfigured as exc:
+        sys.exit(str(exc))
     # connect() would happily CREATE one, and an empty database answers
     # --queue with "nothing to analyse" -- indistinguishable from a drained
     # queue, which is the one thing this flag must not be able to look like.
@@ -382,6 +417,15 @@ def main():
     if args.queue_status:
         print_queue(con)
         return
+
+    # After --queue-status (which only reads the queue) and before anything
+    # decodes audio: since the hardcoded C:\Users\<name>\tools\ffmpeg default
+    # was deleted (2026-08-17, COMMERCIAL_READINESS.md item 10) an
+    # unconfigured rig must say which tool is missing, not fail per-track.
+    try:
+        config.require_tools()
+    except config.FfmpegNotConfigured as exc:
+        sys.exit(str(exc))
 
     if args.fix_durations:
         fix_durations(con)
@@ -402,8 +446,9 @@ def main():
         return
 
     if args.queue:
-        done, failed = drain_queue(con, clap, retry_failed=args.retry_failed,
-                                   limit=args.limit)
+        done, failed, drained = drain_queue(con, clap,
+                                            retry_failed=args.retry_failed,
+                                            limit=args.limit)
         if done:
             # percentiles are library-relative, so the whole library is
             # re-scored once anything new lands -- seconds, from the stored
@@ -411,6 +456,20 @@ def main():
             # the source-bias axes, and there is no reason to churn them.
             retag(con, clap)
         print(f'\nqueue: {done} indexed, {failed} failed')
+        if args.export_drain:
+            # The bundle, not the file, is what goes back to the NAS: pushing
+            # this database over the live one discards everything editors queued
+            # while the drain ran (musicweb/drain.py, 2026-08-17, item 14).
+            try:
+                r = drain.export_bundle(con, drained, args.export_drain,
+                                        source=str(db_path))
+            except drain.BundleError as exc:
+                sys.exit(f'--export-drain: {exc}')
+            print(f'drain bundle: {r["tracks"]} track(s) -> {r["path"]}')
+            for uid, why in r['skipped']:
+                print(f'  not exported {uid}: {why}')
+            print('  apply it where the LIVE index is:\n'
+                  f'    python -m musicweb.drain apply {r["path"]} --db <music.db>')
         print_queue(con)
         n = con.execute('SELECT COUNT(*) c FROM tracks').fetchone()['c']
         print(f'DB: {n} tracks -> {db_path}')

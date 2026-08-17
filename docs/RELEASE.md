@@ -133,12 +133,18 @@ This assembles the editor package at
 ```
 POST /api/v1/login                                     (session cookie)
 PUT  /api/v1/admin/packages/windows/<version>?sha256=<64 hex>&make_current=1
+     &signature=<base64>&pubkey_id=<id>&min_version=<x.y.z>
+     &published_at=<iso>&signed_binary=0|1
      body = raw exe bytes
 ```
 
 - The version comes from `config.py`; the upload refuses on version drift, on
   an exe older than `companion/src`, and on a **409** (already published).
 - The server verifies the sha256 before the build becomes visible.
+- The `&signature=...` half comes from `tools/sign_release.py`, which
+  `build_editor_package.ps1` runs for you with the offline release key.
+  **An unsigned publish is refused (422), not warned about** — see
+  *The release signing key* below.
 - Without `-MakeCurrent` the build is *staged* — published but not offered.
   Flip `[ MAKE CURRENT ]` on the dashboard admin page when you are ready.
 - Old builds are retained; `?prune=1` is opt-in. Rollback = make an older
@@ -235,9 +241,11 @@ provenance half only), and does, stopping at the first failure:
    `git rev-parse/describe/status`. A dirty tree does not block the build but
    stamps the manifest `<version>+dirty`.
 3. **venv + tests** — `python3 -m venv companion/.venv`,
-   `pip install -e '.[dev,tray]' pyinstaller` (the `tray` extra is what
-   carries pystray/Pillow/pyobjc; without it the build silently has no
-   menu-bar icon), then the full companion suite. `--skip-tests` records
+   `pip install -e '.[dev,tray]' pyinstaller` (the `tray` extra carries
+   Pillow and, on macOS, pyobjc; without it the build silently has no
+   menu-bar icon. It no longer carries pystray — the tray backend is
+   `ccsync_companion/tray_native.py`, ours, since 2026-08-17,
+   docs/COMMERCIAL_READINESS.md item 3), then the full companion suite. `--skip-tests` records
    `tests_run: false` in the manifest.
 4. **Build + signature** — `PyInstaller build.spec --noconfirm`, then
    `codesign -dv`. PyInstaller ad-hoc signs macOS binaries; an **unsigned**
@@ -305,6 +313,192 @@ menu bar, exactly as on Windows.
 
 ---
 
+## The release signing key (the upgrade channel's trust anchor)
+
+*Added 2026-08-17 — `docs/COMMERCIAL_READINESS.md` item 4 (STOP-SHIP, C2).*
+
+Until this existed, the upgrade channel had **no authentication at all**. The
+companion learned about a new build from a plain-HTTP `/api/v1/report`
+response, and the sha256 that "verified" the download came from *that same
+response* — so anything able to answer as the dashboard could hand an editor
+an arbitrary binary plus a matching hash, which the companion then renamed
+over its own running exe and launched detached. Origin pinning and the
+no-redirect opener narrowed that to "whoever controls the dashboard", which
+on a customer install is a container on **their** NAS.
+
+Now every published package carries an **Ed25519 signature over its whole
+record**, made offline by a key that exists on no fleet machine and in no
+repo. The dashboard stores and serves a signature it cannot produce.
+
+### What is signed
+
+```
+kind · platform · version · filename · sha256 · size_bytes ·
+min_version · published_at · signed_binary
+```
+
+The *whole record*, not just the hash: signing only the sha256 would leave
+the server free to relabel a genuine build as another version, platform or
+kind — which is how a Mac gets handed a Windows exe, or how the onboarding
+installer gets offered as a companion self-upgrade. The `url` is deliberately
+**not** signed: it is server-relative, and its host is pinned to the
+configured dashboard by `upgrade.same_origin()`.
+
+### Where the key lives
+
+| | |
+|---|---|
+| **Private key** | `%USERPROFILE%\.ccsync-release\release.key` (mode 0600), **outside the repo, never committed**. Override with `CCSYNC_RELEASE_KEY`. |
+| **Public key** | baked into `companion/src/ccsync_companion/release_pubkey.py` → `RELEASE_PUBKEYS` (a *list*, so keys can rotate). |
+| **Dashboard's copy** | `DASH_RELEASE_PUBKEYS` in the container env (comma-separated). Verify-on-publish only. |
+
+```powershell
+python tools\release_key.py new       # once, ever. Refuses to clobber.
+python tools\release_key.py pubkey    # the value for DASH_RELEASE_PUBKEYS
+python tools\release_key.py bake      # writes the PUBLIC half into the companion
+```
+
+**Back the key file up offline.** Losing it means you can never offer the
+fleet another build: every companion trusts only the keys baked into its own
+binary, and the only way out is a hand reinstall on every machine.
+
+`tools/release.ps1` refuses to build when `RELEASE_PUBKEYS` is empty (a
+companion like that would refuse *every* update, permanently) and when the
+key on this rig is not one the build trusts.
+
+### Rotating
+
+`RELEASE_PUBKEYS` is a list and **every** key in it is trusted. Rotation is a
+two-release dance, and skipping the overlap strands the fleet:
+
+1. `python tools\release_key.py new --force` then `... bake --add` — the new
+   public key joins the old one. **Ship this build with the OLD key still
+   signing.**
+2. Once `check_deploy_drift.ps1` (and the dashboard's fleet grid) shows every
+   machine on that build, sign with the new key and drop the old one from the
+   list in a later release.
+
+### The dashboard side
+
+`DASH_RELEASE_PUBKEYS` unset ⇒ the publish route answers **503** and says so.
+That is deliberate: a dashboard that would accept an unsigned build is one
+compromise away from owning every editor's machine. A customer running their
+own dashboard pins the **vendor's** key here.
+
+---
+
+## The downgrade floor (`min_version`)
+
+The offer has always been *"different, not newer"* — the dashboard advertises
+whatever is `current`, so a deliberate rollback is offered to the fleet
+exactly like an upgrade, with one click. That is a feature; it is also how a
+stolen-or-replayed old build could reintroduce a whole round of security
+fixes. Hence the floor.
+
+- Each signed record carries `min_version`: **the oldest build this release
+  says the fleet may still be rolled back to.**
+- A companion remembers the **highest** `min_version` it has ever accepted in
+  `~/.ccsync/upgrade_floor.json` and refuses any offer below it.
+- Above the floor, nothing changes: rolling back to any version ≥ floor is
+  still one click, still worded "Roll back to vX (older build)".
+
+Set it per release with `$env:CCSYNC_MIN_VERSION` (Windows ship) /
+`CCSYNC_MIN_VERSION` (macOS scripts); default `0.0.0`, i.e. no floor. **Raise
+it whenever a release fixes something a downgrade would reintroduce.**
+
+### Lowering it
+
+**You cannot.** The floor is monotonic on purpose, and no signed record can
+lower it — if a record could, then possessing one old, genuinely-signed
+record with a low `min_version` would be enough to unwind the entire
+mechanism, and old signed records are exactly what an attacker has.
+
+To roll a machine below its floor, an operator deletes
+`~/.ccsync/upgrade_floor.json` **on that machine** and restarts the
+companion. That is hands-on, per box, and unautomatable from the dashboard —
+which is the point: undoing a security floor should cost someone a trip to
+each machine, not one click on a web page they may not control.
+
+---
+
+## Code signing (Authenticode / Developer ID)
+
+Two *different* signatures, and neither substitutes for the other:
+
+| | Protects against | Set by |
+|---|---|---|
+| **Release record** (Ed25519, above) | the fleet installing a build the vendor did not make | always, `tools/sign_release.py` |
+| **Authenticode / Developer ID** | SmartScreen, Gatekeeper, AV quarantine, enterprise allowlists | only when a certificate is configured |
+
+A build with no Authenticode signature still publishes and still upgrades
+correctly. What it does is greet every *fresh* install with "Windows
+protected your PC" (or, on a Mac, "cannot be opened because the developer
+cannot be verified") — the single loudest signal a customer gets that this is
+not a product. The manifest records `signed_binary`, `sign_release.py` signs
+that into the record, and **`tools\ship.cmd` refuses `-MakeCurrent` for an
+unsigned binary** unless you pass `-AllowUnsignedBinary`.
+
+### What to buy
+
+- **Windows:** an **OV** ("standard") or **EV** Authenticode code-signing
+  certificate — DigiCert, Sectigo, SSL.com, GlobalSign. Roughly $200–600/yr.
+  Since June 2023 the private key must live on FIPS-140-2 hardware (a USB
+  token or a cloud HSM), so plan for the token to arrive by post and for the
+  signing machine to be the one it is plugged into. **EV** starts with
+  SmartScreen reputation from day one; **OV** has to earn it over some weeks
+  of downloads, during which editors still see the warning.
+- **macOS:** an **Apple Developer Program** membership ($99/yr) and the
+  **Developer ID Application** certificate it lets you create, plus an
+  app-specific password for `notarytool`. Notarisation is not optional for
+  anything downloaded.
+
+### Where the env vars go
+
+Set them on the **release machine** (`setx` on Windows, the shell profile on
+the Mac) — never in the repo, never in the dashboard.
+
+```powershell
+# Windows, EV token / HSM: the cert's SHA1 thumbprint in CurrentUser\My
+setx CCSYNC_SIGN_THUMBPRINT  "A1B2C3..."
+# or an OV .pfx on disk
+setx CCSYNC_SIGN_PFX          "C:\certs\ccsync-ov.pfx"
+setx CCSYNC_SIGN_PFX_PASSWORD "..."
+# optional; defaults to http://timestamp.digicert.com
+setx CCSYNC_SIGN_TIMESTAMP_URL "http://timestamp.sectigo.com"
+```
+
+```bash
+# macOS
+export CCSYNC_APPLE_DEV_ID="Developer ID Application: Your Co (TEAMID)"
+export CCSYNC_NOTARY_PROFILE="ccsync-notary"
+# created once:
+xcrun notarytool store-credentials ccsync-notary \
+    --apple-id you@example.com --team-id TEAMID --password <app-specific-password>
+```
+
+`tools/release.ps1` signs with `signtool sign /fd sha256 /tr <url> /td sha256`
+(the timestamp is not optional — without it every signature this build ever
+made turns invalid the day the certificate expires) and **stops the run** if
+signtool fails: a build that was meant to be signed must not slip out
+unsigned under a signed build's version number. `tools/release_macos.sh` and
+`tools/build_onboard_macos.sh` do `codesign --sign "$CCSYNC_APPLE_DEV_ID"
+--options runtime --timestamp`, then `notarytool submit --wait`, then
+`stapler`. The wizard `.app` is stapled *before* the shipping zip is made
+(the bare companion Mach-O cannot be stapled at all — Gatekeeper looks its
+ticket up online instead).
+
+With nothing configured, each script prints a loud **UNSIGNED BUILD**
+advisory and marks the record `signed_binary: false`.
+
+### Operator TODO
+
+No certificate exists for this fleet yet. Everything above is wired and
+tested; buying the certificates and setting the four env vars is the whole
+remaining step, and until it happens `tools\ship.cmd` needs
+`-AllowUnsignedBinary`.
+
+---
+
 ## The doctor: `tools/check_deploy_drift.ps1`
 
 Read-only: no files, no registry, no processes, no git writes; GETs only
@@ -365,7 +559,7 @@ Example of it doing its job (base rig, 2026-07-25, before this build landed):
   "git_describe": "b989422-dirty",
   "git_dirty": true,
   "tests_run": true,
-  "built_by": "alex@CREATOR_1",
+  "built_by": "<user>@<build-host>",
   "built_with": "tools/release.ps1"
 }
 ```
@@ -387,19 +581,75 @@ has four fallbacks rather than one.
 
 ---
 
+## Refreshing the lockfiles
+
+Every component carries a `requirements.lock` — the exact, hash-pinned closure
+`uv pip compile` resolved from its `pyproject.toml` (or `requirements.txt`).
+They are what CI installs, what `dashboard/deploy/Dockerfile` bakes into the
+image, what `deploy/run.sh` prefers over `requirements.txt` inside the
+container, and what `tools/check_licenses.py` judges. Added 2026-08-17
+(`docs/COMMERCIAL_READINESS.md` item 13); the floors in `pyproject.toml` and
+`deploy/requirements.txt` are still the hand-maintained source of truth, and a
+lock is only ever regenerated FROM them.
+
+**A version bump goes in the `pyproject.toml`/`requirements.txt` floor first,
+then into the lock.** Editing a lock by hand invalidates its hashes.
+
+```bash
+# One component. --universal keeps the win32/darwin/linux markers, so ONE lock
+# serves the Windows exe, the Mac app and the Linux container.
+cd companion && uv pip compile --universal --generate-hashes \
+    --python-version 3.12 -o requirements.lock pyproject.toml --extra tray --extra dev
+```
+
+The full set, with the extras each one needs (run from the repo root; `uv` is
+the resolver — `pip-compile --generate-hashes` from pip-tools produces the same
+thing if you prefer it):
+
+| Component | Input | Extras |
+|---|---|---|
+| `companion` | `pyproject.toml` | `tray`, `dev` |
+| `dashboard` | `pyproject.toml` | `broll`, `music`, `ytdl`, `synology`, `oidc`, `dev` |
+| `dashboard/deploy` | `requirements.txt` | — (the container set) |
+| `server` | `requirements.txt` | — |
+| `onboarding` | `requirements.in` | — |
+| `bench` | `pyproject.toml` | `dev` |
+| `broll/web`, `music/web`, `ytdl/web` | `pyproject.toml` | `test` |
+| `broll/indexer` | `pyproject.toml` | `dev` |
+| `music/indexer` | `pyproject.toml` | `dev` |
+
+Two of these have caveats worth knowing before you regenerate them:
+
+- **`dashboard/deploy/requirements.lock` is the one the fleet runs.** Changing
+  it changes what every customer's container installs on its next boot, and
+  `run.sh` re-runs pip only when the file's hash changes — so a bump here *is*
+  the container upgrade mechanism, exactly as `requirements.txt` was.
+- **`music/indexer` pulls `torch` and, on Linux, the whole `nvidia-*` set.**
+  That is the CPU/default-PyPI wheel set and it is correct for the base rig;
+  the CUDA-index build belongs to the GPU image (item 14), not here. It is
+  deliberately not installed by CI.
+
+After regenerating, run `python tools/check_licenses.py` — a new transitive
+dependency with a copyleft licence is exactly what the gate exists to catch,
+and the lock is where it first appears.
+
+---
+
 ## Quick reference
 
 ```powershell
 .\tools\ship.cmd                                # ALL OF THE ABOVE, in order, gated
 .\tools\ship.cmd -DashboardOnly                 # stop after the dashboard deploy
 .\tools\ship.cmd -AllowDirty                    # publish from a dirty tree (deliberate hotfix)
+.\tools\ship.cmd -AllowUnsignedBinary           # make an exe with no Authenticode signature CURRENT
+python tools\release_key.py new|pubkey|bake     # the offline release signing key (once, ever)
 .\tools\check_deploy_drift.ps1                  # what is actually running, anywhere
 .\tools\release.ps1                             # parity + tests + build + manifest
 .\tools\release.ps1 -DryRun                     # show the pipeline, change nothing
 .\tools\release.ps1 -SkipTests -AllowDirty      # fast local iteration build
 .\installer\build_editor_package.ps1 -Publish -MakeCurrent   # ship to the fleet
 .\installer\windows_upgrade.ps1 -CompanionExe <path-to-exe>  # install here
-.\tools\check_deploy_drift.ps1 -AdminUser alex  # + published version, machines behind
+.\tools\check_deploy_drift.ps1 -AdminUser <your-dashboard-admin>   # + published version, machines behind
 ```
 
 These are PowerShell 5.1 scripts. Execution policy on a fresh shell:

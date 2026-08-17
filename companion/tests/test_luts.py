@@ -130,8 +130,8 @@ def test_disabled_does_nothing(tmp_path):
 
 def test_finds_a_lut_the_library_does_not_have(tmp_path):
     library = _library(tmp_path)
-    (library / "Ruskin").mkdir()
-    (library / "Ruskin" / "shared.cube").write_text("x" * 10)
+    (library / "Editor2").mkdir()
+    (library / "Editor2" / "shared.cube").write_text("x" * 10)
 
     lut_dir = tmp_path / "resolve-lut"
     lut_dir.mkdir()
@@ -146,8 +146,8 @@ def test_matches_by_basename_so_a_regrouped_lut_is_not_offered_again(tmp_path):
     loose. Same name and size means same LUT -- prompting forever would be
     noise."""
     library = _library(tmp_path)
-    (library / "Ruskin").mkdir()
-    (library / "Ruskin" / "CC Base.cube").write_text("x" * 10)
+    (library / "Editor2").mkdir()
+    (library / "Editor2" / "CC Base.cube").write_text("x" * 10)
 
     lut_dir = tmp_path / "resolve-lut"
     lut_dir.mkdir()
@@ -195,7 +195,7 @@ def test_a_sibling_directory_that_merely_extends_the_library_path_is_not_the_lib
 def test_a_nested_copy_inside_the_library_is_still_skipped(tmp_path):
     """The containment test still has to do its actual job."""
     library = _library(tmp_path)
-    nested = library / "Ruskin"
+    nested = library / "Editor2"
     nested.mkdir()
     (nested / "inside.cube").write_text("z" * 12)
 
@@ -257,7 +257,7 @@ def test_copy_leaves_no_partial_file_visible(tmp_path, monkeypatch):
     assert not list(library.glob("*.ccsync-tmp"))
 
 
-# -- the stale LUT index (Ruskin, 2026-08-11) -------------------------------
+# -- the stale LUT index (an editor's rig, 2026-08-11) ------------------------
 #
 # Resolve scans its LUT locations once at startup. Launch it before P: is
 # mapped and the shared library is missing for the whole session while the

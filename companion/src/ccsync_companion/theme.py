@@ -1,5 +1,6 @@
-"""Creators Club visual theme — neon-red terminal aesthetic shared by the
-popup dialog and the tray icon (matches the site's WRITE.EXE-style look).
+"""The visual theme — neon-red terminal aesthetic shared by the popup dialog
+and the tray icon (a WRITE.EXE-style look). The MARK it paints is site data,
+not a compiled-in logo: see WINDOW_ICON_ASSET / brand_logo_override.
 
 Pure constants + tiny helpers; no tkinter/PIL imports at module level so the
 headless paths never pay for them.
@@ -55,7 +56,7 @@ def asset_path(name: str):
 
 
 def icon_path():
-    """Path to the OLD pre-composed Creators Club logo PNG, or None.
+    """Path to the OLD pre-composed logo PNG, or None.
 
     Deliberately still points at assets/icon.png (April's already-coloured,
     already-composed mark) rather than being repointed at the new white mark:
@@ -69,7 +70,23 @@ def icon_path():
 # The window icon is the SAME white-on-transparent mark the tray tints per
 # status (tray.MARK_ASSET), not the pre-composed icon.png -- one mark for the
 # taskbar, the title bar and the tray, differing only in colour (2026-08-11).
-WINDOW_ICON_ASSET = "cc_mark_white.png"
+#
+# WHICH mark is an indirection as of 2026-08-17
+# (docs/COMMERCIAL_READINESS.md item 10). The default is the product's own
+# neutral mark; cc_mark_white.png -- one studio's logo -- is still shipped and
+# still selectable, but a build no longer wears it by default:
+#
+#     CCSYNC_BRAND_LOGO=cc_mark_white.png      a file inside assets/
+#     CCSYNC_BRAND_LOGO=C:\brand\acme.png      any white-on-transparent PNG
+#
+# Env rather than config.toml because both the tray and the popups need it
+# before (and without) a config load, and because the installer that brands a
+# fleet is the thing that sets machine environment. It must be
+# WHITE-ON-TRANSPARENT: everything below tints the alpha channel, so a
+# pre-coloured logo comes out as a solid red blob.
+BRAND_LOGO_ENV = "CCSYNC_BRAND_LOGO"
+PRODUCT_MARK_ASSET = "ccsync_mark.png"
+WINDOW_ICON_ASSET = PRODUCT_MARK_ASSET
 
 # 128 px, not the asset's native 512: Windows scales an iconphoto down to
 # 16/32/48 (96 on a 200% display) and every root that gets one holds the
@@ -78,11 +95,30 @@ WINDOW_ICON_ASSET = "cc_mark_white.png"
 WINDOW_ICON_SIZE = 128
 
 
+def brand_logo_override():
+    """$CCSYNC_BRAND_LOGO resolved to a real file, or None.
+
+    A bare name is looked up in assets/ (so a site can select the mark this
+    build already ships); anything with a separator is taken as a path. An
+    override that names a file that is not there is IGNORED rather than fatal
+    -- a wrong logo path must not stop an editor's tray coming up."""
+    import os
+    from pathlib import Path
+
+    raw = str(os.environ.get(BRAND_LOGO_ENV, "") or "").strip().strip('"')
+    if not raw:
+        return None
+    if "/" not in raw and "\\" not in raw:
+        return asset_path(raw)
+    candidate = Path(raw).expanduser()
+    return candidate if candidate.is_file() else None
+
+
 def window_mark_path():
     """Where the white mark lives in this build, or None. Its own function so
     a test can point it elsewhere (and so the icon.png fallback below is
     reachable)."""
-    return asset_path(WINDOW_ICON_ASSET)
+    return brand_logo_override() or asset_path(WINDOW_ICON_ASSET)
 
 
 # Rendered at most once per (asset, colour, size) per process: apply_window_icon
@@ -166,7 +202,7 @@ def _window_icon_image(tk_module, root):
 
 
 def apply_window_icon(tk_module, root) -> None:
-    """Set the Creators Club mark, in brand red, as this window's
+    """Set the product mark, in brand red, as this window's
     title-bar/taskbar icon.
 
     Best-effort and never raises: an icon is decoration, and none of the

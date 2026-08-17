@@ -581,7 +581,7 @@ class SynologyClient:
         for the same reason.
 
         Matched case-insensitively: DSM's own names are mixed case
-        (`Cablewrap`), and a refusal that can be dodged by capitalising is not
+        (`Studio`), and a refusal that can be dodged by capitalising is not
         a refusal. The row carries DSM's spelling of the name.
 
         The row's `sshpubkey` is always None here: answering it costs an SSH

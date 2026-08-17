@@ -64,33 +64,70 @@ run alongside the tray app — it would hold port 8899.
 - Companion builds reach editors through the dashboard's upgrade channel
   (publish with `-Publish -MakeCurrent`). macOS bundles must be built ON a
   Mac (`tools/release_macos.sh`); they cannot be cross-built from Windows.
-- The editor tree root is the P: drive, **deliberately hardcoded** (a
-  configurable drive letter is explicitly deferred). The b-roll archive is
-  `P:\Assets\B-roll Archive`, shared by SMB browsing, the search UI's media,
-  and Resolve timelines alike.
+- The editor tree root is **site data, not code** (2026-08-17,
+  COMMERCIAL_READINESS.md item 11): the drive letter comes from the site
+  manifest's `canonical_prefix` (default `P:\`) and the tree name from
+  `tree_name`; both installers, both uninstallers and the companion read the
+  same two keys. `P:` remains the shipped default and every machine in the
+  field is on it — what changed is that a second customer no longer forks
+  the installer. The b-roll archive is `<prefix>\Assets\B-roll Archive`,
+  shared by SMB browsing, the search UI's media, and Resolve timelines alike.
+- **No customer's name in code.** Brand strings come from the site manifest
+  (`org_name`/`org_short`) with the product name (`CC Sync`) as the last
+  fallback; the tray/popup copy goes through `companion/site.drive_phrase()`,
+  the dashboard's through `ui._render`'s `brand_org`. macOS bundle ids and
+  launchd labels are `com.ccsync.*`; any installer that writes the new label
+  must boot out and delete the legacy `com.creatorsclub.*` pair.
+- **Optional features are off in the vendor build and turned on per
+  customer** in `site.toml [features]`, published by `GET /api/v1/site` and
+  read by the companion via `site.feature_enabled` (fails closed).
+  `youtube_download` gates the whole `/ytdl` stack; `youtube_unblock`
+  additionally gates the anti-anti-automation components. The code stays in
+  the tree, dormant — never a second binary.
+- The b-roll indexer and the ytdl service call the **Anthropic API** through
+  the `anthropic` SDK, never a Claude Code subscription or the `claude`
+  binary (2026-08-17): both need `ANTHROPIC_API_KEY` in the environment
+  (the indexer refuses to start without one; the container gets it from
+  compose). Cost/knobs: `broll/docs/indexing-api.md`.
+- The 8899 loopback is origin-allow-listed (`loopback_guard.py`,
+  2026-08-17): only the configured dashboard origin gets CORS headers, and a
+  POST needs that origin or the `~/.ccsync/loopback-token` header. If
+  `dashboard_url` does not match the URL editors actually browse, every
+  Send-to-Resolve call 403s — the companion log names both the refused
+  origin and the list it holds. `docs/LOOPBACK_API.md`.
 
 ## Running tests
 
-Everything at once: `powershell -File tools\run_all_tests.ps1` (runs all 8
-suites with the right interpreters, summary table at the end).
+Everything at once: `powershell -File tools\run_all_tests.ps1` (runs all 13
+suites with the right interpreters, summary table at the end; the exit code is
+the number of failed suites).
 
 Per-component venvs; run pytest from the component dir so `python -m pytest`
 puts the in-repo package first on sys.path:
 
 ```powershell
-cd companion;   .venv\Scripts\python.exe -m pytest tests -q
-cd dashboard;   .venv\Scripts\python.exe -m pytest tests -q
-cd bench;       .venv\Scripts\python.exe -m pytest tests -q
-cd server;      ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # no venv of its own; RUN IT FROM GIT BASH (see below)
-cd onboarding;  python -m pytest tests -q                                  # system python
-cd broll\indexer; python -m pytest tests -q                                # system python
-cd broll\web;   E:\Projects\broll-platform\web\.venv\Scripts\python.exe -m pytest tests -q
-cd music\web;   .venv\Scripts\python.exe -m pytest tests -q                # own venv, deliberately no torch
+cd companion;     .venv\Scripts\python.exe -m pytest tests -q
+cd dashboard;     .venv\Scripts\python.exe -m pytest tests -q
+cd server;        ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # no venv of its own; RUN IT FROM GIT BASH (see below)
+cd onboarding;    python -m pytest tests -q                                  # system python
+cd bench;         .venv\Scripts\python.exe -m pytest tests -q
+cd broll\web;     E:\Projects\broll-platform\web\.venv\Scripts\python.exe -m pytest tests -q
+cd broll\indexer; python -m pytest tests -q                                  # system python
+cd music\web;     .venv\Scripts\python.exe -m pytest tests -q                # own venv, deliberately no torch
+cd music\indexer; python -m pytest tests -q                                  # system python; the path/config half, torch-free on purpose
+cd ytdl\web;      ..\..\dashboard\.venv\Scripts\python.exe -m pytest tests -q # no venv of its own -- the deployed reality is the dashboard's
+cd tools;         ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # stdlib-only by design; the dashboard venv has pytest + packaging
 powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMapParser.ps1
+bash installer/tests/test_macos_site_values.sh                               # Git Bash; macos_bootstrap.sh's string helpers, no Mac needed
 ```
 
-`broll/web` still borrows the old standalone repo's venv (the in-repo copy
-has none yet); the dashboard venv also has its deps and can substitute.
+`broll/web` still borrows the old standalone repo's venv; `run_all_tests.ps1`
+falls back to the dashboard venv when that path is absent, and the dashboard
+venv can substitute by hand too.
+
+Not pytest, but part of the gate: `dashboard\.venv\Scripts\python.exe
+tools\check_licenses.py` reads every `requirements.lock` and exits 1 on
+unexcused copyleft (`--strict` in CI, where every lock is installed).
 
 **Run `server/`'s suite from Git Bash, not PowerShell.** 18 of its tests
 execute the generated remote scripts under a stub `sudo`/`chown`, and where
@@ -127,8 +164,8 @@ suite `release.ps1` does not run, guarding the deploy script step 1 executes
 tools\release.ps1                                            # Windows companion: parity + tests + PyInstaller + manifest
 installer\build_editor_package.ps1 -RebuildExe -RebuildOnboard   # editor package (add -Publish -MakeCurrent to ship it)
 installer\windows_upgrade.ps1 -CompanionExe <path>           # install a build on THIS machine
-tools\check_deploy_drift.ps1 [-AdminUser alex]               # read-only doctor: repo vs built vs installed vs live
-tools\run_all_tests.ps1                                      # all 8 suites (ship only gates on server/)
+tools\check_deploy_drift.ps1 [-AdminUser <admin>]            # read-only doctor: repo vs built vs installed vs live (also reports the package signature state)
+tools\run_all_tests.ps1                                      # all 13 suites (ship only gates on server/)
 ```
 
 **The Mac half cannot run from Windows** — PyInstaller does not cross-compile,
@@ -139,6 +176,19 @@ of these run **on a Mac**, and until they do, Mac editors stay on their old buil
 git pull && ./tools/release_macos.sh --publish --make-current   # macOS companion
 ./tools/build_onboard_macos.sh --publish --make-current         # macOS wizard (installer ≥ 1.0.17)
 ```
+
+**The upgrade channel is signed (2026-08-17).** `tools\ship.cmd` signs each
+package record with the offline key at `%USERPROFILE%\.ccsync-release\release.key`
+(`tools/release_key.py new|pubkey|bake`); the dashboard needs
+`DASH_RELEASE_PUBKEYS` set to its public half or it refuses every publish with
+a 503. The public key is baked into the companion, so **an editor only trusts
+keys present in the build they are already running** — rotating one costs an
+overlap release (`release_key.py bake --add`, ship, then drop the old key).
+`-AllowUnsignedBinary` is needed until an Authenticode certificate exists.
+`.github/workflows/release-*.yml` build (never publish) on hosted runners —
+the macOS runner is the answer to "PyInstaller needs a Mac"; publishing still
+happens from the base rig. Secrets for the ship come from
+`tools/load_secrets.ps1` (DPAPI, session-scoped), not `setx` — `docs/SECRETS.md`.
 
 Full runbook, including what each version number means and how to roll back:
 `docs/RELEASE.md`.
@@ -164,4 +214,57 @@ Full runbook, including what each version number means and how to roll back:
   follow the existing conftest patterns when touching popup/tray tests.
 - Version lives in `companion/src/ccsync_companion/config.py` (`VERSION`);
   the upgrade channel's version-difference rule makes republishing an older
-  build a first-class rollback.
+  build a first-class rollback — above the machine's signed `min_version`
+  floor (`~/.ccsync/upgrade_floor.json`).
+- **The tray is ours (`tray_native.py`), not pystray** — ctypes on Windows,
+  PyObjC on macOS, written from the OS APIs. pystray was LGPLv3 and frozen
+  single-file (2026-08-17, item 3). Do not re-add it: `tools/check_licenses.py`
+  fails if you do. `CCSYNC_TRAY_BACKEND=pystray` is a dev-only hatch, inert
+  in a frozen build. The popup HMENU is built at right-click time and
+  destroyed on close, so `icon.menu = ...` is a plain attribute assignment.
+- **Legal paperwork lives in `docs/legal/`** and is DRAFT FOR COUNSEL.
+  `THIRD_PARTY_NOTICES.md` is generated — edit `tools/gen_notices.py` or the
+  hand-maintained block between its sentinels, never the generated half. The
+  EULA's version comes from its `<!-- EULA-VERSION: -->` marker; bumping it
+  pushes every editor in every fleet back through the wizard.
+- **Snapshot before anything privileged and recursive.** `chown -R`, the
+  deploy swap and `--recreate` all call `common.snapshot_before()` first
+  (`server/setup_snapshots.py` configures the schedule;
+  `docs/BACKUP_RESTORE.md` is the runbook). A search index is published with
+  `server/publish_db.py --which broll|music`, never by copying over the live
+  file — the container holds it open read-write in WAL mode.
+- **The base rig refuses an unpinned NAS host key** (`[nas] ssh_hostkey`, or
+  a one-off `--trust-host-key-on-first-use` recorded in
+  `~/.ccsync/known_hosts`); a changed key is a refusal, never a re-trust. The
+  dashboard container should hold `TRUENAS_API_KEY` (`server/create_api_key.py`),
+  not the admin password. `[stack] editor_shell` and `[net] shell_type` are
+  not independent — sftp-only forces `sftp_shell_type=none` into the manifest
+  (`docs/TENANCY.md`).
+- Dashboard secrets are checked at BOOT: `DASH_SESSION_SECRET` and
+  `DASH_REPORT_TOKEN` go through `broll.check_ingest_token` (>= 24 chars, no
+  placeholder) and a weak one refuses to start. `DASH_DEV_INSECURE=1` is the
+  ONE test/dev bypass — `dashboard/tests/conftest.py` sets it at import time;
+  it must never be set on a deployment. Fleet credentials come in two shapes:
+  the shared `DASH_REPORT_TOKEN` (migration only) and per-editor `cce1.…`
+  tokens that BIND to an identity. No dashboard call follows a redirect —
+  stub the *opener* in tests, never `urlopen`. `docs/GOTCHAS.md` §12.
+- Lane B can STOP ITSELF: `sync/lane_guard.py`'s circuit breaker parks proxy
+  download in `paused` (never `error`) whenever the NAS stops looking like
+  the tree or a pass trashes too much; lanes A and C keep running, and only a
+  human at the tray clears it. Before "lane B isn't downloading", check
+  `~/.ccsync/state/lane_b_breaker.json`, the tray line, or the grid chip. Same
+  for `sync_halt.json`. Never make a safety latch in-memory-only.
+  `docs/SYNC_SAFETY.md`.
+- Every media-pool write goes through `resolve_bridge.replace_clip` /
+  `link_proxy_media`, which take a `SaveProject`+export save point and write an
+  undo journal under `~/.ccsync/resolve_edits` — add new Resolve mutations
+  *through those two functions*. The companion suite's `_no_live_resolve`
+  conftest fixture exists because that save point calls `connect()`.
+- Both indexers require their paths (`BROLL_DATA_ROOT`, `BROLL_DB_PATH`,
+  `CCSYNC_WHISPER_*`, `MUSIC_DB_PATH`, …); every refusal names the key. Never
+  push a drained `music.db` back over the live one — `--export-drain` then
+  `python -m musicweb.drain apply`. `docs/INDEXERS.md`.
+- Every component carries a hash-pinned `requirements.lock`; bump the floor
+  in `pyproject.toml`/`requirements.txt` first, then regenerate
+  (`docs/RELEASE.md`, "Refreshing the lockfiles"). A new dependency must clear
+  `tools/check_licenses.py`. CI is `.github/workflows/ci.yml` (`docs/CI.md`).

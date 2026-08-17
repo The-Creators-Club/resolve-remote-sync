@@ -38,14 +38,14 @@ from ccsync_companion import fixer
     ],
 )
 def test_suggest_destination_audio_and_stills(filename, expected):
-    assert fixer.suggest_destination(f"C:\\Desktop\\{filename}", "alex") == expected
+    assert fixer.suggest_destination(f"C:\\Desktop\\{filename}", "owen") == expected
 
 
 @pytest.mark.parametrize("filename", ["clip.mov", "clip.mp4", "notes.docx", "weird.xyz"])
 def test_suggest_destination_video_and_other_falls_back_to_editor_added(filename):
     assert (
-        fixer.suggest_destination(f"C:\\Desktop\\{filename}", "alex")
-        == "B-roll/Editor Added/alex"
+        fixer.suggest_destination(f"C:\\Desktop\\{filename}", "owen")
+        == "B-roll/Editor Added/owen"
     )
 
 
@@ -57,24 +57,24 @@ def test_suggest_destination_unknown_editor_name():
 
 
 def test_list_destination_dirs_includes_defaults_even_if_missing(tmp_path):
-    dirs = fixer.list_destination_dirs(str(tmp_path), "alex")
+    dirs = fixer.list_destination_dirs(str(tmp_path), "owen")
     assert "Audio/Music" in dirs
     assert "B-roll/Stills" in dirs
-    assert "B-roll/Editor Added/alex" in dirs
+    assert "B-roll/Editor Added/owen" in dirs
 
 
 def test_list_destination_dirs_excludes_proxy(tmp_path):
     (tmp_path / "B-roll" / "Proxy").mkdir(parents=True)
     (tmp_path / "B-roll" / "Proxy" / "Nested").mkdir(parents=True)
     (tmp_path / "Interviewees" / "Jane").mkdir(parents=True)
-    dirs = fixer.list_destination_dirs(str(tmp_path), "alex")
+    dirs = fixer.list_destination_dirs(str(tmp_path), "owen")
     assert "Interviewees/Jane" in dirs
     assert not any("proxy" in d.lower() for d in dirs)
 
 
 def test_list_destination_dirs_uses_forward_slashes(tmp_path):
     (tmp_path / "AE" / "Renders").mkdir(parents=True)
-    dirs = fixer.list_destination_dirs(str(tmp_path), "alex")
+    dirs = fixer.list_destination_dirs(str(tmp_path), "owen")
     assert "AE/Renders" in dirs
     assert not any("\\" in d for d in dirs)
 
@@ -121,12 +121,12 @@ def test_fix_clip_copies_and_relinks(tmp_path):
     media_pool_item = {}
 
     result = fixer.fix_clip(
-        str(src), "B-roll/Editor Added/alex", str(local_root), media_pool_item,
+        str(src), "B-roll/Editor Added/owen", str(local_root), media_pool_item,
         replace_clip_fn=_fake_replace_clip_ok,
     )
 
     assert result["ok"] is True
-    dest = local_root / "B-roll" / "Editor Added" / "alex" / "clip.mov"
+    dest = local_root / "B-roll" / "Editor Added" / "owen" / "clip.mov"
     assert dest.is_file()
     assert dest.read_text() == "video bytes"
     assert src.is_file(), "original must never be deleted/moved"
@@ -182,9 +182,9 @@ def test_fix_clip_relink_failure_keeps_copy_and_reports_error(tmp_path):
 
 def test_ignore_tracker_is_ignored_and_normalizes_case_on_windows():
     tracker = fixer.IgnoreTracker()
-    tracker.ignore(r"C:\Users\alex\Desktop\clip.mov")
-    assert tracker.is_ignored(r"c:\USERS\alex\DESKTOP\clip.MOV") is True
-    assert tracker.is_ignored(r"C:\Users\alex\Desktop\other.mov") is False
+    tracker.ignore(r"C:\Users\owen\Desktop\clip.mov")
+    assert tracker.is_ignored(r"c:\USERS\owen\DESKTOP\clip.MOV") is True
+    assert tracker.is_ignored(r"C:\Users\owen\Desktop\other.mov") is False
 
 
 def test_ignore_tracker_clear():
@@ -228,7 +228,7 @@ def test_fix_clip_accepts_single_media_pool_item_back_compat(tmp_path):
     media_pool_item = {}
 
     result = fixer.fix_clip(
-        str(src), "B-roll/Editor Added/alex", str(local_root), media_pool_item,
+        str(src), "B-roll/Editor Added/owen", str(local_root), media_pool_item,
         replace_clip_fn=_fake_replace_clip_ok,
     )
 
@@ -282,13 +282,13 @@ def test_fix_clip_copy_failure_mid_copy_leaves_no_dest_file(tmp_path):
         raise OSError("disk full")
 
     result = fixer.fix_clip(
-        str(src), "B-roll/Editor Added/alex", str(local_root), {},
+        str(src), "B-roll/Editor Added/owen", str(local_root), {},
         copy_fn=flaky_copy,
     )
 
     assert result["ok"] is False
     assert result["copied_to"] is None
-    dest_dir = local_root / "B-roll" / "Editor Added" / "alex"
+    dest_dir = local_root / "B-roll" / "Editor Added" / "owen"
     assert not dest_dir.exists() or list(dest_dir.iterdir()) == []
     assert src.is_file(), "original must never be touched"
 
@@ -646,7 +646,7 @@ def _interrupted_fix(root, name="A001_C012.braw", pid=424242, reservation=b"",
     import os
     import time
 
-    folder = root / "B-roll" / "Editor Added" / "ruskin"
+    folder = root / "B-roll" / "Editor Added" / "editor2"
     folder.mkdir(parents=True, exist_ok=True)
     final = folder / name
     final.write_bytes(reservation)
@@ -779,9 +779,9 @@ def test_list_destination_dirs_scopes_to_the_project_prefix(tmp_path):
     (tmp_path / "Projects" / "2026" / "CCT" / "Season 1" / "Audio" / "Music").mkdir(parents=True)
     (tmp_path / "Audio" / "Music").mkdir(parents=True)  # a stray root-level dir
 
-    dirs = fixer.list_destination_dirs(str(tmp_path), "ruskin", prefix)
+    dirs = fixer.list_destination_dirs(str(tmp_path), "editor2", prefix)
     assert f"{prefix}/Audio/Music" in dirs
-    assert f"{prefix}/B-roll/Editor Added/ruskin" in dirs
+    assert f"{prefix}/B-roll/Editor Added/editor2" in dirs
     assert "Audio/Music" not in dirs, "an un-prefixed destination never syncs"
     assert "B-roll/Editor Added/Unknown" not in dirs
     assert all(d.startswith(prefix) for d in dirs)
@@ -1246,16 +1246,188 @@ def test_fix_clip_relinks_to_canonical_path_not_physical(tmp_path):
     media_pool_item = {}
 
     result = fixer.fix_clip(
-        str(src), "B-roll/Editor Added/alex", str(local_root), media_pool_item,
+        str(src), "B-roll/Editor Added/owen", str(local_root), media_pool_item,
         replace_clip_fn=_fake_replace_clip_ok,
         canonical_prefix="P:\\",
     )
 
     assert result["ok"] is True
     # the file physically lands under local_root...
-    dest = local_root / "B-roll" / "Editor Added" / "alex" / "clip.mov"
+    dest = local_root / "B-roll" / "Editor Added" / "owen" / "clip.mov"
     assert dest.is_file()
     # ...but Resolve is pointed at the canonical P:\ path, spelled with
     # backslashes on every host (see the note in
     # test_canonical_clip_path_translates_local_root_to_prefix).
-    assert media_pool_item["relinked_to"] == r"P:\B-roll\Editor Added\alex\clip.mov"
+    assert media_pool_item["relinked_to"] == r"P:\B-roll\Editor Added\owen\clip.mov"
+
+
+# -- item 9 (COMMERCIAL_READINESS.md, 2026-08-17): the two gates around the
+# copy, and the rehearsal switch -------------------------------------------
+
+
+class TestReservationRecheck:
+    """`_claim_destination_path` claims the final name with O_EXCL before the
+    copy; nothing stopped a second writer overwriting the 0-byte claim during
+    a multi-GB copy, and os.replace then destroyed what arrived."""
+
+    def test_a_file_that_lands_on_our_reservation_is_not_overwritten(self, tmp_path):
+        root = tmp_path / "root"
+        (root / "B-roll").mkdir(parents=True)
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"ours" * 10)
+        dest = root / "B-roll" / "clip.mov"
+
+        def copy_that_loses_the_race(s, d):
+            # Lane C syncs somebody else's clip.mov onto our reservation
+            # WHILE we copy -- the DEL-7 case, one step later.
+            dest.write_bytes(b"someone-elses")
+            shutil.copy2(s, d)
+
+        result = fixer.fix_clip(
+            str(src), "B-roll", str(root), [],
+            copy_fn=copy_that_loses_the_race,
+            replace_clip_fn=lambda mpi, p: {"ok": True, "message": ""},
+        )
+
+        assert result["ok"] is True
+        assert dest.read_bytes() == b"someone-elses"
+        assert result["copied_to"].endswith("clip (2).mov")
+        assert Path(result["copied_to"]).read_bytes() == src.read_bytes()
+
+    def test_a_reservation_that_vanished_still_lands_under_its_own_name(self, tmp_path):
+        root = tmp_path / "root"
+        (root / "B-roll").mkdir(parents=True)
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"ours")
+
+        def copy_that_loses_the_reservation(s, d):
+            (root / "B-roll" / "clip.mov").unlink()
+            shutil.copy2(s, d)
+
+        result = fixer.fix_clip(
+            str(src), "B-roll", str(root), [],
+            copy_fn=copy_that_loses_the_reservation,
+            replace_clip_fn=lambda mpi, p: {"ok": True, "message": ""},
+        )
+        assert result["ok"] is True
+        assert result["copied_to"].endswith("clip.mov")
+
+
+class TestVerifyBeforeRelink:
+    def test_a_short_copy_is_never_relinked(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x" * 5000)
+        relinks = []
+
+        def truncating_copy(s, d):
+            Path(d).write_bytes(b"x" * 10)
+
+        result = fixer.fix_clip(
+            str(src), "B-roll", str(root), [object()],
+            copy_fn=truncating_copy,
+            replace_clip_fn=lambda mpi, p: relinks.append(p) or {"ok": True},
+        )
+
+        assert result["ok"] is False
+        assert relinks == []
+        assert "cut short" in result["verify_error"]
+        # And the bad copy is gone, so lane A cannot upload it under a name
+        # --ignore-existing would never let it replace.
+        assert not (root / "B-roll" / "clip.mov").exists()
+
+    def test_a_source_that_changed_during_the_copy_is_never_relinked(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x" * 100)
+        relinks = []
+
+        def copy_then_grow_the_source(s, d):
+            shutil.copy2(s, d)
+            # The card is still being ingested: same size, new mtime.
+            os.utime(src, (1000000.0, 1000000.0))
+
+        result = fixer.fix_clip(
+            str(src), "B-roll", str(root), [object()],
+            copy_fn=copy_then_grow_the_source,
+            replace_clip_fn=lambda mpi, p: relinks.append(p) or {"ok": True},
+        )
+
+        assert result["ok"] is False
+        assert relinks == []
+        assert "still being written" in result["verify_error"]
+
+    def test_a_faithful_copy_is_relinked(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x" * 100)
+        relinks = []
+
+        result = fixer.fix_clip(
+            str(src), "B-roll", str(root), [object()],
+            copy_fn=shutil.copy2,
+            replace_clip_fn=lambda mpi, p: relinks.append(p) or {"ok": True},
+        )
+        assert result["ok"] is True and len(relinks) == 1
+
+    def test_verify_copy_is_pure(self, tmp_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.write_bytes(b"12345")
+        b.write_bytes(b"12345")
+        before = fixer.sample_source(a)
+        assert fixer.verify_copy(a, b, before) is None
+        b.write_bytes(b"12")
+        assert "cut short" in fixer.verify_copy(a, b, before)
+
+
+class TestDryRun:
+    def test_it_copies_nothing_and_relinks_nothing(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x" * 100)
+        relinks = []
+
+        result = fixer.fix_clip(
+            str(src), "B-roll", str(root), [object()],
+            copy_fn=lambda s, d: pytest.fail("dry run copied a file"),
+            replace_clip_fn=lambda mpi, p: relinks.append(p) or {"ok": True},
+            canonical_prefix="P:\\",
+            dry_run=True,
+        )
+
+        assert result["ok"] is False and result["dry_run"] is True
+        assert relinks == []
+        assert not (root / "B-roll").exists()
+        assert result["would_copy_to"].endswith(os.path.join("B-roll", "clip.mov"))
+        assert result["would_relink_to"] == r"P:\B-roll\clip.mov"
+
+    def test_it_still_refuses_a_destination_outside_local_root(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x")
+        result = fixer.fix_clip(str(src), "../escape", str(root), [], dry_run=True)
+        assert result["ok"] is False
+        assert "outside local_root" in result["message"]
+
+    def test_the_config_default_is_read_once(self, tmp_path, monkeypatch):
+        from ccsync_companion import config as config_mod
+        fixer.reset_dry_run_cache()
+        reads = []
+
+        def fake_load():
+            reads.append(1)
+            return {"fixer_dry_run": True}
+
+        monkeypatch.setattr(config_mod, "load_config", fake_load)
+        try:
+            assert fixer.dry_run_default() is True
+            assert fixer.dry_run_default() is True
+            assert len(reads) == 1
+        finally:
+            fixer.reset_dry_run_cache()

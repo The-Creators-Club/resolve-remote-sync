@@ -3,8 +3,28 @@
 Implements the "Companion API contract" section of broll/SPEC.md exactly:
   GET  /status
   POST /insert
-plus OPTIONS preflight handling and permissive CORS (loopback-only bind
-makes that safe -- see that spec).
+plus OPTIONS preflight handling.
+
+WHO MAY CALL IT (2026-08-17, COMMERCIAL_READINESS.md item 5 / C1). Until this
+date the answer was "any page in the editor's browser": CORS was "*" with
+Access-Control-Allow-Private-Network, and a loopback bind was mistaken for an
+authorisation decision. It is not -- the browser is ON the machine, which is
+the attacker's whole foothold, so an ad iframe could insert clips into the
+timeline an editor was grading and spawn Explorer on their desktop. There are
+now exactly two ways in, both spelled out in loopback_guard.py:
+
+  * an **Origin** on this deployment's allow-list (the dashboard that serves
+    the b-roll / music / ytdl pages, from `dashboard_url` and the cached site
+    manifest) -- the browser's own unforgeable claim about which page is
+    calling. Anything else gets 403 and no CORS headers at all;
+  * the **X-CCSync-Loopback token** from ~/.ccsync/loopback-token, for
+    callers that are not a browser and so have no Origin: the tray itself,
+    the onboarding wizard, an operator with curl.
+
+A request with no Origin still gets GETs -- opening /status in a tab is the
+self-test all three web UIs tell editors to run, and a top-level navigation
+sends no Origin -- but a state-changing POST needs one of the two above, plus
+Content-Type: application/json and a loopback Host (DNS-rebinding defence).
 
 Since port step 8 (2026-08-10) it also carries the MUSIC library's
 "Send to Resolve" actions as a route group:
@@ -46,6 +66,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,9 +76,11 @@ from urllib.parse import parse_qs, urlparse
 
 from . import broll_fetch
 from . import config as ccsync_config
+from . import loopback_guard
 from . import music_server
 from . import music_worker
 from . import resolve_bridge
+from . import site as site_mod
 from . import ytdl_executor
 from . import ytdl_server
 
@@ -76,8 +99,9 @@ STATUS_TIMEOUT = 20
 # Nothing either route accepts is more than a few hundred bytes, and the
 # Content-Length was taken on trust: a non-numeric one crashed the handler and
 # an invented large one parked a daemon thread in an unbounded buffered read.
-# CORS here is "*" plus private-network, so any page in the editor's browser
-# can reach it (MED-10, 2026-08-11).
+# The origin allow-list is newer than this cap (2026-08-17) and does not
+# replace it: an ALLOWED page with a bug can still send a bad Content-Length
+# (MED-10, 2026-08-11).
 MAX_BODY_BYTES = 256 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
 
@@ -279,21 +303,44 @@ def _validate_components(parts: list[str]) -> None:
             raise PathTraversalError(f"invalid path segment '{part}' in rel_path")
 
 
+VOLUMES_DIR = "/Volumes"
+
+
 def probe_darwin_mount(
-    share: str, isdir: Optional[Callable[[str], bool]] = None
+    share: str, isdir: Optional[Callable[[str], bool]] = None,
+    realpath: Optional[Callable[[str], str]] = None,
 ) -> Optional[str]:
     """Look for /Volumes/<share>, -1, -2 (Finder's collision-suffix convention).
 
     Returns the first candidate that exists as a directory, or None.
 
+    `share` is interpolated into a PATH here, so it is vetted as one safe
+    segment first and the result is realpath-contained under /Volumes after
+    (2026-08-17, C1): share="../.." used to build "/Volumes/../.." and hand
+    back "/", which then became the root every rel_path was joined onto -- the
+    whole filesystem served through a route whose contract is one share.
+
     `isdir` defaults to None (resolved to os.path.isdir at call time, not at
     import time) so tests can either monkeypatch os.path.isdir directly or
-    inject a fake callable explicitly.
+    inject a fake callable explicitly; `realpath` is the same seam for the
+    containment check, so a darwin layout is testable from a Windows host.
     """
+    if not loopback_guard.valid_share(share):
+        log.warning("broll: refusing to probe %s for share %r", VOLUMES_DIR, share)
+        return None
     check = isdir if isdir is not None else os.path.isdir
-    for candidate in (f"/Volumes/{share}", f"/Volumes/{share}-1", f"/Volumes/{share}-2"):
-        if check(candidate):
-            return candidate
+    for candidate in (f"{VOLUMES_DIR}/{share}", f"{VOLUMES_DIR}/{share}-1",
+                      f"{VOLUMES_DIR}/{share}-2"):
+        if not check(candidate):
+            continue
+        if not loopback_guard.is_within(candidate, VOLUMES_DIR, realpath=realpath):
+            # A symlink at /Volumes/<share> pointing out of /Volumes: the
+            # segment rules cannot see it, and following it would serve
+            # someone else's filesystem under a share name.
+            log.warning("broll: %s does not resolve inside %s -- ignoring it",
+                        candidate, VOLUMES_DIR)
+            continue
+        return candidate
     return None
 
 
@@ -351,6 +398,12 @@ def translate_path_with_root(
         raise PathTraversalError(
             f"share must be a string, got {type(share).__name__}"
         )
+    # ONE safe path segment, checked before the value is used as a mounts key
+    # or interpolated into /Volumes/<share> (2026-08-17, C1). Here rather
+    # than in probe_darwin_mount alone so the rule holds on every platform
+    # and for every route group that translates a pair.
+    if not loopback_guard.valid_share(share):
+        raise PathTraversalError(f"invalid share name {share!r}")
 
     if not rel_path or not rel_path.strip():
         raise PathTraversalError("empty rel_path")
@@ -381,6 +434,45 @@ def translate_path_with_root(
     if root_norm == "":
         root_norm = "/"
     return root, root_norm + "/" + "/".join(parts)
+
+
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
+def contained_local_path(share: str, rel_path: str, mounts: dict) -> str:
+    """translate_path, plus the two guards that make the answer safe to USE.
+
+    An ABSOLUTE rel_path is a contradiction (joining it would hand back a
+    path with nothing to do with the share), and the result must still
+    resolve INSIDE the root once symlinks are followed -- the only check that
+    catches an escape no component rule can see (a symlink, a junction, a
+    component none of these rules anticipated).
+
+    Lifted out of music_server.local_path_for on 2026-08-17 (C1): both guards
+    had been on the music/ytdl routes since MED-11 while /insert, the route
+    that hands its answer to Resolve's ImportMedia, still used the bare
+    translate_path. One containment implementation for every route group.
+    """
+    norm = str(rel_path or "").replace("\\", "/")
+    if norm.startswith("/") or _DRIVE_RE.match(norm):
+        raise PathTraversalError(f"rel_path must be relative, got {rel_path!r}")
+
+    # The ROOT comes back with the path: on macOS it may have come from the
+    # /Volumes probe rather than the mounts table, and reading mounts[share]
+    # again here skipped this check entirely for the documented "mounted but
+    # not configured" case (MED-11, 2026-08-11).
+    root, local = translate_path_with_root(share, rel_path, mounts)
+
+    if root:
+        try:
+            Path(local).resolve(strict=False).relative_to(
+                Path(root).resolve(strict=False)
+            )
+        except ValueError:
+            raise PathTraversalError(
+                f"rel_path escapes the share root: {rel_path!r}"
+            ) from None
+    return local
 
 
 # -- the two endpoints ------------------------------------------------------
@@ -489,7 +581,7 @@ def build_insert_response(
         return 200, {"ok": False, "message": "out point must be after in point"}
 
     try:
-        local_path_str = translate_path(share, rel_path, mounts)
+        local_path_str = contained_local_path(share, rel_path, mounts)
     except PathTraversalError as exc:
         return 400, {"ok": False, "message": str(exc)}
     except MountNotConfiguredError as exc:
@@ -502,6 +594,14 @@ def build_insert_response(
                 "ok": False,
                 "message": f"file not found at {local_path} — is the share mounted?",
             }
+        # ...and the tree this download would land in has to BE there, and
+        # the destination inside it (2026-08-17, COMMERCIAL_READINESS.md
+        # item 5's M-tier "on-demand fetch bypasses root guard"): rclone
+        # against an unmounted macOS root does not fail, it fills the boot
+        # disk (root_guard.py's opening paragraph).
+        refusal = broll_fetch.fetch_refusal(ccsync_cfg, str(local_path))
+        if refusal:
+            return 200, {"ok": False, "message": refusal}
         # The validated components, re-joined with forward slashes: the
         # remote side of the copy must never see the raw client string that
         # translate_path only just finished vetting.
@@ -560,13 +660,116 @@ def build_insert_response(
 class BrollRequestHandler(BaseHTTPRequestHandler):
     server_version = f"CCSyncCompanion/{ccsync_config.VERSION}"
 
+    # The caller's Origin once it has been ALLOWED, else None -- set per
+    # request by _vet_request and read by _set_cors_headers. A class-level
+    # default because _guarded's 500 path can reach _send_json before any
+    # dispatch has run.
+    _cors_origin: Optional[str] = None
+
+    def _vet_request(self) -> bool:
+        """Decide whether this request may be answered at all.
+
+        False means a refusal is already on the wire. The order matters: Host
+        before Origin, because a rebinding request that also carries a hostile
+        Origin should be refused on the more specific fact, and both before
+        any body is read.
+        """
+        self._cors_origin = None
+        host = self.headers.get("Host")
+        if not loopback_guard.host_allowed(host, self.server.server_address[1]):
+            # DNS rebinding: a name the attacker controls, pointed at
+            # 127.0.0.1, would make their page same-origin with this server
+            # and the Origin check below would never fire.
+            log.warning("broll: refusing %s %s -- Host %r is not this loopback",
+                        self.command, self.path, host)
+            self._refuse(403)
+            return False
+
+        origin = self.headers.get("Origin")
+        if origin:
+            allowed = getattr(self.server, "allowed_origins", frozenset())
+            if not loopback_guard.origin_allowed(
+                origin, allowed, dev=getattr(self.server, "dev_origins", False)
+            ):
+                log.warning(
+                    "broll: refusing %s %s from origin %r -- this companion "
+                    "serves %s. If that is the dashboard your editors actually "
+                    "browse, set dashboard_url (or loopback_extra_origins) in "
+                    "~/.ccsync/config.toml to match it.",
+                    self.command, self.path, origin, sorted(allowed) or "no origin",
+                )
+                self._refuse(403)
+                return False
+            self._cors_origin = origin
+        return True
+
+    def _post_authorised(self) -> bool:
+        """A state-changing request needs an allowed Origin or the token."""
+        if self._cors_origin is not None:
+            return True
+        if loopback_guard.verify_token(
+            self.headers.get(loopback_guard.TOKEN_HEADER)
+        ):
+            return True
+        log.warning(
+            "broll: refusing POST %s -- no allowed Origin and no valid %s "
+            "header (the token is in %s)",
+            self.path, loopback_guard.TOKEN_HEADER, loopback_guard.token_path(),
+        )
+        self._refuse(403)
+        return False
+
+    def _content_type_ok(self) -> bool:
+        """Every POST body here is JSON, and saying so is load-bearing.
+
+        text/plain, multipart/form-data and application/x-www-form-urlencoded
+        are the three a cross-origin <form> can send with NO preflight at all;
+        insisting on application/json is what makes the browser ask this
+        server's permission before a hostile page's POST can arrive.
+        """
+        ctype = self.headers.get("Content-Type")
+        if loopback_guard.content_type_is_json(ctype):
+            return True
+        log.warning("broll: refusing POST %s -- Content-Type %r is not "
+                    "application/json", self.path, ctype)
+        self._refuse(415)
+        return False
+
+    def _refuse(self, status: int) -> None:
+        """One body for every refusal, carrying BOTH route groups' error keys.
+
+        Generic on purpose (COMMERCIAL_READINESS.md L-tier): a caller this
+        server has just declined to talk to is not owed a description of the
+        allow-list it failed. The reason is always in the log.
+        """
+        self._send_json(status, {
+            "ok": False,
+            "message": loopback_guard.REFUSED_MESSAGE,
+            "error": loopback_guard.REFUSED_MESSAGE,
+        })
+
     def _set_cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # Vary unconditionally: the answer to "may this origin read the
+        # response" now depends on the request, and a cache that missed that
+        # would hand one page another's permission.
+        self.send_header("Vary", "Origin")
+        if self._cors_origin is None:
+            # No Origin, or one already refused. A response with no
+            # Access-Control-Allow-Origin at all is unreadable to any page,
+            # which is exactly what a refused caller should get -- and it is
+            # what a browser-less caller (curl, the tray) neither needs nor
+            # notices.
+            return
+        self.send_header("Access-Control-Allow-Origin", self._cors_origin)
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            f"Content-Type, {loopback_guard.TOKEN_HEADER}",
+        )
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        # Private Network Access. The b-roll UI is served from the cc_sync
-        # dashboard, so the page comes from a tailnet address and calls
-        # loopback — exactly the public-to-private direction Chromium is
+        # Private Network Access, for ALLOWED origins only (it was
+        # unconditional until 2026-08-17). The b-roll UI is served from the
+        # cc_sync dashboard, so the page comes from a tailnet address and
+        # calls loopback — exactly the public-to-private direction Chromium is
         # progressively blocking, and it blocks at the PREFLIGHT, so without
         # this the insert button fails before any of our code runs. Harmless
         # on browsers that don't implement it.
@@ -582,6 +785,17 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_OPTIONS(self) -> None:  # CORS preflight
+        self._guarded(self._dispatch_options)
+
+    def _dispatch_options(self) -> None:
+        if not self._vet_request():
+            return
+        if self._cors_origin is None:
+            # A preflight is a browser asking permission; a preflight with no
+            # Origin is not a browser, and answering it would publish the
+            # allow-list's shape to anything that asked.
+            self._refuse(403)
+            return
         self.send_response(204)
         self._set_cors_headers()
         self.send_header("Content-Length", "0")
@@ -652,10 +866,17 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 log.debug("broll: could not send the 500 either", exc_info=True)
 
     def do_GET(self) -> None:
-        self._guarded(self._dispatch_get)
+        # No token needed: a GET here changes nothing, and the self-test every
+        # web UI tells editors to run ("open http://127.0.0.1:8899/status")
+        # is a top-level navigation, which sends no Origin and could carry no
+        # header of ours anyway.
+        self._guarded(lambda: self._vet_request() and self._dispatch_get())
 
     def do_POST(self) -> None:
-        self._guarded(self._dispatch_post)
+        self._guarded(
+            lambda: self._vet_request() and self._post_authorised()
+            and self._content_type_ok() and self._dispatch_post()
+        )
 
     def _ytdl_deps(self) -> Any:
         """The executor's view of this companion.
@@ -810,6 +1031,32 @@ class BrollCompanionServer(ThreadingHTTPServer):
         # download executor. None = no capability (see _ytdl_deps).
         self.ytdl_deps = ytdl_deps
 
+        # Who may drive this listener (loopback_guard.py, 2026-08-17).
+        # Computed ONCE, here, rather than per request: it reads the cached
+        # site manifest off disk, and a request thread is not the place for
+        # that. A companion whose dashboard_url is blank ends up with an EMPTY
+        # allow-list, which is the honest answer -- it is pointed at no
+        # dashboard, so no page is entitled to drive it; local callers still
+        # have the token.
+        self.allowed_origins = frozenset()
+        self.dev_origins = False
+        try:
+            self.allowed_origins = loopback_guard.allowed_origins(
+                ccsync_cfg, site=site_mod.cached_site()
+            )
+            self.dev_origins = loopback_guard.dev_origins_enabled(ccsync_cfg)
+        except Exception:
+            log.warning("broll: could not build the origin allow-list -- "
+                        "browser callers will all be refused", exc_info=True)
+        # The other way in, for callers that have no Origin to offer. Best
+        # effort: a machine that cannot write ~/.ccsync still serves the
+        # dashboard's pages perfectly well.
+        try:
+            loopback_guard.ensure_token()
+        except Exception:
+            log.warning("broll: could not publish a loopback token",
+                        exc_info=True)
+
 
 def make_server(
     cfg: dict, host: str = HOST, port: int = PORT,
@@ -907,9 +1154,10 @@ def start(ccsync_cfg: dict[str, Any],
 
     log.info(
         "broll: Send-to-Resolve listening on http://%s:%d (mounts: %s; "
-        "/music/* mounts: %s; /ytdl/* mounts: %s)",
+        "/music/* mounts: %s; /ytdl/* mounts: %s; browser origins allowed: %s)",
         HOST, server.server_address[1], broll_cfg["mounts"], music_mounts,
-        ytdl_mounts,
+        ytdl_mounts, sorted(server.allowed_origins) or "NONE -- dashboard_url "
+        "is blank, so no web page can drive this companion",
     )
     return server
 

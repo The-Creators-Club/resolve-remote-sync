@@ -1,9 +1,13 @@
 """Drive the full archive queue, stage by stage, resuming across rate limits.
 
-Designed for a job measured in days on a subscription: the session limit WILL be
-hit repeatedly, and that is normal rather than an error. `run_pipeline` raises
+Designed for a job measured in days: an account-wide rate limit WILL be hit
+repeatedly, and that is normal rather than an error. `run_pipeline` raises
 FatalRunError on an account-wide failure and leaves the queue untouched, so the
 correct response is to wait for the reset and continue — not to fail videos.
+(This was written against Claude Code session limits; since 2026-08-17 the calls
+are Messages API requests, which hit the organisation's rate limits instead. The
+shape of the problem, and the response to it, are identical — see
+broll/docs/indexing-api.md.)
 
 Stage order matters:
   1. probe    — cheap, gets duration/fps so everything else can plan
@@ -17,8 +21,8 @@ Stage order matters:
 Everything before `claude` can run to completion without touching the API, so a
 rate limit never blocks the parts that don't need it.
 
-    python run_queue.py --config config.queue.yaml
-    python run_queue.py --config config.queue.yaml --stages claude
+    python run_queue.py                  # --config defaults to private/broll/indexer/config.queue.yaml
+    python run_queue.py --stages claude
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from pathlib import Path
 import yaml
 
 from broll_index.claude_client import extract_reset_hint, is_rate_limited, seconds_until_reset
+from broll_index.site_data import DEFAULT_QUEUE_CONFIG
 
 LOCAL_STAGES = ["probe", "transcribe", "proxy", "frames"]
 API_STAGES = ["claude"]
@@ -173,7 +178,7 @@ def stage_cmd(config: Path, stages: list[str], model: str, api_workers: int,
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.queue.yaml")
+    ap.add_argument("--config", default=DEFAULT_QUEUE_CONFIG)
     ap.add_argument("--model", default="haiku")
     ap.add_argument("--stages", default=None, help="override; default runs local then API stages")
     ap.add_argument("--max-hours", type=float, default=None)

@@ -6,4 +6,9 @@ Three lanes behind a common adapter interface (see base.py):
     and direction.
   - syncthing_lane.py — Lane C (everything else, bidirectional), supervises
     a locally-running Syncthing instance via its REST API.
+  - lane_guard.py — the safety latches that sit ACROSS the lanes rather than
+    inside one: lane B's circuit breaker, `.ccsync-trash` retention, and the
+    "stop all sync" halt (COMMERCIAL_READINESS.md item 9, 2026-08-17). All
+    three persist to <state_dir>, because a latch that a tray restart clears
+    is not a latch. See docs/SYNC_SAFETY.md.
 """

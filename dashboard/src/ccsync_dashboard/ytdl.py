@@ -56,13 +56,21 @@ log = logging.getLogger(__name__)
 
 MOUNT_PATH = "/ytdl"
 
-# mount_ytdl's tri-state. "absent" and "degraded" are both "do not advertise
-# it in the nav" (ui.py), but they are different operator problems: absent =
-# the code is not there, degraded = the code is there and its data root is not
-# usable, so every request would 500 with "unable to open database file".
+# mount_ytdl's four states. Everything except MOUNTED is "do not advertise it
+# in the nav" (ui.py), but they are different operator problems: absent = the
+# code is not there, degraded = the code is there and its data root is not
+# usable (so every request would 500 with "unable to open database file"), and
+# disabled = this site has not turned the feature on, which is not a problem at
+# all.
 MOUNTED = "mounted"
 ABSENT = "absent"
 DEGRADED = "degraded"
+# The site said no (site.toml [features] youtube_download, 2026-08-17 --
+# COMMERCIAL_READINESS.md item 2). Nothing is imported, nothing is mounted, so
+# /ytdl and every fleet download route under it answer the dashboard's own 404:
+# the customer, not the vendor, decides whether downloading third-party YouTube
+# material is lawful for them. See docs/legal/YOUTUBE_FEATURE_NOTICE.md.
+DISABLED = "disabled"
 
 # Mounting a third FastAPI() brings its default interactive docs along, and
 # they would be reachable by every editor with a session. The dashboard does
@@ -225,7 +233,10 @@ def _add_in_repo_ytdl_web() -> bool:
 
 
 def mount_ytdl(app: FastAPI, settings: Settings) -> str:
-    """Mount the ytdl app at /ytdl. Returns MOUNTED / ABSENT / DEGRADED.
+    """Mount the ytdl app at /ytdl. Returns MOUNTED / DISABLED / ABSENT / DEGRADED.
+
+    DISABLED comes first and short-circuits everything else: the feature is
+    OFF unless this site turned it on (2026-08-17).
 
     The import is guarded and the failure is logged rather than raised, so a
     deployment whose ytdl tree is missing, stale or mid-upgrade -- or one whose
@@ -243,6 +254,16 @@ def mount_ytdl(app: FastAPI, settings: Settings) -> str:
     dashboard already cannot log anyone in without one, so every request would
     arrive with no session at all and the sub-app would 401 by itself.
     """
+    if not settings.site_feature_youtube_download:
+        # BEFORE the import, deliberately: an off site must not even load the
+        # downloader's code, so there is nothing to reach, nothing listening on
+        # the fleet claim/manifest/status routes, and no yt-dlp import cost.
+        log.info("ytdl UI not mounted: this site has not enabled the YouTube "
+                 "downloader ([features] youtube_download in site.toml / "
+                 "DASH_SITE_YOUTUBE_DOWNLOAD=1). See "
+                 "docs/legal/YOUTUBE_FEATURE_NOTICE.md")
+        return DISABLED
+
     try:
         try:
             from ytdlweb.main import app as ytdl_app  # type: ignore[import-not-found]

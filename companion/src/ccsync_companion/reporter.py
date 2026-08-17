@@ -162,7 +162,17 @@ def default_http_post(url: str, data: dict, headers: dict, timeout: float) -> An
     # but it's a hard stdlib limitation, not something this function
     # controls -- do not "fix" the casing here, it won't stick.
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # NO REDIRECTS. `headers` carries X-CCSync-Token and X-CCSync-Identity, and
+    # urllib.request.urlopen follows 3xx automatically while stripping only the
+    # Authorization header -- custom ones ride along. A dashboard (or anything
+    # answering in its place) replying "302 Location: http://elsewhere/" would
+    # therefore hand this fleet's credentials to another origin, and the
+    # companion would parse whatever came back as its report response. The
+    # upgrade channel has refused redirects since AUDIT_3 H-1; every other
+    # dashboard call does now too (COMMERCIAL_READINESS.md item 15,
+    # 2026-08-17). A 3xx surfaces as an HTTPError, which every caller here
+    # already treats as a failed request.
+    with upgrade_mod.build_no_redirect_opener().open(req, timeout=timeout) as resp:
         resp_data = resp.read()
     return json.loads(resp_data.decode("utf-8")) if resp_data else {}
 
@@ -189,6 +199,7 @@ class DashboardReporter:
         get_completions: Optional[Callable[[], list]] = None,
         get_proxy_coverage: Optional[GetProxyCoverageFn] = None,
         get_youtube_import: Optional[GetYoutubeImportFn] = None,
+        get_sync_guard: Optional[Callable[[], dict[str, Any]]] = None,
     ) -> None:
         self._get_statuses = get_statuses
         self.cfg = cfg
@@ -229,6 +240,13 @@ class DashboardReporter:
         # companion whose importer failed to construct, simply omits the
         # section rather than reporting a zeroed one.
         self._get_youtube_import = get_youtube_import
+        # The lane B circuit breaker, the trash size, the sync halt and lane
+        # A's "skipped, exists" counter (COMMERCIAL_READINESS.md item 9,
+        # 2026-08-17). On EVERY tick including light ones, and NEVER shed by
+        # _fit_payload: it is a few hundred bytes, and it is the one section
+        # whose absence would leave a machine that has stopped syncing looking
+        # exactly like one that has nothing to do.
+        self._get_sync_guard = get_sync_guard
 
         self.dashboard_url = str(cfg.get("dashboard_url", "")).strip()
         self.dashboard_token = str(cfg.get("dashboard_token", "")).strip()
@@ -374,6 +392,14 @@ class DashboardReporter:
             # nothing on the wire cannot be told from "nothing to import".
             if youtube:
                 payload["youtube_import"] = youtube
+        if self._get_sync_guard is not None:
+            try:
+                guard = self._get_sync_guard()
+            except Exception:
+                log.exception("get_sync_guard() failed")
+                guard = None
+            if guard:
+                payload["sync_guard"] = guard
         if not light:
             if self._get_local_manifest is not None:
                 try:

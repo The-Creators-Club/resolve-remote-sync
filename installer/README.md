@@ -1,16 +1,96 @@
-# installer/ -- Creators Club Sync: editor bootstrap scripts
+# installer/ -- CC Sync: editor bootstrap scripts
+
+CC Sync -- fleet sync for DaVinci Resolve(R). Requires DaVinci Resolve Studio
+on every editing machine (the free edition exposes neither collaboration nor
+the external scripting interface these scripts configure).
 
 Per-editor bootstrap scripts that get a new remote editor's Windows or Mac
 machine ready for the sync system: Tailscale, rclone, Syncthing (installed
 **and running**), the local sync root (verified as a real mount when it is
-on an external volume), the `P:` mapping (Windows) or Resolve's **Mapped
-Mount** preference (Mac -- set automatically while Resolve is quit; see
-`../docs/EDITOR_SETUP.md` step 6 for the manual fallback), rclone remote
+on an external volume), the tree-drive mapping (Windows) or Resolve's
+**Mapped Mount** preference (Mac -- set automatically while Resolve is quit;
+see `../docs/EDITOR_SETUP.md` step 6 for the manual fallback), rclone remote
 config, a seeded companion config, and the companion app itself plus its
 autostart entry.
 
+## The site manifest decides, not this code (2026-08-17)
+
+Nothing tenant-shaped is compiled into these scripts any more
+(`../docs/COMMERCIAL_READINESS.md` items 10 and 11). Both bootstraps fetch
+
+    GET <dashboard>/api/v1/site
+
+before they do anything, and every site-shaped value below resolves in this
+order: **the flag you passed** → **the manifest** → **a neutral fallback, or a
+named capability miss where guessing would put terabytes in the wrong place.**
+
+| Manifest key | Used for | Fallback |
+|---|---|---|
+| `canonical_prefix` | the Windows drive letter the tree is mounted as, and Resolve's Mapped Mount prefix on macOS | `P:\` |
+| `tree_name` | `%SystemDrive%\<tree>` / `~/<tree>` when no `-LocalRoot`, and the Explorer drive label | `CCSync` |
+| `remote_root` | lanes A/B destination | none — capability miss |
+| `rclone_remote` | the `[section]` name in `rclone.conf` | `ccsync_sftp` |
+| `sftp_port`, `sftp_shell_type` | the rclone SFTP stanza | `22`, `unix` |
+| `nas_syncthing_id` | lane C pairing | none — capability miss |
+
+Everything the Windows bootstrap derives from `canonical_prefix` moves with
+it: the `subst`/`net use` commands, the loopback share name (`CCSync_<letter>`),
+the logon task (`CCSync-Subst<letter>`), the `HKCU\...\Run` fallback entry,
+the Explorer `MountPoints2` label key, and the "is this drive already
+somebody else's?" guard. `windows_uninstall.ps1` reads the letter back out of
+`~/.ccsync/config.toml` (it has to work on a machine that is off the tailnet)
+and takes `-DriveLetter` to override. `installer/tests/Test-DriveMapParser.ps1`
+pins both the parser and the absence of any `CCSync_P` / `CCSync-SubstP`
+literal in the bootstrap's code.
+
+## Pinned downloads, and how to bump one
+
+rclone and Syncthing used to be fetched as "latest" (`rclone-current-*.zip`;
+a GitHub API lookup for Syncthing's version-stamped asset) and installed with
+**no integrity check at all**. Since 2026-08-17 both bootstraps pin a version
+and a sha256 per asset, verify before unpacking, and delete anything that does
+not match rather than install it (`COMMERCIAL_READINESS.md` item 13). This is
+the same contract the companion's `sidecar_tools.py` already used for ffmpeg
+and deno.
+
+Current pins (bump the two files **together** — `build_editor_package.ps1`
+ships both, and a Windows fleet on one rclone and a Mac fleet on another is a
+support problem before it is a security one):
+
+| Tool | Version | Where |
+|---|---|---|
+| rclone | `v1.75.0` | `windows_bootstrap.ps1` `$RcloneVersion` / `macos_bootstrap.sh` `RCLONE_VERSION` |
+| Syncthing | `v2.1.3` | `windows_bootstrap.ps1` `$SyncthingVersion` / `macos_bootstrap.sh` `SYNCTHING_VERSION` |
+
+**Bumping a pinned download**
+
+1. Pick the new version. rclone: `https://downloads.rclone.org/version.txt`.
+   Syncthing: the latest release tag on GitHub.
+2. Take the digests from the PUBLISHER'S OWN checksum list, never from the
+   download you just made:
+   ```bash
+   curl -s https://downloads.rclone.org/<ver>/SHA256SUMS | grep -E 'windows-amd64|osx-(amd64|arm64)'
+   curl -sL https://github.com/syncthing/syncthing/releases/download/<ver>/sha256sum.txt.asc      | grep -E '^.*syncthing-(windows-amd64|macos-(amd64|arm64))-<ver>\.zip'
+   ```
+   Syncthing's list is PGP-signed; verify the signature if you are being
+   careful. Fetching a hash from the same host that served the bytes proves
+   nothing on its own — that is why the digest is hardcoded, not downloaded.
+3. Edit **all six constants**: `$RcloneVersion` + `$RcloneZipSha256` and
+   `$SyncthingVersion` + `$SyncthingZipSha256` (Windows, amd64 only);
+   `RCLONE_VERSION` + `RCLONE_SHA256_ARM64`/`_AMD64` and `SYNCTHING_VERSION` +
+   `SYNCTHING_SHA256_ARM64`/`_AMD64` (macOS).
+4. Bump `INSTALLER_VERSION` in `windows_bootstrap.ps1`, `macos_bootstrap.sh`
+   AND `onboarding/steps.py` — `release.ps1` refuses on drift between them.
+5. Run one bootstrap with `-DryRun` / `--dry-run` and confirm it prints the
+   new URL and digest, then one real install on a scratch machine.
+
+The winget / scoop / brew routes are still tried first and are **not** pinned:
+those package managers verify their own manifest hashes, and a customer who
+already manages rclone that way should keep doing so. The direct download —
+the route that had no verification at all — is the pinned one.
+
 **Status:** the Windows script has now been run end-to-end on a real editor
-machine (`DESKTOP-LQQ41TC`, 2026-07-24); the bugs that run exposed are fixed
+machine (2026-07-24); the bugs that run exposed are fixed
 here and listed under "Fixed after the first live run" below. `onboard.exe`
 (built from `onboarding/`) wraps it and is the path a new Windows editor
 should actually take.
@@ -124,8 +204,10 @@ companion then offers its editor a one-click "Update now" in the tray):
 Publishing needs the version bumped first — in BOTH
 `companion/src/ccsync_companion/config.py` (`VERSION`) and
 `companion/pyproject.toml` — and prompts for the dashboard admin password
-(`-AdminUser`, default `alex`; `-DashboardUrl` defaults to the tailnet
-address). Without `-MakeCurrent` the build is staged until you flip
+(`-AdminUser`, or `$env:CCSYNC_ADMIN_USER`; there is no compiled-in default
+any more — it used to be one operator's username, 2026-08-17,
+`COMMERCIAL_READINESS.md` item 10. `-DashboardUrl` comes from `site.toml` /
+`$env:CCSYNC_DASHBOARD_URL`). Without `-MakeCurrent` the build is staged until you flip
 `[ MAKE CURRENT ]` on the dashboard's admin page. Publishing **keeps every
 previous build** (nothing is auto-pruned any more, so rollback stays
 available); add `?prune=1` to the publish URL if you deliberately want the
@@ -225,24 +307,38 @@ Steps (each idempotent, each prints what it did/skipped):
 2. rclone via winget, else scoop, else a direct zip to
    `%LOCALAPPDATA%\ccsync\bin` (which is added to the user `PATH` if not
    already there).
-3. Syncthing via winget, else a direct zip whose URL is **resolved from the
-   GitHub releases API** (the asset name is version-stamped, so a fixed URL
-   goes stale -- see below).
+3. Syncthing via winget, else the **pinned, sha256-verified** zip (see
+   "Pinned downloads" above).
 4. The local sync root (`-LocalRoot`).
-5. Maps `P:` to `<LocalRoot>`. Preferred: creates a private loopback SMB
-   share `CCSync_P` of the local root (admin-only -- via a one-off UAC
-   prompt, which is why the script itself must not be run elevated) and maps
-   `net use P: \\localhost\CCSync_P /persistent:yes` -- self-restores at
+5. Maps the tree drive (the manifest's `canonical_prefix`, `P:` unless the
+   site says otherwise) to `<LocalRoot>`. Preferred: creates a private
+   loopback SMB share `CCSync_<letter>` of the local root (admin-only -- via
+   a one-off UAC prompt, which is why the script itself must not be run
+   elevated) and maps
+   `net use <drive> \\localhost\CCSync_<letter> /persistent:yes` -- self-restores at
    logon with no scheduled task, and (crucially) net-use drives are the
    only kind Explorer can display-name. The `net use` itself deliberately
    runs UNelevated: a drive mapped by an elevated token is invisible to
    the user's normal session (UAC linked-token isolation). If the share
    can't be created (UAC declined, SMB server off): falls back to the old
-   `subst P: <LocalRoot>` with a logon scheduled task (`CCSync-SubstP`),
-   falling back further to an `HKCU\...\Run` entry -- works identically,
-   but the drive shows the host volume's label in Explorer.
-6. Labels `P:` as `-DriveLabel` in Explorer via the per-user
-   `MountPoints2\##localhost#CCSync_P\_LabelFromReg` value (what Explorer
+   `subst <drive> <LocalRoot>` with a logon scheduled task
+   (`CCSync-Subst<letter>`), falling back further to an `HKCU\...\Run`
+   entry -- works identically, but the drive shows the host volume's label
+   in Explorer.
+
+   **The share is loopback-only, and is now firewalled that way.** It exists
+   solely so Explorer will show the tree's name on the drive; nothing outside
+   the machine is meant to reach it. The same elevated step therefore installs
+   an inbound **block** rule for TCP 139/445 on all profiles
+   (`CC Sync: block remote SMB (tree share is loopback-only)`). That does not
+   break the mapping: Windows Firewall does not filter loopback traffic, and
+   the mapping is `\\localhost\...`. A scoped *allow* rule would have been
+   weaker and wrong — block rules win by precedence and the built-in File and
+   Printer Sharing allow rules are already on. Pass `-KeepRemoteSmbOpen` only
+   on a machine that deliberately serves SMB to its network; the uninstaller
+   removes the rule with the share (`COMMERCIAL_READINESS.md` item 15).
+6. Labels the tree drive as `-DriveLabel` in Explorer via the per-user
+   `MountPoints2\##localhost#CCSync_<letter>\_LabelFromReg` value (what Explorer
    itself writes when you F2-rename a network drive), then restarts
    Explorer so it shows immediately. `subst`-mapped drives cannot be
    labelled at all on current Windows 11 -- `DriveIcons\DefaultLabel`
@@ -285,7 +381,7 @@ those stay interactive one-time steps.
 |---|---|---|
 | `--tailnet-host` | *(required)* | Tailnet hostname or `100.x.y.z` of the NAS. |
 | `--editor-name` | *(required)* | TrueNAS username. Lowercased automatically. |
-| `--local-root` | `$HOME/Creators_Club` | Normally the editing SSD: `/Volumes/<Name>/<tree>`. See the external-volume rules below. |
+| `--local-root` | your existing `config.toml`'s `local_root`, else `$HOME/<tree_name from the site manifest>` | Normally the editing SSD: `/Volumes/<Name>/<tree>`. See the external-volume rules below. |
 | `--remote-root` | *(the site manifest's `remote_root`)* | Must be absolute -- SFTP lands in the editor's NAS home directory. A capability miss when neither is set. |
 | `--companion-file` | *(none)* | Install the companion from a local file instead of downloading it (no `DASHBOARD_TOKEN` needed). The supervised-first-install path. |
 | `--companion-version` | `current` | Published version to fetch. |
@@ -322,7 +418,11 @@ cannot be installed, the run ends with an unmissable "THE SYNC APP IS NOT
 INSTALLED ON THIS MAC" block **and a non-zero exit**, because everything
 else succeeding otherwise reads as a finished install.
 
-Its LaunchAgent (`com.creatorsclub.ccsync.companion`) runs the binary
+Its LaunchAgent (`com.ccsync.companion` -- renamed from
+`com.creatorsclub.ccsync.companion` on 2026-08-17, `COMMERCIAL_READINESS.md`
+item 10; both bootstraps and both uninstallers unload and delete the legacy
+label first, so a Mac provisioned before the rename never ends up running two
+companions) runs the binary
 directly -- no `.app`, no `open -a` -- with `RunAtLoad`, **no `KeepAlive`**
 (which would race the self-upgrade's re-exec and leave two companions
 fighting over the instance lock) and **`AbandonProcessGroup`** (without it
@@ -441,13 +541,14 @@ on a new editor's machine. Recorded here because most of these fail
 6. **The local sync root was hardcoded** to a fixed path. Now
    `-LocalRoot` / `--local-root`, flowing through to the `subst` target and
    the companion's `local_root`.
-7. **`-EditorName` wasn't normalized.** A case mismatch (`Ruskin` vs the real
-   `ruskin`) produced a working-looking `rclone.conf` that failed much later
+7. **`-EditorName` wasn't normalized.** A case mismatch (`Editor` typed here
+   vs the account's real lowercase spelling) produced a working-looking
+   `rclone.conf` that failed much later
    with a generic SSH auth error pointing nowhere near the typo. Now
    lowercased, with the change reported.
 8. **`remote_root` resolved to the wrong place.** An SFTP session lands in the
    editor's home directory on the NAS, so a relative `remote_root =
-   "Creators_Club"` meant `~/Creators_Club` -- a path that does not exist --
+   "<tree>"` meant `~/<tree>` -- a path that does not exist --
    rather than the shared tree. It must be absolute; the installers seed it
    that way and the companion refuses to treat a relative value as valid.
 
@@ -539,7 +640,7 @@ In order. Each one is blocked by the one above it.
    ownership warning on `.config.data`; record whether Resolve minds.
 6. **E1–E4 — the external-SSD drills**, which are the point of the port and
    are currently inert: `config.toml` has
-   `local_root = /Users/leso/Creators_Club`, i.e. the internal disk, so the
+   `local_root = /Users/<editor>/<tree>`, i.e. the internal disk, so the
    root guard can never fire. **Blocked on a decision**: the only external
    volume present is ExFAT and already holds unrelated material, and ExFAT
    has no POSIX permissions or symlinks. Pick a drive and a filesystem
@@ -548,3 +649,8 @@ In order. Each one is blocked by the one above it.
 
 Only after E–H should `KNOWN_BUGS.md` item 8 or the status block above be
 softened further.
+
+---
+
+DaVinci Resolve is a registered trademark of Blackmagic Design Pty Ltd. CC Sync
+is not affiliated with, endorsed by, or sponsored by Blackmagic Design.

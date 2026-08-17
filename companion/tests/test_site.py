@@ -325,3 +325,103 @@ def test_the_sftp_port_survives_the_round_trip(port):
     the number, so it must not be lost in the cache."""
     site_mod.save_site(site_mod.normalise(dict(GOOD, sftp_port=port)))
     assert site_mod.cached_site()["sftp_port"] == port
+
+
+# -- brand (2026-08-17, docs/COMMERCIAL_READINESS.md item 10) ---------------
+#
+# Eight tray/popup sentences said "your Creators Club drive" and the tray mark
+# was one studio's logo. Both are site data now, and the fallback matters more
+# than the happy path: an editor whose dashboard has never been reached must
+# be told about "your studio drive", never about somebody else's studio.
+
+def _forget_brand():
+    """The brand accessors memoise the cache file against its mtime; a test
+    that writes a new manifest inside the same mtime tick would otherwise read
+    the previous one."""
+    site_mod._BRAND_CACHE.clear()
+
+
+def test_the_brand_falls_back_to_neutral_with_no_manifest_at_all():
+    _forget_brand()
+    assert site_mod.org_name() == ""
+    assert site_mod.org_short() == ""
+    assert site_mod.product_name() == "CC Sync"
+    assert site_mod.drive_phrase() == "your studio drive"
+    assert site_mod.drive_phrase(capitalised=True) == "Your studio drive"
+
+
+def test_the_site_names_the_drive_once_the_manifest_is_cached():
+    site_mod.save_site(site_mod.normalise(GOOD))
+    _forget_brand()
+    assert site_mod.org_name() == "Example Post"
+    assert site_mod.drive_phrase() == "your Example Post drive"
+    assert site_mod.drive_phrase(capitalised=True) == "Your Example Post drive"
+
+
+def test_org_short_falls_back_to_the_full_name_then_to_nothing():
+    site_mod.save_site(site_mod.normalise(dict(GOOD, org_short="EP")))
+    _forget_brand()
+    assert site_mod.org_short() == "EP"
+    # ...and the DRIVE keeps the full name: "your EP drive" reads as an
+    # initialism nobody was taught.
+    assert site_mod.drive_phrase() == "your Example Post drive"
+
+    site_mod.save_site(site_mod.normalise(GOOD))
+    _forget_brand()
+    assert site_mod.org_short() == "Example Post"
+
+
+def test_a_site_can_rename_the_product_but_never_to_nothing():
+    site_mod.save_site(site_mod.normalise(dict(GOOD, product_name="Acme Sync")))
+    _forget_brand()
+    assert site_mod.product_name() == "Acme Sync"
+
+    site_mod.save_site(site_mod.normalise(dict(GOOD, product_name="   ")))
+    _forget_brand()
+    assert site_mod.product_name() == "CC Sync"
+
+
+def test_a_dashboard_that_predates_the_brand_keys_is_not_a_failure():
+    """Additive to schema 1: an older dashboard sends neither key, and every
+    reader has to degrade rather than show a blank brand."""
+    older = {k: v for k, v in GOOD.items() if k not in ("org_short", "product_name")}
+    older["org_name"] = ""
+    site_mod.save_site(site_mod.normalise(older))
+    _forget_brand()
+    assert site_mod.org_short() == ""
+    assert site_mod.product_name() == "CC Sync"
+    assert site_mod.drive_phrase() == "your studio drive"
+
+
+def test_the_tray_and_the_window_wear_the_same_mark_and_it_is_the_products():
+    """The tray icon and the title-bar icon are one asset with one override
+    ($CCSYNC_BRAND_LOGO): keeping a second literal in tray.py is how they
+    drifted apart before."""
+    from ccsync_companion import theme
+    from ccsync_companion import tray as tray_mod
+
+    assert tray_mod.MARK_ASSET == theme.WINDOW_ICON_ASSET == "ccsync_mark.png"
+    assert theme.asset_path(theme.WINDOW_ICON_ASSET) is not None
+    assert tray_mod._mark_asset_path() == theme.window_mark_path()
+
+
+def test_a_site_can_select_a_different_mark_and_a_bad_one_is_ignored(monkeypatch, tmp_path):
+    from ccsync_companion import theme
+
+    theme._WINDOW_ICON_CACHE.clear()
+    # A bare name means "a file this build already ships" -- which is how the
+    # existing fleet keeps the studio mark it has always had.
+    monkeypatch.setenv(theme.BRAND_LOGO_ENV, "cc_mark_white.png")
+    assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
+
+    # An absolute path is taken as one...
+    own = tmp_path / "acme.png"
+    own.write_bytes(theme.asset_path("ccsync_mark.png").read_bytes())
+    monkeypatch.setenv(theme.BRAND_LOGO_ENV, str(own))
+    assert theme.window_mark_path() == own
+
+    # ...and a path to nothing is IGNORED, not fatal: a wrong logo must not
+    # stop an editor's tray coming up.
+    monkeypatch.setenv(theme.BRAND_LOGO_ENV, str(tmp_path / "gone.png"))
+    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+    theme._WINDOW_ICON_CACHE.clear()

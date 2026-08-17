@@ -57,6 +57,8 @@ import collections
 import json
 import logging
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -66,7 +68,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
-from . import ffmpeg_tools, proxy_history, proxy_scan
+from . import ffmpeg_tools, proxy_history, proxy_relink, proxy_scan
 
 # "ccsync.proxy_gen", NOT __name__ -- setup_logging() only attaches handlers
 # to the "ccsync" logger, and in the windowed build sys.stderr is None, so a
@@ -176,6 +178,34 @@ BPG_LAUNCH_STATES = frozenset({
     STATE_RESOLVE_OPEN,
 })
 
+# -- destination-volume floor (COMMERCIAL_READINESS.md item 9, 2026-08-17) --
+#
+# A proxy is written NEXT TO ITS ORIGINAL, i.e. onto the editor's tree volume
+# -- the same volume lane A/B/C are writing, the same one Resolve puts its
+# cache and renders on. Filling it does not just fail the encode: it stalls
+# every sync lane, and on the base rig it stalls the volume the NAS mount and
+# the b-roll archive live on. Until this existed, the generator would encode
+# a 4,000-clip backlog straight into the last free gigabyte and report
+# nothing but muxer errors.
+#
+# The floor is whichever is LARGER of a fixed number of gigabytes and a
+# percentage of the volume: 20 GB is meaningless on a 400 GB laptop disk and
+# 5% is meaningless on a 100 TB array.
+DEFAULT_FREE_SPACE_FLOOR_GB = 20.0
+DEFAULT_FREE_SPACE_FLOOR_PCT = 5.0
+
+# How long the two stability samples are apart. Deliberately short: it is a
+# pause before an encode that takes minutes, and the point is to catch a file
+# still GROWING, not to wait out a whole copy (the min-age gate does that).
+DEFAULT_STABILITY_SECONDS = 5.0
+
+# Path components that mean "this file is already a proxy". Encoding a proxy
+# of a proxy writes `Proxy/Proxy/<stem>.mp4`, halves the quality of the only
+# copy some editors have, and -- when the stems line up -- can be published
+# over the very file it was made from. Structural, like every other rule in
+# this module: no probing, no guessing (item 9, 2026-08-17).
+PROXY_DIR_NAMES = frozenset({proxy_relink.PROXY_DIR_NAME.lower(), "proxies"})
+
 # encode_once() outcomes -- returned rather than logged-and-swallowed so the
 # state machine is assertable in a test.
 RESULT_EMPTY = "empty"
@@ -188,6 +218,54 @@ RESULT_INTERRUPTED = "interrupted"
 # manifest.MAX_PROJECTS (64) projects, so this is a belt-and-braces bound on
 # what a caller can be handed; the reporter caps again on its own terms.
 MAX_COVERAGE_PROJECTS = 64
+
+
+def _coerce_zero_ok(cfg: dict[str, Any], key: str, default: float) -> float:
+    """config_mod.coerce_numeric, except that 0 is a legal value meaning OFF.
+
+    Item 9's three gates are all safety margins the operator must be able to
+    switch off (a customer who knows their volume is full, a machine whose
+    originals are never written in place). coerce_numeric rejects 0 as "not a
+    positive number" and silently substitutes the default, which would turn
+    "off" into "on" -- config_mod.coerce_count exists for exactly this shape
+    but returns an int, and these are seconds and percentages.
+    """
+    try:
+        value = float(cfg.get(key, default))
+        if value < 0:
+            raise ValueError
+        return value
+    except (TypeError, ValueError):
+        log.error("config: %s=%r is not a number >= 0 (0 disables it) -- using %r",
+                  key, cfg.get(key), default)
+        return float(default)
+
+
+def is_proxy_path(path: Any) -> Optional[str]:
+    """Why `path` must never be used as an encode SOURCE, or None.
+
+    Three refusals, all structural (item 9, 2026-08-17):
+      - anything inside a `Proxy/` (or `proxies/`) directory at any depth --
+        the fleet's one convention for where a proxy lives, and the same one
+        proxy_relink.expected_proxy_paths writes to;
+      - a `.partial`, which is a proxy that is not finished yet;
+      - a file whose own sibling convention would make it its own output
+        (`<dir>/Proxy/<stem>.mp4` == the file itself).
+    A proxy of a proxy is half the quality of the only copy some editors
+    have, and where the stems agree it can be published over its own source.
+    """
+    text = str(path or "")
+    if not text:
+        return None
+    if text.lower().endswith(proxy_scan.PARTIAL_SUFFIX):
+        return "it is a half-written proxy, not an original"
+    parts = [p for p in re.split(r"[\\/]+", text)[:-1] if p]
+    if any(part.lower() in PROXY_DIR_NAMES for part in parts):
+        return "it is already a proxy (it lives in a Proxy folder)"
+    if os.path.normcase(text) in {
+            os.path.normcase(p) for p in proxy_scan.expected_proxies(text)}:
+        return "it is already a proxy (encoding it would overwrite itself)"
+    return None
 
 
 def _iso_now() -> str:
@@ -413,6 +491,9 @@ class ProxyGenerator:
         bpg_launcher: Any = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        stat_fn: Optional[Callable[[str], Any]] = None,
+        disk_usage_fn: Optional[Callable[[str], Any]] = None,
+        settle_sleep_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
         self.cfg = cfg
         self.local_root = str(cfg.get("local_root", "") or "")
@@ -444,6 +525,11 @@ class ProxyGenerator:
         self._available_fn = available_fn or ffmpeg_tools.ffmpeg_available
         self._encoders_fn = encoders_fn or ffmpeg_tools.detect_encoders
         self._resolve_running_fn = resolve_running_fn
+        # Item 9's three world-touching seams, injectable for the same reason
+        # every other one here is: the gates must be testable with no disk.
+        self._stat_fn = stat_fn or os.stat
+        self._disk_usage_fn = disk_usage_fn or shutil.disk_usage
+        self._settle_sleep_fn = settle_sleep_fn
         # Started only once the ffmpeg queue is empty -- see bpg.py. None on a
         # machine with no proxy generator, which is most of the fleet.
         self._bpg = bpg_launcher
@@ -471,6 +557,22 @@ class ProxyGenerator:
             cfg, "proxy_notify_cooldown_seconds", 86400
         )
         self.skip_while_resolve = bool(cfg.get("proxy_gen_skip_while_resolve_running", False))
+        # Item 9 (2026-08-17) gates. All three are config-overridable because
+        # the right numbers differ between a 500 GB laptop and the base rig's
+        # array, and because a customer with a full disk needs a way to say
+        # "I know, encode anyway" without editing the exe.
+        self.free_space_floor_gb = _coerce_zero_ok(
+            cfg, "proxy_gen_free_space_floor_gb", DEFAULT_FREE_SPACE_FLOOR_GB)
+        self.free_space_floor_pct = _coerce_zero_ok(
+            cfg, "proxy_gen_free_space_floor_pct", DEFAULT_FREE_SPACE_FLOOR_PCT)
+        self.stability_seconds = _coerce_zero_ok(
+            cfg, "proxy_gen_stability_seconds", DEFAULT_STABILITY_SECONDS)
+        # Rehearsal mode: every gate runs, the plan is logged, ffmpeg never
+        # starts and no `.partial` is created.
+        self.dry_run = bool(cfg.get("proxy_dry_run", False))
+        if self.dry_run:
+            log.warning("proxy_dry_run = true: the generator will report what it "
+                        "would encode and encode nothing")
         # None means "derive it per drain" -- the NVENC answer is only known
         # after the first scan has probed ffmpeg, so this cannot be decided here.
         self.workers = self._configured_workers(cfg)
@@ -488,6 +590,11 @@ class ProxyGenerator:
         # registered exactly like a worker's; insertion order is start order,
         # which is what makes _current deterministic.
         self._encoding: dict[int, str] = {}
+        # The last free-space refusal, published in coverage() so the
+        # dashboard can say "this machine has stopped making proxies and
+        # why" rather than showing a gap that never closes (item 9).
+        self._low_space: Optional[str] = None
+        self._low_space_notified_at: Optional[float] = None
         # {thread ident: {"path", "duration_s", "started", "out_s", "speed"}} --
         # the LIVE progress of those same encodes, kept beside _encoding rather
         # than inside it because every consumer written before 2026-08-17 reads
@@ -975,6 +1082,9 @@ class ProxyGenerator:
                 "ffmpeg": bool(self._ffmpeg_ok),
                 "nvenc": bool(self._nvenc),
                 "scanned_at": self._scanned_at,
+                # "" rather than None: the reporter's payload is JSON either
+                # way, and a dashboard testing truthiness reads both the same.
+                "low_space": self._low_space or "",
                 "projects": projects,
                 # SCALARS ONLY (proxy_history.snapshot's contract): the
                 # reporter's size guard drops the per-project map when a
@@ -1612,14 +1722,24 @@ class ProxyGenerator:
         path = str(clip.get("path") or "")
         if not path:
             return "no path"
+        already = is_proxy_path(path)
+        if already is not None:
+            # NEVER encode from a proxy (item 9, 2026-08-17). Structural, and
+            # checked here rather than at queue time so a clip that reaches
+            # this method by any route -- the scan, a forced run, a direct
+            # encode_once(clip) -- meets the same rule.
+            return already
         try:
-            stat = os.stat(path)
+            stat = self._stat_fn(path)
         except OSError:
             return "the original is gone"
         if stat.st_size <= 0:
             return "the original is empty"
         if (time.time() - stat.st_mtime) < self.min_age_seconds:
             return "the original is still being written"
+        growing = self._still_growing(clip, path, stat)
+        if growing is not None:
+            return growing
         if any(os.path.exists(p) for p in proxy_scan.expected_proxies(path)):
             # The commonest one, and deliberately silent: lane B delivering
             # the proxy is the system working, not an event.
@@ -1627,6 +1747,143 @@ class ProxyGenerator:
         if proxy_scan.is_bpg_busy(path):
             return "the Blackmagic Proxy Generator is making it"
         return None
+
+    def _still_growing(self, clip: dict[str, Any], path: str,
+                       now_stat: Any) -> Optional[str]:
+        """TWO samples, `stability_seconds` apart, of (size, mtime).
+
+        The single mtime sample this replaces (item 9, 2026-08-17) misses the
+        case it was written for. rclone, Syncthing and every camera-card
+        copier set the mtime when they CREATE the file and again when they
+        finish, so a multi-GB transfer spends minutes looking 'settled' with
+        an mtime older than min_age and a size that is still climbing. ffmpeg
+        then reads a truncated file, and the proxy that gets published is
+        four minutes of a forty-minute interview -- a silent wrong answer,
+        the worst kind this module can give.
+
+        Size AND mtime, because either alone has a blind spot: an in-place
+        rewrite keeps the size, and a preallocated file keeps the mtime.
+
+        THE FIRST SAMPLE IS USUALLY FREE. proxy_scan already recorded
+        (size, mtime) for every queued clip, and the queue is normally
+        minutes old, so `now_stat` is the second sample and no waiting is
+        needed. The bounded wait below is the fallback for a clip handed
+        straight to encode_once() (a forced run, a direct call) where the
+        scan sample is missing or younger than `stability_seconds`.
+        """
+        try:
+            wait = float(self.stability_seconds)
+        except (TypeError, ValueError):
+            wait = DEFAULT_STABILITY_SECONDS
+        if wait <= 0:
+            return None
+
+        def _changed(before_size: Any, before_mtime: Any, elapsed: float) -> Optional[str]:
+            if (int(before_size), float(before_mtime)) == (
+                    int(now_stat.st_size), float(now_stat.st_mtime)):
+                return None
+            log.info(
+                "proxy gen: %s changed (%s -> %s bytes) over %.0fs -- still being "
+                "written, leaving it for the next scan",
+                os.path.basename(path), before_size, now_stat.st_size, elapsed,
+            )
+            return "the original is still being written (it changed while we watched)"
+
+        scan_size, scan_mtime = clip.get("size"), clip.get("mtime")
+        with self._lock:
+            last_scan = self._last_scan_at
+        if scan_size is not None and scan_mtime is not None and last_scan is not None:
+            elapsed = float(self._clock()) - float(last_scan)
+            if elapsed >= wait:
+                return _changed(scan_size, scan_mtime, elapsed)
+
+        if self._settle_sleep_fn is not None:
+            self._settle_sleep_fn(wait)
+        elif self._stop_event.wait(wait):
+            return "the companion is shutting down"
+        try:
+            second = self._stat_fn(path)
+        except OSError:
+            return "the original went away while it was being checked"
+        if (second.st_size, second.st_mtime) != (now_stat.st_size, now_stat.st_mtime):
+            log.info(
+                "proxy gen: %s changed (%s -> %s bytes) over %.0fs -- still being "
+                "written, leaving it for the next scan",
+                os.path.basename(path), now_stat.st_size, second.st_size, wait,
+            )
+            return "the original is still being written (it changed while we watched)"
+        return None
+
+    def free_space_shortfall(self, target: str) -> Optional[str]:
+        """Why this volume must not be encoded onto, or None to go ahead.
+
+        The floor is max(`proxy_gen_free_space_floor_gb`,
+        `proxy_gen_free_space_floor_pct` of the volume) -- see
+        DEFAULT_FREE_SPACE_FLOOR_GB. "Cannot tell" is NOT a refusal: a volume
+        whose free space cannot be read (an exotic mount, a permission quirk)
+        is the machine most likely to be the only one making proxies, and
+        this gate is a safety margin, not a correctness rule.
+        """
+        # The `Proxy/` directory usually does not exist yet -- this gate runs
+        # BEFORE anything is created, deliberately -- and disk_usage on an
+        # absent path raises, which "cannot tell" would turn into a pass. Walk
+        # up to the nearest directory that does exist; it is on the same
+        # volume, which is the only thing being measured.
+        directory = os.path.dirname(str(target or "")) or "."
+        for _ in range(16):
+            if os.path.isdir(directory):
+                break
+            parent = os.path.dirname(directory)
+            if not parent or parent == directory:
+                break
+            directory = parent
+        try:
+            usage = self._disk_usage_fn(directory)
+            free = float(usage.free)
+            total = float(usage.total)
+        except Exception:
+            log.debug("proxy gen: could not read free space on %s", directory,
+                      exc_info=True)
+            return None
+        gb = 1024.0 ** 3
+        try:
+            floor_bytes = max(float(self.free_space_floor_gb) * gb,
+                              total * (float(self.free_space_floor_pct) / 100.0))
+        except (TypeError, ValueError):
+            floor_bytes = DEFAULT_FREE_SPACE_FLOOR_GB * gb
+        if floor_bytes <= 0 or free >= floor_bytes:
+            return None
+        return (f"only {free / gb:.1f} GB free on the drive holding {directory} "
+                f"(CCSync keeps {floor_bytes / gb:.1f} GB clear so the sync lanes "
+                f"and Resolve's cache do not run out)")
+
+    def _surface_low_space(self, why: str) -> None:
+        """Say it once per cooldown, in the log, the tray and coverage().
+
+        Skipping silently is what makes a full disk look like "the proxies
+        just never got made" -- the failure this whole module exists to stop
+        being invisible."""
+        with self._lock:
+            self._low_space = why
+            last = self._low_space_notified_at
+        now = self._wall_clock()
+        cooldown = self.notify_cooldown if self.notify_cooldown > 0 else 0
+        if cooldown and last is not None and (now - last) < cooldown:
+            log.debug("proxy gen: still low on space -- %s", why)
+            return
+        with self._lock:
+            self._low_space_notified_at = now
+        log.warning("proxy gen: not encoding -- %s", why)
+        if self._notify is not None:
+            try:
+                self._notify(
+                    f"CCSync stopped making video proxies: {why}. Free some space and "
+                    "they will resume on their own.",
+                    "ccsync-companion: low disk space",
+                )
+            except Exception:
+                log.debug("proxy gen: could not show the low-space notification",
+                          exc_info=True)
 
     def _build_cmd(self, clip: dict[str, Any], partial: str, nvenc: bool,
                    info: dict[str, Any]) -> list[str]:
@@ -1654,7 +1911,7 @@ class ProxyGenerator:
         """Ask ffmpeg for a machine-readable progress stream on stdout.
 
         Added HERE rather than in ffmpeg_tools' builders because those two
-        argvs are the shared spec for what a Creators Club proxy IS -- the
+        argvs are the shared spec for what a CC Sync proxy IS -- the
         b-roll indexer builds the same files from the same functions -- and
         how one caller watches its own encode is not part of that. Position
         1 because `-progress` is a global option and everything after the
@@ -1692,6 +1949,21 @@ class ProxyGenerator:
 
         partial = proxy_scan.partial_path(path)
         if not partial:
+            return RESULT_SKIPPED
+        # FREE SPACE, before anything is claimed or created (item 9,
+        # 2026-08-17). Not counted as a failure: the file is fine, the disk
+        # is not, and capping the clip after three attempts would silence the
+        # one condition an editor must be told about.
+        shortfall = self.free_space_shortfall(partial)
+        if shortfall is not None:
+            self._surface_low_space(shortfall)
+            return RESULT_SKIPPED
+        with self._lock:
+            self._low_space = None
+        if self.dry_run:
+            log.info("proxy gen [dry-run]: would encode %s -> %s (%s)",
+                     path, partial[: -len(proxy_scan.PARTIAL_SUFFIX)],
+                     clip.get("kind") or proxy_scan.classify_footage(path))
             return RESULT_SKIPPED
         if not self._claim_partial(partial):
             # Another worker is writing this exact file for a DIFFERENT

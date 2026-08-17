@@ -7,7 +7,7 @@ available immediately — English "police raid" reaching Mandarin dialogue — a
 proves the embed path at real scale before it has to run over ~35k visual
 segments after the indexing pass.
 
-    python embed_transcripts.py --config config.queue.yaml
+    python embed_transcripts.py    # --config defaults to private/broll/indexer/config.queue.yaml
 """
 
 from __future__ import annotations
@@ -21,12 +21,13 @@ from pathlib import Path
 import yaml
 
 from broll_index import embed as embed_mod
+from broll_index.site_data import DEFAULT_QUEUE_CONFIG
 from broll_index.storage.sqlite_backend import bump_search_generation
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.queue.yaml")
+    ap.add_argument("--config", default=DEFAULT_QUEUE_CONFIG)
     ap.add_argument("--batch", type=int, default=256)
     args = ap.parse_args()
 

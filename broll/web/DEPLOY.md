@@ -21,12 +21,13 @@ Three things make that safe and are easy to break:
 - **The sub-app's lifespan does NOT run.** Starlette only runs the outermost
   app's. `broll._init_storage()` replicates it (data dirs + `ensure_schema`);
   without it the first request hits a database that was never created.
-- **`BROLL_INGEST_TOKEN` is mandatory.** The b-roll app treats an unset token as
-  dev mode and allows ingest with *no* credential — harmless standalone, an
-  unauthenticated write path on the fleet's origin once mounted. The dashboard
-  refuses to open the ingest carve-out unless the token is set, so leaving it
-  blank makes ingest unreachable rather than open. The indexer then cannot push
-  either, so set it.
+- **`BROLL_INGEST_TOKEN` is mandatory.** Unset, the three `/api/ingest/*`
+  endpoints answer **503** and log why — there is no "dev mode" open branch any
+  more (deleted 2026-08-17, COMMERCIAL_READINESS.md item 15; it was an
+  unauthenticated write path on the fleet's origin the moment anything
+  proxied or mounted this app). The dashboard additionally refuses to open its
+  ingest carve-out without the token. Set it on the server *and* in the
+  indexer config, or nothing can push.
 
 ## Deploying it
 
@@ -91,10 +92,10 @@ docker run -d \
   `/api/shares` (used by the frontend's Settings panel). Purely descriptive;
   actual share->local-path mounting happens in the indexer/companion
   configs, not here.
-- `BROLL_INGEST_TOKEN` -- if set, the three `/api/ingest/*` endpoints
-  require a matching `X-Ingest-Token` header (used by a remote indexer). If
-  unset, ingest is open (fine for a co-located/dev indexer on the same
-  Tailscale-only network).
+- `BROLL_INGEST_TOKEN` -- the three `/api/ingest/*` endpoints require a
+  matching `X-Ingest-Token` header (used by a remote indexer). REQUIRED: unset,
+  those endpoints answer 503, including for a co-located indexer and including
+  in a bare dev checkout. Generate one with `openssl rand -hex 24`.
 - Port `8420` is the app's fixed port (see `Dockerfile`/`CMD`).
 
 On first start, the container applies `schema.sql` to `/data/broll.db`

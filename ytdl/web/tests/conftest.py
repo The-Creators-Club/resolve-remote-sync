@@ -11,9 +11,9 @@ it would race every test in this suite for the same rows. Everything that
 exercises the pipeline calls `worker.run_job()` directly instead, which is
 synchronous and takes the connection it should use.
 
-Nothing here needs yt-dlp or the claude CLI: both are reached through seams the
-tests replace (`ytdlweb.vendor.ytsearch` / `ytdlweb.claude_cli`), which is the
-same property that lets the app mount on a host that has neither.
+Nothing here needs yt-dlp or the Anthropic SDK: both are reached through seams
+the tests replace (`ytdlweb.vendor.ytsearch` / `ytdlweb.claude_cli._client`),
+which is the same property that lets the app mount on a host that has neither.
 """
 import os
 import shutil
@@ -37,7 +37,11 @@ os.environ['YTDL_WORKER'] = '0'
 os.environ['YTDL_DATA_ROOT'] = str(_DATA)
 os.environ['YTDL_PROJECTS_ROOT'] = str(_PROJECTS)
 os.environ['YTDL_DASH_DB'] = str(_DASH_DB)
-os.environ['YTDL_DEV_USER'] = ''
+# YTDL_DEV_USER is gone (2026-08-17, COMMERCIAL_READINESS.md item 15); this
+# suite has always driven the gate the way the dashboard does, with the
+# x-ccsync-user header, so there is nothing to replace it with here. The line
+# that used to blank the env var is kept as a comment only so a reader who
+# greps for the old name lands on the explanation in session.py.
 os.environ['YTDL_DOWNLOAD_PAUSE'] = '0'         # the 3 s pacing is not a test
 # Same for the search pause (2026-08-11). Not cosmetic: it defaults to 2 s and
 # the search phase runs once per TERM, so leaving it on made a single job-level
@@ -47,7 +51,11 @@ os.environ['YTDL_DOWNLOAD_PAUSE'] = '0'         # the 3 s pacing is not a test
 # and a test asserts the worker hands the real configured value through.
 os.environ['YTDL_SEARCH_PAUSE'] = '0'
 
-os.environ['YTDL_CLAUDE_HOME'] = str(_TMP / 'claude-home')
+# The two AI calls go through the anthropic SDK now (2026-08-17,
+# COMMERCIAL_READINESS.md item 1), so there is no claude-home to point at
+# and no subprocess to point it for. The key is blank on purpose: the
+# suite fakes ytdlweb.claude_cli._client and must never build a real one.
+os.environ['ANTHROPIC_API_KEY'] = ''
 
 # The fleet token the companion authenticates its claim/heartbeat/manifest/
 # status calls with (docs/YTDL_LOCAL_DOWNLOAD.md §4). Explicitly EMPTY, and set
@@ -57,6 +65,11 @@ os.environ['YTDL_CLAUDE_HOME'] = str(_TMP / 'claude-home')
 # most -- an unconfigured token FAILS CLOSED. The tests that need a working
 # token set ytdlweb.config.REPORT_TOKEN themselves.
 os.environ['DASH_REPORT_TOKEN'] = ''
+# ...and the identity-signing secret the fleet routes verify X-CCSync-Identity
+# with (identity.py, H5 2026-08-17). Blank here for the same reason the token
+# is: an unconfigured secret must FAIL CLOSED, and the tests that exercise a
+# working identity set ytdlweb.config.SESSION_SECRET themselves.
+os.environ['DASH_SESSION_SECRET'] = ''
 # ...and the local-download feature ships OFF (plan §10). Nothing here turns it
 # on, so the default the fleet deploys with is the default the suite runs.
 os.environ.pop('YTDL_LOCAL_DOWNLOAD', None)
@@ -64,10 +77,10 @@ os.environ.pop('YTDL_LOCAL_DOWNLOAD', None)
 from ytdlweb import config, db                   # noqa: E402
 from ytdlweb.main import app                     # noqa: E402
 
-USER = 'alex'
+USER = 'owen'
 OTHER_USER = 'sam'
 
-# The two projects `alex` syncs, and the one `sam` does. Labels are rel paths,
+# The two projects `owen` syncs, and the one `sam` does. Labels are rel paths,
 # exactly as the dashboard stores them.
 PROJECTS = [
     ('2026-ff5-energy', '2026/FF5/Energy Transition', 1),
@@ -141,14 +154,47 @@ def con(tmp_roots):
     the app's routes go through it, so the file has to stay the same file.
     """
     c = db.con()
-    for table in ('job_video_terms', 'job_videos', 'job_terms', 'jobs', 'downloads'):
+    for table in ('job_video_terms', 'job_videos', 'job_terms', 'jobs', 'downloads',
+                  'attestations'):
         c.execute(f'DELETE FROM {table}')
     c.commit()
     return c
 
 
 @pytest.fixture()
-def client(con):
+def attested(con):
+    """Both test editors have accepted the current rights/ToS wording.
+
+    Autouse via the `client` fixture below rather than per test: the
+    attestation is a precondition of essentially every route (routes_api
+    refuses a job, a URL job and a download without it), so a suite that had to
+    remember it in 80 places would be testing the memory of whoever wrote the
+    81st. The tests that are ABOUT the gate ask for `unattested` instead.
+    """
+    from ytdlweb import attestation
+
+    for user in (USER, OTHER_USER):
+        db.record_attestation(con, user, attestation.TEXT_VERSION,
+                              attestation.text_sha256())
+    return con
+
+
+@pytest.fixture()
+def unattested(client):
+    """A client whose editors have accepted NOTHING -- the state a fresh
+    deployment is in.
+
+    Takes `client` and clears afterwards rather than being a peer of it:
+    `client` pulls in `attested`, and a fixture that merely ran first would
+    have its DELETE undone by the INSERT that follows it.
+    """
+    db.con().execute('DELETE FROM attestations')
+    db.con().commit()
+    return client
+
+
+@pytest.fixture()
+def client(attested):
     """The app served at the origin root, as `uvicorn ytdlweb.main:app` does."""
     from fastapi.testclient import TestClient
     with TestClient(app) as c:

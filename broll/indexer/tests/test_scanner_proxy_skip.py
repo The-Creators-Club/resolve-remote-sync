@@ -21,7 +21,7 @@ from broll_index.storage.sqlite_backend import SqliteBackend
     [
         "Proxy/clip.mov",
         "proxy/clip.mov",
-        "Orchid/Ruskin/Proxy/clip.mov",
+        "Orchid/Editor2/Proxy/clip.mov",
         "PROXIES/clip.mov",
         "footage/Optimized/clip.mov",
         "footage/transcodes/clip.mov",

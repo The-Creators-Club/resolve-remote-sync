@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -141,6 +142,27 @@ def test_install_copies_a_valid_file_to_the_default_path(tmp_path):
     assert not dest.with_suffix(dest.suffix + ".new").exists()
     if sys.platform != "win32":
         assert (os.stat(dest).st_mode & 0o777) == 0o600
+
+
+def test_install_hardens_the_temp_file_before_the_rename(tmp_path, monkeypatch):
+    """os.chmod(0o600) is a NO-OP on Windows, where most of this fleet's
+    editors are, so the one file here that is a logged-in Google account sat
+    at whatever the download dir's inherited ACL was (2026-08-17,
+    COMMERCIAL_READINESS.md item 5). secretfile.harden is the cross-platform
+    answer, and it must land on the TEMP file -- after the replace the secret
+    has already existed under wider permissions.
+    """
+    from ccsync_companion import secretfile
+
+    src = tmp_path / "export.txt"
+    src.write_text(_signed_in())
+    dest = tmp_path / ".ccsync" / "youtube-cookies.txt"
+    hardened: list = []
+    monkeypatch.setattr(secretfile, "harden",
+                        lambda path: hardened.append((Path(path), Path(path).exists())) or True)
+
+    assert yc.install(str(src), dest=dest)[0] is True
+    assert hardened == [(dest.with_suffix(dest.suffix + ".new"), True)]
 
 
 def test_install_refuses_a_logged_out_export_and_writes_nothing(tmp_path):

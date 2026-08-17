@@ -153,14 +153,67 @@ class ServerBackend(Protocol):
         """Dataset / shared folder. Raises UnsupportedOnBackend where it is a
         UI step."""
 
-    def set_tree_acl(self, base: str, owner: str, group: str) -> list[str]:
+    def set_tree_acl(self, base: str, owner: str, group: str,
+                     project_group: str = "", container_dirs=None) -> list[str]:
         """Shell lines that give `group` write access to everything under
         `base`. Returned rather than executed: setup_tree.py assembles ONE
         remote script and runs it in one SSH session, and server/tests runs
-        that script under a stub sudo."""
+        that script under a stub sudo.
+
+        `project_group` / `container_dirs` are the per-project isolation mode
+        ([stack] project_acl = "per-project", docs/TENANCY.md, 2026-08-17):
+        the project subtree belongs to proj-<slug> instead of the fleet-wide
+        editors group, and the directories ABOVE it get the sticky bit so one
+        editor cannot delete another's project. Both default to today's
+        behaviour, and a backend that cannot express the split says so on
+        stderr rather than silently ignoring it."""
 
     def snapshot(self, path: str, label: str, dry_run: bool) -> bool:
-        """Point-in-time snapshot of `path` (readiness item 8)."""
+        """Point-in-time snapshot of `path` (readiness item 8).
+
+        The one-call convenience over snapshot_now: it invents the name from
+        `label` and throws the identifier away, which is what a caller standing
+        in front of a `chown -R` wants (common.snapshot_before).
+        """
+
+    def snapshot_now(self, path: str, name: str, dry_run: bool) -> tuple[bool, str]:
+        """Take ONE snapshot of the dataset/share `path` lives in, called
+        `name`. Returns (ok, the identifier the platform gave it).
+
+        `path` is a NAS PATH on both platforms, not a dataset or a share id:
+        the scripts know where the tree is, not how this NAS spells the volume
+        it sits on. Each backend maps it (TrueNAS strips /mnt/, DSM takes the
+        shared folder out of /volume<N>/<share>/...) -- COMMERCIAL_READINESS.md
+        item 8, 2026-08-17.
+        """
+
+    def list_snapshots(self, path: str, dry_run: bool) -> list[dict]:
+        """Existing snapshots of `path`'s dataset/share, oldest first.
+
+        [{"name": str, "created": str, "used": str}]. A failed read is [] with
+        the reason printed -- "I could not tell you" is never "there are none",
+        so callers that REPORT (setup_snapshots.py) say so themselves rather
+        than letting an empty list read as a backup floor that is missing.
+        """
+
+    def ensure_snapshot_schedule(self, path: str, schedules: list[dict],
+                                 dry_run: bool) -> list[tuple[str, str]]:
+        """Create or update the periodic snapshot tasks for `path`.
+
+        `schedules` is the POLICY (cadence and retention), which belongs to
+        setup_snapshots.py, not to a platform; each entry is
+        {"label", "naming_schema", "schedule": {minute,hour,dom,month,dow},
+        "lifetime_value", "lifetime_unit", "recursive"}. Idempotent by
+        (dataset, naming_schema).
+
+        Returns one (state, detail) per entry, state in:
+          "created" | "updated" | "unchanged" -- the task is now in place;
+          "manual"                            -- this platform cannot be
+                                                 scheduled from here and
+                                                 `detail` is the exact click
+                                                 path for the admin (DSM);
+          "failed"                            -- with the reason.
+        """
 
     # -- diagnostics ---------------------------------------------------------
 

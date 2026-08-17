@@ -23,6 +23,41 @@ def test_migrate_idempotent(conn):
             "active_transfers"} <= tables
 
 
+def test_every_step_is_ordered_and_both_a_fresh_and_a_v13_db_reach_the_head():
+    """Three migrations landed on 2026-08-17 from three different changes
+    (sessions, report tokens, release signing), each appending its own step to
+    the same list. The failure that costs a fleet is two of them claiming the
+    same number, or a customer's LIVE database -- which is at whatever version
+    its last deploy left it -- taking a different path from a fresh one.
+    """
+    import sqlite3
+
+    numbers = [n for n, _ in dbmod._MIGRATION_STEPS]
+    assert numbers == sorted(numbers), "the migration steps are out of order"
+    assert len(set(numbers)) == len(numbers), "two migration steps share a number"
+    assert numbers == list(range(1, dbmod.SCHEMA_VERSION + 1)), \
+        "the step numbers are not a gapless 1..SCHEMA_VERSION"
+
+    fresh = sqlite3.connect(":memory:")
+    dbmod.migrate(fresh)
+    assert fresh.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
+
+    # A container that has not been redeployed since before the three
+    # 2026-08-17 steps: stop at 13, then run the real migrate() over it.
+    old = sqlite3.connect(":memory:")
+    dbmod.migrate(old, [s for s in dbmod._MIGRATION_STEPS if s[0] <= 13])
+    assert old.execute("PRAGMA user_version").fetchone()[0] == 13
+    dbmod.migrate(old)
+    assert old.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
+
+    def tables(conn):
+        return {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+
+    assert tables(old) == tables(fresh), \
+        "an upgraded database and a fresh one have different tables"
+
+
 def test_upsert_project_and_deactivate(conn):
     pid = dbmod.upsert_project(conn, "2025-ff4-nuclear", "2025/FF4/Nuclear", "/data/Projects/2025/FF4/Nuclear", T0)
     assert dbmod.upsert_project(conn, "2025-ff4-nuclear", "2025/FF4/Nuclear v2", "/x", T1) == pid
@@ -211,7 +246,7 @@ def test_migration_commits_user_version_after_each_step(tmp_path):
 
 def test_selection_helpers(conn):
     assert dbmod.add_selection(conn, "jsmith", "a", "jsmith", T0) is True
-    assert dbmod.add_selection(conn, "jsmith", "b", "alex", T1) is True
+    assert dbmod.add_selection(conn, "jsmith", "b", "owen", T1) is True
     assert dbmod.add_selection(conn, "jsmith", "a", "jsmith", T1) is False  # already ticked
     sels = dbmod.fetch_selections(conn, "jsmith")
     assert [(s["slug"], s["position"]) for s in sels] == [("a", 1), ("b", 2)]
@@ -352,9 +387,9 @@ def test_machine_state_is_capped_per_editor(conn):
     assert "BOGUS-000" not in machines                                        # oldest evicted
 
     # another editor's rows are untouched by the cap
-    dbmod.upsert_machine_state(conn, "ruskin", "RUSKIN-PC", None, base.isoformat())
+    dbmod.upsert_machine_state(conn, "editor2", "EDITOR-PC-02", None, base.isoformat())
     assert conn.execute(
-        "SELECT COUNT(*) FROM machine_state WHERE editor_username='ruskin'"
+        "SELECT COUNT(*) FROM machine_state WHERE editor_username='editor2'"
     ).fetchone()[0] == 1
 
 
@@ -386,7 +421,7 @@ def test_editor_reported_resolve_project(conn):
     assert f(conn, "jsmith", "Nuclear Family Reunion") is True
     assert f(conn, "jsmith", "nuclear family reunion") is True   # NOCASE, like project_roots
     assert f(conn, "jsmith", "  Nuclear Family Reunion  ") is True
-    assert f(conn, "ruskin", "Nuclear Family Reunion") is False  # not YOUR machine
+    assert f(conn, "editor2", "Nuclear Family Reunion") is False  # not YOUR machine
     assert f(conn, "jsmith", "Something Else") is False
     assert f(conn, "jsmith", "") is False
 

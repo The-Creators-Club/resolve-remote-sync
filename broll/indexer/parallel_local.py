@@ -12,7 +12,7 @@ belongs to run_queue.py, which this feeds. Each video is independent and writes
 to its own DATA_ROOT subtree, so there is no shared-state contention beyond the
 SQLite row updates (WAL mode handles those). Failures are isolated per video.
 
-    python parallel_local.py --config config.queue.yaml --workers 6
+    python parallel_local.py --workers 6    # --config defaults to private/broll/indexer/config.queue.yaml
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from broll_index.pipeline import (
     ORGANISED_STATUS, reopen_if_now_indexable, stage_frames, stage_probe,
     stage_proxy, stage_transcribe,
 )
+from broll_index.site_data import DEFAULT_QUEUE_CONFIG
 from broll_index.storage.sqlite_backend import SqliteBackend
 
 # `transcribe` is included only as an INGEST of .srt files batch_transcribe.py has
@@ -126,7 +127,7 @@ def eligible_ids(db_path: str) -> list[int]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.queue.yaml")
+    ap.add_argument("--config", default=DEFAULT_QUEUE_CONFIG)
     # NVENC on consumer GPUs limits concurrent encode sessions (~3-8 depending
     # on driver); scene detection and tiling scale with CPU cores. 6 is a safe
     # default for a 24-core box with one NVENC-capable GPU.

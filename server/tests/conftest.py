@@ -7,7 +7,7 @@ which for pytest means here: conftest.py is imported before any test module.
 
 Without this the suite would run against a blank site (every identity value
 ""), which is the un-configured state the scripts refuse in -- correct
-behaviour, useless for testing a deploy. The fixture carries this fleet's real
+behaviour, useless for testing a deploy. The fixture carries placeholder
 values because a deploy test needs a host, a pool and a tree that look like
 one; the refuse-when-unset contract has its own test, which reloads common
 with the environment cleared (test_site_manifest.py). Added 2026-08-17 with
@@ -17,6 +17,19 @@ import os
 from pathlib import Path
 
 FIXTURE_SITE = Path(__file__).resolve().parent / "fixtures" / "site.toml"
+
+# The search order is flag, then ENV VAR, then the manifest -- so a shell that
+# exports the operator's own NAS (the base rig's does: TRUENAS_HOST, and
+# tools/load_secrets.ps1 exports more) SHADOWS the fixture, and the byte-for-
+# byte compose goldens then render that shell's host instead of the fixture's.
+# That went unnoticed for as long as the fixture carried this fleet's real
+# address and the two happened to agree; the 2026-08-17 identity sweep
+# (COMMERCIAL_READINESS.md item 10) made them differ, and the goldens then
+# failed on the base rig only. Clear the identity overrides here, before
+# common is imported. A test that WANTS one sets it with monkeypatch.setenv,
+# which is unaffected.
+for _shadowing in ("TRUENAS_HOST", "SYNO_HOST", "TRUENAS_USER", "SYNO_USER"):
+    os.environ.pop(_shadowing, None)
 
 # setdefault, not a bare assignment: running the suite against another site's
 # manifest (CCSYNC_SITE=... pytest) is a legitimate thing to want.

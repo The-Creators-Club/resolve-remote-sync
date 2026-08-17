@@ -76,7 +76,7 @@ def test_classify_p_target():
     f = drive_swap.classify_p_target
     assert f("\\\\localhost\\CCSync_P", r"D:\Creators_Club", "") == "local"
     assert f(r"D:\Creators_Club", r"D:\Creators_Club", "") == "local"   # legacy subst
-    unc = "\\\\100.65.15.123\\TheCreatorsPool\\Creators_Club"
+    unc = "\\\\100.64.0.2\\TheCreatorsPool\\Creators_Club"
     assert f(unc, r"D:\Creators_Club", unc) == "server"
     assert f(unc + "\\", r"D:\Creators_Club", unc) == "server"
     assert f("\\\\OTHER\\Share", r"D:\Creators_Club", unc) == "other"
@@ -104,7 +104,7 @@ def test_current_p_target_keeps_a_unc_containing_a_space():
     one came back truncated, classify_p_target answered "other" for a
     deliberate grade-swap, and the watcher then fired "nothing will sync
     until this is fixed" once per clip."""
-    unc = "\\\\100.65.15.123\\TheCreatorsPool\\Creator Profiles"
+    unc = "\\\\100.64.0.2\\TheCreatorsPool\\Creator Profiles"
 
     def net_use_run(args):
         assert args[:2] == ["net", "use"]
@@ -152,7 +152,7 @@ def test_the_connect_never_asks_windows_to_prompt(monkeypatch):
     CONNECT_INTERACTIVE (0x8), so the flags word must never carry it."""
     connects = _fake_wnet(monkeypatch)
     drive_swap.swap_to_server("\\\\nas\\Pool\\CC", lambda args: _proc(0),
-                              username="alex", password="pw")
+                              username="owen", password="pw")
     flags = connects[0][-1]
     assert not flags & 0x00000008           # CONNECT_INTERACTIVE
     assert not flags & 0x00000010           # CONNECT_PROMPT
@@ -163,7 +163,7 @@ def test_is_auth_failure_recognises_console_prompt_cancel():
     # The live 2026-07-26 failure: net use tried to prompt with no console.
     assert drive_swap.is_auth_failure(
         "System error 1223 has occurred. The operation was canceled by the "
-        "user. Enter the username for '100.71.216.3':")
+        "user. Enter the username for '100.64.0.1':")
     assert drive_swap.is_auth_failure("The user name or password is incorrect.")
     assert not drive_swap.is_auth_failure("System error 53: network path not found")
 
@@ -174,7 +174,7 @@ def test_bad_credentials_codes_are_classified_as_auth(monkeypatch, code):
     classification is what makes the tray offer login-and-retry."""
     _fake_wnet(monkeypatch, code=code)
     ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", lambda a: _proc(0),
-                                        username="alex", password="pw")
+                                        username="owen", password="pw")
     assert not ok
     assert str(code) in msg
     assert drive_swap.is_auth_failure(msg)
@@ -196,7 +196,7 @@ def test_1219_credential_conflict_reads_as_a_conflict_not_an_auth_failure(monkey
     which net use's own localised text did, incidentally, via "user name"."""
     _fake_wnet(monkeypatch, code=1219)
     ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", lambda a: _proc(0),
-                                        username="alex", password="pw")
+                                        username="owen", password="pw")
     assert not ok
     assert "1219" in msg and "disconnect" in msg.lower()
     assert not drive_swap.is_auth_failure(msg)
@@ -217,20 +217,20 @@ def test_swap_to_server_with_credentials_and_persist(monkeypatch):
         return _proc(0, "")
 
     connects = _fake_wnet(monkeypatch)
-    ok, _ = drive_swap.swap_to_server(unc, run, username="alex", password="pw")
+    ok, _ = drive_swap.swap_to_server(unc, run, username="owen", password="pw")
     assert ok
     # R1: the login rides the CALL, not an argv.
-    assert connects == [(unc, "P:", "alex", "pw", drive_swap.CONNECT_TEMPORARY)]
+    assert connects == [(unc, "P:", "owen", "pw", drive_swap.CONNECT_TEMPORARY)]
 
     writes = _fake_credwrite(monkeypatch)
-    drive_swap.persist_credentials(unc, "alex", "pw", run)
-    assert writes == [("nas", "alex", "pw",
+    drive_swap.persist_credentials(unc, "owen", "pw", run)
+    assert writes == [("nas", "owen", "pw",
                        drive_swap.CRED_TYPE_DOMAIN_PASSWORD,
                        drive_swap.CRED_PERSIST_LOCAL_MACHINE)]
 
     # missing host/username -> silently does nothing
     writes.clear()
-    drive_swap.persist_credentials("", "alex", "pw", run)
+    drive_swap.persist_credentials("", "owen", "pw", run)
     drive_swap.persist_credentials(unc, "", "pw", run)
     assert writes == []
 
@@ -273,12 +273,12 @@ def test_derive_server_unc_from_existing_config():
     """Zero-config fleet rollout: host from dashboard_url, share path from
     remote_root's post-pool tail."""
     f = drive_swap.derive_server_unc
-    assert f("http://192.168.0.102:8480",
+    assert f("http://192.168.0.10:8480",
              "/mnt/tank/TheCreatorsPool/Creators_Club") == \
-        "\\\\192.168.0.102\\TheCreatorsPool\\Creators_Club"
-    assert f("http://100.71.216.3:8480",
+        "\\\\192.168.0.10\\TheCreatorsPool\\Creators_Club"
+    assert f("http://100.64.0.1:8480",
              "/mnt/tank/TheCreatorsPool/Creators_Club/") == \
-        "\\\\100.71.216.3\\TheCreatorsPool\\Creators_Club"
+        "\\\\100.64.0.1\\TheCreatorsPool\\Creators_Club"
     # underivable inputs -> "" (feature hidden, never a broken UNC)
     assert f("", "/mnt/tank/X") == ""
     assert f("http://host:1", "") == ""
@@ -304,7 +304,7 @@ def test_a_blocked_connect_is_abandoned_after_the_timeout(monkeypatch):
 
     started = time.monotonic()
     code = drive_swap._connect_p_drive_timed(
-        "\\\\nas\\Pool\\CC", "alex", _SECRET, timeout=0.1)
+        "\\\\nas\\Pool\\CC", "owen", _SECRET, timeout=0.1)
     elapsed = time.monotonic() - started
 
     assert code is None               # "timed out", not an error code
@@ -328,7 +328,7 @@ def test_an_unreachable_server_times_out_without_leaking_the_password(
         with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
             ok, msg = drive_swap.swap_to_server(
                 "\\\\nas\\Pool\\Creators_Club", lambda args: _proc(0),
-                username="alex", password=_SECRET,
+                username="owen", password=_SECRET,
             )
     finally:
         released.set()      # let the orphan finish now, not in 10 s
@@ -351,19 +351,19 @@ def test_a_raising_connect_reports_only_the_exception_type(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
         ok, msg = drive_swap.swap_to_server(
             "\\\\nas\\Pool\\Creators_Club", lambda args: _proc(0),
-            username="alex", password=_SECRET)
+            username="owen", password=_SECRET)
 
     assert not ok
     assert "ArgumentError" in msg
     assert _SECRET not in msg
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert _SECRET not in logged
-    assert "alex" in logged           # ...but enough context to diagnose with
+    assert "owen" in logged           # ...but enough context to diagnose with
 
 
 # -- SYNC-4: the editor's TrueNAS password must never leave this module -----
 
-_SECRET = "hunter2-CreatorsClub"
+_SECRET = "hunter2-secret"
 
 
 def test_no_swap_path_puts_the_password_on_an_argv(monkeypatch):
@@ -379,8 +379,8 @@ def test_no_swap_path_puts_the_password_on_an_argv(monkeypatch):
     unc = "\\\\nas\\Pool\\Creators_Club"
     _fake_wnet(monkeypatch)
     _fake_credwrite(monkeypatch)
-    drive_swap.swap_to_server(unc, recording_run, username="alex", password=_SECRET)
-    drive_swap.persist_credentials(unc, "alex", _SECRET, recording_run)
+    drive_swap.swap_to_server(unc, recording_run, username="owen", password=_SECRET)
+    drive_swap.persist_credentials(unc, "owen", _SECRET, recording_run)
     drive_swap.swap_to_local(r"D:\Creators_Club", recording_run)
 
     flat = " ".join(" ".join(a) for a in spawned)
@@ -399,12 +399,12 @@ def test_a_failed_credwrite_is_non_fatal_and_silent_about_the_password(
     _fake_credwrite(monkeypatch, result=0)
     with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
         assert drive_swap.persist_credentials(
-            "\\\\nas\\Pool\\CC", "alex", _SECRET) is None
+            "\\\\nas\\Pool\\CC", "owen", _SECRET) is None
 
     _fake_credwrite(monkeypatch, raises=OSError("advapi32 exploded"))
     with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
         assert drive_swap.persist_credentials(
-            "\\\\nas\\Pool\\CC", "alex", _SECRET) is None
+            "\\\\nas\\Pool\\CC", "owen", _SECRET) is None
 
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert _SECRET not in logged
@@ -414,10 +414,10 @@ def test_a_failed_credwrite_is_non_fatal_and_silent_about_the_password(
 
 def test_the_redactor_masks_both_shapes_the_password_arrives_in():
     r = drive_swap._redacted
-    assert r(["cmdkey", "/add:nas", "/user:alex", f"/pass:{_SECRET}"]) == \
-        "cmdkey /add:nas /user:alex /pass:***"
-    assert r(["net", "use", "P:", "\\\\nas\\X", "/user:alex", _SECRET], _SECRET) == \
-        "net use P: \\\\nas\\X /user:alex ***"
+    assert r(["cmdkey", "/add:nas", "/user:owen", f"/pass:{_SECRET}"]) == \
+        "cmdkey /add:nas /user:owen /pass:***"
+    assert r(["net", "use", "P:", "\\\\nas\\X", "/user:owen", _SECRET], _SECRET) == \
+        "net use P: \\\\nas\\X /user:owen ***"
     # No password given (the uncredentialed swap) -- nothing to mask.
     assert r(["net", "use", "P:", "\\\\nas\\X", "/persistent:no"]) == \
         "net use P: \\\\nas\\X /persistent:no"
@@ -433,7 +433,7 @@ def test_a_failing_unmap_logs_a_redacted_argv(monkeypatch, caplog):
     _fake_wnet(monkeypatch)
     with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
         drive_swap.swap_to_server("\\\\nas\\Pool\\CC", timing_out,
-                                  username="alex", password=_SECRET)
+                                  username="owen", password=_SECRET)
 
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert _SECRET not in logged

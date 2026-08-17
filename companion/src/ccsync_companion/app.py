@@ -21,12 +21,16 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import broll_server as broll_server_mod
 from . import canon
 from . import config as config_mod
+from . import crash_report
+from . import eula as eula_mod
 from . import idle as idle_mod
 from . import luts as luts_mod
 from . import music_worker
@@ -36,6 +40,7 @@ from . import bpg as bpg_mod
 from . import proxy_gen as proxy_gen_mod
 from . import proxy_relink
 from . import resolve_bridge
+from . import resolve_journal
 from . import resolve_prefs as resolve_prefs_mod
 from . import root_guard as root_guard_mod
 from . import shutdown_guard as shutdown_guard_mod
@@ -53,6 +58,7 @@ from .paths import OUT_OF_TREE, classify_path
 from .project_setup import ProjectSetupPrompter
 from .reporter import DashboardReporter
 from .selection import SelectionClient
+from .sync import lane_guard
 from .sync.base import LaneAdapter, LaneStatus
 from .sync.rclone_lane import DIRECTION_DOWN, DIRECTION_UP, VIDEO_EXTS, RcloneLane
 from .sync.sequencer import PROJECTS_PREFIX, Sequencer
@@ -86,11 +92,14 @@ def setup_logging(cfg: dict[str, Any]) -> None:
         handler.setFormatter(fmt)
         root.addHandler(handler)
 
-    # pystray logs under its own "pystray" root, which had no handler at all:
+    # pystray logged under its own "pystray" root, which had no handler at all:
     # in the windowed build sys.stderr is None, so logging's last-resort
-    # handler had nowhere to write either. Everything the tray backend says
-    # about itself -- "An error occurred in the main loop" included -- was
-    # therefore invisible on exactly the machines where the tray misbehaves.
+    # handler had nowhere to write either, and everything the tray backend said
+    # about itself was invisible on exactly the machines where the tray
+    # misbehaves. tray_native (2026-08-17, COMMERCIAL_READINESS.md item 3) logs
+    # under "ccsync.tray.native" and needs none of this; the wiring stays for
+    # the CCSYNC_TRAY_BACKEND=pystray dev escape hatch, which is the only way
+    # that logger can still exist.
     pystray_log = logging.getLogger("pystray")
     pystray_log.setLevel(level)
     pystray_log.handlers.clear()
@@ -552,10 +561,15 @@ _LOCAL_ROOT_MISSING_PREFIX = "local_root does not exist:"
 
 # What a lane says while the tree is not there. Read by tray.py through the
 # normal detail channel, same as the pending-login/misconfigured details.
-_LANE_ROOT_ABSENT_DETAIL = (
-    "PAUSED: your Creators Club drive is disconnected -- plug it back in and "
-    "syncing resumes on its own"
-)
+#
+# A FUNCTION, not a constant: the drive's name comes from the site manifest
+# (site.drive_phrase), which this machine may not have cached yet at import
+# time -- an install whose first manifest fetch happens after start() would
+# otherwise say "your studio drive" for the life of the process
+# (2026-08-17, docs/COMMERCIAL_READINESS.md item 10).
+def _lane_root_absent_detail() -> str:
+    return (f"PAUSED: {site_mod.drive_phrase()} is disconnected -- plug it "
+            f"back in and syncing resumes on its own")
 
 
 class CompanionApp:
@@ -710,6 +724,25 @@ class CompanionApp:
         # re-starting after an earlier require_login gate.
         self._lanes_started = False
 
+        # -- the two safety latches (COMMERCIAL_READINESS.md item 9) --------
+        # Both persist to <state_dir>, both are read HERE so their state is
+        # in hand before a single lane exists: a breaker that only latches
+        # once lane B has run, or a halt that only applies after the first
+        # report, is a latch an editor clears by restarting the tray. The
+        # state dir is resolved the same way _build_lanes() resolves it, and
+        # deliberately not read from self._state_dir -- that attribute does
+        # not exist until _build_lanes() runs, one line below.
+        guard_state_dir = config_mod.resolved_log_path(cfg).parent / "state"
+        self.lane_b_breaker = lane_guard.LaneBBreaker(
+            guard_state_dir / lane_guard.BREAKER_STATE_FILENAME, cfg,
+            on_trip=self._notify_breaker_tripped,
+        )
+        self.halt = lane_guard.HaltState(guard_state_dir / lane_guard.HALT_STATE_FILENAME)
+        # Overridden "Remove from this machine" actions awaiting a report.
+        # Bounded: this is an audit trail on the wire, not a ledger -- the
+        # WARNING in the log is the record that cannot be lost.
+        self._removal_overrides: deque = deque(maxlen=20)
+
         self.lanes: list[LaneAdapter] = self._build_lanes()
         self.selection_client: Optional[SelectionClient] = None
         self.syncthing_admin: Optional[SyncthingAdmin] = None
@@ -775,9 +808,9 @@ class CompanionApp:
         # is the ONE broken state the editor can neither see nor is told
         # about -- every Resolve feature (the fixer, proxy attach, b-roll and
         # music inserts, YouTube import) is silently gone while Resolve looks
-        # perfectly normal on screen, and it cost ruskin's rig a full session
-        # on 2026-08-12. So this one nags, on a timer, until it is fixed or
-        # the editor silences it.
+        # perfectly normal on screen, and it cost an editor's rig
+        # a full session on 2026-08-12. So this one nags, on a timer, until
+        # it is fixed or the editor silences it.
         #   _since        monotonic stamp of the first poll in the bad state
         #                 (None = not in it) -- the "held continuously"
         #                 clock, reset by ANY good poll;
@@ -946,6 +979,10 @@ class CompanionApp:
             # bins" is a handful of counters, and the dashboard's YouTube page
             # wants to show it beside the download it started.
             get_youtube_import=self.youtube_import_status,
+            # The safety latches (item 9). Every tick, not just the heavy
+            # ones: a tripped breaker and a halted machine are the two states
+            # an admin must not learn about a report interval late.
+            get_sync_guard=self.sync_guard,
         )
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
@@ -979,6 +1016,9 @@ class CompanionApp:
                 self.project_setup.note_report_response(resp)
             except Exception:
                 log.exception("project_setup.note_report_response failed")
+        # The fleet halt rides the same reply (item 9, 2026-08-17) -- see
+        # _apply_fleet_halt for why it is not its own request.
+        self._apply_fleet_halt(resp)
 
     def _on_resolve_project_changed(self, name: str) -> None:
         if self.project_setup is not None:
@@ -1048,6 +1088,12 @@ class CompanionApp:
             # folder into .ccsync-trash. That used to happen in total
             # silence (AUDIT_3 L-12).
             on_trash=self._notify_trash_recovery,
+            # The circuit breaker (COMMERCIAL_READINESS.md item 9,
+            # 2026-08-17). Built HERE rather than left to the lane so the
+            # tray's "Resume proxy download" action, the report field and the
+            # lane all read one object -- and so its state file sits beside
+            # every other piece of persisted companion state.
+            breaker=self.lane_b_breaker,
         )
         lane_c = SyncthingLane(
             base_url=cfg.get("syncthing_url", "http://127.0.0.1:8384"),
@@ -1164,7 +1210,7 @@ class CompanionApp:
                     self.config.get("local_root"), state,
                 )
                 self._notify_tray(
-                    "Sync paused — your Creators Club drive is disconnected.",
+                    f"Sync paused — {site_mod.drive_phrase()} is disconnected.",
                     "ccsync-companion",
                 )
             self._root_pause_lanes()
@@ -1266,11 +1312,12 @@ class CompanionApp:
             "directory is occupying it", mount_point,
         )
         self._notify_tray(
-            "Your Creators Club drive is mounted at the wrong path. Sync is paused "
-            "until it is fixed — see the CCSync window.", "ccsync-companion")
+            f"{site_mod.drive_phrase(capitalised=True)} is mounted at the wrong "
+            f"path. Sync is paused until it is fixed — see the CCSync window.",
+            "ccsync-companion")
         body = (
-            f"Your Creators Club drive is plugged in, but macOS mounted it "
-            f"somewhere other than {mount_point}.\n\n"
+            f"{site_mod.drive_phrase(capitalised=True)} is plugged in, but macOS "
+            f"mounted it somewhere other than {mount_point}.\n\n"
             f"That happens when an empty leftover folder is already sitting at "
             f"{mount_point}, so the drive gets a numbered name instead "
             f"({mount_point} 1). The numbered name changes every time you plug "
@@ -1331,7 +1378,7 @@ class CompanionApp:
             return
         # RESTAMP before refusing. start()'s _root_absent branch deliberately
         # outranks the sign-in gate, so all three lanes read "PAUSED: your
-        # Creators Club drive is disconnected" -- and with the drive back that
+        # <site> drive is disconnected" -- and with the drive back that
         # sentence names nothing the editor can fix, while the real blocker
         # (sign in / a config problem) appears nowhere in the menu. Every
         # sibling refusal path stamps its own reason; this one didn't
@@ -1370,7 +1417,7 @@ class CompanionApp:
         for lane in self.lanes:
             try:
                 with lane._lock:
-                    lane._status.detail = _LANE_ROOT_ABSENT_DETAIL
+                    lane._status.detail = _lane_root_absent_detail()
             except Exception:
                 pass
 
@@ -1466,6 +1513,21 @@ class CompanionApp:
             "ccsync-companion: files moved to .ccsync-trash",
         )
 
+    def _notify_breaker_tripped(self, reason: str) -> None:
+        """One toast on the EDGE of a lane B trip (item 9, 2026-08-17).
+
+        The sentence has to say three things or it produces a support call:
+        nothing was deleted, uploads are still running, and there is a tray
+        action that fixes it. The tray line and the dashboard alarm carry the
+        same reason string."""
+        self._notify_tray(
+            "CCSync STOPPED downloading proxies as a safety measure:\n"
+            f"{reason}\n"
+            "Your uploads are still running and nothing has been deleted. When your "
+            'admin says the server is fine, use the tray\'s "Resume proxy download".',
+            "ccsync-companion: proxy download stopped",
+        )
+
     def _notify_watch_state(self, message: str) -> None:
         """Lane A's file watcher went away (or came back) because of the sync
         drive itself -- see RcloneLane._watch_root_answers (MAC-12).
@@ -1540,6 +1602,28 @@ class CompanionApp:
             if self._canon_relink_busy:
                 return
             self._canon_relink_busy = True
+        # RATE LIMIT, because nobody consented to this pass (item 9,
+        # 2026-08-17). It rewrites the project database with no popup, and on
+        # a machine whose canonical_prefix or local_root is wrong the same
+        # rewrite is re-offered every sweep -- hundreds of ReplaceClips an
+        # hour, plus a save point and a journal burst each. Checked HERE, at
+        # the start of a burst, rather than per batch: a batch arriving while
+        # the worker is draining extends that same burst (the single-flight
+        # design above), and splitting one burst in half would be arbitrary.
+        # The refused clips stay in _canon_relink_pending -- the watcher
+        # offers each path once per process, so dropping them strands them.
+        project = resolve_bridge.current_project_name()
+        if not resolve_journal.allow_automatic(project, "canon-relink"):
+            with self._canon_relink_lock:
+                self._canon_relink_busy = False
+                waiting = len(self._canon_relink_pending)
+            log.info(
+                "non-canonical relink: holding %d clip(s) -- this project was "
+                "auto-relinked less than %.0f minutes ago and the unprompted path "
+                "is rate-limited. Tray → Advanced → Scan whole project runs it now",
+                waiting, resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS / 60.0,
+            )
+            return
         try:
             threading.Thread(
                 target=self._canon_relink_loop, name="ccsync-canon-relink", daemon=True,
@@ -1571,7 +1655,10 @@ class CompanionApp:
                 self._canon_relink_busy = False
 
     def _relink_non_canonical(self, items: list[dict[str, Any]]) -> None:
-        """One batch of ReplaceClips, on the relink thread. Never raises."""
+        """One batch of ReplaceClips, on the relink thread. Never raises.
+
+        The rate limit for this unprompted path lives in
+        _handle_non_canonical, at the start of a burst -- see the note there."""
         fixed = 0
         for item in items:
             if self._stop_event.is_set():
@@ -1593,7 +1680,8 @@ class CompanionApp:
                 continue
             if not target or canon.norm(str(target)) == canon.norm(path):
                 continue
-            result = resolve_bridge.replace_clip(mpi, str(target), tries=1)
+            result = resolve_bridge.replace_clip(
+                mpi, str(target), tries=1, source="auto-canonical")
             if result.get("ok"):
                 fixed += 1
                 log.info("relinked non-canonical clip %s -> %s", path, target)
@@ -1608,6 +1696,31 @@ class CompanionApp:
                 "so they stay online for every editor.",
                 "ccsync-companion",
             )
+
+    def undo_last_relink(self) -> None:
+        """Tray → Advanced → "Undo the last clip-path change CCSync made".
+
+        The user-facing half of item 9's save point/journal (2026-08-17).
+        Resolve's own Undo does not cover a scripted ReplaceClip, so without
+        this an editor who watches the companion re-address 158 clips has no
+        way back short of importing the exported `.drp` by hand. Runs on the
+        tray's spawned thread like every other action; never raises.
+        """
+        try:
+            summary = resolve_journal.describe_latest()
+            result = resolve_bridge.undo_last_relink()
+        except Exception:
+            log.exception("undo of the last relink failed")
+            self._notify_tray(
+                "CCSync could not undo the last clip-path change. Tray → Open log, "
+                "and send it to your admin.", "ccsync-companion: undo failed",
+            )
+            return
+        message = result.get("message") or "Nothing to undo."
+        if summary and result.get("undone"):
+            message += f" (that pass changed {summary})"
+        log.info("undo last relink: %s", message)
+        self._notify_tray(message, "ccsync-companion: undo")
 
     def _handle_foreign(self, item: dict[str, Any]) -> None:
         """One tray warning per clip stored under ANOTHER machine's path.
@@ -1820,8 +1933,9 @@ class CompanionApp:
         if self._root_absent:
             log.warning("scan whole project refused: the sync drive is disconnected")
             self._notify_tray(
-                "Your Creators Club drive is disconnected, so CCSync can't tell where "
-                "your media is. Plug it back in and try again.", "ccsync-companion")
+                f"{site_mod.drive_phrase(capitalised=True)} is disconnected, so "
+                f"CCSync can't tell where your media is. Plug it back in and try "
+                f"again.", "ccsync-companion")
             return
         if self._local_root_is_broken():
             log.error("scan whole project refused: local_root is misconfigured")
@@ -1936,8 +2050,9 @@ class CompanionApp:
             # lane A then correctly refuses to upload.
             log.warning("consolidate refused: the sync drive is disconnected or misconfigured")
             self._notify_tray(
-                "Your Creators Club drive is disconnected, so CCSync can't copy media in. "
-                "Plug it back in and try again.", "ccsync-companion")
+                f"{site_mod.drive_phrase(capitalised=True)} is disconnected, so "
+                f"CCSync can't copy media in. Plug it back in and try again.",
+                "ccsync-companion")
             return
         if not self._consolidate_lock.acquire(blocking=False):
             self._notify_tray("Already copying a project's media in. Let it finish.",
@@ -2424,12 +2539,13 @@ class CompanionApp:
         """Restart the companion when the Resolve it connected to has exited.
 
         fusionscript.dll keeps process-global IPC state. Proven live
-        2026-08-12 (ruskin's rig): after his Resolve restarted, this
-        process's stale client wedged every NEW Resolve session's scripting
-        server -- for every client on the machine, across three Resolve
-        restarts -- until the companion was restarted FIRST. The safe moment
-        to shed the stale state is while Resolve is DOWN: nothing to wedge,
-        and the fresh process greets the next Resolve with a clean DLL.
+        2026-08-12 (an editor's rig): after their Resolve restarted,
+        this process's stale client wedged every NEW Resolve session's
+        scripting server -- for every client on the machine, across three
+        Resolve restarts -- until the companion was restarted FIRST. The
+        safe moment to shed the stale state is while Resolve is DOWN:
+        nothing to wedge, and the fresh process greets the next Resolve
+        with a clean DLL.
 
         Guards, in order: feature flag; once per process (the replacement
         starts unlatched); ever_connected (a fresh DLL has no stale state);
@@ -2585,7 +2701,21 @@ class CompanionApp:
             if not ops:
                 return
             log.info("proxy relink: %d clip(s) need their proxy repointed", len(ops))
-            proxy_relink.apply_relinks(ops, resolve_bridge.link_proxy_media)
+            # The second unprompted media-pool rewrite, rate-limited on the
+            # same terms as the canonical one (item 9, 2026-08-17). Refusals
+            # are already remembered per proxy file, so the steady state is
+            # zero ops; this bounds the case where they are NOT remembered --
+            # a mis-set local_root that makes every clip look repointable.
+            project = resolve_bridge.current_project_name()
+            if not resolve_journal.allow_automatic(project, "auto-proxy-relink"):
+                log.info("proxy relink: rate-limited for this project -- %d op(s) "
+                         "left for the next pass", len(ops))
+                return
+            proxy_relink.apply_relinks(
+                ops,
+                lambda mpi, path: resolve_bridge.link_proxy_media(
+                    mpi, path, source="auto-proxy-relink"),
+            )
         except Exception:
             log.exception("proxy relink pass failed")
 
@@ -2836,7 +2966,116 @@ class CompanionApp:
                 out.append({"slug": slug, "rel": rel})
         return out
 
-    def remove_project_from_machine(self, slug: str) -> tuple[bool, str]:
+    def removal_blockers(self, slug: str) -> dict[str, Any]:
+        """Is it safe to delete this project's local copy right now?
+
+        Answers with {"blocked", "reasons", "pending_uploads", "lane_c",
+        "unknown"} -- the gate on remove_project_from_machine's `rmtree`
+        (COMMERCIAL_READINESS.md item 9, 2026-08-17). Two questions, one per
+        outbound lane:
+
+          * lane A -- a --dry-run of the real lane A command for this
+            project (RcloneLane.pending_uploads). Counts exactly the files
+            the lane would upload, with the lane's own filters and age/size
+            floors, so a growing card ingest blocks and a `.DS_Store` does
+            not.
+          * lane C -- Syncthing's own aggregate completion for the folder
+            (`/rest/db/completion?folder=X`) plus its local needTotalItems.
+            Anything under 100% means bytes this editor made have reached
+            nobody yet.
+
+        FAILS CLOSED. A probe that could not answer blocks the removal, the
+        opposite of the fail-open posture everywhere else in this file: for
+        every other guard "I could not tell" costs a warning, for this one it
+        costs footage that exists nowhere else. Never raises."""
+        out: dict[str, Any] = {
+            "blocked": False, "reasons": [], "pending_uploads": 0,
+            "lane_c": {}, "unknown": False,
+        }
+        rel = next((p["rel"] for p in self.removable_projects() if p["slug"] == slug), None)
+        if rel is None:
+            out["blocked"] = True
+            out["reasons"].append("that project is not selected on this machine")
+            return out
+        subpath = f"{PROJECTS_PREFIX}{rel}"
+        try:
+            pending = self._lane_a.pending_uploads(subpath)
+        except Exception:
+            log.exception("removal gate: pending_uploads failed for %s", subpath)
+            pending = None
+        if pending is None:
+            out["unknown"] = True
+            out["blocked"] = True
+            out["reasons"].append(
+                "CCSync could not reach the server to check whether your footage has "
+                "been uploaded"
+            )
+        else:
+            count = int(pending.get("count") or 0)
+            out["pending_uploads"] = count
+            if count:
+                sample = ", ".join((pending.get("samples") or [])[:3])
+                out["blocked"] = True
+                out["reasons"].append(
+                    f"{count} video file(s) have not been uploaded yet"
+                    + (f" (e.g. {sample})" if sample else "")
+                )
+        if self.syncthing_admin is not None:
+            try:
+                completion = self.syncthing_admin.folder_completion(slug) or {}
+                status = self.syncthing_admin.folder_status(slug) or {}
+            except Exception:
+                log.exception("removal gate: Syncthing status failed for %s", slug)
+                out["unknown"] = True
+                out["blocked"] = True
+                out["reasons"].append(
+                    "CCSync could not ask Syncthing whether this project is fully shared"
+                )
+                completion, status = {}, {}
+            try:
+                pct = float(completion.get("completion", 100.0))
+            except (TypeError, ValueError):
+                pct = 100.0
+            need_local = int(status.get("needTotalItems") or 0)
+            out["lane_c"] = {
+                "completion": pct,
+                "need_bytes": int(completion.get("needBytes") or 0),
+                "need_local_items": need_local,
+                "state": str(status.get("state") or ""),
+            }
+            if pct < 100.0:
+                out["blocked"] = True
+                out["reasons"].append(
+                    f"the shared files for this project are only {pct:.0f}% synced to "
+                    "the server"
+                )
+            if need_local:
+                out["blocked"] = True
+                out["reasons"].append(
+                    f"{need_local} shared file(s) have not arrived on this machine yet"
+                )
+        return out
+
+    def _note_removal_override(self, slug: str, rel: str, blockers: dict[str, Any]) -> None:
+        """Remember an overridden removal so the dashboard sees it too.
+
+        Bounded and best-effort: it rides the next report's `sync_guard`
+        section, which means a machine that is taken offline immediately
+        afterwards never reports it -- the log line above is the record that
+        cannot be lost."""
+        try:
+            self._removal_overrides.append({
+                "slug": slug, "rel": rel,
+                "at": datetime.now(timezone.utc).isoformat(),
+                "pending_uploads": int(blockers.get("pending_uploads") or 0),
+                "reasons": list(blockers.get("reasons") or [])[:4],
+            })
+        except Exception:
+            log.exception("could not record the removal override")
+
+    def remove_project_from_machine(
+        self, slug: str, override: bool = False
+    ) -> tuple[bool, str]:
         """The safe order for "I'm done with this project here":
 
           1. untick it on the dashboard (the server unshares the Syncthing
@@ -2867,8 +3106,8 @@ class CompanionApp:
             # nothing will ever reclaim it, while they believe the space is
             # back.
             return False, (
-                "your Creators Club drive is disconnected, so nothing was removed. "
-                "Plug it back in and try again."
+                f"{site_mod.drive_phrase()} is disconnected, so nothing was "
+                f"removed. Plug it back in and try again."
             )
         rel = next((p["rel"] for p in self.removable_projects() if p["slug"] == slug), None)
         if rel is None:
@@ -2876,6 +3115,28 @@ class CompanionApp:
         safe_rel = normalized_safe_rel(rel)
         if not safe_rel:
             return False, f"unsafe project path {rel!r} -- nothing was deleted"
+
+        # THE CAUGHT-UP GATE (COMMERCIAL_READINESS.md item 9, 2026-08-17).
+        # Until now the only guard on the one irreversible delete in this
+        # system was a sentence in the confirm dialog asking the editor to go
+        # and check the dashboard's TRANSFERS page themselves. Nobody does.
+        blockers = self.removal_blockers(slug)
+        if blockers["blocked"] and not override:
+            return False, (
+                f"'{rel}' still has work that has not reached the server, so nothing "
+                f"was deleted:\n  - " + "\n  - ".join(blockers["reasons"]) + "\n"
+                "Leave CCSync running until it is finished, then try again."
+            )
+        if blockers["blocked"] and override:
+            # An override is a decision to destroy un-uploaded footage. It is
+            # allowed (an editor with a dead NAS and a full disk has to be
+            # able to act) but it is never quiet: log line, report field,
+            # and the dialog made them type the project's name.
+            log.warning(
+                "remove_project: OVERRIDE -- deleting %s (%s) with work still pending: %s",
+                slug, rel, "; ".join(blockers["reasons"]),
+            )
+            self._note_removal_override(slug, rel, blockers)
 
         ok, message = self.selection_client.untick(slug)
         if not ok:
@@ -2965,6 +3226,29 @@ class CompanionApp:
             except Exception:
                 pass
 
+    def _mark_lanes_eula_not_accepted(self, problem: str) -> None:
+        detail = f"NOT SYNCING: {problem}"
+        for lane in self.lanes:
+            try:
+                with lane._lock:
+                    lane._status.detail = detail
+            except Exception:
+                pass
+
+    def eula_problem(self) -> Optional[str]:
+        """One sentence saying why this machine may not sync for licence
+        reasons, or None. Read by the gate below and by run()'s startup
+        notification, so the tray toast and the lane detail cannot disagree
+        (2026-08-17, COMMERCIAL_READINESS.md item 3)."""
+        try:
+            return eula_mod.acceptance_problem()
+        except Exception:
+            # A licence check that throws must not be the thing that stops
+            # an editor syncing -- same fail-open reasoning as a missing
+            # bundled document (eula.py's docstring).
+            log.exception("EULA acceptance check failed -- treating it as accepted")
+            return None
+
     def _start_lanes(self) -> None:
         """Actually start the sync lanes/sequencer, per sync_enabled/managed
         mode. Extracted from start() so on_signed_in() can (re)run it once a
@@ -2980,6 +3264,20 @@ class CompanionApp:
             # to _start_lanes() itself so no future caller can miss it.
             log.info("sync lanes/sequencer NOT started: syncing is paused from the tray")
             return
+        if self.halt.active:
+            # Above every other refusal below except the tray's own pause:
+            # a halt survives restarts precisely so it cannot be cleared by
+            # the first thing anyone tries, and _start_lanes() is the ONE
+            # door every start path goes through (COMMERCIAL_READINESS.md
+            # item 9, 2026-08-17).
+            for lane in self.lanes:
+                try:
+                    with lane._lock:
+                        lane._status.detail = self._halt_detail()
+                except Exception:
+                    pass
+            log.warning("sync lanes/sequencer NOT started: %s", self._halt_detail())
+            return
         if self.config_problems:
             # validate_config()'s "errors that STOP syncing" used to stop
             # nothing: they were logged and then start() ran anyway. A typo'd
@@ -2994,6 +3292,22 @@ class CompanionApp:
                 "-- fix them in %s and restart",
                 len(self.config_problems), config_mod.CONFIG_PATH,
             )
+            return
+        eula_problem = self.eula_problem()
+        if eula_problem:
+            # 2026-08-17, COMMERCIAL_READINESS.md item 3: nobody on this
+            # machine has agreed to the licence (or agreed to an older
+            # version of it), so the lanes do not run. Same shape as the
+            # pending-login and DEL-3 gates above -- lanes stay down with a
+            # reason on them, everything else (watcher, reporter, tray)
+            # still starts, so the machine stays visible and the editor has
+            # a route back. The wizard, not the tray, is what records
+            # consent: it is the only place the document is actually read.
+            # A MISSING BUNDLED DOCUMENT does not land here at all --
+            # eula.acceptance_problem() fails open on that (see its
+            # docstring); this refusal only ever means "no one accepted".
+            self._mark_lanes_eula_not_accepted(eula_problem)
+            log.warning("sync lanes/sequencer NOT started: %s", eula_problem)
             return
         if self._root_absent:
             # The tree is not there. Unlike a config problem this needs no
@@ -3261,6 +3575,178 @@ class CompanionApp:
         except Exception:
             log.exception("express_report() failed")
         return health
+
+    # -- the safety latches (COMMERCIAL_READINESS.md item 9, 2026-08-17) ----
+    def sync_guard(self) -> dict[str, Any]:
+        """The `sync_guard` report section: breaker, trash, halt, and lane A's
+        "skipped, exists" counter.
+
+        These are the four states an admin cannot see any other way. A tripped
+        breaker on one editor's machine looks EXACTLY like a quiet lane B on
+        the fleet grid -- idle, green, no error -- which is why it is a
+        reported field and a dashboard alarm rather than only a tray line.
+
+        Never raises: same contract as transport_health, and for a stronger
+        reason -- a diagnostic that can fail the report cycle would take the
+        alarm down with it."""
+        guard: dict[str, Any] = {}
+        try:
+            guard.update(self._lane_b.sync_guard_report())
+        except Exception:
+            log.exception("lane B sync_guard_report() failed")
+        try:
+            mismatches = getattr(self._lane_a, "size_mismatch_report", lambda: None)()
+            if mismatches:
+                guard["skipped_exists"] = mismatches
+        except Exception:
+            log.exception("size_mismatch_report() failed")
+        try:
+            guard["halt"] = self.halt.report()
+        except Exception:
+            log.exception("halt.report() failed")
+        if self._removal_overrides:
+            # Not drained: an overridden removal is small and must survive a
+            # failed POST, unlike the completed-file feed (which is a
+            # history and can afford to lose a tick).
+            guard["removal_overrides"] = list(self._removal_overrides)[-5:]
+        return guard
+
+    def resume_lane_b(self) -> tuple[bool, str]:
+        """Tray-facing: clear the lane B breaker after the operator has
+        checked the server. Returns (ok, message); never raises."""
+        try:
+            if not self._lane_b.resume_after_trip("tray"):
+                return False, "proxy download is not stopped"
+        except Exception:
+            log.exception("resume_lane_b failed")
+            return False, "could not resume proxy download -- see the log"
+        # A resumed lane must actually get a turn: without this the editor
+        # waits a whole rotation to find out whether the button worked.
+        try:
+            self._lane_b.arm()
+        except Exception:
+            log.exception("resume_lane_b: arm() failed")
+        if self._managed and self.sequencer is not None:
+            try:
+                self.sequencer.trigger_pass_now()
+            except Exception:
+                log.exception("resume_lane_b: could not trigger a pass")
+        return True, "Proxy download resumed."
+
+    def halt_all_sync(self, reason: str, scope: str = lane_guard.HALT_SCOPE_LOCAL) -> tuple[bool, str]:
+        """STOP -- not pause. Stops lanes A and B AND pauses every lane C
+        folder through Syncthing's own REST API, and persists it so a restart
+        does not undo it.
+
+        Pause (toggle_pause) deliberately leaves lane C running: it exists for
+        "my uplink is bad", and the assets lane is small. This is the other
+        button, the one an editor or an admin reaches for when something is
+        wrong and the answer is "stop touching the files" -- lane C carries
+        project files, Fusion comps and audio, so a halt that left it running
+        would not be a halt (COMMERCIAL_READINESS.md item 9)."""
+        changed = self.halt.engage(reason, scope)
+        try:
+            self._stop_lanes()
+        except Exception:
+            log.exception("halt: could not stop the rclone lanes")
+        self._lanes_started = False
+        self._set_express_paused(True)
+        paused = self._pause_lane_c_folders(True)
+        for lane in self.lanes:
+            try:
+                with lane._lock:
+                    lane._status.detail = self._halt_detail()
+            except Exception:
+                pass
+        if changed:
+            self._notify_tray(
+                f"SYNCING IS STOPPED on this machine.\n{reason}\n"
+                "Nothing is uploading, downloading or sharing until it is started "
+                "again.", "ccsync-companion: syncing stopped",
+            )
+        log.warning("sync halted (%s): %s -- %d lane C folder(s) paused",
+                    scope, reason, paused)
+        return True, "Syncing is stopped."
+
+    def release_halt(self, by: str = "tray", force: bool = False) -> tuple[bool, str]:
+        """Undo halt_all_sync. A FLEET halt refuses here (force=True is the
+        dashboard's own release, applied from the report reply)."""
+        ok, message = self.halt.release(by=by, force=force)
+        if not ok:
+            return False, message
+        self._pause_lane_c_folders(False)
+        self._set_express_paused(self._paused)
+        try:
+            self._start_lanes()
+        except Exception:
+            log.exception("halt release: could not start the lanes")
+        return True, message
+
+    def _halt_detail(self) -> str:
+        reason = self.halt.reason
+        who = ("your administrator stopped syncing for the whole fleet"
+               if self.halt.scope == lane_guard.HALT_SCOPE_FLEET
+               else "syncing is STOPPED on this machine")
+        return f"STOPPED: {who}" + (f" -- {reason}" if reason else "")
+
+    def _pause_lane_c_folders(self, paused: bool) -> int:
+        """Pause/unpause every lane C folder through Syncthing's REST API.
+
+        Lane C is not a process this companion owns -- Syncthing runs as its
+        own service and would happily keep syncing through a stopped
+        companion -- so stopping it means PAUSING ITS FOLDERS, which is a
+        config write per folder (see SyncthingAdmin.set_folder_paused; each
+        commits and restarts the folder, hence the long write timeout).
+
+        Only the folders this editor is actually assigned: a halt must not
+        touch some other tool's folders on a shared machine. Returns how many
+        were written; never raises."""
+        if self.syncthing_admin is None:
+            return 0
+        try:
+            folders = (self.sequencer.expected_folder_slugs()
+                       if self.sequencer is not None else [])
+        except Exception:
+            log.exception("halt: could not list lane C folders")
+            return 0
+        written = 0
+        for folder_id in folders or []:
+            try:
+                self.syncthing_admin.set_folder_paused(folder_id, paused)
+                written += 1
+            except Exception:
+                log.warning("halt: could not %s Syncthing folder %s",
+                            "pause" if paused else "resume", folder_id, exc_info=True)
+        return written
+
+    def _apply_fleet_halt(self, resp: Any) -> None:
+        """Adopt the dashboard's fleet halt flag from a report reply.
+
+        The reply already carries the upgrade advertisement and the
+        unmapped-project prompt, so the halt rides the same channel rather
+        than costing a second request -- an admin's stop reaches every tray
+        within one report interval. Never raises: this runs on the reporter
+        thread."""
+        try:
+            command = None
+            if isinstance(resp, dict):
+                commands = resp.get("commands")
+                if isinstance(commands, dict):
+                    command = commands.get("halt")
+            engaged = self.halt.note_fleet_flag(command)
+            if engaged is True:
+                self.halt_all_sync(self.halt.reason, lane_guard.HALT_SCOPE_FLEET)
+            elif engaged is False:
+                log.warning("the dashboard released the fleet halt -- restarting sync")
+                self._pause_lane_c_folders(False)
+                self._set_express_paused(self._paused)
+                self._start_lanes()
+                self._notify_tray(
+                    "Your administrator started syncing again.",
+                    "ccsync-companion: syncing resumed",
+                )
+        except Exception:
+            log.exception("could not apply the fleet halt flag")
 
     def sequencer_state(self) -> tuple[str, str]:
         """(state, human detail) for the sequencer, or ("", "") in legacy
@@ -3814,6 +4300,11 @@ class CompanionApp:
                 selection_fn=(
                     (lambda: selection.get()[0]) if selection is not None else None
                 ),
+                # The dashboard-signed identity token. The fleet routes VERIFY
+                # it since 2026-08-17 (H5): the shared report token proves
+                # "a fleet machine" and this proves whose. Same getter shape
+                # the reporter uses, so a sign-out stops claims at once.
+                identity_token_fn=lambda: self.identity.token,
             )
         except Exception:
             log.exception("failed to build the ytdl executor dependencies")
@@ -4508,6 +4999,15 @@ class CompanionApp:
                 self._notify_tray(
                     "NOT SYNCING: CCSync isn't fully set up on this machine. "
                     "Tray → Copy diagnostics for your admin.", "ccsync-companion")
+            else:
+                # The licence gate (_start_lanes) is silent apart from the log
+                # and the lane detail, and an editor whose sync simply never
+                # starts does not go looking in either. Only when there is no
+                # config error to report first -- two "NOT SYNCING" toasts at
+                # once tells them nothing (2026-08-17, item 3).
+                eula_problem = self.eula_problem()
+                if eula_problem:
+                    self._notify_tray(f"NOT SYNCING: {eula_problem}", "ccsync-companion")
 
             if just_upgraded:
                 log.info("self-upgrade to v%s completed", config_mod.VERSION)
@@ -4669,6 +5169,16 @@ def run() -> None:
         # bad log_path took the windowed exe down before anything could say
         # why (AUDIT_2 CORE-H2).
         _fallback_logging(cfg)
+    # AFTER logging, before anything that can throw. crash_report writes
+    # ~/.ccsync/crashes/<ts>.json for every unhandled exception -- main thread
+    # and worker threads alike -- carrying the tail of companion.log with it,
+    # which is the half that has usually rotated away by the time an editor
+    # reports the symptom. Local and silent by default; the network sender is
+    # opt-in twice over (crash_reporting + crash_dsn, and sentry_sdk is not in
+    # the frozen build). install() chains onto the existing hooks and never
+    # raises, so nothing below it changes (2026-08-17, COMMERCIAL_READINESS.md
+    # item 13).
+    crash_report.install(cfg)
     errors, _warnings = config_mod.validate_config(cfg)
     if errors:
         log.error(

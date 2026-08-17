@@ -8,6 +8,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+# THE dev/test flag (settings.Settings.dev_insecure, 2026-08-17). Set at import
+# time, before any test module builds a Settings, because Settings.__post_init__
+# reads it: without it every `Settings(session_secret="test-secret")` in this
+# suite would be refused at create_app by the secret-strength floor, and every
+# hand-minted session cookie would be rejected as a session this server never
+# issued. It relaxes exactly those two rules plus the CSRF token (see
+# app.csrf_gate); a deployment that sets it gets a WARNING on every boot.
+os.environ["DASH_DEV_INSECURE"] = "1"
+
 from ccsync_dashboard import db as dbmod  # noqa: E402
 
 

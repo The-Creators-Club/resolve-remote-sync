@@ -1,21 +1,25 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Creators Club Sync -- Windows editor bootstrap.
+    CC Sync -- Windows editor bootstrap.
 
 .DESCRIPTION
     Idempotent setup for a remote Resolve editor's Windows machine:
       - Tailscale (winget, else prints download URL and exits)
-      - rclone   (winget, else scoop, else direct zip to %LOCALAPPDATA%\ccsync\bin)
-      - Syncthing (winget, else direct zip to the same bin folder)
+      - rclone   (winget, else scoop, else a PINNED, sha256-verified zip to
+        %LOCALAPPDATA%\ccsync\bin)
+      - Syncthing (winget, else the same pinned + verified route)
       - the local sync root (-LocalRoot; defaults to your existing
         config.toml's local_root, else %SystemDrive%\<tree name from the
         dashboard's site manifest>)
-      - a logon task that runs `subst P: <LocalRoot>`, run once now too
+      - the tree drive (the site manifest's canonical_prefix, P: unless the
+        site says otherwise): a private loopback SMB share mapped with
+        `net use /persistent:yes`, or a `subst` logon task as the fallback
       - the Syncthing daemon: started now AND registered for autostart
       - an rclone remote config stanza template in %APPDATA%\rclone\rclone.conf
       - a seeded companion config at ~/.ccsync/config.toml
-      - the companion app (ccsync-companion.exe) installed to P:\ (if
+      - the companion app (ccsync-companion.exe) installed to
+        %LOCALAPPDATA%\ccsyncin (if
         -CompanionExeSource is given, or it's already there), registered for
         autostart, launched immediately, and confirmed still running a few
         seconds later
@@ -30,7 +34,7 @@
 
     ELEVATION: run this from a NORMAL, NON-ADMINISTRATOR PowerShell window.
     Windows keeps elevated and unelevated drive letters in separate device
-    maps, so a P: created by an elevated process is INVISIBLE to the session
+    maps, so a tree drive created by an elevated process is INVISIBLE to the session
     DaVinci Resolve, Explorer and the companion actually run in -- while this
     script's own checks succeed, so the install looks perfect and Resolve
     shows every clip offline (INST-1). Exactly one step genuinely needs admin
@@ -67,19 +71,19 @@
     either, the run reports a capability miss rather than syncing anywhere.
 
 .PARAMETER DriveLabel
-    Explorer display name for the P: drive -- by default the tree name from
-    the site manifest (else "CCSync") -- so editors can tell it apart from
-    their own drives at a glance. Set via the
-    per-user DriveIcons registry key rather than `label`: P: is a subst
-    drive, which has no volume label of its own, so `label P:` would rename
-    the whole underlying volume (e.g. all of F:) instead.
+    Explorer display name for the tree drive -- by default the tree name
+    from the site manifest (else "CCSync") -- so editors can tell it apart
+    from their own drives at a glance. Set via the per-user DriveIcons
+    registry key rather than `label`: a subst drive has no volume label of
+    its own, so `label` would rename the whole underlying volume (e.g. all
+    of F:) instead.
 
 .PARAMETER CompanionExePath
     Where ccsync-companion.exe should live and run from. Defaults to
     %LOCALAPPDATA%\ccsync\bin\ccsync-companion.exe -- the ONE canonical
     location every tool now agrees on (windows_upgrade.ps1, the onboarding
     wizard, and the companion's own self-upgrade all target the running
-    exe's path). It used to default to the LocalRoot/P:\ tree root, which
+    exe's path). It used to default to the LocalRoot/tree root, which
     left machines with copies in two places and an autostart entry racing
     the subst logon task at boot; the onboarding wizard's clean-slate step
     removes those old copies.
@@ -109,6 +113,13 @@
 .PARAMETER SftpPort
     SSH port for the rclone SFTP remote. 0 (the default) means "whatever the
     site manifest says, else 22".
+
+.PARAMETER KeepRemoteSmbOpen
+    Do NOT install the inbound-SMB block rule that normally accompanies the
+    loopback tree share. The share is the editor's whole project tree and the
+    mapping that needs it is \\localhost, which Windows Firewall never sees --
+    so blocking remote SMB costs nothing and closes a laptop-on-a-hotel-LAN
+    exposure. Pass this only on a machine that deliberately serves SMB.
 
 .PARAMETER DryRun
     Print what would happen without installing anything or touching the
@@ -170,12 +181,19 @@ param(
     # the two can pair without a human accepting anything in either GUI. A
     # fresh `syncthing generate` config knows NO devices, so the NAS's
     # connection attempts are dropped as "unknown device" 1 second after
-    # hello -- the alex_laptop reinstall flapping of 2026-07-26.
+    # hello -- the owen_laptop reinstall flapping of 2026-07-26.
     # No default: it is fetched from the site manifest (or
     # $env:CCSYNC_NAS_SYNCTHING_ID), and when neither has one the seeding is
     # a NAMED capability miss rather than a silent skip -- lane C never
     # syncing is exactly the failure that used to go unnoticed.
     [string]$NasSyncthingId = "",
+
+    # Skip the inbound-SMB block rule section 5 installs alongside the
+    # loopback tree share (2026-08-17, COMMERCIAL_READINESS.md item 15). Only
+    # for a machine that deliberately serves SMB to its network -- the share
+    # this installer creates is the editor's ENTIRE project tree, and the
+    # mapping that needs it is \\localhost, which the firewall never sees.
+    [switch]$KeepRemoteSmbOpen,
 
     [switch]$DryRun
 )
@@ -199,6 +217,12 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # INSTALLER_VERSION in installer/macos_bootstrap.sh together -- one installer
 # number covers all three, and build_editor_package.ps1 / tools\release.ps1
 # refuse on drift between any of them.
+# 1.0.30: the commercial-readiness pass (KNOWN_BUGS.md CR-17): every P: /
+# Creators_Club site derives from the manifest's canonical_prefix / tree_name;
+# rclone + Syncthing pinned by version + sha256; the loopback share gets an
+# inbound 139/445 block; the elevated helper is a per-run random name; the
+# fleet token files get icacls; setx is gone in favour of tools/load_secrets.ps1.
+# Bundles companion 0.8.0 (2026-08-17).
 # 1.0.29: this script now fetches GET /api/v1/site for the NAS Syncthing
 # device ID, remote root, rclone remote name and SFTP host/port/shell_type
 # when the flags are absent (they used to default to one fleet's values, and
@@ -234,7 +258,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.29"
+$InstallerVersion = "1.0.30"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -252,13 +276,42 @@ catch {}
 # PS 5.1 has no ternary/null-coalescing operators and no `&&`/`||` chaining --
 # every branch below is written as a plain if/else.
 
+# --------------------------------------------------------------------
+# PINNED DOWNLOADS (2026-08-17, COMMERCIAL_READINESS.md item 13)
+# --------------------------------------------------------------------
+# rclone and Syncthing used to be fetched as "latest", over TLS, and installed
+# with NO integrity check at all: `rclone-current-windows-amd64.zip`, and a
+# Syncthing version discovered at run time from the GitHub API. That is a
+# vendor-shipped installer handing an unverified binary the customer's entire
+# footage library -- and it also meant no two editor machines were guaranteed
+# to be running the same sync engine, which is a support problem before it is
+# a security one.
+#
+# Same contract as the companion's sidecar_tools.py: a release pinned by
+# version, each asset pinned by the sha256 OF THE ARCHIVE AS DOWNLOADED,
+# hardcoded here. No checksum file is fetched -- a hash served by the host
+# that served the bytes proves nothing. An artifact that does not match is
+# deleted, not installed, and the run reports a capability miss.
+#
+# Digests below were taken from the publishers' own signed checksum lists on
+# 2026-08-17 (rclone's per-version SHA256SUMS, Syncthing's release
+# sha256sum.txt.asc). Bumping a pin is a code change with a review, which is
+# what "the whole fleet now runs a different binary" deserves; the procedure
+# is in installer/README.md under "Bumping a pinned download".
+$RcloneVersion = "v1.75.0"
+$RcloneZipUrl = "https://downloads.rclone.org/$RcloneVersion/rclone-$RcloneVersion-windows-amd64.zip"
+$RcloneZipSha256 = "203581f0a7baeae873f2347483a798c79e2eaf5c384a4e9d866aa374f1c89ac0"
+$SyncthingVersion = "v2.1.3"
+$SyncthingZipUrl = "https://github.com/syncthing/syncthing/releases/download/$SyncthingVersion/syncthing-windows-amd64-$SyncthingVersion.zip"
+$SyncthingZipSha256 = "c0b79cffa6ce5dad5ed41ede86454f3325d13ccac33447a528cb59d65fbc3a21"
+
 # Hard-capability misses (rclone absent, Syncthing absent, no device ID).
 # Each one means this machine can never sync something it is supposed to
 # sync, so unlike every other warning here they must NOT end in exit 0 with
 # the wizard showing a green DONE page (INST-5).
 $script:CapabilityMisses = @()
 
-# Set when a P: mount had to be made from an elevated token after all -- the
+# Set when the tree-drive mount had to be made from an elevated token after all -- the
 # editor then needs to log off and back on before Resolve can see it.
 $script:MappedWhileElevated = $false
 
@@ -306,13 +359,83 @@ function Ensure-Dir {
     }
 }
 
+# Strip inheritance and leave exactly three principals on a file or directory:
+# this user, SYSTEM, Administrators (2026-08-17, COMMERCIAL_READINESS.md item
+# 15). Windows creates files under %USERPROFILE% at the profile's inherited
+# ACL, which on a machine with more than one local account includes anything
+# that account can read -- and ~/.ccsync/config.toml and identity.json both
+# hold the FLEET TOKEN in clear text. macOS has chmod 600 on both since the
+# port; Windows had nothing. `icacls`, not Set-Acl: PS 5.1's Set-Acl needs a
+# full SDDL round-trip to remove inheritance and gets the owner wrong on a
+# file created by a different token.
+#
+# Best-effort by design: a failure here is a warning, never a stop. An install
+# that aborts because of a permissions cosmetic leaves the editor with no
+# working sync at all, which is strictly worse than a readable token on a
+# single-user laptop.
+function Protect-CCSyncPath {
+    param([string]$Path, [string]$What = "")
+
+    if ($DryRun) {
+        Write-Step "[dry-run] would restrict $Path to $env:USERNAME + SYSTEM + Administrators (icacls /inheritance:r)"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try {
+        # 2>&1 into $null: icacls writes its "processed 1 files" chatter to
+        # stdout and any per-ACE complaint to stderr, and a native stderr write
+        # is fatal under $ErrorActionPreference = 'Stop'.
+        $me = "$env:USERDOMAIN\$env:USERNAME"
+        cmd /c "icacls `"$Path`" /inheritance:r /grant:r `"$me`":(F) `"*S-1-5-18`":(F) `"*S-1-5-32-544`":(F) >nul 2>&1"
+        if ($LASTEXITCODE -eq 0) {
+            if ($What) { Write-Step "restricted $What to you, SYSTEM and Administrators" }
+        }
+        else {
+            Write-Warn2 "could not tighten the permissions on $Path (icacls exit $LASTEXITCODE) -- it holds your fleet token, so check it by hand if this machine has other local accounts"
+        }
+    }
+    catch {
+        Write-Warn2 "could not tighten the permissions on $Path ($($_.Exception.Message)) -- it holds your fleet token, so check it by hand if this machine has other local accounts"
+    }
+}
+
+# Verifies a downloaded file against a PINNED sha256 (2026-08-17,
+# COMMERCIAL_READINESS.md item 13). Returns $true only on an exact match; on
+# anything else the file is DELETED before the caller can unpack it, which is
+# the whole point -- a tampered or truncated archive must never reach
+# Expand-Archive, let alone %LOCALAPPDATA%\ccsync\bin.
+#
+# Same contract as the companion's sidecar_tools.py: the digest is of the
+# archive AS DOWNLOADED, hardcoded here, checked against a real download when
+# the pin was set. No checksum file is fetched -- fetching the hash from the
+# same host that served the bytes verifies nothing.
+function Test-PinnedDownload {
+    param([string]$Path, [string]$ExpectedSha256, [string]$What)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Warn2 "$What was not downloaded"
+        return $false
+    }
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -eq $ExpectedSha256.ToLowerInvariant()) {
+        Write-Step "verified $What (sha256 $($actual.Substring(0,16))...)"
+        return $true
+    }
+    Write-Warn2 "CHECKSUM MISMATCH for $What"
+    Write-Warn2 "  expected sha256 $ExpectedSha256"
+    Write-Warn2 "  got      sha256 $actual"
+    Write-Warn2 "The download was NOT installed and has been deleted. Either the mirror served something else, or the pin in this installer is stale -- see 'Bumping a pinned download' in installer/README.md."
+    try { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue } catch {}
+    return $false
+}
+
 # Runs one command line through cmd.exe at the user's NORMAL (unelevated,
 # medium-integrity) level, even when this process is elevated. A one-shot
 # scheduled task with -RunLevel Limited + -LogonType Interactive is the only
 # mechanism in PS 5.1 that reliably does this without a shell round-trip.
 #
 # WHY it matters: drive letters live in a per-logon-session DOS device map
-# that is ALSO split by UAC's linked tokens. A P: mapped by an elevated
+# that is ALSO split by UAC's linked tokens. A tree drive mapped by an elevated
 # process does not exist for the unelevated session Resolve, Explorer and the
 # companion run in -- and the elevated session's own Get-PSDrive happily
 # reports success, which is what made this invisible (INST-1).
@@ -352,7 +475,7 @@ function Invoke-AtUserIntegrity {
     }
 }
 
-# Every P: mount/unmount goes through here. Unelevated (the normal, and the
+# Every tree-drive mount/unmount goes through here. Unelevated (the normal, and the
 # documented, case) it just runs; elevated it is routed to the user's own
 # integrity level so the mapping is visible where it needs to be.
 function Invoke-MappingCommand {
@@ -382,14 +505,37 @@ function Invoke-MappingCommand {
 # Parses the combined output of `subst` + `net use` for ONE drive letter.
 # Pure text in, object out, so it can be reasoned about without a machine.
 #
-#   subst   -> "P:\: => C:\Creators_Club"
+#   subst   -> "P:\: => C:\CCSync"
 #   net use -> "OK           P:        \\localhost\CCSync_P   Microsoft Windows Network"
 #              "Unavailable  P:        \\nas\Share  Microsoft Windows Network"
+#
+# The letter is a PARAMETER, not a constant -- it comes from the site
+# manifest's canonical_prefix (2026-08-17, COMMERCIAL_READINESS.md item 11).
 #
 # The `net use` status column is localised and is sometimes blank, so it is
 # deliberately not matched -- the letter followed by a UNC path is the signal,
 # and "Unavailable"/"Disconnected" rows count as MAPPED (that is the whole
 # point: a persistent mapping to a sleeping NAS is still a mapping).
+# The site manifest's `canonical_prefix` -> the bare drive LETTER, uppercase.
+# Returns "" for anything this script cannot mount as a drive letter (a UNC, a
+# POSIX path, an empty manifest field) -- the caller refuses rather than
+# falling back to P:, because a site that publishes something else means it,
+# and mapping P: anyway puts the tree behind a letter no clip path mentions.
+#
+# Pure string-in/string-out so installer/tests/Test-DriveMapParser.ps1 can
+# exercise it without a machine in any particular state (2026-08-17,
+# COMMERCIAL_READINESS.md item 11).
+function ConvertFrom-CanonicalPrefix {
+    param([string]$Prefix)
+
+    if ([string]::IsNullOrWhiteSpace($Prefix)) { return "" }
+    # Anchored, and the ':' is required: "P" alone, "\\nas\share" and
+    # "/mnt/tank/tree" must all be refusals, not near-misses.
+    $m = [regex]::Match($Prefix.Trim(), '^(?i)([A-Z]):')
+    if (-not $m.Success) { return "" }
+    return $m.Groups[1].Value.ToUpperInvariant()
+}
+
 function ConvertFrom-DriveMapReport {
     param([string]$Report, [string]$Letter = "P")
 
@@ -424,16 +570,16 @@ function ConvertFrom-DriveMapReport {
 # own integrity level. Returns $null when the state could NOT be determined --
 # callers MUST treat $null as "somebody else's mapping" and refuse to touch it.
 #
-# WHY not `Test-Path "P:\"` (B21, and the same root cause as INST-1/INST-15):
+# WHY not `Test-Path "<drive>:\"` (B21, same root cause as INST-1/INST-15):
 # drive letters live in a per-logon-session device map that UAC additionally
 # splits between the linked tokens, so an ELEVATED run cannot see the mapping
 # the unelevated session holds -- yet the teardown below runs via
 # Invoke-AtUserIntegrity inside that very session. And Test-Path reports
 # $false for a DISCONNECTED persistent mapping (NAS asleep, Tailscale not up
 # -- both likely at bootstrap time) that is still in the device map and will
-# reconnect. Both read as "there is no P: here", after which the teardown
-# deleted the base rig's real NAS mapping and section 5 recreated P: as a
-# loopback of a local folder, taking every P:\Projects\... clip path in the
+# reconnect. Both read as "there is nothing mapped here", after which the
+# teardown deleted the base rig's real NAS mapping and section 5 recreated the
+# letter as a loopback of a local folder, taking every \Projects\... clip path in the
 # Resolve database offline.
 function Get-DriveMapping {
     param([string]$Letter = "P")
@@ -618,10 +764,34 @@ if ($SftpPort -le 0) { $SftpPort = 22 }
 $TreeName = Get-SiteValue "tree_name"
 if (-not $TreeName) { $TreeName = "CCSync" }
 
+# THE DRIVE LETTER IS SITE DATA, NOT A CONSTANT (2026-08-17,
+# COMMERCIAL_READINESS.md item 11). P: was a literal at ~70 places in this
+# script -- the mount, the teardown, the logon task, the loopback share name,
+# the Explorer label, the "is it ours?" guard and every message about them --
+# so a customer whose P: is already taken by a card reader had to fork the
+# installer. The manifest publishes `canonical_prefix` and everything below
+# derives from it; the companion reads the SAME key, so the two halves agree
+# by construction instead of by luck. "P:\" stays the fallback: it is what
+# every existing machine in the field is mapped as, and CLAUDE.md's
+# hardcoded-P: decision is now a default rather than a constant.
+$CanonicalPrefix = Get-SiteValue "canonical_prefix"
+if (-not $CanonicalPrefix) { $CanonicalPrefix = "P:\" }
+if ((ConvertFrom-CanonicalPrefix -Prefix $CanonicalPrefix) -eq "") {
+    # Refuse rather than fall back: a site that publishes a UNC or a POSIX
+    # prefix means something this script cannot honour, and quietly mapping
+    # P: instead would put the tree behind a letter no clip path mentions.
+    Write-Host "[ccsync] ERROR: the site manifest's canonical_prefix is '$CanonicalPrefix', which is not a drive-letter path." -ForegroundColor Red
+    Write-Host "[ccsync] Windows editors mount the tree as a drive letter; ask your admin to set canonical_prefix to e.g. 'P:\' in site.toml."
+    exit 2
+}
+$DriveLetter = ConvertFrom-CanonicalPrefix -Prefix $CanonicalPrefix
+$DriveRoot = "${DriveLetter}:"
+$CanonicalPrefix = "$DriveRoot\"
+
 # -LocalRoot resolves against the EXISTING install before any fallback: a
-# re-run that quietly picked a different folder would subst P: at an empty
-# directory and leave the real tree stranded, which is worse than any
-# default could be.
+# re-run that quietly picked a different folder would subst the tree drive at
+# an empty directory and leave the real tree stranded, which is worse than
+# any default could be.
 if (-not $LocalRoot) {
     $existingConfig = "$env:USERPROFILE\.ccsync\config.toml"
     if (Test-Path -LiteralPath $existingConfig) {
@@ -640,13 +810,13 @@ if (-not $LocalRoot) {
 }
 if (-not $DriveLabel) { $DriveLabel = $TreeName }
 
-# A double quote in -LocalRoot cannot survive the `cmd /c subst P: "<root>"`
-# command line the logon remap runs through, and there is no escaping that
-# fixes it -- so refuse up front rather than install a machine whose P: never
-# comes back after a reboot (INST-2).
+# A double quote in -LocalRoot cannot survive the `cmd /c subst <drive>:
+# "<root>"` command line the logon remap runs through, and there is no
+# escaping that fixes it -- so refuse up front rather than install a machine
+# whose tree drive never comes back after a reboot (INST-2).
 if ($LocalRoot -match '"') {
     Write-Host "[ccsync] ERROR: -LocalRoot contains a double-quote character: $LocalRoot" -ForegroundColor Red
-    Write-Host "[ccsync] The logon remap runs 'subst P: `"<LocalRoot>`"' through cmd, which a quote breaks irrecoverably."
+    Write-Host "[ccsync] The logon remap runs 'subst $DriveRoot `"<LocalRoot>`"' through cmd, which a quote breaks irrecoverably."
     Write-Host "[ccsync] Rename the folder (or pick a different one) and re-run."
     exit 2
 }
@@ -675,14 +845,14 @@ if (-not $IsElevated) {
 }
 else {
     # UAC linked-token isolation: drive letters are per-logon-session AND
-    # per-token, so a P: mapped by this elevated process does not exist in
+    # per-token, so a tree drive mapped by this elevated process does not exist in
     # the unelevated session Resolve and Explorer run in. Both mapping styles
     # (net use, subst) behave identically here. Section 5 works around it by
     # doing the mapping through an unelevated helper; this is the warning for
     # when that can't be done (INST-1).
     Write-Warn2 "this PowerShell window is ELEVATED (running as administrator)."
     Write-Warn2 "Drive letters mapped by an elevated process are INVISIBLE to your normal, unelevated session -- which is the one DaVinci Resolve runs in."
-    Write-Warn2 "This script will try to create the P: mapping at your normal integrity level anyway (see section 5). If that fails, P: will not appear until you log off and back on."
+    Write-Warn2 "This script will try to create the $DriveRoot mapping at your normal integrity level anyway (see section 5). If that fails, $DriveRoot will not appear until you log off and back on."
     Write-Warn2 "Next time, run this from a NORMAL (non-administrator) PowerShell window -- it asks for elevation only for the one step that genuinely needs it."
 }
 
@@ -768,14 +938,14 @@ else {
         }
     }
     if (-not $installed) {
-        $zipUrl = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
-        $zipPath = "$env:TEMP\rclone-current-windows-amd64.zip"
+        $zipUrl = $RcloneZipUrl
+        $zipPath = "$env:TEMP\rclone-$RcloneVersion-windows-amd64.zip"
         $extractDir = "$env:TEMP\rclone-extract"
         if ($DryRun) {
-            Write-Step "[dry-run] would download $zipUrl to $zipPath, extract, and copy rclone.exe to $BinDir"
+            Write-Step "[dry-run] would download $zipUrl to $zipPath, verify sha256 $RcloneZipSha256, extract, and copy rclone.exe to $BinDir"
         }
         else {
-            Write-Step "downloading rclone from $zipUrl ..."
+            Write-Step "downloading rclone $RcloneVersion from $zipUrl ..."
             # -UseBasicParsing skips the IE DOM parser; SilentlyContinue on
             # $ProgressPreference removes PS 5.1's per-chunk progress render,
             # which costs an order of magnitude on a multi-MB download; and
@@ -789,11 +959,18 @@ else {
             finally {
                 $ProgressPreference = $prevProgress
             }
-            if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
-            Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-            $exe = Get-ChildItem -Path $extractDir -Filter "rclone.exe" -Recurse | Select-Object -First 1
+            # Verified BEFORE Expand-Archive: a tampered or truncated archive
+            # must never be inflated onto the disk, let alone into the bin dir
+            # the companion runs things out of.
+            $exe = $null
+            if (Test-PinnedDownload -Path $zipPath -ExpectedSha256 $RcloneZipSha256 -What "rclone $RcloneVersion") {
+                if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+                Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+                $exe = Get-ChildItem -Path $extractDir -Filter "rclone.exe" -Recurse | Select-Object -First 1
+                if ($null -eq $exe) { Write-Warn2 "could not find rclone.exe inside the downloaded zip" }
+            }
             if ($null -eq $exe) {
-                Write-Warn2 "could not find rclone.exe inside the downloaded zip"
+                Write-Warn2 "rclone was not installed from the direct download"
             }
             else {
                 Copy-Item -Path $exe.FullName -Destination "$BinDir\rclone.exe" -Force
@@ -903,9 +1080,8 @@ if (-not $DryRun) {
 
 # GitHub's /releases/latest/download/<name> alias only resolves when that
 # EXACT filename exists in the release. Syncthing's assets are version-named
-# (syncthing-windows-amd64-v2.1.2.zip), so the unversioned alias 404s. Two
-# ways to learn the real name, API first, redirect-sniffing as a backstop
-# (the unauthenticated API is rate-limited to 60 requests/hour per IP).
+# (syncthing-windows-amd64-v2.1.3.zip), so the unversioned alias 404s -- which
+# is why the pinned URL above names the version explicitly.
 function Get-SyncthingExePath {
     if (Test-CommandExists "syncthing") { return (Get-Command syncthing).Source }
     if (Test-Path "$BinDir\syncthing.exe") { return "$BinDir\syncthing.exe" }
@@ -914,40 +1090,12 @@ function Get-SyncthingExePath {
     return $null
 }
 
-function Get-SyncthingZipUrl {
-    $pattern = "syncthing-windows-amd64-*.zip"
-
-    try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/syncthing/syncthing/releases/latest" `
-            -Headers @{ "User-Agent" = "ccsync-bootstrap" } -TimeoutSec 30
-        $asset = $release.assets | Where-Object { $_.name -like $pattern } | Select-Object -First 1
-        if ($asset) {
-            Write-Step "resolved Syncthing asset via GitHub API: $($asset.name)"
-            return $asset.browser_download_url
-        }
-        Write-Warn2 "GitHub API returned no asset matching $pattern; trying redirect method"
-    }
-    catch {
-        Write-Warn2 "GitHub API lookup failed ($($_.Exception.Message)); trying redirect method"
-    }
-
-    try {
-        $resp = Invoke-WebRequest -Uri "https://github.com/syncthing/syncthing/releases/latest" `
-            -UseBasicParsing -TimeoutSec 30
-        $finalUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
-        if ($finalUrl -match "/tag/(v[0-9][^/]*)$") {
-            $tag = $Matches[1]
-            Write-Step "resolved Syncthing version via release redirect: $tag"
-            return "https://github.com/syncthing/syncthing/releases/download/$tag/syncthing-windows-amd64-$tag.zip"
-        }
-        Write-Warn2 "could not parse a version tag out of '$finalUrl'"
-    }
-    catch {
-        Write-Warn2 "release redirect lookup failed: $($_.Exception.Message)"
-    }
-
-    return $null
-}
+# The version-at-run-time lookup this replaces (GitHub API first, release-URL
+# redirect-sniffing as a backstop) is gone with the pin: it made every editor
+# machine a different Syncthing depending on the day it was installed, it cost
+# two unauthenticated GitHub calls against a 60/hour/IP budget, and its answer
+# was installed unverified (2026-08-17, COMMERCIAL_READINESS.md item 13). The
+# pinned asset URL is stable -- GitHub release assets are immutable.
 
 Write-Step "checking Syncthing..."
 $syncthingPath = Get-SyncthingExePath
@@ -980,38 +1128,36 @@ else {
     }
     if (-not $installed) {
         if ($DryRun) {
-            Write-Step "[dry-run] would resolve the latest syncthing-windows-amd64-<version>.zip via the GitHub API, download, extract, and copy syncthing.exe to $BinDir"
+            Write-Step "[dry-run] would download $SyncthingZipUrl, verify sha256 $SyncthingZipSha256, extract, and copy syncthing.exe to $BinDir"
         }
         else {
-            $zipUrl = Get-SyncthingZipUrl
-            if ($null -eq $zipUrl) {
-                Write-Warn2 "could not determine a Syncthing download URL -- install Syncthing manually from https://syncthing.net/downloads/ and re-run this script"
+            $zipUrl = $SyncthingZipUrl
+            $zipPath = "$env:TEMP\syncthing-windows-amd64-$SyncthingVersion.zip"
+            $extractDir = "$env:TEMP\syncthing-extract"
+            Write-Step "downloading Syncthing $SyncthingVersion from $zipUrl ..."
+            # See the rclone download above for why all three of these
+            # matter (INST-19).
+            $prevProgress = $ProgressPreference
+            $ProgressPreference = 'SilentlyContinue'
+            try {
+                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
             }
-            else {
-                $zipPath = "$env:TEMP\syncthing-windows-amd64.zip"
-                $extractDir = "$env:TEMP\syncthing-extract"
-                Write-Step "downloading Syncthing from $zipUrl ..."
-                # See the rclone download above for why all three of these
-                # matter (INST-19).
-                $prevProgress = $ProgressPreference
-                $ProgressPreference = 'SilentlyContinue'
-                try {
-                    Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
-                }
-                finally {
-                    $ProgressPreference = $prevProgress
-                }
+            finally {
+                $ProgressPreference = $prevProgress
+            }
+            $exe = $null
+            if (Test-PinnedDownload -Path $zipPath -ExpectedSha256 $SyncthingZipSha256 -What "Syncthing $SyncthingVersion") {
                 if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
                 Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
                 $exe = Get-ChildItem -Path $extractDir -Filter "syncthing.exe" -Recurse | Select-Object -First 1
                 if ($null -eq $exe) {
                     Write-Warn2 "could not find syncthing.exe inside the downloaded zip -- install Syncthing manually"
                 }
-                else {
-                    Copy-Item -Path $exe.FullName -Destination "$BinDir\syncthing.exe" -Force
-                    Write-Step "installed Syncthing to $BinDir\syncthing.exe"
-                    $syncthingPath = "$BinDir\syncthing.exe"
-                }
+            }
+            if ($exe) {
+                Copy-Item -Path $exe.FullName -Destination "$BinDir\syncthing.exe" -Force
+                Write-Step "installed Syncthing to $BinDir\syncthing.exe"
+                $syncthingPath = "$BinDir\syncthing.exe"
             }
         }
     }
@@ -1030,45 +1176,98 @@ $CCRoot = $LocalRoot
 Ensure-Dir $CCRoot
 
 # --------------------------------------------------------------------
-# 5. Logon task: subst P: <LocalRoot> -- TEAR DOWN, then recreate
+# 5. Logon task: subst <tree drive> <LocalRoot> -- TEAR DOWN, then recreate
 # --------------------------------------------------------------------
 # Always tear down whatever mapping/autostart exists and recreate it fresh.
 # The old skip-if-anything-exists behavior had two live failure modes: a
 # machine bootstrapped unelevated kept its Run-entry fallback forever (never
 # upgraded to the proper task even when re-run elevated), and an SMB-mapped
-# P: (net use) is invisible to `subst`, so the old detection concluded "not
-# mapped" and then failed to map over it.
+# tree drive (net use) is invisible to `subst`, so the old detection
+# concluded "not mapped" and then failed to map over it.
 #
 # Register-ScheduledTask needs admin rights when a -Principal is supplied.
 # The documented launch path ("Run with PowerShell") is unelevated, so this
 # is the common case, not the exception -- it must warn and continue rather
 # than take the rest of the script down with $ErrorActionPreference=Stop.
-# Set when P: turns out to be somebody else's mapping (a real NAS share).
-# Section 5 AND section 5b both bail out on it: relabelling a drive this
-# installer did not create is the same class of mistake as remapping it.
+# Set when the tree drive turns out to be somebody else's mapping (a real NAS
+# share). Section 5 AND section 5b both bail out on it: relabelling a drive
+# this installer did not create is the same class of mistake as remapping it.
 $script:PIsForeign = $false
-$TaskName = "CCSync-SubstP"
+# Task, Run-entry and share names all carry the LETTER, so a site that maps
+# the tree somewhere other than P: gets its own names and a P: machine keeps
+# the exact names it was provisioned with -- the teardown below has to be able
+# to find what an older installer registered (2026-08-17, item 11).
+$TaskName = "CCSync-Subst$DriveLetter"
 # QUOTED, always. This exact string is handed to `cmd /c` twice -- as the
 # scheduled task's -Argument and inside the .cmd shim Register-HiddenRunEntry
 # writes -- and cmd splits on spaces. Unquoted, a -LocalRoot of
-# "D:\Video Projects\Creators_Club" becomes `subst P: D:\Video` at EVERY
-# logon: "Path not found", no window, no log, no P:, Resolve fully offline,
+# "D:\Video Projects\<tree>" becomes `subst P: D:\Video` at EVERY logon:
+# "Path not found", no window, no log, no tree drive, Resolve fully offline,
 # while the companion (which has the real path) reports green. The direct
 # call at the bottom of this section is fine either way -- PowerShell
 # auto-quotes an argument containing spaces -- which is exactly why the
 # install looked successful and only reboots broke (INST-2, measured).
-$SubstCommand = "subst P: `"$CCRoot`""
+$SubstCommand = "subst $DriveRoot `"$CCRoot`""
 $RunKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$substFallbackName = "CCSyncSubstP"
-$ShareName = "CCSync_P"
+$substFallbackName = "CCSyncSubst$DriveLetter"
+$ShareName = "CCSync_$DriveLetter"
+$SmbFirewallRuleName = "CC Sync: block remote SMB (tree share is loopback-only)"
 
-# -- "is P: ours?" guard, BEFORE any teardown and before the dry-run split --
+# Scope the loopback share to this machine (2026-08-17,
+# COMMERCIAL_READINESS.md item 15). Creating '$ShareName' turns an editor's
+# laptop into an SMB server holding the WHOLE project tree, on a machine that
+# travels; the audit found it with no firewall scoping at all, on every
+# profile, reachable from any coffee-shop LAN the editor joins.
+#
+# The rule blocks INBOUND TCP 139/445 from every remote address, on every
+# profile. That is not a typo and it does not break the mapping: Windows
+# Firewall does not filter loopback traffic, and the mapping is
+# \\localhost\<share> -- 127.0.0.1 never reaches the filter engine. A rule
+# scoped with -RemoteAddress to "loopback + the tailnet" would be weaker AND
+# wrong: Windows resolves allow/block by precedence, block wins, and the
+# built-in File and Printer Sharing allow rules are already enabled on the
+# Private profile -- so an extra ALLOW rule scoped to a few addresses would
+# restrict nothing at all. Blocking is the only expression of "only this
+# machine" the firewall actually honours.
+#
+# -KeepRemoteSmbOpen exists for the one site that deliberately shares from an
+# editor machine (a second local user, a home NAS on the same box). It is not
+# the default because the tree is the customer's whole footage library.
+#
+# Must run elevated: the unelevated path creates the rule inside the same
+# one-shot UAC helper that creates the share, because a second prompt would
+# be declined and a share without the rule is exactly the exposure.
+function Set-SmbLoopbackFirewallRule {
+    if ($KeepRemoteSmbOpen) {
+        Write-Skip "-KeepRemoteSmbOpen given -- NOT blocking remote SMB. This machine serves '$ShareName' (your whole project tree) to any network it joins."
+        return
+    }
+    if ($DryRun) {
+        Write-Step "[dry-run] would add firewall rule '$SmbFirewallRuleName' (inbound block, TCP 139/445, all profiles -- loopback is exempt, so \\localhost\$ShareName keeps working)"
+        return
+    }
+    try {
+        if (Get-NetFirewallRule -DisplayName $SmbFirewallRuleName -ErrorAction SilentlyContinue) {
+            Remove-NetFirewallRule -DisplayName $SmbFirewallRuleName -ErrorAction SilentlyContinue
+        }
+        New-NetFirewallRule -DisplayName $SmbFirewallRuleName -Direction Inbound -Action Block `
+            -Protocol TCP -LocalPort 139,445 -RemoteAddress Any -Profile Any -Enabled True `
+            -Description "CC Sync: the project-tree share is a LOOPBACK share. Windows Firewall does not filter loopback, so \\localhost keeps working while the network cannot reach the tree." | Out-Null
+        Write-Step "firewall: remote SMB blocked -- '$ShareName' is reachable only from this machine"
+    }
+    catch {
+        Write-Warn2 "could not add the '$SmbFirewallRuleName' firewall rule: $($_.Exception.Message). The '$ShareName' share is your WHOLE project tree -- add an inbound block for TCP 139/445 by hand, or re-run this script."
+    }
+}
+
+# -- "is the tree drive ours?" guard, BEFORE any teardown and before the
+# dry-run split --
 # Same test windows_uninstall.ps1 and steps.build_cleanup_plan already apply
 # (D-8), which the bootstrap never got (INST-15). A subst mapping has no
 # DisplayRoot and is always ours; a net-use mapping is ours only when it
 # points at our own loopback share. Anything else is a real NAS mapping --
 # replacing it with a loopback share of a local folder makes every
-# P:\Projects\... path in the Resolve database resolve to a nearly-empty
+# <drive>:\Projects\... path in the Resolve database resolve to a nearly-empty
 # local tree. Detected outside the -DryRun branch on purpose, so a dry run
 # reports the refusal instead of describing a remap that would never happen.
 #
@@ -1078,19 +1277,19 @@ $ShareName = "CCSync_P"
 # situations where getting this wrong destroys the base rig. "Can't tell"
 # counts as foreign.
 $existingDisplayRoot = $null
-$pMapping = Get-DriveMapping -Letter "P"
+$pMapping = Get-DriveMapping -Letter $DriveLetter
 if ($null -eq $pMapping) {
     $script:PIsForeign = $true
     $existingDisplayRoot = "<could not be determined>"
-    Write-Warn2 "could not read this logon session's drive mappings, so P: is being treated as somebody else's and left alone. That is deliberate: guessing 'there is no P:' here is how a real NAS mapping gets deleted."
+    Write-Warn2 "could not read this logon session's drive mappings, so $DriveRoot is being treated as somebody else's and left alone. That is deliberate: guessing 'there is no $DriveRoot' here is how a real NAS mapping gets deleted."
 }
 elseif ($pMapping.Mapped) {
     $existingDisplayRoot = $pMapping.Target
     if ($pMapping.Kind -eq "subst") {
-        Write-Step "P: is a subst mapping of '$existingDisplayRoot' -- this installer's own style, safe to replace"
+        Write-Step "$DriveRoot is a subst mapping of '$existingDisplayRoot' -- this installer's own style, safe to replace"
     }
-    elseif ($existingDisplayRoot -match '^(?i)\\\\localhost\\CCSync_P$') {
-        Write-Step "P: is our own loopback share '$existingDisplayRoot' -- safe to replace"
+    elseif ($existingDisplayRoot -match ('^(?i)\\\\localhost\\' + [Regex]::Escape($ShareName) + '$')) {
+        Write-Step "$DriveRoot is our own loopback share '$existingDisplayRoot' -- safe to replace"
     }
     else {
         $script:PIsForeign = $true
@@ -1098,17 +1297,18 @@ elseif ($pMapping.Mapped) {
 }
 
 if ($script:PIsForeign) {
-    Write-Host "[ccsync] ERROR: P: is already mapped to '$existingDisplayRoot' -- that is not a mapping this installer created." -ForegroundColor Red
-    Write-Warn2 "Leaving it exactly as it is. Replacing a real NAS mapping with a loopback share of a local folder would make every P:\Projects\... path in your Resolve database point at a nearly-empty local tree."
-    Write-Warn2 "If this IS the machine that should get a local P:, disconnect that mapping yourself first (Explorer > This PC > right-click P: > Disconnect) and re-run."
+    Write-Host "[ccsync] ERROR: $DriveRoot is already mapped to '$existingDisplayRoot' -- that is not a mapping this installer created." -ForegroundColor Red
+    Write-Warn2 "Leaving it exactly as it is. Replacing a real NAS mapping with a loopback share of a local folder would make every $CanonicalPrefix`Projects\... path in your Resolve database point at a nearly-empty local tree."
+    Write-Warn2 "If this IS the machine that should get a local $DriveRoot, disconnect that mapping yourself first (Explorer > This PC > right-click $DriveRoot > Disconnect) and re-run."
     Write-Warn2 "If this is the base rig, you want the BASE role in onboard.exe -- it never touches drive mappings."
-    Write-Warn2 "Skipping the whole P: mapping section; everything else below still runs."
+    Write-Warn2 "Skipping the whole $DriveRoot mapping section; everything else below still runs."
 }
 elseif ($DryRun) {
-    Write-Step "[dry-run] would remove any existing '$TaskName' task / '$substFallbackName' Run entry, unmount P: (subst /D + net use /delete), then remap P: (elevated: loopback share '\\localhost\$ShareName' -> $CCRoot via net use /persistent:yes; unelevated: logon task + '$SubstCommand')"
+    Write-Step "[dry-run] would remove any existing '$TaskName' task / '$substFallbackName' Run entry, unmount $DriveRoot (subst /D + net use /delete), then remap $DriveRoot (elevated: loopback share '\\localhost\$ShareName' -> $CCRoot via net use /persistent:yes; unelevated: logon task + '$SubstCommand')"
+    Set-SmbLoopbackFirewallRule
 }
 else {
-    # -- tear down: task, Run-entry fallback (+ its shim files), P: mapping --
+    # -- tear down: task, Run-entry fallback (+ its shim files), drive mapping --
     try {
         if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
@@ -1135,8 +1335,8 @@ else {
     # Routed through Invoke-MappingCommand so an elevated run tears down the
     # mapping in the session that actually holds it (the user's), not this
     # process's private view of it.
-    Invoke-MappingCommand "subst P: /D" | Out-Null
-    Invoke-MappingCommand "net use P: /delete /y" | Out-Null
+    Invoke-MappingCommand "subst $DriveRoot /D" | Out-Null
+    Invoke-MappingCommand "net use $DriveRoot /delete /y" | Out-Null
 
     # -- recreate. Preferred style: a private loopback SMB share of the
     # local root, mapped with `net use /persistent:yes`. Explorer honors
@@ -1151,9 +1351,18 @@ else {
     # THIS process at the user's normal integrity level -- a drive mapped
     # by an elevated token is invisible to the user's unelevated session
     # (UAC linked-token isolation), which would leave Resolve staring at a
-    # missing P: until the next logon. If the share can't be created (UAC
-    # declined, SMB server off), fall back to the old subst + logon-task
+    # missing tree drive until the next logon. If the share can't be created
+    # (UAC declined, SMB server off), fall back to the old subst + logon-task
     # style: everything works, the drive just shows the host volume's name.
+    #
+    # WHY A SHARE AT ALL, given it turns an editor laptop into an SMB server
+    # (COMMERCIAL_READINESS.md item 15): the share exists ONLY so Explorer
+    # will display the tree's name on the drive. It is a LOOPBACK share --
+    # nothing outside this machine is ever meant to touch it, and the mapping
+    # is literally \\localhost\<share>. Section 5d therefore blocks remote
+    # SMB inbound; Windows Firewall does not filter loopback traffic, so the
+    # mapping keeps working while the network cannot reach the whole project
+    # tree. The FullAccess grant is this one user, never Everyone.
     $script:PMappedViaShare = $false
     $shareReady = $false
     $existingShare = $null
@@ -1161,6 +1370,23 @@ else {
     if ($existingShare -and $existingShare.Path -eq $CCRoot) {
         Write-Skip "loopback share '$ShareName' already -> $CCRoot"
         $shareReady = $true
+        # The share survives a re-run; the firewall rule may not (a machine
+        # provisioned before 2026-08-17 has the share and no rule). Adding it
+        # needs admin, and this branch raises no UAC prompt of its own -- so
+        # do it if we already have the rights, and otherwise say exactly what
+        # to run rather than leaving the whole tree quietly served to the LAN.
+        $haveRule = $null
+        try { $haveRule = Get-NetFirewallRule -DisplayName $SmbFirewallRuleName -ErrorAction SilentlyContinue } catch {}
+        if (-not $haveRule -and -not $KeepRemoteSmbOpen) {
+            if ($IsElevated -or $DryRun) {
+                Set-SmbLoopbackFirewallRule
+            }
+            else {
+                Write-Warn2 "'$ShareName' (your whole project tree) is shared but remote SMB is NOT blocked on this machine. In an ADMINISTRATOR PowerShell, run:"
+                Write-Warn2 "    New-NetFirewallRule -DisplayName '$SmbFirewallRuleName' -Direction Inbound -Action Block -Protocol TCP -LocalPort 139,445 -RemoteAddress Any -Profile Any"
+                Write-Warn2 "It cannot break the mapping: Windows Firewall does not filter loopback, and the drive is mapped from \\localhost."
+            }
+        }
     }
     elseif ($IsElevated) {
         try {
@@ -1171,6 +1397,7 @@ else {
             New-SmbShare -Name $ShareName -Path $CCRoot -FullAccess "$env:USERDOMAIN\$env:USERNAME" -ErrorAction Stop | Out-Null
             Write-Step "created loopback share '$ShareName' -> $CCRoot"
             $shareReady = $true
+            Set-SmbLoopbackFirewallRule
         }
         catch {
             Write-Warn2 "could not create share '$ShareName': $($_.Exception.Message) -- falling back to subst"
@@ -1179,10 +1406,28 @@ else {
     else {
         # One-off elevated helper for just the share. -File + argument array
         # keeps paths with spaces intact (no nested-quote surgery).
+        #
+        # WHERE the helper lives is a security decision, not a convenience
+        # (2026-08-17, COMMERCIAL_READINESS.md item 15). It used to be
+        # %TEMP%\ccsync_make_share.ps1: a FIXED name in a directory every
+        # process on the machine can write, handed to a process that is about
+        # to be elevated. Any unprivileged local process could have parked its
+        # own file there first (or replaced ours between the write and the
+        # RunAs) and had the editor's UAC prompt run it as administrator.
+        # Now: a per-user directory under %LOCALAPPDATA%, a per-run random
+        # name, an ACL stripped down to this user + SYSTEM + Administrators,
+        # and the file is deleted in `finally` whether the prompt was approved
+        # or not.
+        $helperPath = $null
         try {
-            $helperPath = Join-Path $env:TEMP "ccsync_make_share.ps1"
+            $helperDir = Join-Path $env:LOCALAPPDATA "ccsync\elevate"
+            if (-not (Test-Path -LiteralPath $helperDir)) {
+                New-Item -ItemType Directory -Path $helperDir -Force | Out-Null
+            }
+            Protect-CCSyncPath -Path $helperDir
+            $helperPath = Join-Path $helperDir ("make_share_" + [Guid]::NewGuid().ToString("N") + ".ps1")
             @'
-param([string]$Name, [string]$Path, [string]$Grantee)
+param([string]$Name, [string]$Path, [string]$Grantee, [string]$FirewallRule)
 $ErrorActionPreference = "Stop"
 $existing = Get-SmbShare -Name $Name -ErrorAction SilentlyContinue
 if ($existing -and $existing.Path -ne $Path) {
@@ -1192,11 +1437,27 @@ if ($existing -and $existing.Path -ne $Path) {
 if (-not $existing) {
     New-SmbShare -Name $Name -Path $Path -FullAccess $Grantee | Out-Null
 }
+# Same elevated trip does the firewall rule: a second UAC prompt for it would
+# be declined, and a share created without it is the exposure this rule
+# exists to close (COMMERCIAL_READINESS.md item 15).
+if ($FirewallRule) {
+    try {
+        if (Get-NetFirewallRule -DisplayName $FirewallRule -ErrorAction SilentlyContinue) {
+            Remove-NetFirewallRule -DisplayName $FirewallRule -ErrorAction SilentlyContinue
+        }
+        New-NetFirewallRule -DisplayName $FirewallRule -Direction Inbound -Action Block `
+            -Protocol TCP -LocalPort 139,445 -RemoteAddress Any -Profile Any -Enabled True `
+            -Description "CC Sync: the project-tree share is a LOOPBACK share. Windows Firewall does not filter loopback, so \\localhost keeps working while the network cannot reach the tree." | Out-Null
+    }
+    catch {}
+}
 '@ | Set-Content -LiteralPath $helperPath -Encoding UTF8
+            Protect-CCSyncPath -Path $helperPath
             Write-Step "creating the '$ShareName' share needs administrator rights -- approve the UAC prompt..."
             $proc = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList @(
                 "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $helperPath,
-                "-Name", $ShareName, "-Path", $CCRoot, "-Grantee", "$env:USERDOMAIN\$env:USERNAME"
+                "-Name", $ShareName, "-Path", $CCRoot, "-Grantee", "$env:USERDOMAIN\$env:USERNAME",
+                "-FirewallRule", $SmbFirewallRuleName
             )
             $madeShare = $null
             try { $madeShare = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue } catch {}
@@ -1209,21 +1470,29 @@ if (-not $existing) {
             }
         }
         catch {
-            Write-Warn2 "UAC declined or share creation failed: $($_.Exception.Message) -- falling back to subst (P: will show the host volume's name in Explorer)"
+            Write-Warn2 "UAC declined or share creation failed: $($_.Exception.Message) -- falling back to subst ($DriveRoot will show the host volume's name in Explorer)"
+        }
+        finally {
+            # The helper carried no secret, but it is a script that was just
+            # run as administrator: it does not get to linger under a
+            # predictable-enough path for the next UAC prompt to find.
+            if ($helperPath) {
+                try { Remove-Item -LiteralPath $helperPath -Force -ErrorAction SilentlyContinue } catch {}
+            }
         }
     }
 
     if ($shareReady) {
-        $mappedOk = Invoke-MappingCommand "net use P: \\localhost\$ShareName /persistent:yes" `
-            "mapped P: -> \\localhost\$ShareName (persistent -- no logon task needed)"
+        $mappedOk = Invoke-MappingCommand "net use $DriveRoot \\localhost\$ShareName /persistent:yes" `
+            "mapped $DriveRoot -> \\localhost\$ShareName (persistent -- no logon task needed)"
         if ($mappedOk) {
             if (-not $IsElevated) {
-                Write-Step "mapped P: -> \\localhost\$ShareName (persistent -- no logon task needed)"
+                Write-Step "mapped $DriveRoot -> \\localhost\$ShareName (persistent -- no logon task needed)"
             }
             $script:PMappedViaShare = $true
         }
         else {
-            Write-Warn2 "net use P: \\localhost\$ShareName failed -- falling back to subst"
+            Write-Warn2 "net use $DriveRoot \\localhost\$ShareName failed -- falling back to subst"
         }
     }
 
@@ -1245,35 +1514,35 @@ if (-not $existing) {
         if (-not $taskRegistered) {
             $okFallback = Register-HiddenRunEntry -Name $substFallbackName -CommandLine $SubstCommand
             if (-not $okFallback) {
-                Write-Warn2 "P: will NOT be remapped automatically at logon. Run '$SubstCommand' by hand after each reboot, or tell the admin -- do NOT re-run this script as administrator to try to fix it, that makes P: invisible to Resolve."
+                Write-Warn2 "$DriveRoot will NOT be remapped automatically at logon. Run '$SubstCommand' by hand after each reboot, or tell the admin -- do NOT re-run this script as administrator to try to fix it, that makes $DriveRoot invisible to Resolve."
             }
         }
 
-        $substOk = Invoke-MappingCommand $SubstCommand "mapped P: -> $CCRoot"
+        $substOk = Invoke-MappingCommand $SubstCommand "mapped $DriveRoot -> $CCRoot"
         if ($substOk) {
             if (-not $IsElevated) {
-                Write-Step "mapped P: -> $CCRoot"
+                Write-Step "mapped $DriveRoot -> $CCRoot"
             }
         }
         else {
-            Write-Warn2 "'$SubstCommand' failed -- something may still have files open on the old P:"
+            Write-Warn2 "'$SubstCommand' failed -- something may still have files open on the old $DriveRoot"
         }
     }
-}  # end: P: is ours, safe to remap
+}  # end: the tree drive is ours, safe to remap
 
 if ($script:MappedWhileElevated) {
     Write-Host ""
     Write-Host "[ccsync] ******************************************************************" -ForegroundColor Red
-    Write-Warn2 "P: HAD TO BE MAPPED FROM THIS ELEVATED WINDOW."
-    Write-Warn2 "Windows keeps elevated and normal drive letters apart, so P: does NOT exist yet for DaVinci Resolve, Explorer, or the companion app."
-    Write-Warn2 "LOG OFF AND BACK ON (or restart) BEFORE OPENING RESOLVE. After that P: is there for good."
+    Write-Warn2 "$DriveRoot HAD TO BE MAPPED FROM THIS ELEVATED WINDOW."
+    Write-Warn2 "Windows keeps elevated and normal drive letters apart, so $DriveRoot does NOT exist yet for DaVinci Resolve, Explorer, or the companion app."
+    Write-Warn2 "LOG OFF AND BACK ON (or restart) BEFORE OPENING RESOLVE. After that $DriveRoot is there for good."
     Write-Warn2 "Do not re-run this installer to 'fix' it -- it will report success from this window every time."
     Write-Host "[ccsync] ******************************************************************" -ForegroundColor Red
     Write-Host ""
 }
 
 # --------------------------------------------------------------------
-# 5b. Name the P: drive in Explorer
+# 5b. Name the tree drive in Explorer
 # --------------------------------------------------------------------
 # Only net-use (network-style) drives can be display-named: Explorer reads
 # the per-user MountPoints2 _LabelFromReg value for them -- the same value
@@ -1282,20 +1551,20 @@ if ($script:MappedWhileElevated) {
 # under both HKCU and HKLM, autorun.inf label= -- all verified dead on
 # build 26200): they always show the host volume's label. That asymmetry is
 # WHY section 5 prefers the loopback-share mapping.
-Write-Step "labelling the P: drive as '$DriveLabel' in Explorer..."
+Write-Step "labelling the $DriveRoot drive as '$DriveLabel' in Explorer..."
 if ($script:PIsForeign) {
     # Section 5 refused to touch this mapping; renaming it in Explorer is the
     # same mistake in cosmetic form -- and _LabelFromReg would then persist on
     # someone else's mount point long after this script is forgotten (INST-15).
-    Write-Skip "P: is not this installer's mapping -- leaving its Explorer name alone too"
+    Write-Skip "$DriveRoot is not this installer's mapping -- leaving its Explorer name alone too"
 }
 elseif ($DryRun) {
-    Write-Step "[dry-run] would set MountPoints2 _LabelFromReg = $DriveLabel for P:'s UNC path (net-use mappings only)"
+    Write-Step "[dry-run] would set MountPoints2 _LabelFromReg = $DriveLabel for $DriveRoot's UNC path (net-use mappings only)"
 }
 else {
     try {
         $displayRoot = $null
-        try { $displayRoot = (Get-PSDrive -Name P -ErrorAction Stop).DisplayRoot } catch {}
+        try { $displayRoot = (Get-PSDrive -Name $DriveLetter -ErrorAction Stop).DisplayRoot } catch {}
         if ([string]::IsNullOrWhiteSpace($displayRoot) -and $script:PMappedViaShare) {
             # Elevated run: the mapping was deliberately made in the user's
             # own session, so it is invisible from here. We still know what
@@ -1309,7 +1578,7 @@ else {
             # name (INST-1). The labelled mapping comes from approving the
             # one UAC prompt this script raises for the share, from a NORMAL
             # PowerShell window.
-            Write-Warn2 "P: is a subst mapping, so Explorer will show the host volume's name instead of '$DriveLabel'. Cosmetic only -- everything syncs exactly the same. To get the nicer name, re-run this script from a NORMAL (non-administrator) PowerShell window and approve the single UAC prompt it raises for the '$ShareName' share."
+            Write-Warn2 "$DriveRoot is a subst mapping, so Explorer will show the host volume's name instead of '$DriveLabel'. Cosmetic only -- everything syncs exactly the same. To get the nicer name, re-run this script from a NORMAL (non-administrator) PowerShell window and approve the single UAC prompt it raises for the '$ShareName' share."
         }
         else {
             # \\localhost\CCSync_P -> ##localhost#CCSync_P
@@ -1320,7 +1589,7 @@ else {
                 $currentLabel = (Get-ItemProperty -LiteralPath $mpKey -ErrorAction SilentlyContinue)._LabelFromReg
             }
             if ($currentLabel -eq $DriveLabel) {
-                Write-Skip "P: already labelled '$DriveLabel' in Explorer"
+                Write-Skip "$DriveRoot already labelled '$DriveLabel' in Explorer"
             }
             else {
                 # New-Item -Force on a registry key that ALREADY EXISTS
@@ -1331,7 +1600,7 @@ else {
                     New-Item -Path $mpKey -Force | Out-Null
                 }
                 Set-ItemProperty -LiteralPath $mpKey -Name "_LabelFromReg" -Value $DriveLabel
-                Write-Step "labelled P: as '$DriveLabel' ($mpName)"
+                Write-Step "labelled $DriveRoot as '$DriveLabel' ($mpName)"
                 # This used to force-kill explorer.exe to make the new name
                 # show immediately. Never again: Stop-Process -Force kills
                 # EVERY Explorer in reach (all sessions when elevated -- other
@@ -1358,16 +1627,16 @@ public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr 
                     $refreshed = $false
                 }
                 if ($refreshed) {
-                    Write-Step "asked Explorer to refresh (SHChangeNotify) -- if P: still shows its old name, it will be correct at your next sign-in"
+                    Write-Step "asked Explorer to refresh (SHChangeNotify) -- if $DriveRoot still shows its old name, it will be correct at your next sign-in"
                 }
                 else {
-                    Write-Step "the '$DriveLabel' name on P: will appear the next time you sign in (Explorer caches drive names; nothing else is affected)"
+                    Write-Step "the '$DriveLabel' name on $DriveRoot will appear the next time you sign in (Explorer caches drive names; nothing else is affected)"
                 }
             }
         }
     }
     catch {
-        Write-Warn2 "could not set the Explorer label for P:: $($_.Exception.Message) -- cosmetic only, everything else still works."
+        Write-Warn2 "could not set the Explorer label for ${DriveRoot}: $($_.Exception.Message) -- cosmetic only, everything else still works."
     }
 }
 
@@ -1376,7 +1645,7 @@ function Ensure-NasSyncthingDevice {
     # REST API of the RUNNING instance (an XML edit behind a live daemon is
     # silently overwritten). Without this entry a fresh `syncthing generate`
     # config drops every NAS connection as "unknown device" one second after
-    # hello, in a permanent reconnect loop (alex_laptop, 2026-07-26).
+    # hello, in a permanent reconnect loop (owen_laptop, 2026-07-26).
     #
     # autoAcceptFolders stays FALSE on purpose: folder offers are accepted by
     # the companion's sequencer at the CORRECT local path. Syncthing's own
@@ -1685,6 +1954,7 @@ if (-not (Test-Path -LiteralPath $KeyFilePath)) {
 $CCSyncConfigDir = "$env:USERPROFILE\.ccsync"
 $CCSyncConfigPath = "$CCSyncConfigDir\config.toml"
 $LocalRootToml = $CCRoot -replace '\\', '\\'
+$CanonicalPrefixToml = $CanonicalPrefix -replace '\\', '\\'
 # A blank remote_root written as `remote_root = ""` looks like a deliberate
 # answer -- to the companion, and to the next re-run of this script. Leaving
 # the key out entirely is what makes validate_config name it as missing (S-1).
@@ -1693,6 +1963,20 @@ if ($RemoteRoot) {
 }
 else {
     $RemoteRootToml = "# remote_root NOT SET -- ask your admin for the absolute NAS tree path"
+}
+
+# Tighten ~/.ccsync itself before anything is written into it, so identity.json
+# -- which the companion, not this script, creates on first run -- inherits a
+# restricted ACL instead of the profile's default one. Re-running this on an
+# already-provisioned machine is how existing editors get the fix (2026-08-17,
+# COMMERCIAL_READINESS.md item 15).
+if (Test-Path -LiteralPath $CCSyncConfigDir) {
+    Protect-CCSyncPath -Path $CCSyncConfigDir -What "$CCSyncConfigDir"
+}
+foreach ($secretFile in @($CCSyncConfigPath, "$CCSyncConfigDir\identity.json")) {
+    if (Test-Path -LiteralPath $secretFile) {
+        Protect-CCSyncPath -Path $secretFile -What "$secretFile (it holds your fleet token)"
+    }
 }
 
 if (Test-Path -LiteralPath $CCSyncConfigPath) {
@@ -1711,11 +1995,13 @@ else {
 
 editor_name = "$EditorName"
 
-# This machine's local copy of the project tree (P: maps here).
+# This machine's local copy of the project tree ($DriveRoot maps here).
 local_root = "$LocalRootToml"
 
-# The shared-drive prefix used in Resolve's stored clip paths.
-canonical_prefix = "P:\\"
+# The shared-drive prefix used in Resolve's stored clip paths. Comes from the
+# site manifest's canonical_prefix, so this file and the drive this script
+# just mapped cannot disagree (2026-08-17, COMMERCIAL_READINESS.md item 11).
+canonical_prefix = "$CanonicalPrefixToml"
 
 # Must match the rclone remote name in %APPDATA%\rclone\rclone.conf.
 remote = "$RemoteName"
@@ -1768,6 +2054,11 @@ dashboard_token = "$DashboardToken"
         $utf8NoBom = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllText($CCSyncConfigPath, "$CompanionToml`r`n", $utf8NoBom)
         Write-Step "wrote seeded companion config: $CCSyncConfigPath"
+        # dashboard_token above is the FLEET token, in clear text. macOS has
+        # chmod 600 on this file since the port; Windows wrote it at the
+        # profile's inherited ACL and set nothing (2026-08-17,
+        # COMMERCIAL_READINESS.md item 15, section B "at-rest handling").
+        Protect-CCSyncPath -Path $CCSyncConfigPath -What "$CCSyncConfigPath (it holds your fleet token)"
         Write-Step "  the whole project tree syncs as-is; set active_project in that file only if you want popup-fixed media filed into a specific project."
     }
 }

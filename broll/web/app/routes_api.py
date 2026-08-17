@@ -28,7 +28,7 @@ def _insert_target(video: dict) -> tuple[str, str]:
     and v1 sent that identity to the companion verbatim -- which only a
     machine with a hand-written mount for that share could translate, and
     translated it to the clip's PRE-archive location: the base rig resolved
-    share ff3 to Z:\\Cablewrap\\... and inserted from outside the tree, and
+    share ff3 to an out-of-tree drive and inserted from outside the tree, and
     every other machine got "no mount configured for share 'ff3'"
     (2026-08-12). An archived clip's canonical home is the archive, which is
     mountable everywhere as the "broll" share (derived from local_root; the

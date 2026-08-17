@@ -1,0 +1,57 @@
+# The Creators Club site, as a TEST FIXTURE.
+#
+# These are the values that were hardcoded in server/common.py and
+# dashboard/deploy/compose.yaml until 2026-08-17 (WP0 of
+# docs/SYNOLOGY_PORT_PLAN.md moved them out and left the shipped defaults
+# blank). The suite still needs *some* site to test against -- a deploy has to
+# name a host, a pool and a tree -- so the tenant values live here, where they
+# are obviously test data, and conftest.py points $CCSYNC_SITE at this file
+# before anything imports common.
+#
+# The "no site configured" contract is tested separately, by reloading common
+# with the env cleared (test_site_manifest.py).
+#
+# No secrets: those come from monkeypatch.setenv in the tests that need them.
+
+[nas]
+kind = "truenas"
+host = "192.168.0.10"
+admin_user = "truenas_admin"
+verify_ssl = "0"
+
+[tree]
+pool_root = "/mnt/tank/TheCreatorsPool"
+tree_name = "Creators_Club"
+projects_dir = "Projects"
+share_name = "Creators_Club"
+smb_unc = "\\\\192.168.0.10\\TheCreatorsPool\\Creators_Club"
+
+[apps]
+root = "/mnt/tank/apps/ccsync-dashboard"
+
+[net]
+dashboard_url = "http://100.64.0.1:8480"
+bind_lan = "192.168.0.10"
+bind_tailnet = "100.64.0.1"
+sftp_port = "22"
+sftp_chunk_size = "255Ki"
+sftp_concurrency = 64
+shell_type = "unix"
+rclone_remote = "creators_club_sftp"
+
+[syncthing]
+gui_url = "http://192.168.0.10:8384"
+
+[site]
+org_name = "Creators Club"
+
+[stack]
+uid = "3000"
+gid = "3001"
+owner = "broll"
+group = "editors"
+# This fixture stands in for THIS fleet, which still has bash editors and a
+# manifest promising shell_type = unix (2026-08-17, COMMERCIAL_READINESS item
+# 7). The product DEFAULT is "sftp-only"; site.synology.toml exercises that.
+editor_shell = "shell"
+project_acl = "shared"

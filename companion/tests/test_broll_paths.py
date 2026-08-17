@@ -147,3 +147,51 @@ def test_probe_darwin_mount_directly_match_order():
         return path in ("/Volumes/broll", "/Volumes/broll-1")
 
     assert probe_darwin_mount("broll", isdir=fake_isdir) == "/Volumes/broll"
+
+
+# ---------------------------------------------------------------------------
+# `share` is a path segment too (COMMERCIAL_READINESS.md item 5 / C1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("share", ["../..", "..", "a/b", "a\\b", ".hidden",
+                                   ".", "C:", "bro\x00ll", "bro\nll", "",
+                                   " broll", "broll "])
+def test_an_unsafe_share_is_never_interpolated_into_a_path(share):
+    """`share` is BOTH a mounts key and, on macOS, the tail of
+    f"/Volumes/{share}" -- so share="../.." resolved to "/" and served the
+    whole filesystem under a route whose contract is one share. It is one safe
+    segment or it is refused."""
+    assert probe_darwin_mount(share, isdir=lambda p: True) is None
+    with pytest.raises(PathTraversalError):
+        translate_path(share, "clip.mov", {"broll": "Y:/broll"}, platform="win32")
+
+
+def test_the_share_rule_applies_on_windows_too():
+    """Not a darwin-only guard: the same string is the key of a mounts table
+    an editor can hand-edit."""
+    with pytest.raises(PathTraversalError):
+        translate_path("../secrets", "clip.mov", {"../secrets": "Y:/x"},
+                       platform="win32")
+
+
+def test_a_probed_volume_must_resolve_inside_volumes():
+    """A symlink at /Volumes/<share> pointing out of /Volumes passes every
+    segment rule there is; only realpath sees it."""
+    def escaping_realpath(path):
+        return "/private/etc" if path.endswith("/broll") else path
+
+    assert probe_darwin_mount(
+        "broll", isdir=lambda p: p == "/Volumes/broll",
+        realpath=escaping_realpath,
+    ) is None
+
+
+def test_a_probed_volume_that_stays_inside_volumes_is_served():
+    def honest_realpath(path):
+        return path
+
+    assert probe_darwin_mount(
+        "broll", isdir=lambda p: p == "/Volumes/broll-2",
+        realpath=honest_realpath,
+    ) == "/Volumes/broll-2"

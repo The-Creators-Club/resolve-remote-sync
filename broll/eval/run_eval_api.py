@@ -8,7 +8,7 @@ scored a miss there may be answered perfectly by the semantic side.
 This runs the same query set through the web app's /api/search, so the number
 reflects what an editor actually experiences.
 
-    python eval/run_eval_api.py E:/broll-data/broll.db --queries eval/queries_ff2.yaml
+    python eval/run_eval_api.py E:/broll-data/broll.db   # --queries defaults to DEFAULT_QUERIES below
     python eval/run_eval_api.py <db> --mode keyword    # isolate one half
 """
 
@@ -21,6 +21,16 @@ from collections import defaultdict
 from pathlib import Path
 
 import yaml
+
+# Query sets are written against one site's real footage — the expectations are
+# substrings of that customer's filenames and transcripts — so they live outside
+# the tracked tree from 2026-08-17 (COMMERCIAL_READINESS.md item 10 / section B).
+# Resolved from __file__ rather than the cwd, which used to decide whether the
+# default found anything at all. Pass --queries for any other set, e.g.
+# `--queries private/broll/eval/queries_archive.yaml` for the whole archive.
+DEFAULT_QUERIES = str(
+    Path(__file__).resolve().parents[2] / "private" / "broll" / "eval" / "queries_ff2.yaml"
+)
 
 
 def evaluate(db_path: Path, queries: list[dict], mode: str, fuzzy: bool) -> dict:
@@ -113,7 +123,7 @@ def report(run: dict) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("db")
-    ap.add_argument("--queries", default="eval/queries_ff2.yaml")
+    ap.add_argument("--queries", default=DEFAULT_QUERIES)
     ap.add_argument("--mode", default="hybrid", choices=["hybrid", "keyword", "semantic"])
     ap.add_argument("--no-fuzzy", action="store_true")
     args = ap.parse_args()

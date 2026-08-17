@@ -1,0 +1,89 @@
+# sshd_config for the ccsync-sftp sidecar -- ZERO_TOUCH_PLAN.md 3.1/3.3.
+#
+# There is exactly one job here: an editor's rclone (lane A up, lane B down)
+# speaks internal-sftp, chrooted to /jail, landing in /jail/tree. No shell,
+# no port forwarding, no X11, no password auth -- ever. This REPLACES the
+# NAS host's own sshd `Match Group editors` block and everything
+# docs/TENANCY.md calls "the home directory trap"; see README.md in this
+# directory for the chroot layout this file assumes.
+
+Port 22
+Protocol 2
+
+# Generated ONCE by entrypoint.sh into a volume (compose:
+# ${CCSYNC_DATA}/sftp-hostkeys:/etc/ssh/keys) and never again. A regenerated
+# host key would make every editor's rclone refuse the NAS on the next
+# connection (known_hosts mismatch) -- entrypoint.sh checks for these
+# BEFORE anything else runs, precisely so a container recreate never
+# touches them. The spike that validated this whole sidecar baked its own
+# host key into the image instead (regenerated on every `docker build`) and
+# flagged that as wrong for the product for exactly this reason
+# (docs/spikes/zero-touch-spikes-2026-08-17.md S2 verdict) -- this file does
+# not repeat that mistake.
+HostKey /etc/ssh/keys/ssh_host_ed25519_key
+HostKey /etc/ssh/keys/ssh_host_rsa_key
+
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+# NOT `UsePAM no` -- Alpine's openssh-server is built WITHOUT PAM support at
+# all, and that directive is flatly unrecognised on it: `sshd -t` logs
+# "sshd_config line N: Unsupported option UsePAM" on every start (harmless,
+# but a spurious warning on every boot forever). Measured directly against
+# this image's own OpenSSH 9.6p1 build (docs/spikes/zero-touch-spikes-2026-08-17.md,
+# S2) -- there is simply nothing to turn off here.
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+PermitTunnel no
+GatewayPorts no
+PrintMotd no
+PrintLastLog no
+StrictModes yes
+LogLevel INFO
+
+# The dashboard is the identity provider (ZERO_TOUCH_PLAN.md 3.3): sshd asks
+# it for each user's authorized_keys over the internal API instead of
+# reading a file, so revoking an editor is one row in the dashboard's
+# `users` table, not an SSH session into the NAS. `AuthorizedKeysFile none`
+# turns off the file-based fallback entirely -- the API answer is the only
+# source of truth, deliberately (a stray local key file would be a second,
+# unaudited way in).
+#
+# `AuthorizedKeysCommandUser sftpkeys`, NOT `nobody` -- ccsync-keys.sh has to
+# read the internal API token from a file, and `nobody` reading that file
+# would mean EVERY unprivileged process anywhere is entitled to (a stray
+# world-readable file becomes exactly as reachable to nobody as to this one
+# script). `sftpkeys` is a dedicated, otherwise-empty account created in the
+# Dockerfile for exactly this; entrypoint.sh writes the token file
+# `0440 root:sftpkeys` (spike recommendation,
+# docs/spikes/zero-touch-spikes-2026-08-17.md S2's own verdict).
+AuthorizedKeysCommand /usr/local/bin/ccsync-keys %u
+AuthorizedKeysCommandUser sftpkeys
+AuthorizedKeysFile none
+
+Subsystem sftp internal-sftp
+
+# internal-sftp only, chrooted to the tree mount, landing every editor
+# straight in /tree (see README.md "chroot layout" for what /jail/tree is
+# bind-mounted from). Every OS account ccsync-users.sh creates is a member
+# of this one `editors` group -- there is no per-editor group and no other
+# Match block; per-project isolation is a follow-up once bind views are
+# spiked (ZERO_TOUCH_PLAN.md section 7, S3), not this file's job today.
+#
+# `-u 002`: the umask internal-sftp applies to everything an editor writes,
+# MEASURED end to end in the same spike (S2c) -- files land `664`, dirs
+# `2775`, readable by the dashboard, by Syncthing (the same service uid) and
+# by any SMB user the customer puts in the `editors` group. Without it the
+# default umask (022) would leave group-write off, and a setgid tree
+# (`2770`) with no group-write on its own files is a trap the same spike
+# exists to avoid.
+Match Group editors
+    ChrootDirectory /jail
+    ForceCommand internal-sftp -d /tree -u 002
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTunnel no

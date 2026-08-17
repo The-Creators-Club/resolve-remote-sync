@@ -1,0 +1,266 @@
+# Build + publish the two vendor images -- ZERO_TOUCH_PLAN.md WP A ("Image +
+# registry"), added 2026-08-17.
+#
+# Until this workflow existed, `dashboard/deploy/Dockerfile` had NEVER been
+# through `docker build` (docs/DOCKER.md says so explicitly) and "there is no
+# registry in this product" (ZERO_TOUCH_PLAN.md section 2). This is that
+# registry: it builds `dashboard/deploy/Dockerfile` (the fleet dashboard,
+# FastAPI + the broll/music/ytdl mounts) and `dashboard/deploy/sftp/Dockerfile`
+# (the chrooted internal-sftp sidecar, ZERO_TOUCH_PLAN.md 3.1's "SFTP as a
+# sidecar"), pushes both to GHCR, signs them keylessly with cosign and attaches
+# an SBOM -- so `dashboard/deploy/compose.appliance.yaml` has something real to
+# pull.
+#
+# THIS WORKFLOW DOES NOT REPLACE `tools\ship.cmd`. It publishes IMAGES; the
+# companion/onboarding exe/app path is release-windows.yml / release-macos.yml
+# / ship.cmd, unchanged. A customer's compose file only ever references a tag
+# this workflow pushed.
+#
+# TRIGGERS
+#   push to main       -> `:<short-sha>` and `:edge` (the floating "whatever
+#                          main currently is" tag compose.dev-style testing
+#                          would pull; the appliance compose never uses it).
+#   push tag `v*`       -> `:<VERSION>` (read from
+#                          dashboard/src/ccsync_dashboard/__init__.py, NOT
+#                          from the git tag string -- the tag is what triggers
+#                          the build, the VERSION constant is the ground
+#                          truth for what that build actually is) plus `:1`,
+#                          the FLOATING MAJOR TAG. `:1` is deliberately not
+#                          "whatever VERSION's leading digit says" (VERSION is
+#                          0.5.0 today, a `:0` tag would be actively
+#                          misleading) -- it is the one long-lived tag
+#                          `compose.appliance.yaml` and DOCKER.md pin
+#                          (ZERO_TOUCH_PLAN.md 3.4: "the compose file pins a
+#                          floating minor tag (`ccsync:1`) so that click
+#                          [the platform's own image-update UI] is the whole
+#                          update"). Every 0.x/1.x release moves `:1` until a
+#                          deliberately breaking cut earns a `:2` -- that is a
+#                          decision made in this workflow's history, not a
+#                          formula on VERSION.
+#   workflow_dispatch   -> same as a push to main, so this can be exercised
+#                          from a feature branch with `gh workflow run
+#                          image.yml --ref <branch>` before it ever reaches
+#                          main.
+#
+# IMAGE NAMES. `vars.CCSYNC_IMAGE` / `vars.CCSYNC_SFTP_IMAGE` (repo Settings ->
+# Secrets and variables -> Actions -> Variables) override the default
+# `ghcr.io/<owner-lowercased>/ccsync[-sftp]`. The default exists so this repo
+# builds out of the box; the variable exists because ZERO_TOUCH_PLAN.md 3.1
+# names the vendor image `ghcr.io/ccsync/ccsync` and the org that publishes it
+# may not be this GitHub org forever (`ghcr.io/<owner>` is always THIS repo's
+# owner, lowercased -- GHCR rejects uppercase in image paths, and this repo's
+# owner has one).
+#
+# --require-hashes S4 spike (ZERO_TOUCH_PLAN.md section 7): this workflow IS
+# that spike -- the first hosted `docker build` of the lockfile, which nothing
+# on the base rig could do (Docker Desktop is not installed there,
+# docs/DOCKER.md "Not done here").
+
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+  # TEMPORARY, for the PR that first introduces this workflow only: GitHub
+  # will not let `workflow_dispatch`/the API target a branch until the
+  # workflow file has been registered by existing on the default branch at
+  # least once, so `pull_request` is the only way to prove this file builds
+  # BEFORE it merges. Removed in the same PR once the run is green -- see
+  # that PR's description.
+  pull_request:
+    paths:
+      - "dashboard/deploy/Dockerfile"
+      - "dashboard/deploy/sftp/**"
+      - "dashboard/deploy/requirements.lock"
+      - ".github/workflows/image.yml"
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # GHCR push authenticates with the workflow's own GITHUB_TOKEN -- no PAT,
+  # no long-lived registry credential anywhere in the repo's secrets.
+  packages: write
+  # cosign keyless (sigstore/cosign-installer + `cosign sign`) exchanges this
+  # OIDC token for a short-lived Fulcio certificate; without this permission
+  # the sign step has no identity to sign with at all.
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      owner: ${{ steps.names.outputs.owner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # THE CRLF GATE, same reasoning as ci.yml's: a CRLF Dockerfile or
+      # compose file is a crash-loop, not a style nit, and this is the first
+      # workflow that actually BUILDS the Dockerfile rather than just reading
+      # it, so the failure mode moves from "the container won't boot on the
+      # NAS" to "the image never gets made" -- earlier and cheaper, which is
+      # the whole point of catching it here too rather than trusting ci.yml
+      # alone (a rebase that drops a line from .gitattributes would still be
+      # caught by THIS job before anything reaches a registry).
+      - name: line endings -- no CR in anything this build reads
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS= read -r f; do
+            if [ -f "$f" ] && LC_ALL=C grep -qU $'\r' "$f"; then
+              echo "CR found in $f"; bad=1
+            fi
+          done < <(git ls-files 'dashboard/deploy/Dockerfile' 'dashboard/deploy/run.sh' \
+                                'dashboard/deploy/sftp/Dockerfile' 'dashboard/deploy/sftp/*.sh' \
+                                'dashboard/deploy/sftp/sshd_config' 'dashboard/deploy/*.yaml' \
+                                '.github/workflows/image.yml')
+          if [ "$bad" -ne 0 ]; then
+            echo "A CR in a file the image build or the container reads is a crash-loop, not a style nit."
+            exit 1
+          fi
+
+      # GHCR paths are case-sensitive and reject uppercase -- this repo's
+      # owner (The-Creators-Club) is not lowercase, so every tag below is
+      # built from this, never from `github.repository_owner` directly.
+      - name: compute image names
+        id: names
+        run: |
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="${{ vars.CCSYNC_IMAGE }}"
+          if [ -z "$image" ]; then
+            image="ghcr.io/${owner}/ccsync"
+          fi
+          sftp_image="${{ vars.CCSYNC_SFTP_IMAGE }}"
+          if [ -z "$sftp_image" ]; then
+            sftp_image="ghcr.io/${owner}/ccsync-sftp"
+          fi
+          # dashboard/src/ccsync_dashboard/__init__.py: `VERSION = "0.5.0"` --
+          # the same string ci.yml and the companion's own version file use,
+          # read with a plain grep rather than importing the package (this
+          # job never installs the dashboard's dependencies).
+          version="$(grep -oP '(?<=^VERSION = ")[^"]+' dashboard/src/ccsync_dashboard/__init__.py)"
+          if [ -z "$version" ]; then
+            echo "::error::could not read VERSION from dashboard/src/ccsync_dashboard/__init__.py"
+            exit 1
+          fi
+          echo "owner=$owner" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "sftp_image=$sftp_image" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Builds the TAG LIST for one image repo, given the trigger. Shared by
+      # both images so the dashboard and the sftp sidecar are always tagged
+      # in lockstep -- a customer's compose file pins `:1` on both, and a
+      # dashboard `:1` beside an sftp sidecar three versions behind is a
+      # support call waiting to happen.
+      - name: compute tags
+        id: tags
+        run: |
+          image="${{ steps.names.outputs.image }}"
+          sftp_image="${{ steps.names.outputs.sftp_image }}"
+          version="${{ steps.names.outputs.version }}"
+          sha="$(git rev-parse --short HEAD)"
+          dash_tags="$image:$sha"
+          sftp_tags="$sftp_image:$sha"
+          # ref_type alone is enough: the `tags: ["v*"]` trigger above is
+          # what filters WHICH tags start this job at all, so any tag push
+          # that reaches this step already matched "v*".
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            dash_tags="$dash_tags,$image:$version,$image:1"
+            sftp_tags="$sftp_tags,$sftp_image:$version,$sftp_image:1"
+          else
+            dash_tags="$dash_tags,$image:edge"
+            sftp_tags="$sftp_tags,$sftp_image:edge"
+          fi
+          {
+            echo "dash_tags<<EOF"
+            echo "$dash_tags"
+            echo "EOF"
+            echo "sftp_tags<<EOF"
+            echo "$sftp_tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@v3
+
+      # --- the dashboard image ------------------------------------------
+      #
+      # Built from THE REPO ROOT, exactly as docs/DOCKER.md's manual build
+      # command says: the image carries four trees from four directories
+      # (dashboard/, broll/web, music/web, ytdl/web) and .dockerignore keeps
+      # the ~2 GB repo down to ~10 MB of context. `--require-hashes` lives
+      # INSIDE the Dockerfile (`pip install --require-hashes`), so a wheel
+      # with no manylinux build fails HERE, not on a customer's NAS -- this
+      # step is spike S4 (ZERO_TOUCH_PLAN.md section 7).
+      - name: build + push dashboard image
+        id: build_dashboard
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: dashboard/deploy/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.dash_tags }}
+          sbom: true
+          cache-from: type=gha,scope=ccsync-dashboard
+          cache-to: type=gha,mode=max,scope=ccsync-dashboard
+
+      - name: sign dashboard image (cosign keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes "${{ steps.names.outputs.image }}@${{ steps.build_dashboard.outputs.digest }}"
+
+      # --- the sftp sidecar image -----------------------------------------
+      #
+      # Also from the repo root (its two shell helpers and sshd_config are
+      # COPYed with paths relative to the root, same convention as the
+      # dashboard Dockerfile) so one `docker build -f <path> .` recipe works
+      # for both images -- dashboard/deploy/sftp/README.md has the details.
+      - name: build + push sftp image
+        id: build_sftp
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: dashboard/deploy/sftp/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.sftp_tags }}
+          sbom: true
+          cache-from: type=gha,scope=ccsync-sftp
+          cache-to: type=gha,mode=max,scope=ccsync-sftp
+
+      - name: sign sftp image (cosign keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes "${{ steps.names.outputs.sftp_image }}@${{ steps.build_sftp.outputs.digest }}"
+
+      - name: step summary
+        run: |
+          {
+            echo "## ccsync image build"
+            echo
+            echo "| image | digest |"
+            echo "|---|---|"
+            echo "| \`${{ steps.names.outputs.image }}\` | \`${{ steps.build_dashboard.outputs.digest }}\` |"
+            echo "| \`${{ steps.names.outputs.sftp_image }}\` | \`${{ steps.build_sftp.outputs.digest }}\` |"
+            echo
+            echo "Tags pushed: \`${{ steps.tags.outputs.dash_tags }}\` / \`${{ steps.tags.outputs.sftp_tags }}\`"
+            echo
+            echo "Both signed keylessly with cosign (sigstore Fulcio/Rekor); verify with:"
+            echo '```'
+            echo "cosign verify --certificate-identity-regexp '.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com ${{ steps.names.outputs.image }}@${{ steps.build_dashboard.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

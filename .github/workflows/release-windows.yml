@@ -51,6 +51,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Same step, same reason as ci.yml's windows job (2026-08-17): the
+      # runner resolves `bash` to WSL's stub, whose UTF-16 stdout fails 37
+      # companion tests at once and stops release.ps1 before PyInstaller.
+      - name: put Git's bash ahead of WSL's on PATH
+        run: "'C:\\Program Files\\Git\\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

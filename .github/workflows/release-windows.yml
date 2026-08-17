@@ -129,6 +129,34 @@ jobs:
           if ("${{ inputs.allow_dirty }}" -eq "true") { $args += "-AllowDirty" }
           pwsh -NoProfile -ExecutionPolicy Bypass -File tools/release.ps1 @args
 
+      # The onboarding wizard (onboard.exe) is a second PyInstaller artefact
+      # that BUNDLES the companion exe just built (onboarding/build_onboard.spec
+      # refuses to run without it), so it has to come after, from the same
+      # venv. Same shape as release-macos.yml's wizard step (2026-08-17): a
+      # failed wizard build must not throw away a companion build that
+      # succeeded -- it is reported and the companion artefact still uploads.
+      # Publish both from the base rig with tools/publish_package.py
+      # (--kind onboard --platform windows --version <installer version>).
+      - name: build the onboarding wizard (onboard.exe)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "companion/dist/ccsync-companion.exe")) {
+            "no companion exe -- skipping onboard.exe" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
+          Push-Location onboarding
+          try {
+            & ../companion/.venv/Scripts/python.exe -m PyInstaller build_onboard.spec --noconfirm 2>&1 | ForEach-Object { "    $_" }
+            if ($LASTEXITCODE -ne 0) {
+              "onboard.exe build FAILED (PyInstaller exit $LASTEXITCODE) -- companion artefact is still good" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            } else {
+              $v = Select-String -Path steps.py -Pattern '^INSTALLER_VERSION\s*=\s*"([^"]+)"' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+              $h = (Get-FileHash dist/onboard.exe -Algorithm SHA256).Hash.ToLower()
+              "onboard.exe built: installer $v, sha256 $h, $((Get-Item dist/onboard.exe).Length) bytes" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            }
+          } finally { Pop-Location }
+
       - name: report what was produced
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -148,4 +176,5 @@ jobs:
           path: |
             companion/dist/ccsync-companion.exe
             companion/dist/ccsync-release.json
+            onboarding/dist/onboard.exe
           if-no-files-found: error

@@ -82,6 +82,22 @@ def test_admin_users_view_over_every_backend(tmp_path, nas_case, syncthing):
         assert body["editors"] == []
 
 
+def test_the_service_account_never_lists_as_an_editor(tmp_path, nas_case, syncthing):
+    """The stack's own NAS account (site.toml [stack] owner -> DASH_NAS_SERVICE_USER)
+    is plumbing; on the first Synology bring-up it appeared on the Users page as
+    an editor with a MISSING ssh key (2026-08-17)."""
+    if not nas_case.provisions:
+        pytest.skip("listing needs a provisioning backend")
+    nas_case.seed_editor("jsmith", 3010)
+    nas_case.seed_editor("ccsync-svc", 3011)
+    with TestClient(client_for(tmp_path, nas_case, syncthing,
+                               nas_service_user="ccsync-svc")) as client:
+        as_admin(client)
+        body = client.get("/api/v1/admin/users").json()
+    names = {e["username"] for e in body["editors"]}
+    assert "jsmith" in names and "ccsync-svc" not in names
+
+
 def test_create_editor_over_every_backend(tmp_path, nas_case, syncthing):
     with TestClient(client_for(tmp_path, nas_case, syncthing)) as client:
         as_admin(client)

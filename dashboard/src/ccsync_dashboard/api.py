@@ -1618,6 +1618,14 @@ def build_admin_users_view(settings) -> dict[str, Any]:
     except NasError as exc:
         truenas_error = f"{settings.nas_kind}: {exc}"
 
+    # The stack's own service account is plumbing, not a person: it must never
+    # appear on the Users page (it did on the first Synology bring-up, as an
+    # "editor" with a MISSING ssh key -- 2026-08-17). Filtered here, once, for
+    # every backend, on top of the install-time rule that it is not in the group.
+    service_user = (getattr(settings, "nas_service_user", "") or "").strip().lower()
+    if service_user:
+        editors = [u for u in editors if str(u.get("username", "")).lower() != service_user]
+
     editor_rows = [{
         "username": u["username"],
         "uid": u.get("uid"),

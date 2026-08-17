@@ -80,6 +80,11 @@ class Settings:
     # (HOME_PARENT) until 2026-08-17; now site.toml [tree] homes_parent, passed
     # into the container as DASH_NAS_HOMES_PARENT by the deploy.
     nas_homes_parent: str = ""
+    # The account the dashboard STACK runs as on the NAS (site.toml [stack]
+    # owner: `broll` on TrueNAS, `ccsync-svc` on DSM). Never an editor; it is
+    # filtered out of every editor listing so a studio owner does not see the
+    # plumbing account beside their people (2026-08-17, Users page review).
+    nas_service_user: str = ""
     # Test-only escape hatch: overrides the https://<host>/... API base so
     # tests can point a backend client at a plain-http fake server instead of
     # also having to fake TLS. Never set from env; production always uses
@@ -296,6 +301,7 @@ class Settings:
             nas_pw=first("DASH_NAS_PW", "TRUENAS_PW"),
             nas_verify_ssl=verify_ssl("DASH_NAS_VERIFY_SSL", "TRUENAS_VERIFY_SSL"),
             nas_homes_parent=env.get("DASH_NAS_HOMES_PARENT", "").strip().rstrip("/"),
+            nas_service_user=env.get("DASH_NAS_SERVICE_USER", "").strip(),
             site_org_name=env.get("DASH_SITE_ORG_NAME", "").strip(),
             site_tree_name=env.get("DASH_SITE_TREE_NAME", "").strip(),
             site_canonical_prefix=env.get("DASH_SITE_CANONICAL_PREFIX", "").strip() or "P:\\",

@@ -462,6 +462,30 @@ def test_the_editor_row_looks_like_the_truenas_one():
     assert backend(dsm=dsm, ssh=ssh).find_user("JSmith", dry_run=False)["uid"] == 1030
 
 
+def test_the_service_account_is_not_an_editor_and_gets_its_own_share_ace(monkeypatch):
+    """First Synology bring-up (2026-08-17) put ccsync-svc in `editors` so the
+    container could write the tree -- and the dashboard's Users page then
+    listed the plumbing account as an editor with a MISSING ssh key. It gets a
+    user ACE on the share instead, and an earlier deploy's membership is
+    reverted."""
+    monkeypatch.setattr(common, "site_value",
+                        lambda table, key, default="": "CCSyncTest"
+                        if (table, key) == ("tree", "share_name") else default)
+    ssh = FakeSsh(answers=[("id -u", (0, "1043\n", ""))])
+    dsm = FakeDsmApi(groups={"editors": 65536}, users={"ccsync-svc": {"uid": 1043}})
+    dsm.membership["editors"] = {"ccsync-svc", "jsmith"}       # the old, wrong state
+    assert backend(ssh=ssh, dsm=dsm).ensure_service_user("ccsync-svc", "editors", False) == 1043
+    # its own RW ACE on the tree share, as a USER, not via the group
+    perm = [c for c in dsm.of("SYNO.Core.Share.Permission", "set")]
+    assert perm and perm[-1].params["user_group_type"] == "local_user"
+    assert perm[-1].params["permissions"][0]["name"] == "ccsync-svc"
+    assert perm[-1].params["permissions"][0]["is_writable"] is True
+    # and it is no longer in the group; the real editor still is
+    assert "ccsync-svc" not in dsm.membership["editors"]
+    assert "jsmith" in dsm.membership["editors"]
+    assert dsm.of("SYNO.Core.Group.Member", "remove")
+
+
 def test_the_service_user_uid_comes_from_the_box_and_is_range_checked():
     ssh = FakeSsh(answers=[("id -u", (0, "1042\n", ""))])
     dsm = FakeDsmApi(groups={"editors": 65536})

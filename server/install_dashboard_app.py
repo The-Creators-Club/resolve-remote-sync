@@ -728,6 +728,9 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # site.toml [tree] homes_parent -> the dashboard's account
                     # creation (was a literal in its TrueNAS client, 2026-08-17).
                     "DASH_NAS_HOMES_PARENT": DEFAULT_HOMES_PARENT,
+                    # The stack's own account (site.toml [stack] owner); the
+                    # dashboard hides it from the Users page (2026-08-17).
+                    "DASH_NAS_SERVICE_USER": DEFAULT_DATASET_OWNER,
                     # TLS verification for those TrueNAS API calls (they carry
                     # TRUENAS_PW). "0" = trust the NAS's self-signed cert, as
                     # before; "1" or a CA bundle path inside the container
@@ -919,6 +922,7 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         "NAS_HOST": nas_host,
         "NAS_USER": nas_user,
         "NAS_HOMES_PARENT": homes_parent or DEFAULT_HOMES_PARENT,
+        "NAS_SERVICE_USER": DEFAULT_DATASET_OWNER,
         # NOT read from $DASH_ADMIN_USERS here: the template is the FILE an
         # operator pastes, and it must not silently inherit whichever admin
         # list happened to be exported in the shell that rendered it. main()

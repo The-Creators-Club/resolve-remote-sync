@@ -143,6 +143,13 @@ class FakeDsmApi:
         self.membership.setdefault(group, set()).update(names)
         return {}
 
+    def _SYNO_Core_Group_Member__remove(self, group, **params):
+        names = params.get("name") or []
+        if isinstance(names, str):
+            names = [names]
+        self.membership.setdefault(group, set()).difference_update(names)
+        return {}
+
     def _SYNO_Core_Group_Member__list(self, group, offset=0, limit=200):
         if group not in self.groups:
             raise self.error(3205, "SYNO.Core.Group.Member.list")

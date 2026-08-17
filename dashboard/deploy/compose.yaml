@@ -231,6 +231,9 @@ services:
       # dashboard creates accounts under it. Was a literal in the client
       # until 2026-08-17.
       DASH_NAS_HOMES_PARENT: "{{NAS_HOMES_PARENT}}"
+      # The stack's own NAS account (site.toml [stack] owner); hidden from the
+      # Users page (2026-08-17).
+      DASH_NAS_SERVICE_USER: "{{NAS_SERVICE_USER}}"
       # TLS verification for those TrueNAS API calls (they carry TRUENAS_PW).
       # "0" = trust the NAS's self-signed cert, as before. Set "1" (or a CA
       # bundle path inside the container) once the NAS has a trusted cert.

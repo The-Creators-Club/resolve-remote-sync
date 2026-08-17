@@ -877,15 +877,39 @@ class SynologyBackend:
                 f"refusing to run the stack as uid {uid} ({name!r}): DSM local accounts "
                 f"start at {MIN_EDITOR_UID} and package accounts live at "
                 f"{PACKAGE_UID_FLOOR}+. Pick a normal local account.")
-        # Supplementary membership so the account is an editor everywhere the
-        # group is named, even though the container's gid is set explicitly.
-        try:
-            if group and not self._add_to_group(name, group):
-                print(f"NOTE: {name!r} could not be added to {group!r} -- the stack still "
-                      f"runs as {uid}:<{group} gid>, but check the group in DSM.",
+        # The service account is NOT an editor. Until 2026-08-17 it was added to
+        # the editors group so the container could write the tree through the
+        # group ACE -- and then showed up on the dashboard's Users page as an
+        # editor with a MISSING ssh key, which is exactly what a studio owner
+        # must never see. It gets its own RW ACE on the tree share instead
+        # (Share.Permission set, local_user), and if an earlier deploy put it in
+        # the group it is taken back out. The container still runs uid:<editors
+        # gid>: docker sets the gid regardless of membership, and the ACLs on
+        # the tree are what actually decide access.
+        share = common.site_value("tree", "share_name")
+        if share:
+            try:
+                self._dsm("SYNO.Core.Share.Permission", "set", 1, post=True, name=share,
+                          user_group_type="local_user",
+                          permissions=[{"name": name, "is_readonly": False,
+                                        "is_writable": True, "is_deny": False,
+                                        "is_custom": False}])
+                print(f"service account {name!r} has its own RW permission on {share!r}")
+            except common.DsmError as exc:
+                print(f"NOTE: could not grant {name!r} RW on share {share!r}: {exc}",
                       file=sys.stderr)
+        try:
+            if group and group in self._groups_of(name):
+                self._dsm("SYNO.Core.Group.Member", "remove", 1, post=True,
+                          group=group, name=[name])
+                if group in self._groups_of(name):
+                    print(f"NOTE: {name!r} is still in {group!r} after remove -- take it out "
+                          f"in DSM so it stops listing as an editor.", file=sys.stderr)
+                else:
+                    print(f"removed service account {name!r} from {group!r} (it is not an editor)")
         except common.DsmError as exc:
-            print(f"NOTE: could not add {name!r} to {group!r}: {exc}", file=sys.stderr)
+            print(f"NOTE: could not check/remove {name!r} from {group!r}: {exc}",
+                  file=sys.stderr)
         return uid
 
     def grant_sftp(self, group: str, dry_run: bool) -> bool:

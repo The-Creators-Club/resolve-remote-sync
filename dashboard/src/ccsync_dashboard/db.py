@@ -295,9 +295,7 @@ ALTER TABLE machine_state ADD COLUMN guard_at TEXT;
 """
 
 # v18: the site manifest as DATA, and the SetupEngine's task state
-# (ZERO_TOUCH_PLAN.md WP D, 2026-08-17). Owned by this work package only --
-# v17 and v19 are other agents' migrations, added in their own worktrees; do
-# not renumber this one to close the gap.
+# (ZERO_TOUCH_PLAN.md WP D, 2026-08-17).
 #
 # site_settings is a plain key/value table (see site_store.py for the key
 # list, validation and the DB-over-env precedence rule): GET /api/v1/site
@@ -324,6 +322,9 @@ CREATE TABLE IF NOT EXISTS setup_tasks (
   detail     TEXT NOT NULL DEFAULT '',
   at         TEXT,
   skipped    INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 # v19: the vendor release feed's client-side state (ZERO_TOUCH_PLAN.md WP E,
 # 2026-08-17). "we publish once, every dashboard pulls" needs somewhere to
 # remember the last poll -- otherwise a restart forgets whether the feed was
@@ -343,11 +344,6 @@ CREATE TABLE IF NOT EXISTS setup_tasks (
 #   policy_override             '' = use DASH_RELEASE_FEED_POLICY; otherwise
 #                               one of manual/stage/current, set from the
 #                               admin page without a redeploy
-#
-# Numbered v19 deliberately, not v17: this migration is owned by one agent of
-# a parallel commercial-readiness pass (agents C/D own v17/v18 in their own
-# worktrees) -- see ZERO_TOUCH_PLAN.md WP E's brief. Do not renumber this on
-# merge; insert the missing steps between v16 and v19 instead.
 SCHEMA_V19 = """
 CREATE TABLE IF NOT EXISTS feed_state (
   id                         INTEGER PRIMARY KEY CHECK (id = 1),

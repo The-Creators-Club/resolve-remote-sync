@@ -950,7 +950,10 @@ def page_admin_users(request: Request, conn: sqlite3.Connection = Depends(get_co
     return _render(request, "admin_users.html", {
         **_sidebar_context(request, conn, None),
         "admin_users": build_admin_users_view(request.app.state.settings, conn),
-        "packages": build_packages_view(conn, request.app.state.settings),
+        # The packages partial is included by this page and, since WP E, also
+        # renders the vendor feed section -- so it needs the same context the
+        # partial's own routes build (2026-08-17 merge of WP C + WP E).
+        **_packages_and_feed(conn, request),
     })
 
 
@@ -1512,10 +1515,7 @@ async def partial_admin_package_delete(
         except OSError:
             pass
 
-    return _render(request, "partials/admin_packages.html", {
-        "packages": build_packages_view(conn, settings),
-        "error": error,
-    })
+    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
 
 
 # ------------------------------------------------------------- setup wizard

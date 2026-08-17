@@ -26,6 +26,13 @@ from __future__ import annotations
 
 import json
 import shutil
+
+# The FULL path, not the bare name: on Windows, subprocess resolves a bare
+# "bash" through CreateProcess, whose search order puts System32 -- home of
+# WSL's bash.exe launcher stub, which answers in UTF-16 -- AHEAD of PATH,
+# so Git's bash never wins however PATH is ordered (hosted CI, 2026-08-17).
+# shutil.which() honours PATH; the skipif above already keys on it.
+_BASH = shutil.which("bash") or "bash"
 import subprocess
 from pathlib import Path
 
@@ -84,7 +91,7 @@ def _run(tmp_path: Path, body: str, stdin: str = "", argv=()) -> subprocess.Comp
         newline="\n",
     )
     raw = subprocess.run(
-        ["bash", str(script), *argv],
+        [_BASH, str(script), *argv],
         input=stdin.encode("utf-8"), capture_output=True, timeout=60,
     )
     return subprocess.CompletedProcess(

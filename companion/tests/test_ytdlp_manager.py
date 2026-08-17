@@ -24,6 +24,7 @@ import pytest
 
 from ccsync_companion import app as app_mod
 from ccsync_companion import resolve_bridge
+from ccsync_companion import sidecar_tools
 from ccsync_companion import ytdlp_manager as ytdlp_mod
 
 
@@ -810,6 +811,24 @@ def test_the_thread_survives_an_ensure_that_raises(monkeypatch, caplog):
         raise RuntimeError("boom")
 
     mgr.ensure = angry_ensure
+
+    # _loop() also runs sidecar_tools.ensure() every tick (ffmpeg + deno,
+    # 2026-08-16), UNMOCKED here until this fix -- and conftest's autouse
+    # _youtube_feature_enabled fixture turns both youtube_download AND
+    # youtube_unblock "on" for every companion test, so that real call went
+    # looking for a real ffmpeg/ffprobe/deno, found none in the isolated
+    # tools dir, and tried to actually reach GitHub to install them. That is
+    # real, variable-latency network I/O sitting BETWEEN the two angry_ensure()
+    # calls this test needs to see -- on a slow/degraded runner (observed on
+    # macos-latest) it alone can exceed the 5 s below, which is what made this
+    # test flake: `done` was never a timing problem, the thread was just stuck
+    # in a real network call the test never intended to make. Stubbing this
+    # out is the actual fix; the wait below is a generous ceiling on top of a
+    # loop body that no longer does any real I/O, not a race against one.
+    monkeypatch.setattr(sidecar_tools, "ensure",
+                        lambda *a, **kw: {"ok": True, "action": "none",
+                                          "message": "stubbed for this test"})
+
     with caplog.at_level(logging.ERROR, logger="ccsync.ytdlp"):
         mgr.start()
         try:

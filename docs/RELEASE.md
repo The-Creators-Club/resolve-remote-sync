@@ -271,6 +271,37 @@ including for a fresh install: `macos_bootstrap.sh` fetches
 `GET /api/v1/companion/package/macos/current` and verifies the bytes against
 the `X-CCSync-SHA256` response header.
 
+### The no-Mac path: hosted runner + `tools/publish_package.py` (2026-08-17)
+
+The Mac in "a second machine" no longer has to be anyone's laptop.
+`.github/workflows/release-macos.yml` runs steps 1–5 above on a hosted
+`macos-latest` runner (manual trigger; it builds, it never publishes — see
+its header for why) and uploads `companion/dist/**` and `onboarding/dist/**`
+as the artifact `ccsync-companion-macos`. Step 6 then happens **from the base
+rig**, with the offline key, using the publish-only tool
+(`docs/ZERO_TOUCH_PLAN.md` WP E, first slice):
+
+```powershell
+gh workflow run release-macos.yml --ref main
+gh run watch                                        # ~10 min
+gh run download -n ccsync-companion-macos -D .\ci-mac
+dashboard\.venv\Scripts\python.exe tools\publish_package.py `
+    --manifest ci-mac\companion\dist\ccsync-release.json `
+    --dashboard-url <url> --admin-user <you> --make-current
+# and the wizard, if onboarding/dist produced one:
+dashboard\.venv\Scripts\python.exe tools\publish_package.py `
+    --artifact ci-mac\onboarding\dist\<zip> --kind onboard --platform macos `
+    --version <installer version> --dashboard-url <url> --admin-user <you> --make-current
+```
+
+`publish_package.py` signs first (no key, no login), pre-flights the version
+over `DASH_REPORT_TOKEN` if present, prompts for the dashboard password
+(getpass; `--password-stdin` for automation — never argv or env), PUTs, reads
+the row back. `--manifest` **refuses** a `git_dirty` or `tests_run: false`
+manifest unless `--allow-dirty` / `--allow-untested` — OPS-1 applies to
+CI-built artefacts too. `--dry-run` prints the exact PUT without touching the
+network. Exit codes: 2 usage, 3 already published, 4 login, 5 publish.
+
 ### What the lag looks like, and why it is expected
 
 A Windows ship (`build_editor_package.ps1 -Publish -MakeCurrent`) publishes

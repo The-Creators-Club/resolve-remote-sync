@@ -64,6 +64,46 @@ ANTHROPIC_BASE_URL = os.environ.get('ANTHROPIC_BASE_URL') or ''
 # no CLI left to expand an alias. Overridable per deployment.
 CLAUDE_MODEL = os.environ.get('YTDL_CLAUDE_MODEL') or 'claude-sonnet-5'
 CLAUDE_TIMEOUT = int(os.environ.get('YTDL_CLAUDE_TIMEOUT') or '180')
+
+# ------------------------------------------------------- the other providers
+# 2026-08-18: the dashboard grew a Settings -> AI providers page, and the two
+# AI calls now go to the first AVAILABLE backend in the chain claude_code >
+# anthropic_api > codex > openai_api > deepseek_api (ai_backend.py). The keys
+# an admin types there live in the dashboard's <data>/secrets/ai/, not here --
+# these env vars are the DEPLOYMENT's own values, they still win over anything
+# typed on the page, and they are the only providers a standalone
+# `uvicorn ytdlweb.main:app` (no dashboard in reach) can reach at all.
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY') or ''
+OPENAI_BASE_URL = os.environ.get('OPENAI_BASE_URL') or 'https://api.openai.com/v1'
+# A conservative, long-lived default rather than the newest name: an unknown
+# model id is an HTTP 400 on every job, and the operator who wants the newest
+# one can say so in one variable. Same reasoning for DeepSeek below, where
+# `deepseek-chat` has been the stable alias for the general model throughout.
+OPENAI_MODEL = os.environ.get('YTDL_OPENAI_MODEL') or 'gpt-4o-mini'
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY') or ''
+DEEPSEEK_BASE_URL = os.environ.get('DEEPSEEK_BASE_URL') or 'https://api.deepseek.com'
+DEEPSEEK_MODEL = os.environ.get('YTDL_DEEPSEEK_MODEL') or 'deepseek-chat'
+
+# The non-interactive invocation of the two CLI providers, as ONE overridable
+# string each (shlex-split, never a shell). THE CUSTOMER INSTALLED THESE
+# BINARIES -- nothing here downloads or bundles one (docs/COMMERCIAL_READINESS.md
+# item 1 is why), and the whole CLI path is dark unless the site turns
+# `[features] ai_cli_providers` on.
+#
+# The flags are a variable rather than a literal because they are the one
+# thing about someone else's CLI that we cannot pin: `claude -p` and
+# `codex exec` are the stable non-interactive forms, but a customer on an
+# older or newer build may need to correct a flag, and waiting for a release
+# to do that would strand them on a dead provider. `--disallowed-tools *` is
+# in the default for the reason the 2026-08-17 rewrite gave: this container
+# mounts the whole Projects tree read-write, and these prompts want text back,
+# so an agent with file tools is not a risk worth carrying for a translation.
+CLAUDE_CODE_ARGS = (os.environ.get('YTDL_CLAUDE_CODE_ARGS')
+                    or '-p --output-format text --disallowed-tools *')
+CODEX_ARGS = os.environ.get('YTDL_CODEX_ARGS') or 'exec --sandbox read-only -'
+# A CLI is slower to start than an HTTPS call and is doing the same small job,
+# so it gets its own ceiling rather than inheriting CLAUDE_TIMEOUT's 180 s.
+AI_CLI_TIMEOUT = int(os.environ.get('YTDL_AI_CLI_TIMEOUT') or '300')
 # Ceiling on one reply. The two prompts answer with a JSON object of ~20 search
 # queries or ~40 keep/drop indices; 8000 is roomy for both and bounds a runaway.
 CLAUDE_MAX_TOKENS = int(os.environ.get('YTDL_CLAUDE_MAX_TOKENS') or '8000')

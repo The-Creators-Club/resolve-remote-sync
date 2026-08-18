@@ -117,6 +117,12 @@ def health(request: Request):
     return {
         'claude': cached['claude'],            # ok|unauthenticated|missing|timeout|error|unknown
         'claude_detail': cached['detail'],
+        # WHICH backend that verdict is about (2026-08-18): one of
+        # ai_backend.PROVIDER_ORDER, or '' before any call has resolved one.
+        # The key is `ai_provider` rather than a rename of `claude` because an
+        # editor's cached SPA bundle still reads the old names, and the health
+        # pip going blank is a worse failure than an unlabelled one.
+        'ai_provider': cached.get('provider', ''),
         'yt_dlp': _yt_dlp_state(),
         'js_runtime': _js_runtime_state(),
         'worker_alive': worker.is_alive(),

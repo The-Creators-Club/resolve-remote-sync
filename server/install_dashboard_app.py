@@ -695,6 +695,14 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    # mount and no NAS-side cookie file, and a customer who is
                    # entitled to them turns them on in their own site.toml.
                    youtube_download: str = "0", youtube_unblock: str = "0",
+                   # Whether this site permits the downloader's AI calls to
+                   # run a Claude Code / Codex CLI THE CUSTOMER installed on
+                   # this host (2026-08-18, dashboard ai_providers.py). "0"
+                   # here is the vendor build: nothing is ever installed by
+                   # this script either way -- there is no binary to push,
+                   # which was the whole point of item 1 -- so this projects
+                   # one site.toml key and provisions nothing.
+                   ai_cli_providers: str = "0",
                    anthropic_api_key: str = "") -> dict:
     """The compose body, as the dict the TrueNAS middleware stores verbatim.
 
@@ -842,6 +850,12 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # dashboard mounts /ytdl at all.
                     "DASH_SITE_YOUTUBE_DOWNLOAD": youtube_download,
                     "DASH_SITE_YOUTUBE_UNBLOCK": "1" if unblock_on else "0",
+                    # Read only by the dashboard's Settings -> AI providers
+                    # page (a site_settings row set there beats it, per
+                    # site_store's own precedence) and never published in
+                    # GET /api/v1/site: no companion, installer or indexer
+                    # has any use for it.
+                    "DASH_SITE_AI_CLI_PROVIDERS": ai_cli_providers,
                     **({
                         # THE UNBLOCK HALF, present only when the customer
                         # asked for it (COMMERCIAL_READINESS.md item 3). Both
@@ -3071,6 +3085,11 @@ def main():
                                or site_bool("features", "youtube_download")) else "0"
     youtube_unblock = "1" if (args.enable_youtube_unblock
                               or site_bool("features", "youtube_unblock")) else "0"
+    # No --enable flag for this one, deliberately: it is the customer stating
+    # that a personal Claude/ChatGPT subscription may power their service
+    # (docs/legal/YOUTUBE_FEATURE_NOTICE.md), which belongs in their manifest
+    # where it is written down, not in one operator's shell history.
+    ai_cli_providers = "1" if site_bool("features", "ai_cli_providers") else "0"
     if youtube_download == "1" and not anthropic_api_key and not args.dry_run:
         print("NOTE: the YouTube downloader is enabled for this site but "
               "ANTHROPIC_API_KEY is not set. Everything deploys; /ytdl will "
@@ -3627,6 +3646,7 @@ def main():
         ssh_key_probe=site_value("nas", "ssh_key_probe") or "1",
         youtube_download=youtube_download,
         youtube_unblock=youtube_unblock,
+        ai_cli_providers=ai_cli_providers,
         anthropic_api_key=anthropic_api_key,
     )
     # A compose FILE for a platform that reads one. Rendered from exactly the

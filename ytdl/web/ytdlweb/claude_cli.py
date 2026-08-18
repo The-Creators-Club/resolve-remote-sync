@@ -1,4 +1,21 @@
-"""The two AI calls, over the Anthropic API, and how they fail.
+"""The two AI calls -- the prompts, the parsing, the health cache.
+
+**2026-08-18: WHICH backend answers them now lives in `ai_backend.py`.** The
+dashboard grew a Settings -> AI providers page, and a call goes to the first
+available of claude_code > anthropic_api > codex > openai_api > deepseek_api,
+re-resolved on every call so a key an admin pastes works without a container
+restart. This module kept everything that is about THIS FEATURE -- the two
+prompts, the shot-type bias tables, the JSON contract, the four error
+prefixes, the health cache -- and delegates the transport. `ClaudeError`, the
+`ERR_*` prefixes and `_client` are re-exported here because worker.py,
+routes_api.py, db.py and this app's suite all reach for them by these names;
+new code should read `ai_backend`.
+
+The Anthropic API is still the vendor default and still the only backend a
+customer gets without asking: the CLI providers are adapters for a binary the
+CUSTOMER installed on the dashboard host, behind a site feature flag that
+ships off. See ai_backend.py's docstring for why that is not a walk-back of
+the 2026-08-17 decision below.
 
 **2026-08-17: this module no longer shells out to the `claude` CLI**
 (docs/COMMERCIAL_READINESS.md item 1). It used to run `claude -p` as a
@@ -50,16 +67,18 @@ import re
 import threading
 import time
 
-from ytdlweb import config
+from ytdlweb import ai_backend, config
 
 log = logging.getLogger(__name__)
 
 # The four prefixes. They are part of the contract with the SPA (app.js
-# HINTS) -- change one and the hint text stops appearing.
-ERR_AUTH = 'claude_auth:'
-ERR_MISSING = 'claude_missing:'
-ERR_TIMEOUT = 'claude_timeout:'
-ERR_OUTPUT = 'claude_output:'
+# HINTS) -- change one and the hint text stops appearing. Defined in
+# ai_backend since 2026-08-18 (every provider classifies into the same four)
+# and re-exported here, which is the name the rest of this app imports.
+ERR_AUTH = ai_backend.ERR_AUTH
+ERR_MISSING = ai_backend.ERR_MISSING
+ERR_TIMEOUT = ai_backend.ERR_TIMEOUT
+ERR_OUTPUT = ai_backend.ERR_OUTPUT
 
 # Where the untrusted material sits in the user turn. A named block, not bare
 # text: it gives the system prompt something to point at when it says "the
@@ -69,17 +88,11 @@ DATA_OPEN = '<{name}>'
 DATA_CLOSE = '</{name}>'
 
 
-class ClaudeError(RuntimeError):
-    """A failed Claude call, already classified.
-
-    `str(exc)` is written straight into jobs.error and shown verbatim in the
-    UI, so it always starts with one of the four prefixes above.
-    """
-
-    def __init__(self, prefix, detail):
-        self.prefix = prefix
-        self.detail = str(detail)[:600]
-        super().__init__(f'{prefix} {self.detail}')
+# THE class, not a subclass: worker.py catches `claude_cli.ClaudeError` in two
+# phases and one of them degrades rather than failing the job, so an OpenAI
+# failure that did not satisfy `isinstance` would take a twenty-minute job
+# down where the design says show a banner (YTDL-13's lesson).
+ClaudeError = ai_backend.ClaudeError
 
 
 def data_block(name, text):
@@ -99,24 +112,13 @@ def data_block(name, text):
 def _client():
     """The Anthropic client, built per call. Raises ClaudeError.
 
-    Per call and not cached: it is a thin object over an httpx pool, these
-    calls are minutes apart, and a cached client would hold a key an operator
-    rotated until the container restarted.
+    THE SEAM. The construction moved to `ai_backend.anthropic_client`
+    (2026-08-18) but this name did not: it is what ytdl/web/tests patches to
+    run the whole suite with no `anthropic` installed and no network, and
+    ai_backend looks it up here at call time rather than binding the function
+    at import, so that monkeypatch keeps biting.
     """
-    if not config.ANTHROPIC_API_KEY:
-        raise ClaudeError(ERR_AUTH, _auth_detail('ANTHROPIC_API_KEY is not set'))
-    try:
-        import anthropic
-    except ImportError as exc:
-        # The one shape of "missing" that is left. It is a deployment fault
-        # (requirements.txt pins the SDK), not an operator one, so it says so.
-        raise ClaudeError(ERR_MISSING,
-                          f'the `anthropic` SDK is not installed in this '
-                          f'container ({exc}). See ytdl/web/DEPLOY.md.') from None
-    kwargs = {'api_key': config.ANTHROPIC_API_KEY}
-    if config.ANTHROPIC_BASE_URL:
-        kwargs['base_url'] = config.ANTHROPIC_BASE_URL
-    return anthropic, anthropic.Anthropic(**kwargs)
+    return ai_backend.anthropic_client()
 
 
 def _strip_fences(text):
@@ -138,83 +140,39 @@ def _strip_fences(text):
 
 
 def _invoke(system, user, timeout=None):
-    """One Messages API call. -> the model's TEXT. Raises ClaudeError.
+    """One AI call, through whichever provider the chain picks. -> TEXT.
 
     `system` is OURS -- composed from the tables in this file -- and `user`
     carries whatever came off the wire, fenced by data_block(). Keeping the two
     apart is the whole of this module's prompt-injection posture: a YouTube
     title that says "ignore your instructions" is then a line inside a labelled
-    data block rather than a peer of the instructions themselves.
+    data block rather than a peer of the instructions themselves. Every
+    provider in ai_backend honours that split (the two CLIs as well as they
+    can -- see its docstring).
 
-    No `tools` array is ever sent. Not a policy the model is asked to follow --
-    a capability it is not given.
+    THE PROVIDER IS RESOLVED PER CALL, not cached: an admin who pastes a key
+    into Settings -> AI providers must not have to wait for a container
+    restart, and one who clears a key must not keep spending it.
+
+    No `tools` array is ever sent to an API provider, and the CLI providers
+    are invoked with tools disallowed. Not a policy the model is asked to
+    follow -- a capability it is not given.
     """
-    anthropic, client = _client()
-    limit = float(timeout or config.CLAUDE_TIMEOUT)
-    try:
-        response = client.with_options(timeout=limit).messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=config.CLAUDE_MAX_TOKENS,
-            system=system,
-            # `low` deliberately: both calls are short structured judgements
-            # over a list, not reasoning problems, and this is a fleet feature
-            # a customer pays per token for.
-            output_config={'effort': 'low'},
-            messages=[{'role': 'user', 'content': user}],
-        )
-    except anthropic.AuthenticationError as exc:
-        raise ClaudeError(ERR_AUTH, _auth_detail(exc)) from None
-    except anthropic.PermissionDeniedError as exc:
-        # A key that exists and may not call this model reads to an operator
-        # exactly like a key that is wrong, and the fix is in the same place.
-        raise ClaudeError(ERR_AUTH, _auth_detail(exc)) from None
-    except anthropic.APITimeoutError:
-        raise ClaudeError(ERR_TIMEOUT,
-                          f'Claude did not answer within {limit:.0f}s.') from None
-    except anthropic.APIConnectionError as exc:
-        raise ClaudeError(ERR_MISSING,
-                          f'could not reach the Anthropic API from this '
-                          f'container ({exc}). Check the container\'s egress '
-                          'and ANTHROPIC_BASE_URL.') from None
-    except anthropic.APIStatusError as exc:
-        raise ClaudeError(ERR_OUTPUT,
-                          f'the Anthropic API answered '
-                          f'{getattr(exc, "status_code", "?")}: '
-                          f'{str(getattr(exc, "message", exc))[:300]}') from None
-    except Exception as exc:                      # noqa: BLE001 - see below
-        # A worker phase must never die on an SDK shape we did not anticipate:
-        # the caller's contract is ClaudeError, and generate_terms' caller
-        # fails the job on one while filter_relevance's DEGRADES to an
-        # unfiltered manifest. An escaping TypeError does neither (YTDL-13's
-        # lesson, in a new place).
-        raise ClaudeError(ERR_OUTPUT,
-                          f'the Anthropic call failed: '
-                          f'{type(exc).__name__}: {str(exc)[:200]}') from None
-
-    if getattr(response, 'stop_reason', None) == 'refusal':
-        # A 200 with no usable content. Its own message because "the model
-        # declined" is not something an operator can fix by rotating a key.
-        raise ClaudeError(ERR_OUTPUT,
-                          'Claude declined this request '
-                          f'({getattr(getattr(response, "stop_details", None), "category", None)}).')
-    text = ''.join(block.text for block in (response.content or [])
-                   if getattr(block, 'type', None) == 'text')
-    if not text.strip():
-        raise ClaudeError(ERR_OUTPUT, 'Claude returned an empty response')
+    provider = ai_backend.current_provider()
+    text = ai_backend.complete(system, user, provider=provider, timeout=timeout)
     # A call that worked IS the probe, and it is the only thing that ever
     # writes `ok` back: without it one transient timeout showed red on every
     # editor's page until the container was restarted, including after an admin
     # had followed DEPLOY.md and fixed the credentials by hand (YTDL-5,
     # 2026-08-11).
-    _note_ok()
+    _note_ok(provider.name)
     return text
 
 
-def _auth_detail(raw):
-    return ('this deployment has no working Anthropic API key. An admin must '
-            'set ANTHROPIC_API_KEY in the dashboard container '
-            '(ytdl/web/DEPLOY.md) -- until then no job can generate search '
-            'terms. [' + ' '.join(str(raw).split())[:160] + ']')
+def _auth_detail(raw, provider=None):
+    """Kept as a name because this app's suite and its ops docs both point at
+    it; the wording now names whichever provider failed (ai_backend)."""
+    return ai_backend.auth_detail(raw, provider)
 
 
 def ask_json(system, user, timeout=None, retries=1):
@@ -716,7 +674,11 @@ def _mmss(sec):
 # on its own (YTDL-5): the only other way back to green is a container restart,
 # which takes the fleet status page down with it.
 
-_health = {'claude': 'unknown', 'checked_at': None, 'detail': ''}
+# `provider` joined the cache 2026-08-18: with five possible backends, "claude
+# unauthenticated" on the SPA's status pip is only actionable once it says
+# WHICH one -- an admin who just pinned DeepSeek and sees an Anthropic auth
+# error has learnt something real (the pin did not take).
+_health = {'claude': 'unknown', 'checked_at': None, 'detail': '', 'provider': ''}
 _health_lock = threading.Lock()
 
 # Don't re-probe more often than this. A wedged claude that fails 40 videos in
@@ -745,6 +707,14 @@ def refresh_health(force=False):
             return dict(_health)
 
     state, detail = 'ok', ''
+    # Resolved here as well as inside _invoke so the cache can name the
+    # provider even for a probe that failed on the way to it.
+    try:
+        probe_provider = ai_backend.current_provider().name
+    except ClaudeError:
+        probe_provider = ''
+    except Exception:  # noqa: BLE001 - a probe must never kill the worker
+        probe_provider = ''
     try:
         _invoke('Reply with the two characters: ok', 'ping',
                 timeout=min(60, config.CLAUDE_TIMEOUT))
@@ -757,14 +727,16 @@ def refresh_health(force=False):
         state, detail = 'error', str(exc)[:200]
 
     with _health_lock:
-        _health.update({'claude': state, 'checked_at': time.time(), 'detail': detail})
+        _health.update({'claude': state, 'checked_at': time.time(),
+                        'detail': detail, 'provider': probe_provider})
         return dict(_health)
 
 
-def _note_ok():
+def _note_ok(provider=''):
     """Record that a live call just worked. Called from _invoke, any thread."""
     with _health_lock:
-        _health.update({'claude': 'ok', 'checked_at': time.time(), 'detail': ''})
+        _health.update({'claude': 'ok', 'checked_at': time.time(), 'detail': '',
+                        'provider': provider or _health.get('provider', '')})
 
 
 def note_failure(exc):
@@ -777,4 +749,10 @@ def note_failure(exc):
              ERR_TIMEOUT: 'timeout'}.get(getattr(exc, 'prefix', ''), 'error')
     with _health_lock:
         _health.update({'claude': state, 'checked_at': time.time(),
-                        'detail': getattr(exc, 'detail', str(exc))[:200]})
+                        'detail': getattr(exc, 'detail', str(exc))[:200],
+                        # '' when the failure happened BEFORE a provider was
+                        # chosen (no credential anywhere) -- which is itself
+                        # the most common cause, so it must not overwrite a
+                        # known provider with a blank.
+                        'provider': (getattr(exc, 'provider', '')
+                                     or _health.get('provider', ''))})

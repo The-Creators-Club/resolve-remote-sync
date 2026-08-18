@@ -78,6 +78,14 @@ KEYS: dict[str, str] = {
     "nas_kind": "str",
     "features.youtube_download": "bool",
     "features.youtube_unblock": "bool",
+    # Whether the YouTube downloader may use a Claude Code / Codex CLI the
+    # CUSTOMER installed on the dashboard host (2026-08-18, ai_providers.py).
+    # A site feature like the two above -- so it is settable here, importable
+    # from a site.toml `[features]` block and exportable -- but deliberately
+    # NOT published by `api_site`: no companion, installer or indexer has any
+    # use for it, and the open manifest gains a field only when a client
+    # needs one.
+    "features.ai_cli_providers": "bool",
     # Which LOCAL vision model the b-roll indexer loads -- "good" (Qwen3-VL
     # 4B) or "best" (Qwen3-VL 8B), chosen by how much VRAM the indexing
     # machine has (2026-08-18). Validated against MODEL_TIERS in validate()
@@ -268,6 +276,7 @@ def seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:
         "nas_kind": settings.nas_kind,
         "features.youtube_download": "1" if settings.site_feature_youtube_download else "0",
         "features.youtube_unblock": "1" if settings.site_feature_youtube_unblock else "0",
+        "features.ai_cli_providers": "1" if settings.site_feature_ai_cli_providers else "0",
         "indexer_model_tier": settings.site_indexer_model_tier,
     }
     # template_folders / shared_asset_folders come from provision.py (its own
@@ -358,6 +367,7 @@ def resolved_manifest(conn: sqlite3.Connection, settings: Any) -> dict[str, Any]
         "features": {
             "youtube_download": as_bool("features.youtube_download"),
             "youtube_unblock": as_bool("features.youtube_unblock"),
+            "ai_cli_providers": as_bool("features.ai_cli_providers"),
         },
         # A NEW top-level object (2026-08-18), not another flat key -- same
         # shape convention as "features" above, and room for more indexer
@@ -398,6 +408,7 @@ def _settings_fallback(key: str, settings: Any) -> str:
         "nas_kind": settings.nas_kind,
         "features.youtube_download": "1" if settings.site_feature_youtube_download else "0",
         "features.youtube_unblock": "1" if settings.site_feature_youtube_unblock else "0",
+        "features.ai_cli_providers": "1" if settings.site_feature_ai_cli_providers else "0",
         "indexer_model_tier": settings.site_indexer_model_tier,
         "template_folders": "",
         "shared_asset_folders": "",
@@ -423,7 +434,8 @@ _SECTIONS: list[tuple[str, list[str]]] = [
     ("syncthing", ["nas_syncthing_id"]),
     ("site", ["org_name", "org_short", "product_name", "brand_logo",
               "canonical_prefix"]),
-    ("features", ["features.youtube_download", "features.youtube_unblock"]),
+    ("features", ["features.youtube_download", "features.youtube_unblock",
+                  "features.ai_cli_providers"]),
     ("indexer", ["indexer_model_tier"]),
 ]
 
@@ -436,6 +448,7 @@ _TOML_KEY_NAMES = {
     "shared_asset_folders": "shared_assets",
     "features.youtube_download": "youtube_download",
     "features.youtube_unblock": "youtube_unblock",
+    "features.ai_cli_providers": "ai_cli_providers",
     "indexer_model_tier": "model_tier",
 }
 
@@ -476,6 +489,7 @@ def export_toml(conn: sqlite3.Connection, settings: Any) -> str:
         "canonical_prefix": manifest["canonical_prefix"],
         "features.youtube_download": manifest["features"]["youtube_download"],
         "features.youtube_unblock": manifest["features"]["youtube_unblock"],
+        "features.ai_cli_providers": manifest["features"]["ai_cli_providers"],
         "indexer_model_tier": manifest["indexer"]["model_tier"],
     }
     for section, keys in _SECTIONS:

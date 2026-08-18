@@ -426,6 +426,23 @@ input[type="radio"]:disabled {
 .radio-option input[type="radio"] { margin-top: 0.15rem; }
 .radio-option .muted { display: block; font-weight: normal; }
 
+/* ---------------- AI providers (Settings, 2026-08-18) ---------------- */
+/* One row per provider, in chain order. The rank number is part of the
+   information: the whole feature is "the first available one wins", and a
+   list that did not show its own order would leave an admin guessing why
+   their DeepSeek key is not being used. */
+.ai-provider {
+  border-top: 1px dotted #2a2a31;
+  padding: 0.5rem 0;
+}
+.ai-provider:first-child { border-top: none; }
+.ai-provider-head { display: flex; align-items: baseline; gap: 0.5rem; }
+.ai-rank { color: var(--muted); }
+.ai-key { display: flex; align-items: baseline; gap: 0.5rem; margin-top: 0.3rem;
+          flex-wrap: wrap; }
+.ai-key input { min-width: 22rem; }
+.ai-test { display: inline-flex; align-items: baseline; gap: 0.3rem; }
+
 /* ---------------- sidebar checkbox ---------------- */
 .project-link { display: flex; align-items: baseline; gap: 0.4rem; }
 .proj-check {

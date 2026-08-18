@@ -47,12 +47,28 @@ const PHASE_LABEL = {
 // ANTHROPIC_API_KEY", not "run the one-time login", and claude_missing: is a
 // broken container rather than a missing binary an operator forgot to install
 // (docs/COMMERCIAL_READINESS.md item 1).
+//
+// 2026-08-18: there are five possible backends now (dashboard Settings -> AI
+// providers), so the wording says "AI provider" rather than naming Anthropic
+// -- the prefixes themselves are still the four above because an editor's
+// cached bundle and the server have to agree on them.
 const HINTS = [
-  ['claude_auth:', 'This deployment has no working Anthropic API key. An admin must set ANTHROPIC_API_KEY on the dashboard container — see ytdl/web/DEPLOY.md. Nothing else on this page is affected.'],
-  ['claude_missing:', 'The dashboard container cannot reach the Anthropic API (missing SDK, or no route out). See ytdl/web/DEPLOY.md.'],
-  ['claude_timeout:', 'Claude did not answer in time. Try the search again; if it keeps happening the server is overloaded.'],
-  ['claude_output:', 'Claude answered with something this app could not read. Trying again usually works.'],
+  ['claude_auth:', 'This deployment has no working AI provider credential. An admin must add one on the dashboard: Settings → AI providers (or set ANTHROPIC_API_KEY on the container) — see ytdl/web/DEPLOY.md. Nothing else on this page is affected.'],
+  ['claude_missing:', 'The dashboard container cannot reach the configured AI provider (missing SDK or CLI, or no route out). See ytdl/web/DEPLOY.md.'],
+  ['claude_timeout:', 'The AI provider did not answer in time. Try the search again; if it keeps happening the server is overloaded.'],
+  ['claude_output:', 'The AI provider answered with something this app could not read. Trying again usually works.'],
 ];
+
+// Display names for GET api/health's `ai_provider`. Mirrors
+// ytdlweb.ai_backend.PROVIDER_ORDER; an unknown value falls back to the old
+// word rather than showing a raw key.
+const PROVIDER_NAMES = {
+  claude_code: 'claude code',
+  anthropic_api: 'claude api',
+  codex: 'codex',
+  openai_api: 'openai',
+  deepseek_api: 'deepseek',
+};
 
 // The shot-type checkboxes. Mirrors ytdlweb.claude_cli.SHOT_TYPES -- key,
 // label and default tick -- and tests/test_static_app.py compares the two
@@ -298,7 +314,13 @@ async function loadHealth() {
   state.localDownload = h.local_download === true;
   const pip = $('#health');
   const claudeOk = h.claude === 'ok';
-  pip.textContent = `claude ${h.claude}` + (h.yt_dlp === 'ok' ? '' : ' · yt-dlp missing');
+  // The AI backend is chosen by the dashboard's Settings -> AI providers page
+  // now (2026-08-18), so the pip names the one in force rather than always
+  // saying "claude" -- an admin who pinned DeepSeek and reads "claude ok" has
+  // been told nothing. A server too old to send `ai_provider` (or a call that
+  // has not resolved one yet) falls back to the old word.
+  const aiName = PROVIDER_NAMES[h.ai_provider] || 'claude';
+  pip.textContent = `${aiName} ${h.claude}` + (h.yt_dlp === 'ok' ? '' : ' · yt-dlp missing');
   pip.className = 'rstatus ' + (claudeOk && h.yt_dlp === 'ok' ? 'on'
                                 : h.claude === 'unknown' ? '' : 'off');
   // The health contract is ok|unauthenticated|missing|timeout|error|unknown.

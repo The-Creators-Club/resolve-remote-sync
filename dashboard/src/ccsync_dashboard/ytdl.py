@@ -281,6 +281,15 @@ def mount_ytdl(app: FastAPI, settings: Settings) -> str:
 
     gated = YtdlGate(ytdl_app, settings.session_secret)
 
+    # WHICH AI answers the sub-app's two calls (2026-08-18). Env at mount time
+    # is not enough any more: keys are typed on Settings and can change while
+    # the container runs, so what is installed is a CALLBACK the sub-app
+    # invokes per call (ai_providers.make_lookup -> ai_backend's
+    # set_provider_lookup). Best-effort in both directions -- an older ytdl
+    # tree with no ai_backend keeps working off its own environment, and a
+    # failure to install the hook must not un-mount the feature.
+    _install_ai_provider_lookup(ytdl_app, settings)
+
     try:
         _init_ytdl_storage()
     except Exception as e:  # noqa: BLE001
@@ -299,6 +308,38 @@ def mount_ytdl(app: FastAPI, settings: Settings) -> str:
     app.mount(MOUNT_PATH, gated)
     log.info("ytdl UI mounted at %s", MOUNT_PATH)
     return MOUNTED
+
+
+def _install_ai_provider_lookup(ytdl_app: Any, settings: Settings) -> bool:
+    """Give the sub-app the dashboard's "which provider, with what credential"
+    callback. -> whether it took.
+
+    TWO PLACES, on purpose. `ai_backend.set_provider_lookup` is a module
+    global because the thing that asks is the ytdl WORKER THREAD, which has no
+    request and no app object in hand; `ytdl_app.state.ai_provider_lookup` is
+    the same callable where an operator (or a test) can see what was
+    installed, and is the fallback ai_backend reads if only the attribute was
+    set. Neither carries a key: the callback FETCHES one per call, so nothing
+    is captured here that a later Settings edit would make stale.
+    """
+    try:
+        from . import ai_providers
+
+        lookup = ai_providers.make_lookup(settings)
+        try:
+            ytdl_app.state.ai_provider_lookup = lookup
+        except Exception:  # noqa: BLE001 - a sub-app with no state is still mountable
+            pass
+        from ytdlweb import ai_backend  # type: ignore[import-not-found]
+
+        ai_backend.set_provider_lookup(lookup)
+        return True
+    except Exception as e:  # noqa: BLE001 - see the module docstring
+        log.warning("ytdl AI-provider lookup not installed (%s: %s); the sub-app "
+                    "will fall back to ANTHROPIC_API_KEY / OPENAI_API_KEY / "
+                    "DEEPSEEK_API_KEY from the container's environment",
+                    type(e).__name__, e)
+        return False
 
 
 def _init_ytdl_storage() -> None:

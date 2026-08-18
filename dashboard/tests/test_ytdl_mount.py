@@ -120,10 +120,23 @@ def _build_fake_ytdlweb() -> dict[str, types.ModuleType]:
     def home() -> str:
         return "<html><body>YOUTUBE DOWNLOADER</body></html>"
 
+    # The provider layer (2026-08-18). The real ai_backend asks this callback
+    # on EVERY AI call, which is what lets a key typed on Settings work with
+    # no container restart; the fake records what was installed.
+    ai_backend = types.ModuleType("ytdlweb.ai_backend")
+    ai_backend.installed = []
+
+    def set_provider_lookup(fn) -> None:
+        ai_backend.installed.append(fn)
+
+    ai_backend.set_provider_lookup = set_provider_lookup
+
     main.app = ytdl_app
     pkg.config, pkg.db, pkg.main, pkg.worker = config, db, main, worker
+    pkg.ai_backend = ai_backend
     return {"ytdlweb": pkg, "ytdlweb.config": config, "ytdlweb.db": db,
-            "ytdlweb.main": main, "ytdlweb.worker": worker}
+            "ytdlweb.main": main, "ytdlweb.worker": worker,
+            "ytdlweb.ai_backend": ai_backend}
 
 
 @pytest.fixture
@@ -707,3 +720,53 @@ def test_the_default_settings_have_both_flags_off():
     s = Settings()
     assert s.site_feature_youtube_download is False
     assert s.site_feature_youtube_unblock is False
+    # ...and CLI AI providers, for the same "the vendor decides nothing for
+    # the customer" reason (2026-08-18, ai_providers.py).
+    assert s.site_feature_ai_cli_providers is False
+
+
+# --- how the sub-app learns which AI to use (2026-08-18) ----------------------
+
+def test_mounting_installs_the_ai_provider_lookup(tmp_path, ytdl_env):
+    """Env at mount time is not enough: keys are typed on Settings and change
+    while the container runs, so what the sub-app gets is a CALLBACK it asks
+    per call -- installed in two places (the module global the WORKER THREAD
+    reads, and app.state where it can be seen)."""
+    import sys as _sys
+
+    app = _app(tmp_path)
+    assert app.state.ytdl_status == ytdl.MOUNTED
+    fake_backend = _sys.modules["ytdlweb.ai_backend"]
+    assert len(fake_backend.installed) == 1
+    assert _sys.modules["ytdlweb.main"].app.state.ai_provider_lookup is \
+        fake_backend.installed[0]
+
+
+def test_the_installed_lookup_answers_from_the_live_database(tmp_path, ytdl_env):
+    """End to end: a key stored through the admin route is what the ytdl app's
+    next call resolves to -- no restart, no env var."""
+    import sys as _sys
+
+    from ccsync_dashboard import ai_providers
+
+    app = _app(tmp_path)
+    lookup = _sys.modules["ytdlweb.ai_backend"].installed[0]
+    assert lookup()["provider"] == ""          # nothing configured yet
+    ai_providers.set_key(app.state.settings, "deepseek_api", "sk-live-value-abcd")
+    payload = lookup()
+    assert payload["provider"] == "deepseek_api"
+    assert payload["api_key"] == "sk-live-value-abcd"
+    assert payload["cli_enabled"] is False
+
+
+def test_an_older_ytdl_tree_with_no_ai_backend_still_mounts(tmp_path, ytdl_env,
+                                                            monkeypatch):
+    """Best-effort in both directions: a tree that predates the provider layer
+    keeps working off its own environment, and a failure to install the hook
+    must never cost the mount."""
+    import sys as _sys
+
+    monkeypatch.delitem(_sys.modules, "ytdlweb.ai_backend")
+    monkeypatch.delattr(_sys.modules["ytdlweb"], "ai_backend")
+    app = _app(tmp_path)
+    assert app.state.ytdl_status == ytdl.MOUNTED

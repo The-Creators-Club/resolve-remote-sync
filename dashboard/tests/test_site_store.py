@@ -208,7 +208,13 @@ def test_features_block_shape(conn):
     site_store.set_many(conn, {"features.youtube_download": "1"}, updated_by="admin")
     conn.commit()
     manifest = site_store.resolved_manifest(conn, settings)
-    assert manifest["features"] == {"youtube_download": True, "youtube_unblock": False}
+    # ai_cli_providers joined the block 2026-08-18 (ai_providers.py) and is
+    # false unless a site says otherwise, like both YouTube flags. It is NOT
+    # in `GET /api/v1/site` -- see test_site.py, which pins that the open
+    # manifest still carries exactly the two.
+    assert manifest["features"] == {"youtube_download": True,
+                                    "youtube_unblock": False,
+                                    "ai_cli_providers": False}
 
 
 # ------------------------------------------------------------------- seed

@@ -78,6 +78,18 @@ def _write_secret_file(path: Path, value: str) -> None:
         pass  # best-effort on platforms without POSIX modes
 
 
+def write_secret_file(path: Path, value: str) -> None:
+    """The public name for the 0600 write above (2026-08-18).
+
+    `ai_providers.py` stores the customer's AI keys under the same
+    `<data>/secrets/` tree and must use the same hardening -- one
+    implementation, so a future fix to it (an ACL on Windows, a fsync, a
+    umask) reaches every secret this container writes rather than four of the
+    five.
+    """
+    _write_secret_file(path, value)
+
+
 def _read_secret_file(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()

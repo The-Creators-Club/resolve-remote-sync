@@ -31,6 +31,7 @@ anti-automation measures.
 | PO-token provider sidecar (`bgutil-ytdlp-pot-provider`) | **No** — the compose service does not exist | `[features] youtube_unblock = true` |
 | deno, the "n-challenge" JavaScript solver | **No** — not provisioned on the NAS, not installed by the companion | `[features] youtube_unblock = true` |
 | Signing in to YouTube with browser cookies | **No** — the tray item is hidden, the endpoint refuses, cookie files on disk are ignored | `[features] youtube_unblock = true` |
+| The Claude Code / Codex CLIs | **No, and not at any setting** — nothing here downloads, bundles, installs or updates either one. The customer installs and signs in their own | `[features] ai_cli_providers = true` only permits *using* one already on the host |
 | The rights/ToS attestation | Always. It cannot be switched off | — |
 
 The three rows in the middle are what this document calls the **unblock
@@ -119,12 +120,51 @@ python server/install_dashboard_app.py --enable-youtube --enable-youtube-unblock
 serve the downloader, and the deploy says so rather than provisioning them.
 
 The downloader's two AI calls (search-term expansion and relevance filtering)
-need an Anthropic API key, which **the customer supplies** as
-`ANTHROPIC_API_KEY` in the dashboard container's environment. It is billed to
-their account, it is masked in `--dry-run` output, and on Synology it is
-written to the 0600 `.env` beside the compose file rather than into it. Without
-one the downloader reports "no working Anthropic API key" and nothing else on
-the dashboard is affected.
+need an AI provider, which **the customer supplies**. The supported path is an
+API key — Anthropic, OpenAI or DeepSeek — typed on the dashboard's **Settings →
+AI providers** page or set in the container's environment
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`). It is billed to
+their account, it is masked in `--dry-run` output and in every API response,
+and on Synology it is written to the 0600 `.env` beside the compose file rather
+than into it. Without one the downloader reports "no working AI provider
+credential" and nothing else on the dashboard is affected.
+
+### CLI providers: the customer's own subscription, and the customer's own CLI
+
+Since 2026-08-18 the same Settings page can also point the two AI calls at
+**Claude Code** or **Codex** — the command-line tools Anthropic and OpenAI
+publish, driven by a personal Claude or ChatGPT subscription instead of a
+metered API key.
+
+**Neither tool is part of this product.** CC Sync does not ship, bundle,
+download, install, update or version-pin either one. What it contains is an
+*adapter*: if an executable called `claude` (or `codex`) is present on the
+dashboard host — because the customer installed it there — and the customer has
+signed it in there, the downloader can invoke it in its non-interactive mode.
+CC Sync cannot sign it in: that is an interactive browser login, so the page
+prints the command for the customer to run on the host and does nothing else.
+
+**It is off unless the customer turns it on.** `site.toml` `[features]
+ai_cli_providers` (default `false`) is what makes the two rows appear at all;
+while it is off they are not even probed — no process is executed. The Settings
+page carries this sentence above the switch:
+
+> Using a personal Claude/ChatGPT subscription for a service may breach its
+> terms — that is your decision.
+
+Which is the whole of the vendor's position. **Whether a personal subscription
+may be used to power a service, and whether more than one person may benefit
+from one seat, is between the customer and the provider of that subscription**;
+CC Sync makes no representation that it is permitted, receives nothing from it,
+and defaults to the metered API path in which every deployment pays for its own
+usage under its own agreement.
+
+This history matters and is recorded in `docs/COMMERCIAL_READINESS.md` item 1:
+an earlier version of this feature shipped the 304 MB Claude Code binary onto
+customer hardware and ran every deployment under one human's consumer account.
+The redistribution was the vendor's to fix and is fixed — nothing is
+distributed. What remains is a switch the customer may set for their own host,
+their own binary and their own account.
 
 ## Vendored code
 

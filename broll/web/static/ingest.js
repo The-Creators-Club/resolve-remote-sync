@@ -1193,12 +1193,23 @@ function ingestRenderLive() {
   }
   if (lb) {
     const bits = [];
-    if (lb.gate) bits.push(lb.gate);
+    // The companion's `model` block is {tier, ready, percent, note}; the
+    // note is "downloading" while the weights land and the percent is the
+    // download's. Shown INSTEAD of the raw gate token: an editor watching
+    // "no-model" for ten minutes read it as broken while 3.3 GB were in
+    // fact arriving at 2 MB/s (owner, 2026-08-18).
+    const model = lb.model || {};
+    const fetching = model.note === "downloading" ||
+                     (lb.gate === "no-model" && model.percent != null);
+    if (fetching) {
+      const pct = model.percent != null ? ` ${Math.round(model.percent)}%` : "";
+      bits.push(`downloading the ${ingTierLabel(model.tier || ing.tier)} model${pct}` +
+                (pct ? " (a few GB, this can take a while on the first run)" : ""));
+    } else if (lb.gate) {
+      bits.push(ingGateLabel(lb.gate));
+    }
     if (lb.current && lb.current.stage) {
       bits.push(`${lb.current.stage}${lb.current.percent != null ? ` ${lb.current.percent}%` : ""}`);
-    }
-    if (lb.model && lb.model.downloading) {
-      bits.push(`downloading the ${lb.model.tier || ing.tier} model`);
     }
     if (lb.upload) bits.push(`uploads: ${lb.upload.queued || 0} queued`);
     if (lb.upload_paused) bits.push("uploads paused");
@@ -1440,6 +1451,28 @@ function ingestBytes(n) {
   if (bytes >= 1e6) return `${Math.round(bytes / 1e6)} MB`;
   if (bytes >= 1e3) return `${Math.round(bytes / 1e3)} kB`;
   return `${bytes} B`;
+}
+
+// The companion's gate tokens (broll_ingest.STATE_*), in words. Unknown
+// tokens pass through so a future gate is still visible rather than blank.
+const ING_GATE_LABELS = {
+  "no-model": "waiting for the indexing model",
+  "user-active": "waiting until you step away from the keyboard",
+  "resolve-open": "waiting for DaVinci Resolve to close",
+  "paused": "paused",
+  "no-ffmpeg": "waiting for ffmpeg to be installed",
+  "drive-absent": "waiting: the sync drive is not connected",
+  "misconfigured": "waiting: this machine's sync config needs fixing",
+  "tier-unfit": "this GPU cannot run the chosen model",
+  "disabled": "b-roll ingest is off on this machine",
+  "nothing-to-do": "nothing to do",
+  "running": "indexing",
+};
+function ingGateLabel(gate) {
+  return ING_GATE_LABELS[gate] || String(gate || "");
+}
+function ingTierLabel(tier) {
+  return tier === "best" ? "Best" : tier === "good" ? "Good" : String(tier || "");
 }
 
 function ingestAgo(iso) {

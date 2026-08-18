@@ -139,7 +139,7 @@ is the operator/customer-facing companion to it.
    `reason:'attestation'` on job creation, on `start_download`, and on the
    **claim** — §4's endpoint list gains that failure mode. `capabilities()`
    answers `ok:false` without the machine-local record, so the SPA quietly
-   takes the server path and the tray offers "YouTube download terms…".
+   takes the server path and the tray offers "Accept YouTube Terms…".
 
 3. **THE UNBLOCK COMPONENTS ARE A SECOND, NARROWER OPT-IN** (item 3):
    `[features] youtube_unblock` gates the PO-token sidecar, the NAS-side

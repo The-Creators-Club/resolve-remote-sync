@@ -1578,6 +1578,10 @@ class WorkProgressWindow:
         self._closed.set()
         self._thread: Optional[threading.Thread] = None
         self._buttons: dict[str, Any] = {}
+        self._closing = False
+        self._headline_label = self._headline_bar = None
+        self._item_label = self._item_bar = None
+        self._overall_label = self._overall_bar = self._note_label = None
 
     # -- lifecycle ---------------------------------------------------------
     def is_open(self) -> bool:
@@ -1594,6 +1598,7 @@ class WorkProgressWindow:
         if self._open.is_set():
             return False
         self._closed.clear()
+        self._closing = False
         self._open.set()
         self._thread = threading.Thread(target=self._serve, name="ccsync-work-window",
                                         daemon=True)
@@ -1707,11 +1712,39 @@ class WorkProgressWindow:
             root.after(self.POLL_MS, self._tick)
             ui_dispatch.run_dialog(root)
         finally:
+            # Every Tk object this window made dies HERE, on the thread that
+            # made it. The 2026-08-18 crash: the b-roll window closed, the
+            # music window opened on a fresh thread, and its build overwrote
+            # self._buttons / the label attributes -- so the OLD widgets (and
+            # through them the old interpreter) were finalised on the NEW
+            # thread. Tcl answers that with Tcl_Panic ("Tcl_AsyncDelete: async
+            # handler deleted by the wrong thread"), exception 0x80000003 in
+            # tcl86t.dll, and the whole tray exits with no Python traceback.
+            self._drop_widgets()
+            try:
+                del root._ccsync_icon_image
+            except Exception:
+                pass
             try:
                 root.destroy()
             except Exception:
                 pass
             self.root = None
+            del root
+            import gc
+
+            gc.collect()
+
+    def _drop_widgets(self) -> None:
+        """Forget every widget reference so nothing Tk-owned survives the
+        window thread. Runs ON that thread (see _build_and_show)."""
+        self._buttons = {}
+        for name in ("_headline_label", "_headline_bar", "_item_label", "_item_bar",
+                     "_overall_label", "_overall_bar", "_note_label"):
+            try:
+                setattr(self, name, None)
+            except Exception:
+                pass
 
     def _fire(self, name: str) -> None:
         """Run one button's action OFF the Tk thread."""
@@ -1725,6 +1758,12 @@ class WorkProgressWindow:
             self._action_fn(name)
         except Exception:
             log.exception("work window: the %r action failed", name)
+
+    # How long a finished job stays on screen before the window closes itself
+    # (owner, 2026-08-18: "the indexing window should automatically close when
+    # it is completed"). Long enough to read the final line, short enough
+    # that nobody has to reach for the X.
+    AUTO_CLOSE_MS = 4000
 
     def _tick(self) -> None:
         root = self.root
@@ -1740,12 +1779,21 @@ class WorkProgressWindow:
                 self._render(model)
             except Exception:
                 log.exception("work window: render failed")
+            if getattr(model, "finished", False) and not self._closing:
+                self._closing = True
+                try:
+                    root.after(self.AUTO_CLOSE_MS, root.destroy)
+                except Exception:
+                    pass
+                return
         try:
             root.after(self.POLL_MS, self._tick)
         except Exception:
             pass
 
     def _render(self, model: ProgressModel) -> None:
+        if self._headline_label is None:
+            return  # torn down (see _drop_widgets); a late tick must not touch Tk
         self._headline_label.config(text=model.headline_line())
         self._headline_bar["value"] = (
             int(10 * max(0, min(100, int(model.headline_percent))))

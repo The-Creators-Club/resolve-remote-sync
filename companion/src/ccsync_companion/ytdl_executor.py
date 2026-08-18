@@ -230,8 +230,8 @@ REASON_NO_IDENTITY = ("this machine has no valid sign-in token -- sign in "
 # per user and gates the browser; this is the per-machine half, because "this
 # computer downloads other people's video" is a fact about the machine and
 # whoever owns it.
-REASON_NOT_ATTESTED = ("the YouTube download terms have not been accepted on "
-                       "this machine -- tray > 'YouTube download terms...'")
+REASON_NOT_ATTESTED = ("the YouTube terms have not been accepted on this "
+                       "machine: tray > 'Accept YouTube Terms...'")
 # COMP-BROLL-5 (2026-08-14). ffmpeg is an OPTIONAL dependency on this fleet
 # (ffmpeg_tools.ffmpeg_available says so, and proxy_generation_enabled is
 # tri-state for the same reason), but EVERY rung this executor runs is a

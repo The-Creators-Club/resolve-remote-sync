@@ -1578,6 +1578,14 @@ class BrollIngestor:
         shutdown mid-download is a resumable partial rather than a wait.
         """
         tier = self._tier()
+        # Say so BEFORE the bytes start: a multi-GB fetch with no visible
+        # sign is read as "nothing happened" (owner, 2026-08-18: ten minutes
+        # of a silent 3.3 GB download, reported as broken). One balloon at the
+        # start, one when the model is in; the per-second numbers live in the
+        # progress window the balloon points at, never in more balloons.
+        fetching = not self._model_ready(tier)
+        if fetching:
+            self._say(self._download_started_text(tier))
         with self._lock:
             self._model_note = "downloading"
         ok, message = self.sidecar.ensure(tier, stop_event=self._stop_event)
@@ -1586,8 +1594,33 @@ class BrollIngestor:
         if ok:
             self.log.info("%s", message)
             self._clear_warning()
+            if fetching:
+                self._say(f"The {self.kind.label} indexing model is ready. "
+                          f"Indexing starts now.")
         else:
             self.log.warning("the model is not ready -- %s", message)
+
+    def _download_started_text(self, tier: str) -> str:
+        """The balloon for a model fetch: what, how big, where to watch."""
+        size = ""
+        try:
+            n = int(self.sidecar.required_bytes(tier) if tier else self.sidecar.required_bytes())
+            if n > 0:
+                size = f" ({n / 1e9:.1f} GB)"
+        except Exception:
+            size = ""
+        which = f"{tier.capitalize()} " if tier in ("good", "best") else ""
+        return (f"Downloading the {which}{self.kind.label} indexing model{size}. "
+                f"Right-click the tray icon to see progress.")
+
+    def _say(self, message: str) -> None:
+        """A tray balloon, best-effort: never a reason the tick fails."""
+        if self._notify is None:
+            return
+        try:
+            self._notify(message, f"ccsync-companion: {self.kind.label}")
+        except Exception:
+            self.log.debug("the tray notification failed", exc_info=True)
 
     def _download_snapshot(self) -> dict[str, Any]:
         try:

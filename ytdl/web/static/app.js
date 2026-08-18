@@ -1232,6 +1232,18 @@ async function cancelJob() {
 // answer a locally-computed question in a second is not one to hand a job to.
 const PROBE_MS = 1000;
 
+// The one companion refusal the editor can fix (the YouTube terms in the tray)
+// is said once; everything else in the fast path stays silent (see §11 and
+// test_the_probe_is_bounded_and_every_failure_of_it_is_silent).
+let lastCompanionRefusal = "";
+function explainCompanionRefusal(reason) {
+  if (reason === lastCompanionRefusal) return;
+  lastCompanionRefusal = reason;
+  toast("Please first accept the download terms in the companion: right-click the " +
+        "tray icon, then 'Accept YouTube Terms'. This download runs on the server instead.",
+        true, 12000);
+}
+
 // Is there a companion on this machine willing to do the work? 200 with
 // ok:false is a companion saying WHY not (no yt-dlp, disk nearly full, an older
 // naming template than the server's -- §5/§6); it is a no, like every other
@@ -1243,7 +1255,16 @@ async function companionCapabilities() {
     const res = await fetch(`${COMPANION_URL}/ytdl/capabilities`, {signal: ctl.signal});
     if (!res.ok) return null;              // 404: a companion predating 0.8.0
     const body = await res.json();
-    return body && body.ok === true ? body : null;
+    if (body && body.ok === true) return body;
+    // §11 keeps machine-side refusals (an old yt-dlp, no ffmpeg) quiet: the
+    // editor cannot act on them and the server does the job. The ONE reason
+    // that is the editor's own to fix is said out loud: the YouTube terms not
+    // yet accepted in the tray, which read as a broken feature when nothing on
+    // the page mentioned it (owner, 2026-08-18). Server-side download either way.
+    if (body && /terms/i.test(String(body.reason || ""))) {
+      explainCompanionRefusal(String(body.reason));
+    }
+    return null;
   } catch {
     // Nothing listening, the abort above, or Chrome's local-network permission
     // refusing a plain-HTTP origin -- indistinguishable here, and all the same

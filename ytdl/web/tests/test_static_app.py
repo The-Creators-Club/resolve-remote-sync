@@ -1529,12 +1529,20 @@ scenarios['a_companion_that_cannot_take_it_is_never_handed_it'] = async () => {
   const unable = await run({cap: () => ({json: {ok: false, reason: 'yt-dlp too old'}})});
   const refused = await run({cap: CAPABLE, dl: () => ({status: 503, json: {ok: false}})});
   const busy = await run({cap: CAPABLE, dl: () => ({status: 409, json: {ok: false}})});
+  // the ONE refusal the editor can fix themselves: the terms, not yet accepted
+  // in the tray (owner, 2026-08-18) -- said out loud, still server-side
+  const terms = await run({cap: () => ({json: {ok: false,
+    reason: "the YouTube terms have not been accepted on this machine: tray > 'Accept YouTube Terms...'"}})});
   return {dead: loopback(dead), old: loopback(old), unable: loopback(unable),
           refused: loopback(refused).map(c => c.url),
           busy: loopback(busy).map(c => c.url),
           // not one of them says a word to the editor
           quiet: [dead, old, unable, refused, busy]
             .map(p => [p.get('toast').hidden, p.warnText()]),
+          terms: {calls: loopback(terms).map(c => c.url),
+                  toast_hidden: terms.get('toast').hidden,
+                  toast_text: terms.get('toast').textContent,
+                  badge: terms.get('dlmode').textContent},
           // and every one of them is downloading, on the server
           badges: [dead, old, unable, refused, busy]
             .map(p => p.get('dlmode').textContent)};
@@ -2350,7 +2358,9 @@ def test_no_companion_no_dispatch_and_no_word_about_it(spa):
     """§11's first column. Nothing listening, a tray predating the routes, a
     stale yt-dlp, a claim that lost the race, a companion already busy with
     another job: all five end at the server worker doing the job exactly as
-    today, and none of them says anything to the editor."""
+    today, and none of them says anything to the editor. The one exception,
+    since 2026-08-18: terms not yet accepted in the tray, which the editor
+    can fix and is told about."""
     r = spa['a_companion_that_cannot_take_it_is_never_handed_it']
     for name in ('dead', 'old', 'unable'):
         assert [c['url'] for c in r[name]] == [CAPABILITIES], f'{name}: {r[name]}'
@@ -2362,6 +2372,13 @@ def test_no_companion_no_dispatch_and_no_word_about_it(spa):
         assert hidden is True, 'a failed fast path toasted at the editor'
         assert warn == '', warn
     assert r['badges'] == ['downloading on the server'] * 5, r['badges']
+    # ...except the terms, which are the editor's to accept: probed, not
+    # dispatched, told in the owner's words, and still downloading server-side
+    assert r['terms']['calls'] == [CAPABILITIES], r['terms']
+    assert r['terms']['toast_hidden'] is False, 'the terms refusal was silent'
+    assert 'accept the download terms in the companion' in r['terms']['toast_text']
+    assert 'Accept YouTube Terms' in r['terms']['toast_text']
+    assert r['terms']['badge'] == 'downloading on the server', r['terms']
 
 
 def test_a_probe_that_is_never_answered_is_abandoned(spa):
@@ -2851,6 +2868,10 @@ def test_the_probe_is_bounded_and_every_failure_of_it_is_silent():
     # to watch fail (§11)
     for banned in ('toast(', 'setBanner('):
         assert banned not in body + _dispatch(), banned
+    # ...with ONE exception since 2026-08-18: the terms not accepted in the
+    # tray, which the editor can fix, goes through explainCompanionRefusal and
+    # only when the reason names the terms
+    assert '/terms/i.test(' in body and 'explainCompanionRefusal(' in body, body
 
 
 def test_the_dispatch_carries_a_job_id_and_nothing_else():

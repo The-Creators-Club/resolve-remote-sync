@@ -991,7 +991,7 @@ def _show_youtube_terms_dialog(app: "CompanionApp", confirm=None) -> None:
         return
 
     if ytdl_attestation.accepted(who):
-        _notify(app, f"You already accepted the YouTube download terms "
+        _notify(app, f"You already accepted the YouTube terms "
                      f"({ytdl_attestation.TEXT_VERSION}) on this machine.")
         return
 
@@ -1015,7 +1015,7 @@ def _show_youtube_terms_dialog(app: "CompanionApp", confirm=None) -> None:
             # notice nobody read, and recording agreement to text that was
             # never displayed is the one outcome this feature must not have.
             log.warning("youtube terms: dialog unavailable (%s)", exc)
-            _notify(app, "Couldn't show the YouTube download terms. Open the "
+            _notify(app, "Couldn't show the YouTube terms. Open the "
                          "downloader in the dashboard and accept them there.")
             return
     else:
@@ -2441,7 +2441,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         _spawn(app, "YouTube cookies file", lambda: _install_youtube_cookies(app))
 
     def on_youtube_terms(icon, item):
-        _spawn(app, "YouTube download terms",
+        _spawn(app, "Accept YouTube Terms",
                lambda: _show_youtube_terms_dialog(app))
 
     def on_sign_out(icon, item):
@@ -2488,16 +2488,26 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     # done so an editor can see the state without opening it.
     yt_health = (snap.get("ytdl_cookies_health") or {}).get("status")
     yt_bad = yt_health in (ytdl_cookies.STATUS_STALE, ytdl_cookies.STATUS_EXPIRED)
+    # STATUS_OK means a cookies file is installed and nothing has refused it:
+    # the label says so, or the editor who has just signed in reads the
+    # unchanged "Sign in to YouTube..." as "it did not take" (owner,
+    # 2026-08-18). The item stays clickable so a different account can be
+    # signed in without a sign-out step.
+    yt_signed_in = yt_health == ytdl_cookies.STATUS_OK
+    if yt_bad:
+        yt_label = "Sign in to YouTube again (session expired)…"
+    elif yt_signed_in:
+        yt_label = "YouTube: signed in ✓ (sign in again…)"
+    else:
+        yt_label = "Sign in to YouTube (for downloads)…"
     youtube_items = (
         ([tray_backend.MenuItem(
-            ("YouTube download terms ✓" if snap.get("ytdl_attested")
-             else "YouTube download terms…"), on_youtube_terms)]
+            ("Accept YouTube Terms ✓" if snap.get("ytdl_attested")
+             else "Accept YouTube Terms…"), on_youtube_terms)]
          if snap.get("ytdl_local_downloads") else [])
         + ([tray_backend.MenuItem(_youtube_warning_line(snap), None, enabled=False)]
            if snap.get("ytdl_youtube_signin") and yt_bad else [])
-        + ([tray_backend.MenuItem(
-            ("Sign in to YouTube again (session expired)…" if yt_bad
-             else "Sign in to YouTube (for downloads)…"), on_youtube_sign_in)]
+        + ([tray_backend.MenuItem(yt_label, on_youtube_sign_in)]
            if snap.get("ytdl_youtube_signin") else [])
     )
     # Present only while the open Resolve project has no server-side root

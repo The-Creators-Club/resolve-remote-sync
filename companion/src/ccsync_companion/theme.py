@@ -281,9 +281,59 @@ def claim_app_identity() -> bool:
 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
         _APP_IDENTITY_CLAIMED = True
-        return True
     except Exception:
         return False
+    # The shell shows an AppUserModelID's DISPLAY NAME as the header of every
+    # balloon/toast this process raises -- and with no registration that
+    # header is the raw id: the owner's first balloon after CR-24 read
+    # "com.ccsync.companion" (2026-08-18). Per-user registry, no admin,
+    # idempotent, and a failure here is cosmetic.
+    _register_app_display(APP_USER_MODEL_ID)
+    return True
+
+
+def _register_app_display(app_id: str) -> None:
+    """HKCU/Software/Classes/AppUserModelId/<id>: DisplayName + IconUri.
+
+    The icon is the same tinted mark the windows wear, written once to
+    ~/.ccsync/app_icon.png (a toast needs a FILE; the frozen build's assets
+    live in a per-run temp dir). Product name from the site manifest, so a
+    fleet that renamed the product sees its own name on the toast."""
+    try:
+        import winreg
+        from pathlib import Path
+
+        try:
+            from . import site as site_mod
+
+            name = site_mod.product_name()
+        except Exception:
+            name = "CC Sync"
+        icon_uri = ""
+        try:
+            data = window_icon_png_b64(size=128)
+            if data:
+                import base64
+
+                target = Path.home() / ".ccsync" / "app_icon.png"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                raw = base64.b64decode(data)
+                if not target.is_file() or target.read_bytes() != raw:
+                    target.write_bytes(raw)
+                icon_uri = str(target)
+        except Exception:
+            icon_uri = ""
+        key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
+                                 "Software" + chr(92) + "Classes" + chr(92) + "AppUserModelId" + chr(92) + app_id, 0,
+                                 winreg.KEY_SET_VALUE)
+        try:
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, name)
+            if icon_uri:
+                winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, icon_uri)
+        finally:
+            winreg.CloseKey(key)
+    except Exception:
+        pass
 
 
 def apply_window_icon(tk_module, root) -> None:

@@ -125,6 +125,11 @@ class MusicIngestor(broll_ingest.BrollIngestor):
         different arguments: b-roll's `ensure(tier)` picks a tier, and there is
         no tier here.
         """
+        # Same two balloons as the b-roll fetch (BrollIngestor._fetch_model):
+        # one before the bytes, one when the model is in.
+        fetching = not self._model_ready("")
+        if fetching:
+            self._say(self._download_started_text(""))
         with self._lock:
             self._model_note = "downloading"
         ok, message = self.sidecar.ensure(self.cfg, stop_event=self._stop_event)
@@ -133,6 +138,8 @@ class MusicIngestor(broll_ingest.BrollIngestor):
         if ok:
             self.log.info("%s", message)
             self._clear_warning()
+            if fetching:
+                self._say("The music indexing model is ready. Indexing starts now.")
         else:
             self.log.warning("the model is not ready - %s", message)
 

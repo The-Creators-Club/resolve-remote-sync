@@ -48,7 +48,7 @@ STATE_FILENAME = "ytdl-attestation.json"
 # two halves of the gate disagree about what the editor agreed to.
 TEXT_VERSION = "2026-08-17.1"
 
-TITLE = "Before you download: your responsibilities"
+TITLE = "Accept YouTube Terms"
 
 # Kept in step with ytdlweb.attestation.NOTICE_TEXT. Trimmed of the numbering's
 # hanging indents so it renders in a plain Tk message box.

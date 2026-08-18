@@ -23,6 +23,7 @@
 # Shell scripts run on the NAS / macOS. Anything the container or a Mac
 # executes belongs here.
 dashboard/deploy/run.sh   text eol=lf
+dashboard/deploy/select_code_root.py text eol=lf
 installer/macos_bootstrap.sh text eol=lf
 installer/macos_uninstall.sh text eol=lf
 # Written on Windows, run only on the Mac (they refuse on any other uname).

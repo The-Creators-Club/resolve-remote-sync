@@ -320,6 +320,12 @@ jobs:
           # dashboard container are) and this is a test-time import only. Do
           # NOT regenerate broll/indexer/requirements.lock for this.
           broll/indexer/.venv/bin/python -m pip install --disable-pip-version-check "numpy==2.5.2"
+          # Same reasoning for Pillow: broll_index/local_vlm.py (the local
+          # Qwen path, 2026-08-18) reads frames with PIL and its tests import
+          # it at collection time (CI run 32125130987 errored 2 modules at
+          # collection). Test-time only, not a conveyed artefact from here;
+          # the version is the one companion/requirements.lock already pins.
+          broll/indexer/.venv/bin/python -m pip install --disable-pip-version-check "pillow==12.3.0"
 
       # test_ffmpeg_tools.py / test_proxy_integrity.py / test_encoding.py shell
       # out to a REAL ffmpeg/ffprobe to prove proxy encoding, 10-bit forcing,

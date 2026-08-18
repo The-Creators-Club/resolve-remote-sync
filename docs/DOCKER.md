@@ -11,13 +11,14 @@ operator deliberately switches.
 
 | | bind-mount mode (default) | image mode (opt-in) |
 |---|---|---|
+| chosen by | nothing (the default) | `[stack] mode = "image"`, or `--mode image` |
 | compose file | `dashboard/deploy/compose.yaml` | `dashboard/deploy/compose.image.yaml` |
 | base image | stock `python:3.12.7-slim` | `ccsync-dashboard:<version>`, built here |
 | code | bind-mounted `:ro` from the host | image layers |
 | dependencies | `pip install` into a `/venv` volume on first boot | baked, `--require-hashes` |
 | needs PyPI at boot | on the first boot, and after any requirements change | never for the base set; ONCE, on the first boot after a site turns `[features] youtube_unblock` on (see "What image mode does NOT bake in") |
 | what a deploy ships | the code trees, over SFTP | an image, plus the code trees are unused |
-| rollback | re-ship the previous tree | re-tag / re-pull the previous image |
+| rollback | re-ship the previous tree | re-pin the previous image/digest — or `--mode bind`, which is the whole mode's rollback |
 
 Both run the **same entrypoint** (`/app/deploy/run.sh`), put the same four
 trees on the same `PYTHONPATH` (`/app/src:/broll-app:/music-app:/ytdl-app`),
@@ -246,25 +247,124 @@ shares over SMB find files they cannot open.
 
 ## Migrating between the modes
 
-Both directions are a compose-file swap. **No data moves and nothing is
-deleted.**
+**Two commands, one each way** (2026-08-18). `server/install_dashboard_app.py`
+deploys both shapes now — the "Not done here" entry that used to say otherwise
+is gone. **No data moves and nothing is deleted, in either direction.**
 
-Bind-mount → image:
+```bash
+# bind-mount -> image
+python server/install_dashboard_app.py --mode image \
+    --container-image ghcr.io/the-creators-club/ccsync:edge
 
-1. Build and load the image (above).
-2. `docker compose down` (or stop the app in the TrueNAS UI).
-3. Bring the stack up with the rendered `compose.image.yaml`.
-4. Check `/api/v1/health` returns `{"ok": true}` and that `/broll`, `/music`
-   and `/ytdl` are present on the dashboard's nav.
+# image -> bind-mount (the rollback)
+python server/install_dashboard_app.py --mode bind
+```
+
+`--mode` **implies `--recreate`**: the mode is a compose-level setting, baked
+in when the app is created, so a plain restart would keep the old one and
+report success. `--recreate` deletes and re-creates the *app definition*; the
+host directories, the database, the tree and the archive are untouched — and
+the deploy takes a snapshot first (`snapshot_before`), as it does for every
+`--recreate`.
+
+Everything the two commands need in their environment is what a deploy always
+needs (`SYNCTHING_API_KEY`, `DASH_REPORT_TOKEN`, `DASH_SESSION_SECRET`,
+`BROLL_INGEST_TOKEN`, `TRUENAS_PW` — pass them again on a `--recreate` or every
+editor is logged out), **plus `DASH_RELEASE_PUBKEYS` for image mode**, which is
+a refusal rather than a warning: see the pre-flight below.
+
+To make the mode stick without repeating the flag, put it in the manifest:
+
+```toml
+[stack]
+mode  = "image"
+image = "ghcr.io/the-creators-club/ccsync@sha256:…"   # a tag works; a digest is better
+```
+
+### What each direction actually does
+
+| | `--mode image` | `--mode bind` |
+|---|---|---|
+| code trees shipped | none (steps 2, 2b, 2c, 2f skipped) | all four, staged-verify-swap as always |
+| compose | the vendor image, **no** `/app`, `/venv`, `/broll-app`, `/music-app`, `/ytdl-app` mounts | today's body, unchanged |
+| host dirs | still created, never removed | reused |
+| music data, ffmpeg, deno | provisioned exactly as before | unchanged |
+| image | `docker pull`ed onto the NAS first | not touched |
+
+### The pre-flight (image mode only)
+
+Before anything moves, the deploy:
+
+- **refuses an empty `DASH_RELEASE_PUBKEYS`.** In bind-mount mode an unset
+  value only costs the upgrade channel (publishes 503). In image mode it also
+  costs the dashboard its own updates: `select_code_root.py` will not boot a
+  tree it cannot verify, so with no keys **the image always wins and no
+  over-the-air update can ever apply** — a site that migrated in order to get
+  self-updating dashboards would have migrated for nothing, and nothing in the
+  running system would say so (`ZERO_TOUCH_PLAN.md` WP K).
+- **warns on a blank `[releases] feed_url`.** Image mode without a feed is a
+  perfectly valid deployment — it just updates from the base rig, like bind
+  mode — so this is not a refusal.
+- **prints the runtime id this checkout would bake**, so
+  `docker exec <container> cat /venv/.runtime-id` has something to be compared
+  against after boot. A different value is not an error; it means the image
+  came from another checkout, and every code bundle built here will be refused
+  as a *runtime* change rather than offered as a code update.
+- **notes a tag rather than a digest.** A tag is mutable: two deploys a week
+  apart can run different code from the same compose body.
+
+### After the switch, automatically
+
+The deploy reads the container back and reports:
+
+- which code root `run.sh` chose (`run.sh: PYTHONPATH=…` plus the
+  `select_code_root: …` lines) — `/app/src` is the image, `/data/code/<v>` is a
+  bundle applied over the air, and **no such line at all** means the container
+  is not in image mode: `/venv/.image-baked` is missing, i.e. a `/venv` mount
+  is shadowing the image's layer;
+- `/venv/.runtime-id`, against the expected value;
+- `/api/v1/health` from inside the container.
+
+A failure prints the rollback command and **never reverts anything**. Reverting
+a deploy automatically is how you end up with two half-applied states instead
+of one known one.
+
+### What happens to the host code trees
 
 The host's `app/`, `venv/`, `broll-web/`, `music-web/` and `ytdl-web/`
-directories are simply unused afterwards. **Leave them there.** They are the
-rollback: swapping back to `compose.yaml` uses them exactly as before, and
-`/venv` still holds a populated venv, so the first boot back does not even need
-PyPI.
+directories are simply unused after a switch to image mode. **Leave them
+there.** They are the rollback: `--mode bind` re-ships them, and `/venv` still
+holds a populated venv, so the first boot back does not even need PyPI.
+`tools/check_deploy_drift.ps1` knows this and does not report them as drift
+when `[stack] mode = "image"`.
 
-Image → bind-mount: re-run `server/install_dashboard_app.py` to refresh the
-code trees (they may be older than the image), then start with `compose.yaml`.
+`--mode bind` re-ships all four trees from the checkout you run it from, so the
+rollback also refreshes code that may be older than the image was.
+
+### The registry
+
+The vendor images are on GHCR and the package is **public** — measured
+2026-08-18 with no credentials on the wire (`GET
+https://ghcr.io/token?scope=repository:the-creators-club/ccsync:pull` returns a
+token, and that token reads the manifest). A NAS pulls them without a
+`docker login`.
+
+**`:1` does not exist yet.** `image.yml` pushes `:1` only on a `v*` tag and no
+`v*` tag has been pushed, so today the registry holds `:edge` (every push to
+main) and the short-sha tags. Until the first `v*` release, deploy with
+`--container-image ghcr.io/the-creators-club/ccsync:edge` — or, better, the
+digest that tag currently resolves to.
+
+The pull itself is a plain `docker pull` over the deploy's existing root SSH,
+run before the app is created. TrueNAS's middleware does have its own
+(`app.pull_images`, and the app **create** job pulls by itself — the create
+wait in `backends/truenas.py` says as much), but a plain **restart** never
+pulls, which is the path a routine redeploy takes; and the REST v2.0 argument
+shape for a multi-parameter middleware method is not verified from here, while
+this file's standing rule is to print a fallback rather than guess at API
+shapes. `docker pull` is unambiguous, identical on TrueNAS and DSM, and
+idempotent alongside whatever the create job does. `--no-image-pull` skips it
+for an air-gapped site that loaded the image with `docker save | docker load`.
 
 ## What to check after either switch
 
@@ -384,11 +484,10 @@ service in that compose file rather than the dashboard's own first-boot code.
   and `tools/compose.indexer-gpu.yaml` (item 14). Nothing here builds them, and
   `music/indexer/requirements.lock` is deliberately the CPU / default-PyPI wheel
   set: the CUDA-index build belongs to that image, and CI does not install it.
-- **`server/install_dashboard_app.py` does not deploy image mode.** Its
-  `--image`/`DASH_IMAGE` switch changes the *tag* only; the mounts and the
-  compose body it POSTs to the TrueNAS middleware are bind-mount mode's. Image
-  mode is a rendered-compose deployment today. Wiring the install script to
-  render `compose.image.yaml` on a flag is a small, separate change.
+- ~~**`server/install_dashboard_app.py` does not deploy image mode.**~~ **Done
+  2026-08-18** — `--mode image|bind` and `[stack] mode`, above. `--image` /
+  `DASH_IMAGE` still means the *base* image and applies to bind mode only;
+  image mode takes `--container-image` / `[stack] image` / `$CCSYNC_IMAGE`.
 - **`broll/web/Dockerfile`** predates all of this and builds the *standalone*
   b-roll app on its own port. It is not part of the dashboard image and is not
   used by any deployment here.

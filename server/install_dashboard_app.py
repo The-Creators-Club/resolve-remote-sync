@@ -4,6 +4,21 @@
     SYNCTHING_API_KEY=... DASH_REPORT_TOKEN=... TRUENAS_PW=... \\
         python install_dashboard_app.py [--port 8480] [--dry-run]
 
+TWO SHAPES, ONE SCRIPT (2026-08-18, docs/DOCKER.md):
+
+  --mode bind   (the default, and what every fleet in the field runs) the four
+                code trees ship from this checkout and /venv is a host volume.
+  --mode image  the vendor container image carries all five; steps 2, 2b, 2c
+                and 2f are skipped and no code is uploaded at all.
+
+Everything else -- host dirs, the tree-side mounts, ffmpeg/deno, the ~1.4 GB
+of music DATA, the secrets, the snapshot -- is identical in both. Passing
+--mode implies --recreate, because the mode is baked in at create time.
+MIGRATION AND ROLLBACK ARE ONE COMMAND EACH and neither deletes anything: the
+host code trees are left in place on purpose, and are what `--mode bind`
+re-ships. `[stack] mode` in site.toml is the persistent setting; `[stack]
+image` names the image (a `@sha256:` digest is accepted and preferred).
+
 Steps (each idempotent, one line printed per action):
 
   1. Create the host dirs over SSH (sudo):
@@ -158,7 +173,11 @@ DASH_BIND_LAN / DASH_BIND_TAILNET (the two addresses the dashboard is
 published on; they default to [net] bind_lan / bind_tailnet in site.toml and
 a blank one is REFUSED, never guessed -- change them when the NAS's DHCP
 lease or tailnet IP moves, or Docker refuses to start the app with "cannot
-assign requested address"), DASH_IMAGE (pinned base image),
+assign requested address"), DASH_IMAGE (pinned base image, bind mode only),
+CCSYNC_IMAGE (the vendor image for --mode image; same value as [stack] image),
+DASH_RELEASE_PUBKEYS (the release public key(s); REQUIRED by --mode image --
+without them the image's select_code_root.py can never verify a code bundle,
+so no over-the-air dashboard update can ever apply),
 TRUENAS_VERIFY_SSL (default "0" = trust the NAS's self-signed cert),
 DASH_BROLL_ENABLED (default "1"; "0" deploys without the b-roll UI),
 BROLL_INGEST_TOKEN (REQUIRED when DASH_BROLL_ENABLED=1 -- it guards a write
@@ -467,6 +486,66 @@ PLACEHOLDER_INGEST_TOKENS = {
 # Pinned, mirroring dashboard/deploy/compose.yaml: an unpinned python:3.12-slim
 # silently changes underneath a redeploy. Bump deliberately, in both places.
 DEFAULT_IMAGE = "python:3.12.7-slim"
+
+# --------------------------------------------------------------------------
+# BIND-MOUNT MODE vs IMAGE MODE (2026-08-18, docs/DOCKER.md)
+# --------------------------------------------------------------------------
+#
+# Until now this script deployed ONE shape: a stock python:3.12.7-slim with the
+# four code trees and a /venv bind-mounted off the host. docs/DOCKER.md's "Not
+# done here" said so in as many words -- image mode was a rendered-compose
+# deployment you assembled by hand, which is why the studio never moved and why
+# ZERO_TOUCH_PLAN.md WP K (the dashboard's own over-the-air code updates) has
+# been dark on every deployment: WP K only exists inside an image.
+#
+# Both directions are now ONE command each (docs/DOCKER.md, "Migrating between
+# the modes"). What the mode changes, and ONLY this:
+#
+#   image:    the vendor image instead of the stock python base;
+#   volumes:  the five CODE mounts are gone -- /app, /venv, /broll-app,
+#             /music-app and /ytdl-app are image layers, and /venv carries
+#             .image-baked + .runtime-id with them;
+#   steps:    main() ships no code tree and provisions no venv.
+#
+# What it does NOT change: every DATA mount, /opt/ffmpeg, /opt/deno, the whole
+# environment, the ports, the healthcheck, the uid/gid, the restart policy, and
+# the host directories -- which are LEFT IN PLACE on purpose, because they are
+# the rollback (docs/DOCKER.md: "Leave them there").
+STACK_MODES = ("bind", "image")
+DEFAULT_STACK_MODE = "bind"
+# The site's answer, read at import like every other manifest-derived default
+# (argparse bakes its defaults in when the parser is built). "bind" when the
+# manifest does not say: today's behaviour, for every fleet in the field.
+SITE_STACK_MODE = site_value("stack", "mode") or DEFAULT_STACK_MODE
+
+# The vendor image, and the tag CI publishes for it. `:1` is the deliberately
+# fixed long-lived tag (.github/workflows/image.yml, docs/DOCKER.md "Published
+# images (CI)"): every 0.x/1.x release moves it, so a customer's NAS updating
+# the image is the whole update story.
+#
+# MEASURED 2026-08-18, anonymously, with no credentials on the wire: the GHCR
+# package IS public -- `GET https://ghcr.io/token?scope=repository:the-creators-
+# club/ccsync:pull` returns a token and that token reads the manifest -- so a
+# NAS pulls it without a docker login. What is NOT there yet is the `:1` tag
+# itself: image.yml pushes `:1` only on a `v*` tag and no `v*` tag has been
+# pushed, so today the registry holds `:edge` (every push to main) and the
+# short-sha tags. Until the first `v*` release, deploy with
+# `--container-image ghcr.io/the-creators-club/ccsync:edge`, or better with the
+# digest that tag currently resolves to.
+#
+# A DIGEST PIN IS ACCEPTED AND PREFERRED once one is known:
+# `ghcr.io/the-creators-club/ccsync@sha256:...` is immutable, which is what
+# makes a rollback a value change rather than an archaeology exercise, and it
+# is the only form that says what a customer is actually running.
+DEFAULT_CONTAINER_IMAGE = "ghcr.io/the-creators-club/ccsync:1"
+SITE_CONTAINER_IMAGE = site_value("stack", "image") or DEFAULT_CONTAINER_IMAGE
+
+# The container paths image mode does NOT mount, because the image carries
+# them. Everything else in compose_config()'s volume list is DATA (or the two
+# licence-driven /opt mounts) and is byte-for-byte identical in both modes --
+# dashboard/deploy/compose.image.yaml documents the same list, and
+# server/tests/test_compose_template.py holds the two to it.
+IMAGE_MODE_CODE_MOUNTS = ("/app", "/venv", "/broll-app", "/music-app", "/ytdl-app")
 # Host interfaces the dashboard binds to (mirrors dashboard/deploy/compose.yaml
 # -- keep in sync): LAN for the base rig, tailnet for remote editors. Never
 # 0.0.0.0 -- a new NAS interface must not silently expose the dashboard.
@@ -545,6 +624,368 @@ def deploy_nas_kind() -> str:
         return _kind(_ARGS)
     except EnvError:
         return "truenas"
+
+
+def mount_target(volume: str) -> str:
+    """The CONTAINER path of a compose `host:container[:opts]` bind string.
+
+    Second field, not "the one starting with /": both halves are absolute
+    here, and the b-roll archive's host path contains a space
+    ("<tree>/Assets/B-roll Archive:/broll-data:rw"), so anything cleverer
+    than a positional split gets that one wrong.
+    """
+    parts = str(volume).split(":")
+    return parts[1] if len(parts) > 1 else ""
+
+
+def resolve_stack_mode(flag: str = "") -> str:
+    """Which deploy shape this run builds: --mode, else [stack] mode, else
+    "bind" (today's behaviour, and every fleet in the field).
+
+    Raises EnvError on an unknown value rather than falling back: "iamge"
+    silently deploying bind-mount mode is a migration that reports success and
+    changes nothing.
+    """
+    mode = (flag or "").strip().lower() or SITE_STACK_MODE
+    mode = mode.strip().lower()
+    if mode not in STACK_MODES:
+        raise EnvError(
+            f"unknown stack mode {mode!r} -- expected one of {', '.join(STACK_MODES)}. "
+            f"It comes from --mode, else [stack] mode in the site manifest; "
+            f"'bind' is the default and what every deployment runs today "
+            f"(docs/DOCKER.md).")
+    return mode
+
+
+def resolve_container_image(flag: str = "") -> str:
+    """The vendor image image mode runs: --container-image / $CCSYNC_IMAGE,
+    else [stack] image, else DEFAULT_CONTAINER_IMAGE."""
+    return ((flag or "").strip()
+            or os.environ.get("CCSYNC_IMAGE", "").strip()
+            or SITE_CONTAINER_IMAGE)
+
+
+# The runtime id recipe has ONE implementation
+# (dashboard/src/ccsync_dashboard/runtime_id.py) and this is a third caller of
+# it, beside tools/build_dashboard_bundle.py and the Dockerfile. Loaded BY PATH
+# rather than by putting dashboard/src on sys.path: server/ deliberately does
+# not import the dashboard package (it has its own venv, its own dependencies
+# and no ccsync_dashboard on its path), and a partial import of that package
+# here would drag in fastapi.
+def expected_runtime_id() -> str:
+    """The runtime id an image built from THIS checkout would carry, or "".
+
+    Printed by the image-mode preflight so `docker exec <c> cat
+    /venv/.runtime-id` has something to be compared against: a mismatch is the
+    difference between "the dashboard can update its own code over the air"
+    and "every apply is refused as a runtime change" (ZERO_TOUCH_PLAN.md WP K).
+    Best-effort -- an unreadable Dockerfile or lock costs the operator a
+    printed line, never the deploy.
+    """
+    import importlib.util  # noqa: PLC0415 - only this one function needs it
+
+    repo = Path(__file__).resolve().parents[1]
+    module_path = repo / "dashboard" / "src" / "ccsync_dashboard" / "runtime_id.py"
+    lock = repo / "dashboard" / "deploy" / "requirements.lock"
+    dockerfile = repo / "dashboard" / "deploy" / "Dockerfile"
+    try:
+        spec = importlib.util.spec_from_file_location("_ccsync_runtime_id", module_path)
+        if spec is None or spec.loader is None:
+            return ""
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.runtime_id_from_paths(lock, dockerfile)
+    except Exception:  # noqa: BLE001 - advisory only; see the docstring
+        return ""
+
+
+def image_mode_preflight(image: str, dry_run: bool) -> str:
+    """Everything image mode must be told BEFORE anything moves. "" = go.
+
+    Returns the refusal text, or "" when the deploy may proceed; warnings and
+    the runtime-id line are printed here either way.
+
+    THE ONE REFUSAL is an empty DASH_RELEASE_PUBKEYS, and it is specific to
+    this mode (ZERO_TOUCH_PLAN.md WP K). In bind-mount mode an unset value
+    costs the upgrade CHANNEL -- the dashboard answers 503 to a publish and
+    everything else works. In image mode it additionally costs the dashboard
+    its own updates: select_code_root.py refuses to boot an unsigned or
+    unverifiable code tree, so with no keys the image ALWAYS wins and no
+    over-the-air update can ever apply. A site that moves to image mode to get
+    self-updating dashboards and then never sets the keys has moved for
+    nothing, and nothing in the running system would ever say so.
+    """
+    print(f"stack mode: image -- {image}")
+    if "@sha256:" not in image:
+        print(f"NOTE: {image} is a TAG, not a digest. A tag is mutable: two "
+              f"deploys a week apart can run different code with the same "
+              f"compose body. Pin the digest once you know it "
+              f"(`[stack] image = \"ghcr.io/...@sha256:...\"`), which also "
+              f"makes a rollback a value change.", file=sys.stderr)
+    if image.startswith("ghcr.io/the-creators-club/ccsync:1"):
+        print("NOTE: `:1` is the long-lived tag .github/workflows/image.yml "
+              "pushes on a `v*` TAG only. Measured 2026-08-18: the package is "
+              "public (anonymous pull works) but `:1` does not exist yet -- the "
+              "registry holds `:edge` (every push to main) and the short-sha "
+              "tags. Until the first `v*` release use --container-image "
+              "ghcr.io/the-creators-club/ccsync:edge, or its digest.",
+              file=sys.stderr)
+    if not site_value("releases", "feed_url"):
+        print("WARNING: [releases] feed_url is blank, so the vendor release "
+              "feed is off: no poller, no network call, and the Packages page "
+              "offers no dashboard code update however well the image is "
+              "signed. Image mode without a feed is still a valid deployment "
+              "(it just updates from the base rig, like bind mode) -- set the "
+              "URL if self-updating is why you are migrating "
+              "(docs/RELEASE_FEED.md).", file=sys.stderr)
+    expected = expected_runtime_id()
+    if expected:
+        print(f"expected runtime id: {expected}")
+        print(f"  after boot:  docker exec {backend().dashboard_container} "
+              f"cat /venv/.runtime-id")
+        print(f"  a DIFFERENT value is not an error -- it means the image was "
+              f"built from another checkout, and every over-the-air code "
+              f"update stamped with this one will be refused as a runtime "
+              f"change (ZERO_TOUCH_PLAN.md WP K).")
+    else:
+        print("NOTE: could not compute the expected runtime id from this "
+              "checkout (dashboard/deploy/requirements.lock + Dockerfile) -- "
+              "the post-deploy check will report what the container has "
+              "without comparing it.", file=sys.stderr)
+    if not os.environ.get("DASH_RELEASE_PUBKEYS", "").strip():
+        return (
+            "DASH_RELEASE_PUBKEYS is empty, and image mode needs it.\n"
+            "  The image's own select_code_root.py verifies every code tree in "
+            "/data/code against these keys before booting it, so with no keys "
+            "the IMAGE always wins and NO over-the-air update can ever apply -- "
+            "the dashboard would report a version available and refuse it "
+            "forever (ZERO_TOUCH_PLAN.md WP K).\n"
+            "  The publish route also answers 503 without them, in both modes.\n"
+            "  Fix:  $env:DASH_RELEASE_PUBKEYS = python tools/release_key.py pubkey\n"
+            "  (docs/RELEASE.md, \"The upgrade channel is signed\"; "
+            "tools/load_secrets.ps1 exports it on the base rig.)"
+        )
+    if dry_run:
+        print("[dry-run] DASH_RELEASE_PUBKEYS is set")
+    return ""
+
+
+# --------------------------------------------------------------------------
+# Post-deploy: did the container actually come up on the IMAGE's code?
+# --------------------------------------------------------------------------
+#
+# The existing pattern is a health check after the swap. Image mode needs two
+# more facts, because "healthy" is exactly what a MISCONFIGURED image-mode
+# container looks like from outside:
+#
+#   * which code root run.sh chose. In image mode run.sh runs
+#     select_code_root.py on every boot and prints `run.sh: PYTHONPATH=...`
+#     plus `select_code_root: ...` lines. A PYTHONPATH starting /app/src is the
+#     image; one under /data/code is a bundle applied over the air. Both are
+#     valid; a deploy that just installed an image and finds a VOLUME tree
+#     running is a fact the operator has to be told.
+#   * whether /venv came from the image at all. If `.image-baked` is missing,
+#     something re-created the venv volume over the layer -- run.sh then
+#     pip-installs on every boot against a registry the container may not
+#     reach (docs/DOCKER.md, "What to check after either switch").
+#
+# Nothing here ever reverts anything: a failed check prints the rollback
+# command and returns. Auto-reverting a deploy is how you get two half-applied
+# states instead of one known one.
+IMAGE_BOOT_LOG_LINES = 200
+
+
+def parse_image_boot(log_text: str) -> dict:
+    """`docker logs` -> what run.sh decided. Pure, so it has a test.
+
+    Keys: pythonpath (the last one wins -- exit 75 re-selects and re-prints),
+    source ("image" | "volume" | ""), code_root, select_lines, fatal.
+    """
+    pythonpath, select_lines, fatal = "", [], []
+    for raw in (log_text or "").splitlines():
+        line = raw.strip()
+        if line.startswith("run.sh: PYTHONPATH="):
+            pythonpath = line.split("=", 1)[1].strip()
+        elif line.startswith("select_code_root:"):
+            select_lines.append(line)
+        elif "FATAL" in line and line.startswith("run.sh:"):
+            fatal.append(line)
+    first = pythonpath.split(":", 1)[0] if pythonpath else ""
+    if first == "/app/src":
+        source = "image"
+    elif first.startswith("/data/code/"):
+        source = "volume"
+    else:
+        source = ""
+    return {
+        "pythonpath": pythonpath,
+        "source": source,
+        "code_root": first,
+        "select_lines": select_lines,
+        "fatal": fatal,
+    }
+
+
+def parse_health_line(text: str) -> dict:
+    """The `{"ok":..., "version":...}` the in-container probe prints.
+
+    Tolerant on purpose: this runs through `docker exec` through `sudo`
+    through SSH, and every one of those can prepend a line. Take the first
+    line that parses as a JSON object; {} if none does.
+    """
+    import json  # noqa: PLC0415 - one caller, and json is not otherwise used here
+
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def verify_image_boot(port: int, expected: str, dry_run: bool) -> bool:
+    """Report what the image-mode container actually booted. True = as expected.
+
+    NON-FATAL to the deploy's exit code by design -- the caller decides -- and
+    it never reverts. What it prints on a failure is the rollback command,
+    because "the container is up and serving the wrong code" is a decision, not
+    an automation.
+    """
+    container = backend().dashboard_container
+    if dry_run:
+        print(f"[dry-run] would read `docker logs {container}` for run.sh's "
+              f"PYTHONPATH/select_code_root lines, `cat /venv/.runtime-id` and "
+              f"/api/v1/health from inside the container")
+        return True
+    # The container needs a moment to get past run.sh's selection and bind the
+    # port; the healthcheck's own start_period is 120s and this is not that
+    # check -- it just must not read an empty log.
+    time.sleep(10)
+    rc, out, err = run_ssh_guarded(
+        f'echo "$SUDO_PW" | sudo -S -p "" docker logs --tail {IMAGE_BOOT_LOG_LINES} '
+        f'{shell_quote(container)} 2>&1', False, 120)
+    if rc != 0:
+        print(f"NOTE: could not read the container's log ({err.strip()[:200]}) -- "
+              f"check it in the NAS UI: the two lines that matter are "
+              f"`run.sh: PYTHONPATH=...` and `select_code_root: ...`.",
+              file=sys.stderr)
+        return False
+    boot = parse_image_boot(out)
+    ok_boot = True
+    for line in boot["select_lines"]:
+        print(f"  {line}")
+    for line in boot["fatal"]:
+        print(f"  {line}", file=sys.stderr)
+    if boot["source"] == "image":
+        print(f"code root: the IMAGE ({boot['code_root']})")
+    elif boot["source"] == "volume":
+        print(f"code root: a code bundle applied OVER THE AIR "
+              f"({boot['code_root']}) -- newer than the image's own version, "
+              f"signature verified at boot. The image you just deployed is the "
+              f"RUNTIME under it (ZERO_TOUCH_PLAN.md WP K).")
+    else:
+        ok_boot = False
+        print(f"FAILED: the container printed no `run.sh: PYTHONPATH=` line, so "
+              f"it is not running image mode's boot path at all.\n"
+              f"  Most likely /venv/.image-baked is missing -- i.e. a /venv "
+              f"MOUNT is shadowing the image's layer. Check the compose body's "
+              f"volumes (docs/DOCKER.md, \"What to check after either switch\").",
+              file=sys.stderr)
+    rc_id, id_out, _ = run_ssh_guarded(
+        f'echo "$SUDO_PW" | sudo -S -p "" docker exec {shell_quote(container)} '
+        f'cat /venv/.runtime-id', False, 60)
+    live_id = id_out.strip().splitlines()[-1].strip() if rc_id == 0 and id_out.strip() else ""
+    if live_id:
+        print(f"runtime id (in the container): {live_id}")
+        if expected and live_id != expected:
+            print(f"NOTE: that is NOT this checkout's runtime id ({expected}). "
+                  f"The image was built from a different requirements.lock or "
+                  f"base image, so a code bundle built here would be refused as "
+                  f"a runtime change. Not an error -- but it is why the "
+                  f"Packages page will say 'runtime update' rather than "
+                  f"offering a button.", file=sys.stderr)
+    else:
+        ok_boot = False
+        print("FAILED: /venv/.runtime-id is not in the container. This image "
+              "predates ZERO_TOUCH_PLAN.md WP K (2026-08-18), so it can never "
+              "apply an over-the-air code update -- and if it also predates "
+              "the templates/ + static/ COPY lines it answers /api/v1/health "
+              "perfectly and 500s on every page. Rebuild or re-pull the image.",
+              file=sys.stderr)
+    probe = (
+        "/venv/bin/python -c \"import json,urllib.request;"
+        f"print(json.dumps(json.load(urllib.request.urlopen("
+        f"'http://127.0.0.1:{port}/api/v1/health', timeout=5))))\"")
+    rc_h, h_out, _ = run_ssh_guarded(
+        f'echo "$SUDO_PW" | sudo -S -p "" docker exec {shell_quote(container)} '
+        f'sh -c {shell_quote(probe)}', False, 60)
+    health = parse_health_line(h_out) if rc_h == 0 else {}
+    if health:
+        # Unauthenticated from inside the container, so this is {ok, version}:
+        # the `code` block WP K added is admin-only. The source is established
+        # from run.sh's own line above, which is the same fact from the one
+        # place that cannot be wrong about it.
+        print(f"live dashboard: v{health.get('version', '?')} "
+              f"ok={health.get('ok')}")
+    else:
+        ok_boot = False
+        print(f"FAILED: /api/v1/health did not answer from inside the "
+              f"container on port {port}.", file=sys.stderr)
+    if not ok_boot:
+        print(f"\nROLL BACK with the bind-mount mode this site ran before -- "
+              f"the host code trees under <host-root> were never touched:\n"
+              f"    python server/install_dashboard_app.py --mode bind\n"
+              f"  (that re-renders the bind compose and re-creates the app; the "
+              f"database, the tree and the archive are untouched by either "
+              f"mode. docs/DOCKER.md, \"Migrating between the modes\".)",
+              file=sys.stderr)
+    return ok_boot
+
+
+def pull_container_image(image: str, dry_run: bool) -> bool:
+    """`docker pull <image>` on the NAS, as root. Non-fatal.
+
+    WHY A DIRECT PULL RATHER THAN THE MIDDLEWARE'S OWN CALL. TrueNAS SCALE's
+    middleware does have an app-level pull (`app.pull_images`), and the app
+    CREATE job pulls by itself -- the create wait in backends/truenas.py says
+    so ("the image pull can take a few minutes"). What it does NOT do is pull
+    on a plain restart, which is the path a routine redeploy takes: a floating
+    tag like `:1` moving upstream would then change nothing at all. The REST
+    v2.0 argument shape for a multi-parameter middleware method is not
+    verified from here, and this script's rule is to print a fallback rather
+    than guess at API shapes (see the custom_app POST) -- and it already holds
+    root over SSH, where `docker pull` is unambiguous and identical on
+    TrueNAS and DSM. So: pull directly, and let the create/recreate job do its
+    own pull as well; both are idempotent.
+
+    A failure is a NOTE. The image may legitimately already be on the host
+    (docker save/load, an air-gapped site), and the create job will say so far
+    more usefully than a pull that could not reach GHCR.
+    """
+    rc, _out, err = run_ssh_guarded(
+        f'echo "$SUDO_PW" | sudo -S -p "" docker pull {shell_quote(image)}',
+        dry_run, 900)
+    if dry_run:
+        return True
+    if rc != 0:
+        print(f"NOTE: `docker pull {image}` failed on the NAS "
+              f"({err.strip()[:300]}).\n"
+              f"  If the image is already loaded there (docker save | docker "
+              f"load), that is expected and the deploy continues.\n"
+              f"  If it is not: the GHCR package is PUBLIC (measured "
+              f"2026-08-18 -- an anonymous token reads the manifest), so a 401 "
+              f"here means the NAS has no route out rather than missing "
+              f"credentials; a 404/manifest-unknown means that TAG does not "
+              f"exist (`:1` is only pushed on a `v*` release -- try `:edge`).",
+              file=sys.stderr)
+        return False
+    print(f"pulled image: {image}")
+    return True
 
 
 def cookie_secure_for(dashboard_url: str) -> str:
@@ -703,7 +1144,15 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    # which was the whole point of item 1 -- so this projects
                    # one site.toml key and provisions nothing.
                    ai_cli_providers: str = "0",
-                   anthropic_api_key: str = "") -> dict:
+                   anthropic_api_key: str = "",
+                   # WHERE THE CODE COMES FROM (2026-08-18, docs/DOCKER.md).
+                   # "bind" is the default in the SIGNATURE too, not
+                   # SITE_STACK_MODE: main() always passes the resolved value,
+                   # and a helper whose shape changed with whichever manifest
+                   # happened to be on $CCSYNC_SITE would be a different
+                   # deployment for the same call.
+                   mode: str = DEFAULT_STACK_MODE,
+                   ccsync_image: str = "") -> dict:
     """The compose body, as the dict the TrueNAS middleware stores verbatim.
 
     Rendered from the same five variables dashboard/deploy/compose.yaml is --
@@ -735,6 +1184,14 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
     # said otherwise would run a PO-token sidecar for a feature that is not
     # mounted. Same rule the dashboard's own /api/v1/site applies.
     unblock_on = youtube_unblock == "1" and youtube_download == "1"
+    # IMAGE MODE (docs/DOCKER.md). `image` stays the stock python base for bind
+    # mode; in image mode the container IS the vendor build, and the five code
+    # mounts below are dropped because the image carries them as read-only
+    # layers -- which keeps AUDIT C-1's "the container must never be able to
+    # rewrite its own code" without needing a mount option.
+    image_mode = mode == "image"
+    if image_mode:
+        image = ccsync_image or SITE_CONTAINER_IMAGE
     return {
         "services": {
             "dashboard": {
@@ -742,6 +1199,17 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                 "user": f"{uid}:{gid}",
                 "command": ["/bin/sh", "/app/deploy/run.sh"],
                 "environment": {
+                    # IMAGE MODE ONLY, matching compose.image.yaml. An
+                    # unprivileged container cannot setuid, so run.sh reads
+                    # these two and SHOUTS when the uid it actually got
+                    # disagrees -- the symptom otherwise is silent and delayed
+                    # (files in /projects and /music-share owned by the wrong
+                    # uid, and editors browsing over SMB find files they
+                    # cannot open). Bind mode does not carry them because
+                    # compose.yaml does not, and the two must not drift
+                    # (test_safety.test_env_keys_match_compose).
+                    **({"APP_UID": str(uid), "APP_GID": str(gid)}
+                       if image_mode else {}),
                     "SYNCTHING_GUI_URL": gui_url,
                     "SYNCTHING_API_KEY": api_key,
                     "DASH_REPORT_TOKEN": token,
@@ -961,7 +1429,14 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     **site_env(port, tree_root, truenas_host, dashboard_url),
                 },
                 "ports": [f"{addr}:{port}:{port}" for _env, addr in binds],
-                "volumes": [
+                # ONE list, filtered for image mode rather than two lists to
+                # keep in step: every DATA mount is identical in both modes,
+                # and the only difference is that image mode drops the five
+                # CODE mounts (IMAGE_MODE_CODE_MOUNTS). Written this way so a
+                # mount added below cannot be forgotten in the other mode --
+                # which is exactly how compose.image.yaml drifted into
+                # carrying the deno mount in 2026-08-17.
+                "volumes": [v for v in [
                     # ro: the command: line executes /app/deploy/run.sh, so a
                     # writable /app is code execution in a container holding
                     # TRUENAS_PW (AUDIT C-1).
@@ -1027,7 +1502,7 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # onto the host like ffmpeg and read-only for the same
                     # reason: no image build, unprivileged container.
                     *([f"{host_root}/deno:/opt/deno:ro"] if unblock_on else []),
-                ],
+                ] if not (image_mode and mount_target(v) in IMAGE_MODE_CODE_MOUNTS)],
                 "restart": "unless-stopped",
                 "healthcheck": healthcheck_config(port),
             },
@@ -1089,7 +1564,17 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
 # substitution at run time (DASH_BIND_LAN, SYNCTHING_API_KEY, DASH_PG_PORT),
 # and those must survive rendering untouched.
 COMPOSE_TEMPLATE = LOCAL_DASHBOARD_DIR / "deploy" / "compose.yaml"
+# The same grammar, the same variables, one difference: the vendor image and
+# no code mounts (2026-08-18). Rendered by the Synology deploy path, which
+# uploads a compose FILE; the TrueNAS path POSTs compose_config()'s dict, and
+# server/tests/test_compose_template.py holds the two descriptions together.
+IMAGE_COMPOSE_TEMPLATE = LOCAL_DASHBOARD_DIR / "deploy" / "compose.image.yaml"
 _COMPOSE_VAR_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
+
+
+def compose_template_for(mode: str) -> Path:
+    """The compose FILE this mode deploys from."""
+    return IMAGE_COMPOSE_TEMPLATE if mode == "image" else COMPOSE_TEMPLATE
 
 
 def compose_bind_lines(binds, port: int, indent: str = "      ") -> str:
@@ -1112,7 +1597,8 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
                       syncthing_url: str = "", nas_host: str = "",
                       nas_user: str = "", admin_users: str = "",
                       homes_parent: str = "", nas_kind: str = "",
-                      dashboard_url: str = "", broll_enabled: str = "1") -> dict:
+                      dashboard_url: str = "", broll_enabled: str = "1",
+                      ccsync_image: str = "") -> dict:
     """Every {{NAME}} the compose template takes, defaulted from site.toml."""
     host_root = require_site_value(host_root or DEFAULT_HOST_ROOT, "[apps] root",
                                    "--host-root").rstrip("/")
@@ -1143,6 +1629,12 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         # it (the same rule NAS_ADMIN_USERS follows below). main() passes the
         # real one when it renders for a deploy.
         "DASH_BROLL_ENABLED": broll_enabled or "1",
+        # IMAGE MODE's one extra variable (compose.image.yaml renders it as
+        # `${CCSYNC_IMAGE:-<this>}`, so the file keeps compose's own escape
+        # hatch the way the bind addresses do). Provided unconditionally --
+        # compose.yaml simply never asks for it, and an unused variable costs
+        # nothing while a missing one is a hard error by design.
+        "CCSYNC_IMAGE": ccsync_image or SITE_CONTAINER_IMAGE,
         **site,
         "NAS_APPS_ROOT": host_root,
         "NAS_TREE_ROOT": tree_root,
@@ -2851,8 +3343,35 @@ def main():
                     help=f"tailnet address to publish on, default {TAILNET_BIND_IP} "
                          f"(or DASH_BIND_TAILNET)")
     ap.add_argument("--image", default=os.environ.get("DASH_IMAGE", DEFAULT_IMAGE),
-                    help=f"container base image, default {DEFAULT_IMAGE} (pinned on "
-                         f"purpose; keep it in step with dashboard/deploy/compose.yaml)")
+                    help=f"container base image FOR BIND-MOUNT MODE, default "
+                         f"{DEFAULT_IMAGE} (pinned on purpose; keep it in step with "
+                         f"dashboard/deploy/compose.yaml). Image mode ignores it and "
+                         f"uses --container-image instead.")
+    # WHERE THE CODE COMES FROM (2026-08-18, docs/DOCKER.md). Deliberately
+    # default=None rather than the resolved mode: main() has to be able to tell
+    # "the operator asked for this mode" from "the manifest says so", because
+    # the first is a MIGRATION and needs --recreate to take effect at all.
+    ap.add_argument("--mode", choices=STACK_MODES, default=None,
+                    help=f"how the container gets its code: 'bind' (the default, "
+                         f"and what every deployment runs today -- the four code "
+                         f"trees and a /venv bind-mounted off the host) or 'image' "
+                         f"(the vendor image carries them; no code is shipped). "
+                         f"Defaults to [stack] mode in the site manifest, else "
+                         f"'{DEFAULT_STACK_MODE}'. PASSING THIS FLAG IMPLIES "
+                         f"--recreate: the mode is a compose-level setting, and a "
+                         f"plain restart would keep the old one. Both directions "
+                         f"are non-destructive -- the host code trees are left in "
+                         f"place and ARE the rollback (docs/DOCKER.md).")
+    ap.add_argument("--container-image", default="",
+                    help=f"the vendor image image mode runs, default "
+                         f"{SITE_CONTAINER_IMAGE} ([stack] image, else "
+                         f"{DEFAULT_CONTAINER_IMAGE}; $CCSYNC_IMAGE also works). A "
+                         f"digest pin (ghcr.io/...@sha256:...) is accepted and "
+                         f"preferred -- a tag is mutable.")
+    ap.add_argument("--no-image-pull", action="store_true",
+                    help="image mode: do not `docker pull` the image onto the NAS "
+                         "first. For an air-gapped site that loaded it with "
+                         "`docker save | docker load`.")
     ap.add_argument("--music-data",
                     default=os.environ.get("MUSIC_DATA_PUSH", MUSIC_DATA_PUSH_DEFAULT),
                     help="which of the music DATA artefacts to ship: 'auto' (default; "
@@ -2936,6 +3455,24 @@ def main():
     set_host_key_pin(args.host_key)
     global _ARGS
     _ARGS = args
+    # Which shape this deploy builds (2026-08-18, docs/DOCKER.md). Resolved
+    # FIRST, because it decides which steps run at all -- and an unknown value
+    # refuses here rather than silently deploying bind-mount mode and reporting
+    # success.
+    mode = resolve_stack_mode(args.mode or "")
+    image_mode = mode == "image"
+    ccsync_image = resolve_container_image(args.container_image)
+    push_code = not image_mode
+    if args.mode:
+        # A mode is baked in at CREATE time like every other compose-level
+        # setting, so switching without re-creating changes nothing and says it
+        # did. Implied only for the FLAG: a manifest that already says `image`
+        # is not a migration, and a routine redeploy of a site that lives in
+        # image mode should not delete and re-create its app every time.
+        args.recreate = True
+        print(f"--mode {mode}: implying --recreate (the mode is baked in at "
+              f"create time; a restart would keep the old one). Nothing under "
+              f"<host-root> is deleted either way.")
     # Which addresses this dashboard publishes on is the platform's answer
     # (LAN + tailnet on TrueNAS; loopback plus `tailscale serve` on DSM, whose
     # userspace-mode tailscaled has no interface to bind). Resolved here so a
@@ -2961,6 +3498,20 @@ def main():
         print(f"FAILED: {LOCAL_DASHBOARD_DIR} not found -- run from the repo", file=sys.stderr)
         return 1
 
+    # Image-mode pre-flight, BEFORE anything is created or uploaded -- the
+    # same place, and for the same reason, as the b-roll pre-flight below:
+    # the operator is still looking at a terminal.
+    if image_mode:
+        problem = image_mode_preflight(ccsync_image, args.dry_run)
+        if problem:
+            print(f"{'[dry-run] would FAIL' if args.dry_run else 'FAILED'}: "
+                  f"{problem}", file=sys.stderr)
+            if not args.dry_run:
+                return 1
+    else:
+        print("stack mode: bind -- the four code trees ship from this checkout "
+              "and /venv is a host volume (docs/DOCKER.md)")
+
     # b-roll pre-flight, BEFORE anything is uploaded or created. Two ways this
     # feature used to ship broken and silent, and neither is detectable from a
     # healthcheck: an empty broll-web (nothing ever copied the app in), and an
@@ -2976,7 +3527,14 @@ def main():
     # workstation" trap the b-roll tests fell into). A real run refuses.
     ship_broll = broll_enabled == "1"
     if broll_enabled == "1":
-        if not (broll_src / "app" / "main.py").is_file():
+        # IMAGE MODE: the b-roll tree is an image layer at /broll-app, so a
+        # checkout that does not have it is not a broken deploy -- there is no
+        # host mount for it to leave empty. The INGEST TOKEN check below is
+        # unchanged in both modes: the dashboard refuses to START without a
+        # strong one, whichever mode it boots in.
+        if image_mode:
+            pass
+        elif not (broll_src / "app" / "main.py").is_file():
             print(
                 f"{'[dry-run] would FAIL' if args.dry_run else 'FAILED'}: "
                 f"DASH_BROLL_ENABLED=1 but no b-roll app at {broll_src}\n"
@@ -3015,7 +3573,7 @@ def main():
     # documented, supported state.
     music_src = music_web_source()
     music_data_src = music_data_source()
-    ship_music = (music_src / "musicweb" / "main.py").is_file()
+    ship_music = image_mode or (music_src / "musicweb" / "main.py").is_file()
     if not ship_music:
         print(f"NOTE: no music app at {music_src} "
               f"(looked for {music_src / 'musicweb' / 'main.py'}) -- deploying "
@@ -3031,8 +3589,16 @@ def main():
     # mounted either, so /ytdl and its fleet routes 404 and the nav link is
     # not there. Read-only code the dashboard never imports costs a few MB and
     # makes enabling the feature a redeploy rather than a re-ship.
+    #
+    # IMAGE MODE (both of these): the three sub-app trees are image layers, so
+    # `ship_*` stops meaning "was this checkout complete" and simply becomes
+    # True -- what it still gates is the MOUNT PREPARATION each app needs on
+    # the host (the music library root, ffmpeg/deno, the ~1.4 GB of music data),
+    # every bit of which image mode needs exactly as much as bind mode does.
+    # The four install_tree calls further down are the part that is skipped,
+    # and they are gated on `push_code`.
     ytdl_src = ytdl_web_source()
-    ship_ytdl = (ytdl_src / "ytdlweb" / "main.py").is_file()
+    ship_ytdl = image_mode or (ytdl_src / "ytdlweb" / "main.py").is_file()
     if not ship_ytdl:
         print(f"NOTE: no ytdl app at {ytdl_src} "
               f"(looked for {ytdl_src / 'ytdlweb' / 'main.py'}) -- deploying "
@@ -3482,6 +4048,11 @@ def main():
     # A pre-C-2 deployment has an editor-writable venv sitting inside data/.
     # Move it aside (never delete: no-deletion rule) so run.sh rebuilds a
     # clean one at /venv and nothing keeps executing the old interpreter.
+    #
+    # Run in BOTH modes on purpose. Image mode does not mount /venv at all, so
+    # nothing there is executed -- but /data is still mounted, the hazard is a
+    # writable directory inside it, and the rollback to bind mode is one
+    # command away.
     quarantine = f"{root}/data/venv.quarantined.{time.strftime('%Y%m%d%H%M%S')}"
     retire_old_venv = (
         f"if [ -d {shell_quote(root + '/data/venv')} ]; then "
@@ -3499,16 +4070,29 @@ def main():
               file=sys.stderr)
         return 1
 
+    # Steps 2/2b/2c/2f ship CODE, and image mode ships none of it: /app,
+    # /broll-app, /music-app, /ytdl-app and /venv are image layers there
+    # (docs/DOCKER.md). The host directories those trees live in are NOT
+    # touched and NOT removed -- they are the rollback, and `--mode bind`
+    # re-ships them. Step 2d (the ~1.4 GB of music DATA) and steps 2e/2g (the
+    # ffmpeg and deno binaries) are unaffected: none of that is in the image,
+    # deliberately (GPLv3 -- COMMERCIAL_READINESS.md item 3).
+    if image_mode:
+        print(f"image mode: shipping no code. /app, /venv, /broll-app, "
+              f"/music-app and /ytdl-app come from {ccsync_image}; the host "
+              f"trees under {root} are left exactly as they are and are the "
+              f"rollback (`--mode bind`).")
+
     # Step 2: ship the dashboard code (see install_tree for the guarantees).
-    if not install_tree(root, "app", LOCAL_DASHBOARD_DIR, args.dry_run,
-                        staging_parent=code_staging_parent):
+    if push_code and not install_tree(root, "app", LOCAL_DASHBOARD_DIR, args.dry_run,
+                                      staging_parent=code_staging_parent):
         return 1
 
     # Step 2b: ship the b-roll web/ tree into broll-web. Without this the
     # directory the container mounts at /broll-app is EMPTY, `from app.main
     # import app` raises ModuleNotFoundError, the mount is skipped, and the
     # operator gets a green healthcheck with a missing feature.
-    if ship_broll:
+    if ship_broll and push_code:
         if not install_tree(root, "broll-web", broll_src, args.dry_run,
                             excludes=BROLL_EXCLUDE_DIRS,
                             staging_slug="ccsync-brollweb-upload",
@@ -3520,7 +4104,7 @@ def main():
     # /music-app and imports musicweb.main off PYTHONPATH, so an empty dir there
     # is a silently absent feature behind a green healthcheck. data/ is excluded
     # (MUSIC_EXCLUDE_DIRS) and shipped by step 2d instead.
-    if ship_music:
+    if ship_music and push_code:
         if not install_tree(root, "music-web", music_src, args.dry_run,
                             excludes=MUSIC_EXCLUDE_DIRS,
                             staging_slug="ccsync-musicweb-upload",
@@ -3580,12 +4164,19 @@ def main():
     # empty dir there is a silently absent feature behind a green healthcheck.
     # There is no data push to go with it: ytdl.db is created by the container
     # in its own writable /ytdl-data on first request.
-    if ship_ytdl:
+    if ship_ytdl and push_code:
         if not install_tree(root, "ytdl-web", ytdl_src, args.dry_run,
                             excludes=YTDL_EXCLUDE_DIRS,
                             staging_slug="ccsync-ytdlweb-upload",
                             staging_parent=code_staging_parent):
             return fail_after_app_swap(args.dry_run)
+
+    # Step 2h (image mode): get the image onto the NAS before the app is
+    # created, so a create job that pulls has nothing left to fetch and a
+    # RESTART -- which never pulls -- at least runs against an up-to-date local
+    # copy of a floating tag. Non-fatal: see pull_container_image.
+    if image_mode and not args.no_image_pull:
+        pull_container_image(ccsync_image, args.dry_run)
 
     # Step 3: create or redeploy the custom app.
     # SERVER-8: a GET /app that cannot be answered is a post-swap failure like
@@ -3612,13 +4203,27 @@ def main():
         restarted, err = restart_dashboard_container(args.dry_run)
         if restarted:
             print(f"restarted container: {container}")
-            print("NOTE: only the CODE was updated. Compose-level changes -- bind "
-                  "addresses (--bind-lan/--bind-tailnet), image tag, healthcheck, env "
-                  "vars -- need --recreate to take effect (pass DASH_REPORT_TOKEN and "
-                  "DASH_SESSION_SECRET again when you do).")
+            if image_mode:
+                # A restart re-uses the EXISTING container, image id and all,
+                # so a tag that moved upstream (and the pull above that
+                # fetched it) reaches nothing. Say so: "the deploy succeeded
+                # and the code did not change" is precisely the OPS-4 class of
+                # failure this file keeps getting bitten by.
+                print("NOTE: image mode -- a restart keeps the container's "
+                      "CURRENT image. The newly pulled one is picked up by "
+                      "--recreate (or `--mode image`, which implies it), or by "
+                      "the NAS UI's own update click. Nothing under "
+                      "<host-root> is deleted by either.")
+            else:
+                print("NOTE: only the CODE was updated. Compose-level changes -- bind "
+                      "addresses (--bind-lan/--bind-tailnet), image tag, healthcheck, env "
+                      "vars -- need --recreate to take effect (pass DASH_REPORT_TOKEN and "
+                      "DASH_SESSION_SECRET again when you do).")
         else:
             print(f"NOTE: docker restart failed ({err.strip()[:200]}); restart the "
                   f"{APP_NAME!r} app from the TrueNAS UI to pick up the new code.")
+        if image_mode and restarted:
+            verify_image_boot(args.port, expected_runtime_id(), args.dry_run)
         return 0
 
     # The create itself is the backend's: a custom_app POST on TrueNAS Apps,
@@ -3648,6 +4253,8 @@ def main():
         youtube_unblock=youtube_unblock,
         ai_cli_providers=ai_cli_providers,
         anthropic_api_key=anthropic_api_key,
+        mode=mode,
+        ccsync_image=ccsync_image,
     )
     # A compose FILE for a platform that reads one. Rendered from exactly the
     # variables the dict above is built from, with the five secrets turned into
@@ -3662,8 +4269,8 @@ def main():
                 syncthing_url=args.syncthing_gui_url, nas_host=truenas_host,
                 nas_user=truenas_user, admin_users=admin_users,
                 homes_parent=DEFAULT_HOMES_PARENT, nas_kind=backend().kind,
-                broll_enabled=broll_enabled,
-            )),
+                broll_enabled=broll_enabled, ccsync_image=ccsync_image,
+            ), template=compose_template_for(mode)),
             STACK_ENV_SECRETS)
         env_file = {
             "SYNCTHING_API_KEY": api_key,
@@ -3692,6 +4299,16 @@ def main():
     )
     if rc_deploy != 0 or args.dry_run:
         return rc_deploy
+
+    # The image-mode half of the existing post-deploy health check: a
+    # misconfigured image-mode container is healthy from outside, so the two
+    # facts that decide whether the migration worked -- which code root run.sh
+    # chose, and whether /venv came from the image -- are read from the
+    # container itself. A failure prints the rollback command and NEVER
+    # reverts anything (docs/DOCKER.md).
+    if image_mode and not verify_image_boot(args.port, expected_runtime_id(),
+                                            args.dry_run):
+        return 1
 
     print(f"installed custom app: {APP_NAME} on port {args.port}")
     print(f"Next: open http://<tailnet-ip>:{args.port}/ and check /api/v1/health; then set "

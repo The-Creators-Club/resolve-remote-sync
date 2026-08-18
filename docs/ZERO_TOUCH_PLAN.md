@@ -472,10 +472,21 @@ Three things worth knowing that the design above did not say:
 
 Not done here, deliberately: `min_version` is signed but unused for this kind
 (there is no downgrade floor for dashboard code — the version-newer-than-the-
-image rule is the only ordering); `snapshot_before` needs
+image rule is the only ordering); and `snapshot_before` needs
 `DASH_UPDATE_SNAPSHOT_DATASET` because a container cannot see the pool path
-behind `/data`; and `server/install_dashboard_app.py` still deploys bind-mount
-mode, so this whole path waits on the image-mode migration (`docs/DOCKER.md`).
+behind `/data`.
+
+~~`server/install_dashboard_app.py` still deploys bind-mount mode, so this
+whole path waits on the image-mode migration.~~ **Unblocked 2026-08-18:**
+`--mode image|bind` / `[stack] mode` makes the migration and its rollback one
+command each (`docs/DOCKER.md`, "Migrating between the modes"). The deploy
+**refuses image mode with an empty `DASH_RELEASE_PUBKEYS`** for the reason
+this WP makes plain — with no keys `select_code_root.py` can never trust a
+bundle, the image always wins, and a site would have migrated for a feature it
+cannot have — and prints the expected `runtime_id` so `docker exec …
+cat /venv/.runtime-id` can be checked against it. What still has to happen
+before an editor sees anything: a `v*` release so `:1` exists, and a
+`dashboard` record published to the feed.
 
 ## 5. Decisions taken here, and what they cost
 
@@ -512,6 +523,16 @@ mode, so this whole path waits on the image-mode migration (`docs/DOCKER.md`).
   format* (Settings → Export) so a NAS migration is import-and-go.
 
 ## 6. Migrating this studio (and any fleet already on the old shape)
+
+**Status 2026-08-18: step 0 of this section is built and untried on the live
+NAS.** The dashboard's *deploy shape* — bind-mount vs image — is now a
+one-command switch in each direction (`server/install_dashboard_app.py --mode
+image` / `--mode bind`, `[stack] mode`, `docs/DOCKER.md`). That is the piece
+WP K waits on, and it is deliberately independent of the rest of this section:
+it changes only where the container's code comes from, on the SAME apps root,
+the same tree mount, the same Syncthing and the same URL. Nothing is deleted
+and the host code trees are the rollback. Everything numbered below — the
+second stack, the second tailnet node, the SFTP cutover — is still unbuilt.
 
 The current TrueNAS site runs NAS-native SFTP accounts, catalog Syncthing
 and host Tailscale + a LAN URL. Migration is additive, then a switch:

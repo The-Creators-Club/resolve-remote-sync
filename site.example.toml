@@ -307,3 +307,40 @@ editor_shell = "sftp-only"
 # Multi-ORG is NOT this switch: one customer = one dashboard container. See
 # docs/TENANCY.md before turning this on -- it changes an existing tree.
 project_acl = "shared"
+# HOW THE DASHBOARD CONTAINER GETS ITS CODE (docs/DOCKER.md):
+#
+#   "bind"   (DEFAULT, and what every deployment runs today) a stock, pinned
+#            python:3.12.7-slim with the four code trees and a /venv
+#            bind-mounted off the host. server/install_dashboard_app.py ships
+#            the trees over SFTP; run.sh pip-installs the lock on first boot.
+#   "image"  the vendor container image carries all five as read-only layers.
+#            Nothing is uploaded, the dependency set is hash-pinned at build
+#            time, and the dashboard can update its OWN CODE from the signed
+#            vendor feed without touching the image (ZERO_TOUCH_PLAN.md WP K).
+#
+# Migrating either way is ONE command and deletes nothing -- the host code
+# trees are left in place and are the rollback:
+#
+#   python server/install_dashboard_app.py --mode image
+#   python server/install_dashboard_app.py --mode bind        # back again
+#
+# IMAGE MODE REQUIRES DASH_RELEASE_PUBKEYS in the deploying shell. Without the
+# keys the image's own boot-time verifier can never trust a code bundle, so no
+# over-the-air update can ever apply -- the deploy refuses rather than let a
+# site migrate for nothing.
+# mode = "bind"
+# WHICH IMAGE, when mode = "image". Default:
+# ghcr.io/the-creators-club/ccsync:1 -- the deliberately fixed long-lived tag
+# .github/workflows/image.yml publishes on a `v*` release (see docs/DOCKER.md,
+# "Published images (CI)"). The GHCR package is PUBLIC, so no docker login is
+# needed on the NAS.
+#
+# A DIGEST IS ACCEPTED AND PREFERRED once you know one:
+# "ghcr.io/the-creators-club/ccsync@sha256:..." is immutable, which is the only
+# form that says what this customer is actually running -- and it makes a
+# rollback a value change here rather than an archaeology exercise.
+#
+# NOTE (2026-08-18): `:1` does not exist yet -- no `v*` tag has been pushed --
+# so until the first release, use ":edge" (published on every push to main) or
+# the digest it resolves to.
+# image = "ghcr.io/the-creators-club/ccsync:1"

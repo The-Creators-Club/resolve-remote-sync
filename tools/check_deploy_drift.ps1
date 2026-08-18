@@ -37,7 +37,13 @@
       RUNNING    is a ccsync-companion process alive, and does the HKCU Run
                  key point at the exe we just inspected?
       DASHBOARD  GET /api/v1/health -> "version" (unauthenticated; still
-                 present if that response is ever trimmed to ok+version).
+                 present if that response is ever trimmed to ok+version), and
+                 what site.toml's [stack] mode says the deployment IS. In
+                 image mode the host code trees under the apps root are
+                 deliberately unused and are NOT reported as drift -- they are
+                 the rollback (docs/DOCKER.md). With -AdminUser, also
+                 /api/v1/health's admin-only `code` block: which code root is
+                 live (image / volume / checkout) and its runtime id.
                  With -AdminUser, also the CURRENT published companion
                  package -- the version the fleet will self-upgrade to --
                  for windows AND macos, plus an advisory when the macOS
@@ -115,6 +121,36 @@ function Read-Manifest {
     catch { return $null }
 }
 
+# --- the site manifest's stack shape (2026-08-18, docs/DOCKER.md) ----------
+#
+# `[stack] mode` decides what "drift" even MEANS for the dashboard:
+#
+#   bind   the container's code is the four trees under <apps root> on the NAS,
+#          shipped by server/install_dashboard_app.py from this checkout. Repo
+#          version vs live version is the whole question.
+#   image  those host trees are UNUSED -- docs/DOCKER.md says to leave them
+#          exactly where they are, because they are the rollback. Nothing about
+#          them is drift, and reporting them as such would send an operator to
+#          re-ship code the deployment does not read. The comparison is repo vs
+#          IMAGE TAG/DIGEST vs live version instead.
+#
+# Parsed with a regex rather than a TOML library: PowerShell 5.1 has none, this
+# script is read-only and stdlib-only by design, and it needs exactly two
+# scalars out of one section.
+function Get-SiteScalar {
+    param([string]$Path, [string]$Section, [string]$Key)
+    if (-not (Test-Path -LiteralPath $Path)) { return "" }
+    $inSection = $false
+    foreach ($line in (Get-Content -LiteralPath $Path -Encoding UTF8)) {
+        $t = $line.Trim()
+        if ($t -match '^\[([^\]]+)\]$') { $inSection = ($Matches[1] -eq $Section); continue }
+        if (-not $inSection) { continue }
+        if ($t.StartsWith("#")) { continue }
+        if ($t -match ("^" + [regex]::Escape($Key) + '\s*=\s*"([^"]*)"')) { return $Matches[1] }
+    }
+    return ""
+}
+
 function Format-Age {
     param($When)
     if (-not $When) { return "" }
@@ -149,6 +185,22 @@ Write-Row "installer version" $BootstrapVersion
 Write-Row "  onboarding/steps.py" $OnboardVersion
 Write-Row "  macos_bootstrap.sh" $MacBootstrapVersion
 Write-Row "dashboard VERSION" $DashRepoVersion
+
+# Which deploy shape this site is configured for. $env:CCSYNC_SITE wins, as it
+# does for every server/ script.
+$SitePath = $env:CCSYNC_SITE
+if (-not $SitePath) { $SitePath = Join-Path $RepoRoot "site.toml" }
+$StackMode = Get-SiteScalar -Path $SitePath -Section "stack" -Key "mode"
+if (-not $StackMode) { $StackMode = "bind" }
+$StackImage = Get-SiteScalar -Path $SitePath -Section "stack" -Key "image"
+if (-not $StackImage) { $StackImage = "ghcr.io/the-creators-club/ccsync:1" }
+Write-Row "dashboard stack mode" "$StackMode  ([stack] mode in $(Split-Path -Leaf $SitePath))"
+if ($StackMode -eq "image") {
+    Write-Row "  container image" $StackImage
+    if ($StackImage -notmatch '@sha256:') {
+        Write-Unknown "the image is pinned by TAG, not digest -- two deploys can run different code from the same site.toml"
+    }
+}
 
 $gitDescribe = "$(cmd /c "git -C ""$RepoRoot"" describe --tags --always --dirty 2>nul")".Trim()
 if ($gitDescribe) { Write-Row "git" $gitDescribe }
@@ -396,9 +448,25 @@ if ($liveDashVersion -and $DashRepoVersion) {
     if ($liveDashVersion -eq $DashRepoVersion) {
         Write-Ok "dashboard reports v$liveDashVersion, repo says v$DashRepoVersion"
     }
+    elseif ($StackMode -eq "image") {
+        # The remedy differs from bind mode's, and getting it wrong is the
+        # expensive part: re-shipping the host code trees on an image-mode
+        # site changes NOTHING the container reads, and the operator concludes
+        # the deploy is broken (2026-08-18). A new version arrives either as a
+        # new image or, if the release feed and DASH_RELEASE_PUBKEYS are set,
+        # as a signed code bundle the dashboard applies to itself
+        # (ZERO_TOUCH_PLAN.md WP K).
+        Write-Drift "dashboard reports v$liveDashVersion but the repo is v$DashRepoVersion -- image mode: build/publish a new image and redeploy (python server\install_dashboard_app.py --mode image), or publish a signed dashboard bundle to the release feed. Re-shipping the host code trees would change nothing."
+    }
     else {
         Write-Drift "dashboard reports v$liveDashVersion but the repo is v$DashRepoVersion -- the container is behind (docker compose up -d --build)"
     }
+}
+if ($StackMode -eq "image") {
+    # Said out loud so nobody goes looking. docs/DOCKER.md: "The host's app/,
+    # venv/, broll-web/, music-web/ and ytdl-web/ directories are simply unused
+    # afterwards. LEAVE THEM THERE. They are the rollback."
+    Write-Row "host code trees" "unused in image mode -- not drift; they are the rollback (--mode bind)"
 }
 
 if ($AdminUser -and $DashboardUrl) {
@@ -414,6 +482,39 @@ if ($AdminUser -and $DashboardUrl) {
             Write-Unknown "'$AdminUser' is not a dashboard admin -- cannot read the package channel"
         }
         else {
+            # WHICH CODE IS LIVE (ZERO_TOUCH_PLAN.md WP K). /api/v1/health's
+            # `code` block is admin-only -- the unauthenticated read above gets
+            # ok+version and nothing else -- so this is the one place the
+            # doctor can answer "image or over-the-air bundle?" at all. It is
+            # the same question this whole script exists for, one layer down.
+            try {
+                $authHealth = Invoke-RestMethod -Method Get `
+                    -Uri "$DashboardUrl/api/v1/health" -WebSession $dashSession -TimeoutSec 8
+                $codeBlock = $authHealth.PSObject.Properties["code"]
+                if ($codeBlock -and $codeBlock.Value) {
+                    $code = $codeBlock.Value
+                    Write-Row "live code source" "$($code.source)"
+                    Write-Row "  running / in image" "$($code.running) / $($code.image)"
+                    if ("$($code.runtime_id)") { Write-Row "  runtime id" "$($code.runtime_id)" }
+                    if ($StackMode -eq "image" -and "$($code.source)" -eq "checkout") {
+                        Write-Drift "site.toml says image mode but the container is running a developer checkout"
+                    }
+                    if ($StackMode -eq "bind" -and "$($code.source)" -ne "image" -and "$($code.runtime_id)") {
+                        Write-Drift "site.toml says bind mode but the container carries an image runtime id -- the live deployment is in image mode; set [stack] mode = ""image"""
+                    }
+                    if ($StackMode -eq "image" -and -not "$($code.runtime_id)") {
+                        Write-Drift "site.toml says image mode but the container has no /venv/.runtime-id -- either it is still bind-mounted, or the image predates 2026-08-18 and can never apply an over-the-air update"
+                    }
+                }
+                else {
+                    # Single-quoted: a backtick is PowerShell's escape
+                    # character inside "..." and `b would emit a backspace.
+                    Write-Unknown 'no code block in /api/v1/health -- a dashboard older than 2026-08-18 (ZERO_TOUCH_PLAN.md WP K)'
+                }
+            }
+            catch {
+                Write-Unknown "authenticated /api/v1/health failed ($($_.Exception.Message))"
+            }
             $pkgs = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/admin/packages" `
                 -WebSession $dashSession -TimeoutSec 15
             # `current` is platform -> version and only ever names the

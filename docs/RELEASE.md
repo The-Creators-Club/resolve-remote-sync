@@ -553,6 +553,15 @@ That is deliberate: a dashboard that would accept an unsigned build is one
 compromise away from owning every editor's machine. A customer running their
 own dashboard pins the **vendor's** key here.
 
+**In image mode it is not optional at all.** A site whose `site.toml` says
+`[stack] mode = "image"` (`docs/DOCKER.md`) gets a container whose `run.sh`
+picks its code root at boot by verifying `/data/code/<version>` against these
+keys — so with none, the image always wins and the dashboard's own
+over-the-air code updates can never apply, not merely the publish route.
+`server/install_dashboard_app.py --mode image` therefore **refuses to deploy**
+with an empty value, before anything moves, rather than let a site migrate for
+a feature it cannot have.
+
 **Beyond one dashboard:** everything above is "one build reaches one
 dashboard because someone PUT it there." For N customers there is also the
 **release feed** (`docs/RELEASE_FEED.md`, `docs/ZERO_TOUCH_PLAN.md` WP E) —

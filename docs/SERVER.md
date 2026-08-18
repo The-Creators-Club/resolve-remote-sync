@@ -494,6 +494,24 @@ SYNCTHING_API_KEY=<key> DASH_REPORT_TOKEN=<shared-secret> \
     python server/install_dashboard_app.py [--dry-run]
 ```
 
+**Two deploy shapes, one script** (2026-08-18). `[stack] mode` in `site.toml`
+-- or `--mode` on the command line -- decides whether the container's code is
+the four trees this command uploads (`bind`, the default and what every
+deployment runs today) or a vendor container image that carries them
+(`image`). Migrating either way is one command, `--mode` implies `--recreate`,
+and **nothing is deleted**: the host code trees stay exactly where they are
+and are the rollback.
+
+```
+python server/install_dashboard_app.py --mode image     # migrate
+python server/install_dashboard_app.py --mode bind      # roll back
+```
+
+Image mode additionally **requires `DASH_RELEASE_PUBKEYS`** in the deploying
+shell (it refuses without it) and takes `--container-image` / `[stack] image`.
+The full story, the pre-flight, the post-deploy check and what happens to the
+host directories: [`DOCKER.md`](DOCKER.md), "Migrating between the modes".
+
 `DASH_SESSION_SECRET` is **required** -- the install fails without it. It
 signs editors' login cookies, so invent it once (`openssl rand -hex 32`) and
 keep it stable across deploys: changing it logs every editor out. Setting it

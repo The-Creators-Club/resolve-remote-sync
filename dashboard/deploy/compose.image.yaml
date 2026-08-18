@@ -5,8 +5,14 @@
 # without the spaces, filled in by
 # server/install_dashboard_app.render_compose_yaml(), which takes a `template`
 # path; every ${VAR} is compose's own runtime substitution and is left alone),
-# and the same variables. Nothing in the install script points at this file
-# yet -- render it explicitly:
+# and the same variables.
+#
+# SINCE 2026-08-18 THE INSTALL SCRIPT DEPLOYS THIS FILE ITSELF. It is chosen by
+# `[stack] mode = "image"` in site.toml, or `--mode image` on the command line
+# (install_dashboard_app.compose_template_for); the TrueNAS path POSTs the
+# equivalent dict from compose_config(mode="image") instead, because that
+# middleware stores a dict. Migrating either way is one command --
+# docs/DOCKER.md, "Migrating between the modes". To render it by hand anyway:
 #
 #   python -c "import sys; sys.path.insert(0,'server'); \
 #     import install_dashboard_app as i, pathlib; \
@@ -21,11 +27,13 @@
 #             /music-app and /ytdl-app are image content now. Every DATA mount
 #             is unchanged, byte for byte, because the data is the thing that
 #             cannot be rebuilt: /data, /projects, /broll-data, /music-data,
-#             /music-encoder, /music-proxies, /music-share, /ytdl-data and
-#             /claude-home. /opt/ffmpeg, /opt/claude and /opt/deno stay mounts
-#             too, deliberately: the ffmpeg build is GPL and the Claude Code
-#             CLI must not be redistributed inside a vendor image
-#             (COMMERCIAL_READINESS.md items 1 and 3).
+#             /music-encoder, /music-proxies, /music-share and /ytdl-data.
+#             /opt/ffmpeg stays a mount too, deliberately, and so does
+#             /opt/deno on a site that enabled youtube_unblock: both are GPLv3
+#             and baking either into a vendor image is CONVEYING it
+#             (COMMERCIAL_READINESS.md item 3). /opt/claude and /claude-home
+#             are gone entirely -- there is no CLI subprocess since 2026-08-17
+#             (item 1), so there is nothing to mount either way.
 #
 # Everything else -- environment, ports, healthcheck, the two optional
 # profiles -- is compose.yaml's, and the reasoning for each line lives there.
@@ -50,10 +58,20 @@
 # and the tree are untouched by both modes.
 services:
   dashboard:
-    # No digest pin here on purpose: this is YOUR build, and the thing that is
-    # pinned by digest is deploy/Dockerfile's base image. Use an immutable tag
-    # (the dashboard version, not "latest") so a rollback is a tag change.
-    image: "${CCSYNC_IMAGE:-ccsync-dashboard:latest}"
+    # THE SITE'S OWN IMAGE, from site.toml `[stack] image` (or
+    # --container-image / $CCSYNC_IMAGE), rendered in as the default while
+    # compose's own ${CCSYNC_IMAGE} stays the escape hatch -- exactly the shape
+    # the two bind addresses use, and for the same reason: a re-pin should be a
+    # variable edit, not a file edit.
+    #
+    # The default is the vendor's published tag
+    # (ghcr.io/the-creators-club/ccsync:1, .github/workflows/image.yml). A
+    # DIGEST is accepted and preferred once one is known --
+    # `ghcr.io/the-creators-club/ccsync@sha256:...` is immutable, which is what
+    # makes a rollback a value change rather than archaeology, and it is the
+    # only form that says what a customer is actually running. The thing pinned
+    # by digest inside the image is deploy/Dockerfile's own base.
+    image: "${CCSYNC_IMAGE:-{{CCSYNC_IMAGE}}}"
     # The image defaults to 3000:3000; this line is what makes it the site's
     # own service account. DSM assigns uids >= 1026, so it is read from the
     # live account, never assumed. run.sh warns if APP_UID/APP_GID below

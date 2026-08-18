@@ -422,6 +422,21 @@ def classify_lane_error(last_error: Optional[str], root_absent: bool = False) ->
                 f"-- nothing was deleted.")
     if not text:
         return "Something went wrong. Tray → Copy diagnostics for your admin."
+    if "sync engine" in text:
+        # SYNC-17 (2026-08-18): the supervisor's own sentence, already
+        # written for an editor ("the sync engine (Syncthing) is not running
+        # on this machine -- restarting it"). Passed through verbatim so the
+        # tray line, the dashboard chip and the log agree word for word; the
+        # generic fallback below turned eighteen hours of a dead sync engine
+        # into "Something went wrong".
+        return str(last_error)
+    if "syncthing not running" in text:
+        # The same state seen by a lane built without a supervisor (a bare
+        # lane in a test, or a companion whose supervisor failed to
+        # construct). Say the same thing, minus the promise to fix it.
+        return ("The sync engine (Syncthing) is not running on this machine, so "
+                "audio, graphics, subtitles and project files are not syncing. "
+                "Restart this machine, or tray → Copy diagnostics for your admin.")
     if "marker missing" in text:
         # The editor deleted a project's local folder while it was still
         # ticked -- routine when cycling projects, and nothing was lost

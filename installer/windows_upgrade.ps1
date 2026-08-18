@@ -417,6 +417,50 @@ else {
     }
 }
 
+# --- 5b. the sync engine ---------------------------------------------------
+# SYNC-17 (2026-08-18). This script does not touch syncthing.exe -- and that
+# is exactly why this check is here. Syncthing is started by an HKCU Run
+# entry, which fires at LOGON AND NEVER AGAIN, so a session that ended (a
+# sign-out, a remote shell closing, a forced restart) leaves the machine with
+# no sync engine until somebody logs in again. One editor spent eighteen
+# hours in that state: the companion came back on its own, rclone came back,
+# lane C carried nothing, and the fleet grid was green throughout. An upgrade
+# is one of the few moments this machine is being looked at, so look.
+#
+# Companion 0.9.1+ supervises this itself (sync/syncthing_supervisor.py);
+# this is the belt for the machine whose companion has not been upgraded yet,
+# and for the window between the two.
+$stShim = "$BinDir\CCSyncSyncthing.vbs"
+$stRunning = [bool](Get-Process -Name "syncthing" -ErrorAction SilentlyContinue)
+if ($DryRun) {
+    Write-Step "[dry-run] would start the sync engine via $stShim if no syncthing process is running"
+}
+elseif ($stRunning) {
+    Write-Skip "sync engine (Syncthing) is running"
+}
+elseif (-not (Test-Path -LiteralPath $stShim)) {
+    Write-Warn2 "the sync engine (Syncthing) is NOT running and there is no autostart shim at $stShim -- lane C (audio, graphics, subtitles, project files) is carrying nothing on this machine. Re-run windows_bootstrap.ps1."
+}
+else {
+    try {
+        # Through the SAME shim the Run key uses, so this start and a logon
+        # start are the same command line -- including the --home the .cmd
+        # beside it bakes in, which a hand-rolled `syncthing serve` here
+        # would get wrong and quietly point at an empty config.
+        Start-Process -FilePath "wscript.exe" -ArgumentList "//B", "//Nologo", "`"$stShim`"" -WindowStyle Hidden | Out-Null
+        Start-Sleep -Seconds 2
+        if (Get-Process -Name "syncthing" -ErrorAction SilentlyContinue) {
+            Write-Step "started the sync engine (Syncthing) -- it was not running"
+        }
+        else {
+            Write-Warn2 "started the sync engine but no syncthing process appeared -- check $env:LOCALAPPDATA\ccsync\syncthing-config and the companion log; lane C is not syncing until it runs."
+        }
+    }
+    catch {
+        Write-Warn2 "could not start the sync engine: $($_.Exception.Message) -- lane C is not syncing on this machine."
+    }
+}
+
 # --- 6. the licence agreement, and the wizard that takes it ----------------
 # A COMPLETED UPGRADE THAT DOES NOT SYNC (2026-08-18). Companion 0.8.0 gates
 # the sync lanes on ~/.ccsync/eula_accepted.json (CR-5, eula.acceptance_problem):

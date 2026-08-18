@@ -61,6 +61,75 @@ the "Status 2026-08-17" paragraphs in `docs/COMMERCIAL_READINESS.md`.**
 
 ---
 
+## Open - the sync engine's lifetime (SYNC-17, 2026-08-18)
+
+### SYNC-17 - Syncthing died with the Windows session and stayed dead for 18 hours, with lane C green - FIXED in repo 2026-08-18, unshipped
+Editor `ruskin` (DESKTOP-LQQ41TC, companion 0.9.0). His Windows session ended
+at **00:53**: rclone exited `0x40010004` (`DBG_TERMINATE_PROCESS`) and
+Syncthing logged "Syncthing is being stopped / Exiting". The companion came
+back at **18:24** (autostart, then a self-upgrade). Syncthing did not, and
+stayed dead for eighteen hours with **12 GB unsynced**.
+
+Three separate failures, and the third is the one that made it last eighteen
+hours instead of five minutes:
+
+1. **Nothing supervises Syncthing on an editor machine.** It is started by an
+   HKCU `Run` entry (`CCSyncSyncthing` -> `wscript CCSyncSyncthing.vbs` ->
+   `CCSyncSyncthing.cmd` -> `syncthing serve --home=...`), and **the Run key
+   fires at logon and never again**. Nothing anywhere restarts it. The
+   companion gets away with the same arrangement only because an editor who
+   sees no tray icon says so.
+2. **The companion knew and said it at DEBUG.** `repath.reconcile` logged
+   `repath: local syncthing unreachable -- skipping reconcile` once a pass,
+   for eighteen hours, at a level nothing collects.
+3. **Lane C reported idle / green / 0 queued the whole time.** `check_once`
+   does return `error` when the ping fails, but nothing carried that to a
+   sentence anyone could act on: the tray's `classify_lane_error` had no
+   branch for "Syncthing not running" and rendered the generic "Something
+   went wrong. Tray -> Copy diagnostics for your admin."
+
+**Fixed.** `companion/src/ccsync_companion/sync/syncthing_supervisor.py` is a
+supervisor driven from lane C's existing 15 s poll (no thread of its own): 30 s
+of unreachability, then it runs the same shim the Run key runs
+(`wscript.exe //B //Nologo %LOCALAPPDATA%\ccsync\bin\CCSyncSyncthing.vbs`;
+macOS `launchctl kickstart -k gui/<uid>/com.ccsync.syncthing`), detached
+(`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, `close_fds`, DEVNULL handles --
+a child of the tray dies with the tray's next self-upgrade), waits up to 20 s
+for the API, and backs off 30 s / 1 m / 2 m / 4 m / 8 m capped at 10 m. `INFO`
+per attempt, `WARNING` plus a tray balloon naming the last stderr line at the
+third failure, one balloon when it comes back. State lives in
+`~/.ccsync/state/syncthing_supervisor.json` so the counter survives the
+companion's own self-upgrade. It **stands off** while `sync_halt.json` is
+active, while syncing is paused, and on `sync_enabled = false`: resurrecting
+what somebody deliberately stopped is the one thing it must not do. Kill
+switch: `supervise_syncthing = false`.
+
+Lane C is now `error` whenever the API is unreachable, carrying the
+supervisor's own sentence ("the sync engine (Syncthing) is not running on this
+machine -- restarting it" / "...could not be started: `<why>`" / "...and it is
+not being restarted: `<why>`"), which the tray line and the dashboard chip
+repeat verbatim; an open incident also rides the report as
+`sync_guard.syncthing_supervisor` (which the dashboard does not declare yet,
+so it is dropped there for now -- the chip goes red off lane C's own state). `installer/windows_upgrade.ps1` gained step
+5b, which starts the engine through the same shim when no `syncthing` process
+is running -- the belt for a machine whose companion has not been upgraded
+yet. A `401`/`403` is deliberately NOT an outage (the process is up, holding
+another home's key).
+
+Docs: `docs/SYNC_SAFETY.md` section 6, `docs/GOTCHAS.md` section 14
+("processes die with the session that started them" -- including the SSH
+corollary: a daemon started over SSH lives exactly as long as that session).
+Tests: `companion/tests/test_syncthing_supervisor.py` (state machine, backoff,
+three strikes, latches, kill switch, persistence, and the launcher seam's argv
+and flags on both platforms -- no test spawns a process), plus the lane C,
+tray and app-wiring halves in `test_syncthing_lane.py`, `test_tray.py` and
+`test_sync_halt.py`.
+
+**Still owed:** this is unshipped. Every editor keeps the old behaviour until
+they take a build carrying it, and the Mac half needs a Mac to build.
+
+---
+
 ## Open — dashboard self-update over the air (WP K, 2026-08-18)
 
 ### WPK-1 — image mode never carried `templates/` or `static/` — FIXED in repo 2026-08-18, no image rebuilt yet

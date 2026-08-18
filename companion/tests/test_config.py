@@ -200,6 +200,11 @@ def test_default_toml_text_documents_every_default_key():
         "broll_ingest_enabled", "broll_ingest_idle_seconds",
         "broll_ingest_skip_while_resolve", "broll_ingest_free_space_floor_gb",
         "broll_ingest_max_concurrent_ffmpeg", "broll_ingest_staging_dir",
+        # The Syncthing supervisor's kill switch (SYNC-17, 2026-08-18). ON is
+        # the shipped behaviour and the only one anybody should want; writing
+        # `supervise_syncthing = true` into every first-run file would make
+        # the day we need to change that default a fleet-wide edit.
+        "supervise_syncthing",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -266,6 +271,8 @@ EXAMPLE_COMMENTED_OUT = {
     "broll_ingest_enabled", "broll_ingest_idle_seconds",
     "broll_ingest_skip_while_resolve", "broll_ingest_free_space_floor_gb",
     "broll_ingest_max_concurrent_ffmpeg", "broll_ingest_staging_dir",
+    # The Syncthing supervisor's kill switch, same class (SYNC-17).
+    "supervise_syncthing",
 }
 
 # Read straight off the loaded config with .get() and DELIBERATELY absent from

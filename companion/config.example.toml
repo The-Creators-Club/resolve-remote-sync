@@ -181,6 +181,15 @@ syncthing_api_key = ""
 # above). Leave as [] to skip the folder-id verification.
 syncthing_folder_ids = []
 
+# Restart the sync engine when it dies (SYNC-17, 2026-08-18). Nothing else on
+# an editor machine does: the autostart entry runs at LOGON and never again,
+# so a session that ends leaves Syncthing dead while the companion, rclone and
+# the tray all come back -- lane C then carries nothing until the next logon.
+# Commented out because true IS the shipped value; set it false only to take
+# the engine's lifetime into your own hands. Nothing is restarted while
+# syncing is halted or paused, and lane C reports the error either way.
+# supervise_syncthing = true
+
 # Path to the rclone binary. Defaults to "rclone" (must be on PATH). The
 # bootstrap installer is responsible for getting rclone onto PATH, not this
 # app; if missing, the sync lanes report a clear error status.

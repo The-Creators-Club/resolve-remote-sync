@@ -583,3 +583,106 @@ def test_pending_offered_folder_is_setup_not_error(fake_syncthing_server):
     lane2 = _lane_for(fake_syncthing_server, expected_folder_ids=["new-proj"])
     status = lane2.check_once()
     assert status.state == STATE_ERROR
+
+
+# -- SYNC-17 (2026-08-18): the lane drives the supervisor, and says so ------
+#
+# The incident: Syncthing died with a Windows session and stayed dead for
+# eighteen hours while lane C reported idle/green/0 queued. Nothing here
+# spawns a process -- the supervisor is a recorder.
+
+
+class _RecordingSupervisor:
+    def __init__(self, error: str | None = None) -> None:
+        self.ticks: list[bool] = []
+        self.error = error
+
+    def tick(self, reachable: bool) -> None:
+        self.ticks.append(bool(reachable))
+
+    def lane_error(self):
+        return self.error
+
+
+def _dead_http_get(url, api_key, timeout):
+    raise ConnectionRefusedError("no listener on 8384")
+
+
+def test_an_unreachable_api_is_an_error_carrying_the_supervisors_sentence(tmp_path):
+    supervisor = _RecordingSupervisor(
+        "the sync engine (Syncthing) is not running on this machine -- restarting it")
+    cfg_xml = tmp_path / "config.xml"
+    cfg_xml.write_text(
+        "<configuration><gui><apikey>k</apikey></gui></configuration>", encoding="utf-8")
+    lane = SyncthingLane(
+        api_key="k", config_xml_path=cfg_xml, http_get=_dead_http_get,
+        expected_folder_ids=["proj-1"], supervisor=supervisor,
+    )
+    status = lane.check_once()
+    assert status.state == STATE_ERROR
+    assert status.last_error == (
+        "the sync engine (Syncthing) is not running on this machine -- restarting it")
+    assert supervisor.ticks == [False]
+
+
+def test_an_unreachable_api_can_never_be_idle_even_with_no_folders(tmp_path):
+    """The "nothing to check" branch reports idle by design -- but it sits
+    BEHIND the ping, and must stay there. This is the shape of the incident:
+    no supervisor, no folders, a dead engine."""
+    lane = SyncthingLane(
+        api_key="k", http_get=_dead_http_get, expected_folder_ids=[],
+    )
+    status = lane.check_once()
+    assert status.state == STATE_ERROR
+    assert status.last_error == "Syncthing not running"
+
+
+def test_a_running_syncthing_holding_another_key_is_not_restarted(_windows_paths):
+    """A 401/403 means the process is UP. Restarting it would be the wrong
+    fix applied forever, so the supervisor is told "reachable"."""
+    managed, _stock = _windows_paths
+    _write_config_xml(managed, "managed-key")
+    supervisor = _RecordingSupervisor()
+    lane = SyncthingLane(
+        api_key="", http_get=_http_get_requiring("some-other-key", []),
+        supervisor=supervisor,
+    )
+    status = lane.check_once()
+    assert status.state == STATE_ERROR
+    assert "rejected every known API key" in status.last_error
+    assert supervisor.ticks == [True]
+
+
+def test_a_healthy_poll_tells_the_supervisor_it_is_reachable(fake_syncthing_server):
+    supervisor = _RecordingSupervisor()
+    lane = _lane_for(
+        fake_syncthing_server, expected_folder_ids=["proj-1"], supervisor=supervisor)
+    assert lane.check_once().state == STATE_IDLE
+    assert supervisor.ticks == [True]
+
+
+def test_a_supervisor_that_raises_cannot_take_the_lane_down(fake_syncthing_server):
+    class _Angry:
+        def tick(self, reachable):
+            raise RuntimeError("boom")
+
+        def lane_error(self):
+            raise RuntimeError("boom")
+
+    lane = _lane_for(
+        fake_syncthing_server, expected_folder_ids=["proj-1"], supervisor=_Angry())
+    assert lane.check_once().state == STATE_IDLE
+
+
+def test_api_reachable_is_true_for_a_401_and_false_for_a_dead_port(
+    fake_syncthing_server, tmp_path
+):
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"])
+    assert lane.api_reachable() is True
+
+    dead = SyncthingLane(api_key="k", http_get=_dead_http_get)
+    assert dead.api_reachable() is False
+
+    rejecting = SyncthingLane(
+        api_key="k", http_get=_http_get_requiring("another-key", []))
+    assert rejecting.api_reachable() is True

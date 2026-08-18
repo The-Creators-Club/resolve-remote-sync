@@ -886,3 +886,55 @@ window must claim the identity first, not "somewhere during startup".
 Which mark appears is a separate question, and not a leak: the Creators Club
 mark is the product default (CR-25), and a white-label fleet selects the
 neutral one with `brand_logo` in the site manifest.
+
+## 14. Processes die with the session that started them
+
+### Syncthing is not running, and nothing was going to notice
+
+Added 2026-08-18 (KNOWN_BUGS SYNC-17). An editor's Windows session ended at
+00:53. rclone exited `0x40010004` (`DBG_TERMINATE_PROCESS`) and Syncthing
+logged "Syncthing is being stopped / Exiting". The companion came back at
+18:24 on its own; Syncthing stayed dead for **eighteen hours**, with 12 GB
+unsynced and lane C reporting idle and green the whole time.
+
+**The Run key fires at logon and never again.** Everything CC Sync starts on
+Windows starts from `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`:
+
+| entry | what it starts |
+|---|---|
+| `CCSyncCompanion` | the tray app |
+| `CCSyncSyncthing` | `wscript CCSyncSyncthing.vbs` -> `CCSyncSyncthing.cmd` -> `syncthing serve --no-browser --home=%LOCALAPPDATA%\ccsync\syncthing-config` |
+
+That is a **start**, not a service. Nothing restarts either one if it exits,
+and nothing did until the supervisor landed (`docs/SYNC_SAFETY.md` section 6,
+`sync/syncthing_supervisor.py`). The tray app got away with it because an
+editor who sees no tray icon restarts it; nobody looks at Syncthing, which is
+why it went eighteen hours.
+
+Corollaries worth knowing before you debug one of these:
+
+* **A process launched over SSH dies when that session closes.** Starting
+  Syncthing (or the companion, or a long ffmpeg) from a remote shell to "fix"
+  a machine buys you exactly as long as you stay connected. On Windows the
+  child is killed with `DBG_TERMINATE_PROCESS`, which in `syncthing.log`
+  looks like an ordinary clean stop. Use the Run-key shim
+  (`wscript.exe //B //Nologo %LOCALAPPDATA%\ccsync\bin\CCSyncSyncthing.vbs`),
+  which detaches, rather than `syncthing serve` in the SSH session.
+* **A logoff, a fast-user-switch and a forced restart all look the same** in
+  the logs: a clean exit at an odd hour with nothing after it. If two of our
+  processes stopped within a second of each other, that is the session, not
+  a crash.
+* **`DETACHED_PROCESS` alone is not enough** if the child inherits handles:
+  an inherited pipe keeps it tied to the parent's console. The supervisor
+  spawns with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, `close_fds=True`
+  and all three standard handles on `DEVNULL` for that reason; `upgrade.py`'s
+  `_default_spawn` does the same for the companion's own relaunch.
+* **macOS does not have this problem in the same shape**: Syncthing runs from
+  a LaunchAgent (`com.ccsync.syncthing`), and launchd restarts it. The
+  supervisor's macOS half is therefore a `launchctl kickstart -k`, which
+  fixes a half-loaded agent rather than a missing process.
+
+**First thing to check** when an editor's audio, graphics or subtitles have
+stopped arriving: is `syncthing.exe` in Task Manager? Then
+`~/.ccsync/state/syncthing_supervisor.json` (`attempts`, `last_error`) and the
+companion log's `ccsync.sync.supervisor` lines.

@@ -2957,3 +2957,49 @@ def test_the_proxy_line_says_why_it_is_standing_aside():
     labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
 
     assert "Proxies waiting: indexing b-roll first" in labels
+
+
+# -- the sync engine is not running (SYNC-17, 2026-08-18) -------------------
+
+
+def test_the_tray_says_what_the_dashboard_says_about_a_dead_sync_engine():
+    """The supervisor writes ONE sentence and lane C, the tray line and the
+    dashboard chip all say it. Before this the tray turned eighteen hours of
+    a dead Syncthing into "Something went wrong"."""
+    from ccsync_companion.tray import _format_lane_line_from, classify_lane_error
+
+    sentence = ("the sync engine (Syncthing) is not running on this machine "
+                "-- restarting it")
+    assert classify_lane_error(sentence) == sentence
+
+    status = LaneStatus(name="lane_c_syncthing", state="error", last_error=sentence)
+    line = _format_lane_line_from(status, paused=False, problems=False)
+    assert sentence in line
+    assert "Copy diagnostics" not in line
+
+
+def test_a_sync_engine_that_will_not_start_names_the_obstacle():
+    from ccsync_companion.tray import classify_lane_error
+
+    sentence = ("the sync engine (Syncthing) could not be started: "
+                "Load failed: 5: Input/output error")
+    assert classify_lane_error(sentence) == sentence
+
+
+def test_the_unsupervised_wording_still_reads_as_an_instruction():
+    """A lane built without a supervisor still publishes the old literal
+    "Syncthing not running", which used to fall through to the generic
+    shrug."""
+    from ccsync_companion.tray import classify_lane_error
+
+    text = classify_lane_error("Syncthing not running")
+    assert "sync engine" in text.lower()
+    assert "Something went wrong" not in text
+
+
+def test_a_dead_sync_engine_turns_the_icon_red():
+    statuses = [_status("lane_a_video_up", "idle"),
+                LaneStatus(name="lane_c_syncthing", state="error",
+                           last_error="the sync engine (Syncthing) is not running "
+                                      "on this machine -- restarting it")]
+    assert compute_overall_color(statuses) == "red"

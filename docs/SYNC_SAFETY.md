@@ -133,6 +133,72 @@ chip on the grid) — overwriting the NAS copy would be lane A growing a
 delete/replace path, which is exactly what this system does not do. The fix is
 a human one: rename the local file, or have an admin remove the NAS copy.
 
+## 6. Syncthing supervision: keeping the sync engine alive
+
+Added 2026-08-18 (SYNC-17). `companion/src/ccsync_companion/sync/syncthing_supervisor.py`,
+state at `~/.ccsync/state/syncthing_supervisor.json`.
+
+**What happened.** An editor's Windows session ended at 00:53 (rclone exited
+`0x40010004 DBG_TERMINATE_PROCESS`, Syncthing logged "Syncthing is being
+stopped / Exiting"). The companion came back at 18:24 by itself. Syncthing did
+not, and stayed dead for eighteen hours, because the only thing that starts it
+is an HKCU `Run` entry and **the Run key fires at logon and never again**. For
+those eighteen hours the companion logged `repath: local syncthing unreachable`
+at DEBUG, reported lane C as **idle, green, 0 queued**, and 12 GB sat unsynced.
+Nothing else on an editor machine supervises Syncthing.
+
+**The rules.** Driven from lane C's own poll (every 15 s), so there is no
+thread of its own:
+
+| | |
+|---|---|
+| Grace | the API must have been unreachable for **30 s** before anything starts. A Syncthing restarting mid-config-commit is back inside that. |
+| Launcher | Windows: `wscript.exe //B //Nologo %LOCALAPPDATA%\ccsync\bin\CCSyncSyncthing.vbs` -- the SAME shim the Run key executes, so a supervised start and a logon start are the same command line (including the `--home`, which lives in the `.cmd` beside it). macOS: `launchctl kickstart -k gui/<uid>/com.ccsync.syncthing`. |
+| Detachment | Windows spawns with `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP`, `close_fds`, all handles to `DEVNULL`. A Syncthing started as an ordinary child of the tray dies with the tray, and with its self-upgrade. |
+| Confirmation | after launching, the API is polled for up to 20 s. A launch that never answers is a **failed attempt**, not a success. |
+| Backoff | 30 s, 1 m, 2 m, 4 m, 8 m, capped at **10 m**, measured from when the last attempt finished. A machine where Syncthing genuinely cannot start costs about six log lines an hour. |
+| Three strikes | `INFO` per attempt; at the third failure a `WARNING` naming the last stderr line, and one tray balloon: *"Sync engine will not start: &lt;why&gt;"*. |
+| Recovery | when the API answers again: one balloon, *"Sync engine was not running: restarted it"*, once per incident. |
+| Persistence | `since`, `attempts`, `last_error`, `last_attempt` are written to `~/.ccsync/state/syncthing_supervisor.json`. The companion self-upgrades; a three-strike counter that resets on restart would never reach three. |
+
+**It respects the latches.** Nothing is restarted while `sync_halt.json` is
+active, while syncing is paused from the tray, or on a machine with
+`sync_enabled = false` (the base rig). The refusal is logged with its reason,
+once per edge -- resurrecting the engine somebody deliberately stopped is the
+one thing a supervisor must not do.
+
+**Lane C can no longer be green while the engine is down.** An unreachable
+API is `state: "error"` on lane C, whatever the supervisor is doing, carrying
+one of three sentences that the tray line and the dashboard chip repeat
+verbatim:
+
+* `the sync engine (Syncthing) is not running on this machine -- restarting it`
+* `the sync engine (Syncthing) could not be started: <why>` (after three failures)
+* `the sync engine (Syncthing) is not running on this machine, and it is not being restarted: <why>` (halted, paused, or supervision switched off)
+
+A `401`/`403` from the API is **not** an outage: the process is up and holding
+a different home's key, and restarting it would be the wrong fix applied
+forever (see `default_api_key_paths`).
+
+An open incident also rides the report as `sync_guard.syncthing_supervisor`
+(`down_since`, `attempts`, `last_error`, `supervising`), and the section is
+**absent while the engine is up** -- the same "empty means healthy" contract
+the ingest sections use. **The dashboard does not read that section yet**
+(`SyncGuardIn` does not declare the key, so `extra="ignore"` drops it); what
+turns the grid chip red today is lane C's own `state`/`last_error`. Wiring the
+section up is a dashboard schema change, not another companion release.
+
+**The upgrade path.** `installer/windows_upgrade.ps1` never replaces
+`syncthing.exe`, so nothing there stops it -- but an upgrade is one of the few
+moments a machine is being looked at, so step 5b starts the engine through the
+same shim when no `syncthing` process is running. That is the belt for a
+machine whose companion has not been upgraded yet; the supervisor is the
+braces.
+
+**Kill switch.** `supervise_syncthing = false` in `~/.ccsync/config.toml`
+(default `true`; a `[sync]` table with the same key is honoured too). With it
+off nothing is ever started, and lane C still reports the error.
+
 ## Config knobs
 
 All documented commented-out in `config.example.toml` (the shipped numbers are
@@ -146,6 +212,7 @@ re-tune reaches nobody):
 # trash_max_age_days = 14
 # trash_max_bytes = 53687091200
 # trash_prune_interval_seconds = 21600
+# supervise_syncthing = true
 ```
 
 Undocumented but read the same way, for the rare tune:

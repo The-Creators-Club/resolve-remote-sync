@@ -229,6 +229,13 @@ DEFAULTS: dict[str, Any] = {
     "express_max_batch": 200,
     "syncthing_url": "http://127.0.0.1:8384",
     "syncthing_api_key": "",
+    # Restart a dead local Syncthing (SYNC-17, 2026-08-18). Nothing else on
+    # an editor machine does: the Windows Run key fires at LOGON and never
+    # again, and a session that ends takes the daemon with it -- one editor
+    # spent eighteen hours with lane C carrying nothing and the dashboard
+    # green. false leaves the engine alone; lane C still reports the error.
+    # See sync/syncthing_supervisor.py.
+    "supervise_syncthing": True,
     # The server tree's SMB path for the tray's "Grade from server
     # originals" P: swap (drive_swap.py). Empty = take it from the cached
     # site manifest's smb_unc (_apply_site_manifest), else derive it from
@@ -802,6 +809,15 @@ syncthing_api_key = ""
 # Expected Syncthing folder ID per project (same order/length as `projects`
 # above). Leave as [] to skip the folder-id verification.
 syncthing_folder_ids = []
+
+# Restart the sync engine when it dies. Nothing else on this machine does:
+# the autostart entry runs at logon and never again, so a session that ends
+# (a sign-out, a forced restart) leaves Syncthing dead until the next logon
+# while everything else comes back. Commented out because the shipped value
+# IS the default -- set it to false only to take the engine's lifetime into
+# your own hands. Lane C reports the error either way; nothing is restarted
+# while syncing is halted or paused. See docs/SYNC_SAFETY.md.
+# supervise_syncthing = true
 
 # Path to the rclone binary. Defaults to "rclone" (must be on PATH).
 rclone_path = "rclone"

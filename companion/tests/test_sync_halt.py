@@ -269,3 +269,73 @@ def test_an_override_is_logged_and_reported(tmp_path, caplog):
     assert ok is False
     assert any("OVERRIDE" in r.message for r in caplog.records)
     assert app.sync_guard()["removal_overrides"][-1]["pending_uploads"] == 3
+
+
+# -- the Syncthing supervisor's wiring (SYNC-17, 2026-08-18) ----------------
+#
+# The supervisor's own state machine is tested in
+# test_syncthing_supervisor.py; these are the four joins to the app: lane C
+# drives it, the halt and the pause hold it off, and an open incident reaches
+# the report. No process is spawned here either -- nothing calls tick().
+
+
+def test_lane_c_is_handed_the_supervisor_and_a_probe(tmp_path):
+    app = _app(tmp_path)
+    assert app._lane_c.supervisor is app.syncthing_supervisor
+    # The probe is the lane's own ping, bound after construction (the
+    # supervisor exists before the lanes do).
+    assert app.syncthing_supervisor.probe == app._lane_c.api_reachable
+
+
+def test_the_supervisor_stands_off_while_syncing_is_halted(tmp_path):
+    app = _app(tmp_path, sync_enabled=True)
+    app.syncthing_admin = _FakeAdmin()
+    app.sequencer = _FakeSequencer([])
+    assert app._syncthing_supervision_suppressed() == ""
+
+    app.halt_all_sync("restoring the pool")
+    reason = app._syncthing_supervision_suppressed()
+    assert "halted" in reason
+
+
+def test_a_fleet_halt_says_whose_it_is(tmp_path):
+    app = _app(tmp_path, sync_enabled=True)
+    app.syncthing_admin = _FakeAdmin()
+    app.sequencer = _FakeSequencer([])
+    app.halt.engage("pool import", lane_guard.HALT_SCOPE_FLEET)
+    assert "administrator" in app._syncthing_supervision_suppressed()
+
+
+def test_the_supervisor_stands_off_while_paused(tmp_path):
+    app = _app(tmp_path, sync_enabled=True)
+    app._paused = True
+    assert "paused" in app._syncthing_supervision_suppressed()
+
+
+def test_the_supervisor_stands_off_where_there_is_no_lane_c_at_all(tmp_path):
+    """The base rig works straight off the NAS: sync_enabled=false, no lanes,
+    and nothing for a resurrected Syncthing to do."""
+    app = _app(tmp_path)          # the fixture config is sync_enabled=false
+    assert "switched off" in app._syncthing_supervision_suppressed()
+
+
+def test_an_open_supervisor_incident_reaches_the_report(tmp_path):
+    app = _app(tmp_path)
+    assert "syncthing_supervisor" not in app.sync_guard()
+
+    app.syncthing_supervisor.tick(reachable=False)
+    guard = app.sync_guard()
+    assert guard["syncthing_supervisor"]["down_since"]
+    assert guard["syncthing_supervisor"]["attempts"] == 0
+    # sync_enabled=false on this machine, so it is NOT being restarted.
+    assert guard["syncthing_supervisor"]["supervising"] is False
+
+    app.syncthing_supervisor.tick(reachable=True)
+    assert "syncthing_supervisor" not in app.sync_guard()
+
+
+def test_the_supervisors_state_lives_beside_the_other_latches(tmp_path):
+    app = _app(tmp_path)
+    assert app.syncthing_supervisor.state_path.name == "syncthing_supervisor.json"
+    assert (app.syncthing_supervisor.state_path.parent
+            == app.lane_b_breaker.state_path.parent)

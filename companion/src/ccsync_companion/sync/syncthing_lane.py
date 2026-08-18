@@ -1,8 +1,17 @@
 """Lane C (everything else, bidirectional) — supervises a locally-running
 Syncthing instance via its REST API. This module does NOT implement sync
-itself and does NOT install/launch Syncthing (per SPEC.md: "supervises a
-local Syncthing... Do not auto-install Syncthing" and this task's own
-constraint not to install Syncthing system-wide).
+itself and does NOT INSTALL Syncthing (per SPEC.md: "supervises a local
+Syncthing... Do not auto-install Syncthing" and this task's own constraint
+not to install Syncthing system-wide).
+
+It does now RE-LAUNCH one that has died, which is a different thing and was
+added for SYNC-17 (2026-08-18): an editor's Syncthing died with his Windows
+session and nothing on the machine was ever going to start it again, because
+the autostart entry that starts it fires at logon only. The install is still
+the installer's; only the lifetime is ours, and only through the launcher the
+installer registered. See sync/syncthing_supervisor.py -- this poll is where
+it is driven from, since it is the only thread that knows whether
+127.0.0.1:8384 answered.
 
 Responsibilities:
   - find the REST API (default http://127.0.0.1:8384, overridable)
@@ -179,6 +188,7 @@ class SyncthingLane(LaneAdapter):
         poll_interval: float = 15.0,
         http_get: Optional[HttpGetFn] = None,
         expected_folder_ids_fn: Optional[Callable[[], list[str]]] = None,
+        supervisor: Optional[Any] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._configured_api_key = api_key
@@ -192,6 +202,13 @@ class SyncthingLane(LaneAdapter):
         # `expected_folder_ids_fn` (e.g. Sequencer.expected_folder_slugs) and
         # it is evaluated fresh on every poll.
         self.expected_folder_ids_fn = expected_folder_ids_fn
+        # SYNC-17 (2026-08-18): this poll is the only thread in the companion
+        # that knows whether 127.0.0.1:8384 answered, so it is where the
+        # supervisor is driven from (sync/syncthing_supervisor.py). Optional,
+        # and duck-typed rather than imported for a type: a lane built without
+        # one behaves exactly as it did before, which is what every existing
+        # test of this file assumes.
+        self.supervisor = supervisor
         # An EXPLICIT config_xml_path scopes key discovery to that one file
         # (tests, power users); only the default wiring fans out over every
         # known home -- see default_api_key_paths for why.
@@ -366,6 +383,56 @@ class SyncthingLane(LaneAdapter):
             size /= 1024
         return "?"
 
+    def api_reachable(self) -> bool:
+        """Does 127.0.0.1:8384 answer AT ALL, right now?
+
+        The supervisor's post-launch probe (SYNC-17). Deliberately weaker
+        than check_once: a 401/403 is TRUE here, because the question is
+        "did the process come back", not "can we drive it" -- restarting a
+        Syncthing that answers with the wrong key would be an infinite loop
+        of the wrong fix. Never raises."""
+        try:
+            self._get("/rest/system/ping")
+            return True
+        except urllib.error.HTTPError as exc:
+            return exc.code in (401, 403)
+        except Exception:
+            return False
+
+    def _note_supervisor(self, reachable: bool) -> None:
+        """Hand this poll's verdict to the supervisor. Never raises: a lane
+        must not go dark because the thing that restarts Syncthing threw."""
+        if self.supervisor is None:
+            return
+        try:
+            self.supervisor.tick(bool(reachable))
+        except Exception:
+            log.exception("%s: syncthing supervisor tick failed", self.name)
+
+    def _unreachable_status(self) -> LaneStatus:
+        """The lane verdict for "127.0.0.1:8384 did not answer".
+
+        SYNC-17 (2026-08-18). ERROR, always -- lane C carries the audio,
+        graphics, subtitles and .drp files, and with the engine dead it is
+        carrying none of them. The message comes from the supervisor when
+        there is one, because only it knows whether a restart is under way,
+        has failed three times, or is being deliberately withheld; "Syncthing
+        not running" is the unsupervised fallback and the string this lane
+        published for a year, so the tray's classifier still recognises it.
+        """
+        self._note_supervisor(False)
+        detail = ""
+        if self.supervisor is not None:
+            try:
+                detail = str(self.supervisor.lane_error() or "")
+            except Exception:
+                log.exception("%s: supervisor lane_error() failed", self.name)
+        return LaneStatus(
+            name=self.name,
+            state=STATE_ERROR,
+            last_error=detail or "Syncthing not running",
+        )
+
     def check_once(self) -> LaneStatus:
         """Single synchronous status check. Never raises."""
         if not self._has_any_api_key():
@@ -383,7 +450,11 @@ class SyncthingLane(LaneAdapter):
             if exc.code in (401, 403):
                 # Running, but owned by a different home than any key we
                 # hold -- "not running" here sent the 2026-07-26 laptop
-                # debugging in exactly the wrong direction.
+                # debugging in exactly the wrong direction. It ANSWERED, so
+                # the supervisor is told the process is alive: restarting a
+                # Syncthing that is up and merely holding a different key
+                # would be the wrong fix applied forever.
+                self._note_supervisor(True)
                 checked = ", ".join(str(p) for p in self.api_key_paths)
                 status = LaneStatus(
                     name=self.name,
@@ -391,15 +462,14 @@ class SyncthingLane(LaneAdapter):
                     last_error=f"Syncthing is running but rejected every known API key (checked {checked})",
                 )
             else:
-                status = LaneStatus(
-                    name=self.name, state=STATE_ERROR, last_error="Syncthing not running"
-                )
+                status = self._unreachable_status()
             self._set_status(status)
             return status
         except Exception:
-            status = LaneStatus(name=self.name, state=STATE_ERROR, last_error="Syncthing not running")
+            status = self._unreachable_status()
             self._set_status(status)
             return status
+        self._note_supervisor(True)
 
         # Path diagnostics BEFORE the folder verdict, so every branch below
         # can carry "relayed, slow path" (AUDIT_2 C-6). A relayed lane C and

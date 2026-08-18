@@ -67,6 +67,8 @@ from .sync.rclone_lane import DIRECTION_DOWN, DIRECTION_UP, VIDEO_EXTS, RcloneLa
 from .sync.sequencer import PROJECTS_PREFIX, Sequencer
 from .sync.syncthing_admin import SyncthingAdmin
 from .sync.syncthing_lane import SyncthingLane
+from .sync.syncthing_supervisor import STATE_FILENAME as SUPERVISOR_STATE_FILENAME
+from .sync.syncthing_supervisor import SyncthingSupervisor
 from .watcher import TimelineWatcher
 
 log = logging.getLogger("ccsync.app")
@@ -774,6 +776,18 @@ class CompanionApp:
             on_trip=self._notify_breaker_tripped,
         )
         self.halt = lane_guard.HaltState(guard_state_dir / lane_guard.HALT_STATE_FILENAME)
+        # -- the sync engine's own supervisor (SYNC-17, 2026-08-18) ---------
+        # Built here, beside the latches, for the same reason they are: its
+        # incident state has to be in hand before lane C's first poll, or a
+        # companion that self-upgrades every few hours resets the three-strike
+        # counter forever and nobody is ever told. Driven from lane C's poll
+        # (see _build_lanes) -- there is no thread of its own, on purpose.
+        self.syncthing_supervisor = SyncthingSupervisor(
+            guard_state_dir / SUPERVISOR_STATE_FILENAME,
+            cfg,
+            notify=self._notify_tray,
+            suppressed=self._syncthing_supervision_suppressed,
+        )
         # Overridden "Remove from this machine" actions awaiting a report.
         # Bounded: this is an audit trail on the wire, not a ledger -- the
         # WARNING in the log is the record that cannot be lost.
@@ -1229,10 +1243,20 @@ class CompanionApp:
                 (lambda: self.sequencer.expected_folder_slugs() if self.sequencer else [])
                 if self._managed else None
             ),
+            # SYNC-17 (2026-08-18): the poll that discovers "the API did not
+            # answer" is also the thing that restarts the daemon and the
+            # thing that must never then report idle. One object, one
+            # verdict per poll.
+            supervisor=self.syncthing_supervisor,
         )
         self._lane_a = lane_a
         self._lane_b = lane_b
         self._lane_c = lane_c
+        # Late-bound because the supervisor is built before the lanes are
+        # (its incident state has to be in hand first): this is how a start
+        # attempt gets a verdict inside its own tick rather than 15 s later,
+        # and it is bounded by the supervisor's own api_wait_seconds.
+        self.syncthing_supervisor.probe = lane_c.api_reachable
         return [lane_a, lane_b, lane_c]
 
     # -- external-SSD root guard (root_guard.py) --------------------------
@@ -1645,6 +1669,41 @@ class CompanionApp:
             'admin says the server is fine, use the tray\'s "Resume proxy download".',
             "ccsync-companion: proxy download stopped",
         )
+
+    def _syncthing_supervision_suppressed(self) -> str:
+        """Why the supervisor must NOT restart Syncthing right now, or "".
+
+        SYNC-17 (2026-08-18). Every entry here is a state somebody chose:
+
+          * the halt stops lanes A and B AND pauses every lane C folder, so
+            starting the engine back up is starting the thing that was
+            stopped on purpose (and, for a FLEET halt, the thing one editor's
+            machine is not allowed to override);
+          * pause is the tray's "my laptop is on a hotspot". Lane C keeps
+            running through an ordinary pause, but an editor who paused and
+            then killed Syncthing themselves gets to keep it dead;
+          * sync_enabled=false is the base rig, which works straight off the
+            NAS and has no lane C at all.
+
+        A drive that is merely unplugged is deliberately NOT here: Syncthing
+        with an absent folder is a folder error, which is honest, and the
+        engine has to be running for the drive coming back to fix itself.
+        """
+        try:
+            if self.halt.active:
+                scope = self.halt.scope
+                return (
+                    "syncing is halted on this machine"
+                    + (" by your administrator" if scope == lane_guard.HALT_SCOPE_FLEET else "")
+                )
+        except Exception:
+            log.exception("supervision check: halt state unreadable")
+            return "the halt state could not be read"
+        if self._paused:
+            return "syncing is paused from the tray"
+        if not self._sync_enabled:
+            return "syncing is switched off on this machine"
+        return ""
 
     def _notify_watch_state(self, message: str) -> None:
         """Lane A's file watcher went away (or came back) because of the sync
@@ -3819,6 +3878,26 @@ class CompanionApp:
             guard["halt"] = self.halt.report()
         except Exception:
             log.exception("halt.report() failed")
+        try:
+            # Empty while the sync engine is up, so an absent section is how
+            # "Syncthing is running" is spelled (SYNC-17, 2026-08-18). The
+            # lane C error says it too, but the lane says only what is wrong
+            # NOW -- this one carries how long it has been down and how many
+            # restarts have failed, which is the difference between "he
+            # rebooted" and "that machine has needed a human since Tuesday".
+            #
+            # THE DASHBOARD DOES NOT READ THIS YET: `SyncGuardIn` does not
+            # declare the key, and `extra="ignore"` drops it (BROLL-ING-1 is
+            # what that costs when nobody says so out loud). What raises the
+            # alarm today is lane C's own `state`/`last_error`, which are
+            # declared and do reach the grid. This section is here so the
+            # dashboard half is a schema change and not a fleet-wide
+            # companion release.
+            supervisor = self.syncthing_supervisor.report()
+            if supervisor:
+                guard["syncthing_supervisor"] = supervisor
+        except Exception:
+            log.exception("syncthing supervisor report() failed")
         if self._removal_overrides:
             # Not drained: an overridden removal is small and must survive a
             # failed POST, unlike the completed-file feed (which is a

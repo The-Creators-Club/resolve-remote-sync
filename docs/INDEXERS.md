@@ -163,12 +163,28 @@ The short version, `broll-index doctor`'s own logic
 
 ## Customers without a GPU
 
-This is the v1 scope-out, and it is a real product, not a degraded one. It
-still applies in full to **music** (CLAP embedding has no non-GPU path). For
-**b-roll**, `indexer.backend: anthropic` is now a second way for a no-GPU
-customer to index their own new footage without a card at all — an Anthropic
-API key instead of a GPU, `broll/docs/indexing-api.md`. Everything below still
-holds for a customer who wants neither: a vendor-built index they only search.
+This is the v1 scope-out, and it is a real product, not a degraded one. Two
+things have narrowed it since it was written, and both are about *whose*
+machine has the card:
+
+- **Music no longer needs one at all** (2026-08-18). The sentence that used to
+  stand here, "CLAP embedding has no non-GPU path", was true of the torch
+  pipeline and is not true of the exported ONNX tower an editor's companion
+  runs: ~90 ms per 10 s window on one CPU core. A customer with no GPU
+  anywhere still gets immediate, searchable music ingest, as long as their
+  editors are on companion 0.9.0+ and the fleet has a release feed configured.
+- **B-roll can be indexed on an editor's machine**, not only on a base rig, if
+  any one machine in the fleet has a card that fits a tier: they drag clips
+  onto the b-roll page and that machine crunches them
+  (`docs/BROLL_INGEST_PLAN.md`). The tiers in the table above are the same ones
+  `GET /broll/ingest/capabilities` gates on, and a tier that does not fit is
+  refused rather than run on the CPU.
+
+For **b-roll** with no card anywhere, `indexer.backend: anthropic` is a second
+way for a no-GPU customer to index their own new footage without one at all,
+an Anthropic API key instead of a GPU (`broll/docs/indexing-api.md`).
+Everything below still holds for a customer who wants neither: a vendor-built
+index they only search.
 
 A customer with no NVIDIA card and no Anthropic key gets **search-only, over a
 vendor-built index**:
@@ -186,12 +202,14 @@ vendor-built index**:
 
 What such a customer does **not** get:
 
-- indexing new footage or new music themselves — each addition is a round trip
-  to a machine that has a card;
-- drag-and-drop music ingest becoming searchable *immediately*. The upload is
-  accepted, validated, de-duplicated, transcoded and landed in the library by
-  the container, and sits `pending` in the ingest journal until a drain runs.
-  The UI says so.
+- indexing new *footage* themselves: each addition is a round trip to a
+  machine that has a card (or to the Anthropic backend);
+- drag-and-drop music ingest becoming searchable immediately **on a companion
+  older than 0.9.0, or in a fleet with no release feed**. That drop takes the
+  base-rig path: the upload is accepted, validated, de-duplicated, transcoded
+  and landed in the library by the container, and sits `pending` in the ingest
+  journal until a drain runs. The UI says so. With 0.9.0+ and a feed, this
+  bullet does not apply, because no GPU was needed for it in the first place.
 
 If that round trip is not acceptable for a given customer, the honest answers
 are a GPU in their NAS, a small GPU box beside it running
@@ -286,13 +304,13 @@ with instinct.
 ## Music has two indexing paths now, and only one of them is here
 
 *2026-08-18, `docs/MUSIC_INGEST_PLAN.md` steps 3-4.* Everything above this
-section describes the BASE RIG path. Since companion 0.8.x there is a second
+section describes the BASE RIG path. Since companion 0.9.0 there is a second
 one, and it is the one an editor meets:
 
 | | the companion path (new, default) | the base-rig path (older, kept) |
 |---|---|---|
 | Who analyses | the editor's own machine, in the tray app | the base rig, `index_music.py --queue` |
-| Reached by | drag onto `/music` with a companion running | drag with no companion, or one older than 0.8.x |
+| Reached by | drag onto `/music` with a companion running | drag with no companion, or one older than 0.9.0 |
 | Audio model | the exported CLAP tower on **onnxruntime, CPU** (`music_clap_sidecar.py`) | `laion/larger_clap_music_and_speech` on **torch, GPU** |
 | Where the file goes | rclone straight into the library, under the name the SERVER allocated | uploaded to the NAS by the browser, `ingest_queue` row, drained later |
 | Tags, axes, debias | the **container**, from the uploaded embedding (`musicweb/rescore.py`) | the base rig, then a `--export-drain` bundle |

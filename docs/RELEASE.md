@@ -62,7 +62,8 @@ The countermeasures are:
 | Installer version (dup) | `onboarding/build_onboard_macos.spec` → `CFBundleShortVersionString` | **Fourth** copy of the same number — the macOS wizard bundle's Info.plist. Not enforced by the release scripts (they predate it); `onboarding/tests/test_macos_steps.py::TestInstallerVersionParity::test_all_four_agree` is what catches it, which is why "bump the installer" means **four** files, not three. |
 | Installer version (dup) | `installer/macos_bootstrap.sh` → `INSTALLER_VERSION` | Third copy of the **same** number — the macOS bootstrap ships as the `macos` `kind=onboard` package and is versioned by it. Parity is now **three-way**: enforced by `tools/release.ps1` and `build_editor_package.ps1 -Publish` (which refuses to publish either onboard package on drift), reported by `tools/check_deploy_drift.ps1`, and warned about by `tools/release_macos.sh` (which publishes none of the three, so it reports rather than fails). |
 | macOS companion build | `tools/release_macos.sh` | Carries **no** version of its own: it reads `config.py`/`pyproject.toml` for the companion version and all three installer constants for the parity report. Runs only on a Mac (`--dry-run` degrades to inspection mode elsewhere). |
-| Dashboard VERSION | `dashboard/src/ccsync_dashboard/__init__.py` → `VERSION` | Ships separately (Docker). Served by `GET /api/v1/health`. Bump it when you deploy dashboard changes, otherwise the live/repo comparison can never detect a stale container. |
+| Dashboard VERSION | `dashboard/src/ccsync_dashboard/__init__.py` → `VERSION` | Ships separately (Docker, and since 2026-08-18 over the feed as a code bundle). Served by `GET /api/v1/health`, and stamped into the bundle by `tools/build_dashboard_bundle.py`. Bump it when you deploy dashboard changes, otherwise the live/repo comparison can never detect a stale container. |
+| Dashboard version (dup) | `dashboard/pyproject.toml` → `version` | Must equal the above. Neither `release.ps1` nor `check_deploy_drift.ps1` reads it (both read `__init__.py`), which is how it once drifted three releases behind unnoticed; `dashboard/tests/test_hardening.py::test_dashboard_version_does_not_drift` is the guard. |
 
 Bumping the companion means editing **two** files (`config.py` and
 `pyproject.toml`) to the same value. Bumping the *installer* means editing
@@ -85,6 +86,54 @@ to reach for, and it stops before touching anything on a dirty tree, an
 already-published version, or a failing `server/` suite. Read the steps to
 understand what it did, or to redo one of them by hand; do not assemble a
 release out of them.
+
+### What a whole release is, as of 2026-08-18
+
+`ship.cmd` is still the one command, but it only serves **this** deployment's
+dashboard. A release that reaches feed customers as well is four commands, in
+this order, and the last two are skipped only when nothing they carry changed:
+
+```powershell
+.\tools\ship.cmd                                     # 1. this fleet: gates, build, deploy, publish, upgrade
+dashboard\.venv\Scripts\python.exe tools\publish_feed.py `
+    --manifest companion\dist\ccsync-release.json `
+    --feed-dir .\feed --github-repo <owner/repo> --github-upload   # 2. the companion, to every feed customer
+dashboard\.venv\Scripts\python.exe tools\build_dashboard_bundle.py --out .\dist
+dashboard\.venv\Scripts\python.exe tools\publish_feed.py `
+    --artifact .\dist\ccsync-dashboard-<v>.tar.gz --kind dashboard --platform linux `
+    --version <v> --feed-dir .\feed --github-repo <owner/repo> --github-upload   # 3. their dashboard's own code
+dashboard\.venv\Scripts\python.exe tools\publish_feed.py `
+    --asset music\web\data\audio_encoder\music-clap-audio-1.onnx `
+    --asset music\web\data\audio_encoder\music-clap-audio-1.params.json `
+    --asset-kind music-clap-audio --asset-version 1 `
+    --feed-dir .\feed --github-repo <owner/repo> --github-upload   # 4. the CLAP audio tower
+```
+
+Three things to know before you start:
+
+- **The CLAP artefacts are not in git.** `music/web/data/audio_encoder/` is
+  ignored, and the two files are produced on the base rig by
+  `music/indexer/export_audio_encoder.py`. Step 4 is needed only when
+  `music_models.MODELS["clap-audio"]["version"]` changed, but a feed with no
+  copy of the version the shipped companion pins means **no editor can ingest
+  music at all**, so check the digest matches the build you are shipping
+  (`docs/RELEASE_FEED.md` §6) rather than assuming the last upload still fits.
+- **Never put a lock change and a code fix in the same dashboard release.**
+  The bundle carries code; the image carries the dependency closure. Any edit
+  to `dashboard/deploy/requirements.lock` or the Dockerfile's `ARG BASE_IMAGE`
+  changes the `runtime_id`, which turns that release into a **runtime update**:
+  every customer is shown a click for their NAS UI and offered no over-the-air
+  button, so the code fix travelling with it reaches nobody until they do it.
+  Split them into two releases (step 6 says the same thing at more length).
+- **The first OTA update at any image site needs an image rebuilt from the
+  current Dockerfile** (KNOWN_BUGS WPK-1/WPK-2). The two-tier rule keys off
+  `/venv/.runtime-id`, which only the updated Dockerfile writes, and every
+  image built before 2026-08-18 is additionally missing `templates/` and
+  `static/`: it answers `/api/v1/health` and 500s every page. Until that
+  rebuild the site is bind-mount mode, every apply is refused with "this
+  deployment updates from the base rig", and that refusal is correct. Every
+  live site today is bind-mount mode, so this is an order-of-operations note
+  for the first image site, not a defect.
 
 ### 1. Bump
 
@@ -850,6 +899,10 @@ python tools\build_dashboard_bundle.py --verify .\dist\ccsync-dashboard-<v>.tar.
 python tools\publish_feed.py --artifact .\dist\ccsync-dashboard-<v>.tar.gz `
     --kind dashboard --platform linux --version <v> `
     --feed-dir .\feed --github-repo <owner/repo> --github-upload   # every feed customer's dashboard
+python tools\publish_feed.py --asset music\web\data\audio_encoder\music-clap-audio-1.onnx `
+    --asset music\web\data\audio_encoder\music-clap-audio-1.params.json `
+    --asset-kind music-clap-audio --asset-version 1 `
+    --feed-dir .\feed --github-repo <owner/repo> --github-upload   # the CLAP audio tower (not in git)
 .\installer\windows_upgrade.ps1 -CompanionExe <path-to-exe>  # install here
 .\tools\check_deploy_drift.ps1 -AdminUser <your-dashboard-admin>   # + published version, machines behind
 ```

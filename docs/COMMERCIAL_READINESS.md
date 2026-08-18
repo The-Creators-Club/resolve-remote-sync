@@ -564,12 +564,17 @@ Ordered so that nothing breaks the fleet that is currently on 0.7.11.
 3. **Confirm every companion's `dashboard_url`** matches the origin editors
    browse (CR-7) BEFORE publishing the companion; behind Tailscale Serve set
    `DASH_COOKIE_SECURE=1` + `DASH_SITE_DASHBOARD_URL=https://…ts.net`.
-4. **Bump versions and ship** (companion `VERSION`, `INSTALLER_VERSION` 1.0.30
-   in three files, dashboard version): `tools\ship.cmd -AllowUnsignedBinary`
-   until certificates exist. Back up `%USERPROFILE%\.ccsync-release\release.key`
+4. **Bump versions and ship**: `tools\ship.cmd -AllowUnsignedBinary` until
+   certificates exist. Back up `%USERPROFILE%\.ccsync-release\release.key`
    offline first (CR-6). Watch the first deploy's ffmpeg fetch (CR-4) and the
    first lane B pass per machine (CR-11 baseline). Publish the first signed
    build BEFORE editors upgrade past 0.7.11.
+   *Updated 2026-08-18:* the versions are now **companion 0.9.0 / dashboard
+   0.6.0 / installer 1.0.32**, the installer number lives in **four** files
+   (not three), and `ship.cmd` is no longer the whole release. A release that
+   reaches feed customers is four commands (`docs/RELEASE.md`, "What a whole
+   release is"): the ship, the companion to the feed, the dashboard code
+   bundle, and the CLAP audio artefacts that music ingest cannot run without.
 5. **After the ship:** mint per-editor tokens and later flip
    `DASH_SHARED_REPORT_TOKEN_ENABLED=0` (CR-18); check `~/.ccsync/resolve_edits/`
    gets a `.drp` on the base rig (CR-12); set the whisper keys + `MUSIC_DB_PATH`

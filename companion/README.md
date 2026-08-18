@@ -118,6 +118,41 @@ What an operator needs to know:
 - **The base rig must set `broll_ingest_staging_dir`** — its `local_root` is
   the NAS share, and staging there would send every original over SMB twice.
 
+## Music ingest: the same drop, for tracks
+
+`music_ingest.py` (with `music_clap_sidecar.py` and the vendored `music_clap/`),
+2026-08-18, `docs/MUSIC_INGEST_PLAN.md`.
+
+Drag audio onto the dashboard's music page and this machine embeds it, then
+rclone puts it in the library under the name the **server** allocated. It is
+the b-roll machinery with a different per-item pipeline: `MusicIngestor`
+subclasses `BrollIngestor` and `ingest_kinds.py` parameterises the gate, the
+checkpoints, the lease, the state file, the upload queue, the progress window
+and the tray lines, so everything in the section above is true here too.
+
+What differs, and why:
+
+- **No GPU, and no tier to choose.** The CLAP audio tower runs on onnxruntime
+  on the CPU, about 90 ms per 10 s of audio, so a music batch never stands the
+  proxy generator down the way a b-roll batch does.
+- **The model is an artefact, not a package.** ~280 MB fetched once per machine
+  from this fleet's release feed (`release_feed_base` in `GET /api/v1/site`)
+  and verified against a sha256 baked into this build. **A fleet with no
+  release feed configured cannot do any of this**: the tray says so and every
+  drop falls back to the browser upload.
+- **Tags, axes and the search vectors are the container's**, computed from the
+  embedding this machine uploads. bpm, key and loudness are not computed at all
+  (KNOWN_BUGS MUSIC-ING-1).
+- **A track this machine cannot embed is not lost.** It ends
+  `queued_for_base_rig` with the reason and the page offers the browser upload,
+  which is the older path, unchanged.
+- **`music_ingest_staging_dir`** is the base rig's override, for the same
+  reason `broll_ingest_staging_dir` is.
+
+An editor on a companion older than 0.9.0 gets a 404 on every `/music/ingest/*`
+route, which the page reads as "your companion is too old" and falls back
+correctly.
+
 ## YouTube auto-import
 
 `youtube_import.py` — a daemon thread that files the clips the dashboard's

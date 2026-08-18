@@ -3,7 +3,7 @@
 *Written 2026-08-17 with COMMERCIAL_READINESS.md item 5 (finding C1).*
 
 The tray app runs one HTTP listener on `127.0.0.1:8899`
-(`companion/src/ccsync_companion/broll_server.py`). Three route groups hang off
+(`companion/src/ccsync_companion/broll_server.py`). Five route groups hang off
 it, because a second process holding that port breaks the tray (CLAUDE.md):
 
 | Route | What it does |
@@ -12,6 +12,7 @@ it, because a second process holding that port breaks the tray (CLAUDE.md):
 | `GET /music/status`, `POST /music/send`, `POST /music/reveal` | the music library's |
 | `POST /ytdl/reveal`, `GET /ytdl/capabilities`, `POST /ytdl/download`, `GET /ytdl/progress` | the YouTube downloader page's |
 | `GET /broll/ingest/capabilities`, `POST /broll/ingest/{pick,prepare,run,control}`, `PUT /broll/ingest/upload/{staging_id}/{local_id}`, `GET /broll/ingest/{progress,thumb}` | b-roll ingest — drag clips onto the b-roll page and **this machine** indexes them (2026-08-18, `BROLL_INGEST_PLAN.md` §4.1) |
+| the same eight under `/music/ingest/…` | music ingest: the same routes, one kind parameter apart (2026-08-18, `MUSIC_INGEST_PLAN.md` step 3) |
 
 ## What was wrong
 
@@ -115,7 +116,17 @@ On top of those:
   `/music/send`:
   the browser is the only party that can see both the dashboard and this
   loopback, which is why it dispatches — not a reason to trust it with the work
-  order.
+  order. Its answers: `202` claimed (`{state: "claimed" | "waiting-for-model"}`),
+  `400` that is not a batch id, `409` this machine is already on another batch
+  or those files are no longer staged, and `503` for every "this machine
+  cannot": the feature is switched off, no dashboard URL or token, nobody
+  signed in, the dashboard unreachable, or **the chosen tier does not fit this
+  GPU** (`{"reason": "tier_unfit"}`, with the VRAM figures in the message and a
+  tray warning to match). A tier that does not fit is never run on the CPU, and
+  the batch is left `queued` rather than failed so another of that editor's
+  machines can take it. The claim's own `403`/`409`/`410` are passed through
+  unchanged: not this editor's batch, another machine holds it, already
+  terminal.
 - **`GET /broll/ingest/capabilities` is 200 always**, verdict in the body, and
   does no GPU probe or ffmpeg spawn: it is asked before the page renders its
   drop zone. `POST /broll/ingest/pick` is the one route that *learns* a local

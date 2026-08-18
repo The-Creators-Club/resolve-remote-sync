@@ -253,6 +253,79 @@ merges — the index file is never pushed back over a live one. Both indexers
 require their paths (`BROLL_DATA_ROOT`, `BROLL_DB_PATH`, `CCSYNC_WHISPER_*`,
 `MUSIC_DB_PATH`, …); nothing is defaulted to a developer's machine.
 
+## Ingest (added 2026-08-18)
+
+Until now, footage entered the b-roll archive only through an operator running
+the indexer on the base rig, and music only through a browser upload the base
+rig later drained. Both libraries now take a **drag and drop in the browser**,
+and the machine that did the dropping does the work: the NAS never gains a GPU
+and a 40 GB camera original never round-trips through the container. Design and
+contracts: `docs/BROLL_INGEST_PLAN.md`, `docs/MUSIC_INGEST_PLAN.md`.
+
+**The path a drop takes.** The page asks the companion what it can do
+(`GET /<kind>/ingest/capabilities`, 200 always with the verdict in the body,
+zero I/O, because it is asked before the drop zone renders). Dropped `File`s
+are streamed to the companion with the listener's one PUT
+(`application/octet-stream`, capped at that file's declared size + 1 %, into a
+staging dir inside the tree); the "Choose from this computer…" picker instead
+opens a native dialog through the companion and needs no bytes at all, because
+it learns real paths. The batch is then created **on the web app** through a
+session route, and only its uid is handed to the loopback (`POST
+/<kind>/ingest/run`). The companion claims it under the fleet token, gets back
+the work order (items, server-allocated archive names, taxonomy), and per clip
+runs ffmpeg → local model → `POST .../items/{iuid}/result` → rclone the outputs
+and the original → `.../uploaded` → `.../release`. The clip is live in the
+search index the moment its result lands; the original arrives behind it.
+
+**Why the browser dispatches but does not order.** It is the only party that
+can see both the NAS-served page and this editor's tray, which is the same
+reason "Send to Resolve" is a loopback call. That is a routing fact, not a
+trust one, so the work order comes back from the server under the fleet token
+and `run` reads exactly three fields (`batch_uid`, `staging_id`, `run_mode`).
+
+**Precedence and run modes.** Indexing beats proxy generation: while a batch
+crunches, `ProxyGenerator` is blocked through its existing `blocked_fn` seam
+and its tray line reads "waiting: indexing b-roll first" (owner's reversal of
+the first draft, which had it the other way round). Each batch carries a run
+mode: `idle`, the default, waits until the editor is away with Resolve closed
+and pauses the moment they return; `foreground` runs now and ignores both. The
+gate is the proxy generator's own idle machinery, so "away" means one thing on
+the machine. A tier that does not fit the GPU is refused at `run` with a 503
+and a tray warning, never CPU inference, which would run for days.
+
+**What music does differently.** One model instead of two tiers, and it runs on
+the CPU, so there is no VRAM refusal to make; the CLAP audio tower ships as an
+ONNX artefact fetched once per machine from the release feed and checked
+against a sha256 baked into the running build (`music_clap/music_models.py`,
+parity-gated against the indexer's copy); tags, axes and the search vectors are
+computed server-side from the embedding with the text tower the container
+already has; the per-file cap is the container's own 512 MiB, refused on the
+editor's machine so they are told by the thing holding the file; and a machine
+that cannot embed refuses the claim, at which point the page falls back to the
+browser upload the library has always had. Everything else is literally the
+same code: `MusicIngestor` subclasses `BrollIngestor` and `ingest_kinds.py` is
+the strategy that parameterises the gate, the checkpoints, the lease, the state
+file, the upload queue and the tray surfaces.
+
+**What the editor sees.** One `WorkProgressWindow` (`popup.py`), shared with
+the proxy generator. It shows per-item percent and ETA, pause/resume, the gate's reason
+when nothing is running. The tray grows an ingest section; the reporter sends
+`broll_ingest`/`music_ingest` to the dashboard, which chips it on the fleet
+grid (`[ INDEXING B-ROLL: 12/40 ]`) so an admin can see which machines are
+busy, and answers with `commands.*_ingest` so a cancel reaches a tray.
+
+**Beside it, the dashboard learned to update itself** (`docs/ZERO_TOUCH_PLAN.md`
+WP K). The companion's upgrade channel is unchanged; what is new is a second
+signed record kind, `dashboard`, carried on the vendor release feed rather than
+uploaded to one deployment with its admin password. A customer's dashboard
+fetches the feed, an admin clicks Publish, and the container stages, verifies
+and swaps a **code bundle** under a database backup with a rollback, then
+restarts into it. The container **image** stays the runtime: it carries Python
+and the dependency closure and is identified by `/venv/.runtime-id`, so any
+release that changes `requirements.lock` or the base image is a runtime update
+that the customer must click in their NAS UI. A lock change and a code fix must
+therefore never ship together, or nobody gets the fix.
+
 ## Flaws / holes you asked me to flag
 
 1. **Lag window**: editor adds video → other editors see it offline until upload + proxy-gen + proxy-download complete (minutes to hours for big files). Inherent to originals-up/proxies-down; companion tray shows queue so it's at least visible.

@@ -360,6 +360,29 @@ Properties worth knowing:
 - macOS bundles must be built on a Mac. PyInstaller does not cross-compile, so
   a Windows release run publishes no macOS artifact and prints an advisory.
 
+### The vendor feed, and the dashboard updating itself (2026-08-18)
+
+The channel above is per deployment: someone with that dashboard's admin
+password publishes to it. That is N passwords and N ships for N customers, so
+a second path sits beside it and neither replaces the other.
+
+- **The release feed** is a signed, world-readable static document
+  (`channel.json` + `channel.json.sig`, hosted on GitHub Releases) that the
+  vendor writes once with the same offline key. Each customer's dashboard
+  fetches it on its own schedule, shows what is available, and an admin
+  clicks Publish. No credential is ever on that wire, which is why the fetch
+  is the one call in the dashboard allowed to follow redirects: every byte is
+  signature or sha256 verified afterwards. [`RELEASE_FEED.md`](RELEASE_FEED.md).
+- **The dashboard updates its own code** over that feed (WP K,
+  [`ZERO_TOUCH_PLAN.md`](ZERO_TOUCH_PLAN.md)): a `dashboard` package record
+  carries a code bundle, which is staged, verified and swapped under a
+  database backup with a rollback, and the container restarts into it. Two
+  tiers, deliberately: the **image** is the runtime (Python and the dependency
+  closure, identified by `/venv/.runtime-id`) and the **bundle** is the code.
+  A release that changes `requirements.lock` or the base image changes the
+  runtime id, and every customer is shown a click for their NAS UI instead of
+  a button, so a lock change and a code fix must never travel together.
+
 Everything about running one: [`RELEASE.md`](RELEASE.md).
 
 ---
@@ -367,8 +390,9 @@ Everything about running one: [`RELEASE.md`](RELEASE.md).
 ## 8. The loopback API
 
 The tray app runs **one** HTTP listener on `127.0.0.1:8899`. A second process
-holding that port breaks the tray, which is why the b-roll, music and ytdl
-route groups all hang off the same server rather than three.
+holding that port breaks the tray, which is why the b-roll, music, ytdl and
+(since 2026-08-18) the two ingest route groups all hang off the same server
+rather than five.
 
 It is what makes "Send to Resolve" work from a web page: the page is served
 from the NAS, but only the editor's own browser can reach the editor's own
@@ -384,6 +408,65 @@ are not a browser. Anything else gets 403 with no CORS headers at all, so the
 calling page cannot even read the refusal.
 
 Full contract: [`LOOPBACK_API.md`](LOOPBACK_API.md).
+
+---
+
+## 8a. Ingest: the drop runs on the machine it was dropped on
+
+*Added 2026-08-18.* An editor drags clips onto the b-roll page, or tracks onto
+the music page, and **their own machine** does the work: ffmpeg, the local
+vision or audio model, then the upload. The NAS never gains a GPU and the
+originals never make a round trip through the container.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser (b-roll or music page)
+    participant W as web app on the NAS
+    participant C as Companion (127.0.0.1:8899)
+    participant N as NAS tree
+    B->>C: GET /<kind>/ingest/capabilities
+    B->>C: PUT /<kind>/ingest/upload/... (or a native picker, which needs no bytes)
+    B->>W: POST api/ingest-batches  (the batch is created HERE)
+    B->>C: POST /<kind>/ingest/run {batch_uid, staging_id, run_mode}
+    C->>W: POST api/fleet/ingest/batches/{uid}/claim
+    W-->>C: the work order: items, archive names, taxonomy
+    C->>C: proxy, poster, sprite, frames -> local model -> result
+    C->>W: .../items/{iuid}/result, then .../uploaded
+    C->>N: rclone the outputs and the original
+    C->>W: .../release
+```
+
+The parts that are decisions rather than plumbing:
+
+- **The browser dispatches, it does not order.** The batch is created through
+  a session route on the web app; the loopback is handed a uid and nothing
+  else. The browser is simply the only party that can see both the NAS page
+  and this machine's tray, which is the same reason "Send to Resolve" works
+  that way, and is not a reason to trust it with the work order.
+- **Indexing beats proxy generation.** While a batch is crunching, the proxy
+  generator is blocked through its existing `blocked_fn` seam and its tray
+  line reads "waiting: indexing b-roll first". The owner's ruling: an editor
+  who just dropped 40 clips is waiting on the index, not on proxies.
+- **Two run modes, chosen per batch.** `idle` (the default) waits until the
+  editor is away and Resolve is closed, and pauses the moment they come back;
+  `foreground` runs now and ignores both. The gate is the proxy generator's
+  idle machinery, so "away" means the same thing to both features.
+- **Staging is inside the tree** (`<local_root>/Assets/B-roll Archive/.ingest`,
+  `Assets/Music/.ingest`), every write containment-checked twice, with a
+  free-space floor refused before a byte is accepted.
+- **Music is the same machinery with three differences**: one model instead of
+  two tiers, and it runs on the CPU, so there is no VRAM refusal; the audio
+  tower is an ONNX artefact fetched once per machine from the release feed and
+  checked against a digest baked into the running build; and a track that
+  cannot be embedded falls back to the browser upload the library already had.
+  `BrollIngestor` and `MusicIngestor` share the gate, the checkpoints, the
+  lease, the state file, the upload queue, the tray surfaces and one progress
+  window (`ingest_kinds.py` is the strategy that parameterises them).
+
+Plans and contracts: [`BROLL_INGEST_PLAN.md`](BROLL_INGEST_PLAN.md),
+[`MUSIC_INGEST_PLAN.md`](MUSIC_INGEST_PLAN.md), [`API.md`](API.md) §6a/§6b,
+[`LOOPBACK_API.md`](LOOPBACK_API.md).
 
 ---
 
@@ -503,7 +586,7 @@ Deferred, and named so nobody mistakes them for oversights:
 |---|---|
 | **Linux editor client** | never built; only if a customer asks |
 | **In-instance multi-tenancy** | architectural. One customer = one container is the answer today — [`TENANCY.md`](TENANCY.md) §1 |
-| **A configurable drive letter** | `P:\` is hardcoded by an explicit decision (2026-07-26). The manifest *states* it so no client has to guess, but changing it is not supported |
+| **A drive letter other than the manifest's** | since 2026-08-17 (item 11) the tree root IS site data: `canonical_prefix` and `tree_name` are read by both installers, both uninstallers and the companion, so a second customer is no longer a fork. `P:\` remains the shipped default and every machine in the field is on it, so anything else is untested in anger rather than unsupported by design |
 | **Per-file lane A/B inventory on the server** | the NAS cannot see an editor's local trees; it would need the companion to report rclone `check` summaries |
 | **A generic Linux NAS backend** | v2 candidate alongside the `ServerBackend` protocol work |
 

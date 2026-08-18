@@ -27,6 +27,8 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | Doc | What it is |
 |---|---|
 | [`RELEASE.md`](RELEASE.md) | Shipping a companion build: versions, the signing key, the downgrade floor, code signing, the drift doctor |
+| [`RELEASE_FEED.md`](RELEASE_FEED.md) | The signed vendor feed every customer's dashboard reads: the channel format, publishing it, and the dashboard's own code updates |
+| [`LOOPBACK_API.md`](LOOPBACK_API.md) | The companion's 127.0.0.1:8899 listener: every route group, and who is allowed to call them |
 | [`GOTCHAS.md`](GOTCHAS.md) | The accumulated "why is it doing that" list. Read it before debugging anything |
 | [`INDEXERS.md`](INDEXERS.md) | The GPU indexers: what runs where, and what a customer without a GPU gets |
 | [`YTDL_LOCAL_DOWNLOAD.md`](YTDL_LOCAL_DOWNLOAD.md) | The YouTube downloader's fleet job model and the local-download path |
@@ -70,6 +72,8 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 |---|---|
 | [`COMMERCIAL_READINESS.md`](COMMERCIAL_READINESS.md) | The 2026-08-17 audit and the ranked list of what must change to sell this to other organisations |
 | [`SYNOLOGY_PORT_PLAN.md`](SYNOLOGY_PORT_PLAN.md) | The plan behind the second NAS backend |
+| [`BROLL_INGEST_PLAN.md`](BROLL_INGEST_PLAN.md) | Drag-and-drop b-roll ingest: the design, the contracts and what was deviated from |
+| [`MUSIC_INGEST_PLAN.md`](MUSIC_INGEST_PLAN.md) | The same for music, reusing the b-roll machinery, plus what it deliberately does not compute |
 | `../SPEC.md` | The internal architecture document — history, rationale, known flaws |
 | `../KNOWN_BUGS.md` | The live defect ledger (numbered entries, per-platform prefixes) |
 | `../CLAUDE.md` | Repo conventions, test commands, and the one ship command |

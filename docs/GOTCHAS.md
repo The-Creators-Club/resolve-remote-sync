@@ -78,6 +78,24 @@ publish `macos_bootstrap.sh` at all if a byte-scan finds a CR in it -- the
 `.sh` is served to Macs by the dashboard's `[ INSTALLER ]` link, where a
 single CR makes it fail on the first line (`bad interpreter: bash^M`).
 
+### A byte-parity gate fails on a file nobody edited
+
+Added 2026-08-18. Several modules exist twice on purpose, vendored verbatim
+because the two consumers cannot import each other: `broll_vlm` in the
+companion against `broll_index`, `ytdl_common.py` and the three `identity.py`
+copies, `normalize.py` in `broll/web`. `tools/release.ps1` and
+`server/tests/test_cross_component.py` compare each pair **byte for byte**, so
+a working copy where one half is CRLF and the other is LF is reported as drift
+in code that is identical. Nothing in the diff explains it, because the index
+holds LF for both.
+
+Every pair is now pinned `text eol=lf` in `.gitattributes`. The catch is the
+one from the top of this section: **a working copy checked out before a rule
+was added keeps its CRLF** until the file is re-checked-out
+(`rm <file>` then `git checkout -- <file>`). Confirm with `git ls-files --eol`,
+which reports the index and the working tree separately, rather than with grep,
+which strips CRs before matching.
+
 Audit the whole tree at once:
 
 ```powershell
@@ -430,6 +448,15 @@ three were added on 2026-07-25 after real incidents.
 The lesson generalises: if a test's outcome can depend on whether a real
 process is running or a real file exists, it needs a guard, not a fix at the
 call site.
+
+**It happened again on 2026-08-18**, with a new window: a companion suite run
+left a real "MAKING PROXIES" `WorkProgressWindow` on the operator's desktop.
+`_no_real_tk_windows` is autouse, so the only ways past it are constructing a
+window outside the fixture's reach or running the file with an interpreter
+that never loaded `companion/tests/conftest.py` (a bare `python -m pytest
+some_test.py` from the repo root does exactly that). Any new test that touches
+`popup.py` goes through the conftest pattern, and a window on your desktop
+after a test run is a bug in the test, never in the app.
 
 Also: tests marked `needs_bash` require a POSIX shell and **skip** under
 PowerShell. A count of "97 passed, 12 skipped" on Windows and "108 passed, 1
@@ -830,3 +857,32 @@ Missing-files for somebody else's device is a **404, not a 403** -- an editor
 must not learn that the device id exists. The redaction lives in `api.py`
 (`_scope_projects_view` / `_scope_editors_view`) and `ui.py` imports it, so
 the JSON API and the pages cannot drift apart.
+
+---
+
+## 13. Windows desktop identity
+
+### The taskbar shows a snake, or the wrong logo, whatever the title bar shows
+
+Added 2026-08-18 (KNOWN_BUGS CR-24). `theme.apply_window_icon` had been setting
+the title-bar icon since 0.4.7, and the taskbar button ignored it: it wore
+`python.exe`'s icon in a dev tree and the exe's `icon.ico` in a frozen build.
+
+The Windows taskbar decides which **application** a window belongs to when the
+button is created. A process that has never declared an AppUserModelID is "the
+exe", so the button takes the exe's icon and groups every popup under it.
+`theme.claim_app_identity()` declares `com.ccsync.companion` (Windows only,
+idempotent, silent); `app.run()` calls it before `load_config()`, which is the
+earliest thing that can put a dialog up, and `apply_window_icon` calls it again
+so a process that never went through `run()` (the wizard, a test) still claims
+it before its first window maps.
+
+**The ordering is the whole gotcha.** Measured: set before the first `tk.Tk()`
+or after it but before the first map, the taskbar shows the tinted window mark;
+set after the first window has mapped, that button is already grouped and stays
+on the exe icon for the life of the process. So a new entry point that opens a
+window must claim the identity first, not "somewhere during startup".
+
+Which mark appears is a separate question, and not a leak: the Creators Club
+mark is the product default (CR-25), and a white-label fleet selects the
+neutral one with `brand_logo` in the site manifest.

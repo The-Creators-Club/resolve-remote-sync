@@ -379,7 +379,8 @@ for `broll_ingest_*`):
 | `music_ingest_enabled` | `true` | `false` switches the orchestrator off; the loopback routes then answer "music indexing is not running on this machine" and the page falls back |
 | `music_ingest_idle_seconds` | `proxy_gen_idle_seconds`, else `300` | How long away from the keyboard counts as idle, for a batch running in `idle` mode |
 | `music_ingest_skip_while_resolve` | `true` | Stand down while Resolve is open. Kept for symmetry with b-roll and with the proxy generator; music uses one CPU core, so a site that wants it running anyway can say so |
-| `music_ingest_free_space_floor_gb` | `20` | Refuse to stage a drop below this much free space |
+| `music_ingest_free_space_floor_gb` | `20` | Refuse to stage a drop below this much free space. Read by the orchestrator AND by the PUT that refuses before the first byte (both since 2026-08-18; the route used to read b-roll's key) |
+| `music_ingest_max_concurrent_ffmpeg` | `2` | How many transcodes one batch may run at once, for the formats that need one |
 | `music_ingest_staging_dir` | `<local_root>/Assets/Music/.ingest` | The base rig overrides it: its `local_root` IS the NAS share, and staging there would push every file over SMB twice |
 | `music_clap_feed_base` | *(the site manifest's)* | A dev loop or a base rig pointing at a local copy of the feed. Overrides `release_feed_base` |
 
@@ -517,6 +518,29 @@ locally-made proxy into `.ccsync-trash`), `ffmpeg_path`, `proxy_scan_interval`
 Blackmagic Proxy Generator: `bpg_enabled`, `bpg_path`,
 `bpg_manage_watch_folders` (true), `bpg_autostart` (true),
 `bpg_settings_path`.
+
+### Ingest (2026-08-18)
+
+Drag clips onto the b-roll page or tracks onto the music page and this machine
+does the work (`BROLL_INGEST_PLAN.md`, `MUSIC_INGEST_PLAN.md`). Both
+orchestrators read the same suffixes behind their own prefix
+(`IngestKind.cfg_key`), so an operator who has learned one has learned both.
+Every key is optional; on a machine nobody drops anything on, all of this is
+inert.
+
+| Key | Default | Notes |
+|---|---|---|
+| `broll_ingest_enabled` | `true` | `false` switches the orchestrator off, and the loopback routes then answer "b-roll indexing is not running on this machine" so the page says so instead of hanging |
+| `broll_ingest_idle_seconds` | `300` | Seconds away from the keyboard before a batch in `idle` mode may crunch. A `foreground` batch ignores this gate entirely |
+| `broll_ingest_skip_while_resolve` | `true` | Stand down while Resolve is open. True here where `proxy_gen_skip_while_resolve_running` is false: this wants the 4 to 12 GB of VRAM a Resolve timeline is already using |
+| `broll_ingest_free_space_floor_gb` | `20` | Free space kept clear where clips are staged. Checked twice, once by the orchestrator and once by the PUT, before a byte is accepted |
+| `broll_ingest_max_concurrent_ffmpeg` | `2` | Not four: the describe stage owns the GPU, and a wide encode beside it makes both slower |
+| `broll_ingest_staging_dir` | `<local_root>/Assets/B-roll Archive/.ingest` | **The base rig needs this**: its `local_root` IS the NAS share, so staging there pushes every original over SMB twice |
+
+The music half is the same six keys under `music_ingest_*`, plus
+`music_clap_feed_base`; they are listed with the server-side variables they
+depend on in §2.5b, because the one thing music ingest cannot work without
+(`DASH_RELEASE_FEED_URL`) is set on the dashboard, not here.
 
 ### YouTube (**F** — all inert unless the site enables the feature)
 

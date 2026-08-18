@@ -321,7 +321,13 @@ def test_loop_survives_a_record_poll_run_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(dbmod, "record_poll_run", flaky_record_poll_run)
     collector.start()
     try:
-        deadline = time.monotonic() + 5.0
+        # 20 s, not 5: every poll runner here times out against 127.0.0.1:1
+        # (0.2 s each, several per iteration, plus backoff), and a hosted
+        # Windows runner managed ONE iteration in five seconds -- which
+        # failed the companion release build for a dashboard timing test
+        # (2026-08-18). The loop leaves as soon as five have happened, so
+        # a fast machine pays nothing for the headroom.
+        deadline = time.monotonic() + 20.0
         while calls["n"] < 5 and time.monotonic() < deadline:
             time.sleep(0.05)
     finally:

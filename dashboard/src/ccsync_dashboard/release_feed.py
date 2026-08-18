@@ -22,11 +22,29 @@ verification and is logged and discarded -- it can never make this dashboard
 accept a binary the offline release key did not sign.
 
 Fetching is deliberately paranoid in the same shape the companion's own
-upgrade client already uses against THIS dashboard (`upgrade.py`,
-`docs/GOTCHAS.md` §12): a redirect-refusing opener, https only, a short
-timeout, and a hard byte ceiling BEFORE anything is parsed or written to
-disk. An unverified channel is never surfaced to an admin as "available" --
-see `check_now`.
+upgrade client already uses against THIS dashboard (`upgrade.py`): https
+only, a short timeout, and a hard byte ceiling BEFORE anything is parsed or
+written to disk. An unverified channel is never surfaced to an admin as
+"available" -- see `check_now`.
+
+REDIRECTS: these two fetches are the ONE carve-out from `docs/GOTCHAS.md`
+§12's "no dashboard call follows a redirect" rule (2026-08-18). That rule
+exists because following a 3xx on an AUTHENTICATED call hands the session
+cookie / `X-CCSync-Token` / `X-CCSync-Identity` to whatever host the
+`Location` names, and it still holds everywhere else in this codebase. It
+does not bind here for two reasons that must BOTH stay true: these requests
+carry no credential of any kind (no cookie, no Authorization, no token --
+nothing in this module may ever add one), and every byte they return is
+content-verified before it is believed (the channel against
+`settings.release_pubkeys`, the artefact against the sha256 pinned inside
+that signed channel and then again by `package_store.store_verified_package`).
+A redirect can point us at a different host; it cannot make that host's bytes
+verify. The rule had to bend because GitHub Releases -- the chosen feed host
+-- answers `https://github.com/OWNER/REPO/releases/download/TAG/FILE` with a
+302 to a short-lived signed `release-assets.githubusercontent.com` URL
+(measured 2026-08-18), so a redirect-refusing opener failed on the very first
+fetch. The follow is bounded at _MAX_REDIRECTS hops and EVERY hop must be
+https:// -- a downgrade to http:// is refused, never followed.
 """
 from __future__ import annotations
 
@@ -39,6 +57,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from fastapi import APIRouter, Depends, HTTPException, Request as FastAPIRequest
@@ -69,6 +88,11 @@ FEED_FETCH_TIMEOUT = 10.0
 FEED_MAX_BYTES = 1024 * 1024
 ARTIFACT_MAX_BYTES = 200 * 1024 * 1024
 ARTIFACT_FETCH_TIMEOUT = 600.0
+# GitHub Releases needs exactly one hop (github.com -> a signed
+# release-assets.githubusercontent.com URL); 5 is headroom for a host that
+# puts a CDN or a bucket alias in front, not an invitation. Exceeding it is a
+# refusal -- see _open_following_https_redirects.
+_MAX_REDIRECTS = 5
 # How soon after boot the background poller makes its first check, and the
 # floor under its cadence -- see FeedPoller._run.
 POLLER_FIRST_CHECK_DELAY = 10.0
@@ -123,6 +147,10 @@ def verify_channel_signature(
 
 
 class _NoRedirect(HTTPRedirectHandler):
+    """urllib must never follow a 3xx BY ITSELF: it would neither count the
+    hops nor re-check the scheme. _open_following_https_redirects walks the
+    chain by hand instead, one explicitly checked hop at a time."""
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
         return None
 
@@ -134,18 +162,78 @@ def _opener():
     return build_opener(_NoRedirect())
 
 
+def _redirect_target(url: str, headers) -> str:
+    """The absolute https URL a 3xx points at. Raises FeedError on a missing
+    Location or on any scheme but https -- a `Location: http://...` is a
+    downgrade attempt and is refused outright, never fetched."""
+    location = ""
+    if headers is not None:
+        location = str(headers.get("Location") or headers.get("location") or "").strip()
+    if not location:
+        raise FeedError(f"{url} answered with a redirect but no Location -- refused")
+    # Relative Locations are legal (RFC 7231 §7.1.2) and resolve against the
+    # hop we are on, so a relative target on an https base stays https --
+    # which the explicit check below still confirms rather than assumes.
+    target = urljoin(url, location)
+    if not target.lower().startswith("https://"):
+        raise FeedError(
+            f"refusing a non-https redirect: {url} -> {target!r} (scheme downgrade)")
+    return target
+
+
+def _open_following_https_redirects(url: str, *, timeout: float):
+    """GET `url` and return the OPEN response for the caller to stream and
+    close, following at most _MAX_REDIRECTS redirects.
+
+    No credential is sent on any hop -- no cookie, no Authorization, no
+    `X-CCSync-*` header, on the first request or any redirect target. That,
+    plus the fact that every byte the caller gets back is signature- or
+    sha256-verified afterwards, is what makes following a redirect safe HERE
+    and nowhere else (module docstring, `docs/GOTCHAS.md` §12, 2026-08-18).
+    Do not add a header to this request.
+
+    Raises FeedError on a non-https hop, a chain longer than the cap, a 3xx
+    with no usable Location, or any transport failure."""
+    current = url
+    for _hop in range(_MAX_REDIRECTS + 1):
+        if not current.lower().startswith("https://"):
+            raise FeedError(f"refusing a non-https feed URL: {current!r}")
+        req = Request(current, method="GET")
+        try:
+            resp = _opener().open(req, timeout=timeout)
+        except HTTPError as exc:
+            # _NoRedirect turns a 3xx into an HTTPError; the headers on it are
+            # the redirect's own, so this IS the normal redirect path.
+            if 300 <= exc.code < 400:
+                current = _redirect_target(current, getattr(exc, "headers", None))
+                continue
+            raise FeedError(f"{current} answered HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise FeedError(f"could not reach {current}: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise FeedError(f"{current} timed out after {timeout}s") from exc
+        status = int(getattr(resp, "status", None) or getattr(resp, "code", 200))
+        if 300 <= status < 400:
+            # Belt and braces: a handler stack that answered a 3xx as a normal
+            # response instead of raising must not be read as a body.
+            headers = getattr(resp, "headers", None)
+            close = getattr(resp, "close", None)
+            if callable(close):
+                close()
+            current = _redirect_target(current, headers)
+            continue
+        return resp
+    raise FeedError(f"{url} redirected more than {_MAX_REDIRECTS} times -- refused")
+
+
 def _fetch_bytes(url: str, *, cap: int, timeout: float = FEED_FETCH_TIMEOUT) -> bytes:
-    """GET url, https only, no redirects followed, capped at `cap` bytes.
-    Raises FeedError on anything short of a clean 2xx under the cap -- see
-    the module docstring's threat model."""
-    if not url.lower().startswith("https://"):
-        raise FeedError(f"refusing a non-https feed URL: {url!r}")
-    req = Request(url, method="GET")
+    """GET url, https only, at most _MAX_REDIRECTS https redirects followed,
+    capped at `cap` bytes. Raises FeedError on anything short of a clean 2xx
+    under the cap -- see the module docstring's threat model. The cap is
+    applied to the FINAL response's body, so no length of redirect chain can
+    smuggle more than `cap` bytes past it."""
     try:
-        with _opener().open(req, timeout=timeout) as resp:
-            status = int(getattr(resp, "status", None) or getattr(resp, "code", 200))
-            if 300 <= status < 400:
-                raise FeedError(f"{url} answered with a redirect (HTTP {status}) -- refused")
+        with _open_following_https_redirects(url, timeout=timeout) as resp:
             data = bytearray()
             while True:
                 chunk = resp.read(65536)
@@ -155,10 +243,8 @@ def _fetch_bytes(url: str, *, cap: int, timeout: float = FEED_FETCH_TIMEOUT) -> 
                 if len(data) > cap:
                     raise FeedError(f"{url} exceeded the {cap}-byte cap -- refused")
             return bytes(data)
-    except HTTPError as exc:
-        if 300 <= exc.code < 400:
-            raise FeedError(f"{url} answered with a redirect (HTTP {exc.code}) -- refused") from exc
-        raise FeedError(f"{url} answered HTTP {exc.code}") from exc
+    # _open_following_https_redirects has already turned every transport
+    # failure it saw into a FeedError; these two cover the read half.
     except URLError as exc:
         raise FeedError(f"could not reach {url}: {exc.reason}") from exc
     except TimeoutError as exc:
@@ -348,11 +434,14 @@ def publish_from_feed(
     digest = hashlib.sha256()
     size = 0
     try:
-        req = Request(url, method="GET")
-        with part.open("wb") as fh, _opener().open(req, timeout=ARTIFACT_FETCH_TIMEOUT) as resp:
-            status = int(getattr(resp, "status", None) or getattr(resp, "code", 200))
-            if 300 <= status < 400:
-                raise FeedError(f"artifact url answered with a redirect (HTTP {status}) -- refused")
+        # Same bounded, credential-free, https-only redirect follow as the
+        # channel fetch (2026-08-18): GitHub Releases 302s every asset URL to
+        # a signed release-assets.githubusercontent.com URL, and the sha256
+        # check below is what decides whether the bytes are believed -- not
+        # which host handed them over.
+        with part.open("wb") as fh, _open_following_https_redirects(
+            url, timeout=ARTIFACT_FETCH_TIMEOUT
+        ) as resp:
             while True:
                 chunk = resp.read(1 << 20)
                 if not chunk:

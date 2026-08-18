@@ -119,7 +119,8 @@ files says so.
 ### 2.3 Verification, end to end
 
 1. The dashboard fetches `channel.json` and `channel.json.sig` (https only,
-   no redirects followed, 10s timeout, 1 MiB cap — §5).
+   at most 5 https redirects followed, 10s timeout, 1 MiB cap — §5, and
+   §3.1 for why a redirect is followed at all).
 2. It verifies the **channel-level** signature against
    `settings.release_pubkeys` (`DASH_RELEASE_PUBKEYS`) — the SAME list the
    PUT route already verifies every publish against. A channel whose
@@ -151,12 +152,18 @@ advancing), or serve garbage that fails every check above and is logged and
 discarded. **It can never make a dashboard install a binary the offline
 release key did not sign.**
 
-## 3. `tools/publish_feed.py` — building a feed directory (never uploading)
+## 3. `tools/publish_feed.py` — building, signing and publishing a feed
 
 Run **on the release rig**, next to the offline key, exactly like
-`tools/sign_release.py` and `tools/publish_package.py`. It never touches a
-network: it reads/writes a local directory and imports `sign_release` for
-the actual per-record signing (no second signer implementation).
+`tools/sign_release.py` and `tools/publish_package.py`. It reads/writes a
+local directory and imports `sign_release` for the actual per-record signing
+(no second signer implementation).
+
+Signing is always local and always first. Uploading is a separate, explicit
+opt-in (`--github-upload`, 2026-08-18): regenerating a feed directory to look
+at it must never publish to the world as a side effect. **The offline release
+key is never sent anywhere** — GitHub receives signed bytes, never the thing
+that signed them.
 
 ```powershell
 python tools\publish_feed.py --artifact companion\dist\ccsync-companion.exe `
@@ -194,20 +201,49 @@ What it does, per invocation:
   Verifies against the SAME baked `RELEASE_PUBKEYS` a real companion/
   dashboard trusts, so `--verify` failing here means a real deployment would
   refuse it too.
-- **Never uploads.** Getting the directory onto whatever actually serves
-  `<base-url>` is one of:
+- `--github-repo OWNER/REPO --github-upload`: uploads `channel.json`, its
+  `.sig` and every artefact to a GitHub release via `gh` (`--clobber`,
+  creating the release if absent), after signing and after asserting that
+  every signed record URL matches the asset it is about to become. Before
+  2026-08-18 the tool refused to upload at all and printed the `gh release
+  upload` / `rclone sync` one-liners for a human to run; publishing a release
+  is now one command. See §3.1.
+- **Any static file host still works.** Nothing in the format requires GitHub
+  and no server-side code runs at `<base-url>` at all — an S3-compatible
+  bucket behind a CDN is `rclone sync .\feed remote:ccsync-releases
+  --checksum` and a `--base-url` naming it. That is the escape hatch for the
+  day this moves off GitHub.
 
-  ```powershell
-  # A public "ccsync-releases" GitHub repo, release assets as the CDN:
-  gh release upload stable-v1 .\feed\channel.json .\feed\channel.json.sig `
-      .\feed\windows\*.exe .\feed\macos\* --clobber -R ccsync/ccsync-releases
+### 3.1 GitHub Releases as the host (and its 302)
 
-  # Any S3-compatible bucket behind a CDN:
-  rclone sync .\feed remote:ccsync-releases --checksum
-  ```
+GitHub Releases is the host we chose. Its URLs have exactly one shape:
 
-  Either is "any static file host" — nothing about the format requires a
-  particular one, and no server-side code runs at `<base-url>` at all.
+```
+https://github.com/OWNER/REPO/releases/download/TAG/FILE
+```
+
+and `DASH_RELEASE_FEED_URL` is that prefix + `/channel.json`. Give
+`publish_feed.py` `--github-repo OWNER/REPO` (with `--github-tag`) rather than
+a hand-typed `--base-url`: the URL is baked into the *signed* channel, so one
+that disagrees with where the bytes actually land is a channel nobody can fix
+without the offline key. A release's assets live in one flat namespace per tag
+— there are no directories — so `channel.json`, `channel.json.sig` and every
+artefact are siblings under `TAG`, and filenames must be unique across
+platforms (they already are: the version and platform are in them).
+
+**Every one of those URLs answers `302`**, with a `Location` on a short-lived
+signed `https://release-assets.githubusercontent.com/...` URL (measured
+2026-08-18). It is not optional and not a misconfiguration — it is how GitHub
+serves assets. Until 2026-08-18 `release_feed.py` refused all 3xx outright, so
+a GitHub-hosted feed failed on its very first fetch; it now follows **at most
+5 redirects, every hop `https://`**, and refuses a `Location:` on any other
+scheme as the downgrade attack it would be. See §5 for why that is safe here
+and nowhere else in this codebase.
+
+The tag is stable and re-uploaded to (`gh release upload … --clobber`), so
+`<base>` never changes under a deployed dashboard. A private repo will NOT
+work: the fetch deliberately sends no credential (§5), so the assets must be
+world-readable.
 
 ## 4. Dashboard configuration
 
@@ -288,8 +324,26 @@ click sufficient — see the plan's §3.4.
   stale bytes forever" (the latter is not even security-critical: a stale
   channel just means no update is offered, not a wrong one). Every
   consumer treats it exactly as it would treat a network attacker who
-  fully controls it: fetch is capped, redirect-refusing, https-only, and
-  nothing is acted on until it verifies.
+  fully controls it: fetch is capped, https-only, and nothing is acted on
+  until it verifies.
+- **Redirects are followed here, and ONLY here** (2026-08-18). `docs/
+  GOTCHAS.md` §12's rule is that no dashboard call follows a 3xx, because on
+  an *authenticated* call the session cookie / `X-CCSync-Token` /
+  `X-CCSync-Identity` would ride along to whatever host the `Location` names.
+  These two fetches (`channel.json`/`.sig` and the artefact) are the single
+  carve-out, and only because both halves of the justification hold: they
+  send **no credential at all** — no cookie, no Authorization, no token, and
+  nothing in `release_feed.py` may ever add one — and **every byte they
+  return is content-verified** by §2.3 before it is believed. A redirect can
+  point the fetch at a different host; it cannot make that host's bytes
+  verify against the offline release key, so the redirect target inherits
+  exactly the trust the feed host had, which is none. The follow is bounded
+  at **5 hops**, and **every hop must be `https://`** — a `Location:` on
+  `http://` (or any other scheme) is refused, never fetched, because a
+  downgrade is the one thing a network attacker on the path could actually
+  use. This carve-out does not extend to any authenticated call anywhere
+  else; `dashboard/tests/test_release_feed.py`'s redirect section pins each
+  of these rules.
 - **Compromise of the feed host** lets an attacker: withhold updates,
   replay an old (but still validly signed, and still floor-checked via
   `min_version`) channel, or serve garbage that is discarded. It does NOT

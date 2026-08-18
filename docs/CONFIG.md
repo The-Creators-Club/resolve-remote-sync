@@ -97,6 +97,23 @@ it stops and names it; that is the enforcement.
 | `youtube_download` | `false` | **F**. The `/ytdl` page. Off means the mount does not exist, the fleet routes 404, and companions hide their YouTube items. A legal decision, not a technical one — [`legal/YOUTUBE_FEATURE_NOTICE.md`](legal/YOUTUBE_FEATURE_NOTICE.md) |
 | `youtube_unblock` | `false` | **F**. The PO-token provider, the deno n-challenge solver, the cookie sign-in. **The vendor build ships none of them installed.** Requires `youtube_download`; alone it does nothing and the manifest will not report it true |
 
+### `[releases]`
+
+Whose builds this fleet takes. The vendor publishes one signed `channel.json`;
+every dashboard polls it and offers an admin a **Publish** button — no
+dashboard password, no per-customer visit. Wired into the deploy 2026-08-18;
+[`RELEASE_FEED.md`](RELEASE_FEED.md) is the full writeup.
+
+| Key | Default | Notes |
+|---|---|---|
+| `feed_url` | `""` | Absolute `https://` URL of the `channel.json` itself → `DASH_RELEASE_FEED_URL`. **Empty = the feed is entirely off**: no poller thread, no network call, and the only route into the channel is the authenticated PUT (`build_editor_package.ps1 -Publish`). Deliberately NOT on the Settings page — it names whose builds this fleet trusts, so it is written at install |
+| `policy` | `manual` | `manual` (list it, an admin clicks) \| `stage` (auto-publish, not current) \| `current` (auto-publish and make current) → `DASH_RELEASE_FEED_POLICY`. Overridable at runtime from the admin page; an unrecognised value falls back to `manual`, never upward |
+
+A hostile or compromised feed host cannot install anything: every record is
+re-verified against `DASH_RELEASE_PUBKEYS` before it reaches the channel. The
+worst it can do is serve nothing, serve stale records, or serve garbage that
+fails verification and is logged and discarded.
+
 ### `[indexer]`
 
 | Key | Default | Notes |

@@ -599,6 +599,28 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
         # This is a seed, not the last word: Settings writes site_settings and
         # a DB row beats every DASH_SITE_* value here.
         "DASH_SITE_BRAND_LOGO": site_value("site", "brand_logo"),
+        # THE VENDOR RELEASE FEED (ZERO_TOUCH_PLAN.md WP E; wired into the
+        # deploy 2026-08-18). WP E built the whole client -- fetch, verify,
+        # the admin Publish button -- and nothing ever set the URL, so
+        # app.py's lifespan (which gates the poller on release_feed_url)
+        # left it dark on every deployment including the vendor's own.
+        #
+        # Vendor identity, not customer preference: it names WHOSE builds
+        # this fleet takes, so it comes from the manifest the vendor writes
+        # at install and is deliberately NOT on the Settings page. Blank =
+        # the feed is entirely off (no thread, no network call), which is
+        # what every fleet running today gets until it is set.
+        #
+        # Pointing this at a hostile host is still not enough to install
+        # anything: every record is re-verified against DASH_RELEASE_PUBKEYS
+        # before it reaches companion_packages (release_feed.py's threat
+        # model).
+        "DASH_RELEASE_FEED_URL": site_value("releases", "feed_url"),
+        # manual = show what is available and wait for an admin to click.
+        # The other two (stage, current) auto-publish; a site opts into that
+        # deliberately. An unrecognised value falls back to manual in
+        # Settings, never upward.
+        "DASH_RELEASE_FEED_POLICY": site_value("releases", "policy"),
         "DASH_SITE_TREE_NAME": site_value("tree", "tree_name"),
         # The project template and the fleet-wide asset libraries, comma-joined
         # (dashboard/src/ccsync_dashboard/provision._site_list splits on

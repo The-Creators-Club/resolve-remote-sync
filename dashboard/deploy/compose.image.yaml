@@ -79,6 +79,17 @@ services:
       # (COMMERCIAL_READINESS.md item 4, 2026-08-17). Unset = the upgrade
       # channel cannot be published to (503); nothing else is affected.
       DASH_RELEASE_PUBKEYS: ""
+      # THE VENDOR RELEASE FEED (ZERO_TOUCH_PLAN.md WP E; wired into the
+      # deploy 2026-08-18 -- WP E shipped the client and nothing ever set
+      # the URL, so the feature was dark on every deployment). Blank = off:
+      # no poller thread, no network call, no auto-publish. It names WHOSE
+      # builds this fleet takes, so it is vendor identity written at install
+      # rather than a Settings field. A hostile URL still cannot install
+      # anything -- every record is re-verified against DASH_RELEASE_PUBKEYS.
+      DASH_RELEASE_FEED_URL: "{{RELEASE_FEED_URL}}"
+      # manual = list what is available and wait for an admin to click.
+      # stage/current auto-publish; a site opts into that deliberately.
+      DASH_RELEASE_FEED_POLICY: "{{RELEASE_FEED_POLICY}}"
       DASH_ADMIN_USERS: "{{NAS_ADMIN_USERS}}"
       DASH_SMB_HOST: "{{SMB_HOST}}"
       DASH_COOKIE_SECURE: "{{DASH_COOKIE_SECURE}}"

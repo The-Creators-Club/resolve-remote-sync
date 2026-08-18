@@ -194,6 +194,25 @@ org_name = "Your Studio"
 # (2026-07-26); it is served so no client has to assume it.
 # canonical_prefix = "P:\\"
 
+[releases]
+# WHOSE BUILDS THIS FLEET TAKES (docs/RELEASE_FEED.md, ZERO_TOUCH_PLAN WP E).
+# The vendor publishes one signed channel.json; every dashboard polls it and
+# offers an admin a Publish button -- no dashboard password, no per-customer
+# visit. Unset -- the default -- means the feed is entirely OFF: no poller
+# thread, no network call, and the only way a build reaches this fleet is the
+# old authenticated PUT (installer/build_editor_package.ps1 -Publish).
+#
+# Must be an absolute https:// URL of the channel.json itself. A hostile or
+# compromised host cannot install anything: every record is re-verified
+# against DASH_RELEASE_PUBKEYS, which is the offline release key's public
+# half baked into the deploy.
+# feed_url = "https://github.com/<org>/<releases-repo>/releases/download/ccsync-releases-v1/channel.json"
+#
+# manual  -- list what is available; an admin clicks Publish (the default)
+# stage   -- auto-publish on sight, but do NOT make it current
+# current -- auto-publish AND make current: the fleet upgrades unattended
+# policy = "manual"
+
 [broll]
 # The b-roll search UI's OWN-FOOTAGE collection: the shares listed as
 # BROLL_CREATORS_SHARES browse under this root rather than the subject

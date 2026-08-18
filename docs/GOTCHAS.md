@@ -754,7 +754,7 @@ a machine that cannot be tightened still runs, with one WARNING naming the
 file. An install that predates this gets its `config.toml` tightened once, at
 the next companion start.
 
-### No dashboard call follows a redirect any more
+### No dashboard call follows a redirect any more (with one carve-out)
 
 `urllib.request.urlopen` follows 3xx automatically and strips only the
 `Authorization` header -- `X-CCSync-Token` and `X-CCSync-Identity` ride along
@@ -767,6 +767,38 @@ as a failed request.
 **If you stub HTTP in a companion test, stub the opener, not `urlopen`** --
 patching `urllib.request.urlopen` now leaves the test passing against code
 that never calls it.
+
+#### The ONE carve-out: the vendor release feed (2026-08-18)
+
+`dashboard/src/ccsync_dashboard/release_feed.py`'s two fetches -- `channel.json`
+(+ `.sig`) and the artefact download -- follow up to **5 redirects, every hop
+`https://`**. They had to: the feed host is GitHub Releases, and
+`https://github.com/OWNER/REPO/releases/download/TAG/FILE` answers **302** with
+a `Location` on a short-lived signed `release-assets.githubusercontent.com`
+URL. Refusing that is refusing the host entirely.
+
+It is safe **there** because both halves hold, and neither is optional:
+
+1. **The call carries no credential.** No cookie, no `Authorization`, no
+   `X-CCSync-*`. There is nothing for a `Location` to steal. A test
+   (`test_no_credential_rides_along_on_any_hop`) asserts the request headers
+   are empty, so adding one breaks the build rather than the security model.
+2. **Every byte it returns is content-verified afterwards** -- the channel
+   against `settings.release_pubkeys` (Ed25519), the artefact against the
+   sha256 pinned inside that signed channel, then again by
+   `package_store.store_verified_package`. A redirect can change *which host*
+   answers; it cannot produce bytes that verify.
+
+A `Location:` on `http://` is refused, not followed -- a downgrade is the one
+thing an on-path attacker could use. Details: `docs/RELEASE_FEED.md` §3.1, §5.
+
+**This is not precedent.** Do NOT cite it to add a redirect follow to the
+reporter, the selection client, the ytdl executor, the upgrade channel, any
+admin route, or anything else that sends a token or a session cookie: for
+those, following a 3xx *is* the credential leak, which is why the rule exists.
+If a call is authenticated, or if it acts on bytes it has not independently
+verified, it refuses redirects. Both conditions above must be true, and the
+feed client is the only place in this codebase where they are.
 
 ### Both mounted apps' ingest routes are fail-closed
 

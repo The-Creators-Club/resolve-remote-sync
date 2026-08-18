@@ -39,6 +39,10 @@
 #               carried the key and the dict did not, and the TrueNAS deploy
 #               posts the DICT, so the flag would never have reached the
 #               container it was written for.
+#   2026-08-18  +DASH_RELEASE_FEED_URL / _POLICY -- WP E's client shipped
+#               2026-08-17 with nothing to set its URL, so the vendor feed
+#               was dark on every deployment. BLANK here, which is the
+#               feature entirely off: no poller, no network call.
 #   2026-08-18  +DASH_SITE_BRAND_LOGO -- the customer's tray/window mark,
 #               which item 10 could only restore via a per-machine env var.
 #               BLANK for this site here (the fixture site.toml names no
@@ -275,6 +279,17 @@ services:
       # (503); everything else keeps working. `python tools/release_key.py
       # pubkey` prints the value.
       DASH_RELEASE_PUBKEYS: ""
+      # THE VENDOR RELEASE FEED (ZERO_TOUCH_PLAN.md WP E; wired into the
+      # deploy 2026-08-18 -- WP E shipped the client and nothing ever set
+      # the URL, so the feature was dark on every deployment). Blank = off:
+      # no poller thread, no network call, no auto-publish. It names WHOSE
+      # builds this fleet takes, so it is vendor identity written at install
+      # rather than a Settings field. A hostile URL still cannot install
+      # anything -- every record is re-verified against DASH_RELEASE_PUBKEYS.
+      DASH_RELEASE_FEED_URL: ""
+      # manual = list what is available and wait for an admin to click.
+      # stage/current auto-publish; a site opts into that deliberately.
+      DASH_RELEASE_FEED_POLICY: ""
       # Admin "Users" section (create editor accounts, approve devices,
       # set known passwords). Leave TRUENAS_PW blank to disable that section
       # only -- everything else keeps working without it.

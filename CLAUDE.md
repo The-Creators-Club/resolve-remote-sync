@@ -247,7 +247,12 @@ Full runbook, including what each version number means and how to roll back:
   it must never be set on a deployment. Fleet credentials come in two shapes:
   the shared `DASH_REPORT_TOKEN` (migration only) and per-editor `cce1.…`
   tokens that BIND to an identity. No dashboard call follows a redirect —
-  stub the *opener* in tests, never `urlopen`. `docs/GOTCHAS.md` §12.
+  stub the *opener* in tests, never `urlopen`. `docs/GOTCHAS.md` §12. ONE
+  carve-out since 2026-08-18: `release_feed.py`'s vendor-feed fetch follows
+  up to 5 hops, https-only, because GitHub Releases 302 to
+  `release-assets.githubusercontent.com`. It is safe *there* because no
+  credential is on the wire and every byte is signature/sha-verified after
+  the fact — neither is true of any other call, so it is not precedent.
 - Lane B can STOP ITSELF: `sync/lane_guard.py`'s circuit breaker parks proxy
   download in `paused` (never `error`) whenever the NAS stops looking like
   the tree or a pass trashes too much; lanes A and C keep running, and only a

@@ -821,7 +821,10 @@ def test_the_heartbeat_runs_at_the_interval_the_claim_named(tmp_path, ytdlp):
     beat = threading.Event()
 
     def slow_run(argv, timeout, on_spawn=None):
-        beat.wait(2)
+        # The download waits for the heartbeat, never the other way round --
+        # and the cap is a deadlock escape, not a budget, so it is generous
+        # (a loaded runner is what broke the 410 test next door on 2026-08-18).
+        beat.wait(30)
         return ytdlp.run_fn(argv, timeout, on_spawn)
 
     deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
@@ -847,7 +850,16 @@ def test_a_410_on_the_heartbeat_kills_the_download_in_flight(tmp_path, ytdlp):
     reclaimed the job while yt-dlp was running. Finishing the download would
     write a file nobody will record, so the child is killed where it stands and
     its litter goes with it (§3). Nothing more is posted -- the job is not ours
-    to report on any more."""
+    to report on any more.
+
+    The 410 is held until the child is actually running, rather than raced
+    against a short heartbeat interval: this test failed on GitHub's
+    windows-latest runner (run 32096641553, 2026-08-18) with an EMPTY state
+    sequence, because a 0.02 s heartbeat beat the manifest fetch and the mkdir
+    to the first clip, so the lease was gone before there was any download to
+    kill -- correct behaviour, and not the behaviour this test is named for.
+    Gating the ANSWER is the fix; a bigger interval is the same race with a
+    bigger constant."""
     fleet = FakeFleet(manifest_for(clips=[
         {"video_id": VID1, "url": watch(VID1)},
         {"video_id": VID2, "url": watch(VID2)},
@@ -855,17 +867,36 @@ def test_a_410_on_the_heartbeat_kills_the_download_in_flight(tmp_path, ytdlp):
     fleet.claim_body = dict(fleet.claim_body, heartbeat_seconds=0.02)
     fleet.gone.add("heartbeat")
     deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+    in_flight = threading.Event()
+    original = fleet.request
+
+    def held_until_the_child_is_running(method, url, body, headers, timeout):
+        if url.endswith("/heartbeat"):
+            # Not asserted here: this runs on the heartbeat thread, where
+            # _heartbeat_loop swallows every exception but LeaseLost. A wait
+            # that timed out shows up as the in_flight assertion below.
+            in_flight.wait(30)
+        return original(method, url, body, headers, timeout)
 
     def endless(argv, timeout, on_spawn=None):
+        def spawned(proc):
+            # Registered BEFORE the 410 is let through, or this would exercise
+            # _register_proc's spawn-race guard instead of the kill in flight.
+            if on_spawn is not None:
+                on_spawn(proc)
+            in_flight.set()
+
         # A download that would never finish on its own: only the kill ends it.
         return ex.default_run(
             [sys.executable, "-c", "import time; time.sleep(120)"],
-            timeout, on_spawn)
+            timeout, spawned)
 
+    deps.request = held_until_the_child_is_running
     deps.run = endless
 
     job = run_job(deps)  # returns only because the child was killed
 
+    assert in_flight.is_set(), "yt-dlp never spawned, so nothing was killed"
     assert fleet.state_sequence == [(VID1, "downloading")]
     assert job.running is False and (job.done, job.failed) == (0, 0)
 

@@ -77,16 +77,21 @@ def make_channel(records: list[dict], *, seed=TEST_SEED, image=None) -> tuple[di
 
 
 class _FakeResp:
-    def __init__(self, data: bytes, status: int = 200):
+    def __init__(self, data: bytes, status: int = 200, headers: dict | None = None):
         self._data = data
         self._pos = 0
         self.status = status
+        self.headers = headers or {}
+        self.closed = False
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
+
+    def close(self):
+        self.closed = True
 
     def read(self, n: int = -1) -> bytes:
         if n is None or n < 0:
@@ -98,21 +103,43 @@ class _FakeResp:
         return chunk
 
 
+class _Redirect:
+    """A table entry answering a 3xx, the way a real fetch sees one: the
+    module's opener refuses to follow, so urllib raises HTTPError and the
+    redirect's own headers hang off it. `as_response=True` covers the other
+    shape release_feed guards against defensively -- a handler stack that
+    hands back a 3xx as an ordinary response instead of raising."""
+
+    def __init__(self, location: str | None, code: int = 302, as_response: bool = False):
+        self.location = location
+        self.code = code
+        self.as_response = as_response
+
+    def headers(self) -> dict:
+        return {} if self.location is None else {"Location": self.location}
+
+
 class _FakeOpener:
-    """table: url -> bytes, or a callable raising an exception."""
+    """table: url -> bytes, a _Redirect, or an exception instance to raise."""
 
     def __init__(self, table: dict):
         self.table = table
         self.requested: list[str] = []
+        self.requests: list = []
 
     def open(self, req, timeout=None):
         url = req.full_url if hasattr(req, "full_url") else str(req)
         self.requested.append(url)
+        self.requests.append(req)
         val = self.table.get(url)
         if val is None:
             raise urllib.error.HTTPError(url, 404, "not found", {}, None)
         if isinstance(val, Exception):
             raise val
+        if isinstance(val, _Redirect):
+            if val.as_response:
+                return _FakeResp(b"", status=val.code, headers=val.headers())
+            raise urllib.error.HTTPError(url, val.code, "redirect", val.headers(), None)
         return _FakeResp(val)
 
 
@@ -268,18 +295,6 @@ def test_https_is_required(env, monkeypatch):
     assert "https" in r.json()["error"]
 
 
-def test_a_redirect_is_refused(env, monkeypatch):
-    client, conn, settings = env
-
-    def boom(req, timeout=None):
-        raise urllib.error.HTTPError(CHANNEL_URL, 302, "redirect", {"Location": "https://evil.test/x"}, None)
-
-    monkeypatch.setattr(release_feed, "_opener",
-                        lambda: type("O", (), {"open": staticmethod(boom)})())
-    r = client.post("/api/v1/admin/feed/check")
-    assert r.json()["ok"] is False
-
-
 def test_an_oversized_channel_is_refused(env, monkeypatch):
     client, conn, settings = env
     huge = b"x" * (release_feed.FEED_MAX_BYTES + 1)
@@ -287,6 +302,158 @@ def test_an_oversized_channel_is_refused(env, monkeypatch):
     r = client.post("/api/v1/admin/feed/check")
     assert r.json()["ok"] is False
     assert "cap" in r.json()["error"]
+
+
+# ----------------------------------------------------------------- redirects
+# Added 2026-08-18: GitHub Releases 302s every asset URL to a signed
+# release-assets.githubusercontent.com URL, so the original absolute
+# no-redirect rule made a GitHub-hosted feed fail on its first fetch. What
+# these pin is the shape of the carve-out -- bounded, https-only, and buying
+# the redirect target no trust whatsoever.
+
+ASSET_HOST = "https://release-assets.example.test"
+
+
+def redirect_chain(start: str, hops: int, body: bytes) -> dict:
+    """A table of `hops` https redirects from `start`, ending in `body`."""
+    table: dict = {}
+    url = start
+    for i in range(hops):
+        nxt = f"{ASSET_HOST}/hop{i + 1}/channel.json"
+        table[url] = _Redirect(nxt)
+        url = nxt
+    table[url] = body
+    return table
+
+
+def test_a_single_https_redirect_is_followed(env, monkeypatch):
+    client, conn, settings = env
+    record, body = make_record()
+    channel, sig = make_channel([record])
+    signed_url = f"{ASSET_HOST}/signed/channel.json"
+    opener = patch_opener(monkeypatch, {
+        CHANNEL_URL: _Redirect(signed_url),
+        signed_url: json.dumps(channel).encode(),
+        SIG_URL: sig.encode(),
+    })
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["ok"] is True, r.json()["error"]
+    assert len(r.json()["view"]["available"]) == 1
+    assert signed_url in opener.requested
+
+
+def test_a_redirect_answered_as_a_response_is_also_followed(env, monkeypatch):
+    """The defensive half: a 3xx that arrives as an ordinary response rather
+    than an HTTPError must be followed as a redirect, never read as a body."""
+    client, conn, settings = env
+    channel, sig = make_channel([])
+    signed_url = f"{ASSET_HOST}/signed/channel.json"
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: _Redirect(signed_url, as_response=True),
+        signed_url: json.dumps(channel).encode(),
+        SIG_URL: sig.encode(),
+    })
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["ok"] is True, r.json()["error"]
+
+
+def test_a_chain_at_the_hop_cap_is_followed(env, monkeypatch):
+    client, conn, settings = env
+    channel, sig = make_channel([])
+    table = redirect_chain(CHANNEL_URL, release_feed._MAX_REDIRECTS, json.dumps(channel).encode())
+    table[SIG_URL] = sig.encode()
+    patch_opener(monkeypatch, table)
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["ok"] is True, r.json()["error"]
+
+
+def test_one_hop_over_the_cap_is_refused(env, monkeypatch):
+    client, conn, settings = env
+    channel, sig = make_channel([])
+    table = redirect_chain(CHANNEL_URL, release_feed._MAX_REDIRECTS + 1, json.dumps(channel).encode())
+    table[SIG_URL] = sig.encode()
+    patch_opener(monkeypatch, table)
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["ok"] is False
+    assert "redirected more than" in r.json()["error"]
+
+
+def test_an_endless_redirect_loop_is_refused(env, monkeypatch):
+    client, conn, settings = env
+    patch_opener(monkeypatch, {CHANNEL_URL: _Redirect(CHANNEL_URL)})
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["ok"] is False
+    assert "redirected more than" in r.json()["error"]
+
+
+def test_a_redirect_to_http_is_refused_as_a_downgrade(env, monkeypatch):
+    client, conn, settings = env
+    opener = patch_opener(monkeypatch, {
+        CHANNEL_URL: _Redirect("http://releases.example.test/v1/channel.json"),
+    })
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["ok"] is False
+    assert "non-https redirect" in r.json()["error"]
+    # Refused, not fetched-then-discarded: the http URL was never opened.
+    assert not any(u.startswith("http://") for u in opener.requested)
+
+
+def test_a_redirect_without_a_location_is_refused(env, monkeypatch):
+    client, conn, settings = env
+    patch_opener(monkeypatch, {CHANNEL_URL: _Redirect(None)})
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["ok"] is False
+    assert "no Location" in r.json()["error"]
+
+
+def test_a_redirect_buys_the_new_host_no_trust(env, monkeypatch):
+    """The redirect target is as untrusted as the feed host itself: a channel
+    signed by a key this dashboard does not hold is still discarded whole."""
+    client, conn, settings = env
+    record, body = make_record(seed=OTHER_SEED)
+    channel, sig = make_channel([record], seed=OTHER_SEED)
+    evil = "https://evil.example.test/channel.json"
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: _Redirect(evil),
+        evil: json.dumps(channel).encode(),
+        SIG_URL: sig.encode(),
+    })
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["ok"] is False
+    assert "signature invalid" in r.json()["error"]
+    assert r.json()["view"]["available"] == []
+
+
+def test_the_byte_cap_still_applies_after_a_redirect(env, monkeypatch):
+    client, conn, settings = env
+    signed_url = f"{ASSET_HOST}/signed/channel.json"
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: _Redirect(signed_url),
+        signed_url: b"x" * (release_feed.FEED_MAX_BYTES + 1),
+    })
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["ok"] is False
+    assert "cap" in r.json()["error"]
+
+
+def test_no_credential_rides_along_on_any_hop(env, monkeypatch):
+    """The property that makes following a redirect safe here at all
+    (GOTCHAS §12): these fetches carry no credential, so a redirect cannot
+    leak one. If this fails, the carve-out is no longer justified."""
+    client, conn, settings = env
+    channel, sig = make_channel([])
+    signed_url = f"{ASSET_HOST}/signed/channel.json"
+    opener = patch_opener(monkeypatch, {
+        CHANNEL_URL: _Redirect(signed_url),
+        signed_url: json.dumps(channel).encode(),
+        SIG_URL: sig.encode(),
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    assert len(opener.requests) >= 3
+    for req in opener.requests:
+        assert req.header_items() == []
+        assert req.get_header("Authorization") is None
+        assert req.get_header("Cookie") is None
 
 
 # --------------------------------------------------------------- publish (manual)
@@ -352,6 +519,77 @@ def test_publish_refuses_a_non_https_artifact_url(env, monkeypatch):
     assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
     r = client.post("/api/v1/admin/feed/publish", json={"platform": "windows", "version": "0.9.0"})
     assert r.status_code == 400
+
+
+def test_publish_follows_a_redirect_on_the_artifact_url(env, monkeypatch):
+    """The download half of the 2026-08-18 carve-out: a GitHub asset URL 302s
+    to a short-lived signed URL on another host, and publishing must work."""
+    client, conn, settings = env
+    record, body = make_record()
+    channel, sig = make_channel([record])
+    signed_url = f"{ASSET_HOST}/blob/abc123?exp=1"
+    opener = patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+        record["url"]: _Redirect(signed_url), signed_url: body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    r = client.post("/api/v1/admin/feed/publish", json={"platform": "windows", "version": "0.9.0"})
+    assert r.status_code == 200
+    assert signed_url in opener.requested
+    assert (settings.packages_path() / "windows" / record["filename"]).read_bytes() == body
+
+
+def test_publish_refuses_an_http_redirect_on_the_artifact_url(env, monkeypatch):
+    client, conn, settings = env
+    record, body = make_record()
+    channel, sig = make_channel([record])
+    opener = patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+        record["url"]: _Redirect("http://releases.example.test/v1/windows/x.exe"),
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    r = client.post("/api/v1/admin/feed/publish", json={"platform": "windows", "version": "0.9.0"})
+    assert r.status_code == 502
+    assert "non-https redirect" in r.json()["detail"]
+    assert not any(u.startswith("http://") for u in opener.requested)
+    assert dbmod.get_package(conn, "windows", "0.9.0") is None
+
+
+def test_publish_refuses_an_artifact_redirect_chain_over_the_cap(env, monkeypatch):
+    client, conn, settings = env
+    record, body = make_record()
+    channel, sig = make_channel([record])
+    table = {CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode()}
+    url = record["url"]
+    for i in range(release_feed._MAX_REDIRECTS + 1):
+        nxt = f"{ASSET_HOST}/hop{i + 1}/x.exe"
+        table[url] = _Redirect(nxt)
+        url = nxt
+    table[url] = body
+    patch_opener(monkeypatch, table)
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    r = client.post("/api/v1/admin/feed/publish", json={"platform": "windows", "version": "0.9.0"})
+    assert r.status_code == 502
+    assert "redirected more than" in r.json()["detail"]
+    assert dbmod.get_package(conn, "windows", "0.9.0") is None
+
+
+def test_a_redirected_artifact_still_has_to_hash_right(env, monkeypatch):
+    """Same rule as the channel: the host a redirect names is trusted for
+    nothing -- the sha256 pinned in the signed record still decides."""
+    client, conn, settings = env
+    record, body = make_record()
+    channel, sig = make_channel([record])
+    signed_url = f"{ASSET_HOST}/blob/abc123"
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+        record["url"]: _Redirect(signed_url), signed_url: b"substituted by the redirect target",
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    r = client.post("/api/v1/admin/feed/publish", json={"platform": "windows", "version": "0.9.0"})
+    assert r.status_code == 400
+    assert dbmod.get_package(conn, "windows", "0.9.0") is None
+    assert not list((settings.packages_path() / "windows").glob("*"))
 
 
 def test_publish_already_published_is_409(env, monkeypatch):

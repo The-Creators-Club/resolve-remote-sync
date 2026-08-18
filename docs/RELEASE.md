@@ -473,6 +473,62 @@ default) means nothing here changes.
 
 ---
 
+## Publishing the release feed (one command, no dashboard password)
+
+Since 2026-08-18 `tools/publish_feed.py` does the upload itself, to **GitHub
+Releases** (the chosen feed host). Build the exe as usual (`tools/release.ps1`,
+step 2 above), then:
+
+```powershell
+dashboard\.venv\Scripts\python.exe tools\publish_feed.py `
+    --manifest companion\dist\ccsync-release.json `
+    --feed-dir .\feed --github-repo ccsync/ccsync-releases --github-upload
+```
+
+That is the whole ship for feed customers:
+
+1. **build** — `tools\release.ps1` produces `companion\dist\ccsync-companion.exe`
+   and its `ccsync-release.json` (the same manifest gate applies here: a
+   `git_dirty` or `tests_run: false` manifest is refused unless
+   `--allow-dirty`/`--allow-untested`).
+2. **publish the feed** — the command above signs the record with the offline
+   key, writes and signs `channel.json`, re-verifies its own output offline,
+   and only then uploads `channel.json`, `channel.json.sig` and the artefacts
+   to the release with `gh release upload … --clobber` (creating the release on
+   first run). Re-running is idempotent; the tag is a stable pointer, not a
+   per-version archive.
+3. **the customer's dashboard** picks the channel up on its own schedule (or an
+   admin's "Check now"), shows it under `[ AVAILABLE FROM THE VENDOR ]`, and an
+   admin clicks **Publish** (or **Publish + make current**). On feed policy
+   `stage`/`current` even that click is automatic — `docs/RELEASE_FEED.md` §4.
+
+**No dashboard password is involved anywhere in this path.** That is the point
+of it: `installer\build_editor_package.ps1 -Publish` (and
+`tools\publish_package.py`) log in to one specific dashboard and prompt for its
+admin password via `Read-Host`/`getpass`, which is N passwords and N ships for N
+customers. The feed authenticates nothing to anyone — it publishes signed bytes
+to a public host, and every dashboard decides for itself whether the offline
+key signed them.
+
+- `--github-repo OWNER/REPO` also **derives** `--base-url`
+  (`https://github.com/OWNER/REPO/releases/download/<tag>`), and passing a
+  `--base-url` that disagrees is refused: the download URL is inside the signed
+  document, so a channel pointing away from its own assets cannot be corrected
+  without re-signing. `--github-tag` (default `ccsync-releases-v1`) moves both.
+- **`--github-upload` is required to upload.** Without it the tool only builds
+  and signs the directory — regenerating a feed to look at it must never
+  publish to the world.
+- The **release key never goes near GitHub**. It signs on this rig; what
+  travels is the already-signed channel plus the artefacts, and the only
+  credential used is your own `gh auth login`. A missing or unauthenticated
+  `gh` fails the run (exit 5) *after* the local feed is written and verified,
+  and says which of the two to fix.
+
+For any other host (S3, a CDN, a bucket) nothing changed: pass `--base-url`
+and copy the directory yourself (`rclone sync .\feed remote:… --checksum`).
+
+---
+
 ## The downgrade floor (`min_version`)
 
 The offer has always been *"different, not newer"* — the dashboard advertises
@@ -743,7 +799,10 @@ python tools\release_key.py new|pubkey|bake     # the offline release signing ke
 .\tools\release.ps1                             # parity + tests + build + manifest
 .\tools\release.ps1 -DryRun                     # show the pipeline, change nothing
 .\tools\release.ps1 -SkipTests -AllowDirty      # fast local iteration build
-.\installer\build_editor_package.ps1 -Publish -MakeCurrent   # ship to the fleet
+.\installer\build_editor_package.ps1 -Publish -MakeCurrent   # ship to the fleet (prompts for the dashboard password)
+python tools\publish_feed.py --manifest companion\dist\ccsync-release.json `
+    --feed-dir .\feed --github-repo <owner/repo> --github-upload   # ship to EVERY feed customer (no password)
+python tools\publish_feed.py --verify .\feed                 # offline-check a feed dir
 .\installer\windows_upgrade.ps1 -CompanionExe <path-to-exe>  # install here
 .\tools\check_deploy_drift.ps1 -AdminUser <your-dashboard-admin>   # + published version, machines behind
 ```

@@ -79,6 +79,22 @@ jobs:
           companion/.venv/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r companion/requirements.lock
           companion/.venv/Scripts/python -m pip install --disable-pip-version-check "pyinstaller==6.21.0"
 
+      # release.ps1 runs the DASHBOARD suite too (its own parity gate), and it
+      # locates an interpreter with Get-VenvPython -- which falls back to bare
+      # `python` on PATH when dashboard/.venv is absent, and a hosted runner's
+      # python has no pytest. That is why every release-windows run since the
+      # workflow was added (2026-08-17) died with "No module named pytest"
+      # AFTER a clean 3736-test companion pass, having built nothing. The
+      # macOS workflow never hit it: release_macos.sh does not run this suite.
+      #
+      # From the lock, --require-hashes, same as the companion venv above:
+      # pytest is already in dashboard/requirements.lock, so this needs no
+      # extra pin of its own.
+      - name: prepare the dashboard venv (release.ps1 runs its suite too)
+        run: |
+          python -m venv dashboard/.venv
+          dashboard/.venv/Scripts/python -m pip install --disable-pip-version-check --require-hashes -r dashboard/requirements.lock
+
       # release.ps1 runs the companion suite with CCSYNC_REQUIRE_RCLONE=1 (its
       # own comment: "pytest exits 0 when tests SKIP, so a missing rclone would
       # silently drop 24 lane-direction tests from a release"), which turns a

@@ -74,4 +74,5 @@ def page_admin_assignments(request: Request, conn: sqlite3.Connection = Depends(
     return _render(request, "admin_assignments.html", {
         **_sidebar_context(request, conn, None),
         "assignments": _assignments_view(conn),
+        "nav_current": "assignments",
     })

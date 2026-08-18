@@ -1,11 +1,32 @@
 {# THE topbar. base.html includes it, and /partials/topbar (ui.py) serves it
    to the mounted SPAs (/broll, /music, /ytdl), whose app.js swaps it in over
    their static fallback header -- one template, so the headers cannot drift
-   apart. `nav_current` ('broll' / 'music' / 'ytdl') marks the entry for the
-   page the viewer is standing on; the dashboard's own pages don't set it.
+   apart. `nav_current` marks the entry for the page the viewer is standing
+   on: 'broll' / 'music' / 'ytdl' from the SPAs' ?current=, and the dashboard's
+   own pages set it too ('fleet', 'users', 'packages', ...).
    data-dash-topbar is the marker the SPAs check before injecting: a fetch
    that came back as something else (the login page, an error body) must
    leave their fallback header alone. #}
+{# The bar holds NO module links since 2026-08-18 (owner's redesign): the
+   modules live in the left drawer below, and everything administrative lives
+   under Settings. The bar is a menu button, the brand, and who you are --
+   the three things that are true on every page of every module. #}
+
+{# The drawer is opened by the HTML popover API, with NO JavaScript at all.
+   That is not a style preference, it is the constraint: this partial is
+   injected into the three SPAs with innerHTML, which never executes a
+   <script> it brings with it, so any drawer that needed a listener would be
+   dead on /broll, /music and /ytdl -- the three pages that need it most.
+   The popover attribute is honoured on the parsed fragment itself, and it
+   carries Esc-to-close, click-outside-to-close and ::backdrop for free.
+   A checkbox hack would also survive innerHTML, but not the SPAs' stacking:
+   their #app-header is `position: sticky; z-index: 10`, so a drawer rendered
+   inside it lives in that stacking context and their overlays paint over it.
+   A popover renders in the TOP LAYER, above every z-index on the page, which
+   is the actual reason this mechanism was chosen. #}
+<button class="btn menu-btn" type="button" popovertarget="nav-drawer" aria-label="menu">
+  <span class="menu-bars" aria-hidden="true"></span>
+</button>
 {# The brand half is SITE DATA, not a literal (2026-08-17,
    docs/COMMERCIAL_READINESS.md item 10): ui._render supplies brand_org as
    org_short -> org_name -> product_name, so an install that has said nothing
@@ -17,55 +38,80 @@
    what each owner has to do to come off that list. Publishing it here first
    means the change on their side is one header, not a new endpoint. #}
 <a class="brand" data-dash-topbar data-csrf="{{ csrf_token or '' }}" href="/">{{ brand_org | upper }} <span class="dim">//</span> SYNC STATUS</a>
-{# The sync dashboard's own pages come first; everything after a "//" is a
-   separate platform or a download, not a page of this app. The separator is
-   drawn by CSS as `.nav-sep::before`, NOT as a text node of its own
-   (2026-08-18): as its own flex item it could be left stranded at the start
-   or end of a wrapped row (the owner's 1920x1080 screenshot had "//"s
-   floating between broken-up labels). As a pseudo-element it is part of the
-   item it precedes, so it wraps with that item or not at all, and an absent
-   item still takes its "//" with it. #}
-<a class="btn nav-link" href="/transfers">[ TRANSFERS ]</a>
-{% if session_is_admin %}
-  <a class="btn nav-link" href="/admin/users">[ USERS ]</a>
-  {# Grid of every project x every known editor (2026-08-17) -- writes
-     nothing of its own, see assignments.py's docstring. #}
-  <a class="btn nav-link" href="/admin/assignments">[ ASSIGNMENTS ]</a>
-  {# ZERO_TOUCH_PLAN.md WP D, 2026-08-17: always in the admin nav, not just
-     while something is outstanding -- "after all non-optional tasks are ok,
-     /setup stays reachable ... as 'Setup'" (the work package). Adding a
-     live outstanding-count badge here would cost a setup_tasks read on
-     EVERY page render for every admin; page_login_submit already redirects
-     an admin here automatically while something is unfinished, which is
-     the moment that actually matters. #}
-  <a class="btn nav-link" href="/setup">[ SETUP ]</a>
-  <a class="btn nav-link" href="/admin/settings">[ SETTINGS ]</a>
-{% endif %}
-{% if broll_mounted %}
-  {# Trailing slash matters: the b-roll SPA uses document-relative URLs, so at
-     /broll (no slash) they would resolve against the dashboard root. #}
-  <a class="btn nav-link nav-sep{{ ' nav-current' if nav_current == 'broll' }}" href="/broll/">[ B-ROLL ]</a>
-{% endif %}
-{% if music_mounted %}
-  {# Trailing slash for the same reason as /broll/: the music SPA resolves
-     its URLs against the document. Shown only when the mount fully took --
-     an absent or degraded music tree gets no link, same rule as b-roll. #}
-  <a class="btn nav-link nav-sep{{ ' nav-current' if nav_current == 'music' }}" href="/music/">[ MUSIC ]</a>
-{% endif %}
-{% if ytdl_mounted %}
-  {# Trailing slash for the same reason as /broll/ and /music/: the downloader
-     SPA resolves every URL against the document, so at /ytdl (no slash) its
-     api/ calls would hit the dashboard root. Shown only when the mount fully
-     took -- an absent or degraded ytdl tree gets no link. #}
-  <a class="btn nav-link nav-sep{{ ' nav-current' if nav_current == 'ytdl' }}" href="/ytdl/">[ YOUTUBE ]</a>
-{% endif %}
-<a class="btn nav-link nav-sep" href="/download" title="download the latest CC Sync installer for this computer">[ INSTALLER ]</a>
+
+{# Every page under Settings, so the drawer can light [ SETTINGS ] up for all
+   seven of them rather than only the site form. Same list as
+   partials/settings_nav.html, which marks the individual entry. #}
+{% set SETTINGS_PAGES = ["site", "users", "assignments", "transfers", "setup",
+                         "installer", "packages"] %}
+<div class="nav-drawer" id="nav-drawer" popover>
+  <div class="drawer-head">
+    <span class="drawer-brand">{{ brand_org | upper }} <span class="dim">//</span> MENU</span>
+    {# Light dismiss (click the backdrop) and Esc both close it; this button is
+       for touch, where neither is obvious. popovertargetaction is
+       declarative -- still no script. #}
+    <button class="btn drawer-close" type="button" popovertarget="nav-drawer"
+            popovertargetaction="hide" aria-label="close menu">[ X ]</button>
+  </div>
+  <nav class="drawer-nav">
+    <a class="drawer-item{{ ' drawer-current' if nav_current == 'fleet' }}" href="/">[ SYNC STATUS ]</a>
+    {% if broll_mounted %}
+      {# Trailing slash matters: the b-roll SPA uses document-relative URLs, so at
+         /broll (no slash) they would resolve against the dashboard root. #}
+      <a class="drawer-item{{ ' drawer-current' if nav_current == 'broll' }}" href="/broll/">[ B-ROLL ]</a>
+    {% endif %}
+    {% if music_mounted %}
+      {# Trailing slash for the same reason as /broll/: the music SPA resolves
+         its URLs against the document. Shown only when the mount fully took --
+         an absent or degraded music tree gets no link, same rule as b-roll. #}
+      <a class="drawer-item{{ ' drawer-current' if nav_current == 'music' }}" href="/music/">[ MUSIC ]</a>
+    {% endif %}
+    {% if ytdl_mounted %}
+      {# Trailing slash for the same reason as /broll/ and /music/: the downloader
+         SPA resolves every URL against the document, so at /ytdl (no slash) its
+         api/ calls would hit the dashboard root. Shown only when the mount fully
+         took -- an absent or degraded ytdl tree gets no link. #}
+      <a class="drawer-item{{ ' drawer-current' if nav_current == 'ytdl' }}" href="/ytdl/">[ YOUTUBE ]</a>
+    {% endif %}
+    {% if session_is_admin %}
+      <a class="drawer-item{{ ' drawer-current' if nav_current in SETTINGS_PAGES }}" href="/admin/settings">[ SETTINGS ]</a>
+    {% else %}
+      {# An editor has no Settings hub to enter, so the two hub pages they ARE
+         allowed to see are named here directly. Without this the redesign
+         would have taken Transfers and the installer download away from
+         everyone who is not an admin. #}
+      <a class="drawer-item{{ ' drawer-current' if nav_current == 'transfers' }}" href="/transfers">[ TRANSFERS ]</a>
+      <a class="drawer-item{{ ' drawer-current' if nav_current == 'installer' }}" href="/installer">[ INSTALLER ]</a>
+    {% endif %}
+  </nav>
+  <div class="drawer-foot">
+    {% if session_user %}
+      <div class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</div>
+      {# PLAIN forms, not htmx, so they do not inherit base.html's hx-headers --
+         the token has to travel as a field. app.py's csrf_gate reads either. #}
+      <form method="post" action="/logout" class="inline-form">
+        <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+        <button class="btn" type="submit">[ LOGOUT ]</button></form>
+      {# LOGOUT ALL lives here rather than in the bar (2026-08-18): it is the
+         rare action -- "a machine was lost" -- and the bar is deliberately
+         three items wide now. It stays one click from every page for every
+         account, admin or not. #}
+      <form method="post" action="/logout-everywhere" class="inline-form"
+            title="revoke this account's sessions on every device -- use it if a machine was lost">
+        <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+        <button class="btn" type="submit">[ LOGOUT ALL ]</button></form>
+    {% else %}
+      <a class="btn" href="/login">[ LOGIN ]</a>
+    {% endif %}
+  </div>
+</div>
+
 {% if view and not view.syncthing_reachable %}
   <span class="banner">▲ SYNCTHING UNREACHABLE: data may be stale</span>
 {% endif %}
 {# The staleness stamp and the session chip are ONE flex item (2026-08-18):
    as two siblings a wrap could put "updated 4s ago" on one row and the user
-   plus their logout buttons on the next. .topbar-right carries the
+   plus their logout button on the next. .topbar-right carries the
    margin-left:auto that used to sit on .stamp, so the pair still parks at
    the right edge of whichever row it lands on. #}
 <span class="topbar-right">
@@ -73,15 +119,27 @@
 <span class="session">
   {% if session_user %}
     <span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>
+    {# The gear: the owner's own request (2026-08-18) for a way into Settings
+       that is visible from every page without reading a word. Hand-drawn
+       inline (ring + eight teeth) rather than an icon-set path, so it costs
+       no asset, no request and no third-party licence; currentColor makes it
+       red from .gear-link. Admins only -- /admin/settings 403s for an
+       editor, and a control that always refuses is worse than no control. #}
+    {% if session_is_admin %}
+      <a class="gear-link" href="/admin/settings" aria-label="settings" title="settings">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false"
+             fill="none" stroke="currentColor" stroke-width="2.2">
+          <circle cx="12" cy="12" r="5.2"></circle>
+          <path d="M12 1.4v3.2M12 19.4v3.2M1.4 12h3.2M19.4 12h3.2"></path>
+          <path d="M4.5 4.5l2.3 2.3M17.2 17.2l2.3 2.3M19.5 4.5l-2.3 2.3M6.8 17.2l-2.3 2.3"></path>
+        </svg>
+      </a>
+    {% endif %}
     {# A PLAIN form, not htmx, so it does not inherit base.html's hx-headers --
        the token has to travel as a field. app.py's csrf_gate reads either. #}
     <form method="post" action="/logout" class="inline-form">
       <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
       <button class="btn" type="submit">[ LOGOUT ]</button></form>
-    <form method="post" action="/logout-everywhere" class="inline-form"
-          title="revoke this account's sessions on every device -- use it if a machine was lost">
-      <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
-      <button class="btn" type="submit">[ LOGOUT ALL ]</button></form>
   {% else %}
     <a class="btn" href="/login">[ LOGIN ]</a>
   {% endif %}

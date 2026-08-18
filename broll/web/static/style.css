@@ -247,6 +247,143 @@ a.brand:hover { color: var(--red-hot); }
   padding: 0 0.45rem 0 0.55rem;
 }
 
+/* ===== BEGIN nav drawer, menu button, settings gear (2026-08-18) =========
+   The owner's nav redesign: the module links left the bar for a drawer that
+   slides in from the left, and Settings gained a gear on the right. This
+   block is IDENTICAL in all four stylesheets (dashboard, b-roll, music,
+   ytdl), because the header the three SPAs inject from /partials/topbar is
+   painted by THEIR stylesheet, not the dashboard's.
+
+   The drawer is the HTML popover API and nothing else -- no script anywhere.
+   That is forced: the partial is injected with innerHTML, which never runs a
+   <script> it carries, so a listener-based drawer would be dead on exactly
+   the three pages that need it. popover also renders in the TOP LAYER, above
+   every z-index on the page, which a checkbox hack could not do here: the
+   SPAs' #app-header is `position: sticky; z-index: 10`, so a drawer nested
+   inside it would be trapped in that stacking context and painted over by
+   their own overlays. Esc, click-outside and ::backdrop come with it. */
+
+/* The three vertical bars, DRAWN not set: a glyph would be at the mercy of
+   whichever monospace face the machine has, and half of them centre it
+   differently. 2px bar + 4px gap over a 14px box is exactly three bars. */
+.menu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--red);
+}
+.menu-btn::before { content: "["; }
+.menu-btn::after { content: "]"; }
+.menu-btn:hover { color: var(--red-hot); text-shadow: 0 0 10px rgba(255, 92, 115, 0.7); }
+.menu-bars {
+  display: inline-block;
+  width: 14px;
+  height: 11px;
+  background: repeating-linear-gradient(to right, currentColor 0 2px, transparent 2px 6px);
+}
+
+/* Paint only, out here where an ancient browser can still use it: without
+   popover support the panel simply stays in the header as a block of links.
+   Everything below is inside @supports so that browser is never left with a
+   fixed panel it has no way to dismiss covering a third of the window. */
+.nav-drawer {
+  width: 280px;
+  max-width: 86vw;
+  padding: 0;
+  overflow: auto;
+  flex-direction: column;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+@supports selector(:popover-open) {
+  .nav-drawer {
+    /* The UA's popover box is a centred fit-content card with a border and
+       padding; every part of that is replaced here. */
+    position: fixed;
+    inset: 0 auto 0 0;
+    margin: 0;
+    height: 100%;
+    border: none;
+    border-right: 1px solid var(--red);
+    box-shadow: 0 0 30px rgba(255, 33, 64, 0.22);
+    transform: translateX(-100%);
+    transition: transform 0.16s ease-out;
+  }
+  /* No `display` in the rule above ON PURPOSE: an author display would beat
+     the UA's `[popover]:not(:popover-open) { display: none }` and the drawer
+     would never close. It is declared only for the open state. */
+  .nav-drawer:popover-open {
+    display: flex;
+    transform: translateX(0);
+  }
+  /* An element entering the top layer has no previous style to animate from,
+     so the slide needs its starting point spelled out. */
+  @starting-style {
+    .nav-drawer:popover-open { transform: translateX(-100%); }
+  }
+  .nav-drawer::backdrop { background: rgba(5, 5, 8, 0.72); }
+}
+.drawer-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.9rem 1rem 0.6rem;
+  border-bottom: 1px solid var(--red-dim);
+}
+.drawer-brand {
+  color: var(--red);
+  font-weight: bold;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+.drawer-head .dim { color: var(--red-dim); }
+.drawer-close { color: var(--red-dim); font-size: 11px; }
+.drawer-close:hover { color: var(--red-hot); }
+.drawer-nav { display: flex; flex-direction: column; padding: 0.6rem 0; }
+.drawer-item {
+  color: var(--red);
+  padding: 0.45rem 1rem;
+  letter-spacing: 0.06em;
+  border-left: 2px solid transparent;
+}
+.drawer-item:hover {
+  color: var(--red-hot);
+  background: var(--field);
+  text-shadow: 0 0 10px rgba(255, 92, 115, 0.7);
+}
+/* The house current-selection idiom, same as .nav-link.nav-current: field
+   fill with a 2px red left accent. */
+.drawer-item.drawer-current,
+.drawer-item.drawer-current:hover {
+  background: var(--field);
+  border-left-color: var(--red);
+  color: var(--red-hot);
+}
+/* margin-top:auto parks the foot at the bottom of the panel however few
+   modules are mounted. */
+.drawer-foot {
+  margin-top: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.8rem 1rem;
+  border-top: 1px solid var(--red-dim);
+}
+.drawer-foot .muted { width: 100%; }
+
+/* The gear, admin only, straight to /admin/settings. currentColor on the
+   inline SVG is what makes it red, so it inherits the hover like a link. */
+.gear-link { color: var(--red); }
+.gear-link svg { vertical-align: -2px; }
+.gear-link:hover {
+  color: var(--red-hot);
+  filter: drop-shadow(0 0 6px rgba(255, 92, 115, 0.75));
+}
+/* ===== END nav drawer, menu button, settings gear ======================= */
+
 .rule {
   color: var(--red-dim);
   overflow: hidden;

@@ -198,20 +198,21 @@ fall back to accepting unsigned builds. Full detail:
 
 ### Step 7 — the first editor
 
-1. **Create the account.** Dashboard ▸ Admin ▸ Users ▸ add editor (needs
+1. **Create the account.** Dashboard ▸ Settings ▸ Users ▸ add editor (needs
    `DASH_NAS_PW` or `DASH_NAS_API_KEY` configured), or from the base rig:
    `python server/setup_editor_account.py --site site.toml --name <editor>
    --ssh-pubkey-file <their key.pub>` (`--dry-run` first).
    Editors are **SFTP-only** by default (`[stack] editor_shell = "sftp-only"`):
    nologin, `ForceCommand internal-sftp`, no password auth. See
    [`TENANCY.md`](TENANCY.md).
-2. **Send them the installer.** They sign in to the dashboard and click
-   `[ INSTALLER ]`, which serves the right package for their OS. The
+2. **Send them the installer.** They sign in to the dashboard, open the menu
+   (the three bars at the top left) and click `[ INSTALLER ]`, which serves
+   the right package for their OS. The
    walkthrough written for the editor is
    [`../installer/START_HERE.md`](../installer/START_HERE.md); the operator
    view is [`EDITOR_SETUP.md`](EDITOR_SETUP.md).
 3. **Approve them.** The wizard ends by showing the editor their **Syncthing
-   device ID** and **SSH public key**. Approve the device from Admin ▸ Users
+   device ID** and **SSH public key**. Approve the device from Settings ▸ Users
    (or `python server/accept_device.py`), and the SSH key goes on the account.
 4. **Tick their projects.** Nothing syncs to a machine until a project is
    ticked for that editor.
@@ -331,7 +332,7 @@ Decide this before the first editor signs in.
 
 Companions authenticate separately, with `X-CCSync-Token` plus an
 `X-CCSync-Identity` token minted by signing in from the tray. Prefer
-**per-editor report tokens** (Admin ▸ Users) over the one shared
+**per-editor report tokens** (Settings ▸ Users) over the one shared
 `DASH_REPORT_TOKEN`: they are revocable one person at a time and they *bind*,
 so a token cannot report as somebody else. Once the Users page shows no
 machines still on the shared credential, set
@@ -363,7 +364,7 @@ Then check by hand:
       `folder_errors`.
 - [ ] Signing in to the dashboard with an editor's NAS credentials works, and
       that editor sees only their own rows.
-- [ ] Admin ▸ Users lists your editors and **not** the stack's service
+- [ ] Settings ▸ Users lists your editors and **not** the stack's service
       account (it is filtered out on purpose).
 - [ ] Publishing a build is refused with a clear 503 when
       `DASH_RELEASE_PUBKEYS` is unset — then works once it is set.

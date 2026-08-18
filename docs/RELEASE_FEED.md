@@ -364,8 +364,9 @@ POST /api/v1/admin/feed/policy      {policy}
 ```
 
 All four require an admin session, exactly like `/api/v1/admin/packages`.
-The admin page (`Admin → Users`, `[ AVAILABLE FROM THE VENDOR ]` section
-under Published Packages) is the same underlying functions
+The admin page (`Settings → Packages`, i.e. `/admin/packages`, the
+`[ AVAILABLE FROM THE VENDOR ]` section under Published Packages; it was the
+bottom of the Users page until 2026-08-18) is the same underlying functions
 (`release_feed.py`) driven from htmx partials instead — "Check now" from a
 script and "Check now" from the browser behave identically.
 

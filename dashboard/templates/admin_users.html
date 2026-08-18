@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}CC SYNC: USERS  <script src="/static/dashboard_update.js" defer></script>
-{% endblock %}
+{% block title %}CC SYNC: USERS{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
+    {% include "partials/settings_nav.html" %}
     <div hx-get="/partials/admin/users" hx-trigger="every 30s" hx-swap="innerHTML">
       {% include "partials/admin_users.html" %}
     </div>
@@ -26,15 +26,9 @@
        unreachable because the NAS is the thing that is broken. #}
     <div style="margin-top:1.6rem" hx-get="/partials/admin/fleet-halt"
          hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
-    <div style="margin-top:1.6rem" hx-get="/partials/admin/packages" hx-trigger="every 30s" hx-swap="innerHTML">
-      {% include "partials/admin_packages.html" %}
-    </div>
-    {# The dashboard's OWN code (ZERO_TOUCH_PLAN.md WP K). Loaded on its own
-       trigger and, unlike the packages panel above, NOT polled: an update in
-       flight owns this panel and static/dashboard_update.js refreshes it,
-       because a 30s swap would throw the progress away mid-update. #}
-    <div style="margin-top:1.6rem" hx-get="/partials/admin/dashboard-update"
-         hx-trigger="load" hx-swap="innerHTML"></div>
+    {# The packages table, the vendor feed and the dashboard's own update USED
+       to be the bottom third of this page (2026-08-18): the owner went looking
+       for "where do I update the dashboard" and could not find it under four
+       panels about editor accounts. They are /admin/packages now. #}
   </main>
-  <script src="/static/dashboard_update.js" defer></script>
 {% endblock %}

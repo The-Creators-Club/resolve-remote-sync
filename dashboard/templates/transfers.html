@@ -5,7 +5,14 @@
          hx-trigger="every 30s" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
-  <main class="main" hx-get="/partials/transfers" hx-trigger="load, every 2s" hx-swap="innerHTML">
-    {% include "partials/transfers.html" %}
+  {# The 2s poll moved off <main> onto an inner wrapper (2026-08-18): the swap
+     is innerHTML, so anything rendered beside the partial inside the polled
+     element -- the Settings strip -- would be thrown away two seconds after
+     the page painted. #}
+  <main class="main">
+    {% include "partials/settings_nav.html" %}
+    <div hx-get="/partials/transfers" hx-trigger="load, every 2s" hx-swap="innerHTML">
+      {% include "partials/transfers.html" %}
+    </div>
   </main>
 {% endblock %}

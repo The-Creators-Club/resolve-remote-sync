@@ -2,6 +2,11 @@
 {% block title %}CC SYNC: SETUP{% endblock %}
 {% block layout %}
   <main class="main" id="setup-main" style="max-width:56rem">
+    {# Only for someone who is signed in: this page is also the FIRST-RUN
+       wizard, reachable with no session at all while setup_routes.first_run_
+       open() holds, and a hub strip shown to an anonymous visitor would be
+       three links that bounce them to /login. #}
+    {% if session_user %}{% include "partials/settings_nav.html" %}{% endif %}
     <div class="side-head">[ SETUP ]
       <span class="muted">First-run wizard -- every step here can be re-run later from Settings.</span>
     </div>

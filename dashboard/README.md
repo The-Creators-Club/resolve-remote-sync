@@ -103,8 +103,9 @@ HMAC token (`auth.py`), but every live session also has a row in
 `auth_sessions` keyed by `HMAC(secret, cookie)` — a keyed digest, so the table
 holds nothing replayable. A cookie with no row is not a session. Therefore:
 `[ LOGOUT ]` revokes rather than just deleting the browser's copy;
-`[ LOGOUT ALL ]` signs the account out on every device; and an admin can
-revoke anyone's from **Admin ▸ Users ▸ SIGNED-IN BROWSERS**
+`[ LOGOUT ALL ]` (in the menu drawer's foot since the 2026-08-18 nav
+redesign) signs the account out on every device; and an admin can
+revoke anyone's from **Settings ▸ Users ▸ SIGNED-IN BROWSERS**
 (`POST /partials/admin/sessions/revoke`). Lifetimes are 12h idle (refreshed by
 activity, at most one write per minute) and 7d absolute, both configurable.
 The companion's *identity* token is a separate credential and is not affected
@@ -171,7 +172,7 @@ cannot lock the operator out and cannot reopen password login for the fleet.
 
 **Per-editor report tokens.** The one `DASH_REPORT_TOKEN` every companion
 holds proves only "somebody in this fleet" — it is not revocable per person,
-and one leak is fleet-wide. Admin ▸ Users mints a **per-editor** token instead
+and one leak is fleet-wide. Settings ▸ Users mints a **per-editor** token instead
 (`cce1.<id>.<secret>`), stored hashed, revocable individually, and **bound**:
 `resolve_companion_credential` returns the editor it belongs to, so a report
 whose `editor_name` disagrees is a 401, and a selection read under it can only

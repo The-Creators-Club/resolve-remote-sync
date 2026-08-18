@@ -107,8 +107,8 @@ survives a restart. Two scopes:
 
 * **local** — tray → Advanced → *Stop ALL syncing on this machine…*. The
   editor can clear it (top-level *► Start syncing again*).
-* **fleet** — an admin sets it on the dashboard: Users page → **FLEET SYNC
-  HALT**, or `POST /api/v1/fleet/halt {"active": true, "reason": "..."}`
+* **fleet** — an admin sets it on the dashboard: Settings → Users →
+  **FLEET SYNC HALT**, or `POST /api/v1/fleet/halt {"active": true, "reason": "..."}`
   (admin only; `GET` is readable by any signed-in user). It is persisted in
   the `meta` table and handed to every companion on its **next report reply**
   (`commands.halt`), so a machine that is off right now adopts it when it comes

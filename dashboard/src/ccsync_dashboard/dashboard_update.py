@@ -77,11 +77,11 @@ log = logging.getLogger("ccsync.dashboard.dashboard_update")
 # tests (the same seam select_code_root.py exposes); a deployment never sets
 # these, and nothing reads them from a request.
 IMAGE_APP_ROOT = Path(os.environ.get("CCSYNC_APP_ROOT") or "/app")
-IMAGE_SUBAPP_ROOTS: tuple[tuple[str, str], ...] = (
-    ("broll-app", "/broll-app"),
-    ("music-app", "/music-app"),
-    ("ytdl-app", "/ytdl-app"),
-)
+# The three sub-app roots a code tree provides, in run.sh's order. They are
+# directory names inside a bundle here, and mount points (/broll-app, ...) in
+# the image -- deploy/select_code_root.py carries the same list for the same
+# reason, and the two must not disagree about the order.
+SUBAPP_DIRS: tuple[str, ...] = ("broll-app", "music-app", "ytdl-app")
 
 # The exit code run.sh's loop reads as "re-select the code root and exec me
 # again". 75 is EX_TEMPFAIL from sysexits.h -- a code no library and no
@@ -98,6 +98,11 @@ BOOT_HEALTHY_SECONDS = 45.0
 # Two failed boots of a volume tree revert it. One is not enough (a NAS that
 # lost power mid-boot is not a bad bundle); three would mean two full outages
 # before anything self-heals.
+#
+# The number that ACTS on this is deploy/select_code_root.py's own copy: it
+# runs before anything from this package is importable, so it cannot read this
+# one. Held here because this is where the reasoning belongs, and pinned
+# together by dashboard/tests/test_select_code_root.py.
 MAX_BOOT_ATTEMPTS = 2
 
 # Ceilings and floors for an apply. The bundle is ~1 MB of source today; 256
@@ -228,6 +233,35 @@ def image_version() -> str:
             _, _, value = stripped.partition("=")
             return value.strip().strip('"').strip("'")
     return ""
+
+
+def version_tuple(text: str) -> tuple[int, ...]:
+    """Dotted-numeric to a comparable tuple; () for anything else, which
+    compares lower than every real version. Mirrors
+    select_code_root.parse_version, which is the copy that decides at BOOT --
+    the two must agree, or the page would offer an update the container then
+    refuses to boot."""
+    raw = str(text or "").strip()
+    if not raw or any(ch not in "0123456789." for ch in raw):
+        return ()
+    try:
+        return tuple(int(p) for p in raw.split(".") if p != "")
+    except ValueError:
+        return ()
+
+
+def newer_than_image(version: str) -> bool:
+    """True when a bundle of `version` would actually be booted.
+
+    The image always wins a tie or better (select_code_root's rule), so
+    offering an older bundle would be offering a button whose only effect is
+    to land back on the image's own code. An image whose version cannot be
+    read at all answers True: that is the "no image to compare against" case,
+    and the boot-time check is still there behind it."""
+    image = version_tuple(image_version())
+    if not image:
+        return True
+    return version_tuple(version) > image
 
 
 def running_root() -> Path:
@@ -422,6 +456,12 @@ def preflight(settings, app_state, *, version: str, force: bool) -> dict[str, An
                  f"progress (step: {state.get('step')}). Wait for it to finish or fail.")
     if version == VERSION:
         raise DashboardUpdateError(409, f"this dashboard is already running {version}")
+    if not newer_than_image(version):
+        raise DashboardUpdateError(
+            409, f"dashboard {version} is not newer than the code in this container image "
+                 f"({image_version()}), and the image always wins at boot -- applying it "
+                 "would land right back on the image's own code. To go back, roll back "
+                 "instead.")
 
     root = code_dir(settings)
     try:
@@ -540,7 +580,7 @@ def bundle_pythonpath(root: Path) -> list[str]:
     puts them (`src` first). `templates/` and `static/` are found relative to
     `src`'s parent by ui.py/app.py, which is why the bundle root is what a
     tree is, not `src` alone."""
-    return [str(root / "src")] + [str(root / name) for name, _ in IMAGE_SUBAPP_ROOTS]
+    return [str(root / "src")] + [str(root / name) for name in SUBAPP_DIRS]
 
 
 # ---------------------------------------------------------------- stage-verify
@@ -942,6 +982,12 @@ def rollback(settings, *, to_version: str = "", restore_db: str = "",
         raise DashboardUpdateError(
             409, "this deployment updates from the base rig, not over the air "
                  "(bind-mount mode).")
+    state = read_state(settings)
+    if state.get("in_progress"):
+        raise DashboardUpdateError(
+            409, f"an update to {state.get('version') or 'another version'} is in progress "
+                 f"(step: {state.get('step')}) -- rolling back underneath it would race the "
+                 "swap. Wait for it to finish or fail.")
     current = _read_json(current_json_path(settings))
     if not current.get("version"):
         raise DashboardUpdateError(409, "this dashboard is already running the image's own code")
@@ -1016,6 +1062,12 @@ def status(settings, app_state) -> dict[str, Any]:
     for record in records:
         version = str(record.get("version") or "")
         if not version or version == VERSION:
+            continue
+        if not newer_than_image(version):
+            # Not an update from here: the image already carries that version
+            # or better, and it wins at boot. Left out of BOTH lists rather
+            # than shown as unavailable -- there is nothing for an admin to do
+            # about it, and a row nobody can act on is noise.
             continue
         entry = {
             "version": version,

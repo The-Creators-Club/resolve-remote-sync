@@ -312,6 +312,30 @@ def test_a_cleared_counter_is_a_fresh_start(world):
     assert proc.stdout.strip() == volume_path(world)
 
 
+def test_the_two_copies_of_the_watchdog_number_agree(world):
+    """select_code_root.py cannot import dashboard_update (it runs before the
+    app's imports are on the path at all), so MAX_BOOT_ATTEMPTS exists twice.
+    A disagreement would be a tree reverted a boot too early or a boot too
+    late, silently."""
+    from ccsync_dashboard import dashboard_update
+
+    text = SCRIPT.read_text(encoding="utf-8")
+    in_script = int(next(line for line in text.splitlines()
+                         if line.startswith("MAX_BOOT_ATTEMPTS")).split("=")[1])
+    assert in_script == dashboard_update.MAX_BOOT_ATTEMPTS
+
+
+def test_the_two_copies_of_the_subapp_list_agree(world):
+    """Same reasoning for the three sub-app roots: the order is what run.sh
+    exports, and `app`/`musicweb`/`ytdlweb` colliding or arriving in the wrong
+    order is the failure CLAUDE.md warns about."""
+    from ccsync_dashboard import dashboard_update
+
+    text = SCRIPT.read_text(encoding="utf-8")
+    line = next(ln for ln in text.splitlines() if ln.startswith("SUBAPP_DIRS"))
+    assert tuple(eval(line.split("=", 1)[1].strip())) == dashboard_update.SUBAPP_DIRS
+
+
 def test_a_read_only_data_volume_still_boots(world):
     """Nothing in this script may stop the container starting. A /data it
     cannot write means no watchdog bookkeeping, not a dead dashboard."""

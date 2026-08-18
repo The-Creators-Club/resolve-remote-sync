@@ -49,7 +49,7 @@ RUNTIME_ID = "a" * 64
 
 # The fake-opener machinery is test_release_feed's; imported rather than
 # copied so the two suites cannot drift about what "the network" looks like.
-from test_release_feed import _FakeOpener, as_user, patch_opener  # noqa: E402
+from test_release_feed import as_user, patch_opener  # noqa: E402
 
 
 def sign_record(record: dict, seed: bytes = TEST_SEED) -> dict:
@@ -137,6 +137,15 @@ def world(tmp_path, monkeypatch):
         yield {"client": client, "settings": settings, "app": app,
                "restarts": restarts, "exits": exits, "data": data,
                "runtime_id_file": rid}
+
+
+def finish_the_restart(world):
+    """What the container does between an apply and the next request: the
+    lifespan's shutdown path consumes the restart flag (clearing
+    `in_progress`) and exits 75, run.sh re-execs, and the new process comes up
+    on the new tree. `_signal_restart` and `_exit_process` are stubbed in this
+    suite, so a test that wants the AFTER state has to run this step itself."""
+    dashboard_update.finish_restart(world["settings"])
 
 
 def check(world, records: list[dict], monkeypatch, extra: dict | None = None):
@@ -235,6 +244,18 @@ def test_the_running_version_is_refused(world, monkeypatch):
     r = world["client"].post("/api/v1/admin/dashboard-update/apply", json={"version": VERSION})
     assert r.status_code == 409
     assert "already running" in r.json()["detail"]
+
+
+def test_a_version_the_image_already_carries_is_neither_offered_nor_applied(world, monkeypatch):
+    """select_code_root gives a tie (or better) to the image, so applying an
+    older bundle would land right back on the image's own code. Offering that
+    button would be offering a no-op with a ten-second outage attached."""
+    check(world, [make_dashboard_record(b"x", version="0.4.0")], monkeypatch)
+    status = world["client"].get("/api/v1/admin/dashboard-update").json()
+    assert status["code_updates"] == [] and status["runtime_updates"] == []
+    r = world["client"].post("/api/v1/admin/dashboard-update/apply", json={"version": "0.4.0"})
+    assert r.status_code == 409
+    assert "not newer than the code in this container image" in r.json()["detail"]
 
 
 def test_a_creative_version_is_refused_before_anything_else(world):
@@ -475,6 +496,7 @@ def test_a_bundle_that_fails_its_checks_is_never_swapped_in(world, monkeypatch, 
 def test_rollback_swaps_back_and_asks_to_restart(real_bundle_world):
     settings = real_bundle_world["settings"]
     dashboard_update.apply(settings, real_bundle_world["app"].state, version=NEW_VERSION)
+    finish_the_restart(real_bundle_world)
     result = dashboard_update.rollback(settings, started_by="owen")
     current = json.loads((dashboard_update.current_json_path(settings)).read_text())
     assert result["version"] == "image"
@@ -483,6 +505,18 @@ def test_rollback_swaps_back_and_asks_to_restart(real_bundle_world):
     assert real_bundle_world["restarts"] == [1, 1]
     # The tree stays on disk: rolling forward again must not need a download.
     assert (dashboard_update.code_dir(settings) / NEW_VERSION / "manifest.json").is_file()
+
+
+def test_rollback_while_an_update_runs_is_refused(real_bundle_world):
+    settings = real_bundle_world["settings"]
+    dashboard_update.apply(settings, real_bundle_world["app"].state, version=NEW_VERSION)
+    finish_the_restart(real_bundle_world)
+    dashboard_update._set_state(settings, in_progress=True, step="downloading",
+                                version="9.9.10")
+    with pytest.raises(dashboard_update.DashboardUpdateError) as exc:
+        dashboard_update.rollback(settings)
+    assert exc.value.status_code == 409
+    assert "in progress" in exc.value.detail
 
 
 def test_rollback_with_nothing_applied_is_refused(world):
@@ -494,6 +528,7 @@ def test_rollback_with_nothing_applied_is_refused(world):
 def test_rollback_to_a_version_that_was_never_applied_is_a_404(real_bundle_world):
     settings = real_bundle_world["settings"]
     dashboard_update.apply(settings, real_bundle_world["app"].state, version=NEW_VERSION)
+    finish_the_restart(real_bundle_world)
     with pytest.raises(dashboard_update.DashboardUpdateError) as exc:
         dashboard_update.rollback(settings, to_version="8.8.8")
     assert exc.value.status_code == 404
@@ -511,6 +546,7 @@ def test_rollback_can_restore_a_named_database_backup(real_bundle_world):
     conn.close()
 
     dashboard_update.apply(settings, real_bundle_world["app"].state, version=NEW_VERSION)
+    finish_the_restart(real_bundle_world)
     name = dashboard_update.list_backups(settings)[0]["name"]
 
     conn = dbmod.connect(settings.db_path)

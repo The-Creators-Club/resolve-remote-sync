@@ -1,5 +1,6 @@
-<!-- DRAFT FOR COUNSEL — NOT LEGAL ADVICE. Generated 2026-08-17 for
-     docs/COMMERCIAL_READINESS.md item 3.
+<!-- DRAFT FOR COUNSEL — NOT LEGAL ADVICE. First written 2026-08-17 for
+     docs/COMMERCIAL_READINESS.md item 3; the tables below are
+     regenerated, and `git log` on this file is when they last were.
      GENERATED FILE — the pip sections below are produced by
      `python tools/gen_notices.py`. Edit that script, not these tables.
      The block between <!-- BEGIN HAND-MAINTAINED --> and
@@ -65,19 +66,23 @@ installs `dashboard/deploy/requirements.txt`.
 
 ### companion
 
-editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `E:\Projects\resolve-remote-sync\companion\.venv` — 17 package(s).
+editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `E:\Projects\resolve-remote-sync\companion\.venv` — 22 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
 | `altgraph` | 0.17.5 | MIT License | https://altgraph.readthedocs.io |
-| `ccsync-companion` | 0.8.0 | UNKNOWN | UNKNOWN |
-| `ccsync-companion` | 0.8.0 | UNKNOWN | UNKNOWN |
+| `ccsync-companion` | 0.9.0 | UNKNOWN | UNKNOWN |
+| `ccsync-companion` | 0.9.0 | UNKNOWN | UNKNOWN |
 | `colorama` | 0.4.6 | BSD License | https://github.com/tartley/colorama |
+| `flatbuffers` | 25.12.19 | Apache Software License | https://google.github.io/flatbuffers/ |
 | `iniconfig` | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
+| `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | https://numpy.org |
+| `onnxruntime` | 1.29.0 | MIT License | https://onnxruntime.ai |
 | `packaging` | 26.2 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | `pefile` | 2024.8.26 | MIT | https://github.com/erocarrera/pefile |
 | `pillow` | 12.3.0 | MIT-CMU | https://python-pillow.github.io |
 | `pluggy` | 1.6.0 | MIT License | UNKNOWN |
+| `protobuf` | 7.35.1 | 3-Clause BSD License | https://developers.google.com/protocol-buffers/ |
 | `Pygments` | 2.20.0 | BSD-2-Clause | https://pygments.org |
 | `pyinstaller` | 6.21.0 | GNU General Public License v2 (GPLv2) | https://pyinstaller.org |
 | `pyinstaller-hooks-contrib` | 2026.6 | Apache Software License; GNU General Public License v2 (GPLv2) | https://github.com/pyinstaller/pyinstaller-hooks-contrib |
@@ -86,10 +91,11 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 | `pywin32-ctypes` | 0.2.3 | BSD-3-Clause | https://github.com/enthought/pywin32-ctypes |
 | `six` | 1.17.0 | MIT License | https://github.com/benjaminp/six |
 | `watchdog` | 6.0.0 | Apache Software License | https://github.com/gorakhargosh/watchdog |
+| `xxhash` | 4.0.1 | BSD-2-Clause | https://github.com/ifduyue/python-xxhash |
 
 ### dashboard
 
-FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `E:\Projects\resolve-remote-sync\dashboard\.venv` — 53 package(s).
+FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `E:\Projects\resolve-remote-sync\dashboard\.venv` — 55 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -117,11 +123,13 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 | `idna` | 3.18 | BSD-3-Clause | https://github.com/kjd/idna |
 | `iniconfig` | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
 | `invoke` | 3.0.3 | BSD-2-Clause | https://github.com/pyinvoke/invoke |
+| `jieba` | 0.42.1 | MIT License | https://github.com/fxsjy/jieba |
 | `Jinja2` | 3.1.6 | BSD License | https://github.com/pallets/jinja/ |
 | `jiter` | 0.16.0 | MIT | https://github.com/pydantic/jiter/ |
 | `MarkupSafe` | 3.0.3 | BSD-3-Clause | https://github.com/pallets/markupsafe/ |
 | `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | https://numpy.org |
 | `onnxruntime` | 1.28.0 | MIT License | https://onnxruntime.ai |
+| `opencc-python-reimplemented` | 0.1.7 | Apache Software License | https://github.com/yichen0831/opencc-python |
 | `packaging` | 26.3 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | `paramiko` | 5.0.0 | LGPL-2.1 | https://github.com/paramiko/paramiko |
 | `pluggy` | 1.6.0 | MIT License | UNKNOWN |
@@ -245,7 +253,7 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 
 ## All pip dependencies (merged)
 
-95 distinct (package, version) pair(s) across every scanned venv.
+97 distinct (package, version) pair(s) across every scanned venv.
 
 | Package | Version | Licence | Components | Licence text on disk |
 |---|---|---|---|---|
@@ -259,7 +267,7 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `bcrypt` | 5.0.0 | Apache Software License | dashboard | yes |
 | `bgutil-ytdlp-pot-provider` | 1.3.1 | GNU General Public License v3 (GPLv3) | dashboard | no |
 | `broll-web` | 0.1.0 | UNKNOWN | broll/web | no |
-| `ccsync-companion` | 0.8.0 | UNKNOWN | companion, companion | no |
+| `ccsync-companion` | 0.9.0 | UNKNOWN | companion, companion | no |
 | `ccsync-dashboard` | 0.1.0 | UNKNOWN | dashboard, dashboard | no |
 | `certifi` | 2026.7.22 | Mozilla Public License 2.0 (MPL 2.0) | dashboard, music/web | yes |
 | `certifi` | 2026.6.17 | Mozilla Public License 2.0 (MPL 2.0) | broll/web | yes |
@@ -275,7 +283,7 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `fastapi` | 0.139.2 | MIT | broll/web | yes |
 | `fastembed` | 0.8.0 | Other/Proprietary License | broll/web | yes |
 | `filelock` | 3.31.1 | MIT | broll/web | yes |
-| `flatbuffers` | 25.12.19 | Apache Software License | dashboard, music/web, broll/web | no |
+| `flatbuffers` | 25.12.19 | Apache Software License | companion, dashboard, music/web, broll/web | no |
 | `fsspec` | 2026.6.0 | BSD-3-Clause | broll/web | yes |
 | `h11` | 0.16.0 | MIT License | dashboard, music/web, broll/web | yes |
 | `hf-xet` | 1.5.2 | Apache-2.0 | broll/web | yes |
@@ -286,24 +294,25 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `idna` | 3.18 | BSD-3-Clause | dashboard, music/web, broll/web | yes |
 | `iniconfig` | 2.3.0 | MIT | companion, dashboard, music/web, broll/web | yes |
 | `invoke` | 3.0.3 | BSD-2-Clause | dashboard | yes |
-| `jieba` | 0.42.1 | MIT License | broll/web | no |
+| `jieba` | 0.42.1 | MIT License | dashboard, broll/web | no |
 | `Jinja2` | 3.1.6 | BSD License | dashboard | yes |
 | `jiter` | 0.16.0 | MIT | dashboard | yes |
 | `loguru` | 0.7.3 | MIT License | broll/web | no |
 | `MarkupSafe` | 3.0.3 | BSD-3-Clause | dashboard | yes |
 | `mmh3` | 5.2.1 | MIT License | broll/web | yes |
-| `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | dashboard, music/web | yes |
+| `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | companion, dashboard, music/web | yes |
 | `numpy` | 2.5.1 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | broll/web | yes |
+| `onnxruntime` | 1.29.0 | MIT License | companion | yes |
 | `onnxruntime` | 1.28.0 | MIT License | dashboard, music/web | yes |
 | `onnxruntime` | 1.27.0 | MIT License | broll/web | yes |
-| `opencc-python-reimplemented` | 0.1.7 | Apache Software License | broll/web | yes |
+| `opencc-python-reimplemented` | 0.1.7 | Apache Software License | dashboard, broll/web | yes |
 | `packaging` | 26.2 | Apache-2.0 OR BSD-2-Clause | companion, broll/web | yes |
 | `packaging` | 26.3 | Apache-2.0 OR BSD-2-Clause | dashboard, music/web | yes |
 | `paramiko` | 5.0.0 | LGPL-2.1 | dashboard | yes |
 | `pefile` | 2024.8.26 | MIT | companion | yes |
 | `pillow` | 12.3.0 | MIT-CMU | companion, broll/web | yes |
 | `pluggy` | 1.6.0 | MIT License | companion, dashboard, music/web, broll/web | yes |
-| `protobuf` | 7.35.1 | 3-Clause BSD License | dashboard, music/web, broll/web | yes |
+| `protobuf` | 7.35.1 | 3-Clause BSD License | companion, dashboard, music/web, broll/web | yes |
 | `py_rust_stemmers` | 0.1.8 | UNKNOWN | broll/web | yes |
 | `pycparser` | 3.0 | BSD-3-Clause | dashboard | yes |
 | `pydantic` | 2.13.4 | MIT | dashboard, music/web, broll/web | yes |
@@ -343,6 +352,7 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `websockets` | 17.0.1 | BSD-3-Clause | music/web | yes |
 | `websockets` | 16.1.1 | BSD-3-Clause | broll/web | yes |
 | `win32_setctime` | 1.2.0 | MIT License | broll/web | yes |
+| `xxhash` | 4.0.1 | BSD-2-Clause | companion | yes |
 | `yt-dlp` | 2026.7.4 | Unlicense | dashboard | yes |
 
 <!-- BEGIN HAND-MAINTAINED -->
@@ -414,6 +424,14 @@ Windows "essentials" build and evermeet's macOS builds one-file-per-platform.
 Each asset is sha256-pinned in that module. The download is performed by the
 editor's own machine from GitHub, so upstream is the one conveying (mode B);
 we choose the build.
+
+*Scope change 2026-08-18:* `ensure_ffmpeg_pair` is no longer behind the
+`youtube_download` feature gate, because b-roll and music ingest need ffmpeg on
+any machine an editor drops files on. The mode is unchanged (still B, still the
+editor's own machine fetching from GitHub) but the population is: **every**
+editor machine now installs a GPLv3 ffmpeg, where before only a
+youtube-enabled fleet's did. Counsel should read the written offer below
+knowing that, rather than as an edge case.
 
 **NAS side.** `server/install_dashboard_app.py` puts johnvansickle's
 `ffmpeg-7.0.2-amd64-static` on the customer's NAS for `/music`'s ingest

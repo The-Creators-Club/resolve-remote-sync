@@ -184,8 +184,15 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
     lines: list[str] = []
     add = lines.append
 
-    add("<!-- DRAFT FOR COUNSEL — NOT LEGAL ADVICE. Generated 2026-08-17 for")
-    add("     docs/COMMERCIAL_READINESS.md item 3.")
+    # No run date in the header, deliberately: --check compares the rendered
+    # text against the file, so a timestamp would make every check fail on the
+    # day after a regeneration. 2026-08-17 is when this file was FIRST written;
+    # what the tables say is true of whatever venvs the last run scanned, and
+    # `git log docs/legal/THIRD_PARTY_NOTICES.md` is the honest answer to when
+    # (2026-08-18).
+    add("<!-- DRAFT FOR COUNSEL — NOT LEGAL ADVICE. First written 2026-08-17 for")
+    add("     docs/COMMERCIAL_READINESS.md item 3; the tables below are")
+    add("     regenerated, and `git log` on this file is when they last were.")
     add("     GENERATED FILE — the pip sections below are produced by")
     add("     `python tools/gen_notices.py`. Edit that script, not these tables.")
     add("     The block between <!-- BEGIN HAND-MAINTAINED --> and")

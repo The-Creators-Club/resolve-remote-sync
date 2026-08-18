@@ -375,6 +375,34 @@ DEFAULTS: dict[str, Any] = {
     # sitting in front of. On for a machine that leaves UNATTENDED renders
     # going, which idleness cannot see (it looks exactly like being away).
     "proxy_gen_skip_while_resolve_running": False,
+    # -- b-roll ingest (docs/BROLL_INGEST_PLAN.md, 2026-08-18) -------------
+    # Drag clips onto the dashboard's b-roll page and THIS machine indexes
+    # them: ffmpeg, then a local Qwen3-VL, then rclone to the NAS. On by
+    # default and still inert on every machine nobody drops anything on --
+    # the orchestrator claims nothing until a batch is handed to it.
+    "broll_ingest_enabled": True,
+    # Seconds away from keyboard/mouse before a batch in "only when idle"
+    # mode may crunch. Defaults to the proxy generator's number because it is
+    # the same judgement about the same machine; a batch run in FOREGROUND
+    # mode ignores this gate entirely (owner review (b)).
+    "broll_ingest_idle_seconds": 300,
+    # Stand down while Resolve is open. TRUE here where the proxy
+    # generator's equivalent is false: this feature wants 4-12 GB of VRAM for
+    # llama-server, which is exactly what a Resolve timeline is using.
+    # Idle-mode batches only -- foreground means the editor asked for it now.
+    "broll_ingest_skip_while_resolve": True,
+    # Free space kept clear where clips are staged. Same floor and the same
+    # reasoning as proxy_gen_free_space_floor_gb: staging is inside the tree.
+    "broll_ingest_free_space_floor_gb": 20,
+    # How many ffmpeg children one batch may run at once. Two, not four: the
+    # describe stage owns the GPU and a wide encode beside it just makes both
+    # slower.
+    "broll_ingest_max_concurrent_ffmpeg": 2,
+    # Override for where clips are staged. Blank = inside the archive
+    # (<local_root>/Assets/B-roll Archive/.ingest). The BASE RIG needs this:
+    # its local_root IS the NAS share, so staging there pushes every original
+    # over SMB twice.
+    "broll_ingest_staging_dir": "",
     # Hand the BRAW/R3D/CRM gap to the Blackmagic Proxy Generator once the
     # ffmpeg queue is empty (see bpg.py). Tri-state like proxy_gen_enabled:
     # None derives "wherever this machine generates proxies AND has BPG
@@ -934,6 +962,31 @@ proxy_gen_min_age_seconds = 120
 # gate already covers a Resolve you are sitting in front of. Turn it on if you
 # leave UNATTENDED renders going, which idleness cannot see.
 # proxy_gen_skip_while_resolve_running = false
+
+# -- b-roll ingest ----------------------------------------------------------
+# Drag clips onto the dashboard's b-roll page and THIS machine indexes them:
+# ffmpeg makes the proxy, sprite, poster and the frames, a local Qwen3-VL
+# describes them, and rclone puts the results in the archive on the NAS. It
+# claims nothing until somebody drops something, so leaving it on costs a
+# machine that never ingests exactly nothing.
+# broll_ingest_enabled = true
+# Seconds away from the keyboard before an "only when idle" batch may crunch.
+# A batch run in FOREGROUND mode ignores this and the Resolve gate below.
+# broll_ingest_idle_seconds = 300
+# Stand down while Resolve is open. ON here, unlike the proxy generator's
+# equivalent: indexing wants 4-12 GB of VRAM for the local model, which is
+# what the timeline you left open is using.
+# broll_ingest_skip_while_resolve = true
+# Free space kept clear where clips are staged (staging is inside the tree).
+# broll_ingest_free_space_floor_gb = 20
+# ffmpeg children one batch may run at once. The describe stage owns the GPU;
+# a wider encode beside it just makes both slower.
+# broll_ingest_max_concurrent_ffmpeg = 2
+# Where clips are staged. "" = inside the archive
+# (<local_root>/Assets/B-roll Archive/.ingest). THE BASE RIG NEEDS THIS SET:
+# its local_root is the NAS share, so staging there sends every original over
+# SMB twice.
+# broll_ingest_staging_dir = ''
 
 # Let the Blackmagic Proxy Generator make the proxies ffmpeg cannot: BRAW, R3D
 # and CRM are counted and reported but never queued here, because ffmpeg cannot

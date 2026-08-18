@@ -17,6 +17,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import socket
 import threading
 from pathlib import Path
 
@@ -147,6 +148,29 @@ class BrollClient:
         conn.endheaders()
         if payload:
             conn.send(payload)
+        resp = conn.getresponse()
+        body = resp.read()
+        out = dict(resp.getheaders())
+        conn.close()
+        return resp.status, out, body
+
+    def put(self, path: str, payload: bytes, content_type="application/octet-stream",
+            ingest_header="1", token=False, origin=None, content_length=None):
+        """A streamed upload with EXACTLY the envelope the caller names.
+
+        Defaults to the browser's shape (octet-stream + X-CCSync-Ingest) but
+        with neither Origin nor token, so the auth matrix can be driven one
+        header at a time.
+        """
+        conn = self._connect()
+        headers = {"Content-Length": str(len(payload) if content_length is None
+                                         else content_length)}
+        if content_type is not None:
+            headers["Content-Type"] = content_type
+        if ingest_header is not None:
+            headers[broll_server.INGEST_HEADER] = ingest_header
+        headers.update(self._auth_headers(token, origin))
+        conn.request("PUT", path, body=payload, headers=headers)
         resp = conn.getresponse()
         body = resp.read()
         out = dict(resp.getheaders())
@@ -2038,3 +2062,616 @@ def test_the_downloading_state_travels_over_http(live_server, tmp_path, monkeypa
     assert data["ok"] is False
     assert data["state"] == "downloading"
     assert data["progress"]["percent"] == 40
+
+
+# ===========================================================================
+# b-roll ingest routes (docs/BROLL_INGEST_PLAN.md §4.1, PR-G, 2026-08-18)
+# ===========================================================================
+#
+# The orchestrator itself is test_broll_ingest.py's; everything here is about
+# the ENVELOPE -- who may PUT bytes into staging, what the cap is on that one
+# route, where the file is allowed to land, and that every route still refuses
+# cleanly on a companion whose orchestrator never constructed.
+
+
+class FakeIngestor:
+    """The orchestrator's surface as broll_server uses it, and nothing else.
+
+    Deliberately a stub rather than a real BrollIngestor: these tests are about
+    the HTTP layer's rules, and a real one would drag ffmpeg, a GPU probe and a
+    fleet client into an assertion about a 415.
+    """
+
+    def __init__(self, staging_root):
+        self.staging_root = str(staging_root)
+        self.calls: list = []
+        self.slot_status = 200
+        self.slot_extra: dict = {}
+        self.uploads: list = []
+        self.busy_state = {"batch_uid": None, "state": "nothing-to-do"}
+        self.run_result = (202, {"ok": True, "batch_uid": "b" * 32, "state": "claimed"})
+        self.prepare_result = (202, {"ok": True, "staging_id": "s1", "items": []})
+        self.control_result = (200, {"ok": True, "state": "paused"})
+        self.thumb_result = (200, b"\xff\xd8jpegbytes")
+        self.stopped = False
+
+    # -- what broll_server calls ------------------------------------------
+    def busy(self):
+        return dict(self.busy_state)
+
+    def upload_slot(self, staging_id, local_id):
+        self.calls.append(("upload_slot", staging_id, local_id))
+        if self.slot_status != 200:
+            return self.slot_status, {"ok": False, "message": "no"}
+        dest = Path(self.staging_root) / staging_id / f"{local_id}.mp4"
+        return 200, {"path": str(dest), "staging_root": self.staging_root,
+                     "size": 10, **self.slot_extra}
+
+    def note_upload(self, staging_id, local_id, written):
+        self.uploads.append((staging_id, local_id, written))
+        return 200, {"ok": True, "size": written, "hash": "abc", "probe": {}}
+
+    def progress(self, staging_id):
+        self.calls.append(("progress", staging_id))
+        return {"staging": {"items": []}, "batch": {"uid": None}}
+
+    def thumb(self, staging_id, local_id):
+        self.calls.append(("thumb", staging_id, local_id))
+        return self.thumb_result
+
+    def prepare(self, body):
+        self.calls.append(("prepare", body))
+        return self.prepare_result
+
+    def run(self, batch_uid, staging_id, run_mode):
+        self.calls.append(("run", batch_uid, staging_id, run_mode))
+        return self.run_result
+
+    def control(self, action):
+        self.calls.append(("control", action))
+        return self.control_result
+
+    def stop(self):
+        self.stopped = True
+
+
+class FakeIngestDeps:
+    def __init__(self, ingestor, editor="alex"):
+        self.ingestor = ingestor
+        self._editor = editor
+
+    def editor(self):
+        return self._editor
+
+
+@pytest.fixture
+def ingest_server(companion_config, tmp_path, monkeypatch):
+    """A live server with an ingest-capable deps object on it."""
+    monkeypatch.setattr(broll_server.resolve_bridge, "try_connect", lambda: False)
+    staging = tmp_path / "staging"
+    (staging / "s1").mkdir(parents=True)
+    ingestor = FakeIngestor(staging)
+    srv = broll_server.make_server(
+        companion_config, host="127.0.0.1", port=0,
+        ccsync_cfg={"dashboard_url": DASH_ORIGIN,
+                    "broll_ingest_staging_dir": str(staging)},
+        ingest_deps=FakeIngestDeps(ingestor),
+    )
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield srv, BrollClient(srv.server_address[1]), ingestor, staging
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
+# -- capabilities -----------------------------------------------------------
+
+
+def test_capabilities_answers_200_even_when_this_machine_cannot_index(live_server):
+    """A non-200 reads to the page as "no companion here", which is a different
+    (and less useful) message than "this GPU is too small". The verdict is in
+    the body -- see ytdl's identical rule."""
+    srv, client = live_server
+
+    status, _headers, body = client.get("/broll/ingest/capabilities")
+
+    data = json.loads(body)
+    assert status == 200
+    assert data["ok"] is False
+    # No orchestrator on this server at all: that IS one of the reasons.
+    assert any("switched off" in r for r in data["reasons"])
+    assert data["run_modes"] == ["idle", "foreground"]
+
+
+def test_capabilities_reports_the_staging_floor_and_free_space(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    data = json.loads(client.get("/broll/ingest/capabilities")[2])
+
+    assert data["staging"]["dir"] == str(staging)
+    assert data["staging"]["floor_bytes"] == 20_000_000_000
+    assert data["staging"]["free_bytes"] > 0
+    assert set(data["tiers"]) == {"good", "best"}
+
+
+def test_capabilities_refuses_while_a_batch_is_already_running(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+    ingestor.busy_state = {"batch_uid": "a" * 32, "state": "running"}
+
+    data = json.loads(client.get("/broll/ingest/capabilities")[2])
+
+    assert data["ok"] is False
+    assert any("already indexing" in r for r in data["reasons"])
+    assert data["busy"]["batch_uid"] == "a" * 32
+
+
+def test_capabilities_does_no_gpu_probe(ingest_server, monkeypatch):
+    """ZERO I/O bar one disk_usage: the page asks this before it renders the
+    drop zone. A probe here would spawn nvidia-smi on every page load."""
+    srv, client, ingestor, staging = ingest_server
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("capabilities must not probe the GPU")
+
+    monkeypatch.setattr(broll_server.broll_vlm_sidecar, "gpu", _boom)
+    monkeypatch.setattr(broll_server.ffmpeg_tools, "detect_encoders", _boom)
+
+    assert client.get("/broll/ingest/capabilities")[0] == 200
+
+
+def test_capabilities_says_nvenc_is_unknown_until_something_probed(ingest_server):
+    """None, not False: "we have not asked" and "this build has no NVENC" send
+    an editor to different places. The encoder cache is a module global that
+    survives between tests (and, live, for the life of the process), so this
+    clears it rather than assuming what ran before it."""
+    from ccsync_companion import ffmpeg_tools
+
+    srv, client, ingestor, staging = ingest_server
+    ffmpeg_tools.reset_encoder_cache()
+
+    assert json.loads(client.get("/broll/ingest/capabilities")[2])["nvenc"] is None
+
+    ffmpeg_tools._encoder_cache["ffmpeg"] = frozenset({"h264_nvenc"})
+    try:
+        assert json.loads(client.get("/broll/ingest/capabilities")[2])["nvenc"] is True
+    finally:
+        ffmpeg_tools.reset_encoder_cache()
+
+
+# -- the JSON routes --------------------------------------------------------
+
+
+def test_prepare_run_and_control_reach_the_orchestrator(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    assert client.post_json("/broll/ingest/prepare", {"items": []})[0] == 202
+    assert client.post_json(
+        "/broll/ingest/run",
+        {"batch_uid": "b" * 32, "staging_id": "s1", "run_mode": "foreground"})[0] == 202
+    assert client.post_json("/broll/ingest/control", {"action": "pause"})[0] == 200
+
+    assert ("run", "b" * 32, "s1", "foreground") in ingestor.calls
+    assert ("control", "pause") in ingestor.calls
+
+
+def test_run_reads_only_the_three_fields_it_is_allowed_to(ingest_server):
+    """The tier, the archive names, the taxonomy and the settings all come back
+    from the server's claim under the fleet token. The browser dispatches; it
+    does not write the work order (the /music/send principle)."""
+    srv, client, ingestor, staging = ingest_server
+
+    client.post_json("/broll/ingest/run", {
+        "batch_uid": "b" * 32, "staging_id": "s1", "run_mode": "idle",
+        "tier": "best", "archive_dir": "../../etc", "upload_originals": False,
+    })
+
+    assert ingestor.calls[-1] == ("run", "b" * 32, "s1", "idle")
+
+
+def test_start_now_is_the_legacy_spelling_of_foreground(ingest_server):
+    """The plan's first draft called it `start_now`, and a page cached before
+    2026-08-18 still sends it. run_mode wins when both arrive."""
+    srv, client, ingestor, staging = ingest_server
+
+    client.post_json("/broll/ingest/run",
+                     {"batch_uid": "b" * 32, "staging_id": "s1", "start_now": True})
+    assert ingestor.calls[-1] == ("run", "b" * 32, "s1", "foreground")
+
+    client.post_json("/broll/ingest/run",
+                     {"batch_uid": "b" * 32, "staging_id": "s1",
+                      "start_now": True, "run_mode": "idle"})
+    assert ingestor.calls[-1] == ("run", "b" * 32, "s1", "idle")
+
+
+def test_the_tier_block_carries_what_the_page_renders(ingest_server):
+    """The SPA disables a tier it cannot run and confirms the download size
+    before Run, so both have to be in the capability answer."""
+    srv, client, ingestor, staging = ingest_server
+
+    tiers = json.loads(client.get("/broll/ingest/capabilities")[2])["tiers"]
+
+    assert tiers["best"]["vram_gb"] == 12
+    assert tiers["good"]["vram_gb"] == 8
+    assert tiers["good"]["download_bytes"] > 3_000_000_000
+    assert tiers["good"]["label"]
+    assert isinstance(tiers["good"]["fits"], bool)
+
+
+def test_run_answers_the_orchestrators_refusal_verbatim(ingest_server):
+    """A tier that does not fit is a 503 whose message is the one the tray
+    balloons -- the page must be able to show the same sentence."""
+    srv, client, ingestor, staging = ingest_server
+    ingestor.run_result = (503, {"ok": False, "message": (
+        "Can't index b-roll: Best needs 12 GB VRAM, this GPU has 8 GB — choose Good")})
+
+    status, _headers, body = client.post_json(
+        "/broll/ingest/run", {"batch_uid": "b" * 32, "staging_id": "s1"})
+
+    assert status == 503
+    assert "12 GB VRAM" in json.loads(body)["message"]
+
+
+def test_progress_and_thumb_answer_from_staging(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    status, _h, body = client.get("/broll/ingest/progress?staging_id=s1")
+    assert status == 200
+    assert json.loads(body)["staging"] == {"items": []}
+
+    status, headers, body = client.get("/broll/ingest/thumb?staging_id=s1&local_id=x")
+    assert status == 200
+    assert headers["Content-Type"] == "image/jpeg"
+    assert headers["Cache-Control"] == "no-store"
+    assert body == b"\xff\xd8jpegbytes"
+
+
+def test_a_thumb_refusal_is_json_not_a_broken_image(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+    ingestor.thumb_result = (404, {"ok": False, "message": "no such clip"})
+
+    status, headers, body = client.get("/broll/ingest/thumb?staging_id=s1&local_id=x")
+
+    assert status == 404
+    assert headers["Content-Type"] == "application/json"
+    assert json.loads(body)["message"] == "no such clip"
+
+
+def test_every_ingest_route_refuses_cleanly_with_no_orchestrator(live_server):
+    """A companion whose orchestrator failed to construct serves every other
+    route unchanged and says "cannot index here" -- it does not 500."""
+    srv, client = live_server
+
+    assert client.post_json("/broll/ingest/prepare", {"items": []})[0] == 503
+    assert client.post_json("/broll/ingest/run", {"batch_uid": "x"})[0] == 503
+    assert client.post_json("/broll/ingest/control", {"action": "pause"})[0] == 503
+    assert client.get("/broll/ingest/progress")[0] == 503
+    assert client.get("/broll/ingest/thumb")[0] == 503
+    assert client.put("/broll/ingest/upload/s1/i1", b"x", token=True)[0] == 503
+
+
+def test_an_unknown_ingest_route_is_a_404(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    assert client.get("/broll/ingest/nope")[0] == 404
+    assert client.post_json("/broll/ingest/nope", {})[0] == 404
+    assert client.put("/broll/ingest/upload/s1", b"x", token=True)[0] == 404
+
+
+def test_pick_runs_the_dialog_on_the_ui_thread(ingest_server, monkeypatch):
+    srv, client, ingestor, staging = ingest_server
+    from ccsync_companion import popup
+
+    monkeypatch.setattr(popup, "pick_media_sources", lambda kind, timeout=300: [
+        {"path": "D:/card/A001.MP4", "name": "A001.MP4", "size": 5, "rel_dir": ""}])
+
+    status, _headers, body = client.post_json("/broll/ingest/pick", {"kind": "files"})
+
+    data = json.loads(body)
+    assert status == 200
+    assert data["files"][0]["name"] == "A001.MP4"
+
+
+def test_pick_says_cancelled_rather_than_erroring(ingest_server, monkeypatch):
+    srv, client, ingestor, staging = ingest_server
+    from ccsync_companion import popup
+
+    monkeypatch.setattr(popup, "pick_media_sources", lambda kind, timeout=300: [])
+
+    data = json.loads(client.post_json("/broll/ingest/pick", {"kind": "folder"})[2])
+
+    assert data == {"ok": False, "message": "cancelled"}
+
+
+def test_pick_refuses_a_kind_it_does_not_know(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    status, _headers, body = client.post_json(
+        "/broll/ingest/pick", {"kind": "everything-on-this-disk"})
+
+    assert status == 400
+
+
+# -- the PUT auth matrix ----------------------------------------------------
+
+
+def test_a_dropped_file_is_accepted_with_the_ingest_header(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    status, _headers, body = client.put(
+        "/broll/ingest/upload/s1/i1", b"0123456789", origin=DASH_ORIGIN)
+
+    assert status == 200
+    assert json.loads(body)["hash"] == "abc"
+    assert (staging / "s1" / "i1.mp4").read_bytes() == b"0123456789"
+    assert ingestor.uploads == [("s1", "i1", 10)]
+
+
+def test_a_put_with_no_origin_and_no_token_is_refused(ingest_server):
+    """The same rule every POST here runs on: an allowed Origin or the token.
+    The X-CCSync-Ingest header proves a preflight happened, not who called."""
+    srv, client, ingestor, staging = ingest_server
+
+    status, _headers, _body = client.put("/broll/ingest/upload/s1/i1", b"0123456789")
+
+    assert status == 403
+    assert not (staging / "s1" / "i1.mp4").exists()
+
+
+def test_a_put_from_a_hostile_origin_is_refused(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    status, headers, _body = client.put(
+        "/broll/ingest/upload/s1/i1", b"0123456789", origin="https://evil.example")
+
+    assert status == 403
+    assert "Access-Control-Allow-Origin" not in headers
+    assert not (staging / "s1" / "i1.mp4").exists()
+
+
+def test_the_loopback_token_is_the_other_way_in(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    status, _headers, _body = client.put(
+        "/broll/ingest/upload/s1/i1", b"0123456789", token=True, ingest_header=None)
+
+    assert status == 200
+
+
+def test_octet_stream_without_the_ingest_header_or_token_is_refused(ingest_server):
+    """CSRF: a page that never preflighted must not be able to stream bytes
+    into staging. The Origin got it past the envelope; this is the second,
+    independent gate (plan §4.1)."""
+    srv, client, ingestor, staging = ingest_server
+
+    status, _headers, _body = client.put(
+        "/broll/ingest/upload/s1/i1", b"0123456789",
+        origin=DASH_ORIGIN, ingest_header=None)
+
+    assert status == 403
+    assert not (staging / "s1" / "i1.mp4").exists()
+
+
+def test_a_json_body_on_the_upload_route_is_415(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    status, _headers, _body = client.put(
+        "/broll/ingest/upload/s1/i1", b"{}", content_type="application/json",
+        origin=DASH_ORIGIN)
+
+    assert status == 415
+
+
+def test_a_form_content_type_on_the_upload_route_is_415(ingest_server):
+    """text/plain, multipart/form-data and x-www-form-urlencoded are the three
+    a cross-origin <form> can send with no preflight at all."""
+    srv, client, ingestor, staging = ingest_server
+
+    status, _headers, _body = client.put(
+        "/broll/ingest/upload/s1/i1", b"x" * 10,
+        content_type="multipart/form-data", origin=DASH_ORIGIN)
+
+    assert status == 415
+
+
+# -- the PUT body rules -----------------------------------------------------
+
+
+def test_a_body_bigger_than_declared_is_413_and_leaves_nothing(ingest_server):
+    """The slot said 10 bytes; the request announces a megabyte. Refused
+    BEFORE the first chunk is read, so the drive never sees it -- which is
+    also why this is driven on a raw socket: nothing is drained, and a client
+    still pushing a megabyte into a closed connection is what a browser
+    handles and http.client does not."""
+    srv, client, ingestor, staging = ingest_server
+    ingestor.slot_extra = {"size": 10}
+
+    sock = socket.create_connection(("127.0.0.1", srv.server_address[1]), timeout=5)
+    try:
+        sock.sendall(
+            f"PUT /broll/ingest/upload/s1/i1 HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{srv.server_address[1]}\r\n"
+            f"Origin: {DASH_ORIGIN}\r\n"
+            f"Content-Type: application/octet-stream\r\n"
+            f"{broll_server.INGEST_HEADER}: 1\r\n"
+            f"Content-Length: 1000000\r\n\r\n".encode()
+        )
+        answer = sock.recv(4096).decode("latin-1")
+    finally:
+        sock.close()
+
+    assert " 413 " in answer.splitlines()[0]
+    assert not (staging / "s1" / "i1.mp4").exists()
+    assert not (staging / "s1" / "i1.mp4.partial").exists()
+    assert ingestor.uploads == []
+
+
+def test_the_cap_is_this_files_declared_size_not_the_json_body_cap(ingest_server):
+    """MAX_BODY_BYTES is 256 KiB and a camera original is 40 GB: the upload
+    route's cap is per-file, which is the whole reason do_PUT exists."""
+    srv, client, ingestor, staging = ingest_server
+    big = broll_server.MAX_BODY_BYTES * 2
+    ingestor.slot_extra = {"size": big}
+
+    status, _headers, _body = client.put(
+        "/broll/ingest/upload/s1/i1", b"y" * big, origin=DASH_ORIGIN)
+
+    assert status == 200
+    assert (staging / "s1" / "i1.mp4").stat().st_size == big
+
+
+def test_a_truncated_upload_keeps_neither_file(ingest_server):
+    """A short file that reached the hashing stage would be indexed and
+    uploaded as if it were the whole clip.
+
+    Driven on a raw socket with a half-close, because that is what a browser
+    tab closed mid-drop actually does: http.client would sit waiting for a
+    response the server is not going to send until the body it was promised
+    arrives (or the connection ends).
+    """
+    srv, client, ingestor, staging = ingest_server
+
+    sock = socket.create_connection(("127.0.0.1", srv.server_address[1]), timeout=5)
+    try:
+        sock.sendall(
+            f"PUT /broll/ingest/upload/s1/i1 HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{srv.server_address[1]}\r\n"
+            f"Origin: {DASH_ORIGIN}\r\n"
+            f"Content-Type: application/octet-stream\r\n"
+            f"{broll_server.INGEST_HEADER}: 1\r\n"
+            f"Content-Length: 10\r\n\r\nxx".encode()
+        )
+        sock.shutdown(socket.SHUT_WR)
+        answer = sock.recv(4096).decode("latin-1")
+    finally:
+        sock.close()
+
+    assert answer.startswith("HTTP/1.0 400") or answer.startswith("HTTP/1.1 400")
+    assert not (staging / "s1" / "i1.mp4").exists()
+    assert not (staging / "s1" / "i1.mp4.partial").exists()
+
+
+def test_the_bytes_land_through_a_partial_that_is_renamed(ingest_server, monkeypatch):
+    """broll_fetch's rule: a half-written file that looks finished is worse
+    than no file, and the next attempt must be able to tell them apart."""
+    srv, client, ingestor, staging = ingest_server
+    seen: list = []
+    real_replace = broll_server.os.replace
+
+    def _spy(src, dst):
+        seen.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(broll_server.os, "replace", _spy)
+
+    client.put("/broll/ingest/upload/s1/i1", b"0123456789", origin=DASH_ORIGIN)
+
+    assert seen and seen[0][0].endswith("i1.mp4.partial")
+    assert seen[0][1].endswith("i1.mp4")
+
+
+def test_an_upload_slot_the_orchestrator_refuses_is_answered_verbatim(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+    ingestor.slot_status = 409
+
+    status, _headers, _body = client.put(
+        "/broll/ingest/upload/s1/i1", b"0123456789", origin=DASH_ORIGIN)
+
+    assert status == 409
+    assert ingestor.uploads == []
+
+
+def test_a_slot_pointing_outside_staging_is_refused(ingest_server, tmp_path):
+    """Belt and braces over the orchestrator's own containment check: this is
+    the only route on this listener that WRITES a caller-named file."""
+    srv, client, ingestor, staging = ingest_server
+    escape = tmp_path / "elsewhere"
+    escape.mkdir()
+
+    def _escaping_slot(staging_id, local_id):
+        return 200, {"path": str(escape / "stolen.mp4"),
+                     "staging_root": str(staging), "size": 10}
+
+    ingestor.upload_slot = _escaping_slot
+
+    status, _headers, _body = client.put(
+        "/broll/ingest/upload/s1/i1", b"0123456789", origin=DASH_ORIGIN)
+
+    assert status == 403
+    assert not (escape / "stolen.mp4").exists()
+
+
+def test_no_free_space_is_507_before_a_byte_is_accepted(ingest_server, monkeypatch):
+    srv, client, ingestor, staging = ingest_server
+    ingestor.slot_extra = {"size": 5_000_000_000}
+    monkeypatch.setattr(broll_server, "_free_bytes_at", lambda path: 6_000_000_000)
+
+    status, _headers, body = client.put(
+        "/broll/ingest/upload/s1/i1", b"z" * 10, content_length=10,
+        origin=DASH_ORIGIN)
+
+    assert status == 507
+    assert "free some space" in json.loads(body)["message"]
+    assert ingestor.uploads == []
+
+
+# -- CORS -------------------------------------------------------------------
+
+
+def test_the_preflight_advertises_put_and_the_ingest_header(ingest_server):
+    """A method (or header) a preflight does not name is one the browser
+    refuses before the request is made -- i.e. no drag-and-drop at all."""
+    srv, client, ingestor, staging = ingest_server
+
+    status, headers, _body = client.options("/broll/ingest/upload/s1/i1",
+                                            origin=DASH_ORIGIN)
+
+    assert status == 204
+    assert "PUT" in headers["Access-Control-Allow-Methods"]
+    assert broll_server.INGEST_HEADER in headers["Access-Control-Allow-Headers"]
+
+
+def test_a_hostile_origin_gets_no_preflight_for_the_upload_route(ingest_server):
+    srv, client, ingestor, staging = ingest_server
+
+    status, headers, _body = client.options("/broll/ingest/upload/s1/i1",
+                                            origin="https://evil.example")
+
+    assert status == 403
+    assert "Access-Control-Allow-Origin" not in headers
+
+
+# -- staging paths ----------------------------------------------------------
+
+
+def test_staging_lives_inside_the_archive_by_default(tmp_path):
+    cfg = {"local_root": str(tmp_path / "tree")}
+
+    root = broll_server.ingest_staging_root(cfg)
+
+    assert root == Path(tmp_path / "tree", "Assets", "B-roll Archive", ".ingest")
+
+
+def test_the_base_rig_can_stage_somewhere_else(tmp_path):
+    """Its local_root IS the NAS share, so staging there pushes every original
+    over SMB twice (plan §9.2)."""
+    cfg = {"local_root": str(tmp_path / "tree"),
+           "broll_ingest_staging_dir": str(tmp_path / "fast-ssd")}
+
+    assert broll_server.ingest_staging_root(cfg) == tmp_path / "fast-ssd"
+
+
+def test_a_machine_with_no_tree_has_nowhere_to_stage(tmp_path):
+    assert broll_server.ingest_staging_root({"local_root": ""}) is None
+
+
+def test_stopping_the_server_stops_the_orchestrator(ingest_server):
+    """An ffmpeg still writing into staging after the tray exits is an orphan
+    nothing supervises -- same rule as the fetch jobs and the ytdl executor."""
+    srv, client, ingestor, staging = ingest_server
+
+    broll_server.stop(srv)
+
+    assert ingestor.stopped is True

@@ -2754,3 +2754,206 @@ def test_accepting_the_licence_changes_the_menu_fingerprint():
     clear = _FakeAppWithLicence({"dashboard_url": ""})
     assert (_menu_fingerprint(_tray_snapshot(blocked))
             != _menu_fingerprint(_tray_snapshot(clear)))
+
+
+# -- b-roll ingest lines (BROLL_INGEST_PLAN.md §3.3, 2026-08-18) ------------
+
+
+def _ingest_app(**ingest):
+    """A machine with a b-roll batch on it. Defaults describe a batch that is
+    crunching right now, because that is the state most of these are about."""
+    from ccsync_companion.tray import _tray_snapshot  # noqa: F401 - import parity
+
+    view = {
+        "active": True, "batch_uid": "b" * 32, "state": "running",
+        "gate": "running", "done": 12, "failed": 0, "total": 40,
+        "clip": "A001.MP4", "stage": "describing", "percent": 70,
+        "tier": "good", "run_mode": "idle", "uploading": False,
+        "upload_left": 0, "upload_paused": False,
+        "model_download_percent": None, "warning": "", "paused": False,
+    }
+    view.update(ingest)
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.broll_ingest_view = lambda: view
+    return app
+
+
+def test_a_crunching_batch_says_what_it_is_doing_and_when_it_stops():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    labels = _all_menu_labels(_build_menu(_ingest_app(), _tray_snapshot(_ingest_app())))
+
+    assert "Indexing b-roll… 12 of 40 (stops when you're back)" in labels
+
+
+def test_a_foreground_batch_does_not_promise_to_stop():
+    """It runs while the editor works -- that is what they chose."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _ingest_app(run_mode="foreground")
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+
+    assert "Indexing b-roll… 12 of 40" in labels
+
+
+def test_a_queued_batch_says_it_is_waiting_for_the_editor_to_leave():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _ingest_app(gate="user-active", done=0)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+
+    assert "B-roll indexing waits until you're away: 40 clips queued" in labels
+    assert ("Index the b-roll batch now (don't wait until I'm away)" in labels)
+
+
+def test_the_model_download_replaces_the_clip_line():
+    """Until it lands nothing else can start, and two progress lines about
+    different things is how a menu stops being read."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _ingest_app(gate="no-model", model_download_percent=43)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+
+    assert "Downloading the b-roll indexing model… 43 %" in labels
+    assert not any(label.startswith("Indexing b-roll…") for label in labels)
+
+
+def test_the_vram_refusal_is_the_first_line_and_survives_an_idle_gate():
+    """Owner review (c): the batch the editor asked for is NOT happening, and
+    this is the only thing here they can do something about."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    warning = ("Can't index b-roll: Best needs 12 GB VRAM, this GPU has 8 GB "
+               "— choose Good")
+    app = _ingest_app(gate="tier-unfit", warning=warning, batch_uid="", total=0)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+
+    assert warning in labels
+
+
+def test_the_upload_line_counts_what_is_left():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _ingest_app(uploading=True, upload_left=3)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+
+    assert "Uploading indexed b-roll… 3 clip(s) left" in labels
+
+
+def test_a_paused_upload_says_so_rather_than_looking_stuck():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _ingest_app(uploading=True, upload_left=3, upload_paused=True)
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+
+    assert "Uploading indexed b-roll is paused: 3 left" in labels
+
+
+def test_the_ingest_actions_live_under_advanced():
+    """"Cancel" throws an evening of GPU time away and "index now" commits the
+    machine to hours of it: neither is something to hit on the way to Pause."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _ingest_app()
+    menu = _build_menu(app, _tray_snapshot(app))
+
+    assert "Cancel the b-roll batch…" not in _menu_labels(menu)
+    labels = _all_menu_labels(menu)
+    assert "Cancel the b-roll batch…" in labels
+    assert "Show indexing progress…" in labels
+    assert "Pause b-roll indexing" in labels
+
+
+def test_a_paused_batch_offers_resume_and_not_pause():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _ingest_app(paused=True, gate="paused")
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+
+    assert "Resume indexing the b-roll batch" in labels
+    assert "Pause b-roll indexing" not in labels
+
+
+def test_the_menu_does_not_rebuild_while_the_percentage_ticks():
+    """_proxy_fingerprint's rule applied to the newer feature: a rebuild per
+    finished clip destroys a menu the editor may have open (and on the win32
+    backend resolves their click against the new callback list)."""
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    before = _tray_snapshot(_ingest_app(percent=10, clip="A001.MP4"))
+    after = _tray_snapshot(_ingest_app(percent=95, clip="A002.MP4", done=13))
+
+    assert _menu_fingerprint(before) == _menu_fingerprint(after)
+
+
+def test_the_menu_does_rebuild_when_the_gate_changes():
+    """The other half of UI-3: the three ACTIONS appear and disappear with the
+    gate, and nothing else on an idle machine moves when a batch is dropped."""
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    waiting = _tray_snapshot(_ingest_app(gate="user-active"))
+    running = _tray_snapshot(_ingest_app(gate="running"))
+    warned = _tray_snapshot(_ingest_app(gate="tier-unfit", warning="no VRAM"))
+
+    assert _menu_fingerprint(waiting) != _menu_fingerprint(running)
+    assert _menu_fingerprint(running) != _menu_fingerprint(warned)
+
+
+def test_the_live_count_is_in_the_tooltip_where_it_is_safe():
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    snap = _tray_snapshot(_ingest_app())
+
+    assert "indexing b-roll 12/40" in _tooltip_text(snap)
+
+
+def test_the_tooltip_shows_the_model_download_instead_while_it_runs():
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    snap = _tray_snapshot(_ingest_app(gate="no-model", model_download_percent=43))
+
+    assert "fetching the b-roll model 43%" in _tooltip_text(snap)
+
+
+def test_a_companion_with_no_orchestrator_renders_normally():
+    from ccsync_companion.tray import (_build_menu, _menu_fingerprint,
+                                       _tooltip_text, _tray_snapshot)
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    snap = _tray_snapshot(app)
+
+    assert snap["broll_ingest"] == {}
+    assert _tooltip_text(snap) == "CCSync: up to date"
+    assert _menu_fingerprint(snap)
+    assert "Sync now" in _all_menu_labels(_build_menu(app, snap))
+
+
+def test_an_orchestrator_on_fire_does_not_take_the_menu_with_it():
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+
+    def _boom():
+        raise RuntimeError("the orchestrator is on fire")
+
+    app.broll_ingest_view = _boom
+    snap = _tray_snapshot(app)
+
+    assert snap["broll_ingest"] == {}
+    assert "Sync now" in _all_menu_labels(_build_menu(app, snap))
+
+
+def test_the_proxy_line_says_why_it_is_standing_aside():
+    """The precedence reversal, as an editor sees it: without this the menu
+    says "12 clips have no proxy" for an hour with nothing explaining why
+    nothing is happening about it."""
+    from ccsync_companion.tray import _build_menu, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.proxy_gap = lambda: {"missing": 12, "braw": 0, "left": 12,
+                             "encoding": False, "can_generate": True,
+                             "state": "blocked",
+                             "blocked_reason": "indexing b-roll first"}
+    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
+
+    assert "Proxies waiting: indexing b-roll first" in labels

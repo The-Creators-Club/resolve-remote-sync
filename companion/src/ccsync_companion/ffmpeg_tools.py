@@ -242,6 +242,19 @@ def reset_encoder_cache() -> None:
         _encoder_cache.clear()
 
 
+def encoders_if_known(ffmpeg_path: str) -> Optional[frozenset[str]]:
+    """What detect_encoders already learned about this binary, or None.
+
+    ZERO I/O -- a lock-guarded dict read. For callers that must answer inside a
+    web request and would rather say "not asked yet" than spend ffmpeg's
+    startup on it (broll_server's ingest capability probe, 2026-08-18). None
+    and an empty set are different answers: nothing has probed, versus this
+    build offers none of the interesting encoders.
+    """
+    with _encoder_lock:
+        return _encoder_cache.get(ffmpeg_path)
+
+
 def detect_encoders(ffmpeg_path: str) -> frozenset[str]:
     """Which of INTERESTING_ENCODERS this ffmpeg build offers. Never raises.
 

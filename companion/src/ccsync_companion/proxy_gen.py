@@ -157,6 +157,14 @@ STATE_DISABLED = "disabled"
 STATE_DRIVE_ABSENT = "drive-absent"
 STATE_PAUSED = "paused"
 STATE_MISCONFIGURED = "misconfigured"
+# Another feature of this companion is using the GPU and this one is standing
+# aside (2026-08-18, BROLL_INGEST_PLAN.md owner review (a)): b-roll indexing
+# takes precedence over proxy generation, so `blocked_fn` may now answer with a
+# REASON string instead of a bare bool. A bool stays MISCONFIGURED -- that is
+# app.py's config_problems gate and the ~2,300 lines of tests that pin it --
+# and only a string produces this state, whose whole job is to carry a
+# different sentence to the tray ("waiting: indexing b-roll first").
+STATE_BLOCKED = "blocked"
 STATE_NO_FFMPEG = "no-ffmpeg"
 STATE_NOTHING_TO_DO = "nothing-to-do"
 STATE_USER_ACTIVE = "user-active"
@@ -593,6 +601,10 @@ class ProxyGenerator:
         # The last free-space refusal, published in coverage() so the
         # dashboard can say "this machine has stopped making proxies and
         # why" rather than showing a gap that never closes (item 9).
+        # Why the generator is standing aside for another feature, if it is
+        # (STATE_BLOCKED). Published in gap()/coverage() so the tray can say
+        # "waiting: indexing b-roll first" rather than the misconfigured line.
+        self._blocked_reason: str = ""
         self._low_space: Optional[str] = None
         self._low_space_notified_at: Optional[float] = None
         # {thread ident: {"path", "duration_s", "started", "out_s", "speed"}} --
@@ -890,12 +902,21 @@ class ProxyGenerator:
             log.debug("proxy gen: paused_fn failed", exc_info=True)
             return False
 
-    def _is_blocked(self) -> bool:
+    def _blocked_value(self) -> Any:
+        """`blocked_fn`'s raw answer: False/None, True, or a reason string.
+
+        Two shapes on one seam because they mean different things to the
+        editor and the same thing to the generator: a bool is "this machine is
+        not set up" and a string is "something else needs the GPU right now".
+        """
         try:
-            return bool(self._blocked_fn()) if self._blocked_fn is not None else False
+            return self._blocked_fn() if self._blocked_fn is not None else None
         except Exception:
             log.debug("proxy gen: blocked_fn failed", exc_info=True)
-            return False
+            return None
+
+    def _is_blocked(self) -> bool:
+        return bool(self._blocked_value())
 
     def _resolve_running(self) -> bool:
         """Fails CLOSED (True), like resolve_prefs.resolve_is_running: this
@@ -967,8 +988,14 @@ class ProxyGenerator:
             return STATE_DRIVE_ABSENT
         if self._is_paused():
             return STATE_PAUSED
-        if self._is_blocked():
-            return STATE_MISCONFIGURED
+        blocked = self._blocked_value()
+        if blocked:
+            reason = blocked if isinstance(blocked, str) else ""
+            with self._lock:
+                self._blocked_reason = reason
+            return STATE_BLOCKED if reason else STATE_MISCONFIGURED
+        with self._lock:
+            self._blocked_reason = ""
         if not self._check_ffmpeg():
             return STATE_NO_FFMPEG
         with self._lock:
@@ -1028,6 +1055,9 @@ class ProxyGenerator:
                 "encoding_detail": detail,
                 "can_generate": bool(self.generation_enabled and self._ffmpeg_ok),
                 "state": self._state,
+                # Why another feature is holding the GPU, in the words the tray
+                # shows ("indexing b-roll first"). "" whenever nothing is.
+                "blocked_reason": self._blocked_reason,
                 # This SESSION's counters, unchanged. The numbers that survive
                 # a restart are in "history" -- both are here because "since
                 # the companion started" is the honest answer to "is it
@@ -1092,6 +1122,7 @@ class ProxyGenerator:
                 # to. It is what lets the dashboard say what a machine has
                 # made without a second endpoint.
                 "history": history,
+                "blocked_reason": self._blocked_reason,
             }
 
     def block_reason(self) -> Optional[str]:

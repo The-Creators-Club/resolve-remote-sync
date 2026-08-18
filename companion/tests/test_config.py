@@ -193,6 +193,13 @@ def test_default_toml_text_documents_every_default_key():
         # to reach, and two switches whose ON state is a deliberate one-off.
         "proxy_gen_free_space_floor_gb", "proxy_gen_free_space_floor_pct",
         "proxy_gen_stability_seconds", "proxy_dry_run", "fixer_dry_run",
+        # B-roll ingest (BROLL_INGEST_PLAN.md, 2026-08-18). Same class again:
+        # every one of these is a measured default a later re-tune has to be
+        # able to reach, and broll_ingest_staging_dir is an override only the
+        # base rig sets.
+        "broll_ingest_enabled", "broll_ingest_idle_seconds",
+        "broll_ingest_skip_while_resolve", "broll_ingest_free_space_floor_gb",
+        "broll_ingest_max_concurrent_ffmpeg", "broll_ingest_staging_dir",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -251,6 +258,14 @@ EXAMPLE_COMMENTED_OUT = {
     # rehearsal switches (COMMERCIAL_READINESS.md item 9, 2026-08-17).
     "proxy_gen_free_space_floor_gb", "proxy_gen_free_space_floor_pct",
     "proxy_gen_stability_seconds", "proxy_dry_run", "fixer_dry_run",
+    # B-roll ingest (BROLL_INGEST_PLAN.md, 2026-08-18), same class as the
+    # proxy generator's knobs above: the shipped values are the measured
+    # defaults, and broll_ingest_staging_dir is an override exactly like
+    # server_p_unc -- there to be FOUND (the base rig needs it) and not to be
+    # copied onto every editor's machine.
+    "broll_ingest_enabled", "broll_ingest_idle_seconds",
+    "broll_ingest_skip_while_resolve", "broll_ingest_free_space_floor_gb",
+    "broll_ingest_max_concurrent_ffmpeg", "broll_ingest_staging_dir",
 }
 
 # Read straight off the loaded config with .get() and DELIBERATELY absent from

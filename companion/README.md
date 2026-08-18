@@ -80,6 +80,44 @@ no entry at all, because this app knows the tree — it defaults to
 `<local_root>/Assets/B-roll Archive`. An explicit entry always wins, and
 other shares have no derivable root, so they still need one line each.
 
+## B-roll ingest — this machine indexes the clips you drop
+
+`broll_ingest.py` (with `broll_vlm_sidecar.py`, `broll_ingest_media.py` and
+`broll_upload.py`), 2026-08-18, `docs/BROLL_INGEST_PLAN.md`.
+
+Drag clips — or a whole card folder — onto the dashboard's b-roll page and
+**the editor's own machine** does the work: ffmpeg makes a 540p proxy, a
+sprite, a poster and the frames; a local Qwen3-VL (llama.cpp, on the GPU)
+describes them; rclone puts the results in `Assets/B-roll Archive` on the NAS;
+and the server flips the rows live only once it has `stat()`ed the files
+itself. The browser only ever hands over a batch id — every path, name and
+setting comes back from the server under the fleet token.
+
+What an operator needs to know:
+
+- **It runs when you are away**, like the proxy generator, unless the batch was
+  created in **Foreground** mode (which skips the idle and Resolve-open gates
+  and nothing else). Coming back to the keyboard stops it within one stage and
+  frees the GPU; it resumes from the same checkpoint.
+- **Indexing beats proxy generation.** While a batch is crunching, the proxy
+  generator is *blocked* and says so ("waiting: indexing b-roll first"). They
+  share one GPU, and this is the one an editor is waiting on.
+- **It never runs the model on the CPU.** A machine whose GPU cannot fit the
+  chosen tier refuses the batch, in the page and in the tray, naming the VRAM.
+- **The first batch downloads a model** (about 3.3 GB for Good, 6.2 GB for
+  Best) into the same tools directory yt-dlp and ffmpeg use. Free space is
+  checked first, every URL is checked against an allow-list, and progress is
+  in the tray and in the window.
+- **Progress is a WINDOW**, not just tray lines: model download, the clip and
+  stage in flight, N of M, failures and a time estimate, with Pause / Start now
+  / Cancel. Tray ▸ Advanced ▸ "Show indexing progress…" reopens it; closing it
+  stops nothing. The proxy generator uses the same window.
+- **State survives a restart.** `~/.ccsync/state/broll_ingest.json` is rewritten
+  at every transition, so a companion killed mid-batch re-claims and carries on
+  from the last checkpoint rather than re-indexing anything.
+- **The base rig must set `broll_ingest_staging_dir`** — its `local_root` is
+  the NAS share, and staging there would send every original over SMB twice.
+
 ## YouTube auto-import
 
 `youtube_import.py` — a daemon thread that files the clips the dashboard's

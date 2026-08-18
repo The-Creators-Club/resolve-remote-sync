@@ -381,6 +381,31 @@ proxy_gen_min_age_seconds = 120
 # render looks exactly like being away from the machine).
 # proxy_gen_skip_while_resolve_running = false
 
+# -- b-roll ingest ----------------------------------------------------------
+# Drag clips onto the dashboard's b-roll page and THIS machine indexes them:
+# ffmpeg makes the proxy, sprite, poster and the frames, a local Qwen3-VL
+# describes them, and rclone puts the results in the archive on the NAS. It
+# claims nothing until somebody drops something, so leaving it on costs a
+# machine that never ingests exactly nothing.
+# broll_ingest_enabled = true
+# Seconds away from the keyboard before an "only when idle" batch may crunch.
+# A batch run in FOREGROUND mode ignores this and the Resolve gate below.
+# broll_ingest_idle_seconds = 300
+# Stand down while Resolve is open. ON here, unlike the proxy generator's
+# equivalent: indexing wants 4-12 GB of VRAM for the local model, which is
+# what the timeline you left open is using.
+# broll_ingest_skip_while_resolve = true
+# Free space kept clear where clips are staged (staging is inside the tree).
+# broll_ingest_free_space_floor_gb = 20
+# ffmpeg children one batch may run at once. The describe stage owns the GPU;
+# a wider encode beside it just makes both slower.
+# broll_ingest_max_concurrent_ffmpeg = 2
+# Where clips are staged. "" = inside the archive
+# (<local_root>\Assets\B-roll Archive\.ingest). THE BASE RIG NEEDS THIS SET:
+# its local_root is the NAS share, so staging there sends every original over
+# SMB twice.
+# broll_ingest_staging_dir = ''
+
 # BRAW / R3D / CRM -- the clips ffmpeg cannot decode at any quality. They are
 # counted and reported but never queued for ffmpeg, because promising a proxy
 # this machine cannot make is worse than reporting the gap. The Blackmagic

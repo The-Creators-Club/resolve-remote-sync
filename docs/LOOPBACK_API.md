@@ -11,6 +11,7 @@ it, because a second process holding that port breaks the tray (CLAUDE.md):
 | `GET /status`, `POST /insert` | the b-roll library's "Send to Resolve" |
 | `GET /music/status`, `POST /music/send`, `POST /music/reveal` | the music library's |
 | `POST /ytdl/reveal`, `GET /ytdl/capabilities`, `POST /ytdl/download`, `GET /ytdl/progress` | the YouTube downloader page's |
+| `GET /broll/ingest/capabilities`, `POST /broll/ingest/{pick,prepare,run,control}`, `PUT /broll/ingest/upload/{staging_id}/{local_id}`, `GET /broll/ingest/{progress,thumb}` | b-roll ingest — drag clips onto the b-roll page and **this machine** indexes them (2026-08-18, `BROLL_INGEST_PLAN.md` §4.1) |
 
 ## What was wrong
 
@@ -87,6 +88,40 @@ On top of those:
   unmounted `/Volumes/<Name>` does not fail, it fills the boot disk. At most
   **two** fetches run at once; a third gets a clear "already downloading as much
   as it will at once" answer, which the UI's own 1.5 s re-poll turns into a retry.
+- **The ingest upload route is the one PUT, and it has its own two rules**
+  (2026-08-18). Every other route on this listener caps a body at 256 KiB and
+  insists on `application/json`; a camera original is 40 GB and is not JSON, so
+  `PUT /broll/ingest/upload/{staging_id}/{local_id}` takes
+  **`application/octet-stream`** with a cap of **that one file's declared size
+  + 1 %** (floor 64 KiB), streamed to `<local_id>.<ext>.partial` and renamed
+  only on a complete body. `application/octet-stream` is accepted **only there**
+  and **only with the `X-CCSync-Ingest` header** (or the loopback token): the
+  header is not a credential, it is what forces the browser to preflight, so a
+  page that never asked permission cannot stream bytes into staging. The
+  envelope is otherwise unchanged — Host, then an allowed Origin *or* the token.
+  Answers: `409` the slot is already filled, `413` bigger than declared, `507`
+  the staging volume is below its free-space floor (checked *before* a byte is
+  accepted), `403` a destination that does not realpath-contain inside the
+  staging root.
+- **Staging is inside the tree**, `<local_root>/Assets/B-roll Archive/.ingest`
+  (`broll_ingest_staging_dir` overrides it for the base rig, whose `local_root`
+  *is* the NAS share). Every write is containment-checked against that root,
+  twice — once by the orchestrator, once by the route.
+- **`POST /broll/ingest/run` reads three fields**: `batch_uid`, `staging_id`,
+  `run_mode` (`idle` | `foreground`; `start_now: true` is the plan's first-draft
+  spelling of `foreground` and is still accepted, with `run_mode` winning when
+  a page sends both). The tier, archive names, taxonomy and settings all come
+  back from the server's `claim` under the fleet token. Same principle as
+  `/music/send`:
+  the browser is the only party that can see both the dashboard and this
+  loopback, which is why it dispatches — not a reason to trust it with the work
+  order.
+- **`GET /broll/ingest/capabilities` is 200 always**, verdict in the body, and
+  does no GPU probe or ffmpeg spawn: it is asked before the page renders its
+  drop zone. `POST /broll/ingest/pick` is the one route that *learns* a local
+  path — a native dialog on the UI thread, ≤ 300 s, after which it answers
+  "cancelled" rather than parking a request thread (and, on macOS, the UI
+  dispatcher's main thread) for the life of the process.
 - **Refusals are generic.** "This request was refused — see the log." The
   reason, the offending Origin and the allow-list are log lines. A caller this
   server has just declined to talk to is not owed a description of the check it

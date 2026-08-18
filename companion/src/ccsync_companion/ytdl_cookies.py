@@ -59,7 +59,7 @@ _MIN_SESSION_COOKIES = 2
 # The refusal an off site gets, in the editor's words. One string so the tray
 # item and the resolver never tell different stories.
 OFF_MESSAGE = ("signing in to YouTube for downloads is not enabled for this "
-               "site — ask your administrator (site.toml [features] "
+               "site. Ask your administrator (site.toml [features] "
                "youtube_unblock)")
 
 
@@ -127,7 +127,7 @@ def validate(text: Any) -> tuple[bool, str]:
 
     if not any(line.strip().lower().startswith("# netscape") or "\t" in line
                for line in lines):
-        return False, ("that is not a cookies.txt in Netscape format — export it "
+        return False, ("that is not a cookies.txt in Netscape format. Export it "
                        "with a \"cookies.txt\" browser extension, not Save As")
 
     found = set()
@@ -143,7 +143,7 @@ def validate(text: Any) -> tuple[bool, str]:
 
     if len(found) < _MIN_SESSION_COOKIES:
         return False, ("those cookies are not from a signed-in YouTube session "
-                       "(no login cookies found) — sign in to YouTube in the "
+                       "(no login cookies found). Sign in to YouTube in the "
                        "browser first, then export")
     return True, f"signed-in session found ({len(found)} login cookies)"
 
@@ -203,7 +203,7 @@ def install_text(text: Any, dest: Optional[Path] = None) -> tuple[bool, str]:
         return False, f"couldn't save the cookies ({exc})"
     log.info("ytdl cookies: installed a signed-in session at %s", target)
     mark_ok("fresh sign-in")
-    return True, "YouTube sign-in saved — your downloads can now reach age-restricted clips"
+    return True, "YouTube sign-in saved: your downloads can now reach age-restricted clips"
 
 
 # ---------------------------------------------------------------- health

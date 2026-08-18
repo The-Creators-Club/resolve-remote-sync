@@ -1361,7 +1361,7 @@ def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
     message = (f"Put {undone} clip path(s) back the way they were "
                f"(from {Path(path).name}).")
     if skipped:
-        message += (f" {skipped} could not be undone — those clips are no longer in "
+        message += (f" {skipped} could not be undone: those clips are no longer in "
                     "this project's media pool.")
     log.info("resolve: undo replayed %s -- %d undone, %d skipped", path, undone, skipped)
     return {"ok": undone > 0, "undone": undone, "skipped": skipped, "message": message}
@@ -1409,12 +1409,12 @@ BROLL_TRACK_INDEX = 1
 # a project is open" they used to get is advice they cannot act on, with a
 # project open in front of them (COMP-MEDIA-8, 2026-08-14).
 BIN_REFUSED_MESSAGE = (
-    "Resolve wouldn't create the B-Roll/Archive bin — the project is locked "
+    "Resolve wouldn't create the B-Roll/Archive bin: the project is locked "
     "(or open elsewhere in a collaboration). Unlock it and try again."
 )
 
 NOTHING_PLACED_MESSAGE = (
-    "Resolve reported no error but nothing landed on the timeline — check the "
+    "Resolve reported no error but nothing landed on the timeline. Check the "
     "destination track buttons (V1/A1) at the left of the timeline; with the "
     "video destination off, an append is silently dropped."
 )
@@ -1776,7 +1776,7 @@ def _perform_insert_locked(
     except Exception:
         timeline = None
     if timeline is None:
-        return {"ok": False, "message": "no timeline open — create one first"}
+        return {"ok": False, "message": "no timeline open - create one first"}
 
     try:
         media_pool = project.GetMediaPool()

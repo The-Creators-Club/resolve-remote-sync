@@ -149,8 +149,8 @@ def download_verified(
     if got != sha256:
         tmp.unlink(missing_ok=True)
         raise LocalRuntimeError(
-            f"sha256 mismatch downloading {url}: expected {sha256}, got {got} "
-            "— refusing to use this file. Re-run to retry the download."
+            f"sha256 mismatch downloading {url}: expected {sha256}, got {got}. "
+            "Refusing to use this file. Re-run to retry the download."
         )
     tmp.replace(dest)
     return dest
@@ -297,7 +297,7 @@ def ensure_runtime(cache_dir: Path, *, quiet: bool = False,
     if not exe.is_file():
         raise LocalRuntimeError(
             f"extracted {build.label} but {build.server_binary} is not where expected "
-            f"({exe}) — the release asset's internal layout may have changed"
+            f"({exe}) - the release asset's internal layout may have changed"
         )
     if platform.system() != "Windows":
         exe.chmod(exe.stat().st_mode | 0o111)
@@ -411,7 +411,7 @@ def recommend_tier(gpu: GpuInfo | None = None) -> str | None:
 def refuse_if_tier_unfit(tier_key: str, gpu: GpuInfo | None = None, *, force: bool = False) -> None:
     """Raise LocalRuntimeError with an actionable message when `tier_key` does
     not fit this machine's GPU, unless `force`. Mirrors the eval doc's example
-    message verbatim: "Best needs 12 GB VRAM; this machine reports 10 GB —
+    message verbatim: "Best needs 12 GB VRAM; this machine reports 10 GB -
     choose Good or add --force"."""
     if force:
         return
@@ -419,7 +419,7 @@ def refuse_if_tier_unfit(tier_key: str, gpu: GpuInfo | None = None, *, force: bo
     gpu = gpu if gpu is not None else probe_gpu()
     if not gpu.present:
         raise LocalRuntimeError(
-            f"no GPU detected ({gpu.detail}) — the local backend needs an NVIDIA GPU "
+            f"no GPU detected ({gpu.detail}). The local backend needs an NVIDIA GPU "
             f"(or Apple Silicon); use backend: anthropic, or add --force to try anyway"
         )
     floor = t.apple_unified_gb if gpu.is_apple_silicon else t.vram_gb
@@ -430,5 +430,5 @@ def refuse_if_tier_unfit(tier_key: str, gpu: GpuInfo | None = None, *, force: bo
         suggestion = f"choose {local_models.TIERS[other].label} or add --force" if other else "add --force"
         raise LocalRuntimeError(
             f"{t.label} needs {floor} GB {kind}; this machine reports {have:.0f} GB "
-            f"— {suggestion}"
+            f"- {suggestion}"
         )

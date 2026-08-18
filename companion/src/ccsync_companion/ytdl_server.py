@@ -282,7 +282,7 @@ def build_reveal_response(
         # likely story and the message must not promise it. The folder is
         # still the useful answer: it is what the editor clicked to look at.
         target, select = str(folder), False
-        message = (f"{path.name} is not on this machine — opened {folder} instead. "
+        message = (f"{path.name} is not on this machine - opened {folder} instead. "
                    f"{NOT_HERE_WHY}")
     else:
         # Nothing to point a file manager at. Spawning "explorer <missing>" here
@@ -296,8 +296,8 @@ def build_reveal_response(
     if argv is None:
         return 200, {
             "ok": False,
-            "message": f"opening a folder is only supported on Windows and macOS "
-                       f"— the file is at {target}",
+            "message": f"opening a folder is only supported on Windows and macOS. "
+                       f"The file is at {target}",
         }
 
     run = spawner if spawner is not None else spawn

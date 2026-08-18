@@ -208,11 +208,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
 BROLL_SHARE = "broll"
 BROLL_ARCHIVE_REL = ("Assets", "B-roll Archive")
 
-README_SNIPPET = """B-roll Send-to-Resolve config — {config_path}
+README_SNIPPET = """B-roll Send-to-Resolve config: {config_path}
 
 Read by the CC Sync companion (the tray app), which is what "Send to Resolve"
 in the b-roll web UI talks to. The separate BRoll Companion this file was
-originally written for is retired — do not run it; it would hold port 8899
+originally written for is retired. Do not run it: it would hold port 8899
 and the tray app's server could not start.
 
 This file has no comments (it's plain JSON), so here's what each field means:
@@ -678,7 +678,7 @@ def build_insert_response(
         if not _fetchable_from_nas(share, rel_path, mounts, ccsync_cfg):
             return 200, {
                 "ok": False,
-                "message": f"file not found at {local_path} — is the share mounted?",
+                "message": f"file not found at {local_path} - is the share mounted?",
             }
         # ...and the tree this download would land in has to BE there, and
         # the destination inside it (2026-08-17, COMMERCIAL_READINESS.md
@@ -700,7 +700,7 @@ def build_insert_response(
             progress = fetch.get("progress") or {}
             percent = progress.get("percent")
             message = (
-                f"syncing the clip to this machine — {percent}%"
+                f"syncing the clip to this machine: {percent}%"
                 if isinstance(percent, int)
                 else "syncing the clip to this machine…"
             )
@@ -717,7 +717,7 @@ def build_insert_response(
             # the job, so reaching here means the file vanished in between.
             return 200, {
                 "ok": False,
-                "message": f"file not found at {local_path} — is the share mounted?",
+                "message": f"file not found at {local_path} - is the share mounted?",
             }
 
     # In a CHILD, with a timeout, for the reason build_status_response spells

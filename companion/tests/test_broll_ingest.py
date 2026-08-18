@@ -45,7 +45,7 @@ class FakeSidecar:
         if self._fits:
             return True, ""
         return False, ("Can't index b-roll: Best needs 12 GB VRAM, this GPU has "
-                       "8 GB — choose Good")
+                       "8 GB - choose Good")
 
     def status(self):
         return {"runtime_ready": self._runtime,

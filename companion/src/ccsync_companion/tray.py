@@ -487,7 +487,7 @@ def _format_lane_line_from(
     # "this machine isn't set up" would send them to their admin instead of
     # to the cable.
     if root_absent:
-        return f"{label}: PAUSED — drive disconnected"
+        return f"{label}: PAUSED (drive disconnected)"
     if problems:
         return f"{label}: NOT SYNCING (this machine isn't set up yet)"
     if paused:
@@ -860,18 +860,18 @@ def _youtube_sign_in(app: "CompanionApp", runner: Optional[Any] = None,
         log.exception("ytdl sign-in: browser discovery failed")
         browser = None
     if browser is None:
-        _notify(app, "No Edge/Chrome found for the one-click sign-in — choose an exported "
+        _notify(app, "No Edge/Chrome found for the one-click sign-in: choose an exported "
                      "cookies.txt instead")
         _install_youtube_cookies(app)
         return
-    _notify(app, f"{browser.name} is opening — sign in to YouTube in that window; "
+    _notify(app, f"{browser.name} is opening. Sign in to YouTube in that window; "
                  "it closes by itself when you're done")
     run = runner or ytdl_browser_login.run
     try:
         outcome = run(browser=browser)
     except Exception:  # noqa: BLE001 -- run() never raises, but the seam might
         log.exception("ytdl sign-in: browser flow crashed")
-        _notify(app, "The sign-in window failed unexpectedly — see the log, or use "
+        _notify(app, "The sign-in window failed unexpectedly. See the log, or use "
                      "Advanced → YouTube: use an exported cookies.txt…")
         return
     if outcome.ok:
@@ -928,8 +928,8 @@ def _youtube_warning_line(snap: dict) -> str:
     balloon and the menu never disagree."""
     h = snap.get("ytdl_cookies_health") or {}
     if h.get("status") == ytdl_cookies.STATUS_EXPIRED:
-        return "⚠ YouTube sign-in has expired — age-restricted clips will fall back to the server"
-    return "⚠ YouTube sign-in no longer works (Google rotated the session) — sign in again"
+        return "⚠ YouTube sign-in has expired: age-restricted clips will fall back to the server"
+    return "⚠ YouTube sign-in no longer works (Google rotated the session). Sign in again"
 
 
 def _maybe_warn_youtube_session(app: "CompanionApp", snap: dict) -> None:
@@ -986,7 +986,7 @@ def _show_youtube_terms_dialog(app: "CompanionApp", confirm=None) -> None:
 
     who = getattr(app, "editor_identity", lambda: None)()
     if not str(who or "").strip():
-        _notify(app, "Sign in first — the record has to say who accepted "
+        _notify(app, "Sign in first: the record has to say who accepted "
                      "these terms.")
         return
 
@@ -1703,8 +1703,8 @@ def resolve_bridge_line(state: Optional[dict]) -> Optional[str]:
         return "Resolve: connected"
     reason = str(state.get("reason") or "no connection")
     if state.get("ever_connected"):
-        return f"Resolve: not connected right now — {reason}"
-    return f"Resolve: NOT CONNECTED this session — {reason}"
+        return f"Resolve: not connected right now ({reason})"
+    return f"Resolve: NOT CONNECTED this session ({reason})"
 
 
 def _tray_snapshot(app: "CompanionApp") -> dict:
@@ -1884,8 +1884,8 @@ def _skipped_exists_line(guard: dict) -> Optional[str]:
     if count <= 0:
         return None
     return (f"⚠ {count} file{'s' if count != 1 else ''} on the server "
-            f"{'have' if count != 1 else 'has'} the same name but a different size — "
-            "your newer version will NOT upload")
+            f"{'have' if count != 1 else 'has'} the same name but a different size. "
+            "Your newer version will NOT upload")
 
 
 def _progress_bucket(status: LaneStatus) -> Optional[int]:
@@ -2248,7 +2248,7 @@ def _tooltip_text(snap: dict) -> str:
     if snap["problems"]:
         return "CCSync: NOT SET UP (nothing syncs)"
     if snap.get("root_absent"):
-        return "CCSync: PAUSED — your drive is disconnected"
+        return "CCSync: PAUSED (your drive is disconnected)"
     if not snap["signed_in"] and snap.get("require_login", True):
         return "CCSync: not signed in (nothing syncs)"
     if snap["paused"]:
@@ -2501,7 +2501,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     stray_luts = int(snap.get("stray_luts") or 0)
     lut_items = (
         [tray_backend.MenuItem(
-            f"► {stray_luts} LUT{'s' if stray_luts != 1 else ''} only on this machine — "
+            f"► {stray_luts} LUT{'s' if stray_luts != 1 else ''} only on this machine: "
             f"share with the team", on_share_luts,
         ), tray_backend.Menu.SEPARATOR]
         if stray_luts else []
@@ -2533,9 +2533,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
             proxy_lines.append(eta)
     elif proxy_missing:
         proxy_lines.append(
-            f"{proxy_missing} clips have no proxy — other editors can't see them"
+            f"{proxy_missing} clips have no proxy: other editors can't see them"
             if proxy_missing != 1 else
-            "1 clip has no proxy — other editors can't see it"
+            "1 clip has no proxy: other editors can't see it"
         )
     if proxy_braw:
         # Named by format because it is the one gap the editor must act on

@@ -38,6 +38,53 @@ def get_sheets_dir() -> Path:
     return get_data_root() / "sheets"
 
 
+# --- dashboard b-roll ingest (docs/BROLL_INGEST_PLAN.md, 2026-08-18) ---------
+
+# Where the companion stages dropped bytes inside the editor's own archive
+# mirror: `<local archive root>/.ingest/<staging_id>/`. Named here, not only in
+# the companion, because it is a directory that appears in the SHARED archive
+# tree's local mirror and anything that walks that tree has to know it is not
+# footage.
+ARCHIVE_INGEST_DIR = ".ingest"
+
+# How long a claim is good for, and how often the companion must say it is
+# still alive. Copied from the ytdl fleet routes' 300/30 because the failure
+# they cover is identical: a machine that is switched off mid-batch has to
+# release its lease without anyone pressing anything, and 10 missed heartbeats
+# is a comfortable margin over a laptop lid closing for a minute.
+LEASE_SECONDS = 300
+HEARTBEAT_SECONDS = 30
+
+
+def get_fleet_token() -> str | None:
+    """DASH_REPORT_TOKEN, or None when it is unset.
+
+    The shared secret every companion in the fleet already holds. FAIL-CLOSED,
+    like the ytdl fleet routes and unlike nothing else here: None means every
+    /api/fleet/ingest call is refused, because the alternative -- an
+    unauthenticated route that mints `videos` rows and hands out archive paths
+    -- is not a dev convenience, it is the whole write path.
+
+    It is NOT an identity: every machine has the same one, so it proves "a
+    fleet machine" and nothing about WHICH (H5, COMMERCIAL_READINESS.md item
+    7). See fleet_auth.require_identity for the half that does.
+    """
+    token = os.environ.get("DASH_REPORT_TOKEN")
+    return token if token else None
+
+
+def get_session_secret() -> str | None:
+    """DASH_SESSION_SECRET, or None when it is unset.
+
+    The key the dashboard signs its identity tokens with. Read live rather than
+    cached so a container restart with a rotated secret needs no code change,
+    and shared with the dashboard by ENVIRONMENT rather than by import: this
+    app is deployed as its own tree and cannot see ccsync_dashboard.
+    """
+    secret = os.environ.get("DASH_SESSION_SECRET")
+    return secret if secret else None
+
+
 def get_ingest_token() -> str | None:
     """BROLL_INGEST_TOKEN, or None when it is unset.
 
@@ -122,6 +169,30 @@ def get_creators_shares() -> set[str]:
 
 def collection_of(share: str) -> str:
     return COLLECTION_CREATORS if share in get_creators_shares() else COLLECTION_DOWNLOADS
+
+
+def get_archive_creators_dir() -> str:
+    """The top-level folder own-footage shoots live in, inside the archive
+    tree: `<archive root>/Creators_Club/<share>/<shoot dirs>/`.
+
+    It is a LITERAL in the indexer (`build_archive.CREATORS`) and every one of
+    the ~7,000 files already published sits under it, so the default cannot
+    change without moving them. But the name is one customer's, and
+    COMMERCIAL_READINESS.md item 4/10 is explicit that a second customer must
+    not have to fork code to be called something else -- so ingest, which is
+    NEW writes only, takes it from the environment with the historical value as
+    the default. Sanitised like any other path component: it is joined into an
+    archive path that a companion then hands to rclone.
+    """
+    raw = os.environ.get("BROLL_ARCHIVE_CREATORS_DIR", "").strip()
+    if not raw:
+        return "Creators_Club"
+    # Imported here, not at module scope: config is imported by everything and
+    # archive_names imports nothing, but the cycle is not worth risking for a
+    # value read once per claim.
+    from app.archive_names import safe_name
+
+    return safe_name(raw.replace("/", "_").replace("\\", "_"))
 
 
 # Directory this module lives in: web/app/

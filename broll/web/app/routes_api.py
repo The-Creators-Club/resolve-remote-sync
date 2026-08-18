@@ -179,9 +179,15 @@ def _shoot_tree(conn: sqlite3.Connection, creators: list[str]) -> list[dict]:
     if not creators:
         return []
     placeholders = ", ".join("?" for _ in creators)
+    # BROWSE_PREDICATE, not a hand-copied twin of it: this query produces the
+    # COUNT beside each shoot folder, and a click on that folder goes through
+    # search's browse path. The two drifted once already (BROLL-10), and the
+    # 'ingesting' rows dashboard ingest mints hours before their media lands
+    # would have drifted them again -- a shoot advertising 40 while 12 are
+    # playable is worse than no count at all.
     rows = conn.execute(
-        f"SELECT share, rel_path FROM videos WHERE share IN ({placeholders}) "
-        "AND status != 'skipped' AND status != 'excluded' AND duplicate_of IS NULL",
+        f"SELECT v.share, v.rel_path FROM videos v WHERE v.share IN ({placeholders}) "
+        f"AND {BROWSE_PREDICATE}",
         creators,
     ).fetchall()
 

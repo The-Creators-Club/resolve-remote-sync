@@ -355,8 +355,8 @@ writing the new one; `macos_uninstall.sh` enumerates both generations. Never
 run on a Mac — the first Mac upgrade after this must be watched
 (`launchctl list | grep ccsync` shows exactly one companion). Also from the
 brand pass: every "Creators Club" string is site data (`org_name`/`org_short`,
-fallback `product_name` = "CC Sync"), the tray mark is the neutral
-`assets/ccsync_mark.png` unless `CCSYNC_BRAND_LOGO=cc_mark_white.png`, the
+fallback `product_name` = "CC Sync"), the tray mark was briefly the neutral
+`assets/ccsync_mark.png` — reversed 2026-08-18, see CR-25 — the
 b-roll own-footage slug is `BROLL_DEFAULT_COLLECTION` (default `owned`, legacy
 `creators_club` still routed), and the music `W:\Creators_Club` probe is
 `MUSIC_LIBRARY_ROOT`. Not changed on purpose: the PHYSICAL `Creators_Club`
@@ -526,6 +526,21 @@ Also seen while measuring: a companion-suite run leaked a REAL Tk window
 ("MAKING PROXIES", system `python -m pytest`) onto the operator's desktop — the
 progress-window tests must go through the conftest's headless pattern; sent
 back to the builder before merge.
+
+---
+
+### CR-25 — the neutral product mark was the wrong call: this is Creators Club software, branded like Resolve or Premiere — DONE in repo 2026-08-18, unshipped
+Item 10 read "no customer's name in code" as "no brand in code" and shipped a
+neutral placeholder mark by default, with the CC logo demoted to a per-fleet
+setting (CR-23). The owner's answer 2026-08-18: *"our brand on every
+customer's build is what I want"* — CC Sync is sold under the Creators Club
+mark the way Resolve carries Blackmagic's. `theme.PRODUCT_MARK_ASSET` is
+`cc_mark_white.png` again; `ccsync_mark.png` stays shipped as the neutral
+alternative a white-label fleet can select through `brand_logo` (the
+mechanism CR-23 built is unchanged — only the default flipped). Not touched:
+`org_name`/`org_short`/`product_name` stay site data (a customer's *name* is
+theirs; the *mark* is ours), the dashboard favicon (already CC), `icon.ico`
+(already CC).
 
 ---
 

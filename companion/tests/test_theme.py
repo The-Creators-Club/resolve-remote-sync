@@ -68,10 +68,11 @@ def _clean_icon_cache():
 def test_the_window_icon_is_the_new_mark_not_the_old_pre_composed_one():
     """The white mark is the tintable asset; icon.png is already coloured and
     cannot become red without repainting it."""
-    # The PRODUCT's mark since 2026-08-17 (COMMERCIAL_READINESS.md item 10):
-    # the studio logo it used to be is still shipped, but only a site that
-    # asks for it by name ($CCSYNC_BRAND_LOGO) wears it.
-    assert theme.WINDOW_ICON_ASSET == "ccsync_mark.png"
+    # The PRODUCT's mark is the Creators Club one (owner's call 2026-08-18,
+    # reversing item 10's neutral placeholder: this is CC-branded software).
+    # The neutral mark is still shipped for a white-label site that asks for
+    # it by name ($CCSYNC_BRAND_LOGO / brand_logo).
+    assert theme.WINDOW_ICON_ASSET == "cc_mark_white.png"
     assert theme.window_mark_path() is not None
     assert theme.window_mark_path() != theme.icon_path()
     # icon_path() deliberately still means the pre-composed file (other code
@@ -339,26 +340,26 @@ def test_no_selector_wears_the_products_own_mark(monkeypatch):
     monkeypatch.delenv("CCSYNC_BRAND_LOGO", raising=False)
     monkeypatch.setattr(theme, "brand_logo_site", lambda: None)
     assert theme.brand_logo_override() is None
-    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+    assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
 
 
 def test_the_site_manifest_selects_a_mark_the_build_ships(monkeypatch):
     """A bare name means "the asset in this build" -- which is the whole
-    reason build.spec still ships cc_mark_white.png beside the neutral one."""
+    reason build.spec still ships the neutral ccsync_mark.png beside the CC one."""
     monkeypatch.delenv("CCSYNC_BRAND_LOGO", raising=False)
     monkeypatch.setattr(theme, "brand_logo_site",
-                        lambda: theme.asset_path("cc_mark_white.png"))
-    assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
+                        lambda: theme.asset_path("ccsync_mark.png"))
+    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
 
 
 def test_the_env_var_beats_the_manifest(monkeypatch):
     """The escape hatch has to be one: a machine pinned to a mark by hand --
     a vendor rig testing a customer build, an editor mid-migration -- must not
     be overruled by whatever its dashboard publishes."""
-    monkeypatch.setenv("CCSYNC_BRAND_LOGO", "ccsync_mark.png")
+    monkeypatch.setenv("CCSYNC_BRAND_LOGO", "cc_mark_white.png")
     monkeypatch.setattr(theme, "brand_logo_site",
-                        lambda: theme.asset_path("cc_mark_white.png"))
-    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+                        lambda: theme.asset_path("ccsync_mark.png"))
+    assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
 
 
 def test_a_manifest_naming_a_missing_file_falls_back_rather_than_failing(monkeypatch, tmp_path):
@@ -368,14 +369,14 @@ def test_a_manifest_naming_a_missing_file_falls_back_rather_than_failing(monkeyp
     monkeypatch.setattr(theme, "brand_logo_site",
                         lambda: theme._resolve_logo(str(tmp_path / "gone.png")))
     assert theme.brand_logo_override() is None
-    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+    assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
 
 
 def test_brand_logo_site_reads_the_cached_manifest(monkeypatch):
     from ccsync_companion import site as site_mod
 
-    monkeypatch.setattr(site_mod, "brand_logo", lambda: "cc_mark_white.png")
-    assert theme.brand_logo_site() == theme.asset_path("cc_mark_white.png")
+    monkeypatch.setattr(site_mod, "brand_logo", lambda: "ccsync_mark.png")
+    assert theme.brand_logo_site() == theme.asset_path("ccsync_mark.png")
 
 
 def test_brand_logo_site_never_raises(monkeypatch):
@@ -388,7 +389,7 @@ def test_brand_logo_site_never_raises(monkeypatch):
 
     monkeypatch.setattr(site_mod, "brand_logo", boom)
     assert theme.brand_logo_site() is None
-    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+    assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
 
 
 # -- claim_app_identity: the taskbar shows the WINDOW's icon, not the exe's --

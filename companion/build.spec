@@ -101,10 +101,11 @@ a = Analysis(
     # bundle twice, and a glob would ship whatever anyone drops in assets/.
     #
     # BOTH marks ship (2026-08-17, docs/COMMERCIAL_READINESS.md item 10):
-    # ccsync_mark.png is the product's own and is what a build wears by
-    # default; cc_mark_white.png is one studio's, kept so a fleet already
-    # wearing it can select it with CCSYNC_BRAND_LOGO=cc_mark_white.png
-    # rather than have its tray change under it on upgrade.
+    # cc_mark_white.png is the Creators Club mark and what every build wears
+    # by default (owner's decision 2026-08-18 -- this is CC-branded software,
+    # not white-label; item 10's neutral default was reversed); ccsync_mark.png
+    # is the neutral alternative a white-label fleet can select with
+    # brand_logo / CCSYNC_BRAND_LOGO=ccsync_mark.png.
     datas=[
         ("src/ccsync_companion/assets/icon.png", "ccsync_companion/assets"),
         ("src/ccsync_companion/assets/ccsync_mark.png", "ccsync_companion/assets"),

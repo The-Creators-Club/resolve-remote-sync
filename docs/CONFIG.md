@@ -87,7 +87,7 @@ it stops and names it; that is the enforcement.
 | `org_name` | `""` | **Your** name — the dashboard topbar and the companion's tray |
 | `org_short` | `""` | The same name where only a few characters fit. Blank = use `org_name` |
 | `product_name` | `CC Sync` | **The vendor's** product name — the one brand string here with a non-blank default, because every deployment runs the same software. Set it only if you resell |
-| `brand_logo` | `""` | **Your logo** in every editor's tray and window title bar. Blank wears the product's own mark. A bare name selects a mark the companion build already ships (`cc_mark_white.png`); anything with a separator is an absolute path on the **editor's** machine. Must be **white on transparent** — the tray tints it red/amber/green to carry sync status, so a pre-coloured logo renders as a solid blob. Per machine, `$CCSYNC_BRAND_LOGO` overrides it |
+| `brand_logo` | `""` | The mark in every editor's tray, window title bars and taskbar buttons. Blank wears the product's own — the **Creators Club** mark (`cc_mark_white.png`); this is CC-branded software, so that is what every customer's build shows unless a white-label fleet says otherwise. A bare name selects a mark the companion build already ships (`ccsync_mark.png` is the neutral one); anything with a separator is an absolute path on the **editor's** machine. Must be **white on transparent** — the tray tints it red/amber/green to carry sync status, so a pre-coloured logo renders as a solid blob. Per machine, `$CCSYNC_BRAND_LOGO` overrides it |
 | `canonical_prefix` | `P:\` | The drive letter editors map the tree as. Hardcoded by decision (2026-07-26); published so no client has to assume it |
 
 ### `[features]`

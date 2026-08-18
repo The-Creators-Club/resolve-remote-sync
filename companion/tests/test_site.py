@@ -415,7 +415,7 @@ def test_the_tray_and_the_window_wear_the_same_mark_and_it_is_the_products():
     from ccsync_companion import theme
     from ccsync_companion import tray as tray_mod
 
-    assert tray_mod.MARK_ASSET == theme.WINDOW_ICON_ASSET == "ccsync_mark.png"
+    assert tray_mod.MARK_ASSET == theme.WINDOW_ICON_ASSET == "cc_mark_white.png"
     assert theme.asset_path(theme.WINDOW_ICON_ASSET) is not None
     assert tray_mod._mark_asset_path() == theme.window_mark_path()
 
@@ -424,19 +424,19 @@ def test_a_site_can_select_a_different_mark_and_a_bad_one_is_ignored(monkeypatch
     from ccsync_companion import theme
 
     theme._WINDOW_ICON_CACHE.clear()
-    # A bare name means "a file this build already ships" -- which is how the
-    # existing fleet keeps the studio mark it has always had.
-    monkeypatch.setenv(theme.BRAND_LOGO_ENV, "cc_mark_white.png")
-    assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
+    # A bare name means "a file this build already ships" -- which is how a
+    # white-label fleet selects the neutral mark instead of the CC one.
+    monkeypatch.setenv(theme.BRAND_LOGO_ENV, "ccsync_mark.png")
+    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
 
     # An absolute path is taken as one...
     own = tmp_path / "acme.png"
-    own.write_bytes(theme.asset_path("ccsync_mark.png").read_bytes())
+    own.write_bytes(theme.asset_path("cc_mark_white.png").read_bytes())
     monkeypatch.setenv(theme.BRAND_LOGO_ENV, str(own))
     assert theme.window_mark_path() == own
 
     # ...and a path to nothing is IGNORED, not fatal: a wrong logo must not
     # stop an editor's tray coming up.
     monkeypatch.setenv(theme.BRAND_LOGO_ENV, str(tmp_path / "gone.png"))
-    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+    assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
     theme._WINDOW_ICON_CACHE.clear()

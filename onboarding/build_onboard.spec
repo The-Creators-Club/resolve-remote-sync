@@ -46,8 +46,9 @@ a = Analysis(
         # prefers now (tinted to the brand red at runtime); icon.png stays as
         # its fallback. Without the mark the wizard silently degrades to the
         # old April logo -- the first thing a new editor ever sees
-        # (2026-08-11). BOTH marks ship: ccsync_mark.png is the product's own
-        # default and cc_mark_white.png is one studio's, selectable with
+        # (2026-08-11). BOTH marks ship: cc_mark_white.png is the Creators
+        # Club mark and the default (2026-08-18); ccsync_mark.png is the
+        # neutral one a white-label fleet selects with brand_logo /
         # CCSYNC_BRAND_LOGO (2026-08-17, COMMERCIAL_READINESS.md item 10).
         (str(COMPANION_SRC / "ccsync_companion" / "assets" / "ccsync_mark.png"),
          "ccsync_companion/assets"),

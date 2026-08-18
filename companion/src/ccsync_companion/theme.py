@@ -72,11 +72,15 @@ def icon_path():
 # taskbar, the title bar and the tray, differing only in colour (2026-08-11).
 #
 # WHICH mark is an indirection as of 2026-08-17
-# (docs/COMMERCIAL_READINESS.md item 10). The default is the product's own
-# neutral mark; cc_mark_white.png -- one studio's logo -- is still shipped and
-# still selectable, but a build no longer wears it by default:
+# (docs/COMMERCIAL_READINESS.md item 10), and the DEFAULT is the Creators
+# Club mark (cc_mark_white.png) as of 2026-08-18: item 10 first swapped in a
+# neutral placeholder (ccsync_mark.png), and the owner reversed that -- this
+# is Creators Club software sold under its own brand, the way Resolve and
+# Premiere carry theirs, so every build wears the CC mark unless a site asks
+# for something else. The neutral mark stays shipped and selectable for a
+# white-label fleet:
 #
-#     CCSYNC_BRAND_LOGO=cc_mark_white.png      a file inside assets/
+#     CCSYNC_BRAND_LOGO=ccsync_mark.png        a file inside assets/
 #     CCSYNC_BRAND_LOGO=C:\brand\acme.png      any white-on-transparent PNG
 #
 # Env rather than config.toml because both the tray and the popups need it
@@ -91,7 +95,7 @@ def icon_path():
 # var on every editor's machine, which meant a fleet that had its own logo
 # lost it on upgrade and could only get it back through a reinstall.
 BRAND_LOGO_ENV = "CCSYNC_BRAND_LOGO"
-PRODUCT_MARK_ASSET = "ccsync_mark.png"
+PRODUCT_MARK_ASSET = "cc_mark_white.png"
 WINDOW_ICON_ASSET = PRODUCT_MARK_ASSET
 
 # 128 px, not the asset's native 512: Windows scales an iconphoto down to

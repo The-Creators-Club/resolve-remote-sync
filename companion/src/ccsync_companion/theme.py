@@ -247,6 +247,41 @@ def _window_icon_image(tk_module, root):
     return tk_module.PhotoImage(file=str(path), master=root)
 
 
+# The Windows taskbar groups windows by APPLICATION identity, and for a
+# process that never declared one that identity is the exe -- so the taskbar
+# button wears the exe's icon, not the window's, no matter what iconphoto set
+# (measured 2026-08-18: the title bar showed the mark and the taskbar showed
+# python.exe's snakes; under a frozen build it would be icon.ico, i.e. one
+# studio's logo on every customer's taskbar). Declaring an explicit
+# AppUserModelID makes the taskbar take the window's own icon -- the one
+# brand_logo controls. It has to happen before the FIRST window is mapped;
+# after that the button is already grouped and stays so. Windows-only: macOS
+# uses the bundle icon, and neither X11 nor Tk care.
+APP_USER_MODEL_ID = "com.ccsync.companion"
+_APP_IDENTITY_CLAIMED = False
+
+
+def claim_app_identity() -> bool:
+    """Tell the Windows shell which app this process is. Idempotent, silent,
+    a no-op off Windows. Called from app.run() at startup and again (cheaply)
+    by apply_window_icon so a process that never went through run() -- tests,
+    the wizard -- still gets it before its first window maps."""
+    global _APP_IDENTITY_CLAIMED
+    if _APP_IDENTITY_CLAIMED:
+        return True
+    if sys.platform != "win32":
+        _APP_IDENTITY_CLAIMED = True
+        return False
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+        _APP_IDENTITY_CLAIMED = True
+        return True
+    except Exception:
+        return False
+
+
 def apply_window_icon(tk_module, root) -> None:
     """Set the product mark, in brand red, as this window's
     title-bar/taskbar icon.
@@ -260,6 +295,7 @@ def apply_window_icon(tk_module, root) -> None:
     RGB_RED, not the dashboard favicon's #CC0000: this is the one red the rest
     of the companion's chrome is painted in, and a second spelling of "brand
     red" in here is how palettes drift apart (2026-08-11)."""
+    claim_app_identity()
     try:
         image = _window_icon_image(tk_module, root)
         if image is None:

@@ -45,6 +45,7 @@ from . import resolve_prefs as resolve_prefs_mod
 from . import root_guard as root_guard_mod
 from . import shutdown_guard as shutdown_guard_mod
 from . import stills as stills_mod
+from . import theme
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
 from . import site as site_mod
@@ -5265,6 +5266,12 @@ def run() -> None:
     # above: no single-instance lock, no config, no tray.
     if music_worker.WORKER_FLAG in sys.argv[1:]:
         sys.exit(music_worker.main(sys.argv[1:]))
+
+    # Before the first window of any kind: the taskbar decides which app a
+    # window belongs to when its button is created, and without this it is
+    # "the exe" and wears the exe's icon rather than the branded window mark
+    # (theme.claim_app_identity, 2026-08-18).
+    theme.claim_app_identity()
 
     cfg = config_mod.load_config()
     # Logging (and a first validate_config pass) must exist BEFORE

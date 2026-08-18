@@ -389,3 +389,77 @@ def test_brand_logo_site_never_raises(monkeypatch):
     monkeypatch.setattr(site_mod, "brand_logo", boom)
     assert theme.brand_logo_site() is None
     assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+
+
+# -- claim_app_identity: the taskbar shows the WINDOW's icon, not the exe's --
+#
+# Measured 2026-08-18 on Windows 11: with iconphoto set and no explicit
+# AppUserModelID, the title bar wore the mark and the taskbar wore
+# python.exe's snakes (a frozen build: icon.ico). Declaring the identity
+# before the first window maps is what makes the taskbar follow brand_logo.
+
+def test_claim_app_identity_is_a_silent_no_op_off_windows(monkeypatch):
+    monkeypatch.setattr(theme, "_APP_IDENTITY_CLAIMED", False)
+    monkeypatch.setattr(theme.sys, "platform", "darwin")
+    assert theme.claim_app_identity() is False
+    # ...and remembers that it looked, so it is not re-evaluated per window.
+    assert theme._APP_IDENTITY_CLAIMED is True
+
+
+def test_claim_app_identity_declares_the_ccsync_id_once_on_windows(monkeypatch):
+    calls = []
+
+    class _Shell32:
+        @staticmethod
+        def SetCurrentProcessExplicitAppUserModelID(app_id):
+            calls.append(app_id)
+            return 0
+
+    class _Windll:
+        shell32 = _Shell32()
+
+    import ctypes
+
+    monkeypatch.setattr(theme, "_APP_IDENTITY_CLAIMED", False)
+    monkeypatch.setattr(theme.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", _Windll(), raising=False)
+    assert theme.claim_app_identity() is True
+    assert theme.claim_app_identity() is True
+    assert calls == [theme.APP_USER_MODEL_ID]
+    # The id is the same family the macOS bundle and launchd labels use --
+    # a product id, never a customer's (COMMERCIAL_READINESS item 10).
+    assert theme.APP_USER_MODEL_ID.startswith("com.ccsync.")
+
+
+def test_claim_app_identity_never_raises_when_the_shell_api_is_missing(monkeypatch):
+    class _Windll:
+        pass  # no shell32 at all -> AttributeError inside
+
+    import ctypes
+
+    monkeypatch.setattr(theme, "_APP_IDENTITY_CLAIMED", False)
+    monkeypatch.setattr(theme.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", _Windll(), raising=False)
+    assert theme.claim_app_identity() is False
+    assert theme._APP_IDENTITY_CLAIMED is False, "a failed claim may be retried by the next window"
+
+
+def test_apply_window_icon_claims_the_app_identity_before_touching_the_icon(monkeypatch):
+    order = []
+    monkeypatch.setattr(theme, "claim_app_identity", lambda: order.append("claim") or True)
+    monkeypatch.setattr(theme, "_window_icon_image",
+                        lambda tk, root: order.append("image") or None)
+    theme.apply_window_icon(_FakeTk, _FakeRoot())
+    assert order == ["claim", "image"]
+
+
+def test_run_claims_the_app_identity_before_any_window_can_exist():
+    """app.run() must declare the identity before load_config -- the earliest
+    thing that can put a dialog up (a bad config's popup) comes after it."""
+    import inspect
+
+    from ccsync_companion import app
+
+    source = inspect.getsource(app.run)
+    claim = source.index("theme.claim_app_identity()")
+    assert claim < source.index("config_mod.load_config()")

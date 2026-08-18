@@ -502,6 +502,33 @@ developer's own branded rig was otherwise deciding what the suite measured.
 
 ---
 
+### CR-24 — the taskbar never showed the window mark at all: Windows grouped every popup under the exe and drew the exe's icon — FIXED in repo 2026-08-18, unshipped
+`theme.apply_window_icon` had been setting the title-bar icon since 0.4.7 and
+nobody had checked the taskbar button. Measured 2026-08-18: same window, title
+bar wearing the mark, taskbar wearing **python.exe's snakes** (a frozen build:
+`icon.ico`, i.e. one studio's logo on every customer's taskbar regardless of
+`brand_logo`). The Windows taskbar decides which *application* a window
+belongs to when its button is created; a process that never declared an
+AppUserModelID is "the exe", and the button takes the exe's icon.
+
+`theme.claim_app_identity()` declares `com.ccsync.companion` (the same
+product-id family as the macOS bundle/launchd labels) — Windows-only,
+idempotent, silent. `app.run()` calls it before `load_config()` (the earliest
+thing that can put a dialog up), and `apply_window_icon` calls it again so a
+process that never went through `run()` (the wizard, a test) still claims it
+before its first window maps. Verified: with the id set before the first
+`tk.Tk()` *or* after it but before the first map, the taskbar shows the tinted
+window mark; set after the first map, the button is already grouped and stays
+on the exe icon. Which mark that is remains `brand_logo`'s decision (CR-23);
+this fleet's `site.toml` names `cc_mark_white.png`.
+
+Also seen while measuring: a companion-suite run leaked a REAL Tk window
+("MAKING PROXIES", system `python -m pytest`) onto the operator's desktop — the
+progress-window tests must go through the conftest's headless pattern; sent
+back to the builder before merge.
+
+---
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

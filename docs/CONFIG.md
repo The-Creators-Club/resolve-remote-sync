@@ -185,8 +185,8 @@ The full annotated table, including the Synology-only rows, is in
 
 | Var | | Notes |
 |---|---|---|
-| `DASH_SESSION_SECRET` | **R S** | Signs session cookies **and** companion identity tokens. ≥ 24 chars, not a placeholder, enough variety to be random — **checked at boot, and a failure refuses to serve** (a weak value is a forgeable *admin* cookie). Must stay stable across deploys |
-| `DASH_REPORT_TOKEN` | **R S** | The shared fleet token companions present as `X-CCSync-Token`. Same boot check. Unset = reports refused |
+| `DASH_SESSION_SECRET` | **R S** | Signs session cookies **and** companion identity tokens. ≥ 24 chars, not a placeholder, enough variety to be random — **checked at boot, and a failure refuses to serve** (a weak value is a forgeable *admin* cookie). Must stay stable across deploys. Also read by the MOUNTED b-roll app (`broll/web` `config.get_session_secret`), which verifies the same identity tokens on its ingest fleet routes — unset there means those routes refuse, never run open |
+| `DASH_REPORT_TOKEN` | **R S** | The shared fleet token companions present as `X-CCSync-Token`. Same boot check. Unset = reports refused — and, since 2026-08-18, b-roll ingest fleet calls too (`broll/web` `config.get_fleet_token`, fail-closed) |
 | `SYNCTHING_API_KEY` | **R S** | Syncthing's GUI API key. The collector does nothing without it |
 | `BROLL_INGEST_TOKEN` | **S F** | Mandatory when `DASH_BROLL_ENABLED=1`; `create_app` refuses to build an app with a blank, placeholder or short one rather than serve a write path a session cookie alone could reach |
 | `DASH_NAS_PW` / `TRUENAS_PW` | **S** | Only `/admin/users` needs it. Unset = that section is 503, everything else works |
@@ -277,6 +277,7 @@ a boot warning, the same "never coerce upward" rule as
 | Var | Default | Notes |
 |---|---|---|
 | `DASH_BROLL_ENABLED` | `1` at deploy time (`0` in `Settings`) | `"1"` and nothing else. Requires `BROLL_INGEST_TOKEN` |
+| `BROLL_ARCHIVE_CREATORS_DIR` | `Creators_Club` | The top-level folder dashboard b-roll ingest files a shoot under: `<archive root>/<this>/<shoot>/…`. It is a literal in the indexer (`build_archive.CREATORS`) and every already-published file sits under it, so the default cannot change — but the name is one customer's, and item 4/10 says a second customer must not fork code to be called something else. Read only by NEW writes (2026-08-18) |
 | *(music)* | — | **There is deliberately no `DASH_MUSIC_ENABLED`.** Ship the tree or don't |
 | `DASH_INTERVAL_PROVISION` | `300` | |
 | `DASH_INTERVAL_CONFIG` | `120` | |

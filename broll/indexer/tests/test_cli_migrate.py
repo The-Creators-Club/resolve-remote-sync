@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from broll_index.cli import build_parser, main
+from broll_index.migrate import LATEST_VERSION
 from test_migrate import V1_SCHEMA
 
 
@@ -44,7 +45,7 @@ def test_cli_migrate_upgrades_v1_db(tmp_path, capsys):
 
     conn = sqlite3.connect(str(db_path))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION
     finally:
         conn.close()
 

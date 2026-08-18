@@ -581,7 +581,7 @@ its policy.
 | `/` and `/partials/*` | the server-rendered UI (htmx fragments). Session-gated |
 | `/login`, `/logout` | the HTML login/logout forms |
 | `/auth/oidc/login`, `/auth/oidc/callback` | the two OIDC legs. Inert unless `DASH_AUTH_METHOD=oidc` — they answer 503 with the break-glass URL otherwise, and the callback authenticates on a signed flow cookie plus a verified `id_token`, never on being reachable |
-| `/broll/*` | the b-roll SPA and its API. Ingest routes take `X-Ingest-Token` |
+| `/broll/*` | the b-roll SPA and its API. Ingest routes take `X-Ingest-Token`; the ingest **panel** and **fleet** routes are §6a |
 | `/music/*` | the music SPA and its API. The bare `/music` → `/music/` redirect is load-bearing |
 | `/ytdl/*` | the downloader SPA, **only when the feature is on** |
 | `/static/*`, `/favicon.ico` | assets |
@@ -591,6 +591,94 @@ The mounted SPAs are currently exempt from the CSRF check
 token yet; `SameSite=Lax` holds that line meanwhile. The token is already
 published to them on the injected topbar (`data-csrf`), so the fix is a
 frontend change plus deleting the prefix.
+
+---
+
+## 6a. B-roll ingest — `/broll/api/ingest-batches` and `/broll/api/fleet/ingest`
+
+Added 2026-08-18 (`docs/BROLL_INGEST_PLAN.md` §4.2/§4.3). Drag clips onto the
+b-roll page and the editor's **own machine** indexes them — ffmpeg, then a local
+model — and uploads the results to the NAS. Three parties, and the split of
+credentials between them is the whole design:
+
+- the **browser** only dispatches. It creates a batch and hands the uid to the
+  local companion over the loopback; it never learns a path and never dictates
+  one.
+- the **companion** claims that batch on the fleet routes and receives the work
+  order — video ids, archive folder and stem, taxonomy, lease.
+- the **server** flips rows live only after it has `stat()`ed the uploaded files
+  in `BROLL_DATA_ROOT`, which *is* the NAS archive.
+
+### The panel's routes (session)
+
+Authorised by `X-CCSync-User` / `X-CCSync-Admin`, which
+`ccsync_dashboard.broll.BrollGate` mints from the session cookie and **strips
+inbound** — the same rule `/ytdl` runs on. A request with no stamp is 401 in the
+sub-app even if something let it past `login_gate`.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST …/precheck` | `{share, keep_subfolders, items:[{local_id,name,size,hash,rel_dir}]}` | `{items:[{local_id, duplicate_of, duplicate_name, final_name}]}`. Reserves nothing |
+| `POST …/` | `{share, collection?, settings, items:[…]}` | `{uid, state:"queued", n_items}` |
+| `GET …/?scope=mine\|all` | — | `{scope, admin, batches:[…]}`. `scope=all` needs `X-CCSync-Admin: 1` |
+| `GET …/{uid}` | — | `{batch, items:[…]}` |
+| `POST …/{uid}/cancel` | — | sets `cancel_requested` **and expires the lease**. Owner or admin |
+| `POST …/{uid}/upload-paused` | `{paused}` | holds the uploads; the crunching continues |
+
+`settings` = `{tier: good\|best, run_mode: idle\|foreground, upload_originals,
+keep_subfolders, transcribe:false}`. A tier or run mode this server does not
+know is 422, not a machine that waits forever for a model nobody can fetch;
+`transcribe: true` is 422 until phase 2 exists.
+
+Another editor's batch is **404, never 403** — a 403 hands out a uid, and the
+uid is the only thing between an editor and someone else's drop.
+
+### The companion's routes (fleet)
+
+`X-CCSync-Token` (the shared `DASH_REPORT_TOKEN`) **plus** a signed
+`X-CCSync-Identity`, both fail-closed, exactly as the ytdl fleet routes do (§1,
+and H5 — the token proves *a* fleet machine and nothing about **which**).
+`login_gate` carves these six shapes out **per suffix**, so a leaked fleet token
+cannot read or stop a batch through the panel routes above.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST …/batches/{uid}/claim` | `{machine, companion_version, tier, capabilities}` | the manifest: `{batch, settings, lease_seconds, heartbeat_seconds, archive_remote_rel, taxonomy, items:[…]}` |
+| `POST …/batches/{uid}/heartbeat` | `{}` | `{ok, cancel_requested, upload_paused, lease_expires_at}` |
+| `POST …/batches/{uid}/items/{iuid}/status` | `{state, stage_percent?, error?, attempts?, hash?, probe?}` | the batch counters |
+| `POST …/batches/{uid}/items/{iuid}/result` | `{segments, themes, quality_flags, category_hint, model, probe fields, sprite_*}` | server writes the rows **and computes `search_norm`** |
+| `POST …/batches/{uid}/items/{iuid}/uploaded` | `{files:[{rel,size}], original_uploaded}` | `{ok, live:true, archive_path}` |
+| `POST …/batches/{uid}/release` | `{state: done\|failed\|cancelled, summary}` | finalises; `done` with failures becomes `done_with_errors` |
+
+Both uids are 32 lowercase hex characters (`lower(hex(randomblob(16)))`), and
+the shape is load-bearing: an integer id would be one an editor could
+enumerate, and `app.py`'s carve-out regex pins it.
+
+**Every call after `claim` should also send `X-CCSync-Machine`** — the same
+string that claim's body carried. It is what proves the caller is still *this*
+editor's leaseholding machine rather than another of their companions, and
+without it that one check is skipped (the editor, lease and cancel checks all
+still run). A machine that does not match gets 410 `reason: other_machine`.
+
+**`claim` is one transaction** and is idempotent for the machine that already
+holds the batch (a companion restarting mid-batch re-issues it): it mints the
+`videos` rows at `status='ingesting'`, allocates each archive name against what
+is already published in that folder ∪ this batch (`_2`, `_3`… — the
+`build_archive.claim_name` rule), records the share with
+`share_roots.collection`, and takes the lease.
+
+**`uploaded` believes nothing.** Every declared `rel` is resolved under
+`BROLL_DATA_ROOT`, containment-checked and `stat()`ed, and the proxy the server
+itself allocated is required whether or not the companion mentioned it.
+
+### Status codes here
+
+| Code | Means, on these routes |
+|---|---|
+| `403` | a credential problem, and only that: no/invalid fleet token, an unverifiable identity, or a claim on **another editor's** batch |
+| `409` | another of this editor's machines holds a live lease; or (on `uploaded`) the files are not all there — body carries `{missing[], size_mismatch[]}` so an interrupted rclone retries those and not the clip |
+| `410` | **your claim is over**, however it ended: lease expired and reclaimed, cancelled, taken by another machine, batch finished. The companion's answer to all of them is the same one — stop, quietly — and a 403 would read as "fix your credentials" and be retried forever |
+| `400` | an illegal item transition (an item cannot go backwards; only `failed` may be left again), or a `rel` that points outside the archive root — no retry can fix either |
 
 ---
 

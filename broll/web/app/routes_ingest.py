@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from app import config
+from app import config, ingest_batches
 from app.db import bump_search_generation, get_db
 from app.schemas import IndexIn, MovedIn, ShareRootIn, VideoIn
 
@@ -150,23 +150,39 @@ def ingest_index(body: IndexIn, conn: sqlite3.Connection = Depends(get_db)) -> d
             )
 
             for seg in body.segments:
+                objects = ", ".join(seg.objects)
                 conn.execute(
                     """
                     INSERT INTO segments
                         (video_id, t_start, t_end, description, objects, setting, motion,
-                         onscreen_text, onscreen_text_en)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         onscreen_text, onscreen_text_en, search_norm)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         body.video_id,
                         seg.t_start,
                         seg.t_end,
                         seg.description,
-                        ", ".join(seg.objects),
+                        objects,
                         seg.setting,
                         seg.motion,
                         seg.onscreen_text,
                         seg.onscreen_text_en,
+                        # Computed HERE since 2026-08-18
+                        # (docs/BROLL_INGEST_PLAN.md §3.1, PR-D). It used to be
+                        # left at '' with the indexer's http_backend saying
+                        # search_norm "is not supported over the ingest API" --
+                        # which meant every clip indexed over HTTP was
+                        # keyword-searchable only after somebody remembered to
+                        # run a base-rig `broll-index run --stages embed`. A
+                        # two-character CJK on-screen-text term is not findable
+                        # at all without this blob (migrations/004), so the gap
+                        # was silent: the clip was in the archive, indexed,
+                        # and unreachable by the words on its own screen.
+                        # app/normalize.py is the indexer's own module,
+                        # vendored byte-for-byte so both ends tokenise
+                        # identically.
+                        ingest_batches.segment_norm(seg, objects),
                     ),
                 )
 

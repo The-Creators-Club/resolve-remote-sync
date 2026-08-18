@@ -261,6 +261,87 @@ def test_migration_seeds_the_search_generation_counter(tmp_path):
             conn.close()
 
 
+def test_migration_011_adds_the_ingest_tables_on_both_paths(tmp_path):
+    """v10 -> v11 (migrations/011_ingest_batches.sql), and the from-scratch
+    schema.sql twin, must produce the SAME tables and the same columns.
+
+    The two paths are how a real database and a fresh one get here, and they
+    have diverged before -- a version added in one describer and not the other
+    produces a startup failure on exactly one of them (app/db.py's own
+    docstring says so). Column-for-column rather than "the table exists":
+    `share_roots.collection` missing from the fresh path would make
+    creators_shares fall back on every new deployment, and a whole customer's
+    own footage would file itself under Downloads with nothing in a log.
+    """
+    migrated = tmp_path / "migrated.db"
+    _build_v1_db(migrated)
+    ensure_schema(migrated)
+
+    scratch = tmp_path / "scratch.db"
+    ensure_schema(scratch)
+
+    shapes = []
+    for db_path in (migrated, scratch):
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 11, db_path
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            assert "ingest_batches" in tables, db_path
+            assert "ingest_items" in tables, db_path
+            indexes = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'")}
+            assert {"idx_ingest_batches_editor", "idx_ingest_batches_state",
+                    "idx_ingest_items_batch", "idx_ingest_items_video"} <= indexes, db_path
+            shape = {}
+            for table in ("ingest_batches", "ingest_items", "share_roots", "videos"):
+                shape[table] = sorted(
+                    (r[1], r[2].upper(), r[3], r[4])
+                    for r in conn.execute(f"PRAGMA table_info({table})"))
+            shapes.append(shape)
+            assert "collection" in [c[0] for c in shape["share_roots"]], db_path
+        finally:
+            conn.close()
+    assert shapes[0] == shapes[1], (
+        "the stepped chain and schema.sql describe different databases -- "
+        "migrations/011_ingest_batches.sql and schema.sql have drifted")
+
+
+def test_the_ingest_state_checks_are_enforced_by_the_database(tmp_path):
+    """The CHECK constraints are the last line, not decoration: the fleet
+    routes validate transitions, and a bug there must still not be able to
+    write a state nothing downstream can read (the tray, the grid chip and the
+    SPA all switch on these strings)."""
+    db_path = tmp_path / "broll.db"
+    ensure_schema(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        # Before any statement opens a transaction: SQLite silently ignores
+        # this pragma inside one, and a cascade test that never had foreign
+        # keys on is a test that passes for the wrong reason.
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "INSERT INTO ingest_batches (uid, editor, share, settings_json, created_at) "
+            "VALUES ('a', 'jsmith', 'shoot', '{}', 'now')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE ingest_batches SET state = 'nonsense' WHERE uid = 'a'")
+        conn.execute(
+            "INSERT INTO ingest_items (uid, batch_uid, ord, orig_name, source) "
+            "VALUES ('i', 'a', 0, 'A001.MP4', 'upload')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE ingest_items SET state = 'nonsense' WHERE uid = 'i'")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO ingest_items (uid, batch_uid, ord, orig_name, source) "
+                "VALUES ('j', 'a', 1, 'B.MP4', 'telepathy')")
+        # ...and the cascade: deleting a batch must not leave orphan items
+        # behind for a later batch's counters to pick up.
+        conn.execute("DELETE FROM ingest_batches WHERE uid = 'a'")
+        assert conn.execute("SELECT COUNT(*) FROM ingest_items").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_ensure_schema_rejects_future_version(tmp_path):
     db_path = tmp_path / "broll.db"
     conn = sqlite3.connect(db_path)

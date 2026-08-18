@@ -17,6 +17,12 @@ from app.main import app  # noqa: E402
 # test that reuses it against ccsync_dashboard.broll.check_ingest_token passes.
 INGEST_TOKEN = "test-ingest-token-0123456789abcdef"
 
+# The dashboard b-roll ingest credentials (docs/BROLL_INGEST_PLAN.md §4.2,
+# 2026-08-18). Both fail closed when unset, so the suite runs configured like a
+# deployment; the tests that are ABOUT the refusals unset them deliberately.
+FLEET_TOKEN = "test-fleet-report-token-0123456789ab"
+SESSION_SECRET = "test-session-secret-0123456789abcdef"
+
 
 @pytest.fixture(autouse=True)
 def reset_hybrid_search_caches():
@@ -44,6 +50,8 @@ def data_root(tmp_path, monkeypatch):
     # that no longer exists. The `client` fixture sends the matching header on
     # every request; tests about the gate itself build their own bare client.
     monkeypatch.setenv("BROLL_INGEST_TOKEN", INGEST_TOKEN)
+    monkeypatch.setenv("DASH_REPORT_TOKEN", FLEET_TOKEN)
+    monkeypatch.setenv("DASH_SESSION_SECRET", SESSION_SECRET)
     ensure_schema(tmp_path / "broll.db")
     return tmp_path
 
@@ -68,3 +76,34 @@ def client(data_root, conn):
     with TestClient(app, headers={"X-Ingest-Token": INGEST_TOKEN}) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+def fleet_headers(editor: str = "jsmith", machine: str = "EDIT-01") -> dict:
+    """What a companion sends on every /api/fleet/ingest call.
+
+    A REAL signed identity token, minted with the same secret the app verifies
+    against -- never a bare name. The whole point of these routes is that the
+    shared fleet token proves "a fleet machine" and nothing about which editor
+    (H5), so a test that hand-waved the identity would be testing the hole
+    rather than the fix.
+    """
+    from app import identity
+
+    return {
+        "X-CCSync-Token": FLEET_TOKEN,
+        "X-CCSync-Identity": identity.make_identity_token(SESSION_SECRET, editor),
+        "X-CCSync-Machine": machine,
+    }
+
+
+@pytest.fixture()
+def as_editor(client):
+    """The SPA's half: the identity header BrollGate stamps from the session."""
+    client.headers.update({"X-CCSync-User": "jsmith"})
+    return client
+
+
+@pytest.fixture()
+def as_admin(client):
+    client.headers.update({"X-CCSync-User": "root", "X-CCSync-Admin": "1"})
+    return client

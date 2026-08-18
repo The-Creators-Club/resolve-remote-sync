@@ -97,6 +97,33 @@ def _build_fake_broll(data_root_env: str) -> dict[str, types.ModuleType]:
 
     broll_app.include_router(ingest)
 
+    # The ingest PANEL (docs/BROLL_INGEST_PLAN.md §4.3): session-authorised on
+    # a header the real broll/web reads and this gate mints. Echoed rather than
+    # implemented -- what these tests are about is WHICH name (and whether
+    # "admin") reaches the sub-app, which is the gate's job, not the panel's.
+    @broll_app.get("/api/ingest-batches")
+    def list_batches(x_ccsync_user: str | None = Header(default=None),
+                     x_ccsync_admin: str | None = Header(default=None)) -> dict:
+        return {"user": x_ccsync_user, "admin": x_ccsync_admin}
+
+    @broll_app.post("/api/ingest-batches")
+    def create_batch(x_ccsync_user: str | None = Header(default=None)) -> dict:
+        return {"created_by": x_ccsync_user}
+
+    @broll_app.post("/api/ingest-batches/{uid}/cancel")
+    def cancel_batch(uid: str, x_ccsync_user: str | None = Header(default=None),
+                     x_ccsync_admin: str | None = Header(default=None)) -> dict:
+        return {"uid": uid, "user": x_ccsync_user, "admin": x_ccsync_admin}
+
+    # The companion's half: fleet-token authed, no session anywhere.
+    @broll_app.post("/api/fleet/ingest/batches/{uid}/claim")
+    def fleet_claim(uid: str) -> dict:
+        return {"claimed": uid}
+
+    @broll_app.post("/api/fleet/ingest/batches/{uid}/items/{iuid}/result")
+    def fleet_result(uid: str, iuid: str) -> dict:
+        return {"batch": uid, "item": iuid}
+
     @broll_app.get("/", response_class=HTMLResponse)
     def index() -> str:
         return "<html><body>B-ROLL SEARCH</body></html>"
@@ -394,3 +421,175 @@ def test_check_ingest_token_accepts_what_the_docs_tell_operators_to_generate():
     # `openssl rand -hex 24` -- the exact recipe in compose.yaml
     assert broll.check_ingest_token("a" * 24 + "b" * 24) is not None, "still too uniform"
     assert broll.check_ingest_token("0123456789abcdef01234567") is None
+
+
+# --- identity: the ingest panel's headers are minted here, never accepted -----
+#
+# docs/BROLL_INGEST_PLAN.md §4.3, 2026-08-18. `/broll/api/ingest-batches` makes
+# per-user decisions with real consequences -- whose batches these are, and who
+# may stop another machine's work -- and broll/web has no session code of its
+# own. BrollGate is where the ccsync_session cookie becomes a name.
+
+def test_the_sub_app_is_told_who_the_session_belongs_to(tmp_path, broll_env):
+    app = _broll_app(tmp_path)
+    with TestClient(app) as c:
+        as_user(c, "kchen")
+        assert c.get("/broll/api/ingest-batches").json()["user"] == "kchen"
+        assert c.post("/broll/api/ingest-batches").json() == {"created_by": "kchen"}
+        as_user(c, "jsmith")
+        assert c.get("/broll/api/ingest-batches").json()["user"] == "jsmith"
+
+
+def test_a_forged_identity_header_never_reaches_the_sub_app(tmp_path, broll_env):
+    """SPOOF-PROOFING, and the reason the gate strips before it appends. A
+    logged-in editor sails past login_gate with a valid session of their own;
+    if their `fetch(url, {headers: {'X-CCSync-User': 'admin'}})` survived the
+    trip, that header would be the whole authorisation story for "whose batch
+    may I cancel"."""
+    app = _broll_app(tmp_path)
+    with TestClient(app) as c:
+        as_user(c, "jsmith")
+        forged = {"X-CCSync-User": "kchen", "X-CCSync-Admin": "1"}
+        body = c.get("/broll/api/ingest-batches", headers=forged).json()
+        assert body["user"] == "jsmith"
+        assert body["admin"] is None, "a forged admin claim reached the sub-app"
+        assert c.post("/broll/api/ingest-batches/abc/cancel",
+                      headers=forged).json()["user"] == "jsmith"
+
+
+def test_a_real_admin_is_stamped_as_one(tmp_path, broll_env):
+    """`scope=all` (every machine's batches) and cancelling somebody else's
+    work are gated on this header inside the sub-app, so it has to arrive for
+    the people who really are admins -- and only them."""
+    app = _broll_app(tmp_path, admin_users="root, kchen")
+    with TestClient(app) as c:
+        as_user(c, "kchen")
+        assert c.get("/broll/api/ingest-batches").json()["admin"] == "1"
+        as_user(c, "jsmith")
+        assert c.get("/broll/api/ingest-batches").json()["admin"] is None
+
+
+def test_a_forged_header_survives_nothing_even_with_no_session(tmp_path, broll_env):
+    """login_gate answers this 401 long before the sub-app sees it, so this is
+    the belt to that brace: even reached directly, the gate hands the sub-app
+    NO identity rather than the caller's own claim."""
+    import asyncio
+
+    seen: dict = {}
+
+    async def spy(scope, receive, send):
+        seen["headers"] = [(k.decode(), v.decode()) for k, v in scope["headers"]]
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_message):
+        return None
+
+    gate = broll.BrollGate(spy, TOKEN, Settings(db_path=":memory:", session_secret=SECRET))
+    scope = {"type": "http", "method": "GET", "path": "/broll/api/ingest-batches",
+             "root_path": "/broll",
+             "headers": [(b"x-ccsync-user", b"admin"), (b"x-ccsync-admin", b"1"),
+                         (b"cookie", b"ccsync_session=nonsense; other=1")]}
+    asyncio.run(gate(scope, receive, send))
+
+    assert not [k for k, _v in seen["headers"]
+                if k in ("x-ccsync-user", "x-ccsync-admin")], (
+        "a forged identity header reached the sub-app with no session at all")
+    # ...and the gate did not mutate the caller's own scope on the way past:
+    # it belongs to the server, and a mounted app is not the only reader.
+    assert (b"x-ccsync-user", b"admin") in scope["headers"]
+
+
+def test_the_identity_header_round_trips_a_latin1_name_and_withholds_a_cjk_one(
+        tmp_path, broll_env):
+    """LATIN-1, because Starlette decodes headers latin-1: UTF-8 turned `josé`
+    into `josÃ©` on arrival and that editor's own rows matched nothing
+    (YTDL-29, 2026-08-11). A name beyond U+00FF has no lossless encoding and a
+    lossy one could collide two editors, so the header is withheld entirely and
+    the sub-app 401s -- broken loudly for one person, never quietly wrong."""
+    app = _broll_app(tmp_path)
+    with TestClient(app) as c:
+        as_user(c, "josé")
+        assert c.get("/broll/api/ingest-batches").json()["user"] == "josé"
+        as_user(c, "小明")
+        assert c.get("/broll/api/ingest-batches").json()["user"] is None
+
+
+def test_a_mount_with_no_settings_serves_search_but_stamps_nothing(tmp_path, broll_env):
+    """The b-roll mount fails ABSENT, never fatal. A caller that has not been
+    updated must get a working search UI with the ingest panel 401ing, not a
+    dashboard that will not boot."""
+    from fastapi import FastAPI
+
+    host = FastAPI()
+    assert broll.mount_broll(host, TOKEN) == broll.MOUNTED
+    with TestClient(host) as c:
+        c.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
+        assert c.get("/broll/api/ingest-batches").json()["user"] is None
+
+
+# --- the fleet carve-out (docs/BROLL_INGEST_PLAN.md §4.2) ---------------------
+
+FLEET_UID = "0123456789abcdef0123456789abcdef"
+ITEM_UID = "fedcba9876543210fedcba9876543210"
+
+
+def test_a_companion_reaches_the_fleet_routes_with_the_fleet_token(tmp_path, broll_env):
+    """These calls happen with no browser open, so there is no session to gate
+    on. Without the carve-out every one of them gets a 303 to an HTML login
+    page that no companion can follow, and b-roll ingest stops fleet-wide."""
+    token = "f" * 40
+    app = _broll_app(tmp_path, report_token=token)
+    headers = {"X-CCSync-Token": token}
+    with TestClient(app) as c:
+        r = c.post(f"/broll/api/fleet/ingest/batches/{FLEET_UID}/claim", json={},
+                   headers=headers, follow_redirects=False)
+        assert r.status_code == 200, r.text
+        r = c.post(f"/broll/api/fleet/ingest/batches/{FLEET_UID}/items/{ITEM_UID}/result",
+                   json={}, headers=headers, follow_redirects=False)
+        assert r.status_code == 200, r.text
+
+
+def test_the_carve_out_is_per_suffix_not_per_prefix(tmp_path, broll_env):
+    """The SPA's own panel -- which decides whose batches you may cancel --
+    stays fully session-gated, so a leaked fleet token cannot read or stop
+    one."""
+    token = "f" * 40
+    app = _broll_app(tmp_path, report_token=token)
+    headers = {"X-CCSync-Token": token}
+    with TestClient(app) as c:
+        for path in ("/broll/api/ingest-batches",
+                     f"/broll/api/fleet/ingest/batches/{FLEET_UID}",
+                     f"/broll/api/fleet/ingest/batches/{FLEET_UID}/anything",
+                     f"/broll/api/fleet/ingest/batches/{FLEET_UID}/items/{ITEM_UID}/delete"):
+            r = c.post(path, json={}, headers=headers, follow_redirects=False)
+            assert r.status_code == 401, path
+
+
+def test_a_fleet_route_without_the_token_is_still_gated(tmp_path, broll_env):
+    token = "f" * 40
+    app = _broll_app(tmp_path, report_token=token)
+    with TestClient(app) as c:
+        r = c.post(f"/broll/api/fleet/ingest/batches/{FLEET_UID}/claim", json={},
+                   follow_redirects=False)
+        assert r.status_code == 401
+        r = c.post(f"/broll/api/fleet/ingest/batches/{FLEET_UID}/claim", json={},
+                   headers={"X-CCSync-Token": "wrong"}, follow_redirects=False)
+        assert r.status_code == 401
+
+
+def test_a_batch_uid_that_is_not_32_hex_gets_no_carve_out(tmp_path, broll_env):
+    """The uid shape is what ingest_batches.new_uid mints. A route that took an
+    integer id would be one an editor could enumerate, and the regex is where
+    that is enforced at the edge."""
+    token = "f" * 40
+    app = _broll_app(tmp_path, report_token=token)
+    headers = {"X-CCSync-Token": token}
+    with TestClient(app) as c:
+        for uid in ("1", "ZZZZ", FLEET_UID[:31], FLEET_UID + "0", FLEET_UID.upper()):
+            r = c.post(f"/broll/api/fleet/ingest/batches/{uid}/claim", json={},
+                       headers=headers, follow_redirects=False)
+            assert r.status_code == 401, uid

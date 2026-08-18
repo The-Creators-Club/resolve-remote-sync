@@ -530,6 +530,76 @@ def test_both_release_gates_pin_every_vendored_pair(gate):
         assert name in text, f"tools/{gate} does not pin the vendored {name}"
 
 
+# -- the b-roll ingest vendored pairs (2026-08-18, BROLL_INGEST_PLAN.md §3.1) --
+#
+# Same mechanism as ytdl_common above, two more files, and neither of them
+# involves the companion at all: they cross from one deployed tree to another
+# inside the container, which is a gap no import can close.
+#
+#   broll/web/app/normalize.py  <- broll/indexer/broll_index/normalize.py
+#     `search_norm`, the word-segmented + script-normalised CJK blob. The
+#     server computes it now (the HTTP ingest path used to insert an empty one
+#     and leave it to a base-rig embed pass; dashboard ingest has no base rig).
+#     A blob built by a DIFFERENT tokenisation than the one the query path
+#     normalises with does not match badly, it matches nothing -- so this is
+#     the same silent class of failure as a drifted ytdl_common, one layer
+#     down. broll/web cannot import broll_index: the container has no
+#     anthropic, xxhash, pyyaml or requests.
+#
+#   broll/web/app/identity.py   <- ytdl/web/ytdlweb/identity.py
+#     Verifies WHICH editor's companion is calling. Two verifiers that disagree
+#     about a token shape are two answers to that question and one is wrong.
+#     broll/web cannot import ytdlweb either: ytdl is feature-gated and a site
+#     may never have shipped it, and b-roll ingest must not stop working
+#     because a customer turned the YouTube downloader off.
+BROLL_VENDOR_PAIRS = {
+    "broll/web/app/normalize.py": (
+        REPO_ROOT / "broll" / "web" / "app" / "normalize.py",
+        REPO_ROOT / "broll" / "indexer" / "broll_index" / "normalize.py"),
+    "broll/web/app/identity.py": (
+        REPO_ROOT / "broll" / "web" / "app" / "identity.py",
+        YTDL_WEB_PKG / "identity.py"),
+}
+
+
+def test_the_broll_web_vendored_copies_are_byte_identical_to_their_sources():
+    """Fix a drift by editing the SOURCE and re-copying it in below the marker
+    -- never by editing broll/web's copy, which is what each header says and
+    what tools/release.ps1 prints."""
+    for label, (vendored, source) in sorted(BROLL_VENDOR_PAIRS.items()):
+        assert source.exists(), f"missing source of truth for {label}: {source}"
+        assert vendored.exists(), f"missing vendored copy: {vendored}"
+        body = _vendored_body(vendored)
+        assert body == source.read_bytes(), (
+            f"{vendored} has drifted from {source}: {len(body)} bytes below the "
+            f"marker vs {len(source.read_bytes())} in the source. Edit the source, "
+            f"then re-copy it below the marker line.")
+
+
+def test_the_vendored_identity_verifier_agrees_with_ytdls():
+    """The bytes are equal, so this proves the two MODULES load independently
+    and answer the same on the input that matters: a genuine token, and the
+    session-purpose token that must never be replayable as a machine identity
+    (the dashboard's SEC-1, copied into both copies of this file)."""
+    ytdl_identity = _load_by_path("ytdlweb_identity_under_test",
+                                  YTDL_WEB_PKG / "identity.py")
+    broll_identity = _load_by_path(
+        "broll_web_identity_under_test",
+        REPO_ROOT / "broll" / "web" / "app" / "identity.py")
+    secret = "s" * 32
+    token = ytdl_identity.make_identity_token(secret, "jsmith")
+    assert broll_identity.read_identity_token(secret, token) == "jsmith"
+    assert ytdl_identity.read_identity_token(secret, token) == "jsmith"
+    for bad in (None, "", "v1.jsmith.999.deadbeef", token.replace("identity", "session"),
+                token[:-1] + ("0" if token[-1] != "0" else "1")):
+        assert broll_identity.read_identity_token(secret, bad) is None, bad
+        assert ytdl_identity.read_identity_token(secret, bad) is None, bad
+    # No secret configured is None on BOTH sides -- fail-closed is the property,
+    # not an implementation detail of one of them.
+    assert broll_identity.read_identity_token("", token) is None
+    assert ytdl_identity.read_identity_token("", token) is None
+
+
 # A deliberately hostile info dict: the byte comparison above proves the FILES
 # match, this proves the two imported MODULES behave alike on the input most
 # likely to expose an encoding or fallback difference between a Linux container

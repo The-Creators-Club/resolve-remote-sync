@@ -32,6 +32,22 @@ smbprotocol>=1.13
 numpy>=1.26
 rapidfuzz>=3.0
 
+# The CJK keyword blob (`segments.search_norm`), computed by the SERVER since
+# 2026-08-18 (docs/BROLL_INGEST_PLAN.md §3.1). It used to be the base-rig
+# indexer's job alone: the HTTP ingest path inserted segments with an empty
+# one, so anything indexed over HTTP was keyword-searchable only after somebody
+# remembered to run `broll-index run --stages embed`. Dashboard b-roll ingest
+# has no base rig behind it at all.
+#
+# Without these two the app still runs -- broll/web's normalize.py treats them
+# as optional and returns raw text -- and that is exactly the failure worth
+# paying 40 MB to avoid: a two-character CJK term (堵車) is below trigram's
+# 3-character floor, and unicode61 makes an unbroken CJK run a single token, so
+# the clip is in the archive, indexed, and unreachable by the words on its own
+# screen. Licences: jieba MIT, opencc-python-reimplemented Apache-2.0.
+jieba>=0.42
+opencc-python-reimplemented>=0.1.7
+
 # --- music UI (mounted at /music) ------------------------------------------
 # `numpy` above already covers the embedding maths; the music app carries no
 # torch, because the container never embeds audio -- only query text, and only

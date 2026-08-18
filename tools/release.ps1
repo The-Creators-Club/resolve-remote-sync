@@ -24,11 +24,14 @@
          1.2.3: the dashboard rejects anything else, so a "-rc1" would build
          fine here and 422 at the publish (SHIP-11).
 
-         The same step also byte-compares the VENDORED files: the companion's
-         copy of ytdl_common.py must match ytdl/web/ytdlweb/ytdl_common.py
-         exactly below its header marker (docs/YTDL_LOCAL_DOWNLOAD.md section 5,
-         2026-08-14). Drift there is not a wrong version number, it is two
-         spellings of the same downloaded clip in one canonical tree.
+         The same step also byte-compares the VENDORED files -- three pairs as
+         of 2026-08-18, see $VendorPairs below. The companion's ytdl_common.py
+         must match ytdl/web's (docs/YTDL_LOCAL_DOWNLOAD.md section 5); and
+         broll/web's normalize.py and identity.py must match broll/indexer's
+         and ytdl/web's (docs/BROLL_INGEST_PLAN.md section 3.1). Drift in any of
+         them is not a wrong version number: it is two spellings of the same
+         downloaded clip in one canonical tree, or a CJK search blob nothing
+         matches, or two answers to "which editor is this companion".
 
          This script builds the WINDOWS artifact. PyInstaller does not
          cross-compile, so the macOS companion is built on the Mac by
@@ -156,6 +159,17 @@ $VendorPairs = @(
     @{ Source = Join-Path $RepoRoot "broll\indexer\broll_index\prompts\index_clip_v7_compact.md"
        Vendored = Join-Path $CompanionDir "src\ccsync_companion\broll_vlm\prompts\index_clip_v7_compact.md"
        Mode = "exact"; Fix = "copy broll/indexer/broll_index/prompts/index_clip_v7_compact.md over the companion's copy whole -- it has no header" }
+    # b-roll ingest (docs/BROLL_INGEST_PLAN.md section 3.1): two more pairs that
+    # never involve the companion -- they cross from one deployed tree to
+    # another inside the container, a gap no import can close.
+    @{ Source = Join-Path $RepoRoot "broll\indexerroll_index
+ormalize.py"
+       Vendored = Join-Path $RepoRoot "broll\webpp
+ormalize.py"
+       Mode = "marker"; Fix = "edit broll/indexer/broll_index/normalize.py (a search_norm built by a different tokenisation than the query path matches NOTHING), then re-copy it in" }
+    @{ Source = Join-Path $RepoRoot "ytdl\web\ytdlweb\identity.py"
+       Vendored = Join-Path $RepoRoot "broll\webpp\identity.py"
+       Mode = "marker"; Fix = "edit ytdl/web/ytdlweb/identity.py (two verifiers that disagree about a token shape are two answers to 'which editor is this'), then re-copy it in" }
 )
 $DistDir = Join-Path $CompanionDir "dist"
 $ExePath = Join-Path $DistDir "ccsync-companion.exe"
@@ -453,7 +467,7 @@ foreach ($pair in $VendorPairs) {
     }
 }
 if ($vendorFailed) { exit 1 }
-Write-Step "vendored parity OK ($($VendorPairs.Count) pairs: ytdl_common.py + the broll_vlm set)"
+Write-Step "vendored parity OK ($($VendorPairs.Count) pairs: ytdl_common.py, the broll_vlm set, broll/web normalize.py + identity.py)"
 
 # --- release-key parity (COMMERCIAL_READINESS.md item 4, 2026-08-17) --------
 # A companion built with an EMPTY RELEASE_PUBKEYS trusts nobody and can never

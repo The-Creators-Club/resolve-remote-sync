@@ -36,7 +36,10 @@ Migration steps (PRAGMA user_version):
     9 -> 10  apply migrations/010_search_generation.sql (adds the `meta`
              key/value table seeded with `search_generation`, the counter the
              semantic/fuzzy caches key on -- see bump_search_generation below)
-    10 -> 10 no-op, already current
+    10 -> 11 apply migrations/011_ingest_batches.sql (the dashboard b-roll
+             ingest work orders: `ingest_batches` + `ingest_items`, and
+             `share_roots.collection` -- docs/BROLL_INGEST_PLAN.md §2)
+    11 -> 11 no-op, already current
 
 A DB is stepped through every migration in this chain in one ensure_schema()
 call regardless of its starting version -- e.g. a real v1 production DB goes
@@ -53,7 +56,7 @@ from pathlib import Path
 from app import config
 
 # Highest schema version this codebase knows how to run against.
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 # Maps "user_version found" -> migration filename that advances it to the
 # next version. Resolved via find_migration_path() (repo-root-first, then
@@ -75,6 +78,7 @@ _MIGRATIONS: dict[int, str] = {
     7: "008_original_path.sql",
     8: "009_sprite_geometry.sql",
     9: "010_search_generation.sql",
+    10: "011_ingest_batches.sql",
 }
 
 # The `meta` key holding the search-cache generation counter (migration 010).

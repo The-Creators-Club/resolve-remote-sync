@@ -27,6 +27,15 @@ to run without one (app.py checks it before we get here) and every request to
 the sub-app's write routes is re-checked here, so the upstream "no token
 configured = dev mode, ingest is open" branch can never be reached in this
 deployment even for a logged-in editor.
+
+AND SINCE 2026-08-18, NOR IS WHO THE CALLER IS. The b-roll ingest panel
+(docs/BROLL_INGEST_PLAN.md §4.3) makes per-user decisions with real
+consequences -- whose batches these are, and who may cancel another machine's
+work -- and the sub-app learns the answer from headers this gate mints from the
+session cookie. BrollGate therefore STRIPS every inbound `X-CCSync-User` and
+`X-CCSync-Admin` before appending its own, exactly as YtdlGate does: the
+headers must only ever be server-minted, or any logged-in editor could cancel
+the whole fleet's ingests by adding one line to a fetch().
 """
 
 from __future__ import annotations
@@ -39,6 +48,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import FastAPI
+
+from . import auth
+from .settings import Settings
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +71,22 @@ DEGRADED = "degraded"
 # this wrong silently unguards the ingest routes, which is exactly the class of
 # bug this module exists to prevent.
 INGEST_PREFIX = "/api/ingest/"
+# The ingest PANEL's own routes (docs/BROLL_INGEST_PLAN.md §4.3). Note the
+# absence of a trailing slash: the collection routes are `/api/ingest-batches`
+# and `/api/ingest-batches/`, and a prefix with a slash on the end would miss
+# the first of them -- so the create and list calls would reach the sub-app
+# with no identity and be answered 401 for every editor.
+#
+# It does NOT overlap INGEST_PREFIX above ("/api/ingest/" vs
+# "/api/ingest-batches"), which is deliberate and slightly fragile: these
+# routes are session-authorised, and demanding the indexer's X-Ingest-Token on
+# them would lock every editor out of their own drops. Renaming either prefix
+# means re-reading both constants.
+BATCHES_PREFIX = "/api/ingest-batches"
+# The two headers the sub-app trusts, lowercase bytes because that is how they
+# appear in an ASGI scope.
+IDENTITY_HEADER = b"x-ccsync-user"
+ADMIN_HEADER = b"x-ccsync-admin"
 # Mounting a second FastAPI() brings its default interactive docs along, and
 # they would be reachable by every editor with a session. The dashboard does
 # not publish an API explorer; neither does its mount.
@@ -99,7 +127,7 @@ def check_ingest_token(token: str) -> str | None:
 
 
 class BrollGate:
-    """ASGI wrapper around the b-roll sub-app. Two jobs, both fail-closed.
+    """ASGI wrapper around the b-roll sub-app. Three jobs, all fail-closed.
 
     1. `/api/ingest/*` demands a matching X-Ingest-Token, ALWAYS. The b-roll
        app's own verify_ingest_token opens ingest to everyone when no token is
@@ -110,6 +138,25 @@ class BrollGate:
        ours, it does not consult the environment, and it does not depend on any
        upstream behaviour.
     2. The sub-app's default interactive docs are 404'd.
+    3. `/api/ingest-batches*` is re-stamped with the session's identity: any
+       inbound `X-CCSync-User`/`X-CCSync-Admin` is REMOVED, and the real pair
+       -- decoded from the ccsync_session cookie with the dashboard's own
+       secret -- is appended when, and only when, that cookie is valid
+       (2026-08-18, docs/BROLL_INGEST_PLAN.md §4.3). A request with no valid
+       session reaches the sub-app carrying NO identity at all, so it answers
+       its own 401 even in the impossible case that something let it past
+       login_gate.
+
+       Strip-then-append rather than "append if absent", for YtdlGate's reason:
+       an editor who is genuinely logged in sails through login_gate, and
+       without the strip their own `fetch(url, {headers: {'X-CCSync-Admin':
+       '1'}})` would be the whole authorisation story for "may I see and cancel
+       every other machine's ingest".
+
+       The strip runs on EVERY request, not only the batch ones. Scoping it to
+       the paths that read the headers today would mean a route added upstream
+       tomorrow inherits a forgeable identity, and the cost is two list
+       comprehensions over ~8 headers.
 
     A plain ASGI wrapper rather than BaseHTTPMiddleware or add_middleware:
     nothing is re-wrapped or buffered on the way through, so the media routes'
@@ -117,9 +164,40 @@ class BrollGate:
     mutated by importing us.
     """
 
-    def __init__(self, app: Any, token: str) -> None:
+    def __init__(self, app: Any, token: str, settings: Settings | None = None) -> None:
         self.app = app
         self._token = token or ""
+        # Optional so an older caller (or a merge that has not caught up) gets
+        # a mount with no identity stamping rather than a TypeError at boot --
+        # the b-roll mount fails ABSENT, never fatal, and the ingest panel
+        # 401ing is a smaller failure than the dashboard not starting.
+        self._settings = settings
+        self._secret = getattr(settings, "session_secret", "") or ""
+
+    def _identified_scope(self, scope: dict) -> dict:
+        """A copy of `scope` whose headers carry our identity pair and no other.
+
+        The original is left alone: it belongs to the server, and a mounted app
+        is not the only thing that ever reads it.
+        """
+        headers = [(k, v) for k, v in scope.get("headers", ())
+                   if k.lower() not in (IDENTITY_HEADER, ADMIN_HEADER)]
+        username = (auth.read_session_cookie(self._secret, _session_cookie(headers))
+                    if self._secret else None)
+        if username:
+            encoded = _header_value(username)
+            if encoded is None:
+                # Fail closed: no header at all, so the sub-app answers its own
+                # 401 rather than authorising a name that is not this editor's.
+                log.warning("b-roll identity header not minted for %r: the name "
+                            "cannot survive a latin-1 header round trip", username)
+            else:
+                headers.append((IDENTITY_HEADER, encoded))
+                if self._settings is not None and auth.is_admin(self._settings, username):
+                    headers.append((ADMIN_HEADER, b"1"))
+        new_scope = dict(scope)
+        new_scope["headers"] = headers
+        return new_scope
 
     def _token_ok(self, scope: dict) -> bool:
         if not self._token:
@@ -147,7 +225,46 @@ class BrollGate:
                 await _json_response(
                     send, 401, {"detail": "missing or invalid X-Ingest-Token"})
                 return
+            scope = self._identified_scope(scope)
         await self.app(scope, receive, send)
+
+
+def _header_value(username: str) -> bytes | None:
+    """The identity header's bytes, or None if this name cannot be carried.
+
+    LATIN-1, not UTF-8 (YTDL-29, 2026-08-11, and the same rule ytdl.py's copy
+    of this function carries). Starlette decodes header bytes as latin-1, so a
+    UTF-8-encoded `josé` reached the sub-app as `josÃ©` -- deterministically,
+    so that editor's own batches matched nothing. Encoding the way the reader
+    decodes covers every name up to U+00FF; beyond that (a CJK username) there
+    is no lossless answer and a lossy one could collide two editors into one
+    identity, so the header is withheld and the sub-app 401s -- broken, but
+    loudly and for one person, rather than quietly authorising the wrong name.
+    """
+    try:
+        return username.encode("latin-1")
+    except UnicodeEncodeError:
+        return None
+
+
+def _session_cookie(headers: list[tuple[bytes, bytes]]) -> str | None:
+    """The ccsync_session value out of raw ASGI headers, or None.
+
+    Hand-parsed rather than via Starlette's Request: building one here would
+    mean constructing a request object (and its receive channel) for every
+    media byte-range and every poll. Split on the FIRST "=" only -- the token
+    is `v2.session.<b64url>.<expires>.<hmac>` and base64url padding is
+    stripped, but a cookie parser that loses everything after a second "=" is a
+    bug waiting for the day that changes.
+    """
+    for key, value in headers:
+        if key.lower() != b"cookie":
+            continue
+        for part in value.decode("latin-1").split(";"):
+            name, sep, raw = part.strip().partition("=")
+            if sep and name == auth.COOKIE_NAME:
+                return raw.strip()
+    return None
 
 
 def sub_paths(scope: dict) -> tuple[str, ...]:
@@ -200,8 +317,15 @@ def _add_in_repo_broll_web() -> bool:
     return True
 
 
-def mount_broll(app: FastAPI, ingest_token: str) -> str:
+def mount_broll(app: FastAPI, ingest_token: str,
+                settings: Settings | None = None) -> str:
     """Mount the b-roll app at /broll. Returns MOUNTED / ABSENT / DEGRADED.
+
+    `settings` is what BrollGate mints the ingest panel's identity from (the
+    session secret, and whether that editor is an admin). It defaults to None
+    so a caller that has not been updated still gets a working search UI with
+    the ingest panel 401ing, rather than a dashboard that will not boot -- the
+    b-roll mount fails absent, never fatal.
 
     The import is guarded and the failure is logged rather than raised, so a
     deployment whose /broll-app volume is missing, stale or mid-upgrade starts
@@ -236,7 +360,7 @@ def mount_broll(app: FastAPI, ingest_token: str) -> str:
                     type(e).__name__, e)
         return ABSENT
 
-    gated = BrollGate(broll_app, ingest_token)
+    gated = BrollGate(broll_app, ingest_token, settings)
 
     try:
         _init_broll_storage()

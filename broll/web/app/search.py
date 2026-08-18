@@ -461,17 +461,35 @@ def creators_shares(conn: sqlite3.Connection | None = None) -> set[str]:
     filing under Downloads until someone remembers to edit an env var on the
     NAS — which is exactly what happened to the FF4 shoot footage (2026-08-10).
 
-    A pre-v6 DB has no share_roots table; fall back to the env list alone.
+    A THIRD source since 2026-08-18 (docs/BROLL_INGEST_PLAN.md §2):
+    `share_roots.collection`, said outright. Deriving membership from
+    `source='proxies'` works for the indexer's shares and fails for a shoot
+    dropped onto the dashboard, which archives its ORIGINALS -- so without this
+    column the customer's own camera footage would file itself under Downloads,
+    which is the same class of mistake as the FF4 shoot above and one nobody
+    could fix from the UI. NULL keeps the old rule for every share that
+    predates the column.
+
+    A pre-v6 DB has no share_roots table, and a pre-v11 one has no `collection`
+    column; both fall back rather than 500. This is on the query path, which
+    must not fail (see the module docstring).
     """
     shares = set(config.get_creators_shares())
     if conn is not None:
         try:
             rows = conn.execute(
-                "SELECT share FROM share_roots WHERE source = 'proxies'"
+                "SELECT share FROM share_roots WHERE source = 'proxies' "
+                "OR collection = ?", (config.COLLECTION_CREATORS,)
             ).fetchall()
             shares.update(r["share"] for r in rows)
         except sqlite3.OperationalError:
-            pass
+            try:
+                rows = conn.execute(
+                    "SELECT share FROM share_roots WHERE source = 'proxies'"
+                ).fetchall()
+                shares.update(r["share"] for r in rows)
+            except sqlite3.OperationalError:
+                pass
     return shares
 
 
@@ -993,8 +1011,17 @@ def _fill_semantic_meta(
 # everything browsable read N and delivered N + the discovered/probed/proxied/
 # error rows (BROLL-10, 2026-08-11). A count that disagrees with the click is
 # worse than no count -- see get_tree's own docstring.
+#
+# 'ingesting' joined the list 2026-08-18 (docs/BROLL_INGEST_PLAN.md §2): a
+# dashboard ingest mints its `videos` rows at CLAIM, hours before the media
+# reaches the NAS, so the row is a name reservation and a place to put segments
+# -- there is no proxy, poster or sprite behind it yet. Browsing one is the
+# broken-thumbnail grid 'skipped' and 'excluded' were added to prevent, and
+# search would offer a clip that cannot be played or sent to Resolve. The row
+# becomes visible when ingest_batches.mark_uploaded has stat'ed the files.
 BROWSE_PREDICATE = (
-    "v.status != 'skipped' AND v.status != 'excluded' AND v.duplicate_of IS NULL"
+    "v.status != 'skipped' AND v.status != 'excluded' AND v.status != 'ingesting' "
+    "AND v.duplicate_of IS NULL"
 )
 
 

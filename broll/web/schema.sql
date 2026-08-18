@@ -201,7 +201,13 @@ CREATE TABLE share_roots (
                 CHECK (source IN ('originals', 'proxies')),
     description TEXT NOT NULL DEFAULT '',
     indexed     INTEGER NOT NULL DEFAULT 1,
-    updated_at  TEXT
+    updated_at  TEXT,
+    -- Which browse root this share belongs to, said outright rather than
+    -- derived from `source` (see migrations/011). NULL = today's rule, which
+    -- is every share the indexer has ever pushed; only dashboard ingest
+    -- writes a value, because an ingested shoot archives ORIGINALS and would
+    -- otherwise file the customer's own camera footage under Downloads.
+    collection  TEXT
 );
 
 -- Generic key/value scratch; `search_generation` is its first key (see
@@ -218,4 +224,65 @@ CREATE TABLE meta (
 );
 INSERT INTO meta (key, value) VALUES ('search_generation', '0');
 
-PRAGMA user_version = 10;
+-- Drag-and-drop b-roll ingest (docs/BROLL_INGEST_PLAN.md §2, 2026-08-18). The
+-- work orders the dashboard hands a companion, and the per-clip ledger it
+-- reports back against. See migrations/011_ingest_batches.sql for why each
+-- column exists; this file is the fresh-install twin of it and the two are
+-- compared column-for-column by web/tests/test_migration.py.
+CREATE TABLE ingest_batches (
+    uid TEXT PRIMARY KEY,                    -- lower(hex(randomblob(16))), server-minted
+    editor TEXT NOT NULL,                    -- the VERIFIED dashboard identity
+    machine TEXT,                            -- which of that editor's machines holds the lease
+    companion_version TEXT,
+    share TEXT NOT NULL,                     -- the shoot folder, through archive_names.safe_name
+    collection TEXT NOT NULL DEFAULT 'owned',
+    settings_json TEXT NOT NULL,             -- {tier, run_mode, upload_originals, keep_subfolders, transcribe}
+    state TEXT NOT NULL DEFAULT 'queued'
+      CHECK (state IN ('queued','claimed','running','done','done_with_errors','cancelled','failed')),
+    n_items INTEGER NOT NULL DEFAULT 0,
+    n_done INTEGER NOT NULL DEFAULT 0,
+    n_failed INTEGER NOT NULL DEFAULT 0,
+    n_live INTEGER NOT NULL DEFAULT 0,
+    n_duplicate INTEGER NOT NULL DEFAULT 0,
+    current_item_uid TEXT,
+    lease_expires_at TEXT,                   -- a claim dies of silence; see the migration
+    last_heartbeat_at TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,  -- a REQUEST; the companion releases
+    cancel_by TEXT,
+    upload_paused INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    claimed_at TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    updated_at TEXT
+);
+CREATE INDEX idx_ingest_batches_editor ON ingest_batches(editor, created_at);
+CREATE INDEX idx_ingest_batches_state  ON ingest_batches(state);
+
+CREATE TABLE ingest_items (
+    uid TEXT PRIMARY KEY,
+    batch_uid TEXT NOT NULL REFERENCES ingest_batches(uid) ON DELETE CASCADE,
+    ord INTEGER NOT NULL,
+    orig_name TEXT NOT NULL,
+    rel_dir TEXT NOT NULL DEFAULT '',        -- forward slashes; '' for a flat drop
+    size_bytes INTEGER,
+    hash TEXT,                               -- the SAME digest videos.hash carries
+    duration_s REAL, fps REAL, width INTEGER, height INTEGER, codec TEXT, shot_date TEXT,
+    source TEXT NOT NULL CHECK (source IN ('upload','path')),
+    video_id INTEGER REFERENCES videos(id) ON DELETE SET NULL,   -- minted AT CLAIM
+    duplicate_of INTEGER REFERENCES videos(id) ON DELETE SET NULL,
+    archive_dir TEXT,                        -- archive_path = archive_dir/Proxy/archive_stem.mp4
+    archive_stem TEXT,
+    state TEXT NOT NULL DEFAULT 'pending'
+      CHECK (state IN ('pending','duplicate','proxying','framing','describing','indexed','uploading','live','failed','cancelled','skipped')),
+    stage_percent INTEGER,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    original_uploaded INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT
+);
+CREATE INDEX idx_ingest_items_batch ON ingest_items(batch_uid, ord);
+CREATE INDEX idx_ingest_items_video ON ingest_items(video_id);
+
+PRAGMA user_version = 11;

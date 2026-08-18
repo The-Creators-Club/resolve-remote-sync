@@ -76,6 +76,141 @@ class MovedIn(BaseModel):
     new_rel_path: str
 
 
+# --- dashboard b-roll ingest (docs/BROLL_INGEST_PLAN.md §4.2/§4.3, 2026-08-18) --
+#
+# The caps are not decoration. `items` arrives from a drag-and-drop that
+# traversed a folder tree in the browser, and `segments` from a local model
+# nobody on this side supervises; both go through the dashboard's 4 MiB body
+# cap first, but a body that fits and still describes 50,000 clips would be a
+# request this single-worker process spends a minute inside.
+MAX_BATCH_ITEMS = 2000
+MAX_NAME_CHARS = 255
+MAX_SEGMENTS = 500
+
+
+class IngestItemIn(BaseModel):
+    """One clip in a drop, as the SPA describes it before anything has run."""
+
+    local_id: str = Field(default="", max_length=128)
+    name: str = Field(max_length=MAX_NAME_CHARS)
+    # Sub-folder below the shoot root. Sanitised server-side (every component
+    # through archive_names.safe_name, `..` dropped) -- it ends up in a path a
+    # companion hands to rclone.
+    rel_dir: str = Field(default="", max_length=1024)
+    size: int | None = None
+    # xxh64(first 8MiB + last 8MiB + size), computed by the companion with the
+    # indexer's own algorithm. Absent = no duplicate check for this clip.
+    hash: str | None = Field(default=None, max_length=64)
+    source: Literal["upload", "path"] = "upload"
+    # Carried through from a pre-check the editor then confirmed. Advisory: the
+    # server does not act on it beyond recording what they were told.
+    duplicate_of: int | None = None
+
+
+class IngestPrecheckIn(BaseModel):
+    """POST /api/ingest-batches/precheck. Read-only; reserves nothing."""
+
+    share: str = Field(max_length=MAX_NAME_CHARS)
+    keep_subfolders: bool = True
+    items: list[IngestItemIn] = Field(default_factory=list, max_length=MAX_BATCH_ITEMS)
+
+
+class IngestBatchCreateIn(BaseModel):
+    """POST /api/ingest-batches."""
+
+    share: str = Field(max_length=MAX_NAME_CHARS)
+    # v1 files every ingested shoot as own footage (plan §9 decision 1);
+    # Downloads/category allocation at result time is the follow-up. Accepted
+    # on the wire so that follow-up is not a body change.
+    collection: str | None = None
+    settings: dict = Field(default_factory=dict)
+    items: list[IngestItemIn] = Field(default_factory=list, max_length=MAX_BATCH_ITEMS)
+
+
+class UploadPausedIn(BaseModel):
+    paused: bool = True
+
+
+class ClaimIn(BaseModel):
+    """POST …/claim. NOTE the absence of an `editor` field: the leaseholder is
+    the name the verified X-CCSync-Identity carries and nothing else. Two
+    sources for one fact is how the wrong one wins (H5)."""
+
+    machine: str = Field(default="", max_length=MAX_NAME_CHARS)
+    companion_version: str = Field(default="", max_length=64)
+    tier: Literal["good", "best"] = "good"
+    # Whatever the companion's capability probe found (GPU, VRAM, ffmpeg,
+    # rclone). Recorded in the log, not enforced: the machine that knows what a
+    # clip costs is the one that declines its own claim (the ytdl free-space
+    # lesson, plan §7).
+    capabilities: dict = Field(default_factory=dict)
+
+
+class HeartbeatIn(BaseModel):
+    pass
+
+
+class ItemStatusIn(BaseModel):
+    """POST …/items/{iuid}/status -- one checkpoint."""
+
+    state: str
+    stage_percent: int | None = Field(default=None, ge=0, le=100)
+    error: str | None = Field(default=None, max_length=2000)
+    attempts: int | None = Field(default=None, ge=0)
+    hash: str | None = Field(default=None, max_length=64)
+    # ffprobe's answers, once the companion has them: duration_s, fps, width,
+    # height, codec, shot_date.
+    probe: dict | None = None
+
+
+class ItemResultIn(BaseModel):
+    """POST …/items/{iuid}/result -- what the local model saw.
+
+    Reuses SegmentIn, so the shape the vendored `describe_video` produces is
+    the shape `/api/ingest/index` already accepts: one contract, two doors.
+    """
+
+    segments: list[SegmentIn] = Field(default_factory=list, max_length=MAX_SEGMENTS)
+    themes: list[str] = Field(default_factory=list, max_length=64)
+    quality_flags: list[str] = Field(default_factory=list, max_length=16)
+    category_hint: str | None = None
+    model: str | None = None
+    duration_s: float | None = None
+    fps: float | None = None
+    width: int | None = None
+    height: int | None = None
+    codec: str | None = None
+    shot_date: str | None = None
+    # Measured off the sheet the companion just wrote, never re-derived -- the
+    # browser's old source-derived heuristics were wrong on 6,783 of 7,117
+    # sheets (BROLL-1/BROLL-2, migrations/009).
+    sprite_cell_w: int | None = None
+    sprite_cell_h: int | None = None
+    sprite_cols: int | None = None
+    sprite_cells: int | None = None
+    sprite_interval_s: float | None = None
+
+
+class UploadedFileIn(BaseModel):
+    """One file the companion says it put in the archive. `rel` is relative to
+    the archive root and is stat'ed there before anything is believed."""
+
+    rel: str = Field(max_length=1024)
+    size: int | None = None
+
+
+class ItemUploadedIn(BaseModel):
+    files: list[UploadedFileIn] = Field(default_factory=list, max_length=16)
+    original_uploaded: bool = False
+
+
+class ReleaseIn(BaseModel):
+    state: Literal["done", "failed", "cancelled"] = "done"
+    # Free-form; stored truncated in ingest_batches.error, which the fleet grid
+    # shows in a tooltip.
+    summary: dict | str | None = None
+
+
 class ShareRootIn(BaseModel):
     """One share's origin facts, pushed by the indexer (POST /api/ingest/shares)."""
 

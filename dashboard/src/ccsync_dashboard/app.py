@@ -563,6 +563,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         r"^/ytdl/api/jobs/\d+/(claim|heartbeat|download-manifest|clips/[^/]+/status)$"
     )
 
+    # The b-roll ingest fleet routes (docs/BROLL_INGEST_PLAN.md §4.2,
+    # 2026-08-18): claim, heartbeat, release and the three per-item posts. Same
+    # posture as the ytdl block above and for the same reason -- these calls
+    # happen while the editor is away from their desk and no browser is open,
+    # so there is no session to gate on; they authenticate with the fleet token
+    # and re-check it (plus a SIGNED identity) inside the sub-app.
+    #
+    # Per-suffix, never per-prefix. /broll/api/ingest-batches -- the SPA's own
+    # panel, which decides whose batches you may cancel -- stays fully
+    # session-gated, so a leaked fleet token cannot read or stop one.
+    #
+    # The 32-hex uid shape is pinned here on purpose: it is what
+    # ingest_batches.new_uid mints, and a route that took an integer id would
+    # be one an editor could enumerate.
+    _broll_fleet_re = re.compile(
+        r"^/broll/api/fleet/ingest/batches/[0-9a-f]{32}/"
+        r"(claim|heartbeat|release|items/[0-9a-f]{32}/(status|result|uploaded))$"
+    )
+
     @app.middleware("http")
     async def login_gate(request, call_next):
         path = request.url.path
@@ -590,6 +609,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # the companion executing a local download for a claimed job --
             # same fleet-token posture as the selection route above
             or (_ytdl_fleet_re.match(path) is not None and _companion_token_ok(request))
+            # the companion indexing a claimed b-roll ingest batch -- same
+            # fleet-token posture again (docs/BROLL_INGEST_PLAN.md §4.2)
+            or (_broll_fleet_re.match(path) is not None and _companion_token_ok(request))
             # the setup wizard's own API (ZERO_TOUCH_PLAN.md WP D). Open at
             # THIS layer only -- every route under it re-checks via
             # setup_routes.require_setup_access, which is the actual gate
@@ -685,8 +707,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # code being present. mount_broll() reports mounted/absent/degraded; only a
     # fully working mount is advertised in the nav (ui.py), because a link to a
     # page that 500s on every request is worse than no link.
+    # `settings` as well as the token since 2026-08-18: BrollGate mints the
+    # ingest panel's identity (X-CCSync-User/X-CCSync-Admin) from the session
+    # cookie with settings.session_secret, the way YtdlGate already does.
     app.state.broll_status = (
-        broll.mount_broll(app, broll_ingest_token) if settings.broll_enabled
+        broll.mount_broll(app, broll_ingest_token, settings) if settings.broll_enabled
         else broll.ABSENT
     )
     app.state.broll_mounted = app.state.broll_status == broll.MOUNTED

@@ -51,12 +51,33 @@ DATA_ROOT/
   sheets/{id}/*.jpg   # contact sheets (indexer working files, keep for debugging)
 ```
 
+On the NAS, `DATA_ROOT` **is** the shared archive root
+(`<prefix>\Assets\B-roll Archive`), which is what lets the web app verify an
+upload with a `stat()` rather than a promise — see "Dashboard ingest" below.
+
+`.ingest/` (`app.config.ARCHIVE_INGEST_DIR`) is the one directory in that tree
+that is NOT footage: it is where a companion stages dropped bytes inside the
+editor's own local mirror, `<local archive root>/.ingest/<staging_id>/`. It is
+named on the server side too so anything walking the archive knows to skip it.
+
 ## Database
 
 Schema in `schema.sql` at repo root — the single source of truth. SQLite, WAL mode.
 Applied on startup by the web app via `PRAGMA user_version` migrations (v1 = the
-original schema, v2 = on-screen text + dual-tokenizer search). `CREATE TABLE IF NOT
-EXISTS` style is NOT used.
+original schema, v2 = on-screen text + dual-tokenizer search; v11 = dashboard
+ingest). `CREATE TABLE IF NOT EXISTS` style is NOT used.
+
+**Four describers, one database.** `schema.sql` (fresh install, and its bundled
+twin at `web/schema.sql`), `migrations/NNN_*.sql` (existing databases, copied
+into `web/migrations/` and `indexer/broll_index/migrations/`), `web/app/db.py`'s
+`_MIGRATIONS` and `broll_index/migrate.py`'s `_MIGRATION_STEPS` all describe the
+same thing, and a version added to one and not the others produces a startup
+failure on exactly one path. That has happened once; `web/tests/test_migration.py`
+now compares the two paths column-for-column.
+
+`videos.status` values: `discovered | probed | proxied | indexed | sorted |
+skipped | excluded | ingesting | error`. The last three are invisible to
+browse, tree and search (`search.BROWSE_PREDICATE`).
 
 **Two FTS tables, on purpose** (measured, see `docs/indexing-findings.md`):
 
@@ -137,6 +158,54 @@ Base: `/api`. JSON. No auth in v1 (Tailscale-only deployment).
   - `POST /api/ingest/index` — body `{video_id, themes, quality_flags, category_hint, segments:[...]}`,
     replaces existing segments for that video atomically.
   - `POST /api/ingest/moved` — body `{video_id, new_rel_path}` (category sort).
+
+  `/api/ingest/index` computes `segments.search_norm` itself since 2026-08-18.
+  It used to insert an empty one — the indexer's `HttpBackend` said search_norm
+  "is not supported over the ingest API" — so anything indexed over HTTP was
+  keyword-searchable only after somebody remembered to run a base-rig
+  `broll-index run --stages embed`. A two-character CJK term is not findable at
+  all without that blob, so the gap was silent: the clip was in the archive,
+  indexed, and unreachable by the words on its own screen.
+  `app/normalize.py` is `broll_index/normalize.py` vendored byte-for-byte, so
+  both ends tokenise identically (`tests/test_normalize_parity.py`).
+
+### Dashboard ingest (2026-08-18)
+
+Drag-and-drop onto the b-roll page; the editor's own machine crunches the clips
+and uploads them. Full design in `docs/BROLL_INGEST_PLAN.md`; the wire contract
+is `docs/API.md` §6a. What it adds to *this* component:
+
+- **Tables** `ingest_batches` + `ingest_items` (`migrations/011`), and
+  `share_roots.collection`. That last column is why an ingested shoot browses
+  under Our Footage at all: `search.creators_shares()` derives own-footage
+  membership from `source='proxies'`, and an ingested camera clip archives
+  ORIGINALS, so without it a customer's own footage would file under Downloads.
+  NULL keeps the old rule for every share the indexer has ever pushed.
+- **`videos.status = 'ingesting'`** — a row that exists but whose media is not
+  on the NAS yet. Minted at claim so the name is reserved and the segments have
+  somewhere to land; excluded from browse, tree and search exactly as `skipped`
+  and `excluded` are (`search.BROWSE_PREDICATE`), because there is no proxy,
+  poster or sprite behind it. It becomes `indexed` — and visible — only when
+  `ingest_batches.mark_uploaded` has `stat()`ed the files under `DATA_ROOT` and
+  found the sizes the companion declared. A cancelled batch DELETES the rows
+  that never got media and leaves the `live` ones alone.
+- **Two route groups**, deliberately in separate modules because they
+  authenticate differently and must not learn each other's habits:
+  `routes_batches.py` (`/api/ingest-batches`, the browser, identity stamped by
+  the dashboard's `BrollGate`) and `routes_fleet.py`
+  (`/api/fleet/ingest`, the companion, shared fleet token PLUS a signed
+  identity, no session anywhere). Every rule about what a batch or an item may
+  become lives once, in `ingest_batches.py`.
+- **The archive name is allocated by the server**, inside the claim
+  transaction, against the names already published in that folder ∪ this batch
+  (`archive_names.claim_name`, lifted from `build_archive`). Two editors
+  dropping the same camera card into one shoot on two machines would otherwise
+  both pick `A001_C003` and the second upload would land on a file already
+  recorded on another row and already cut into a timeline.
+  `archive_path = <archive_dir>/Proxy/<stem>.mp4`, `archive_dir =
+  <BROLL_ARCHIVE_CREATORS_DIR>/<shoot>/<sub folders>` — the same layout
+  `build_archive.dest_dir` writes, so what an editor sees in search is where
+  the file actually is.
 
 ## Companion API contract
 

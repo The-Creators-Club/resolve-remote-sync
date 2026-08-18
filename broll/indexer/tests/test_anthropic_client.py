@@ -466,7 +466,7 @@ def test_stage_claude_sends_the_contact_sheets_as_image_blocks(
     stopped passing them the model would be describing nothing at all — and
     would still return plausible-looking JSON."""
     from broll_index import pipeline
-    from broll_index.config import Config, DbConfig, SamplingConfig, ShareConfig
+    from broll_index.config import Config, DbConfig, IndexerConfig, SamplingConfig, ShareConfig
 
     vid = sqlite_storage.upsert_video("broll", "clip.mov", status="proxied", duration_s=8.0)
     sheets_dir = tmp_path / "_data" / "sheets" / str(vid)
@@ -483,8 +483,9 @@ def test_stage_claude_sends_the_contact_sheets_as_image_blocks(
         data_root=tmp_path / "_data",
         db=DbConfig(mode="sqlite", path=str(tmp_path / "b.db")),
         sampling=SamplingConfig(),
+        indexer=IndexerConfig(backend="anthropic"),
     )
-    pipeline.stage_claude(cfg, sqlite_storage, sqlite_storage.get_video(vid), model="haiku")
+    pipeline.stage_describe(cfg, sqlite_storage, sqlite_storage.get_video(vid), model="haiku")
 
     assert len(client.messages.calls) == 1, "2 sheets is one 4-sheet window"
     content = client.messages.calls[0]["messages"][0]["content"]

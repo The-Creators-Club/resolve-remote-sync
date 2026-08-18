@@ -213,7 +213,7 @@ def test_rate_limit_via_nonzero_exit_aborts_the_run(tmp_path, schema_path, monke
             "· resets 3:50am (Asia/Taipei)"
         )
 
-    monkeypatch.setattr(pipeline, "stage_claude", boom)
+    monkeypatch.setattr(pipeline, "stage_describe", boom)
 
     cfg = type("C", (), {"shares": {"s": type("S", (), {"root": str(tmp_path)})()},
                          "data_root": tmp_path})()

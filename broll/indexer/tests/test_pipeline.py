@@ -46,7 +46,7 @@ def test_process_video_runs_stages_in_order_and_advances_status(tmp_path, sqlite
     monkeypatch.setattr(pipeline, "stage_probe", fake_probe)
     monkeypatch.setattr(pipeline, "stage_proxy", fake_proxy)
     monkeypatch.setattr(pipeline, "stage_frames", fake_frames)
-    monkeypatch.setattr(pipeline, "stage_claude", fake_claude)
+    monkeypatch.setattr(pipeline, "stage_describe", fake_claude)
     monkeypatch.setattr(pipeline, "stage_transcribe", fake_transcribe)
 
     (tmp_path / "clip.mov").write_bytes(b"x")
@@ -65,7 +65,7 @@ def test_process_video_resumes_from_current_status(tmp_path, sqlite_storage, mon
     monkeypatch.setattr(pipeline, "stage_probe", lambda *a, **k: calls.append("probe"))
     monkeypatch.setattr(pipeline, "stage_proxy", lambda *a, **k: (calls.append("proxy"), a[1].update_video(a[2]["id"], status="proxied")))
     monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: calls.append("frames"))
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: calls.append("claude"))
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: calls.append("claude"))
     monkeypatch.setattr(pipeline, "stage_transcribe", lambda *a, **k: calls.append("transcribe"))
 
     (tmp_path / "clip.mov").write_bytes(b"x")
@@ -84,7 +84,7 @@ def test_process_video_stages_filter_restricts_execution(tmp_path, sqlite_storag
     monkeypatch.setattr(pipeline, "stage_probe", lambda *a, **k: calls.append("probe"))
     monkeypatch.setattr(pipeline, "stage_proxy", lambda *a, **k: calls.append("proxy"))
     monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: calls.append("frames"))
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: calls.append("claude"))
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: calls.append("claude"))
 
     (tmp_path / "clip.mov").write_bytes(b"x")
     vid = sqlite_storage.upsert_video("broll", "clip.mov", status="discovered")
@@ -131,7 +131,7 @@ def test_run_pipeline_skips_duplicate_of_rows_never_invokes_claude(tmp_path, sql
     spend a Claude call describing footage already described under its canonical row."""
     processed_ids = []
     monkeypatch.setattr(
-        pipeline, "stage_claude",
+        pipeline, "stage_describe",
         lambda cfg, storage, video, model, invoke=None: processed_ids.append(video["id"]),
     )
 

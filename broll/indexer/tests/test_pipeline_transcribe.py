@@ -212,7 +212,7 @@ def test_process_video_transcribe_failure_does_not_error_video_or_block_claude(t
         )
 
     monkeypatch.setattr(pipeline, "stage_transcribe", failing_transcribe)
-    monkeypatch.setattr(pipeline, "stage_claude", fake_claude)
+    monkeypatch.setattr(pipeline, "stage_describe", fake_claude)
 
     (tmp_path / "clip.mov").write_bytes(b"x")
     vid = sqlite_storage.upsert_video("broll", "clip.mov", status="discovered")

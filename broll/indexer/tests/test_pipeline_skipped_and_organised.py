@@ -44,7 +44,7 @@ def _stub_stages(monkeypatch, calls: list[str], *, probe_result: dict):
         calls.append("proxy"), storage.update_video(video["id"], status="proxied")))
     monkeypatch.setattr(pipeline, "stage_frames",
                         lambda cfg, storage, video, src: calls.append("frames"))
-    monkeypatch.setattr(pipeline, "stage_claude",
+    monkeypatch.setattr(pipeline, "stage_describe",
                         lambda cfg, storage, video, model, invoke=None: calls.append("claude"))
     monkeypatch.setattr(pipeline, "stage_embed",
                         lambda cfg, storage, video: calls.append("embed"))

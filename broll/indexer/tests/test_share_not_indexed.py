@@ -35,7 +35,7 @@ def test_the_model_stage_is_skipped_and_the_clip_is_marked_organised(
     (tmp_path / "Proxy" / "a.mov").write_bytes(b"x")
 
     called = []
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: called.append(1))
 
     pipeline._process_video(_cfg(tmp_path, index=False), db, db.get_video(vid),
                             model="haiku", requested_stages={"claude"})
@@ -56,7 +56,7 @@ def test_an_organised_clip_leaves_the_work_queue(tmp_path, schema_path, monkeypa
     vid = db.upsert_video("own", "Proxy/a.mov", status="proxied", duration_s=10.0)
     (tmp_path / "Proxy").mkdir(exist_ok=True)
     (tmp_path / "Proxy" / "a.mov").write_bytes(b"x")
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: None)
 
     pipeline._process_video(_cfg(tmp_path, index=False), db, db.get_video(vid),
                             model="haiku", requested_stages={"claude"})
@@ -70,7 +70,7 @@ def test_an_indexable_share_is_unaffected(tmp_path, schema_path, monkeypatch):
     vid = db.upsert_video("dl", "a.mov", status="proxied", duration_s=10.0)
     (tmp_path / "a.mov").write_bytes(b"x")
     called = []
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: called.append(1))
 
     pipeline._process_video(_cfg(tmp_path, index=False), db, db.get_video(vid),
                             model="haiku", requested_stages={"claude"})
@@ -128,7 +128,7 @@ def test_contact_sheets_are_skipped_too(tmp_path, schema_path, monkeypatch):
 
     frames, claude = [], []
     monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: frames.append(1))
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: claude.append(1))
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: claude.append(1))
 
     pipeline._process_video(_cfg(tmp_path, index=False), db, db.get_video(vid),
                             model="haiku", requested_stages={"frames", "claude"})
@@ -144,7 +144,7 @@ def test_an_indexable_share_still_gets_its_sheets(tmp_path, schema_path, monkeyp
     (tmp_path / "a.mov").write_bytes(b"x")
     frames = []
     monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: frames.append(1))
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: None)
 
     pipeline._process_video(_cfg(tmp_path, index=False), db, db.get_video(vid),
                             model="haiku", requested_stages={"frames"})
@@ -215,7 +215,7 @@ def test_reopened_clips_get_their_sheets_and_index(tmp_path, schema_path, monkey
 
     frames, claude = [], []
     monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: frames.append(1))
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: claude.append(1))
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: claude.append(1))
 
     pipeline._process_video(_cfg(tmp_path, index=True), db, db.get_video(vid),
                             model="haiku", requested_stages={"frames", "claude"})
@@ -247,7 +247,7 @@ def test_the_serial_runner_can_see_an_organised_clip_too(tmp_path, schema_path, 
 
     frames, claude = [], []
     monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: frames.append(1))
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: claude.append(1))
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: claude.append(1))
 
     count = pipeline.run_pipeline(_cfg(tmp_path, index=True), db, model="haiku",
                                   stages=["frames", "claude"])
@@ -269,7 +269,7 @@ def test_the_serial_runner_leaves_a_still_opted_out_clip_resting(
 
     frames, claude = [], []
     monkeypatch.setattr(pipeline, "stage_frames", lambda *a, **k: frames.append(1))
-    monkeypatch.setattr(pipeline, "stage_claude", lambda *a, **k: claude.append(1))
+    monkeypatch.setattr(pipeline, "stage_describe", lambda *a, **k: claude.append(1))
 
     pipeline.run_pipeline(_cfg(tmp_path, index=False), db, model="haiku",
                           stages=["frames", "claude"])

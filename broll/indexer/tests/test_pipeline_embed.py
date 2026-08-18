@@ -353,7 +353,7 @@ def test_process_video_runs_embed_after_claude(tmp_path, sqlite_storage_v4, monk
         pipeline, "stage_transcribe",
         lambda cfg, storage, video, src_path, ingest_only=False: calls.append("transcribe"),
     )
-    monkeypatch.setattr(pipeline, "stage_claude", fake_claude)
+    monkeypatch.setattr(pipeline, "stage_describe", fake_claude)
     monkeypatch.setattr(pipeline, "stage_embed", fake_embed)
 
     (tmp_path / "clip.mov").write_bytes(b"x")

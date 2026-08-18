@@ -196,6 +196,60 @@ class AnthropicConfig:
 
 
 @dataclass
+class IndexerConfig:
+    """Which vision backend describes a clip's shots — 2026-08-18, the
+    "local by default" decision (`broll/docs/local-indexing-options-2026-08-17.md`
+    §3, proven out by `broll/eval/local_vlm/results/report.md`).
+
+    `backend`: "local" runs Qwen3-VL through a vendored llama.cpp (see
+    `local_models.py`/`local_runtime.py`/`local_vlm.py`) — zero marginal cost,
+    needs a GPU. "anthropic" is the original Messages API path
+    (`claude_client.py`), unchanged, for a site that wants the better first
+    impression `broll/docs/indexing-api.md` describes, or has no GPU to spare.
+
+    `model_tier`: "good" (Qwen3-VL-4B, 8 GB VRAM) or "best" (Qwen3-VL-8B,
+    12 GB VRAM) — see `local_models.TIERS`. `model_tier_explicit` is set by
+    `load_config` when `model_tier` was actually written in config.yaml, which
+    is what lets `dashboard_site.resolve_model_tier` tell "the operator chose
+    this" from "nobody said, ask the dashboard manifest, then default good".
+
+    `local_cache_dir`: where the runtime binary and GGUF weights land — "" means
+    `local_runtime.default_cache_dir()` (per-OS: see that function). This is
+    NOT `data_root`: those tens of GB are the archive's own frames/proxies and
+    get backed up per-site; the model cache is the same handful of GB on every
+    machine of the same tier and is never site data.
+
+    `llama_server_path`: point at an already-installed `llama-server` instead
+    of the vendored download (e.g. a distro package, or a hand-built server).
+    "" = fetched into `local_cache_dir` by `local_runtime.ensure_runtime`.
+
+    `dashboard_url`: explicit override for where to ask
+    `GET /api/v1/site` for `indexer.model_tier` when config.yaml does not say
+    (see `dashboard_site.py`). "" = derive it from `db.url` when
+    `db.mode == "api"`, else no manifest lookup.
+    """
+    backend: str = "local"
+    model_tier: str = "good"
+    model_tier_explicit: bool = False
+    local_cache_dir: str = ""
+    llama_server_path: str = ""
+    dashboard_url: str = ""
+    # Frames per llama-server call (9 = one 3x3 sheet's worth of images, but
+    # sent as individual native-resolution frames, not a tiled sheet — see
+    # local_vlm.py). gpu_layers is llama.cpp's `-ngl`; 99 offloads every layer
+    # it can, the same flag the eval ran with (b10470, `-ngl 99`).
+    frames_per_call: int = 9
+    gpu_layers: int = 99
+    # The eval's remaining known gap (results/report.md: 10.3 segments/clip
+    # predicted vs Haiku's 4.3) — merge adjacent over-segmented shots back
+    # together (local_vlm.merge_similar_segments). Local only by default:
+    # Claude's segments were already close to per-shot, so there is nothing to
+    # merge there and turning it on would just risk collapsing two real cuts
+    # that happen to look similar.
+    merge_similar_segments: bool = True
+
+
+@dataclass
 class Config:
     shares: dict[str, ShareConfig]
     data_root: Path
@@ -206,6 +260,7 @@ class Config:
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    indexer: IndexerConfig = field(default_factory=IndexerConfig)
 
     @property
     def local_state_db_path(self) -> Path:
@@ -310,6 +365,48 @@ def _build_anthropic(raw: dict[str, Any]) -> AnthropicConfig:
     )
 
 
+def _build_indexer(raw: dict[str, Any], top_raw: dict[str, Any]) -> IndexerConfig:
+    """`indexer:` section, plus the backend-default heuristic that keeps every
+    pre-2026-08-18 config.yaml behaving exactly as it did.
+
+    Every one of those configs already has an `anthropic:` block (it was the
+    only backend), and none of them has an `indexer:` block at all. A config
+    that says nothing about `backend` but DOES name `anthropic:` is read as
+    "this site already chose Anthropic" and keeps running unchanged — the
+    alternative is a fleet of unattended indexer machines silently switching
+    to a backend that needs a GPU and 3+ GB of first-run downloads. A brand
+    new config (no `anthropic:` section either) defaults to `local`, per
+    CLAUDE.md's task and `broll/docs/local-indexing-options-2026-08-17.md` §3.
+    An explicit `indexer.backend` always wins over this heuristic.
+    """
+    d = IndexerConfig()
+    backend = raw.get("backend")
+    if backend is None:
+        backend = "anthropic" if "anthropic" in top_raw else d.backend
+    backend = str(backend).strip().lower()
+    if backend not in ("local", "anthropic"):
+        raise ValueError(
+            f"indexer.backend must be 'local' or 'anthropic', got {backend!r}")
+
+    model_tier_explicit = "model_tier" in raw
+    model_tier = str(raw.get("model_tier", d.model_tier)).strip().lower()
+    if model_tier not in ("good", "best"):
+        raise ValueError(
+            f"indexer.model_tier must be 'good' or 'best', got {model_tier!r}")
+
+    return IndexerConfig(
+        backend=backend,
+        model_tier=model_tier,
+        model_tier_explicit=model_tier_explicit,
+        local_cache_dir=_env("BROLL_LOCAL_CACHE_DIR") or raw.get("local_cache_dir") or d.local_cache_dir,
+        llama_server_path=_env("BROLL_LLAMA_SERVER_PATH") or raw.get("llama_server_path") or d.llama_server_path,
+        dashboard_url=_env("BROLL_DASHBOARD_URL") or raw.get("dashboard_url") or d.dashboard_url,
+        frames_per_call=int(raw.get("frames_per_call", d.frames_per_call)),
+        gpu_layers=int(raw.get("gpu_layers", d.gpu_layers)),
+        merge_similar_segments=bool(raw.get("merge_similar_segments", d.merge_similar_segments)),
+    )
+
+
 def load_config(path: str | Path) -> Config:
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -386,4 +483,5 @@ def load_config(path: str | Path) -> Config:
         sampling=sampling,
         whisper=whisper,
         embedding=embedding,
+        indexer=_build_indexer(raw.get("indexer") or {}, raw),
     )

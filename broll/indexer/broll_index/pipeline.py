@@ -26,7 +26,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from . import embed, ffmpeg_tools, normalize, transcribe, transcript_quality
+from . import embed, ffmpeg_tools, local_vlm, normalize, transcribe, transcript_quality
 from .claude_client import InvokeFn, build_index_prompt, chunk_sheets, cap_sheets, invoke_claude, call_claude_with_retry, \
     merge_index_results, resolve_model, build_client, ClaudeCallError, is_fatal_api_error, is_rate_limited, \
     extract_reset_hint
@@ -258,9 +258,29 @@ def _log_usage(
         pass
 
 
-def stage_claude(
+def stage_describe(
     cfg: Config, storage: Storage, video: dict[str, Any], model: str, invoke: InvokeFn = invoke_claude
 ) -> None:
+    """Describe a clip's shots — dispatches on `cfg.indexer.backend`
+    (2026-08-18, `broll/docs/local-indexing-options-2026-08-17.md` §3).
+
+    `backend == "local"` runs Qwen3-VL through a vendored llama-server
+    (local_vlm.describe_video) and returns; everything below this point is the
+    ORIGINAL `stage_claude` body, byte-for-byte, for `backend == "anthropic"` —
+    same prompt, same windowing, same retry, same usage log. `invoke` keeps its
+    old meaning (and every existing Anthropic-path test its old fixture) only
+    for that branch; the local branch does not take one; it plugs into
+    llama-server through `local_vlm.call_local_with_retry` instead, at the
+    same conceptual seam (see claude_client.InvokeFn's docstring for why this
+    seam exists).
+    """
+    if cfg.indexer.backend == "local":
+        local_vlm.describe_video(
+            cfg, storage, video,
+            log_usage=lambda m, n, u: _log_usage(cfg, video, m, n, u),
+        )
+        return
+
     sheets_dir = cfg.data_root / "sheets" / str(video["id"])
     meta_path = sheets_dir / "frames.json"
     if not meta_path.exists():
@@ -632,7 +652,7 @@ def _process_video(
                 # since that measurement; the serial path had not.
                 stage_transcribe(cfg, storage, current, src_path, ingest_only=True)
             elif stage == "claude":
-                stage_claude(cfg, storage, current, model, invoke=invoke)
+                stage_describe(cfg, storage, current, model, invoke=invoke)
         except Exception as e:  # noqa: BLE001 - a stage failure must never crash the queue
             if stage == "transcribe":
                 # Belt-and-suspenders: stage_transcribe already catches and logs its own
@@ -658,7 +678,16 @@ def _process_video(
             # that have nothing to do with the account. Classifying one of those
             # as account-wide aborted the run AND left the clip runnable, so
             # every re-run stopped on the same clip forever.
-            elif stage == "claude" and is_fatal_api_error(str(e)):
+            elif stage == "claude" and (
+                is_fatal_api_error(str(e))
+                # Same account-wide-vs-per-video distinction, for the local
+                # backend: a dead/refused llama-server will fail every
+                # remaining clip identically (unlike a per-clip parse
+                # failure, which is not fatal — see local_vlm.LocalVlmError's
+                # docstring), so it gets the same "stop, don't mark 'error'"
+                # treatment rather than marching through the queue.
+                or (cfg.indexer.backend == "local" and local_vlm.is_fatal_local_error(str(e)))
+            ):
                 # Environmental, not per-video: exhausted credit, bad auth, and the
                 # like will fail every remaining call identically. Marking each video
                 # 'error' would march through the archive destroying the queue's

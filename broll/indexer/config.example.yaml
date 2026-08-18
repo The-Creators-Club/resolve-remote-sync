@@ -25,8 +25,35 @@ db:
   url: "http://truenas.local:8000/api"  # used when mode == api
   token: "changeme"                     # used when mode == api (X-Ingest-Token header)
 
-# Default model for `run`. One of: haiku | sonnet | opus | fable — or an exact
-# API model id, which is passed through unchanged.
+# Which vision backend describes a clip's shots — 2026-08-18,
+# broll/docs/indexing-local.md (tiers, hardware, troubleshooting) and
+# broll/docs/local-indexing-options-2026-08-17.md (why). A NEW config with no
+# `indexer:` section at all defaults to `local` — Qwen3-VL through a vendored
+# llama.cpp, zero marginal cost, needs a GPU (`broll-index doctor` reports what
+# this machine can run; `broll-index models pull` fetches the runtime +
+# weights on first use). An EXISTING config that already has an `anthropic:`
+# section below and no `indexer:` section keeps calling the Anthropic Messages
+# API exactly as before — nothing here silently switches a running site.
+indexer:
+  backend: local           # local | anthropic
+  # good = Qwen3-VL-4B, needs an 8 GB NVIDIA GPU (or 16 GB Apple Silicon).
+  # best = Qwen3-VL-8B, needs 12 GB NVIDIA (or 24 GB Apple Silicon), a little
+  # sharper on on-screen text and vocabulary, about 2x slower.
+  # Unset (comment this out) to take CLI --tier, then the dashboard's site
+  # manifest (indexer.model_tier, if this indexer is pointed at one), then
+  # "good" — see broll_index/dashboard_site.py.
+  # model_tier: good
+  # local_cache_dir: ""    # "" = the per-OS default (see local_runtime.default_cache_dir);
+                           # NOT data_root — this is model/runtime cache, not site data
+  # llama_server_path: ""  # "" = fetched automatically; set to use an already-installed llama-server
+  # dashboard_url: ""      # "" = derived from db.url when db.mode: api, else no manifest lookup
+  frames_per_call: 9        # native-resolution frames per llama-server call (not tiled sheets)
+  gpu_layers: 99            # llama.cpp -ngl; 99 offloads everything it can
+  merge_similar_segments: true  # local backend only by default — see indexing-local.md
+
+# Default model for `run` WHEN indexer.backend: anthropic. One of: haiku |
+# sonnet | opus | fable — or an exact API model id, which is passed through
+# unchanged.
 #   haiku  -> claude-haiku-4-5   ($1 / $5 per Mtok)   cheapest, the archive default
 #   sonnet -> claude-sonnet-5    ($3 / $15)           the quality/cost default
 #   opus   -> claude-opus-5      ($5 / $25)
@@ -34,9 +61,12 @@ db:
 model: sonnet
 
 # Model used for `taxonomy propose` (a "big model" clustering pass per SPEC).
+# Unaffected by indexer.backend — taxonomy proposal always uses the Anthropic
+# API regardless of which backend describes clips.
 taxonomy_model: sonnet
 
-# Anthropic Messages API access. Indexing costs money per clip — see
+# Anthropic Messages API access — needed only when indexer.backend: anthropic
+# (or for `taxonomy propose`, always). Indexing costs money per clip — see
 # docs/indexing-findings.md for the calls-per-clip arithmetic and what each knob
 # below does to it.
 #

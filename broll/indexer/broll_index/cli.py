@@ -7,8 +7,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import local_models, local_runtime
 from .claude_client import describe_auth
 from .config import Config, ConfigError, load_config
+from .dashboard_site import dashboard_url_from_config, resolve_model_tier
 from .duplicates import do_duplicates
 from .manifest import do_export_manifest
 from .migrate import migrate_sqlite_db
@@ -69,12 +71,92 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
+    if cfg.indexer.backend == "local":
+        # CLI --tier > config.yaml indexer.model_tier > dashboard manifest >
+        # default "good" (dashboard_site.resolve_model_tier).
+        cfg.indexer.model_tier = resolve_model_tier(cfg, getattr(args, "tier", None))
+        t = local_models.tier(cfg.indexer.model_tier)
+        print(f"backend: local — {t.label} ({t.vram_note})")
+    else:
+        print(describe_auth(cfg.anthropic))
     storage = build_storage(cfg)
-    print(describe_auth(cfg.anthropic))
     stages = args.stages.split(",") if args.stages else None
     stages = [s.strip() for s in stages] if stages else None
     count = run_pipeline(cfg, storage, model=args.model, limit=args.limit, stages=stages)
     print(f"run: processed {count} video(s)")
+    return 0
+
+
+def cmd_models_pull(args: argparse.Namespace) -> int:
+    """Download the pinned llama.cpp runtime + one tier's GGUF weights into
+    `indexer.local_cache_dir` (see local_runtime.py). Safe to re-run: a file
+    already present with the correct sha256 is not re-fetched."""
+    cfg = load_config(args.config)
+    tier_key = (args.tier or resolve_model_tier(cfg, None)).strip().lower()
+    try:
+        local_models.tier(tier_key)
+    except ValueError as e:
+        print(f"models pull: {e}", file=sys.stderr)
+        return 2
+
+    gpu = local_runtime.probe_gpu()
+    try:
+        local_runtime.refuse_if_tier_unfit(tier_key, gpu, force=args.force)
+    except local_runtime.LocalRuntimeError as e:
+        print(f"models pull: {e}", file=sys.stderr)
+        return 2
+
+    cache_dir = Path(cfg.indexer.local_cache_dir) if cfg.indexer.local_cache_dir \
+        else local_runtime.default_cache_dir()
+    print(f"models pull: fetching the {local_models.TIERS[tier_key].label} tier into {cache_dir}")
+    exe = local_runtime.ensure_runtime(cache_dir)
+    weights, mmproj = local_runtime.ensure_model(cache_dir, tier_key)
+    print(f"models pull: runtime  {exe}")
+    print(f"models pull: weights  {weights}")
+    print(f"models pull: mmproj   {mmproj}")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Report GPU/tier/runtime/model state for the local backend — the first
+    thing to run when 'the local backend won't start' comes up."""
+    cfg = load_config(args.config)
+    print(f"backend configured: {cfg.indexer.backend}")
+
+    gpu = local_runtime.probe_gpu()
+    if gpu.present and gpu.vram_gb:
+        kind = "unified memory" if gpu.is_apple_silicon else "VRAM"
+        print(f"GPU: {gpu.name or '(unnamed)'} — {gpu.vram_gb:.1f} GB {kind} ({gpu.detail})")
+    else:
+        print(f"GPU: none detected ({gpu.detail})")
+    recommended = local_runtime.recommend_tier(gpu)
+    print(f"recommended tier: {recommended or 'none — search-only, or backend: anthropic'}")
+
+    tier_key = resolve_model_tier(cfg, None)
+    t = local_models.tier(tier_key)
+    print(f"configured tier (resolved: CLI > config.yaml > dashboard manifest > default): "
+          f"{tier_key} — {t.label}")
+
+    cache_dir = Path(cfg.indexer.local_cache_dir) if cfg.indexer.local_cache_dir \
+        else local_runtime.default_cache_dir()
+    print(f"local_cache_dir: {cache_dir}")
+
+    exe_path = Path(cfg.indexer.llama_server_path) if cfg.indexer.llama_server_path \
+        else local_runtime.server_path(cache_dir)
+    present = exe_path.is_file()
+    print(f"llama-server: {exe_path} "
+          f"({'present' if present else 'NOT downloaded yet — run `broll-index models pull`'})")
+    if present:
+        version = local_runtime.llama_server_version(exe_path)
+        if version:
+            print(f"llama-server reports: {version}")
+
+    weights, mmproj = local_runtime.model_paths(cache_dir, t)
+    for label, p in (("weights", weights), ("mmproj", mmproj)):
+        print(f"{label}: {p} ({'present' if p.is_file() else 'NOT downloaded yet'})")
+
+    dash_url = dashboard_url_from_config(cfg)
+    print(f"dashboard manifest URL: {dash_url or '(none configured or derivable from db.url)'}")
     return 0
 
 
@@ -277,7 +359,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--model", default=None, choices=["haiku", "sonnet", "fable"])
     p_run.add_argument("--limit", type=int, default=None)
     p_run.add_argument("--stages", default=None, help="comma-separated: probe,proxy,frames,transcribe,claude,embed")
+    p_run.add_argument("--tier", default=None, choices=list(local_models.VALID_TIERS),
+                       help="local backend only: overrides indexer.model_tier / the dashboard "
+                            "manifest for this run (see dashboard_site.resolve_model_tier)")
     p_run.set_defaults(func=cmd_run)
+
+    p_models = sub.add_parser("models", help="local-backend model/runtime management")
+    models_sub = p_models.add_subparsers(dest="models_command", required=True)
+    p_models_pull = models_sub.add_parser(
+        "pull", help="download the pinned llama.cpp runtime + one tier's GGUF weights")
+    p_models_pull.add_argument("--tier", default=None, choices=list(local_models.VALID_TIERS))
+    p_models_pull.add_argument("--force", action="store_true",
+                               help="pull even if this machine's GPU looks too small for the tier")
+    p_models_pull.set_defaults(func=cmd_models_pull)
+
+    p_doctor = sub.add_parser(
+        "doctor", help="report GPU / tier / runtime / model state for the local backend")
+    p_doctor.set_defaults(func=cmd_doctor)
 
     p_transcribe = sub.add_parser(
         "transcribe", help="convenience wrapper over `run --stages transcribe`"

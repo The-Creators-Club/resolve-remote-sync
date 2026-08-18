@@ -1666,3 +1666,165 @@ def test_progress_window_show_goes_through_ui_dispatch(monkeypatch):
     window = popup.ProgressWindow("COPYING")
     window._show()
     assert len(calls) == 1 and callable(calls[0])
+
+
+# -- WorkProgressWindow (the shared monitor window, 2026-08-18) -------------
+#
+# The real window cannot be built in a test (conftest._no_real_tk_windows), so
+# these cover the parts that are not Tk: the model's formatting, the ETA, the
+# lifecycle around a display that is not there, and the rule that separates
+# this class from ProgressWindow above -- it owns no work, so closing it stops
+# nothing.
+
+
+def _model(**kw):
+    from ccsync_companion import popup
+
+    return popup.ProgressModel(**kw)
+
+
+def test_the_work_window_does_not_block_the_thread_that_opens_it():
+    """It is opened from a tray action, which runs on a thread the menu is
+    waiting on -- ProgressWindow's blocking run() would freeze the tray."""
+    import threading
+
+    from ccsync_companion import popup
+
+    started = threading.Event()
+    released = threading.Event()
+
+    def _slow_dispatch(fn):
+        started.set()
+        released.wait(5)
+
+    window = popup.WorkProgressWindow("INDEXING B-ROLL", "", lambda: _model(),
+                                      lambda name: None)
+    window._build_and_show = lambda: _slow_dispatch(None)
+    try:
+        assert window.open() is True
+        assert started.wait(5), "the window never started serving"
+        assert window.is_open() is True
+    finally:
+        released.set()
+        window.wait_closed(5)
+
+
+def test_a_machine_with_no_display_carries_on_without_the_window(monkeypatch):
+    """The batch is happening either way; the window is decoration."""
+    from ccsync_companion import popup
+
+    window = popup.WorkProgressWindow("INDEXING B-ROLL", "", lambda: _model())
+
+    def _no_display():
+        raise RuntimeError("no display name and no $DISPLAY")
+
+    window._build_and_show = _no_display
+    window.open()
+
+    assert window.wait_closed(5) is True
+    assert window.is_open() is False
+
+
+def test_opening_the_same_window_twice_does_not_open_two_roots():
+    """Two live Tk roots in this process is CORE-M3's wedged interpreter."""
+    import threading
+
+    from ccsync_companion import popup
+
+    released = threading.Event()
+    window = popup.WorkProgressWindow("INDEXING B-ROLL", "", lambda: _model())
+    window._build_and_show = lambda: released.wait(5)
+    try:
+        assert window.open() is True
+        assert window.open() is False
+    finally:
+        released.set()
+        window.wait_closed(5)
+
+
+def test_the_actions_run_off_the_tk_thread():
+    """"Cancel" reaches a fleet API; a UI frozen mid-cancel would be worse
+    than no button at all."""
+    import threading
+
+    from ccsync_companion import popup
+
+    seen = []
+    done = threading.Event()
+
+    def _action(name):
+        seen.append((name, threading.current_thread().name))
+        done.set()
+
+    window = popup.WorkProgressWindow("X", "", lambda: _model(), _action)
+    window._fire("cancel")
+
+    assert done.wait(5)
+    assert seen[0][0] == "cancel"
+    assert seen[0][1] != threading.current_thread().name
+
+
+def test_the_window_never_lets_a_bad_snapshot_kill_its_tick():
+    from ccsync_companion import popup
+
+    class _Root:
+        def __init__(self):
+            self.scheduled = 0
+
+        def after(self, ms, fn):
+            self.scheduled += 1
+
+    def _boom():
+        raise RuntimeError("the orchestrator is on fire")
+
+    window = popup.WorkProgressWindow("X", "", _boom)
+    window.root = _Root()
+    window._tick()
+
+    assert window.root.scheduled == 1, "it must schedule the next tick anyway"
+
+
+def test_the_work_window_gets_the_app_icon_like_every_other_root():
+    """Source-level, because the real window cannot be built in a test (see
+    conftest._no_real_tk_windows) -- the same check PopupDialog has."""
+    import inspect
+
+    from ccsync_companion import popup
+
+    source = inspect.getsource(popup.WorkProgressWindow._build_and_show_unpatched)
+    assert "apply_window_icon" in source
+
+
+def test_the_x_closes_the_window_and_cancels_nothing():
+    """The difference from ProgressWindow, which owns its worker: cancelling a
+    two-hour batch because somebody tidied their desktop is not a thing this
+    window may do."""
+    import inspect
+
+    from ccsync_companion import popup
+
+    source = inspect.getsource(popup.WorkProgressWindow._build_and_show_unpatched)
+    assert 'root.protocol("WM_DELETE_WINDOW", root.destroy)' in source
+
+
+def test_the_model_renders_the_three_lines_the_owner_asked_for():
+    model = _model(headline="Downloading Qwen3-VL 4B", headline_percent=43,
+                   item_label="A001.MP4 - describing", item_percent=70,
+                   done=12, total=40, failed=1, eta_seconds=720)
+
+    assert model.headline_line() == "Downloading Qwen3-VL 4B - 43%"
+    assert model.item_line() == "A001.MP4 - describing - 70%"
+    assert model.overall_line() == "12 of 40 clips · 1 failed"
+    assert model.eta_line() == "~12 min left"
+
+
+def test_a_percentage_nobody_can_compute_simply_is_not_shown():
+    model = _model(item_label="A001.MP4")
+
+    assert model.item_line() == "A001.MP4"
+    assert model.headline_line() == ""
+
+
+def test_a_percentage_out_of_range_is_clamped_rather_than_drawn():
+    assert _model(item_label="x", item_percent=140).item_line() == "x - 100%"
+    assert _model(item_label="x", item_percent=-5).item_line() == "x - 0%"

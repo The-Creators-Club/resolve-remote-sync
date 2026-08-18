@@ -2271,6 +2271,35 @@ def test_run_reads_only_the_three_fields_it_is_allowed_to(ingest_server):
     assert ingestor.calls[-1] == ("run", "b" * 32, "s1", "idle")
 
 
+def test_start_now_is_the_legacy_spelling_of_foreground(ingest_server):
+    """The plan's first draft called it `start_now`, and a page cached before
+    2026-08-18 still sends it. run_mode wins when both arrive."""
+    srv, client, ingestor, staging = ingest_server
+
+    client.post_json("/broll/ingest/run",
+                     {"batch_uid": "b" * 32, "staging_id": "s1", "start_now": True})
+    assert ingestor.calls[-1] == ("run", "b" * 32, "s1", "foreground")
+
+    client.post_json("/broll/ingest/run",
+                     {"batch_uid": "b" * 32, "staging_id": "s1",
+                      "start_now": True, "run_mode": "idle"})
+    assert ingestor.calls[-1] == ("run", "b" * 32, "s1", "idle")
+
+
+def test_the_tier_block_carries_what_the_page_renders(ingest_server):
+    """The SPA disables a tier it cannot run and confirms the download size
+    before Run, so both have to be in the capability answer."""
+    srv, client, ingestor, staging = ingest_server
+
+    tiers = json.loads(client.get("/broll/ingest/capabilities")[2])["tiers"]
+
+    assert tiers["best"]["vram_gb"] == 12
+    assert tiers["good"]["vram_gb"] == 8
+    assert tiers["good"]["download_bytes"] > 3_000_000_000
+    assert tiers["good"]["label"]
+    assert isinstance(tiers["good"]["fits"], bool)
+
+
 def test_run_answers_the_orchestrators_refusal_verbatim(ingest_server):
     """A tier that does not fit is a 503 whose message is the one the tray
     balloons -- the page must be able to show the same sentence."""

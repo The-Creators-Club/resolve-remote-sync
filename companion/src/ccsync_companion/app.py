@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import broll_ingest as broll_ingest_mod
 from . import broll_server as broll_server_mod
 from . import canon
 from . import config as config_mod
@@ -572,6 +573,23 @@ def _lane_root_absent_detail() -> str:
             f"back in and syncing resumes on its own")
 
 
+def _proxy_state_note(state: str) -> str:
+    """proxy_gen's gate, in the sentence the progress window shows.
+
+    Deliberately not the tray's words: the tray says "Making proxies... 12
+    left" to somebody glancing at a menu, and this is for somebody watching a
+    window and wondering why the bar is not moving.
+    """
+    return {
+        proxy_gen_mod.STATE_USER_ACTIVE: "waiting until you're away from the keyboard",
+        proxy_gen_mod.STATE_RESOLVE_OPEN: "waiting: DaVinci Resolve is open",
+        proxy_gen_mod.STATE_PAUSED: "paused",
+        proxy_gen_mod.STATE_NO_FFMPEG: "waiting: ffmpeg is not installed here",
+        proxy_gen_mod.STATE_DRIVE_ABSENT: "waiting: the sync drive is not connected",
+        proxy_gen_mod.STATE_MISCONFIGURED: "waiting: this machine's sync config needs fixing",
+    }.get(state, "")
+
+
 class CompanionApp:
     """Owns the timeline watcher, all three sync lanes, and (optionally) the
     tray icon. Every public method is safe to call from any thread (the
@@ -598,6 +616,11 @@ class CompanionApp:
         # popup and the user-initiated "Scan whole project" tray action
         # both trying to open a Tk root at once.
         self._popup_active_lock = threading.Lock()
+        # The one live work-progress window (popup.WorkProgressWindow), as
+        # (key, window). One at a time: two Tk roots in this process is
+        # CORE-M3's wedged interpreter.
+        self._work_window: Any = None
+        self._work_window_lock = threading.Lock()
         # Batches that turned up while a popup was ON SCREEN, shown the
         # moment it closes (2026-08-01). Tk still permits only one root at a
         # time, but "one at a time" no longer means "the rest are thrown
@@ -867,8 +890,12 @@ class CompanionApp:
                 paused_fn=self.is_paused,
                 # config_problems, the same DEL-3 gate the lanes use: a
                 # half-configured install must not be quietly encoding into a
-                # tree whose local_root is wrong.
-                blocked_fn=lambda: bool(self.config_problems),
+                # tree whose local_root is wrong -- AND, since 2026-08-18,
+                # b-roll indexing, which now takes precedence over proxy
+                # generation (BROLL_INGEST_PLAN.md owner review (a)). The seam
+                # answers a REASON there, so the tray can say "waiting:
+                # indexing b-roll first" instead of the misconfigured line.
+                blocked_fn=self._proxy_block_reason,
                 get_selected_rels=self._selected_project_rels if self._managed else None,
                 notify=self._notify_tray,
                 idle_probe=idle_mod.make_idle_probe(True),
@@ -884,6 +911,37 @@ class CompanionApp:
             )
         except Exception:
             log.exception("failed to build the proxy generator")
+
+        # B-roll ingest (broll_ingest.py, 2026-08-18): the editor drops clips
+        # on the dashboard's b-roll page and THIS machine indexes them. Behind
+        # its own try for the same reason the generator above is -- a feature
+        # that runs when somebody drags something must never be why a
+        # companion fails to construct -- and constructed AFTER it, because
+        # the generator's blocked_fn reads this attribute (through
+        # _proxy_block_reason, which is called per gate, not now).
+        self.broll_ingestor: Any = None
+        self._broll_ingest_deps: Any = None
+        try:
+            self._broll_ingest_deps = self._ingest_deps()
+            if self._broll_ingest_deps is not None:
+                self.broll_ingestor = broll_ingest_mod.BrollIngestor(
+                    cfg,
+                    self._state_dir,
+                    deps=self._broll_ingest_deps,
+                    root_present_fn=self.root_is_present,
+                    paused_fn=self.is_paused,
+                    blocked_fn=lambda: bool(self.config_problems),
+                    idle_probe=idle_mod.make_idle_probe(True),
+                    resolve_running_fn=resolve_prefs_mod.resolve_is_running,
+                    notify=self._notify_tray,
+                    # The window opens itself when a batch starts crunching
+                    # (or downloading a model) -- the owner's requirement, and
+                    # the moment there is something to watch.
+                    show_window=self.show_ingest_progress,
+                )
+        except Exception:
+            log.exception("failed to build the b-roll ingest orchestrator")
+            self.broll_ingestor = None
 
         # YouTube auto-import (youtube_import.py): files the clips the
         # dashboard's YouTube page downloaded into <project>\Youtube\<term>\
@@ -985,6 +1043,12 @@ class CompanionApp:
             # bins" is a handful of counters, and the dashboard's YouTube page
             # wants to show it beside the download it started.
             get_youtube_import=self.youtube_import_status,
+            # The b-roll batch this machine is crunching, if any. Same shape
+            # and the same rules as the two above: a cached zero-I/O read that
+            # rides every tick, because the page that started the batch and
+            # the admin watching the fleet grid are both looking for exactly
+            # this and neither should wait for a heavy cycle.
+            get_broll_ingest=self.broll_ingest_status,
             # The safety latches (item 9). Every tick, not just the heavy
             # ones: a tripped breaker and a halted machine are the two states
             # an admin must not learn about a report interval late.
@@ -1022,6 +1086,14 @@ class CompanionApp:
                 self.project_setup.note_report_response(resp)
             except Exception:
                 log.exception("project_setup.note_report_response failed")
+        # A b-roll ingest cancel rides it too (BROLL_INGEST_PLAN.md §4.2):
+        # the heartbeat's 410 is still the authoritative stop, this just makes
+        # it arrive within one report interval instead of one heartbeat.
+        if self.broll_ingestor is not None:
+            try:
+                self.broll_ingestor.note_report_response(resp)
+            except Exception:
+                log.exception("broll_ingest.note_report_response failed")
         # The fleet halt rides the same reply (item 9, 2026-08-17) -- see
         # _apply_fleet_halt for why it is not its own request.
         self._apply_fleet_halt(resp)
@@ -4310,6 +4382,10 @@ class CompanionApp:
         try:
             if self.proxy_generator is not None:
                 self.proxy_generator.start()
+            # With it, and for the same reasons: its own thread, its own
+            # gate, and nothing to do on a machine nobody drops clips on.
+            if self.broll_ingestor is not None:
+                self.broll_ingestor.start()
         except Exception:
             log.exception("failed to start the proxy generator")
         # Next to it, and behind its own try for the same reason: it needs no
@@ -4367,7 +4443,12 @@ class CompanionApp:
         """
         try:
             self._broll_server = broll_server_mod.start(
-                self.config, ytdl_deps=self._ytdl_deps())
+                self.config, ytdl_deps=self._ytdl_deps(),
+                # THE SAME deps object the orchestrator was built with -- it
+                # carries `.ingestor`, which is how the /broll/ingest/* routes
+                # reach the live batch. A second one would answer every route
+                # "this machine cannot index".
+                ingest_deps=self._broll_ingest_deps)
         except Exception:
             log.exception("failed to start the b-roll Send-to-Resolve server")
             self._broll_server = None
@@ -4511,12 +4592,247 @@ class CompanionApp:
             return {}
         return self.youtube_importer.status()
 
+    # -- the shared work-progress window (popup.WorkProgressWindow) --------
+    #
+    # ONE window at a time, deliberately: two live Tk roots in this process is
+    # CORE-M3's wedged interpreter, and the b-roll batch and the proxy run are
+    # never both crunching anyway (indexing blocks the generator). Opening the
+    # second closes the first rather than refusing, because the click that
+    # asked for it is the editor telling us which one they want to watch.
+    def _open_work_window(self, key: str, title: str, subtitle: str,
+                          snapshot_fn: Any, action_fn: Any) -> None:
+        with self._work_window_lock:
+            existing = self._work_window
+            if existing is not None and existing[0] == key and existing[1].is_open():
+                return
+            if existing is not None:
+                try:
+                    existing[1].close()
+                except Exception:
+                    log.debug("could not close the open work window", exc_info=True)
+            window = popup.WorkProgressWindow(title, subtitle, snapshot_fn, action_fn)
+            self._work_window = (key, window)
+        try:
+            window.open()
+        except Exception:
+            log.exception("could not open the %s progress window", key)
+
+    def close_work_window(self) -> None:
+        with self._work_window_lock:
+            existing, self._work_window = self._work_window, None
+        if existing is not None:
+            try:
+                existing[1].close()
+            except Exception:
+                log.debug("could not close the work window", exc_info=True)
+
+    def show_ingest_progress(self) -> None:
+        """Tray action / automatic on a batch start: the b-roll window."""
+        if self.broll_ingestor is None:
+            return
+        self._open_work_window(
+            "ingest", "INDEXING B-ROLL",
+            "Your clips are indexed on this machine and uploaded to the archive. "
+            "Closing this window does not stop it.",
+            self.broll_ingestor.progress_model, self._ingest_window_action)
+
+    def _ingest_window_action(self, name: str) -> None:
+        """The window's buttons are the tray's actions -- one object, two
+        surfaces, so a pause from either means the same thing."""
+        if self.broll_ingestor is None:
+            return
+        {
+            "pause": self.pause_broll_ingest,
+            "resume": self.resume_broll_ingest,
+            "start_now": self.index_broll_now,
+            "cancel": self.cancel_broll_ingest,
+        }.get(name, lambda: None)()
+
+    def show_proxy_progress(self) -> None:
+        """Tray action / automatic on "make them now": the proxy window."""
+        if self.proxy_generator is None:
+            return
+        self._open_work_window(
+            "proxy", "MAKING PROXIES",
+            "Proxies let the rest of the team see this footage. Closing this "
+            "window does not stop them.",
+            self._proxy_progress_model, self._proxy_window_action)
+
+    def _proxy_progress_model(self) -> Any:
+        """proxy_gen.gap() as the shared window draws it.
+
+        The per-clip percentage and ETA are the generator's OWN numbers
+        (`encoding_detail`, the history rollup) rather than a second estimate
+        computed here: two ETAs for one queue is two ETAs that disagree.
+        """
+        gap = self.proxy_gap() or {}
+        detail = [d for d in (gap.get("encoding_detail") or []) if isinstance(d, dict)]
+        first = detail[0] if detail else {}
+        encoding = bool(gap.get("encoding"))
+        left = int(gap.get("left") or 0)
+        made = int(gap.get("generated") or 0)
+        eta = (gap.get("history") or {}).get("eta_seconds")
+        return popup.ProgressModel(
+            title="MAKING PROXIES",
+            phase=str(gap.get("state") or ""),
+            item_label=(os.path.basename(str(first.get("path") or "")) if first
+                        else ""),
+            item_percent=first.get("percent"),
+            done=made, total=made + left,
+            failed=int(gap.get("failed") or 0),
+            eta_seconds=eta,
+            note=("" if encoding else
+                  str(gap.get("blocked_reason") or "")
+                  or _proxy_state_note(str(gap.get("state") or ""))),
+            actions=("cancel",) if encoding else ("start_now",),
+            finished=not encoding and left == 0,
+        )
+
+    def _proxy_window_action(self, name: str) -> None:
+        if self.proxy_generator is None:
+            return
+        if name == "cancel":
+            self.stop_proxy_generation()
+        elif name == "start_now":
+            self.proxy_generator.request_run()
+
+    def _proxy_block_reason(self) -> Any:
+        """`ProxyGenerator.blocked_fn`: True, a reason string, or False.
+
+        Two answers on one seam because they are different states. True is the
+        DEL-3 config gate the lanes use -- a half-configured install must not
+        be quietly encoding into a tree whose local_root is wrong. A STRING is
+        the 2026-08-18 precedence reversal: while a b-roll batch is crunching,
+        proxy generation stands aside and the tray says why ("waiting:
+        indexing b-roll first"). Indexing wins because it is the thing an
+        editor is waiting on and it needs the same GPU.
+        """
+        if self.config_problems:
+            return True
+        ingestor = getattr(self, "broll_ingestor", None)
+        if ingestor is None:
+            return False
+        try:
+            return ingestor.blocking_reason() or False
+        except Exception:
+            log.debug("broll ingest: blocking_reason() failed", exc_info=True)
+            return False
+
+    # -- b-roll ingest (broll_ingest.py) --------------------------------
+    # NULL-SAFE like the proxy accessors above and for the same reason: the
+    # orchestrator's constructor is allowed to fail without taking the
+    # companion with it, and the tray reads these on its refresh thread.
+    def _ingest_deps(self) -> Any:
+        """What the b-roll ingest orchestrator (and the 8899 routes) are
+        allowed to know about this machine.
+
+        The three live seams are the app's answers rather than config keys,
+        exactly as _ytdl_deps' are: `editor_identity` because a lease needs
+        the VERIFIED holder, `identity.token` because the fleet routes check
+        the dashboard's signature (H5) and a signed-out machine must stop
+        claiming at once, and the machine name because the server compares it
+        against the leaseholder on every call after the claim (API.md §6a).
+        """
+        try:
+            import platform
+
+            return broll_ingest_mod.IngestDeps(
+                self.config,
+                editor_fn=self.editor_identity,
+                identity_token_fn=lambda: self.identity.token,
+                machine_name=platform.node(),
+            )
+        except Exception:
+            log.exception("failed to build the b-roll ingest dependencies")
+            return None
+
+    def broll_ingest_status(self) -> dict[str, Any]:
+        """The reporter's `broll_ingest` section -- the dashboard's
+        BrollIngestIn fields only. Empty when nothing is happening, which is
+        how an absent section clears the fleet grid's chip."""
+        if self.broll_ingestor is None:
+            return {}
+        try:
+            return self.broll_ingestor.report()
+        except Exception:
+            log.debug("broll ingest: report() failed", exc_info=True)
+            return {}
+
+    def broll_ingest_view(self) -> dict[str, Any]:
+        """The TRAY's fuller view of the same snapshot (zero I/O)."""
+        if self.broll_ingestor is None:
+            return {}
+        try:
+            return self.broll_ingestor.status()
+        except Exception:
+            log.debug("broll ingest: status() failed", exc_info=True)
+            return {}
+
+    def index_broll_now(self) -> None:
+        """Tray action: "don't wait until I'm away" for the current batch."""
+        if self.broll_ingestor is None:
+            self._notify_tray("B-roll indexing is not set up on this machine.")
+            return
+        self.broll_ingestor.request_run()
+        self._notify_tray(
+            "Indexing the b-roll batch now. It keeps going while you work.",
+            "ccsync-companion: b-roll")
+        # The window follows from the tick that starts crunching (the
+        # `show_window` seam), not from here: one place decides, so a batch
+        # that is still gated on something else does not get a window with
+        # nothing in it.
+
+    def pause_broll_ingest(self) -> None:
+        if self.broll_ingestor is None:
+            return
+        self.broll_ingestor.pause()
+        self._notify_tray("B-roll indexing paused. Nothing already indexed is lost.",
+                          "ccsync-companion: b-roll")
+
+    def resume_broll_ingest(self) -> None:
+        if self.broll_ingestor is None:
+            return
+        self.broll_ingestor.resume()
+        self._notify_tray("B-roll indexing will carry on from where it stopped.",
+                          "ccsync-companion: b-roll")
+
+    def cancel_broll_ingest(self) -> None:
+        """Tray action, CONFIRMED: a cancel throws away an evening of GPU time
+        and cannot be undone from here (the clips already live stay live)."""
+        if self.broll_ingestor is None:
+            return
+        snap = self.broll_ingest_view()
+        if not snap.get("batch_uid"):
+            return
+        if not self._popup_active_lock.acquire(blocking=False):
+            log.info("broll ingest: not asking about the cancel -- a dialog is open")
+            return
+        try:
+            confirmed = popup.confirm_dialog(
+                "STOP INDEXING THIS B-ROLL BATCH",
+                f"{snap.get('done', 0)} of {snap.get('total', 0)} clips are already "
+                "in the archive and they stay there.\n\nThe rest will not be "
+                "indexed. The clips themselves are not deleted.",
+                ok_label="STOP INDEXING",
+            )
+        finally:
+            self._popup_active_lock.release()
+        if not confirmed:
+            return
+        self.broll_ingestor.cancel("cancelled from the tray")
+        self._notify_tray("B-roll indexing stopped.", "ccsync-companion: b-roll")
+
     def generate_proxies_now(self) -> None:
         """Tray action: scan now and encode without waiting for idle."""
         if self.proxy_generator is None:
             self._notify_tray("Proxy generation is not set up on this machine.")
             return
         self.proxy_generator.request_run()
+        # The window the owner asked for (2026-08-18): a six-hour encode
+        # behind two tray lines is what "the lack of feedback is disturbing"
+        # was about. Only on a run the editor ASKED for -- an idle-time run
+        # must not put a window in front of whatever they left open.
+        self.show_proxy_progress()
         self._notify_tray(
             "Making the missing proxies now — it stops on its own when they're done.",
             "ccsync-companion",
@@ -4687,6 +5003,17 @@ class CompanionApp:
         # while the user is away, i.e. exactly when the idle timer fires. The
         # hold ends by itself when the queue drains. Cheap by contract --
         # block_reason() is a lock-guarded read with no I/O.
+        # B-roll indexing before proxies, in the same order the two features
+        # now hold the GPU: a batch only runs BECAUSE the editor walked away,
+        # which is exactly when the idle timer would put the machine to sleep
+        # on top of it.
+        try:
+            if self.broll_ingestor is not None:
+                reason = self.broll_ingestor.block_reason()
+                if reason:
+                    return reason
+        except Exception:
+            log.debug("broll ingest block_reason() failed", exc_info=True)
         try:
             if self.proxy_generator is not None:
                 return self.proxy_generator.block_reason()
@@ -4883,6 +5210,21 @@ class CompanionApp:
         # a running ffmpeg child, and it is the one thing in this teardown
         # that is still burning the machine's CPU while we work through the
         # rest. Its thread is joined in the bounded loop below.
+        # BEFORE the proxy generator, because it owns more: an ffmpeg child,
+        # a llama-server holding 4-12 GB of VRAM, and an rclone pushing a 40 GB
+        # original. Its batch's lease then expires and this machine re-claims
+        # it from the last checkpoint on the next start (plan §6).
+        try:
+            if self.broll_ingestor is not None:
+                self.broll_ingestor.stop()
+        except Exception:
+            log.exception("failed to stop the b-roll ingest orchestrator")
+        # A work-progress window is a live Tk root; leaving one up while the
+        # dispatcher shuts down is MAC-11's shape.
+        try:
+            self.close_work_window()
+        except Exception:
+            log.debug("failed to close the work window", exc_info=True)
         try:
             if self.proxy_generator is not None:
                 self.proxy_generator.stop()
@@ -4941,6 +5283,8 @@ class CompanionApp:
         try:
             if self.proxy_generator is not None:
                 self.proxy_generator.join(timeout=5.0)
+            if self.broll_ingestor is not None:
+                self.broll_ingestor.join(timeout=5.0)
         except Exception:
             log.exception("shutdown: failed to join the proxy generator")
         # Bounded for the same reason again: its worker may be inside a

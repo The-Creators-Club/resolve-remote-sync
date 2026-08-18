@@ -832,8 +832,23 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
             fits, why = broll_vlm_sidecar.fits(key, gpu_info or None)
         except Exception:  # noqa: BLE001
             fits, why = False, "this build cannot describe that model tier"
-        tiers[key] = {"fits": bool(fits), "reason": why,
-                      "cached": bool(ready.get(key))}
+        cached = bool(ready.get(key))
+        entry: dict[str, Any] = {"fits": bool(fits), "reason": why, "cached": cached}
+        # What the SPA's "this will download N GB first" confirmation needs
+        # (plan §5, §9.6), and the VRAM floor beside it so the disabled radio
+        # can say WHY without parsing the sentence. Nothing here is I/O: both
+        # come out of the vendored catalogue's pinned sizes.
+        try:
+            tier_meta = broll_vlm_sidecar._models().tier(key)
+            entry["vram_gb"] = (tier_meta.apple_unified_gb
+                                if gpu_info.get("apple_silicon") else tier_meta.vram_gb)
+            entry["download_bytes"] = (
+                0 if cached else
+                tier_meta.weights.size_bytes + tier_meta.mmproj.size_bytes)
+            entry["label"] = tier_meta.label
+        except Exception:  # noqa: BLE001 - an unknown tier stays unadorned
+            log.debug("broll ingest: no catalogue entry for tier %r", key, exc_info=True)
+        tiers[key] = entry
     try:
         recommended = broll_vlm_sidecar.recommended_tier(gpu_info or None)
     except Exception:  # noqa: BLE001
@@ -848,7 +863,7 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
     except Exception:  # noqa: BLE001
         ffmpeg = None
     if not ffmpeg:
-        reasons.append("ffmpeg is not installed on this machine yet — it is "
+        reasons.append("ffmpeg is not installed on this machine yet: it is "
                        "fetched the first time a batch runs")
     # None, not False, when nothing has probed the encoders yet: "we have not
     # asked" and "this build has no NVENC" send an editor to different places.
@@ -875,7 +890,7 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
     elif free is not None and free < floor:
         reasons.append(
             f"only {free / 1_000_000_000:.1f} GB free where the clips would be "
-            f"staged — {floor / 1_000_000_000:.0f} GB is the floor")
+            f"staged (the floor is {floor / 1_000_000_000:.0f} GB)")
 
     busy = {"batch_uid": None, "state": ""}
     if ingestor is not None:
@@ -1192,18 +1207,35 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             and self._content_type_ok() and self._dispatch_post()
         )
 
+    # How much of THIS request's body has been read. Only the PUT route has a
+    # body big enough to care, and it is what lets the tail drain below know
+    # whether there is anything left to swallow.
+    _body_consumed = 0
+
     def do_PUT(self) -> None:
         """The upload route, and nothing else.
 
         Same envelope as a POST -- Host, Origin, then "an allowed Origin or the
         token" -- but NOT _content_type_ok: this body is bytes, and the
         content-type rule that applies here is do_PUT's own (see
-        _ingest_upload).
+        _ingest_content_type_ok).
+
+        The `finally` matters. A refusal that leaves an unread body in the
+        socket's receive buffer makes the CLOSE a reset, and the client then
+        loses the 403/409/507 that explained what happened -- it sees only
+        "connection aborted", which is what a firewall looks like. Every
+        refusal path is covered rather than each one remembering.
         """
-        self._guarded(
-            lambda: self._vet_request() and self._post_authorised()
-            and self._dispatch_put()
-        )
+        self._body_consumed = 0
+
+        def _dispatch() -> None:
+            try:
+                (self._vet_request() and self._post_authorised()
+                 and self._dispatch_put())
+            finally:
+                self._drain_small_body()
+
+        self._guarded(_dispatch)
 
     def _ingest_deps(self) -> Any:
         """What app.py handed this listener about b-roll ingest, or None.
@@ -1240,6 +1272,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         if ctype != "application/octet-stream":
             log.warning("broll ingest: refusing PUT %s -- Content-Type %r is not "
                         "application/octet-stream", self.path, ctype or None)
+            self._drain_small_body()
             self._refuse(415)
             return False
         if str(self.headers.get(INGEST_HEADER) or "").strip():
@@ -1253,6 +1286,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             "header (which forces a preflight) or the loopback token",
             self.path, INGEST_HEADER,
         )
+        self._drain_small_body()
         self._refuse(403)
         return False
 
@@ -1295,6 +1329,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                     if not chunk:
                         break
                     written += len(chunk)
+                    self._body_consumed += len(chunk)
                     if written > limit:
                         raise _UploadTooLarge()
                     handle.write(chunk)
@@ -1329,6 +1364,28 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             return None
         return written
 
+    def _drain_small_body(self, limit: int = _UPLOAD_CHUNK_BYTES) -> None:
+        """Swallow up to `limit` bytes of a body we are about to refuse.
+
+        Without it a refusal races the client's upload: this handler answers
+        and closes while the browser is still writing, and on Windows the
+        client sees a connection reset instead of the 409/507 that explains
+        what happened. Bounded on purpose -- a 40 GB body is never drained,
+        and a client that big gets the reset it would have got anyway.
+        """
+        raw = self.headers.get("Content-Length")
+        try:
+            declared = int(raw or 0)
+        except (TypeError, ValueError):
+            return
+        remaining = min(declared - self._body_consumed, limit)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, _READ_CHUNK_BYTES))
+            if not chunk:
+                return
+            remaining -= len(chunk)
+            self._body_consumed += len(chunk)
+
     def _dispatch_put(self) -> None:
         match = _UPLOAD_PATH_RE.match(urlparse(self.path).path)
         if match is None:
@@ -1336,6 +1393,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             return
         ingestor = self._ingestor()
         if ingestor is None:
+            self._drain_small_body()
             self._no_ingestor()
             return
         if not self._ingest_content_type_ok():
@@ -1344,6 +1402,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
 
         status, slot = ingestor.upload_slot(staging_id, local_id)
         if status != 200:
+            self._drain_small_body()
             self._send_json(status, slot)
             return
         dest = Path(str(slot.get("path") or ""))
@@ -1355,6 +1414,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         if not root or not loopback_guard.is_within(dest.parent, root):
             log.warning("broll ingest: refusing an upload to %s -- outside %s",
                         dest, root)
+            self._drain_small_body()
             self._refuse(403)
             return
 
@@ -1362,6 +1422,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         floor = _ingest_floor_bytes(getattr(self.server, "ccsync_cfg", None))
         free = _free_bytes_at(dest.parent)
         if free is not None and declared and (free - declared) < floor:
+            self._drain_small_body()
             self._send_json(507, {"ok": False, "message": (
                 f"not enough space to stage this clip: it needs "
                 f"{declared / 1_000_000_000:.1f} GB and only "
@@ -1449,10 +1510,19 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 # fleet token: the browser is the only party that can see both
                 # the dashboard and this loopback, which is why it dispatches
                 # -- not a reason to trust it with the work order.
+                #
+                # `run_mode` is authoritative and `start_now` is its LEGACY
+                # spelling (the plan's first draft, and what a page cached
+                # before 2026-08-18 still sends): a bare `start_now: true`
+                # means foreground. Read second, so a body carrying both is
+                # decided by the newer field rather than by dict order.
+                run_mode = str(body.get("run_mode") or "").strip().lower()
+                if not run_mode and body.get("start_now"):
+                    run_mode = "foreground"
                 status, result = ingestor.run(
                     str(body.get("batch_uid") or ""),
                     str(body.get("staging_id") or ""),
-                    str(body.get("run_mode") or ""),
+                    run_mode,
                 )
             else:
                 status, result = ingestor.control(str(body.get("action") or ""))

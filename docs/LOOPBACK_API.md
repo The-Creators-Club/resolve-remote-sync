@@ -108,8 +108,11 @@ On top of those:
   *is* the NAS share). Every write is containment-checked against that root,
   twice — once by the orchestrator, once by the route.
 - **`POST /broll/ingest/run` reads three fields**: `batch_uid`, `staging_id`,
-  `run_mode`. The tier, archive names, taxonomy and settings all come back from
-  the server's `claim` under the fleet token. Same principle as `/music/send`:
+  `run_mode` (`idle` | `foreground`; `start_now: true` is the plan's first-draft
+  spelling of `foreground` and is still accepted, with `run_mode` winning when
+  a page sends both). The tier, archive names, taxonomy and settings all come
+  back from the server's `claim` under the fleet token. Same principle as
+  `/music/send`:
   the browser is the only party that can see both the dashboard and this
   loopback, which is why it dispatches — not a reason to trust it with the work
   order.

@@ -240,6 +240,34 @@ def _no_real_tk_windows(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_work_windows(monkeypatch):
+    """GUARD. No test may open a real WorkProgressWindow.
+
+    _no_real_tk_windows above catches a tk.Tk() on the TEST's thread. This
+    window is different in a way that defeats it: `open()` returns
+    immediately and the Tk root is built on a daemon thread of its own, so
+    when the window loses the race the monkeypatch is already undone and the
+    real tkinter.Tk runs -- on the developer's desktop, after the test that
+    caused it has passed. Seen live 2026-08-18: a "MAKING PROXIES" window left
+    on the owner's screen by a suite that reported no failures at all.
+
+    Patched at the class, so a test that wants to drive one still can by
+    setting `_build_and_show` on its own INSTANCE (instance attribute wins) --
+    which is what tests/test_popup.py's WorkProgressWindow tests do.
+    """
+    from ccsync_companion import popup
+
+    # The real builder is kept reachable under a second name -- the
+    # `_feature_enabled_unpatched` precedent above -- for the source-level
+    # tests that check what it CONTAINS (the app icon, the X's binding),
+    # which is the only way to test a window nothing may build.
+    popup.WorkProgressWindow._build_and_show_unpatched =         popup.WorkProgressWindow.__dict__["_build_and_show"]
+    monkeypatch.setattr(popup.WorkProgressWindow, "_build_and_show",
+                        lambda self: None)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _single_instance_slot_is_free(monkeypatch):
     """Pretend no other companion holds the single-instance slot.
 

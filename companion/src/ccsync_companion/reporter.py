@@ -74,6 +74,13 @@ GetProxyCoverageFn = Callable[[], dict[str, Any]]
 # the download is watching for exactly this, and a heavy-cycle wait would
 # make a working import look like a stuck one.
 GetYoutubeImportFn = Callable[[], dict[str, Any]]
+# B-roll ingest state (app.CompanionApp.broll_ingest_status ->
+# broll_ingest.py): which batch this machine is crunching, how far in, and the
+# VRAM refusal if there is one. Scalars only and cached/zero-I/O like the two
+# above, so it rides EVERY tick: the page that started the batch is polling for
+# exactly this, and the fleet grid's chip is how an admin sees which machines
+# are indexing (BROLL_INGEST_PLAN.md §1 step 8, 2026-08-18).
+GetBrollIngestFn = Callable[[], dict[str, Any]]
 # Upgrade-channel addition: called with the PARSED report response after
 # every successful post (the dashboard piggybacks its `upgrade`
 # advertisement on the report reply -- see upgrade.py). Exceptions are
@@ -200,6 +207,7 @@ class DashboardReporter:
         get_proxy_coverage: Optional[GetProxyCoverageFn] = None,
         get_youtube_import: Optional[GetYoutubeImportFn] = None,
         get_sync_guard: Optional[Callable[[], dict[str, Any]]] = None,
+        get_broll_ingest: Optional[GetBrollIngestFn] = None,
     ) -> None:
         self._get_statuses = get_statuses
         self.cfg = cfg
@@ -247,6 +255,12 @@ class DashboardReporter:
         # whose absence would leave a machine that has stopped syncing looking
         # exactly like one that has nothing to do.
         self._get_sync_guard = get_sync_guard
+        # Optional on the same terms as the two above: an empty dict from a
+        # companion with no orchestrator (or one with nothing to say) omits
+        # the section, which is how a FINISHED batch is spelled -- the
+        # dashboard reads an absent section as "not indexing" and clears the
+        # chip (api.flatten_broll_ingest).
+        self._get_broll_ingest = get_broll_ingest
 
         self.dashboard_url = str(cfg.get("dashboard_url", "")).strip()
         self.dashboard_token = str(cfg.get("dashboard_token", "")).strip()
@@ -400,6 +414,17 @@ class DashboardReporter:
                 guard = None
             if guard:
                 payload["sync_guard"] = guard
+        if self._get_broll_ingest is not None:
+            try:
+                ingest = self._get_broll_ingest()
+            except Exception:
+                log.exception("get_broll_ingest() failed")
+                ingest = None
+            # Empty is omitted, like the two sections above -- and here that
+            # omission is load-bearing rather than an economy: it is what tells
+            # the dashboard the batch is over.
+            if ingest:
+                payload["broll_ingest"] = ingest
         if not light:
             if self._get_local_manifest is not None:
                 try:

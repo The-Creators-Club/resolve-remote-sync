@@ -1338,3 +1338,84 @@ def test_a_youtube_getter_that_raises_costs_only_its_own_section():
     _reporter_with_youtube(_boom, calls).post_once(light=True)
     assert "youtube_import" not in calls[0]
     assert calls[0]["lanes"], "the rest of the report still went"
+
+
+# -- the b-roll ingest section (broll_ingest.py, 2026-08-18) -----------------
+
+
+def _reporter_with_ingest(status, calls):
+    from ccsync_companion.sync.base import LaneStatus
+
+    def fake_post(url, data, headers, timeout):
+        calls.append(data)
+        return {}
+
+    return DashboardReporter(
+        lambda: [LaneStatus(name="lane_a_video_up", state="idle")],
+        _cfg(), http_post=fake_post,
+        get_broll_ingest=(status if callable(status) else (lambda: status)),
+    )
+
+
+def _ingest_section():
+    return {"active": True, "batch_uid": "b" * 32, "state": "running",
+            "gate": "running", "done": 12, "failed": 0, "total": 40,
+            "clip": "A001.MP4", "percent": 70, "tier": "good",
+            "run_mode": "idle", "uploading": True, "upload_paused": False,
+            "model_download_percent": None, "warning": "",
+            "at": "2026-08-18T12:00:00Z"}
+
+
+def test_the_ingest_section_rides_every_tick_including_light_ones():
+    """The page that started the batch polls for exactly this, and the fleet
+    grid's chip is how an admin sees which machines are indexing."""
+    calls = []
+    reporter = _reporter_with_ingest(_ingest_section(), calls)
+
+    reporter.post_once(light=True)
+    reporter.post_once(light=False)
+
+    assert len(calls) == 2
+    for sent in calls:
+        assert sent["broll_ingest"]["batch_uid"] == "b" * 32
+        assert sent["broll_ingest"]["done"] == 12
+        assert sent["broll_ingest"]["gate"] == "running"
+
+
+def test_a_finished_batch_is_spelled_as_an_absent_section():
+    """The dashboard reads silence as "not indexing" and clears the chip
+    (api.flatten_broll_ingest), so an empty getter must send NOTHING rather
+    than a section of zeroes that would keep the chip lit."""
+    calls = []
+    _reporter_with_ingest({}, calls).post_once(light=True)
+
+    assert "broll_ingest" not in calls[0]
+
+
+def test_no_ingest_getter_means_no_ingest_section():
+    calls = []
+    _reporter_with(calls=calls).post_once(light=True)
+
+    assert "broll_ingest" not in calls[0]
+
+
+def test_an_ingest_getter_that_raises_costs_only_its_own_section():
+    calls = []
+
+    def _boom():
+        raise RuntimeError("the orchestrator is on fire")
+
+    _reporter_with_ingest(_boom, calls).post_once(light=True)
+
+    assert "broll_ingest" not in calls[0]
+    assert calls[0]["lanes"], "the rest of the report still went"
+
+
+def test_the_ingest_section_is_scalars_only():
+    """It rides every tick of every machine and the shedding path must never
+    have to look at it -- same contract as sync_guard."""
+    calls = []
+    _reporter_with_ingest(_ingest_section(), calls).post_once(light=True)
+
+    assert all(not isinstance(v, (dict, list))
+               for v in calls[0]["broll_ingest"].values())

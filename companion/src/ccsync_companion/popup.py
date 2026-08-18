@@ -1410,6 +1410,356 @@ class ProgressWindow:
             pass
 
 
+# ---------------------------------------------------------------------------
+# the generic work window (b-roll ingest + proxy generation, 2026-08-18)
+# ---------------------------------------------------------------------------
+#
+# ProgressWindow above OWNS its worker: it starts one, shows a window until it
+# finishes, and returns. That is right for a copy an editor asked for and is
+# waiting on, and wrong for everything else this companion does in the
+# background -- a proxy run and a b-roll batch are hours long, started by a
+# gate rather than a click, and must survive the window being closed. So this
+# is the other shape: a MONITOR. It owns no work, polls a snapshot function,
+# and its buttons are the same actions the tray menu offers.
+#
+# The owner's complaint that produced it (2026-08-18): "the lack of feedback
+# is disturbing" -- the proxy generator could encode for six hours behind two
+# tray lines. One window, one model, three producers (ingest, proxies, and
+# music ingest when it exists), because three windows would be three sets of
+# the same ETA bug.
+
+
+class EmaEta:
+    """Seconds per item, smoothed, and what that means for the clips left.
+
+    An exponential moving average rather than a plain mean: a b-roll batch
+    holds 4-second cutaways and 3-minute interviews, and after 40 of the
+    former one of the latter must not read as "3 minutes left" for a quarter
+    of an hour. Alpha 0.4 follows a change within ~4 clips.
+
+    Answers None until `min_samples` items are done, and the window shows
+    "estimating…" for exactly that long: a number derived from one clip is a
+    number that will be wrong by an order of magnitude, and the first estimate
+    an editor sees is the one they remember.
+    """
+
+    def __init__(self, alpha: float = 0.4, min_samples: int = 2) -> None:
+        self.alpha = alpha
+        self.min_samples = min_samples
+        self._value: Optional[float] = None
+        self._samples = 0
+
+    def observe(self, seconds: Optional[float]) -> None:
+        try:
+            value = float(seconds)
+        except (TypeError, ValueError):
+            return
+        if value <= 0:
+            return
+        self._samples += 1
+        self._value = value if self._value is None else (
+            self.alpha * value + (1.0 - self.alpha) * self._value)
+
+    @property
+    def samples(self) -> int:
+        return self._samples
+
+    def per_item_seconds(self) -> Optional[float]:
+        if self._value is None or self._samples < self.min_samples:
+            return None
+        return self._value
+
+    def eta_seconds(self, remaining: int) -> Optional[float]:
+        per_item = self.per_item_seconds()
+        if per_item is None or remaining <= 0:
+            return None
+        return per_item * remaining
+
+
+class ProgressModel:
+    """One snapshot of a background job, in the words the window draws.
+
+    Plain attributes and no behaviour: it is built on the producer's thread
+    (the tray's snapshot, the ingest tick) and read on the Tk thread, so
+    anything with a lock or a live handle in it would be a deadlock waiting to
+    happen. `actions` is the set of buttons that should be LIVE -- the window
+    never decides that for itself, because only the producer knows whether a
+    paused batch can be resumed.
+    """
+
+    ACTIONS = ("pause", "resume", "start_now", "cancel")
+
+    def __init__(self, title: str = "", phase: str = "", headline: str = "",
+                 headline_percent: Optional[int] = None, item_label: str = "",
+                 item_percent: Optional[int] = None, done: int = 0, total: int = 0,
+                 failed: int = 0, eta_seconds: Optional[float] = None,
+                 note: str = "", actions: Any = (), finished: bool = False) -> None:
+        self.title = title
+        self.phase = phase
+        self.headline = headline
+        self.headline_percent = headline_percent
+        self.item_label = item_label
+        self.item_percent = item_percent
+        self.done = int(done or 0)
+        self.total = int(total or 0)
+        self.failed = int(failed or 0)
+        self.eta_seconds = eta_seconds
+        self.note = note
+        self.actions = tuple(actions or ())
+        self.finished = bool(finished)
+
+    def overall_line(self) -> str:
+        """"12 of 40 clips · 1 failed"."""
+        if not self.total:
+            return "" if not self.done else f"{self.done} done"
+        word = "clip" if self.total == 1 else "clips"
+        line = f"{min(self.done, self.total)} of {self.total} {word}"
+        if self.failed:
+            line += f" · {self.failed} failed"
+        return line
+
+    def eta_line(self) -> str:
+        """"~12 min left", or "estimating…" until the rate is worth quoting."""
+        if self.finished:
+            return ""
+        if self.eta_seconds is None:
+            return "estimating…" if self.total else ""
+        return human_eta(self.eta_seconds)
+
+    def item_line(self) -> str:
+        if not self.item_label:
+            return ""
+        if self.item_percent is None:
+            return self.item_label
+        return f"{self.item_label} - {max(0, min(100, int(self.item_percent)))}%"
+
+    def headline_line(self) -> str:
+        if not self.headline:
+            return ""
+        if self.headline_percent is None:
+            return self.headline
+        return f"{self.headline} - {max(0, min(100, int(self.headline_percent)))}%"
+
+
+class WorkProgressWindow:
+    """A window that WATCHES a background job. Never owns it, never blocks.
+
+    `snapshot_fn()` must be cheap and lock-free (it is called on the Tk thread
+    two to four times a second) and return a ProgressModel; `action_fn(name)`
+    is called on a helper thread, never on the Tk thread, because "cancel"
+    reaches a fleet API and a UI that froze mid-cancel would be worse than no
+    button at all.
+
+    Closing it stops nothing: the batch (or the proxy run) carries on, and the
+    tray's "Show … progress…" item opens it again. That is the whole
+    difference from ProgressWindow above, and it is why the X is not wired to
+    a cancel here.
+    """
+
+    POLL_MS = 400
+
+    def __init__(self, title: str, subtitle: str,
+                 snapshot_fn: Callable[[], ProgressModel],
+                 action_fn: Optional[Callable[[str], None]] = None) -> None:
+        self.title = title
+        self.subtitle = subtitle
+        self._snapshot_fn = snapshot_fn
+        self._action_fn = action_fn
+        self.root = None
+        self._open = threading.Event()
+        self._closed = threading.Event()
+        self._closed.set()
+        self._thread: Optional[threading.Thread] = None
+        self._buttons: dict[str, Any] = {}
+
+    # -- lifecycle ---------------------------------------------------------
+    def is_open(self) -> bool:
+        return self._open.is_set()
+
+    def open(self) -> bool:
+        """Show the window. Returns at once -- the Tk loop runs on its own
+        thread (via ui_dispatch, so on macOS that is the main thread's queue).
+
+        False when there is no display, or the dispatcher has stopped, or one
+        is already up: none of those is an error worth surfacing, because the
+        window is decoration over work that is happening either way.
+        """
+        if self._open.is_set():
+            return False
+        self._closed.clear()
+        self._open.set()
+        self._thread = threading.Thread(target=self._serve, name="ccsync-work-window",
+                                        daemon=True)
+        self._thread.start()
+        return True
+
+    def close(self) -> None:
+        """Ask the window to go away. Safe from any thread, and safe to call
+        on a window that never opened."""
+        root = self.root
+        if root is None:
+            self._open.clear()
+            self._closed.set()
+            return
+        try:
+            root.after(0, root.destroy)
+        except Exception:
+            log.debug("work window: could not marshal the close", exc_info=True)
+            self._open.clear()
+
+    def wait_closed(self, timeout: float = 5.0) -> bool:
+        return self._closed.wait(timeout)
+
+    def _serve(self) -> None:
+        try:
+            ui_dispatch.dispatch(self._build_and_show)
+        except Exception as exc:  # noqa: BLE001 - no display is not an error
+            log.info("work progress window unavailable (%s) -- the job carries "
+                     "on without it", exc)
+        finally:
+            self.root = None
+            self._open.clear()
+            self._closed.set()
+
+    # -- the window --------------------------------------------------------
+    def _build_and_show(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        from . import theme
+
+        root = tk.Tk()
+        self.root = root
+        try:
+            root.title(self.title)
+            theme.apply_window_icon(tk, root)
+            root.configure(bg=theme.BG, padx=18, pady=14)
+            bar_style = theme.style_progressbar(ttk, root)
+
+            tk.Label(root, text=f"► {self.title}", bg=theme.BG, fg=theme.RED,
+                     font=theme.mono(12, bold=True), anchor="w",
+                     justify="left").pack(anchor="w")
+            tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+            if self.subtitle:
+                tk.Label(root, text=self.subtitle, bg=theme.BG, fg=theme.MUTED,
+                         font=theme.mono(9), anchor="w", justify="left",
+                         wraplength=560).pack(anchor="w", pady=(4, 8))
+
+            # Order matters and is the plan's: what is being FETCHED (a model,
+            # a runtime) above what is being crunched, because until the
+            # download finishes nothing else can start and an editor watching
+            # a still per-clip bar would think it had hung.
+            self._headline_label = tk.Label(root, text="", bg=theme.BG, fg=theme.TEXT,
+                                            font=theme.mono(9), anchor="w",
+                                            justify="left", wraplength=560)
+            self._headline_label.pack(anchor="w", fill="x")
+            self._headline_bar = ttk.Progressbar(root, style=bar_style,
+                                                 mode="determinate", maximum=1000,
+                                                 length=560)
+            self._headline_bar.pack(anchor="w", fill="x", pady=(2, 8))
+
+            self._item_label = tk.Label(root, text="", bg=theme.BG, fg=theme.TEXT,
+                                        font=theme.mono(9), anchor="w",
+                                        justify="left", wraplength=560)
+            self._item_label.pack(anchor="w", fill="x")
+            self._item_bar = ttk.Progressbar(root, style=bar_style, mode="determinate",
+                                             maximum=1000, length=560)
+            self._item_bar.pack(anchor="w", fill="x", pady=(2, 8))
+
+            self._overall_label = tk.Label(root, text="", bg=theme.BG, fg=theme.MUTED,
+                                           font=theme.mono(9), anchor="w",
+                                           justify="left", wraplength=560)
+            self._overall_label.pack(anchor="w", fill="x")
+            self._overall_bar = ttk.Progressbar(root, style=bar_style,
+                                                mode="determinate", maximum=1000,
+                                                length=560)
+            self._overall_bar.pack(anchor="w", fill="x", pady=(2, 8))
+
+            self._note_label = tk.Label(root, text="", bg=theme.BG, fg=theme.MUTED,
+                                        font=theme.mono(9), anchor="w",
+                                        justify="left", wraplength=560)
+            self._note_label.pack(anchor="w", fill="x", pady=(0, 6))
+
+            bar = tk.Frame(root, bg=theme.BG)
+            bar.pack(anchor="w", pady=(4, 0))
+            for name, label, primary in (
+                ("pause", "PAUSE", False),
+                ("resume", "RESUME", False),
+                ("start_now", "START NOW", False),
+                ("cancel", "CANCEL", True),
+            ):
+                button = theme.neon_button(
+                    tk, bar, label, lambda n=name: self._fire(n), primary=primary)
+                button.pack(side="left", padx=(0, 18))
+                self._buttons[name] = button
+
+            # The X CLOSES THE WINDOW AND NOTHING ELSE -- see the class
+            # docstring. Cancelling a two-hour batch because someone tidied
+            # their desktop is not a thing this window may do.
+            root.protocol("WM_DELETE_WINDOW", root.destroy)
+            root.after(self.POLL_MS, self._tick)
+            ui_dispatch.run_dialog(root)
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+            self.root = None
+
+    def _fire(self, name: str) -> None:
+        """Run one button's action OFF the Tk thread."""
+        if self._action_fn is None:
+            return
+        threading.Thread(target=self._fire_now, args=(name,),
+                         name="ccsync-work-action", daemon=True).start()
+
+    def _fire_now(self, name: str) -> None:
+        try:
+            self._action_fn(name)
+        except Exception:
+            log.exception("work window: the %r action failed", name)
+
+    def _tick(self) -> None:
+        root = self.root
+        if root is None:
+            return
+        try:
+            model = self._snapshot_fn()
+        except Exception:
+            log.debug("work window: the snapshot failed", exc_info=True)
+            model = None
+        if model is not None:
+            try:
+                self._render(model)
+            except Exception:
+                log.exception("work window: render failed")
+        try:
+            root.after(self.POLL_MS, self._tick)
+        except Exception:
+            pass
+
+    def _render(self, model: ProgressModel) -> None:
+        self._headline_label.config(text=model.headline_line())
+        self._headline_bar["value"] = (
+            int(10 * max(0, min(100, int(model.headline_percent))))
+            if model.headline_percent is not None else 0)
+        self._item_label.config(text=model.item_line())
+        self._item_bar["value"] = (
+            int(10 * max(0, min(100, int(model.item_percent))))
+            if model.item_percent is not None else 0)
+        overall = model.overall_line()
+        eta = model.eta_line()
+        self._overall_label.config(text=" · ".join(p for p in (overall, eta) if p))
+        self._overall_bar["value"] = (
+            int(1000 * min(model.done, model.total) / model.total) if model.total else 0)
+        self._note_label.config(text=model.note or model.phase)
+        for name, button in self._buttons.items():
+            try:
+                button.config(state=("normal" if name in model.actions else "disabled"))
+            except Exception:
+                pass
+
+
 def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
     """Modal neon confirm dialog. Returns True if the user clicked the OK
     button, False on cancel/close. Falls back to False (safe default: do

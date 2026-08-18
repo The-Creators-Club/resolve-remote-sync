@@ -5195,3 +5195,168 @@ def test_the_recheck_gives_up_immediately_when_the_companion_is_stopping(tmp_pat
         str(root), fixer_mod.walk_ccsync_tmp_files(str(root)))
     assert time.monotonic() - started < 1.0
     assert (folder / "A003.braw").exists()
+
+
+# -- b-roll ingest wiring (broll_ingest.py, 2026-08-18) ---------------------
+
+
+def test_the_orchestrator_is_built_and_knows_who_is_signed_in(tmp_path):
+    app = _make_app(tmp_path)
+
+    assert app.broll_ingestor is not None
+    # The SAME deps object the 8899 routes get, carrying `.ingestor` -- a
+    # second one would answer every route "this machine cannot index".
+    assert app._broll_ingest_deps.ingestor is app.broll_ingestor
+    assert app._broll_ingest_deps.machine, "the fleet routes compare it per call"
+
+
+def test_a_broken_orchestrator_never_stops_the_companion(tmp_path, monkeypatch):
+    """The oldest failure mode in this file: the windowed exe vanishing with
+    no tray and no log line because an advisory feature raised in __init__."""
+    from ccsync_companion import broll_ingest as broll_ingest_mod
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("the orchestrator is on fire")
+
+    monkeypatch.setattr(broll_ingest_mod, "BrollIngestor", _boom)
+
+    app = _make_app(tmp_path)
+
+    assert app.broll_ingestor is None
+    assert app.broll_ingest_status() == {}
+    assert app.broll_ingest_view() == {}
+
+
+def test_a_crunching_batch_blocks_the_proxy_generator(tmp_path):
+    """Owner review (a): indexing takes precedence, and the generator learns
+    it through the seam it already had."""
+    app = _make_app(tmp_path)
+    app.broll_ingestor.blocking_reason = lambda: "indexing b-roll first"
+
+    assert app._proxy_block_reason() == "indexing b-roll first"
+
+
+def test_a_config_problem_still_blocks_it_as_a_bool(tmp_path):
+    """The DEL-3 gate the lanes use, unchanged: a half-configured install must
+    not be quietly encoding into a tree whose local_root is wrong."""
+    app = _make_app(tmp_path)
+    app.config_problems = ["remote_root is blank"]
+
+    assert app._proxy_block_reason() is True
+
+
+def test_nothing_indexing_means_nothing_blocking(tmp_path):
+    app = _make_app(tmp_path)
+
+    assert app._proxy_block_reason() is False
+
+
+def test_an_orchestrator_on_fire_does_not_block_proxies_forever(tmp_path):
+    app = _make_app(tmp_path)
+
+    def _boom():
+        raise RuntimeError("the orchestrator is on fire")
+
+    app.broll_ingestor.blocking_reason = _boom
+
+    assert app._proxy_block_reason() is False
+
+
+def test_a_dashboard_cancel_reaches_the_orchestrator(tmp_path):
+    app = _make_app(tmp_path)
+    seen = []
+    app.broll_ingestor.note_report_response = seen.append
+
+    app._on_report_response({"commands": {"broll_ingest": {"cancel": ["b" * 32]}}})
+
+    assert seen and seen[0]["commands"]["broll_ingest"]["cancel"] == ["b" * 32]
+
+
+def test_a_report_consumer_on_fire_does_not_stop_the_others(tmp_path):
+    app = _make_app(tmp_path)
+
+    def _boom(resp):
+        raise RuntimeError("the orchestrator is on fire")
+
+    app.broll_ingestor.note_report_response = _boom
+
+    app._on_report_response({"commands": {"halt": {"active": False}}})  # no raise
+
+
+def test_the_shutdown_screen_says_indexing_before_it_says_proxies(tmp_path):
+    """Both hold the machine awake; the b-roll one is the longer job and the
+    one an editor is waiting on."""
+    app = _make_app(tmp_path)
+    app.broll_ingestor.block_reason = lambda: "still indexing b-roll (12 clip(s) left)"
+    if app.proxy_generator is not None:
+        app.proxy_generator.block_reason = lambda: "still making video proxies"
+
+    assert app._shutdown_block_reason() == "still indexing b-roll (12 clip(s) left)"
+
+
+def test_the_progress_window_is_one_at_a_time(tmp_path, monkeypatch):
+    """Two live Tk roots in this process is CORE-M3's wedged interpreter, so
+    opening the second closes the first rather than refusing."""
+    from ccsync_companion import popup
+
+    opened = []
+
+    class _FakeWindow:
+        def __init__(self, title, subtitle, snapshot_fn, action_fn=None):
+            self.title = title
+            self.closed = False
+            self._open = False
+            opened.append(self)
+
+        def open(self):
+            self._open = True
+            return True
+
+        def is_open(self):
+            return self._open
+
+        def close(self):
+            self.closed = True
+            self._open = False
+
+    monkeypatch.setattr(popup, "WorkProgressWindow", _FakeWindow)
+    app = _make_app(tmp_path)
+
+    app.show_ingest_progress()
+    app.show_ingest_progress()          # the same one: no second window
+    assert len(opened) == 1
+
+    app.show_proxy_progress()           # a different one: the first closes
+    assert len(opened) == 2
+    assert opened[0].closed is True
+
+    app.close_work_window()
+    assert opened[1].closed is True
+
+
+def test_the_proxy_window_shows_the_generators_own_numbers(tmp_path):
+    """Its ETA and per-clip percentage, not a second estimate computed here:
+    two ETAs for one queue is two ETAs that disagree."""
+    app = _make_app(tmp_path)
+    app.proxy_gap = lambda: {
+        "encoding": True, "left": 28, "generated": 12, "failed": 1,
+        "state": "running", "blocked_reason": "",
+        "encoding_detail": [{"path": r"P:\a\A001.mp4", "percent": 62}],
+        "history": {"eta_seconds": 900},
+    }
+
+    model = app._proxy_progress_model()
+
+    assert model.item_line() == "A001.mp4 - 62%"
+    assert model.overall_line() == "12 of 40 clips · 1 failed"
+    assert model.eta_line() == "~15 min left"
+    assert model.actions == ("cancel",)
+
+
+def test_the_proxy_window_says_why_it_is_standing_aside(tmp_path):
+    app = _make_app(tmp_path)
+    app.proxy_gap = lambda: {"encoding": False, "left": 12, "generated": 0,
+                             "state": "blocked",
+                             "blocked_reason": "indexing b-roll first"}
+
+    assert app._proxy_progress_model().note == "indexing b-roll first"

@@ -1803,6 +1803,12 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # {} is the right default for a companion whose generator is absent,
     # because every consumer below treats it as "nothing to say".
     _get("proxy_gap", lambda: (getattr(app, "proxy_gap", None) or (lambda: {}))() or {}, {})
+    # The b-roll batch this machine is indexing, if any (broll_ingest.py,
+    # 2026-08-18). Same contract as proxy_gap above: the orchestrator's own
+    # thread keeps it, so this is a lock-guarded dict read and never a probe,
+    # and {} is the honest answer on a companion with no orchestrator.
+    _get("broll_ingest",
+         lambda: (getattr(app, "broll_ingest_view", None) or (lambda: {}))() or {}, {})
     _get("p_swap_available", lambda: (getattr(app, "p_swap_available", None) or (lambda: False))(), False)
     # The CACHED classification, never a probe: p_mapping_mode() spawns
     # `net use P:` (plus a `subst` on a subst-mapped rig), and reading it here
@@ -1937,6 +1943,12 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # share_stray_luts took the count back to 0 (UI-3, 2026-08-11).
         int(snap.get("stray_luts") or 0),
         _proxy_fingerprint(snap.get("proxy_gap")),
+        # Same rule, same reason (2026-08-18): the b-roll lines and the three
+        # ingest ACTIONS appear and disappear with the gate, and on an
+        # otherwise-idle machine nothing else in this tuple moves when a batch
+        # is dropped on it -- so without this the whole group would be
+        # unreachable until something unrelated changed (UI-3's shape).
+        _ingest_fingerprint(snap.get("broll_ingest")),
         # The safety latches decide whether two ACTIONS exist at all
         # ("Resume proxy download", "Start syncing again"), so they have to
         # move the fingerprint or the menu keeps offering the wrong one until
@@ -2018,6 +2030,101 @@ def _proxy_eta_line(gap: Optional[dict]) -> str:
     if not eta:
         return ""
     return f"About {proxy_history.human_duration(eta)} to go at this rate"
+
+
+def _ingest_lines(ingest: Optional[dict]) -> list[str]:
+    """The b-roll indexing lines, in the plan's words (§3.3).
+
+    Advisory, like the proxy lines above and for the same reason: an editor
+    whose machine is indexing has nothing to fix, and the sentence has to say
+    what is happening and when it stops rather than name a stage. The VRAM
+    refusal is the exception -- it IS something only they can fix, so it goes
+    first and stays until the batch changes.
+    """
+    if not isinstance(ingest, dict) or not ingest:
+        return []
+    lines: list[str] = []
+    warning = str(ingest.get("warning") or "")
+    if warning:
+        lines.append(warning)
+    total = int(ingest.get("total") or 0)
+    done = int(ingest.get("done") or 0)
+    failed = int(ingest.get("failed") or 0)
+    gate = str(ingest.get("gate") or "")
+    percent = ingest.get("model_download_percent")
+
+    if percent is not None:
+        lines.append(f"Downloading the b-roll indexing model… {int(percent)} %")
+    elif gate == "running":
+        tail = (" (stops when you're back)"
+                if ingest.get("run_mode") != "foreground" else "")
+        lines.append(f"Indexing b-roll… {done} of {total}{tail}")
+    elif gate in ("user-active", "resolve-open") and total:
+        left = max(total - done - failed, 0)
+        lines.append(f"B-roll indexing waits until you're away: {left} clips queued")
+    elif gate == "paused" and total:
+        lines.append(f"B-roll indexing paused: {max(total - done - failed, 0)} clips left")
+
+    upload_left = int(ingest.get("upload_left") or 0)
+    if ingest.get("upload_paused") and upload_left:
+        lines.append(f"Uploading indexed b-roll is paused: {upload_left} left")
+    elif upload_left:
+        lines.append(f"Uploading indexed b-roll… {upload_left} clip(s) left")
+    if failed and total:
+        lines.append(f"{failed} b-roll clip(s) could not be indexed. See the log")
+    return lines
+
+
+def _ingest_fingerprint(ingest: Optional[dict]) -> tuple:
+    """The parts of the ingest state that change which LINES the menu has.
+
+    NEVER the percentage, and the counts BUCKETED -- _proxy_fingerprint's rule
+    and its reason: a rebuild per finished clip destroys a menu the editor may
+    have open, and the live numbers belong in the tooltip, which is a plain
+    NIM_MODIFY and safe at any time.
+    """
+    if not isinstance(ingest, dict) or not ingest:
+        return ()
+    total = int(ingest.get("total") or 0)
+    done = int(ingest.get("done") or 0)
+    return (
+        str(ingest.get("gate") or ""),
+        str(ingest.get("warning") or ""),
+        bool(ingest.get("batch_uid")),
+        bool(ingest.get("paused")),
+        bool(ingest.get("upload_paused")),
+        total,
+        # In tens: enough movement to be worth a rebuild on a 400-clip batch,
+        # not one per clip.
+        done // 10,
+        int(ingest.get("failed") or 0),
+        # Present-or-not, not the number: the "Downloading the model" LINE
+        # exists or it does not, and its percentage is tooltip material.
+        ingest.get("model_download_percent") is not None,
+        bool(int(ingest.get("upload_left") or 0)),
+    )
+
+
+def _with_ingest_suffix(text: str, snap: dict) -> str:
+    """Append "· indexing b-roll 12/40" when there is room.
+
+    The tooltip is where the LIVE count lives (the menu deliberately does not
+    rebuild per clip -- see _ingest_fingerprint), so this is the one place an
+    editor watches the number move.
+    """
+    ingest = snap.get("broll_ingest")
+    if not isinstance(ingest, dict) or not ingest:
+        return text
+    percent = ingest.get("model_download_percent")
+    if percent is not None:
+        suffix = f" · fetching the b-roll model {int(percent)}%"
+    elif ingest.get("gate") == "running":
+        suffix = (f" · indexing b-roll {int(ingest.get('done') or 0)}/"
+                  f"{int(ingest.get('total') or 0)}")
+    else:
+        return text
+    combined = text + suffix
+    return combined if len(combined) <= TOOLTIP_LIMIT else text
 
 
 def _proxy_fingerprint(gap: Optional[dict]) -> tuple:
@@ -2158,8 +2265,11 @@ def _tooltip_text(snap: dict) -> str:
                 parts.append(f"{human_bytes(int(status.speed_bps))}/s")
             if status.eta_seconds:
                 parts.append(f"{human_duration(status.eta_seconds)} left")
-            return _with_proxy_suffix(" · ".join(parts), snap)[:127]
-    return _with_proxy_suffix("CCSync: up to date", snap)
+            return _with_ingest_suffix(
+                _with_proxy_suffix(" · ".join(parts), snap), snap)[:127]
+    # Indexing SECOND, so on a machine doing both the proxy count (the older,
+    # more familiar number) is the one that survives the length limit.
+    return _with_ingest_suffix(_with_proxy_suffix("CCSync: up to date", snap), snap)
 
 
 def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backend.Menu":
@@ -2203,6 +2313,36 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     def on_stop_proxies(icon, item):
         _spawn(app, "Stop making proxies",
                getattr(app, "stop_proxy_generation", None) or (lambda: None))
+
+    def on_show_proxy_progress(icon, item):
+        # A WINDOW, not a toast (2026-08-18, at the owner's request): a six-
+        # hour encode behind two menu lines is the "lack of feedback" this
+        # answers. It opens on its own thread and never blocks this one.
+        _spawn(app, "Show proxy progress",
+               getattr(app, "show_proxy_progress", None) or (lambda: None))
+
+    def on_index_broll_now(icon, item):
+        _spawn(app, "Index b-roll now",
+               getattr(app, "index_broll_now", None) or (lambda: None))
+
+    def on_pause_broll_ingest(icon, item):
+        _spawn(app, "Pause b-roll indexing",
+               getattr(app, "pause_broll_ingest", None) or (lambda: None))
+
+    def on_resume_broll_ingest(icon, item):
+        _spawn(app, "Resume b-roll indexing",
+               getattr(app, "resume_broll_ingest", None) or (lambda: None))
+
+    def on_cancel_broll_ingest(icon, item):
+        # CONFIRMED in the app (it opens a dialog), which is why it goes
+        # through _spawn like every other action rather than running on the
+        # message loop.
+        _spawn(app, "Cancel the b-roll batch",
+               getattr(app, "cancel_broll_ingest", None) or (lambda: None))
+
+    def on_show_ingest_progress(icon, item):
+        _spawn(app, "Show indexing progress",
+               getattr(app, "show_ingest_progress", None) or (lambda: None))
 
     def on_proxy_history(icon, item):
         # Rendering the report reads the ledger off disk, so it goes through
@@ -2376,6 +2516,12 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     proxy_encoding = bool(proxy_gap.get("encoding"))
     proxy_left = int(proxy_gap.get("left") or 0)
     proxy_lines: list[str] = []
+    # Why it is NOT encoding, when the reason is another feature of this same
+    # companion rather than a gap (2026-08-18): without this the menu says
+    # "12 clips have no proxy" for an hour with nothing explaining why nothing
+    # is happening about it.
+    if not proxy_encoding and proxy_gap.get("blocked_reason"):
+        proxy_lines.append(f"Proxies waiting: {proxy_gap['blocked_reason']}")
     if proxy_encoding:
         # "stops when you're back" is the whole promise of the feature, and
         # it is the answer to the question this line provokes ("is that why
@@ -2414,6 +2560,8 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     proxy_actions = []
     if proxy_encoding:
         proxy_actions.append(tray_backend.MenuItem("Stop making proxies", on_stop_proxies))
+        proxy_actions.append(tray_backend.MenuItem(
+            "Show proxy progress…", on_show_proxy_progress))
     elif proxy_missing and proxy_gap.get("can_generate"):
         proxy_actions.append(tray_backend.MenuItem(
             "Make the missing proxies now (don't wait until I'm away)", on_make_proxies,
@@ -2427,7 +2575,35 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
             "Proxies this machine has made…", on_proxy_history,
         ))
 
-    # "nothing syncs until you do" is only TRUE when login is required. With
+    # B-roll indexing (broll_ingest.py, 2026-08-18). Advisory lines like the
+    # proxy ones -- no icon colour, no pulse -- with one exception: the VRAM
+    # refusal, which is the only thing here an editor can act on and which
+    # _ingest_lines therefore puts first.
+    ingest = snap.get("broll_ingest") or {}
+    ingest_items = [tray_backend.MenuItem(line, None, enabled=False)
+                    for line in _ingest_lines(ingest)]
+    # The ACTIONS live under Advanced beside the proxy ones, for the same
+    # reason: "index now" commits the machine to hours of GPU work and
+    # "cancel" throws an evening of it away, and neither is something to hit
+    # on the way to Pause.
+    ingest_actions = []
+    if ingest.get("batch_uid"):
+        if ingest.get("paused"):
+            ingest_actions.append(tray_backend.MenuItem(
+                "Resume indexing the b-roll batch", on_resume_broll_ingest))
+        else:
+            if ingest.get("gate") in ("user-active", "resolve-open"):
+                ingest_actions.append(tray_backend.MenuItem(
+                    "Index the b-roll batch now (don't wait until I'm away)",
+                    on_index_broll_now))
+            ingest_actions.append(tray_backend.MenuItem(
+                "Pause b-roll indexing", on_pause_broll_ingest))
+        ingest_actions.append(tray_backend.MenuItem(
+            "Show indexing progress…", on_show_ingest_progress))
+        ingest_actions.append(tray_backend.MenuItem(
+            "Cancel the b-roll batch…", on_cancel_broll_ingest))
+
+        # "nothing syncs until you do" is only TRUE when login is required. With
     # require_login=false the lanes are already running under editor_name, and
     # telling the editor otherwise sends them chasing a sign-in they don't
     # need -- the same check compute_overall_color() already makes.
@@ -2524,6 +2700,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         *setup_items,
         *lut_items,
         *proxy_items,
+        *ingest_items,
         tray_backend.Menu.SEPARATOR,
         *upgrade_items,
         tray_backend.MenuItem("Copy diagnostics for your admin", on_copy_diagnostics),
@@ -2544,6 +2721,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
                                      on_youtube_cookies_file)]
               if snap.get("ytdl_youtube_signin") else []),
             *proxy_actions,
+            *ingest_actions,
             *halt_stop_items,
             *([tray_backend.Menu.SEPARATOR] if snap.get("removable") else []),
             *[

@@ -735,8 +735,9 @@ updates silently). Publish flow, from the base rig:
    the `[ PUBLISHED PACKAGES ]` box on `/admin/packages` (Settings >
    `[ PACKAGES ]`) when ready. The same publish run also uploads
    `onboard.exe` as the `kind=onboard` package (versioned by
-   `$InstallerVersion`), which `/installer` (Settings > `[ INSTALLER ]`, and
-   still `/download` for the one-click guess) serves to any signed-in user -- bump the installer version in
+   `$InstallerVersion`), which `/download` (the menu's `[ INSTALLER ]`
+   entry; `/installer` shows both platforms) serves to any signed-in
+   user -- bump the installer version in
    `installer/windows_bootstrap.ps1` AND `onboarding/steps.py` whenever
    onboard.exe's contents change, or the upload is skipped.
 4. Watch the fleet grid: each machine's VERSION cell goes amber until its

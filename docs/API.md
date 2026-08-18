@@ -741,8 +741,8 @@ its policy.
 |---|---|
 | `/` and `/partials/*` | the server-rendered UI (htmx fragments). Session-gated |
 | `/partials/topbar` | the one header, fetched and injected by the three SPAs. Since 2026-08-18 it carries the left nav drawer (HTML popover, no script: `innerHTML` would never run one) and, for admins, the settings gear |
-| `/admin/settings`, `/admin/users`, `/admin/assignments`, `/setup`, `/admin/packages`, `/installer` | the Settings hub. Admin-only except `/transfers` and `/installer`, which editors may open. `/admin/packages` is **new on 2026-08-18**: the packages table, the vendor feed and this dashboard's own update, which used to be the bottom of `/admin/users` |
-| `/download`, `/download/{platform}` | unchanged: `/download` still guesses the browser's platform and 303s to the file. `/installer` is the page that shows both |
+| `/admin/settings`, `/admin/users`, `/admin/assignments`, `/setup`, `/admin/packages` | the Settings hub. Admin-only except `/transfers`, which editors may open. `/admin/packages` is **new on 2026-08-18**: the packages table, the vendor feed and this dashboard's own update, which used to be the bottom of `/admin/users` |
+| `/download`, `/download/{platform}` | the drawer's `[ INSTALLER ]` entry (2026-08-18): the click IS the download. `/download` 303s to this browser's package for a Windows or macOS User-Agent, and renders `/installer`'s two-platform chooser when the UA names neither -- it no longer guesses Windows for anything unrecognised. `/installer` is that chooser on its own URL; it is not a hub page |
 | `/login`, `/logout` | the HTML login/logout forms |
 | `/auth/oidc/login`, `/auth/oidc/callback` | the two OIDC legs. Inert unless `DASH_AUTH_METHOD=oidc` — they answer 503 with the break-glass URL otherwise, and the callback authenticates on a signed flow cookie plus a verified `id_token`, never on being reachable |
 | `/broll/*` | the b-roll SPA and its API. Ingest routes take `X-Ingest-Token`; the ingest **panel** and **fleet** routes are §6a |

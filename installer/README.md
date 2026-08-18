@@ -216,8 +216,9 @@ companion update".
 
 `-Publish` also uploads `onboarding/dist/onboard.exe` as the `kind=onboard`
 package (version = `$InstallerVersion`), which the dashboard serves to any
-signed-in user via the `[ INSTALLER ]` header link (`/download` — picks
-Windows or macOS from the browser). That download is the supported way to
+signed-in user via the menu drawer's `[ INSTALLER ]` entry (`/download` — picks
+Windows or macOS from the browser's User-Agent, and shows a chooser when it
+names neither). That download is the supported way to
 hand an editor the installer: onboard.exe refuses to run from the NAS share
 anyway, and the dashboard copy can't drift behind the way a hand-copied one
 does. The upload is refused when onboard.exe is stale or its version wasn't

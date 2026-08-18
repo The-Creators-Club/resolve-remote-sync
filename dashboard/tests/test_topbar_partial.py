@@ -129,6 +129,24 @@ def test_the_bar_holds_no_module_links_and_the_drawer_holds_them_all(tmp_path):
         assert "nav-link" not in body
 
 
+def test_the_installer_entry_is_the_download_itself(tmp_path):
+    """[ INSTALLER ] points at /download, not at a page about a download
+    (2026-08-18, owner: the installer "must NOT be a sub-page under
+    Settings/Transfers"). /download 303s to the current package for this
+    browser's User-Agent, so the click IS the download.
+
+    Everyone gets it, admin or not: the entry left the Settings strip the same
+    day, and admins install editor machines too."""
+    with _admin_client(tmp_path) as c:
+        for user in ("owen", "jsmith"):
+            body = as_user(c, user).get("/partials/topbar").text
+            drawer = body[body.index('id="nav-drawer"'):body.index("</nav>")]
+            assert 'href="/download">[ INSTALLER ]' in drawer
+            # Nothing in the drawer points at the chooser page any more; it is
+            # the fallback /download itself paints for an unknown User-Agent.
+            assert 'href="/installer"' not in body
+
+
 def test_only_an_admin_gets_the_settings_gear_and_the_settings_entry(tmp_path):
     """The gear is the owner's own request (2026-08-18): a way into Settings
     from every page. /admin/settings 403s for an editor, so an editor gets

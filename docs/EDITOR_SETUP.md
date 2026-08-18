@@ -79,9 +79,10 @@ from there. Don't keep it anywhere else; that folder is the only one the
 script starts at logon.
 
 **Mac** -- get the script from the dashboard: sign in, open the menu (the
-three bars at the top left) and click `[ INSTALLER ]`, which serves
-`ccsync-onboard-<version>.sh` to a Mac browser. An admin finds the same page
-under `[ SETTINGS ]` > `[ INSTALLER ]`. Then, in Terminal:
+three bars at the top left) and click `[ INSTALLER ]`, which downloads
+`ccsync-onboard-<version>.sh` to a Mac browser. To fetch the OTHER platform's
+package (an admin on Windows setting a Mac up), open `/installer`, which shows
+both. Then, in Terminal:
 ```bash
 cd ~/Downloads
 chmod +x ccsync-onboard-*.sh

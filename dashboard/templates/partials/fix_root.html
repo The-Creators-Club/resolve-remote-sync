@@ -1,0 +1,25 @@
+{# [ FIX DESTINATION ROOT ], its own sub-section since 2026-08-18. It used to
+   sit inside the SYNC QUEUE box, where it read as a property of the queue; it
+   is not one. It answers a different question -- "when the fixer repairs the
+   project open in Resolve, where do the files land" -- so it gets its own
+   header and its own panel below the queue. The behaviour is unchanged: this
+   is a read-out, and only an admin changes it, in [ PROJECT ROOTS ]. #}
+<div class="fix-root-box">
+  <div class="side-head">[ FIX DESTINATION ROOT ]
+    <span class="muted">where FIX ALL puts the files for the project open in Resolve</span></div>
+  <div class="mono-sm root-line">
+    {% if queue.resolve_project %}
+      open in Resolve: <span class="who">{{ queue.resolve_project }}</span> →
+      {% if queue.root_label %}
+        files into <span class="who">{{ queue.root_label }}</span>
+        <span class="muted">({{ "admin-set" if queue.root_source == "admin" else "auto-matched, fixed" }};
+          admins change it in [ PROJECT ROOTS ])</span>
+      {% else %}
+        <span class="chip amber">[ NO MATCH ]</span>
+        <span class="muted">no tree project matched; an admin can map it in [ PROJECT ROOTS ]</span>
+      {% endif %}
+    {% else %}
+      <span class="muted">no Resolve project reported yet</span>
+    {% endif %}
+  </div>
+</div>

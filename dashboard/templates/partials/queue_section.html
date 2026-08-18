@@ -1,0 +1,13 @@
+{# What the home page's 10s /partials/queue poll swaps: the SYNC QUEUE panel
+   and, below it, its own [ FIX DESTINATION ROOT ] sub-section.
+
+   Two panels, ONE fragment and one build_queue_view (2026-08-18): the
+   destination root left the queue box in the owner's redesign, but both read
+   the same view, so giving the root its own route and its own poll would cost
+   a second build of the whole queue -- completions, lanes, manifests -- every
+   ten seconds for one line of text.
+
+   The untick button inside my_queue.html targets `closest .queue-box`, so a
+   toggle still swaps only the queue panel and leaves this section standing. #}
+{% include "partials/my_queue.html" %}
+{% include "partials/fix_root.html" %}

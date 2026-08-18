@@ -7,16 +7,35 @@
          hx-trigger="every 30s" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
+  {# Order is the owner's, 2026-08-18: the fleet grid answers "is everyone's
+     footage where it should be", which is what this page is for, so it comes
+     first. The sync area below it reads top to bottom as what is moving right
+     now (the live window), what is queued behind it, and where the fixer
+     writes. #}
   <main class="main">
-    {% if queue %}
-      <div hx-get="/partials/queue{{ ('?as=' ~ queue.editor) if session_user and queue.editor != session_user else '' }}"
-           hx-trigger="every 10s" hx-swap="innerHTML">
-        {% include "partials/my_queue.html" %}
-      </div>
-    {% endif %}
     <div hx-get="/partials/fleet" hx-trigger="every 15s" hx-swap="innerHTML">
       {% include "partials/fleet_grid.html" %}
     </div>
+
+    {# The /transfers page, windowed (2026-08-18). The panel is the scroll
+       container and the poll lives on the wrapper INSIDE it: the swap is
+       innerHTML, so replacing the wrapper leaves the panel -- and therefore
+       the reader's scroll position -- alone, twice a second. Swapping the
+       panel itself would yank them back to the top of the list every 2s.
+       Its height is pinned in style.css, not here, so the number lives in
+       one place. #}
+    <section class="live-transfers-window" aria-label="live transfers">
+      <div hx-get="/partials/transfers" hx-trigger="every 2s" hx-swap="innerHTML">
+        {% include "partials/transfers.html" %}
+      </div>
+    </section>
+
+    {% if queue %}
+      <div hx-get="/partials/queue{{ ('?as=' ~ queue.editor) if session_user and queue.editor != session_user else '' }}"
+           hx-trigger="every 10s" hx-swap="innerHTML">
+        {% include "partials/queue_section.html" %}
+      </div>
+    {% endif %}
     {% if session_user %}
     <div style="margin-top:1.4rem" hx-get="/partials/project-roots" hx-trigger="every 30s" hx-swap="innerHTML">
       {% include "partials/project_roots.html" %}

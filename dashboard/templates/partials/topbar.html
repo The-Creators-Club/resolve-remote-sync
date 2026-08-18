@@ -40,10 +40,12 @@
 <a class="brand" data-dash-topbar data-csrf="{{ csrf_token or '' }}" href="/">{{ brand_org | upper }} <span class="dim">//</span> SYNC STATUS</a>
 
 {# Every page under Settings, so the drawer can light [ SETTINGS ] up for all
-   seven of them rather than only the site form. Same list as
-   partials/settings_nav.html, which marks the individual entry. #}
+   six of them rather than only the site form. Same list as
+   partials/settings_nav.html, which marks the individual entry. "installer"
+   is deliberately absent since 2026-08-18: the installer is a download with
+   its own drawer entry, not a hub page (see below). #}
 {% set SETTINGS_PAGES = ["site", "users", "assignments", "transfers", "setup",
-                         "installer", "packages"] %}
+                         "packages"] %}
 <div class="nav-drawer" id="nav-drawer" popover>
   <div class="drawer-head">
     <span class="drawer-brand">{{ brand_org | upper }} <span class="dim">//</span> MENU</span>
@@ -76,13 +78,19 @@
     {% if session_is_admin %}
       <a class="drawer-item{{ ' drawer-current' if nav_current in SETTINGS_PAGES }}" href="/admin/settings">[ SETTINGS ]</a>
     {% else %}
-      {# An editor has no Settings hub to enter, so the two hub pages they ARE
-         allowed to see are named here directly. Without this the redesign
-         would have taken Transfers and the installer download away from
-         everyone who is not an admin. #}
+      {# An editor has no Settings hub to enter, so the one hub page they ARE
+         allowed to see is named here directly. Without this the redesign would
+         have taken Transfers away from everyone who is not an admin. #}
       <a class="drawer-item{{ ' drawer-current' if nav_current == 'transfers' }}" href="/transfers">[ TRANSFERS ]</a>
-      <a class="drawer-item{{ ' drawer-current' if nav_current == 'installer' }}" href="/installer">[ INSTALLER ]</a>
     {% endif %}
+    {# /download, not /installer (2026-08-18, owner's redesign): the click IS
+       the download. /download has always 303'd to the current package for this
+       browser's User-Agent, so an editor told "click [ INSTALLER ]" gets a
+       file, not a page about a file. It is outside the admin branch because
+       admins install editor machines too, and the entry left the Settings
+       strip the same day. Unknown UA is the one case that still paints a page:
+       /download renders /installer's two-platform chooser then. #}
+    <a class="drawer-item{{ ' drawer-current' if nav_current == 'installer' }}" href="/download">[ INSTALLER ]</a>
   </nav>
   <div class="drawer-foot">
     {% if session_user %}

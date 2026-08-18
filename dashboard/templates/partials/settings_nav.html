@@ -4,18 +4,23 @@
    they all include, not a router. `nav_current` names the entry to mark, the
    same variable partials/topbar.html uses to light [ SETTINGS ] in the drawer.
 
-   admin_only is per ENTRY, not per strip: /transfers and /installer are
-   editor-visible pages that happen to hang here, so an editor standing on
-   Transfers gets a strip with the two entries they may actually open rather
-   than five that would 403 (or a strip that pretends the hub is admin-only
-   and hides Transfers from the person looking straight at it). #}
+   admin_only is per ENTRY, not per strip: /transfers is an editor-visible
+   page that happens to hang here, so an editor standing on Transfers gets a
+   strip with the one entry they may actually open rather than five that would
+   403 (or a strip that pretends the hub is admin-only and hides Transfers
+   from the person looking straight at it).
+
+   INSTALLER is NOT here (2026-08-18, owner's redesign): it is a DOWNLOAD, not
+   a page. The drawer's [ INSTALLER ] goes straight to /download, which 303s to
+   this browser's own package, so the click is the download. /installer
+   survives only as the chooser /download falls back to when the User-Agent
+   names neither platform. #}
 {% set SETTINGS_NAV = [
   ("site",        "SITE",        "/admin/settings",    true),
   ("users",       "USERS",       "/admin/users",       true),
   ("assignments", "ASSIGNMENTS", "/admin/assignments", true),
   ("transfers",   "TRANSFERS",   "/transfers",         false),
   ("setup",       "SETUP",       "/setup",             true),
-  ("installer",   "INSTALLER",   "/installer",         false),
   ("packages",    "PACKAGES",    "/admin/packages",    true),
 ] %}
 <nav class="settings-nav" aria-label="settings">

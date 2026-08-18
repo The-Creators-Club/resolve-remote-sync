@@ -3,10 +3,16 @@
 The 2026-08-18 nav redesign. The bar used to carry eight bracketed links and
 the packages/vendor-feed/dashboard-update panels were the bottom third of the
 Users page, where the owner went looking for "how do I update the dashboard"
-and did not find them. Now: Users, Assignments, Transfers, Setup, Installer
-and Packages all hang off Settings, every one of them renders the same strip
+and did not find them. Now: Users, Assignments, Transfers, Setup and Packages
+all hang off Settings, every one of them renders the same strip
 (partials/settings_nav.html) with its own entry marked, and every one keeps
 the route it always had -- this is a strip, not a router.
+
+The INSTALLER entry was in this strip for part of that same day and is not any
+more: it is a download, not a page. The drawer takes [ INSTALLER ] straight to
+/download; what remains here is the pin that the strip does NOT offer it (see
+test_the_strip_does_not_offer_the_installer) and the /installer chooser's own
+tests at the foot of the file.
 
 What is pinned here is what an admin can actually reach, because the failure
 mode of a nav redesign is a page that still exists and nothing links to.
@@ -32,12 +38,11 @@ HUB = {
     "assignments": ("/admin/assignments", "[ ASSIGNMENTS ]"),
     "transfers": ("/transfers", "[ TRANSFERS ]"),
     "setup": ("/setup", "[ SETUP ]"),
-    "installer": ("/installer", "[ INSTALLER ]"),
     "packages": ("/admin/packages", "[ PACKAGES ]"),
 }
-# The two an editor may open. The rest 403 or redirect for them, so the strip
+# The one an editor may open. The rest 403 or redirect for them, so the strip
 # must not offer them (see test_the_strip_offers_an_editor_only_their_pages).
-EDITOR_PAGES = ("transfers", "installer")
+EDITOR_PAGES = ("transfers",)
 
 
 @pytest.fixture(autouse=True)
@@ -108,9 +113,9 @@ def test_an_editor_on_transfers_sees_it_lit_in_the_drawer(client):
 
 
 def test_the_strip_offers_an_editor_only_their_pages(client):
-    """Transfers is editor-visible and always was; the installer download is
-    too. The other five 403 or bounce, so an editor standing on Transfers is
-    shown two entries rather than five refusals."""
+    """Transfers is editor-visible and always was. The other five 403 or
+    bounce, so an editor standing on Transfers is shown one entry rather than
+    five refusals."""
     page = as_user(client, "jsmith").get("/transfers")
     assert page.status_code == 200
     for key, (_url, label) in HUB.items():
@@ -178,13 +183,61 @@ def test_every_packages_route_still_answers_with_the_panel(client, route, data):
 
 
 # --------------------------------------------------------- the installer
+#
+# It left the hub on 2026-08-18 (owner: "it must NOT be a sub-page under
+# Settings/Transfers"). The click is the download now: the drawer's
+# [ INSTALLER ] is /download, which 303s to this browser's own package. The
+# chooser page survives one rung down, as what /download paints when the
+# User-Agent names neither platform, and as the "other platform" link for the
+# admin setting a Mac up from a Windows browser.
+
+WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+MACOS_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+# A UA that names neither. Not exotic: TestClient's own default is one, and so
+# is a Linux browser or anything with a trimmed User-Agent.
+UNKNOWN_UA = "Mozilla/5.0 (X11; Linux x86_64)"
+
+
+def test_the_strip_does_not_offer_the_installer(client):
+    """The removal itself, checked on every page that renders the strip: a hub
+    entry that comes back would put the download two clicks and one page
+    behind where it belongs."""
+    for url, _label in HUB.values():
+        body = as_user(client, "owen").get(url).text
+        assert "[ INSTALLER ]" not in body[body.index('class="settings-nav"'):
+                                           body.index("</nav>")]
+
+
+def test_download_303s_to_the_browsers_own_package(client):
+    """Windows and macOS, the two platforms the fleet runs on."""
+    as_user(client, "jsmith")
+    for ua, plat in ((WINDOWS_UA, "windows"), (MACOS_UA, "macos")):
+        resp = client.get("/download", follow_redirects=False,
+                          headers={"User-Agent": ua})
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/download/{plat}"
+
+
+def test_an_unknown_user_agent_gets_the_chooser_not_a_guess(client):
+    """The old code answered anything it did not recognise with the Windows
+    exe. A Linux admin, or a browser with a trimmed UA, then downloaded the
+    wrong installer with no page to go back to. Now the guess only fires when
+    the UA actually said something, and everyone else is ASKED."""
+    as_user(client, "jsmith")
+    resp = client.get("/download", follow_redirects=False,
+                      headers={"User-Agent": UNKNOWN_UA})
+    assert resp.status_code == 200
+    assert "[ INSTALLER ]" in resp.text
+    assert "[ WINDOWS ]" in resp.text and "[ MACOS ]" in resp.text
+    # Neither card claims to be this computer, because nothing said so.
+    assert "installer-pick-detected" not in resp.text
 
 
 def test_the_installer_page_offers_both_platforms(client, tmp_path):
-    """/download still guesses this browser's platform and always will -- the
-    docs and every editor's bookmark say so. The page exists because a hub
-    entry has to be a page, and because the guess is wrong for the admin
-    setting up somebody else's Mac from a Windows machine."""
+    """The chooser, on its own URL. It exists because a User-Agent guess can
+    never serve the admin who is standing at a Windows machine setting up
+    somebody else's Mac -- and because /download needs somewhere to land when
+    the UA names neither platform."""
     as_user(client, "jsmith")
     # Nothing published yet: two platform cards, no download, and NOT an error
     # banner -- a fleet with no Mac package is a normal state.
@@ -192,6 +245,8 @@ def test_the_installer_page_offers_both_platforms(client, tmp_path):
     assert page.status_code == 200
     assert page.text.count("nothing published for this platform yet") == 2
     assert "/download/" not in page.text
+    # No Settings strip: it is not a hub page any more.
+    assert 'class="settings-nav"' not in page.text
 
     settings = client.app.state.settings
     with db.connect(settings.db_path) as conn:
@@ -205,6 +260,8 @@ def test_the_installer_page_offers_both_platforms(client, tmp_path):
     page = client.get("/installer")
     assert 'href="/download/windows"' in page.text
     assert "1.0.30" in page.text
-    # The Mac half is still honestly empty, and /download keeps guessing.
+    # The Mac half is still honestly empty.
     assert page.text.count("nothing published for this platform yet") == 1
-    assert client.get("/download", follow_redirects=False).status_code == 303
+    # ...and a Windows browser is told which card is its own.
+    page = client.get("/installer", headers={"User-Agent": WINDOWS_UA})
+    assert "installer-pick-detected" in page.text

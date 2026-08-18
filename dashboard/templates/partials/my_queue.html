@@ -1,3 +1,10 @@
+{# READ AND UNTICK, nothing else, since 2026-08-18. The [ ADD TO QUEUE ] row of
+   [ TICK ] buttons that used to close this panel was a second place to start a
+   sync, competing with the checkboxes in the [ PROJECTS ] tree beside it and
+   listing every project in the fleet flat, with no tree and no scroll of its
+   own. Ticking lives in the sidebar now; this panel says what is queued and
+   lets you take something off. [ FIX DESTINATION ROOT ] left this box the same
+   day -- partials/fix_root.html. #}
 <div class="queue-box">
   <div class="side-head">[ SYNC QUEUE: {{ queue.editor | upper }} ]
     <span class="muted">one project at a time, top to bottom</span></div>
@@ -26,33 +33,7 @@
       </tbody>
     </table>
   {% else %}
-    <div class="muted">Nothing ticked, so nothing syncs to this machine. Tick a project below.</div>
-  {% endif %}
-
-  <div class="side-head" style="margin-top:1rem">[ FIX DESTINATION ROOT ]</div>
-  <div class="mono-sm root-line">
-    {% if queue.resolve_project %}
-      open in Resolve: <span class="who">{{ queue.resolve_project }}</span> →
-      {% if queue.root_label %}
-        files into <span class="who">{{ queue.root_label }}</span>
-        <span class="muted">({{ "admin-set" if queue.root_source == "admin" else "auto-matched, fixed" }};
-          admins change it in [ PROJECT ROOTS ])</span>
-      {% else %}
-        <span class="chip amber">[ NO MATCH ]</span>
-        <span class="muted">no tree project matched; an admin can map it in [ PROJECT ROOTS ]</span>
-      {% endif %}
-    {% else %}
-      <span class="muted">no Resolve project reported yet</span>
-    {% endif %}
-  </div>
-
-  {% if queue.available %}
-    <div class="side-head" style="margin-top:1rem">[ ADD TO QUEUE ]</div>
-    <div class="tick-list">
-      {% for p in queue.available %}
-        <button class="btn" hx-post="/partials/selection/{{ queue.editor }}/{{ p.slug }}/toggle"
-                hx-target="closest .queue-box" hx-swap="outerHTML">[ TICK ] {{ p.label }}</button>
-      {% endfor %}
-    </div>
+    <div class="muted">Nothing ticked, so nothing syncs to this machine. Tick a project in
+      the [ PROJECTS ] tree on the left.</div>
   {% endif %}
 </div>

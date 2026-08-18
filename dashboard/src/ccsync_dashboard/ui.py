@@ -176,6 +176,7 @@ def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     # from their own `now`, so one page render was ~2x the queries and the two
     # panels could disagree by construction (DASH-6, 2026-08-14).
     projects_view = build_projects_view(conn)
+    scope = auth.scope_for(request)
     context = {
         # _sidebar_context, not a bare view: the every-30s /partials/sidebar
         # refresh has always rendered the checkboxes, so building this page's
@@ -183,10 +184,16 @@ def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
         **_sidebar_context(request, conn, None, projects_view=projects_view),
         # Scoped: an editor sees their own machines plus the summary counts,
         # an admin sees the fleet (COMMERCIAL_READINESS.md L1, 2026-08-17).
-        "fleet": api_scope_editors_view(build_editors_view(conn),
-                                        auth.scope_for(request)),
+        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
         "queue": build_queue_view(conn, queue_editor, projects_view=projects_view)
                  if queue_editor else None,
+        # First paint for the windowed live-transfers panel (2026-08-18). The
+        # panel polls /partials/transfers every 2s like the /transfers page
+        # does, so this build costs one extra pass on page load and nothing
+        # after it -- rendered server-side rather than left to hx-trigger=load
+        # so the window is never a blank 35vh hole while the first poll flies.
+        "transfers": build_transfers_view(conn, editor=scope.editor),
+        "scope_admin": scope.admin,
         "nav_current": "fleet",
     }
     if queue_editor:
@@ -385,10 +392,17 @@ def partial_topbar(request: Request, current: str = ""):
 
 @router.get("/partials/queue")
 def partial_queue(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """The queue panel AND the destination-root panel below it.
+
+    One fragment for two panels since 2026-08-18, when [ FIX DESTINATION ROOT ]
+    moved out of the queue box: both read one build_queue_view, so a route of
+    its own for the root line would rebuild the whole queue every 10s to
+    re-render one sentence.
+    """
     editor = _queue_editor(request)
     if editor is None:
         raise HTTPException(status_code=401, detail="not logged in")
-    return _render(request, "partials/my_queue.html", {
+    return _render(request, "partials/queue_section.html", {
         "queue": build_queue_view(conn, editor),
     })
 
@@ -1403,7 +1417,8 @@ async def partial_admin_set_fleet_halt(
 
 # --------------------------------------------------------- installer download
 
-# The [ INSTALLER ] header link. Serves the CURRENT kind='onboard' package
+# The drawer's [ INSTALLER ] entry points at /download. It serves the CURRENT
+# kind='onboard' package
 # (onboard.exe on Windows; on macOS the zipped onboarding wizard since
 # installer 1.0.17, or the Terminal bootstrap script on older rows) -- the
 # full clean-install/repair package, NOT the bare companion exe.
@@ -1414,26 +1429,25 @@ async def partial_admin_set_fleet_halt(
 # by the wizard itself.
 
 def _detect_platform(user_agent: str) -> str:
+    """'macos', 'windows', or '' when the User-Agent names neither.
+
+    Empty is a real answer, not a failure (2026-08-18): /download used to fall
+    back to Windows for anything it did not recognise, which handed a Linux
+    admin -- or a browser with a trimmed UA -- an exe with no way back. It
+    renders the two-platform chooser instead now, so the guess only ever fires
+    when the UA actually said something.
+    """
     ua = user_agent.lower()
     if "mac os" in ua or "macintosh" in ua:
         return "macos"
-    # Anything unrecognized falls back to windows: the fleet is Windows-first
-    # and /download/macos stays reachable directly.
-    return "windows"
+    if "windows" in ua:
+        return "windows"
+    return ""
 
 
-@router.get("/installer")
-def page_installer(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
-    """The Settings hub's [ INSTALLER ] entry (2026-08-18).
-
-    /download below is untouched and still guesses this browser's platform,
-    because the docs, the wizard's own instructions and every editor's
-    bookmark say so. This page exists because a hub entry has to be a page --
-    it renders the strip and marks itself current -- and because the guess is
-    wrong for the admin who is standing at a Windows machine setting up
-    somebody's Mac. Two cheap reads, not build_packages_view: the whole
-    packages view also builds the editors view, which this page never shows.
-    """
+def _installer_page(request: Request, conn: sqlite3.Connection) -> HTMLResponse:
+    """The two-platform chooser. Two cheap reads, not build_packages_view: the
+    whole packages view also builds the editors view, which this never shows."""
     installers = {plat: db.get_current_package(conn, plat, kind="onboard")
                   for plat in ("windows", "macos")}
     return _render(request, "installer.html", {
@@ -1444,9 +1458,33 @@ def page_installer(request: Request, conn: sqlite3.Connection = Depends(get_conn
     })
 
 
+@router.get("/installer")
+def page_installer(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """The chooser, reachable on its own URL.
+
+    NOT a hub page since 2026-08-18: [ INSTALLER ] in the drawer goes to
+    /download, so the click is the download. This page is what /download falls
+    back to for an unrecognised User-Agent, and the "other platform" link for
+    the admin standing at a Windows machine setting somebody's Mac up, whom a
+    UA guess can never serve. Its own URL stays because the docs and the Mac
+    runbooks link it.
+    """
+    return _installer_page(request, conn)
+
+
 @router.get("/download")
-def page_download(request: Request):
+def page_download(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """The [ INSTALLER ] click itself: 303 straight to this browser's package.
+
+    The redirect is the point -- an editor told "click [ INSTALLER ]" gets a
+    file, not a page about a file (2026-08-18, owner's redesign). Only a
+    User-Agent that names neither platform paints anything, and what it paints
+    is the chooser, so the answer to "which one do I want" is never a guess
+    dressed as a download.
+    """
     plat = _detect_platform(request.headers.get("user-agent", ""))
+    if not plat:
+        return _installer_page(request, conn)
     return RedirectResponse(f"/download/{plat}", status_code=303)
 
 

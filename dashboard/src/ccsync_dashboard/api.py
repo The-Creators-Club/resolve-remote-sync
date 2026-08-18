@@ -1152,6 +1152,11 @@ def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = No
             "status": best["status"] if best else "green",
         })
     ticked = {i["slug"] for i in items}
+    # NOT rendered anywhere since 2026-08-18: the queue panel's [ ADD TO QUEUE ]
+    # row was the only reader, and ticking moved to the sidebar tree, which
+    # builds its own checkboxes from the projects view. Kept because the view
+    # dict is a shape callers read (and it is one pass over an already-loaded
+    # dict, no query) -- delete it with its last consumer, not before.
     available = [
         {"slug": s, "label": p["label"]}
         for s, p in sorted(projects.items(), key=lambda kv: kv[1]["label"])

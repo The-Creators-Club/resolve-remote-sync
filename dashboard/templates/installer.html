@@ -1,18 +1,18 @@
 {% extends "base.html" %}
-{# The [ INSTALLER ] entry of the Settings hub (2026-08-18). /download is
-   unchanged and still 303s straight to this browser's own package -- editors'
-   bookmarks, the docs and every "click [ INSTALLER ]" instruction keep
-   working. This page exists because a hub entry has to be a PAGE (it renders
-   the strip and marks itself current), and because an admin setting a Mac up
-   from a Windows browser could never reach the other platform's build from a
-   link that guesses by User-Agent. #}
+{# The two-platform chooser. NOT a hub page any more (2026-08-18, owner's
+   redesign): [ INSTALLER ] in the drawer points at /download, which 303s
+   straight to this browser's own package, so the click is the download and
+   this page is the fallback behind it -- rendered by /download itself when the
+   User-Agent names neither platform, and linked from here for the admin
+   setting a Mac up from a Windows browser, whom a User-Agent guess can never
+   serve. It renders no Settings strip for the same reason it has no hub
+   entry. #}
 {% block title %}CC SYNC: INSTALLER{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
-    {% include "partials/settings_nav.html" %}
     <div class="side-head">[ INSTALLER ]
       <span class="muted">The full clean-install and repair package for a new editor
         machine. Save it to the machine's own disk: running it off the shared drive

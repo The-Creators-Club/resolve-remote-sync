@@ -552,6 +552,30 @@ textarea { line-height: 1.4; }
 .login-btn { margin-top: 1.2rem; font-size: 14px; }
 .login-error { color: var(--bg); background: var(--red); padding: 0.2rem 0.6rem; margin-top: 0.8rem; }
 
+/* ---------------- the home page's live-transfers window ----------------
+   The /transfers page's own content, windowed on the home page (2026-08-18,
+   owner's redesign): "what is moving right now" belongs where everyone
+   already looks, but it is an unbounded list -- transfers, then the queued
+   tree, then a week of history -- and left to grow it pushes the sync queue
+   off the bottom of the screen.
+
+   35vh is the owner's number, and it is a HEIGHT, not a max-height: the panel
+   has to occupy the same space whether three files are moving or none, or the
+   page below it would jump every two seconds as the list emptied and filled.
+   The scroll lives here, on the container the 2s poll never replaces (see
+   fleet.html), so a reader mid-list keeps their place; the bar itself is
+   painted by the theme-common block at the foot of this file, which styles
+   every scrolling container in the fleet rather than each one by name. */
+.live-transfers-window {
+  height: 35vh;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--red-dim);
+  border-left: 2px solid var(--red);
+  padding: 0.8rem 1rem 1rem;
+  margin-bottom: 1.4rem;
+}
+
 /* ---------------- sync queue ---------------- */
 .queue-box {
   background: var(--panel);
@@ -561,7 +585,15 @@ textarea { line-height: 1.4; }
   margin-bottom: 1.4rem;
 }
 tr.current-row { background: var(--field); }
-.tick-list { display: flex; flex-wrap: wrap; gap: 0.3rem 1rem; }
+/* [ FIX DESTINATION ROOT ], its own panel below the queue since 2026-08-18.
+   Same paint as .queue-box without the left rule: it is a read-out, not a
+   thing with a status. */
+.fix-root-box {
+  background: var(--panel);
+  border: 1px solid var(--red-dim);
+  padding: 0.8rem 1rem 1rem;
+  margin-bottom: 1.4rem;
+}
 .root-line { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
 .root-select {
   font-size: 12px;

@@ -83,7 +83,11 @@ def test_queue_ui_and_toggle(env):
     client, conn = env
     as_user(client, "jsmith")
     page = client.get("/")
-    assert "[ SYNC QUEUE: JSMITH ]" in page.text and "[ TICK ]" in page.text
+    # The queue panel reads and unticks; the ticking control is the sidebar
+    # tree's checkbox, since the [ ADD TO QUEUE ] row of [ TICK ] buttons left
+    # the panel on 2026-08-18 (test_home_layout.py holds that line).
+    assert "[ SYNC QUEUE: JSMITH ]" in page.text
+    assert 'class="proj-check"' in page.text and "[ TICK ]" not in page.text
 
     resp = client.post("/partials/selection/jsmith/2025-ff4-nuclear/toggle")
     assert resp.status_code == 200 and "[ UNTICK ]" in resp.text

@@ -638,8 +638,12 @@ def provider_states(
                 # somebody's agent binary to find out whether it would have
                 # worked.
                 row["status"] = ST_DISABLED
-                row["detail"] = ("this site has not enabled CLI providers "
-                                 "([features] ai_cli_providers)")
+                # Names the control on THIS page, not the config key: the
+                # owner read "[features] ai_cli_providers" and went looking
+                # for a features page that does not exist (2026-08-18).
+                row["detail"] = ("CLI providers are off for this site. Tick "
+                                 "'Allow CLI providers (Claude Code, Codex)' "
+                                 "below to enable them")
             elif not probe:
                 row["status"] = ST_UNKNOWN
             else:

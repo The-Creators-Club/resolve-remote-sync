@@ -114,6 +114,67 @@ Also TrueNAS-only (`/zfs/snapshot`); a DSM site gets the same skip. The
 database backups under `/data/backups/<ts>/` are taken either way and are the
 recovery path that actually matters here.
 
+## Open — b-roll ingest (BROLL-ING-n, 2026-08-18)
+
+Found while building `docs/BROLL_INGEST_PLAN.md`. The first two are fixes that
+happen to be about OLD features: the ingest work walked through code the ingest
+work then had to share, and found both defects sitting there.
+
+### BROLL-ING-1 — the fleet report threw away two whole sections, for weeks — FIXED in repo 2026-08-18, unshipped
+`ReportIn` declared neither `proxy_coverage` nor `youtube_import`, and the
+model is `extra="ignore"`, so pydantic discarded both on **every tick since
+those features shipped**. The companion computed them, sent them, and reached
+nobody: no proxy coverage on the grid, no YouTube import state, and no way to
+tell from either end that anything was missing. Nothing logged, because
+dropping an undeclared field is what `extra="ignore"` is for.
+
+All three sections (the two above plus the new `broll_ingest`) now parse
+through `_ReportSectionIn`, which **bounds instead of raising**: strings
+truncated, sequences sliced, numbers clamped. A section that will not parse at
+all is dropped with a log line rather than 422'ing the report, because a 422
+here skips the route body entirely and takes that machine's lanes, transfers,
+presence and upgrade advertisement off the grid with it (B6).
+
+The lesson for the next section anyone adds: a field the dashboard does not
+declare is not a warning, it is silence.
+`dashboard/tests/test_broll_ingest_report.py` asserts each of the three
+sections is persisted and chipped.
+
+### BROLL-ING-2 — the companion's own preview proxies were black rectangles from any 10-bit camera — FIXED in repo 2026-08-18, unshipped
+`ffmpeg_tools.preview_proxy_cmd` in the COMPANION had no `-pix_fmt yuv420p`.
+The indexer's copy gained it on 2026-08-11, after every preview cut from an
+FX3/FX30 XAVC source came back yuv420p10le, which browsers draw as a black
+rectangle (R9). The companion's copy never got the fix, and the YouTube tier
+has been using it since: every preview it made from a 10-bit source has the
+same defect, and b-roll ingest was about to inherit it.
+
+Fixed in `companion/src/ccsync_companion/ffmpeg_tools.py` (posters and frames
+in `broll_ingest_media.py` pin `yuvj420p` for the same reason). Two copies of
+one encoder that drifted for a week is the actual finding, and the guard is a
+hand-copied literal: `companion/tests/test_ffmpeg_tools.py` asserts the whole
+argv against `BROLL_NVENC_TAIL` / `BROLL_CPU_TAIL`, transcribed from the
+indexer's `build_proxy`. It is a transcription, so it catches drift only in the
+direction of the companion. A change on the indexer side still has to be
+carried over by hand.
+
+**Not swept.** Previews already made by the YouTube tier from 10-bit sources
+are still black and will stay that way until something re-cuts them, exactly as
+R9's archive sweep was declined.
+
+### BROLL-ING-3 — a duplicate the editor unticks leaves no trace anywhere
+Deferred, found in PR-J review. The pre-check marks duplicates and unticks them
+by default ("already in the archive - clip #4127"), and the panel then sends
+only the ticked rows: `chosen.map(...)` in `static/ingest.js`. So a clip the
+editor deliberately declined is simply **absent from the batch**, not recorded
+as `skipped` in it.
+
+The schema is ready for the better answer -- `skipped` is already an
+`ITEM_ENDING` and an `ITEM_TERMINAL` state, and the browse/tree/search queries
+already exclude it -- so this is a UI and one request-body change, not a
+migration. What it costs today: "40 clips, 38 indexed" with no explanation of
+the other two, and no way to ask later what a batch chose not to ingest. Worth
+doing the next time the panel is opened for other reasons.
+
 ## Open — music ingest (MUSIC-ING-n, 2026-08-18)
 
 Deferred deliberately while building `docs/MUSIC_INGEST_PLAN.md` steps 3-5.
@@ -174,6 +235,30 @@ ended in the fallback leaves the progress window reading e.g. "11 of 12
 tracks" for ever even though the batch has finished and been released. The
 batch state on the fleet grid and in the panel is correct; the local window's
 counter is not.
+
+### MUSIC-ING-5 — every `GET /music/ingest/*` 404'd, so the feature was invisible on the machine holding the files — FIXED in repo 2026-08-18 (release prep), unshipped
+`BrollRequestHandler._dispatch_get` tested `path.startswith(INGEST_PREFIX)` --
+b-roll's prefix alone -- while the POST and PUT dispatchers both tested the
+whole `INGEST_PREFIXES` set. So `capabilities`, `progress` and `thumb` fell
+through to the generic 404 for music, and `capabilities` is the FIRST call the
+music page makes: the page read the 404 as "this companion is too old", fell
+back to the browser upload, and did so correctly and silently. Every other
+piece of music ingest worked; nothing could reach it.
+
+One line, now the same shape as the POST dispatcher, plus
+`test_music_ingest.py::test_a_music_ingest_get_reaches_the_ingest_dispatcher`.
+The general point: `_kind_for_path` made the handlers kind-agnostic, and the
+three dispatchers each decide separately whether a path is theirs. A sixth
+route group needs all three checked.
+
+### MUSIC-ING-6 — the staging free-space floor was b-roll's on the route and music's in the batch — FIXED in repo 2026-08-18 (release prep), unshipped
+`IngestKind.cfg_key` gives each kind its own `<prefix>_free_space_floor_gb`,
+and the orchestrator has always read it that way. The loopback's own pre-flight
+(`broll_server._ingest_floor_bytes`) read the b-roll key for both kinds, so a
+site that set only `music_ingest_free_space_floor_gb` got its number in the
+batch and b-roll's at the PUT that refuses before the first byte. Both default
+to 20 GB, so only a site that changed one would ever have seen it. The helper
+takes the kind now; `docs/CONFIG.md` §2.5b and §3 document both sets.
 
 ---
 
@@ -256,6 +341,18 @@ NON-FATAL. Air-gapped sites keep the push behind `--push-ffmpeg-from-local`,
 which prints `FFMPEG_LOCAL_PUSH_GPL_NOTICE` before any bytes move. Watch the
 first deploy: first time a NAS does the ~25-minute download under the new
 ceiling.
+
+*Posture note, 2026-08-18 (open, no action believed necessary).* The EDITOR
+side changed scope: `sidecar_tools.ensure_ffmpeg_pair` is no longer behind the
+YouTube feature gate, because b-roll and music ingest need ffmpeg on any
+machine an editor drops files on. So every editor machine now fetches the
+pinned `eugeneware/ffmpeg-static` build, where before only a youtube-enabled
+fleet did. **The conveyance analysis is unchanged**: the editor's own machine
+downloads it from GitHub, so upstream conveys and we only choose the build
+(mode B in `docs/legal/THIRD_PARTY_NOTICES.md`). What changed is how many
+customers meet a GPLv3 component at all, which is a question for counsel's
+review of the notices, not a code change. The written offer in the notices
+already covers the case where we do convey.
 
 ### CR-5 — no LICENSE, EULA, privacy policy, telemetry disclosure or third-party notices — DRAFTED 2026-08-17, awaiting counsel
 All exist as DRAFTS FOR COUNSEL: `LICENSE`, `docs/legal/EULA.md`,
@@ -622,10 +719,17 @@ developer's own branded rig was otherwise deciding what the suite measured.
 `theme.apply_window_icon` had been setting the title-bar icon since 0.4.7 and
 nobody had checked the taskbar button. Measured 2026-08-18: same window, title
 bar wearing the mark, taskbar wearing **python.exe's snakes** (a frozen build:
-`icon.ico`, i.e. one studio's logo on every customer's taskbar regardless of
+`icon.ico`, i.e. the exe's icon rather than the window's, regardless of
 `brand_logo`). The Windows taskbar decides which *application* a window
 belongs to when its button is created; a process that never declared an
 AppUserModelID is "the exe", and the button takes the exe's icon.
+
+*Corrected 2026-08-18:* this entry originally called `icon.ico` "one studio's
+logo on every customer's taskbar", which read it as a branding leak. CR-25
+settled that question the other way: the Creators Club mark IS the product
+default, so `icon.ico` being the CC logo is correct and was never the defect.
+The defect is only that the taskbar showed the *exe's* icon instead of the
+*window's*, so a white-label fleet's `brand_logo` had no effect there.
 
 `theme.claim_app_identity()` declares `com.ccsync.companion` (the same
 product-id family as the macOS bundle/launchd labels) — Windows-only,

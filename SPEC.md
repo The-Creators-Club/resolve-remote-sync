@@ -165,6 +165,23 @@ https, or plain http to tailnet/LAN origins only. Code signing (Authenticode /
 Developer ID + notarization) is wired behind env vars and advisory until
 certificates exist. `docs/RELEASE.md`.
 
+**The dashboard's own updates** (2026-08-18, `ZERO_TOUCH_PLAN.md` WP K) take
+the same path in two tiers. Its CODE ships as a signed `dashboard` record in
+the vendor feed (`ccsync-dashboard-<version>.tar.gz` = the seven trees the
+image carries plus a manifest; the record signs a tenth field, `runtime_id`);
+the running container downloads it, verifies it against the keys baked into
+the build it is already running, stage-verifies it in a subprocess, backs up
+every database, swaps the tree in under `/data/code/<version>/` and re-execs
+(exit 75, `deploy/run.sh` loops). Its RUNTIME -- Python and the hash-pinned
+dependency closure -- is the image, and changes only through the NAS's own
+image-update click: a bundle whose `runtime_id` differs from
+`/venv/.runtime-id` is refused, named as a runtime update, and pointed at that
+click. The boot-time choice of code root is made by the IMAGE's copy of
+`deploy/select_code_root.py` with the IMAGE's verifier, so nothing in the data
+volume decides whether the data volume is used, and two failed boots revert it
+automatically. Bind-mount deployments (every live site today) are detected and
+keep updating from the base rig. `docs/DOCKER.md`, `docs/RELEASE_FEED.md`.
+
 **Server trust and tenancy.** The base rig refuses an unpinned NAS host key
 (`[nas] ssh_hostkey`, or a one-off `--trust-host-key-on-first-use` that
 records it in `~/.ccsync/known_hosts`); a changed key is a refusal.

@@ -1,0 +1,95 @@
+# Build the dashboard's own CODE bundle on a runner -- ZERO_TOUCH_PLAN.md WP K,
+# added 2026-08-18.
+#
+# MANUAL ONLY (workflow_dispatch), and the same posture as release-windows.yml:
+# a release is a decision, not a consequence of a push.
+#
+# IT DOES NOT PUBLISH, and it cannot. Signing needs the offline release key,
+# which lives on the release rig and never enters CI (docs/RELEASE_FEED.md
+# section 5). This job produces the tarball; a human downloads it and runs
+#
+#   python tools/publish_feed.py --artifact ccsync-dashboard-<v>.tar.gz \
+#       --kind dashboard --platform linux --version <v> \
+#       --feed-dir ./feed --github-repo OWNER/REPO --github-upload
+#
+# which signs the record (runtime_id read straight out of the bundle) and
+# uploads it. Note the bundle is NOT the image: it carries the dashboard's code
+# only, and a customer can apply it over the air exactly while their
+# runtime_id matches. Changing dashboard/deploy/requirements.lock or the
+# Dockerfile's ARG BASE_IMAGE line makes the next release a RUNTIME update
+# instead -- rebuild and publish the image (.github/workflows/image.yml).
+#
+# ubuntu, not windows: the bundle is a tar.gz of source trees with fixed
+# member metadata, so it is byte-identical either way -- but this is the
+# platform it runs on, and building it there keeps a path separator or a mode
+# bit from ever becoming a surprise.
+
+name: release-dashboard
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_dirty:
+        description: "Build from an uncommitted tree anyway (stamps git_dirty=true; the publisher refuses a dirty manifest without its own override)"
+        type: boolean
+        default: false
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Full history: the manifest records the commit, and a shallow checkout
+      # makes that describe the wrong thing.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # No dependencies at all. build_dashboard_bundle.py is stdlib-only
+      # (tarfile, hashlib, subprocess) and imports the dashboard package only
+      # for its VERSION and the runtime_id recipe, neither of which pulls in
+      # fastapi. If this step ever needs a pip install, something has taken a
+      # dependency it should not have.
+      - name: build the bundle
+        run: |
+          set -eu
+          args="--out dist"
+          if [ "${{ inputs.allow_dirty }}" = "true" ]; then args="$args --allow-dirty"; fi
+          python tools/build_dashboard_bundle.py $args | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The same offline check tools/publish_feed.py --verify does for a feed
+      # directory: manifest complete, every member listed, every hash right. A
+      # bundle that fails here would fail at the customer's end instead.
+      - name: verify what was produced
+        run: |
+          set -eu
+          for f in dist/ccsync-dashboard-*.tar.gz; do
+            python tools/build_dashboard_bundle.py --verify "$f" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: say how to publish it
+        run: |
+          {
+            echo ""
+            echo "This artifact is NOT published. Download it, then on the release rig:"
+            echo ""
+            echo '```'
+            echo "python tools/publish_feed.py --artifact <the .tar.gz> \\"
+            echo "    --kind dashboard --platform linux --version <version> \\"
+            echo "    --feed-dir ./feed --github-repo OWNER/REPO --github-upload"
+            echo '```'
+            echo ""
+            echo "The runtime_id is read out of the bundle; do not type it twice."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload the bundle
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccsync-dashboard-bundle
+          path: dist/ccsync-dashboard-*.tar.gz
+          if-no-files-found: error

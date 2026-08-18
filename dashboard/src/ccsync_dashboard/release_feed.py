@@ -80,6 +80,15 @@ CHANNEL_PREFIX = b"ccsync-channel-v1\n"
 
 _VALID_POLICIES = ("manual", "stage", "current")
 
+# The dashboard's own code bundle (ZERO_TOUCH_PLAN.md WP K, 2026-08-18). It
+# travels in the same channel, signed by the same key and verified by the same
+# verifier -- but it is APPLIED, never PUBLISHED: nothing of this kind may ever
+# reach `companion_packages`, because no editor machine downloads one and a row
+# there would offer the dashboard's tarball to a companion as an upgrade.
+# Everything in this module that walks records therefore splits on it, and
+# `dashboard_update.py` is what consumes the other half.
+DASHBOARD_KIND = "dashboard"
+
 # Transport ceilings (docs/RELEASE_FEED.md "threat model"): the channel is a
 # few KB of JSON in every real deployment, so 1 MiB is already generous
 # headroom, not a working assumption. The artefact ceiling matches
@@ -251,6 +260,56 @@ def _fetch_bytes(url: str, *, cap: int, timeout: float = FEED_FETCH_TIMEOUT) -> 
         raise FeedError(f"{url} timed out after {timeout}s") from exc
 
 
+class FeedHashMismatch(FeedError):
+    """The bytes arrived but they are not the bytes the signed record
+    describes. A distinct type because it is a distinct answer: the transport
+    worked (so retrying changes nothing) and the FEED is what is wrong."""
+
+
+def fetch_artifact_to(url: str, part: Path, *, expected_sha256: str,
+                      max_bytes: int, timeout: float) -> tuple[str, int]:
+    """Stream `url` into `part`, capped and hashed, and refuse anything whose
+    digest is not `expected_sha256`. Returns (sha256, size).
+
+    `part` is UNLINKED on every failure -- a half-written artefact must never
+    survive to be mistaken for a good one. Raises FeedHashMismatch for a
+    digest that does not match and FeedError for everything else, because the
+    two are different answers to "should I retry".
+
+    Two callers (publish_from_feed for an editor package,
+    dashboard_update.apply for the dashboard's own code bundle) and one
+    implementation on purpose: this is the function that decides whether
+    bytes off an untrusted host are believed, and that must have one answer.
+    Same credential-free, https-only, bounded redirect follow as the channel
+    fetch (module docstring)."""
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with part.open("wb") as fh, _open_following_https_redirects(
+            url, timeout=timeout
+        ) as resp:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise FeedError(f"artifact exceeded the {max_bytes}-byte cap -- refused")
+                fh.write(chunk)
+                digest.update(chunk)
+    except (FeedError, HTTPError, URLError, OSError, TimeoutError) as exc:
+        part.unlink(missing_ok=True)
+        if isinstance(exc, FeedError):
+            raise
+        raise FeedError(f"could not download {url}: {exc}") from exc
+    sha = digest.hexdigest()
+    if size == 0 or sha != str(expected_sha256 or "").lower():
+        part.unlink(missing_ok=True)
+        raise FeedHashMismatch(
+            "the downloaded artefact's sha256 does not match the signed record -- refused")
+    return sha, size
+
+
 def fetch_and_verify_channel(
     url: str, pubkeys: tuple[str, ...]
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -304,6 +363,27 @@ def _valid_records(channel: dict[str, Any], pubkeys: tuple[str, ...]) -> list[di
     if dropped:
         log.warning("release feed: %d package record(s) failed verification and were ignored", dropped)
     return out
+
+
+def package_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The verified records that describe an EDITOR package (companion,
+    onboard). Everything the packages table, the publish routes and the
+    auto-publish policy touch goes through here, so a `dashboard` record can
+    never be published into `companion_packages` by any of the three."""
+    return [r for r in records if str(r.get("kind", "")) != DASHBOARD_KIND]
+
+
+def dashboard_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The verified records that describe THIS dashboard's own code bundle.
+    Consumed by dashboard_update.py, never by package_store."""
+    return [r for r in records if str(r.get("kind", "")) == DASHBOARD_KIND]
+
+
+def verified_records(app_state) -> list[dict[str, Any]]:
+    """Everything the last check verified, for a caller outside this module
+    (dashboard_update.py). Empty until a check has run -- the cache is
+    deliberately process-local; see _cache."""
+    return list(_cache(app_state).get("valid_records") or [])
 
 
 # --------------------------------------------------------------- app-state cache
@@ -381,7 +461,11 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
     if policy == "manual":
         return []
     applied: list[str] = []
-    for record in valid_records:
+    # package_records, not valid_records: `stage`/`current` must never
+    # auto-apply a DASHBOARD code update. Replacing the code the container is
+    # running is a ten-second outage and an admin's decision, not a
+    # consequence of a policy about editor packages (ZERO_TOUCH_PLAN.md WP K).
+    for record in package_records(valid_records):
         kind, platform, version = _record_key(record)
         if not (kind and platform and version):
             continue
@@ -411,7 +495,12 @@ def publish_from_feed(
     hand it to package_store -- the exact same write path a human PUT uses
     (see package_store.store_verified_package's docstring). Raises
     PackageStoreError; never partially publishes."""
-    valid_records = _cache(app_state).get("valid_records") or []
+    if kind == DASHBOARD_KIND:
+        raise package_store.PackageStoreError(
+            400, "a dashboard code bundle is applied, not published: use "
+                 "Admin > Packages > Dashboard, or POST "
+                 "/api/v1/admin/dashboard-update/apply")
+    valid_records = package_records(_cache(app_state).get("valid_records") or [])
     record = next(
         (r for r in valid_records if _record_key(r) == (kind, platform, version)), None
     )
@@ -431,35 +520,20 @@ def publish_from_feed(
     dest_dir = settings.packages_path() / platform
     dest_dir.mkdir(parents=True, exist_ok=True)
     part = dest_dir / f"{filename}.{uuid.uuid4().hex}.part"
-    digest = hashlib.sha256()
-    size = 0
+    # Same bounded, credential-free, https-only redirect follow as the channel
+    # fetch (2026-08-18): GitHub Releases 302s every asset URL to a signed
+    # release-assets.githubusercontent.com URL, and the sha256 check inside
+    # fetch_artifact_to is what decides whether the bytes are believed -- not
+    # which host handed them over.
     try:
-        # Same bounded, credential-free, https-only redirect follow as the
-        # channel fetch (2026-08-18): GitHub Releases 302s every asset URL to
-        # a signed release-assets.githubusercontent.com URL, and the sha256
-        # check below is what decides whether the bytes are believed -- not
-        # which host handed them over.
-        with part.open("wb") as fh, _open_following_https_redirects(
-            url, timeout=ARTIFACT_FETCH_TIMEOUT
-        ) as resp:
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > ARTIFACT_MAX_BYTES:
-                    raise FeedError(f"artifact exceeded the {ARTIFACT_MAX_BYTES}-byte cap -- refused")
-                fh.write(chunk)
-                digest.update(chunk)
-    except (FeedError, HTTPError, URLError, OSError, TimeoutError) as exc:
-        part.unlink(missing_ok=True)
-        raise package_store.PackageStoreError(502, f"could not download the feed artefact: {exc}") from exc
-
-    sha = digest.hexdigest()
-    if size == 0 or sha != sha_expected:
-        part.unlink(missing_ok=True)
+        sha, size = fetch_artifact_to(
+            url, part, expected_sha256=sha_expected,
+            max_bytes=ARTIFACT_MAX_BYTES, timeout=ARTIFACT_FETCH_TIMEOUT)
+    except FeedHashMismatch as exc:
         raise package_store.PackageStoreError(
-            400, "downloaded artefact's sha256 does not match the feed record -- refused")
+            400, "downloaded artefact's sha256 does not match the feed record -- refused") from exc
+    except FeedError as exc:
+        raise package_store.PackageStoreError(502, f"could not download the feed artefact: {exc}") from exc
 
     # store_verified_package re-verifies release_trust.verify_record against
     # settings.release_pubkeys -- belt and braces on top of _valid_records'
@@ -493,7 +567,11 @@ def build_feed_view(conn, settings, app_state) -> dict[str, Any]:
     cache = _cache(app_state)
     available: list[dict[str, Any]] = []
     if configured:
-        for record in cache.get("valid_records") or []:
+        # package_records only: the `dashboard` half of the channel is served
+        # by dashboard_update.status(), which knows about runtime ids and the
+        # running code root. Offering it here would put a [ PUBLISH ] button
+        # next to something that must never enter companion_packages.
+        for record in package_records(cache.get("valid_records") or []):
             kind, platform, version = _record_key(record)
             if kind and platform and version and db.get_package(conn, platform, version, kind) is None:
                 available.append(record)

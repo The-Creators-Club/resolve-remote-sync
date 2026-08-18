@@ -253,6 +253,38 @@ the container (`dashboard/deploy/compose.yaml`,
 `docker compose up -d --build`). `GET /api/v1/health` must report the new
 version — that is the only externally visible proof the container is current.
 
+**For feed customers, that is not how the dashboard is updated** (2026-08-18,
+`ZERO_TOUCH_PLAN.md` WP K). Their dashboards pull their own **code** from the
+signed feed, so a dashboard release is two more commands on this rig:
+
+```powershell
+dashboard\.venv\Scripts\python.exe tools\build_dashboard_bundle.py --out .\dist
+dashboard\.venv\Scripts\python.exe tools\publish_feed.py `
+    --artifact .\dist\ccsync-dashboard-<version>.tar.gz `
+    --kind dashboard --platform linux --version <version> `
+    --feed-dir .\feed --github-repo ccsync/ccsync-releases --github-upload
+```
+
+`build_dashboard_bundle.py` refuses a dirty tree (`--allow-dirty` for a
+deliberate hotfix), stamps the bundle with the dashboard's own `VERSION` — the
+one `/api/v1/health` reports — and prints the `runtime_id` that
+`publish_feed.py` then reads straight out of the bundle. Each customer's
+Packages page grows a `[ UPDATE NOW ]` button; ~10 s later they are on it.
+
+**When a customer has to click in their NAS UI instead.** The bundle carries
+only code; the image carries Python and the dependency closure. So **any**
+change to `dashboard/deploy/requirements.lock` or to the Dockerfile's
+`ARG BASE_IMAGE` line changes the `runtime_id`, and that release is a
+**runtime update**: every dashboard shows it with the exact click for their
+platform and offers no button, until they update the image. Plan releases
+accordingly — a new dependency and a code fix in the same release means
+nobody gets the code fix over the air. Split them.
+
+`.github/workflows/release-dashboard.yml` builds the same bundle on a hosted
+runner (`workflow_dispatch`, artifact only, never publishes) for the case
+where the bundle must come from clean hardware; the signing and the upload
+still happen here, next to the offline key.
+
 ### 7. Verify — do not skip
 
 ```powershell
@@ -420,6 +452,16 @@ kind — which is how a Mac gets handed a Windows exe, or how the onboarding
 installer gets offered as a companion self-upgrade. The `url` is deliberately
 **not** signed: it is server-relative, and its host is pinned to the
 configured dashboard by `upgrade.same_origin()`.
+
+**One kind signs a tenth field.** A `dashboard` record — the dashboard's own
+code bundle, applied by the container to itself (`ZERO_TOUCH_PLAN.md` WP K,
+2026-08-18) — adds `runtime_id`, because that value decides whether the update
+may be applied at all and an unsigned one could be relabelled. It is scoped to
+the kind (`release_pubkey.KIND_EXTRA_FIELDS`), NOT added to every record: a
+tenth field for everyone would need a `v2` prefix and an overlap release,
+since an old companion canonicalises only the fields it knows and would reject
+every new record. No companion ever sees a `dashboard` record.
+`docs/RELEASE_FEED.md` §2.1a.
 
 ### Where the key lives
 
@@ -803,6 +845,11 @@ python tools\release_key.py new|pubkey|bake     # the offline release signing ke
 python tools\publish_feed.py --manifest companion\dist\ccsync-release.json `
     --feed-dir .\feed --github-repo <owner/repo> --github-upload   # ship to EVERY feed customer (no password)
 python tools\publish_feed.py --verify .\feed                 # offline-check a feed dir
+python tools\build_dashboard_bundle.py --out .\dist          # the DASHBOARD's own code bundle
+python tools\build_dashboard_bundle.py --verify .\dist\ccsync-dashboard-<v>.tar.gz
+python tools\publish_feed.py --artifact .\dist\ccsync-dashboard-<v>.tar.gz `
+    --kind dashboard --platform linux --version <v> `
+    --feed-dir .\feed --github-repo <owner/repo> --github-upload   # every feed customer's dashboard
 .\installer\windows_upgrade.ps1 -CompanionExe <path-to-exe>  # install here
 .\tools\check_deploy_drift.ps1 -AdminUser <your-dashboard-admin>   # + published version, machines behind
 ```

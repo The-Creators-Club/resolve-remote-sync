@@ -257,6 +257,14 @@ Full writeup: [`RELEASE_FEED.md`](RELEASE_FEED.md).
 | `DASH_RELEASE_FEED_URL` | `""` | absolute `https://` URL of `channel.json`. **Empty = the feed is entirely off** — no background thread, no network call, no admin-page section beyond "how to configure it" |
 | `DASH_RELEASE_FEED_POLICY` | `manual` | `manual` \| `stage` \| `current`. An unrecognised value falls back to `manual`, never upward. Editable at runtime (`POST /api/v1/admin/feed/policy`), which overrides this default until cleared |
 | `DASH_RELEASE_FEED_INTERVAL` | `86400` | seconds between background checks (floored at 60s) |
+| `DASH_UPDATE_SNAPSHOT_DATASET` | `""` | TrueNAS dataset to snapshot before the dashboard applies a code update to ITSELF (`ZERO_TOUCH_PLAN.md` WP K). Needed because a container sees `/data`, not the pool path behind it; empty means the snapshot is skipped with that reason and the `/data/backups/<ts>/` database copies are the recovery path. Also needs `DASH_NAS_API_KEY` |
+
+The same feed carries the dashboard's own code (`RELEASE_FEED.md` §2.1a). It
+needs no variable of its own: `DASH_RELEASE_FEED_URL` turns it on and
+`DASH_RELEASE_PUBKEYS` is what it is verified against, at fetch, at apply and
+again at **every boot** (`dashboard/deploy/select_code_root.py`). A dashboard
+with no pubkeys configured will never boot an installed code tree, which is
+the same fail-closed answer the publish route gives.
 
 ### 2.4 NAS backend
 

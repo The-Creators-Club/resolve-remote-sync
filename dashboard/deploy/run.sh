@@ -192,6 +192,14 @@ umask 077
 # packages of the same name on one PYTHONPATH collide in sys.modules and one
 # wins silently.
 export PYTHONPATH=/app/src:/broll-app:/music-app:/ytdl-app
+# The image's own four roots, remembered for the restart loop at the bottom of
+# this file: in image mode the path is re-decided on every boot by
+# select_code_root.py, and this is what it falls back to (and what a
+# bind-mount deployment keeps unconditionally). Assigned FROM the line above
+# rather than repeated, so the list exists exactly once
+# (server/tests/test_music_deploy.py reads that line and checks every entry is
+# a real mount).
+IMAGE_PYTHONPATH="$PYTHONPATH"
 
 # Static ffmpeg/ffprobe, mounted read-only from the host at /opt/ffmpeg by
 # compose and put there by server/install_dashboard_app.py. This image is a
@@ -221,6 +229,52 @@ export PYTHONPATH=/app/src:/broll-app:/music-app:/ytdl-app
 # entry is kept in the PATH below so an older host that still has the mount
 # does not change behaviour mid-upgrade; it can go once no deployment has one.
 export PATH="/opt/ffmpeg:/opt/claude:/opt/deno:$PATH"
+
+# OVER-THE-AIR CODE UPDATES (ZERO_TOUCH_PLAN.md WP K, 2026-08-18), IMAGE MODE
+# ONLY. The dashboard can install a newer, signed copy of its own CODE into
+# /data/code/<version>/ and ask to be re-exec'd; the IMAGE stays the runtime.
+# Two rules shape what follows:
+#
+#   * The choice of code root is made by the IMAGE's python running the
+#     IMAGE's /app/deploy/select_code_root.py, which verifies the installed
+#     tree's signed record against DASH_RELEASE_PUBKEYS before ever naming it.
+#     The tree in /data is the thing being judged; it gets no vote. That is
+#     also why the selection is re-run on every loop iteration rather than
+#     once: a watchdog revert between two boots has to be honoured.
+#   * Bind-mount mode is UNTOUCHED. /venv/.image-baked is absent there, /app
+#     is the host's own tree, and there is no OTA path at all -- that
+#     deployment updates from the base rig (server/install_dashboard_app.py).
+#
+# Exit 75 (EX_TEMPFAIL) is the app asking to be restarted; anything else exits
+# as it always did, so `docker stop` and a real crash both behave exactly as
+# before. uvicorn runs as a CHILD rather than an exec here, which means this
+# shell keeps PID 1 and has to forward the stop signal itself -- without the
+# trap, `docker stop` would kill the shell and leave uvicorn to be SIGKILLed
+# ten seconds later, mid-request.
+if [ -f "$VENV/.image-baked" ]; then
+    while : ; do
+        selected="$("$VENV/bin/python" /app/deploy/select_code_root.py || true)"
+        if [ -n "$selected" ]; then
+            PYTHONPATH="$selected"
+        else
+            echo "run.sh: WARNING: select_code_root.py printed nothing -- using the image's own code." >&2
+            PYTHONPATH="$IMAGE_PYTHONPATH"
+        fi
+        export PYTHONPATH
+        echo "run.sh: PYTHONPATH=$PYTHONPATH"
+        "$VENV/bin/python" -m uvicorn --factory ccsync_dashboard.app:create_app \
+            --host 0.0.0.0 --port "${DASH_PORT:-8480}" --workers 1 &
+        app_pid=$!
+        trap 'kill -TERM "$app_pid" 2>/dev/null' TERM INT
+        rc=0
+        wait "$app_pid" || rc=$?
+        trap - TERM INT
+        if [ "$rc" != "75" ]; then
+            exit "$rc"
+        fi
+        echo "run.sh: the dashboard asked to restart (exit 75) -- re-selecting the code root"
+    done
+fi
 
 exec "$VENV/bin/python" -m uvicorn --factory ccsync_dashboard.app:create_app \
     --host 0.0.0.0 --port "${DASH_PORT:-8480}" --workers 1

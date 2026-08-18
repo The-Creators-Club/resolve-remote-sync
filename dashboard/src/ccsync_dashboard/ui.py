@@ -15,7 +15,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import auth, db, local_users, oidc, package_store, provision, release_feed
+from . import (auth, dashboard_update, db, local_users, oidc, package_store, provision,
+               release_feed)
 from .api import (
     build_admin_users_view, build_editors_view, build_packages_view, build_presence_view,
     build_project_view, build_projects_view, build_queue_view, build_report_tokens_view,
@@ -1463,6 +1464,34 @@ def _packages_and_feed(conn, request: Request, error: str | None = None) -> dict
         "nas_kind": getattr(settings, "nas_kind", ""),
         "error": error,
     }
+
+
+# ------------------------------------------- admin packages: THIS dashboard
+# The dashboard's own code updates (ZERO_TOUCH_PLAN.md WP K, 2026-08-18). Its
+# own partial and its own route, NOT part of _packages_and_feed: the packages
+# panel is polled every 30s and an update in flight owns this one (see
+# static/dashboard_update.js). Read-only server side -- every write goes
+# through the JSON routes in dashboard_update.router, which are admin+CSRF
+# gated like everything else that changes what runs.
+@router.get("/partials/admin/dashboard-update")
+def partial_admin_dashboard_update(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    settings = request.app.state.settings
+    error = None
+    try:
+        view = dashboard_update.status(settings, request.app.state)
+    except Exception as exc:  # noqa: BLE001
+        # Best-effort, like every optional panel on this page: a broken
+        # update-status read must not take the Users page down with it.
+        log.exception("could not build the dashboard-update view")
+        view = {"image_mode": False, "running": dashboard_update.VERSION,
+                "image": "", "source": "", "runtime_id": "", "current": {},
+                "code_updates": [], "runtime_updates": [],
+                "nas_hint": "", "in_progress": False, "step": "idle", "message": "",
+                "last_error": "", "backups": [], "boot_attempts": 0}
+        error = f"could not read the code update state: {exc}"
+    return _render(request, "partials/admin_dashboard_update.html",
+                   {"dash_update": view, "error": error})
 
 
 @router.get("/partials/admin/packages")

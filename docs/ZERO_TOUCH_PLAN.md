@@ -414,6 +414,45 @@ when the runtime changes.
   companion channel's: whoever holds the release key can push code — and the
   container still cannot reach Docker.
 
+**WP K status (2026-08-18): IMPLEMENTED**, on its own branch, exactly as
+designed above. What landed, and where:
+
+| Piece | File |
+|---|---|
+| bundle builder (seven trees + manifest, refuses a dirty tree) | `tools/build_dashboard_bundle.py` |
+| the `runtime_id` recipe, one copy, two callers | `dashboard/src/ccsync_dashboard/runtime_id.py` |
+| record kind `dashboard`/platform `linux`, `runtime_id` inside the signature | `tools/sign_release.py`, `tools/publish_feed.py`, `release_pubkey.py` + `release_trust.py` (`KIND_EXTRA_FIELDS`) |
+| the feed split: applied, never published | `release_feed.package_records` / `.dashboard_records` |
+| boot-time code root + watchdog revert | `dashboard/deploy/select_code_root.py`, `deploy/run.sh`'s exit-75 loop |
+| the updater (download, extract, stage-verify, back up, swap, restart, roll back) | `dashboard/src/ccsync_dashboard/dashboard_update.py` |
+| routes + `/api/v1/health`'s `code` block | same module's router, `api.api_health` |
+| the Packages page's Dashboard section | `templates/partials/admin_dashboard_update.html`, `static/dashboard_update.js` |
+| CI build (artifact only, never publishes) | `.github/workflows/release-dashboard.yml` |
+
+Three things worth knowing that the design above did not say:
+
+1. **The image was missing `templates/` and `static/`.** `ui.py` resolves them
+   as `parents[2]` of the package, which exists in bind-mount mode because the
+   whole `dashboard/` tree is mounted at `/app` — so an image-mode container
+   answered `/api/v1/health` perfectly and 500'd on every page. Two `COPY`
+   lines fixed it, and the bundle carries the same two directories for the
+   same reason. Any image built before 2026-08-18 is unusable for the UI.
+2. **The extra signed field is scoped to the kind.** Adding `runtime_id` to
+   every record would have needed a `v2` prefix and an overlap release; no
+   companion ever sees a `dashboard` record, so `companion`/`onboard` records
+   canonicalise byte for byte as before.
+3. **Nothing is live until an image is rebuilt.** `/venv/.runtime-id` only
+   exists in an image built from the updated Dockerfile, and without it every
+   apply is refused (with that reason). Until then, and for every bind-mount
+   site, the page says the deployment updates from the base rig.
+
+Not done here, deliberately: `min_version` is signed but unused for this kind
+(there is no downgrade floor for dashboard code — the version-newer-than-the-
+image rule is the only ordering); `snapshot_before` needs
+`DASH_UPDATE_SNAPSHOT_DATASET` because a container cannot see the pool path
+behind `/data`; and `server/install_dashboard_app.py` still deploys bind-mount
+mode, so this whole path waits on the image-mode migration (`docs/DOCKER.md`).
+
 ## 5. Decisions taken here, and what they cost
 
 - **SFTP inside the stack, single service uid.** Cost: per-editor file

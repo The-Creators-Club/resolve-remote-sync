@@ -85,6 +85,77 @@ A feed is two files at a stable URL prefix (call it `<base>`):
   `release_pubkey.py`'s docstring, "WHAT IS NOT SIGNED"), and `notes` (a
   short, unsigned, purely cosmetic description).
 
+### 2.1a The `dashboard` record (schema v1, added 2026-08-18)
+
+`ZERO_TOUCH_PLAN.md` WP K. The same channel also carries the **dashboard's own
+code**, as a record of kind `dashboard`, platform `linux`:
+
+```json
+{
+  "kind": "dashboard",
+  "platform": "linux",
+  "version": "0.5.1",
+  "filename": "ccsync-dashboard-0.5.1.tar.gz",
+  "sha256": "…64 hex…",
+  "size_bytes": 982575,
+  "min_version": "0.0.0",
+  "published_at": "2026-08-18T17:55:00Z",
+  "signed_binary": false,
+  "runtime_id": "…64 hex…",
+  "signature": "…base64, 64 bytes…",
+  "pubkey_id": "301d677acf210156",
+  "url": "https://github.com/OWNER/REPO/releases/download/TAG/ccsync-dashboard-0.5.1.tar.gz",
+  "notes": "fixes the transfers page's 30s poll"
+}
+```
+
+Two things are different about it, and only two:
+
+- **A tenth SIGNED field, `runtime_id`.** Every other record signs nine
+  fields; a `dashboard` record signs ten. It is inside the signature because
+  it is what decides whether an update may be applied at all — an unsigned
+  one would let anyone able to serve the feed relabel a bundle as compatible
+  with a runtime it was never built for. The extra field is **scoped to the
+  kind** (`release_pubkey.KIND_EXTRA_FIELDS` / `release_trust.record_fields`,
+  two copies as always), so every `companion`/`onboard` record canonicalises
+  byte for byte as it always did: no `v2` prefix, no overlap release, and no
+  companion in the field notices anything.
+- **It is APPLIED, never PUBLISHED.** A `dashboard` record must never reach
+  `companion_packages` — a row there would offer the dashboard's tarball to
+  an editor's companion as an upgrade. `release_feed._valid_records` verifies
+  it exactly like any other record, and then `package_records()` /
+  `dashboard_records()` split the two: the packages table, the `[ PUBLISH ]`
+  buttons and the `stage`/`current` auto-publish policy only ever see the
+  first list, and `POST /api/v1/admin/feed/publish {kind: "dashboard"}` is a
+  400 naming the route that does apply it. The second list is
+  `dashboard_update.py`'s (`docs/DOCKER.md`, "Code root selection").
+
+**The two-tier rule.** The image is the runtime; the bundle is the code. A
+record whose `runtime_id` equals the running image's `/venv/.runtime-id` is a
+**code update**: one button, ~10 s offline, no NAS involved. A record whose
+`runtime_id` differs brought a dependency, and the container has no Docker
+socket and never will — so it is a **runtime update**: the page names the one
+click in the NAS's own UI (`Apps > ccsync > Update` /
+`Container Manager > Project ccsync > Build`) and offers no button. Concretely,
+a change to `dashboard/deploy/requirements.lock` or to the Dockerfile's
+`ARG BASE_IMAGE` line makes the next release a runtime update; anything else
+is a code update. The id is `sha256` over exactly those two inputs —
+`dashboard/src/ccsync_dashboard/runtime_id.py` is the one implementation, and
+both `tools/build_dashboard_bundle.py` and the Dockerfile call it.
+
+**Threat model line.** A `dashboard` record is the only thing in this system
+that turns a signed artefact into code the dashboard *executes as itself*, so
+it is verified three times, twice more than a companion package: at fetch
+(`_valid_records`), at apply (the tarball's sha256 against the signed record,
+plus the extracted manifest against that record), and **at every subsequent
+boot** — `dashboard/deploy/select_code_root.py` re-checks the record's
+signature before the container will run a byte of the installed tree, using
+the image's own verifier and the image's own baked keys, never anything from
+the data volume. Whoever holds the offline release key can therefore run code
+inside a customer's dashboard container — which was already true of every
+companion on every editor machine, and is exactly why that key is offline. The
+container still cannot reach Docker, the NAS host, or root.
+
 There is no length ceiling on `packages` written down here on purpose — a
 real feed carries a handful of records (2 platforms × 2 kinds, occasionally
 an old version kept for rollback); `dashboard/src/ccsync_dashboard/
@@ -174,6 +245,11 @@ python tools\publish_feed.py --artifact companion\dist\ccsync-companion.exe `
 python tools\publish_feed.py --manifest companion\dist\ccsync-release.json `
     --feed-dir .\feed --base-url https://releases.ccsync.app/v1
 
+python tools\build_dashboard_bundle.py --out .\dist
+python tools\publish_feed.py --artifact .\dist\ccsync-dashboard-0.5.1.tar.gz `
+    --kind dashboard --platform linux --version 0.5.1 `
+    --feed-dir .\feed --github-repo OWNER/REPO --github-upload
+
 python tools\publish_feed.py --set-image 1.2.3@sha256:9f2c...ab12 --feed-dir .\feed
 
 python tools\publish_feed.py --verify .\feed
@@ -189,6 +265,11 @@ What it does, per invocation:
   reimplemented), copies the artefact into `<feed-dir>/<platform>/<filename>`,
   and **replaces** any existing record with the same `(kind, platform,
   version)` in `channel.json` or appends a new one.
+- `--kind dashboard` needs no `--runtime-id`: the tool reads it out of the
+  bundle's own `manifest.json` and **refuses** a `--runtime-id` that
+  disagrees with it. The value is signed, so a typo'd one is not a re-upload
+  away from correct, it is a re-sign away — and every customer would meanwhile
+  see a runtime update they cannot apply.
 - `--set-image tag@digest`: updates `dashboard_image` (can be combined with
   `--artifact` in one run, or run alone to bump only the image line).
 - Either action rewrites `channel.json` and re-signs `channel.json.sig`,
@@ -288,12 +369,30 @@ under Published Packages) is the same underlying functions
 (`release_feed.py`) driven from htmx partials instead — "Check now" from a
 script and "Check now" from the browser behave identically.
 
+### The dashboard's own update routes
+
+```
+GET  /api/v1/admin/dashboard-update          the status view (below)
+GET  /api/v1/admin/dashboard-update/status   the same body, polled 1/s while applying
+POST /api/v1/admin/dashboard-update/apply    {version, force}
+POST /api/v1/admin/dashboard-update/rollback {to_version, restore_db}
+```
+
+Admin session + CSRF, same as everything else that changes what runs. The
+status body carries `code_updates` and `runtime_updates` separately (the
+two-tier rule, §2.1a), the running/image versions and source, the in-progress
+step, the last error, and the database backups taken before each update.
+`docs/API.md` §5 has the field list; `docs/DOCKER.md` has what happens on
+disk.
+
 ### The dashboard image line
 
 The container image itself **cannot self-update**: there is no Docker
 socket mounted (deliberately — `docs/ZERO_TOUCH_PLAN.md` §5, "no Docker
-socket, no self-recreate"). The feed's `dashboard_image` field only lets the
-admin page say *"image 1.2.3 available (running 0.9.0) — update in your NAS
+socket, no self-recreate"). Since 2026-08-18 its **code** can, over this same
+feed (§2.1a) — but the image, i.e. Python and the pinned dependency closure,
+still changes only in the NAS's own UI. The feed's `dashboard_image` field
+lets the admin page say *"image 1.2.3 available (running 0.9.0) — update in your NAS
 UI: <the exact click>"*, where the hint depends on the site manifest's
 `nas_kind`:
 
@@ -366,7 +465,8 @@ click sufficient — see the plan's §3.4.
 
 ## 6. What this does NOT do
 
-- It does not make the dashboard update its own container image (§4).
+- It does not make the dashboard update its own container image (§4). Its
+  own CODE, yes (§2.1a); the image, no, and that is a decision, not a gap.
 - It does not add a second signing key or a second trust anchor —
   `DASH_RELEASE_PUBKEYS` is the only list either the PUT route or the feed
   ever checks against.

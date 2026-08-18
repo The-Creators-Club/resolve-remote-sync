@@ -86,8 +86,21 @@ Unauthenticated:
 ```
 
 With a session or a companion token, it also returns `syncthing_reachable`,
-`collector_stale`, `folder_errors` and `last_polls` (per collector kind:
-`finished_at`, `ok`, `error`).
+`collector_stale`, `folder_errors`, `last_polls` (per collector kind:
+`finished_at`, `ok`, `error`) and `code`:
+
+```json
+{ "code": { "running": "0.5.1", "image": "0.5.0",
+            "source": "volume", "runtime_id": "9f2c…" } }
+```
+
+`code` says WHICH code is live (`ZERO_TOUCH_PLAN.md` WP K, 2026-08-18):
+`running` is this process's `VERSION`, `image` is the version baked into the
+container image, `source` is `image` | `volume` | `checkout`, and `runtime_id`
+is the image's `/venv/.runtime-id` (empty in bind-mount mode). **`ok` and
+`version` are unchanged** and stay where they are: release tooling, the
+onboarding wizard and the container healthcheck read those two and nothing
+else.
 
 **The status code stays 200 even when `ok` is false**, and that is load
 bearing: release tooling polls this route after a deploy and the macOS
@@ -489,6 +502,54 @@ it *can* refuse a channel that has none.
 Staging uses a per-request `.part` file plus `os.replace`, so the served file
 is always complete and two concurrent publishes cannot write into each other's
 staging file.
+
+### The dashboard's own code updates
+
+`ZERO_TOUCH_PLAN.md` WP K, 2026-08-18. Admin session + CSRF, like everything
+else that changes what runs. See `docs/RELEASE_FEED.md` §2.1a for the record
+and `docs/DOCKER.md` for what happens on disk.
+
+| Route | What |
+|---|---|
+| `GET /admin/dashboard-update` | the status view below |
+| `GET /admin/dashboard-update/status` | the same body; the progress panel polls it once a second |
+| `POST /admin/dashboard-update/apply` | `{version, force}` — starts the update on a worker thread |
+| `POST /admin/dashboard-update/rollback` | `{to_version, restore_db}` — swap back, optionally restoring a named backup |
+
+The status body:
+
+```json
+{
+  "image_mode": true, "running": "0.5.0", "image": "0.5.0",
+  "source": "image", "runtime_id": "9f2c…",
+  "current": {"version": "", "previous": "", "applied_at": "", "reverted_reason": ""},
+  "code_updates":    [{"version": "0.5.1", "size_bytes": 982575,
+                       "published_at": "…", "notes": "…", "runtime_id": "9f2c…"}],
+  "runtime_updates": [{"version": "0.6.0", "...": "built against another image"}],
+  "nas_hint": "Apps > ccsync > Update",
+  "in_progress": false, "step": "idle", "message": "", "last_error": "",
+  "backups": [{"name": "20260818T1200Z-before-0.5.1", "created_at": "…",
+               "from_version": "0.5.0", "databases": ["dashboard"], "size_bytes": 1234}],
+  "boot_attempts": 0
+}
+```
+
+`code_updates` can be applied from here; `runtime_updates` cannot (they need a
+new image) and carry the platform's own click in `nas_hint`. Every refusal
+`apply` can answer with, and what it means:
+
+| Status | Refusal |
+|---|---|
+| `400` | the version is not dotted-numeric (it names a directory), or the record's `url` is not https, or the downloaded bundle failed a check |
+| `404` | no verified `dashboard` record for that version in the last feed check — run **Check now** first |
+| `409` | bind-mount mode (this deployment updates from the base rig); another apply in flight; the version is already running; it is a **runtime** update; a ytdl job is running (pass `force`) |
+| `500` | `/data/code` is not writable, or the staged code's checks could not be run |
+| `507` | not enough free space on the data volume (the message names both numbers) |
+
+`apply` returns as soon as preflight passes; the work continues on a worker
+thread and the process exits 75 when it is done, which `deploy/run.sh` turns
+into a re-exec on the new tree. Poll `/status` while `in_progress`, then
+`/api/v1/health` until the new `version` answers.
 
 ### Site settings
 

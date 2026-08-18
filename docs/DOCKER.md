@@ -71,8 +71,17 @@ docker build -f dashboard/deploy/Dockerfile -t ccsync-dashboard:0.4.1 .
 
 Two stages. The first creates `/venv` and runs
 `pip install --require-hashes -r dashboard/deploy/requirements.lock`; the second
-copies that venv plus the four trees, drops to a non-root user, and sets
-`CMD ["/bin/sh", "/app/deploy/run.sh"]`. The base image is pinned **by digest**
+copies that venv plus the four code trees **and `dashboard/templates` +
+`dashboard/static`**, writes `/venv/.runtime-id`, drops to a non-root user, and
+sets `CMD ["/bin/sh", "/app/deploy/run.sh"]`.
+
+> The two `COPY` lines for `templates/` and `static/` were **missing until
+> 2026-08-18**. `ui.py` computes `TEMPLATES_DIR` as `parents[2]` of the
+> package, i.e. `/app/templates`, which exists in bind-mount mode because the
+> whole `dashboard/` tree is mounted at `/app` — so an image-mode container
+> answered `/api/v1/health` perfectly and 500'd on every page. Found while
+> building WP K's bundle, which has to carry the same two directories for the
+> same reason. **Any image built before that fix is unusable for the UI.** The base image is pinned **by digest**
 (`python:3.12.7-slim@sha256:60d9996b…`), not only by tag.
 
 `--require-hashes` is the point of the exercise: it makes a compromised or
@@ -142,6 +151,76 @@ Fill in the five `REPLACE_ME` values (`SYNCTHING_API_KEY`, `DASH_REPORT_TOKEN`,
   `/claude-home` are unchanged, byte for byte, from `compose.yaml`. The data is
   the half that cannot be rebuilt.
 
+### Code root selection, and updating the code without the image
+
+**Image mode only, added 2026-08-18 (`ZERO_TOUCH_PLAN.md` WP K).** The image
+is the *runtime*: Python, `requirements.lock` installed with
+`--require-hashes`, the sidecars. The *code* inside it can be replaced over
+the air, from the same signed vendor feed the companion packages come from
+(`docs/RELEASE_FEED.md` §2.1a), without touching the image at all.
+
+Layout on the data volume:
+
+```
+/data/code/current.json          {version, previous, applied_at, record_sha}
+/data/code/boot_attempts.json    {version, attempts}   the watchdog's counter
+/data/code/update_state.json     what an in-flight update is doing
+/data/code/<version>/            src/ templates/ static/ deploy/
+                                 broll-app/ music-app/ ytdl-app/
+                                 manifest.json  record.json (the SIGNED record)
+/data/backups/<ts>-before-<v>/   the databases, copied with sqlite's backup API
+```
+
+On every boot `run.sh` runs **`/app/deploy/select_code_root.py`** — the
+IMAGE's copy, with the IMAGE's python, importing the IMAGE's verifier and
+reading the IMAGE's baked `/venv/.runtime-id`. The tree in `/data/code` is
+the thing being judged and gets no vote in whether it is used. It prints the
+four PYTHONPATH roots and nothing else; every doubt prints the image's own
+roots and the reason on stderr:
+
+| state | what boots |
+|---|---|
+| no `current.json`, or it names no version | the image (silently: this is the normal state) |
+| `<version>/manifest.json` missing, unreadable, or not a dashboard bundle | the image |
+| `<version>/record.json` missing | the image (an unsigned tree is never booted) |
+| the record's signature does not verify against `DASH_RELEASE_PUBKEYS` | the image |
+| the record's or the manifest's `runtime_id` is not `/venv/.runtime-id` | the image |
+| the version is not NEWER than the image's own | the image (a bundle can never roll the image backwards) |
+| one of the four roots is missing | the image |
+| `DASH_RELEASE_PUBKEYS` unset, or no `/venv/.runtime-id` | the image |
+| all of the above pass | `/data/code/<version>` |
+
+**The boot watchdog.** `select_code_root.py` increments `boot_attempts.json`
+before it hands a volume tree over; the app clears it once it has been up and
+healthy for 45 s (`dashboard_update.start_boot_watchdog`, armed from the
+lifespan). So the counter only ever survives a boot that did not work, and on
+the **third** boot with two failures already recorded the script rewrites
+`current.json` to the previous tree (or the image), with `reverted_reason`,
+and boots that. Nobody has to be watching — the thing that failed to boot is
+the thing an admin would have used to fix it. The failed tree's files are left
+on disk deliberately: they are the evidence.
+
+**Exit 75.** `run.sh` in image mode runs uvicorn as a child inside a loop
+instead of `exec`ing it. Exit code 75 (`EX_TEMPFAIL`) means "I staged new
+code, re-select the root and exec me again"; every other exit code exits the
+container exactly as before, so `docker stop` and a crash-loop behave the way
+every runbook says. The shell keeps PID 1 and forwards SIGTERM to the child
+itself. **Bind-mount mode is untouched** — no `/venv/.image-baked`, no
+selection, the same single `exec` it has always done, and the Dashboard
+section of the Packages page says the deployment updates from the base rig.
+
+An apply, in order (`dashboard_update.apply`): download with the record's
+sha256 verified → extract with absolute paths, `..`, symlinks, hardlinks and
+devices all refused → check the manifest against the signed record and every
+file against the manifest → **stage-verify in a subprocess** on the new
+PYTHONPATH (`import ccsync_dashboard.app`, then run each migration against a
+*copy* of `dashboard.db`/`broll.db`/`music.db`) → back the live databases up
+to `/data/backups/<ts>/` with sqlite's backup API (never a file copy: they are
+open in WAL mode) → optional NAS snapshot → rename staging to final → write
+`current.json` → exit 75. Everything that can fail happens before the live
+tree is touched, so every failure leaves the running dashboard exactly as it
+was.
+
 ### uid and gid
 
 The image defaults to `3000:3000` so a bare `docker run` is still unprivileged,
@@ -193,6 +272,12 @@ curl -s localhost:8480/api/v1/health     # {"ok": true, ...}
 because the venv came from the image. If it says it is *installing* in image
 mode, the `/venv/.image-baked` marker is missing and something rebuilt the venv
 volume over the layer — check that `compose.image.yaml` has no `/venv` mount.
+
+In image mode it also prints one `run.sh: PYTHONPATH=...` line per boot, and
+`select_code_root: ...` lines saying which code tree it chose and why. If the
+Dashboard section of the Packages page offers nothing but the feed lists a
+version, the reason is in those lines. `docker exec <c> cat /venv/.runtime-id`
+against the record's `runtime_id` is the one comparison that decides it.
 
 ---
 

@@ -731,7 +731,7 @@ else.
 Every companion in the field authenticates with the single
 `DASH_REPORT_TOKEN`. It cannot be revoked for one person, everyone who has
 ever been onboarded holds it, and rotating it takes the whole fleet off the
-dashboard at once. **Admin > Users > REPORT TOKENS** mints a per-editor token
+dashboard at once. **Settings > Users > REPORT TOKENS** mints a per-editor token
 instead: `cce1.<id>.<secret>`, stored only as a sha256, revocable on its own
 row, and **shown exactly once** -- nothing can print it again, because nothing
 has it.

@@ -321,8 +321,8 @@ def test_a_signed_in_editor_renders_a_page_through_the_mount(tmp_path, music_env
         # The topbar partial the SPA injects marks the page it was fetched
         # for -- and only that page (see test_topbar_partial.py).
         marked = c.get("/partials/topbar?current=music").text
-        assert 'nav-current" href="/music/"' in marked
-        assert marked.count("nav-current") == 1
+        assert 'drawer-current" href="/music/"' in marked
+        assert marked.count("drawer-current") == 1
 
 
 def test_the_storage_probe_creates_the_database(tmp_path, music_env):

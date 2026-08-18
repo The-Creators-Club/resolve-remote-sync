@@ -116,3 +116,48 @@ def test_placeholder_disabled_and_option_states_exist():
     assert "var(--red)" in rule("::placeholder")
     assert "opacity" in rule("input:disabled")
     assert "background: var(--panel)" in rule("select option")
+
+
+# ---------------------------------------------------- 3. the left nav drawer
+# The 2026-08-18 nav redesign: the module links left the bar for a drawer the
+# HTML popover API opens with no JavaScript at all. This page injects that
+# markup from /partials/topbar with innerHTML, so THIS stylesheet paints it --
+# the same duplication rule as the topbar half above.
+
+
+def test_the_menu_bars_are_drawn_not_typed():
+    """Three vertical bars from a gradient, not a "|||" glyph: a glyph is at
+    the mercy of whichever monospace face the machine happens to have."""
+    assert "repeating-linear-gradient" in rule(".menu-bars")
+    assert 'content: "["' in rule(".menu-btn::before")
+    assert 'content: "]"' in rule(".menu-btn::after")
+
+
+def test_the_drawer_base_rule_declares_no_display():
+    """The one thing a restyle must not break. An author `display` in the base
+    rule beats the UA's `[popover]:not(:popover-open) { display: none }`, and
+    the drawer would then be stuck open with no way to dismiss it."""
+    assert "display:" not in rule(".nav-drawer")
+    assert "display: flex" in rule(".nav-drawer:popover-open")
+
+
+def test_the_drawer_is_a_left_panel_over_a_dimmed_backdrop():
+    body = rule(".nav-drawer")
+    assert "position: fixed" in body
+    assert "background: var(--panel)" in body
+    # ::backdrop is the dim. Without it the drawer floats over a page that
+    # still looks live and clickable.
+    assert "background" in rule(".nav-drawer::backdrop")
+
+
+def test_the_drawers_current_entry_uses_the_house_idiom():
+    """Field fill plus a 2px red accent, the same "you are here" the sidebar
+    and the settings strip use."""
+    body = rule(".drawer-item.drawer-current")
+    assert "background: var(--field)" in body
+    assert "var(--red)" in body
+
+
+def test_the_settings_gear_is_red():
+    """The SVG paints with currentColor, so the link's colour is the icon's."""
+    assert "color: var(--red)" in rule(".gear-link")

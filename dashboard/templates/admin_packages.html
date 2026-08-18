@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{# Its own page since 2026-08-18. These three panels spent their first year as
+   the bottom third of the Users page, where the owner could not find them:
+   "where do I update the dashboard" is not a question about editor accounts.
+   Nothing here changed but the address -- same partials, same routes, same
+   _packages_and_feed context builder. #}
+{% block title %}CC SYNC: PACKAGES{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    {% include "partials/settings_nav.html" %}
+    <div hx-get="/partials/admin/packages" hx-trigger="every 30s" hx-swap="innerHTML">
+      {% include "partials/admin_packages.html" %}
+    </div>
+    {# The dashboard's OWN code (ZERO_TOUCH_PLAN.md WP K). Loaded on its own
+       trigger and, unlike the packages panel above, NOT polled: an update in
+       flight owns this panel and static/dashboard_update.js refreshes it,
+       because a 30s swap would throw the progress away mid-update. #}
+    <div style="margin-top:1.6rem" hx-get="/partials/admin/dashboard-update"
+         hx-trigger="load" hx-swap="innerHTML"></div>
+  </main>
+  <script src="/static/dashboard_update.js" defer></script>
+{% endblock %}

@@ -11,6 +11,11 @@ headers. What the SPAs' loadDashboardTopbar() depends on is pinned here:
     `res.redirected` and keeps its fallback header instead of injecting a
     login form into the page;
   - `?current=` marking the fetching page's own nav entry.
+
+Since the 2026-08-18 redesign the bar itself holds no module links at all:
+they are in a left drawer opened by the HTML popover API, with NO script --
+which is the only mechanism that can work here, because the SPAs inject this
+markup with innerHTML and innerHTML never runs a <script> it carries.
 """
 from __future__ import annotations
 
@@ -54,9 +59,14 @@ def _no_music_mount(monkeypatch):
     yield
 
 
-def _client(tmp_path) -> TestClient:
+def _client(tmp_path, admins: frozenset[str] = frozenset()) -> TestClient:
     return TestClient(create_app(
-        Settings(db_path=str(tmp_path / "d.db"), session_secret=SECRET)))
+        Settings(db_path=str(tmp_path / "d.db"), session_secret=SECRET,
+                 admin_users=admins)))
+
+
+def _admin_client(tmp_path) -> TestClient:
+    return _client(tmp_path, admins=frozenset({"owen"}))
 
 
 def as_user(client, user="jsmith"):
@@ -78,16 +88,73 @@ def test_topbar_partial_serves_the_marked_header(tmp_path):
 
 def test_the_served_partial_carries_the_wrap_safe_structure(tmp_path):
     """What the SPAs inject has to be the wrap-safe markup too (2026-08-18):
-    the stamp and the session chip inside one .topbar-right, and no loose
-    "//" text node between nav entries. Their stylesheets paint the header
-    they inject, so a partial that regressed here would break three pages,
-    not one. The CSS half is pinned in test_theme_css.py."""
+    the stamp and the session chip inside one .topbar-right. Their stylesheets
+    paint the header they inject, so a partial that regressed here would break
+    three pages, not one. The CSS half is pinned in test_theme_css.py."""
     with _client(tmp_path) as c:
         body = as_user(c).get("/partials/topbar").text
         right = body[body.index('class="topbar-right"'):]
         assert 'class="stamp"' in right and 'class="session"' in right
-        nav = body[body.index('href="/transfers"'):body.index('class="topbar-right"')]
-        assert 'class="dim"' not in nav
+
+
+def test_the_drawer_needs_no_javascript(tmp_path):
+    """The mechanism, pinned. The SPAs inject this markup with innerHTML,
+    which never executes a <script> that came with it, so a drawer that needed
+    one would be dead on /broll, /music and /ytdl. The popover attribute pair
+    is the whole implementation: the button names the panel, the panel
+    declares itself a popover, and the browser supplies Esc, click-outside
+    and the backdrop."""
+    with _client(tmp_path) as c:
+        body = as_user(c).get("/partials/topbar").text
+        assert 'popovertarget="nav-drawer"' in body
+        assert 'id="nav-drawer" popover' in body
+        assert 'aria-label="menu"' in body
+        assert "<script" not in body
+
+
+def test_the_bar_holds_no_module_links_and_the_drawer_holds_them_all(tmp_path):
+    """The redesign: the modules and the admin pages left the bar. Checked on
+    the partial an editor gets, whose drawer names the two hub pages they are
+    allowed to open."""
+    with _client(tmp_path) as c:
+        body = as_user(c).get("/partials/topbar").text
+        drawer = body[body.index('id="nav-drawer"'):body.index("</nav>")]
+        bar = body[:body.index('<div class="nav-drawer"')] \
+            + body[body.index("</nav>"):]
+        assert "[ SYNC STATUS ]" in drawer
+        assert "[ TRANSFERS ]" in drawer and "[ INSTALLER ]" in drawer
+        # ...and nowhere else. The bar is the menu button, the brand and who
+        # you are.
+        assert "[ TRANSFERS ]" not in bar
+        assert "nav-link" not in body
+
+
+def test_only_an_admin_gets_the_settings_gear_and_the_settings_entry(tmp_path):
+    """The gear is the owner's own request (2026-08-18): a way into Settings
+    from every page. /admin/settings 403s for an editor, so an editor gets
+    neither the gear nor the drawer entry -- a control that always refuses is
+    worse than no control."""
+    with _admin_client(tmp_path) as c:
+        admin_body = as_user(c, "owen").get("/partials/topbar").text
+        assert 'class="gear-link" href="/admin/settings"' in admin_body
+        assert "[ SETTINGS ]" in admin_body
+        # LOGOUT ALL moved into the drawer's foot; it stays reachable.
+        assert "[ LOGOUT ALL ]" in admin_body
+
+        editor_body = as_user(c, "jsmith").get("/partials/topbar").text
+        assert "gear-link" not in editor_body
+        assert "[ SETTINGS ]" not in editor_body
+        assert "[ LOGOUT ALL ]" in editor_body
+
+
+def test_the_drawer_only_names_modules_that_are_mounted(tmp_path):
+    """Same rule the bar always had: an absent or degraded mount gets no link
+    at all, because a link into a 500 is worse than no link."""
+    with _client(tmp_path) as c:
+        body = as_user(c).get("/partials/topbar").text
+        for absent in ('href="/broll/"', 'href="/music/"', 'href="/ytdl/"'):
+            assert absent not in body
+        assert "[ SYNC STATUS ]" in body
 
 
 def test_topbar_partial_redirects_a_dead_session_to_login(tmp_path):
@@ -106,8 +173,8 @@ def test_current_marks_only_the_named_nav_entry(tmp_path):
     checking nothing gets marked for an unknown or absent value."""
     with _client(tmp_path) as c:
         as_user(c)
-        assert "nav-current" not in c.get("/partials/topbar").text
-        assert "nav-current" not in c.get("/partials/topbar?current=broll").text
+        assert "drawer-current" not in c.get("/partials/topbar").text
+        assert "drawer-current" not in c.get("/partials/topbar?current=broll").text
 
 
 def test_the_dashboards_own_pages_render_the_same_partial(tmp_path):

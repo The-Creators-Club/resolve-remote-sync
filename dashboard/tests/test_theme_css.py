@@ -81,16 +81,36 @@ def test_every_topbar_child_is_an_unbreakable_unit():
 def test_nav_separators_are_pseudo_elements_not_text_nodes():
     """A `<span class="dim">//</span>` between two links is a flex item of its
     own and a wrap can strand it at the end or the start of a row. As a
-    ::before of the item it precedes it travels with that item."""
+    ::before of the item it precedes it travels with that item.
+
+    The bar itself has carried no separated nav entries since the 2026-08-18
+    redesign moved the modules into the drawer, so the markup half of this
+    test is now "the bar has no bracketed links to separate" (below). The
+    rule stays: it is the vocabulary an inline nav entry gets if one ever
+    comes back, and the three SPA stylesheets pin it too.
+    """
     # The escape, not the two characters: a quote followed by a slash is what
     # a root-relative URL looks like, and every shipped asset is scanned for
     # one (YTDL-42).
     assert 'content: "\\2f\\2f"' in rule(CSS, ".nav-link.nav-sep::before")
-    # The brand keeps its literal "//" -- it is inside one item, not between
-    # two -- so the check is that no separator survives BETWEEN nav links.
-    nav_half = TOPBAR[TOPBAR.index('href="/transfers"'):]
-    assert 'class="dim"' not in nav_half
-    assert "nav-sep" in nav_half
+
+
+def test_the_bar_itself_carries_no_module_links():
+    """The redesign in one assertion: between the brand and the right-hand
+    chip the bar holds nothing that could wrap at all. Everything that used to
+    live there -- Transfers, Users, Assignments, Setup, Settings, the three
+    modules, the installer -- is in the drawer or under Settings."""
+    # Comments first: this template explains the redesign in prose and names
+    # the very labels the assertions below say are gone from the bar.
+    markup = re.sub(r"\{#.*?#\}", "", TOPBAR, flags=re.S)
+    # Then the drawer element itself, whole: what is left is the bar.
+    bar = re.sub(r'<div class="nav-drawer".*?\n</div>\n', "", markup, flags=re.S)
+    bar = bar[bar.index('class="brand"'):bar.index('class="topbar-right"')]
+    assert "nav-drawer" not in bar, "the drawer element was not stripped"
+    assert "nav-link" not in bar
+    for gone in ("[ TRANSFERS ]", "[ USERS ]", "[ SETTINGS ]", "[ B-ROLL ]",
+                 "[ MUSIC ]", "[ YOUTUBE ]", "[ INSTALLER ]"):
+        assert gone not in bar
 
 
 def test_the_stamp_and_the_session_chip_are_one_item():

@@ -78,9 +78,10 @@ it install the companion (the tray app) for you -- otherwise you'd copy
 from there. Don't keep it anywhere else; that folder is the only one the
 script starts at logon.
 
-**Mac** -- get the script from the dashboard: sign in and click
-`[ INSTALLER ]` in the header, which serves `ccsync-onboard-<version>.sh` to
-a Mac browser. Then, in Terminal:
+**Mac** -- get the script from the dashboard: sign in, open the menu (the
+three bars at the top left) and click `[ INSTALLER ]`, which serves
+`ccsync-onboard-<version>.sh` to a Mac browser. An admin finds the same page
+under `[ SETTINGS ]` > `[ INSTALLER ]`. Then, in Terminal:
 ```bash
 cd ~/Downloads
 chmod +x ccsync-onboard-*.sh

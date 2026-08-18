@@ -597,7 +597,7 @@ Operational notes:
   credential check is an SMB session setup, so any account the NAS's SMB
   service accepts used to get a machine-identity token *and* the shared
   report token. The account must now be in the `editors` group (or
-  `DASH_ADMIN_USERS`); non-members get a 403 pointing at Admin > Users. With
+  `DASH_ADMIN_USERS`); non-members get a 403 pointing at Settings > Users. With
   no `TRUENAS_PW` configured the check is skipped and logged (same
   degrade-don't-crash rule as the Users section); with TrueNAS configured but
   unreachable it answers 503 rather than opening up.
@@ -666,7 +666,9 @@ are auto-provisioned **unshared** and start syncing when someone ticks them.
 
 ### Admin: Users section
 
-`/admin/users` (linked as `[ USERS ]` in the header for admins) replaces the
+`/admin/users` (the menu button at the top left, then `[ SETTINGS ]` >
+`[ USERS ]`, or the red gear on the right of the header; 2026-08-18 the
+admin pages moved out of the header into that drawer) replaces the
 CLI for the two most common onboarding actions, when the dashboard has
 `TRUENAS_PW` configured:
 
@@ -712,10 +714,11 @@ updates silently). Publish flow, from the base rig:
    dashboard admin password and PUTs the exe to
    `/api/v1/admin/packages/windows/<version>`.
 3. Without `-MakeCurrent`, the build is staged: flip `[ MAKE CURRENT ]` in
-   the `[ PUBLISHED PACKAGES ]` box on `/admin/users` when ready. The same
-   publish run also uploads `onboard.exe` as the `kind=onboard` package
-   (versioned by `$InstallerVersion`), which the dashboard's `[ INSTALLER ]`
-   header link serves to any signed-in user -- bump the installer version in
+   the `[ PUBLISHED PACKAGES ]` box on `/admin/packages` (Settings >
+   `[ PACKAGES ]`) when ready. The same publish run also uploads
+   `onboard.exe` as the `kind=onboard` package (versioned by
+   `$InstallerVersion`), which `/installer` (Settings > `[ INSTALLER ]`, and
+   still `/download` for the one-click guess) serves to any signed-in user -- bump the installer version in
    `installer/windows_bootstrap.ps1` AND `onboarding/steps.py` whenever
    onboard.exe's contents change, or the upload is skipped.
 4. Watch the fleet grid: each machine's VERSION cell goes amber until its

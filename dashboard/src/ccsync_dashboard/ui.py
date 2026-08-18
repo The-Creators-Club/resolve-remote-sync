@@ -119,6 +119,12 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
                                      or settings.site_org_name
                                      or settings.site_product_name))
     context.setdefault("brand_product", settings.site_product_name)
+    # Which nav entry to mark (2026-08-18). The drawer in partials/topbar.html
+    # and the Settings strip in partials/settings_nav.html read the same one
+    # variable, so a page names where it is ONCE. Defaulted here because both
+    # templates test it against a list, and an Undefined that reached a
+    # `in SETTINGS_PAGES` would be a render error rather than "nothing marked".
+    context.setdefault("nav_current", "")
     # Only offer the B-ROLL link when the mount FULLY took (broll.MOUNTED).
     # The import is guarded, so a missing or stale /broll-app leaves the
     # dashboard running with the feature absent; and a mount whose data root
@@ -181,6 +187,7 @@ def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
                                         auth.scope_for(request)),
         "queue": build_queue_view(conn, queue_editor, projects_view=projects_view)
                  if queue_editor else None,
+        "nav_current": "fleet",
     }
     if queue_editor:
         context.update(_roots_context(
@@ -789,6 +796,9 @@ def page_project(slug: str, request: Request, conn: sqlite3.Connection = Depends
         "selected_by": db.fetch_all_selections(conn),
         "scope_admin": scope.admin,
         "tick_editor": tick_editor,
+        # A project page is a page OF the fleet grid, so the drawer keeps
+        # [ SYNC STATUS ] lit rather than marking nothing at all.
+        "nav_current": "fleet",
     })
 
 
@@ -856,6 +866,10 @@ def page_transfers(request: Request, conn: sqlite3.Connection = Depends(get_conn
         **_sidebar_context(request, conn, None),
         "transfers": build_transfers_view(conn, editor=scope.editor),
         "scope_admin": scope.admin,
+        # Under Settings for an admin, and a top-level drawer entry for an
+        # editor -- one value, partials/settings_nav.html decides which
+        # entries that viewer is even shown.
+        "nav_current": "transfers",
     })
 
 
@@ -951,10 +965,10 @@ def page_admin_users(request: Request, conn: sqlite3.Connection = Depends(get_co
     return _render(request, "admin_users.html", {
         **_sidebar_context(request, conn, None),
         "admin_users": build_admin_users_view(request.app.state.settings, conn),
-        # The packages partial is included by this page and, since WP E, also
-        # renders the vendor feed section -- so it needs the same context the
-        # partial's own routes build (2026-08-17 merge of WP C + WP E).
-        **_packages_and_feed(conn, request),
+        # No packages context here since 2026-08-18: the packages table, the
+        # vendor feed and the dashboard update were the bottom third of this
+        # page and are page_admin_packages() now.
+        "nav_current": "users",
     })
 
 
@@ -1408,6 +1422,28 @@ def _detect_platform(user_agent: str) -> str:
     return "windows"
 
 
+@router.get("/installer")
+def page_installer(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """The Settings hub's [ INSTALLER ] entry (2026-08-18).
+
+    /download below is untouched and still guesses this browser's platform,
+    because the docs, the wizard's own instructions and every editor's
+    bookmark say so. This page exists because a hub entry has to be a page --
+    it renders the strip and marks itself current -- and because the guess is
+    wrong for the admin who is standing at a Windows machine setting up
+    somebody's Mac. Two cheap reads, not build_packages_view: the whole
+    packages view also builds the editors view, which this page never shows.
+    """
+    installers = {plat: db.get_current_package(conn, plat, kind="onboard")
+                  for plat in ("windows", "macos")}
+    return _render(request, "installer.html", {
+        **_sidebar_context(request, conn, None),
+        "installers": installers,
+        "detected": _detect_platform(request.headers.get("user-agent", "")),
+        "nav_current": "installer",
+    })
+
+
 @router.get("/download")
 def page_download(request: Request):
     plat = _detect_platform(request.headers.get("user-agent", ""))
@@ -1494,6 +1530,25 @@ def partial_admin_dashboard_update(request: Request, conn: sqlite3.Connection = 
                    {"dash_update": view, "error": error})
 
 
+@router.get("/admin/packages")
+def page_admin_packages(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """The packages table, the vendor feed and this dashboard's own update.
+
+    Its own page since 2026-08-18. All three panels were the bottom third of
+    /admin/users, four NAS-backed panels below the fold, and the owner went
+    looking for "how do I update the dashboard" and did not find it. Nothing
+    moved but the address: the partials, their routes and _packages_and_feed
+    are the same, so a Check now / Publish / policy change still re-renders in
+    place through htmx wherever the panel is standing.
+    """
+    _require_admin_page(request)
+    return _render(request, "admin_packages.html", {
+        **_sidebar_context(request, conn, None),
+        **_packages_and_feed(conn, request),
+        "nav_current": "packages",
+    })
+
+
 @router.get("/partials/admin/packages")
 def partial_admin_packages(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     _require_admin_page(request)
@@ -1567,7 +1622,7 @@ def page_setup(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
 
         if not setup_routes.first_run_open(request, conn):
             return RedirectResponse(f"/login?next={quote('/setup', safe='')}", status_code=303)
-    return _render(request, "setup.html", {})
+    return _render(request, "setup.html", {"nav_current": "setup"})
 
 
 # --------------------------------------------------------------- settings
@@ -1584,8 +1639,8 @@ def page_admin_settings(request: Request, conn: sqlite3.Connection = Depends(get
         "manifest": manifest,
         "auto_derived": sorted(site_store.AUTO_DERIVED_KEYS),
         "from_db": set(manifest.get("_from_db", ())),
+        "nav_current": "site",
     })
-    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
 
 
 # ------------------------------------------------- admin packages: release feed

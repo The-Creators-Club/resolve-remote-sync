@@ -88,6 +88,10 @@ def api_setup_tasks(request: Request, conn: sqlite3.Connection = Depends(get_con
                 "description": task.description,
                 "optional": task.optional,
                 "can_run": task.run is not None,
+                # What the button says. Only meaningful with can_run; sent
+                # always so a client never has to know the default
+                # ("DO IT") -- see Task.run_label.
+                "run_label": task.run_label,
                 **states[task.id].as_dict(),
             }
             for task in setup_engine.TASKS

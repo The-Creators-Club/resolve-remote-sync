@@ -356,6 +356,43 @@ class TrueNASClient:
                 return state, job.get("error")
         return "TIMEOUT", f"job {job_id} did not finish within {timeout}s"
 
+    # ------------------------------------------- optional capabilities
+    # Not on the NasBackend Protocol, deliberately: base.py's rule is that a
+    # new backend must not have to carry a method whose whole job is to
+    # refuse, and neither of these two has a DSM answer (see synology.py's
+    # own note, and BACKUP_RESTORE.md section 2 "Synology": DSM can TAKE a
+    # share snapshot from the API but SCHEDULING lives in the Snapshot
+    # Replication package, which has no supported CLI or API). Callers reach
+    # them through nas.capability() and treat "absent" as "this NAS cannot be
+    # asked", never as "the answer is no" (ZERO_TOUCH_PLAN.md WP D, the
+    # setup wizard's "Connect to your NAS" / "Protect your data" checks,
+    # 2026-08-18).
+
+    def system_info(self) -> dict[str, str]:
+        """{"version", "hostname"} for a status line. Raises TrueNASError."""
+        resp = self.get("/system/info")
+        if not ok(resp):
+            raise TrueNASError(
+                f"GET /system/info failed: HTTP {resp.status_code} {resp.text[:120]}")
+        info = self._json(resp, "GET /system/info")
+        if not isinstance(info, dict):
+            raise TrueNASError("GET /system/info: expected an object")
+        return {
+            "version": str(info.get("version") or ""),
+            "hostname": str(info.get("hostname") or ""),
+        }
+
+    def list_snapshot_tasks(self) -> list[dict[str, Any]]:
+        """Every periodic snapshot task the NAS holds (Data Protection ->
+        Periodic Snapshot Tasks). The same objects `server/setup_snapshots.py`
+        creates over this route; this only ever READS them."""
+        resp = self.get("/pool/snapshottask")
+        if not ok(resp):
+            raise TrueNASError(
+                f"GET /pool/snapshottask failed: HTTP {resp.status_code} {resp.text[:120]}")
+        rows = self._json(resp, "GET /pool/snapshottask")
+        return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
     def set_password(self, username: str) -> str:
         """Not used directly -- callers pass an explicit password via
         set_known_password(). Kept out of create_or_update_editor() itself

@@ -327,18 +327,42 @@ DB-row-wins/`DASH_SITE_*`-fallback precedence and a one-time env seed
 (`site_store.py`), the `/setup` page and Settings UI (Export/Import
 included), first-boot secrets generation (`secrets_boot.py`), and the six
 tasks this repo can implement without A/B/C: `eula`, `admin`\*, `studio`,
-`storage`, `secrets`, `syncthing`. **Still outstanding, exactly where the
-table says they depend on A/B/C:** `nas_connect`'s TrueNAS/DSM calls,
-snapshot scheduling, and the root-in-container tree-ownership helper (all
-registered as `optional=True` placeholders reporting "not implemented in
-this build" so the wizard's page shape is already complete). \*`admin` only
-*checks* for a local account today — account CREATION is WP C's identity
-module and its `POST /setup/admin` route; until that module exists,
-`setup_engine.probe_admin_status` returns `None` and every `/setup` /
-`/api/v1/setup/*` route requires an admin session (fail-closed), so the
-anonymous first-run window §3.5 describes does not open yet. Docs:
-`CONFIG.md` §1.1, `ARCHITECTURE.md` §6, `docs/API.md` §5 ("Site settings" /
-"Setup wizard").
+`storage`, `secrets`, `syncthing`. \*`admin` only *checks*; account CREATION
+is WP C's `POST /setup/admin` route. `setup_engine.probe_admin_status` still
+returns `None` here, so every `/setup` / `/api/v1/setup/*` route requires an
+admin session (fail-closed) and the anonymous first-run window §3.5
+describes does not open yet. Docs: `CONFIG.md` §1.1, `ARCHITECTURE.md` §6,
+`docs/API.md` §5 ("Site settings" / "Setup wizard").
+
+**WP D, stubs replaced 2026-08-18.** The five `optional=True` placeholders
+that answered "not implemented in this build" (`tailnet`, `nas_connect`,
+`snapshots`, `editors`, `software`) are real checks, and `admin` no longer
+holds `Done` hostage on a site whose admins are NAS accounts — the owner
+photographed exactly that on a live 0.6.0 dashboard, and a shipped product
+must not say either thing. What each one now reports is tabled in
+`docs/API.md` §5 ("Setup wizard"). Three notes on scope, since none of
+B/C/F/G landed and these checks had to be honest about that:
+
+- `tailnet` READS the sidecar's LocalAPI (`tailscale_local.py`, stdlib
+  `AF_UNIX` HTTP, spike S1's measured shape) and falls back to asking
+  whether the published `dashboard_url` is a tailnet address. It does not
+  DRIVE the login (`PATCH /prefs` -> `POST /login-interactive`) or set
+  Serve: those mutate the node and stay WP B's.
+- `nas_connect` and `snapshots` go through the existing `nas/` seam, with
+  two new **optional capabilities** on `TrueNASClient` only
+  (`system_info`, `list_snapshot_tasks` = `GET /pool/snapshottask`),
+  discovered by `nas.capability()` rather than added to the Protocol —
+  `base.py`'s rule that a backend must not carry a method whose only job is
+  to refuse. There is no DSM equivalent to add: BACKUP_RESTORE.md §2 records
+  that DSM's snapshot SCHEDULING lives in the Snapshot Replication package
+  with no supported CLI or API, so on Synology the check falls through to
+  the `/data` backup half and says why. Neither task WRITES anything: the
+  wizard's "mint a scoped key / schedule the task" actions are still owed.
+- `editors` counts what the dashboard already knows; the invite flow it
+  should offer is WP F. `software` reads the packages table and, where
+  `DASH_RELEASE_FEED_URL` is set, its `run` action is WP E's
+  `release_feed.check_now` ([ CHECK NOW ], `Task.run_label`, a new field on
+  the `GET /setup/tasks` payload).
 
 Critical path: **A → B → C → D**, ~7 weeks to a stack a stranger can install
 from a compose paste; E and F in parallel from week 2. Everything in

@@ -66,6 +66,23 @@ def test_setup_tasks_lists_every_registered_task_for_an_admin(env):
     ids = {t["id"] for t in body["tasks"]}
     assert {"eula", "admin", "studio", "storage", "secrets", "syncthing", "done"} <= ids
     assert "eula" in body["outstanding_required"]
+    # Every row carries the button label, so a client never has to know the
+    # default (2026-08-18, Task.run_label).
+    labels = {t["id"]: t["run_label"] for t in body["tasks"]}
+    assert labels["storage"] == "DO IT"
+    assert labels["software"] == "CHECK NOW"
+    assert all(t["run_label"] for t in body["tasks"])
+
+
+def test_no_task_reports_itself_unimplemented(env):
+    """A shipped product does not tell a customer that five of its eleven
+    setup steps are "not implemented in this build" (2026-08-18)."""
+    client, conn, settings = env
+    as_user(client, "owen")
+    for task in client.get("/api/v1/setup/tasks").json()["tasks"]:
+        state = client.post(f"/api/v1/setup/tasks/{task['id']}/check").json()
+        assert "not implemented" not in state["detail"], task["id"]
+        assert state["status"] != "fail", (task["id"], state["detail"])
 
 
 def test_check_and_run_and_skip_happy_paths(env):

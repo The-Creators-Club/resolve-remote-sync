@@ -10,37 +10,41 @@ in `setup_tasks` (`db.py` migration v18) keyed by task id, so a container
 restart mid-wizard (routine on an appliance -- `docker restart`, a host
 reboot) resumes exactly where it left off instead of replaying "Welcome".
 
-`TASKS` is the ONE registry every task lives in, in wizard order -- this
-module owns the six real ones this work package delivers (`eula`, `admin`,
-`studio`, `storage`, `secrets`, `syncthing`) plus a `done` marker, and
-registers five PLACEHOLDERS (`tailnet`, `nas_connect`, `snapshots`,
-`editors`, `software`) so the wizard's page shape is complete today and the
-work packages that own them (B, C, F, G — see `ZERO_TOUCH_PLAN.md` §4) only
-have to replace a placeholder entry, never touch the page.
+`TASKS` is the ONE registry every task lives in, in wizard order: `eula`,
+`admin`, `studio`, `storage`, `secrets`, `syncthing`, `done`, then the five
+optional ones (`tailnet`, `nas_connect`, `snapshots`, `editors`,
+`software`). The last five were PLACEHOLDERS reporting "not implemented in
+this build" until 2026-08-18, on the theory that WP B/C/F/G would each
+`replace()` their own entry from their own module; a shipped product cannot
+say that to a customer, and none of those modules exists, so they are real
+checks in this file now. `replace()` remains for the day one of them wants
+its entry back.
 
-Two of the six real tasks reach into work this repo does not have yet in
-this worktree:
+Every check answers from what this container can see WITHOUT reaching out:
+the databases, the settings, the tree mount, a unix socket, and (only where
+a credential is already configured) one 3-second call to the NAS or the
+Syncthing already in the stack. A check catches everything and reports a
+`todo`/`warn`/`fail` with one line naming the next action -- an admin
+reading this page must never see a traceback, and must never see a green
+tick this build cannot actually stand behind.
 
-* `admin` calls `probe_admin_status()`, which tries to reach agent C's
-  identity module (`GET /api/v1/setup/status` — SPEC "Depends on: A, B" for
-  WP C). Until that module exists here, the probe returns `None` and the
-  task reports `todo` / "awaiting identity module" — never a guess, and
-  never a fabricated `ok`.
-* `syncthing`'s "bundled, always on" framing (§3.1) is WP B/A's job; this
-  worktree still pings whatever `SYNCTHING_GUI_URL` is configured (which is
-  every deployment today), so the task is meaningful immediately and stays
-  meaningful once the sidecar lands.
+`admin` is the one task whose answer depends on WHO signs in here
+(`DASH_AUTH_METHOD`): see `_check_admin`.
 """
 from __future__ import annotations
 
 import dataclasses
+import ipaddress
 import logging
 import os
 import shutil
 import sqlite3
 import threading
+import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
+from urllib.parse import urlsplit
 
 log = logging.getLogger("ccsync.dashboard.setup_engine")
 
@@ -100,6 +104,13 @@ class Task:
     check: Callable[[SetupContext], TaskState]
     run: Callable[[SetupContext], TaskState] | None = None
     optional: bool = False
+    # What the wizard writes on the run() button. "DO IT" is right for a task
+    # that CHANGES something (storage probe, secret generation); a task whose
+    # action is a read against someone else's service should say what it is
+    # about to do -- `software` polls the vendor feed, and "DO IT" next to
+    # "Software for editors" reads like "publish something now"
+    # (2026-08-18).
+    run_label: str = "DO IT"
 
 
 TASKS: list[Task] = []
@@ -324,13 +335,93 @@ def probe_admin_status(ctx: SetupContext) -> dict[str, Any] | None:
     return fn(ctx.conn)
 
 
+def _auth_method(ctx: SetupContext) -> str:
+    return str(getattr(ctx.settings, "auth_method", "") or "smb").strip().lower()
+
+
+def _configured_admins(ctx: SetupContext) -> list[str]:
+    """Who can administer this dashboard, from whichever source decides it.
+
+    Exactly `auth.is_admin`'s two sources, read in its order: DASH_ADMIN_USERS
+    is the break-glass list on EVERY auth method, and under
+    DASH_AUTH_METHOD=local a `role='admin'` row counts as well."""
+    names = {str(u).strip().lower() for u in getattr(ctx.settings, "admin_users", ()) or ()}
+    names.discard("")
+    if _auth_method(ctx) == "local":
+        from . import local_users
+
+        try:
+            names.update(
+                u["username"] for u in local_users.list_users(ctx.conn)
+                if u.get("role") == "admin" and not u.get("disabled")
+            )
+        except sqlite3.Error:       # a pre-v17 database has no users table
+            pass
+    return sorted(names)
+
+
 def _check_admin(ctx: SetupContext) -> TaskState:
+    """Whether SOMEBODY can administer this dashboard -- which is not the same
+    question as "does a LOCAL account exist".
+
+    Until 2026-08-18 it only ever asked the local-accounts probe, so on a site
+    that authenticates admins against the NAS (`DASH_AUTH_METHOD=smb`, every
+    deployment in the field) it reported "awaiting identity module" forever
+    and held the whole `Done` step hostage behind a step that site will never
+    take. The wizard's step 2 exists to get a first admin onto a dashboard
+    with no other way in; where a NAS or an IdP plus DASH_ADMIN_USERS already
+    answer that, the step is satisfied, not pending.
+
+    Order: the identity probe first (it is the seam WP C's module plugs into
+    and the one this suite drives), then whatever `DASH_AUTH_METHOD` says.
+    """
     status = probe_admin_status(ctx)
-    if status is None:
-        return TaskState(status="todo", detail="awaiting identity module")
-    if status.get("users_exist"):
-        return TaskState(status="ok", detail="an admin account exists")
-    return TaskState(status="todo", detail="no admin account yet")
+    if status is not None:
+        return _admin_state_from_probe(ctx, status)
+
+    method = _auth_method(ctx)
+    admins = _configured_admins(ctx)
+    if method == "local":
+        # Only the accounts table can answer here. A DASH_ADMIN_USERS entry is
+        # NOT enough: under local login `auth.verify_credentials` needs a row
+        # with a password hash, so an ok on the strength of the env var alone
+        # would report a dashboard nobody can sign in to as set up.
+        #
+        # This fallback deliberately stays OUT of probe_admin_status, which
+        # setup_routes.first_run_open also reads: teaching that one about
+        # local_users would swing the anonymous first-run window open on
+        # deployments where it is currently, correctly, shut.
+        from . import local_users
+
+        try:
+            exists = local_users.any_users_exist(ctx.conn)
+        except sqlite3.Error:
+            return TaskState(status="todo", detail="awaiting identity module")
+        return _admin_state_from_probe(ctx, {"users_exist": exists})
+    if admins:
+        kind = str(getattr(ctx.settings, "nas_kind", "") or "truenas").strip().lower()
+        source = ("your identity provider (oidc)" if method == "oidc"
+                  else f"NAS accounts ({kind})")
+        return TaskState(status="ok", detail=f"admins are {source}: {', '.join(admins)}")
+    if method == "oidc" and str(getattr(ctx.settings, "oidc_admin_claim", "") or ""):
+        return TaskState(
+            status="ok",
+            detail="admins come from your identity provider's "
+                   f"{ctx.settings.oidc_admin_claim} claim",
+        )
+    return TaskState(
+        status="todo",
+        detail=f"no admin is configured for {method} login: set DASH_ADMIN_USERS "
+               "to the NAS account(s) that may administer this dashboard, then redeploy",
+    )
+
+
+def _admin_state_from_probe(ctx: SetupContext, status: dict[str, Any]) -> TaskState:
+    if not status.get("users_exist"):
+        return TaskState(status="todo", detail="no admin account yet")
+    admins = _configured_admins(ctx)
+    detail = f"admin account: {', '.join(admins)}" if admins else "an admin account exists"
+    return TaskState(status="ok", detail=detail)
 
 
 register(Task(
@@ -583,25 +674,444 @@ register(Task(
 ))
 
 
-# ---------------------------------------------------------- WP B/C/F/G stubs
+# ------------------------------------------------------------------ tailnet
 #
-# Registered now so /setup's page shape (the linear checklist, §3.5) is
-# complete today; each work package REPLACES its entry (setup_engine.replace)
-# instead of editing this file, once it lands. optional=True: none of these
-# gate the wizard finishing, matching the plan's "connect to your NAS is
-# optional" / "invites/software are day-2, not day-1" framing (§3.2, §5).
+# WP B/C/F/G registered PLACEHOLDERS here until 2026-08-18 ("not implemented
+# in this build", optional=True) so /setup's page shape was complete before
+# their work packages landed. A shipped product must not say that to a
+# customer, so the five are implemented here, in the ONE registry file,
+# rather than as five modules with one function each: every one of them is
+# the same shape as `storage`/`secrets`/`syncthing` above -- look at the
+# world, report, change nothing -- and `replace()` is still there for the day
+# WP B owns a real tailscale module and wants this entry back.
+#
+# They stay optional=True and skippable: none of them gates a working fleet
+# (sections 3.2 and 5 -- "connect to your NAS is optional", "invites/software
+# are day-2"), and `done` must not wait on a customer's tailnet.
 
-def _not_implemented(_ctx: SetupContext) -> TaskState:
-    return TaskState(status="todo", detail="not implemented in this build")
+_TAILNET_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+# The doc that tells an admin how this dashboard gets a tailnet address:
+# INSTALL.md's "Tailscale Serve is the only supported way to publish it with
+# TLS" for a NAS deployment, APPLIANCE_INSTALL.md step 4 for the bundled
+# sidecar. Named in the detail rather than linked -- these strings land in a
+# table cell and in an API response.
+_TAILNET_DOC = "docs/INSTALL.md"
+_TAILNET_APPLIANCE_DOC = "docs/APPLIANCE_INSTALL.md step 4"
+
+def _one_line(value: Any, limit: int = 160) -> str:
+    """Anything an exception or a NAS says, as one line that fits a table
+    cell -- a multi-line requests error in a `detail` breaks the checklist's
+    layout and tells an admin nothing its first line did not."""
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-for _id, _title, _description in (
-    ("tailnet", "Connect to your tailnet", "Sign this node into your Tailscale network."),
-    ("nas_connect", "Connect to your NAS (optional)", "One-time admin credential for snapshots and SMB users."),
-    ("snapshots", "Protect your data", "Schedule NAS snapshots or export a /data backup."),
-    ("editors", "Editors", "Invite your first editor."),
-    ("software", "Software for editors", "Publish the current companion build."),
-):
-    register(Task(id=_id, title=_title, description=_description,
-                  check=_not_implemented, run=None, optional=True))
-del _id, _title, _description
+def _is_tailnet_address(host: str) -> bool:
+    """A `*.ts.net` MagicDNS name or a 100.64.0.0/10 CGNAT address -- the two
+    shapes a tailnet hands out. Anything else (a LAN IP, a public name) means
+    editors reach this dashboard some other way."""
+    host = str(host or "").strip().lower().rstrip(".")
+    if not host:
+        return False
+    if host.endswith(".ts.net"):
+        return True
+    try:
+        return ipaddress.ip_address(host) in _TAILNET_CGNAT
+    except ValueError:
+        return False
+
+
+def _published_dashboard_url(ctx: SetupContext) -> str:
+    from . import site_store
+
+    try:
+        return str(site_store.resolved_manifest(ctx.conn, ctx.settings).get("dashboard_url") or "")
+    except Exception:                                                 # noqa: BLE001
+        return str(getattr(ctx.settings, "site_dashboard_url", "") or "")
+
+
+def _check_tailnet(ctx: SetupContext) -> TaskState:
+    """Two sources, in order of authority: the bundled Tailscale node's own
+    LocalAPI (it knows whether it is signed in), then the URL this site
+    publishes to editors (which is what they actually type).
+
+    Neither is a network probe: the first is a unix socket on this container,
+    the second a string comparison. A setup check that dialled out would hang
+    the page on exactly the deployments that are not on a tailnet yet."""
+    from . import tailscale_local
+
+    try:
+        node = tailscale_local.summarise(tailscale_local.status())
+    except Exception as exc:                                          # noqa: BLE001
+        log.warning("tailnet check: LocalAPI read failed: %s", exc)
+        node = None
+    if node:
+        state = node["backend_state"] or "unknown"
+        if state == "Running":
+            name = node["dns_name"] or (node["ips"][0] if node["ips"] else "")
+            return TaskState(
+                status="ok",
+                detail=(f"the bundled Tailscale node is signed in as {name}" if name
+                        else "the bundled Tailscale node is signed in"),
+            )
+        if node["auth_url"]:
+            return TaskState(
+                status="todo",
+                detail=f"this node is not signed in yet ({state}): open {node['auth_url']} "
+                       "to add it to your tailnet",
+            )
+        return TaskState(
+            status="todo",
+            detail=f"the bundled Tailscale node is {state}, with no sign-in link yet: see "
+                   f"{_TAILNET_APPLIANCE_DOC}",
+        )
+
+    url = _published_dashboard_url(ctx)
+    if not url:
+        return TaskState(
+            status="todo",
+            detail="no dashboard URL is published to editors yet: set dashboard_url on the "
+                   f"Settings page, or publish this dashboard with Tailscale Serve ({_TAILNET_DOC})",
+        )
+    host = urlsplit(url).hostname or url
+    if _is_tailnet_address(host):
+        return TaskState(status="ok",
+                         detail=f"editors reach this dashboard at {url}, a tailnet address")
+    return TaskState(
+        status="todo",
+        detail=f"the dashboard is reached at {url}, which is not a tailnet address. Publish it "
+               f"with Tailscale Serve so editors need no VPN of their own ({_TAILNET_DOC})",
+    )
+
+
+register(Task(
+    id="tailnet", title="Connect to your tailnet",
+    description="Sign this node into your Tailscale network.",
+    check=_check_tailnet, run=None, optional=True,
+))
+
+
+# -------------------------------------------------------------- nas_connect
+
+# Three seconds, hard: these run while an admin watches a page, and both NAS
+# backends default to a timeout chosen for provisioning calls (30s TrueNAS,
+# 15s DSM), not for a status check.
+NAS_PROBE_TIMEOUT = 3.0
+
+
+def _nas_kind(ctx: SetupContext) -> str:
+    return str(getattr(ctx.settings, "nas_kind", "") or "truenas").strip().lower()
+
+
+def _nas_credential_key(kind: str) -> str:
+    """The env var that is missing, by name. TrueNAS takes a scoped API key
+    (COMMERCIAL_READINESS.md item 6 put the admin password out of the
+    container); DSM has no API-key concept and keeps the password."""
+    return "DASH_NAS_API_KEY (or TRUENAS_API_KEY)" if kind == "truenas" else "DASH_NAS_PW"
+
+
+def _nas_client(ctx: SetupContext):
+    """(client, refusal). Never raises: an unknown DASH_NAS_KIND is a typo an
+    admin can fix, not a traceback on the wizard."""
+    from .nas import NasError, factory
+
+    kind = _nas_kind(ctx)
+    if not factory.nas_configured(ctx.settings):
+        return None, TaskState(
+            status="todo",
+            detail="no NAS credential in this container: set DASH_NAS_HOST and "
+                   f"{_nas_credential_key(kind)}, then redeploy",
+        )
+    try:
+        client = factory.make_nas_client(ctx.settings)
+    except NasError as exc:
+        return None, TaskState(status="fail", detail=_one_line(exc))
+    try:
+        client.timeout = min(
+            float(getattr(client, "timeout", NAS_PROBE_TIMEOUT) or NAS_PROBE_TIMEOUT),
+            NAS_PROBE_TIMEOUT,
+        )
+    except (TypeError, ValueError):
+        pass
+    return client, None
+
+
+def _close_quietly(client) -> None:
+    """SynologyClient holds a DSM session and an SSH channel; TrueNASClient
+    has no close(). Optional, like every other per-backend capability."""
+    from .nas import capability
+
+    closer = capability(client, "close")
+    if closer is None:
+        return
+    try:
+        closer()
+    except Exception:                                                 # noqa: BLE001
+        pass
+
+
+def _check_nas_connect(ctx: SetupContext) -> TaskState:
+    """Reachability, plus what answered where the backend can say. Optional by
+    design (section 3.2): a fleet syncs perfectly with no NAS credential at
+    all, and this buys snapshot scheduling and SMB browsing users."""
+    from .nas import NasError, capability
+
+    kind = _nas_kind(ctx)
+    where = (str(getattr(ctx.settings, "nas_host", "") or "")
+             or str(getattr(ctx.settings, "nas_base_url", "") or "") or "the NAS")
+    client, refusal = _nas_client(ctx)
+    if refusal is not None:
+        return refusal
+    try:
+        try:
+            client.ping()
+        except NasError as exc:
+            return TaskState(
+                status="fail",
+                detail=f"{kind} at {where} refused the credential in this container: "
+                       f"{_one_line(exc, 100)}",
+            )
+        except Exception as exc:                                      # noqa: BLE001
+            return TaskState(status="fail", detail=f"{kind} at {where}: {_one_line(exc, 100)}")
+        info_fn = capability(client, "system_info")
+        if info_fn is not None:
+            try:
+                info = info_fn() or {}
+                version = str(info.get("version") or "")
+                hostname = str(info.get("hostname") or "") or where
+                if version:
+                    return TaskState(status="ok",
+                                     detail=f"{kind} {version} at {hostname} answered")
+            except Exception as exc:                                  # noqa: BLE001
+                # Reachable is the answer to THIS task. A scoped key that
+                # cannot read /system/info is not a failure of it.
+                log.info("nas_connect: system_info unavailable: %s", exc)
+        return TaskState(status="ok", detail=f"{kind} at {where} answered")
+    finally:
+        _close_quietly(client)
+
+
+register(Task(
+    id="nas_connect", title="Connect to your NAS (optional)",
+    description="One-time admin credential for snapshots and SMB users.",
+    check=_check_nas_connect, run=None, optional=True,
+))
+
+
+# ---------------------------------------------------------------- snapshots
+
+# What "protected" means here, and it is a floor: BACKUP_RESTORE.md section 1
+# schedules hourly snapshots kept a day and dailies kept a month. A /data
+# backup older than a week is not a backup of anything that happened this
+# week.
+BACKUP_MAX_AGE_DAYS = 7
+
+
+def _nas_snapshot_tasks(ctx: SetupContext) -> tuple[list[dict[str, Any]] | None, str]:
+    """(tasks, why-not). `None` means the question could not be ASKED, which
+    is not the same answer as "there are none"."""
+    from .nas import NasError, capability
+
+    kind = _nas_kind(ctx)
+    client, refusal = _nas_client(ctx)
+    if refusal is not None:
+        return None, "no NAS credential is configured"
+    try:
+        lister = capability(client, "list_snapshot_tasks")
+        if lister is None:
+            # DSM: TAKING a share snapshot is an API call, SCHEDULING one is
+            # the Snapshot Replication package, which has no supported CLI or
+            # API (BACKUP_RESTORE.md section 2, "Synology").
+            return None, f"{kind} snapshot schedules cannot be read over its API"
+        try:
+            return list(lister()), ""
+        except NasError as exc:
+            return None, _one_line(exc, 80)
+        except Exception as exc:                                      # noqa: BLE001
+            return None, _one_line(exc, 80)
+    finally:
+        _close_quietly(client)
+
+
+def _recent_backup(ctx: SetupContext) -> dict[str, Any] | None:
+    """The newest `/data/backups/<ts>-<label>/` younger than a week, if any.
+    `dashboard_update.backup_databases` writes them today (before a code
+    update); WP G's export page writes the same shape."""
+    from . import dashboard_update
+    from . import db as dbmod
+
+    try:
+        backups = dashboard_update.list_backups(ctx.settings)
+    except Exception as exc:                                          # noqa: BLE001
+        log.info("snapshots check: could not list /data backups: %s", exc)
+        return None
+    cutoff = datetime.now(timezone.utc) - timedelta(days=BACKUP_MAX_AGE_DAYS)
+    for entry in backups:
+        raw = str(entry.get("created_at") or "")
+        if not raw:
+            continue
+        try:
+            when = dbmod.parse_iso(raw)
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when >= cutoff:
+            return entry
+    return None
+
+
+def _check_snapshots(ctx: SetupContext) -> TaskState:
+    tasks, why = _nas_snapshot_tasks(ctx)
+    backup = _recent_backup(ctx)
+    if tasks:
+        detail = f"{len(tasks)} periodic snapshot task(s) on the NAS"
+        if backup:
+            detail += f"; newest /data backup {backup.get('name')}"
+        return TaskState(status="ok", detail=detail)
+    if backup:
+        return TaskState(
+            status="ok",
+            detail=f"/data backup {backup.get('name')} is under {BACKUP_MAX_AGE_DAYS} days old, "
+                   f"but there is no NAS snapshot schedule ({why or 'none found'})",
+        )
+    return TaskState(
+        status="todo",
+        detail=f"no NAS snapshot schedule ({why or 'none found'}) and no /data backup in the "
+               f"last {BACKUP_MAX_AGE_DAYS} days: docs/BACKUP_RESTORE.md section 2",
+    )
+
+
+register(Task(
+    id="snapshots", title="Protect your data",
+    description="Schedule NAS snapshots or export a /data backup.",
+    check=_check_snapshots, run=None, optional=True,
+))
+
+
+# ------------------------------------------------------------------ editors
+
+def _known_editors(ctx: SetupContext) -> list[str]:
+    """Everyone this dashboard has POSITIVE evidence of, from the two places
+    an account can exist: `db.known_editor_usernames` (a report under a signed
+    identity, an admin creating an account, a project tick, the share seed)
+    and, under local login, the accounts table itself."""
+    from . import db as dbmod
+
+    names: set[str] = set()
+    try:
+        names |= {str(n).strip().lower() for n in dbmod.known_editor_usernames(ctx.conn)}
+    except sqlite3.Error as exc:
+        log.info("editors check: known_editor_usernames failed: %s", exc)
+    if _auth_method(ctx) == "local":
+        from . import local_users
+
+        try:
+            names |= {
+                str(u["username"]).strip().lower()
+                for u in local_users.list_users(ctx.conn)
+                if u.get("role") == "editor" and not u.get("disabled")
+            }
+        except sqlite3.Error:
+            pass
+    names.discard("")
+    return sorted(names)
+
+
+def _check_editors(ctx: SetupContext) -> TaskState:
+    names = _known_editors(ctx)
+    if not names:
+        return TaskState(status="todo", detail="no editors yet: Users page, add one")
+    shown = ", ".join(names[:5])
+    if len(names) > 5:
+        shown += f", and {len(names) - 5} more"
+    return TaskState(status="ok", detail=f"{len(names)} editor(s): {shown}")
+
+
+register(Task(
+    id="editors", title="Editors",
+    description="Add your first editor.",
+    check=_check_editors, run=None, optional=True,
+))
+
+
+# ----------------------------------------------------------------- software
+
+# Both halves of the fleet. A studio with no Mac still sees "macos: none
+# published" rather than a green tick that becomes a lie the day someone
+# joins on one -- and the Mac build is exactly the one that gets forgotten,
+# because it has to be made ON a Mac (RELEASE.md).
+SOFTWARE_PLATFORMS = ("windows", "macos")
+
+
+def _current_companions(ctx: SetupContext) -> dict[str, str]:
+    from . import db as dbmod
+
+    out: dict[str, str] = {}
+    for platform in SOFTWARE_PLATFORMS:
+        row = dbmod.get_current_package(ctx.conn, platform, "companion")
+        out[platform] = str(row["version"]) if row is not None else ""
+    return out
+
+
+def _check_software(ctx: SetupContext) -> TaskState:
+    try:
+        current = _current_companions(ctx)
+    except sqlite3.Error as exc:
+        return TaskState(status="fail",
+                         detail=f"could not read the packages table: {_one_line(exc)}")
+    published = [p for p, v in current.items() if v]
+    if not published:
+        return TaskState(
+            status="todo",
+            detail="no companion build is current for any platform: publish one on the Users "
+                   "page, under PUBLISHED PACKAGES",
+        )
+    parts = [f"{p} {v} current" if v else f"{p}: none published" for p, v in current.items()]
+    # warn, not ok: half a fleet cannot upgrade itself. Still optional, so it
+    # never blocks Done.
+    status = "ok" if len(published) == len(current) else "warn"
+    return TaskState(status=status, detail=", ".join(parts))
+
+
+def _run_software(ctx: SetupContext) -> TaskState:
+    """[ CHECK NOW ] against the vendor feed, then re-report. The feed client
+    applies this site's policy (manual/stage/current) itself and never raises
+    -- see release_feed.check_now."""
+    state = _check_software(ctx)
+    if not str(getattr(ctx.settings, "release_feed_url", "") or ""):
+        return TaskState(
+            status=state.status,
+            detail=state.detail + "; no vendor feed is configured (DASH_RELEASE_FEED_URL), so "
+                                  "there is nothing to check for",
+        )
+    from . import release_feed
+
+    app_state = getattr(ctx.app, "state", None)
+    if app_state is None:
+        app_state = types.SimpleNamespace()
+    try:
+        result = release_feed.check_now(ctx.conn, ctx.settings, app_state)
+    except Exception as exc:                                          # noqa: BLE001
+        log.warning("software task: the feed check raised: %s", exc)
+        result = {"ok": False, "error": _one_line(exc)}
+    state = _check_software(ctx)
+    if not result.get("ok"):
+        return TaskState(
+            status="warn" if state.status == "ok" else state.status,
+            detail=f"{state.detail}; the vendor feed check failed: "
+                   f"{_one_line(result.get('error') or 'unknown error', 80)}",
+        )
+    applied = [str(a) for a in (result.get("applied") or [])]
+    suffix = (f"; published from the vendor feed: {', '.join(applied)}" if applied
+              else "; the vendor feed has nothing this dashboard does not already hold")
+    return TaskState(status=state.status, detail=state.detail + suffix)
+
+
+register(Task(
+    id="software", title="Software for editors",
+    description="Publish the current companion build for Windows and macOS.",
+    check=_check_software, run=_run_software, optional=True,
+    run_label="CHECK NOW",
+))

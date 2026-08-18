@@ -382,6 +382,37 @@ def test_paramiko_is_not_a_core_dependency_of_the_dashboard():
                for d in pyproject["project"]["optional-dependencies"]["synology"])
 
 
+def test_optional_capabilities_are_looked_up_by_name_not_required():
+    """`system_info` and `list_snapshot_tasks` are TrueNAS-only: DSM has no
+    API for a snapshot SCHEDULE at all (BACKUP_RESTORE.md section 2). base.py's
+    rule is that a backend must not have to carry a method whose whole job is
+    to refuse, so they are capabilities, not Protocol members -- and every
+    backend without them is still a NasBackend (2026-08-18)."""
+    from ccsync_dashboard.nas import capability
+
+    truenas = TrueNASClient("h", "u", "p")
+    for backend in (SynologyClient("h", "u", "p", False), FakeSynology()):
+        assert isinstance(backend, NasBackend)
+        assert capability(backend, "list_snapshot_tasks") is None
+        assert capability(backend, "system_info") is None
+    assert capability(truenas, "list_snapshot_tasks") is not None
+    assert capability(truenas, "system_info") is not None
+
+
+def test_truenas_reads_system_info_and_periodic_snapshot_tasks():
+    from fake_truenas import FakeTrueNAS
+
+    fake = FakeTrueNAS().start()
+    try:
+        fake.state["snapshot_tasks"] = [{"id": 1, "dataset": "tank/tree"}]
+        client = TrueNASClient("nas.example", "u", "p", base_url=fake.base_url)
+        assert client.system_info()["hostname"] == "fake-nas"
+        assert client.system_info()["version"].startswith("TrueNAS")
+        assert [t["dataset"] for t in client.list_snapshot_tasks()] == ["tank/tree"]
+    finally:
+        fake.stop()
+
+
 def test_every_backend_and_fake_answers_the_whole_protocol():
     for backend in (TrueNASClient("h", "u", "p"), SynologyClient("h", "u", "p", False),
                     FakeSynology()):

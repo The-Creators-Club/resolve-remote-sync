@@ -158,7 +158,8 @@
       var actions = tr.querySelector(".task-actions");
       actions.appendChild(actionButton("CHECK", function () { return taskAction(task.id, "check"); }));
       if (task.can_run) {
-        actions.appendChild(actionButton("DO IT", function () { return taskAction(task.id, "run"); }));
+        actions.appendChild(actionButton(task.run_label || "DO IT",
+                                         function () { return taskAction(task.id, "run"); }));
       }
       if (task.optional && task.status !== "skipped") {
         actions.appendChild(actionButton("SKIP", function () { return taskAction(task.id, "skip"); }));

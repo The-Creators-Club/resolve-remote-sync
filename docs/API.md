@@ -630,7 +630,7 @@ C adds; until it lands, every route below is admin-only, fail-closed — see
 
 | Route | What |
 |---|---|
-| `GET /setup/tasks` | every registered task: `id, title, description, optional, can_run, status, detail, at`, plus `outstanding_required` (task ids gating the wizard) |
+| `GET /setup/tasks` | every registered task: `id, title, description, optional, can_run, run_label, status, detail, at`, plus `outstanding_required` (task ids gating the wizard) |
 | `POST /setup/tasks/{id}/check` | re-inspect the world, save and return the new state. Runs off the event loop (`run_in_threadpool`) |
 | `POST /setup/tasks/{id}/run` | perform the task's action. `400` if it has none (e.g. `admin` — account creation is `POST /setup/admin`, WP C's route, not this one) |
 | `POST /setup/tasks/{id}/skip` | `400` unless the task is `optional` |
@@ -641,6 +641,29 @@ One task, one id, one lock: two concurrent `run` calls for the same task id
 serialise; different task ids never block each other. Every task's state
 survives a container restart (`setup_tasks` table) — the wizard resumes,
 never restarts.
+
+`run_label` (added 2026-08-18) is what the button says: `DO IT` for a task
+that changes something, `CHECK NOW` for `software`, whose action is a poll of
+the vendor feed. Clients render it and need not know the default.
+
+**The eleven tasks and what each `check` looks at** (`setup_engine.py`). Every
+one of them catches everything and answers `todo`/`warn`/`fail` with one line
+naming the next action; a check never raises past `run_check`:
+
+| id | required? | `ok` when |
+|---|---|---|
+| `eula` | yes | the shipped `EULA.md` marker version has been accepted (or no EULA is in this build) |
+| `admin` | yes | somebody can administer this dashboard: under `DASH_AUTH_METHOD=local` a local admin row exists; otherwise `DASH_ADMIN_USERS` (or an OIDC admin claim) names one. **A NAS-auth site is `ok` with no local account at all** |
+| `studio` | yes | `org_name`, `tree_name`, `canonical_prefix` and `template_folders` are all set in the site manifest |
+| `storage` | yes | the tree is mounted and the shared asset folders exist |
+| `secrets` | yes | all five secrets are in the environment or `<data>/secrets/` |
+| `syncthing` | yes | the configured Syncthing answers with a device id |
+| `done` | yes | every required task above is `ok` |
+| `tailnet` | no | the bundled Tailscale node's LocalAPI (`TS_SOCKET`, read only if the socket file exists) reports `BackendState=Running`; else the published `dashboard_url` is a `*.ts.net` name or a `100.64.0.0/10` address |
+| `nas_connect` | no | a NAS credential is configured and the NAS answers within 3s (detail = kind, and version/hostname where the backend can say) |
+| `snapshots` | no | the NAS holds a periodic snapshot task (TrueNAS `pool.snapshottask`; DSM cannot be asked, see `BACKUP_RESTORE.md`) **or** `/data/backups/` holds an export under 7 days old |
+| `editors` | no | at least one editor is known (`known_editors` and, under local login, `role='editor'` accounts) |
+| `software` | no | a **current** companion package exists for `windows` **and** `macos`; `warn` for one of the two |
 
 ---
 

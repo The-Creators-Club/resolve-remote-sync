@@ -33,6 +33,23 @@ class NasError(Exception):
     a backend-specific subclass (TrueNASError) is still one of these."""
 
 
+def capability(client: Any, name: str):
+    """An OPTIONAL backend method, or None when this backend has none.
+
+    The Protocol below is the surface EVERY backend must answer. Some
+    questions only one NAS can answer at all -- reading periodic snapshot
+    tasks is a TrueNAS API call with no DSM equivalent (BACKUP_RESTORE.md
+    section 2: DSM's scheduling lives in the Snapshot Replication package,
+    which has no supported CLI) -- and putting those on the Protocol would
+    force every future backend to carry a method whose whole job is to
+    refuse, which is exactly what the Protocol docstring below says it will
+    not do. So they are looked up by name instead, and "absent" means "this
+    NAS cannot be asked", never "the answer is no" (2026-08-18, the setup
+    wizard's NAS-backed checks).
+    """
+    return getattr(client, name, None)
+
+
 def is_valid_username(name: str) -> bool:
     return bool(USERNAME_RE.match(name))
 

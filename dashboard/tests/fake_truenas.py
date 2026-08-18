@@ -30,6 +30,13 @@ def default_state() -> dict:
         "block_sshpubkey_usernames": set(),
         # jobs to fail on purpose, by id, for negative-path tests
         "fail_setperm": False,
+        # GET /system/info and GET /pool/snapshottask -- the two READ-ONLY
+        # routes the setup wizard's "Connect to your NAS" / "Protect your
+        # data" checks use (2026-08-18). Shapes trimmed to the fields those
+        # checks read; `snapshot_tasks` starts empty, which is the state of a
+        # NAS nobody has run server/setup_snapshots.py against.
+        "system_info": {"version": "TrueNAS-SCALE-25.10.4", "hostname": "fake-nas"},
+        "snapshot_tasks": [],
     }
 
 
@@ -67,6 +74,10 @@ class _Handler(BaseHTTPRequestHandler):
             uid = int(path.rsplit("/", 1)[1])
             row = next((u for u in state["users"] if u["id"] == uid), None)
             self._json(row if row else {"error": "no such user"}, status=200 if row else 404)
+        elif path == "/system/info":
+            self._json(state["system_info"])
+        elif path == "/pool/snapshottask":
+            self._json(state["snapshot_tasks"])
         elif path == "/core/get_jobs":
             job_id = int(q.get("id"))
             job = state["jobs"].get(job_id)

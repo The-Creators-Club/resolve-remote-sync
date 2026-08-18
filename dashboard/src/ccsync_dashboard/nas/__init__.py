@@ -15,6 +15,7 @@ from .base import (
     NasError,
     SSH_KEY_PREFIXES,
     USERNAME_RE,
+    capability,
     is_valid_username,
     looks_like_ssh_pubkey,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "SynologyClient",
     "TrueNASClient",
     "TrueNASError",
+    "capability",
     "is_valid_username",
     "looks_like_ssh_pubkey",
     "make_nas_client",

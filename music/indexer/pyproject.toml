@@ -16,11 +16,16 @@ dependencies = [
     "librosa>=0.11",
     "pyloudnorm>=0.2",
     "soundfile>=0.13",
-    # export_text_encoder.py only. onnx writes the graph; onnxruntime is here
-    # because the exporter refuses to ship an artefact it has not loaded the
-    # way the container will and compared to the full ClapModel. It is a
-    # 19 MB wheel and it is the ONLY new dependency the web half gains --
-    # see that script's docstring for the ONNX-vs-torch numbers.
+    # The two exporters only (export_text_encoder.py, and since 2026-08-18
+    # export_audio_encoder.py). onnx writes the graph; onnxruntime is here
+    # because neither exporter will ship an artefact it has not loaded the way
+    # its consumer will -- the container for the text tower, an editor's
+    # companion for the audio tower -- and compared to the full ClapModel. It
+    # is a 19 MB wheel and it is the ONLY new dependency the web half gains --
+    # see those scripts' docstrings for the ONNX-vs-torch numbers.
+    # onnxconverter-common is NOT a dependency: the fp16 copy is optional and
+    # the exporter falls back to onnxruntime's own converter, then says it
+    # skipped.
     "onnx>=1.16",
     "onnxruntime>=1.17",
 ]

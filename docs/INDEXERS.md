@@ -33,6 +33,8 @@ fitting on the NAS.
 | b-roll: `embed` (fastembed, ONNX) | GPU host | — (CPU is fine) | `broll.db` |
 | music: CLAP embed / tag / peaks / debias | **GPU host only** — an RTX-class card; ~9 min for a full 376-track rebuild | torch + CUDA, ffmpeg, the library on a local mount | `music.db` |
 | music: queue drain | GPU host, against a copy of the NAS index | as above | a result bundle |
+| music: CLAP **audio** embedding at ingest | the editor's own machine, in the companion | onnxruntime + the exported audio tower (280 MB, `export_audio_encoder.py`); **no GPU** — 93 ms per 10 s window on CPU | an embedding uploaded to the NAS; the container turns it into tags/axes |
+| music: export the audio tower to ONNX | GPU host, once per model version | torch + transformers, the library mounted for the check corpus | `music-clap-audio-<ver>.onnx` + `.params.json` → the release feed |
 | **anything served to a browser** | **NAS container** | nothing but CPU | — |
 
 ## Required paths: nothing is guessed any more
@@ -67,6 +69,8 @@ mounts its config read-only, so "edit the file" is not always available.
 | the library | `MUSIC_LIBRARY_ROOT` | where this host has the music share mounted |
 | ffmpeg | `FFMPEG` / `FFPROBE`, else `PATH` | required; `require_tools()` refuses up front rather than failing per track |
 | CLAP weights | `MUSIC_MODEL_CACHE` (or `HF_HOME`) | ~600 MB |
+| the exported audio tower | `MUSIC_AUDIO_ENCODER_DIR` | where `export_audio_encoder.py` writes; default `<MUSIC_DATA_ROOT>/audio_encoder`. **Not shipped to the NAS** — see below |
+| the exported text tower | `MUSIC_TEXT_ENCODER_DIR` | where `export_text_encoder.py` writes; default `<MUSIC_DATA_ROOT>/text_encoder`. This one **is** shipped: the container embeds every query with it |
 
 ## The faster-whisper environment is in the repo now
 
@@ -221,6 +225,63 @@ closed only if the live journal still agrees about its `rel_path` and
 is not touched, and is still `pending` afterwards. `python -m musicweb.drain
 inspect drain.db` shows what a bundle holds. The design and its three safety
 properties are in `music/web/musicweb/drain.py`.
+
+## The CLAP audio tower is an artefact now (`export_audio_encoder.py`)
+
+*2026-08-18, `docs/MUSIC_INGEST_PLAN.md` step 1.* The drain above is the
+fallback path, not the destination. Music ingest is moving to "the indexing
+gets pinged to the editor's companion": the machine the files were dropped on
+embeds them, and the NAS turns the embedding into tags. Neither end may grow a
+torch dependency — the container by the rule at the top of this document, the
+frozen companion because torch is ~2 GB — so the audio half of CLAP is
+exported to ONNX exactly as the text half already was:
+
+```powershell
+cd music\indexer
+python export_audio_encoder.py --db ..\web\data\music.db   # export + verify + report
+python export_audio_encoder.py --check                     # re-verify an existing one
+python export_audio_encoder.py --print-catalogue           # the music_models.py block
+```
+
+It writes four files into `MUSIC_AUDIO_ENCODER_DIR`:
+
+| file | what |
+|---|---|
+| `music-clap-audio-<ver>.onnx` | `audio_model` + `audio_projection` + the L2 normalise, fp32 |
+| `music-clap-audio-<ver>.params.json` | the feature-extractor parameters, read off the checkpoint's own `ClapFeatureExtractor` — sample rate, window length, mel geometry, log-mel scaling, padding/truncation rule, pooling, graph input/output names |
+| `music-clap-audio-<ver>.fp16.onnx` | optional half-precision copy; measured, not shipped (below) |
+| `report.md` | what was measured, on what audio, with which torch/transformers |
+
+**These do not go to the NAS.** `music/web/DEPLOY.md` ships `data/` item by
+item and this is not one of the items: the container never embeds audio. They
+go to the vendor release feed (`docs/RELEASE_FEED.md`) beside the companion
+binaries, and `music/indexer/music_models.py` is the catalogue the companion's
+sidecar verifies the download against (sha256 + size per file). The exporter
+prints that block; paste it in after every export.
+
+Three rules the code enforces rather than documents:
+
+- **Nothing is published until it matches torch.** Cosine >= 0.999 against
+  `ClapModel.get_audio_features` on every window of a real-library check
+  corpus *and* on every mean-pooled track vector, with the same
+  stage-verify-swap as the text exporter (MUSIC-1). The 2026-08-18 export
+  measured min 0.9999999 over 80 windows of 20 tracks.
+- **`mel_numpy.py` is bit-identical to `ClapFeatureExtractor`**, not merely
+  close — the export refuses on any difference, and
+  `tests/test_mel_numpy.py::test_bit_parity_with_transformers` repeats it on 20
+  library windows wherever transformers is installed. A slightly different
+  spectrogram yields a *plausible* embedding of the wrong audio, which no
+  cosine threshold downstream can catch.
+- **A change of weights, graph or feature parameters is a version bump** in
+  `music_models.py`, because the version is in the filename and everything
+  already ingested would otherwise sit in a different space from everything new.
+
+fp16 is exported and measured because it halves the download (141.0 MB vs
+280.0 MB) but is *not* what the catalogue pins: cosine drops to 0.99997, and
+onnxruntime's CPU provider — which is what an editor laptop with no usable GPU
+EP actually runs — executes fp16 by inserting casts. The numbers are in
+`report.md`; revisit them with a measurement from a machine in the field, not
+with instinct.
 
 ## See also
 

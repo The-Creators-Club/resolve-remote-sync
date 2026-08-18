@@ -110,7 +110,11 @@ PROVIDERS: dict[str, ProviderSpec] = {
     CLAUDE_CODE: ProviderSpec(
         name=CLAUDE_CODE, label="Claude Code", kind="cli",
         binary="claude", path_setting="ai_claude_code_path",
-        login_command="claude   (then /login)",
+        # Verified against Claude Code 2.1.234 (2026-08-18). It used to say
+        # "claude   (then /login)", which is the in-session slash command and
+        # needs a terminal somebody is sitting at; this one is the direct
+        # subcommand, and it is what the wizard drives under a pty.
+        login_command="claude auth login",
         # Same env var the ytdl app reads (they share one container
         # environment), so one correction fixes both the probe and the real
         # call rather than leaving them disagreeing about how to invoke a CLI

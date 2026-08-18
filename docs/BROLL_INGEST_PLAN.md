@@ -25,6 +25,19 @@ override; pauses when the editor returns). Models = the local Qwen3-VL tiers
 `broll/docs/indexing-local.md`, chosen per site in Settings and published as
 `indexer.model_tier` in `GET /api/v1/site`.
 
+**Owner review, 2026-08-18 (supersedes the older wording below where they
+differ):** (a) **indexing takes precedence over proxy generation** — while a
+batch is crunching, `ProxyGenerator` is *blocked* (its existing `blocked_fn`
+seam; state "waiting: indexing b-roll first"), not the other way round;
+(b) the batch settings form carries a **run mode** beside the model tier:
+**Foreground** (runs now, ignores the idle and Resolve-open gates; free
+space / drive / model gates still apply) or **Only when idle** (the proxy
+generator's behaviour); "start now" becomes that choice; (c) if a batch is
+run on a machine whose GPU cannot fit the chosen tier, the companion refuses
+and **warns in the tray** (balloon + a menu line naming the VRAM: "Can't
+index b-roll: Best needs 12 GB VRAM, this GPU has 8 GB — choose Good") as
+well as in the page.
+
 Related: `broll/SPEC.md` (data layout, ingest API), `docs/LOOPBACK_API.md`,
 `docs/YTDL_LOCAL_DOWNLOAD.md` (the requester-first job model this copies),
 `docs/INDEXERS.md`, `docs/ZERO_TOUCH_PLAN.md`.
@@ -50,8 +63,8 @@ Three parties: **browser** (b-roll SPA under the dashboard) — **companion** (l
 1. **Drop / pick.** Drop zone on the b-roll page (music `wireDropzone` pattern) traverses folders (`webkitGetAsEntry`), builds a preview list with canvas thumbnails; or "Choose from this computer…" → `POST 127.0.0.1:8899/broll/ingest/pick` → native picker → real paths (index in place).
 2. **Prepare (companion).** `POST /broll/ingest/prepare` → staging dir inside `local_root` (`<local_root>/Assets/B-roll Archive/.ingest/<staging_id>/`, `loopback_guard.is_within` + `root_guard.probe_root`, free-space floor) → per-item upload slots. Dropped files stream to `PUT /broll/ingest/upload/{staging_id}/{item}` (octet-stream + `X-CCSync-Ingest` header ⇒ preflight ⇒ Origin allow-list; per-route cap = declared size; `.partial` → rename). A prepare thread ffprobes + xxh64-hashes every item; SPA polls `GET /broll/ingest/progress`.
 3. **Pre-check (server).** `POST ../api/ingest-batches/precheck {name,size,hash}` → per item `duplicate_of` (by `videos.hash`) and the **final allocated name** in the target shoot folder (collision-safe, `_2` rule of `build_archive.claim_name`).
-4. **Settings + Run.** Form: model tier (default from `../api/v1/site` `indexer.model_tier`; tiers the GPU cannot fit disabled with the reason), shoot name, keep sub-folders, upload originals (on), start now (off), transcription (disabled: phase 2). Run → `POST ../api/ingest-batches` (session; creates rows, state `queued`, returns `batch_uid`) → `POST /broll/ingest/run {batch_uid, staging_id, start_now}` → companion **claims** the batch on the fleet route, receives the manifest (video ids, share/rel_path, archive folder+stem, taxonomy, settings, lease), persists `~/.ccsync/state/broll_ingest.json`, answers 202. Run is also the consent moment: missing ffmpeg / llama-server / model → download starts (free-space checked, progress in tray + SPA; the SPA confirms the byte count first when a model must be fetched); the batch is `waiting-for-model` until verified.
-5. **Idle gate.** 15 s tick; order mirrors `proxy_gen._gate`: disabled → drive absent → paused → misconfigured → no ffmpeg → no model → nothing to do → user active (unless forced) → Resolve open → GPU busy (proxy generator encoding) → running. Editor returns → llama-server stopped (VRAM freed), in-flight ffmpeg killed (`.partial` discarded), item back to its last checkpoint. Heartbeat every 30 s; 410 = stop quietly.
+4. **Settings + Run.** Form: model tier (default from `../api/v1/site` `indexer.model_tier`; tiers the GPU cannot fit disabled with the reason), shoot name, keep sub-folders, upload originals (on), **run mode: Only when idle / Foreground** (default idle), transcription (disabled: phase 2). Run → `POST ../api/ingest-batches` (session; creates rows, state `queued`, returns `batch_uid`) → `POST /broll/ingest/run {batch_uid, staging_id, start_now}` → companion **claims** the batch on the fleet route, receives the manifest (video ids, share/rel_path, archive folder+stem, taxonomy, settings, lease), persists `~/.ccsync/state/broll_ingest.json`, answers 202. Run is also the consent moment: missing ffmpeg / llama-server / model → download starts (free-space checked, progress in tray + SPA; the SPA confirms the byte count first when a model must be fetched); the batch is `waiting-for-model` until verified.
+5. **Gate.** 15 s tick; order mirrors `proxy_gen._gate`: disabled → drive absent → paused → misconfigured → no ffmpeg → no model → tier does not fit this GPU (tray warning) → nothing to do → [idle mode only: user active → Resolve open] → running. While running, the proxy generator is blocked (`blocked_fn`), never the reverse. Editor returns → llama-server stopped (VRAM freed), in-flight ffmpeg killed (`.partial` discarded), item back to its last checkpoint. Heartbeat every 30 s; 410 = stop quietly.
 6. **Crunch per item** (checkpointed): proxy 540p (NVENC → CPU retry) → sprite + poster from the proxy → scene-detect + frames → describe (vendored `local_vlm.describe_video` against a companion-managed llama-server) → `POST …/items/{uid}/result` (server writes segments, computes `search_norm`, status `indexed`).
 7. **Upload** (separate thread, starts as each item finishes; pause toggle): `rclone copyto` up: `posters/{id}.jpg`, `sprites/{id}.jpg`, `<folder>/Proxy/<stem>.mp4`, originals last; `--stats 1s` JSON progress; then `POST …/items/{uid}/uploaded` → server stats each file, sets `archive_path`, `original_path`, status → `live`, bumps search generation. The finished preview is also placed at the local mirror path (`<local_root>/Assets/B-roll Archive/<archive_path>`) so "Send to Resolve" needs no fetch on this machine.
 8. **Live + visibility.** SPA Ingest panel polls `GET ../api/ingest-batches` (mine; all for admins); reporter section `broll_ingest` rides every tick → `machine_state` → fleet-grid chip; tray line + tooltip suffix + Advanced actions. Cancel/halt: dashboard `POST …/cancel` sets `cancel_requested` and expires the lease; the companion learns on its next heartbeat (410) or from `commands.broll_ingest` in the report reply.
@@ -188,7 +201,7 @@ CSRF: octet-stream PUTs lacking `X-CCSync-Ingest` are refused (415/403) unless t
 - Drop: window-level dragenter/over/leave/drop with a depth counter (music pattern); `webkitGetAsEntry`, directories via `reader.readEntries` looped until empty (Chrome ≤ 100 per call); `rel_dir` = `fullPath` minus top folder; filter by the shared video extension list; cap 2000.
 - Thumbnails for dropped Files: `<video muted preload=metadata>` → seek to `min(1, duration*0.1)` → canvas 160×90 → dataURL; two decoders at a time; undecodable formats show "no preview" until the companion thumb arrives. Picker path: rows from `{path,name,size,rel_dir}`, thumbs from `/broll/ingest/thumb`.
 - Prepare/upload: `PUT` two at a time via `XMLHttpRequest` (progress events); poll `progress` for hashes; then `precheck` → duplicates unticked by default ("already in the archive — clip #4127"), final names shown.
-- Form: tier (default from manifest; unfit tiers disabled with the reason), shoot name (default = top folder or `YYYY-MM-DD ingest`, sanitised like `archive_names.safe_name`, re-validated server-side), keep sub-folders (on), upload originals (on), start now (off), transcription (disabled: phase 2). Summary line "N clips, X GB — will run when you're away". If the chosen tier's model is not cached, a confirmation shows the download size before Run.
+- Form: tier (default from manifest; unfit tiers disabled with the reason), shoot name (default = top folder or `YYYY-MM-DD ingest`, sanitised like `archive_names.safe_name`, re-validated server-side), keep sub-folders (on), upload originals (on), **run mode: Only when idle / Foreground** (default idle), transcription (disabled: phase 2). Summary line "N clips, X GB — will run when you're away". If the chosen tier's model is not cached, a confirmation shows the download size before Run.
 - Run → create batch → `/broll/ingest/run` → live view polling `/broll/ingest/progress` (1.5 s) and `api/ingest-batches/{uid}` (5 s; the server view is the truth after reopening the page). Buttons: pause / resume / start now / pause upload / cancel.
 
 ## 6. Failure modes and safety gates
@@ -198,7 +211,9 @@ CSRF: octet-stream PUTs lacking `X-CCSync-Ingest` are refused (415/403) unless t
 | Model/runtime download fails (offline, hash mismatch, disallowed host) | `waiting-for-model`, retried with backoff; mismatch deletes the file | "Downloading the Good model (3.9 GB)… failed: checksum did not match — retrying" |
 | GPU too small / no GPU | `run` refuses 503; never CPU inference | tier disabled with reason; Run disabled |
 | User returns mid-clip | gate → user-active; ffmpeg killed (`.partial` discarded), llama-server stopped, item back to checkpoint | "B-roll indexing paused — resumes when you're away" |
-| Resolve open / proxy generator encoding | gate → nothing runs | "waiting: DaVinci Resolve is open" / "waiting: making proxies first" |
+| Resolve open (idle mode) | gate → nothing runs; foreground mode ignores it | "waiting: DaVinci Resolve is open" |
+| Proxy generator wants the GPU | proxy generation is *blocked* while a batch runs (`ProxyGenerator.blocked_fn`) | tray proxy line "waiting: indexing b-roll first" |
+| Tier does not fit the GPU | `run` refuses 503; tray balloon once + a menu line until the batch is changed; never CPU inference | "Can't index b-roll: Best needs 12 GB VRAM, this GPU has 8 GB — choose Good" |
 | Companion restart mid-batch | state file reloaded, staged files re-stat'ed, claim re-issued (idempotent), resume from checkpoint | batch continues |
 | Lease expires (machine off) | batch back to `queued`; same editor's next companion re-claims | "waiting for <machine>" |
 | Cancel (owner/admin) | `cancel_requested` + lease expired → 410 → kill child, keep staged outputs (7 days), release `cancelled`; `ingesting` rows without media deleted; `live` rows stay | "Cancelled by alex (12 of 40 clips are already in the archive)" |
@@ -239,6 +254,6 @@ End-to-end on the base rig against the live dashboard with three real clips (a 1
 4. Upload verification = size via `rclone lsjson` + server `stat()`; use `--checksum` only where the SFTP remote exposes hashes.
 5. Uploaded files carry the editor's uid, group `editors` (setgid 2770); confirm group-read for the container in the E2E; if not, a `server/` chmod step.
 6. Model download consent = SPA confirmation with byte count before Run when the model is not cached.
-7. Proxy generation wins the GPU over ingest (fleet-serving work first).
+7. ~~Proxy generation wins the GPU~~ Reversed by the owner: indexing wins; proxy generation is blocked while a batch runs.
 8. Default 15 min per-clip cap with an override in the form.
 9. Staging retained 7 days after `live`; the finished preview is placed at the local mirror path so "Send to Resolve" needs no fetch on the machine that indexed it.

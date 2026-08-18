@@ -55,3 +55,17 @@ dashboard/deploy/sftp/sshd_config text eol=lf
 *.exe  binary
 *.png  binary
 *.ico  binary
+
+# Vendored-verbatim pairs (companion/broll_vlm <- broll_index; broll/web/app <-
+# ytdl identity + indexer normalize): the release gates and
+# server/tests/test_cross_component.py compare them BYTE for byte, so a CRLF
+# working copy of one half is a "drift" (seen on the first merge, 2026-08-18).
+broll/indexer/broll_index/*.py text eol=lf
+broll/indexer/broll_index/prompts/*.md text eol=lf
+broll/indexer/broll_index/normalize.py text eol=lf
+companion/src/ccsync_companion/broll_vlm/** text eol=lf
+companion/src/ccsync_companion/ytdl_common.py text eol=lf
+ytdl/web/ytdlweb/ytdl_common.py text eol=lf
+ytdl/web/ytdlweb/identity.py text eol=lf
+broll/web/app/normalize.py text eol=lf
+broll/web/app/identity.py text eol=lf

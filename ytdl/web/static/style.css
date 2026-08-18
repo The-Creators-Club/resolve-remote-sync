@@ -439,7 +439,10 @@ h2 {
   letter-spacing: 0.1em;
   color: var(--red);
   margin: 0 0 8px;
-  border-bottom: 1px dotted var(--border);
+  /* red-dim, not the grey --border used for row separators: a section
+     heading is structure, and the dashboard's .side-head states it the
+     same way (2026-08-18). */
+  border-bottom: 1px dotted var(--red-dim);
   padding-bottom: 3px;
 }
 
@@ -456,7 +459,10 @@ h2 {
   align-items: baseline;
   gap: 12px;
   flex-wrap: wrap;
-  border-bottom: 1px dotted var(--border);
+  /* red-dim, not the grey --border used for row separators: a section
+     heading is structure, and the dashboard's .side-head states it the
+     same way (2026-08-18). */
+  border-bottom: 1px dotted var(--red-dim);
   padding-bottom: 3px;
   margin-bottom: 8px;
 }
@@ -763,3 +769,175 @@ h2 {
   line-height: 1.5;
 }
 .legal div + div { margin-top: 0.4rem; }
+
+/* ==== theme-common BEGIN (byte-identical in all four stylesheets) ==========
+   The dashboard, b-roll, music and ytdl are four separate static trees behind
+   one login and one origin, with no build step and no shared import: a stylesheet
+   here cannot @import one over there without a second request the mount would
+   have to serve. So the rules that MUST be identical everywhere -- an editor
+   scrolling from /transfers into /music must not see the scrollbar change --
+   are duplicated verbatim between these markers, and a test in each of the four
+   suites compares the four blocks byte for byte. Edit one, copy it into the
+   other three; the suites fail until you do.
+
+   What lives here, and why it is not per-app:
+     - scrollbars. Every rail, panel and drop-down in the fleet was still
+       painting the stock light-grey Chromium bar (owner screenshot of the music
+       filter rail, 2026-08-18). The track is the darkest red in the theme, the
+       thumb is the phosphor red, square, thin.
+     - range inputs. accent-color alone leaves the TRACK stock grey in Chromium,
+       so the four FEEL sliders read as a Windows control dropped into a
+       terminal. The vendor-prefixed pseudo-elements are the only way to paint
+       track and thumb separately, and they must be separate rules: an unknown
+       pseudo-element invalidates the whole selector list it appears in, so one
+       list holding both -webkit- and -moz- would style nothing in either.
+     - the last few places the UA still picks its own colour: the selection
+       highlight (blue), accent-color (blue), and the focus ring (white/black).
+   ========================================================================= */
+
+:root {
+  /* One token, defined identically in all four stylesheets, so "the scrollbar
+     colour" is a thing that can be changed in one place per app rather than
+     hunted through per-container rules. */
+  --scroll-track: #1a0508;
+  --scroll-thumb: var(--red);
+  --scroll-thumb-hover: var(--red-hot);
+  /* The UA's own dark mode, so anything we have not painted (a native
+     drop-down list, a print dialog, an overlay scrollbar mid-fade) is at
+     least dark rather than white. */
+  color-scheme: dark;
+}
+
+/* The standard properties: Firefox, and Chromium from 121. scrollbar-color is
+   inherited, so html would be enough -- body and the universal rule are here
+   because a container that sets its own must be overriding a stated value,
+   not falling off an assumption. */
+html,
+body {
+  scrollbar-color: var(--scroll-thumb) var(--scroll-track);
+  scrollbar-width: thin;
+  accent-color: var(--red);
+}
+* {
+  scrollbar-color: var(--scroll-thumb) var(--scroll-track);
+  scrollbar-width: thin;
+}
+
+/* Chromium (Edge is what the editors run) ignores the pair above in favour of
+   these when both are present. Bare pseudo-elements, so EVERY scrolling
+   container gets them: the project tree, the b-roll folder rail, the music
+   filter rail, the ingest panel, the assignments grid, a <select> drop-down,
+   a textarea -- and any container added later, without it having to remember. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: var(--scroll-track);
+}
+::-webkit-scrollbar-track {
+  background: var(--scroll-track);
+  border-radius: 0;
+}
+/* The 2px inset in the track colour is what makes a 10px gutter read as a
+   thin bar without shrinking the hit target to something unclickable. */
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border: 2px solid var(--scroll-track);
+  border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+}
+::-webkit-scrollbar-thumb:active {
+  background: var(--scroll-thumb-hover);
+  border-width: 1px;
+}
+/* Where a horizontal and a vertical bar meet (the assignments grid is the one
+   place both exist at once); left stock it is a light grey square. */
+::-webkit-scrollbar-corner {
+  background: var(--scroll-track);
+}
+/* No UA arrow buttons: this theme has no chrome that looks like that. */
+::-webkit-scrollbar-button {
+  display: none;
+}
+
+/* ---------- range inputs ----------
+   The music FEEL sliders are the only ones today; the rules are element-level
+   so a slider added anywhere in the fleet is themed by existing. Width is left
+   alone deliberately -- the rail sets its own. */
+input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 14px;
+  background: none;
+  accent-color: var(--red);
+  cursor: pointer;
+}
+input[type="range"]:focus {
+  outline: none;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  background: var(--scroll-track);
+  border: 1px solid var(--red-dim);
+  border-radius: 0;
+}
+/* -6px centres a 13px thumb on the 3px track plus its 1px borders. */
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 9px;
+  height: 13px;
+  margin-top: -6px;
+  background: var(--red);
+  border: 0;
+  border-radius: 0;
+  box-shadow: 0 0 8px rgba(255, 33, 64, 0.65);
+}
+input[type="range"]:hover::-webkit-slider-thumb,
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  background: var(--red-hot);
+}
+input[type="range"]::-moz-range-track {
+  height: 3px;
+  background: var(--scroll-track);
+  border: 1px solid var(--red-dim);
+  border-radius: 0;
+}
+/* Firefox alone can paint the travelled half of the track. */
+input[type="range"]::-moz-range-progress {
+  height: 3px;
+  background: var(--red-dim);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 9px;
+  height: 13px;
+  background: var(--red);
+  border: 0;
+  border-radius: 0;
+  box-shadow: 0 0 8px rgba(255, 33, 64, 0.65);
+}
+input[type="range"]:hover::-moz-range-thumb,
+input[type="range"]:focus-visible::-moz-range-thumb {
+  background: var(--red-hot);
+}
+input[type="range"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---------- the last of the UA's own colours ---------- */
+/* Stock is a blue slab with black text, which on this ground is unreadable. */
+::selection {
+  background: var(--red);
+  color: var(--bg);
+}
+/* A floor, not a rule: every control that already states its own focus
+   treatment (the form fields' red ring, the checkboxes' amber outline) is more
+   specific and keeps it. This only catches what would otherwise draw the UA's
+   white-on-black double ring. */
+:focus-visible {
+  outline: 1px solid var(--red);
+  outline-offset: 2px;
+}
+/* ==== theme-common END ==================================================== */

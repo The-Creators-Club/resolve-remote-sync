@@ -86,6 +86,26 @@ EXIT_UPLOAD_FAILED = 5
 
 SCHEMA = 1
 DEFAULT_CHANNEL_NAME = "stable"
+
+# NON-PACKAGE artefacts the feed also carries (2026-08-18,
+# docs/MUSIC_INGEST_PLAN.md step 3). A package record is a thing a dashboard
+# INSTALLS -- it is per-platform, it is signed individually with
+# `sign_release`, and `package_store` verifies that signature again before it
+# reaches `companion_packages`. The CLAP audio tower is none of those things:
+# it is one platform-independent file that a COMPANION downloads and verifies
+# against a sha256 baked into the binary it is already running, so it needs a
+# published URL and a size and nothing else.
+#
+# So it rides a separate top-level `artefacts` list rather than being squeezed
+# into `packages`:
+#   * it is covered by the CHANNEL signature (the whole document is signed),
+#     so nobody can add or move one without the offline key;
+#   * `release_feed.py` reads `schema` and `packages` and ignores everything
+#     else, so an existing dashboard is unaffected -- no migration, no version
+#     bump, and a customer on an older image simply does not see it;
+#   * it cannot be mistaken for something to install, which is the failure a
+#     `kind: "model"` inside `packages` would eventually cause.
+ARTEFACT_KINDS = ("music-clap-audio",)
 CHANNEL_FILENAME = "channel.json"
 SIG_FILENAME = "channel.json.sig"
 
@@ -171,6 +191,30 @@ def upsert_record(channel: dict[str, Any], record: dict[str, Any]) -> None:
     packages.append(record)
 
 
+def upsert_artefact(channel: dict[str, Any], artefact: dict[str, Any]) -> None:
+    """Replace-or-append by (kind, filename), NOT by (kind, version): the
+    version is in the filename precisely so two artefacts can coexist on the
+    feed during a migration, and an editor still running the old companion
+    must keep finding the file its baked sha256 belongs to."""
+    key = (artefact["kind"], artefact["filename"])
+    artefacts = channel.setdefault("artefacts", [])
+    for i, existing in enumerate(artefacts):
+        if (existing.get("kind"), existing.get("filename")) == key:
+            artefacts[i] = artefact
+            return
+    artefacts.append(artefact)
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def write_channel(feed_dir: Path, channel: dict[str, Any], *, key_path: str) -> None:
     secret = release_key_mod.read_secret(release_key_mod.key_path(key_path))
     pub = base64.b64encode(ed25519.public_key(secret)).decode("ascii")
@@ -250,6 +294,25 @@ def verify_feed_dir(feed_dir: Path, pubkeys=None) -> tuple[bool, list[str]]:
                 ok = False
         else:
             report.append(f"record {label}: artifact not present locally (fine if already uploaded)")
+    for artefact in channel.get("artefacts", []):
+        # No per-record signature to check here (see ARTEFACT_KINDS): these are
+        # covered by the channel signature above, and the CONSUMER verifies the
+        # sha256 against the one baked into its own binary. What can be checked
+        # offline is that the bytes on this rig are the bytes the channel
+        # claims -- a mismatch would publish a file every companion refuses.
+        label = f"artefact {artefact.get('kind')} {artefact.get('filename')}"
+        local = feed_dir / str(artefact.get("filename", ""))
+        if not local.is_file():
+            report.append(f"{label}: not present locally (fine if already uploaded)")
+            continue
+        if _sha256_file(local) != artefact.get("sha256"):
+            report.append(f"{label}: file on disk does NOT match sha256 -- FAILED")
+            ok = False
+        elif local.stat().st_size != artefact.get("size_bytes"):
+            report.append(f"{label}: file on disk is not size_bytes -- FAILED")
+            ok = False
+        else:
+            report.append(f"{label}: OK")
     return ok, report
 
 
@@ -326,6 +389,23 @@ def github_asset_plan(feed_dir: Path, channel: dict[str, Any], *, base_url: str)
                 "one would clobber the other in the release's flat asset list", EXIT_USAGE)
         seen[filename] = label
         local = feed_dir / str(record.get("platform") or "") / filename
+        if local.is_file():
+            files.append(local)
+    for artefact in channel.get("artefacts", []):
+        label = f"artefact {artefact.get('kind')}"
+        filename = str(artefact.get("filename") or "")
+        expected = f"{base}/{filename}"
+        if str(artefact.get("url") or "") != expected:
+            raise PublishFeedError(
+                f"{label} is signed with url {artefact.get('url')!r} but its asset would land "
+                f"at {expected!r} -- refusing to upload a signed channel that points somewhere "
+                "the bytes are not", EXIT_USAGE)
+        if filename in seen:
+            raise PublishFeedError(
+                f"records {seen[filename]} and {label} both claim the asset name {filename!r} -- "
+                "one would clobber the other in the release's flat asset list", EXIT_USAGE)
+        seen[filename] = label
+        local = feed_dir / filename
         if local.is_file():
             files.append(local)
     return files
@@ -432,6 +512,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                     help="actually push to GitHub with `gh`. Deliberately explicit: rebuilding a "
                          "feed dir to inspect it must never publish to the world")
     ap.add_argument("--channel", default=DEFAULT_CHANNEL_NAME)
+    ap.add_argument("--asset", default=None, action="append", dest="assets",
+                    help="a non-package artefact to publish beside the packages "
+                         "(repeatable): the CLAP audio ONNX and its params JSON")
+    ap.add_argument("--asset-kind", default=ARTEFACT_KINDS[0], choices=ARTEFACT_KINDS,
+                    help="which artefact these files belong to")
+    ap.add_argument("--asset-version", default="",
+                    help="the artefact version (music_models.MODELS[...]['version'])")
     ap.add_argument("--set-image", default="", help="tag@digest for dashboard_image")
     ap.add_argument("--verify", default="", help="offline-verify an existing feed dir and exit")
     ap.add_argument("--key", default="", help="release key file (default ~/.ccsync-release/release.key)")
@@ -515,6 +602,42 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(artifact, dest_dir / record["filename"])
 
+        for asset_path in (args.assets or []):
+            if not args.base_url:
+                raise PublishFeedError(
+                    "--asset needs --base-url (or --github-repo): the URL is part of the "
+                    "signed channel, so it cannot be filled in later", EXIT_USAGE)
+            if not args.asset_version:
+                raise PublishFeedError(
+                    "--asset needs --asset-version: the version is what stops two exports "
+                    "of the same model being confused for each other", EXIT_USAGE)
+            asset = Path(asset_path).expanduser()
+            if not asset.is_file():
+                raise PublishFeedError(f"no asset at {asset}", EXIT_USAGE)
+            base = args.base_url.rstrip("/")
+            artefact = {
+                "kind": args.asset_kind,
+                "version": args.asset_version,
+                "filename": asset.name,
+                "sha256": _sha256_file(asset),
+                "size_bytes": asset.stat().st_size,
+                # FLAT, on every host: GitHub Releases has one asset namespace
+                # per tag, and the companion's own catalogue builds exactly
+                # this shape (music_models.FEED_URL_TEMPLATE).
+                "url": f"{base}/{asset.name}",
+            }
+            print(f"[publish-feed] artefact {artefact['kind']} {asset.name} "
+                  f"({artefact['size_bytes']} bytes, sha256 {artefact['sha256'][:16]}...)",
+                  file=out)
+            print("[publish-feed]   the COMPANION verifies this sha256 against the one baked "
+                  "into its own build: if they disagree, publish the artefact that build "
+                  "expects or ship a build that expects this one", file=out)
+            upsert_artefact(channel, artefact)
+            published_something = True
+            if not args.dry_run:
+                feed_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(asset, feed_dir / asset.name)
+
         if args.set_image:
             if "@" not in args.set_image:
                 raise PublishFeedError("--set-image must look like tag@sha256:...", EXIT_USAGE)
@@ -524,7 +647,7 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             published_something = True
 
         if not published_something:
-            raise PublishFeedError("nothing to do -- pass --artifact/--manifest and/or --set-image", EXIT_USAGE)
+            raise PublishFeedError("nothing to do -- pass --artifact/--manifest, --asset and/or --set-image", EXIT_USAGE)
 
         if args.dry_run:
             print("[dry-run] channel would be:", file=out)

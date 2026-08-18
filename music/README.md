@@ -132,15 +132,35 @@ anywhere on the waveform to seek. Only one is open at a time.
 
 ## Adding music
 
-**Drag audio files anywhere onto the page.** They are copied into the library,
-analysed, tagged and indexed, and appear as "Just added". `.ogg` is transcoded to 320k
-mp3; the file you dragged is not touched.
+**Drag audio files or folders anywhere onto the page.** Since 2026-08-18
+(`docs/MUSIC_INGEST_PLAN.md`) **your own machine does the work**: the CC Sync
+companion converts what needs converting, analyses each track with the CLAP
+audio model on one CPU core, uploads the finished file to the library, and the
+NAS turns the vector into tags, axes and a waveform. The dashboard never sees
+the audio, and nothing needs a GPU.
 
-Duplicates are refused two ways: by content hash, and by matching filename + duration —
-the second catches a re-encode of something already held, which hashing cannot see.
+An ingest panel opens with the drop. It shows, per track: what it will be
+called, anything already in the library, and how far the upload and the
+analysis have got. Two choices only -- **when to run** (only when you are away
+from the keyboard, or now while you work) and which tracks to include. There is
+no model to pick: there is one, and it runs on the CPU. The first run on a
+machine downloads it (about 280 MB) and asks first.
 
-This needs the indexer (GPU + ffmpeg), so it only works on the base rig; anywhere else
-`/api/ingest` answers 503. Port step 7 turns it into a queued handoff.
+`.ogg` is transcoded to 320k mp3, and the file you dragged is never touched.
+
+Duplicates are refused two ways, and shown to you unticked with the reason: by
+content hash, and by matching filename + duration — the second catches a
+re-encode of something already held, which hashing cannot see.
+
+**If you have no companion**, or one published before 0.8.x, the drop falls
+back to the older loop: the browser uploads the files here, they land in the
+library, and a base rig indexes them the next time somebody runs the drain
+(`docs/INDEXERS.md`, "Music has two indexing paths now"). Nothing is lost
+either way -- the fallback is the path this feature replaced, kept.
+
+Batches survive a reload and a reboot: they live in the database, they can be
+paused or cancelled from the panel (or from the tray on the machine doing the
+work), and an admin can see every machine's on the fleet grid.
 
 ## Sending a cue to Resolve
 
@@ -180,6 +200,10 @@ whose filenames state what they are.
 - CLAP cannot hear absolute quietness or density well. Use the arousal axis for that.
 - `_stems/` is deliberately not indexed.
 - Nothing here writes to `W:` — the library is read-only to this tool.
+- A track added through the **companion** path has no bpm, key or loudness
+  yet: those are librosa's and the companion has no librosa (KNOWN_BUGS
+  MUSIC-ING-1). Everything else about it -- search, tags, axes, the waveform --
+  is complete, and a base-rig `--retag` fills the rest in.
 
 ## Layout
 
@@ -194,9 +218,13 @@ web/
     main.py                 FastAPI app + the SPA routes
     routes_api.py           stats / facets / tracks / search / similar / reload
     routes_media.py         audio (HTTP Range) / peaks
-    routes_ingest.py        ingest (the only write route left here)
+    routes_ingest.py        browser upload -> the NAS queue (the fallback path)
                             resolve + reveal are the companion's, on 127.0.0.1:8899
-  static/                   index.html, app.js, style.css
+    routes_batches.py       the ingest panel's own API (create/list/cancel)
+    routes_fleet.py         the companion's half: claim, checkpoints, result
+    ingest_batches.py       every rule about what a batch or an item may become
+    rescore.py              tags/axes/debias, called by both ingest paths
+  static/                   index.html, app.js, style.css, ingest.js
   schema.sql                SQLite schema                              <- shared with the indexer
   migrations/               empty for now; see its README
   tests/

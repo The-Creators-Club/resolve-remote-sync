@@ -283,6 +283,48 @@ EP actually runs — executes fp16 by inserting casts. The numbers are in
 `report.md`; revisit them with a measurement from a machine in the field, not
 with instinct.
 
+## Music has two indexing paths now, and only one of them is here
+
+*2026-08-18, `docs/MUSIC_INGEST_PLAN.md` steps 3-4.* Everything above this
+section describes the BASE RIG path. Since companion 0.8.x there is a second
+one, and it is the one an editor meets:
+
+| | the companion path (new, default) | the base-rig path (older, kept) |
+|---|---|---|
+| Who analyses | the editor's own machine, in the tray app | the base rig, `index_music.py --queue` |
+| Reached by | drag onto `/music` with a companion running | drag with no companion, or one older than 0.8.x |
+| Audio model | the exported CLAP tower on **onnxruntime, CPU** (`music_clap_sidecar.py`) | `laion/larger_clap_music_and_speech` on **torch, GPU** |
+| Where the file goes | rclone straight into the library, under the name the SERVER allocated | uploaded to the NAS by the browser, `ingest_queue` row, drained later |
+| Tags, axes, debias | the **container**, from the uploaded embedding (`musicweb/rescore.py`) | the base rig, then a `--export-drain` bundle |
+| bpm / key / lufs / peak | **not computed** (KNOWN_BUGS MUSIC-ING-1) | computed (librosa) |
+| Searchable | seconds after the editor drops it | after somebody runs the drain |
+
+Both write the same `tracks` row into the same database and both produce a
+vector in the same 512-dimensional space -- that is what the export's cosine
+>= 0.999 gate is for, and why `tracks.model` records which produced a row
+(`laion/...@onnx1` for the companion path).
+
+What an operator needs to know about the new path:
+
+- **It needs a release feed.** The artefact is fetched from
+  `release_feed_base` in `GET /api/v1/site` (the dashboard's
+  `DASH_RELEASE_FEED_URL` minus `channel.json`), sha256-verified against the
+  catalogue baked into the companion. A fleet with no feed configured sees
+  "this fleet has no release feed configured" in the tray and on the fleet
+  grid, and every drop falls back to the base-rig path. `docs/RELEASE_FEED.md`
+  §6 is how the artefact is published.
+- **It needs no GPU and it does not use one.** ~90 ms per 10 s window on one
+  CPU core, so a music batch never stands proxy generation down the way a
+  b-roll batch does.
+- **A track it could not analyse is not lost.** The item ends
+  `queued_for_base_rig` in the ledger with the reason, the file stays staged
+  on the editor's machine, and the page offers the browser upload -- which is
+  the base-rig path above, unchanged.
+- **A base-rig sweep still works on top of it.** Rows the companion wrote have
+  a `file_hash` (the content hash), so a later `index_music.py` pass over the
+  library does not re-analyse them; a `--retag` fills in nothing they are
+  missing except the DSP features, which is what MUSIC-ING-1 is about.
+
 ## See also
 
 - `broll/docs/indexing-local.md` — the local (Qwen3-VL/llama.cpp) backend:

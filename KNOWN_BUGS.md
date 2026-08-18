@@ -61,6 +61,69 @@ the "Status 2026-08-17" paragraphs in `docs/COMMERCIAL_READINESS.md`.**
 
 ---
 
+## Open — music ingest (MUSIC-ING-n, 2026-08-18)
+
+Deferred deliberately while building `docs/MUSIC_INGEST_PLAN.md` steps 3-5.
+Everything here is a gap in the NEW companion path; the older browser-upload
+path is unaffected by all of it.
+
+### MUSIC-ING-1 — a track the companion indexes has no bpm, key or loudness
+`index_music.analyse_one` computes four DSP features beside the embedding:
+tempo, key + confidence, LUFS and peak dB. Three of the four are librosa's,
+and the companion has no librosa and must not gain one (it is a ~40 MB
+dependency chain with numba and llvmlite inside a frozen exe, for four numbers
+nothing searches on). So `music_ingest._post_result` sends them as null, the
+server stores null, and the track's card shows no bpm.
+
+Everything that matters is complete: the embedding, the per-window vectors,
+the waveform, the probe fields, the tags and the axes. What is missing is the
+**BPM and duration filters** in the left rail, which those rows fall out of,
+and the key badge. A base-rig `index_music.py --retag` does not fill them in
+either -- retag re-scores from stored embeddings and never touches audio.
+
+Fix, when it is worth it: a `--features-only` sweep on the base rig that
+decodes rows whose `bpm IS NULL` and fills the four columns, or a
+scipy/numpy-only tempo+key estimator in the sidecar (they are not hard; they
+are just not free to get identical to librosa's, and a bpm that disagrees
+with the library's other 376 rows is worse than a blank one).
+
+### MUSIC-ING-2 — the mid-batch fallback leaves the audio on the editor's machine
+A companion whose model becomes unusable *after* the claim (a deleted cache, a
+download that will not complete) ends the item `queued_for_base_rig` and does
+**not** upload the audio. It cannot: the library's filenames are allocated by
+the server at `result`, which never happened for that item, and the only name
+this side could use is the one the file already has -- which is how you
+overwrite another editor's `theme.wav`.
+
+So the audio stays staged on the editor's machine and the page tells them to
+drop it again (the browser upload does the whole safe dance: name allocation,
+both duplicate defences, the transcode, the queue row). The plan's §1 wording
+("uploads the file to the NAS and leaves an `ingest_queue` row") is therefore
+only half-true today.
+
+Fix: a fleet route that allocates a name and writes an `ingest_queue` row
+without an embedding -- `POST .../items/{iuid}/queue` -- after which this path
+uploads to the allocated name and the base rig drains it exactly as a browser
+upload. Small, and it needs a decision about whether a *server-side* dedupe
+should run at that point or at drain time.
+
+### MUSIC-ING-3 — one progress window at a time
+`CompanionApp._open_work_window` keeps a single window and closes the previous
+one, so a music batch starting while the b-roll window is open replaces it
+(and the tray's "Show … progress" items each bring their own back). Both
+batches keep running and both tray sections stay correct; only the window is
+exclusive. Fixing it means keying `_work_window` by kind and is a popup
+change, not an ingest one.
+
+### MUSIC-ING-4 — a queued_for_base_rig item counts as neither done nor failed
+`status()["done"]` counts `live` and `failed` counts `failed`, so an item that
+ended in the fallback leaves the progress window reading e.g. "11 of 12
+tracks" for ever even though the batch has finished and been released. The
+batch state on the fleet grid and in the panel is correct; the local window's
+counter is not.
+
+---
+
 ## Open — the 2026-08-17 commercial-readiness pass (CR-n)
 
 ### CR-1 — the b-roll indexer billed a personal Claude Code subscription — FIXED in repo 2026-08-17, unshipped

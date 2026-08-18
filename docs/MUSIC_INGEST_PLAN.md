@@ -98,6 +98,54 @@ too, and tags are library-relative.
 4. SPA panel in `music/web/static` (1.5).
 5. Docs (`docs/INDEXERS.md`, `music/README.md`, `LOOPBACK_API.md`, `API.md`) + ledger (0.5).
 
+## 3a. Built 2026-08-18
+
+Steps 1-5 are **in the repo, unshipped** (no companion build published, so no
+editor has any of it yet -- every `/music/ingest/*` route 404s on the deployed
+build and the page falls back to the browser upload, correctly).
+
+| Step | What landed |
+|---|---|
+| 1 | `music/indexer/export_audio_encoder.py`, `music_models.py`, `mel_numpy.py`, the params fixture. Export measured cosine 0.9999999 vs torch over 80 windows / 20 tracks |
+| 2 | `musicweb/rescore.py`, migration 004, `ingest_batches.py`, `routes_batches.py`, `routes_fleet.py`, `schemas.py`, `fleet_auth.py`, `MusicGate` stamping, `docs/API.md` §6b |
+| 3 | companion: `music_clap/` (vendored, parity-gated), `music_clap_sidecar.py`, `ingest_kinds.py`, `music_ingest.py`, `/music/ingest/*` on the SAME 8899 listener, tray + reporter + progress window; dashboard: `MusicIngestIn`, schema v21 columns, the `[ INDEXING MUSIC ]` chip, `commands.music_ingest`; `/api/v1/site` gained `release_feed_base` |
+| 4 | `music/web/static/ingest.js` + the panel markup, wired to the existing drop veil, with the browser upload kept as the fallback branch |
+| 5 | `docs/INDEXERS.md`, `music/README.md`, `docs/LOOPBACK_API.md`, `docs/API.md`, `docs/CONFIG.md` §2.5b, `docs/RELEASE_FEED.md` §6 (+ `tools/publish_feed.py --asset`), this block, `KNOWN_BUGS.md` MUSIC-ING-1..4 |
+
+**Deviations from this plan, and why:**
+
+- **`BrollIngestor` was made kind-agnostic through a strategy object
+  (`ingest_kinds.py`) and `MusicIngestor` subclasses it**, rather than "the
+  same class with a kind strategy" doing everything. The gate, the run modes,
+  the checkpoints, the state file, the lease, the upload queue, the window and
+  the tray surfaces are literally the same functions (pinned by
+  `test_music_ingest.py`); the per-item pipeline and one HTTP body are
+  overrides, because they are the only parts that are a different job.
+- **The feed URL lost its `models/` segment.** GitHub Releases -- the feed's
+  host of record -- has one flat asset namespace per tag and no directories,
+  so `{base}/models/{filename}` would have 404'd on the only host it is
+  actually served from (`docs/RELEASE_FEED.md` §3.1). It is `{base}/{filename}`
+  now, and the version is in the filename, which is what lets two exports
+  coexist during a migration.
+- **The mid-batch fallback does not upload** (KNOWN_BUGS MUSIC-ING-2): the
+  library's names are allocated by the server at `result`, so an item that
+  never got that far has no name to land under except the one the file already
+  has -- which is how another editor's `theme.wav` gets overwritten. The
+  PRIMARY fallback in §1 is unaffected and is the one editors will meet: a
+  machine that cannot embed refuses the claim and the page uploads through the
+  browser, which lands the file and leaves the queue row.
+- **The four DSP features are not computed** (MUSIC-ING-1): tempo, key,
+  key confidence and LUFS are librosa's, and the frozen companion must not
+  gain numba and llvmlite for four numbers nothing searches on.
+- **`tracks.model` is `laion/larger_clap_music_and_speech@onnx1`**, not the
+  bare checkpoint name: the space is the same one (that is what the export's
+  cosine gate is for), and the suffix is what a future re-embed sweep selects
+  on. The plan asked for the version to be recorded per row; this is where.
+
+Cost, measured: +35 MB frozen for numpy + onnxruntime (wheels, before
+PyInstaller's own compression), 280 MB downloaded once per machine, and
+~90 ms per 10 s window on one CPU core.
+
 ## 4. Verification
 Unit per component as b-roll; parity tests: mel features and embeddings vs
 torch on 20 fixture tracks (cosine ≥ 0.999); end-to-end on the base rig: drop

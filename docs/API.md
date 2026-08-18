@@ -115,6 +115,7 @@ companion).
   "shared_asset_folders": [{"id": "assets-luts", "rel": "Assets/Luts", "label": "…"}],
   "video_extensions": ["…"],
   "nas_kind": "truenas",
+  "release_feed_base": "",
   "features": { "youtube_download": false, "youtube_unblock": false },
   "indexer": { "model_tier": "good" }
 }
@@ -145,6 +146,16 @@ Rules a client can rely on:
   machine's VRAM. A NEW top-level object, same convention as `features`; an
   indexer too old to read it defaults to `good` itself. See `CONFIG.md`
   `[indexer]`.
+- `release_feed_base` (2026-08-18) is where this fleet's vendor artefacts
+  live: the configured `DASH_RELEASE_FEED_URL` **minus its filename**, or ""
+  when no feed is configured (or the URL is not https). It exists because the
+  companion fetches the CLAP audio model for music ingest from there
+  (`docs/MUSIC_INGEST_PLAN.md` step 3, `docs/RELEASE_FEED.md` §6) and no
+  vendor host may be written down in the repo -- the same rule that keeps a
+  customer's name out of it. Not a credential: the feed is world-readable
+  static files, and every byte a client takes from it is signature- or
+  sha256-verified afterwards. Blank means "this fleet cannot fetch models",
+  which every client reads as a refusal with a fix, not an error.
 - `schema` is a monotonic integer, not the dashboard version. Unknown keys are
   additive; a client that cannot read `features` must behave as if the feature
   is **off**.
@@ -230,6 +241,7 @@ Request (abridged — `api.ReportIn`):
 | `proxy_coverage` | `proxy_gen.coverage()`: `state`, `missing`, `left`, plus the per-project map and history. Only `missing`/`state`/`left` are stored (schema v20) |
 | `youtube_import` | `youtube_import.status()`: whether the clips the dashboard downloaded reached the editor's Resolve |
 | `broll_ingest` | one local b-roll indexing batch (below) |
+| `music_ingest` | one local MUSIC indexing batch: the same fields plus `kind: "music"` |
 
 `proxy_coverage` and `youtube_import` were **undeclared until 2026-08-18**, so
 pydantic's `extra="ignore"` silently dropped both on every tick since their
@@ -255,6 +267,16 @@ has 8 GB — choose Good"). It shows on the fleet grid **even when `active` is
 false**: the batch the editor asked for is not happening, and their own tray
 is otherwise the only place that says so.
 
+`music_ingest` (2026-08-18, `MUSIC_INGEST_PLAN.md` step 3) is the same shape
+with `kind: "music"`, an always-empty `tier` (music has one model), and a
+`clip` that is a track name. It is a **second section, not a reuse of the
+first**, and it lands in its own `machine_state.music_ingest_*` columns
+(schema v21) because both can be true at once: music needs no GPU, so a
+machine can be embedding an album while it indexes a camera card, and one
+section could only ever describe one of them. Its `warning` is a model refusal
+("this fleet has no release feed configured…") and shows on the grid on the
+same terms.
+
 Oversized sections are **sliced to the ceiling, not rejected** — a 422 used to
 take the whole machine off the fleet grid. What was dropped comes back in
 `truncated` and is logged on both sides. The three diagnostic sections above go
@@ -274,7 +296,8 @@ Response:
                "signature": "…", "pubkey_id": "…" },
   "resolve_project_unmapped": "Some Project",
   "commands": { "halt": { "active": false, "reason": "", "at": null },
-                "broll_ingest": { "cancel": ["<32 hex>"] } }
+                "broll_ingest": { "cancel": ["<32 hex>"] },
+                "music_ingest": { "cancel": ["<32 hex>"] } }
 }
 ```
 
@@ -295,6 +318,10 @@ Response:
   from its next ingest heartbeat, and every failure to reach the b-roll
   database here — absent checkout, unmigrated schema, unreadable file —
   answers "nothing to cancel" rather than failing the report.
+- `commands.music_ingest` — the same thing for a music batch, on the same
+  terms and with the same best-effort rules, read from `music.db`. Two
+  separate keys because one editor can be running one of each, and a cancel
+  must reach the orchestrator it was meant for.
 
 ---
 

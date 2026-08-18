@@ -364,7 +364,75 @@ click sufficient — see the plan's §3.4.
   follow-up ("air-gapped bundle upload") — not yet built; today's answer is
   "use the PUT route".
 
-## 6. What this does NOT do
+## 6. Artefacts that are not packages: the CLAP audio model
+
+*Added 2026-08-18, `docs/MUSIC_INGEST_PLAN.md` step 3.* The feed carries one
+more kind of thing now, and it deliberately does **not** ride in `packages`:
+
+```json
+"artefacts": [
+  {
+    "kind": "music-clap-audio",
+    "version": "1",
+    "filename": "music-clap-audio-1.onnx",
+    "sha256": "…64 hex…",
+    "size_bytes": 279978254,
+    "url": "https://github.com/OWNER/REPO/releases/download/TAG/music-clap-audio-1.onnx"
+  },
+  { "kind": "music-clap-audio", "version": "1",
+    "filename": "music-clap-audio-1.params.json", "…": "…" }
+]
+```
+
+**Why a separate list.** A package record is something a DASHBOARD installs:
+it is per-platform, it is signed individually by `sign_release.py`, and
+`package_store.store_verified_package` re-verifies that signature before it
+reaches `companion_packages`. The CLAP audio tower is none of those things. It
+is one platform-independent file that a **companion** downloads and checks
+against a sha256 **baked into the binary it is already running**
+(`music/indexer/music_models.py`, vendored into the companion as
+`music_clap/music_models.py` with a parity gate). Squeezing it into `packages`
+would mean inventing a `kind` that nothing may install, a `platform` it does
+not have, and a per-record signature no consumer reads.
+
+**What secures it.** The whole channel document is signed
+(`canonical_channel_bytes` covers every key, `artefacts` included), so nobody
+can add, move or re-point one without the offline release key. The consumer
+then verifies the bytes against its own baked digest, which is a stronger
+check than a feed signature anyway: a compromised feed host can serve nothing,
+or serve something every companion refuses.
+
+**Compatibility.** `release_feed.py` reads `schema` and `packages` and ignores
+every other key, so a dashboard on an older image is unaffected — no
+migration, no schema bump, and it simply does not see the list.
+
+Publishing, on the release rig, next to the offline key:
+
+```powershell
+python tools\publish_feed.py `
+    --asset music\web\data\audio_encoder\music-clap-audio-1.onnx `
+    --asset music\web\data\audio_encoder\music-clap-audio-1.params.json `
+    --asset-kind music-clap-audio --asset-version 1 `
+    --feed-dir .\feed --github-repo OWNER/REPO --github-upload
+```
+
+- Both files, always: a companion needs the ONNX **and** its params JSON, and
+  the params are what drive the numpy mel front end.
+- The `--asset-version` is `music_models.MODELS["clap-audio"]["version"]`, and
+  it is in the FILENAME so two exports can sit on the feed at once. That is
+  the whole migration story: publish the new one, ship a companion that pins
+  it, and drop the old file when no build in the field expects it any more.
+- **The sha256 the tool prints must match the catalogue in the build you are
+  shipping.** They are produced by the same export (`export_audio_encoder.py
+  --print-catalogue` writes the block), and if they disagree, every companion
+  deletes the download and retries for ever. `--verify` re-checks the bytes on
+  disk against the channel before anything is uploaded.
+- An artefact whose `url` does not match where the upload will land is refused
+  before a byte moves, exactly as a package record is: the URL is inside the
+  signed document, so it is not a re-upload away from correct, it is a re-sign
+  away.
+
+## 7. What this does NOT do
 
 - It does not make the dashboard update its own container image (§4).
 - It does not add a second signing key or a second trust anchor —

@@ -19,7 +19,10 @@ labelled F1..Fn with their timecodes IN THE TEXT and answers one line per shot:
 Segment times are LOOKED UP from the frame table (never trusted from the
 model), category is assigned in code by nearest neighbour, and exposure flags
 come from pixel statistics. `parse_compact` returns the exact dict shape
-`claude_client.validate_contract` accepts, and calls it to prove that.
+`contract.validate_contract` accepts, and calls it to prove that (that
+validator lived in `claude_client` until 2026-08-18; it moved so this module
+and `local_vlm` can be vendored into the companion without the Anthropic SDK
+— plan §3.4).
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ import re
 from pathlib import Path
 from typing import Any, Sequence
 
-from .claude_client import validate_contract
+from .contract import validate_contract
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "index_clip_v7_compact.md"
 

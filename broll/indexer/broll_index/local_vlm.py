@@ -33,7 +33,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from . import local_models, local_runtime
-from .claude_client import merge_index_results
+from .contract import merge_index_results
 from .compact_format import (
     CategoryAssigner, build_compact_prompt, build_grammar, clip_text_for_category,
     parse_compact, pixel_quality_flags, seconds_to_tc,
@@ -130,7 +130,15 @@ def start_server(
         logf.flush()
     creation = {}
     if os.name == "nt":
-        creation["creationflags"] = 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW. The group flag keeps a
+        # Ctrl-C in the indexer's console from reaching llama-server; the
+        # no-window flag (0x08000000, added 2026-08-18) is for the OTHER host
+        # this module now runs in -- the companion is a windowed PyInstaller
+        # build (build.spec, console=False), so an unflagged spawn flashes a
+        # black console on the editor's desktop for the life of the server.
+        # Harmless in the console case: llama-server's output goes to `logf`
+        # either way, never to a window anyone was reading.
+        creation["creationflags"] = 0x00000200 | 0x08000000
     proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, **creation)
     url = f"http://127.0.0.1:{port}"
     t0 = time.time()

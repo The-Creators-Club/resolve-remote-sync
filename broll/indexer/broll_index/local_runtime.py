@@ -167,6 +167,37 @@ def _stderr_progress(label: str) -> Callable[[int, int | None], None]:
     return _p
 
 
+# (asset name, bytes written, total bytes or None) -> None. What a HOST
+# APPLICATION passes to ensure_runtime/ensure_model instead of watching stderr.
+# Added 2026-08-18 for the companion (docs/BROLL_INGEST_PLAN.md §3.4): the
+# frozen tray app is a WINDOWED build, so `sys.stderr` is None there and every
+# print below would raise on the first chunk of a 2.5 GB download. When a
+# callback is given, nothing in this module touches stderr at all -- not the
+# per-chunk line, not the "fetching ..." banner, not the trailing newline.
+# That is the contract the companion's sidecar relies on, and what its test
+# asserts by running the whole fetch with sys.stderr set to None.
+ProgressFn = Callable[[str, int, "int | None"], None]
+
+
+def _progress_for(label: str, progress: "ProgressFn | None", quiet: bool):
+    """The per-chunk callback download_verified should use, or None.
+
+    Precedence: an explicit `progress` beats `quiet`, because a caller that
+    passed one is asking for the bytes, not for prints it cannot see.
+    """
+    if progress is not None:
+        return lambda written, total: progress(label, written, total)
+    return None if quiet else _stderr_progress(label)
+
+
+def _say(message: str, *, quiet: bool, progress: "ProgressFn | None") -> None:
+    """A banner line on stderr -- suppressed entirely when a callback is in
+    play (see ProgressFn: stderr is None in a windowed exe)."""
+    if quiet or progress is not None:
+        return
+    print(message, file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # model weights
 # ---------------------------------------------------------------------------
@@ -178,31 +209,34 @@ def model_paths(cache_dir: Path, tier: ModelTier) -> tuple[Path, Path]:
     return models_dir / tier.weights.filename, models_dir / tier.mmproj.filename
 
 
-def _ensure_file(f: ModelFile, dest: Path, *, quiet: bool) -> Path:
+def _ensure_file(f: ModelFile, dest: Path, *, quiet: bool,
+                 progress: "ProgressFn | None" = None) -> Path:
     if dest.is_file() and dest.stat().st_size == f.size_bytes and _sha256_file(dest) == f.sha256:
         return dest
-    if not quiet:
-        print(f"fetching {f.filename} ({f.size_bytes/1e9:.1f} GB) from {f.url}", file=sys.stderr)
+    _say(f"fetching {f.filename} ({f.size_bytes/1e9:.1f} GB) from {f.url}",
+         quiet=quiet, progress=progress)
     return download_verified(
         f.url, dest, sha256=f.sha256, size_bytes=f.size_bytes,
-        progress=None if quiet else _stderr_progress(f.filename),
+        progress=_progress_for(f.filename, progress, quiet),
     )
 
 
-def ensure_model(cache_dir: Path, tier_key: str, *, quiet: bool = False) -> tuple[Path, Path]:
+def ensure_model(cache_dir: Path, tier_key: str, *, quiet: bool = False,
+                 progress: "ProgressFn | None" = None) -> tuple[Path, Path]:
     """Download (if absent or hash-mismatched) tier's weights + mmproj GGUFs.
 
     Returns (weights_path, mmproj_path), both hash-verified. Never re-downloads
     a file that is already present and correct.
+
+    `progress` (2026-08-18) is the host-application seam -- see ProgressFn.
+    Passing one silences stderr completely, whatever `quiet` says.
     """
     t = local_models.tier(tier_key)
     weights_dest, mmproj_dest = model_paths(cache_dir, t)
-    _ensure_file(t.weights, weights_dest, quiet=quiet)
-    if not quiet:
-        print(file=sys.stderr)
-    _ensure_file(t.mmproj, mmproj_dest, quiet=quiet)
-    if not quiet:
-        print(file=sys.stderr)
+    _ensure_file(t.weights, weights_dest, quiet=quiet, progress=progress)
+    _say("", quiet=quiet, progress=progress)
+    _ensure_file(t.mmproj, mmproj_dest, quiet=quiet, progress=progress)
+    _say("", quiet=quiet, progress=progress)
     return weights_dest, mmproj_dest
 
 
@@ -230,13 +264,17 @@ def _extract_archive(archive_path: Path, dest_dir: Path) -> None:
 
 
 def ensure_runtime(cache_dir: Path, *, quiet: bool = False,
-                    build: RuntimeBuild | None = None) -> Path:
+                    build: RuntimeBuild | None = None,
+                    progress: "ProgressFn | None" = None) -> Path:
     """Download + extract the pinned llama.cpp build for this platform.
 
     Returns the path to `llama-server`(.exe). Idempotent: does nothing once the
     binary is already on disk (extraction is not re-verified byte-for-byte
     every run — the archive's own sha256 gate is what protects it on the way
     in; re-hashing every DLL on every run would cost real time for no benefit).
+
+    `progress` (2026-08-18) is the host-application seam -- see ProgressFn.
+    Passing one silences stderr completely, whatever `quiet` says.
     """
     build = build or local_models.runtime_for_platform(platform_key())
     out_dir = runtime_dir(cache_dir, build)
@@ -246,16 +284,14 @@ def ensure_runtime(cache_dir: Path, *, quiet: bool = False,
 
     downloads_dir = Path(cache_dir) / "downloads"
     for asset in (build.archive, *build.extra_archives):
-        if not quiet:
-            print(f"fetching {asset.name} ({asset.size_bytes/1e6:.0f} MB) from {asset.url}",
-                  file=sys.stderr)
+        _say(f"fetching {asset.name} ({asset.size_bytes/1e6:.0f} MB) from {asset.url}",
+             quiet=quiet, progress=progress)
         archive_path = download_verified(
             asset.url, downloads_dir / asset.name, sha256=asset.sha256,
             size_bytes=asset.size_bytes,
-            progress=None if quiet else _stderr_progress(asset.name),
+            progress=_progress_for(asset.name, progress, quiet),
         )
-        if not quiet:
-            print(file=sys.stderr)
+        _say("", quiet=quiet, progress=progress)
         _extract_archive(archive_path, out_dir)
 
     if not exe.is_file():

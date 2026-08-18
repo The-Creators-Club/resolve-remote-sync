@@ -356,6 +356,64 @@ up `https://releases.ccsync.app/v1/channel.json` -- `DASH_RELEASE_FEED_URL`
 defaults to `""` (feed disabled) until that hosting exists, so nothing here
 changes what the current fleet does (§8's promise holds).
 
+### WP K — Dashboard self-update over the air (added 2026-08-18)
+
+Owner's ruling: *"make the dashboard self-update over the air, with the NAS
+UI click kept only for runtime changes."* §5's "no Docker socket, no
+self-recreate" stands — but it only forbids replacing the **box**. The
+dashboard's **code** can take exactly the companion's path: a signed record
+in the same feed, downloaded and verified by the running dashboard against
+the public keys baked into the build it already runs, staged, verified,
+swapped, and the process re-execs itself. The image becomes the *runtime*
+(Python, the pinned lockfile, the sidecars); the NAS click is needed only
+when the runtime changes.
+
+- **Record kind `dashboard`**, platform `linux`, artefact
+  `ccsync-dashboard-<version>.tar.gz` = the four trees the Dockerfile copies
+  (`dashboard/src` → `src/`, `dashboard/deploy` → `deploy/`, `broll/web`,
+  `music/web`, `ytdl/web`) + `manifest.json` {version, git commit,
+  `runtime_id`}. Built by `tools/build_dashboard_bundle.py` (base rig or
+  `release-dashboard.yml`), signed with the offline key, published with
+  `tools/publish_feed.py --kind dashboard`.
+- **`runtime_id`** = sha256 of `dashboard/deploy/requirements.lock` +
+  the base-image tag, baked into the image at build (`/venv/.runtime-id`).
+  A record whose `runtime_id` differs from the running one is a **runtime
+  update**: the badge says so and points at the NAS click; the button is
+  not offered. Same `runtime_id` = **code update**: one button.
+- **Layout in the data volume:** `/data/code/<version>/` (the four trees),
+  `/data/code/current.json` {version, previous, applied_at}, `/data/code/
+  boot_attempts.json`. `run.sh` picks the code root: the `current.json`
+  tree if it exists, its `manifest.json` signature verifies (checked by the
+  IMAGE's own verifier, never by code from the volume) and its version is
+  newer than the image's; else the image trees. Then it loops: exit code 75
+  from the app = "re-exec me", anything else = exit as before.
+- **Apply** (`POST /api/v1/admin/dashboard-update/apply {version}`, admin +
+  CSRF): download from the feed with the record's sha256 and signature
+  verified exactly as `publish_from_feed` does; extract to
+  `<version>.staging`; **stage-verify** in a subprocess on the new
+  PYTHONPATH — import the app, run migrations against COPIES of
+  `dashboard.db`/`broll.db`/`music.db`; back the live DBs up to
+  `/data/backups/<ts>/`; `snapshot_before()` when a NAS key exists; rename
+  staging → final; write `current.json`; refuse (not force) if a ytdl job is
+  running unless `force`; exit 75. **Watchdog:** `boot_attempts` increments
+  before exec and is cleared by the app once healthy; two failed boots of a
+  volume tree revert `current.json` to the previous entry (or the image)
+  automatically and record why. **Rollback** = the same route with the
+  previous version (+ optional DB restore from the backup it names).
+- **Visible:** `/api/v1/health` gains `code: {running, image, source,
+  runtime_id}`; the Packages page shows "Dashboard <v> available:
+  [ UPDATE NOW ]" for code updates, "runtime update: <NAS click>" for the
+  rest, progress while it applies, reload when the new process answers.
+- **Bind-mount deployments** (this studio today, `/app` read-only from the
+  host) are detected (`/venv/.image-baked` absent) and the button says the
+  deployment updates from the base rig instead — nothing changes for the
+  current fleet until it moves to the image (§6).
+- Costs, accepted: two code trees to reason about (health says which is
+  live), a code update cannot bring a dependency (refused, not half-done),
+  ~10 s outage per update, one more updater to maintain. Trust is the
+  companion channel's: whoever holds the release key can push code — and the
+  container still cannot reach Docker.
+
 ## 5. Decisions taken here, and what they cost
 
 - **SFTP inside the stack, single service uid.** Cost: per-editor file

@@ -18,9 +18,13 @@
    means the change on their side is one header, not a new endpoint. #}
 <a class="brand" data-dash-topbar data-csrf="{{ csrf_token or '' }}" href="/">{{ brand_org | upper }} <span class="dim">//</span> SYNC STATUS</a>
 {# The sync dashboard's own pages come first; everything after a "//" is a
-   separate platform or a download, not a page of this app. Each separator
-   lives with the item it precedes so an absent item takes its "//" with
-   it and never leaves a dangling one. #}
+   separate platform or a download, not a page of this app. The separator is
+   drawn by CSS as `.nav-sep::before`, NOT as a text node of its own
+   (2026-08-18): as its own flex item it could be left stranded at the start
+   or end of a wrapped row (the owner's 1920x1080 screenshot had "//"s
+   floating between broken-up labels). As a pseudo-element it is part of the
+   item it precedes, so it wraps with that item or not at all, and an absent
+   item still takes its "//" with it. #}
 <a class="btn nav-link" href="/transfers">[ TRANSFERS ]</a>
 {% if session_is_admin %}
   <a class="btn nav-link" href="/admin/users">[ USERS ]</a>
@@ -38,31 +42,33 @@
   <a class="btn nav-link" href="/admin/settings">[ SETTINGS ]</a>
 {% endif %}
 {% if broll_mounted %}
-  <span class="dim">//</span>
   {# Trailing slash matters: the b-roll SPA uses document-relative URLs, so at
      /broll (no slash) they would resolve against the dashboard root. #}
-  <a class="btn nav-link{{ ' nav-current' if nav_current == 'broll' }}" href="/broll/">[ B-ROLL ]</a>
+  <a class="btn nav-link nav-sep{{ ' nav-current' if nav_current == 'broll' }}" href="/broll/">[ B-ROLL ]</a>
 {% endif %}
 {% if music_mounted %}
-  <span class="dim">//</span>
   {# Trailing slash for the same reason as /broll/: the music SPA resolves
      its URLs against the document. Shown only when the mount fully took --
      an absent or degraded music tree gets no link, same rule as b-roll. #}
-  <a class="btn nav-link{{ ' nav-current' if nav_current == 'music' }}" href="/music/">[ MUSIC ]</a>
+  <a class="btn nav-link nav-sep{{ ' nav-current' if nav_current == 'music' }}" href="/music/">[ MUSIC ]</a>
 {% endif %}
 {% if ytdl_mounted %}
-  <span class="dim">//</span>
   {# Trailing slash for the same reason as /broll/ and /music/: the downloader
      SPA resolves every URL against the document, so at /ytdl (no slash) its
      api/ calls would hit the dashboard root. Shown only when the mount fully
      took -- an absent or degraded ytdl tree gets no link. #}
-  <a class="btn nav-link{{ ' nav-current' if nav_current == 'ytdl' }}" href="/ytdl/">[ YOUTUBE ]</a>
+  <a class="btn nav-link nav-sep{{ ' nav-current' if nav_current == 'ytdl' }}" href="/ytdl/">[ YOUTUBE ]</a>
 {% endif %}
-<span class="dim">//</span>
-<a class="btn nav-link" href="/download" title="download the latest CC Sync installer for this computer">[ INSTALLER ]</a>
+<a class="btn nav-link nav-sep" href="/download" title="download the latest CC Sync installer for this computer">[ INSTALLER ]</a>
 {% if view and not view.syncthing_reachable %}
   <span class="banner">▲ SYNCTHING UNREACHABLE: data may be stale</span>
 {% endif %}
+{# The staleness stamp and the session chip are ONE flex item (2026-08-18):
+   as two siblings a wrap could put "updated 4s ago" on one row and the user
+   plus their logout buttons on the next. .topbar-right carries the
+   margin-left:auto that used to sit on .stamp, so the pair still parks at
+   the right edge of whichever row it lands on. #}
+<span class="topbar-right">
 <span class="stamp">{{ ("updated " + (view.generated_at | ago)) if view else "" }}</span>
 <span class="session">
   {% if session_user %}
@@ -79,4 +85,5 @@
   {% else %}
     <a class="btn" href="/login">[ LOGIN ]</a>
   {% endif %}
+</span>
 </span>

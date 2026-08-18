@@ -76,6 +76,20 @@ def test_topbar_partial_serves_the_marked_header(tmp_path):
         assert 'href="/music/"' not in r.text
 
 
+def test_the_served_partial_carries_the_wrap_safe_structure(tmp_path):
+    """What the SPAs inject has to be the wrap-safe markup too (2026-08-18):
+    the stamp and the session chip inside one .topbar-right, and no loose
+    "//" text node between nav entries. Their stylesheets paint the header
+    they inject, so a partial that regressed here would break three pages,
+    not one. The CSS half is pinned in test_theme_css.py."""
+    with _client(tmp_path) as c:
+        body = as_user(c).get("/partials/topbar").text
+        right = body[body.index('class="topbar-right"'):]
+        assert 'class="stamp"' in right and 'class="session"' in right
+        nav = body[body.index('href="/transfers"'):body.index('class="topbar-right"')]
+        assert 'class="dim"' not in nav
+
+
 def test_topbar_partial_redirects_a_dead_session_to_login(tmp_path):
     """The SPAs' `res.redirected` guard hangs off this: a session that expired
     under a long-open /broll or /music tab must produce a redirect, never a

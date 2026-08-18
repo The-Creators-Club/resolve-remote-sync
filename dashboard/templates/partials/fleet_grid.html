@@ -78,6 +78,15 @@
         {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ SYNC HALTED{{ " (FLEET)" if e.guard.halt_scope == "fleet" }} ]</span>{% endif %}
         {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ e.guard.skipped_exists }} file(s) exist on the NAS under the same name at a different size. Lane A is copy --ignore-existing, so this machine's newer versions will never upload.">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
         {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ e.guard.trash_count }} recoverable file(s) in this machine's .ccsync-trash. Pruned automatically after 14 days.">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
+        {# B-roll ingest (BROLL_INGEST_PLAN.md §3.2, 2026-08-18): which
+           computers are crunching a batch and how far along they are. The
+           WARNING chip is separate and shows even when nothing is running --
+           an insufficient-VRAM refusal means the batch the editor asked for
+           is not happening at all, and the grid is where an admin sees that
+           without reading their tray. #}
+        {% if e.ingest.active %}<span class="chip {{ "amber" if e.ingest.warning else "green" }}" title="b-roll batch {{ e.ingest.batch[:8] if e.ingest.batch else "?" }}{% if e.ingest.clip %} — {{ e.ingest.clip }}{% endif %}{% if e.ingest.state %} ({{ e.ingest.state }}{% if e.ingest.gate %}: {{ e.ingest.gate }}{% endif %}){% endif %}{% if e.ingest.tier %} · {{ e.ingest.tier }} model{% endif %}{% if e.ingest.percent %} · {{ e.ingest.percent }}% of this clip{% endif %}{% if e.ingest.failed %} · {{ e.ingest.failed }} failed{% endif %} · reported {{ e.ingest.at | ago }}">[ INDEXING B-ROLL: {{ e.ingest.done }}/{{ e.ingest.total }} ]</span>{% endif %}
+        {% if e.ingest.warning %}<span class="chip amber" title="{{ e.ingest.warning }}">[ VRAM ]</span>{% endif %}
+        {% if e.proxy.missing %}<span class="chip amber" title="{{ e.proxy.missing }} clip(s) on this machine have no proxy yet, so nobody else on the fleet can see that footage{% if e.proxy.state %} (proxy generator: {{ e.proxy.state }}){% endif %}{% if e.proxy.left %}; {{ e.proxy.left }} queued to encode{% endif %}.">[ {{ e.proxy.missing }} NEED PROXIES ]</span>{% endif %}
         {% if e.transport.express_last_error %}<span class="chip amber" title="last express-lane failure: {{ e.transport.express_last_error }}">[ EXPRESS FAILED ]</span>
         {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file(s) dropped by the express lane's batch cap -- they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
       </td>

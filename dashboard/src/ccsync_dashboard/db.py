@@ -355,6 +355,43 @@ CREATE TABLE IF NOT EXISTS feed_state (
 );
 """
 
+# v20: b-roll ingest, flattened onto machine_state (BROLL_INGEST_PLAN.md §3.2,
+# 2026-08-18). "which computers are indexing and their progress" is a fleet
+# question the grid answers, so the companion's `broll_ingest` report section
+# gets columns for the same reason v13's transport and v16's latches did: the
+# grid sorts and alarms on this, and a JSON blob cannot be asked "who is
+# indexing right now".
+#
+# `ingest_active` is written on EVERY report, not COALESCEd, and goes back to
+# 0 when the section is absent -- the reporter omits an empty section, so
+# "the batch finished" is spelled by silence and a latched 1 would leave a
+# machine indexing forever on the grid (same lesson as halt_active/v16).
+# `ingest_warning` carries the insufficient-VRAM refusal, which the owner
+# asked to be visible even when nothing is running (§0 owner review (c)) --
+# so it is shown by its own chip and survives `active` going false.
+#
+# proxy_missing/proxy_state/proxy_left come from the SAME fix: ReportIn never
+# declared `proxy_coverage`, so every machine's missing-proxy count has been
+# dropped on the floor since the generator shipped. Cheap to store now that
+# the section is parsed at all.
+SCHEMA_V20 = """
+ALTER TABLE machine_state ADD COLUMN ingest_active INTEGER;
+ALTER TABLE machine_state ADD COLUMN ingest_batch TEXT;
+ALTER TABLE machine_state ADD COLUMN ingest_state TEXT;
+ALTER TABLE machine_state ADD COLUMN ingest_gate TEXT;
+ALTER TABLE machine_state ADD COLUMN ingest_done INTEGER;
+ALTER TABLE machine_state ADD COLUMN ingest_total INTEGER;
+ALTER TABLE machine_state ADD COLUMN ingest_failed INTEGER;
+ALTER TABLE machine_state ADD COLUMN ingest_clip TEXT;
+ALTER TABLE machine_state ADD COLUMN ingest_percent INTEGER;
+ALTER TABLE machine_state ADD COLUMN ingest_tier TEXT;
+ALTER TABLE machine_state ADD COLUMN ingest_warning TEXT;
+ALTER TABLE machine_state ADD COLUMN ingest_at TEXT;
+ALTER TABLE machine_state ADD COLUMN proxy_missing INTEGER;
+ALTER TABLE machine_state ADD COLUMN proxy_state TEXT;
+ALTER TABLE machine_state ADD COLUMN proxy_left INTEGER;
+"""
+
 # v14: the signed upgrade channel (COMMERCIAL_READINESS.md item 4,
 # 2026-08-17). Every published package now carries an offline Ed25519
 # signature over its whole record; the dashboard stores it and serves it
@@ -578,6 +615,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (17, SCHEMA_V17),
     (18, SCHEMA_V18),
     (19, SCHEMA_V19),
+    (20, SCHEMA_V20),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1442,6 +1480,8 @@ def upsert_machine_state(
     platform: str | None = None, companion_version: str | None = None,
     transport: Mapping[str, Any] | None = None,
     guard: Mapping[str, Any] | None = None,
+    ingest: Mapping[str, Any] | None = None,
+    proxy: Mapping[str, Any] | None = None,
 ) -> None:
     """`transport` is summarize_transport_health()'s flattened dict, or None.
 
@@ -1455,9 +1495,19 @@ def upsert_machine_state(
     COMMERCIAL_READINESS.md item 9). Same None-leaves-it-alone rule, with one
     deliberate exception below: the two BOOLEAN latches are written on every
     guard-bearing report, because a breaker that clears has to be able to
-    clear the alarm."""
+    clear the alarm.
+
+    `ingest` is flatten_broll_ingest()'s dict and `proxy` the proxy_coverage
+    scalars (v20, BROLL_INGEST_PLAN.md §3.2). Same None-leaves-it-alone rule
+    for every column EXCEPT `ingest_active`, which is written on every single
+    report including the ones carrying no ingest section at all: the
+    companion's reporter omits an empty section, so "the batch finished" is
+    spelled by the section's ABSENCE and a COALESCEd flag would leave the
+    machine indexing on the grid forever."""
     t = dict(transport or {})
     g = dict(guard or {})
+    i = dict(ingest or {})
+    p = dict(proxy or {})
     conn.execute(
         """INSERT INTO machine_state
              (editor_username, machine, detected_project_root, reported_at,
@@ -1467,9 +1517,15 @@ def upsert_machine_state(
               transport_at,
               breaker_tripped, breaker_reason, breaker_at, trash_bytes,
               trash_count, halt_active, halt_scope, halt_reason,
-              skipped_exists, guard_at)
+              skipped_exists, guard_at,
+              ingest_active, ingest_batch, ingest_state, ingest_gate,
+              ingest_done, ingest_total, ingest_failed, ingest_clip,
+              ingest_percent, ingest_tier, ingest_warning, ingest_at,
+              proxy_missing, proxy_state, proxy_left)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?)
            ON CONFLICT(editor_username, machine) DO UPDATE SET
              detected_project_root=excluded.detected_project_root,
              reported_at=excluded.reported_at,
@@ -1519,7 +1575,48 @@ def upsert_machine_state(
              trash_count=COALESCE(excluded.trash_count, machine_state.trash_count),
              skipped_exists=COALESCE(excluded.skipped_exists,
                                      machine_state.skipped_exists),
-             guard_at=COALESCE(excluded.guard_at, machine_state.guard_at)""",
+             guard_at=COALESCE(excluded.guard_at, machine_state.guard_at),
+             -- Written on EVERY report (see the docstring): silence means
+             -- "not indexing", never "keep the last answer".
+             ingest_active=excluded.ingest_active,
+             ingest_batch=CASE WHEN excluded.ingest_at IS NULL
+                               THEN machine_state.ingest_batch
+                               ELSE excluded.ingest_batch END,
+             ingest_state=CASE WHEN excluded.ingest_at IS NULL
+                               THEN machine_state.ingest_state
+                               ELSE excluded.ingest_state END,
+             ingest_gate=CASE WHEN excluded.ingest_at IS NULL
+                              THEN machine_state.ingest_gate
+                              ELSE excluded.ingest_gate END,
+             ingest_done=CASE WHEN excluded.ingest_at IS NULL
+                              THEN machine_state.ingest_done
+                              ELSE excluded.ingest_done END,
+             ingest_total=CASE WHEN excluded.ingest_at IS NULL
+                               THEN machine_state.ingest_total
+                               ELSE excluded.ingest_total END,
+             ingest_failed=CASE WHEN excluded.ingest_at IS NULL
+                                THEN machine_state.ingest_failed
+                                ELSE excluded.ingest_failed END,
+             ingest_clip=CASE WHEN excluded.ingest_at IS NULL
+                              THEN machine_state.ingest_clip
+                              ELSE excluded.ingest_clip END,
+             ingest_percent=CASE WHEN excluded.ingest_at IS NULL
+                                 THEN machine_state.ingest_percent
+                                 ELSE excluded.ingest_percent END,
+             ingest_tier=CASE WHEN excluded.ingest_at IS NULL
+                              THEN machine_state.ingest_tier
+                              ELSE excluded.ingest_tier END,
+             -- Cleared by a section that carries no warning: a refusal the
+             -- editor has since fixed (chose the smaller tier) must not keep
+             -- an amber chip on the grid forever.
+             ingest_warning=CASE WHEN excluded.ingest_at IS NULL
+                                 THEN machine_state.ingest_warning
+                                 ELSE excluded.ingest_warning END,
+             ingest_at=COALESCE(excluded.ingest_at, machine_state.ingest_at),
+             proxy_missing=COALESCE(excluded.proxy_missing,
+                                    machine_state.proxy_missing),
+             proxy_state=COALESCE(excluded.proxy_state, machine_state.proxy_state),
+             proxy_left=COALESCE(excluded.proxy_left, machine_state.proxy_left)""",
         (editor, machine, detected_project_root, now, resolve_project, int(verified),
          platform, companion_version,
          t.get("relayed"), t.get("direct"), t.get("orphan_partials"),
@@ -1528,7 +1625,11 @@ def upsert_machine_state(
          g.get("breaker_tripped"), g.get("breaker_reason"), g.get("breaker_at"),
          g.get("trash_bytes"), g.get("trash_count"), g.get("halt_active"),
          g.get("halt_scope"), g.get("halt_reason"), g.get("skipped_exists"),
-         g.get("at")),
+         g.get("at"),
+         int(bool(i.get("active"))), i.get("batch"), i.get("state"), i.get("gate"),
+         i.get("done"), i.get("total"), i.get("failed"), i.get("clip"),
+         i.get("percent"), i.get("tier"), i.get("warning"), i.get("at"),
+         p.get("missing"), p.get("state"), p.get("left")),
     )
     evict_extra_machines(conn, editor)
 
@@ -1557,6 +1658,58 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
                       breaker_at, trash_bytes, trash_count, halt_active, halt_scope,
                       halt_reason, skipped_exists, guard_at
                FROM machine_state"""
+        )
+    }
+
+
+def fetch_broll_ingest_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> the b-roll ingest state for the fleet grid (v20).
+
+    "Admins see which computers are indexing and their progress"
+    (BROLL_INGEST_PLAN.md §0) is one query: machine_state is already the one
+    row per machine the grid reads, and a batch that is crunching on somebody
+    else's laptop has no other trace on this server until its items land."""
+    return {
+        (r["editor_username"], r["machine"]): {
+            "active": bool(r["ingest_active"]),
+            "batch": r["ingest_batch"],
+            "state": r["ingest_state"],
+            "gate": r["ingest_gate"],
+            "done": r["ingest_done"] or 0,
+            "total": r["ingest_total"] or 0,
+            "failed": r["ingest_failed"] or 0,
+            "clip": r["ingest_clip"],
+            "percent": r["ingest_percent"],
+            "tier": r["ingest_tier"],
+            "warning": r["ingest_warning"] or "",
+            "at": r["ingest_at"],
+        }
+        for r in conn.execute(
+            """SELECT editor_username, machine, ingest_active, ingest_batch,
+                      ingest_state, ingest_gate, ingest_done, ingest_total,
+                      ingest_failed, ingest_clip, ingest_percent, ingest_tier,
+                      ingest_warning, ingest_at
+               FROM machine_state"""
+        )
+    }
+
+
+def fetch_proxy_coverage_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> the missing-proxy scalars (v20).
+
+    The companion has sent `proxy_coverage` on every heavy tick since the
+    generator shipped and ReportIn dropped it undeclared, so "how much of
+    this machine's footage still has no proxy" -- the number that decides
+    whether anyone else can see that footage -- reached nobody."""
+    return {
+        (r["editor_username"], r["machine"]): {
+            "missing": r["proxy_missing"] or 0,
+            "state": r["proxy_state"],
+            "left": r["proxy_left"] or 0,
+        }
+        for r in conn.execute(
+            "SELECT editor_username, machine, proxy_missing, proxy_state, proxy_left "
+            "FROM machine_state"
         )
     }
 

@@ -227,10 +227,39 @@ Request (abridged — `api.ReportIn`):
 | `local_manifest`, `media_tree` | media presence; **absent leaves the tables untouched**, so a light report never wipes them |
 | `transport_health` | direct-vs-relayed path, orphaned `.partial` counters |
 | `sync_guard` | the alarms: a tripped lane B breaker, a halted machine, trash size, lane A "skipped, exists" |
+| `proxy_coverage` | `proxy_gen.coverage()`: `state`, `missing`, `left`, plus the per-project map and history. Only `missing`/`state`/`left` are stored (schema v20) |
+| `youtube_import` | `youtube_import.status()`: whether the clips the dashboard downloaded reached the editor's Resolve |
+| `broll_ingest` | one local b-roll indexing batch (below) |
+
+`proxy_coverage` and `youtube_import` were **undeclared until 2026-08-18**, so
+pydantic's `extra="ignore"` silently dropped both on every tick since their
+features shipped; declaring them is what put the missing-proxy count on the
+fleet grid.
+
+`broll_ingest` (`BROLL_INGEST_PLAN.md` §1 step 8) is scalars only, all
+optional, and **omitted entirely when there is no batch** — the absence is how
+"finished" is spelled, and `machine_state.ingest_active` returns to 0 on any
+report that lacks it:
+
+```json
+"broll_ingest": {
+  "active": true, "batch_uid": "<32 hex>", "state": "running", "gate": "",
+  "done": 12, "failed": 1, "total": 40, "clip": "A001_C003.MP4", "percent": 55,
+  "tier": "good", "run_mode": "idle", "uploading": true, "upload_paused": false,
+  "model_download_percent": null, "warning": "", "at": "2026-08-18T09:59:30+00:00"
+}
+```
+
+`warning` is the insufficient-VRAM refusal ("Best needs 12 GB VRAM, this GPU
+has 8 GB — choose Good"). It shows on the fleet grid **even when `active` is
+false**: the batch the editor asked for is not happening, and their own tray
+is otherwise the only place that says so.
 
 Oversized sections are **sliced to the ceiling, not rejected** — a 422 used to
 take the whole machine off the fleet grid. What was dropped comes back in
-`truncated` and is logged on both sides.
+`truncated` and is logged on both sides. The three diagnostic sections above go
+one step further: one that cannot be parsed **at all** is dropped with a
+warning in the dashboard log, and the rest of the report is accepted.
 
 Response:
 
@@ -244,7 +273,8 @@ Response:
                "min_version": "0.7.0", "signed_binary": true,
                "signature": "…", "pubkey_id": "…" },
   "resolve_project_unmapped": "Some Project",
-  "commands": { "halt": { "active": false, "reason": "", "at": null } }
+  "commands": { "halt": { "active": false, "reason": "", "at": null },
+                "broll_ingest": { "cancel": ["<32 hex>"] } }
 }
 ```
 
@@ -258,6 +288,13 @@ Response:
 - `commands.halt` — **always present, in both states.** An absent key means
   "this dashboard is too old to have an opinion" and the companion holds
   whatever halt it has; `active: false` is what releases one.
+- `commands.broll_ingest` — **present only when there is something to
+  cancel** (≤ 16 batch uids). Unlike `halt`, an empty list is not an
+  instruction, and this reply rides every tick of every machine. It is a
+  best-effort shortcut: the authoritative stop is the 410 the companion gets
+  from its next ingest heartbeat, and every failure to reach the b-roll
+  database here — absent checkout, unmigrated schema, unreadable file —
+  answers "nothing to cancel" rather than failing the report.
 
 ---
 

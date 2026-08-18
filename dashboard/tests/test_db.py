@@ -554,3 +554,87 @@ def test_migration_step_is_atomic_with_its_version_bump(tmp_path):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
     assert "b" not in {r[1] for r in conn.execute("PRAGMA table_info(t)")}
     conn.close()
+
+
+# -- v20: b-roll ingest + the proxy scalars ---------------------------------
+
+INGEST_COLUMNS = {
+    "ingest_active", "ingest_batch", "ingest_state", "ingest_gate", "ingest_done",
+    "ingest_total", "ingest_failed", "ingest_clip", "ingest_percent", "ingest_tier",
+    "ingest_warning", "ingest_at", "proxy_missing", "proxy_state", "proxy_left",
+}
+
+
+def _machine_state_columns(connection) -> set[str]:
+    return {r[1] for r in connection.execute("PRAGMA table_info(machine_state)")}
+
+
+def test_v20_columns_exist_on_a_fresh_database(conn):
+    assert INGEST_COLUMNS <= _machine_state_columns(conn)
+    assert dbmod.SCHEMA_VERSION >= 20
+
+
+def test_a_live_v19_database_upgrades_to_v20_without_losing_its_rows(tmp_path):
+    """The customer case: a container that has not been redeployed since the
+    zero-touch work is at v19, with real machine_state rows in it."""
+    path = tmp_path / "v19.db"
+    connection = dbmod.connect(path)
+    dbmod.migrate(connection, [s for s in dbmod._MIGRATION_STEPS if s[0] <= 19])
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 19
+    assert not (INGEST_COLUMNS & _machine_state_columns(connection))
+    # Raw INSERT, not upsert_machine_state: that writes the v20 columns, and
+    # the point here is a row that predates them.
+    connection.execute(
+        "INSERT INTO machine_state (editor_username, machine, detected_project_root, "
+        "reported_at) VALUES ('jsmith', 'EDIT-PC', NULL, ?)", (T0,))
+
+    dbmod.migrate(connection)
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
+    assert INGEST_COLUMNS <= _machine_state_columns(connection)
+    row = connection.execute(
+        "SELECT * FROM machine_state WHERE machine = 'EDIT-PC'").fetchone()
+    assert row["reported_at"] == T0
+    # Nullable and additive: the pre-existing row simply has no ingest state.
+    assert row["ingest_active"] is None
+    assert dbmod.fetch_broll_ingest_map(connection)[("jsmith", "EDIT-PC")]["active"] is False
+    connection.close()
+
+
+def test_ingest_active_is_written_on_every_report_but_the_rest_latches(conn):
+    """The section is OMITTED by the reporter when there is no batch, so
+    silence is how "finished" is spelled -- ingest_active must fall back to 0
+    while the warning and the counters stay readable."""
+    dbmod.upsert_machine_state(
+        conn, "jsmith", "EDIT-PC", None, T0,
+        ingest={"at": T0, "active": 1, "batch": "a" * 32, "state": "running",
+                "gate": "", "done": 12, "total": 40, "failed": 0,
+                "clip": "A001_0001.MP4", "percent": 55, "tier": "good",
+                "warning": None},
+        proxy={"missing": 7, "state": "idle", "left": 2},
+    )
+    ingest = dbmod.fetch_broll_ingest_map(conn)[("jsmith", "EDIT-PC")]
+    assert ingest["active"] is True and ingest["done"] == 12 and ingest["total"] == 40
+    assert dbmod.fetch_proxy_coverage_map(conn)[("jsmith", "EDIT-PC")]["missing"] == 7
+
+    dbmod.upsert_machine_state(conn, "jsmith", "EDIT-PC", None, T1)
+    after = dbmod.fetch_broll_ingest_map(conn)[("jsmith", "EDIT-PC")]
+    assert after["active"] is False, "a report with no ingest section left it indexing"
+    assert after["done"] == 12, "the counters are a latch, not a live value"
+    # ...and the proxy scalars are untouched by a LIGHT report, like transport.
+    assert dbmod.fetch_proxy_coverage_map(conn)[("jsmith", "EDIT-PC")]["missing"] == 7
+
+
+def test_a_vram_warning_survives_the_batch_and_a_clean_section_clears_it(conn):
+    dbmod.upsert_machine_state(
+        conn, "jsmith", "EDIT-PC", None, T0,
+        ingest={"at": T0, "active": 0,
+                "warning": "Best needs 12 GB VRAM, this GPU has 8 GB"},
+    )
+    dbmod.upsert_machine_state(conn, "jsmith", "EDIT-PC", None, T1)   # no section
+    assert "12 GB VRAM" in dbmod.fetch_broll_ingest_map(conn)[("jsmith", "EDIT-PC")]["warning"]
+
+    dbmod.upsert_machine_state(
+        conn, "jsmith", "EDIT-PC", None, T2,
+        ingest={"at": T2, "active": 1, "warning": None, "done": 0, "total": 3},
+    )
+    assert dbmod.fetch_broll_ingest_map(conn)[("jsmith", "EDIT-PC")]["warning"] == ""

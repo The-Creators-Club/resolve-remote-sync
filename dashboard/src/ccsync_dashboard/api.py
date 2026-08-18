@@ -23,7 +23,7 @@ from typing import Any, Iterator, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from . import VERSION, auth, db, health, local_users, package_store, release_trust
 from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
@@ -622,6 +622,11 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     # The safety latches (item 9): a tripped breaker or a halted machine is
     # invisible in every other signal here -- lane B simply reads idle.
     guards = db.fetch_sync_guard_map(conn)
+    # "Admins see which computers are indexing and their progress"
+    # (BROLL_INGEST_PLAN.md §0) -- plus the missing-proxy count, which the
+    # companion has always sent and this dashboard has never stored (v20).
+    ingest = db.fetch_broll_ingest_map(conn)
+    proxies = db.fetch_proxy_coverage_map(conn)
     result = []
     for entry in machines.values():
         key = (entry["editor_username"], entry["machine"])
@@ -629,6 +634,8 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         entry["verified"] = verified.get(key, False)
         entry["transport"] = transport.get(key) or {}
         entry["guard"] = guards.get(key) or {}
+        entry["ingest"] = ingest.get(key) or {}
+        entry["proxy"] = proxies.get(key) or {}
         entry["companion_version"] = (
             (machine_versions.get(key) or {}).get("companion_version")
             or entry["companion_version"]
@@ -3241,6 +3248,269 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
     }
 
 
+# --------------------------------------------------- tolerant report sections
+#
+# The companion's diagnostic sections (proxy_coverage, youtube_import,
+# broll_ingest) are CACHED ZERO-I/O GETTERS on the tray side: they grow fields
+# whenever a feature does, they are never the point of a report, and they must
+# never be the reason one does not land. So every one of them is bounded here
+# the way B6 bounded the presence sections -- oversize values are cut down to
+# the ceiling instead of raising -- and, one level up, a section that cannot be
+# parsed at all is DROPPED rather than allowed to 422 the report (see
+# ReportIn._a_bad_section_never_422s).
+#
+# The alternative is what shipped for a year: `ReportIn` did not declare
+# proxy_coverage or youtube_import at all, so pydantic's extra='ignore' threw
+# both away on every tick, and the dashboard could not say how much of an
+# editor's footage still had no proxy -- the number that decides whether
+# anyone else on the fleet can see that footage at all.
+
+
+class _ReportSectionIn(BaseModel):
+    """Base for those sections: extras ignored, everything else BOUNDED.
+
+    `max_length` on a plain Field RAISES, and a raising validator fires
+    before the route body -- one 300-character VRAM refusal would have taken
+    the whole machine off the fleet grid (B6's lesson). Here the caps are
+    applied to the raw dict instead: strings truncated, sequences sliced,
+    numbers clamped to their ge/le.
+    """
+
+    # protected_namespaces: `model_download_percent` is a field name from the
+    # companion's payload, not a pydantic attribute; without this, importing
+    # this module warns about every `model_*` field.
+    model_config = ConfigDict(extra="ignore", protected_namespaces=())
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_rather_than_reject(cls, data):
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        for name, field in cls.model_fields.items():
+            if name not in out:
+                continue
+            value = out[name]
+            for meta in field.metadata:
+                cap = getattr(meta, "max_length", None)
+                if cap is not None:
+                    if isinstance(value, (str, list)):
+                        value = value[:cap]
+                    elif isinstance(value, dict) and len(value) > cap:
+                        value = dict(list(value.items())[:cap])
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    low, high = getattr(meta, "ge", None), getattr(meta, "le", None)
+                    if low is not None and value < low:
+                        value = low
+                    if high is not None and value > high:
+                        value = high
+            out[name] = value
+        return out
+
+
+class ProxyCoverageProjectIn(_ReportSectionIn):
+    """One project's row of proxy_gen.coverage()["projects"]."""
+    missing: int | None = None
+    braw: int | None = None
+    needs_resolve: int | None = None
+    own: int | None = None
+    preview: int | None = None
+
+
+class ProxyCoverageIn(_ReportSectionIn):
+    """companion proxy_gen.ProxyGenerator.coverage().
+
+    Only the scalars the grid can act on are persisted (see
+    flatten_proxy_coverage); the rest are declared so that parsing the
+    section does not depend on the companion and the dashboard agreeing on
+    its exact shape.
+    """
+    state: str = Field(default="", max_length=32)
+    enabled: bool | None = None
+    # gap()'s flag rather than coverage()'s: the two getters share a
+    # vocabulary, and a reporter that later sends the tray's block should be
+    # parsed, not refused.
+    encoding: bool | None = None
+    missing: int | None = None
+    braw: int | None = None
+    needs_resolve: int | None = None
+    own: int | None = None
+    preview: int | None = None
+    left: int | None = None
+    generated: int | None = None
+    failed: int | None = None
+    ffmpeg: bool | None = None
+    nvenc: bool | None = None
+    scanned_at: str | None = Field(default=None, max_length=64)
+    low_space: str | None = Field(default=None, max_length=500)
+    truncated: bool | None = None
+    # Sliced, never refused: the companion caps this at MAX_COVERAGE_PROJECTS
+    # and sheds it entirely when the payload gets big.
+    projects: dict[str, ProxyCoverageProjectIn] | None = Field(default=None, max_length=128)
+    history: dict[str, Any] | None = None
+
+
+class YoutubeImportIn(_ReportSectionIn):
+    """companion youtube_import.YoutubeImporter.status() -- whether the clips
+    the dashboard downloaded have actually reached the editor's Resolve."""
+    state: str = Field(default="", max_length=32)
+    pending: int | None = None
+    imported_session: int | None = None
+    failed_session: int | None = None
+    last_import_at: str | None = Field(default=None, max_length=64)
+    last_bin: str | None = Field(default=None, max_length=512)
+    last_error: str | None = Field(default=None, max_length=2000)
+
+
+class BrollIngestIn(_ReportSectionIn):
+    """The companion's `broll_ingest` section (BROLL_INGEST_PLAN.md §1 step 8,
+    2026-08-18) -- one local b-roll indexing batch, as the tray sees it.
+
+    Scalars only, every one optional: an older companion sends nothing (which
+    reads as "not indexing", correctly), and a newer one that grows a counter
+    must never 422 its whole report against this dashboard.
+
+    `warning` is the insufficient-VRAM refusal ("Best needs 12 GB VRAM, this
+    GPU has 8 GB -- choose Good"). It is deliberately shown on the grid even
+    when nothing is running: the batch the editor asked for is NOT happening,
+    and the only other place that says so is their own tray.
+    """
+    active: bool = False
+    batch_uid: str = Field(default="", max_length=32)
+    state: str = Field(default="", max_length=32)
+    gate: str = Field(default="", max_length=32)
+    done: int = Field(default=0, ge=0)
+    failed: int = Field(default=0, ge=0)
+    total: int = Field(default=0, ge=0)
+    clip: str = Field(default="", max_length=255)
+    percent: int = Field(default=0, ge=0, le=100)
+    tier: str = Field(default="", max_length=16)
+    run_mode: str = Field(default="", max_length=16)
+    uploading: bool = False
+    upload_paused: bool = False
+    model_download_percent: int | None = Field(default=None, ge=0, le=100)
+    warning: str = Field(default="", max_length=255)
+    at: str = Field(default="", max_length=64)
+
+
+def flatten_broll_ingest(ingest: "BrollIngestIn | None", now: str) -> dict[str, Any] | None:
+    """BrollIngestIn -> the flat machine_state columns (schema v20).
+
+    None when the companion sent no section at all, which upsert_machine_state
+    reads as "leave every stored ingest value alone EXCEPT ingest_active,
+    which goes to 0" -- the reporter omits an empty section, so silence is how
+    a finished batch is spelled.
+
+    `at` is the RECEIPT time, not the companion's clock: the grid renders it
+    as an age, and a machine with a skewed clock would otherwise show a batch
+    that started in the future (same rule as flatten_sync_guard)."""
+    if ingest is None:
+        return None
+    return {
+        "at": now,
+        "active": int(bool(ingest.active)),
+        "batch": ingest.batch_uid or None,
+        "state": ingest.state or None,
+        "gate": ingest.gate or None,
+        "done": ingest.done,
+        "total": ingest.total,
+        "failed": ingest.failed,
+        "clip": ingest.clip or None,
+        "percent": ingest.percent,
+        "tier": ingest.tier or None,
+        "warning": ingest.warning or None,
+    }
+
+
+def flatten_proxy_coverage(
+    coverage: "ProxyCoverageIn | None", now: str
+) -> dict[str, Any] | None:
+    """ProxyCoverageIn -> the columns the grid reads (schema v20).
+
+    The per-project map, the history block and the capability flags stay out
+    of the database: they are a diagnostic the tray already renders, while
+    "this machine owes the fleet N proxies" is a fleet-level number. `now` is
+    accepted for symmetry with the other flatteners; coverage carries its own
+    `scanned_at` and needs no receipt stamp of its own."""
+    if coverage is None:
+        return None
+    return {
+        "missing": coverage.missing,
+        "state": coverage.state or None,
+        "left": coverage.left,
+        # No column of its own (v20 stays as narrow as the plan drew it):
+        # `state` already spells an encode in flight. Carried in the dict so
+        # a caller that wants it does not have to re-parse the section.
+        "encoding": bool(coverage.encoding) if coverage.encoding is not None else None,
+    }
+
+
+# Which model parses each of the tolerant sections. Explicit rather than
+# derived from the annotations: this table is what
+# ReportIn._a_bad_section_never_422s consults, and it must not silently grow.
+_TOLERANT_SECTIONS: dict[str, type[BaseModel]] = {
+    "proxy_coverage": ProxyCoverageIn,
+    "youtube_import": YoutubeImportIn,
+    "broll_ingest": BrollIngestIn,
+}
+
+
+# At most this many batch uids ride one report reply. A companion runs one
+# batch at a time, so anything past a handful is a stuck queue, not an
+# instruction -- and the reply is on the hot path of every tick of every
+# machine in the fleet.
+MAX_INGEST_CANCELS = 16
+
+
+def broll_cancel_requested(settings: Any, editor: str, machine: str) -> list[str]:
+    """Batch uids an admin/owner has asked this machine to stop indexing.
+
+    BEST-EFFORT IN EVERY DIRECTION (BROLL_INGEST_PLAN.md §4.2). The report
+    reply is the fleet's status channel; it must not acquire a dependency on
+    the b-roll checkout being present, importable, migrated or even readable.
+    Every failure here answers "nothing to cancel" and the companion learns
+    about the cancel from its next heartbeat's 410 instead -- which is the
+    authoritative path anyway. This one only makes it prompt.
+
+    The sub-app is reached exactly as broll.py reaches it (imported as the
+    top-level `app` package the container puts on PYTHONPATH), and its
+    database is opened read-only for the length of the query: the mounted
+    app holds that file open read-write in WAL mode, and this runs inside a
+    request that already has the dashboard's own connection.
+    """
+    if not getattr(settings, "broll_enabled", False):
+        return []
+    try:
+        from app.config import get_db_path  # type: ignore[import-not-found]
+        from app.ingest_batches import cancel_requested_for  # type: ignore[import-not-found]
+    except ImportError:
+        # No b-roll checkout, or one predating the ingest work. Not an error:
+        # the feature is optional and the dashboard is not.
+        return []
+    except Exception as e:  # noqa: BLE001
+        log.debug("b-roll cancel lookup skipped (%s: %s)", type(e).__name__, e)
+        return []
+    conn = None
+    try:
+        path = Path(str(get_db_path()))
+        if not path.is_file():
+            return []
+        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        uids = cancel_requested_for(conn, editor, machine) or []
+        return [str(u) for u in uids][:MAX_INGEST_CANCELS]
+    except Exception as e:  # noqa: BLE001 - see the docstring
+        log.warning("b-roll cancel lookup failed for %s/%s (%s: %s); the report was "
+                    "answered without it", editor, machine, type(e).__name__, e)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 class ReportIn(BaseModel):
     editor_name: str = Field(min_length=1, max_length=64)
     machine: str = Field(min_length=1, max_length=128)
@@ -3275,6 +3545,14 @@ class ReportIn(BaseModel):
     # either state looks perfectly healthy on every other field in this
     # model.
     sync_guard: SyncGuardIn | None = None
+    # The three sections this model used to DROP UNDECLARED. proxy_coverage
+    # and youtube_import have ridden every heavy tick since their features
+    # shipped and reached nobody; broll_ingest is new (BROLL_INGEST_PLAN.md
+    # §3.2) and is what lets an admin see which computers are indexing
+    # b-roll and how far along they are.
+    proxy_coverage: ProxyCoverageIn | None = None
+    youtube_import: YoutubeImportIn | None = None
+    broll_ingest: BrollIngestIn | None = None
     # Set by _truncate_report_sections, never by the client: {section:
     # entries dropped}. Echoed in the reply and logged, so a truncated report
     # is loud rather than silent (B6).
@@ -3316,6 +3594,28 @@ class ReportIn(BaseModel):
         real lanes flowing while still never creating a permanent
         lane_report_current row for a bogus name (SEC-4)."""
         return [lane for lane in lanes if lane.name in LANE_LABELS]
+
+    @field_validator("proxy_coverage", "youtube_import", "broll_ingest", mode="before")
+    @classmethod
+    def _a_bad_section_never_422s(cls, value, info):
+        """A diagnostic section that will not parse is DROPPED, not fatal.
+
+        The bounding in _ReportSectionIn covers oversize values; this covers
+        the rest -- a wrong type, a null where a number was expected, a
+        companion mid-refactor. None of that is worth taking a machine off
+        the fleet grid for, which is precisely what a 422 here does: the
+        route body never runs, so the lanes, transfers, presence and upgrade
+        advertisement in the same report are lost too (B6).
+        """
+        if value is None or isinstance(value, BaseModel):
+            return value
+        model = _TOLERANT_SECTIONS[info.field_name]
+        try:
+            return model.model_validate(value)
+        except Exception as e:  # noqa: BLE001 - deliberately catch-all, see above
+            log.warning("report section %s dropped (%s: %s); the rest of the report "
+                        "was accepted", info.field_name, type(e).__name__, e)
+            return None
 
     # NOTE: the project-key / clip-count / manifest-file ceilings are applied
     # by _truncate_rather_than_reject above, on the raw body. They were
@@ -3487,6 +3787,8 @@ def api_report(
         companion_version=(payload.companion_version or "").strip() or None,
         transport=flatten_transport_health(payload.transport_health, received_at),
         guard=flatten_sync_guard(payload.sync_guard, received_at),
+        ingest=flatten_broll_ingest(payload.broll_ingest, received_at),
+        proxy=flatten_proxy_coverage(payload.proxy_coverage, received_at),
     )
     # An overridden "Remove from this machine" destroyed a local copy the
     # gate said was not caught up. There is nowhere on the grid for a
@@ -3585,6 +3887,14 @@ def api_report(
         "reason": halt_state["reason"],
         "at": halt_state["set_at"],
     }}
+    # B-roll ingest cancels (BROLL_INGEST_PLAN.md §4.2). Present ONLY when
+    # there is something to cancel -- unlike `halt`, an empty list is not an
+    # instruction and this rides every tick of every machine. The companion's
+    # heartbeat 410 remains the authoritative stop; this just makes it
+    # arrive within one report interval instead of one heartbeat.
+    cancels = broll_cancel_requested(settings, editor, machine)
+    if cancels:
+        result["commands"]["broll_ingest"] = {"cancel": cancels}
     return result
 
 

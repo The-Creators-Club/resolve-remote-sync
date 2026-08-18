@@ -24,11 +24,14 @@
          1.2.3: the dashboard rejects anything else, so a "-rc1" would build
          fine here and 422 at the publish (SHIP-11).
 
-         The same step also byte-compares the VENDORED files: the companion's
-         copy of ytdl_common.py must match ytdl/web/ytdlweb/ytdl_common.py
-         exactly below its header marker (docs/YTDL_LOCAL_DOWNLOAD.md section 5,
-         2026-08-14). Drift there is not a wrong version number, it is two
-         spellings of the same downloaded clip in one canonical tree.
+         The same step also byte-compares the VENDORED files -- three pairs as
+         of 2026-08-18, see $VendorPairs below. The companion's ytdl_common.py
+         must match ytdl/web's (docs/YTDL_LOCAL_DOWNLOAD.md section 5); and
+         broll/web's normalize.py and identity.py must match broll/indexer's
+         and ytdl/web's (docs/BROLL_INGEST_PLAN.md section 3.1). Drift in any of
+         them is not a wrong version number: it is two spellings of the same
+         downloaded clip in one canonical tree, or a CJK search blob nothing
+         matches, or two answers to "which editor is this companion".
 
          This script builds the WINDOWS artifact. PyInstaller does not
          cross-compile, so the macOS companion is built on the Mac by
@@ -118,13 +121,34 @@ $PyprojectToml = Join-Path $CompanionDir "pyproject.toml"
 $BootstrapPs1 = Join-Path $RepoRoot "installer\windows_bootstrap.ps1"
 $OnboardSteps = Join-Path $RepoRoot "onboarding\steps.py"
 $BootstrapSh = Join-Path $RepoRoot "installer\macos_bootstrap.sh"
-# The vendored-file parity pair (docs/YTDL_LOCAL_DOWNLOAD.md section 5, 2026-08-14).
-# ytdl/web's copy is the SOURCE OF TRUTH; the companion carries a header and
-# then the same bytes, because the frozen exe has no ytdlweb and the dashboard
-# container has no ccsync_companion.
-$YtdlCommonSrc = Join-Path $RepoRoot "ytdl\web\ytdlweb\ytdl_common.py"
-$YtdlCommonVendored = Join-Path $CompanionDir "src\ccsync_companion\ytdl_common.py"
+# The vendored-file parity TABLE (docs/YTDL_LOCAL_DOWNLOAD.md section 5,
+# 2026-08-14; docs/BROLL_INGEST_PLAN.md section 3.1, 2026-08-18).
+#
+# In each pair the FIRST path is the source of truth and the second carries a
+# header plus those same bytes. Every one of them crosses a gap no import can:
+# the frozen exe has no ytdlweb, the dashboard container has no
+# ccsync_companion, broll/web cannot import broll_index (no anthropic, xxhash,
+# pyyaml or requests in the container) and cannot import ytdlweb either (ytdl
+# is feature-gated and a site may never have shipped it).
+#
+# A drifted copy never throws. It quietly grows a second spelling of the same
+# video, or a search blob nothing matches, or a second answer to "which editor
+# is this companion" -- so this gate refuses the build instead.
 $VendorMarker = "# --- vendored content below, byte-identical ---"
+$VendorPairs = @(
+    @{ Name     = "ytdl_common.py"
+       Source   = Join-Path $RepoRoot "ytdl\web\ytdlweb\ytdl_common.py"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\ytdl_common.py"
+       Why      = "the two download executors must write byte-identical artifacts into one canonical tree" },
+    @{ Name     = "normalize.py"
+       Source   = Join-Path $RepoRoot "broll\indexer\broll_index\normalize.py"
+       Vendored = Join-Path $RepoRoot "broll\web\app\normalize.py"
+       Why      = "a search_norm blob built by a different tokenisation than the query path's matches NOTHING" },
+    @{ Name     = "identity.py"
+       Source   = Join-Path $RepoRoot "ytdl\web\ytdlweb\identity.py"
+       Vendored = Join-Path $RepoRoot "broll\web\app\identity.py"
+       Why      = "two verifiers that disagree about a token shape are two answers to 'which editor is this'" }
+)
 $DistDir = Join-Path $CompanionDir "dist"
 $ExePath = Join-Path $DistDir "ccsync-companion.exe"
 $ManifestPath = Join-Path $DistDir "ccsync-release.json"
@@ -378,24 +402,31 @@ Write-Step "version parity OK"
 # canonical tree, and nobody finds out until an editor sees the same video
 # twice. The exe about to be built BAKES IN whatever is in companion/src, so
 # this is the last moment the two copies can be compared.
-$vendorProblem = Get-VendorParityProblem -SourcePath $YtdlCommonSrc `
-    -VendoredPath $YtdlCommonVendored -Marker $VendorMarker
-if ($vendorProblem) {
+$vendorFailed = $false
+foreach ($pair in $VendorPairs) {
+    $vendorProblem = Get-VendorParityProblem -SourcePath $pair.Source `
+        -VendoredPath $pair.Vendored -Marker $VendorMarker
+    if ($vendorProblem) {
+        $vendorFailed = $true
+        Write-Host ""
+        Write-Fail "vendored-file parity check failed for $($pair.Name):"
+        Write-Host "    - $vendorProblem" -ForegroundColor Red
+        Write-Host "      source   (edit THIS one): $($pair.Source)" -ForegroundColor Red
+        Write-Host "      vendored (do not edit)  : $($pair.Vendored)" -ForegroundColor Red
+        Write-Host "      why it matters          : $($pair.Why)" -ForegroundColor Red
+    }
+}
+if ($vendorFailed) {
     Write-Host ""
-    Write-Fail "vendored-file parity check failed:"
-    Write-Host "    - $vendorProblem" -ForegroundColor Red
-    Write-Host "      source   (edit THIS one): $YtdlCommonSrc" -ForegroundColor Red
-    Write-Host "      vendored (do not edit)  : $YtdlCommonVendored" -ForegroundColor Red
-    Write-Host ""
-    Write-Step "fix: make the change in ytdl/web/ytdlweb/ytdl_common.py -- it is the source of truth --"
-    Write-Step "     then re-copy that whole file into the companion BELOW the marker line"
-    Write-Step "     `"$VendorMarker`", leaving the companion header above it untouched."
-    Write-Step "     (docs/YTDL_LOCAL_DOWNLOAD.md section 5: the two executors must write byte-identical"
-    Write-Step "     artifacts into one canonical tree; bump TEMPLATE_VERSION/SIDECAR_VERSION in the"
-    Write-Step "     source if the shape changed, so old companions decline the claim instead.)"
+    Write-Step "fix: make the change in the SOURCE file named above, then re-copy that whole"
+    Write-Step "     file into the vendored one BELOW the marker line"
+    Write-Step "     `"$VendorMarker`", leaving its header above it untouched."
+    Write-Step "     (docs/YTDL_LOCAL_DOWNLOAD.md section 5 and docs/BROLL_INGEST_PLAN.md section 3.1."
+    Write-Step "     For ytdl_common specifically: bump TEMPLATE_VERSION/SIDECAR_VERSION in the source"
+    Write-Step "     if the shape changed, so old companions decline the claim instead.)"
     exit 1
 }
-Write-Step "vendored parity OK (ytdl_common.py: companion copy == ytdl/web below the marker)"
+Write-Step "vendored parity OK ($($VendorPairs.Count) pairs: $(($VendorPairs | ForEach-Object { $_.Name }) -join ', '))"
 
 # --- release-key parity (COMMERCIAL_READINESS.md item 4, 2026-08-17) --------
 # A companion built with an EMPTY RELEASE_PUBKEYS trusts nobody and can never
